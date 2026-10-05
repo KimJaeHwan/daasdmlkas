@@ -969,4 +969,9 @@ def derive_raw_call_ports(call_seeds, context) -> tuple[RawObservedCallPort, ...
 
 
 def _data_input_start(opcode: str) -> int:
-    return 1 if opcode in {"CALL", "CALLIND", "CALLOTHER"} else 0
+    # LOAD/STORE selectors and direct BRANCH/CBRANCH destinations are metadata;
+    # the CBRANCH condition remains a data dependency. CALLIND retains its
+    # existing call-boundary handling outside this call-free audit.
+    return 1 if opcode in {
+        "LOAD", "STORE", "CALL", "CALLIND", "CALLOTHER", "BRANCH", "CBRANCH"
+    } else 0
