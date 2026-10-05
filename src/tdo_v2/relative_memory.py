@@ -114,20 +114,26 @@ def project_function_relative_memory(
             if projected is None:
                 effects.append(effect)
                 continue
-            relative = ResolvedStorage(projected)
             if effect.memory_read is not None:
+                # A read may depend on every feasible address alternative.
                 effects.append(
                     replace(
                         effect,
-                        reads=effect.reads + (relative,),
+                        reads=effect.reads + tuple(
+                            ResolvedStorage(span) for span in projected
+                        ),
                         memory_read=None,
                     )
                 )
             elif effect.memory_write is not None:
+                # Local SSA writes are definite; an alternative-address write
+                # must remain unresolved until may-write semantics exist.
+                if len(projected) != 1:
+                    raise AssertionError("an alternative-address write must retain debt")
                 effects.append(
                     replace(
                         effect,
-                        writes=effect.writes + (relative,),
+                        writes=effect.writes + (ResolvedStorage(projected[0]),),
                         memory_write=None,
                     )
                 )
@@ -179,7 +185,7 @@ class _Projector:
         self,
         effect: ObservedEffect,
         operation: ValidatedOperation,
-    ) -> ByteSpan | None:
+    ) -> tuple[ByteSpan, ...] | None:
         operation_key = effect.operation_key
         if operation.opcode not in {"LOAD", "STORE"} or len(operation.inputs) < 2:
             return None
@@ -194,8 +200,19 @@ class _Projector:
             or classify_address_space_v2(space) is not AddressSpaceClassV2.ADDRESS
         ):
             return None
-        address = self._expression_for_input(operation_key, operation.inputs[1])
-        if address is None or address.byte_size * 8 != space.address_size_bits:
+        if operation.opcode == "LOAD":
+            addresses = self._candidate_expressions_for_input(
+                operation_key, operation.inputs[1]
+            )
+        else:
+            address = self._expression_for_input(
+                operation_key, operation.inputs[1]
+            )
+            addresses = (address,) if address is not None else None
+        if addresses is None or any(
+            address.byte_size * 8 != space.address_size_bits
+            for address in addresses
+        ):
             return None
         width = (
             operation.output.byte_size
@@ -212,28 +229,89 @@ class _Projector:
             width,
         ):
             return None
-        if not address.atoms:
-            object_id = StorageObjectId(
-                StorageObjectKind.ADDRESS_SPACE,
-                self._context.program_scope,
-                space.space_id,
+        spans = []
+        for address in addresses:
+            if not address.atoms:
+                object_id = StorageObjectId(
+                    StorageObjectKind.ADDRESS_SPACE,
+                    self._context.program_scope,
+                    space.space_id,
+                )
+                start = _unsigned_wrap(address.displacement, address.byte_size)
+                if start + width > 1 << space.address_size_bits:
+                    return None
+            else:
+                object_id = StorageObjectId(
+                    StorageObjectKind.FUNCTION_RELATIVE,
+                    self._ssa.function_scope,
+                    _digest_ints(
+                        b"relative-address-space-v1",
+                        (_address_atom_key(address.atoms), space.space_id),
+                    ),
+                )
+                start = (1 << space.address_size_bits) + address.displacement
+                if start < 0:
+                    return None
+            spans.append(ByteSpan(object_id, start, width))
+        return tuple(sorted(set(spans), key=lambda span: span.canonical_key))
+
+    def _candidate_expressions_for_input(
+        self,
+        operation_key: str,
+        varnode: ValidatedVarnode,
+    ) -> tuple[_AddressExpression, ...] | None:
+        singular = self._expression_for_input(operation_key, varnode)
+        if singular is not None:
+            return (singular,)
+        span = self._resolved_span(varnode)
+        if span is None:
+            return None
+        action_id = self._action_ids.get(operation_key)
+        if action_id is None:
+            return None
+        definition_ids = {
+            fragment.definition_ids[0]
+            for read in self._ssa.reads
+            if read.action_id == action_id and read.span == span
+            for fragment in read.fragments
+        }
+        if len(definition_ids) != 1:
+            return None
+        return self._candidate_expressions_for_definition(
+            next(iter(definition_ids)), span, frozenset()
+        )
+
+    def _candidate_expressions_for_definition(
+        self,
+        definition_id: int,
+        requested_span: ByteSpan,
+        active: frozenset[int],
+    ) -> tuple[_AddressExpression, ...] | None:
+        if definition_id in active:
+            return None
+        definition = self._ssa.definitions[definition_id]
+        if not definition.span.contains(requested_span):
+            return None
+        if definition.kind is not MemoryDefinitionKind.JOIN:
+            expression = self._expression_for_definition(definition_id, requested_span)
+            return (expression,) if expression is not None else None
+        candidates: set[_AddressExpression] = set()
+        sources = self._join_sources.get(definition_id, ())
+        if not sources:
+            return None
+        for source_id in sources:
+            resolved = self._candidate_expressions_for_definition(
+                source_id, requested_span, active | {definition_id}
             )
-            start = _unsigned_wrap(address.displacement, address.byte_size)
-            if start + width > 1 << space.address_size_bits:
+            if resolved is None:
                 return None
-        else:
-            object_id = StorageObjectId(
-                StorageObjectKind.FUNCTION_RELATIVE,
-                self._ssa.function_scope,
-                _digest_ints(
-                    b"relative-address-space-v1",
-                    (_address_atom_key(address.atoms), space.space_id),
-                ),
-            )
-            start = (1 << space.address_size_bits) + address.displacement
-            if start < 0:
+            candidates.update(resolved)
+            if len(candidates) > 8:
                 return None
-        return ByteSpan(object_id, start, width)
+        return tuple(sorted(
+            candidates,
+            key=lambda item: (item.atoms, item.displacement, item.byte_size),
+        ))
 
     def _matches_observed_access(
         self,
@@ -309,7 +387,11 @@ class _Projector:
             )
         elif definition.kind is MemoryDefinitionKind.DATA_WRITE:
             if definition.span != requested_span:
-                result = None
+                operation = self._operations.get(definition.operation_key)
+                result = self._partial_zero_extension(
+                    definition.operation_key, operation, definition.span,
+                    requested_span,
+                )
             else:
                 operation = self._operations.get(definition.operation_key)
                 result = self._expression_for_operation(
@@ -336,6 +418,39 @@ class _Projector:
         self._cache[cache_key] = result
         return result
 
+    def _partial_zero_extension(
+        self,
+        operation_key: str | None,
+        operation: ValidatedOperation | None,
+        written_span: ByteSpan,
+        requested_span: ByteSpan,
+    ) -> _AddressExpression | None:
+        # Without a trusted endian/layout match, a subspan of a wider write
+        # cannot be interpreted as the low-order bits of its result.
+        language_parts = self._translation_namespace.split(":")
+        if (
+            operation_key is None
+            or operation is None
+            or operation.opcode != "INT_ZEXT"
+            or len(operation.inputs) != 1
+            or operation.output is None
+            or len(language_parts) < 2
+            or language_parts[1] != "LE"
+            or self._resolved_span(operation.output) != written_span
+            or written_span.object_id != requested_span.object_id
+            or written_span.start != requested_span.start
+            or operation.inputs[0].byte_size != requested_span.size
+            or not written_span.contains(requested_span)
+        ):
+            return None
+        value = self._expression_for_input(operation_key, operation.inputs[0])
+        if value is None or value.atoms:
+            return None
+        return _AddressExpression(
+            (), _unsigned_wrap(value.displacement, value.byte_size),
+            requested_span.size,
+        )
+
     def _expression_for_operation(
         self,
         operation_key: str | None,
@@ -356,6 +471,16 @@ class _Projector:
         if operation.opcode == "COPY" and len(operation.inputs) == 1:
             value = self._expression_for_input(operation_key, operation.inputs[0])
             return value if value is not None and value.byte_size == byte_size else None
+        if operation.opcode == "INT_ZEXT" and len(operation.inputs) == 1:
+            value = self._expression_for_input(operation_key, operation.inputs[0])
+            if (
+                value is not None
+                and not value.atoms
+                and value.byte_size < byte_size
+            ):
+                return _AddressExpression(
+                    (), _unsigned_wrap(value.displacement, value.byte_size), byte_size
+                )
         if operation.opcode == "LOAD" and len(operation.inputs) >= 2:
             return self._expression_from_memory_read(operation_key, byte_size)
         if operation.opcode == "INT_LEFT" and len(operation.inputs) == 2:
