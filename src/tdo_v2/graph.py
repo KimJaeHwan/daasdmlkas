@@ -16,6 +16,9 @@ from .graph_contracts import (
 )
 
 
+CONTROL_DEPENDENCE_EDGE = "control_dependence"
+
+
 class RustworkxDependencyGraph:
     """Integer-node graph with immutable payloads and stable key lookup."""
 
@@ -84,7 +87,14 @@ class RustworkxDependencyGraph:
     def successors(self, node: NodeId) -> tuple[NodeId, ...]:
         return tuple(sorted({int(item) for item in self._graph.successor_indices(node)}))
 
-    def backward_reachable(self, seeds: Iterable[NodeId]) -> tuple[NodeId, ...]:
+    def backward_reachable(
+        self,
+        seeds: Iterable[NodeId],
+        *,
+        follow_control: bool = False,
+    ) -> tuple[NodeId, ...]:
+        """Nodes reaching ``seeds`` through data edges, plus control-dependence
+        edges when ``follow_control`` is set (data-only is the default)."""
         pending = sorted(set(seeds), reverse=True)
         visited: set[NodeId] = set()
         ordered: list[NodeId] = []
@@ -96,7 +106,15 @@ class RustworkxDependencyGraph:
                 raise KeyError(f"unknown seed node: {node}")
             visited.add(node)
             ordered.append(node)
-            for predecessor in reversed(self.predecessors(node)):
+            if follow_control:
+                predecessors = self.predecessors(node)
+            else:
+                predecessors = sorted({
+                    int(source)
+                    for source, _, record in self._graph.in_edges(node)
+                    if record.kind != CONTROL_DEPENDENCE_EDGE
+                })
+            for predecessor in reversed(predecessors):
                 if predecessor not in visited:
                     pending.append(predecessor)
         return tuple(ordered)

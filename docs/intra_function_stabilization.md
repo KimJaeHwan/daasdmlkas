@@ -292,3 +292,35 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
    `memory_graph.py:196-215`(기대 간선 검증) 동시 수정.
 6. 09 testbed Bundle export 후 회귀 비교
 7. P1, P2
+
+## 5. 그래프 충실성 (call 없는 함수, 2026-10-06)
+
+목표: call 없는 함수에서 그래프가 실제 실행의 모든 의존을 담는다. 역추적은 그 위의 탐색일 뿐이다.
+
+- **독립 오라클** `tests/intra/pcode_interpreter.py`: Low-Pcode 구체 실행기. 바이트마다
+  "마지막으로 쓴 연산(또는 진입 상태)"을 추적해 동적 의존 W→R을 기록한다.
+  `tests/intra/graph_oracle.py`: 각 동적 의존이 그래프의 역방향 경로 R→W로 있는지
+  (진입 레지스터는 OBSERVED_INPUT 도달) 판정. 주소를 모르는 읽기의 진입 메모리는
+  그 읽기에 직접 붙은 unresolved debt만 인정.
+- **데이터 의존 구멍과 수정**
+  1. 주소를 해석 못 하는 LOAD/STORE에 연결 간선이 없었다 → `may_alias.py` 확장:
+     unknown-address write는 모든 객체(비공개 프레임 포함)를 덮을 수 있고, unknown-address
+     read는 이전의 모든 메모리 write를 후보로 연결(writer → debt → read).
+  2. 명령어 안의 조건 분기(`cmov`: `CBRANCH +2; COPY`)에서 건너뛸 수 있는 쓰기를 무조건
+     쓰기로 처리 → 약한 갱신(이전 값도 읽음)으로 수정. 명령어 안 루프(REP), 상대 BRANCH,
+     건너뛰는 메모리/제어 연산은 `UNSUPPORTED_INTRA_INSTRUCTION_FLOW` typed 실패.
+- **제어 의존** `src/tdo_v2/control_dependence.py`: 명령어 CFG의 후지배자(가상 EXIT, 종료
+  불가 노드·함수 밖 목적지는 EXIT로)로 Ferrante 제어 의존 계산, 명령어 안 forward
+  CBRANCH 포함. 간선 `control_dependence`(결정 연산 → 의존 연산).
+  `backward_reachable(follow_control=False)` / `BackwardSliceQuery.run(include_control=False)`
+  기본은 데이터 전용 → 기존 결과 불변.
+- **검증 결과**
+  - 합성 무작위 함수(부분 레지스터, ZEXT/SEXT/SUBPIECE/PIECE, 비교→분기, 카운터 루프,
+    cmov, 별칭 포인터, 메모리에서 꺼낸 포인터, 비-affine 주소) 480개: 동적 의존 누락 0.
+  - 분기 뒤집기 오라클 300개: 제어 의존 위반 0.
+  - 오라클 변이 검사: may-alias 간선 제거 시 누락 557건, 제어 간선 제거 시 위반 328건 검출.
+  - 실제 call 없는 함수 38개(Bundle 4개, 동적 의존 약 9.9만): 누락 0. 단 이 함수들에는
+    분기가 없어 제어 의존은 실제 코드로는 구조 확인만 함(분기 있는 실제 함수 23개 중 23개
+    간선 생성, 함수 밖 조건 점프 수정 후).
+  - 64 케이스 결과 불변(데이터 전용 기본값).
+

@@ -12,14 +12,25 @@ from .query_contracts import SliceResult
 class BackwardSliceQuery:
     """Traverse only dependencies already proven by normalization."""
 
-    def run(self, function: NormalizedFunction, seed: NodeId) -> SliceResult:
+    def run(
+        self,
+        function: NormalizedFunction,
+        seed: NodeId,
+        *,
+        include_control: bool = False,
+    ) -> SliceResult:
+        """Data-only by default; ``include_control`` also follows control dependence."""
         if type(function) is not NormalizedFunction:
             raise TypeError("backward query requires an exact NormalizedFunction")
         if type(function.memory_ssa) is not LocalMemorySsaResult or type(
             function.memory_graph
         ) is not MemoryGraphBindings:
             raise TypeError("approved backward query requires SSA-backed normalization")
-        reachable = function.dependencies.backward_reachable((seed,))
+        if type(include_control) is not bool:
+            raise TypeError("include_control must be an exact bool")
+        reachable = function.dependencies.backward_reachable(
+            (seed,), follow_control=include_control
+        )
         observed = tuple(
             node
             for node in reachable

@@ -20,6 +20,12 @@ No-alias is proved only from the function's own observation:
   ``r' = *(r); r = r + size; RETURN r'`` shape (or the observed call shape).
   A stack-derived value escapes when it is stored to memory, passed to
   CALLOTHER, or copied to another register in a function that makes calls.
+
+Accesses whose address could not be projected at all are modelled as an
+unknown object: an unknown-address write may overwrite every byte of every
+object (private frame bytes included, since a non-affine address may still
+be derived from the stack pointer), and an unknown-address read may observe
+any memory write executed before it. Both stay unresolved debt as well.
 """
 
 from __future__ import annotations
@@ -67,16 +73,17 @@ class MayAliasRead:
     operation_key: str
     spans: tuple[ByteSpan, ...]
     writers: tuple[str, ...]
+    unknown_address: bool = False  # the read's own address is unknown; spans empty
 
     def __post_init__(self) -> None:
         if type(self.operation_key) is not str or not self.operation_key:
             raise TypeError("may-alias read requires an exact operation key")
         if (
             type(self.spans) is not tuple
-            or not self.spans
+            or bool(self.spans) == self.unknown_address
             or any(type(span) is not ByteSpan for span in self.spans)
         ):
-            raise TypeError("may-alias read requires exact byte spans")
+            raise TypeError("may-alias read requires exact byte spans unless its address is unknown")
         if (
             type(self.writers) is not tuple
             or not self.writers
@@ -102,6 +109,7 @@ class _Policy:
         self.stack_object = stack_object
         self.bias = bias
         self.private = stack_object is not None and not escapes
+        self.unknown_writers: frozenset[str] = frozenset()
 
     def is_private(self, object_id: StorageObjectId, offset: int) -> bool:
         """A byte of this function's own frame no other base can reach."""
@@ -140,9 +148,17 @@ def derive_may_alias_reads(
         },
         key=lambda item: (item.kind.value, item.scope.digest, item.space_key),
     )
-    if len(objects) < 2:
+    unknown_writers = frozenset(
+        effect.operation_key
+        for block in unit.blocks
+        for effect in block.effects
+        if _unknown_write(effect)
+    )
+    has_unknown_read = any(_unknown_read(effect) for block in unit.blocks for effect in block.effects)
+    if len(objects) < 2 and not unknown_writers and not has_unknown_read:
         return ()
     policy = _stack_policy(unit, observation, context, address_spaces)
+    policy.unknown_writers = unknown_writers
 
     blocks = {block.key: block for block in unit.blocks}
     successors: dict[str, list[str]] = {key: [] for key in blocks}
@@ -150,6 +166,7 @@ def derive_may_alias_reads(
         for predecessor in block.predecessors:
             successors[predecessor].append(block.key)
     start = {item: _EMPTY_OBJECT for item in objects}
+    start[_ANY_WRITE] = frozenset()  # every memory write executed so far
     in_states: dict[str, dict] = {unit.entry_block_key: start}
     pending = {unit.entry_block_key}
     while pending:
@@ -170,8 +187,10 @@ def derive_may_alias_reads(
 
 
 def _meet(left: dict, right: dict) -> dict:
-    merged = {}
+    merged = {_ANY_WRITE: left[_ANY_WRITE] | right[_ANY_WRITE]}
     for item, a in left.items():
+        if item is _ANY_WRITE:
+            continue
         b = right[item]
         default = a.default | b.default
         offsets = a.bytes.keys() | b.bytes.keys()
@@ -192,9 +211,9 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows) -> dict:
                 span = evidence.span
                 dirty = []
                 for offset in range(span.start, span.end):
-                    if policy.is_private(span.object_id, offset):
-                        continue
                     found = state[span.object_id].at(offset)
+                    if policy.is_private(span.object_id, offset):
+                        found = found & policy.unknown_writers
                     if found:
                         dirty.append(offset)
                         writers |= found
@@ -202,11 +221,42 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows) -> dict:
                     spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
             if spans:
                 rows.append(MayAliasRead(effect.operation_key, tuple(spans), tuple(sorted(writers))))
+            elif _unknown_read(effect) and state[_ANY_WRITE]:
+                rows.append(MayAliasRead(
+                    effect.operation_key, (), tuple(sorted(state[_ANY_WRITE])), unknown_address=True
+                ))
         for evidence in effect.writes:
             if type(evidence) is not ResolvedStorage or evidence.span.object_id not in state:
                 continue
             state = _written(state, evidence.span, effect.operation_key, objects, policy)
+            state[_ANY_WRITE] = state[_ANY_WRITE] | {effect.operation_key}
+        if _unknown_write(effect):
+            state = _written_anywhere(state, effect.operation_key, objects)
     return state
+
+
+_ANY_WRITE = object()
+
+
+def _unknown_read(effect) -> bool:
+    return effect.memory_read is not None or bool(effect.unresolved_reads)
+
+
+def _unknown_write(effect) -> bool:
+    return effect.memory_write is not None or bool(effect.unresolved_writes)
+
+
+def _written_anywhere(state: dict, writer: str, objects) -> dict:
+    """An unknown-address write: every byte of every object may now hold it."""
+    updated = dict(state)
+    for item in objects:
+        current = updated[item]
+        updated[item] = _ObjectState(
+            current.default | {writer},
+            {offset: writers | {writer} for offset, writers in current.bytes.items()},
+        )
+    updated[_ANY_WRITE] = updated[_ANY_WRITE] | {writer}
+    return updated
 
 
 def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy) -> dict:

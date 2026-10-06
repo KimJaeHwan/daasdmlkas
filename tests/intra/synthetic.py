@@ -378,6 +378,18 @@ def normalize_program(*functions: FunctionBuilder) -> list[NormalizedFunction]:
     return results
 
 
+def normalize_with_observation(function: FunctionBuilder):
+    """Return (NormalizedFunction, ValidatedFunctionObservation) for one function."""
+    with open_configured_extraction(
+        _Provider([function]), _mint_orchestrator_capability()
+    ) as envelope:
+        (unit,) = envelope.iter_scoped_functions()
+    result = FunctionNormalizer().normalize(unit)
+    if type(result) is not NormalizedFunction:
+        raise AssertionError(f"normalization unresolved: {result!r}")
+    return result, unit.observation
+
+
 def normalize(function: FunctionBuilder) -> NormalizedFunction:
     (result,) = normalize_program(function)
     return result

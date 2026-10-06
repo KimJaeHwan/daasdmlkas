@@ -26,7 +26,11 @@ def test_complete_slice_reports_no_debt():
 
 
 def test_unresolved_address_is_reported_with_counts():
-    """RCX = RDI*2; *(RCX) = RDX; RAX = *(RCX): one read and one write debt."""
+    """RCX = RDI*2; *(RCX) = RDX; RAX = *(RCX).
+
+    The unknown-address read carries two debts (unresolved address, and the
+    possible earlier unknown-address writer); the store is one write debt.
+    """
     (result,) = _results(
         straight(
             [op("INT_MULT", [reg(RDI), const(2)], reg(RCX))],
@@ -35,7 +39,7 @@ def test_unresolved_address_is_reported_with_counts():
         ),
         2,
     )
-    assert local_completeness((result,)) == LocalCompleteness(False, 1, 1)
+    assert local_completeness((result,)) == LocalCompleteness(False, 2, 1)
 
 
 def test_one_incomplete_root_node_makes_the_occurrence_incomplete():

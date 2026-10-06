@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from .call_effect_contracts import (
@@ -12,6 +12,11 @@ from .call_effect_contracts import (
     unavailable_call_effect_evidence,
 )
 from .call_clobber import CallClobberRead, derive_call_clobber_reads
+from .control_dependence import (
+    CONTROL_DEPENDENCE_EDGE,
+    ControlDependence,
+    derive_control_dependences,
+)
 from .may_alias import MayAliasRead, derive_may_alias_reads
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
@@ -102,6 +107,7 @@ class NormalizedFunction:
     call_clobber_nodes: tuple[NodeId, ...] = ()
     may_alias_reads: tuple[MayAliasRead, ...] = ()
     may_alias_nodes: tuple[NodeId, ...] = ()
+    control_dependences: tuple[ControlDependence, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -412,6 +418,7 @@ class NormalizationFailureReason(StrEnum):
     MISSING_CONSTRUCTED_FUNCTION_SCOPE = "missing_constructed_function_scope"
     ENTRY_NOT_IN_OBSERVATION = "entry_not_in_observation"
     DISCONNECTED_OBSERVED_CFG = "disconnected_observed_cfg"
+    UNSUPPORTED_INTRA_INSTRUCTION_FLOW = "unsupported_intra_instruction_flow"
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,7 +453,9 @@ class FunctionNormalizer:
                 value.scopes,
                 NormalizationFailureReason.MISSING_CONSTRUCTED_FUNCTION_SCOPE,
             )
-        admission_failure = _cfg_admission_failure(value.observation, function)
+        admission_failure = _cfg_admission_failure(
+            value.observation, function
+        ) or _intra_instruction_flow_failure(value.observation)
         if admission_failure is not None:
             return UnresolvedNormalizedFunction(value.scopes, admission_failure)
         return _ScopedNormalizer().normalize(
@@ -477,7 +486,9 @@ class FunctionNormalizer:
                 value.scopes,
                 NormalizationFailureReason.MISSING_CONSTRUCTED_FUNCTION_SCOPE,
             )
-        admission_failure = _cfg_admission_failure(value.observation, function)
+        admission_failure = _cfg_admission_failure(
+            value.observation, function
+        ) or _intra_instruction_flow_failure(value.observation)
         if admission_failure is not None:
             return UnresolvedNormalizedFunction(value.scopes, admission_failure)
         return _ScopedNormalizer().normalize(
@@ -523,6 +534,7 @@ class _ScopedNormalizer:
         constant_inputs: dict[str, list[tuple[int, NodeId]]] = {}
 
         for instruction in sorted(observation.instructions, key=lambda item: item.address):
+            skippable = _skippable_operations(instruction)
             for ordinal, operation in enumerate(instruction.operations):
                 operation_key = _operation_key(instruction, ordinal, operation)
                 operation_nodes[operation_key] = dependencies.add_node(
@@ -530,6 +542,15 @@ class _ScopedNormalizer:
                 )
                 operation_node = operation_nodes[operation_key]
                 effect = _scoped_effect(instruction, ordinal, operation, context)
+                if ordinal in skippable:
+                    # A forward in-instruction branch may skip this write, so the
+                    # previous value may survive: model it as a weak update.
+                    effect = replace(
+                        effect,
+                        reads=effect.reads + tuple(
+                            write for write in effect.writes if type(write) is ResolvedStorage
+                        ),
+                    )
                 for input_ordinal, varnode in enumerate(operation.inputs):
                     if input_ordinal < _data_input_start(operation.opcode):
                         continue
@@ -691,6 +712,13 @@ class _ScopedNormalizer:
             may_alias_reads,
             operation_nodes,
         )
+        control_dependences = derive_control_dependences(observation, function.entry)
+        for row in control_dependences:
+            dependencies.add_edge(
+                operation_nodes[row.decision],
+                operation_nodes[row.dependent],
+                EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=row.decision),
+            )
         dependencies.freeze()
         return NormalizedFunction(
             document=None,
@@ -718,6 +746,7 @@ class _ScopedNormalizer:
             call_clobber_nodes=call_clobber_nodes,
             may_alias_reads=may_alias_reads,
             may_alias_nodes=may_alias_nodes,
+            control_dependences=control_dependences,
         )
 
     def _build_cfg(
@@ -787,6 +816,60 @@ def _materialize_constant_inputs(
                     occurrence=input_ordinal,
                 ),
             )
+
+
+_SKIPPABLE_OPCODES_FORBIDDEN = frozenset({
+    "LOAD", "STORE", "CALL", "CALLIND", "CALLOTHER", "BRANCH", "CBRANCH",
+    "BRANCHIND", "RETURN",
+})
+
+
+def _relative_branches(instruction) -> tuple[tuple[int, str, int], ...]:
+    """(ordinal, opcode, target ordinal) for in-instruction p-code branches."""
+    rows = []
+    for ordinal, operation in enumerate(instruction.operations):
+        if operation.opcode not in ("BRANCH", "CBRANCH") or not operation.inputs:
+            continue
+        destination = operation.inputs[0]
+        if destination.kind is not VarnodeKindCode.CONSTANT:
+            continue
+        bits = 8 * destination.byte_size
+        delta = destination.coordinate.byte_offset
+        if delta >> (bits - 1) & 1:
+            delta -= 1 << bits
+        rows.append((ordinal, operation.opcode, ordinal + delta))
+    return tuple(rows)
+
+
+def _skippable_operations(instruction) -> frozenset[int]:
+    """Ordinals a forward in-instruction CBRANCH may skip (validated at admission)."""
+    return frozenset(
+        index
+        for ordinal, _, target in _relative_branches(instruction)
+        for index in range(ordinal + 1, target)
+    )
+
+
+def _intra_instruction_flow_failure(observation) -> NormalizationFailureReason | None:
+    """Only forward CBRANCH over register/temporary writes is modelled (weak update).
+
+    Backward branches (in-instruction loops such as REP), unconditional
+    relative branches, and skipped memory/control operations would need p-code
+    level blocks; they are a typed failure instead of a silent strong update.
+    """
+    for instruction in observation.instructions:
+        operations = instruction.operations
+        for ordinal, opcode, target in _relative_branches(instruction):
+            if opcode != "CBRANCH" or not ordinal < target <= len(operations):
+                return NormalizationFailureReason.UNSUPPORTED_INTRA_INSTRUCTION_FLOW
+            for operation in operations[ordinal + 1:target]:
+                if operation.opcode in _SKIPPABLE_OPCODES_FORBIDDEN or (
+                    operation.output is not None
+                    and operation.output.kind
+                    not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE)
+                ):
+                    return NormalizationFailureReason.UNSUPPORTED_INTRA_INSTRUCTION_FLOW
+    return None
 
 
 def _cfg_admission_failure(
