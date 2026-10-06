@@ -133,8 +133,13 @@ def test_stack_pointer_is_preserved_across_call():
     assert slices(1).is_complete
 
 
-def test_private_stack_slot_survives_call():
-    """*(RSP+8) = RDX; call f; RAX = *(RSP+8): the slot's address never escapes."""
+def test_stack_slot_needs_callee_evidence_after_call():
+    """*(RSP+8) = RDX; call f; RAX = *(RSP+8).
+
+    Even without any pointer escaping, f can write the caller's frame through
+    its own stack pointer (the slot is at f's entry SP + 16), so the read is
+    incomplete until callee-side evidence proves the slot preserved.
+    """
     function = normalize(
         FunctionBuilder()
         .ins(add(T, reg(RSP), const(8)), store(T, reg(RDX)))      # 0
@@ -144,7 +149,7 @@ def test_private_stack_slot_survives_call():
     )
     seed = slice_from(function, operation_node_at(function, 2, 1))  # the LOAD
     assert seed.reaches(RDX)
-    assert seed.is_complete
+    assert not seed.is_complete
 
 
 def test_escaped_stack_slot_is_incomplete_after_call():
@@ -160,6 +165,48 @@ def test_escaped_stack_slot_is_incomplete_after_call():
     seed = slice_from(function, operation_node_at(function, 3, 1))
     assert seed.reaches(RDX)
     assert not seed.is_complete
+
+
+def test_clobber_debt_names_every_intervening_call():
+    """RAX = RDX; if (ZF) call f else call g; RCX = RAX -> both calls named."""
+    function = normalize(
+        FunctionBuilder()
+        .ins(copy(reg(RAX), reg(RDX)))                 # 0
+        .cbranch("other", reg(ZF, 1))                  # 1
+        .call(0x1800)                                  # 2
+        .branch("join")                                # 3
+        .label("other")
+        .call(0x1900)                                  # 4
+        .label("join")
+        .ins(copy(reg(RCX), reg(RAX)))                 # 5
+        .ret()
+    )
+    (row,) = [
+        row for row in function.call_clobber_reads
+        if row.operation_key.endswith(f"{0x1000 + 5 * 4:x}:0:COPY")
+    ]
+    assert len(row.intervening_calls) == 2
+    assert all(key.endswith(":CALL") for key in row.intervening_calls)
+
+
+def test_rewrite_between_calls_names_only_the_later_call():
+    """RAX = RDX; call f; RAX = RBX; call g; RCX = RAX -> only g is named."""
+    from synthetic import RBX
+
+    function = normalize(
+        FunctionBuilder()
+        .ins(copy(reg(RAX), reg(RDX)))                 # 0
+        .call(0x1800)                                  # 1
+        .ins(copy(reg(RAX), reg(RBX)))                 # 2
+        .call(0x1900)                                  # 3
+        .ins(copy(reg(RCX), reg(RAX)))                 # 4
+        .ret()
+    )
+    (row,) = [
+        row for row in function.call_clobber_reads
+        if row.operation_key.endswith(f"{0x1000 + 4 * 4:x}:0:COPY")
+    ]
+    assert row.intervening_calls == (f"1:{0x1000 + 3 * 4:x}:2:CALL",)
 
 
 # -- other opaque control transfers --------------------------------------------

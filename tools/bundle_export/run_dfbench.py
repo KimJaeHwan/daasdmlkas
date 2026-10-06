@@ -101,6 +101,7 @@ def main() -> int:
             "local": list(root.local_origin_labels),
             "interprocedural": list(root.interprocedural_origin_labels),
             "complete": getattr(root, "is_locally_complete", None),
+            "effective": getattr(root, "is_effectively_complete", None),
         })
     if args.expected:
         expected = json.loads(args.expected.read_text(encoding="utf-8"))

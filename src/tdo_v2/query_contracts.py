@@ -47,3 +47,23 @@ def local_completeness(results: tuple[SliceResult, ...]) -> LocalCompleteness:
     return LocalCompleteness(
         all(row.is_complete for row in results), len(reads), len(writes)
     )
+
+
+def effective_completeness(
+    results: tuple[SliceResult, ...], discharged_nodes: frozenset[NodeId]
+) -> LocalCompleteness:
+    """Local completeness after removing debt nodes discharged by evidence."""
+    local = local_completeness(results)
+    if type(discharged_nodes) is not frozenset:
+        raise TypeError("discharged nodes must be an exact frozenset")
+    reads = {
+        node
+        for row in results
+        for node in row.reachable_unresolved_read_nodes
+        if node not in discharged_nodes
+    }
+    return LocalCompleteness(
+        not reads and local.function_unresolved_writes == 0,
+        len(reads),
+        local.function_unresolved_writes,
+    )

@@ -357,17 +357,29 @@ class _Provider:
         pass
 
 
-def normalize(function: FunctionBuilder) -> NormalizedFunction:
-    provider = _Provider([function])
+def normalize_program(*functions: FunctionBuilder) -> list[NormalizedFunction]:
+    """Normalize several functions of one program (distinct ``entry`` values)."""
+    entries = [function.entry for function in functions]
+    if len(set(entries)) != len(entries):
+        raise ValueError("program functions need distinct entries")
+    provider = _Provider(list(functions))
     with open_configured_extraction(
         provider, _mint_orchestrator_capability()
     ) as envelope:
         units = list(envelope.iter_scoped_functions())
-    if len(units) != 1:
-        raise AssertionError("expected one scoped function")
-    result = FunctionNormalizer().normalize(units[0])
-    if type(result) is not NormalizedFunction:
-        raise AssertionError(f"normalization unresolved: {result!r}")
+    if len(units) != len(functions):
+        raise AssertionError("expected one scoped unit per function")
+    results = []
+    for unit in units:
+        result = FunctionNormalizer().normalize(unit)
+        if type(result) is not NormalizedFunction:
+            raise AssertionError(f"normalization unresolved: {result!r}")
+        results.append(result)
+    return results
+
+
+def normalize(function: FunctionBuilder) -> NormalizedFunction:
+    (result,) = normalize_program(function)
     return result
 
 
@@ -459,3 +471,104 @@ def slice_from(function: NormalizedFunction, seed: int) -> Slice:
 def slice_op(function: NormalizedFunction, opcode: str) -> Slice:
     (seed,) = operation_nodes(function, opcode)
     return slice_from(function, seed)
+
+
+# --------------------------------------------------------------------------
+# Whole-program (interprocedural) runs
+# --------------------------------------------------------------------------
+
+LANGUAGE = "x86:LE:64:default"
+
+
+def _naming_for(unit, seeds, names: dict[int, str]):
+    from tdo_v2.configured_naming_contracts import (
+        CapturedNamingAlias, CapturedNamingResolution, CapturedNamingRow,
+        CapturedNamingSidecar, CapturedNamingTarget, NamingAliasKind,
+        NamingOpcode, NamingResolutionState, NamingSourceQuality,
+        NamingUnresolvedReason, naming_content_digest, naming_row_digest,
+        naming_target_digest,
+    )
+    from tdo_v2.call_contracts import CallOperationKind
+
+    rows = []
+    for seed in seeds.callsites:
+        instruction = seed.locator.instruction
+        ordinal = seed.locator.operation_ordinal
+        if seed.kind is CallOperationKind.INDIRECT:
+            opcode, selector = NamingOpcode.CALLIND, None
+            resolution, targets = CapturedNamingResolution(NamingResolutionState.INDIRECT), ()
+        else:
+            opcode, selector = NamingOpcode.CALL, seed.inputs[0]
+            address = selector.coordinate.byte_offset
+            if address in names:
+                aliases = (CapturedNamingAlias(
+                    NamingAliasKind.SYMBOL, names[address], NamingSourceQuality.USER_DEFINED,
+                ),)
+                coordinate = selector.coordinate
+                targets = (CapturedNamingTarget(
+                    0, coordinate, False, False, aliases,
+                    naming_target_digest(0, coordinate, False, False, aliases),
+                ),)
+                resolution = CapturedNamingResolution(
+                    NamingResolutionState.RESOLVED_NAMED, terminal_target_ordinal=0
+                )
+            else:
+                targets = ()
+                resolution = CapturedNamingResolution(
+                    NamingResolutionState.UNRESOLVED,
+                    NamingUnresolvedReason.NO_EXACT_FUNCTION,
+                )
+        rows.append(CapturedNamingRow(
+            instruction, ordinal, opcode, selector, resolution, targets,
+            naming_row_digest(instruction, ordinal, opcode, selector, resolution, targets),
+        ))
+    rows = tuple(sorted(rows, key=lambda row: row.canonical_key))
+    exporter = b"\x11" * 32
+    return CapturedNamingSidecar(exporter, rows, naming_content_digest(exporter, rows))
+
+
+def boundary(sources: dict[str, int] = (), sinks: dict[str, int] = ()):
+    """SymbolBoundaryProvider: sources return in RAX bytes, sinks read RCX bytes."""
+    from tdo_v2.boundary import BoundaryKind
+    from tdo_v2.boundary_rules import BoundaryRule, SymbolBoundaryProvider
+    from tdo_v2.physical_state import PhysicalRegisterSlice
+
+    rules = [
+        BoundaryRule(name, LANGUAGE, BoundaryKind.SOURCE, f"{name}.ret",
+                     (PhysicalRegisterSlice(RAX, size),))
+        for name, size in dict(sources).items()
+    ] + [
+        BoundaryRule(name, LANGUAGE, BoundaryKind.SINK, f"{name}.arg0",
+                     (PhysicalRegisterSlice(RCX, size),))
+        for name, size in dict(sinks).items()
+    ]
+    return SymbolBoundaryProvider(tuple(rules))
+
+
+def analyze_program(functions: dict[str, FunctionBuilder], provider, **kwargs):
+    """Run ``engine.analyze_observed_functions`` on named synthetic functions."""
+    from tdo_v2.call_seeds import seed_function_calls
+    from tdo_v2.engine import analyze_observed_functions
+    from tdo_v2.integration.observed_function_session import ObservedFunctionEvidence
+
+    builders = list(functions.values())
+    names = {builder.entry: name for name, builder in functions.items()}
+    with open_configured_extraction(
+        _Provider(builders), _mint_orchestrator_capability()
+    ) as envelope:
+        units = list(envelope.iter_scoped_functions())
+    rows = []
+    for unit in units:
+        normalized = FunctionNormalizer().normalize(unit)
+        if type(normalized) is not NormalizedFunction:
+            raise AssertionError(f"normalization unresolved: {normalized!r}")
+        seeds = seed_function_calls(unit)
+        rows.append((
+            ObservedFunctionEvidence(unit, seeds, _naming_for(unit, seeds, names)),
+            normalized,
+        ))
+    roots = analyze_observed_functions(tuple(rows), provider, **kwargs)
+    by_entry = {builder.entry: name for name, builder in functions.items()}
+    return {
+        (by_entry[root.function_byte_offset], root.label): root for root in roots
+    }

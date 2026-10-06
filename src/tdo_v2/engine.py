@@ -12,7 +12,7 @@ from .configured_naming_contracts import (
     NamingBindingExpectation,
 )
 from .external_summary import ExternalSummaryProvider
-from .integration.configured_bundle import admit_frozen_bundle
+from .integration.configured_call_clobber_discharge import CallClobberDischarger
 from .integration.configured_explanation_graph import (
     conditional_call_byte_overlay,
     root_local_explanation,
@@ -24,14 +24,21 @@ from .integration.configured_interprocedural_slice import (
     build_observed_function_analyses,
     complete_configured_interprocedural_slices,
 )
-from .integration.observed_function_session import open_observed_function_session
+from .integration.observed_function_session import (
+    ObservedFunctionEvidence,
+    open_observed_function_session,
+)
 from .normalize import (
     FunctionNormalizer,
     NormalizationFailureReason,
     NormalizedFunction,
 )
 from .opaque_values import OpaqueValueEvidenceProvider
-from .query_contracts import LocalCompleteness, local_completeness
+from .query_contracts import (
+    LocalCompleteness,
+    effective_completeness,
+    local_completeness,
+)
 from .scope_identity import (
     AddressCoordinate,
     ConstructedFunctionScope,
@@ -75,10 +82,16 @@ class RootSlice:
     interprocedural_origin_labels: tuple[str, ...]
     explanation: dict[str, object]
     local_completeness: LocalCompleteness
+    effective_completeness: LocalCompleteness
 
     @property
     def is_locally_complete(self) -> bool:
         return self.local_completeness.complete
+
+    @property
+    def is_effectively_complete(self) -> bool:
+        """Local debt minus call-clobber debt discharged by callee evidence."""
+        return self.effective_completeness.complete
 
     @property
     def reached_origin_labels(self) -> tuple[str, ...]:
@@ -113,6 +126,8 @@ def analyze_frozen_bundle(
     naming_binding = NamingBindingExpectation(
         exporter_digest, CALL_NAMING_GHIDRA_VERSION
     )
+    from .integration.configured_bundle import admit_frozen_bundle  # POSIX-only
+
     snapshot = admit_frozen_bundle(generation_path)
     with open_observed_function_session(
         snapshot, naming_binding=naming_binding
@@ -137,119 +152,150 @@ def analyze_frozen_bundle(
                     normalized.reason,
                 )
             rows.append((evidence, normalized))
-        analyses = build_observed_function_analyses(
-            tuple(rows), boundary_provider, external_provider
+        roots = analyze_observed_functions(
+            tuple(rows),
+            boundary_provider,
+            external_provider,
+            include_explanations=include_explanations,
         )
-        completed = dict(
-            complete_configured_interprocedural_slices(
-                analyses, external_provider
-            )
-        )
-        by_entry = {analysis.entry: analysis for analysis in analyses}
-        roots = []
-        for analysis in analyses:
-            completion_by_node = {
-                item.root_node: item for item in completed[analysis.entry]
-            }
-            groups = {}
-            for local_slice in analysis.slices:
-                key = (local_slice.root.label, local_slice.root.occurrence_ordinal)
-                groups.setdefault(key, []).append(local_slice)
-            for (label, occurrence), group in sorted(groups.items()):
-                completions = tuple(
-                    completion_by_node[item.root.node] for item in group
-                )
-                proofs = tuple(
-                    sorted(
-                        {
-                            proof.canonical_key: proof
-                            for completion in completions
-                            for proof in completion.proofs
-                        }.values(),
-                        key=lambda item: item.canonical_key,
-                    )
-                )
-                local_labels = tuple(
-                    sorted({
-                        origin
-                        for item in group
-                        for origin in item.reached_origin_labels
-                    })
-                )
-                reachable = tuple(
-                    sorted({
-                        node
-                        for item in group
-                        for node in item.result.reachable_nodes
-                    })
-                )
-                root_nodes = tuple(sorted({item.root.node for item in group}))
-                explanation: dict[str, object] = {}
-                if include_explanations:
-                    explanation = root_local_explanation(
-                        analysis.normalized, reachable, root_nodes, len(proofs)
-                    )
-                    proof_ordinals = {
-                        proof.canonical_key: ordinal
-                        for ordinal, proof in enumerate(proofs)
-                    }
-                    replacements = tuple(
-                        sorted(
-                            {
-                                row.canonical_key: row
-                                for completion in completions
-                                for row in completion.call_byte_replacements
-                            }.values(),
-                            key=lambda item: item.canonical_key,
-                        )
-                    )
-                    aliases = tuple(
-                        sorted(
-                            {
-                                row.canonical_key: row
-                                for completion in completions
-                                for row in completion.dynamic_alias_replacements
-                            }.values(),
-                            key=lambda item: item.canonical_key,
-                        )
-                    )
-                    overlay = conditional_call_byte_overlay(
-                        analysis.normalized,
-                        explanation,
-                        replacements,
-                        proof_ordinals,
-                        aliases,
-                    )
-                    explanation["conditional_call_byte_overlay"] = overlay
-                    explanation["conditional_source_to_sink_paths"] = (
-                        conditional_source_paths(
-                            analysis,
-                            proofs,
-                            replacements,
-                            overlay,
-                            by_entry,
-                        )
-                    )
-                roots.append(
-                    RootSlice(
-                        analysis.entry.space_id,
-                        analysis.entry.byte_offset,
-                        label,
-                        occurrence,
-                        root_nodes,
-                        local_labels,
-                        tuple(sorted({proof.label for proof in proofs})),
-                        explanation,
-                        local_completeness(
-                            tuple(item.result for item in group)
-                        ),
-                    )
-                )
         return EngineRun(
             program.scope.digest.hex(),
             program.evidence.executable_sha256.hex(),
             tuple(roots),
         )
+
+
+def analyze_observed_functions(
+    rows: tuple[tuple[ObservedFunctionEvidence, NormalizedFunction], ...],
+    boundary_provider: BoundaryProvider,
+    external_provider: ExternalSummaryProvider | None = None,
+    *,
+    include_explanations: bool = True,
+) -> tuple[RootSlice, ...]:
+    """Slice every boundary root of already-normalized observed functions."""
+    analyses = build_observed_function_analyses(
+        rows, boundary_provider, external_provider
+    )
+    completed = dict(
+        complete_configured_interprocedural_slices(
+            analyses, external_provider
+        )
+    )
+    by_entry = {analysis.entry: analysis for analysis in analyses}
+    discharger = CallClobberDischarger(analyses)
+    roots = []
+    for analysis in analyses:
+        completion_by_node = {
+            item.root_node: item for item in completed[analysis.entry]
+        }
+        groups = {}
+        for local_slice in analysis.slices:
+            key = (local_slice.root.label, local_slice.root.occurrence_ordinal)
+            groups.setdefault(key, []).append(local_slice)
+        for (label, occurrence), group in sorted(groups.items()):
+            completions = tuple(
+                completion_by_node[item.root.node] for item in group
+            )
+            proofs = tuple(
+                sorted(
+                    {
+                        proof.canonical_key: proof
+                        for completion in completions
+                        for proof in completion.proofs
+                    }.values(),
+                    key=lambda item: item.canonical_key,
+                )
+            )
+            local_labels = tuple(
+                sorted({
+                    origin
+                    for item in group
+                    for origin in item.reached_origin_labels
+                })
+            )
+            reachable = tuple(
+                sorted({
+                    node
+                    for item in group
+                    for node in item.result.reachable_nodes
+                })
+            )
+            root_nodes = tuple(sorted({item.root.node for item in group}))
+            results = tuple(item.result for item in group)
+            explanation: dict[str, object] = {}
+            if include_explanations:
+                explanation = root_local_explanation(
+                    analysis.normalized, reachable, root_nodes, len(proofs)
+                )
+                proof_ordinals = {
+                    proof.canonical_key: ordinal
+                    for ordinal, proof in enumerate(proofs)
+                }
+                replacements = tuple(
+                    sorted(
+                        {
+                            row.canonical_key: row
+                            for completion in completions
+                            for row in completion.call_byte_replacements
+                        }.values(),
+                        key=lambda item: item.canonical_key,
+                    )
+                )
+                aliases = tuple(
+                    sorted(
+                        {
+                            row.canonical_key: row
+                            for completion in completions
+                            for row in completion.dynamic_alias_replacements
+                        }.values(),
+                        key=lambda item: item.canonical_key,
+                    )
+                )
+                overlay = conditional_call_byte_overlay(
+                    analysis.normalized,
+                    explanation,
+                    replacements,
+                    proof_ordinals,
+                    aliases,
+                )
+                explanation["conditional_call_byte_overlay"] = overlay
+                explanation["conditional_source_to_sink_paths"] = (
+                    conditional_source_paths(
+                        analysis,
+                        proofs,
+                        replacements,
+                        overlay,
+                        by_entry,
+                    )
+                )
+            roots.append(
+                RootSlice(
+                    analysis.entry.space_id,
+                    analysis.entry.byte_offset,
+                    label,
+                    occurrence,
+                    root_nodes,
+                    local_labels,
+                    tuple(sorted({proof.label for proof in proofs})),
+                    explanation,
+                    local_completeness(results),
+                    effective_completeness(
+                        results,
+                        frozenset(
+                            row.debt_node
+                            for row in discharger.discharge(
+                                analysis.entry,
+                                tuple(
+                                    replacement
+                                    for completion in completions
+                                    for replacement in completion.call_byte_replacements
+                                ),
+                            )
+                        ),
+                    ),
+                )
+            )
+    return tuple(roots)
 
 
 __all__ = (
@@ -258,5 +304,6 @@ __all__ = (
     "RootSlice",
     "UnresolvedBundleFunctionError",
     "analyze_frozen_bundle",
+    "analyze_observed_functions",
     "local_completeness",
 )

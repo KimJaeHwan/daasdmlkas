@@ -201,6 +201,34 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
        레지스터(RBX 등)도 증거가 없으므로 incomplete. 실제 코퍼스 계측 후
        호출 규약 정책(provider) 도입 여부를 결정.
      - 테스트: `tests/intra/test_call_effects.py` 15개 (기존 xfail 3건 해결).
+   - **P0-3b (2026-10-06, Fable 설계)**
+     - 건전성 수정: 1차의 "탈출하지 않은 스택 객체 전체 면제"를 제거했다. callee는
+       포인터를 받지 않아도 자기 SP의 양수 오프셋으로 호출자 프레임에 쓸 수 있다.
+       로컬 면제는 관측된 call 형태에서 나온 스택 포인터 레지스터만 남긴다.
+     - `CallClobberRead.intervening_calls`: 읽기마다 그 사이에 올 수 있는 call 집합.
+     - 해소 `integration/configured_call_clobber_discharge.py`
+       (`engine.RootSlice.effective_completeness`):
+       - MUST_WRITTEN: 사이에 있는 call이 하나이고, 인증된
+         `ObservedCallByteReplacement` 가 읽은 바이트를 callee의 마지막 write W에
+         연결하며, callee 안에서 W의 슬라이스가 complete일 때.
+       - PRESERVED(레지스터): 모든 exit에서 그 레지스터가 entry 값으로 복원되고
+         (COPY/STORE/LOAD 추적), 그 추적 경로에 callee 자신의 call-clobber 읽기가
+         없고, callee에 unresolved write가 없을 때.
+       - CALLIND/CALLOTHER/외부/미해결 대상/메모리 span은 해소하지 않는다.
+     - `engine.analyze_observed_functions` 분리(합성 전체 프로그램 테스트용),
+       Bundle admission은 지연 import → 엔진이 Windows에서도 import됨.
+     - 테스트: `tests/intra/test_call_clobber_discharge.py` (8개, 실제 함수 간 경로)
+     - 실측 (64 케이스, 판정 기준 = "기대 출처 누락인데 확실"):
+
+       | 버전 | 누락+확실 | 정확+확실 | 과다보고+확실 |
+       |---|---|---|---|
+       | P0-3 이전 | 1 | 39 | 22 |
+       | P0-3 local | 0 | 2 | 0 |
+       | P0-3b effective | 0 | 16 | 2 |
+
+       남은 불확실 원인(함수 단위 근사): call 뒤 스택 슬롯 LOAD 47, 레지스터 COPY 33,
+       RBP 기반 INT_ADD 13, 전역 COPY 11 → 다음은 프레임 보존(PRESERVED 메모리)
+       증명(Fable 7단계), 그다음 outparam MUST_WRITTEN(8단계).
    - **순서: P0-3 → P0-1.** 공통 debt 구조를 먼저 세우고 P0-1은 reason만 추가.
      실제 코퍼스에서 incomplete 비율이 크게 오를 수 있어 09 testbed 계측이 필요.
 5. **P0-1**: 방식 (a) may-alias debt. SSA는 후보만 기록(`memory_ssa.py` 읽기 루프),

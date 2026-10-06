@@ -11,7 +11,6 @@ from .call_effect_contracts import (
     RawObservedCallPort,
     unavailable_call_effect_evidence,
 )
-from ._scope_contracts import AddressSpaceClassV2, classify_address_space_v2
 from .call_clobber import CallClobberRead, derive_call_clobber_reads
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
@@ -656,10 +655,7 @@ class _ScopedNormalizer:
         ):
             raise AssertionError("ENTRY definitions must materialize as observed inputs")
         call_clobber_reads = derive_call_clobber_reads(
-            effect_unit,
-            observation,
-            context,
-            _single_address_space_id(address_spaces),
+            effect_unit, observation, context
         )
         call_clobber_nodes = _materialize_call_clobber_debt(
             dependencies,
@@ -832,16 +828,6 @@ _KIND_MAP = {
     VarnodeKindCode.STORAGE: VarnodeKind.STORAGE,
     VarnodeKindCode.OPAQUE: VarnodeKind.UNKNOWN,
 }
-
-
-def _single_address_space_id(address_spaces) -> int | None:
-    candidates = [
-        row.space_id
-        for row in address_spaces
-        if row.classification_revision == 2
-        and classify_address_space_v2(row) is AddressSpaceClassV2.ADDRESS
-    ]
-    return candidates[0] if len(candidates) == 1 else None
 
 
 def _materialize_call_clobber_debt(

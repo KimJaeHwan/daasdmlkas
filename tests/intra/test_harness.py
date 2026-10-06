@@ -45,3 +45,15 @@ def test_prologue_epilogue_function_normalizes():
     restored = slice_from(function, operation_node_at(function, 5, 0))
     assert restored.reaches(RBP)
     assert restored.is_complete
+
+
+def test_two_function_program_normalizes_with_shared_program_scope():
+    from synthetic import CODE_BASE, normalize_program
+
+    callee = FunctionBuilder(entry=CODE_BASE + 0x800).ins(copy(reg(RAX), const(7))).ret()
+    caller = FunctionBuilder().call(CODE_BASE + 0x800).ins(copy(reg(RDX), reg(RAX))).ret()
+    caller_fn, callee_fn = normalize_program(caller, callee)
+    assert caller_fn.scopes.program == callee_fn.scopes.program
+    assert caller_fn.scopes.function.entry != callee_fn.scopes.function.entry
+    result = slice_from(callee_fn, operation_node_at(callee_fn, 0, entry=CODE_BASE + 0x800))
+    assert result.is_complete
