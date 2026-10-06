@@ -336,3 +336,26 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
   39만 건 대조 — 누락 0, 설명되지 않는 누락 0, 제어 위반 0. BRANCHIND(점프 테이블) 실행은
   미지원으로 일부 run 제외.
 
+## 6. source/sink 경계 자르기 — TEST-ONLY 특이 조건 (2026-10-06)
+
+> **이 기능은 테스트를 위해 사용자가 허용한 특이 조건이다.** 관측된 증거가 아니라 선언된
+> 가정이며 기본값은 꺼져 있다. 이 모드로 얻은 결과는 반드시 "가정 사용"으로 보고한다.
+
+- 목적: 09/10 testbed의 복잡한 로직은 모두 source/sink를 호출하는 케이스 함수 안에 있다.
+  경계 호출을 선언된 효과로 자르면 케이스 함수 본문을 call 없는 함수처럼 검증·역추적할 수 있다.
+- 선언: `BoundaryRule(assume_call_effect=True)` + `analyze_frozen_bundle(assume_boundary_call_effects=True)`
+  (`src/tdo_v2/assumed_call_effects.py`). source 호출 = 선언된 반환 레지스터에만 확실한 쓰기,
+  sink 호출 = 인자 레지스터 읽기, 그 밖의 레지스터·메모리는 모두 보존된다고 **가정**.
+  선언된 호출에는 call_clobber debt가 붙지 않고, source 쓰기가 호출자 쪽 SOURCE 출처 노드가 된다.
+  도구: `run_dfbench.py --assume-boundary-effects`, `measure_bundle.py --assume-boundary-effects`
+  (출력에 "TEST-ONLY ASSUMPTION" 표시).
+- **함께 찾은 기존 버그(기본 모드)**: sink 인자가 분기 합류 값이면 sink 시작점이 CALL 명령에
+  묶이는데, CALL은 그래프에서 아무것도 읽지 않아 "출처 없음 + 완전"이 나왔다. 이제 이런
+  시작점은 `LocalCompleteness.unbound_roots` 로 집계되고 불완전으로 표시된다. 가정 모드에서는
+  sink가 인자를 읽으므로 정상적으로 연결된다.
+- 결과
+  - 그래프 검증(가정 모드): source/sink만 부르는 케이스 함수 디버그 38개·최적화 29개 포함 전체
+    함수에서 누락 0, 제어 위반 0.
+  - 64 케이스 (기본 → 가정): PASS 39 → **50**, 함수 내부만으로 정확+확실 2 → **29**,
+    효과적 정확+확실 28 → **40**, 누락+확실 0 유지(전 모드).
+

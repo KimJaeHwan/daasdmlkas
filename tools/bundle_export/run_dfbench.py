@@ -35,16 +35,17 @@ SOURCES = {"dfb_source_A": 4, "dfb_source_B": 4, "dfb_source_C": 4,
 SINKS = {"dfb_sink_int": 4, "dfb_sink_long": 4, "dfb_sink_ptr": 8, "dfb_sink_buf": 8}
 
 
-def boundary_provider():
+def boundary_provider(assume_call_effect: bool = False):
+    """``assume_call_effect``: TEST-ONLY declared source/sink call effects."""
     from tdo_v2.boundary import BoundaryKind
     from tdo_v2.boundary_rules import BoundaryRule, SymbolBoundaryProvider
     from tdo_v2.physical_state import PhysicalRegisterSlice
 
     rules = [BoundaryRule(name, LANGUAGE, BoundaryKind.SOURCE, f"{name}.ret",
-                          (PhysicalRegisterSlice(0x0, size),))
+                          (PhysicalRegisterSlice(0x0, size),), assume_call_effect)
              for name, size in SOURCES.items()]
     rules += [BoundaryRule(name, LANGUAGE, BoundaryKind.SINK, f"{name}.arg0",
-                           (PhysicalRegisterSlice(0x8, size),))
+                           (PhysicalRegisterSlice(0x8, size),), assume_call_effect)
               for name, size in SINKS.items()]
     return SymbolBoundaryProvider(tuple(rules))
 
@@ -65,7 +66,11 @@ def main() -> int:
     parser.add_argument("--binary", default="dfbench_win_core",
                         help="case filter when --expected is cases_manifest.json")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--assume-boundary-effects", action="store_true",
+                        help="TEST-ONLY special condition: declared source/sink call effects")
     args = parser.parse_args()
+    if args.assume_boundary_effects:
+        print("[run] TEST-ONLY ASSUMPTION: source/sink call effects are declared, not observed")
     from tdo_v2.engine import analyze_frozen_bundle
 
     generation = args.generation
@@ -83,8 +88,9 @@ def main() -> int:
         run = analyze_frozen_bundle(
             generation,
             naming_exporter_source=REPO / "ghidra" / "GhidraV2CallNaming.java",
-            boundary_provider=boundary_provider(),
+            boundary_provider=boundary_provider(args.assume_boundary_effects),
             include_explanations=False,
+            assume_boundary_call_effects=args.assume_boundary_effects,
         )
     except Exception as exc:  # noqa: BLE001
         print("".join(traceback.format_exception(exc)), file=sys.stderr)

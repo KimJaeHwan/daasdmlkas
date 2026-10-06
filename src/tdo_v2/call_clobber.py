@@ -126,8 +126,14 @@ def derive_call_clobber_reads(
     unit: ObservedEffectUnit,
     observation: ValidatedFunctionObservation,
     context: StorageResolutionContext,
+    *,
+    assumed_calls: frozenset[str] = frozenset(),
 ) -> tuple[CallClobberRead, ...]:
-    """Return reads that may observe storage written by an unevidenced call."""
+    """Return reads that may observe storage written by an unevidenced call.
+
+    ``assumed_calls`` (TEST-ONLY) are boundary calls with a declared effect:
+    their declared writes are ordinary writes and they clobber nothing else.
+    """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("call-clobber analysis requires an exact effect unit")
     if type(observation) is not ValidatedFunctionObservation:
@@ -140,7 +146,9 @@ def derive_call_clobber_reads(
         for instruction in observation.instructions
         for ordinal, operation in enumerate(instruction.operations)
     }
-    calls = {key for key, opcode in opcodes.items() if opcode in _CALL_OPCODES}
+    calls = {
+        key for key, opcode in opcodes.items() if opcode in _CALL_OPCODES
+    } - set(assumed_calls)
     if not calls:
         return ()
     preserved = _preserved_stack_pointers(observation, context)
@@ -192,7 +200,7 @@ def _transfer(block, state: _State, calls, preserved, rows) -> _State:
                     effect.operation_key, tuple(spans), tuple(sorted(crossed))
                 ))
         key = effect.operation_key
-        if key in calls or effect.kind is EffectKind.CALL:
+        if key in calls:
             state = state.called(key, preserved.get(key, ()))
         for evidence in effect.writes:
             if type(evidence) is ResolvedStorage:

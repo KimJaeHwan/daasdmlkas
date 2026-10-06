@@ -68,7 +68,20 @@ def main() -> int:
     parser.add_argument("generation", type=Path)
     parser.add_argument("--runs", type=int, default=8)
     parser.add_argument("--json", type=Path)
+    parser.add_argument(
+        "--assume-boundary-effects", action="store_true",
+        help="TEST-ONLY special condition: cut DataFlowBench source/sink calls with a "
+             "declared effect (source writes its return register, sink reads its "
+             "argument, all other state assumed preserved)")
     args = parser.parse_args()
+    provider = None
+    if args.assume_boundary_effects:
+        sys.path.insert(0, str(REPO / "tools" / "bundle_export"))
+        import run_dfbench
+        from tdo_v2.engine import assumed_boundary_effects
+        provider = run_dfbench.boundary_provider(assume_call_effect=True)
+        print("[measure] TEST-ONLY ASSUMPTION: boundary call effects are declared, "
+              "not observed", file=sys.stderr)
     binding = NamingBindingExpectation(
         sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
         CALL_NAMING_GHIDRA_VERSION,
@@ -117,7 +130,12 @@ def main() -> int:
                 totals["call_free_with_branches"] += 1
             began = time.time()
             try:
-                normalized = FunctionNormalizer().normalize(evidence.unit)
+                assumed = (
+                    assumed_boundary_effects(evidence, provider) if provider is not None else {}
+                )
+                normalized = FunctionNormalizer().normalize(
+                    evidence.unit, assumed_call_effects=assumed
+                )
             except Exception as error:  # noqa: BLE001
                 row["result"] = "exception:" + type(error).__name__
                 reasons[row["result"]] += 1
@@ -144,11 +162,28 @@ def main() -> int:
                 return values
 
             havoc = (regs, sp_offset, sp_size) if has_calls else None
+            declared = {
+                key: (
+                    tuple((r.byte_offset, r.byte_size) for r in effect.reads),
+                    tuple((r.byte_offset, r.byte_size) for r in effect.writes),
+                )
+                for key, effect in assumed.items()
+            }
+            row["assumed_calls"] = len(declared)
+            row["boundary_only"] = has_calls and all(
+                key in declared
+                for ins in observation.instructions
+                for ordinal, op in enumerate(ins.operations)
+                if op.opcode in CALLS
+                for key in [f"{ins.address.space_id:x}:{ins.address.byte_offset:x}:{ordinal}:{op.opcode}"]
+            )
+            totals["boundary_only_functions"] += row["boundary_only"]
             report = check(normalized, observation, seeds=range(args.runs), register_pools=pool,
-                           spaces=(const, regs, unique), havoc_calls=havoc, image=image)
+                           spaces=(const, regs, unique), havoc_calls=havoc, image=image,
+                           assumed_calls=declared)
             violations = check_control(normalized, observation, seeds=range(min(4, args.runs)),
                                        register_pools=pool, spaces=(const, regs, unique),
-                                       havoc_calls=havoc, image=image)
+                                       havoc_calls=havoc, image=image, assumed_calls=declared)
             row.update({
                 "runs": report.runs, "skipped_runs": report.unsupported,
                 "checked": report.checked, "missing": len(report.silent),
@@ -169,7 +204,9 @@ def main() -> int:
     totals["seconds"] = round(time.time() - started, 1)
     sizes = sorted(row["instructions"] for row in functions)
     summary = {
-        "generation": str(args.generation), "language": language, "totals": dict(totals),
+        "generation": str(args.generation), "language": language,
+        "assumption": "TEST-ONLY declared boundary call effects" if provider else None,
+        "totals": dict(totals),
         "normalize_failures": dict(reasons), "skipped_run_reasons": dict(skipped),
         "opaque_opcodes": dict(opaque),
         "size": {"max": sizes[-1] if sizes else 0, "median": sizes[len(sizes) // 2] if sizes else 0},

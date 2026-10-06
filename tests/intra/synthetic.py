@@ -544,28 +544,33 @@ def _naming_for(unit, seeds, names: dict[int, str]):
     return CapturedNamingSidecar(exporter, rows, naming_content_digest(exporter, rows))
 
 
-def boundary(sources: dict[str, int] = (), sinks: dict[str, int] = ()):
-    """SymbolBoundaryProvider: sources return in RAX bytes, sinks read RCX bytes."""
+def boundary(sources: dict[str, int] = (), sinks: dict[str, int] = (), *,
+             assume_call_effect: bool = False):
+    """SymbolBoundaryProvider: sources return in RAX bytes, sinks read RCX bytes.
+
+    ``assume_call_effect`` marks every rule with the TEST-ONLY declared effect.
+    """
     from tdo_v2.boundary import BoundaryKind
     from tdo_v2.boundary_rules import BoundaryRule, SymbolBoundaryProvider
     from tdo_v2.physical_state import PhysicalRegisterSlice
 
     rules = [
         BoundaryRule(name, LANGUAGE, BoundaryKind.SOURCE, f"{name}.ret",
-                     (PhysicalRegisterSlice(RAX, size),))
+                     (PhysicalRegisterSlice(RAX, size),), assume_call_effect)
         for name, size in dict(sources).items()
     ] + [
         BoundaryRule(name, LANGUAGE, BoundaryKind.SINK, f"{name}.arg0",
-                     (PhysicalRegisterSlice(RCX, size),))
+                     (PhysicalRegisterSlice(RCX, size),), assume_call_effect)
         for name, size in dict(sinks).items()
     ]
     return SymbolBoundaryProvider(tuple(rules))
 
 
-def analyze_program(functions: dict[str, FunctionBuilder], provider, **kwargs):
+def analyze_program(functions: dict[str, FunctionBuilder], provider, *,
+                    assume_boundary_call_effects: bool = False, **kwargs):
     """Run ``engine.analyze_observed_functions`` on named synthetic functions."""
     from tdo_v2.call_seeds import seed_function_calls
-    from tdo_v2.engine import analyze_observed_functions
+    from tdo_v2.engine import analyze_observed_functions, assumed_boundary_effects
     from tdo_v2.integration.observed_function_session import ObservedFunctionEvidence
 
     builders = list(functions.values())
@@ -576,14 +581,18 @@ def analyze_program(functions: dict[str, FunctionBuilder], provider, **kwargs):
         units = list(envelope.iter_scoped_functions())
     rows = []
     for unit in units:
-        normalized = FunctionNormalizer().normalize(unit)
+        seeds = seed_function_calls(unit)
+        evidence = ObservedFunctionEvidence(unit, seeds, _naming_for(unit, seeds, names))
+        normalized = FunctionNormalizer().normalize(
+            unit,
+            assumed_call_effects=(
+                assumed_boundary_effects(evidence, provider)
+                if assume_boundary_call_effects else None
+            ),
+        )
         if type(normalized) is not NormalizedFunction:
             raise AssertionError(f"normalization unresolved: {normalized!r}")
-        seeds = seed_function_calls(unit)
-        rows.append((
-            ObservedFunctionEvidence(unit, seeds, _naming_for(unit, seeds, names)),
-            normalized,
-        ))
+        rows.append((evidence, normalized))
     roots = analyze_observed_functions(tuple(rows), provider, **kwargs)
     by_entry = {builder.entry: name for name, builder in functions.items()}
     return {

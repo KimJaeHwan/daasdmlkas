@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 
-from .boundary import BoundaryProvider
+from .assumed_call_effects import AssumedCallEffect
+from .boundary import BoundaryProvider, CallBoundary
+from .graph_contracts import NodeKind
+from .integration.configured_target_resolution import _selected_resolved_target
 from .configured_naming_contracts import (
     CALL_NAMING_GHIDRA_VERSION,
     NamingBindingExpectation,
@@ -113,8 +116,15 @@ def analyze_frozen_bundle(
     external_provider: ExternalSummaryProvider | None = None,
     opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
     include_explanations: bool = True,
+    assume_boundary_call_effects: bool = False,
 ) -> EngineRun:
     """Analyze one admitted Bundle; report candidate paths and explicit gaps.
+
+    ``assume_boundary_call_effects`` is a TEST-ONLY special condition (off by
+    default): boundary calls whose rule sets ``assume_call_effect`` are
+    normalized as writing only their declared output, so the code between
+    source and sink is sliced as if it were call-free. Results then rely on
+    that declaration, not on observed evidence.
 
     This is engine output, not an independent path-verification or corpus grade.
     Every function must normalize successfully; partial inventories never become
@@ -122,6 +132,8 @@ def analyze_frozen_bundle(
     """
     if type(include_explanations) is not bool:
         raise TypeError("include_explanations must be an exact bool")
+    if type(assume_boundary_call_effects) is not bool:
+        raise TypeError("assume_boundary_call_effects must be an exact bool")
     exporter_digest = sha256(Path(naming_exporter_source).read_bytes()).digest()
     naming_binding = NamingBindingExpectation(
         exporter_digest, CALL_NAMING_GHIDRA_VERSION
@@ -141,6 +153,11 @@ def analyze_frozen_bundle(
             normalized = normalizer.normalize(
                 evidence.unit,
                 opaque_value_provider=opaque_value_provider,
+                assumed_call_effects=(
+                    assumed_boundary_effects(evidence, boundary_provider)
+                    if assume_boundary_call_effects
+                    else None
+                ),
             )
             if type(normalized) is not NormalizedFunction:
                 function = evidence.unit.scopes.function
@@ -163,6 +180,53 @@ def analyze_frozen_bundle(
             program.evidence.executable_sha256.hex(),
             tuple(roots),
         )
+
+
+def _unbound_roots(normalized: NormalizedFunction, root_nodes) -> int:
+    """Roots bound to an operation (a call's consume event) with no data inputs:
+    the boundary state is not represented in the graph at all."""
+    graph = normalized.dependencies
+    return sum(
+        1
+        for node in root_nodes
+        if graph.node(node).kind is NodeKind.OPERATION
+        and not graph.backward_reachable((node,))[1:]
+    )
+
+
+def _with_unbound(completeness: LocalCompleteness, unbound: int) -> LocalCompleteness:
+    if not unbound:
+        return completeness
+    return replace(completeness, complete=False, unbound_roots=unbound)
+
+
+def assumed_boundary_effects(
+    evidence: ObservedFunctionEvidence, provider: BoundaryProvider
+) -> dict[str, AssumedCallEffect]:
+    """TEST-ONLY: declared effects of this function's boundary calls (opt-in rules)."""
+    declare = getattr(provider, "assumed_call_effect", None)
+    if declare is None:
+        return {}
+    language = evidence.unit.scopes.program.evidence.translation_namespace.language_id
+    function = evidence.unit.scopes.function
+    caller = f"{function.entry.space_id:x}:{function.entry.byte_offset:x}"
+    effects = {}
+    for seed, naming in zip(evidence.seeds.callsites, evidence.naming.rows, strict=True):
+        target = _selected_resolved_target(naming)
+        aliases = tuple(sorted({
+            alias.value
+            for alias in (() if target is None else target.aliases)
+            if alias.policy_admissible
+        }))
+        boundary = CallBoundary(caller, seed.operation_key, aliases, language)
+        declared = {
+            effect
+            for match in provider.classify(boundary)
+            if (effect := declare(boundary, match)) is not None
+        }
+        if len(declared) == 1:
+            effects[seed.operation_key] = declared.pop()
+    return effects
 
 
 def analyze_observed_functions(
@@ -222,6 +286,7 @@ def analyze_observed_functions(
             )
             root_nodes = tuple(sorted({item.root.node for item in group}))
             results = tuple(item.result for item in group)
+            unbound = _unbound_roots(analysis.normalized, root_nodes)
             explanation: dict[str, object] = {}
             if include_explanations:
                 explanation = root_local_explanation(
@@ -278,8 +343,8 @@ def analyze_observed_functions(
                     local_labels,
                     tuple(sorted({proof.label for proof in proofs})),
                     explanation,
-                    local_completeness(results),
-                    effective_completeness(
+                    _with_unbound(local_completeness(results), unbound),
+                    _with_unbound(effective_completeness(
                         results,
                         frozenset(
                             row.debt_node
@@ -299,7 +364,7 @@ def analyze_observed_functions(
                                 ),
                             )
                         ),
-                    ),
+                    ), unbound),
                 )
             )
     return tuple(roots)
@@ -312,5 +377,6 @@ __all__ = (
     "UnresolvedBundleFunctionError",
     "analyze_frozen_bundle",
     "analyze_observed_functions",
+    "assumed_boundary_effects",
     "local_completeness",
 )

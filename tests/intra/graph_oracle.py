@@ -22,7 +22,8 @@ class Report:
 
 
 def check(function, observation, *, seeds=range(8), register_pools=None,
-          spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None) -> Report:
+          spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None,
+          assumed_calls=None) -> Report:
     """Run the observation concretely and check every dynamic dependency.
 
     ``spaces`` are the (constant, register, unique) space ids of the program.
@@ -47,7 +48,8 @@ def check(function, observation, *, seeds=range(8), register_pools=None,
 
     for seed in seeds:
         interpreter = Interpreter(observation, constant_space=const_space, seed=seed,
-                                  havoc_calls=havoc_calls, image=image)
+                                  havoc_calls=havoc_calls, image=image,
+                                  assumed_calls=assumed_calls)
         for register, value in (register_pools(seed) if register_pools else {}).items():
             interpreter.preset(reg_space, register, 8, value)
         try:
@@ -147,7 +149,8 @@ def _direct_debt(graph, reader: str, label: str) -> bool:
 
 
 def check_control(function, observation, *, seeds=range(4), register_pools=None,
-                  spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None) -> list:
+                  spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None,
+                  assumed_calls=None) -> list:
     """Flip test: inverting a branch's first decision may only change the
     execution of operations reachable from it through control-dependence edges.
 
@@ -172,7 +175,8 @@ def check_control(function, observation, *, seeds=range(4), register_pools=None,
 
     def execute(seed, flip=None):
         interpreter = Interpreter(observation, constant_space=const_space, seed=seed, flip=flip,
-                                  havoc_calls=havoc_calls, image=image)
+                                  havoc_calls=havoc_calls, image=image,
+                                  assumed_calls=assumed_calls)
         for register, value in (register_pools(seed) if register_pools else {}).items():
             interpreter.preset(reg_space, register, 8, value)
         return interpreter.run()

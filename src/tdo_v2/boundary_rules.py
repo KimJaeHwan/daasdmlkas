@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .assumed_call_effects import AssumedCallEffect
 from .boundary import BoundaryKind, BoundaryMatch, CallBoundary
-from .physical_state import PhysicalStateSlice
+from .physical_state import PhysicalRegisterSlice, PhysicalStateSlice
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,12 +16,18 @@ class BoundaryRule:
     kind: BoundaryKind
     label: str
     physical_state: tuple[PhysicalStateSlice, ...]
+    # TEST-ONLY special condition: declare that this boundary call writes only
+    # its source output (sink: nothing) and preserves all other state. Used
+    # only when the engine is also run with assume_boundary_call_effects=True.
+    assume_call_effect: bool = False
 
     def __post_init__(self) -> None:
         if not self.target_name or not self.language_id or not self.label:
             raise ValueError("boundary rule needs target, language, and label")
         if type(self.kind) is not BoundaryKind or not self.physical_state:
             raise ValueError("boundary rule needs a kind and observed state")
+        if type(self.assume_call_effect) is not bool:
+            raise TypeError("assume_call_effect must be an exact bool")
 
 
 class SymbolBoundaryProvider:
@@ -57,6 +64,30 @@ class SymbolBoundaryProvider:
         if len(states) > 1:
             raise ValueError("boundary aliases disagree on physical state")
         return next(iter(states), ())
+
+    def assumed_call_effect(
+        self, call: CallBoundary, match: BoundaryMatch
+    ) -> AssumedCallEffect | None:
+        """TEST-ONLY declared effect of a matched boundary call, if a rule opts in."""
+        rows = {
+            row
+            for row in self._rules
+            if row.language_id == call.language_id
+            and row.target_name in call.target_names
+            and row.kind is match.kind
+            and row.label == match.label
+            and row.assume_call_effect
+        }
+        if len(rows) != 1:
+            return None
+        (row,) = rows
+        if any(type(item) is not PhysicalRegisterSlice for item in row.physical_state):
+            return None  # memory states are not modelled by the assumption
+        if row.kind is BoundaryKind.SINK:
+            return AssumedCallEffect(row.label, (), row.physical_state)
+        if any(type(item) is not PhysicalRegisterSlice for item in row.physical_state):
+            return None  # memory outputs are not modelled by the assumption
+        return AssumedCallEffect(row.label, row.physical_state)
 
 
 __all__ = ("BoundaryRule", "SymbolBoundaryProvider")

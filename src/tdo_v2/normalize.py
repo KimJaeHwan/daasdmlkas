@@ -11,7 +11,8 @@ from .call_effect_contracts import (
     RawObservedCallPort,
     unavailable_call_effect_evidence,
 )
-from .call_clobber import CallClobberRead, derive_call_clobber_reads
+from .assumed_call_effects import AssumedCallEffect
+from .call_clobber import CallClobberRead, _register_space_id, derive_call_clobber_reads
 from .control_dependence import (
     CONTROL_DEPENDENCE_EDGE,
     ControlDependence,
@@ -109,6 +110,9 @@ class NormalizedFunction:
     may_alias_reads: tuple[MayAliasRead, ...] = ()
     may_alias_nodes: tuple[NodeId, ...] = ()
     control_dependences: tuple[ControlDependence, ...] = ()
+    # TEST-ONLY: boundary calls normalized with a declared effect (see
+    # assumed_call_effects); empty unless the caller explicitly opted in.
+    assumed_call_effects: tuple[tuple[str, AssumedCallEffect], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -440,7 +444,10 @@ class FunctionNormalizer:
         value: ScopedFunctionUnit,
         *,
         opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
+        assumed_call_effects: dict[str, AssumedCallEffect] | None = None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
+        """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
+        declared effect; see ``tdo_v2.assumed_call_effects``."""
         if type(value) is not ScopedFunctionUnit:
             raise TypeError("normalization requires an exact ScopedFunctionUnit")
         if value.observation is None:
@@ -462,6 +469,7 @@ class FunctionNormalizer:
         return _ScopedNormalizer().normalize(
             value,
             opaque_value_provider=opaque_value_provider,
+            assumed_call_effects=assumed_call_effects or {},
         )
 
     def normalize_configured(
@@ -506,7 +514,14 @@ class _ScopedNormalizer:
         configured_call_effects: ConfiguredFunctionCallEffectEvidenceV4 | None = None,
         *,
         opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
+        assumed_call_effects: dict[str, AssumedCallEffect] | None = None,
     ) -> NormalizedFunction:
+        assumed_call_effects = dict(assumed_call_effects or {})
+        if any(
+            type(key) is not str or type(row) is not AssumedCallEffect
+            for key, row in assumed_call_effects.items()
+        ):
+            raise TypeError("assumed call effects map operation keys to AssumedCallEffect")
         observation = unit.observation
         if observation is None:
             raise AssertionError("scoped normalization requires an admitted observation")
@@ -543,6 +558,11 @@ class _ScopedNormalizer:
                 )
                 operation_node = operation_nodes[operation_key]
                 effect = _scoped_effect(instruction, ordinal, operation, context)
+                if operation_key in assumed_call_effects:
+                    effect = _assumed_call_writes(
+                        effect, assumed_call_effects[operation_key], operation, context,
+                        _register_space_id(observation),
+                    )
                 if ordinal in skippable:
                     # A forward in-instruction branch may skip this write, so the
                     # previous value may survive: model it as a weak update.
@@ -696,7 +716,7 @@ class _ScopedNormalizer:
         ):
             raise AssertionError("ENTRY definitions must materialize as observed inputs")
         call_clobber_reads = derive_call_clobber_reads(
-            effect_unit, observation, context
+            effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects)
         )
         call_clobber_nodes = _materialize_call_clobber_debt(
             dependencies,
@@ -748,6 +768,7 @@ class _ScopedNormalizer:
             may_alias_reads=may_alias_reads,
             may_alias_nodes=may_alias_nodes,
             control_dependences=control_dependences,
+            assumed_call_effects=tuple(sorted(assumed_call_effects.items())),
         )
 
     def _build_cfg(
@@ -817,6 +838,32 @@ def _materialize_constant_inputs(
                     occurrence=input_ordinal,
                 ),
             )
+
+
+def _assumed_call_writes(effect, assumed, operation, context, space_id):
+    """TEST-ONLY: a declared boundary call strongly writes exactly its registers."""
+    if operation.opcode not in ("CALL", "CALLIND"):
+        raise ValueError("assumed call effects apply only to CALL/CALLIND operations")
+    if space_id is None:
+        raise ValueError("assumed call effects need one register space")
+    def resolve(rows):
+        spans = []
+        for row in rows:
+            resolved = _resolve_validated_storage(
+                StorageRef(VarnodeKind.REGISTER, "", row.byte_offset, row.byte_size,
+                           space_id=space_id),
+                context,
+            )
+            if type(resolved) is not ResolvedStorage:
+                raise ValueError("assumed call storage does not resolve to a register")
+            spans.append(resolved)
+        return tuple(spans)
+
+    return replace(
+        effect,
+        reads=effect.reads + resolve(assumed.reads),
+        writes=effect.writes + resolve(assumed.writes),
+    )
 
 
 _SKIPPABLE_OPCODES_FORBIDDEN = frozenset({

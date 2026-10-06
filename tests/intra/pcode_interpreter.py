@@ -65,7 +65,7 @@ class Interpreter:
                  register_values: dict[int, int] | None = None,
                  max_steps: int = 4000, flip: str | None = None,
                  havoc_calls: tuple[int, int, int] | None = None,
-                 image=None) -> None:
+                 image=None, assumed_calls: dict | None = None) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size)."""
         self._instructions = {
             (row.address.space_id, row.address.byte_offset): row
@@ -83,6 +83,8 @@ class Interpreter:
         self._flipped = False
         self._havoc = havoc_calls
         self._image = image  # (space, address) -> byte | None: loaded image contents
+        # TEST-ONLY declared boundary calls: key -> (reads, writes) register slices
+        self._assumed = assumed_calls or {}
         self.opaque_opcodes: set[str] = set()
         self._stack_snapshot: list = []
         self._registers = sorted({
@@ -185,6 +187,16 @@ class Interpreter:
         opcode = operation.opcode
         inputs = operation.inputs
         output = operation.output
+        if key in self._assumed and self._havoc is not None:
+            space_id = self._havoc[0]
+            reads, writes = self._assumed[key]
+            for offset, size in reads:
+                self._read(key, space_id, offset, size, run)
+            for offset, size in writes:
+                self._write(key, space_id, offset, size, self._rng.getrandbits(8 * size))
+            for index, item in enumerate(self._stack_snapshot):
+                self._bytes[(space_id, self._havoc[1] + index)] = item
+            return None
         if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:
             for item in inputs[1:] if opcode != "CALLOTHER" else inputs:
                 if item.kind is not VarnodeKindCode.CONSTANT:

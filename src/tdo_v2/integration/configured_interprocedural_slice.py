@@ -10,6 +10,7 @@ arithmetic, or aliasing stays as debt in the local slice.
 from __future__ import annotations
 
 from .._scope_contracts import AddressCoordinate
+from ..memory_contracts import MemoryDefinitionKind
 from ..boundary import BoundaryKind, BoundaryProvider, CallBoundary
 from ..external_summary import (
     ExternalSummaryProvider,
@@ -164,6 +165,27 @@ def build_observed_function_analyses(
                 namespace.language_id,
             )
             matches = provider.classify(boundary)
+            assumed = dict(caller.normalized.assumed_call_effects).get(seed.operation_key)
+            if assumed is not None:
+                # TEST-ONLY declared source effect: the caller's own write is the origin.
+                written = sorted(
+                    definition_id
+                    for definition_id, definition in enumerate(caller_view.memory.definitions)
+                    if definition.operation_key == seed.operation_key
+                    and definition.kind is MemoryDefinitionKind.DATA_WRITE
+                )
+                for match in matches:
+                    if match.kind is BoundaryKind.SOURCE and match.label == assumed.label:
+                        nodes[caller.entry].extend(
+                            ObservedBoundaryNode(
+                                BoundaryKind.SOURCE,
+                                match.label,
+                                caller_view.memory_graph.definition_nodes[definition_id],
+                                occurrence_ordinal,
+                                fragment_ordinal,
+                            )
+                            for fragment_ordinal, definition_id in enumerate(written)
+                        )
             call_position = caller_view.position(seed.operation_key)
             if call_position is None:
                 continue

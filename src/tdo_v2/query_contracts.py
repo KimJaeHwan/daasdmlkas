@@ -36,6 +36,9 @@ class LocalCompleteness:
     complete: bool
     reachable_unresolved_reads: int
     function_unresolved_writes: int
+    # roots bound to a call's consume event with no data inputs: the sink's
+    # argument state is not represented, so nothing can be claimed complete
+    unbound_roots: int = 0
 
 
 def local_completeness(results: tuple[SliceResult, ...]) -> LocalCompleteness:
