@@ -22,3 +22,28 @@ class SliceResult:
             self.reachable_unresolved_read_nodes
             or self.function_unresolved_write_nodes
         )
+
+
+@dataclass(frozen=True, slots=True)
+class LocalCompleteness:
+    """Debt visible to the root's own backward slice.
+
+    ``complete`` is False when any reachable read or any write in the root's
+    function remains unresolved. It says nothing about callers or callees;
+    an empty origin set with ``complete=False`` is not evidence of absence.
+    """
+
+    complete: bool
+    reachable_unresolved_reads: int
+    function_unresolved_writes: int
+
+
+def local_completeness(results: tuple[SliceResult, ...]) -> LocalCompleteness:
+    """Merge the local slices of one root occurrence (one per root node)."""
+    if not results or any(type(row) is not SliceResult for row in results):
+        raise TypeError("local completeness requires exact SliceResult rows")
+    reads = {node for row in results for node in row.reachable_unresolved_read_nodes}
+    writes = {node for row in results for node in row.function_unresolved_write_nodes}
+    return LocalCompleteness(
+        all(row.is_complete for row in results), len(reads), len(writes)
+    )

@@ -31,6 +31,7 @@ class BackwardSliceQuery:
             if function.dependencies.node(node).kind is NodeKind.CONSTANT
         )
         unresolved_read_set = set(function.memory_graph.unresolved_read_nodes)
+        unresolved_read_set.update(function.call_clobber_nodes)
         unresolved_reads = tuple(
             node
             for node in reachable

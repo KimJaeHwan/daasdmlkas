@@ -25,9 +25,43 @@ from .integration.configured_interprocedural_slice import (
     complete_configured_interprocedural_slices,
 )
 from .integration.observed_function_session import open_observed_function_session
-from .normalize import FunctionNormalizer, NormalizedFunction
+from .normalize import (
+    FunctionNormalizer,
+    NormalizationFailureReason,
+    NormalizedFunction,
+)
 from .opaque_values import OpaqueValueEvidenceProvider
-from .scope_identity import ConstructedProgramScope
+from .query_contracts import LocalCompleteness, local_completeness
+from .scope_identity import (
+    AddressCoordinate,
+    ConstructedFunctionScope,
+    ConstructedProgramScope,
+)
+
+
+class UnresolvedBundleFunctionError(ValueError):
+    """One Bundle function did not normalize; the run is not partial-reported.
+
+    Callers of the failed function would otherwise lose its call edges
+    silently, so the whole run fails with the typed reason instead.
+    """
+
+    def __init__(
+        self,
+        index: int,
+        entry: AddressCoordinate | None,
+        reason: NormalizationFailureReason,
+    ) -> None:
+        self.index = index
+        self.entry = entry
+        self.reason = reason
+        where = (
+            f" at {entry.space_id:x}:{entry.byte_offset:x}" if entry is not None else ""
+        )
+        super().__init__(
+            f"Bundle function {index}{where} normalization is unresolved: "
+            f"{reason.value}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +74,11 @@ class RootSlice:
     local_origin_labels: tuple[str, ...]
     interprocedural_origin_labels: tuple[str, ...]
     explanation: dict[str, object]
+    local_completeness: LocalCompleteness
+
+    @property
+    def is_locally_complete(self) -> bool:
+        return self.local_completeness.complete
 
     @property
     def reached_origin_labels(self) -> tuple[str, ...]:
@@ -89,9 +128,13 @@ def analyze_frozen_bundle(
                 opaque_value_provider=opaque_value_provider,
             )
             if type(normalized) is not NormalizedFunction:
-                raise ValueError(
-                    f"Bundle function {index} normalization is unresolved: "
-                    f"{normalized.reason.value}"
+                function = evidence.unit.scopes.function
+                raise UnresolvedBundleFunctionError(
+                    index,
+                    function.entry
+                    if type(function) is ConstructedFunctionScope
+                    else None,
+                    normalized.reason,
                 )
             rows.append((evidence, normalized))
         analyses = build_observed_function_analyses(
@@ -197,6 +240,9 @@ def analyze_frozen_bundle(
                         local_labels,
                         tuple(sorted({proof.label for proof in proofs})),
                         explanation,
+                        local_completeness(
+                            tuple(item.result for item in group)
+                        ),
                     )
                 )
         return EngineRun(
@@ -206,4 +252,11 @@ def analyze_frozen_bundle(
         )
 
 
-__all__ = ("EngineRun", "RootSlice", "analyze_frozen_bundle")
+__all__ = (
+    "EngineRun",
+    "LocalCompleteness",
+    "RootSlice",
+    "UnresolvedBundleFunctionError",
+    "analyze_frozen_bundle",
+    "local_completeness",
+)

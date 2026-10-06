@@ -39,8 +39,14 @@ result = analyze_frozen_bundle(
 )
 for root in result.roots:
     print(root.label, root.reached_origin_labels)
+    print(root.local_completeness)  # complete, unresolved read/write debt counts
     print(root.explanation["conditional_source_to_sink_paths"])
 ```
+
+`root.local_completeness.complete` is False when the root's own backward
+slice reaches unresolved memory debt or its function has an unresolved write.
+It covers only the root's function, not callers or callees, and an
+incomplete root with no origins is not evidence that no source exists.
 
 Supply `external_provider` only when external effects are independently known;
 unknown effects must not be replaced with guessed source transport. The lower

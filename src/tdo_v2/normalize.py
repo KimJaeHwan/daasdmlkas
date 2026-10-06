@@ -11,6 +11,8 @@ from .call_effect_contracts import (
     RawObservedCallPort,
     unavailable_call_effect_evidence,
 )
+from ._scope_contracts import AddressSpaceClassV2, classify_address_space_v2
+from .call_clobber import CallClobberRead, derive_call_clobber_reads
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
     BoundLocalMemorySsa,
@@ -96,8 +98,26 @@ class NormalizedFunction:
     call_port_layout: PreSsaCallPortLayout | None = None
     call_observations: FunctionCallObservations | None = None
     configured_memory_binding: BoundLocalMemorySsa | None = None
+    call_clobber_reads: tuple[CallClobberRead, ...] = ()
+    call_clobber_nodes: tuple[NodeId, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.call_clobber_reads) is not tuple or any(
+            type(row) is not CallClobberRead for row in self.call_clobber_reads
+        ):
+            raise TypeError("call-clobber reads must be an exact tuple")
+        if type(self.call_clobber_nodes) is not tuple or len(
+            self.call_clobber_nodes
+        ) != len(self.call_clobber_reads):
+            raise ValueError("call-clobber nodes must align with call-clobber reads")
+        for row, node in zip(self.call_clobber_reads, self.call_clobber_nodes):
+            record = self.dependencies.node(node)
+            if (
+                record.kind is not NodeKind.MEMORY_DEBT
+                or record.label != "call_clobber_read"
+                or not record.key.endswith(f":{row.operation_key}")
+            ):
+                raise ValueError("call-clobber node does not match its read")
         if type(self.cfg) is not RustworkxDependencyGraph or type(
             self.dependencies
         ) is not RustworkxDependencyGraph:
@@ -458,10 +478,12 @@ class _ScopedNormalizer:
         opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
     ) -> NormalizedFunction:
         observation = unit.observation
-        assert observation is not None
+        if observation is None:
+            raise AssertionError("scoped normalization requires an admitted observation")
         context = unit.scopes.resolution_context
         function = unit.scopes.function
-        assert type(function) is ConstructedFunctionScope
+        if type(function) is not ConstructedFunctionScope:
+            raise AssertionError("scoped normalization requires a constructed function scope")
         observed_call_seeds = seed_function_calls(unit)
         if type(observed_call_seeds) is not FunctionCallSeedUnit:
             raise AssertionError("admitted scoped normalization requires exact call seeds")
@@ -633,6 +655,18 @@ class _ScopedNormalizer:
             for node in expected_entry_nodes
         ):
             raise AssertionError("ENTRY definitions must materialize as observed inputs")
+        call_clobber_reads = derive_call_clobber_reads(
+            effect_unit,
+            observation,
+            context,
+            _single_address_space_id(address_spaces),
+        )
+        call_clobber_nodes = _materialize_call_clobber_debt(
+            dependencies,
+            memory_ssa,
+            call_clobber_reads,
+            operation_nodes,
+        )
         dependencies.freeze()
         return NormalizedFunction(
             document=None,
@@ -656,6 +690,8 @@ class _ScopedNormalizer:
             configured_memory_binding=(
                 memory_binding if configured_call_effects is not None else None
             ),
+            call_clobber_reads=call_clobber_reads,
+            call_clobber_nodes=call_clobber_nodes,
         )
 
     def _build_cfg(
@@ -796,6 +832,48 @@ _KIND_MAP = {
     VarnodeKindCode.STORAGE: VarnodeKind.STORAGE,
     VarnodeKindCode.OPAQUE: VarnodeKind.UNKNOWN,
 }
+
+
+def _single_address_space_id(address_spaces) -> int | None:
+    candidates = [
+        row.space_id
+        for row in address_spaces
+        if row.classification_revision == 2
+        and classify_address_space_v2(row) is AddressSpaceClassV2.ADDRESS
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _materialize_call_clobber_debt(
+    dependencies: RustworkxDependencyGraph,
+    memory_ssa: LocalMemorySsaResult,
+    reads: tuple[CallClobberRead, ...],
+    operation_nodes: dict[str, NodeId],
+) -> tuple[NodeId, ...]:
+    """One debt node per read that may observe an unevidenced call's write."""
+    if not reads:
+        return ()
+    namespace = (
+        f"call-clobber-v1:{memory_ssa.function_scope.digest.hex()}:"
+        f"{memory_ssa.unit_digest.hex()}"
+    )
+    dependencies.claim_namespace(namespace)
+    nodes = []
+    for row in reads:
+        node = dependencies.add_node(
+            NodeRecord(
+                f"{namespace}:{row.operation_key}",
+                NodeKind.MEMORY_DEBT,
+                "call_clobber_read",
+            )
+        )
+        dependencies.add_edge(
+            node,
+            operation_nodes[row.operation_key],
+            EdgeRecord("call_clobber_read", operation=row.operation_key),
+        )
+        nodes.append(node)
+    return tuple(nodes)
 
 
 def _storage_ref(value: ValidatedVarnode) -> StorageRef:

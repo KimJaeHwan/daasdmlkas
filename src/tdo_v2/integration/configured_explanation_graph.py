@@ -105,6 +105,18 @@ def root_local_explanation(
                     else occurrence.access.raw_address.stable_key
                 ),
             })
+    for row, node in zip(
+        normalized.call_clobber_reads,
+        normalized.call_clobber_nodes,
+        strict=True,
+    ):
+        if node in owned:
+            gaps.append({
+                "kind": "call_clobber_read",
+                "node": node,
+                "operation_key": row.operation_key,
+                "spans": [_span_report(span) for span in row.spans],
+            })
     if interprocedural_proof_count:
         gaps.append({
             "kind": "unanchored_interprocedural_proofs",
@@ -335,6 +347,7 @@ def conditional_call_byte_overlay(
     unanchored = sorted(set(proof_ordinals.values()) - attached_ordinals)
     debt_nodes = set(normalized.memory_graph.unresolved_read_nodes)
     debt_nodes.update(normalized.memory_graph.unresolved_write_nodes)
+    debt_nodes.update(normalized.call_clobber_nodes)
     remaining_debt = sorted(debt_nodes & reached)
     return {
         "contract": "conditional_observed_call_byte_explanation",
