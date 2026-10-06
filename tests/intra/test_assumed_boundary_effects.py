@@ -118,3 +118,28 @@ def test_default_mode_does_not_claim_a_joined_sink_argument_complete():
     assert not root.is_locally_complete
     assert not root.is_effectively_complete
     assert root.local_completeness.unbound_roots == 1
+
+
+def test_declared_boundary_calls_do_not_make_the_frame_escape():
+    """RBP = RSP; *(RBP-8) = EAX; *(global) = 1; sink(*(RBP-8)).
+
+    With an undeclared call, the frame-pointer copy counts as an escape and the
+    global write may alias the slot. Declared boundary calls observe nothing,
+    so the private slot stays private.
+    """
+    from synthetic import DATA_BASE, RBP, RSP, add, load, store, tmp
+
+    T = tmp(0x100)
+    main = (
+        FunctionBuilder(entry=MAIN)
+        .push(RBP).ins(copy(reg(RBP), reg(RSP))).sub_rsp(0x20)
+        .call(SOURCE)
+        .ins(add(T, reg(RBP), const(-8 & 0xFFFFFFFFFFFFFFFF)), store(T, reg(RAX, 4)))
+        .ins(store(const(DATA_BASE), const(1, 4)))
+        .ins(add(T, reg(RBP), const(-8 & 0xFFFFFFFFFFFFFFFF)), load(reg(RCX, 4), T))
+        .call(SINK)
+        .add_rsp(0x20).pop(RBP).ret()
+    )
+    root = _root(main, assume=True)
+    assert root.local_origin_labels == ("source.ret",)
+    assert root.is_locally_complete

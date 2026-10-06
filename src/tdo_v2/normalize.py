@@ -725,7 +725,8 @@ class _ScopedNormalizer:
             operation_nodes,
         )
         may_alias_reads = derive_may_alias_reads(
-            effect_unit, observation, context, address_spaces
+            effect_unit, observation, context, address_spaces,
+            assumed_calls=frozenset(assumed_call_effects),
         )
         may_alias_nodes = _materialize_may_alias_debt(
             dependencies,

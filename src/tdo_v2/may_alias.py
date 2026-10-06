@@ -128,8 +128,14 @@ def derive_may_alias_reads(
     observation: ValidatedFunctionObservation,
     context: StorageResolutionContext,
     address_spaces: tuple[AddressSpaceEvidence, ...],
+    *,
+    assumed_calls: frozenset[str] = frozenset(),
 ) -> tuple[MayAliasRead, ...]:
-    """Return memory reads that a write through another base may have overwritten."""
+    """Return memory reads that a write through another base may have overwritten.
+
+    ``assumed_calls`` (TEST-ONLY) are boundary calls declared to touch only
+    their listed registers; they cannot observe a stack pointer copy.
+    """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("may-alias analysis requires an exact effect unit")
     if type(observation) is not ValidatedFunctionObservation:
@@ -157,7 +163,7 @@ def derive_may_alias_reads(
     has_unknown_read = any(_unknown_read(effect) for block in unit.blocks for effect in block.effects)
     if len(objects) < 2 and not unknown_writers and not has_unknown_read:
         return ()
-    policy = _stack_policy(unit, observation, context, address_spaces)
+    policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls)
     policy.unknown_writers = unknown_writers
 
     blocks = {block.key: block for block in unit.blocks}
@@ -284,7 +290,7 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
 
 # -- stack identity and escape ---------------------------------------------------
 
-def _stack_policy(unit, observation, context, address_spaces) -> _Policy:
+def _stack_policy(unit, observation, context, address_spaces, assumed_calls=frozenset()) -> _Policy:
     registers = set()
     space_ids = set()
     for row in observed_call_state_projections(observation):
@@ -317,7 +323,7 @@ def _stack_policy(unit, observation, context, address_spaces) -> _Policy:
     return _Policy(
         stack_object,
         1 << space.address_size_bits,
-        _stack_escapes(observation, register_space, offset, size),
+        _stack_escapes(observation, register_space, offset, size, assumed_calls),
     )
 
 
@@ -356,52 +362,92 @@ def _register_space_id(observation) -> int | None:
     return spaces.pop() if len(spaces) == 1 else None
 
 
-def _stack_escapes(observation, register_space: int, offset: int, size: int) -> bool:
-    """Flow-insensitive: can a stack-derived value reach another base?"""
-    operations = {
-        _operation_key(instruction.address, ordinal, operation.opcode): operation
-        for instruction in observation.instructions
-        for ordinal, operation in enumerate(instruction.operations)
-    }
-    stack_bytes = {(register_space, offset + index) for index in range(size)}
-    tainted = set(stack_bytes)
+def _stack_escapes(observation, register_space: int, offset: int, size: int,
+                   assumed_calls=frozenset()) -> bool:
+    """Flow-sensitive: can a stack-derived value reach another base?
 
-    def touches(varnode) -> bool:
-        return varnode is not None and any(
-            (varnode.coordinate.space_id, varnode.coordinate.byte_offset + index) in tainted
-            for index in range(varnode.byte_size)
+    Forward over the observed instruction CFG, tracking which register and
+    temporary bytes hold a stack-derived value at each point. It escapes when
+    such a value is stored to memory, passed to CALLOTHER, or held in a
+    register other than the stack pointer at a call that is not a declared
+    (TEST-ONLY assumed) boundary call. ``push rbp`` before ``mov rbp, rsp``
+    therefore stores the caller's RBP, not a stack address.
+    """
+    from .control_dependence import in_instruction_skips
+    from .control_projection import control_successor_coordinates
+
+    instructions = {row.address: row for row in observation.instructions}
+    if not instructions:
+        return True
+    stack_bytes = frozenset((register_space, offset + index) for index in range(size))
+    entry = min(instructions)
+    successors = {
+        address: tuple(
+            target
+            for target in control_successor_coordinates(
+                row, local_addresses=set(instructions), function_entry=entry
+            )
+            if target in instructions
         )
+        for address, row in instructions.items()
+    }
 
-    changed = True
-    while changed:
-        changed = False
-        for operation in operations.values():
+    def bytes_of(varnode):
+        return {
+            (varnode.coordinate.space_id, varnode.coordinate.byte_offset + index)
+            for index in range(varnode.byte_size)
+        }
+
+    def transfer(row, state, check):
+        skippable = {
+            index
+            for ordinal, _, stop in in_instruction_skips(row)
+            for index in range(ordinal + 1, stop)
+        }
+        tainted = set(state)
+        for ordinal, operation in enumerate(row.operations):
+            touches = lambda varnode: varnode is not None and bool(bytes_of(varnode) & tainted)
+            key = _operation_key(row.address, ordinal, operation.opcode)
+            if check:
+                if operation.opcode == "STORE" and len(operation.inputs) == 3 and touches(operation.inputs[2]):
+                    return None
+                if operation.opcode == "CALLOTHER" and any(touches(item) for item in operation.inputs):
+                    return None
+                if (
+                    operation.opcode in ("CALL", "CALLIND")
+                    and key not in assumed_calls
+                    and any(item[0] == register_space for item in tainted - stack_bytes)
+                ):
+                    return None  # every register is visible to a callee
             output = operation.output
-            if (
-                output is None
-                or operation.opcode in _NON_VALUE_OPCODES
-                or operation.opcode in _BOOLEAN_OPCODES
-                or output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE)
-                or not any(touches(item) for item in operation.inputs)
-            ):
+            if output is None or output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
                 continue
-            new = {
-                (output.coordinate.space_id, output.coordinate.byte_offset + index)
-                for index in range(output.byte_size)
-            } - tainted
-            if new:
-                tainted |= new
-                changed = True
+            produced = (
+                operation.opcode not in _NON_VALUE_OPCODES
+                and operation.opcode not in _BOOLEAN_OPCODES
+                and any(touches(item) for item in operation.inputs)
+            )
+            written = bytes_of(output)
+            if ordinal not in skippable:
+                tainted -= written
+            if produced:
+                tainted |= written
+        return frozenset(tainted)
 
-    for operation in operations.values():
-        if operation.opcode == "STORE" and len(operation.inputs) == 3 and touches(operation.inputs[2]):
-            return True
-        if operation.opcode == "CALLOTHER" and any(touches(item) for item in operation.inputs):
-            return True
-    has_calls = any(operation.opcode in ("CALL", "CALLIND") for operation in operations.values())
-    # Every register is visible to a callee, so a stack copy in another register escapes.
-    return has_calls and any(
-        space == register_space and (space, byte) not in stack_bytes for space, byte in tainted
+    in_states = {entry: stack_bytes}
+    pending = {entry}
+    while pending:
+        address = min(pending)
+        pending.remove(address)
+        out = transfer(instructions[address], in_states[address], False)
+        for target in successors[address]:
+            merged = out | in_states.get(target, frozenset())
+            if merged != in_states.get(target):
+                in_states[target] = merged
+                pending.add(target)
+    return any(
+        transfer(instructions[address], state, True) is None
+        for address, state in in_states.items()
     )
 
 
