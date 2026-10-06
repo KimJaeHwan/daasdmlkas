@@ -11,9 +11,22 @@ when, for every intervening call C, the callee is an internal function and:
   ``ObservedCallByteReplacement`` attaches R's bytes to the callee's terminal
   write W, whose own backward slice in the callee is locally complete.
 
-CALLIND, CALLOTHER, external or unresolved targets, and memory spans are
-never discharged here. Recursion is not special-cased: a self-call clobbers
-the callee's own reads, so the PRESERVED trace fails.
+* FRAME_PRESERVED: S lies in the caller's own stack object (relative to its
+  entry stack pointer) and the callee provably writes none of S's bytes.
+  The call token gives the callee's entry stack pointer in caller
+  coordinates, so S becomes an interval P relative to the callee's entry SP.
+  Every memory write of the callee must be either relative to its own entry
+  SP and disjoint from P, or to a constant loaded-image address (axiom: such
+  an address is never a stack byte). A write through any other base
+  (pointer argument, loaded pointer, opaque value), an unresolved write,
+  CALLOTHER, or a register call-clobber read in the callee (an address may
+  be computed from a clobbered register) fails the proof. Nested calls are
+  checked recursively with P shifted by their own token, and each nested
+  call's return-address slot counts as written. Recursion fails.
+
+CALLIND, CALLOTHER, external or unresolved targets, and other memory are
+never discharged here. For PRESERVED, a self-call clobbers the callee's own
+reads, so the trace fails.
 """
 
 from __future__ import annotations
@@ -27,15 +40,20 @@ from ..query import BackwardSliceQuery
 from ..scope_identity import AddressCoordinate
 from ..span_geometry import ByteSpan
 from .configured_function_view import _FunctionView
+from ..relative_memory import _function_relative_object_id
 from .configured_interprocedural_contracts import ObservedCallByteReplacement
+from .configured_recursive_frame_inventory import build_recursive_frame_inventory
 from .configured_target_resolution import _selected_resolved_target
 
 MAX_TRACE_DEPTH = 64
+MAX_FRAME_DEPTH = 16
+MAX_FRAME_OFFSET = 1 << 31
 
 
 class DischargeKind(StrEnum):
     PRESERVED = "preserved"
     MUST_WRITTEN = "must_written"
+    FRAME_PRESERVED = "frame_preserved"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +74,8 @@ class CallClobberDischarger:
             entry: _direct_internal_targets(view, self._views)
             for entry, view in self._views.items()
         }
+        self._frames: dict[AddressCoordinate, _Frame | None] = {}
+        self._frame_safe: dict[tuple[AddressCoordinate, int, int], bool] = {}
 
     def discharge(
         self,
@@ -71,12 +91,14 @@ class CallClobberDischarger:
         for read, node in zip(
             normalized.call_clobber_reads, normalized.call_clobber_nodes, strict=True
         ):
-            kinds = self._discharge_read(read, targets, by_reader.get(read.operation_key, ()))
+            kinds = self._discharge_read(
+                entry, read, targets, by_reader.get(read.operation_key, ())
+            )
             if kinds is not None:
                 rows.append(CallClobberDischarge(read.operation_key, node, kinds))
         return tuple(rows)
 
-    def _discharge_read(self, read, targets, replacements):
+    def _discharge_read(self, entry, read, targets, replacements):
         kinds: set[DischargeKind] = set()
         for span in read.spans:
             if all(
@@ -84,6 +106,12 @@ class CallClobberDischarger:
                 for call in read.intervening_calls
             ):
                 kinds.add(DischargeKind.PRESERVED)
+                continue
+            if span.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE and all(
+                call in targets and self._frame_preserved(entry, call, span)
+                for call in read.intervening_calls
+            ):
+                kinds.add(DischargeKind.FRAME_PRESERVED)
                 continue
             if len(read.intervening_calls) == 1 and any(
                 row.proof.call_operation_key == read.intervening_calls[0]
@@ -122,6 +150,125 @@ class CallClobberDischarger:
             view = self._views.get(callee)
             self._preserved[key] = view is not None and _callee_preserves(view, span)
         return self._preserved[key]
+
+    # -- FRAME_PRESERVED ---------------------------------------------------
+    def _frame(self, entry: AddressCoordinate) -> "_Frame | None":
+        if entry not in self._frames:
+            self._frames[entry] = _Frame.build(self._views[entry])
+        return self._frames[entry]
+
+    def _frame_preserved(self, caller: AddressCoordinate, call: str, span: ByteSpan) -> bool:
+        frame = self._frame(caller)
+        if frame is None or span.object_id != frame.stack_object:
+            return False
+        token = frame.tokens.get(call)
+        if token is None:
+            return False
+        start = span.start - frame.bias - token
+        if start < frame.slot and 0 < start + span.size:
+            return False  # the call itself writes the return-address slot
+        return self._callee_frame_safe(
+            self._targets[caller][call], start, start + span.size, ()
+        )
+
+    def _callee_frame_safe(self, callee, start: int, stop: int, active) -> bool:
+        """The callee never writes [start, stop) relative to its entry stack pointer."""
+        if callee in active or len(active) >= MAX_FRAME_DEPTH:
+            return False
+        if abs(start) >= MAX_FRAME_OFFSET or abs(stop) >= MAX_FRAME_OFFSET:
+            return False
+        key = (callee, start, stop)
+        if key not in self._frame_safe:
+            self._frame_safe[key] = self._check_callee_frame(callee, start, stop, active)
+        return self._frame_safe[key]
+
+    def _check_callee_frame(self, callee, start: int, stop: int, active) -> bool:
+        frame = self._frame(callee)
+        if frame is None or not frame.write_safe(start, stop):
+            return False
+        if set(frame.calls) - set(frame.tokens):
+            return False  # a call without an observed stack token
+        targets = self._targets[callee]
+        for call, token in frame.tokens.items():
+            if token < stop and start < token + frame.slot:
+                return False  # the nested call's return-address slot
+            if call not in targets or not self._callee_frame_safe(
+                targets[call], start - token, stop - token, (*active, callee)
+            ):
+                return False
+        return True
+
+
+@dataclass(frozen=True, slots=True)
+class _Frame:
+    """Stack-frame facts of one function, relative to its entry stack pointer."""
+
+    stack_object: object
+    bias: int
+    slot: int
+    tokens: dict[str, int]  # call key -> callee entry SP displacement
+    calls: tuple[str, ...]  # every CALL/CALLIND operation key
+    stack_writes: tuple[tuple[int, int], ...]
+    opaque_writes: bool
+
+    @staticmethod
+    def build(view: _FunctionView) -> "_Frame | None":
+        try:
+            inventory = build_recursive_frame_inventory(view.analysis)
+        except Exception:  # an inventory we cannot build proves nothing
+            return None
+        anchors = {
+            (row.interval.anchor_span, row.interval.address_space_id)
+            for row in (*inventory.call_tokens, *inventory.return_tokens)
+        }
+        if len(anchors) != 1:
+            return None
+        ((anchor_span, space_id),) = anchors
+        bits = view.space_bits.get(space_id)
+        if bits is None:
+            return None
+        stack_object = _function_relative_object_id(
+            view.memory.function_scope, anchor_span, space_id
+        )
+        bias = 1 << bits
+        normalized = view.normalized
+        keys = tuple(view.operations)
+        opaque = (
+            bool(normalized.memory_graph.unresolved_write_nodes)
+            or any(key.endswith(":CALLOTHER") for key in keys)
+            or any(
+                span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                for read in normalized.call_clobber_reads
+                for span in read.spans
+            )
+        )
+        writes = []
+        for definition in view.memory.definitions:
+            if definition.kind not in (MemoryDefinitionKind.DATA_WRITE, MemoryDefinitionKind.KILL):
+                continue
+            kind = definition.span.object_id.kind
+            if kind in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE):
+                continue
+            if kind is StorageObjectKind.ADDRESS_SPACE:
+                continue  # axiom: a constant loaded-image address is never a stack byte
+            if definition.span.object_id != stack_object:
+                opaque = True  # pointer argument, loaded pointer, or opaque base
+                break
+            writes.append((definition.span.start - bias, definition.span.end - bias))
+        return _Frame(
+            stack_object,
+            bias,
+            anchor_span.size,
+            {row.call_operation_key: row.interval.offset for row in inventory.call_tokens},
+            tuple(sorted(key for key in keys if key.endswith((":CALL", ":CALLIND")))),
+            tuple(writes),
+            opaque,
+        )
+
+    def write_safe(self, start: int, stop: int) -> bool:
+        if self.opaque_writes:
+            return False
+        return not any(low < stop and start < high for low, high in self.stack_writes)
 
 
 def _direct_internal_targets(view, views) -> dict[str, AddressCoordinate]:

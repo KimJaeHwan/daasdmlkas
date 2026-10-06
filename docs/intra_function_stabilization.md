@@ -229,6 +229,21 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
        남은 불확실 원인(함수 단위 근사): call 뒤 스택 슬롯 LOAD 47, 레지스터 COPY 33,
        RBP 기반 INT_ADD 13, 전역 COPY 11 → 다음은 프레임 보존(PRESERVED 메모리)
        증명(Fable 7단계), 그다음 outparam MUST_WRITTEN(8단계).
+   - **P0-3c 프레임 보존 (2026-10-06, Fable 7단계 v1)**: FRAME_PRESERVED
+     - 호출자 entry-SP 스택 객체의 span S를 call 토큰으로 callee entry-SP 좌표 P로
+       바꾸고, callee의 모든 메모리 write가 (a) 자기 entry-SP 기준이며 P와 겹치지
+       않거나 (b) 상수 주소(공리: 로드된 이미지 상수 주소는 스택이 아님)일 때만 해소.
+     - 실패 조건: 그 외 base(포인터 인자, LOAD한 포인터, opaque)로의 write,
+       unresolved write, CALLOTHER, callee 안의 레지스터 call-clobber 읽기(주소가
+       clobber된 레지스터에서 계산됐을 수 있음), 토큰 없는 call, 재귀, 깊이 16 초과,
+       S가 그 call의 복귀주소 슬롯과 겹침. 중첩 call은 P를 토큰만큼 옮겨 재귀 검사하고
+       중첩 call의 복귀주소 슬롯도 write로 본다.
+     - 호출자 쪽 탈출 분석은 필요 없음: callee의 비-SP base write는 전부 실패 처리.
+     - 테스트 11개 추가(`test_call_clobber_discharge.py`), 오프셋만 다른 쌍
+       (shadow +0x8 OK / 슬롯 +0x28 실패, 중첩 -0x10 OK / +0x50 실패)으로 좌표 변환 검증.
+     - 실측(64 케이스): 누락+확실 0 유지, **정확+확실 16 → 23**, 과다보고+확실 2 → 9.
+       남은 원인(함수 단위 근사): 레지스터 COPY 27, 스택 슬롯 LOAD 47 → 19,
+       RBP INT_ADD 12, 전역 COPY 6.
    - **순서: P0-3 → P0-1.** 공통 debt 구조를 먼저 세우고 P0-1은 reason만 추가.
      실제 코퍼스에서 incomplete 비율이 크게 오를 수 있어 09 testbed 계측이 필요.
 5. **P0-1**: 방식 (a) may-alias debt. SSA는 후보만 기록(`memory_ssa.py` 읽기 루프),

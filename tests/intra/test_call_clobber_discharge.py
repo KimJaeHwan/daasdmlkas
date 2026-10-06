@@ -159,3 +159,139 @@ def test_unknown_callee_is_not_discharged():
         "sink": _sink(),
     })
     assert not root.is_effectively_complete
+
+
+# -- FRAME_PRESERVED ---------------------------------------------------------------
+#
+# main: sub rsp,0x28; EAX = source(); [rsp+0x20] = EAX; helper(); ECX = [rsp+0x20]; sink()
+# The slot is main-entry-SP - 8. helper's entry SP is main-entry-SP - 0x30, so
+# in helper coordinates the slot is [+0x28, +0x2C).
+
+from synthetic import DATA_BASE, R8, add, store, sub, tmp  # noqa: E402
+
+T = tmp(0x100)
+
+
+def _main_with_stack_slot(*, leak_slot_in_rdi=False):
+    main = FunctionBuilder(entry=MAIN).sub_rsp(0x28).call(SOURCE)
+    main.ins(add(T, reg(RSP), const(0x20)), store(T, reg(RAX, 4)))
+    if leak_slot_in_rdi:
+        main.ins(add(reg(RDI), reg(RSP), const(0x20)))
+    return (
+        main.call(HELPER)
+        .ins(add(T, reg(RSP), const(0x20)), load(reg(RCX, 4), T))
+        .call(SINK)
+        .add_rsp(0x28)
+        .ret()
+    )
+
+
+def _frame_root(helper, *, extra=None, leak_slot_in_rdi=False):
+    functions = {
+        "main": _main_with_stack_slot(leak_slot_in_rdi=leak_slot_in_rdi),
+        "source": _source_returning_constant(),
+        "helper": helper,
+        "sink": _sink(),
+    }
+    functions.update(extra or {})
+    return _root(functions)
+
+
+def _writes_at(offset, size=8, entry=HELPER):
+    """helper: *(entry RSP + offset) = R8 (no frame setup)."""
+    return (
+        FunctionBuilder(entry=entry)
+        .ins(add(T, reg(RSP), const(offset & 0xFFFFFFFFFFFFFFFF)), store(T, reg(R8, size)))
+        .ret()
+    )
+
+
+def test_callee_writing_only_its_own_frame_discharges_slot_debt():
+    helper = (
+        FunctionBuilder(entry=HELPER)
+        .push(RBP).ins(copy(reg(RBP), reg(RSP))).sub_rsp(0x10)
+        .ins(add(T, reg(RBP), const(-8 & 0xFFFFFFFFFFFFFFFF)), store(T, reg(R8)))
+        .add_rsp(0x10).pop(RBP).ret()
+    )
+    root = _frame_root(helper)
+    assert root.reached_origin_labels == ("source.ret",)
+    assert root.is_effectively_complete
+
+
+def test_callee_shadow_space_write_beside_the_slot_discharges():
+    root = _frame_root(_writes_at(0x8))
+    assert root.is_effectively_complete
+
+
+def test_callee_write_into_the_slot_through_its_stack_pointer_is_not_discharged():
+    root = _frame_root(_writes_at(0x28, 4))
+    assert not root.is_effectively_complete
+
+
+def test_callee_write_through_pointer_argument_is_not_discharged():
+    helper = FunctionBuilder(entry=HELPER).ins(store(reg(RDI), reg(R8, 4))).ret()
+    root = _frame_root(helper, leak_slot_in_rdi=True)
+    assert not root.is_effectively_complete
+
+
+def test_callee_write_through_loaded_pointer_is_not_discharged():
+    helper = (
+        FunctionBuilder(entry=HELPER)
+        .ins(add(T, reg(RSP), const(0x10)), load(reg(RAX), T))
+        .ins(store(reg(RAX), reg(R8, 4)))
+        .ret()
+    )
+    root = _frame_root(helper)
+    assert not root.is_effectively_complete
+
+
+def test_callee_global_write_discharges_by_axiom():
+    helper = FunctionBuilder(entry=HELPER).ins(store(const(DATA_BASE), reg(R8))).ret()
+    root = _frame_root(helper)
+    assert root.is_effectively_complete
+
+
+def _helper_calling_inner():
+    """helper: sub rsp,0x20; call inner; add rsp,0x20 (inner entry = helper - 0x28)."""
+    return (
+        FunctionBuilder(entry=HELPER)
+        .sub_rsp(0x20).call(INNER).add_rsp(0x20).ret()
+    )
+
+
+def test_nested_callee_own_frame_write_discharges():
+    root = _frame_root(_helper_calling_inner(), extra={"inner": _writes_at(-0x10, entry=INNER)})
+    assert root.is_effectively_complete
+
+
+def test_nested_callee_writing_the_shifted_slot_is_not_discharged():
+    # slot is helper +0x28 = inner +0x50
+    root = _frame_root(_helper_calling_inner(), extra={"inner": _writes_at(0x50, 4, entry=INNER)})
+    assert not root.is_effectively_complete
+
+
+def test_recursive_callee_is_not_frame_discharged():
+    helper = (
+        FunctionBuilder(entry=HELPER)
+        .sub_rsp(0x20)
+        .cbranch("done", reg(ZF, 1))
+        .call(HELPER)
+        .label("done")
+        .add_rsp(0x20).ret()
+    )
+    root = _frame_root(helper)
+    assert not root.is_effectively_complete
+
+
+def test_callee_with_callother_is_not_frame_discharged():
+    helper = FunctionBuilder(entry=HELPER).ins(op("CALLOTHER", [const(0x10, 4)])).ret()
+    root = _frame_root(helper)
+    assert not root.is_effectively_complete
+
+
+def test_unknown_callee_is_not_frame_discharged():
+    functions = {
+        "main": _main_with_stack_slot(), "source": _source_returning_constant(),
+        "sink": _sink(),
+    }
+    assert not _root(functions).is_effectively_complete
