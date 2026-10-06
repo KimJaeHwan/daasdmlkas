@@ -13,8 +13,9 @@ slice that follows control edges reaches ``s``.
   tree path from B up to (excluding) ipdom(A) are control dependent on A.
   The deciding operation of A is its CBRANCH (with an address destination)
   or BRANCHIND.
-* Inside one instruction: operations a forward relative CBRANCH may skip are
-  control dependent on that CBRANCH (``normalize`` admits only this shape).
+* Inside one instruction: operations an in-instruction branch may skip are
+  control dependent on it (``in_instruction_skips``; ``normalize`` admits only
+  forward CBRANCH over register/temporary writes).
 
 Edges run decision operation -> dependent operation with kind
 ``control_dependence``; queries follow them only when asked.
@@ -149,24 +150,47 @@ def _operation_keys(instruction) -> tuple[str, ...]:
     )
 
 
-def _in_instruction(instruction):
+def in_instruction_skips(instruction) -> tuple[tuple[int, str, int], ...]:
+    """(ordinal, opcode, stop): operations ordinal+1 .. stop-1 may be skipped.
+
+    A relative branch jumps to ``ordinal + delta`` inside the instruction. A
+    branch to an address that is not the last operation leaves the
+    instruction early (Ghidra encodes ``cmovcc`` as ``CBRANCH <next
+    instruction>`` followed by the move), skipping the rest.
+    """
     operations = instruction.operations
+    rows = []
     for ordinal, operation in enumerate(operations):
-        if operation.opcode != "CBRANCH" or not operation.inputs:
+        if operation.opcode not in ("BRANCH", "CBRANCH") or not operation.inputs:
             continue
         destination = operation.inputs[0]
-        if destination.kind is not VarnodeKindCode.CONSTANT:
+        if destination.kind is VarnodeKindCode.CONSTANT:
+            bits = 8 * destination.byte_size
+            delta = destination.coordinate.byte_offset
+            if delta >> (bits - 1) & 1:
+                delta -= 1 << bits
+            rows.append((ordinal, operation.opcode, ordinal + delta))
+        elif ordinal < len(operations) - 1:
+            rows.append((ordinal, operation.opcode, len(operations)))
+    return tuple(rows)
+
+
+def _in_instruction(instruction):
+    operations = instruction.operations
+    for ordinal, opcode, stop in in_instruction_skips(instruction):
+        if opcode != "CBRANCH":
             continue
-        bits = 8 * destination.byte_size
-        delta = destination.coordinate.byte_offset
-        if delta >> (bits - 1) & 1:
-            delta -= 1 << bits
-        decision = _operation_key(instruction.address, ordinal, operation.opcode)
-        for index in range(ordinal + 1, min(ordinal + delta, len(operations))):
+        decision = _operation_key(instruction.address, ordinal, opcode)
+        for index in range(ordinal + 1, min(stop, len(operations))):
             yield ControlDependence(
                 decision,
                 _operation_key(instruction.address, index, operations[index].opcode),
             )
 
 
-__all__ = ("CONTROL_DEPENDENCE_EDGE", "ControlDependence", "derive_control_dependences")
+__all__ = (
+    "CONTROL_DEPENDENCE_EDGE",
+    "ControlDependence",
+    "derive_control_dependences",
+    "in_instruction_skips",
+)

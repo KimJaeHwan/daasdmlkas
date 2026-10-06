@@ -6,13 +6,17 @@ entry input) wrote each byte the operation read. The engine's graph must
 cover every such dynamic dependency; ``tests/intra/test_graph_fidelity.py``
 checks that.
 
-Scope: call-free functions. CALL/CALLIND/CALLOTHER/BRANCHIND stop the run
-(``Unsupported``). Unwritten registers and memory read as random but
+Scope: by default call-free functions; CALL/CALLIND/CALLOTHER/BRANCHIND stop
+the run (``Unsupported``). With ``havoc_calls`` a call instead overwrites
+every register the function mentions (except the stack pointer) with random
+bytes owned by the call operation, and pops the return address; its memory
+effects are not modelled. Unwritten registers and memory read as random but
 consistent bytes owned by an ``Entry`` writer.
 """
 
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import dataclass, field
 
@@ -59,7 +63,10 @@ def _signed(value: int, size: int) -> int:
 class Interpreter:
     def __init__(self, observation, *, constant_space: int, seed: int,
                  register_values: dict[int, int] | None = None,
-                 max_steps: int = 4000, flip: str | None = None) -> None:
+                 max_steps: int = 4000, flip: str | None = None,
+                 havoc_calls: tuple[int, int, int] | None = None,
+                 image=None) -> None:
+        """``havoc_calls`` = (register space, stack pointer offset, stack pointer size)."""
         self._instructions = {
             (row.address.space_id, row.address.byte_offset): row
             for row in observation.instructions
@@ -74,12 +81,26 @@ class Interpreter:
         self._max_steps = max_steps
         self._flip = flip  # CBRANCH key whose first decision is inverted
         self._flipped = False
+        self._havoc = havoc_calls
+        self._image = image  # (space, address) -> byte | None: loaded image contents
+        self.opaque_opcodes: set[str] = set()
+        self._stack_snapshot: list = []
+        self._registers = sorted({
+            (varnode.coordinate.space_id, varnode.coordinate.byte_offset, varnode.byte_size)
+            for row in observation.instructions
+            for operation in row.operations
+            for varnode in (*operation.inputs, operation.output)
+            if varnode is not None and varnode.kind is VarnodeKindCode.REGISTER
+        })
 
     # -- storage -------------------------------------------------------------
     def _byte(self, space_id: int, offset: int) -> tuple[int, object]:
         key = (space_id, offset)
         if key not in self._bytes:
-            self._bytes[key] = (self._rng.randrange(256), Entry(space_id, offset))
+            byte = None if self._image is None else self._image(space_id, offset)
+            if byte is None:
+                byte = self._rng.randrange(256)
+            self._bytes[key] = (byte, Entry(space_id, offset))
         return self._bytes[key]
 
     def preset(self, space_id: int, offset: int, size: int, value: int) -> None:
@@ -117,12 +138,22 @@ class Interpreter:
         while True:
             instruction = self._instructions.get(location)
             if instruction is None:
-                raise Unsupported(f"no instruction at {location}")
+                # control left the observed function (tail jump): the run ends here
+                run.completed = True
+                return run
             next_location = (
                 None if instruction.fallthrough is None
                 else (instruction.fallthrough.space_id, instruction.fallthrough.byte_offset)
             )
             operations = instruction.operations
+            if self._havoc is not None and any(
+                op.opcode in ("CALL", "CALLIND") for op in operations
+            ):
+                # the callee's ret restores the stack pointer of this instruction's start
+                space_id, sp_offset, sp_size = self._havoc
+                self._stack_snapshot = [
+                    self._byte(space_id, sp_offset + i) for i in range(sp_size)
+                ]
             index = 0
             while index < len(operations):
                 steps += 1
@@ -154,7 +185,20 @@ class Interpreter:
         opcode = operation.opcode
         inputs = operation.inputs
         output = operation.output
-        if opcode in ("CALL", "CALLIND", "CALLOTHER", "BRANCHIND"):
+        if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:
+            for item in inputs[1:] if opcode != "CALLOTHER" else inputs:
+                if item.kind is not VarnodeKindCode.CONSTANT:
+                    self._value(key, item, run)
+            self._havoc_registers(key, pop_return=opcode != "CALLOTHER")
+            if opcode == "CALLOTHER" and output is not None:
+                self._write(key, output.coordinate.space_id, output.coordinate.byte_offset,
+                            output.byte_size, self._rng.getrandbits(8 * output.byte_size))
+            return None
+        if opcode == "BRANCHIND":
+            target = self._value(key, inputs[0], run)
+            space_id = self._order[0][0]
+            return ("absolute", (space_id, target))
+        if opcode in ("CALL", "CALLIND", "CALLOTHER"):
             raise Unsupported(opcode)
         if opcode == "RETURN":
             for item in inputs:
@@ -182,10 +226,32 @@ class Interpreter:
             self._write(key, space_id, address, inputs[2].byte_size, value)
             return None
         values = [self._value(key, item, run) for item in inputs]
-        result = self._compute(opcode, values, inputs, output)
+        try:
+            result = self._compute(opcode, values, inputs, output)
+        except Unsupported:
+            if output is None:
+                raise
+            # Semantics unknown to the oracle: any deterministic function of the
+            # inputs preserves the dependency structure, which is all we check.
+            self.opaque_opcodes.add(opcode)
+            digest = hashlib.sha256(repr((opcode, values)).encode()).digest()
+            result = int.from_bytes(digest, "little")
         self._write(key, output.coordinate.space_id, output.coordinate.byte_offset,
                     output.byte_size, result & _MASKS[output.byte_size])
         return None
+
+    def _havoc_registers(self, key: str, *, pop_return: bool) -> None:
+        space_id, sp_offset, sp_size = self._havoc
+        stack = set(range(sp_offset, sp_offset + sp_size))
+        for space, offset, size in self._registers:
+            if space != space_id:
+                continue
+            for byte in range(offset, offset + size):
+                if byte not in stack:
+                    self._write(key, space, byte, 1, self._rng.randrange(256))
+        if pop_return:
+            for index, item in enumerate(self._stack_snapshot):
+                self._bytes[(space_id, sp_offset + index)] = item
 
     def _destination(self, varnode):
         if varnode.kind is VarnodeKindCode.CONSTANT:
@@ -208,7 +274,7 @@ class Interpreter:
             return a * b
         if opcode in ("INT_DIV", "INT_REM", "INT_SDIV", "INT_SREM"):
             if b == 0:
-                raise Unsupported("division by zero")
+                raise Unsupported("division by zero")  # value-free fallback applies
             if opcode == "INT_DIV":
                 return a // b
             if opcode == "INT_REM":

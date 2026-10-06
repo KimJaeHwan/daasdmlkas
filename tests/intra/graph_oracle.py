@@ -4,22 +4,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from pcode_interpreter import Entry, Interpreter, Unsupported
+from pcode_interpreter import Dependency, Entry, Interpreter, Unsupported
 from synthetic import CONST, REG, UNIQUE, slice_from
 from tdo_v2.graph_contracts import NodeKind
+from tdo_v2.observed_call_state import observed_call_state_projections
 
 
 @dataclass
 class Report:
     runs: int = 0
     unsupported: int = 0
+    unsupported_reasons: dict = field(default_factory=dict)
+    opaque_opcodes: set = field(default_factory=set)
     checked: int = 0
     silent: list = field(default_factory=list)    # missing and the slice claims complete
     covered_by_debt: list = field(default_factory=list)  # missing but the slice is incomplete
 
 
 def check(function, observation, *, seeds=range(8), register_pools=None,
-          spaces=(CONST, REG, UNIQUE)) -> Report:
+          spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None) -> Report:
     """Run the observation concretely and check every dynamic dependency.
 
     ``spaces`` are the (constant, register, unique) space ids of the program.
@@ -28,6 +31,13 @@ def check(function, observation, *, seeds=range(8), register_pools=None,
     report = Report()
     graph = function.dependencies
     cache = {}
+    # The call instruction's own push of the return address is undone by the
+    # callee's ret; the engine removes these transient operations on purpose.
+    transient = {
+        key
+        for row in observed_call_state_projections(observation)
+        for key in row.transient_operation_keys
+    }
 
     def static(reader):
         if reader not in cache:
@@ -36,16 +46,28 @@ def check(function, observation, *, seeds=range(8), register_pools=None,
         return cache[reader]
 
     for seed in seeds:
-        interpreter = Interpreter(observation, constant_space=const_space, seed=seed)
+        interpreter = Interpreter(observation, constant_space=const_space, seed=seed,
+                                  havoc_calls=havoc_calls, image=image)
         for register, value in (register_pools(seed) if register_pools else {}).items():
             interpreter.preset(reg_space, register, 8, value)
         try:
             run = interpreter.run()
-        except Unsupported:
+        except Unsupported as error:
             report.unsupported += 1
+            reason = str(error)
+            report.unsupported_reasons[reason] = report.unsupported_reasons.get(reason, 0) + 1
             continue
+        finally:
+            report.opaque_opcodes |= interpreter.opaque_opcodes
         report.runs += 1
         for dependency in sorted(run.dependencies, key=repr):
+            if dependency.reader in transient:
+                continue
+            if dependency.writer in transient:
+                dependency = Dependency(
+                    dependency.reader, dependency.space_id, dependency.offset,
+                    _call_of(dependency.writer),
+                )
             result = static(dependency.reader)
             report.checked += 1
             if result is None:
@@ -68,7 +90,15 @@ def _covered(function, graph, result, dependency, reg_space=REG, unique_space=UN
         if writer == dependency.reader:
             return True
         node = graph.node_for_key(f"op:{writer}")
-        return node is not None and node in reachable
+        if node is not None and node in reachable:
+            return True
+        # bytes an opaque call may have produced: the reader must carry call debt
+        if writer.rsplit(":", 1)[1] in ("CALL", "CALLIND", "CALLOTHER"):
+            return _direct_debt(graph, dependency.reader, "call_clobber_read")
+        # a memory byte read through an address that a call may have changed
+        return dependency.space_id not in (reg_space, unique_space) and _memory_address_unknown(
+            graph, dependency.reader
+        )
     assert isinstance(writer, Entry)
     if writer.space_id == reg_space:
         return result.reaches(writer.offset, 1)
@@ -79,7 +109,32 @@ def _covered(function, graph, result, dependency, reg_space=REG, unique_space=UN
     return (
         any(graph.node(node).kind is NodeKind.OBSERVED_INPUT for node in reachable)
         and bool(result.memory_bytes)
-    ) or _direct_debt(graph, dependency.reader, "unresolved_memory_read")
+    ) or _memory_address_unknown(graph, dependency.reader)
+
+
+def _memory_address_unknown(graph, reader: str) -> bool:
+    """The reader's memory address is not statically certain: unresolved, or
+    computed (directly or upstream) from storage an opaque call may have changed,
+    so the static object may not be the bytes actually accessed."""
+    if _direct_debt(graph, reader, "unresolved_memory_read") or _direct_debt(
+        graph, reader, "call_clobber_read"
+    ):
+        return True
+    node = graph.node_for_key(f"op:{reader}")
+    if node is None:
+        return False
+    operands = [
+        source
+        for source, _, record in graph._graph.in_edges(node)
+        if record.kind == "memory_read"
+        and record.span is not None
+        and record.span.object_id.kind.value in ("register_file", "function_unique")
+    ]
+    return any(
+        graph.node(item).kind is NodeKind.MEMORY_DEBT
+        and graph.node(item).label == "call_clobber_read"
+        for item in graph.backward_reachable(operands)
+    ) if operands else False
 
 
 def _direct_debt(graph, reader: str, label: str) -> bool:
@@ -92,7 +147,7 @@ def _direct_debt(graph, reader: str, label: str) -> bool:
 
 
 def check_control(function, observation, *, seeds=range(4), register_pools=None,
-                  spaces=(CONST, REG, UNIQUE)) -> list:
+                  spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None) -> list:
     """Flip test: inverting a branch's first decision may only change the
     execution of operations reachable from it through control-dependence edges.
 
@@ -116,7 +171,8 @@ def check_control(function, observation, *, seeds=range(4), register_pools=None,
         return controlled[decision]
 
     def execute(seed, flip=None):
-        interpreter = Interpreter(observation, constant_space=const_space, seed=seed, flip=flip)
+        interpreter = Interpreter(observation, constant_space=const_space, seed=seed, flip=flip,
+                                  havoc_calls=havoc_calls, image=image)
         for register, value in (register_pools(seed) if register_pools else {}).items():
             interpreter.preset(reg_space, register, 8, value)
         return interpreter.run()
@@ -143,4 +199,10 @@ def check_control(function, observation, *, seeds=range(4), register_pools=None,
             missing = changed - reach(decision) - {decision}
             violations.extend((decision, key) for key in sorted(missing))
     return violations
+
+
+def _call_of(transient_key: str) -> str:
+    """A transient push belongs to the CALL that ends its instruction."""
+    space, address, _, _ = transient_key.split(":")
+    return f"{space}:{address}:2:CALL"
 

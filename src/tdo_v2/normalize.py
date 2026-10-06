@@ -16,6 +16,7 @@ from .control_dependence import (
     CONTROL_DEPENDENCE_EDGE,
     ControlDependence,
     derive_control_dependences,
+    in_instruction_skips,
 )
 from .may_alias import MayAliasRead, derive_may_alias_reads
 from .call_contracts import FunctionCallSeedUnit
@@ -824,29 +825,12 @@ _SKIPPABLE_OPCODES_FORBIDDEN = frozenset({
 })
 
 
-def _relative_branches(instruction) -> tuple[tuple[int, str, int], ...]:
-    """(ordinal, opcode, target ordinal) for in-instruction p-code branches."""
-    rows = []
-    for ordinal, operation in enumerate(instruction.operations):
-        if operation.opcode not in ("BRANCH", "CBRANCH") or not operation.inputs:
-            continue
-        destination = operation.inputs[0]
-        if destination.kind is not VarnodeKindCode.CONSTANT:
-            continue
-        bits = 8 * destination.byte_size
-        delta = destination.coordinate.byte_offset
-        if delta >> (bits - 1) & 1:
-            delta -= 1 << bits
-        rows.append((ordinal, operation.opcode, ordinal + delta))
-    return tuple(rows)
-
-
 def _skippable_operations(instruction) -> frozenset[int]:
-    """Ordinals a forward in-instruction CBRANCH may skip (validated at admission)."""
+    """Ordinals an in-instruction CBRANCH may skip (validated at admission)."""
     return frozenset(
         index
-        for ordinal, _, target in _relative_branches(instruction)
-        for index in range(ordinal + 1, target)
+        for ordinal, _, stop in in_instruction_skips(instruction)
+        for index in range(ordinal + 1, stop)
     )
 
 
@@ -859,7 +843,7 @@ def _intra_instruction_flow_failure(observation) -> NormalizationFailureReason |
     """
     for instruction in observation.instructions:
         operations = instruction.operations
-        for ordinal, opcode, target in _relative_branches(instruction):
+        for ordinal, opcode, target in in_instruction_skips(instruction):
             if opcode != "CBRANCH" or not ordinal < target <= len(operations):
                 return NormalizationFailureReason.UNSUPPORTED_INTRA_INSTRUCTION_FLOW
             for operation in operations[ordinal + 1:target]:

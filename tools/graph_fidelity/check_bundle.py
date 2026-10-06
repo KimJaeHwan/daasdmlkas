@@ -32,6 +32,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("generation", type=Path)
     parser.add_argument("--runs", type=int, default=16)
+    parser.add_argument("--with-calls", action="store_true",
+                        help="also run functions with calls (calls havoc registers; "
+                             "their memory effects are not modelled)")
     args = parser.parse_args()
     binding = NamingBindingExpectation(
         sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
@@ -49,9 +52,16 @@ def main() -> int:
         for evidence in session.iter_functions():
             observation = evidence.unit.observation
             stats["functions"] += 1
-            if any(op.opcode in CALLS for ins in observation.instructions for op in ins.operations):
+            has_calls = any(
+                op.opcode in CALLS for ins in observation.instructions for op in ins.operations
+            )
+            if has_calls and not args.with_calls:
                 continue
-            stats["call_free"] += 1
+            stats["with_calls" if has_calls else "call_free"] += 1
+            stats["with_branches"] += any(
+                op.opcode == "CBRANCH" for ins in observation.instructions for op in ins.operations
+            )
+            havoc = (regs, RSP, 8) if has_calls else None
             normalized = FunctionNormalizer().normalize(evidence.unit)
             if type(normalized) is not NormalizedFunction:
                 stats["unresolved"] += 1
@@ -66,14 +76,15 @@ def main() -> int:
                 return values
 
             report = check(normalized, observation, seeds=range(args.runs),
-                           register_pools=pool, spaces=(const, regs, unique))
+                           register_pools=pool, spaces=(const, regs, unique), havoc_calls=havoc)
             stats["runs"] += report.runs
             stats["unsupported_runs"] += report.unsupported
             stats["checked"] += report.checked
             stats["silent"] += len(report.silent)
             stats["unexplained"] += len(report.covered_by_debt)
             violations = check_control(normalized, observation, seeds=range(min(args.runs, 4)),
-                                       register_pools=pool, spaces=(const, regs, unique))
+                                       register_pools=pool, spaces=(const, regs, unique),
+                                       havoc_calls=havoc)
             stats["control_violations"] += len(violations)
             stats["control_dependences"] += len(normalized.control_dependences)
             entry = evidence.unit.scopes.function.entry

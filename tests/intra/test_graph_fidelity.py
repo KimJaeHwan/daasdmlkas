@@ -15,8 +15,8 @@ import pytest
 from graph_oracle import check
 from synthetic import (
     CF, DATA_BASE, OF, R8, R9, RAX, RBX, RCX, RDI, RDX, RSI, RSP, SF, ZF,
-    FunctionBuilder, add, const, copy, load, normalize_with_observation, op, reg,
-    store, sub, tmp,
+    CODE_BASE, FunctionBuilder, add, const, copy, load, normalize_with_observation, op,
+    ram, reg, store, sub, tmp,
 )
 
 REGS = (RAX, RCX, RDX, RBX, RSI, RDI, R8, R9)
@@ -33,13 +33,18 @@ def _register_inputs(seed):
     return values
 
 
-def _cmov(rng):
-    """cmovcc: CBRANCH over one register write inside a single instruction."""
+def _cmov(rng, next_address=None):
+    """cmovcc: a CBRANCH skips one register write inside a single instruction.
+
+    Ghidra uses either a relative ``CBRANCH +2`` or ``CBRANCH <next
+    instruction>`` (the form seen in real MinGW code).
+    """
     size = rng.choice((4, 8))
     flag = rng.choice((ZF, CF))
+    destination = const(2, 8) if next_address is None else ram(next_address)
     return [
         op("BOOL_NEGATE", [reg(flag, 1)], tmp(0x200, 1)),
-        op("CBRANCH", [const(2, 8), tmp(0x200, 1)]),
+        op("CBRANCH", [destination, tmp(0x200, 1)]),
         copy(reg(rng.choice(REGS), size), reg(rng.choice(REGS), size)),
     ]
 
@@ -105,7 +110,8 @@ def _random_function(rng) -> FunctionBuilder:
         elif kind < 0.75:
             builder.ins(*_random_memory_ops(rng))
         elif kind < 0.8:
-            builder.ins(*_cmov(rng))
+            next_address = CODE_BASE + 4 * (len(builder._rows) + 1)
+            builder.ins(*_cmov(rng, next_address if rng.random() < 0.5 else None))
         elif kind < 0.85:
             builder.push(rng.choice(REGS))
         elif kind < 0.9:
@@ -164,12 +170,27 @@ def test_conditional_move_keeps_the_old_value():
     assert report.runs == 8 and not report.silent and not report.covered_by_debt
 
 
-def _cmov_fixed():
+def _cmov_fixed(next_address=None):
+    destination = const(2, 8) if next_address is None else ram(next_address)
     return [
         op("BOOL_NEGATE", [reg(ZF, 1)], tmp(0x200, 1)),
-        op("CBRANCH", [const(2, 8), tmp(0x200, 1)]),
+        op("CBRANCH", [destination, tmp(0x200, 1)]),
         copy(reg(RAX), reg(RDX)),
     ]
+
+
+def test_conditional_move_to_next_instruction_keeps_the_old_value():
+    """Ghidra's real cmovcc shape: CBRANCH <next instruction>; COPY."""
+    builder = (
+        FunctionBuilder()
+        .ins(*_cmov_fixed(next_address=CODE_BASE + 4))
+        .ins(copy(reg(RCX), reg(RAX)))
+        .ret()
+    )
+    function, observation = normalize_with_observation(builder)
+    report = check(function, observation, seeds=range(8),
+                   register_pools=lambda seed: {RSP: 0x7000_0000, ZF: seed % 2})
+    assert report.runs == 8 and not report.silent and not report.covered_by_debt
 
 
 def test_in_instruction_loop_is_a_typed_failure():
