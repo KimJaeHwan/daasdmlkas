@@ -8,9 +8,12 @@ Every test runs the real interprocedural engine path
 """
 
 from synthetic import (
-    CODE_BASE, RAX, RBP, RBX, RCX, RDI, RSP, ZF,
-    FunctionBuilder, analyze_program, boundary, const, copy, load, op, reg,
+    CODE_BASE, RAX, RBP, RBX, RCX, RDI, RDX, RSP, ZF,
+    FunctionBuilder, add, analyze_program, boundary, const, copy, load, op, reg,
+    store, tmp,
 )
+
+T = tmp(0x100)
 
 MAIN, SOURCE, SINK, HELPER, INNER = (
     CODE_BASE, CODE_BASE + 0x800, CODE_BASE + 0xA00, CODE_BASE + 0xC00, CODE_BASE + 0xE00,
@@ -81,8 +84,8 @@ def test_conditional_return_write_is_not_discharged():
     assert not root.is_effectively_complete
 
 
-def test_incomplete_callee_value_is_not_discharged():
-    """source returns *(RDI*2): its own slice has unresolved-address debt."""
+def test_source_boundary_value_is_its_label_even_with_inner_debt():
+    """source returns *(RDI*2): the boundary declares its result as the origin."""
     source = (
         FunctionBuilder(entry=SOURCE)
         .ins(op("INT_MULT", [reg(RDI), const(2)], reg(RCX)))
@@ -93,6 +96,27 @@ def test_incomplete_callee_value_is_not_discharged():
         "main": FunctionBuilder(entry=MAIN)
         .call(SOURCE).ins(copy(reg(RCX, 4), reg(RAX, 4))).call(SINK).ret(),
         "source": source,
+        "sink": _sink(),
+    })
+    assert root.reached_origin_labels == ("source.ret",)
+    assert root.is_effectively_complete
+
+
+def test_incomplete_intermediate_value_is_not_discharged():
+    """helper returns source() + *(RDI*2): the unknown load may add origins."""
+    helper = (
+        FunctionBuilder(entry=HELPER)
+        .call(SOURCE)
+        .ins(op("INT_MULT", [reg(RDI), const(2)], reg(RCX)))
+        .ins(load(reg(RDX, 4), reg(RCX)))
+        .ins(op("INT_ADD", [reg(RAX, 4), reg(RDX, 4)], reg(RAX, 4)))
+        .ret()
+    )
+    root = _root({
+        "main": FunctionBuilder(entry=MAIN)
+        .call(HELPER).ins(copy(reg(RCX, 4), reg(RAX, 4))).call(SINK).ret(),
+        "source": _source_returning_constant(),
+        "helper": helper,
         "sink": _sink(),
     })
     assert not root.is_effectively_complete
@@ -122,13 +146,25 @@ def test_clobbered_register_is_not_discharged():
     assert not root.is_effectively_complete
 
 
-def test_nested_call_between_save_and_restore_is_not_discharged():
-    """helper: push rbx; call inner; pop rbx -- inner could overwrite the slot."""
-    helper = (
-        FunctionBuilder(entry=HELPER)
-        .push(RBX).call(INNER).pop(RBX).ret()
-    )
+def test_nested_call_that_keeps_the_saved_slot_is_discharged():
+    """helper: push rbx; call inner; pop rbx -- inner provably writes nothing."""
+    helper = FunctionBuilder(entry=HELPER).push(RBX).call(INNER).pop(RBX).ret()
     inner = FunctionBuilder(entry=INNER).ret()
+    root = _root({
+        "main": _main_through_helper(), "source": _source_returning_constant(),
+        "helper": helper, "inner": inner, "sink": _sink(),
+    })
+    assert root.is_effectively_complete
+
+
+def test_nested_call_overwriting_the_saved_slot_is_not_discharged():
+    """inner writes its entry SP + 8 = helper's saved-RBX slot."""
+    helper = FunctionBuilder(entry=HELPER).push(RBX).call(INNER).pop(RBX).ret()
+    inner = (
+        FunctionBuilder(entry=INNER)
+        .ins(add(T, reg(RSP), const(8)), store(T, reg(RDI)))
+        .ret()
+    )
     root = _root({
         "main": _main_through_helper(), "source": _source_returning_constant(),
         "helper": helper, "inner": inner, "sink": _sink(),
@@ -167,9 +203,7 @@ def test_unknown_callee_is_not_discharged():
 # The slot is main-entry-SP - 8. helper's entry SP is main-entry-SP - 0x30, so
 # in helper coordinates the slot is [+0x28, +0x2C).
 
-from synthetic import DATA_BASE, R8, add, store, sub, tmp  # noqa: E402
-
-T = tmp(0x100)
+from synthetic import DATA_BASE, R8  # noqa: E402
 
 
 def _main_with_stack_slot(*, leak_slot_in_rdi=False):

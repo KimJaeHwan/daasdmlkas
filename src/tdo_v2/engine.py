@@ -290,6 +290,13 @@ def analyze_observed_functions(
                                     for completion in completions
                                     for replacement in completion.call_byte_replacements
                                 ),
+                                proofs,
+                                tuple(
+                                    sorted(
+                                        set(local_labels)
+                                        | {proof.label for proof in proofs}
+                                    )
+                                ),
                             )
                         ),
                     ),

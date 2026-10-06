@@ -244,6 +244,27 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
      - 실측(64 케이스): 누락+확실 0 유지, **정확+확실 16 → 23**, 과다보고+확실 2 → 9.
        남은 원인(함수 단위 근사): 레지스터 COPY 27, 스택 슬롯 LOAD 47 → 19,
        RBP INT_ADD 12, 전역 COPY 6.
+   - **P0-3d 출력 인자 + 재귀 해소 (2026-10-06, Fable 8단계)**
+     - 해소를 "문맥" 단위로 재귀 적용: 루트는 completion의 replacement·proof를,
+       callee 안에서는 proof의 `prior_transfers` 를 증거로 쓴다(순환·깊이 가드).
+     - OUTPARAM_MUST_WRITTEN: proof/transfer가 (call C, callee W, derefs 0,
+       target_span ⊇ S)를 가리키고, C가 읽기를 지배하며 이후 call은 S를 보존하고,
+       W가 **모든 exit에서 그 바이트의 유일한 마지막 정의**이며, callee의 다른
+       메모리 write는 스택(겹치지 않음)/상수 주소뿐이고, 중첩 call이 S를 쓰지 않고,
+       callee의 call debt가 모두 해소될 때.
+     - W 값 설명 가드: W 슬라이스의 callee debt 해소 + 도달한 SOURCE 라벨이 루트
+       보고 라벨에 있음 + 호출자 레지스터에서 온 입력은 호출자 쪽 상태가 완전하고
+       라벨이 보고됨. 호출자 메모리에서 온 입력은 v1에서 실패. `_value_origins` 가
+       매핑 실패 시 출처를 조용히 건너뛰므로 proof 존재만으로는 부족하다.
+       W가 SOURCE 경계 정의 자체이면(라벨 보고됨) 그 값은 정의상 그 라벨 → 추적 중단.
+     - PRESERVED 완화(7b): 보존 추적 경로의 clobber 읽기도 callee 안에서 재귀 해소되면 허용.
+     - **건전성 버그 수정**: `_shared_terminal_writes` 는 "모든 exit에서 W가 후보 중
+       하나"만 요구한다(JOIN 포함). must-write 판정은 `_sole_terminal_writer`
+       (모든 exit에서 그 바이트의 정의 집합이 정확히 {W})로 대체.
+     - 테스트: `test_outparam_discharge.py` 10개, discharge 테스트 갱신(총 81).
+     - 실측(64 케이스): 누락+확실 0 유지, **정확+확실 23 → 28**, 과다보고+확실 9 → 16.
+       단순 8케이스 4 → 7, dfbench_cpp 1 → 0(호출자 메모리 입력 가드로 보수화).
+       남은 원인: 스택 슬롯 LOAD 15, 레지스터 COPY 13, RBP INT_ADD 9, 전역 COPY 5.
    - **순서: P0-3 → P0-1.** 공통 debt 구조를 먼저 세우고 P0-1은 reason만 추가.
      실제 코퍼스에서 incomplete 비율이 크게 오를 수 있어 09 testbed 계측이 필요.
 5. **P0-1**: 방식 (a) may-alias debt. SSA는 후보만 기록(`memory_ssa.py` 읽기 루프),
