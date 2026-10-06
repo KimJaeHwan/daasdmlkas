@@ -468,8 +468,13 @@ def slice_from(function: NormalizedFunction, seed: int) -> Slice:
     return Slice(result, frozenset(register_bytes), frozenset(memory_bytes))
 
 
-def slice_op(function: NormalizedFunction, opcode: str) -> Slice:
-    (seed,) = operation_nodes(function, opcode)
+def slice_op(function: NormalizedFunction, opcode: str, index: int | None = None) -> Slice:
+    """Slice from the only ``opcode`` operation, or the one in instruction ``index``."""
+    seeds = operation_nodes(function, opcode)
+    if index is not None:
+        prefix = f"op:{RAM}:{CODE_BASE + index * 4:x}:"
+        seeds = [node for node in seeds if function.dependencies.node(node).key.startswith(prefix)]
+    (seed,) = seeds
     return slice_from(function, seed)
 
 

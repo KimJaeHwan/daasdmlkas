@@ -1,88 +1,98 @@
-"""P0-1: implicit no-alias between distinct memory objects.
+"""P0-1: reads that a write through another memory object may have overwritten.
 
 See docs/intra_function_stabilization.md. Each test slices backward from a
-LOAD and asks whether the stored value (RDX) is reached or, failing that,
-whether the slice at least reports itself incomplete.
-
-Tests marked ``xfail(strict=True)`` state the *sound* expectation and fail
-today; the ``*_characterization`` tests pin today's (unsound) behavior so a
-fix shows up as an intentional diff.
+LOAD. A possible alias must either make the stored value (RDX) reachable as
+an origin or mark the slice incomplete; the implementation does both
+(``may_alias_read`` debt with writer -> debt -> read edges).
 """
 
-import pytest
-
 from synthetic import (
-    DATA_BASE, RAX, RCX, RDI, RDX, RSI, RSP,
-    add, const, load, normalize, operation_node_at, reg, slice_from, slice_op,
-    store, straight, tmp,
+    DATA_BASE, RAX, RBX, RCX, RDI, RDX, RSI, RSP,
+    add, const, load, normalize, operation_node_at, reg, slice_from,
+    store, straight, sub, tmp,
 )
 
-P0_1 = pytest.mark.xfail(
-    strict=True,
-    reason="P0-1: distinct memory objects are silently assumed not to alias",
-)
 T = tmp(0x100)
 
 
-def sliced(*instructions, seed_index=None):
-    function = normalize(straight(*instructions))
-    if seed_index is None:
-        return slice_op(function, "LOAD")
-    return slice_from(function, operation_node_at(function, seed_index))
+def _first_load(*instructions, index):
+    """Normalize with a realistic ``ret`` and slice from the LOAD of instruction ``index``."""
+    function = normalize(straight(*instructions, realistic_return=True))
+    ordinal = next(
+        position for position, operation in enumerate(instructions[index])
+        if operation[0] == "LOAD"
+    )
+    return function, slice_from(function, operation_node_at(function, index, ordinal))
 
 
 def test_same_pointer_reaches_stored_value():
     """Control: *(RDI) = RDX; RAX = *(RDI)."""
-    result = sliced([store(reg(RDI), reg(RDX))], [load(reg(RAX), reg(RDI))])
+    function, result = _first_load(
+        [store(reg(RDI), reg(RDX))], [load(reg(RAX), reg(RDI))], index=1
+    )
     assert result.registers() == {"RDI", "RDX"}
     assert result.is_complete
+    # only the ret's return-address load (entry SP, reachable by RDI) is flagged
+    assert [row.operation_key for row in function.may_alias_reads] == [f"1:{0x1008:x}:0:LOAD"]
 
 
 # -- relative vs relative --------------------------------------------------
 
-@P0_1
-def test_distinct_entry_pointers_must_not_be_silently_complete():
+def test_distinct_entry_pointers_report_possible_origin_and_debt():
     """*(RDI) = RDX; RAX = *(RSI): RDI == RSI is possible."""
-    result = sliced([store(reg(RDI), reg(RDX))], [load(reg(RAX), reg(RSI))])
-    assert result.reaches(RDX) or not result.is_complete
+    function, result = _first_load(
+        [store(reg(RDI), reg(RDX))], [load(reg(RAX), reg(RSI))], index=1
+    )
+    assert result.reaches(RDX)          # the possible writer's value
+    assert result.reaches(RSI)
+    assert not result.is_complete
+    (row,) = [r for r in function.may_alias_reads if r.operation_key == f"1:{0x1004:x}:0:LOAD"]
+    assert row.writers == (f"1:{0x1000:x}:0:STORE",)
 
 
-def test_distinct_entry_pointers_characterization():
-    result = sliced([store(reg(RDI), reg(RDX))], [load(reg(RAX), reg(RSI))])
+def test_read_before_the_other_write_has_no_debt():
+    """RAX = *(RSI); *(RDI) = RDX."""
+    function, result = _first_load(
+        [load(reg(RAX), reg(RSI))], [store(reg(RDI), reg(RDX))], index=0
+    )
     assert result.registers() == {"RSI"}
     assert result.is_complete
-    assert result.result.reachable_unresolved_read_nodes == ()
-    assert result.result.function_unresolved_write_nodes == ()
+
+
+def test_own_object_rewrite_clears_the_alias():
+    """*(RDI) = RDX; *(RSI) = RCX; RAX = *(RSI): the last write to RSI's bytes wins."""
+    function, result = _first_load(
+        [store(reg(RDI), reg(RDX))], [store(reg(RSI), reg(RCX))], [load(reg(RAX), reg(RSI))],
+        index=2,
+    )
+    assert result.reaches(RCX) and not result.reaches(RDX)
+    assert result.is_complete
 
 
 # -- relative vs absolute --------------------------------------------------
 
-@P0_1
-def test_pointer_write_then_global_read_must_not_be_silently_complete():
-    """*(RDI) = RDX; RAX = *(global): RDI may point at the global."""
-    result = sliced(
-        [store(reg(RDI), reg(RDX))],
-        [load(reg(RAX), const(DATA_BASE + 0x10))],
+def test_pointer_write_then_global_read_is_not_silently_complete():
+    function, result = _first_load(
+        [store(reg(RDI), reg(RDX))], [load(reg(RAX), const(DATA_BASE + 0x10))], index=1
     )
-    assert result.reaches(RDX) or not result.is_complete
+    assert result.reaches(RDX)
+    assert not result.is_complete
 
 
-@P0_1
-def test_global_write_then_pointer_read_must_not_be_silently_complete():
-    """*(global) = RDX; RAX = *(RDI): the reverse direction."""
-    result = sliced(
-        [store(const(DATA_BASE + 0x10), reg(RDX))],
-        [load(reg(RAX), reg(RDI))],
+def test_global_write_then_pointer_read_is_not_silently_complete():
+    function, result = _first_load(
+        [store(const(DATA_BASE + 0x10), reg(RDX))], [load(reg(RAX), reg(RDI))], index=1
     )
-    assert result.reaches(RDX) or not result.is_complete
+    assert result.reaches(RDX)
+    assert not result.is_complete
 
 
-def test_global_write_then_pointer_read_characterization():
-    result = sliced(
-        [store(const(DATA_BASE + 0x10), reg(RDX))],
-        [load(reg(RAX), reg(RDI))],
+def test_two_globals_are_one_exact_object():
+    function, result = _first_load(
+        [store(const(DATA_BASE + 0x10), reg(RDX))], [load(reg(RAX), const(DATA_BASE + 0x18))],
+        index=1,
     )
-    assert result.registers() == {"RDI"}
+    assert not result.reaches(RDX)
     assert result.is_complete
 
 
@@ -91,32 +101,51 @@ def test_global_write_then_pointer_read_characterization():
 def test_private_stack_slot_does_not_alias_entry_pointer():
     """RSP -= 8; *(RSP) = RBX; *(RDI) = RDX; RAX = *(RSP).
 
-    The new slot is below the entry stack pointer and its address never
-    escapes, so RDI cannot point at it: RBX (not RDX) and complete. This must
-    stay true after the P0-1 fix (the non-escape proof rule).
+    The slot is below the entry stack pointer (identified by the observed
+    ``ret`` shape) and no stack-derived value escapes, so RDI cannot reach it.
     """
-    from synthetic import RBX, sub
-
-    result = sliced(
+    function, result = _first_load(
         [sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), reg(RBX))],
         [store(reg(RDI), reg(RDX))],
         [load(reg(RAX), reg(RSP))],
+        index=2,
     )
     assert result.registers() == {"RBX", "RSP"}
     assert result.is_complete
 
 
-@P0_1
-def test_escaped_frame_address_must_not_be_silently_complete():
-    """RCX = RSP+0x10; *(RDI) = RCX; *(RSI) = RDX; RAX = *(RSP+0x10).
+def test_stack_without_observed_ret_shape_is_not_trusted():
+    """Same code but a bare RETURN: the stack pointer is not identified."""
+    function = normalize(straight(
+        [sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), reg(RBX))],
+        [store(reg(RDI), reg(RDX))],
+        [load(reg(RAX), reg(RSP))],
+        realistic_return=False,
+    ))
+    result = slice_from(function, operation_node_at(function, 2))
+    assert result.reaches(RBX) and not result.is_complete
 
-    The slot's address escapes through *(RDI), and RSP+0x10 lies in the
-    caller's frame anyway, so *(RSI) may write it.
-    """
-    result = sliced(
-        [add(reg(RCX), reg(RSP), const(0x10))],
-        [store(reg(RDI), reg(RCX))],
+
+def test_escaped_frame_address_is_not_silently_complete():
+    """RCX = RSP-8 is stored through RDI, so RSI may point at the slot."""
+    function, result = _first_load(
+        [sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), reg(RBX))],
+        [store(reg(RDI), reg(RSP))],
         [store(reg(RSI), reg(RDX))],
-        [add(T, reg(RSP), const(0x10)), load(reg(RAX), T)],
+        [load(reg(RAX), reg(RSP))],
+        index=3,
     )
-    assert result.reaches(RDX) or not result.is_complete
+    assert result.reaches(RBX) and result.reaches(RDX)
+    assert not result.is_complete
+
+
+def test_caller_frame_bytes_are_never_private():
+    """*(RSP+0x10) is above the entry SP (caller frame): RDI may point there."""
+    function, result = _first_load(
+        [add(T, reg(RSP), const(0x10)), store(T, reg(RBX))],
+        [store(reg(RDI), reg(RDX))],
+        [add(T, reg(RSP), const(0x10)), load(reg(RAX), T)],
+        index=2,
+    )
+    assert result.reaches(RDX)
+    assert not result.is_complete

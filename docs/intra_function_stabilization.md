@@ -18,6 +18,22 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
 
 ### P0-1. FUNCTION_RELATIVE 객체 간 암묵적 no-alias 가정 — 조용한 누락 위험
 
+> **해결 (2026-10-06, `src/tdo_v2/may_alias.py`)** — 함수 내부만으로 판단(call 증거 미사용).
+> - 바이트 단위 forward 분석: 각 메모리 객체 바이트에 대해 "마지막 자기 write 이후
+>   실행된 *다른* 객체로의 write" 집합을 추적. 읽기 시 집합이 비어 있지 않으면
+>   `may_alias_read` debt. 그래프 간선은 **후보 writer → debt → read** 라서 가능한
+>   writer 값이 출처 후보로 도달하면서 슬라이스는 incomplete.
+> - 별칭 불가 증명: 같은 객체(SSA가 바이트 정밀), 서로 다른 주소 공간, 그리고
+>   진입 SP **아래**의 자기 프레임 바이트(탈출 없을 때). SP는 관측된
+>   `r'=*(r); r=r+size; RETURN r'` 형태(또는 call 형태)로만 식별 — 식별 실패 시
+>   스택도 신뢰하지 않음. 탈출 = SP 파생 값이 STORE 값 / CALLOTHER 입력이 되거나,
+>   call이 있는 함수에서 다른 레지스터로 복사됨. 진입 SP 이상(복귀주소·호출자 프레임)은
+>   항상 별칭 가능.
+> - 설명 출력에 `may_alias_read` gap(writers 포함), query가 unresolved read로 집계.
+> - 테스트: `test_relative_alias.py` 11개(xfail 4건 해소), 하네스 `slice_op(index=)`.
+> - 실측(64 케이스): 누락+확실 0 유지, 정확+확실 28 유지. DFB031·DFB054는 증명 불가한
+>   포인터 별칭 때문에 금지 출처가 후보로 추가되어 PASS 41→39 (출처 누락 아님, 과다 보고).
+
 - 근거: `relative_memory.py:382-387` 에서 ENTRY 정의마다 별도 atom을 만들고,
   `relative_memory.py:243-252` 가 atom 집합 digest로 `FUNCTION_RELATIVE` 객체를
   만든다. SSA(`memory_ssa.py`)는 서로 다른 `StorageObjectId`를 완전히 분리된

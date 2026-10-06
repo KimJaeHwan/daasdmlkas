@@ -12,6 +12,7 @@ from .call_effect_contracts import (
     unavailable_call_effect_evidence,
 )
 from .call_clobber import CallClobberRead, derive_call_clobber_reads
+from .may_alias import MayAliasRead, derive_may_alias_reads
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
     BoundLocalMemorySsa,
@@ -99,6 +100,8 @@ class NormalizedFunction:
     configured_memory_binding: BoundLocalMemorySsa | None = None
     call_clobber_reads: tuple[CallClobberRead, ...] = ()
     call_clobber_nodes: tuple[NodeId, ...] = ()
+    may_alias_reads: tuple[MayAliasRead, ...] = ()
+    may_alias_nodes: tuple[NodeId, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -117,6 +120,22 @@ class NormalizedFunction:
                 or not record.key.endswith(f":{row.operation_key}")
             ):
                 raise ValueError("call-clobber node does not match its read")
+        if type(self.may_alias_reads) is not tuple or any(
+            type(row) is not MayAliasRead for row in self.may_alias_reads
+        ):
+            raise TypeError("may-alias reads must be an exact tuple")
+        if type(self.may_alias_nodes) is not tuple or len(
+            self.may_alias_nodes
+        ) != len(self.may_alias_reads):
+            raise ValueError("may-alias nodes must align with may-alias reads")
+        for row, node in zip(self.may_alias_reads, self.may_alias_nodes):
+            record = self.dependencies.node(node)
+            if (
+                record.kind is not NodeKind.MEMORY_DEBT
+                or record.label != "may_alias_read"
+                or not record.key.endswith(f":{row.operation_key}")
+            ):
+                raise ValueError("may-alias node does not match its read")
         if type(self.cfg) is not RustworkxDependencyGraph or type(
             self.dependencies
         ) is not RustworkxDependencyGraph:
@@ -663,6 +682,15 @@ class _ScopedNormalizer:
             call_clobber_reads,
             operation_nodes,
         )
+        may_alias_reads = derive_may_alias_reads(
+            effect_unit, observation, context, address_spaces
+        )
+        may_alias_nodes = _materialize_may_alias_debt(
+            dependencies,
+            memory_ssa,
+            may_alias_reads,
+            operation_nodes,
+        )
         dependencies.freeze()
         return NormalizedFunction(
             document=None,
@@ -688,6 +716,8 @@ class _ScopedNormalizer:
             ),
             call_clobber_reads=call_clobber_reads,
             call_clobber_nodes=call_clobber_nodes,
+            may_alias_reads=may_alias_reads,
+            may_alias_nodes=may_alias_nodes,
         )
 
     def _build_cfg(
@@ -857,6 +887,44 @@ def _materialize_call_clobber_debt(
             node,
             operation_nodes[row.operation_key],
             EdgeRecord("call_clobber_read", operation=row.operation_key),
+        )
+        nodes.append(node)
+    return tuple(nodes)
+
+
+def _materialize_may_alias_debt(
+    dependencies: RustworkxDependencyGraph,
+    memory_ssa: LocalMemorySsaResult,
+    reads: tuple[MayAliasRead, ...],
+    operation_nodes: dict[str, NodeId],
+) -> tuple[NodeId, ...]:
+    """Writer -> debt -> read: possible writers stay reachable as origins."""
+    if not reads:
+        return ()
+    namespace = (
+        f"may-alias-v1:{memory_ssa.function_scope.digest.hex()}:"
+        f"{memory_ssa.unit_digest.hex()}"
+    )
+    dependencies.claim_namespace(namespace)
+    nodes = []
+    for row in reads:
+        node = dependencies.add_node(
+            NodeRecord(
+                f"{namespace}:{row.operation_key}",
+                NodeKind.MEMORY_DEBT,
+                "may_alias_read",
+            )
+        )
+        for writer in row.writers:
+            dependencies.add_edge(
+                operation_nodes[writer],
+                node,
+                EdgeRecord("may_alias_write", operation=writer),
+            )
+        dependencies.add_edge(
+            node,
+            operation_nodes[row.operation_key],
+            EdgeRecord("may_alias_read", operation=row.operation_key),
         )
         nodes.append(node)
     return tuple(nodes)

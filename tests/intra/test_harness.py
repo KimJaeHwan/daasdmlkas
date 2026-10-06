@@ -13,7 +13,8 @@ def test_attribution_uses_edge_spans_not_entry_label():
         [sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), reg(RBX))],
         [store(reg(RDI), reg(RDX))],
         [load(reg(RAX), reg(RSP))],
-    )), "LOAD")
+        realistic_return=True,
+    )), "LOAD", index=2)
     assert result.reaches(RBX)
     assert not result.reaches(RDX)
 
