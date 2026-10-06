@@ -47,6 +47,52 @@ from .configured_target_resolution import (
 from .configured_write_event_engine import _stabilized_write_events
 from .observed_function_session import ObservedFunctionEvidence
 
+def _bind_tail_call_sinks(preliminary, views, provider, nodes) -> None:
+    """A sink reached by a tail call (``jmp sink``): root at the jump's state.
+
+    Boundary recognition only -- no callee projection or demand propagation.
+    If the argument state has no exact graph definition, the root is bound to
+    the jump operation itself, which reads nothing, so the engine reports it
+    as an unbound (incomplete) root instead of dropping it.
+    """
+    for caller in preliminary:
+        view = views[caller.entry]
+        evidence = caller.evidence
+        namespace = evidence.unit.scopes.program.evidence.translation_namespace
+        base = len(evidence.seeds.callsites)
+        for index, (tail, naming) in enumerate(
+            zip(evidence.tails, evidence.naming.tail_rows, strict=True)
+        ):
+            target = _selected_resolved_target(naming)
+            aliases = tuple(sorted({
+                alias.value
+                for alias in (() if target is None else target.aliases)
+                if alias.policy_admissible
+            }))
+            boundary = CallBoundary(
+                f"{caller.entry.space_id:x}:{caller.entry.byte_offset:x}",
+                tail.operation_key,
+                aliases,
+                namespace.language_id,
+            )
+            position = view.position(tail.operation_key)
+            if position is None:
+                continue
+            for match in provider.classify(boundary):
+                if match.kind is not BoundaryKind.SINK:
+                    continue  # a tail-called source has no local reader
+                sink_nodes = _direct_sink_boundary_nodes(
+                    view, match.label, tail.operation_key, position, base + index,
+                    provider.state(boundary, match),
+                )
+                if not sink_nodes:
+                    node = caller.normalized.dependencies.node_for_key(f"op:{tail.operation_key}")
+                    sink_nodes = (
+                        ObservedBoundaryNode(BoundaryKind.SINK, match.label, node, base + index, 0),
+                    )
+                nodes[caller.entry].extend(sink_nodes)
+
+
 def complete_configured_interprocedural_slices(
     analyses: tuple[ConfiguredFunctionAnalysis, ...], /,
     external_provider: ExternalSummaryProvider | None = None,
@@ -234,6 +280,7 @@ def build_observed_function_analyses(
                         )
                         nodes[caller.entry].extend(sink_nodes)
 
+    _bind_tail_call_sinks(preliminary, views, provider, nodes)
     analyses = _analyses_from_boundary_nodes(preliminary, nodes)
     demands = {
         item.entry: {

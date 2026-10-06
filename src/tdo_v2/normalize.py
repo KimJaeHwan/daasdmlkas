@@ -843,8 +843,11 @@ def _materialize_constant_inputs(
 
 def _assumed_call_writes(effect, assumed, operation, context, space_id):
     """TEST-ONLY: a declared boundary call strongly writes exactly its registers."""
-    if operation.opcode not in ("CALL", "CALLIND"):
-        raise ValueError("assumed call effects apply only to CALL/CALLIND operations")
+    if operation.opcode in ("BRANCH", "CBRANCH", "BRANCHIND"):
+        if assumed.writes:
+            raise ValueError("a tail-called boundary cannot have declared writes")
+    elif operation.opcode not in ("CALL", "CALLIND"):
+        raise ValueError("assumed call effects apply only to calls and tail calls")
     if space_id is None:
         raise ValueError("assumed call effects need one register space")
     def resolve(rows):

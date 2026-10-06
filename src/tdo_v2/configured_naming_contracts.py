@@ -13,9 +13,9 @@ from .configured_profile_contracts import (
 )
 
 
-CALL_NAMING_SCHEMA_ID = "tdo-v2-call-naming-sidecar-v1"
-CALL_NAMING_SCHEMA_VERSION = 1
-CALL_NAMING_EXPORTER_REVISION = 1
+CALL_NAMING_SCHEMA_ID = "tdo-v2-call-naming-sidecar-v2"
+CALL_NAMING_SCHEMA_VERSION = 2
+CALL_NAMING_EXPORTER_REVISION = 2
 CALL_NAMING_GHIDRA_VERSION = "12.0.4"
 CALL_NAMING_INVENTORY_COMPLETENESS = "COMPLETE"
 
@@ -31,7 +31,7 @@ NAMING_CAPTURE_DEADLINE_SECONDS = 60
 
 _TARGET_DOMAIN = "tdo-v2-call-naming-target-v1"
 _ROW_DOMAIN = "tdo-v2-call-naming-row-v1"
-_CONTENT_DOMAIN = "tdo-v2-call-naming-content-v1"
+_CONTENT_DOMAIN = "tdo-v2-call-naming-content-v2"
 _BOUNDARY_TARGET_DOMAIN = "tdo-v2-configured-boundary-target-v1"
 _U64_LIMIT = 1 << 64
 
@@ -39,6 +39,10 @@ _U64_LIMIT = 1 << 64
 class NamingOpcode(StrEnum):
     CALL = "CALL"
     CALLIND = "CALLIND"
+    # tail calls (v2): Ghidra-flagged call transfers leaving the function
+    BRANCH = "BRANCH"
+    CBRANCH = "CBRANCH"
+    BRANCHIND = "BRANCHIND"
 
 
 class NamingSourceQuality(StrEnum):
@@ -324,9 +328,9 @@ class CapturedNamingRow:
     def _validate_resolution_shape(self) -> None:
         state = self.resolution.state
         reason = self.resolution.reason
-        if self.opcode is NamingOpcode.CALLIND:
+        if self.opcode in (NamingOpcode.CALLIND, NamingOpcode.BRANCHIND):
             if state is not NamingResolutionState.INDIRECT or self.targets:
-                raise ValueError("CALLIND requires target-free INDIRECT naming")
+                raise ValueError("indirect calls require target-free INDIRECT naming")
             return
         if state is NamingResolutionState.INDIRECT:
             raise ValueError("CALL cannot use INDIRECT naming")
@@ -395,8 +399,19 @@ class CapturedNamingSidecar:
     exporter_source_sha256: bytes
     rows: tuple[CapturedNamingRow, ...]
     semantic_content_digest: bytes
+    tail_rows: tuple[CapturedNamingRow, ...] = ()
 
     def __post_init__(self) -> None:
+        _require_exact_tuple(self.tail_rows, CapturedNamingRow, "naming tail rows")
+        if any(
+            row.opcode not in (NamingOpcode.BRANCH, NamingOpcode.CBRANCH, NamingOpcode.BRANCHIND)
+            for row in self.tail_rows
+        ) or any(
+            row.opcode not in (NamingOpcode.CALL, NamingOpcode.CALLIND) for row in self.rows
+        ):
+            raise ValueError("call rows and tail-call rows use their own opcodes")
+        if tuple(sorted(self.tail_rows, key=lambda item: item.canonical_key)) != self.tail_rows:
+            raise ValueError("naming tail rows must be canonical and ordered")
         _require_digest(self.exporter_source_sha256, "naming exporter source SHA-256")
         _require_exact_tuple(self.rows, CapturedNamingRow, "naming rows")
         if len(self.rows) > MAX_NAMING_ROWS:
@@ -417,6 +432,7 @@ class CapturedNamingSidecar:
         if self.semantic_content_digest != naming_content_digest(
             self.exporter_source_sha256,
             self.rows,
+            self.tail_rows,
         ):
             raise ValueError("naming content digest does not match its rows")
 
@@ -505,6 +521,7 @@ def _row_body(
 def naming_content_digest(
     exporter_source_sha256: bytes,
     rows: tuple[CapturedNamingRow, ...],
+    tail_rows: tuple[CapturedNamingRow, ...] = (),
 ) -> bytes:
     _require_digest(exporter_source_sha256, "naming exporter source SHA-256")
     _require_exact_tuple(rows, CapturedNamingRow, "naming rows")
@@ -517,10 +534,11 @@ def naming_content_digest(
     digest.update(_bytes(exporter_source_sha256))
     digest.update(_text(CALL_NAMING_GHIDRA_VERSION))
     digest.update(_text(CALL_NAMING_INVENTORY_COMPLETENESS))
-    digest.update(_u64(len(rows)))
-    for row in rows:
-        digest.update(row.canonical_body)
-        digest.update(_bytes(row.row_digest))
+    for group in (rows, tail_rows):
+        digest.update(_u64(len(group)))
+        for row in group:
+            digest.update(row.canonical_body)
+            digest.update(_bytes(row.row_digest))
     return digest.digest()
 
 

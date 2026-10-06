@@ -194,9 +194,12 @@ class Interpreter:
                 self._read(key, space_id, offset, size, run)
             for offset, size in writes:
                 self._write(key, space_id, offset, size, self._rng.getrandbits(8 * size))
-            for index, item in enumerate(self._stack_snapshot):
-                self._bytes[(space_id, self._havoc[1] + index)] = item
-            return None
+            if opcode in ("BRANCH", "CBRANCH", "BRANCHIND"):
+                pass  # a declared tail-called boundary: the jump itself still happens
+            else:
+                for index, item in enumerate(self._stack_snapshot):
+                    self._bytes[(space_id, self._havoc[1] + index)] = item
+                return None
         if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:
             for item in inputs[1:] if opcode != "CALLOTHER" else inputs:
                 if item.kind is not VarnodeKindCode.CONSTANT:

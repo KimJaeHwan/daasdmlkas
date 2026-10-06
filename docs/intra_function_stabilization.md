@@ -371,3 +371,33 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
   - 64 케이스(가정 모드): PASS 50 → 53, 함수 내부만으로 정확+확실 29 → 30, 효과적 41,
     누락+확실 0. 기본 모드 결과 불변.
 
+## 7. 꼬리 호출(`jmp sink`) 경계 지원 (2026-10-06, Fable 설계)
+
+- 문제: MinGW -O2 빌드에서 케이스 함수 53개 중 45개가 sink를 `jmp dfb_sink_int`(P-code BRANCH)로
+  부른다. 엔진은 CALL/CALLIND만 경계로 인식해 sink 시작점이 없었고 75 케이스 중 70개가 MISSING.
+- 판별 기준: **Ghidra가 그 명령어의 flow type을 call로 분류했는가**(`FlowType.isCall()`, Bundle의
+  `flow_type.is_call`). 함수 밖으로 나가는 분기 중에는 공유 코드 점프(is_call=False)도 있으므로
+  "목적지가 함수 밖"만으로는 추측이 된다. 점프 테이블(COMPUTED_JUMP)은 자동 제외.
+- 형식 변경: naming 사이드카 **v2** (`tdo-v2-call-naming-sidecar-v2`, exporter revision 2,
+  content domain v2). 기존 `calls` 와 분리된 `tail_calls` 배열, opcode BRANCH/CBRANCH/BRANCHIND
+  (BRANCHIND는 CALLIND처럼 target 없는 INDIRECT). exporter 소스 해시가 바인딩이므로 기존 v1 Bundle은
+  재export가 필요(이중 디코드는 두지 않음).
+- Python: `call_contracts.TailCallSeed`, `call_seeds.seed_tail_calls`(exporter와 같은 술어),
+  `ObservedFunctionEvidence.tails`, `CapturedNamingSidecar.tail_rows`. 꼬리 호출은
+  `FunctionCallSeedUnit.callsites` 에 넣지 않는다 — call effect·함수 간 계층이 CALL/CALLIND
+  1:1을 가정하므로 **경계 인식 전용**이고 함수 간 의미는 바뀌지 않는다.
+- 경계: 꼬리 호출된 **sink만** 처리(`_bind_tail_call_sinks`), 점프 시점의 인자 상태가 시작점.
+  인자 정의를 못 찾으면 시작점을 버리지 않고 점프 연산에 묶어 `unbound_roots`(불완전)로 보고.
+  꼬리 호출된 source(`return source()`)는 지역 reader가 없어 무시.
+- TEST-ONLY 가정 모드: 꼬리 호출 sink는 인자 읽기만 선언(쓰기 금지). 검증기는 선언 적용 후에도
+  점프를 수행한다.
+- 영향 없음(근거): call_clobber(점프 뒤 코드 없음), 스택 탈출(점프 시 프레임 해제, 이후 읽기 없음),
+  제어 의존(함수 밖 목적지는 EXIT).
+- 테스트: `tests/intra/test_tail_calls.py` 7개.
+- 결과 (v2 exporter로 재export: 디버그 64케이스 subset, 최적화 win_core)
+  - 디버그: 기본 PASS 39, 가정 PASS 53 — 꼬리 호출이 없어 이전과 동일(회귀 없음).
+  - 최적화(MinGW -O2): 시작점 5 → 57, MISSING 70 → 24(나머지는 인라인/병합으로 export 단계에서
+    빠진 케이스). 기본 PASS 2 → 40, 가정 PASS 46. 가정 모드에서 함수 내부만으로 정확+확실 29,
+    효과적 35. **누락+확실 0 (모든 모드)**.
+  - 그래프 실행 대조(최적화, 두 모드): 함수 87개, 의존 약 10만 건, 누락 0, 제어 위반 0.
+

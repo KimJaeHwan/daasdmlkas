@@ -148,6 +148,44 @@ class UnresolvedCallTarget:
 CallTargetEvidence: TypeAlias = DirectCallTarget | IndirectCallTarget | UnresolvedCallTarget
 
 
+class TailCallOpcode(StrEnum):
+    """A transfer that leaves the function and that Ghidra flags as a call."""
+
+    BRANCH = "BRANCH"
+    CBRANCH = "CBRANCH"
+    BRANCHIND = "BRANCHIND"
+
+
+@dataclass(frozen=True, slots=True)
+class TailCallSeed:
+    """A tail call (``jmp other_function``): boundary recognition only.
+
+    Kept apart from ``FunctionCallSeedUnit.callsites`` on purpose: call-effect
+    and interprocedural layers assume CALL/CALLIND callsites one-to-one.
+    """
+
+    instruction: AddressCoordinate
+    operation_ordinal: int
+    opcode: TailCallOpcode
+    operation_key: str
+    selector: ValidatedVarnode | None
+    target: "CallTargetEvidence"
+
+    def __post_init__(self) -> None:
+        _require_exact(self.instruction, AddressCoordinate, "tail call instruction")
+        _require_nonnegative_int(self.operation_ordinal, "tail call operation ordinal")
+        _require_exact(self.opcode, TailCallOpcode, "tail call opcode")
+        _require_nonempty_text(self.operation_key, "tail call operation key")
+        if self.selector is not None:
+            _require_exact(self.selector, ValidatedVarnode, "tail call selector")
+        if type(self.target) not in (DirectCallTarget, IndirectCallTarget, UnresolvedCallTarget):
+            raise TypeError("tail call target must be exact target evidence")
+
+    @property
+    def canonical_key(self) -> tuple[int, int, int]:
+        return (self.instruction.space_id, self.instruction.byte_offset, self.operation_ordinal)
+
+
 @dataclass(frozen=True, slots=True)
 class CallSiteSeed:
     locator: CallSiteLocator

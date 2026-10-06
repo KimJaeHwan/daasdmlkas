@@ -7,7 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from .assumed_call_effects import AssumedCallEffect
-from .boundary import BoundaryProvider, CallBoundary
+from .boundary import BoundaryKind, BoundaryProvider, CallBoundary
 from .graph_contracts import NodeKind
 from .integration.configured_target_resolution import _selected_resolved_target
 from .configured_naming_contracts import (
@@ -226,6 +226,21 @@ def assumed_boundary_effects(
         }
         if len(declared) == 1:
             effects[seed.operation_key] = declared.pop()
+    for tail, naming in zip(evidence.tails, evidence.naming.tail_rows, strict=True):
+        target = _selected_resolved_target(naming)
+        aliases = tuple(sorted({
+            alias.value
+            for alias in (() if target is None else target.aliases)
+            if alias.policy_admissible
+        }))
+        boundary = CallBoundary(caller, tail.operation_key, aliases, language)
+        declared = {
+            effect
+            for match in provider.classify(boundary)
+            if match.kind is BoundaryKind.SINK and (effect := declare(boundary, match)) is not None
+        }
+        if len(declared) == 1:
+            effects[tail.operation_key] = declared.pop()  # a tail-called sink: reads only
     return effects
 
 

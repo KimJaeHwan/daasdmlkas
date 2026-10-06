@@ -24,7 +24,7 @@ from .configured_naming_contracts import (
 _ROOT_KEYS = (
     "schema_id", "schema_version", "exporter_revision", "exporter_source_sha256",
     "ghidra_version", "transport", "inventory_completeness", "calls",
-    "semantic_content_digest",
+    "tail_calls", "semantic_content_digest",
 )
 _TRANSPORT_KEYS = (
     "generation_id", "manifest_schema_id", "seal_schema_id",
@@ -78,6 +78,7 @@ def decode_configured_naming(
     transport: NamingTransportExpectation,
     binding: NamingBindingExpectation,
     seeds: FunctionCallSeedUnit,
+    tails: tuple = (),
     /,
 ) -> CapturedNamingSidecar:
     _require_exact(raw, RawObject, "configured naming object")
@@ -121,22 +122,29 @@ def decode_configured_naming(
     _decode_transport(root["transport"], transport)
     if transport.function_entry != seeds.function_entry:
         raise ValueError("naming transport function entry does not match call seeds")
-    raw_rows = _array(root["calls"], "naming calls")
-    if len(raw_rows) > MAX_NAMING_ROWS:
-        raise ValueError("naming rows exceed their bound")
-
-    staged_rows: list[_RowStage | None] = [None] * len(raw_rows)
     aggregate_alias_bytes = 0
-    for index, raw_row in enumerate(raw_rows):
-        staged_row, aggregate_alias_bytes = _stage_row(
-            raw_row,
-            index,
-            aggregate_alias_bytes,
-        )
-        staged_rows[len(raw_rows) - index - 1] = staged_row
 
-    _validate_stage_order(staged_rows)
+    def stage_group(raw_rows, label):
+        nonlocal aggregate_alias_bytes
+        if len(raw_rows) > MAX_NAMING_ROWS:
+            raise ValueError(f"naming {label} exceed their bound")
+        staged: list[_RowStage | None] = [None] * len(raw_rows)
+        for index, raw_row in enumerate(raw_rows):
+            staged_row, aggregate_alias_bytes = _stage_row(
+                raw_row,
+                index,
+                aggregate_alias_bytes,
+            )
+            staged[len(raw_rows) - index - 1] = staged_row
+        _validate_stage_order(staged)
+        return staged
+
+    raw_rows = _array(root["calls"], "naming calls")
+    staged_rows = stage_group(raw_rows, "rows")
     _validate_stage_coverage(staged_rows, seeds)
+    raw_tails = _array(root["tail_calls"], "naming tail calls")
+    staged_tails = stage_group(raw_tails, "tail rows")
+    _validate_tail_coverage(staged_tails, tails)
 
     semantic_targets: list[tuple[CapturedNamingTarget, ...] | None] = [None] * len(raw_rows)
     for index, stage in enumerate(reversed(staged_rows)):
@@ -144,11 +152,19 @@ def decode_configured_naming(
         targets = tuple(_construct_target(item) for item in stage.targets)
         semantic_targets[len(raw_rows) - index - 1] = targets
     retained_rows = tuple(_construct_rows(staged_rows, semantic_targets))
+    tail_targets = [
+        tuple(_construct_target(item) for item in stage.targets) for stage in staged_tails
+    ]
+    retained_tails = tuple(_construct_rows(staged_tails, tail_targets))
 
-    computed_content_digest = naming_content_digest(exporter_digest, retained_rows)
+    computed_content_digest = naming_content_digest(
+        exporter_digest, retained_rows, retained_tails
+    )
     if computed_content_digest != supplied_content_digest:
         raise ValueError("naming content digest does not match its rows")
-    return CapturedNamingSidecar(exporter_digest, retained_rows, computed_content_digest)
+    return CapturedNamingSidecar(
+        exporter_digest, retained_rows, computed_content_digest, retained_tails
+    )
 def _decode_transport(raw: object, expected: NamingTransportExpectation) -> None:
     values = _exact_object(raw, _TRANSPORT_KEYS, "naming transport")
     generation_id = _digest(values["generation_id"], "naming generation ID")
@@ -454,6 +470,21 @@ def _validate_stage_coverage(
             or not _selector_matches(stage.selector, occurrence.selector)
         ):
             raise ValueError("naming row does not match its exact call occurrence")
+
+def _validate_tail_coverage(stages: list[_RowStage | None], tails: tuple) -> None:
+    if len(stages) != len(tails):
+        raise ValueError("naming tail rows do not exactly cover tail calls")
+    for stage, tail in zip(reversed(stages), tails, strict=True):
+        assert stage is not None
+        if (
+            stage.instruction.space_id != tail.instruction.space_id
+            or stage.instruction.byte_offset != tail.instruction.byte_offset
+            or stage.operation_ordinal != tail.operation_ordinal
+            or stage.opcode.value != tail.opcode.value
+            or not _selector_matches(stage.selector, tail.selector)
+        ):
+            raise ValueError("naming tail row does not match its exact tail call")
+
 
 def _selector_matches(stage: _SelectorStage | None, value: object) -> bool:
     if stage is None:

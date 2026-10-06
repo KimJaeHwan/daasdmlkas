@@ -109,7 +109,7 @@ def _flow(**flags) -> dict:
 @dataclass
 class _Instruction:
     ops: list[tuple]
-    kind: str = "plain"          # plain | cbranch | branch | call | return
+    kind: str = "plain"          # plain | cbranch | branch | call | tail | return
     target: str | None = None    # label for cbranch/branch
     condition: dict | None = None  # cbranch condition varnode
     call_target: int | None = None  # call destination address
@@ -150,6 +150,11 @@ class FunctionBuilder:
             "call",
             call_target=target,
         ))
+        return self
+
+    def tail_call(self, target: int) -> "FunctionBuilder":
+        """x86-64 tail call ``jmp target``: a BRANCH Ghidra flags as a call."""
+        self._rows.append(_Instruction([op("BRANCH", [ram(target)])], "tail", call_target=target))
         return self
 
     def branch(self, target: str) -> "FunctionBuilder":
@@ -209,8 +214,8 @@ class FunctionBuilder:
         return {"space_id": RAM, "byte_offset": address}
 
     def to_json(self) -> dict:
-        if not self._rows or self._rows[-1].kind not in {"return", "branch"}:
-            raise ValueError("function must end with ret() or branch()")
+        if not self._rows or self._rows[-1].kind not in {"return", "branch", "tail"}:
+            raise ValueError("function must end with ret(), branch() or tail_call()")
         rows = []
         for index, row in enumerate(self._rows):
             address = self._address(index)
@@ -239,6 +244,9 @@ class FunctionBuilder:
                     is_flow=True, has_fallthrough=True, is_call=True,
                     is_unconditional=True,
                 )
+            elif row.kind == "tail":
+                targets = [self._coordinate(row.call_target)]
+                flow = _flow(is_flow=True, is_call=True, is_terminal=True, is_unconditional=True)
             elif row.kind == "return":
                 flow = _flow(is_flow=True, is_terminal=True, is_unconditional=True)
             else:
@@ -497,7 +505,7 @@ def slice_op(function: NormalizedFunction, opcode: str, index: int | None = None
 LANGUAGE = "x86:LE:64:default"
 
 
-def _naming_for(unit, seeds, names: dict[int, str]):
+def _naming_for(unit, seeds, names: dict[int, str], tails=()):
     from tdo_v2.configured_naming_contracts import (
         CapturedNamingAlias, CapturedNamingResolution, CapturedNamingRow,
         CapturedNamingSidecar, CapturedNamingTarget, NamingAliasKind,
@@ -540,8 +548,35 @@ def _naming_for(unit, seeds, names: dict[int, str]):
             naming_row_digest(instruction, ordinal, opcode, selector, resolution, targets),
         ))
     rows = tuple(sorted(rows, key=lambda row: row.canonical_key))
+    tail_rows = []
+    for tail in tails:
+        opcode = NamingOpcode(tail.opcode.value)
+        selector = tail.selector
+        if opcode is NamingOpcode.BRANCHIND:
+            resolution, targets = CapturedNamingResolution(NamingResolutionState.INDIRECT), ()
+        else:
+            address = selector.coordinate.byte_offset
+            aliases = (CapturedNamingAlias(
+                NamingAliasKind.SYMBOL, names.get(address, f"fn_{address:x}"),
+                NamingSourceQuality.USER_DEFINED,
+            ),)
+            targets = (CapturedNamingTarget(
+                0, selector.coordinate, False, False, aliases,
+                naming_target_digest(0, selector.coordinate, False, False, aliases),
+            ),)
+            resolution = CapturedNamingResolution(
+                NamingResolutionState.RESOLVED_NAMED, terminal_target_ordinal=0
+            )
+        tail_rows.append(CapturedNamingRow(
+            tail.instruction, tail.operation_ordinal, opcode, selector, resolution, targets,
+            naming_row_digest(tail.instruction, tail.operation_ordinal, opcode, selector,
+                              resolution, targets),
+        ))
+    tail_rows = tuple(tail_rows)
     exporter = b"\x11" * 32
-    return CapturedNamingSidecar(exporter, rows, naming_content_digest(exporter, rows))
+    return CapturedNamingSidecar(
+        exporter, rows, naming_content_digest(exporter, rows, tail_rows), tail_rows
+    )
 
 
 def boundary(sources: dict[str, int] = (), sinks: dict[str, int] = (), *,
@@ -569,7 +604,7 @@ def boundary(sources: dict[str, int] = (), sinks: dict[str, int] = (), *,
 def analyze_program(functions: dict[str, FunctionBuilder], provider, *,
                     assume_boundary_call_effects: bool = False, **kwargs):
     """Run ``engine.analyze_observed_functions`` on named synthetic functions."""
-    from tdo_v2.call_seeds import seed_function_calls
+    from tdo_v2.call_seeds import seed_function_calls, seed_tail_calls
     from tdo_v2.engine import analyze_observed_functions, assumed_boundary_effects
     from tdo_v2.integration.observed_function_session import ObservedFunctionEvidence
 
@@ -582,7 +617,10 @@ def analyze_program(functions: dict[str, FunctionBuilder], provider, *,
     rows = []
     for unit in units:
         seeds = seed_function_calls(unit)
-        evidence = ObservedFunctionEvidence(unit, seeds, _naming_for(unit, seeds, names))
+        tails = seed_tail_calls(unit)
+        evidence = ObservedFunctionEvidence(
+            unit, seeds, _naming_for(unit, seeds, names, tails), tails
+        )
         normalized = FunctionNormalizer().normalize(
             unit,
             assumed_call_effects=(

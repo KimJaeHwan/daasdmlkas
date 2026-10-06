@@ -13,14 +13,14 @@ import ghidra.program.model.symbol.SourceType; import ghidra.program.model.symbo
 import ghidra.program.model.symbol.SymbolIterator; import ghidra.program.model.symbol.SymbolType;
 import ghidra.util.task.TaskMonitor;
 final class GhidraV2CallNaming {
-    private static final String SCHEMA_ID = "tdo-v2-call-naming-sidecar-v1";
+    private static final String SCHEMA_ID = "tdo-v2-call-naming-sidecar-v2";
     private static final String MANIFEST_SCHEMA_ID = "tdo-v2-configured-bundle-manifest-v2";
     private static final String SEAL_SCHEMA_ID = "tdo-v2-configured-bundle-seal-v2";
     private static final String GHIDRA_VERSION = "12.0.4", COMPLETE = "COMPLETE";
     private static final String TARGET_DOMAIN = "tdo-v2-call-naming-target-v1";
     private static final String ROW_DOMAIN = "tdo-v2-call-naming-row-v1";
-    private static final String CONTENT_DOMAIN = "tdo-v2-call-naming-content-v1";
-    private static final int SCHEMA_VERSION = 1, EXPORTER_REVISION = 1, MAX_ROWS = 16_384;
+    private static final String CONTENT_DOMAIN = "tdo-v2-call-naming-content-v2";
+    private static final int SCHEMA_VERSION = 2, EXPORTER_REVISION = 2, MAX_ROWS = 16_384;
     private static final int MAX_THUNK_EDGES = 64, MAX_TARGETS = MAX_THUNK_EDGES + 1;
     private static final int MAX_ALIASES = 16, MAX_SCANNED_SYMBOLS = 64, MAX_ALIAS_BYTES = 4_096;
     private static final long MAX_AGGREGATE_ALIAS_BYTES = 1024L * 1024L;
@@ -97,11 +97,16 @@ final class GhidraV2CallNaming {
             "observation_member_sha256", observationMemberSha256,
             "function_entry", selectedEntry.json());
         List<Map<String, Object>> calls = new ArrayList<>();
-        Map<String, Object> sizingRoot = root(exporterSourceSha256, transport, calls,
+        // v2: tail calls -- BRANCH/CBRANCH/BRANCHIND in an instruction whose flow
+        // type Ghidra flags as a call (e.g. `jmp other_function`). Kept separate
+        // from CALL/CALLIND rows; the Python seeding uses the same predicate.
+        List<Map<String, Object>> tailCalls = new ArrayList<>();
+        Map<String, Object> sizingRoot = root(exporterSourceSha256, transport, calls, tailCalls,
             "0000000000000000000000000000000000000000000000000000000000000000");
         state.reserveRoot(sizingRoot);
         InstructionIterator instructions = program.getListing().getInstructions(observedBody, true);
         RowKey previous = null;
+        RowKey previousTail = null;
         while (instructions.hasNext()) {
             state.check();
             Instruction instruction = instructions.next();
@@ -110,6 +115,30 @@ final class GhidraV2CallNaming {
                 state.check();
                 PcodeOp operation = operations[ordinal];
                 int opcodeValue = operation.getOpcode();
+                boolean tail = (opcodeValue == PcodeOp.BRANCH || opcodeValue == PcodeOp.CBRANCH
+                        || opcodeValue == PcodeOp.BRANCHIND)
+                    && instruction.getFlowType().isCall()
+                    && operation.getNumInputs() > 0
+                    && (opcodeValue == PcodeOp.BRANCHIND || !operation.getInput(0).isConstant());
+                if (tail) {
+                    if (opcodeValue != PcodeOp.BRANCHIND && operation.getInput(0).isAddress()) {
+                        require(!observedBody.contains(operation.getInput(0).getAddress()),
+                            "a call-flagged branch targets the function's own body");
+                    }
+                    require(tailCalls.size() < MAX_ROWS, "naming tail rows exceed their bound");
+                    Coordinate tailCoordinate = coordinate(instruction.getAddress());
+                    RowKey tailKey = new RowKey(tailCoordinate, ordinal);
+                    require(previousTail == null || previousTail.compareTo(tailKey) < 0,
+                        "Ghidra tail calls are not in canonical order");
+                    String tailOpcode = opcodeValue == PcodeOp.BRANCH ? "BRANCH"
+                        : opcodeValue == PcodeOp.CBRANCH ? "CBRANCH" : "BRANCHIND";
+                    Row tailRow = captureRow(program, state, tailCoordinate, ordinal, tailOpcode,
+                        operation);
+                    state.reserveCall(tailRow.json, tailCalls.isEmpty());
+                    tailCalls.add(tailRow.json);
+                    previousTail = tailKey;
+                    continue;
+                }
                 if (opcodeValue != PcodeOp.CALL && opcodeValue != PcodeOp.CALLIND) {
                     continue;
                 }
@@ -133,15 +162,17 @@ final class GhidraV2CallNaming {
         content.bytes(exporterDigest);
         content.text(GHIDRA_VERSION);
         content.text(COMPLETE);
-        content.u64(calls.size());
-        for (Map<String, Object> rowJson : calls) {
-            state.check();
-            encodeRowBody(content, rowJson);
-            content.bytes(digestBytes((String)rowJson.get("row_digest"), "row digest"));
+        for (List<Map<String, Object>> group : List.of(calls, tailCalls)) {
+            content.u64(group.size());
+            for (Map<String, Object> rowJson : group) {
+                state.check();
+                encodeRowBody(content, rowJson);
+                content.bytes(digestBytes((String)rowJson.get("row_digest"), "row digest"));
+            }
         }
         String contentDigest = content.finishHex();
         state.check();
-        return root(exporterSourceSha256, transport, calls, contentDigest);
+        return root(exporterSourceSha256, transport, calls, tailCalls, contentDigest);
     }
     private static Row captureRow(Program program, CaptureState state, Coordinate instruction,
             int ordinal, String opcode, PcodeOp operation) throws Exception {
@@ -150,7 +181,7 @@ final class GhidraV2CallNaming {
             : Selector.present(operation.getInput(0));
         List<Target> targets = new ArrayList<>();
         Resolution resolution;
-        if ("CALLIND".equals(opcode)) {
+        if ("CALLIND".equals(opcode) || "BRANCHIND".equals(opcode)) {
             resolution = Resolution.indirect();
         }
         else if (!selector.present) {
@@ -366,7 +397,8 @@ final class GhidraV2CallNaming {
         return result;
     }
     private static Map<String, Object> root(String exporterDigest, Map<String, Object> transport,
-            List<Map<String, Object>> calls, String contentDigest) {
+            List<Map<String, Object>> calls, List<Map<String, Object>> tailCalls,
+            String contentDigest) {
         return map(
             "schema_id", SCHEMA_ID,
             "schema_version", BigInteger.valueOf(SCHEMA_VERSION),
@@ -376,6 +408,7 @@ final class GhidraV2CallNaming {
             "transport", transport,
             "inventory_completeness", COMPLETE,
             "calls", calls,
+            "tail_calls", tailCalls,
             "semantic_content_digest", contentDigest);
     }
     private static Coordinate coordinate(Address address) {

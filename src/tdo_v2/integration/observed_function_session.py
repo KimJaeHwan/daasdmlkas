@@ -15,7 +15,7 @@ from .._scope_results import (
     ScopedFunctionUnit,
 )
 from ..call_contracts import FunctionCallSeedUnit
-from ..call_seeds import seed_function_calls
+from ..call_seeds import seed_function_calls, seed_tail_calls
 from ..configured_naming import decode_configured_naming
 from ..configured_naming_contracts import (
     CapturedNamingSidecar,
@@ -43,6 +43,7 @@ class ObservedFunctionEvidence:
     unit: ScopedFunctionUnit
     seeds: FunctionCallSeedUnit
     naming: CapturedNamingSidecar
+    tails: tuple = ()  # TailCallSeed rows, aligned with naming.tail_rows
 
     def __reduce_ex__(self, protocol: int):
         raise TypeError("observed function evidence cannot be serialized")
@@ -249,13 +250,15 @@ class ObservedFunctionSession:
             observation.sha256_digest,
             seeds.function_entry,
         )
+        tails = seed_tail_calls(unit)
         naming = decode_configured_naming(
             parse_raw_json(captured.naming_bytes),
             transport,
             self._naming_binding,
             seeds,
+            tails,
         )
-        return ObservedFunctionEvidence(unit, seeds, naming)
+        return ObservedFunctionEvidence(unit, seeds, naming, tails)
 
     def _require_owner(self) -> None:
         if current_thread() is not self._owner:

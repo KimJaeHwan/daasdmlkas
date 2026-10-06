@@ -14,6 +14,8 @@ from .call_contracts import (
     FunctionCallSeedUnit,
     IndirectCallTarget,
     InstructionFlowContext,
+    TailCallOpcode,
+    TailCallSeed,
     UnresolvedCallTarget,
     UnresolvedFunctionCallSeeds,
     _mint_call_seed_permit,
@@ -27,7 +29,45 @@ from ._scope_results import (
 )
 
 
-__all__ = ("seed_function_calls",)
+__all__ = ("seed_function_calls", "seed_tail_calls")
+
+
+def seed_tail_calls(unit: ScopedFunctionUnit, /) -> tuple[TailCallSeed, ...]:
+    """BRANCH/CBRANCH/BRANCHIND in an instruction Ghidra flags as a call.
+
+    Ghidra's flow type is the only non-guessing criterion: a jump to code
+    outside the function body that Ghidra does not flag as a call (shared
+    code, jump tables) is not a tail call. Must match the naming exporter.
+    """
+    if type(unit) is not ScopedFunctionUnit or unit.observation is None:
+        return ()
+    local = {instruction.address for instruction in unit.observation.instructions}
+    rows = []
+    for instruction in unit.observation.instructions:
+        if not instruction.flow.is_call:
+            continue
+        for ordinal, operation in enumerate(instruction.operations):
+            if operation.opcode not in ("BRANCH", "CBRANCH", "BRANCHIND") or not operation.inputs:
+                continue
+            selector = operation.inputs[0]
+            if operation.opcode != "BRANCHIND" and selector.kind is VarnodeKindCode.CONSTANT:
+                continue  # an in-instruction p-code branch
+            if operation.opcode == "BRANCHIND":
+                target = IndirectCallTarget(selector)
+            elif selector.kind is VarnodeKindCode.ADDRESS:
+                if selector.coordinate in local:
+                    raise ValueError("a call-flagged branch targets the function's own body")
+                target = DirectCallTarget(selector.coordinate)
+            else:
+                target = UnresolvedCallTarget(
+                    CallTargetFailureReason.DIRECT_SELECTOR_NOT_ADDRESS, selector
+                )
+            rows.append(TailCallSeed(
+                instruction.address, ordinal, TailCallOpcode(operation.opcode),
+                _operation_key(instruction.address, ordinal, operation.opcode),
+                selector, target,
+            ))
+    return tuple(sorted(rows, key=lambda row: row.canonical_key))
 
 
 def seed_function_calls(unit: ScopedFunctionUnit, /) -> FunctionCallSeedResult:
