@@ -9,6 +9,7 @@ import rustworkx as rx
 
 from .graph_contracts import (
     DependencyGraph,
+    EdgeKind,
     EdgeRecord,
     NodeId,
     NodeKind,
@@ -16,7 +17,7 @@ from .graph_contracts import (
 )
 
 
-CONTROL_DEPENDENCE_EDGE = "control_dependence"
+CONTROL_DEPENDENCE_EDGE = EdgeKind.CONTROL_DEPENDENCE.value
 
 
 class RustworkxDependencyGraph:

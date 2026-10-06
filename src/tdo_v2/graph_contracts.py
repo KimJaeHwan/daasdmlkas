@@ -17,7 +17,6 @@ class NodeKind(StrEnum):
     OBSERVED_INPUT = "observed_input"
     CONSTANT = "constant"
     OPERATION = "operation"
-    VALUE_VERSION = "value_version"
     MEMORY_DEFINITION = "memory_definition"
     MEMORY_JOIN = "memory_join"
     MEMORY_DEBT = "memory_debt"
@@ -39,16 +38,37 @@ class NodeRecord:
             raise TypeError("node label must be an exact str")
 
 
+class EdgeKind(StrEnum):
+    """Closed vocabulary of dependency-graph edge kinds."""
+
+    CONTROL = "control"                          # CFG successor (cfg graph)
+    VALUE_INPUT = "value_input"                  # constant -> operation input
+    MEMORY_DEFINES = "memory_defines"            # operation -> memory definition
+    MEMORY_READ = "memory_read"                  # definition -> reading operation
+    MEMORY_JOIN_INPUT = "memory_join_input"      # definition -> JOIN
+    UNRESOLVED_READ = "unresolved_read"          # debt -> reading operation
+    UNRESOLVED_WRITE = "unresolved_write"        # writing operation -> debt
+    CALL_CLOBBER_READ = "call_clobber_read"      # call clobber debt -> read
+    MAY_ALIAS_WRITE = "may_alias_write"          # possible writer -> may-alias debt
+    MAY_ALIAS_READ = "may_alias_read"            # may-alias debt -> read
+    CONTROL_DEPENDENCE = "control_dependence"    # decision -> dependent operation
+
+
+_EDGE_KINDS = frozenset(item.value for item in EdgeKind)
+
+
 @dataclass(frozen=True, slots=True)
 class EdgeRecord:
-    kind: str
+    kind: str  # an EdgeKind value; stored as plain str for serialization
     operation: str | None = None
     occurrence: int | None = None
     span: ByteSpan | None = None
 
     def __post_init__(self) -> None:
-        if type(self.kind) is not str or not self.kind:
-            raise TypeError("edge kind must be a non-empty exact str")
+        if self.kind not in _EDGE_KINDS:
+            raise TypeError(f"edge kind must be an EdgeKind: {self.kind!r}")
+        if type(self.kind) is not str:
+            object.__setattr__(self, "kind", str(self.kind))
         if self.operation is not None and type(self.operation) is not str:
             raise TypeError("edge operation must be an exact str or None")
         if self.occurrence is not None and (

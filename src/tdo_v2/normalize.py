@@ -17,8 +17,8 @@ from .control_dependence import (
     CONTROL_DEPENDENCE_EDGE,
     ControlDependence,
     derive_control_dependences,
-    in_instruction_skips,
 )
+from .pcode_blocks import build_pcode_block_graph
 from .may_alias import MayAliasRead, derive_may_alias_reads
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
@@ -50,7 +50,7 @@ from .effects import (
     UnresolvedMemoryAccess,
 )
 from .graph import RustworkxDependencyGraph
-from .graph_contracts import EdgeRecord, NodeId, NodeKind, NodeRecord
+from .graph_contracts import EdgeKind, EdgeRecord, NodeId, NodeKind, NodeRecord
 from .memory_contracts import (
     LocalMemorySsaResult,
     LocalMemoryUnit,
@@ -94,7 +94,6 @@ class NormalizedFunction:
     dependencies: RustworkxDependencyGraph
     effects: tuple[ObservedEffect, ...]
     observed_inputs: tuple[object, ...]
-    value_nodes: tuple[tuple[str, NodeId], ...]
     memory_ssa: LocalMemorySsaResult | None = None
     memory_graph: MemoryGraphBindings | None = None
     terminal_cuts: FunctionTerminalCuts | None = None
@@ -205,10 +204,12 @@ class NormalizedFunction:
                     or self.cfg.successors(node)
                 ):
                     raise ValueError("terminal-cut sites must map to exact CFG terminal nodes")
-            if self.memory_ssa is not None and tuple(
-                state.block_key for state in self.memory_ssa.observed_terminal_states
-            ) != self.terminal_cuts.block_keys:
-                raise ValueError("memory terminal states must align with terminal cuts")
+            if self.memory_ssa is not None and not set(self.terminal_cuts.block_keys) <= {
+                # a p-code sub-block key is "<instruction key>#<ordinal>"
+                state.block_key.split("#")[0]
+                for state in self.memory_ssa.observed_terminal_states
+            }:
+                raise ValueError("memory terminal states must cover the terminal cuts")
         configured = self.configured_call_effects
         if configured is not None and type(
             configured
@@ -414,9 +415,6 @@ class NormalizedFunction:
                 self.memory_graph,
             )
 
-    def value_node(self, operation_key: str) -> NodeId | None:
-        return dict(self.value_nodes).get(operation_key)
-
 
 class NormalizationFailureReason(StrEnum):
     MISSING_VALIDATED_OBSERVATION = "missing_validated_observation"
@@ -463,7 +461,7 @@ class FunctionNormalizer:
             )
         admission_failure = _cfg_admission_failure(
             value.observation, function
-        ) or _intra_instruction_flow_failure(value.observation)
+        ) or _intra_instruction_flow_failure(value.observation, function.entry)
         if admission_failure is not None:
             return UnresolvedNormalizedFunction(value.scopes, admission_failure)
         return _ScopedNormalizer().normalize(
@@ -497,7 +495,7 @@ class FunctionNormalizer:
             )
         admission_failure = _cfg_admission_failure(
             value.observation, function
-        ) or _intra_instruction_flow_failure(value.observation)
+        ) or _intra_instruction_flow_failure(value.observation, function.entry)
         if admission_failure is not None:
             return UnresolvedNormalizedFunction(value.scopes, admission_failure)
         return _ScopedNormalizer().normalize(
@@ -545,12 +543,18 @@ class _ScopedNormalizer:
         terminal_cuts = project_observed_terminal_cuts(unit.scopes, observation, cfg)
         dependencies = RustworkxDependencyGraph()
         effects: list[ObservedEffect] = []
-        value_nodes: list[tuple[str, NodeId]] = []
         operation_nodes: dict[str, NodeId] = {}
         constant_inputs: dict[str, list[tuple[int, NodeId]]] = {}
 
+        block_graph = build_pcode_block_graph(observation, function.entry)
+        if block_graph.unsupported is not None:
+            raise AssertionError("admitted normalization has unsupported p-code flow")
+        operation_blocks = {
+            (block.instruction, ordinal): block.key
+            for block in block_graph.blocks
+            for ordinal in range(block.start, block.stop)
+        }
         for instruction in sorted(observation.instructions, key=lambda item: item.address):
-            skippable = _skippable_operations(instruction)
             for ordinal, operation in enumerate(instruction.operations):
                 operation_key = _operation_key(instruction, ordinal, operation)
                 operation_nodes[operation_key] = dependencies.add_node(
@@ -563,15 +567,11 @@ class _ScopedNormalizer:
                         effect, assumed_call_effects[operation_key], operation, context,
                         _register_space_id(observation),
                     )
-                if ordinal in skippable:
-                    # A forward in-instruction branch may skip this write, so the
-                    # previous value may survive: model it as a weak update.
-                    effect = replace(
-                        effect,
-                        reads=effect.reads + tuple(
-                            write for write in effect.writes if type(write) is ResolvedStorage
-                        ),
-                    )
+                block_key = operation_blocks.get((instruction.address, ordinal))
+                if block_key is not None and block_key != effect.block_key:
+                    # an operation in a p-code sub-block of an instruction with
+                    # internal control flow (pcode_blocks)
+                    effect = replace(effect, block_key=block_key)
                 for input_ordinal, varnode in enumerate(operation.inputs):
                     if input_ordinal < _data_input_start(operation.opcode):
                         continue
@@ -591,28 +591,8 @@ class _ScopedNormalizer:
                         constant_inputs.setdefault(operation_key, []).append(
                             (input_ordinal, constant_node)
                         )
-                if (
-                    operation.output is not None
-                    and operation.output.kind is not VarnodeKindCode.OPAQUE
-                ):
-                    storage_ref = _storage_ref(operation.output)
-                    resolved = _resolve_validated_storage(storage_ref, context)
-                    if type(resolved) is not NonStorage:
-                        storage_key = _storage_key(storage_ref, resolved)
-                        node = dependencies.add_node(
-                            NodeRecord(
-                                f"value:{operation_key}:{storage_key}",
-                                NodeKind.VALUE_VERSION,
-                                storage_key,
-                            )
-                        )
-                        dependencies.add_edge(
-                            operation_node,
-                            node,
-                            EdgeRecord(kind="defines", operation=operation_key),
-                        )
-                        value_nodes.append((operation_key, node))
-                effects.append(effect)
+                if block_key is not None:
+                    effects.append(effect)  # operations in unreachable sub-blocks never run
 
         call_effects = None
         if configured_call_effects is None:
@@ -622,13 +602,13 @@ class _ScopedNormalizer:
                 raw_ports=raw_call_ports,
             )
 
-        predecessors = _cfg_predecessors(observation, function.entry)
+        predecessors: dict[str, set[str]] = {block.key: set() for block in block_graph.blocks}
+        for block in block_graph.blocks:
+            for successor in block.successors:
+                if successor in predecessors:
+                    predecessors[successor].add(block.key)
         effects_by_block: dict[str, list[ObservedEffect]] = {
-            _coordinate_key(instruction.address): []
-            for instruction in sorted(
-                observation.instructions,
-                key=lambda item: item.address,
-            )
+            block.key: [] for block in block_graph.blocks
         }
         for effect in effects:
             assert effect.block_key is not None
@@ -645,7 +625,7 @@ class _ScopedNormalizer:
                 )
                 for block_key in effects_by_block
             ),
-            terminal_cuts.block_keys,
+            tuple(sorted(block.key for block in block_graph.blocks if not block.successors)),
             effect_evidence_digest=(
                 configured_call_effects.canonical_digest
                 if configured_call_effects is not None
@@ -663,7 +643,17 @@ class _ScopedNormalizer:
         memory_ssa = memory_binding.result
         program = unit.scopes.program
         address_spaces = program.evidence.address_spaces
+        # Each productive pass resolves at least one unresolved access, so the
+        # number of passes is bounded by those accesses (+1 for the fixed point).
+        projection_budget = 1 + sum(
+            (effect.memory_read is not None) + (effect.memory_write is not None)
+            for block in effect_unit.blocks
+            for effect in block.effects
+        )
         while True:
+            if projection_budget <= 0:
+                raise AssertionError("relative-memory projection did not reach a fixed point")
+            projection_budget -= 1
             projected_effect_unit = project_function_relative_memory(
                 effect_unit,
                 observation,
@@ -751,7 +741,6 @@ class _ScopedNormalizer:
                 effect for block in effect_unit.blocks for effect in block.effects
             ),
             observed_inputs=observed_inputs,
-            value_nodes=tuple(value_nodes),
             memory_ssa=memory_ssa,
             memory_graph=memory_graph,
             terminal_cuts=terminal_cuts,
@@ -805,7 +794,7 @@ class _ScopedNormalizer:
                     graph.add_edge(
                         nodes[instruction.address],
                         target,
-                        EdgeRecord(kind="control"),
+                        EdgeRecord(kind=EdgeKind.CONTROL),
                     )
         return graph
 
@@ -834,7 +823,7 @@ def _materialize_constant_inputs(
                 constant_node,
                 operation_node,
                 EdgeRecord(
-                    kind="value_input",
+                    kind=EdgeKind.VALUE_INPUT,
                     operation=action.operation_key,
                     occurrence=input_ordinal,
                 ),
@@ -870,40 +859,11 @@ def _assumed_call_writes(effect, assumed, operation, context, space_id):
     )
 
 
-_SKIPPABLE_OPCODES_FORBIDDEN = frozenset({
-    "LOAD", "STORE", "CALL", "CALLIND", "CALLOTHER", "BRANCH", "CBRANCH",
-    "BRANCHIND", "RETURN",
-})
-
-
-def _skippable_operations(instruction) -> frozenset[int]:
-    """Ordinals an in-instruction CBRANCH may skip (validated at admission)."""
-    return frozenset(
-        index
-        for ordinal, _, stop in in_instruction_skips(instruction)
-        for index in range(ordinal + 1, stop)
-    )
-
-
-def _intra_instruction_flow_failure(observation) -> NormalizationFailureReason | None:
-    """Only forward CBRANCH over register/temporary writes is modelled (weak update).
-
-    Backward branches (in-instruction loops such as REP), unconditional
-    relative branches, and skipped memory/control operations would need p-code
-    level blocks; they are a typed failure instead of a silent strong update.
-    """
-    for instruction in observation.instructions:
-        operations = instruction.operations
-        for ordinal, opcode, target in in_instruction_skips(instruction):
-            if opcode != "CBRANCH" or not ordinal < target <= len(operations):
-                return NormalizationFailureReason.UNSUPPORTED_INTRA_INSTRUCTION_FLOW
-            for operation in operations[ordinal + 1:target]:
-                if operation.opcode in _SKIPPABLE_OPCODES_FORBIDDEN or (
-                    operation.output is not None
-                    and operation.output.kind
-                    not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE)
-                ):
-                    return NormalizationFailureReason.UNSUPPORTED_INTRA_INSTRUCTION_FLOW
+def _intra_instruction_flow_failure(observation, entry) -> NormalizationFailureReason | None:
+    """In-instruction p-code flow is modelled as p-code blocks (pcode_blocks);
+    only shapes they cannot express are a typed failure."""
+    if build_pcode_block_graph(observation, entry).unsupported is not None:
+        return NormalizationFailureReason.UNSUPPORTED_INTRA_INSTRUCTION_FLOW
     return None
 
 
@@ -944,30 +904,6 @@ def _cfg_admission_failure(
     return None
 
 
-def _cfg_predecessors(
-    observation: ValidatedFunctionObservation,
-    function_entry: AddressCoordinate,
-) -> dict[str, set[str]]:
-    known_coordinates = {
-        instruction.address for instruction in observation.instructions
-    }
-    predecessors = {
-        _coordinate_key(instruction.address): set()
-        for instruction in observation.instructions
-    }
-    for instruction in observation.instructions:
-        source = _coordinate_key(instruction.address)
-        for target in control_successor_coordinates(
-            instruction,
-            local_addresses=known_coordinates,
-            function_entry=function_entry,
-        ):
-            target_key = _coordinate_key(target)
-            if target_key in predecessors:
-                predecessors[target_key].add(source)
-    return predecessors
-
-
 _KIND_MAP = {
     VarnodeKindCode.CONSTANT: VarnodeKind.CONSTANT,
     VarnodeKindCode.REGISTER: VarnodeKind.REGISTER,
@@ -1004,7 +940,7 @@ def _materialize_call_clobber_debt(
         dependencies.add_edge(
             node,
             operation_nodes[row.operation_key],
-            EdgeRecord("call_clobber_read", operation=row.operation_key),
+            EdgeRecord(EdgeKind.CALL_CLOBBER_READ, operation=row.operation_key),
         )
         nodes.append(node)
     return tuple(nodes)
@@ -1037,12 +973,12 @@ def _materialize_may_alias_debt(
             dependencies.add_edge(
                 operation_nodes[writer],
                 node,
-                EdgeRecord("may_alias_write", operation=writer),
+                EdgeRecord(EdgeKind.MAY_ALIAS_WRITE, operation=writer),
             )
         dependencies.add_edge(
             node,
             operation_nodes[row.operation_key],
-            EdgeRecord("may_alias_read", operation=row.operation_key),
+            EdgeRecord(EdgeKind.MAY_ALIAS_READ, operation=row.operation_key),
         )
         nodes.append(node)
     return tuple(nodes)

@@ -323,7 +323,7 @@ def _stack_policy(unit, observation, context, address_spaces, assumed_calls=froz
     return _Policy(
         stack_object,
         1 << space.address_size_bits,
-        _stack_escapes(observation, register_space, offset, size, assumed_calls),
+        _stack_escapes(observation, register_space, offset, size, assumed_calls, unit.entry_block_key),
     )
 
 
@@ -363,34 +363,30 @@ def _register_space_id(observation) -> int | None:
 
 
 def _stack_escapes(observation, register_space: int, offset: int, size: int,
-                   assumed_calls=frozenset()) -> bool:
+                   assumed_calls=frozenset(), entry_key: str | None = None) -> bool:
     """Flow-sensitive: can a stack-derived value reach another base?
 
-    Forward over the observed instruction CFG, tracking which register and
+    Forward over the p-code block graph (``pcode_blocks``), tracking which register and
     temporary bytes hold a stack-derived value at each point. It escapes when
     such a value is stored to memory, passed to CALLOTHER, or held in a
     register other than the stack pointer at a call that is not a declared
     (TEST-ONLY assumed) boundary call. ``push rbp`` before ``mov rbp, rsp``
     therefore stores the caller's RBP, not a stack address.
     """
-    from .control_dependence import in_instruction_skips
-    from .control_projection import control_successor_coordinates
+    from .pcode_blocks import build_pcode_block_graph, instruction_key
 
     instructions = {row.address: row for row in observation.instructions}
     if not instructions:
         return True
     stack_bytes = frozenset((register_space, offset + index) for index in range(size))
-    entry = min(instructions)
-    successors = {
-        address: tuple(
-            target
-            for target in control_successor_coordinates(
-                row, local_addresses=set(instructions), function_entry=entry
-            )
-            if target in instructions
-        )
-        for address, row in instructions.items()
-    }
+    entry = next(
+        (address for address in instructions if instruction_key(address) == entry_key),
+        min(instructions),
+    )
+    graph = build_pcode_block_graph(observation, entry)
+    if graph.unsupported is not None:
+        return True
+    blocks = {block.key: block for block in graph.blocks}
 
     def bytes_of(varnode):
         return {
@@ -398,14 +394,11 @@ def _stack_escapes(observation, register_space: int, offset: int, size: int,
             for index in range(varnode.byte_size)
         }
 
-    def transfer(row, state, check):
-        skippable = {
-            index
-            for ordinal, _, stop in in_instruction_skips(row)
-            for index in range(ordinal + 1, stop)
-        }
+    def transfer(block, state, check):
+        row = instructions[block.instruction]
         tainted = set(state)
-        for ordinal, operation in enumerate(row.operations):
+        for ordinal in range(block.start, block.stop):
+            operation = row.operations[ordinal]
             touches = lambda varnode: varnode is not None and bool(bytes_of(varnode) & tainted)
             key = _operation_key(row.address, ordinal, operation.opcode)
             if check:
@@ -428,26 +421,28 @@ def _stack_escapes(observation, register_space: int, offset: int, size: int,
                 and any(touches(item) for item in operation.inputs)
             )
             written = bytes_of(output)
-            if ordinal not in skippable:
-                tainted -= written
+            tainted -= written
             if produced:
                 tainted |= written
         return frozenset(tainted)
 
-    in_states = {entry: stack_bytes}
-    pending = {entry}
+    order = {block.key: index for index, block in enumerate(graph.blocks)}
+    in_states = {graph.entry: stack_bytes}
+    pending = {graph.entry}
     while pending:
-        address = min(pending)
-        pending.remove(address)
-        out = transfer(instructions[address], in_states[address], False)
-        for target in successors[address]:
+        key = min(pending, key=order.__getitem__)
+        pending.remove(key)
+        out = transfer(blocks[key], in_states[key], False)
+        for target in blocks[key].successors:
+            if target not in blocks:
+                continue
             merged = out | in_states.get(target, frozenset())
             if merged != in_states.get(target):
                 in_states[target] = merged
                 pending.add(target)
     return any(
-        transfer(instructions[address], state, True) is None
-        for address, state in in_states.items()
+        transfer(blocks[key], state, True) is None
+        for key, state in in_states.items()
     )
 
 

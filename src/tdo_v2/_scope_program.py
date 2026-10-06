@@ -102,6 +102,11 @@ class _AddressSpaceIndex:
     def contains(self, space_id: int) -> bool:
         return space_id in self._spaces
 
+    def external_coordinate(self, coordinate: AddressCoordinate) -> bool:
+        """A coordinate in Ghidra's EXTERNAL space (imported symbols), not memory."""
+        row = self._spaces.get(coordinate.space_id)
+        return row is not None and row.is_external_space and not row.is_overlay_space
+
     def kind_matches(self, space_id: int, kind: VarnodeKindCode) -> bool:
         row = self._spaces.get(space_id)
         return row is not None and _space_matches(row, kind)

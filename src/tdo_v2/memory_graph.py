@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 from .graph import RustworkxDependencyGraph
-from .graph_contracts import EdgeRecord, NodeId, NodeKind, NodeRecord
+from .graph_contracts import EdgeKind, EdgeRecord, NodeId, NodeKind, NodeRecord
 from .memory_contracts import LocalMemorySsaResult, MemoryDefinitionKind
 from .model import ByteSpan, ResolvedStorage, StorageScopeId
 
@@ -117,7 +117,7 @@ def _materialize_local_memory_ssa(
                 definition_nodes[source_id],
                 target,
                 EdgeRecord(
-                    "memory_join_input",
+                    EdgeKind.MEMORY_JOIN_INPUT,
                     occurrence=occurrence,
                     span=join_span,
                 ),
@@ -131,7 +131,7 @@ def _materialize_local_memory_ssa(
                 operation_node,
                 definition_nodes[definition_id],
                 EdgeRecord(
-                    "memory_defines",
+                    EdgeKind.MEMORY_DEFINES,
                     operation=action.operation_key,
                     occurrence=definition.write_ordinal,
                     span=definition.span,
@@ -144,7 +144,7 @@ def _materialize_local_memory_ssa(
             definition_nodes[definition_id],
             action_nodes[action_id],
             EdgeRecord(
-                "memory_read",
+                EdgeKind.MEMORY_READ,
                 operation=action.operation_key,
                 span=span,
             ),
@@ -167,7 +167,7 @@ def _materialize_local_memory_ssa(
             else:
                 unresolved_write_nodes.append(debt_node)
             edge = EdgeRecord(
-                f"unresolved_{direction}",
+                EdgeKind(f"unresolved_{direction}"),
                 operation=action.operation_key,
                 occurrence=occurrence.occurrence_ordinal,
             )
@@ -229,7 +229,7 @@ def _expected_memory_edges(
                     bindings.definition_nodes[source_id],
                     target,
                     EdgeRecord(
-                        "memory_join_input",
+                        EdgeKind.MEMORY_JOIN_INPUT,
                         occurrence=occurrence,
                         span=join_span,
                     ),
@@ -243,7 +243,7 @@ def _expected_memory_edges(
                     bindings.action_nodes[action_id],
                     bindings.definition_nodes[definition_id],
                     EdgeRecord(
-                        "memory_defines",
+                        EdgeKind.MEMORY_DEFINES,
                         operation=action.operation_key,
                         occurrence=definition.write_ordinal,
                         span=definition.span,
@@ -257,7 +257,7 @@ def _expected_memory_edges(
                 bindings.definition_nodes[definition_id],
                 bindings.action_nodes[action_id],
                 EdgeRecord(
-                    "memory_read",
+                    EdgeKind.MEMORY_READ,
                     operation=action.operation_key,
                     span=span,
                 ),
@@ -271,7 +271,7 @@ def _expected_memory_edges(
             action = result.actions[occurrence.action_id]
             action_node = bindings.action_nodes[occurrence.action_id]
             edge = EdgeRecord(
-                f"unresolved_{direction}",
+                EdgeKind(f"unresolved_{direction}"),
                 operation=action.operation_key,
                 occurrence=occurrence.occurrence_ordinal,
             )

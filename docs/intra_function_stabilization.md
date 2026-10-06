@@ -401,3 +401,66 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
     효과적 35. **누락+확실 0 (모든 모드)**.
   - 그래프 실행 대조(최적화, 두 모드): 함수 87개, 의존 약 10만 건, 누락 0, 제어 위반 0.
 
+
+## 8. 검증 코퍼스 · IAT · p-code 블록 (2026-10-06, Fable 설계 A안)
+
+완성 기준(call 없는 함수 그래프):
+1. 검증 자료 전 함수에서 누락 0·제어 위반 0 (gcc/clang, -O0/-O2/-O3, 32비트 포함)
+2. UNSUPPORTED 실패 0 (남으면 문서화)
+3. 검증기(인터프리터)가 건너뛰는 run/연산 0
+4. 가장 큰 함수도 합리적 시간
+5. 09/10 전 모드에서 "누락+확실" 0
+
+- **검증 코퍼스** `tests/corpus/intra/intra_corpus.c`: call 없는 export 함수 26개(switch 밀집/희소,
+  문자열·메모리 루프, CRC, 상태기계, 행렬, 부동소수, 정렬, 이진탐색, 포인터 별칭 등).
+  `build.sh` 로 7종 빌드(clang ELF x64 -O0/-O2/-O3(AVX2), x86 -O0/-O2, MinGW gcc PE -O2
+  `rep_byte`, -O3). `tools/graph_fidelity/corpus_run.sh [runs] [--measure-only]` (WSL)이
+  export + 실행 대조.
+- **검증기 보강**: 마스크 폭 제한 제거(AVX 32/64바이트), BRANCHIND(점프 테이블) 선택을
+  분기 결정으로 기록(-O0 switch 제어 위반 44/76건은 검증기 오탐이었음).
+- **IAT 수정**: `call [__imp_X]` 의 흐름 대상이 외부(EXTERNAL) 공간 주소라 입장이 실패하던 문제.
+  호출 명령어(flow.is_call)에 한해 외부 공간 대상을 건너뜀(`_scope_observation._flow_targets`,
+  `_AddressSpaceIndex.external_coordinate`).
+- **p-code 블록** (`src/tdo_v2/pcode_blocks.py`): 명령어 내부 흐름(cmov의 `CBRANCH`,
+  `rep` 의 `CBRANCH <다음 명령어>` … `BRANCH <자기 주소>`, 상대 분기)이 있는 명령어만
+  분기 지점에서 서브블록(`<명령어키>#<연산 번호>`)으로 쪼갬. 첫 서브블록은 명령어 키를 유지.
+  - normalize: 효과 블록·선행자·종료 블록을 p-code 블록 그래프에서 구성. 이전의 "건너뛸 수
+    있는 쓰기 = 약한 갱신" 근사와 `UNSUPPORTED_INTRA_INSTRUCTION_FLOW` (rep) 실패를 대체.
+    도달 불가 서브블록의 연산은 실행되지 않으므로 제외.
+  - 제어 의존(`control_dependence`)과 스택 탈출 분석(`may_alias._stack_escapes`)도 같은
+    블록 그래프 위에서 계산(`in_instruction_skips` 삭제). 블록의 `exits` 는 함수를 떠날 수
+    있음(RETURN, 함수 밖 분기)을 뜻하며 가상 EXIT로 이어짐.
+  - 남은 미지원(타입 실패): 명령어 밖으로 나가는 상대 분기, 마지막이 아닌 BRANCHIND.
+  - Fable이 찾은 구멍: 레지스터만 쓰는 명령어 내부 루프(`CBRANCH self`)에서 조용한 누락 96건
+    → 0건 (`test_register_only_in_instruction_loop_carries_values_across_iterations`).
+- **relative_memory 루프 규칙(확인)**: 주소식 원자는 ENTRY 값과 그 결정적 함수(불투명 토큰)뿐이고,
+  JOIN은 모든 입력이 같은 식일 때만 받아들이며 순환(루프 운반 값)은 `None`(모름) → 루프마다 다른
+  주소가 같은 객체로 합쳐지지 않음. 추가 코드 불필요.
+- **점프 테이블 미복원**: Ghidra가 대상을 못 찾은 BRANCHIND는 함수 밖으로 나가는 것으로 취급되고,
+  대상 코드는 함수 본문에 들어오지 않음. 본문에 있는데 도달 불가하면 기존대로
+  `DISCONNECTED_OBSERVED_CFG` 타입 실패(측정 자료 전체에서 0건).
+
+- **검증기 보강 2**: 반환하지 않는 호출(`call` 뒤 fallthrough 없음, MSVC 0x401d10)에서 run을
+  건너뛰던 것을 "실행 종료"로 처리(건너뛴 run 6 → 0).
+- **P1 정리**: P1-2 죽은 `VALUE_VERSION` 노드/`value_nodes`/`defines` 간선 제거. P1-3 `EdgeKind`
+  (StrEnum, 닫힌 어휘) 도입 — `EdgeRecord` 는 EdgeKind 값만 받고 직렬화 호환을 위해 일반 str로 저장.
+  P1-1(재투영 루프 상한)은 앞서 완료.
+- **성능** (결과 동일성은 무작위 동치 검사로 확인):
+  - 메모리 SSA 고정점을 직선 체인(단일 선행/단일 후속) 단위로 풀고 펼침 — 최소 고정점 불변.
+  - 제어 의존 후지배자를 집합 교집합(O(n²))에서 Cooper-Harvey-Kennedy로 교체(무작위 그래프 3,000개 동치).
+  - 상태 합집합/차집합/마스크: 양쪽이 비슷한 크기면 한 번의 sweep (무작위 5,000쌍 동치).
+  - 합성(별칭 많음) 1000명령 56초 → 14초. zlib 실측: inflate(2,343명령) 295초 → 211초,
+    1,423명령 49초 → 27초, 그 외 1,300명령 이하 20초 이하.
+  - 남은 병목: 블록마다 상태 전체(수천 run)를 전파하는 구조(O(블록×상태)) + 재투영으로 SSA 3회.
+    더 줄이려면 희소(sparse) 메모리 SSA 설계 변경 필요 → 별도 결정 사항.
+- **관찰(범위 밖)**: win32 MSVC Bundle의 64케이스 실행(`run_dfbench`)이 함수 간 계층
+  (`configured_write_event_engine` → `configured_function_memory.latest_definition`)에서 15분 이상
+  끝나지 않음. 함수 내부 그래프 측정은 2.7초. 함수 간 작업 시 확인 필요.
+
+결과:
+- 코퍼스 7종 × 26함수: 누락 0, 설명 안 되는 누락 0, 제어 위반 0, 건너뛴 run 0, 정규화 실패 0
+  (gcc rep 3건 해소). 대조한 동적 의존 약 101만 건.
+- 실제 Bundle (기본·가정 모드 모두): v2 release 87함수, debug 106함수, win32 MSVC 79함수(IAT 수정으로
+  입장), zlib 25함수(inflate 포함, 의존 24.7만 건) — 누락 0, 제어 위반 0, 건너뛴 run 0, 실패 0.
+- 64케이스: 디버그 PASS(정확) 39 / 가정 53, 최적화 40 / 가정 46 — 변화 없음, 누락+확실 0.
+- 테스트: Windows 129 passed 1 skipped, WSL 130 passed.

@@ -193,8 +193,63 @@ def test_conditional_move_to_next_instruction_keeps_the_old_value():
     assert report.runs == 8 and not report.silent and not report.covered_by_debt
 
 
-def test_in_instruction_loop_is_a_typed_failure():
-    """A backward p-code branch (REP-style) cannot be modelled per instruction."""
+def _rep_movsb(shape):
+    """rep movsb: while (RCX) { *(RDI) = *(RSI); RSI++; RDI++; RCX-- }.
+
+    ``ghidra``: the exit is ``CBRANCH <next instruction>`` and the back edge
+    ``BRANCH <self>`` (Ghidra's real shape); ``relative``: constant branches.
+    """
+    exit_dest = ram(CODE_BASE + 4) if shape == "ghidra" else const(7, 8)
+    back = ram(CODE_BASE) if shape == "ghidra" else const((-7) & 0xFFFFFFFFFFFFFFFF, 8)
+    return [
+        op("INT_EQUAL", [reg(RCX), const(0)], tmp(0x200, 1)),
+        op("CBRANCH", [exit_dest, tmp(0x200, 1)]),
+        load(tmp(0x300, 1), reg(RSI)),
+        store(reg(RDI), tmp(0x300, 1)),
+        add(reg(RSI), reg(RSI), const(1)),
+        add(reg(RDI), reg(RDI), const(1)),
+        sub(reg(RCX), reg(RCX), const(1)),
+        op("BRANCH", [back]),
+    ]
+
+
+@pytest.mark.parametrize("shape", ["ghidra", "relative"])
+def test_in_instruction_rep_loop_is_modelled(shape):
+    from graph_oracle import check_control
+
+    builder = (
+        FunctionBuilder()
+        .ins(*_rep_movsb(shape))
+        .ins(load(reg(RAX, 1), reg(RDI)))
+        .ins(copy(reg(RDX), reg(RSI)))
+        .ret()
+    )
+    function, observation = normalize_with_observation(builder)
+    pools = lambda seed: {RSP: 0x7000_0000, RCX: (0, 1, 2, 5)[seed % 4],
+                          RSI: DATA_BASE, RDI: DATA_BASE + (0, 1, 3, 16)[seed % 4]}
+    report = check(function, observation, seeds=range(8), register_pools=pools)
+    assert report.runs == 8
+    assert not report.silent and not report.covered_by_debt
+    assert check_control(function, observation, seeds=range(4), register_pools=pools) == []
+
+
+def test_register_only_in_instruction_loop_carries_values_across_iterations():
+    """RAX += RBX; RBX = RCX; RCX -= 1; if (RCX) goto self -- was a silent hole."""
+    builder = FunctionBuilder()
+    builder.ins(
+        op("INT_ADD", [reg(RAX), reg(RBX)], reg(RAX)), copy(reg(RBX), reg(RCX)),
+        sub(reg(RCX), reg(RCX), const(1)),
+        op("INT_NOTEQUAL", [reg(RCX), const(0)], tmp(0x200, 1)),
+        op("CBRANCH", [ram(CODE_BASE), tmp(0x200, 1)]),
+    )
+    builder.ins(copy(reg(RDX), reg(RAX))).ret()
+    function, observation = normalize_with_observation(builder)
+    report = check(function, observation, seeds=range(6),
+                   register_pools=lambda seed: {RSP: 0x7000_0000, RCX: 3})
+    assert report.runs == 6 and not report.silent and not report.covered_by_debt
+
+
+def test_relative_branch_outside_its_instruction_is_a_typed_failure():
     from synthetic import _Provider
     from tdo_v2._scope_contracts import _mint_orchestrator_capability
     from tdo_v2._scope_envelope import open_configured_extraction
@@ -202,13 +257,7 @@ def test_in_instruction_loop_is_a_typed_failure():
         FunctionNormalizer, NormalizationFailureReason, UnresolvedNormalizedFunction,
     )
 
-    builder = (
-        FunctionBuilder()
-        .ins(sub(reg(RCX), reg(RCX), const(1)),
-             op("INT_NOTEQUAL", [reg(RCX), const(0)], tmp(0x200, 1)),
-             op("CBRANCH", [const((-2) & 0xFFFFFFFFFFFFFFFF, 8), tmp(0x200, 1)]))
-        .ret()
-    )
+    builder = FunctionBuilder().ins(op("CBRANCH", [const(9, 8), reg(ZF, 1)])).ret()
     with open_configured_extraction(_Provider([builder]), _mint_orchestrator_capability()) as env:
         (unit,) = env.iter_scoped_functions()
     result = FunctionNormalizer().normalize(unit)

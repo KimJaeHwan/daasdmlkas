@@ -417,9 +417,47 @@ def union(state: State, delta: State) -> State:
         return State(_concat(delta.root, state.root))
     if _count(state.root) < _count(delta.root):
         state, delta = delta, state
+    if _comparable(state, delta):
+        return _merge_union(state, delta)  # linear merge beats per-run splitting here
     for incoming in iter_runs(delta.root):
         state = _union_run(state, incoming)
     return state
+
+
+def _sweep(first: State, second: State, combine) -> State:
+    """Combine two run sequences in one sweep: ``combine(left, right)`` gets
+    each elementary interval's definitions (None where a side has no run) and
+    returns the result's definitions (None or empty to leave a gap)."""
+    left_runs = list(iter_runs(first.root))
+    right_runs = list(iter_runs(second.root))
+    points = sorted({
+        point for run in (*left_runs, *right_runs) for point in (run.start, run.stop)
+    })
+    runs: list[Run] = []
+    i = j = 0
+    for start, stop in zip(points, points[1:]):
+        while i < len(left_runs) and left_runs[i].stop <= start:
+            i += 1
+        while j < len(right_runs) and right_runs[j].stop <= start:
+            j += 1
+        left = left_runs[i].definitions if i < len(left_runs) and left_runs[i].start <= start else None
+        right = right_runs[j].definitions if j < len(right_runs) and right_runs[j].start <= start else None
+        definitions = combine(left, right)
+        if definitions:
+            runs.append(Run(start, stop, definitions))
+    return make_state(runs)
+
+
+def _merge_union(state: State, delta: State) -> State:
+    return _sweep(state, delta, lambda left, right: (
+        right if left is None else left if right is None else left.union(right)
+    ))
+
+
+def _comparable(first: State, second: State) -> bool:
+    """Both sides large enough that one sweep beats per-run tree splitting."""
+    small, large = sorted((_count(first.root), _count(second.root)))
+    return 16 * small > large
 
 
 def _left_combine(state: State, other: State, combine) -> State:
@@ -449,6 +487,10 @@ def subtract(delta: State, state: State) -> State:
         return delta
     if _before(delta.root, state.root) or _before(state.root, delta.root):
         return delta
+    if _comparable(delta, state):
+        return _sweep(delta, state, lambda left, right: (
+            None if left is None else left if right is None else left.difference(right)
+        ))
     if _count(state.root) < _count(delta.root):
         for existing in iter_runs(state.root):
             left, remainder = _split(delta.root, existing.start)
@@ -471,6 +513,8 @@ def mask(delta: State, writes: State) -> State:
         return delta
     if _before(delta.root, writes.root) or _before(writes.root, delta.root):
         return delta
+    if _comparable(delta, writes):
+        return _sweep(delta, writes, lambda left, right: left if right is None else None)
     for written in iter_runs(writes.root):
         left, remainder = _split(delta.root, written.start)
         _, right = _split(remainder, written.stop)

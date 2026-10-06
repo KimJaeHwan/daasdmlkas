@@ -52,7 +52,15 @@ class Run:
     completed: bool = False
 
 
-_MASKS = {size: (1 << (8 * size)) - 1 for size in range(1, 17)}
+class _Masks(dict):
+    """size -> all-ones mask of that many bytes (any width: SIMD registers too)."""
+
+    def __missing__(self, size):
+        self[size] = (1 << (8 * size)) - 1
+        return self[size]
+
+
+_MASKS = _Masks()
 
 
 def _signed(value: int, size: int) -> int:
@@ -180,6 +188,10 @@ class Interpreter:
                 next_location = target
                 break
             if next_location is None:
+                if any(op.opcode in ("CALL", "CALLIND") for op in operations):
+                    # a call that does not return (no fallthrough): the run ends here
+                    run.completed = True
+                    return run
                 raise Unsupported("fell off a terminal instruction")
             location = next_location
 
@@ -212,6 +224,7 @@ class Interpreter:
         if opcode == "BRANCHIND":
             target = self._value(key, inputs[0], run)
             space_id = self._order[0][0]
+            run.branch_decisions.append((key, target))  # a jump-table choice is a decision too
             return ("absolute", (space_id, target))
         if opcode in ("CALL", "CALLIND", "CALLOTHER"):
             raise Unsupported(opcode)

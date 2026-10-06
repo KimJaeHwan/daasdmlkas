@@ -178,6 +178,9 @@ def main() -> int:
                 for key in [f"{ins.address.space_id:x}:{ins.address.byte_offset:x}:{ordinal}:{op.opcode}"]
             )
             totals["boundary_only_functions"] += row["boundary_only"]
+            print(f"[measure] {hex(entry)} instructions={row['instructions']} "
+                  f"normalize={row['normalize_seconds']}s", file=sys.stderr, flush=True)
+            began = time.time()
             report = check(normalized, observation, seeds=range(args.runs), register_pools=pool,
                            spaces=(const, regs, unique), havoc_calls=havoc, image=image,
                            assumed_calls=declared)
@@ -185,6 +188,7 @@ def main() -> int:
                                        register_pools=pool, spaces=(const, regs, unique),
                                        havoc_calls=havoc, image=image, assumed_calls=declared)
             row.update({
+                "oracle_seconds": round(time.time() - began, 3),
                 "runs": report.runs, "skipped_runs": report.unsupported,
                 "checked": report.checked, "missing": len(report.silent),
                 "unexplained": len(report.covered_by_debt), "control_violations": len(violations),

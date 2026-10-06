@@ -67,6 +67,39 @@ class _Partition:
         raise AssertionError("partition does not exactly cover an observed span")
 
 
+def _straight_line_chains(unit, blocks, successors) -> dict[str, list[str]]:
+    """leader -> member keys (leader first) of maximal straight-line chains."""
+    predecessors = {key: tuple(set(block.predecessors)) for key, block in blocks.items()}
+
+    def inner(key):
+        if key == unit.entry_block_key or len(predecessors[key]) != 1:
+            return False
+        (predecessor,) = predecessors[key]
+        return predecessor != key and successors[predecessor] == (key,)
+
+    chains: dict[str, list[str]] = {}
+    assigned: set[str] = set()
+
+    def grow(leader):
+        members = [leader]
+        assigned.add(leader)
+        while len(successors[members[-1]]) == 1:
+            (following,) = successors[members[-1]]
+            if following in assigned or not inner(following):
+                break
+            members.append(following)
+            assigned.add(following)
+        chains[leader] = members
+
+    for key in sorted(blocks):
+        if not inner(key):
+            grow(key)
+    for key in sorted(blocks):  # cycles made only of chain members (unreachable)
+        if key not in assigned:
+            grow(key)
+    return chains
+
+
 def build_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
     """Build the canonical least-fixed-point result for one frozen unit."""
     if type(unit) is not LocalMemoryUnit:
@@ -101,9 +134,23 @@ def build_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
             successors[predecessor].append(block.key)
     successors = {key: tuple(sorted(values)) for key, values in successors.items()}
 
-    in_states = {key: _EMPTY_STATE for key in blocks}
+    # Solve on straight-line chains (a block whose only predecessor has it as
+    # the only successor joins that predecessor's chain), then expand. The
+    # in-state of a chain member is exactly its predecessor's out-state, so the
+    # least fixed point is unchanged; only the worklist is shorter.
+    chains = _straight_line_chains(unit, blocks, successors)
+    chain_transfers = {}
+    for leader, members in chains.items():
+        state = _EMPTY_STATE
+        for key in members:
+            for action in blocks[key].actions:
+                state = _apply_writes(state, action, partition, write_ids, pool)
+        chain_transfers[leader] = state
+    chain_successors = {leader: successors[members[-1]] for leader, members in chains.items()}
+
+    in_states = {key: _EMPTY_STATE for key in chains}
     in_states[unit.entry_block_key] = entry_state
-    out_states = {key: _overlay(in_states[key], transfers[key]) for key in blocks}
+    out_states = {key: _overlay(in_states[key], chain_transfers[key]) for key in chains}
     pending_deltas = {
         key: state for key, state in out_states.items() if state.root is not None
     }
@@ -115,14 +162,14 @@ def build_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
         block_key = heapq.heappop(pending)
         queued.remove(block_key)
         delta = pending_deltas.pop(block_key)
-        for successor in successors[block_key]:
+        for successor in chain_successors[block_key]:
             old_in = in_states[successor]
             input_delta = _difference(delta, old_in)
             if input_delta.root is None:
                 continue
             new_in = _union(old_in, input_delta)
             in_states[successor] = new_in
-            output_delta = _mask(input_delta, transfers[successor])
+            output_delta = _mask(input_delta, chain_transfers[successor])
             if output_delta.root is None:
                 continue
             old_out = out_states[successor]
@@ -137,6 +184,13 @@ def build_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
             if successor not in queued:
                 heapq.heappush(pending, successor)
                 queued.add(successor)
+
+    for leader, members in chains.items():
+        state = in_states[leader]
+        for key in members:
+            in_states[key] = state
+            state = _overlay(state, transfers[key])
+            out_states[key] = state
 
     action_keys = sorted(
         action.operation_key for block in unit.blocks for action in block.actions
