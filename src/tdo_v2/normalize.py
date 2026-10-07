@@ -428,14 +428,24 @@ class NormalizedFunction:
 _CALL_EFFECT_TEMPORARY_BASE = 1 << 48
 
 
-_CALL_EFFECT_LABELS = {"": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD"}
+def _program_register_space(unit) -> int | None:
+    """The program's register space, for a function that names no register
+    itself (a thunk that only jumps) but receives summarized call effects."""
+    spaces = [row.space_id for row in unit.scopes.program.evidence.address_spaces if row.is_register_space]
+    return spaces[0] if len(spaces) == 1 else None
+
+
+_CALL_EFFECT_LABELS = {
+    "": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD", "sink": "CALL_EFFECT_SINK",
+}
 
 
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
-    inputs into a call-local temporary, ``~<i>`` the run outputs (register runs
-    first, then memory runs). Anchored memory is projected later
+    inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
+    each callee sink root (the projected root), ``~<i>`` the run outputs
+    (register runs first, then memory runs). Anchored memory is projected later
     (``relative_memory``): returns the effects and their anchored accesses."""
     rows: list[ObservedEffect] = []
     anchored: dict = {}
@@ -500,6 +510,12 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             stage_key, EffectKind.COPY, reads=tuple(inputs), writes=(target,), block_key=block_key,
         ))
         staged.append((kind, run, stage_key, target))
+    for index, demand in enumerate(proven.sink_demands):
+        inputs = [ResolvedStorage(span) for span in demand.reads] + [load(item) for item in demand.loads]
+        rows.append(ObservedEffect(
+            f"{call_key}~sink{index}", EffectKind.COPY, reads=tuple(inputs), writes=(temporary(),),
+            block_key=block_key,
+        ))
     for index, (kind, run, stage_key, target) in enumerate(staged):
         key = f"{call_key}~{index}"
         if kind == "register":
@@ -722,7 +738,7 @@ class _ScopedNormalizer:
                     # call_clobber); every run reads the values at the call
                     rows, anchored = _proven_call_rows(
                         operation_key, proven_call_effects[operation_key], block_key,
-                        function.scope, _register_space_id(observation),
+                        function.scope, _register_space_id(observation) or _program_register_space(unit),
                         call_transitions, staged_temporaries,
                     )
                     for row in rows:
@@ -852,6 +868,9 @@ class _ScopedNormalizer:
             proven_preserved={key: row.preserved for key, row in proven_call_effects.items()},
             memory_keeping=frozenset(
                 key for key, row in proven_call_effects.items() if row.preserves_memory
+            ),
+            unrestored_stack_calls=frozenset(
+                key for key, row in proven_call_effects.items() if not row.restores_stack
             ),
         )
         call_clobber_nodes = _materialize_call_clobber_debt(

@@ -159,6 +159,7 @@ def derive_call_clobber_reads(
     assumed_calls: frozenset[str] = frozenset(),
     proven_preserved: dict[str, tuple[ByteSpan, ...]] | None = None,
     memory_keeping: frozenset[str] = frozenset(),
+    unrestored_stack_calls: frozenset[str] = frozenset(),
 ) -> tuple[CallClobberRead, ...]:
     """Return reads that may observe storage written by an unevidenced call.
 
@@ -166,6 +167,8 @@ def derive_call_clobber_reads(
     their declared writes are ordinary writes and they clobber nothing else.
     ``proven_preserved`` / ``memory_keeping``: register bytes, and for the listed
     calls all memory, that a callee summary proves the call leaves unchanged.
+    ``unrestored_stack_calls``: summarized calls whose callee is not proven to
+    restore the stack pointer -- the call shape's exemption does not apply.
     """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("call-clobber analysis requires an exact effect unit")
@@ -185,6 +188,8 @@ def derive_call_clobber_reads(
     if not calls:
         return ()
     preserved = _preserved_stack_pointers(observation, context)
+    for key in unrestored_stack_calls:
+        preserved.pop(key, None)
     for key, spans in (proven_preserved or {}).items():
         # bytes a callee summary proves unchanged (or rewrites just before the call)
         preserved[key] = tuple(preserved.get(key, ())) + tuple(spans)

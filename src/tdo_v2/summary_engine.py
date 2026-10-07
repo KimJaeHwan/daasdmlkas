@@ -13,18 +13,27 @@ already reaches through calls. Source labels become origin nodes:
 * a summarized call whose runs reached a source inside the callee: those run
   outputs (carried by the summaries).
 
+``EngineRun.assumptions`` also lists "opaque-callees-restore-stack-pointer"
+when some call's callee is not summarized (its stack pointer restore is the
+call-shape rule, not proven).
+
 ``assume_globals_disjoint_from_stack`` (on by default) applies the named
 assumption of ``may_alias`` (constant addresses never alias the stack) unless some
 function switches its stack (``interprocedural.program_switches_stack``); the
 run lists it in ``EngineRun.assumptions`` when it was applied.
 
-Sink roots are bound as in the engine (call sites and tail calls). A sink
-reached only inside a callee (a sink wrapper) is a root of that callee; its
-demand is not projected to callers yet (design S2/S3).
+Sink roots are bound as in the engine (call sites and tail calls); a sink
+whose argument state has no exact graph definition is bound to the call
+operation itself (an unbound, incomplete root -- never dropped). A sink root
+inside a summarized callee (a sink wrapper, also nested) is projected to each
+caller as a root at the call (``~sink<k>`` effect: the caller's values of the
+entry bytes the callee root needs); it is complete only if the callee part
+is.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
@@ -38,7 +47,9 @@ from .integration.observed_function_session import open_observed_function_sessio
 from .interprocedural import analyze_units, function_key, run_definition_nodes
 from .memory_contracts import MemoryDefinitionKind
 from .normalize import NormalizedFunction
+from .observed_call_state import observed_call_state_projections
 from .physical_state import PhysicalRegisterSlice
+from .span_geometry import StorageObjectKind
 from .query_contracts import local_completeness
 from .scope_identity import ConstructedProgramScope
 
@@ -94,6 +105,38 @@ def analyze_frozen_bundle_with_summaries(
         } if assume_boundary_call_effects else {}
         boundaries = {key: _boundaries(item) for key, item in by_key.items()}
 
+        def own_sink_nodes(analysis, view):
+            """ObservedBoundaryNode SINK rows of the function's own boundaries."""
+            key = function_key(analysis.entry)
+            rows: list = []
+            for occurrence, (seed, boundary) in enumerate(boundaries[key]):
+                position = view.position(seed.operation_key)
+                if position is None:
+                    continue
+                for match in boundary_provider.classify(boundary):
+                    if match.kind is BoundaryKind.SINK:
+                        bound = _direct_sink_boundary_nodes(
+                            view, match.label, seed.operation_key, position, occurrence,
+                            boundary_provider.state(boundary, match),
+                        )
+                        if not bound:  # unrepresentable state: unbound root, not a lost one
+                            node = analysis.normalized.dependencies.node_for_key(f"op:{seed.operation_key}")
+                            bound = (ObservedBoundaryNode(BoundaryKind.SINK, match.label, node, occurrence, 0),)
+                        rows.extend(bound)
+            tails = {analysis.entry: []}
+            _bind_tail_call_sinks((analysis,), {analysis.entry: view}, boundary_provider, tails)
+            return rows + tails[analysis.entry]
+
+        def sink_roots(key, unit, normalized):
+            analysis = ConfiguredFunctionAnalysis(by_key[key], normalized, EMPTY_OBSERVED_BOUNDARIES, ())
+            groups: dict = {}
+            for row in own_sink_nodes(analysis, _FunctionView(analysis)):
+                groups.setdefault((row.label, row.occurrence_ordinal), []).append(row.node)
+            return [
+                (label, tuple(sorted(set(group))), not _unbound_roots(normalized, group))
+                for (label, _), group in sorted(groups.items())
+            ]
+
         def source_matches(boundary):
             return [match for match in boundary_provider.classify(boundary)
                     if match.kind is BoundaryKind.SOURCE]
@@ -112,7 +155,7 @@ def analyze_frozen_bundle_with_summaries(
                             if definition.operation_key == call
                             and definition.kind is MemoryDefinitionKind.DATA_WRITE
                         ]
-                    elif call in proven:
+                    else:
                         state = {
                             offset for selector in boundary_provider.state(boundary, match)
                             if type(selector) is PhysicalRegisterSlice
@@ -124,9 +167,20 @@ def analyze_frozen_bundle_with_summaries(
                             if any(offset in state for span in run.writes
                                    for offset in range(span.start, span.end))
                             for node in run_definition_nodes(normalized, f"{call}~{index}")
+                        ] if call in proven else []
+                        # state the call is not proven to write (an unsummarized or
+                        # partly opaque source): its later reads carry call-clobber
+                        # debt naming this call -- the debt is where the value may
+                        # come from, so it carries the label (the root stays unsure)
+                        nodes += [
+                            node
+                            for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
+                            if call in row.intervening_calls and any(
+                                span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                                and any(offset in state for offset in range(span.start, span.end))
+                                for span in row.spans
+                            )
                         ]
-                    else:
-                        nodes = []
                     for node in nodes:
                         origins.setdefault(node, set()).add(match.label)
             return origins
@@ -134,11 +188,21 @@ def analyze_frozen_bundle_with_summaries(
         results = analyze_units(
             [item.unit for item in evidences], assumed_call_effects=assumed, extra_origins=extra_origins,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+            sink_roots=sink_roots,
         )
         assumptions = ("globals-disjoint-from-stack",) if any(
             getattr(item.normalized, "assumes_globals_disjoint_from_stack", False)
             for item in results.values()
         ) else ()
+        # a call with the observed call shape whose callee is not summarized is
+        # still taken to restore the stack pointer (the engine-wide call-shape
+        # rule); summarized callees are checked (AFFINE) instead
+        if any(
+            row.call_operation_key not in item.proven
+            for item in results.values()
+            for row in observed_call_state_projections(item.unit.observation)
+        ):
+            assumptions += ("opaque-callees-restore-stack-pointer",)
         preliminary = []
         for key, item in by_key.items():
             normalized = results[key].normalized
@@ -148,6 +212,7 @@ def analyze_frozen_bundle_with_summaries(
         preliminary = tuple(preliminary)
         views = {analysis.entry: _FunctionView(analysis) for analysis in preliminary}
         nodes = {analysis.entry: [] for analysis in preliminary}
+        incomplete_roots: set = set()  # (entry, label, occurrence) of projected roots
         for analysis in preliminary:
             key = function_key(analysis.entry)
             view = views[analysis.entry]
@@ -155,17 +220,19 @@ def analyze_frozen_bundle_with_summaries(
                 for label in sorted(labels):
                     nodes[analysis.entry].append(
                         ObservedBoundaryNode(BoundaryKind.SOURCE, label, node, 0, fragment))
-            for occurrence, (seed, boundary) in enumerate(boundaries[key]):
-                position = view.position(seed.operation_key)
-                if position is None:
-                    continue
-                for match in boundary_provider.classify(boundary):
-                    if match.kind is BoundaryKind.SINK:
-                        nodes[analysis.entry].extend(_direct_sink_boundary_nodes(
-                            view, match.label, seed.operation_key, position, occurrence,
-                            boundary_provider.state(boundary, match),
-                        ))
-        _bind_tail_call_sinks(preliminary, views, boundary_provider, nodes)
+            nodes[analysis.entry].extend(own_sink_nodes(analysis, view))
+            # projected roots: occurrences after the function's own call sites and tails
+            base = len(analysis.evidence.seeds.callsites) + len(analysis.evidence.tails)
+            for index, (call, _, label, root_nodes, complete) in enumerate(results[key].projected_sinks):
+                occurrence = base + index
+                if not root_nodes:  # the ~sink row did not materialize: bind the call
+                    root_nodes = [analysis.normalized.dependencies.node_for_key(f"op:{call}")]
+                    complete = False
+                for fragment, node in enumerate(root_nodes):
+                    nodes[analysis.entry].append(
+                        ObservedBoundaryNode(BoundaryKind.SINK, label, node, occurrence, fragment))
+                if not complete:
+                    incomplete_roots.add((analysis.entry, label, occurrence))
         analyses = _analyses_from_boundary_nodes(preliminary, nodes)
 
         roots = []
@@ -179,6 +246,9 @@ def analyze_frozen_bundle_with_summaries(
                 results_for_root = tuple(item.result for item in group)
                 unbound = _unbound_roots(analysis.normalized, root_nodes)
                 completeness = _with_unbound(local_completeness(results_for_root), unbound)
+                if (analysis.entry, label, occurrence) in incomplete_roots:
+                    # the callee part of a projected root is incomplete
+                    completeness = replace(completeness, complete=False)
                 roots.append(RootSlice(
                     analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence, root_nodes,
                     tuple(sorted({origin for item in group for origin in item.reached_origin_labels})),

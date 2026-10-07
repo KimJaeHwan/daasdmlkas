@@ -33,40 +33,53 @@ import time
 import traceback
 
 REPO = Path(__file__).resolve().parents[2]
-LANGUAGE = "x86:LE:64:default"
 SOURCES = {"dfb_source_A": 4, "dfb_source_B": 4, "dfb_source_C": 4,
            "dfb_source_long_A": 4, "dfb_source_buf_A": 8}
 SINKS = {"dfb_sink_int": 4, "dfb_sink_long": 4, "dfb_sink_ptr": 8, "dfb_sink_buf": 8}
 
 
 FIRST_ARGUMENT = {"win64": 0x8, "sysv64": 0x38}  # RCX / RDI
+LANGUAGES = {"win64": "x86:LE:64:default", "sysv64": "x86:LE:64:default", "x86-32": "x86:LE:32:default"}
+X86_ESP = 0x10
 
 
 def abi_of(generation: Path) -> str:
-    """'win64' (PE) or 'sysv64' (ELF) from the Bundle's original binary."""
+    """'win64' (PE32+), 'sysv64' (ELF64) or 'x86-32' (PE32 / ELF32, cdecl:
+    arguments on the stack) from the Bundle's original binary."""
     manifest = json.loads((generation / "manifest.json").read_text(encoding="utf-8"))
     paths = {row["id"]: row["path"] for row in manifest["members"]}
-    head = (generation / paths[manifest["original_member_id"]]).read_bytes()[:4]
+    head = (generation / paths[manifest["original_member_id"]]).read_bytes()[:0x400]
     if head[:2] == b"MZ":
-        return "win64"
-    if head == b"\x7fELF":
-        return "sysv64"
-    raise ValueError(f"unknown executable format: {head!r}")
+        pe = int.from_bytes(head[0x3C:0x40], "little")
+        machine = int.from_bytes(head[pe + 4:pe + 6], "little")
+        return "x86-32" if machine == 0x14C else "win64"
+    if head[:4] == b"ELF":
+        return "x86-32" if head[4] == 1 else "sysv64"
+    raise ValueError(f"unknown executable format: {head[:4]!r}")
 
 
 def boundary_provider(assume_call_effect: bool = False, abi: str = "win64"):
-    """``assume_call_effect``: TEST-ONLY declared source/sink call effects."""
+    """``assume_call_effect``: TEST-ONLY declared source/sink call effects.
+    x86-32: the result is EAX (64-bit results EDX:EAX are not modelled) and
+    the first argument is the stack slot at the call (``[ESP]`` before the
+    return-address push); the TEST-ONLY assumption does not model memory
+    state, so 32-bit sinks stay ordinary calls in that mode."""
     from tdo_v2.boundary import BoundaryKind
     from tdo_v2.boundary_rules import BoundaryRule, SymbolBoundaryProvider
-    from tdo_v2.physical_state import PhysicalRegisterSlice
+    from tdo_v2.physical_state import PhysicalMemorySlice, PhysicalRegisterSlice
 
-    rules = [BoundaryRule(name, LANGUAGE, BoundaryKind.SOURCE, f"{name}.ret",
-                          (PhysicalRegisterSlice(0x0, size),), assume_call_effect)
+    language = LANGUAGES[abi]
+    wide = abi != "x86-32"
+    rules = [BoundaryRule(name, language, BoundaryKind.SOURCE, f"{name}.ret",
+                          (PhysicalRegisterSlice(0x0, size if wide else 4),), assume_call_effect)
              for name, size in SOURCES.items()]
-    rules += [BoundaryRule(name, LANGUAGE, BoundaryKind.SINK, f"{name}.arg0",
-                           (PhysicalRegisterSlice(FIRST_ARGUMENT[abi], size),),
-                           assume_call_effect)
-              for name, size in SINKS.items()]
+    for name, size in SINKS.items():
+        if wide:
+            state = (PhysicalRegisterSlice(FIRST_ARGUMENT[abi], size),)
+        else:
+            state = (PhysicalMemorySlice(PhysicalRegisterSlice(X86_ESP, 4), 0, 4),)
+        rules.append(BoundaryRule(name, language, BoundaryKind.SINK, f"{name}.arg0", state,
+                                  assume_call_effect))
     return SymbolBoundaryProvider(tuple(rules))
 
 

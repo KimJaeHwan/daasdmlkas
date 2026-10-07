@@ -114,3 +114,28 @@ def test_checker_rejects_wrong_summaries():
                                seeds=range(6), register_pools=test_graph_fidelity._inputs_with_bounded_loop)
         caught += bool(report.violations)
     assert caught > 20
+
+
+def test_global_write_after_home_space_store_under_the_assumption():
+    """*(RSP+8) = RCX (caller home space); *(global) = RDX: without the
+    assumption the global write may alias the slot (UNKNOWN at the exit);
+    with it the slot is computed from RCX."""
+    from synthetic import DATA_BASE, program_units, tmp
+    from tdo_v2.normalize import FunctionNormalizer
+
+    T = tmp(0x100)
+    builder = (FunctionBuilder()
+               .ins(add(T, reg(RSP), const(8)), store(T, reg(RCX)))
+               .ins(store(const(DATA_BASE + 0x10), reg(RDX)))
+               .ret())
+    kinds = {}
+    for assume in (False, True):
+        (unit,) = program_units(builder)
+        function = FunctionNormalizer().normalize(unit, assume_globals_disjoint_from_stack=assume)
+        summary = summarize_function(function, unit.observation)
+        (exit_summary,) = summary.exits
+        (slot,) = [run for run in exit_summary.runs
+                   if run.span.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE and run.writers
+                   and run.span.size == 8]
+        kinds[assume] = slot.kind
+    assert kinds == {False: SummaryKind.UNKNOWN, True: SummaryKind.COMPUTED}

@@ -75,6 +75,20 @@ class ExitSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class SinkDemand:
+    """What one sink root of the function needs from its callers: the entry
+    bytes its backward data slice reaches (``sources``), the debts on the way,
+    the source labels reached inside, and whether the root itself is complete
+    (bound, no debt). A caller projects it to its own values at the call."""
+
+    label: str
+    sources: tuple[ByteSpan, ...]
+    debts: tuple[str, ...]
+    origins: tuple[str, ...]
+    complete: bool
+
+
+@dataclass(frozen=True, slots=True)
 class FunctionSummary:
     version: int
     exits: tuple[ExitSummary, ...]
@@ -89,12 +103,20 @@ class FunctionSummary:
     # inner call preserves it too
     # (call key, register spans it preserves, whether it preserves all memory)
     inner_calls: tuple[tuple[str, tuple[ByteSpan, ...], bool], ...] = ()
+    sink_demands: tuple[SinkDemand, ...] = ()
+    # pointer-sized registers whose value at every normal exit is provably
+    # "entry value + c" (the same c): ((offset, size), c). The stack pointer's
+    # c tells a caller whether the call restores it (design S2, AFFINE).
+    register_deltas: tuple[tuple[tuple[int, int], int], ...] = ()
 
 
-def summarize_function(normalized, observation, origin_labels=None) -> FunctionSummary:
+def summarize_function(normalized, observation, origin_labels=None, sink_roots=()) -> FunctionSummary:
     """``origin_labels``: graph node -> source labels it carries (boundary
     origins of this function, e.g. a declared source call's write, or a
-    summarized call's run that reached a source inside the callee)."""
+    summarized call's run that reached a source inside the callee).
+    ``sink_roots``: (label, root nodes, bound and complete so far) per sink
+    root of the function, its own or projected from callees; each becomes a
+    ``SinkDemand``."""
     from .call_clobber import _preserved_stack_pointers
 
     context = normalized.scopes.resolution_context
@@ -144,25 +166,118 @@ def summarize_function(normalized, observation, origin_labels=None) -> FunctionS
          if item.operation_key is not None},
         key=lambda row: (row[0], row[1].kind.value, row[1].space_key),
     )
+    demands = []
+    for label, root_nodes, complete in sink_roots:
+        sources, debts, origins = set(), set(), set()
+        for node in root_nodes:
+            found_sources, _, found_debts, found_origins = closure.of(node)
+            sources |= found_sources
+            debts |= found_debts
+            origins |= found_origins
+        demands.append(SinkDemand(
+            label, tuple(sorted(sources, key=lambda item: item.canonical_key)), tuple(sorted(debts)),
+            tuple(sorted(origins)),
+            # like the engine's local completeness: any unknown-address write in
+            # the function leaves every root incomplete
+            bool(complete) and not debts and not crossed.get("unknown_writers"),
+        ))
     return FunctionSummary(
         FUNCTION_SUMMARY_VERSION, tuple(exits), tuple(sorted(crossed.get("unknown_writers", ()))),
-        tuple(writer_objects), _tail_exits(normalized, observation), inner_calls,
+        tuple(writer_objects), _tail_exits(normalized, observation), inner_calls, tuple(demands),
+        _register_deltas(normalized, observation, exits),
     )
 
 
+def _register_deltas(normalized, observation, exits) -> tuple:
+    """((offset, size), c) for pointer-sized register runs equal to their own
+    entry value + c at every exit (UNKNOWN runs -- e.g. crossing a call that
+    may not restore them -- prove nothing; an exit not writing the bytes: 0)."""
+    from .relative_memory import register_value_deltas
+
+    candidates: dict = {}
+    requests = set()
+    for exit_summary in exits:
+        for run in exit_summary.runs:
+            if run.span.object_id.kind is StorageObjectKind.REGISTER_FILE and run.span.size in (4, 8) \
+                    and run.kind is not SummaryKind.UNKNOWN and run.definitions:
+                candidates.setdefault((run.span.start, run.span.size), []).append(run)
+                requests.update((definition, run.span) for definition in run.definitions)
+    tails = _composed_tail_deltas(normalized, observation)
+    for deltas_of_tail in tails.values():  # a thunk need not write the stack pointer itself
+        for key in deltas_of_tail:
+            candidates.setdefault(key, [])
+    if not candidates:
+        return ()
+    values = register_value_deltas(normalized, observation, sorted(requests, key=repr))
+    found = []
+    for (start, size), runs in sorted(candidates.items()):
+        deltas = set()
+        for exit_summary in exits:
+            extra = 0
+            if exit_summary.block_key in tails:
+                extra = tails[exit_summary.block_key].get((start, size), 0)
+                if extra is None:
+                    deltas.add(None)  # the target's stack pointer change is unknown
+                    continue
+            overlapping = [run for run in exit_summary.runs
+                           if run.span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                           and run.span.start < start + size and start < run.span.end]
+            if not overlapping:
+                deltas.add(extra)  # not written on this exit
+                continue
+            if len(overlapping) != 1 or (overlapping[0].span.start, overlapping[0].span.size) != (start, size) \
+                    or overlapping[0].kind is SummaryKind.UNKNOWN:
+                deltas.add(None)
+                continue
+            run = overlapping[0]
+            deltas.update(
+                None if values.get((definition, run.span)) is None else values[(definition, run.span)] + extra
+                for definition in run.definitions
+            )
+        if len(deltas) == 1 and None not in deltas:
+            found.append(((start, size), deltas.pop()))
+    return tuple(found)
+
+
 def _tail_exits(normalized, observation) -> tuple[str, ...]:
+    """Blocks leaving other than by RETURN, except tail jumps composed with the
+    target's summary (``ProvenCallEffect.tail_stack``)."""
+    from .call_seeds import _operation_key
     from .pcode_blocks import build_pcode_block_graph
 
+    composed = {key for key, effect in normalized.proven_call_effects if effect.tail_stack}
     graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
     instructions = {row.address: row for row in observation.instructions}
     found = []
     for block in graph.blocks:
         if not block.exits:
             continue
-        last = instructions[block.instruction].operations[block.stop - 1]
-        if last.opcode != "RETURN":
+        row = instructions[block.instruction]
+        last = row.operations[block.stop - 1]
+        if last.opcode != "RETURN" and _operation_key(row.address, block.stop - 1, last.opcode) not in composed:
             found.append(block.key)
     return tuple(sorted(found))
+
+
+def _composed_tail_deltas(normalized, observation) -> dict:
+    """Terminal block key -> {(offset, size): c} of its composed tail jump."""
+    from .call_seeds import _operation_key
+    from .pcode_blocks import build_pcode_block_graph
+
+    composed = {key: effect for key, effect in normalized.proven_call_effects if effect.tail_stack}
+    if not composed:
+        return {}
+    graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
+    instructions = {row.address: row for row in observation.instructions}
+    found = {}
+    for block in graph.blocks:
+        if not block.exits:
+            continue
+        row = instructions[block.instruction]
+        effect = composed.get(_operation_key(row.address, block.stop - 1, row.operations[block.stop - 1].opcode))
+        if effect is not None:
+            found[block.key] = {(span.start, span.size): effect.tail_stack_delta for span in effect.tail_stack}
+    return found
 
 
 def _state_runs(nodes, root):
@@ -491,6 +606,13 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
             effects_by_block[effect.block_key].append(effect)
     graph = DominatorGraph(unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks})
     preserved = preserved_stack_pointers(observation, context)
+    tails = set()
+    for key, effect in normalized.proven_call_effects:
+        if not effect.restores_stack:
+            preserved.pop(key, None)  # the call shape's stack pointer is not restored
+        if effect.tail_stack:
+            tails.add(key)  # a composed tail jump: its stack pointer is composed by delta
+            preserved[key] = tuple(preserved.get(key, ())) + effect.tail_stack
     memory_keeping = set()
     for key, effect in normalized.proven_call_effects:  # bytes a callee summary proves kept
         preserved[key] = tuple(preserved.get(key, ())) + tuple(effect.preserved)
@@ -503,7 +625,7 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     for block_key, effects in effects_by_block.items():
         for position, effect in enumerate(effects):
             key = effect.operation_key
-            if key.rsplit(":", 1)[-1] in _CALL_OPCODES and key not in assumed:
+            if (key.rsplit(":", 1)[-1] in _CALL_OPCODES and key not in assumed) or key in tails:
                 calls.append((block_key, position, key))
             for index, evidence in enumerate(effect.writes):
                 if type(evidence) is ResolvedStorage:
@@ -519,8 +641,18 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                 unknown.append((block_key, position, 1 + len(effect.writes), key))
                 unknown_writers.add(key)
 
+    # the named assumption the function was normalized under (``may_alias``):
+    # constant addresses never alias its stack object
+    stack = None
+    if normalized.assumes_globals_disjoint_from_stack:
+        from .may_alias import stack_object_of
+        stack = stack_object_of(normalized.scopes, observation)
+
     def may_alias(left, right) -> bool:
         if left == right:
+            return False
+        if stack is not None and {left.kind, right.kind} == {StorageObjectKind.ADDRESS_SPACE,
+                                                               StorageObjectKind.FUNCTION_RELATIVE}                 and stack in (left, right):
             return False
         return not (left.kind is StorageObjectKind.ADDRESS_SPACE
                     and right.kind is StorageObjectKind.ADDRESS_SPACE)
@@ -580,6 +712,7 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
 
 
 __all__ = (
-    "ExitSummary", "FUNCTION_SUMMARY_VERSION", "FunctionSummary", "SummaryKind", "SummaryRun",
+    "ExitSummary", "FUNCTION_SUMMARY_VERSION", "FunctionSummary", "SinkDemand", "SummaryKind",
+    "SummaryRun",
     "summarize_function",
 )

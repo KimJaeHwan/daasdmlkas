@@ -163,3 +163,54 @@ def _input_reached(tag, function, graph, result, reachable, reader, reg_space, u
     # a byte an earlier call wrote: covered by that call's proven runs or debt
     return _covered(function, graph, result, Dependency(reader, space, offset, writer),
                     reg_space, unique_space)
+
+
+def check_sink_demands(analyzed, program, sinks, *, seeds=range(6), register_pools=None,
+                       spaces=(CONST, REG, UNIQUE), havoc_calls=None) -> ProgramReport:
+    """Sink roots projected through calls (``AnalyzedFunction.projected_sinks``).
+
+    Every sink call executed inside an activation of a call of this function
+    must have a projected root at that call, and every caller-level input its
+    argument bytes were computed from must be reached by the root's backward
+    slice -- unless the root admits a gap (incomplete)."""
+    const_space, reg_space, unique_space = spaces
+    function, observation = analyzed.normalized, analyzed.unit.observation
+    graph = function.dependencies
+    proven = _proven_runs(function)
+    roots: dict = {}
+    for call, _, _, nodes, complete in analyzed.projected_sinks:
+        roots.setdefault(call, []).append((nodes, complete))
+    report = ProgramReport()
+    for seed in seeds:
+        interpreter = Interpreter(observation, constant_space=const_space, seed=seed,
+                                  havoc_calls=havoc_calls, program=program, sinks=sinks)
+        for register, value in (register_pools(seed) if register_pools else {}).items():
+            interpreter.preset(reg_space, register, 8, value)
+        try:
+            run = interpreter.run()
+        except Unsupported:
+            report.unsupported += 1
+            continue
+        report.runs += 1
+        for call, tags in run.sink_reads:
+            report.checked += 1
+            candidates = roots.get(call, ())
+            if not candidates:
+                report.silent.append((call, "sink inside the call has no projected root"))
+                continue
+            report.through_calls += 1
+            for tag in sorted(tags, key=repr):
+                reached, admits_gap = False, False
+                for nodes, complete in candidates:
+                    for node in nodes:
+                        result = slice_from(function, node)
+                        reachable = set(result.result.reachable_nodes)
+                        admits_gap = admits_gap or not (complete and result.is_complete)
+                        if tag[0] != "call" and _input_reached(
+                                tag, function, graph, result, reachable, call, reg_space,
+                                unique_space, proven):
+                            reached = True
+                if not reached:
+                    bucket = report.covered_by_debt if admits_gap else report.silent
+                    bucket.append((call, "sink input not reached", tag))
+    return report

@@ -185,6 +185,48 @@ def project_function_relative_memory(
     )
 
 
+def _final_projector(normalized, observation) -> "_Projector":
+    scopes = normalized.scopes
+    operations = {
+        _operation_key(instruction.address, ordinal, operation): operation
+        for instruction in observation.instructions
+        for ordinal, operation in enumerate(instruction.operations)
+    }
+    return _Projector(
+        scopes.resolution_context, scopes.program.evidence.address_spaces, normalized.memory_ssa,
+        operations, OpaqueValueEvidenceResolver(NullOpaqueValueEvidenceProvider()),
+        scopes.program.evidence.translation_namespace.language_id,
+    )
+
+
+def constant_values(normalized, observation, requests) -> dict:
+    """``requests``: (operation key, input varnode). Returns request -> the
+    constant the varnode provably holds at that operation (no atoms; the
+    final memory SSA's single reaching definition chain); others absent."""
+    projector = _final_projector(normalized, observation)
+    found = {}
+    for operation_key, varnode in requests:
+        expression = projector._expression_for_input(operation_key, varnode)
+        if expression is not None and not expression.atoms:
+            found[(operation_key, varnode)] = _unsigned_wrap(expression.displacement, expression.byte_size)
+    return found
+
+
+def register_value_deltas(normalized, observation, requests) -> dict:
+    """``requests``: (definition id, register span) of the final memory SSA.
+    Returns request -> c when the definition's value is exactly "entry value of
+    that same span + c" (signed), by the address-expression evaluator; other
+    requests are absent. Used for the stack-pointer summary (AFFINE)."""
+    projector = _final_projector(normalized, observation)
+    found = {}
+    for definition_id, span in requests:
+        expression = projector._expression_for_definition(definition_id, span)
+        if expression is not None and expression.atoms == ((_stable_storage_key(span), 1),) \
+                and expression.byte_size == span.size:
+            found[(definition_id, span)] = _signed_wrap(expression.displacement, span.size)
+    return found
+
+
 class _Projector:
     def __init__(
         self,

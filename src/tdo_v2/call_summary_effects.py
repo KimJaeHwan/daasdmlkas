@@ -60,6 +60,20 @@ class ProvenMemoryRun:
 
 
 @dataclass(frozen=True, slots=True)
+class ProvenSinkDemand:
+    """A sink root inside the callee, as the caller's values at the call:
+    register bytes (``reads``) and callee-entry memory (``loads``).
+    ``complete`` is False when the callee root is incomplete or some entry
+    byte it needs has no anchor the caller can bind (dropped from loads)."""
+
+    label: str
+    reads: tuple[ByteSpan, ...]
+    loads: tuple[AnchoredSpan, ...]
+    origins: tuple[str, ...]
+    complete: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ProvenCallEffect:
     callee: str                        # callee entry, "space:offset" hex
     runs: tuple[ProvenRunEffect, ...]
@@ -69,6 +83,16 @@ class ProvenCallEffect:
     # the callee may use a register value it receives as an address (or keep it
     # in memory outside its own frame): a stack address in a register escapes
     observes_registers: bool = True
+    sink_demands: tuple[ProvenSinkDemand, ...] = ()
+    # the callee's stack pointer at every exit undoes the call shape's push
+    # (summary AFFINE c == -displacement delta); otherwise the caller's stack
+    # pointer after the call is unknown (call-clobber debt), not assumed
+    restores_stack: bool = True
+    # a composed tail jump (no return-address push): the caller's stack
+    # pointer, left out of the runs, moves by the target's AFFINE c at its
+    # exit (None: unknown) -- the jumping function's summary adds it
+    tail_stack: tuple[ByteSpan, ...] = ()
+    tail_stack_delta: int | None = None
 
 
 def derive_proven_call_effect(
@@ -78,14 +102,17 @@ def derive_proven_call_effect(
     register_limit: int,
     excluded: tuple[ByteSpan, ...] = (),
     anchors: dict | None = None,
+    stack_deltas: dict | None = None,
+    tail: bool = False,
 ) -> ProvenCallEffect | None:
     """``register_object``: the program register file; ``register_limit``: one
     past the highest register byte the caller uses; ``excluded``: bytes the
     caller models itself (the stack pointer of an observed call shape);
     ``anchors``: callee FUNCTION_RELATIVE object -> (anchor register span,
-    address space id) for objects addressed from one entry register value."""
-    if summary.tail_exits or not summary.exits:
-        return None
+    address space id) for objects addressed from one entry register value;
+    ``stack_deltas``: excluded register (offset, size) -> the call shape's
+    displacement delta (callee entry stack pointer - caller's); ``tail``: the
+    site is a tail jump (``excluded`` = the stack pointer, composed by delta)."""
     anchors = anchors or {}
     skip = {offset for span in excluded for offset in range(span.start, span.end)}
 
@@ -95,8 +122,19 @@ def derive_proven_call_effect(
             return AnchoredSpan(None, span.start, span.size, span.object_id.space_key, span)
         if kind is StorageObjectKind.FUNCTION_RELATIVE and span.object_id in anchors:
             anchor, space_id = anchors[span.object_id]
-            return AnchoredSpan(anchor, span.start - (1 << 64), span.size, space_id)
+            # relative objects are biased by 2**(address bits) (relative_memory);
+            # an anchor is a pointer-sized register (a width mismatch fails the
+            # caller's projection: debt, not a wrong address)
+            return AnchoredSpan(anchor, span.start - (1 << (8 * anchor.size)), span.size, space_id)
         return None
+
+    sink_demands = tuple(_sink_demand(demand, anchored) for demand in summary.sink_demands)
+    if summary.tail_exits or not summary.exits:
+        if not sink_demands:
+            return None
+        # no state is proven, but the callee's sink roots still bind at the call
+        # (a wrapper that never returns normally must not lose its sink)
+        return ProvenCallEffect(callee, (), (), sink_demands=sink_demands)
 
     # memory writers the call exports as memory runs (anchored or global)
     exported = {
@@ -200,9 +238,35 @@ def derive_proven_call_effect(
         or (run.write.anchor is None and run.reads)  # a register value kept in global memory
         for run in memory_runs
     ) or any(through_register(load) for run in runs for load in run.loads)
+    deltas = dict(summary.register_deltas)
+    restores = all(
+        deltas.get(key) == -delta for key, delta in (stack_deltas or {}).items()
+    )
+    tail_stack, tail_delta = (), None
+    if tail:
+        tail_stack = tuple(excluded)
+        found = {deltas.get((span.start, span.size)) for span in excluded}
+        tail_delta = found.pop() if len(found) == 1 else None
     return ProvenCallEffect(
         callee, tuple(runs), tuple(_spans(register_object, preserved)), tuple(memory_runs), memory_ok,
-        observes,
+        observes, sink_demands, restores, tail_stack, tail_delta,
+    )
+
+
+def _sink_demand(demand, anchored) -> ProvenSinkDemand:
+    registers, loads, complete = [], set(), demand.complete
+    for source in demand.sources:
+        if source.object_id.kind is StorageObjectKind.REGISTER_FILE:
+            registers.append(source)
+            continue
+        access = anchored(source)
+        if access is None:
+            complete = False  # entry memory the caller cannot locate
+        else:
+            loads.add(access)
+    return ProvenSinkDemand(
+        demand.label, tuple(sorted(registers, key=lambda span: span.canonical_key)),
+        tuple(sorted(loads, key=repr)), demand.origins, complete,
     )
 
 
@@ -266,6 +330,6 @@ def _spans(object_id, offsets):
 
 
 __all__ = (
-    "AnchoredSpan", "ProvenCallEffect", "ProvenMemoryRun", "ProvenRunEffect",
+    "AnchoredSpan", "ProvenCallEffect", "ProvenMemoryRun", "ProvenRunEffect", "ProvenSinkDemand",
     "derive_proven_call_effect",
 )

@@ -53,6 +53,9 @@ class Run:
     # program mode: (caller reader, space, offset) -> the caller-level inputs
     # ("ext", writer, space, offset) a call activation computed that byte from
     call_reads: dict = field(default_factory=dict)
+    # program mode with ``sinks``: (outermost call key, frozenset of caller-level
+    # inputs) per sink call executed inside an activation (its argument bytes)
+    sink_reads: list = field(default_factory=list)
 
 
 class _Masks(dict):
@@ -77,7 +80,8 @@ class Interpreter:
                  max_steps: int = 4000, flip: str | None = None,
                  havoc_calls: tuple[int, int, int] | None = None,
                  image=None, assumed_calls: dict | None = None,
-                 track_provenance: bool = False, program: dict | None = None) -> None:
+                 track_provenance: bool = False, program: dict | None = None,
+                 sinks: tuple | None = None) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
 
         ``track_provenance``: also record, per byte, the set of entry inputs its
@@ -91,7 +95,12 @@ class Interpreter:
         of them is executed for real (call, return); every write made inside
         the activation is attributed to the outermost CALL of the observed
         function, and remembers which caller-level bytes it was computed from
-        (``Run.call_reads``)."""
+        (``Run.call_reads``).
+
+        ``sinks`` = (sink targets {(space, offset)}, argument register (offset,
+        size) slices): a CALL to a sink target inside an activation records the
+        caller-level inputs of its argument bytes (``Run.sink_reads``)."""
+        self._sinks = sinks
         self._instructions = {
             (row.address.space_id, row.address.byte_offset): row
             for row in observation.instructions
@@ -274,6 +283,8 @@ class Interpreter:
                 operation = operations[index]
                 key = _operation_key(instruction.address, index, operation.opcode)
                 run.executed.append(key)
+                if self._sinks is not None and self._activations:
+                    self._record_sink(operation, run)
                 self._operation_inputs = set()
                 jump = self._execute(key, operation, run)
                 if jump is None:
@@ -327,6 +338,12 @@ class Interpreter:
         if opcode == "CALL" and self._program and inputs \
                 and inputs[0].kind is VarnodeKindCode.ADDRESS:
             target = (inputs[0].coordinate.space_id, inputs[0].coordinate.byte_offset)
+            if target in self._program:
+                return ("call", target)
+        if opcode == "CALLIND" and self._program and inputs and self._activations \
+                and self._activations[-1][1] == key:
+            # pushed by the run loop (``_program_call``): the target is a program function
+            target = (self._order[0][0], self._value(key, inputs[0], run))
             if target in self._program:
                 return ("call", target)
         if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:
@@ -399,6 +416,24 @@ class Interpreter:
                 self._bytes[(space_id, sp_offset + index)] = item
                 self._restore_provenance(space_id, sp_offset + index, index)
 
+    def _record_sink(self, operation, run: Run) -> None:
+        targets, arguments = self._sinks
+        if operation.opcode != "CALL" or not operation.inputs                 or operation.inputs[0].kind is not VarnodeKindCode.ADDRESS:
+            return
+        target = (operation.inputs[0].coordinate.space_id, operation.inputs[0].coordinate.byte_offset)
+        if target not in targets:
+            return
+        space_id = self._havoc[0]
+        tags = set()
+        for offset, size in arguments:
+            for index in range(size):
+                key = (space_id, offset + index)
+                if key in self._activation_written:
+                    tags |= self.provenance.get(key, frozenset())
+                else:
+                    tags.add(("ext", self._byte(*key)[1], space_id, offset + index))
+        run.sink_reads.append((self._activations[0][1], frozenset(tags)))
+
     def _program_call(self, instruction):
         """Key of the CALL in ``instruction`` whose target is a program function."""
         if not self._program:
@@ -408,6 +443,25 @@ class Interpreter:
                 target = (operation.inputs[0].coordinate.space_id, operation.inputs[0].coordinate.byte_offset)
                 if target in self._program:
                     return _operation_key(instruction.address, ordinal, operation.opcode)
+            if operation.opcode == "CALLIND" and operation.inputs:
+                target = self._indirect_target(instruction, ordinal)
+                if target in self._program:
+                    return _operation_key(instruction.address, ordinal, operation.opcode)
+        return None
+
+    def _indirect_target(self, instruction, ordinal):
+        """``COPY t <- r; ...; CALLIND t`` (Ghidra's ``call r``): the program
+        location r holds now (read without recording a dependency)."""
+        operand = instruction.operations[ordinal].inputs[0]
+        for operation in instruction.operations[:ordinal]:
+            if operation.opcode == "COPY" and operation.output == operand \
+                    and operation.inputs[0].kind is VarnodeKindCode.REGISTER:
+                source = operation.inputs[0]
+                value = 0
+                for index in range(source.byte_size):
+                    byte, _ = self._byte(source.coordinate.space_id, source.coordinate.byte_offset + index)
+                    value |= byte << (8 * index)
+                return (self._order[0][0], value)
         return None
 
     def _stack_pointer_snapshot(self):

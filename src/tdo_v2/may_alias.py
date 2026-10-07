@@ -581,6 +581,26 @@ def _stack_escape(observation, register_space: int, offset: int, size: int,
     )
 
 
+def stack_object_of(scopes, observation) -> StorageObjectId | None:
+    """The stack object (anchored at the entry stack pointer) of a scoped
+    function, as the may-alias policy identifies it, or None."""
+    found = _stack_pointer(
+        _unit_stub(scopes), observation, scopes.resolution_context,
+        scopes.program.evidence.address_spaces,
+    )
+    return None if found is None else found[0]
+
+
+def _unit_stub(scopes):
+    """What the stack-pointer identification reads of an effect unit."""
+    from types import SimpleNamespace
+    from .normalize import _coordinate_key
+
+    return SimpleNamespace(
+        function_scope=scopes.function.scope, entry_block_key=_coordinate_key(scopes.function.entry),
+    )
+
+
 def stack_switches(unit, observation, context, address_spaces) -> tuple[str, ...]:
     """Operations that set the stack pointer to a value not derived from it."""
     found = _stack_pointer(unit, observation, context, address_spaces)
@@ -591,4 +611,5 @@ def stack_switches(unit, observation, context, address_spaces) -> tuple[str, ...
     return () if taint is None else tuple(sorted(taint[3]))
 
 
-__all__ = ("MAY_ALIAS_CONTRACT_VERSION", "MayAliasRead", "derive_may_alias_reads", "stack_switches")
+__all__ = ("MAY_ALIAS_CONTRACT_VERSION", "MayAliasRead", "derive_may_alias_reads", "stack_object_of",
+           "stack_switches")

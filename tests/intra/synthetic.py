@@ -153,6 +153,21 @@ class FunctionBuilder:
         ))
         return self
 
+    def call_indirect(self, register: int) -> "FunctionBuilder":
+        """x86-64 ``call r``: Ghidra copies the target first, then pushes the
+        return address and CALLINDs the copy."""
+        index = len(self._rows)
+        self._rows.append(_Instruction(
+            [
+                copy(tmp(0x400), reg(register)),
+                sub(reg(RSP), reg(RSP), const(8)),
+                store(reg(RSP), const(self._address(index + 1))),
+                op("CALLIND", [tmp(0x400)]),
+            ],
+            "callind",
+        ))
+        return self
+
     def tail_call(self, target: int) -> "FunctionBuilder":
         """x86-64 tail call ``jmp target``: a BRANCH Ghidra flags as a call."""
         self._rows.append(_Instruction([op("BRANCH", [ram(target)])], "tail", call_target=target))
@@ -223,7 +238,7 @@ class FunctionBuilder:
             next_address = self._address(index + 1)
             ops = list(row.ops)
             targets: list[dict] = []
-            fallthrough = row.kind in {"plain", "cbranch", "call"}
+            fallthrough = row.kind in {"plain", "cbranch", "call", "callind"}
             if row.kind in {"cbranch", "branch"}:
                 if row.target not in self._labels:
                     raise ValueError(f"unknown label {row.target}")
@@ -243,6 +258,11 @@ class FunctionBuilder:
                 targets = [self._coordinate(row.call_target)]
                 flow = _flow(
                     is_flow=True, has_fallthrough=True, is_call=True,
+                    is_unconditional=True,
+                )
+            elif row.kind == "callind":
+                flow = _flow(
+                    is_flow=True, has_fallthrough=True, is_call=True, is_computed=True,
                     is_unconditional=True,
                 )
             elif row.kind == "tail":
