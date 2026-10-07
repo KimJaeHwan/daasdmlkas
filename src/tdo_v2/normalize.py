@@ -12,6 +12,7 @@ from .call_effect_contracts import (
     unavailable_call_effect_evidence,
 )
 from .assumed_call_effects import AssumedCallEffect
+from .call_summary_effects import ProvenCallEffect
 from .call_clobber import CallClobberRead, _register_space_id, derive_call_clobber_reads
 from .control_dependence import (
     CONTROL_DEPENDENCE_EDGE,
@@ -61,6 +62,7 @@ from .memory_graph import (
     _materialize_local_memory_ssa,
     _validate_materialized_local_memory_ssa,
 )
+from .span_geometry import ByteSpan, StorageObjectId, StorageObjectKind
 from .model import (
     FunctionDocument,
     NonStorage,
@@ -112,6 +114,9 @@ class NormalizedFunction:
     # TEST-ONLY: boundary calls normalized with a declared effect (see
     # assumed_call_effects); empty unless the caller explicitly opted in.
     assumed_call_effects: tuple[tuple[str, AssumedCallEffect], ...] = ()
+    # call operation key -> effect proven from the callee's summary
+    # (interprocedural layer); empty for a function normalized on its own
+    proven_call_effects: tuple[tuple[str, ProvenCallEffect], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -416,6 +421,10 @@ class NormalizedFunction:
             )
 
 
+# call-local temporaries of proven call effects, far above any Ghidra unique offset
+_CALL_EFFECT_TEMPORARY_BASE = 1 << 48
+
+
 class NormalizationFailureReason(StrEnum):
     MISSING_VALIDATED_OBSERVATION = "missing_validated_observation"
     MISSING_CONSTRUCTED_FUNCTION_SCOPE = "missing_constructed_function_scope"
@@ -443,9 +452,12 @@ class FunctionNormalizer:
         *,
         opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
         assumed_call_effects: dict[str, AssumedCallEffect] | None = None,
+        proven_call_effects: dict[str, ProvenCallEffect] | None = None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
-        declared effect; see ``tdo_v2.assumed_call_effects``."""
+        declared effect; see ``tdo_v2.assumed_call_effects``.
+        ``proven_call_effects``: call operation key -> effect proven from the
+        callee's summary (``tdo_v2.call_summary_effects``)."""
         if type(value) is not ScopedFunctionUnit:
             raise TypeError("normalization requires an exact ScopedFunctionUnit")
         if value.observation is None:
@@ -468,6 +480,7 @@ class FunctionNormalizer:
             value,
             opaque_value_provider=opaque_value_provider,
             assumed_call_effects=assumed_call_effects or {},
+            proven_call_effects=proven_call_effects or {},
         )
 
     def normalize_configured(
@@ -513,8 +526,15 @@ class _ScopedNormalizer:
         *,
         opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
         assumed_call_effects: dict[str, AssumedCallEffect] | None = None,
+        proven_call_effects: dict[str, ProvenCallEffect] | None = None,
     ) -> NormalizedFunction:
         assumed_call_effects = dict(assumed_call_effects or {})
+        proven_call_effects = dict(proven_call_effects or {})
+        if any(
+            type(key) is not str or type(row) is not ProvenCallEffect
+            for key, row in proven_call_effects.items()
+        ) or set(proven_call_effects) & set(assumed_call_effects):
+            raise TypeError("proven call effects map distinct call keys to ProvenCallEffect")
         if any(
             type(key) is not str or type(row) is not AssumedCallEffect
             for key, row in assumed_call_effects.items()
@@ -543,6 +563,7 @@ class _ScopedNormalizer:
         terminal_cuts = project_observed_terminal_cuts(unit.scopes, observation, cfg)
         dependencies = RustworkxDependencyGraph()
         effects: list[ObservedEffect] = []
+        staged_temporaries: list = []
         operation_nodes: dict[str, NodeId] = {}
         constant_inputs: dict[str, list[tuple[int, NodeId]]] = {}
 
@@ -591,6 +612,41 @@ class _ScopedNormalizer:
                         constant_inputs.setdefault(operation_key, []).append(
                             (input_ordinal, constant_node)
                         )
+                if block_key is not None and operation_key in proven_call_effects:
+                    # the callee's proven register effects, placed just before the
+                    # CALL so their writes survive it (the call preserves them, see
+                    # call_clobber). Two phases keep every run reading the values
+                    # at the call: first each run's inputs are gathered into its
+                    # own call-local temporary, then the runs write their outputs.
+                    runs = proven_call_effects[operation_key].runs
+                    staged = []
+                    for index, run in enumerate(runs):
+                        stage_key = f"{operation_key}~in{index}"
+                        temporary = ResolvedStorage(ByteSpan(
+                            StorageObjectId(StorageObjectKind.FUNCTION_UNIQUE, function.scope, 0),
+                            _CALL_EFFECT_TEMPORARY_BASE + 16 * len(staged_temporaries), 1,
+                        ))
+                        staged_temporaries.append(temporary)
+                        operation_nodes[stage_key] = dependencies.add_node(
+                            NodeRecord(f"op:{stage_key}", NodeKind.OPERATION, "CALL_EFFECT_INPUT")
+                        )
+                        effects.append(ObservedEffect(
+                            stage_key, EffectKind.COPY,
+                            reads=tuple(ResolvedStorage(span) for span in run.reads),
+                            writes=(temporary,), block_key=block_key,
+                        ))
+                        staged.append(temporary)
+                    for index, (run, temporary) in enumerate(zip(runs, staged)):
+                        run_key = f"{operation_key}~{index}"
+                        operation_nodes[run_key] = dependencies.add_node(
+                            NodeRecord(f"op:{run_key}", NodeKind.OPERATION, "CALL_EFFECT")
+                        )
+                        effects.append(ObservedEffect(
+                            run_key, EffectKind.COPY,
+                            reads=(temporary,),
+                            writes=tuple(ResolvedStorage(span) for span in run.writes),
+                            block_key=block_key,
+                        ))
                 if block_key is not None:
                     effects.append(effect)  # operations in unreachable sub-blocks never run
 
@@ -706,7 +762,8 @@ class _ScopedNormalizer:
         ):
             raise AssertionError("ENTRY definitions must materialize as observed inputs")
         call_clobber_reads = derive_call_clobber_reads(
-            effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects)
+            effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects),
+            proven_preserved={key: row.preserved for key, row in proven_call_effects.items()},
         )
         call_clobber_nodes = _materialize_call_clobber_debt(
             dependencies,
@@ -759,6 +816,7 @@ class _ScopedNormalizer:
             may_alias_nodes=may_alias_nodes,
             control_dependences=control_dependences,
             assumed_call_effects=tuple(sorted(assumed_call_effects.items())),
+            proven_call_effects=tuple(sorted(proven_call_effects.items())),
         )
 
     def _build_cfg(

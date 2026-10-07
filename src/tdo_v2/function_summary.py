@@ -83,6 +83,10 @@ class FunctionSummary:
     # conditional ones); a caller treats state leaving through them as UNKNOWN
     # until tail-call composition exists (design S1/S2)
     tail_exits: tuple[str, ...] = ()
+    # every opaque or summarized call inside, with the bytes it is known to leave
+    # unchanged: a byte the function never touches is preserved only if every
+    # inner call preserves it too
+    inner_calls: tuple[tuple[str, tuple[ByteSpan, ...]], ...] = ()
 
 
 def summarize_function(normalized, observation) -> FunctionSummary:
@@ -117,6 +121,7 @@ def summarize_function(normalized, observation) -> FunctionSummary:
 
     uncertain = _uncertain_address_writers(normalized, observation, context, operation_of)
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain)
+    inner_calls = crossed.pop("inner_calls", ())
 
     exits = []
     nodes = ssa.state_nodes
@@ -134,7 +139,7 @@ def summarize_function(normalized, observation) -> FunctionSummary:
     )
     return FunctionSummary(
         FUNCTION_SUMMARY_VERSION, tuple(exits), tuple(sorted(crossed.get("unknown_writers", ()))),
-        tuple(writer_objects), _tail_exits(normalized, observation),
+        tuple(writer_objects), _tail_exits(normalized, observation), inner_calls,
     )
 
 
@@ -396,6 +401,8 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
             effects_by_block[effect.block_key].append(effect)
     graph = DominatorGraph(unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks})
     preserved = preserved_stack_pointers(observation, context)
+    for key, effect in normalized.proven_call_effects:  # bytes a callee summary proves kept
+        preserved[key] = tuple(preserved.get(key, ())) + tuple(effect.preserved)
 
     calls, unknown, writes = [], [], {}       # gen sources / kills
     memory_writes = []                        # (block, position, order, object, key)
@@ -425,7 +432,10 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
         return not (left.kind is StorageObjectKind.ADDRESS_SPACE
                     and right.kind is StorageObjectKind.ADDRESS_SPACE)
 
-    result: dict = {"unknown_writers": unknown_writers}
+    result: dict = {
+        "unknown_writers": unknown_writers,
+        "inner_calls": tuple(sorted((key, tuple(preserved.get(key, ()))) for _, _, key in calls)),
+    }
     ssa = normalized.memory_ssa
     terminal_objects: dict[str, dict] = {}
     for state in ssa.observed_terminal_states:

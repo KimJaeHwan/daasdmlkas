@@ -1,0 +1,137 @@
+"""Graph fidelity across calls (interprocedural S1).
+
+Runs the caller with its callees executed for real (``Interpreter(program=…)``)
+and checks the caller's graph:
+
+* every dynamic def->use whose reader is a caller operation is a backward
+  path (as ``graph_oracle.check``); a byte written inside a call activation is
+  attributed to the call and is covered by the call's proven run effect that
+  writes it (node ``op:<call>~<i>``), or by call-clobber debt on the reader;
+* when it is covered by a proven run effect, every caller-level input the
+  activation computed that byte from must be reached by the reader's
+  backward slice too (``Run.call_reads``): a caller operation's node, an
+  entry register byte, or entry memory (or an address-unknown debt).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from graph_oracle import _covered, _direct_debt, _memory_address_unknown
+from pcode_interpreter import Dependency, Entry, Interpreter, Unsupported
+from synthetic import CONST, REG, UNIQUE, slice_from
+from tdo_v2.graph_contracts import NodeKind
+from tdo_v2.observed_call_state import observed_call_state_projections
+from tdo_v2.span_geometry import StorageObjectKind
+
+
+@dataclass
+class ProgramReport:
+    runs: int = 0
+    unsupported: int = 0
+    checked: int = 0
+    through_calls: int = 0
+    silent: list = field(default_factory=list)
+    covered_by_debt: list = field(default_factory=list)
+
+
+def _proven_runs(function):
+    """call key -> [(node, register offsets written)]."""
+    found = {}
+    graph = function.dependencies
+    for call, effect in function.proven_call_effects:
+        for index, run in enumerate(effect.runs):
+            node = graph.node_for_key(f"op:{call}~{index}")
+            offsets = {
+                offset for span in run.writes
+                if span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                for offset in range(span.start, span.end)
+            }
+            found.setdefault(call, []).append((node, offsets))
+    return found
+
+
+def check_program(function, observation, program, *, seeds=range(6), register_pools=None,
+                  spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None) -> ProgramReport:
+    """``program``: callee entry (space, offset) -> observation."""
+    const_space, reg_space, unique_space = spaces
+    report = ProgramReport()
+    graph = function.dependencies
+    caller_operations = {
+        f"{row.address.space_id:x}:{row.address.byte_offset:x}:{ordinal}:{operation.opcode}"
+        for row in observation.instructions
+        for ordinal, operation in enumerate(row.operations)
+    }
+    transient = {
+        key for row in observed_call_state_projections(observation) for key in row.transient_operation_keys
+    }
+    proven = _proven_runs(function)
+    cache = {}
+
+    def static(reader):
+        if reader not in cache:
+            node = graph.node_for_key(f"op:{reader}")
+            cache[reader] = None if node is None else slice_from(function, node)
+        return cache[reader]
+
+    for seed in seeds:
+        interpreter = Interpreter(observation, constant_space=const_space, seed=seed,
+                                  havoc_calls=havoc_calls, image=image, program=program)
+        for register, value in (register_pools(seed) if register_pools else {}).items():
+            interpreter.preset(reg_space, register, 8, value)
+        try:
+            run = interpreter.run()
+        except Unsupported:
+            report.unsupported += 1
+            continue
+        report.runs += 1
+        for dependency in sorted(run.dependencies, key=repr):
+            if dependency.reader not in caller_operations or dependency.reader in transient:
+                continue
+            result = static(dependency.reader)
+            report.checked += 1
+            if result is None:
+                report.silent.append((dependency, "reader operation has no graph node"))
+                continue
+            writer = dependency.writer
+            if isinstance(writer, str) and writer in proven and dependency.space_id == reg_space:
+                reachable = set(result.result.reachable_nodes)
+                runs = [node for node, offsets in proven[writer]
+                        if node in reachable and dependency.offset in offsets]
+                if runs:
+                    report.through_calls += 1
+                    for tag in run.call_reads.get(
+                            (dependency.reader, dependency.space_id, dependency.offset), ()):
+                        if not _input_reached(tag, function, graph, result, reachable,
+                                              dependency.reader, reg_space, unique_space, proven):
+                            # excused only while the slice admits a gap (debt), as in graph_oracle
+                            bucket = report.covered_by_debt if not result.is_complete else report.silent
+                            bucket.append((dependency, "call input not reached", tag))
+                    continue
+            if _covered(function, graph, result, dependency, reg_space, unique_space):
+                continue
+            bucket = report.covered_by_debt if not result.is_complete else report.silent
+            bucket.append((dependency, "writer not reached"))
+    return report
+
+
+def _input_reached(tag, function, graph, result, reachable, reader, reg_space, unique_space,
+                   proven) -> bool:
+    kind = tag[0]
+    if kind == "call":
+        return False  # an opaque call inside the callee: the run should not be proven
+    _, writer, space, offset = tag
+    if isinstance(writer, Entry):
+        if space == reg_space:
+            return result.reaches(offset, 1)
+        return (any(graph.node(node).kind is NodeKind.OBSERVED_INPUT for node in reachable)
+                and bool(result.memory_bytes)) or _memory_address_unknown(graph, reader)
+    node = graph.node_for_key(f"op:{writer}")
+    if node is not None and node in reachable:
+        return True
+    if writer in proven and space == reg_space and any(
+            run in reachable and offset in offsets for run, offsets in proven[writer]):
+        return True  # an earlier call's proven run wrote it
+    # a byte an earlier call wrote: covered by that call's proven runs or debt
+    return _covered(function, graph, result, Dependency(reader, space, offset, writer),
+                    reg_space, unique_space)

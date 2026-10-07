@@ -129,6 +129,7 @@ def derive_call_clobber_reads(
     context: StorageResolutionContext,
     *,
     assumed_calls: frozenset[str] = frozenset(),
+    proven_preserved: dict[str, tuple[ByteSpan, ...]] | None = None,
 ) -> tuple[CallClobberRead, ...]:
     """Return reads that may observe storage written by an unevidenced call.
 
@@ -153,6 +154,9 @@ def derive_call_clobber_reads(
     if not calls:
         return ()
     preserved = _preserved_stack_pointers(observation, context)
+    for key, spans in (proven_preserved or {}).items():
+        # bytes a callee summary proves unchanged (or rewrites just before the call)
+        preserved[key] = tuple(preserved.get(key, ())) + tuple(spans)
     return run_dataflow(
         "call-clobber", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
         unit, calls, preserved,

@@ -388,6 +388,17 @@ def normalize_program(*functions: FunctionBuilder) -> list[NormalizedFunction]:
     return results
 
 
+def program_units(*functions: FunctionBuilder) -> list:
+    """Scoped units of several functions of one program (distinct ``entry`` values)."""
+    entries = [function.entry for function in functions]
+    if len(set(entries)) != len(entries):
+        raise ValueError("program functions need distinct entries")
+    with open_configured_extraction(
+        _Provider(list(functions)), _mint_orchestrator_capability()
+    ) as envelope:
+        return list(envelope.iter_scoped_functions())
+
+
 def normalize_with_observation(function: FunctionBuilder):
     """Return (NormalizedFunction, ValidatedFunctionObservation) for one function."""
     with open_configured_extraction(

@@ -50,6 +50,9 @@ class Run:
     dependencies: set[Dependency] = field(default_factory=set)
     branch_decisions: list[tuple[str, bool]] = field(default_factory=list)
     completed: bool = False
+    # program mode: (caller reader, space, offset) -> the caller-level inputs
+    # ("ext", writer, space, offset) a call activation computed that byte from
+    call_reads: dict = field(default_factory=dict)
 
 
 class _Masks(dict):
@@ -74,7 +77,7 @@ class Interpreter:
                  max_steps: int = 4000, flip: str | None = None,
                  havoc_calls: tuple[int, int, int] | None = None,
                  image=None, assumed_calls: dict | None = None,
-                 track_provenance: bool = False) -> None:
+                 track_provenance: bool = False, program: dict | None = None) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
 
         ``track_provenance``: also record, per byte, the set of entry inputs its
@@ -82,11 +85,24 @@ class Interpreter:
         addresses included): ("reg", offset) for an entry register byte,
         ("mem", reader) for entry memory read by operation ``reader``,
         ("call", key) for a byte a havoced/declared call produced.
-        ``final_bytes()`` returns them with the entry values (function summaries)."""
+        ``final_bytes()`` returns them with the entry values (function summaries).
+
+        ``program``: callee entry (space, offset) -> observation. A CALL to one
+        of them is executed for real (call, return); every write made inside
+        the activation is attributed to the outermost CALL of the observed
+        function, and remembers which caller-level bytes it was computed from
+        (``Run.call_reads``)."""
         self._instructions = {
             (row.address.space_id, row.address.byte_offset): row
             for row in observation.instructions
         }
+        self._program = dict(program or {})
+        for callee in self._program.values():
+            for row in callee.instructions:
+                self._instructions.setdefault((row.address.space_id, row.address.byte_offset), row)
+        self._activations: list = []          # (return location, call key)
+        self._activation_written: set = set()  # bytes written in the current outermost activation
+        self._call_bytes: set = set()          # bytes last written by some activation
         self._order = [
             (row.address.space_id, row.address.byte_offset) for row in observation.instructions
         ]
@@ -103,7 +119,7 @@ class Interpreter:
         self._assumed = assumed_calls or {}
         self.opaque_opcodes: set[str] = set()
         self._stack_snapshot: list = []
-        self._track = track_provenance
+        self._track = track_provenance or bool(program)
         self.provenance: dict[tuple[int, int], frozenset] = {}
         self.entry_values: dict[tuple[int, int], int] = {}
         self._operation_inputs: set = set()
@@ -150,6 +166,15 @@ class Interpreter:
             byte, writer = self._byte(space_id, offset + index)
             run.dependencies.add(Dependency(reader, space_id, offset + index, writer))
             value |= byte << (8 * index)
+            key = (space_id, offset + index)
+            if self._activations:
+                if key in self._activation_written:
+                    self._operation_inputs |= self.provenance.get(key, frozenset())
+                elif space_id not in self._unique_spaces:
+                    self._operation_inputs.add(("ext", writer, space_id, offset + index))
+                continue
+            if key in self._call_bytes:
+                run.call_reads[(reader, space_id, offset + index)] = self.provenance.get(key, frozenset())
             if self._track:
                 if isinstance(writer, Entry):
                     if space_id in self._register_spaces:
@@ -161,8 +186,26 @@ class Interpreter:
         return value
 
     def _write(self, writer: str, space_id: int, offset: int, size: int, value: int) -> None:
+        inside = bool(self._activations)
+        operation = writer
+        if inside:
+            writer = self._activations[0][1]  # attributed to the outermost call
         for index in range(size):
-            self._bytes[(space_id, offset + index)] = ((value >> (8 * index)) & 0xFF, writer)
+            key = (space_id, offset + index)
+            self._bytes[key] = ((value >> (8 * index)) & 0xFF, writer)
+            if inside:
+                self._activation_written.add(key)
+                self._call_bytes.add(key)
+            else:
+                self._call_bytes.discard(key)
+        if inside:
+            if operation.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") or operation in self._assumed:
+                tags = frozenset({("call", operation)})
+            else:
+                tags = frozenset(self._operation_inputs)
+            for index in range(size):
+                self.provenance[(space_id, offset + index)] = tags
+            return
         if self._track:
             if writer.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") or writer in self._assumed:
                 tags = frozenset({("call", writer)})
@@ -214,6 +257,15 @@ class Interpreter:
                 self._stack_provenance = [
                     self.provenance.get((space_id, sp_offset + i)) for i in range(sp_size)
                 ]
+            call = self._program_call(instruction)
+            if call is not None:
+                # the whole call instruction (stack-pointer adjustment and
+                # return-address push included) belongs to the activation, as the
+                # engine models the call shape
+                if not self._activations:
+                    self._activation_written = set()
+                    self._call_stack_pointer = self._stack_pointer_snapshot()
+                self._activations.append((next_location, call))
             index = 0
             while index < len(operations):
                 steps += 1
@@ -228,7 +280,15 @@ class Interpreter:
                     index += 1
                     continue
                 kind, target = jump
+                if kind == "call":  # into a function of the program (activation pushed above)
+                    next_location = target
+                    break
                 if kind == "return":
+                    if self._activations:
+                        next_location, _ = self._activations.pop()
+                        if not self._activations:
+                            self._restore_call_stack_pointer()
+                        break
                     run.completed = True
                     return run
                 if kind == "relative":
@@ -264,6 +324,11 @@ class Interpreter:
                     self._bytes[(space_id, self._havoc[1] + index)] = item
                     self._restore_provenance(space_id, self._havoc[1] + index, index)
                 return None
+        if opcode == "CALL" and self._program and inputs \
+                and inputs[0].kind is VarnodeKindCode.ADDRESS:
+            target = (inputs[0].coordinate.space_id, inputs[0].coordinate.byte_offset)
+            if target in self._program:
+                return ("call", target)
         if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:
             for item in inputs[1:] if opcode != "CALLOTHER" else inputs:
                 if item.kind is not VarnodeKindCode.CONSTANT:
@@ -333,6 +398,44 @@ class Interpreter:
             for index, item in enumerate(self._stack_snapshot):
                 self._bytes[(space_id, sp_offset + index)] = item
                 self._restore_provenance(space_id, sp_offset + index, index)
+
+    def _program_call(self, instruction):
+        """Key of the CALL in ``instruction`` whose target is a program function."""
+        if not self._program:
+            return None
+        for ordinal, operation in enumerate(instruction.operations):
+            if operation.opcode == "CALL" and operation.inputs                     and operation.inputs[0].kind is VarnodeKindCode.ADDRESS:
+                target = (operation.inputs[0].coordinate.space_id, operation.inputs[0].coordinate.byte_offset)
+                if target in self._program:
+                    return _operation_key(instruction.address, ordinal, operation.opcode)
+        return None
+
+    def _stack_pointer_snapshot(self):
+        """The stack pointer at the start of the call instruction (before its
+        return-address push), as captured by the run loop."""
+        if self._havoc is None or not self._stack_snapshot:
+            return None
+        space_id, sp_offset, sp_size = self._havoc
+        return [
+            ((space_id, sp_offset + i), self._stack_snapshot[i],
+             self._stack_provenance[i] if i < len(self._stack_provenance) else None)
+            for i in range(sp_size)
+        ]
+
+    def _restore_call_stack_pointer(self) -> None:
+        """The callee's ret restores the caller's stack pointer: when the value
+        is back to the pre-call value, so is its definition (the call shape
+        preserves it). A different value is left attributed to the call."""
+        snapshot = getattr(self, "_call_stack_pointer", None)
+        if not snapshot or any(self._bytes[key][0] != item[0] for key, item, _ in snapshot):
+            return
+        for key, item, tags in snapshot:
+            self._bytes[key] = item
+            self._call_bytes.discard(key)
+            if tags is None:
+                self.provenance.pop(key, None)
+            else:
+                self.provenance[key] = tags
 
     def _restore_provenance(self, space_id: int, offset: int, index: int) -> None:
         if not self._track:
