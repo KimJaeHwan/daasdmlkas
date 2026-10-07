@@ -268,6 +268,28 @@ def _build_dense(unit: LocalMemoryUnit, *, compress_chains: bool = True) -> Loca
         unit, partition, write_ids, entry_state, pool, compress_chains=compress_chains
     )
 
+    def block_reads(block):
+        state = in_states[block.key]
+        for action in block.actions:
+            yield [
+                _read_fragments(state, *partition.covered_range(span), partition.atoms)
+                for span in action.reads
+            ]
+            state = _apply_writes(state, action, partition, write_ids, pool)
+
+    return _assemble(
+        unit, partition, raw_definitions, writes_by_action, blocks, block_reads,
+        {key: out_states[key] for key in unit.observed_terminal_block_keys},
+    )
+
+
+def _assemble(
+    unit, partition, raw_definitions, writes_by_action, blocks, block_reads, terminal_out_states
+) -> LocalMemorySsaResult:
+    """Engine-independent result assembly. ``block_reads(block)`` yields, per
+    action in order, the read fragments ((span, definition IdSet), ...) of
+    each of its reads as seen just before the action; ``terminal_out_states``
+    maps every observed terminal block to its exit state."""
     action_keys = sorted(
         action.operation_key for block in unit.blocks for action in block.actions
     )
@@ -277,11 +299,10 @@ def _build_dense(unit: LocalMemoryUnit, *, compress_chains: bool = True) -> Loca
 
     for block_key in sorted(blocks):
         block = blocks[block_key]
-        state = in_states[block_key]
-        for action in block.actions:
-            for read_ordinal, read_span in enumerate(action.reads):
-                start, stop = partition.covered_range(read_span)
-                fragments = _read_fragments(state, start, stop, partition.atoms)
+        for action, action_fragments in zip(block.actions, block_reads(block), strict=True):
+            for read_ordinal, (read_span, fragments) in enumerate(
+                zip(action.reads, action_fragments, strict=True)
+            ):
                 for fragment_span, definitions in fragments:
                     if len(definitions) < 2:
                         continue
@@ -304,7 +325,6 @@ def _build_dense(unit: LocalMemoryUnit, *, compress_chains: bool = True) -> Loca
                         fragments,
                     )
                 )
-            state = _apply_writes(state, action, partition, write_ids, pool)
 
     definitions = tuple(
         sorted((*raw_definitions, *join_sources), key=lambda item: item.canonical_key)
@@ -389,7 +409,7 @@ def _build_dense(unit: LocalMemoryUnit, *, compress_chains: bool = True) -> Loca
     raw_to_final = tuple(definition_ids[item] for item in raw_definitions)
     state_nodes, terminal_states = _serialize_terminal_states(
         unit.observed_terminal_block_keys,
-        out_states,
+        terminal_out_states,
         raw_to_final,
         definitions,
     )
@@ -424,6 +444,15 @@ register_memory_ssa_engine("dense", _build_dense)
 register_memory_ssa_engine(
     "dense-unchained", lambda unit: _build_dense(unit, compress_chains=False)
 )
+
+
+def _build_sparse(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
+    from ._memory_ssa_sparse import build_sparse_local_memory_ssa
+
+    return build_sparse_local_memory_ssa(unit)
+
+
+register_memory_ssa_engine("sparse", _build_sparse)
 
 
 def _serialize_terminal_states(
