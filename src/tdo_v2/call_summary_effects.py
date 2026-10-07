@@ -66,6 +66,9 @@ class ProvenCallEffect:
     preserved: tuple[ByteSpan, ...]    # caller register bytes the call leaves unchanged
     memory_runs: tuple[ProvenMemoryRun, ...] = ()
     preserves_memory: bool = False
+    # the callee may use a register value it receives as an address (or keep it
+    # in memory outside its own frame): a stack address in a register escapes
+    observes_registers: bool = True
 
 
 def derive_proven_call_effect(
@@ -188,8 +191,18 @@ def derive_proven_call_effect(
             for span in _spans(object_id, offsets):
                 memory_runs.append(ProvenMemoryRun(anchored(span), registers, loads, keeps_old, _origins(sources)))
     preserved = [offset for offset in range(register_limit) if offset not in unknown and offset not in skip]
+    stack = {(span.start, span.size) for span in excluded}
+
+    def through_register(access):
+        return access is not None and access.anchor is not None and             (access.anchor.start, access.anchor.size) not in stack
+    observes = not memory_ok or any(
+        through_register(run.write) or any(through_register(load) for load in run.loads)
+        or (run.write.anchor is None and run.reads)  # a register value kept in global memory
+        for run in memory_runs
+    ) or any(through_register(load) for run in runs for load in run.loads)
     return ProvenCallEffect(
         callee, tuple(runs), tuple(_spans(register_object, preserved)), tuple(memory_runs), memory_ok,
+        observes,
     )
 
 

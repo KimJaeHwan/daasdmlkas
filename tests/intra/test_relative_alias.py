@@ -7,10 +7,12 @@ an origin or mark the slice incomplete; the implementation does both
 """
 
 from synthetic import (
-    DATA_BASE, RAX, RBX, RCX, RDI, RDX, RSI, RSP,
-    add, const, load, normalize, operation_node_at, reg, slice_from,
+    CODE_BASE, DATA_BASE, RAX, RBX, RCX, RDI, RDX, RSI, RSP, FunctionBuilder,
+    add, const, copy, load, normalize, operation_node_at, program_units, reg, slice_from,
     store, straight, sub, tmp,
 )
+from tdo_v2.interprocedural import analyze_units, program_switches_stack
+from tdo_v2.normalize import FunctionNormalizer
 
 T = tmp(0x100)
 
@@ -149,3 +151,101 @@ def test_caller_frame_bytes_are_never_private():
     )
     assert result.reaches(RDX)
     assert not result.is_complete
+
+
+# -- escape is per program point ---------------------------------------------
+
+def test_frame_read_before_a_later_escape_stays_private():
+    """The slot is read before RSP is stored through RSI: no base holds it yet."""
+    function, result = _first_load(
+        [sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), reg(RBX))],
+        [store(reg(RDI), reg(RDX))],
+        [load(reg(RAX), reg(RSP))],
+        [store(reg(RSI), reg(RSP))],
+        index=2,
+    )
+    assert result.registers() == {"RBX", "RSP"}
+    assert result.is_complete
+
+
+def test_frame_write_before_an_escape_is_visible_through_another_base():
+    """*(RSP) = RBX; *(RDI) = RSP (escape); RAX = *(RSI): RSI may be the slot."""
+    function, result = _first_load(
+        [sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), reg(RBX))],
+        [store(reg(RDI), reg(RSP))],
+        [load(reg(RAX), reg(RSI))],
+        index=2,
+    )
+    assert result.reaches(RBX)
+    assert not result.is_complete
+
+
+def test_escape_later_in_a_loop_reaches_the_loop_head():
+    """The escape at the loop's end precedes the next iteration's read."""
+    builder = (
+        FunctionBuilder()
+        .ins(sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), reg(RBX)))
+        .label("top")
+        .ins(store(reg(RDI), reg(RDX)))
+        .ins(load(reg(RAX), reg(RSP)))
+        .ins(store(reg(RSI), reg(RSP)))
+        .cbranch("top", reg(RCX, 1))
+        .ret()
+    )
+    function = normalize(builder)
+    result = slice_from(function, operation_node_at(function, 2))
+    assert result.reaches(RDX)
+    assert not result.is_complete
+
+
+# -- named assumption: constant addresses never alias the stack --------------
+
+def _home_space_reload(*between, assume):
+    """*(RSP+8) = RCX (caller home space); between; RAX = *(RSP+8)."""
+    (unit,) = program_units(straight(
+        [add(T, reg(RSP), const(8)), store(T, reg(RCX))],
+        *between,
+        [add(T, reg(RSP), const(8)), load(reg(RAX), T)],
+        realistic_return=True,
+    ))
+    function = FunctionNormalizer().normalize(unit, assume_globals_disjoint_from_stack=assume)
+    assert function.assumes_globals_disjoint_from_stack is assume
+    return slice_from(function, operation_node_at(function, 1 + len(between), 1))
+
+
+def test_global_write_may_alias_the_stack_without_the_assumption():
+    result = _home_space_reload([store(const(DATA_BASE + 0x10), reg(RDX))], assume=False)
+    assert result.reaches(RDX)
+    assert not result.is_complete
+
+
+def test_assumption_separates_globals_from_the_stack():
+    result = _home_space_reload([store(const(DATA_BASE + 0x10), reg(RDX))], assume=True)
+    assert result.registers() == {"RCX", "RSP"}
+    assert result.is_complete
+
+
+def test_assumption_keeps_pointer_writes_aliasing_the_stack():
+    """RDI may still point into the stack."""
+    result = _home_space_reload([store(reg(RDI), reg(RDX))], assume=True)
+    assert result.reaches(RDX)
+    assert not result.is_complete
+
+
+def test_stack_switch_withdraws_the_assumption():
+    """``mov rsp, [global]``: the program may run on a stack in static data."""
+    ordinary = straight(
+        [add(T, reg(RSP), const(8)), store(T, reg(RCX))], realistic_return=True,
+    )
+    switching = straight(
+        [load(T, const(DATA_BASE)), copy(reg(RSP), T)], realistic_return=True,
+    )
+    switching.entry = CODE_BASE + 0x100
+    units = program_units(ordinary, switching)
+    found = program_switches_stack(units)
+    assert list(found) == [f"1:{CODE_BASE + 0x100:x}"]
+    assert program_switches_stack(program_units(ordinary)) == {}
+    results = analyze_units(units, assume_globals_disjoint_from_stack=True)
+    assert not any(item.normalized.assumes_globals_disjoint_from_stack for item in results.values())
+    (alone,) = analyze_units(program_units(ordinary), assume_globals_disjoint_from_stack=True).values()
+    assert alone.normalized.assumes_globals_disjoint_from_stack

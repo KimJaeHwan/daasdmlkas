@@ -41,12 +41,16 @@ def function_key(coordinate) -> str:
     return f"{coordinate.space_id:x}:{coordinate.byte_offset:x}"
 
 
-def analyze_units(units, *, assumed_call_effects=None, extra_origins=None) -> dict[str, AnalyzedFunction]:
+def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
+                  assume_globals_disjoint_from_stack=False) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
     of the function's own boundaries (e.g. declared sources, calls to a source
-    function); summarized runs that reach sources add theirs automatically."""
+    function); summarized runs that reach sources add theirs automatically.
+    ``assume_globals_disjoint_from_stack``: the named opt-in assumption of
+    ``may_alias``, applied only when ``program_switches_stack`` finds no
+    function of the program loading its stack pointer from elsewhere."""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -56,6 +60,8 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None) -> di
         if type(unit.scopes.function) is ConstructedFunctionScope and unit.observation is not None
     }
     calls = {key: _direct_calls(unit, functions) for key, unit in functions.items()}
+    if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
+        assume_globals_disjoint_from_stack = False
     order = _callee_first_components(calls)
     component_of = {key: index for index, component in enumerate(order) for key in component}
     results: dict[str, AnalyzedFunction] = {}
@@ -83,6 +89,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None) -> di
             proven = {call: effect for call, effect in proven.items() if call not in assumed}
             normalized = FunctionNormalizer().normalize(
                 unit, assumed_call_effects=assumed, proven_call_effects=proven,
+                assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             )
             origins: dict = {}
             if type(normalized) is NormalizedFunction:
@@ -97,6 +104,37 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None) -> di
             results[key] = AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
                                             anchors, origins)
     return results
+
+
+def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
+    """Entry key -> operations that set the stack pointer to a value not
+    derived from it (a stack switch: fibers, coroutines); empty for ordinary
+    programs. A switching program may run on a stack in static data, so the
+    globals-vs-stack assumption is withdrawn for all of it."""
+    from .may_alias import stack_switches
+
+    found = {}
+    for unit in units:
+        program = unit.scopes.program
+        rows = stack_switches(
+            _effect_unit_stub(unit), unit.observation, unit.scopes.resolution_context,
+            program.evidence.address_spaces,
+        )
+        if rows:
+            found[function_key(unit.scopes.function.entry)] = rows
+    return found
+
+
+def _effect_unit_stub(unit):
+    """What ``stack_switches`` reads of an effect unit: the function scope and
+    its entry block key."""
+    from types import SimpleNamespace
+    from .normalize import _coordinate_key
+
+    return SimpleNamespace(
+        function_scope=unit.scopes.function.scope,
+        entry_block_key=_coordinate_key(unit.scopes.function.entry),
+    )
 
 
 def _direct_calls(unit, functions) -> dict[str, str]:

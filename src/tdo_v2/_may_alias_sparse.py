@@ -54,7 +54,7 @@ def derive_sparse(unit, objects, policy):
                 order = 1 + index
                 write_spans.setdefault(span.object_id, []).append(
                     (span.start, span.end, (block.key, position, order)))
-                if not all(policy.is_private(span.object_id, offset)
+                if not all(policy.is_private(span.object_id, offset, writer, write=True)
                            for offset in range(span.start, span.end)):
                     for other in tracked:
                         if policy.may_alias(other, span.object_id):
@@ -142,7 +142,7 @@ def derive_sparse(unit, objects, policy):
                 dirty = []
                 for offset in range(span.start, span.end):
                     found = value_at(class_of[(span.object_id, offset)], block.key, position)
-                    if policy.is_private(span.object_id, offset):
+                    if policy.is_private(span.object_id, offset, effect.operation_key):
                         found = found & policy.unknown_writers
                     if found:
                         dirty.append(offset)

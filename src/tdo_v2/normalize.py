@@ -117,6 +117,9 @@ class NormalizedFunction:
     # call operation key -> effect proven from the callee's summary
     # (interprocedural layer); empty for a function normalized on its own
     proven_call_effects: tuple[tuple[str, ProvenCallEffect], ...] = ()
+    # named opt-in assumption (``may_alias``): constant addresses never alias
+    # the stack; results relying on this function's may-alias rows rely on it
+    assumes_globals_disjoint_from_stack: bool = False
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -544,11 +547,14 @@ class FunctionNormalizer:
         opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
         assumed_call_effects: dict[str, AssumedCallEffect] | None = None,
         proven_call_effects: dict[str, ProvenCallEffect] | None = None,
+        assume_globals_disjoint_from_stack: bool = False,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
         declared effect; see ``tdo_v2.assumed_call_effects``.
         ``proven_call_effects``: call operation key -> effect proven from the
-        callee's summary (``tdo_v2.call_summary_effects``)."""
+        callee's summary (``tdo_v2.call_summary_effects``).
+        ``assume_globals_disjoint_from_stack``: named opt-in assumption, see
+        ``tdo_v2.may_alias``."""
         if type(value) is not ScopedFunctionUnit:
             raise TypeError("normalization requires an exact ScopedFunctionUnit")
         if value.observation is None:
@@ -572,6 +578,7 @@ class FunctionNormalizer:
             opaque_value_provider=opaque_value_provider,
             assumed_call_effects=assumed_call_effects or {},
             proven_call_effects=proven_call_effects or {},
+            assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
         )
 
     def normalize_configured(
@@ -618,6 +625,7 @@ class _ScopedNormalizer:
         opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
         assumed_call_effects: dict[str, AssumedCallEffect] | None = None,
         proven_call_effects: dict[str, ProvenCallEffect] | None = None,
+        assume_globals_disjoint_from_stack: bool = False,
     ) -> NormalizedFunction:
         assumed_call_effects = dict(assumed_call_effects or {})
         proven_call_effects = dict(proven_call_effects or {})
@@ -854,7 +862,12 @@ class _ScopedNormalizer:
         )
         may_alias_reads = derive_may_alias_reads(
             effect_unit, observation, context, address_spaces,
-            assumed_calls=frozenset(assumed_call_effects),
+            # summarized calls that never use a received register as an address
+            # cannot observe a stack-pointer copy either
+            assumed_calls=frozenset(assumed_call_effects) | frozenset(
+                key for key, row in proven_call_effects.items() if not row.observes_registers
+            ),
+            assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
         )
         may_alias_nodes = _materialize_may_alias_debt(
             dependencies,
@@ -898,6 +911,7 @@ class _ScopedNormalizer:
             control_dependences=control_dependences,
             assumed_call_effects=tuple(sorted(assumed_call_effects.items())),
             proven_call_effects=tuple(sorted(proven_call_effects.items())),
+            assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
         )
 
     def _build_cfg(

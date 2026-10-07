@@ -147,3 +147,49 @@ PointerPath(무한 루프), 재귀 미지원. 새 설계는 **완성된 intra �
   win32 352→1,704, UE Dev 112→688, DebugGame 84→796. 함수 내부 골든 v2 0 차이. 테스트 Win 184 / WSL 185.
 - 한계(기록): 검증기의 메모리 경유 판정은 "그 호출의 메모리 run 중 하나에 도달"(동적 주소를 정적 객체로 사상하지
   않음) + 호출자 입력 도달 검사. 32비트 스택 인자(메모리 앵커)는 S2.
+
+## 11. S1c 결과 (2026-10-07): 요약 엔진 경로와 케이스 지표
+
+- `src/tdo_v2/summary_engine.py` `analyze_frozen_bundle_with_summaries`: 엔진의 루트별 함수 간 보완 대신
+  하향식 요약 계층(`analyze_units`)으로 Bundle 전체를 정규화. `run_dfbench.py --summaries`
+  (또는 `TDO_V2_INTERPROCEDURAL=summaries`).
+  - origin: TEST-ONLY 선언 source 호출의 쓰기, Bundle 안 source 함수 호출의 run 출력(선택자 범위),
+    피호출자 안에서 source에 닿은 run의 출력(요약이 `origins`로 전달).
+  - sink: 엔진과 같은 방식(호출 지점·꼬리 호출). sink 래퍼·콜백 안의 sink는 그 함수의 루트(호출자로 요구 투영은 S2/S3).
+- 요약 보강: 복사 사슬 IDENTITY(`_CopyTracer`, push/pop 보존 레지스터), `ProvenCallEffect.observes_registers`
+  (받은 레지스터를 주소로 쓰지 않는 피호출자 → 그 호출에서 스택 포인터 복사가 탈출하지 않음).
+- **스택 탈출을 위치별로**(`may_alias._Escape`): 함수 안 어디서든 탈출하면 함수 전체가 비공개가 아니던 규칙을
+  "읽기: 입구→그 지점 경로에 탈출이 없으면 비공개, 쓰기: 그 지점→이후 경로에 탈출이 없으면 비공개"로.
+  탈출 연산 자체와 그 호출의 요약 효과(`call~…`)는 탈출 쪽으로 취급. 옛 규칙 대비 행·작성자 **제거만**
+  (전체 Bundle 비교, 추가 0). 함수 내부만으로는 거의 차이 없음(호출이 불투명하면 첫 호출에서 탈출) —
+  효과는 요약 호출이 있을 때.
+- **이름 붙은 가정 `globals-disjoint-from-stack`**(요약 엔진에서 **기본 켜짐** — 2026-10-07 사용자 결정;
+  하위 API `normalize`/`analyze_units`는 기본 꺼짐): 상수 주소(전역)는 스택 객체(입구 SP 기준, 자기 프레임 +
+  호출자 프레임)와 겹치지 않음. 포인터 기반 객체와 스택은 여전히 겹칠 수 있음.
+  `stack_switches`: SP에 스택에서 유도되지 않은 값을 넣는 연산(`mov rsp,[x]` 등 — 파이버·코루틴 전환)이
+  프로그램의 어느 함수에라도 있으면 가정을 프로그램 전체에서 철회(Bundle 안 함수만 보므로 Bundle 밖 전환
+  코드는 못 봄). 적용 여부는 `NormalizedFunction.assumes_globals_disjoint_from_stack`, `EngineRun.assumptions`에
+  기록, `run_dfbench` 출력에 "assumptions applied" 표시. 끄기: `run_dfbench --no-assume-globals-not-stack`
+  또는 `TDO_V2_ASSUME_GLOBALS_NOT_STACK=0`(펌웨어·정적 버퍼 스택 등). 지표의 "확실"은 이 가정 아래에서 확실.
+  검증(골든·동적 검증기)은 가정 없이도 계속 돌림.
+- 케이스 지표(요약 엔진, 정확 / 정확+확실, 누락+확실은 모든 실행에서 0):
+
+  | Bundle | 모드 | S1c 1부 | + 위치별 탈출 | + 전역·스택 가정 |
+  |---|---|---|---|---|
+  | 09 debug (61) | 기본 | 40 / 4 | 42 / 4 | **50 / 42** |
+  | 09 debug | TEST-ONLY 가정 | 50 / 43 | 50 / 43 | 50 / 43 |
+  | 09 release (51) | 기본 | — | 48 / 40 | 48 / 41 |
+  | UE DLL Dev (22) | 기본 | — | 13 / 12 | 13 / 12 |
+  | UE DLL DebugGame (22) | 기본 | — | 5 / 2 | 6 / 2 |
+
+  09 debug 기본 모드가 가정을 켜면 TEST-ONLY 경계 가정과 거의 같아짐: 경계 함수가 Bundle 안에 있어 요약으로
+  증명되고, 남던 원인이 "sink 안 전역 쓰기 ↔ 호출자 home space 재읽기" 별칭이었기 때문.
+  (옛 엔진: 기본 39 / 28, 가정 53 / 41.)
+- 남은 것(기록): cpp_like x64 기본 모드에서 요약 엔진이 source 라벨을 못 찾음(0/11, 옛 엔진 10/11) — source
+  함수 호출이 증명되지 않으면 origin이 안 붙음(불투명 source 호출에 라벨 부착 필요). 32비트(win32, cpp x86)는
+  지표 미지원(S2). sink 래퍼·콜백(DFB055/071/073)은 호출자로 요구 투영 필요. 요약의 `crossed`
+  (function_summary 안 may_alias)에는 아직 가정을 적용하지 않음(더 보수적).
+- 테스트: 위치별 탈출(탈출 전 읽기 비공개, 탈출 전 쓰기는 다른 기반에서 보임, 루프 뒤 탈출이 루프 머리에 영향),
+  가정 켬/끔, 포인터는 여전히 별칭, 스택 전환 시 철회, 무작위 탈출 함수 400개 동적 검증기. 두 규칙을 일부러
+  틀리게 바꾸면 손 테스트가 잡음(무작위 검증기는 못 잡음: 함수 안에서 실제 별칭은 주소 미상 접근으로만
+  생기고 그건 항상 부채라서 — 위치별 규칙은 출처 추론의 안전장치).

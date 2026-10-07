@@ -15,11 +15,22 @@ No-alias is proved only from the function's own observation:
 
 * two constant addresses in the same space are one object (exact already);
 * bytes of the function's own frame strictly below its entry stack pointer
-  cannot be reached through any other base while no stack-derived value
+  cannot be reached through any other base before a stack-derived value
   escapes. The stack pointer is the register restored by the observed
   ``r' = *(r); r = r + size; RETURN r'`` shape (or the observed call shape).
   A stack-derived value escapes when it is stored to memory, passed to
-  CALLOTHER, or copied to another register in a function that makes calls.
+  CALLOTHER, or held in another register at a call. Escape is per program
+  point: a read is private while no path from the entry to it passes an
+  escape, a frame write while no path from it reaches one (afterwards
+  another base may read the bytes it wrote).
+
+Named assumption ``assume_globals_disjoint_from_stack`` (off here, on by
+default in the summary engine; reported by callers): constant addresses never fall in the stack -- the function's own
+frame or its callers' frames (the stack object anchored at the entry stack
+pointer). True for ordinary programs, whose stacks are mapped outside the
+image; false for stacks placed in static data (fibers on a static buffer,
+firmware). ``stack_switches`` detects functions that load the stack pointer
+from something other than the stack itself, so callers can withdraw it.
 
 Accesses whose address could not be projected at all are modelled as an
 unknown object: an unknown-address write may overwrite every byte of every
@@ -105,22 +116,56 @@ class _ObjectState:
 _EMPTY_OBJECT = _ObjectState(frozenset(), {})
 
 
+@dataclass(frozen=True, slots=True)
+class _Escape:
+    """Per operation key: ``escaped`` -- some path from the entry to the
+    operation passes an escape (the operation itself included); ``reaches`` --
+    some path from the operation reaches an escape (itself included). Keys the
+    observation does not know count as both."""
+
+    known: frozenset[str]
+    escaped: frozenset[str]
+    reaches: frozenset[str]
+
+    @staticmethod
+    def _base(key: str) -> str:
+        return key.split("~", 1)[0]  # a summarized call effect runs at its call
+
+    def private_read(self, key: str) -> bool:
+        base = self._base(key)
+        return base in self.known and base not in self.escaped
+
+    def private_write(self, key: str) -> bool:
+        base = self._base(key)
+        return base in self.known and base not in self.reaches
+
+
 class _Policy:
-    def __init__(self, stack_object: StorageObjectId | None, bias: int, escapes: bool) -> None:
+    def __init__(self, stack_object: StorageObjectId | None, bias: int,
+                 escape: _Escape | None = None, globals_disjoint: bool = False) -> None:
         self.stack_object = stack_object
         self.bias = bias
-        self.private = stack_object is not None and not escapes
+        self.escape = escape if stack_object is not None else None
+        self.globals_disjoint = globals_disjoint and stack_object is not None
         self.unknown_writers: frozenset[str] = frozenset()
 
-    def is_private(self, object_id: StorageObjectId, offset: int) -> bool:
-        """A byte of this function's own frame no other base can reach."""
-        return self.private and object_id == self.stack_object and offset < self.bias
+    def is_private(self, object_id: StorageObjectId, offset: int, key: str, *, write: bool = False) -> bool:
+        """A byte of this function's own frame no other base can reach at
+        ``key`` (a read), or at any point after ``key`` (a write)."""
+        if self.escape is None or object_id != self.stack_object or offset >= self.bias:
+            return False
+        return self.escape.private_write(key) if write else self.escape.private_read(key)
 
     def may_alias(self, left: StorageObjectId, right: StorageObjectId) -> bool:
         if left == right:
             return False  # one object: the SSA is byte-exact
         if left.kind is StorageObjectKind.ADDRESS_SPACE and right.kind is StorageObjectKind.ADDRESS_SPACE:
             return False  # different spaces
+        if self.globals_disjoint and (
+            (left.kind is StorageObjectKind.ADDRESS_SPACE and right == self.stack_object)
+            or (right.kind is StorageObjectKind.ADDRESS_SPACE and left == self.stack_object)
+        ):
+            return False  # ASSUMPTION: a constant address is never a stack address
         return True
 
 
@@ -131,11 +176,13 @@ def derive_may_alias_reads(
     address_spaces: tuple[AddressSpaceEvidence, ...],
     *,
     assumed_calls: frozenset[str] = frozenset(),
+    assume_globals_disjoint_from_stack: bool = False,
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
     ``assumed_calls`` (TEST-ONLY) are boundary calls declared to touch only
     their listed registers; they cannot observe a stack pointer copy.
+    ``assume_globals_disjoint_from_stack``: the opt-in assumption above.
     """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("may-alias analysis requires an exact effect unit")
@@ -164,7 +211,8 @@ def derive_may_alias_reads(
     has_unknown_read = any(_unknown_read(effect) for block in unit.blocks for effect in block.effects)
     if len(objects) < 2 and not unknown_writers and not has_unknown_read:
         return ()
-    policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls)
+    policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls,
+                           assume_globals_disjoint_from_stack)
     policy.unknown_writers = unknown_writers
     return run_dataflow(
         "may-alias", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
@@ -235,7 +283,7 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows) -> dict:
                 dirty = []
                 for offset in range(span.start, span.end):
                     found = state[span.object_id].at(offset)
-                    if policy.is_private(span.object_id, offset):
+                    if policy.is_private(span.object_id, offset, effect.operation_key):
                         found = found & policy.unknown_writers
                     if found:
                         dirty.append(offset)
@@ -292,7 +340,8 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
         else:
             cleared.pop(offset, None)
     updated[span.object_id] = _ObjectState(own.default, cleared)
-    if all(policy.is_private(span.object_id, offset) for offset in range(span.start, span.end)):
+    if all(policy.is_private(span.object_id, offset, writer, write=True)
+           for offset in range(span.start, span.end)):
         return updated  # a private frame write cannot reach any other object
     for other in objects:
         if not policy.may_alias(other, span.object_id):
@@ -307,7 +356,21 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
 
 # -- stack identity and escape ---------------------------------------------------
 
-def _stack_policy(unit, observation, context, address_spaces, assumed_calls=frozenset()) -> _Policy:
+def _stack_policy(unit, observation, context, address_spaces, assumed_calls=frozenset(),
+                  globals_disjoint=False) -> _Policy:
+    found = _stack_pointer(unit, observation, context, address_spaces)
+    if found is None:
+        return _Policy(None, 0)
+    stack_object, bias, register_space, offset, size = found
+    return _Policy(
+        stack_object, bias,
+        _stack_escape(observation, register_space, offset, size, assumed_calls, unit.entry_block_key),
+        globals_disjoint,
+    )
+
+
+def _stack_pointer(unit, observation, context, address_spaces):
+    """(stack object, bias, register space, register offset, size) or None."""
     registers = set()
     space_ids = set()
     for row in observed_call_state_projections(observation):
@@ -327,7 +390,7 @@ def _stack_policy(unit, observation, context, address_spaces, assumed_calls=froz
     register_space = _register_space_id(observation)
     spaces = {row.space_id: row for row in address_spaces}
     if len(registers) != 1 or register_space is None or len(space_ids) != 1:
-        return _Policy(None, 0, True)
+        return None
     ((offset, size),) = registers
     (space_id,) = space_ids
     space = spaces.get(space_id)
@@ -335,13 +398,9 @@ def _stack_policy(unit, observation, context, address_spaces, assumed_calls=froz
         StorageRef(VarnodeKind.REGISTER, "", offset, size, space_id=register_space), context
     )
     if space is None or type(resolved) is not ResolvedStorage:
-        return _Policy(None, 0, True)
+        return None
     stack_object = _function_relative_object_id(unit.function_scope, resolved.span, space_id)
-    return _Policy(
-        stack_object,
-        1 << space.address_size_bits,
-        _stack_escapes(observation, register_space, offset, size, assumed_calls, unit.entry_block_key),
-    )
+    return stack_object, 1 << space.address_size_bits, register_space, offset, size
 
 
 def _return_shape(instruction):
@@ -379,22 +438,25 @@ def _register_space_id(observation) -> int | None:
     return spaces.pop() if len(spaces) == 1 else None
 
 
-def _stack_escapes(observation, register_space: int, offset: int, size: int,
-                   assumed_calls=frozenset(), entry_key: str | None = None) -> bool:
-    """Flow-sensitive: can a stack-derived value reach another base?
+def _stack_taint(observation, register_space: int, offset: int, size: int,
+                 assumed_calls=frozenset(), entry_key: str | None = None):
+    """Forward over the p-code block graph (``pcode_blocks``), tracking which
+    register and temporary bytes hold a stack-derived value at each point.
 
-    Forward over the p-code block graph (``pcode_blocks``), tracking which register and
-    temporary bytes hold a stack-derived value at each point. It escapes when
-    such a value is stored to memory, passed to CALLOTHER, or held in a
-    register other than the stack pointer at a call that is not a declared
-    (TEST-ONLY assumed) boundary call. ``push rbp`` before ``mov rbp, rsp``
-    therefore stores the caller's RBP, not a stack address.
+    Returns (operation keys per reached block, block successors, escape keys,
+    switch keys), or None when the graph is unsupported. An operation escapes
+    when it stores a stack-derived value to memory, passes one to CALLOTHER, or
+    is a call that is not a declared (TEST-ONLY assumed) boundary call while a
+    register other than the stack pointer holds one (every register is
+    visible to a callee). ``push rbp`` before ``mov rbp, rsp`` therefore
+    stores the caller's RBP, not a stack address. A switch writes the stack
+    pointer with a value not derived from it (``mov rsp, [x]``).
     """
     from .pcode_blocks import build_pcode_block_graph, instruction_key
 
     instructions = {row.address: row for row in observation.instructions}
     if not instructions:
-        return True
+        return None
     stack_bytes = frozenset((register_space, offset + index) for index in range(size))
     entry = next(
         (address for address in instructions if instruction_key(address) == entry_key),
@@ -402,7 +464,7 @@ def _stack_escapes(observation, register_space: int, offset: int, size: int,
     )
     graph = build_pcode_block_graph(observation, entry)
     if graph.unsupported is not None:
-        return True
+        return None
     blocks = {block.key: block for block in graph.blocks}
 
     def bytes_of(varnode):
@@ -411,24 +473,23 @@ def _stack_escapes(observation, register_space: int, offset: int, size: int,
             for index in range(varnode.byte_size)
         }
 
-    def transfer(block, state, check):
+    def transfer(block, state, escapes, switches):
         row = instructions[block.instruction]
         tainted = set(state)
         for ordinal in range(block.start, block.stop):
             operation = row.operations[ordinal]
             touches = lambda varnode: varnode is not None and bool(bytes_of(varnode) & tainted)
             key = _operation_key(row.address, ordinal, operation.opcode)
-            if check:
-                if operation.opcode == "STORE" and len(operation.inputs) == 3 and touches(operation.inputs[2]):
-                    return None
-                if operation.opcode == "CALLOTHER" and any(touches(item) for item in operation.inputs):
-                    return None
-                if (
+            if escapes is not None and (
+                (operation.opcode == "STORE" and len(operation.inputs) == 3 and touches(operation.inputs[2]))
+                or (operation.opcode == "CALLOTHER" and any(touches(item) for item in operation.inputs))
+                or (
                     operation.opcode in ("CALL", "CALLIND")
                     and key not in assumed_calls
                     and any(item[0] == register_space for item in tainted - stack_bytes)
-                ):
-                    return None  # every register is visible to a callee
+                )
+            ):
+                escapes.add(key)
             output = operation.output
             if output is None or output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
                 continue
@@ -438,6 +499,8 @@ def _stack_escapes(observation, register_space: int, offset: int, size: int,
                 and any(touches(item) for item in operation.inputs)
             )
             written = bytes_of(output)
+            if switches is not None and written & stack_bytes and not produced:
+                switches.add(key)
             tainted -= written
             if produced:
                 tainted |= written
@@ -449,7 +512,7 @@ def _stack_escapes(observation, register_space: int, offset: int, size: int,
     while pending:
         key = min(pending, key=order.__getitem__)
         pending.remove(key)
-        out = transfer(blocks[key], in_states[key], False)
+        out = transfer(blocks[key], in_states[key], None, None)
         for target in blocks[key].successors:
             if target not in blocks:
                 continue
@@ -457,10 +520,75 @@ def _stack_escapes(observation, register_space: int, offset: int, size: int,
             if merged != in_states.get(target):
                 in_states[target] = merged
                 pending.add(target)
-    return any(
-        transfer(blocks[key], state, True) is None
-        for key, state in in_states.items()
+    escapes: set[str] = set()
+    switches: set[str] = set()
+    for key, state in in_states.items():
+        transfer(blocks[key], state, escapes, switches)
+    keys = {}
+    for block in graph.blocks:
+        if block.key in in_states:
+            row = instructions[block.instruction]
+            keys[block.key] = [
+                _operation_key(row.address, ordinal, row.operations[ordinal].opcode)
+                for ordinal in range(block.start, block.stop)
+            ]
+    successors = {
+        key: [target for target in blocks[key].successors if target in keys] for key in keys
+    }
+    return keys, successors, escapes, switches
+
+
+def _flagged(keys, edges, escapes, reverse: bool) -> set[str]:
+    """Operation keys an escape precedes (``reverse``: follows) on some path,
+    the escape itself included: forward (backward) may-reachability."""
+    entering: set[str] = set()   # blocks reached along ``edges`` from an escaping block
+    work = [block for block, sequence in keys.items() if any(key in escapes for key in sequence)]
+    leaving = set(work)
+    while work:
+        block = work.pop()
+        for target in edges[block]:
+            if target not in entering:
+                entering.add(target)
+                if target not in leaving:
+                    leaving.add(target)
+                    work.append(target)
+    flagged: set[str] = set()
+    for block, sequence in keys.items():
+        seen = block in entering
+        for key in (reversed(sequence) if reverse else sequence):
+            seen = seen or key in escapes
+            if seen:
+                flagged.add(key)
+    return flagged
+
+
+def _stack_escape(observation, register_space: int, offset: int, size: int,
+                  assumed_calls=frozenset(), entry_key: str | None = None) -> _Escape:
+    """Where a stack-derived value may have escaped (``_Escape``)."""
+    taint = _stack_taint(observation, register_space, offset, size, assumed_calls, entry_key)
+    if taint is None:
+        return _Escape(frozenset(), frozenset(), frozenset())  # nothing private
+    keys, successors, escapes, _ = taint
+    predecessors: dict[str, list[str]] = {block: [] for block in keys}
+    for block, targets in successors.items():
+        for target in targets:
+            predecessors[target].append(block)
+    known = frozenset(key for sequence in keys.values() for key in sequence)
+    return _Escape(
+        known,
+        frozenset(_flagged(keys, successors, escapes, reverse=False)),
+        frozenset(_flagged(keys, predecessors, escapes, reverse=True)),
     )
 
 
-__all__ = ("MAY_ALIAS_CONTRACT_VERSION", "MayAliasRead", "derive_may_alias_reads")
+def stack_switches(unit, observation, context, address_spaces) -> tuple[str, ...]:
+    """Operations that set the stack pointer to a value not derived from it."""
+    found = _stack_pointer(unit, observation, context, address_spaces)
+    if found is None:
+        return ()
+    _, _, register_space, offset, size = found
+    taint = _stack_taint(observation, register_space, offset, size, frozenset(), unit.entry_block_key)
+    return () if taint is None else tuple(sorted(taint[3]))
+
+
+__all__ = ("MAY_ALIAS_CONTRACT_VERSION", "MayAliasRead", "derive_may_alias_reads", "stack_switches")

@@ -91,7 +91,14 @@ def main() -> int:
                              "instead of the engine's per-root completion")
     parser.add_argument("--assume-boundary-effects", action="store_true",
                         help="TEST-ONLY special condition: declared source/sink call effects")
+    parser.add_argument("--no-assume-globals-not-stack", dest="assume_globals_not_stack",
+                        action="store_false",
+                        help="drop the named assumption (--summaries only, on by default): constant "
+                             "addresses never alias the stack; it is withdrawn automatically when a "
+                             "function switches stacks. Use for firmware / custom static stacks")
     args = parser.parse_args()
+    if os.environ.get("TDO_V2_ASSUME_GLOBALS_NOT_STACK") == "0":
+        args.assume_globals_not_stack = False
     if args.assume_boundary_effects:
         print("[run] TEST-ONLY ASSUMPTION: source/sink call effects are declared, not observed")
     from tdo_v2.engine import analyze_frozen_bundle
@@ -118,7 +125,9 @@ def main() -> int:
                 boundary_provider=boundary_provider(args.assume_boundary_effects,
                                                     abi_of(generation)),
                 assume_boundary_call_effects=args.assume_boundary_effects,
+                assume_globals_disjoint_from_stack=args.assume_globals_not_stack,
             )
+            print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
         else:
             run = analyze_frozen_bundle(
                 generation,

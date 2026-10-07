@@ -106,6 +106,9 @@ class EngineRun:
     program_scope_digest: str
     executable_sha256: str
     roots: tuple[RootSlice, ...]
+    # named opt-in assumptions the results rely on (e.g.
+    # "globals-disjoint-from-stack"); empty for evidence-only runs
+    assumptions: tuple[str, ...] = ()
 
 
 def analyze_frozen_bundle(

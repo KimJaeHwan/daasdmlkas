@@ -13,6 +13,11 @@ already reaches through calls. Source labels become origin nodes:
 * a summarized call whose runs reached a source inside the callee: those run
   outputs (carried by the summaries).
 
+``assume_globals_disjoint_from_stack`` (on by default) applies the named
+assumption of ``may_alias`` (constant addresses never alias the stack) unless some
+function switches its stack (``interprocedural.program_switches_stack``); the
+run lists it in ``EngineRun.assumptions`` when it was applied.
+
 Sink roots are bound as in the engine (call sites and tail calls). A sink
 reached only inside a callee (a sink wrapper) is a root of that callee; its
 demand is not projected to callers yet (design S2/S3).
@@ -61,6 +66,7 @@ def analyze_frozen_bundle_with_summaries(
     naming_exporter_source: str | Path,
     boundary_provider: BoundaryProvider,
     assume_boundary_call_effects: bool = False,
+    assume_globals_disjoint_from_stack: bool = True,
 ) -> EngineRun:
     from .integration.configured_boundary_demands import (
         _analyses_from_boundary_nodes, _direct_sink_boundary_nodes,
@@ -127,7 +133,12 @@ def analyze_frozen_bundle_with_summaries(
 
         results = analyze_units(
             [item.unit for item in evidences], assumed_call_effects=assumed, extra_origins=extra_origins,
+            assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
         )
+        assumptions = ("globals-disjoint-from-stack",) if any(
+            getattr(item.normalized, "assumes_globals_disjoint_from_stack", False)
+            for item in results.values()
+        ) else ()
         preliminary = []
         for key, item in by_key.items():
             normalized = results[key].normalized
@@ -175,6 +186,7 @@ def analyze_frozen_bundle_with_summaries(
                 ))
         return EngineRun(
             program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(roots),
+            assumptions,
         )
 
 
