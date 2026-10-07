@@ -86,7 +86,8 @@ class FunctionSummary:
     # every opaque or summarized call inside, with the bytes it is known to leave
     # unchanged: a byte the function never touches is preserved only if every
     # inner call preserves it too
-    inner_calls: tuple[tuple[str, tuple[ByteSpan, ...]], ...] = ()
+    # (call key, register spans it preserves, whether it preserves all memory)
+    inner_calls: tuple[tuple[str, tuple[ByteSpan, ...], bool], ...] = ()
 
 
 def summarize_function(normalized, observation) -> FunctionSummary:
@@ -401,8 +402,11 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
             effects_by_block[effect.block_key].append(effect)
     graph = DominatorGraph(unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks})
     preserved = preserved_stack_pointers(observation, context)
+    memory_keeping = set()
     for key, effect in normalized.proven_call_effects:  # bytes a callee summary proves kept
         preserved[key] = tuple(preserved.get(key, ())) + tuple(effect.preserved)
+        if effect.preserves_memory:
+            memory_keeping.add(key)
 
     calls, unknown, writes = [], [], {}       # gen sources / kills
     memory_writes = []                        # (block, position, order, object, key)
@@ -434,7 +438,9 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
 
     result: dict = {
         "unknown_writers": unknown_writers,
-        "inner_calls": tuple(sorted((key, tuple(preserved.get(key, ()))) for _, _, key in calls)),
+        "inner_calls": tuple(sorted(
+            (key, tuple(preserved.get(key, ())), key in memory_keeping) for _, _, key in calls
+        )),
     }
     ssa = normalized.memory_ssa
     terminal_objects: dict[str, dict] = {}
@@ -457,6 +463,8 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
             for offset in sorted(offsets):
                 covering = frozenset(w for s, e, w in spans if s <= offset < e)
                 keeping = frozenset(k for s, e, k in keeps if s <= offset < e)
+                if object_id.kind in _MEMORY_KINDS:
+                    keeping |= memory_keeping
                 signature = (object_id, covering, keeping, block_key)
                 value = cache.get(signature)
                 if value is None:

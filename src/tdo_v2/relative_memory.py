@@ -61,8 +61,15 @@ def project_function_relative_memory(
     first_pass: LocalMemorySsaResult,
     opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
     translation_namespace: str = "",
+    anchored_accesses: dict | None = None,
 ) -> ObservedEffectUnit:
-    """Resolve provably equal indirect addresses, preserving all other debt."""
+    """Resolve provably equal indirect addresses, preserving all other debt.
+
+    ``anchored_accesses``: effect key -> (evaluation operation key, anchor
+    register varnode, displacement, width, address space id) for summarized
+    call effects whose memory is "callee entry value of a register +
+    displacement": the anchor is evaluated once, at the evaluation operation
+    (which reads it), like an address operand."""
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("relative-memory projection requires an exact effect unit")
     if type(observation) is not ValidatedFunctionObservation:
@@ -100,17 +107,41 @@ def project_function_relative_memory(
         ),
         translation_namespace,
     )
+    # Writes of one summarized call that bind to overlapping caller bytes: the
+    # callee took its objects as distinct, so their order there is unknown here
+    # (caller passed one object twice) -- they stay unresolved (debt).
+    blocked: set[str] = set()
+    by_call: dict[str, list] = {}
+    for block in unit.blocks:
+        for effect in block.effects:
+            anchored = (anchored_accesses or {}).get(effect.operation_key)
+            if anchored is not None and effect.memory_write is not None:
+                spans = projector.project_anchored(*anchored)
+                if spans:
+                    by_call.setdefault(effect.operation_key.split("~")[0], []).append(
+                        (effect.operation_key, spans[0]))
+    for rows in by_call.values():
+        for index, (key, span) in enumerate(rows):
+            for other_key, other in rows[index + 1:]:
+                if span.overlaps(other):
+                    blocked.update((key, other_key))
     changed = False
     blocks: list[ObservedEffectBlock] = []
     for block in unit.blocks:
         effects = []
         for effect in block.effects:
             operation = operations.get(effect.operation_key)
-            projected = (
-                None
-                if operation is None
-                else projector.project_access(effect, operation)
-            )
+            anchored = (anchored_accesses or {}).get(effect.operation_key)
+            if effect.operation_key in blocked:
+                projected = None
+            elif anchored is not None and (effect.memory_read is not None or effect.memory_write is not None):
+                projected = projector.project_anchored(*anchored)
+            else:
+                projected = (
+                    None
+                    if operation is None
+                    else projector.project_access(effect, operation)
+                )
             if projected is None:
                 effects.append(effect)
                 continue
@@ -254,6 +285,48 @@ class _Projector:
                     return None
             spans.append(ByteSpan(object_id, start, width))
         return tuple(sorted(set(spans), key=lambda span: span.canonical_key))
+
+    def project_anchored(
+        self,
+        evaluation_key: str,
+        anchor: ValidatedVarnode,
+        displacement: int,
+        width: int,
+        space_id: int,
+    ) -> tuple[ByteSpan, ...] | None:
+        """The bytes at (value of ``anchor`` read by ``evaluation_key``) +
+        ``displacement``, in this function's objects (one exact address only)."""
+        space = self._spaces.get(space_id)
+        if (
+            space is None
+            or space.classification_revision != 2
+            or space.addressable_unit_bytes != 1
+            or classify_address_space_v2(space) is not AddressSpaceClassV2.ADDRESS
+        ):
+            return None
+        address = self._expression_for_input(evaluation_key, anchor)
+        if address is None or address.byte_size * 8 != space.address_size_bits:
+            return None
+        if not address.atoms:
+            object_id = StorageObjectId(
+                StorageObjectKind.ADDRESS_SPACE, self._context.program_scope, space.space_id,
+            )
+            start = _unsigned_wrap(address.displacement + displacement, address.byte_size)
+            if start + width > 1 << space.address_size_bits:
+                return None
+        else:
+            object_id = StorageObjectId(
+                StorageObjectKind.FUNCTION_RELATIVE,
+                self._ssa.function_scope,
+                _digest_ints(
+                    b"relative-address-space-v1",
+                    (_address_atom_key(address.atoms), space.space_id),
+                ),
+            )
+            start = (1 << space.address_size_bits) + address.displacement + displacement
+            if start < 0:
+                return None
+        return (ByteSpan(object_id, start, width),)
 
     def _candidate_expressions_for_input(
         self,

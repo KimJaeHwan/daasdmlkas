@@ -16,10 +16,13 @@ from bisect import bisect_right
 
 from ._sparse_dataflow import DominatorGraph
 from .model import ResolvedStorage
-from .span_geometry import ByteSpan
+from .span_geometry import ByteSpan, StorageObjectKind
+
+_MEMORY_KINDS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 
 
-def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ...]]):
+def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ...]],
+                  memory_keeping: frozenset[str] = frozenset()):
     from .call_clobber import CallClobberRead
 
     graph = DominatorGraph(unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks})
@@ -60,6 +63,8 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
             if index is None:
                 covering = frozenset(w for s, e, w in writes if s <= offset < e)
                 keeping = frozenset(c for s, e, c in keeps if s <= offset < e)
+                if object_id.kind in _MEMORY_KINDS:
+                    keeping |= memory_keeping  # summarized calls proven to keep memory
                 signature = (covering, keeping)
                 index = signatures.get(signature)
                 if index is None:

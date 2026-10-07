@@ -83,7 +83,7 @@ from .scope_identity import (
     VarnodeKindCode,
 )
 from .relative_memory import project_function_relative_memory
-from .observed_call_state import project_persistent_call_state
+from .observed_call_state import observed_call_state_projections, project_persistent_call_state
 from .opaque_values import OpaqueValueEvidenceProvider
 from .storage import _resolve_validated_storage
 
@@ -425,6 +425,97 @@ class NormalizedFunction:
 _CALL_EFFECT_TEMPORARY_BASE = 1 << 48
 
 
+_CALL_EFFECT_LABELS = {"": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD"}
+
+
+def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries):
+    """Effects of one summarized call (``call_summary_effects``), in order:
+    ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
+    inputs into a call-local temporary, ``~<i>`` the run outputs (register runs
+    first, then memory runs). Anchored memory is projected later
+    (``relative_memory``): returns the effects and their anchored accesses."""
+    rows: list[ObservedEffect] = []
+    anchored: dict = {}
+
+    def temporary():
+        span = ResolvedStorage(ByteSpan(
+            StorageObjectId(StorageObjectKind.FUNCTION_UNIQUE, scope, 0),
+            _CALL_EFFECT_TEMPORARY_BASE + 16 * len(temporaries), 1,
+        ))
+        temporaries.append(span)
+        return span
+
+    def anchor_varnode(anchor):
+        return ValidatedVarnode(
+            VarnodeKindCode.REGISTER, AddressCoordinate(register_space, anchor.start), anchor.size,
+        )
+
+    def displacement(access):
+        # the callee's entry stack pointer is the caller's after the
+        # return-address push of the observed call shape
+        transition = transitions.get(call_key)
+        if transition is not None and (
+            access.anchor.start, access.anchor.size
+        ) == (transition.caller_base.byte_offset, transition.caller_base.byte_size):
+            return access.displacement + transition.displacement_delta
+        return access.displacement
+
+    loaded: dict = {}
+
+    def load(access):
+        if access in loaded:
+            return loaded[access]
+        key = f"{call_key}~ld{len(loaded)}"
+        target = temporary()
+        if access.anchor is None:
+            rows.append(ObservedEffect(
+                key, EffectKind.COPY, reads=(ResolvedStorage(access.span),), writes=(target,),
+                block_key=block_key,
+            ))
+        else:
+            rows.append(ObservedEffect(
+                key, EffectKind.COPY, reads=(ResolvedStorage(access.anchor),), writes=(target,),
+                memory_read=UnresolvedMemoryAccess(None, access.size), block_key=block_key,
+            ))
+            anchored[key] = (key, anchor_varnode(access.anchor), displacement(access),
+                             access.size, access.space_id)
+        loaded[access] = target
+        return target
+
+    staged = []
+    runs = [("register", run) for run in proven.runs] + [("memory", run) for run in proven.memory_runs]
+    for index, (kind, run) in enumerate(runs):
+        inputs = [ResolvedStorage(span) for span in run.reads] + [load(item) for item in run.loads]
+        if kind == "memory":
+            if run.keeps_old:
+                inputs.append(load(run.write))
+            if run.write.anchor is not None:
+                inputs.append(ResolvedStorage(run.write.anchor))
+        stage_key = f"{call_key}~in{index}"
+        target = temporary()
+        rows.append(ObservedEffect(
+            stage_key, EffectKind.COPY, reads=tuple(inputs), writes=(target,), block_key=block_key,
+        ))
+        staged.append((kind, run, stage_key, target))
+    for index, (kind, run, stage_key, target) in enumerate(staged):
+        key = f"{call_key}~{index}"
+        if kind == "register":
+            writes = tuple(ResolvedStorage(span) for span in run.writes)
+            rows.append(ObservedEffect(key, EffectKind.COPY, reads=(target,), writes=writes,
+                                       block_key=block_key))
+        elif run.write.anchor is None:
+            rows.append(ObservedEffect(key, EffectKind.COPY, reads=(target,),
+                                       writes=(ResolvedStorage(run.write.span),), block_key=block_key))
+        else:
+            rows.append(ObservedEffect(
+                key, EffectKind.COPY, reads=(target,),
+                memory_write=UnresolvedMemoryAccess(None, run.write.size), block_key=block_key,
+            ))
+            anchored[key] = (stage_key, anchor_varnode(run.write.anchor), displacement(run.write),
+                             run.write.size, run.write.space_id)
+    return rows, anchored
+
+
 class NormalizationFailureReason(StrEnum):
     MISSING_VALIDATED_OBSERVATION = "missing_validated_observation"
     MISSING_CONSTRUCTED_FUNCTION_SCOPE = "missing_constructed_function_scope"
@@ -564,6 +655,11 @@ class _ScopedNormalizer:
         dependencies = RustworkxDependencyGraph()
         effects: list[ObservedEffect] = []
         staged_temporaries: list = []
+        anchored_call_accesses: dict = {}
+        call_transitions = {
+            row.call_operation_key: row.memory_transition
+            for row in observed_call_state_projections(observation)
+        } if proven_call_effects else {}
         operation_nodes: dict[str, NodeId] = {}
         constant_inputs: dict[str, list[tuple[int, NodeId]]] = {}
 
@@ -613,40 +709,21 @@ class _ScopedNormalizer:
                             (input_ordinal, constant_node)
                         )
                 if block_key is not None and operation_key in proven_call_effects:
-                    # the callee's proven register effects, placed just before the
-                    # CALL so their writes survive it (the call preserves them, see
-                    # call_clobber). Two phases keep every run reading the values
-                    # at the call: first each run's inputs are gathered into its
-                    # own call-local temporary, then the runs write their outputs.
-                    runs = proven_call_effects[operation_key].runs
-                    staged = []
-                    for index, run in enumerate(runs):
-                        stage_key = f"{operation_key}~in{index}"
-                        temporary = ResolvedStorage(ByteSpan(
-                            StorageObjectId(StorageObjectKind.FUNCTION_UNIQUE, function.scope, 0),
-                            _CALL_EFFECT_TEMPORARY_BASE + 16 * len(staged_temporaries), 1,
+                    # the callee's proven effects, placed just before the CALL so
+                    # their writes survive it (the call preserves them, see
+                    # call_clobber); every run reads the values at the call
+                    rows, anchored = _proven_call_rows(
+                        operation_key, proven_call_effects[operation_key], block_key,
+                        function.scope, _register_space_id(observation),
+                        call_transitions, staged_temporaries,
+                    )
+                    for row in rows:
+                        operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
+                            f"op:{row.operation_key}", NodeKind.OPERATION,
+                            _CALL_EFFECT_LABELS[row.operation_key.rsplit("~", 1)[1].rstrip("0123456789")],
                         ))
-                        staged_temporaries.append(temporary)
-                        operation_nodes[stage_key] = dependencies.add_node(
-                            NodeRecord(f"op:{stage_key}", NodeKind.OPERATION, "CALL_EFFECT_INPUT")
-                        )
-                        effects.append(ObservedEffect(
-                            stage_key, EffectKind.COPY,
-                            reads=tuple(ResolvedStorage(span) for span in run.reads),
-                            writes=(temporary,), block_key=block_key,
-                        ))
-                        staged.append(temporary)
-                    for index, (run, temporary) in enumerate(zip(runs, staged)):
-                        run_key = f"{operation_key}~{index}"
-                        operation_nodes[run_key] = dependencies.add_node(
-                            NodeRecord(f"op:{run_key}", NodeKind.OPERATION, "CALL_EFFECT")
-                        )
-                        effects.append(ObservedEffect(
-                            run_key, EffectKind.COPY,
-                            reads=(temporary,),
-                            writes=tuple(ResolvedStorage(span) for span in run.writes),
-                            block_key=block_key,
-                        ))
+                        effects.append(row)
+                    anchored_call_accesses.update(anchored)
                 if block_key is not None:
                     effects.append(effect)  # operations in unreachable sub-blocks never run
 
@@ -720,6 +797,7 @@ class _ScopedNormalizer:
                 translation_namespace=(
                     unit.scopes.program.evidence.translation_namespace.language_id
                 ),
+                anchored_accesses=anchored_call_accesses,
             )
             if projected_effect_unit is effect_unit:
                 break
@@ -764,6 +842,9 @@ class _ScopedNormalizer:
         call_clobber_reads = derive_call_clobber_reads(
             effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects),
             proven_preserved={key: row.preserved for key, row in proven_call_effects.items()},
+            memory_keeping=frozenset(
+                key for key, row in proven_call_effects.items() if row.preserves_memory
+            ),
         )
         call_clobber_nodes = _materialize_call_clobber_debt(
             dependencies,

@@ -1,19 +1,25 @@
-"""Proven call effects from callee summaries (interprocedural S1a, registers).
+"""Proven call effects from callee summaries (interprocedural S1a/S1b).
 
 A ``ProvenCallEffect`` turns a callee ``FunctionSummary`` into what one call
-site may assume, in caller coordinates, without calling conventions:
+site may assume, without calling conventions:
 
 * ``runs``: register bytes the callee writes on some normal exit, each group
-  with the caller register bytes its value depends on (a byte left unchanged
-  on some exit also depends on itself: a may-write keeps the old value).
-* ``preserved``: register bytes the call leaves exactly as they were
-  (untouched or IDENTITY on every exit) -- plus the written ones, because
-  normalization places the run effects just before the CALL operation.
+  with the caller register bytes its value depends on and the callee-entry
+  memory it reads (``loads``); a byte left unchanged on some exit also
+  depends on itself (a may-write keeps the old value).
+* ``memory_runs``: memory the callee writes through an entry-register-anchored
+  pointer (``AnchoredSpan``: callee entry register value + displacement; the
+  stack pointer anchors the callee frame) or at a global address, with its
+  inputs likewise. The caller binds each anchor to its own value of that
+  register at the call (relative-memory projection, once -- no re-substitution).
+* ``preserved``: register bytes the call leaves exactly as they were (plus the
+  written ones: normalization places the run effects just before the CALL).
+* ``preserves_memory``: every memory byte the call may change is a memory run;
+  otherwise (unknown-address writes, unanchored objects, UNKNOWN memory runs,
+  opaque inner calls) all memory keeps call-clobber debt.
 
-Everything else stays an opaque call effect (call-clobber debt): register
-bytes that are UNKNOWN on some exit or computed from callee entry memory or
-through debts, all memory (S1b binds pointer-relative memory), and callees
-with tail exits or no normal exit.
+Register bytes UNKNOWN on some exit, computed through debts or from
+unanchored memory, or that an inner call may change, stay opaque.
 """
 
 from __future__ import annotations
@@ -25,9 +31,30 @@ from .span_geometry import ByteSpan, StorageObjectKind
 
 
 @dataclass(frozen=True, slots=True)
+class AnchoredSpan:
+    """Memory at (callee entry value of ``anchor``) + ``displacement``, or at a
+    global address (``anchor`` None, ``span`` the ADDRESS_SPACE bytes)."""
+
+    anchor: ByteSpan | None
+    displacement: int
+    size: int
+    space_id: int
+    span: ByteSpan | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProvenRunEffect:
     writes: tuple[ByteSpan, ...]
     reads: tuple[ByteSpan, ...]
+    loads: tuple[AnchoredSpan, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenMemoryRun:
+    write: AnchoredSpan
+    reads: tuple[ByteSpan, ...]
+    loads: tuple[AnchoredSpan, ...]
+    keeps_old: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +62,8 @@ class ProvenCallEffect:
     callee: str                        # callee entry, "space:offset" hex
     runs: tuple[ProvenRunEffect, ...]
     preserved: tuple[ByteSpan, ...]    # caller register bytes the call leaves unchanged
+    memory_runs: tuple[ProvenMemoryRun, ...] = ()
+    preserves_memory: bool = False
 
 
 def derive_proven_call_effect(
@@ -43,69 +72,146 @@ def derive_proven_call_effect(
     register_object,
     register_limit: int,
     excluded: tuple[ByteSpan, ...] = (),
+    anchors: dict | None = None,
 ) -> ProvenCallEffect | None:
     """``register_object``: the program register file; ``register_limit``: one
     past the highest register byte the caller uses; ``excluded``: bytes the
-    caller models itself (the stack pointer of an observed call shape)."""
+    caller models itself (the stack pointer of an observed call shape);
+    ``anchors``: callee FUNCTION_RELATIVE object -> (anchor register span,
+    address space id) for objects addressed from one entry register value."""
     if summary.tail_exits or not summary.exits:
         return None
+    anchors = anchors or {}
     skip = {offset for span in excluded for offset in range(span.start, span.end)}
+
+    def anchored(span: ByteSpan) -> AnchoredSpan | None:
+        kind = span.object_id.kind
+        if kind is StorageObjectKind.ADDRESS_SPACE:
+            return AnchoredSpan(None, span.start, span.size, span.object_id.space_key, span)
+        if kind is StorageObjectKind.FUNCTION_RELATIVE and span.object_id in anchors:
+            anchor, space_id = anchors[span.object_id]
+            return AnchoredSpan(anchor, span.start - (1 << 64), span.size, space_id)
+        return None
+
+    # memory writers the call exports as memory runs (anchored or global)
+    exported = {
+        writer for exit_summary in summary.exits for run in exit_summary.runs
+        if run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE
+        and anchored(run.span) is not None for writer in run.writers
+    }
     per_exit = []
+    memory_ok = not summary.unknown_writers
     for exit_summary in summary.exits:
-        verdicts: dict[int, object] = {}
+        verdicts: dict[tuple, object] = {}
         for run in exit_summary.runs:
-            if run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE:
+            kind = run.span.object_id.kind
+            if kind is StorageObjectKind.FUNCTION_UNIQUE:
                 continue
-            verdict = _verdict(run)
+            verdict = _verdict(run, anchored)
+            if verdict == "unknown" and kind is not StorageObjectKind.REGISTER_FILE                     and _only_exported_aliasing(run, exported):
+                # unknown only because an exported memory write may alias these
+                # bytes: in the caller that write is an ordinary write to the bound
+                # object, and the caller's may-alias analysis covers the overlap
+                verdict = _verdict_without_crossings(run, anchored)
+            if kind is not StorageObjectKind.REGISTER_FILE and verdict != "self" and (
+                    verdict == "unknown" or anchored(run.span) is None):
+                memory_ok = False
             for offset in range(run.span.start, run.span.end):
-                verdicts[offset] = verdict
+                verdicts[(run.span.object_id, offset)] = verdict
         per_exit.append(verdicts)
-    # byte -> "self" (unchanged) | "unknown" | (frozenset of source spans, keeps_old);
+    # byte -> "self" (unchanged) | "unknown" | (frozenset of sources, keeps_old);
     # a byte an exit does not mention is unchanged on that exit
-    state: dict[int, object] = {}
-    for offset in set().union(*per_exit):
+    state: dict[tuple, object] = {}
+    for item in set().union(*per_exit):
         value = None
         for verdicts in per_exit:
-            value = _merge(value, verdicts.get(offset, "self"))
-        state[offset] = value
-    # a byte no exit mentions was untouched by the function itself, but an inner
-    # call that does not provably preserve it may still have changed it
-    for _, kept in summary.inner_calls:
+            value = _merge(value, verdicts.get(item, "self"))
+        state[item] = value
+    # a register no exit mentions was untouched by the function itself, but an
+    # inner call that does not provably preserve it may still have changed it
+    for _, kept, keeps_memory in summary.inner_calls:
+        memory_ok = memory_ok and keeps_memory
         kept_offsets = {
             offset for span in kept if span.object_id.kind is StorageObjectKind.REGISTER_FILE
             for offset in range(span.start, span.end)
         }
         for offset in range(register_limit):
-            if offset not in state and offset not in kept_offsets:
-                state[offset] = "unknown"
-    groups: dict[tuple, list[int]] = {}
+            if (register_object, offset) not in state and offset not in kept_offsets:
+                state[(register_object, offset)] = "unknown"
+
+    register_groups: dict[tuple, list[int]] = {}
+    memory_groups: dict[tuple, list[tuple]] = {}
     unknown: set[int] = set()
-    for offset, value in state.items():
-        if offset in skip or value in (None, "self"):
+    for (object_id, offset), value in state.items():
+        is_register = object_id.kind is StorageObjectKind.REGISTER_FILE
+        if is_register and offset in skip:
+            continue
+        if value in (None, "self"):
             continue
         if value == "unknown":
-            unknown.add(offset)
+            if is_register:
+                unknown.add(offset)
             continue
-        sources, keeps_old = value
-        groups.setdefault((sources, keeps_old), []).append(offset)
+        if is_register:
+            register_groups.setdefault(value, []).append(offset)
+        elif anchored(ByteSpan(object_id, offset, 1)) is not None:
+            memory_groups.setdefault(value, []).append((object_id, offset))
+
+    def split_sources(sources):
+        registers, loads = [], []
+        for source in sources:
+            if source.object_id.kind is StorageObjectKind.REGISTER_FILE:
+                registers.append(source)
+            else:
+                loads.append(anchored(source))
+        return (tuple(sorted(registers, key=lambda span: span.canonical_key)),
+                tuple(sorted(set(loads), key=repr)))
+
     runs = []
-    for (sources, keeps_old), offsets in sorted(groups.items(), key=lambda item: min(item[1])):
+    for (sources, keeps_old), offsets in sorted(register_groups.items(), key=lambda item: min(item[1])):
         writes = tuple(_spans(register_object, offsets))
-        reads = set(sources)
+        registers, loads = split_sources(sources)
         if keeps_old:
-            reads.update(writes)
-        runs.append(ProvenRunEffect(writes, tuple(sorted(reads, key=lambda span: span.canonical_key))))
+            registers = tuple(sorted(set(registers) | set(writes), key=lambda span: span.canonical_key))
+        runs.append(ProvenRunEffect(writes, registers, loads))
+    memory_runs = []
+    for (sources, keeps_old), items in sorted(memory_groups.items(), key=lambda item: repr(min(item[1], key=repr))):
+        registers, loads = split_sources(sources)
+        by_object: dict = {}
+        for object_id, offset in items:
+            by_object.setdefault(object_id, []).append(offset)
+        for object_id, offsets in sorted(by_object.items(), key=repr):
+            for span in _spans(object_id, offsets):
+                memory_runs.append(ProvenMemoryRun(anchored(span), registers, loads, keeps_old))
     preserved = [offset for offset in range(register_limit) if offset not in unknown and offset not in skip]
-    return ProvenCallEffect(callee, tuple(runs), tuple(_spans(register_object, preserved)))
+    return ProvenCallEffect(
+        callee, tuple(runs), tuple(_spans(register_object, preserved)), tuple(memory_runs), memory_ok,
+    )
 
 
-def _verdict(run):
+def _only_exported_aliasing(run, exported) -> bool:
+    return bool(run.crossed) and not run.debts and all(
+        label.startswith("alias:") and label[len("alias:"):] in exported for label in run.crossed
+    )
+
+
+def _verdict_without_crossings(run, anchored):
+    if not run.writers and all(span.object_id == run.span.object_id for span in run.sources):
+        return "self"  # entry contents, not rewritten by the function itself
+    for source in run.sources:
+        if source.object_id.kind is not StorageObjectKind.REGISTER_FILE and anchored(source) is None:
+            return "unknown"
+    return (frozenset(run.sources), False)
+
+
+def _verdict(run, anchored):
     if run.kind is SummaryKind.UNKNOWN or run.debts:
         return "unknown"
     if run.kind is SummaryKind.IDENTITY:
         return "self"
-    if any(source.object_id.kind is not StorageObjectKind.REGISTER_FILE for source in run.sources):
-        return "unknown"  # depends on callee entry memory: S1b
+    for source in run.sources:
+        if source.object_id.kind is not StorageObjectKind.REGISTER_FILE and anchored(source) is None:
+            return "unknown"  # entry memory with no anchor the caller can bind
     return (frozenset(run.sources), False)
 
 
@@ -134,4 +240,7 @@ def _spans(object_id, offsets):
         yield ByteSpan(object_id, run_start, previous + 1 - run_start)
 
 
-__all__ = ("ProvenCallEffect", "ProvenRunEffect", "derive_proven_call_effect")
+__all__ = (
+    "AnchoredSpan", "ProvenCallEffect", "ProvenMemoryRun", "ProvenRunEffect",
+    "derive_proven_call_effect",
+)

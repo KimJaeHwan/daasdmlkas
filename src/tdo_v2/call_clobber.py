@@ -27,6 +27,7 @@ from .call_seeds import _operation_key
 from .effects import EffectKind, ObservedEffectUnit
 from .model import (
     ResolvedStorage,
+    StorageObjectKind,
     StorageObjectId,
     StorageRef,
     StorageResolutionContext,
@@ -71,29 +72,55 @@ class CallClobberRead:
 _Byte = tuple[StorageObjectId, int]
 
 
+_MEMORY_KINDS = frozenset({StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE})
+
+
 @dataclass(frozen=True, slots=True)
 class _State:
-    """Calls crossed since the last write, per byte; ``default`` for untracked bytes."""
+    """Calls crossed since the last write, per byte; ``default`` for untracked
+    bytes, ``memory_default`` (when set) for untracked memory bytes."""
 
     default: frozenset[str]
     bytes: dict[_Byte, frozenset[str]]
+    memory_default: frozenset[str] | None = None
+
+    def _default_for(self, item: _Byte) -> frozenset[str]:
+        if self.memory_default is not None and item[0].kind in _MEMORY_KINDS:
+            return self.memory_default
+        return self.default
 
     def calls_at(self, item: _Byte) -> frozenset[str]:
-        return self.bytes.get(item, self.default)
+        return self.bytes.get(item, self._default_for(item))
+
+    def _compact(self, default, memory_default, values) -> "_State":
+        if memory_default == default:
+            memory_default = None
+        state = _State(default, {}, memory_default)
+        return _State(default, {
+            item: calls for item, calls in values.items() if calls != state._default_for(item)
+        }, memory_default)
 
     def meet(self, other: "_State") -> "_State":
         default = self.default | other.default
-        merged = {}
-        for item in self.bytes.keys() | other.bytes.keys():
-            calls = self.calls_at(item) | other.calls_at(item)
-            if calls != default:
-                merged[item] = calls
-        return _State(default, merged)
+        memory_default = (self.memory_default if self.memory_default is not None else self.default) | (
+            other.memory_default if other.memory_default is not None else other.default)
+        merged = {
+            item: self.calls_at(item) | other.calls_at(item)
+            for item in self.bytes.keys() | other.bytes.keys()
+        }
+        return self._compact(default, memory_default, merged)
 
-    def called(self, key: str, preserved: tuple[ByteSpan, ...]) -> "_State":
+    def called(self, key: str, preserved: tuple[ByteSpan, ...], keeps_memory: bool = False) -> "_State":
+        """``keeps_memory``: a summarized call proven to change no memory byte
+        other than its (separately written) memory runs."""
+        memory = self.memory_default if self.memory_default is not None else self.default
         default = self.default | {key}
-        crossed = {item: calls | {key} for item, calls in self.bytes.items()}
-        state = _State(default, {item: calls for item, calls in crossed.items() if calls != default})
+        memory_default = memory if keeps_memory else memory | {key}
+        crossed = {
+            item: calls if keeps_memory and item[0].kind in _MEMORY_KINDS else calls | {key}
+            for item, calls in self.bytes.items()
+        }
+        state = self._compact(default, memory_default, crossed)
         for span in preserved:
             state = state._restore(span, self)
         return state
@@ -101,11 +128,12 @@ class _State:
     def written(self, span: ByteSpan) -> "_State":
         updated = dict(self.bytes)
         for offset in range(span.start, span.end):
-            if self.default:
-                updated[(span.object_id, offset)] = frozenset()
+            item = (span.object_id, offset)
+            if self._default_for(item):
+                updated[item] = frozenset()
             else:
-                updated.pop((span.object_id, offset), None)
-        return _State(self.default, updated)
+                updated.pop(item, None)
+        return _State(self.default, updated, self.memory_default)
 
     def _restore(self, span: ByteSpan, before: "_State") -> "_State":
         """The call is evidenced to leave ``span`` exactly as it was."""
@@ -113,11 +141,11 @@ class _State:
         for offset in range(span.start, span.end):
             item = (span.object_id, offset)
             calls = before.calls_at(item)
-            if calls == self.default:
+            if calls == self._default_for(item):
                 updated.pop(item, None)
             else:
                 updated[item] = calls
-        return _State(self.default, updated)
+        return _State(self.default, updated, self.memory_default)
 
 
 _EMPTY = _State(frozenset(), {})
@@ -130,11 +158,14 @@ def derive_call_clobber_reads(
     *,
     assumed_calls: frozenset[str] = frozenset(),
     proven_preserved: dict[str, tuple[ByteSpan, ...]] | None = None,
+    memory_keeping: frozenset[str] = frozenset(),
 ) -> tuple[CallClobberRead, ...]:
     """Return reads that may observe storage written by an unevidenced call.
 
     ``assumed_calls`` (TEST-ONLY) are boundary calls with a declared effect:
     their declared writes are ordinary writes and they clobber nothing else.
+    ``proven_preserved`` / ``memory_keeping``: register bytes, and for the listed
+    calls all memory, that a callee summary proves the call leaves unchanged.
     """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("call-clobber analysis requires an exact effect unit")
@@ -159,20 +190,20 @@ def derive_call_clobber_reads(
         preserved[key] = tuple(preserved.get(key, ())) + tuple(spans)
     return run_dataflow(
         "call-clobber", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
-        unit, calls, preserved,
+        unit, calls, preserved, frozenset(memory_keeping) & calls,
     )
 
 
 DEFAULT_ENGINE = "sparse"  # verified identical to "dense" (docs section 14)
 
 
-def _sparse_rows(unit, calls, preserved) -> tuple[CallClobberRead, ...]:
+def _sparse_rows(unit, calls, preserved, memory_keeping=frozenset()) -> tuple[CallClobberRead, ...]:
     from ._call_clobber_sparse import derive_sparse
 
-    return derive_sparse(unit, calls, preserved)
+    return derive_sparse(unit, calls, preserved, memory_keeping)
 
 
-def _dense_rows(unit, calls, preserved) -> tuple[CallClobberRead, ...]:
+def _dense_rows(unit, calls, preserved, memory_keeping=frozenset()) -> tuple[CallClobberRead, ...]:
     """Reference engine: the whole per-byte state through every block."""
     blocks = {block.key: block for block in unit.blocks}
     successors: dict[str, list[str]] = {key: [] for key in blocks}
@@ -185,7 +216,7 @@ def _dense_rows(unit, calls, preserved) -> tuple[CallClobberRead, ...]:
     while pending:
         key = min(pending)
         pending.remove(key)
-        state = _transfer(blocks[key], in_states[key], calls, preserved, None)
+        state = _transfer(blocks[key], in_states[key], calls, preserved, None, memory_keeping)
         for successor in successors[key]:
             previous = in_states.get(successor)
             merged = state if previous is None else previous.meet(state)
@@ -195,11 +226,11 @@ def _dense_rows(unit, calls, preserved) -> tuple[CallClobberRead, ...]:
 
     rows: list[CallClobberRead] = []
     for key in sorted(in_states):
-        _transfer(blocks[key], in_states[key], calls, preserved, rows)
+        _transfer(blocks[key], in_states[key], calls, preserved, rows, memory_keeping)
     return tuple(sorted(rows, key=lambda row: row.operation_key))
 
 
-def _transfer(block, state: _State, calls, preserved, rows) -> _State:
+def _transfer(block, state: _State, calls, preserved, rows, memory_keeping=frozenset()) -> _State:
     for effect in block.effects:
         if rows is not None:
             spans = []
@@ -222,7 +253,7 @@ def _transfer(block, state: _State, calls, preserved, rows) -> _State:
                 ))
         key = effect.operation_key
         if key in calls:
-            state = state.called(key, preserved.get(key, ()))
+            state = state.called(key, preserved.get(key, ()), key in memory_keeping)
         for evidence in effect.writes:
             if type(evidence) is ResolvedStorage:
                 state = state.written(evidence.span)

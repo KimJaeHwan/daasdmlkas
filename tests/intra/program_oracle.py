@@ -36,7 +36,7 @@ class ProgramReport:
 
 
 def _proven_runs(function):
-    """call key -> [(node, register offsets written)]."""
+    """call key -> [(node, register offsets written | None for a memory run)]."""
     found = {}
     graph = function.dependencies
     for call, effect in function.proven_call_effects:
@@ -48,7 +48,18 @@ def _proven_runs(function):
                 for offset in range(span.start, span.end)
             }
             found.setdefault(call, []).append((node, offsets))
+        for index, _ in enumerate(effect.memory_runs, start=len(effect.runs)):
+            found.setdefault(call, []).append((graph.node_for_key(f"op:{call}~{index}"), None))
     return found
+
+
+def _covering_runs(proven, writer, space, offset, reachable, reg_space):
+    """Reached proven run nodes of call ``writer`` that may have written the byte:
+    register runs writing that register byte; for memory, any memory run (the
+    dynamic address is not mapped to a static object here)."""
+    return [node for node, offsets in proven.get(writer, ())
+            if node in reachable and ((offsets is not None and offset in offsets)
+                                      if space == reg_space else offsets is None)]
 
 
 def check_program(function, observation, program, *, seeds=range(6), register_pools=None,
@@ -94,10 +105,10 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
                 report.silent.append((dependency, "reader operation has no graph node"))
                 continue
             writer = dependency.writer
-            if isinstance(writer, str) and writer in proven and dependency.space_id == reg_space:
+            if isinstance(writer, str) and writer in proven and dependency.space_id != unique_space:
                 reachable = set(result.result.reachable_nodes)
-                runs = [node for node, offsets in proven[writer]
-                        if node in reachable and dependency.offset in offsets]
+                runs = _covering_runs(proven, writer, dependency.space_id, dependency.offset,
+                                      reachable, reg_space)
                 if runs:
                     report.through_calls += 1
                     for tag in run.call_reads.get(
@@ -129,8 +140,7 @@ def _input_reached(tag, function, graph, result, reachable, reader, reg_space, u
     node = graph.node_for_key(f"op:{writer}")
     if node is not None and node in reachable:
         return True
-    if writer in proven and space == reg_space and any(
-            run in reachable and offset in offsets for run, offsets in proven[writer]):
+    if writer in proven and _covering_runs(proven, writer, space, offset, reachable, reg_space):
         return True  # an earlier call's proven run wrote it
     # a byte an earlier call wrote: covered by that call's proven runs or debt
     return _covered(function, graph, result, Dependency(reader, space, offset, writer),

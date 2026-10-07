@@ -132,3 +132,80 @@ def test_random_programs_have_no_silent_misses(chunk):
             silent += [(seed, key, item) for item in report.silent]
     assert runs > 0 and through > 0
     assert silent == [], silent[:3]
+
+
+# -- S1b: memory through pointers -------------------------------------------------
+
+def _stack_local_call(leaf, after):
+    """caller: rdi = rsp (a local), rsi = rdx, call leaf, then ``after`` ops."""
+    return (FunctionBuilder().sub_rsp(0x20).ins(add(reg(RDI), reg(RSP), const(0)))
+            .ins(copy(reg(RSI), reg(RDX))).call(LEAF).ins(*after).add_rsp(0x20).ret())
+
+
+def test_outparam_written_by_the_callee():
+    """leaf: *(rdi + 8) = rsi; the caller reads its local back: origin is its rdx."""
+    from synthetic import load, store, tmp
+    leaf = FunctionBuilder(entry=LEAF).ins(add(tmp(0x100), reg(RDI), const(8)), store(tmp(0x100), reg(RSI))).ret()
+    caller = _stack_local_call(leaf, [add(tmp(0x100), reg(RSP), const(8)), load(reg(RAX), tmp(0x100))])
+    results, program = _analyze(caller, leaf)
+    effect = next(iter(results["1:1000"].proven.values()))
+    assert effect.memory_runs and effect.preserves_memory
+    loaded = slice_op(results["1:1000"].normalized, "LOAD", 4)
+    assert set(range(RDX, RDX + 8)) <= loaded.register_bytes and loaded.result.is_complete
+    report = _check(results, program)
+    assert report.through_calls and report.silent == []
+
+
+def test_swap_through_two_pointers():
+    """dfb_swap(&x, &y): x gets y's old value."""
+    from synthetic import load, store
+    leaf = (FunctionBuilder(entry=LEAF).ins(load(reg(RAX), reg(RDI))).ins(load(reg(RCX), reg(RSI)))
+            .ins(store(reg(RDI), reg(RCX))).ins(store(reg(RSI), reg(RAX))).ret())
+    caller = (FunctionBuilder().sub_rsp(0x20)
+              .ins(store(reg(RSP), reg(RDX)))                                   # x = rdx
+              .ins(add(reg(R8), reg(RSP), const(8)), store(reg(R8), reg(R9)))   # y = r9
+              .ins(copy(reg(RDI), reg(RSP))).ins(copy(reg(RSI), reg(R8)))
+              .call(LEAF).ins(load(reg(RBX), reg(RSP))).add_rsp(0x20).ret())
+    results, program = _analyze(caller, leaf)
+    report = _check(results, program, pools=lambda seed: {RSP: 0x7000_0000})
+    assert report.through_calls and report.silent == []
+
+
+def test_callee_frame_and_pointer_loaded_from_memory():
+    """A balanced push/pop frame is bound to the caller's stack; a store through
+    a pointer the callee loads from memory has no anchor: memory stays debt."""
+    from synthetic import load, store, tmp
+    leaf = (FunctionBuilder(entry=LEAF).push(RBX).ins(load(tmp(0x110), reg(RDI)), store(tmp(0x110), reg(RSI)))
+            .pop(RBX).ret())
+    caller = _stack_local_call(leaf, [load(reg(RAX), reg(RSP))])
+    results, program = _analyze(caller, leaf)
+    effect = next(iter(results["1:1000"].proven.values()))
+    assert not effect.preserves_memory
+    assert results["1:1000"].normalized.call_clobber_reads
+    assert _check(results, program).silent == []
+
+
+def test_global_written_by_the_callee():
+    from synthetic import DATA_BASE, load, store
+    leaf = FunctionBuilder(entry=LEAF).ins(store(const(DATA_BASE + 0x20), reg(RDI))).ret()
+    caller = (FunctionBuilder().ins(copy(reg(RDI), reg(RSI))).call(LEAF)
+              .ins(load(reg(RAX), const(DATA_BASE + 0x20))).ret())
+    results, program = _analyze(caller, leaf)
+    loaded = slice_op(results["1:1000"].normalized, "LOAD", 2)
+    assert set(range(RSI, RSI + 8)) <= loaded.register_bytes
+    assert _check(results, program).silent == []
+
+
+def test_one_object_passed_twice_is_not_trusted():
+    """swap(&x, &x): the callee assumed two distinct objects; the caller binds
+    both to the same bytes, so those writes stay unresolved (no silent miss)."""
+    from synthetic import load, store
+    leaf = (FunctionBuilder(entry=LEAF).ins(load(reg(RAX), reg(RDI))).ins(store(reg(RDI), reg(RCX)))
+            .ins(store(reg(RSI), reg(RAX))).ret())
+    caller = (FunctionBuilder().sub_rsp(0x20).ins(store(reg(RSP), reg(RDX)))
+              .ins(copy(reg(RDI), reg(RSP))).ins(copy(reg(RSI), reg(RSP)))
+              .call(LEAF).ins(load(reg(RBX), reg(RSP))).add_rsp(0x20).ret())
+    results, program = _analyze(caller, leaf)
+    report = _check(results, program, pools=lambda seed: {RSP: 0x7000_0000})
+    assert report.silent == []
+    assert not slice_op(results["1:1000"].normalized, "LOAD", 5).result.is_complete

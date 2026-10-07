@@ -30,6 +30,8 @@ class AnalyzedFunction:
     summary: FunctionSummary | None
     calls: dict[str, str] = field(default_factory=dict)          # call key -> callee key
     proven: dict[str, ProvenCallEffect] = field(default_factory=dict)
+    # FUNCTION_RELATIVE object -> (entry register span it is addressed from, space)
+    anchors: dict = field(default_factory=dict)
 
 
 def function_key(coordinate) -> str:
@@ -67,6 +69,7 @@ def analyze_units(units, *, assumed_call_effects=None) -> dict[str, AnalyzedFunc
                     effect = derive_proven_call_effect(
                         done.summary, callee, register_object, register_limit,
                         excluded=tuple(stack_pointers.get(call_key, ())),
+                        anchors=done.anchors,
                     )
                     if effect is not None:
                         proven[call_key] = effect
@@ -79,7 +82,8 @@ def analyze_units(units, *, assumed_call_effects=None) -> dict[str, AnalyzedFunc
                 summarize_function(normalized, observation)
                 if type(normalized) is NormalizedFunction else None
             )
-            results[key] = AnalyzedFunction(key, unit, normalized, summary, calls[key], proven)
+            anchors = _relative_anchors(unit, normalized) if summary is not None else {}
+            results[key] = AnalyzedFunction(key, unit, normalized, summary, calls[key], proven, anchors)
     return results
 
 
@@ -142,6 +146,34 @@ def _callee_first_components(calls: dict[str, dict[str, str]]) -> list[set[str]]
                         break
                 order.append(component)
     return order
+
+
+def _relative_anchors(unit, normalized) -> dict:
+    """FUNCTION_RELATIVE objects of the function addressed from one entry
+    register value (pointer-sized register spans the function uses, in every
+    memory space it loads from or stores to): object -> (span, space id)."""
+    from .relative_memory import _function_relative_object_id
+
+    observation, context = unit.observation, unit.scopes.resolution_context
+    spaces, registers = set(), set()
+    for instruction in observation.instructions:
+        for operation in instruction.operations:
+            if operation.opcode in ("LOAD", "STORE") and operation.inputs                     and operation.inputs[0].kind is VarnodeKindCode.CONSTANT:
+                spaces.add(operation.inputs[0].coordinate.byte_offset)
+            for varnode in (*operation.inputs, operation.output):
+                if varnode is not None and varnode.kind is VarnodeKindCode.REGISTER                         and varnode.byte_size in (4, 8):
+                    resolved = _resolve_validated_storage(_storage_ref(varnode), context)
+                    if type(resolved) is ResolvedStorage:
+                        registers.add(resolved.span)
+    candidates = {}
+    for span in registers:
+        for space_id in spaces:
+            candidates[_function_relative_object_id(unit.scopes.function.scope, span, space_id)] = (
+                span, space_id)
+    used = {
+        run.span.object_id for item in normalized.memory_ssa.atomic_spans for run in ()
+    } | {atom.object_id for atom in normalized.memory_ssa.atomic_spans}
+    return {object_id: row for object_id, row in candidates.items() if object_id in used}
 
 
 def _register_file(observation, context):
