@@ -73,8 +73,16 @@ class Interpreter:
                  register_values: dict[int, int] | None = None,
                  max_steps: int = 4000, flip: str | None = None,
                  havoc_calls: tuple[int, int, int] | None = None,
-                 image=None, assumed_calls: dict | None = None) -> None:
-        """``havoc_calls`` = (register space, stack pointer offset, stack pointer size)."""
+                 image=None, assumed_calls: dict | None = None,
+                 track_provenance: bool = False) -> None:
+        """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
+
+        ``track_provenance``: also record, per byte, the set of entry inputs its
+        value was computed from (all operands of every operation on the way,
+        addresses included): ("reg", offset) for an entry register byte,
+        ("mem", reader) for entry memory read by operation ``reader``,
+        ("call", key) for a byte a havoced/declared call produced.
+        ``final_bytes()`` returns them with the entry values (function summaries)."""
         self._instructions = {
             (row.address.space_id, row.address.byte_offset): row
             for row in observation.instructions
@@ -95,6 +103,11 @@ class Interpreter:
         self._assumed = assumed_calls or {}
         self.opaque_opcodes: set[str] = set()
         self._stack_snapshot: list = []
+        self._track = track_provenance
+        self.provenance: dict[tuple[int, int], frozenset] = {}
+        self.entry_values: dict[tuple[int, int], int] = {}
+        self._operation_inputs: set = set()
+        self._stack_provenance: list = []
         self._registers = sorted({
             (varnode.coordinate.space_id, varnode.coordinate.byte_offset, varnode.byte_size)
             for row in observation.instructions
@@ -102,6 +115,15 @@ class Interpreter:
             for varnode in (*operation.inputs, operation.output)
             if varnode is not None and varnode.kind is VarnodeKindCode.REGISTER
         })
+        kinds = {
+            (varnode.coordinate.space_id, varnode.kind)
+            for row in observation.instructions
+            for operation in row.operations
+            for varnode in (*operation.inputs, operation.output)
+            if varnode is not None
+        }
+        self._register_spaces = {space for space, kind in kinds if kind is VarnodeKindCode.REGISTER}
+        self._unique_spaces = {space for space, kind in kinds if kind is VarnodeKindCode.UNIQUE}
 
     # -- storage -------------------------------------------------------------
     def _byte(self, space_id: int, offset: int) -> tuple[int, object]:
@@ -111,6 +133,7 @@ class Interpreter:
             if byte is None:
                 byte = self._rng.randrange(256)
             self._bytes[key] = (byte, Entry(space_id, offset))
+            self.entry_values[key] = byte
         return self._bytes[key]
 
     def preset(self, space_id: int, offset: int, size: int, value: int) -> None:
@@ -119,6 +142,7 @@ class Interpreter:
             self._bytes[(space_id, offset + index)] = (
                 (value >> (8 * index)) & 0xFF, Entry(space_id, offset + index)
             )
+            self.entry_values[(space_id, offset + index)] = (value >> (8 * index)) & 0xFF
 
     def _read(self, reader: str, space_id: int, offset: int, size: int, run: Run) -> int:
         value = 0
@@ -126,11 +150,34 @@ class Interpreter:
             byte, writer = self._byte(space_id, offset + index)
             run.dependencies.add(Dependency(reader, space_id, offset + index, writer))
             value |= byte << (8 * index)
+            if self._track:
+                if isinstance(writer, Entry):
+                    if space_id in self._register_spaces:
+                        self._operation_inputs.add(("reg", offset + index))
+                    elif space_id not in self._unique_spaces:
+                        self._operation_inputs.add(("mem", reader))
+                else:
+                    self._operation_inputs |= self.provenance.get((space_id, offset + index), frozenset())
         return value
 
     def _write(self, writer: str, space_id: int, offset: int, size: int, value: int) -> None:
         for index in range(size):
             self._bytes[(space_id, offset + index)] = ((value >> (8 * index)) & 0xFF, writer)
+        if self._track:
+            if writer.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") or writer in self._assumed:
+                tags = frozenset({("call", writer)})
+            else:
+                tags = frozenset(self._operation_inputs)
+            for index in range(size):
+                self.provenance[(space_id, offset + index)] = tags
+
+    def final_bytes(self):
+        """(space, offset) -> (value, writer, provenance) of every byte the run wrote."""
+        return {
+            key: (byte, writer, self.provenance.get(key, frozenset()))
+            for key, (byte, writer) in self._bytes.items()
+            if not isinstance(writer, Entry)
+        }
 
     def _value(self, reader: str, varnode, run: Run, *, data: bool = True) -> int:
         if varnode.kind is VarnodeKindCode.CONSTANT:
@@ -164,6 +211,9 @@ class Interpreter:
                 self._stack_snapshot = [
                     self._byte(space_id, sp_offset + i) for i in range(sp_size)
                 ]
+                self._stack_provenance = [
+                    self.provenance.get((space_id, sp_offset + i)) for i in range(sp_size)
+                ]
             index = 0
             while index < len(operations):
                 steps += 1
@@ -172,6 +222,7 @@ class Interpreter:
                 operation = operations[index]
                 key = _operation_key(instruction.address, index, operation.opcode)
                 run.executed.append(key)
+                self._operation_inputs = set()
                 jump = self._execute(key, operation, run)
                 if jump is None:
                     index += 1
@@ -211,6 +262,7 @@ class Interpreter:
             else:
                 for index, item in enumerate(self._stack_snapshot):
                     self._bytes[(space_id, self._havoc[1] + index)] = item
+                    self._restore_provenance(space_id, self._havoc[1] + index, index)
                 return None
         if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:
             for item in inputs[1:] if opcode != "CALLOTHER" else inputs:
@@ -280,6 +332,16 @@ class Interpreter:
         if pop_return:
             for index, item in enumerate(self._stack_snapshot):
                 self._bytes[(space_id, sp_offset + index)] = item
+                self._restore_provenance(space_id, sp_offset + index, index)
+
+    def _restore_provenance(self, space_id: int, offset: int, index: int) -> None:
+        if not self._track:
+            return
+        tags = self._stack_provenance[index] if index < len(self._stack_provenance) else None
+        if tags is None:
+            self.provenance.pop((space_id, offset), None)
+        else:
+            self.provenance[(space_id, offset)] = tags
 
     def _destination(self, varnode):
         if varnode.kind is VarnodeKindCode.CONSTANT:
