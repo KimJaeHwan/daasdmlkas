@@ -550,3 +550,17 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
 - 묶음 엔진 검증 절차: (1) `pytest tests/intra/test_memory_ssa_equivalence.py` (sparse 등록 시 자동 포함),
   (2) `TDO_V2_MEMORY_SSA_ENGINE=sparse TDO_V2_MEMORY_SSA_CROSSCHECK=dense golden_all.sh dump <dir>` 후
   `golden_all.sh compare golden/v2 <dir>` 0 차이, (3) measure_bundle 누락 0.
+
+## 12. 묶음 2단계: atom class (2026-10-07)
+
+- `src/tdo_v2/_memory_ssa_classes.py`: atom을 서명 `(connected span, 덮는 write 정의 집합)`으로 묶음.
+  `check_atom_classes(unit)` 는 dense 엔진의 모든 지점(블록 입구, action 사이, 블록 출구)에서 한 묶음의
+  atom들이 같은 정의 집합인지 검사. dense 고정점은 `memory_ssa._dense_states` 로 분리(결과 불변:
+  골든 v2와 1,260 함수-모드 0 차이).
+- 테스트 `tests/intra/test_atom_classes.py`: 무작위 600개, 정규화 경로(재투영 포함), 묶음이 atom을 정확히
+  분할·서명 유일, 잘못 묶으면 검사기가 잡는지.
+- 실제 Bundle 검사(`tools/graph_fidelity/atom_class_report.py`): 09 3종, UE cpp·DLL, 코퍼스, zlib 전부
+  class-check OK.
+- 관찰: 묶음 수 ≈ atom 수(합쳐지는 atom은 적음). 이득은 각 묶음을 건드리는 블록이 적은 데서 온다.
+  작업량 추정(블록×atom 대비 묶음별 관심 블록 합, IDF 추가 전): 09 3.8~4.6배, UE DLL 10~11배,
+  코퍼스 -O3 9.5배, zlib 25.6배, inflate 단위 28~37배. 함수가 클수록 이득이 크다.

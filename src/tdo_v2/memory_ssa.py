@@ -70,6 +70,83 @@ class _Partition:
         raise AssertionError("partition does not exactly cover an observed span")
 
 
+def _dense_states(unit, partition, write_ids, entry_state, pool, *, compress_chains=True):
+    """Least fixed point of the dense dataflow: (in_states, out_states) per block."""
+    blocks = {block.key: block for block in unit.blocks}
+    transfers = {
+        key: _compile_transfer(block, partition, write_ids, pool)
+        for key, block in blocks.items()
+    }
+    successors: dict[str, list[str]] = {key: [] for key in blocks}
+    for block in unit.blocks:
+        for predecessor in block.predecessors:
+            successors[predecessor].append(block.key)
+    successors = {key: tuple(sorted(values)) for key, values in successors.items()}
+
+    # Solve on straight-line chains (a block whose only predecessor has it as
+    # the only successor joins that predecessor's chain), then expand. The
+    # in-state of a chain member is exactly its predecessor's out-state, so the
+    # least fixed point is unchanged; only the worklist is shorter.
+    chains = (
+        _straight_line_chains(unit, blocks, successors)
+        if compress_chains
+        else {key: [key] for key in sorted(blocks)}
+    )
+    chain_transfers = {}
+    for leader, members in chains.items():
+        state = _EMPTY_STATE
+        for key in members:
+            for action in blocks[key].actions:
+                state = _apply_writes(state, action, partition, write_ids, pool)
+        chain_transfers[leader] = state
+    chain_successors = {leader: successors[members[-1]] for leader, members in chains.items()}
+
+    in_states = {key: _EMPTY_STATE for key in chains}
+    in_states[unit.entry_block_key] = entry_state
+    out_states = {key: _overlay(in_states[key], chain_transfers[key]) for key in chains}
+    pending_deltas = {
+        key: state for key, state in out_states.items() if state.root is not None
+    }
+    pending = sorted(pending_deltas)
+    heapq.heapify(pending)
+    queued = set(pending)
+
+    while pending:
+        block_key = heapq.heappop(pending)
+        queued.remove(block_key)
+        delta = pending_deltas.pop(block_key)
+        for successor in chain_successors[block_key]:
+            old_in = in_states[successor]
+            input_delta = _difference(delta, old_in)
+            if input_delta.root is None:
+                continue
+            new_in = _union(old_in, input_delta)
+            in_states[successor] = new_in
+            output_delta = _mask(input_delta, chain_transfers[successor])
+            if output_delta.root is None:
+                continue
+            old_out = out_states[successor]
+            output_delta = _difference(output_delta, old_out)
+            if output_delta.root is None:
+                continue
+            new_out = _union(old_out, output_delta)
+            out_states[successor] = new_out
+            pending_deltas[successor] = _union(
+                pending_deltas.get(successor, _EMPTY_STATE), output_delta
+            )
+            if successor not in queued:
+                heapq.heappush(pending, successor)
+                queued.add(successor)
+
+    for leader, members in chains.items():
+        state = in_states[leader]
+        for key in members:
+            in_states[key] = state
+            state = _overlay(state, transfers[key])
+            out_states[key] = state
+    return in_states, out_states
+
+
 def _straight_line_chains(unit, blocks, successors) -> dict[str, list[str]]:
     """leader -> member keys (leader first) of maximal straight-line chains."""
     predecessors = {key: tuple(set(block.predecessors)) for key, block in blocks.items()}
@@ -187,77 +264,9 @@ def _build_dense(unit: LocalMemoryUnit, *, compress_chains: bool = True) -> Loca
     pool = _DefinitionSetPool()
     entry_state = _entry_state(partition, entry_ids, pool)
     blocks = {block.key: block for block in unit.blocks}
-    transfers = {
-        key: _compile_transfer(block, partition, write_ids, pool)
-        for key, block in blocks.items()
-    }
-    successors: dict[str, list[str]] = {key: [] for key in blocks}
-    for block in unit.blocks:
-        for predecessor in block.predecessors:
-            successors[predecessor].append(block.key)
-    successors = {key: tuple(sorted(values)) for key, values in successors.items()}
-
-    # Solve on straight-line chains (a block whose only predecessor has it as
-    # the only successor joins that predecessor's chain), then expand. The
-    # in-state of a chain member is exactly its predecessor's out-state, so the
-    # least fixed point is unchanged; only the worklist is shorter.
-    chains = (
-        _straight_line_chains(unit, blocks, successors)
-        if compress_chains
-        else {key: [key] for key in sorted(blocks)}
+    in_states, out_states = _dense_states(
+        unit, partition, write_ids, entry_state, pool, compress_chains=compress_chains
     )
-    chain_transfers = {}
-    for leader, members in chains.items():
-        state = _EMPTY_STATE
-        for key in members:
-            for action in blocks[key].actions:
-                state = _apply_writes(state, action, partition, write_ids, pool)
-        chain_transfers[leader] = state
-    chain_successors = {leader: successors[members[-1]] for leader, members in chains.items()}
-
-    in_states = {key: _EMPTY_STATE for key in chains}
-    in_states[unit.entry_block_key] = entry_state
-    out_states = {key: _overlay(in_states[key], chain_transfers[key]) for key in chains}
-    pending_deltas = {
-        key: state for key, state in out_states.items() if state.root is not None
-    }
-    pending = sorted(pending_deltas)
-    heapq.heapify(pending)
-    queued = set(pending)
-
-    while pending:
-        block_key = heapq.heappop(pending)
-        queued.remove(block_key)
-        delta = pending_deltas.pop(block_key)
-        for successor in chain_successors[block_key]:
-            old_in = in_states[successor]
-            input_delta = _difference(delta, old_in)
-            if input_delta.root is None:
-                continue
-            new_in = _union(old_in, input_delta)
-            in_states[successor] = new_in
-            output_delta = _mask(input_delta, chain_transfers[successor])
-            if output_delta.root is None:
-                continue
-            old_out = out_states[successor]
-            output_delta = _difference(output_delta, old_out)
-            if output_delta.root is None:
-                continue
-            new_out = _union(old_out, output_delta)
-            out_states[successor] = new_out
-            pending_deltas[successor] = _union(
-                pending_deltas.get(successor, _EMPTY_STATE), output_delta
-            )
-            if successor not in queued:
-                heapq.heappush(pending, successor)
-                queued.add(successor)
-
-    for leader, members in chains.items():
-        state = in_states[leader]
-        for key in members:
-            in_states[key] = state
-            state = _overlay(state, transfers[key])
-            out_states[key] = state
 
     action_keys = sorted(
         action.operation_key for block in unit.blocks for action in block.actions
