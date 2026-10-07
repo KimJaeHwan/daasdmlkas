@@ -5,6 +5,8 @@ from __future__ import annotations
 from bisect import bisect_left
 from dataclasses import dataclass
 import heapq
+import os
+from typing import Callable
 
 from ._memory_ssa_state import (
     DefinitionSetPool as _DefinitionSetPool,
@@ -101,8 +103,68 @@ def _straight_line_chains(unit, blocks, successors) -> dict[str, list[str]]:
     return chains
 
 
+MEMORY_SSA_ENGINE_ENV = "TDO_V2_MEMORY_SSA_ENGINE"
+MEMORY_SSA_CROSSCHECK_ENV = "TDO_V2_MEMORY_SSA_CROSSCHECK"
+_ENGINES: dict[str, Callable[[LocalMemoryUnit], LocalMemorySsaResult]] = {}
+
+
+class MemorySsaEngineMismatch(AssertionError):
+    """Two memory SSA engines produced different results for one unit."""
+
+
+def register_memory_ssa_engine(
+    name: str, builder: Callable[[LocalMemoryUnit], LocalMemorySsaResult]
+) -> None:
+    """Make an engine selectable by name (``MEMORY_SSA_ENGINE_ENV`` /
+    ``MEMORY_SSA_CROSSCHECK_ENV``); every engine must produce the canonical
+    least-fixed-point result, identical to ``dense``."""
+    if type(name) is not str or not name:
+        raise TypeError("memory SSA engine name must be a non-empty str")
+    _ENGINES[name] = builder
+
+
+def memory_ssa_engine_names() -> tuple[str, ...]:
+    return tuple(sorted(_ENGINES))
+
+
 def build_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
-    """Build the canonical least-fixed-point result for one frozen unit."""
+    """Build the canonical least-fixed-point result for one frozen unit.
+
+    The engine is ``dense`` unless ``TDO_V2_MEMORY_SSA_ENGINE`` names another
+    registered engine. With ``TDO_V2_MEMORY_SSA_CROSSCHECK=<engine>`` the unit
+    is also built by that engine and any difference raises
+    ``MemorySsaEngineMismatch`` naming the first differing fields (equivalence
+    harness for alternative engines; off by default).
+    """
+    if type(unit) is not LocalMemoryUnit:
+        raise TypeError("local memory SSA requires an exact LocalMemoryUnit")
+    result = _engine(os.environ.get(MEMORY_SSA_ENGINE_ENV) or "dense")(unit)
+    other = os.environ.get(MEMORY_SSA_CROSSCHECK_ENV)
+    if other:
+        expected = _engine(other)(unit)
+        if result != expected:
+            from .memory_ssa_compare import memory_ssa_differences
+
+            raise MemorySsaEngineMismatch(
+                f"memory SSA engines disagree ({os.environ.get(MEMORY_SSA_ENGINE_ENV) or 'dense'}"
+                f" vs {other}): " + "; ".join(memory_ssa_differences(result, expected))
+            )
+    return result
+
+
+def _engine(name: str) -> Callable[[LocalMemoryUnit], LocalMemorySsaResult]:
+    try:
+        return _ENGINES[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown memory SSA engine {name!r}; known: {', '.join(memory_ssa_engine_names())}"
+        ) from None
+
+
+def _build_dense(unit: LocalMemoryUnit, *, compress_chains: bool = True) -> LocalMemorySsaResult:
+    """Dense engine: every block carries the whole state. ``compress_chains``
+    solves on straight-line chains (same result; ``dense-unchained`` is the
+    one-block-per-node reference)."""
     if type(unit) is not LocalMemoryUnit:
         raise TypeError("local memory SSA requires an exact LocalMemoryUnit")
 
@@ -139,7 +201,11 @@ def build_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
     # the only successor joins that predecessor's chain), then expand. The
     # in-state of a chain member is exactly its predecessor's out-state, so the
     # least fixed point is unchanged; only the worklist is shorter.
-    chains = _straight_line_chains(unit, blocks, successors)
+    chains = (
+        _straight_line_chains(unit, blocks, successors)
+        if compress_chains
+        else {key: [key] for key in sorted(blocks)}
+    )
     chain_transfers = {}
     for leader, members in chains.items():
         state = _EMPTY_STATE
@@ -343,6 +409,12 @@ def build_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
         state_nodes,
         terminal_states,
     )
+
+
+register_memory_ssa_engine("dense", _build_dense)
+register_memory_ssa_engine(
+    "dense-unchained", lambda unit: _build_dense(unit, compress_chains=False)
+)
 
 
 def _serialize_terminal_states(

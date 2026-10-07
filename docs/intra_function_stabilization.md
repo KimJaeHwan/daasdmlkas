@@ -530,3 +530,23 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
   / `configured_origin_projection` 경로) → 함수 간 작업 때 확인.
 - 골든 **v2** (`D:\01_gitproject\14_TDO_v2\golden\v2`, 20MB): v1(현재 코드와 0 차이) + UE 12세트,
   총 1,260 함수-모드.
+
+## 11. 묶음(희소 SSA) 1단계: 엔진 동치 비교 장치 (2026-10-07)
+
+- `memory_ssa.build_local_memory_ssa` 가 엔진 등록부로 분기: `dense`(기본, 현재 엔진),
+  `dense-unchained`(체인 압축 없는 기준 구현). `TDO_V2_MEMORY_SSA_ENGINE=<이름>` 으로 엔진 선택,
+  `TDO_V2_MEMORY_SSA_CROSSCHECK=<이름>` 이면 같은 입력을 그 엔진으로도 만들어 다르면
+  `MemorySsaEngineMismatch` (첫 차이 필드·원소·값을 메시지에). 모르는 엔진 이름은 즉시 오류.
+  새 엔진은 `register_memory_ssa_engine` 으로 등록.
+- `memory_ssa_compare.memory_ssa_differences`: 필드별 첫 차이를 읽을 수 있게 설명.
+- `tests/intra/memory_units.py`: 메모리 SSA 입력(`LocalMemoryUnit`) 무작위 생성 — 부분 겹침, 4종 객체,
+  KILL 쓰기, 주소 미상 접근, back edge(entry·self loop 포함), 서브블록 키, 다중 종료 블록, 블록 순서 섞기.
+- `tests/intra/test_memory_ssa_equivalence.py`: 등록된 모든 대체 엔진이 무작위 600개 입력과 정규화
+  경로(재투영 패스 포함, rep 루프 포함)에서 dense와 완전히 같아야 함. 심은 결함을 정확히 보고하는지도 검사.
+- 민감도 확인(변이 시험): back edge 누락 / KILL을 데이터 쓰기로 / 쓰기 폭 축소 — 600개 중 각각
+  455 / 436 / 567개에서 차이 검출.
+- 실제 Bundle: CROSSCHECK=dense-unchained 로 골든 전체(1,260 함수-모드, 재투영 패스마다 비교)를
+  만들었을 때 불일치 0, 골든 v2와 0 차이. 환경 변수가 실제 경로에 적용됨도 확인.
+- 묶음 엔진 검증 절차: (1) `pytest tests/intra/test_memory_ssa_equivalence.py` (sparse 등록 시 자동 포함),
+  (2) `TDO_V2_MEMORY_SSA_ENGINE=sparse TDO_V2_MEMORY_SSA_CROSSCHECK=dense golden_all.sh dump <dir>` 후
+  `golden_all.sh compare golden/v2 <dir>` 0 차이, (3) measure_bundle 누락 0.
