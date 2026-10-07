@@ -464,3 +464,45 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
   입장), zlib 25함수(inflate 포함, 의존 24.7만 건) — 누락 0, 제어 위반 0, 건너뛴 run 0, 실패 0.
 - 64케이스: 디버그 PASS(정확) 39 / 가정 53, 최적화 40 / 가정 46 — 변화 없음, 누락+확실 0.
 - 테스트: Windows 129 passed 1 skipped, WSL 130 passed.
+
+## 9. 결정: 메모리 SSA 묶음(atom class) 희소 계산 (2026-10-07, Fable 검토)
+
+**결정**: 큰 함수 성능은 "묶음별 희소 계산"으로 해결한다. **채택, 착수 시점은 보류** — 함수 내부
+추적의 기준선(골든)을 먼저 확정한 뒤 시작한다(아래 선행 조건).
+
+- 근거: 격자에 atom 간 결합이 없다. write는 덮는 atom 구간을 strong kill(`_replace`)하고 읽기·JOIN·
+  끝 상태는 "atom → 도달 raw 정의 집합"의 순수 함수. 결합은 출력 인코딩(fragment 병합, 끝 상태 트리)뿐.
+  현재 비용 O(블록 × 상태 크기)는 레지스터·unique atom 수천 개가 모든 블록으로 흐르기 때문.
+- 방법(Choi–Cytron–Ferrante sparse evaluation graph):
+  1. atom을 서명 `(connected span, 그 atom을 덮는 write 집합)`으로 묶음(class)화 — 같은 서명이면
+     모든 지점에서 도달 집합이 같다.
+  2. 묶음별 관심 노드 T = writer ∪ reader ∪ terminal ∪ entry, SEG = T ∪ IDF(T), 간선은 dominator tree의
+     가장 가까운 관심 조상. back-edge가 있으므로 SEG 위 fixpoint.
+  3. 읽기는 블록 in-값에서 action 순서대로 블록 내 write를 재생해 fragment 구성(`_read_fragments` 동치).
+- 기대: 메모리 SSA 6~15배(inflate 수 분 → 수십 초). 위험 중 — 기존 dense 엔진을 oracle로 보존.
+- 탈락안: Cytron φ 단독(결국 같은 fixpoint), unique 특수 처리(p-code 서브블록 때문에 unique가 블록을
+  넘음 — 가정이 틀림), 재투영 간 증분(무효화 위험; 묶음 이후 필요 시).
+- 보존할 것: `_build_partition`/`_raw_definitions`/정렬 규칙 재사용, JOIN 식별자 (span, 읽는 블록 키),
+  JOIN 소스는 raw id만, entry 블록 back-edge 허용, 한 빌드에 IdSet pool 하나.
+- 함정: 부분 겹침(서명은 atom 단위), KILL write도 정의, unresolved write는 SSA 밖, 도달 불가 블록에는
+  read/terminal이 없다는 암묵 불변을 명시 assert로, 서브블록 키 `addr#n` 유지.
+
+**선행 조건(착수 전)**
+0. 끝 상태 저장 정규화: 현재 `_serialize_terminal_states` 가 AVL 트리 모양을 그대로 저장해, 같은 의미라도
+   계산 순서에 따라 `state_nodes` 가 달라진다(434bc56의 체인 압축·sweep도 모양을 바꿨을 수 있음).
+   run 열에서 균형 트리를 다시 만들어 저장하도록 바꾸고, 노드 수가 함수 간 계층 한도(8192,
+   `configured_function_memory.py:434`) 안인지 확인.
+1. 골든 기준선: 코퍼스·실제 Bundle 전 함수의 `LocalMemorySsaResult` (와 그래프 요약)를 파일로 고정.
+   이후 모든 성능 변경은 "골든과 완전히 같음"으로 검증.
+2. 비교 장치: dense/sparse 엔진 env flag 분기 + 동치 테스트(무작위·실제 유닛, 재투영 각 패스 포함).
+
+**선행 조건 진행 (2026-10-07)**
+- 0 완료: `_serialize_terminal_states` 가 run 열로 균형 트리를 다시 만든 뒤 직렬화(트리 모양 무관).
+  `tests/intra/test_terminal_state_canonical.py` (이전 코드에서는 실패함을 확인). 전 검증 자료
+  752함수에서 내용(run 열) 차이 0, 최대 노드 1,306개(한도 8,192).
+- 434bc56 속도 개선 검증: 속도 개선만 되돌린 코드(체인 압축·sweep·CHK 제거)와 비교해 752함수 전부
+  메모리 SSA 내용·그래프(제어 의존 포함) 동일.
+- 1 완료: 골든 기준선 `D:\01_gitproject\14_TDO_v2\golden\v1` (13MB, `MANIFEST.txt` 에 코드·Bundle
+  generation). 도구 `tools/graph_fidelity/ssa_snapshot.py` (dump/compare, 결정적 — 같은 입력 두 번
+  비교 0 차이), `golden_all.sh dump|compare <dir>`. 이후 변경은
+  `golden_all.sh compare <골든> <새 결과>` 가 0이어야 한다(의도된 변경이면 골든 v2로 갱신하고 사유 기록).

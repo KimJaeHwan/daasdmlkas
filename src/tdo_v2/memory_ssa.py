@@ -12,6 +12,7 @@ from ._memory_ssa_state import (
     IdSet as _IdSet,
     Run as _Run,
     State as _State,
+    iter_runs as _iter_runs,
     iter_runs_from as _iter_runs_from,
     make_state as _make_state,
     mask as _mask,
@@ -354,12 +355,18 @@ def _serialize_terminal_states(
     interned: dict[tuple[object, ...], int] = {}
     encoded: dict[int, int] = {}
     terminal_states: list[ObservedTerminalMemoryState] = []
+    canonical_roots = []  # keeps rebuilt trees alive: ``encoded`` is keyed by id()
 
     for block_key in terminal_keys:
         root = out_states[block_key].root
         if root is None:
             terminal_states.append(ObservedTerminalMemoryState(block_key, None))
             continue
+        # Serialize a canonical shape: the balanced tree rebuilt from the run
+        # sequence, so the nodes depend only on the state's content and not on
+        # the order of the operations (solver strategy) that produced it.
+        root = _make_state(_iter_runs(root)).root
+        canonical_roots.append(root)
 
         stack = [(root, False)]
         while stack:
