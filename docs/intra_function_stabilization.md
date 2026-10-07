@@ -582,3 +582,25 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
 - 남은 병목(inflate 프로파일): may_alias 전방 분석(`_meet`), call_clobber 전방 분석(`meet`) — 둘 다 블록마다
   전체 상태를 들고 다니는 같은 구조. 4단계(선택) 대상.
 - 기본 엔진은 아직 `dense`(사용자 결정 대기).
+
+## 14. 묶음 4단계: call_clobber · may_alias sparse (2026-10-07, Fable 검토)
+
+- 두 분석을 바이트별 gen/kill 문제로 재정식화(Fable: 정확히 등가, SEG 공식 정확 확인).
+  - call_clobber: 그 바이트를 보존하지 않는 호출 = gen(호출 키), 바이트를 덮는 쓰기 = kill. 한 effect 안에서
+    읽기 → 호출 → 쓰기 순. 묶음 서명 (덮는 쓰기, 보존하는 호출).
+  - may_alias: 객체 o의 바이트에 대해, `effect.writes` 순서대로 o에 대한 쓰기 = kill, 별칭 가능한 다른 객체에
+    대한 쓰기(전부 private이 아니면) = gen, 그 뒤 주소 미상 쓰기 = 모든 객체 gen. `_ANY_WRITE` 는 kill 없는
+    의사 바이트. private 프레임 필터·`elif` 주소 미상 읽기 행은 읽을 때 그대로 적용. 서명 (객체, 덮는 쓰기).
+- 공용 `src/tdo_v2/_sparse_dataflow.py`: `DominatorGraph`(도달 가능 블록만) + `solve_gen_kill`
+  (P = 이벤트 블록 ∪ IDF ∪ entry, gen만 있는 블록도 P에 포함, 최소 고정점). 메모리 SSA sparse도 같은 지배
+  트리 사용. `run_dataflow` 로 엔진 선택(`TDO_V2_DATAFLOW_ENGINE`)·교차 확인(`TDO_V2_DATAFLOW_CROSSCHECK`).
+- 구현 `_call_clobber_sparse.py`, `_may_alias_sparse.py`; dense는 `_dense_rows` 로 기준 유지.
+- 검증: 솔버 단독 무작위 그래프 2,000개 = 전체 고정점(변이 3종 각각 1,100+개 검출), 정규화 경로 교차 확인
+  테스트(`tests/intra/test_dataflow_equivalence.py`, 실제 행이 비교되는지 검사), 실제 Bundle 전체 교차 확인
+  불일치 0, 골든 v2 0 차이.
+- Fable이 우려한 "호출·쓰기 블록이 모든 묶음의 이벤트라 P가 CFG 전체에 가까워질 수 있음"은 실측에서
+  문제되지 않았다(inflate 호출 24개 / 2,349블록).
+- 성능(zlib, 메모리 SSA sparse 기준): 정규화 전체 74.8초 → 27.7초, inflate 49.4초 → 9.8초.
+  처음(dense 전부) 대비 inflate 188초 → 9.8초(약 19배).
+- 기본 엔진: 메모리 SSA·call_clobber·may_alias 모두 `sparse`. dense는 기준/교차 확인용.
+- 남은 비용(inflate 프로파일): 메모리 SSA 결과 조립(`_assemble`)과 정의 집합 interning이 절반.

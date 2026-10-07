@@ -23,9 +23,8 @@ terminal states are assembled by the shared ``memory_ssa._assemble``.
 
 from __future__ import annotations
 
-from bisect import bisect_right
-
 from ._memory_ssa_classes import build_atom_classes
+from ._sparse_dataflow import DominatorGraph
 from ._memory_ssa_state import DefinitionSetPool, Run, make_state
 from .memory_contracts import LocalMemorySsaResult, LocalMemoryUnit, MemoryDefinitionKind
 from .model import ByteSpan
@@ -56,7 +55,11 @@ def build_sparse_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult
     classes = build_atom_classes(unit, partition, write_ids)
     class_of_atom = classes.class_of_atom
     blocks = {block.key: block for block in unit.blocks}
-    graph = _DominatorGraph(unit)
+    graph = DominatorGraph(
+        unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks}
+    )
+    if len(graph.pre) != len(blocks):
+        raise AssertionError("sparse memory SSA requires every block reachable")
 
     # what each action writes / reads, as classes
     def classes_in(span: ByteSpan) -> list[int]:
@@ -154,160 +157,6 @@ def build_sparse_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult
 def _fragment(atoms, start: int, stop: int, definitions):
     first, last = atoms[start], atoms[stop - 1]
     return ByteSpan(first.object_id, first.start, last.end - first.start), definitions
-
-
-class _DominatorGraph:
-    """Dominator tree, dominance frontiers and nearest-dominator queries of a
-    unit's block graph (every block is reachable from the entry)."""
-
-    def __init__(self, unit: LocalMemoryUnit) -> None:
-        self.entry = unit.entry_block_key
-        self.predecessors = {block.key: tuple(sorted(set(block.predecessors))) for block in unit.blocks}
-        successors: dict[str, list[str]] = {key: [] for key in self.predecessors}
-        for key, sources in self.predecessors.items():
-            for source in sources:
-                successors[source].append(key)
-        self.successors = {key: tuple(sorted(values)) for key, values in successors.items()}
-        order = self._reverse_postorder()
-        self.idom = self._immediate_dominators(order)
-        self.frontier = self._frontiers()
-        self._number_tree()
-
-    def _reverse_postorder(self) -> list[str]:
-        order, seen = [], {self.entry}
-        stack = [(self.entry, iter(self.successors[self.entry]))]
-        while stack:
-            node, children = stack[-1]
-            for child in children:
-                if child not in seen:
-                    seen.add(child)
-                    stack.append((child, iter(self.successors[child])))
-                    break
-            else:
-                stack.pop()
-                order.append(node)
-        if len(order) != len(self.successors):
-            raise AssertionError("sparse memory SSA requires every block reachable")
-        order.reverse()
-        return order
-
-    def _immediate_dominators(self, order: list[str]) -> dict[str, str | None]:
-        rank = {node: index for index, node in enumerate(order)}
-        idom: dict[str, str] = {self.entry: self.entry}
-
-        def intersect(left, right):
-            while left != right:
-                while rank[left] > rank[right]:
-                    left = idom[left]
-                while rank[right] > rank[left]:
-                    right = idom[right]
-            return left
-
-        changed = True
-        while changed:
-            changed = False
-            for node in order[1:]:
-                processed = [item for item in self.predecessors[node] if item in idom]
-                candidate = processed[0]
-                for item in processed[1:]:
-                    candidate = intersect(item, candidate)
-                if idom.get(node) != candidate:
-                    idom[node] = candidate
-                    changed = True
-        result: dict[str, str | None] = dict(idom)
-        result[self.entry] = None
-        return result
-
-    def _frontiers(self) -> dict[str, set[str]]:
-        frontier: dict[str, set[str]] = {node: set() for node in self.successors}
-        for node, sources in self.predecessors.items():
-            if len(sources) < 2 and node != self.entry:
-                continue
-            for source in sources:
-                runner = source
-                while runner is not None and runner != self.idom[node]:
-                    frontier[runner].add(node)
-                    runner = self.idom[runner]
-        return frontier
-
-    def _number_tree(self) -> None:
-        children: dict[str, list[str]] = {node: [] for node in self.successors}
-        for node, parent in self.idom.items():
-            if parent is not None:
-                children[parent].append(node)
-        self.pre: dict[str, int] = {}
-        self.post: dict[str, int] = {}
-        counter = 0
-        stack = [(self.entry, False)]
-        while stack:
-            node, done = stack.pop()
-            if done:
-                self.post[node] = counter
-                counter += 1
-                continue
-            self.pre[node] = counter
-            counter += 1
-            stack.append((node, True))
-            for child in sorted(children[node], reverse=True):
-                stack.append((child, False))
-
-    def _dominates(self, upper: str, lower: str) -> bool:
-        return self.pre[upper] <= self.pre[lower] and self.post[lower] <= self.post[upper]
-
-    def solve(self, writes: set[str], needed: set[str], *, exit_of_write, entry_value):
-        """Entry value of one class at every block in ``needed``."""
-        phis = {self.entry}
-        pending = list(writes)
-        while pending:  # iterated dominance frontier of the writing blocks
-            node = pending.pop()
-            for item in self.frontier[node]:
-                if item not in phis:
-                    phis.add(item)
-                    pending.append(item)
-        points = sorted(writes | phis, key=self.pre.__getitem__)
-        point_pre = [self.pre[item] for item in points]
-
-        def nearest(node: str) -> str:
-            """Nearest dominator-or-self of ``node`` among the points."""
-            position = bisect_right(point_pre, self.pre[node]) - 1
-            while not self._dominates(points[position], node):
-                position -= 1  # entry dominates everything, so this stops
-            return points[position]
-
-        phi_value: dict[str, frozenset] = {item: frozenset() for item in phis}
-
-        def exit_value(node: str) -> frozenset:
-            point = nearest(node)
-            return exit_of_write(point) if point in writes else phi_value[point]
-
-        sources = {item: [nearest(pred) for pred in self.predecessors[item]] for item in phis}
-        dependents: dict[str, set[str]] = {}
-        for item, points_in in sources.items():
-            for point in points_in:
-                if point in phis and point not in writes:
-                    dependents.setdefault(point, set()).add(item)
-        pending = sorted(phis, key=self.pre.__getitem__)
-        queued = set(pending)
-        while pending:
-            item = pending.pop(0)
-            queued.discard(item)
-            value = entry_value if item == self.entry else frozenset()
-            for point in sources[item]:
-                value |= exit_of_write(point) if point in writes else phi_value[point]
-            if value != phi_value[item]:
-                phi_value[item] = value
-                for dependent in dependents.get(item, ()):
-                    if dependent not in queued:
-                        queued.add(dependent)
-                        pending.append(dependent)
-
-        result = {}
-        for node in needed:
-            if node in phis:
-                result[node] = phi_value[node]
-            else:
-                result[node] = exit_value(self.idom[node])
-        return result
 
 
 __all__ = ("build_sparse_local_memory_ssa",)

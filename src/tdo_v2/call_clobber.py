@@ -32,6 +32,7 @@ from .model import (
     StorageResolutionContext,
     VarnodeKind,
 )
+from ._sparse_dataflow import run_dataflow
 from .observed_call_state import observed_call_state_projections
 from .span_geometry import ByteSpan
 from .storage import _resolve_validated_storage
@@ -152,7 +153,23 @@ def derive_call_clobber_reads(
     if not calls:
         return ()
     preserved = _preserved_stack_pointers(observation, context)
+    return run_dataflow(
+        "call-clobber", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
+        unit, calls, preserved,
+    )
 
+
+DEFAULT_ENGINE = "sparse"  # verified identical to "dense" (docs section 14)
+
+
+def _sparse_rows(unit, calls, preserved) -> tuple[CallClobberRead, ...]:
+    from ._call_clobber_sparse import derive_sparse
+
+    return derive_sparse(unit, calls, preserved)
+
+
+def _dense_rows(unit, calls, preserved) -> tuple[CallClobberRead, ...]:
+    """Reference engine: the whole per-byte state through every block."""
     blocks = {block.key: block for block in unit.blocks}
     successors: dict[str, list[str]] = {key: [] for key in blocks}
     for block in unit.blocks:

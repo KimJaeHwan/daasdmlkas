@@ -47,6 +47,7 @@ from .model import (
     StorageResolutionContext,
     VarnodeKind,
 )
+from ._sparse_dataflow import run_dataflow
 from .observed_call_state import observed_call_state_projections
 from .relative_memory import _function_relative_object_id
 from .span_geometry import ByteSpan
@@ -165,7 +166,23 @@ def derive_may_alias_reads(
         return ()
     policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls)
     policy.unknown_writers = unknown_writers
+    return run_dataflow(
+        "may-alias", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
+        unit, objects, policy,
+    )
 
+
+DEFAULT_ENGINE = "sparse"  # verified identical to "dense" (docs section 14)
+
+
+def _sparse_rows(unit, objects, policy) -> tuple[MayAliasRead, ...]:
+    from ._may_alias_sparse import derive_sparse
+
+    return derive_sparse(unit, objects, policy)
+
+
+def _dense_rows(unit, objects, policy) -> tuple[MayAliasRead, ...]:
+    """Reference engine: the whole per-byte state through every block."""
     blocks = {block.key: block for block in unit.blocks}
     successors: dict[str, list[str]] = {key: [] for key in blocks}
     for block in unit.blocks:

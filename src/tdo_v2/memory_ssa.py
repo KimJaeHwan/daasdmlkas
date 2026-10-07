@@ -182,6 +182,7 @@ def _straight_line_chains(unit, blocks, successors) -> dict[str, list[str]]:
 
 MEMORY_SSA_ENGINE_ENV = "TDO_V2_MEMORY_SSA_ENGINE"
 MEMORY_SSA_CROSSCHECK_ENV = "TDO_V2_MEMORY_SSA_CROSSCHECK"
+DEFAULT_MEMORY_SSA_ENGINE = "sparse"  # verified identical to "dense" (docs section 13)
 _ENGINES: dict[str, Callable[[LocalMemoryUnit], LocalMemorySsaResult]] = {}
 
 
@@ -207,15 +208,17 @@ def memory_ssa_engine_names() -> tuple[str, ...]:
 def build_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
     """Build the canonical least-fixed-point result for one frozen unit.
 
-    The engine is ``dense`` unless ``TDO_V2_MEMORY_SSA_ENGINE`` names another
-    registered engine. With ``TDO_V2_MEMORY_SSA_CROSSCHECK=<engine>`` the unit
+    The engine is ``sparse`` (``DEFAULT_MEMORY_SSA_ENGINE``) unless
+    ``TDO_V2_MEMORY_SSA_ENGINE`` names another registered engine; ``dense`` is
+    the reference every engine must reproduce. With ``TDO_V2_MEMORY_SSA_CROSSCHECK=<engine>`` the unit
     is also built by that engine and any difference raises
     ``MemorySsaEngineMismatch`` naming the first differing fields (equivalence
     harness for alternative engines; off by default).
     """
     if type(unit) is not LocalMemoryUnit:
         raise TypeError("local memory SSA requires an exact LocalMemoryUnit")
-    result = _engine(os.environ.get(MEMORY_SSA_ENGINE_ENV) or "dense")(unit)
+    name = os.environ.get(MEMORY_SSA_ENGINE_ENV) or DEFAULT_MEMORY_SSA_ENGINE
+    result = _engine(name)(unit)
     other = os.environ.get(MEMORY_SSA_CROSSCHECK_ENV)
     if other:
         expected = _engine(other)(unit)
@@ -223,8 +226,7 @@ def build_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
             from .memory_ssa_compare import memory_ssa_differences
 
             raise MemorySsaEngineMismatch(
-                f"memory SSA engines disagree ({os.environ.get(MEMORY_SSA_ENGINE_ENV) or 'dense'}"
-                f" vs {other}): " + "; ".join(memory_ssa_differences(result, expected))
+                f"memory SSA engines disagree ({name} vs {other}): " + "; ".join(memory_ssa_differences(result, expected))
             )
     return result
 
