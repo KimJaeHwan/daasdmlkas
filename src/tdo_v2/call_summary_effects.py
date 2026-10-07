@@ -47,6 +47,7 @@ class ProvenRunEffect:
     writes: tuple[ByteSpan, ...]
     reads: tuple[ByteSpan, ...]
     loads: tuple[AnchoredSpan, ...] = ()
+    origins: tuple[str, ...] = ()      # source labels the value may come from (inside the callee)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,7 @@ class ProvenMemoryRun:
     reads: tuple[ByteSpan, ...]
     loads: tuple[AnchoredSpan, ...]
     keeps_old: bool
+    origins: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +162,8 @@ def derive_proven_call_effect(
     def split_sources(sources):
         registers, loads = [], []
         for source in sources:
+            if type(source) is tuple:  # ("origin", label)
+                continue
             if source.object_id.kind is StorageObjectKind.REGISTER_FILE:
                 registers.append(source)
             else:
@@ -173,7 +177,7 @@ def derive_proven_call_effect(
         registers, loads = split_sources(sources)
         if keeps_old:
             registers = tuple(sorted(set(registers) | set(writes), key=lambda span: span.canonical_key))
-        runs.append(ProvenRunEffect(writes, registers, loads))
+        runs.append(ProvenRunEffect(writes, registers, loads, _origins(sources)))
     memory_runs = []
     for (sources, keeps_old), items in sorted(memory_groups.items(), key=lambda item: repr(min(item[1], key=repr))):
         registers, loads = split_sources(sources)
@@ -182,11 +186,19 @@ def derive_proven_call_effect(
             by_object.setdefault(object_id, []).append(offset)
         for object_id, offsets in sorted(by_object.items(), key=repr):
             for span in _spans(object_id, offsets):
-                memory_runs.append(ProvenMemoryRun(anchored(span), registers, loads, keeps_old))
+                memory_runs.append(ProvenMemoryRun(anchored(span), registers, loads, keeps_old, _origins(sources)))
     preserved = [offset for offset in range(register_limit) if offset not in unknown and offset not in skip]
     return ProvenCallEffect(
         callee, tuple(runs), tuple(_spans(register_object, preserved)), tuple(memory_runs), memory_ok,
     )
+
+
+def _origins(sources) -> tuple[str, ...]:
+    return tuple(sorted(item[1] for item in sources if type(item) is tuple))
+
+
+def _with_origins(sources, run) -> frozenset:
+    return frozenset(sources) | {("origin", label) for label in run.origins}
 
 
 def _only_exported_aliasing(run, exported) -> bool:
@@ -201,7 +213,7 @@ def _verdict_without_crossings(run, anchored):
     for source in run.sources:
         if source.object_id.kind is not StorageObjectKind.REGISTER_FILE and anchored(source) is None:
             return "unknown"
-    return (frozenset(run.sources), False)
+    return (_with_origins(run.sources, run), False)
 
 
 def _verdict(run, anchored):
@@ -212,7 +224,7 @@ def _verdict(run, anchored):
     for source in run.sources:
         if source.object_id.kind is not StorageObjectKind.REGISTER_FILE and anchored(source) is None:
             return "unknown"  # entry memory with no anchor the caller can bind
-    return (frozenset(run.sources), False)
+    return (_with_origins(run.sources, run), False)
 
 
 def _merge(current, verdict):

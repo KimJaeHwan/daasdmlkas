@@ -32,15 +32,21 @@ class AnalyzedFunction:
     proven: dict[str, ProvenCallEffect] = field(default_factory=dict)
     # FUNCTION_RELATIVE object -> (entry register span it is addressed from, space)
     anchors: dict = field(default_factory=dict)
+    # graph node -> source labels it carries (declared or bound sources, and
+    # summarized calls whose runs reach a source inside the callee)
+    origins: dict = field(default_factory=dict)
 
 
 def function_key(coordinate) -> str:
     return f"{coordinate.space_id:x}:{coordinate.byte_offset:x}"
 
 
-def analyze_units(units, *, assumed_call_effects=None) -> dict[str, AnalyzedFunction]:
+def analyze_units(units, *, assumed_call_effects=None, extra_origins=None) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
-    ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects."""
+    ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
+    ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
+    of the function's own boundaries (e.g. declared sources, calls to a source
+    function); summarized runs that reach sources add theirs automatically."""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -78,12 +84,18 @@ def analyze_units(units, *, assumed_call_effects=None) -> dict[str, AnalyzedFunc
             normalized = FunctionNormalizer().normalize(
                 unit, assumed_call_effects=assumed, proven_call_effects=proven,
             )
+            origins: dict = {}
+            if type(normalized) is NormalizedFunction:
+                origins = _run_origins(normalized)
+                for node, labels in (extra_origins(key, unit, normalized, calls[key]) if extra_origins else {}).items():
+                    origins.setdefault(node, set()).update(labels)
             summary = (
-                summarize_function(normalized, observation)
+                summarize_function(normalized, observation, origins)
                 if type(normalized) is NormalizedFunction else None
             )
             anchors = _relative_anchors(unit, normalized) if summary is not None else {}
-            results[key] = AnalyzedFunction(key, unit, normalized, summary, calls[key], proven, anchors)
+            results[key] = AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
+                                            anchors, origins)
     return results
 
 
@@ -146,6 +158,28 @@ def _callee_first_components(calls: dict[str, dict[str, str]]) -> list[set[str]]
                         break
                 order.append(component)
     return order
+
+
+def run_definition_nodes(normalized, run_key: str) -> list[int]:
+    """Graph nodes of the definitions a summarized-call run effect writes."""
+    from .memory_contracts import MemoryDefinitionKind
+
+    return [
+        normalized.memory_graph.definition_nodes[index]
+        for index, definition in enumerate(normalized.memory_ssa.definitions)
+        if definition.operation_key == run_key and definition.kind is MemoryDefinitionKind.DATA_WRITE
+    ]
+
+
+def _run_origins(normalized) -> dict:
+    """Source labels carried by summarized runs (reached inside the callee)."""
+    origins: dict = {}
+    for call, effect in normalized.proven_call_effects:
+        for index, run in enumerate((*effect.runs, *effect.memory_runs)):
+            if run.origins:
+                for node in run_definition_nodes(normalized, f"{call}~{index}"):
+                    origins.setdefault(node, set()).update(run.origins)
+    return origins
 
 
 def _relative_anchors(unit, normalized) -> dict:

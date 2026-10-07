@@ -25,6 +25,7 @@ Root functions are named from the exporter selection order recorded in
 from __future__ import annotations
 
 import argparse
+import os
 import json
 from pathlib import Path
 import sys
@@ -85,6 +86,9 @@ def main() -> int:
     parser.add_argument("--binary", default="dfbench_win_core",
                         help="case filter when --expected is cases_manifest.json")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--summaries", action="store_true",
+                        help="interprocedural layer on callee summaries (tdo_v2.summary_engine) "
+                             "instead of the engine's per-root completion")
     parser.add_argument("--assume-boundary-effects", action="store_true",
                         help="TEST-ONLY special condition: declared source/sink call effects")
     args = parser.parse_args()
@@ -105,14 +109,25 @@ def main() -> int:
 
     started = time.time()
     try:
-        run = analyze_frozen_bundle(
-            generation,
-            naming_exporter_source=REPO / "ghidra" / "GhidraV2CallNaming.java",
-            boundary_provider=boundary_provider(args.assume_boundary_effects,
-                                                abi_of(generation)),
-            include_explanations=False,
-            assume_boundary_call_effects=args.assume_boundary_effects,
-        )
+        if args.summaries or os.environ.get("TDO_V2_INTERPROCEDURAL") == "summaries":
+            from tdo_v2.summary_engine import analyze_frozen_bundle_with_summaries
+            print("[run] interprocedural: callee summaries")
+            run = analyze_frozen_bundle_with_summaries(
+                generation,
+                naming_exporter_source=REPO / "ghidra" / "GhidraV2CallNaming.java",
+                boundary_provider=boundary_provider(args.assume_boundary_effects,
+                                                    abi_of(generation)),
+                assume_boundary_call_effects=args.assume_boundary_effects,
+            )
+        else:
+            run = analyze_frozen_bundle(
+                generation,
+                naming_exporter_source=REPO / "ghidra" / "GhidraV2CallNaming.java",
+                boundary_provider=boundary_provider(args.assume_boundary_effects,
+                                                    abi_of(generation)),
+                include_explanations=False,
+                assume_boundary_call_effects=args.assume_boundary_effects,
+            )
     except Exception as exc:  # noqa: BLE001
         print("".join(traceback.format_exception(exc)), file=sys.stderr)
         return 2

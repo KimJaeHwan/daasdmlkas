@@ -65,6 +65,7 @@ class SummaryRun:
     entry_readers: tuple[str, ...]      # operations that read entry memory on the way
     debts: tuple[str, ...]              # debt kinds reached by the backward slice
     crossed: tuple[str, ...]            # "call:<key>", "alias:<key>", "unknown:<key>" at the exit
+    origins: tuple[str, ...] = ()       # source labels reached (``origin_labels`` of the function)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +91,10 @@ class FunctionSummary:
     inner_calls: tuple[tuple[str, tuple[ByteSpan, ...], bool], ...] = ()
 
 
-def summarize_function(normalized, observation) -> FunctionSummary:
+def summarize_function(normalized, observation, origin_labels=None) -> FunctionSummary:
+    """``origin_labels``: graph node -> source labels it carries (boundary
+    origins of this function, e.g. a declared source call's write, or a
+    summarized call's run that reached a source inside the callee)."""
     from .call_clobber import _preserved_stack_pointers
 
     context = normalized.scopes.resolution_context
@@ -112,7 +116,7 @@ def summarize_function(normalized, observation) -> FunctionSummary:
             if record.kind is NodeKind.OPERATION and record.key.startswith("op:"):
                 operation_of[node] = record.key[3:]
 
-    closure = _AncestorClosure(graph, operation_of)
+    closure = _AncestorClosure(graph, operation_of, origin_labels or {})
 
     def definition_slice(definition_id: int):
         """(entry source spans, entry-memory readers, debt labels) of the
@@ -121,6 +125,7 @@ def summarize_function(normalized, observation) -> FunctionSummary:
         return closure.of(definition_nodes[definition_id])
 
     uncertain = _uncertain_address_writers(normalized, observation, context, operation_of)
+    tracer = _CopyTracer(normalized, observation, context, operation_of)
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain)
     inner_calls = crossed.pop("inner_calls", ())
 
@@ -131,7 +136,8 @@ def summarize_function(normalized, observation) -> FunctionSummary:
         for node in _state_runs(nodes, state.root_node_id):
             for span in _object_spans(atoms, node.start_atom, node.stop_atom):
                 runs.append(_classify(span, node.definition_ids, definitions, definition_slice,
-                                      crossed.get((state.block_key, span.object_id), {}), uncertain))
+                                      crossed.get((state.block_key, span.object_id), {}), uncertain,
+                                      tracer))
         exits.append(ExitSummary(state.block_key, tuple(runs)))
     writer_objects = sorted(
         {(item.operation_key, item.span.object_id) for item in definitions
@@ -176,7 +182,7 @@ class _AncestorClosure:
     Control-dependence edges are not followed (data-only, like the default
     backward query). Strongly connected components share one value."""
 
-    def __init__(self, graph, operation_of) -> None:
+    def __init__(self, graph, operation_of, origin_labels=None) -> None:
         from .graph import CONTROL_DEPENDENCE_EDGE
 
         self.graph = graph
@@ -211,7 +217,8 @@ class _AncestorClosure:
                 item in carriers for item in self.predecessors.get(node, ())
             ) else frozenset()
             debts = frozenset((record.label,)) if record.kind is NodeKind.MEMORY_DEBT else frozenset()
-            self.own[node] = (frozenset(own_sources.get(node, ())), readers, debts)
+            origins = frozenset((origin_labels or {}).get(node, ()))
+            self.own[node] = (frozenset(own_sources.get(node, ())), readers, debts, origins)
         self.value: dict[int, tuple] = {}
 
     def of(self, node: int):
@@ -263,12 +270,13 @@ class _AncestorClosure:
                     if item == node:
                         break
                 members = set(component)
-                sources, readers, debts = set(), set(), set()
+                sources, readers, debts, origins = set(), set(), set(), set()
                 for item in component:
-                    own = self.own.get(item, (frozenset(), frozenset(), frozenset()))
+                    own = self.own.get(item, (frozenset(), frozenset(), frozenset(), frozenset()))
                     sources |= own[0]
                     readers |= own[1]
                     debts |= own[2]
+                    origins |= own[3]
                     for parent_node in self.predecessors.get(item, ()):
                         if parent_node in members:
                             continue
@@ -276,7 +284,8 @@ class _AncestorClosure:
                         sources |= found[0]
                         readers |= found[1]
                         debts |= found[2]
-                value = (frozenset(sources), frozenset(readers), frozenset(debts))
+                        origins |= found[3]
+                value = (frozenset(sources), frozenset(readers), frozenset(debts), frozenset(origins))
                 for item in component:
                     self.value[item] = value
 
@@ -318,6 +327,77 @@ def _uncertain_address_writers(normalized, observation, context, operation_of) -
     return found
 
 
+class _CopyTracer:
+    """Follows a definition's value back through COPY, LOAD and STORE (same
+    size, no debt on the loads, single reaching definitions) to an ENTRY
+    definition: ``trace(definition, span)`` is the entry span the value of
+    ``span`` was copied from, or None."""
+
+    def __init__(self, normalized, observation, context, operation_of) -> None:
+        from .normalize import _storage_ref
+        from .storage import _resolve_validated_storage
+
+        self._resolve = lambda varnode: _resolve_validated_storage(_storage_ref(varnode), context)
+        ssa = normalized.memory_ssa
+        self.definitions = ssa.definitions
+        keys = [action.operation_key for action in ssa.actions]
+        self.reads: dict[str, list] = {}
+        for read in ssa.reads:
+            self.reads.setdefault(keys[read.action_id], []).append(read)
+        self.operations = {
+            f"{row.address.space_id:x}:{row.address.byte_offset:x}:{ordinal}:{operation.opcode}": operation
+            for row in observation.instructions for ordinal, operation in enumerate(row.operations)
+        }
+        graph = normalized.dependencies
+        node_of = {key: node for node, key in operation_of.items()}
+        self.indebted = {
+            key for key, node in node_of.items()
+            if any(graph.node(item).kind is NodeKind.MEMORY_DEBT for item in graph.predecessors(node))
+        }
+
+    def trace(self, definition_id: int, span: ByteSpan, depth: int = 0):
+        if depth > 64:
+            return None
+        definition = self.definitions[definition_id]
+        if definition.kind is MemoryDefinitionKind.ENTRY:
+            return span if definition.span.contains(span) else None
+        key = definition.operation_key
+        operation = self.operations.get(key)
+        if definition.kind is not MemoryDefinitionKind.DATA_WRITE or operation is None                 or key in self.indebted or not definition.span.contains(span):
+            return None
+        offset = span.start - definition.span.start
+        if operation.opcode == "COPY" and len(operation.inputs) == 1:
+            value = operation.inputs[0]
+        elif operation.opcode == "STORE" and len(operation.inputs) == 3:
+            value = operation.inputs[2]
+        elif operation.opcode == "LOAD" and operation.output is not None:
+            value = None
+        else:
+            return None
+        if value is not None:
+            if value.byte_size != definition.span.size:
+                return None
+            resolved = self._resolve(value)
+            if type(resolved) is not ResolvedStorage:
+                return None
+            source = resolved.span
+        else:
+            memory = [read.span for read in self.reads.get(key, ())
+                      if read.span.object_id.kind in _MEMORY_KINDS
+                      and read.span.size == definition.span.size]
+            if len(memory) != 1:
+                return None
+            source = memory[0]
+        requested = ByteSpan(source.object_id, source.start + offset, span.size)
+        for read in self.reads.get(key, ()):
+            if read.span != source:
+                continue
+            for fragment in read.fragments:
+                if fragment.span.contains(requested) and len(fragment.definition_ids) == 1:
+                    return self.trace(fragment.definition_ids[0], requested, depth + 1)
+        return None
+
+
 def _object_spans(atoms, start: int, stop: int):
     """Split an atom range into maximal contiguous spans of one object."""
     current = None
@@ -333,8 +413,16 @@ def _object_spans(atoms, start: int, stop: int):
         yield current
 
 
-def _classify(span, definition_ids, definitions, definition_slice, crossed_by_offset, uncertain):
-    sources, readers, debts, writers = set(), set(), set(), set()
+def _classify(span, definition_ids, definitions, definition_slice, crossed_by_offset, uncertain,
+              tracer=None):
+    if tracer is not None and definition_ids and all(
+            tracer.trace(definition_id, span) == span for definition_id in definition_ids):
+        # the value is the entry value of these very bytes, copied through
+        # registers and memory (e.g. a callee-saved register pushed and popped)
+        definition_ids_for_identity = definition_ids
+    else:
+        definition_ids_for_identity = None
+    sources, readers, debts, writers, origins = set(), set(), set(), set(), set()
     identity = True
     for definition_id in definition_ids:
         definition = definitions[definition_id]
@@ -346,10 +434,11 @@ def _classify(span, definition_ids, definitions, definition_slice, crossed_by_of
         identity = False
         if definition.operation_key is not None:
             writers.add(definition.operation_key)
-        found_sources, found_readers, found_debts = definition_slice(definition_id)
+        found_sources, found_readers, found_debts, found_origins = definition_slice(definition_id)
         sources |= found_sources
         readers |= found_readers
         debts |= found_debts
+        origins |= found_origins
     crossings = set()
     for offset in range(span.start, span.end):
         crossings |= crossed_by_offset.get(offset, frozenset())
@@ -358,14 +447,14 @@ def _classify(span, definition_ids, definitions, definition_slice, crossed_by_of
     crossings |= {f"uncertain:{writer}" for writer in writers & uncertain}
     if crossings:
         kind = SummaryKind.UNKNOWN
-    elif identity:
+    elif identity or definition_ids_for_identity is not None:
         kind = SummaryKind.IDENTITY
     else:
         kind = SummaryKind.COMPUTED
     return SummaryRun(
         span, kind, tuple(sorted(definition_ids)), tuple(sorted(writers)),
         tuple(sorted(sources, key=lambda item: item.canonical_key)), tuple(sorted(readers)),
-        tuple(sorted(debts)), tuple(sorted(crossings)),
+        tuple(sorted(debts)), tuple(sorted(crossings)), tuple(sorted(origins)),
     )
 
 

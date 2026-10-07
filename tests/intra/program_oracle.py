@@ -119,6 +119,24 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
                             bucket = report.covered_by_debt if not result.is_complete else report.silent
                             bucket.append((dependency, "call input not reached", tag))
                     continue
+            if isinstance(writer, str) and writer in proven:
+                tags = run.call_reads.get((dependency.reader, dependency.space_id, dependency.offset), ())
+                same = [tag for tag in tags if tag[0] == "ext"
+                        and (tag[2], tag[3]) == (dependency.space_id, dependency.offset)]
+                reached_runs = _covering_runs(proven, writer, dependency.space_id, dependency.offset,
+                                              set(result.result.reachable_nodes), reg_space)
+                if same and not reached_runs:
+                    # the call copied the byte's own pre-call value back (e.g. a
+                    # callee-saved register pushed and popped) and its summary
+                    # says the byte is preserved (IDENTITY, value-checked by the
+                    # summary oracle): the real writer is the pre-call one
+                    earlier = same[0][1]
+                    if isinstance(earlier, str) and earlier in proven:
+                        # an earlier summarized call that also kept the byte: the
+                        # same preservation edge, already accepted for that call
+                        continue
+                    dependency = Dependency(dependency.reader, dependency.space_id,
+                                            dependency.offset, earlier)
             if _covered(function, graph, result, dependency, reg_space, unique_space):
                 continue
             bucket = report.covered_by_debt if not result.is_complete else report.silent
