@@ -506,3 +506,27 @@ typed debt로 끝나며 (3) 예측 가능한 비용으로 돈다**는 것을 먼
   generation). 도구 `tools/graph_fidelity/ssa_snapshot.py` (dump/compare, 결정적 — 같은 입력 두 번
   비교 0 차이), `golden_all.sh dump|compare <dir>`. 이후 변경은
   `golden_all.sh compare <골든> <새 결과>` 가 0이어야 한다(의도된 변경이면 골든 v2로 갱신하고 사유 기록).
+
+## 10. 10_tdo_UE_testbed 재export와 검증 (2026-10-07)
+
+- `tools/bundle_export/ue_export.sh`: cpp_like `.so` 4종(P0/P1 × x64/x86, 11케이스)과 UE 모듈
+  DLL 2종(Development 22케이스, DebugGame) → `/root/tdo_bundles/ue-*`. 인라인으로 사라진 이름은
+  하나씩 제외하며 재시도(이번엔 제외 0).
+- **IAT 점프 입장**: `jmp [__imp_X]` (Ghidra는 computed jump로 분류)의 흐름 대상이 EXTERNAL 공간이라
+  UE DLL 세션이 50번째 함수에서 멈췄다. EXTERNAL 공간은 이 함수의 코드가 아니므로 호출뿐 아니라
+  모든 명령의 EXTERNAL 대상을 후속에서 제외(점프는 함수를 떠남). 다른 비메모리 대상은 여전히 실패.
+  테스트 `tests/intra/test_import_targets.py` (synthetic에 EXTERNAL 공간 추가).
+- **검증기 규칙 수정**: 호출의 반환주소 push가 남긴 스택 바이트를 주소 미상 읽기(`rep movsb`,
+  unresolved_memory_read 부채)가 읽으면, 메모리 바이트에 대해 "주소 미상"을 설명으로 인정
+  (CALL 작성자에 대해서만 이 규칙이 빠져 있었음). 엔진 변경 없음.
+- **지표 도구 ABI 수정**: TEST-ONLY 경계 규칙의 sink 인자 레지스터가 Windows x64(RCX) 고정이라
+  ELF에서 엉뚱한 레지스터를 추적("source 없음 + 확실" 11건, 측정 도구 오류). Bundle 원본 헤더로
+  PE→RCX, ELF→RDI 선택(`run_dfbench.abi_of`). 32비트(스택 인자)는 규칙으로 표현 불가 → 지표 미지원.
+  `dfbench_metric.sh` 는 10 UE 정답 형식(expected_data_sources 등)도 읽고, 각 실행에 timeout.
+- 결과 (기본·가정 모드 모두, 누락 0 · 설명 안 되는 누락 0 · 제어 위반 0 · 건너뜀 0 · 실패 0):
+  cpp_like 4종 각 16함수, UE DLL Development 71함수(의존 31만), DebugGame 119함수(의존 81만).
+- 케이스 지표(x64): cpp P1 기본 정확 10/11, 가정 11/11(확실 10). cpp P0(-O0) 기본 1/11, 가정 9/11,
+  누락+확실 0. UE DLL은 함수 간 계층에서 끝나지 않음(win32와 같은 `configured_write_event_engine`
+  / `configured_origin_projection` 경로) → 함수 간 작업 때 확인.
+- 골든 **v2** (`D:\01_gitproject\14_TDO_v2\golden\v2`, 20MB): v1(현재 코드와 0 차이) + UE 12세트,
+  총 1,260 함수-모드.

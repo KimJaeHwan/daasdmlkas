@@ -29,6 +29,7 @@ from tdo_v2.query import BackwardSliceQuery
 
 # Space ids are arbitrary; only the classification flags matter.
 CONST, RAM, REG, UNIQUE = 0, 1, 2, 3
+EXTERNAL = 4  # Ghidra EXTERNAL space (imported symbols)
 
 # Ghidra x86-64 register offsets.
 RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI = (
@@ -284,7 +285,7 @@ def straight(*instructions: list[tuple], realistic_return: bool = False) -> Func
 # Program provider
 # --------------------------------------------------------------------------
 
-def _space(space_id, *, const=False, reg=False, unique=False, mem=False):
+def _space(space_id, *, const=False, reg=False, unique=False, mem=False, external=False):
     return {
         "space_id": space_id,
         "address_size_bits": 64,
@@ -294,7 +295,7 @@ def _space(space_id, *, const=False, reg=False, unique=False, mem=False):
         "is_unique_space": unique,
         "is_memory_space": mem,
         "is_overlay_space": False,
-        "is_external_space": False,
+        "is_external_space": external,
         "is_loaded_memory_space": mem,
         "is_non_loaded_memory_space": False,
         "has_signed_offset": False,
@@ -348,6 +349,7 @@ class _Provider:
                 _space(RAM, mem=True),
                 _space(REG, reg=True),
                 _space(UNIQUE, unique=True),
+                _space(EXTERNAL, external=True),
             ],
             "image_base": {"space_id": RAM, "byte_offset": CODE_BASE},
         }))

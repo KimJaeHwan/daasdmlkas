@@ -70,7 +70,8 @@ def dump(args) -> int:
         sys.path.insert(0, str(REPO / "tools" / "bundle_export"))
         import run_dfbench
         from tdo_v2.engine import assumed_boundary_effects
-        provider = run_dfbench.boundary_provider(assume_call_effect=True)
+        provider = run_dfbench.boundary_provider(
+            assume_call_effect=True, abi=run_dfbench.abi_of(Path(args.generation)))
     binding = NamingBindingExpectation(
         sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
         CALL_NAMING_GHIDRA_VERSION,

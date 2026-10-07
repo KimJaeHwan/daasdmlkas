@@ -79,7 +79,8 @@ def main() -> int:
         sys.path.insert(0, str(REPO / "tools" / "bundle_export"))
         import run_dfbench
         from tdo_v2.engine import assumed_boundary_effects
-        provider = run_dfbench.boundary_provider(assume_call_effect=True)
+        provider = run_dfbench.boundary_provider(
+            assume_call_effect=True, abi=run_dfbench.abi_of(args.generation))
         print("[measure] TEST-ONLY ASSUMPTION: boundary call effects are declared, "
               "not observed", file=sys.stderr)
     binding = NamingBindingExpectation(

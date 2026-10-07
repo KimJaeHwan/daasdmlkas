@@ -94,9 +94,14 @@ def _covered(function, graph, result, dependency, reg_space=REG, unique_space=UN
         node = graph.node_for_key(f"op:{writer}")
         if node is not None and node in reachable:
             return True
-        # bytes an opaque call may have produced: the reader must carry call debt
+        # bytes an opaque call may have produced (or its transient return-address
+        # push left behind): the reader must carry call debt, or -- for memory --
+        # read through an address the graph declares unknown (any byte possible)
         if writer.rsplit(":", 1)[1] in ("CALL", "CALLIND", "CALLOTHER"):
-            return _direct_debt(graph, dependency.reader, "call_clobber_read")
+            return _direct_debt(graph, dependency.reader, "call_clobber_read") or (
+                dependency.space_id not in (reg_space, unique_space)
+                and _memory_address_unknown(graph, dependency.reader)
+            )
         # a memory byte read through an address that a call may have changed
         return dependency.space_id not in (reg_space, unique_space) and _memory_address_unknown(
             graph, dependency.reader

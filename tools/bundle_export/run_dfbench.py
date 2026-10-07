@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Run tdo_v2.engine.analyze_frozen_bundle on a DataFlowBench Bundle (WSL).
 
-Boundary table (Windows x64, Ghidra language x86:LE:64:default, register
-space offsets RAX=0x0, RCX=0x8):
+Boundary table (x86-64, Ghidra language x86:LE:64:default, register
+space offsets RAX=0x0, RCX=0x8, RDI=0x38). The first-argument register
+depends on the ABI, chosen from the Bundle's original binary (``abi_of``):
+PE -> Windows x64 (RCX), ELF -> System V (RDI). 32-bit x86 passes arguments
+on the stack, which these register rules cannot express: unsupported.
   sources dfb_source_A/B/C, dfb_source_long_A  -> EAX  (0x0, 4)  label "<name>.ret"
   source  dfb_source_buf_A                      -> RAX  (0x0, 8)
-  sinks   dfb_sink_int, dfb_sink_long (LLP64)   -> ECX  (0x8, 4)  label "<name>.arg0"
-  sinks   dfb_sink_ptr, dfb_sink_buf            -> RCX  (0x8, 8)
+  sinks   dfb_sink_int, dfb_sink_long           -> ECX/EDI (4)    label "<name>.arg0"
+  sinks   dfb_sink_ptr, dfb_sink_buf            -> RCX/RDI (8)
 The engine resolves a SOURCE selector in the callee's own view at its end,
 so the source function must be inside the Bundle (the exporter's call
 closure includes it); a SINK selector is resolved in the caller before the
@@ -35,7 +38,22 @@ SOURCES = {"dfb_source_A": 4, "dfb_source_B": 4, "dfb_source_C": 4,
 SINKS = {"dfb_sink_int": 4, "dfb_sink_long": 4, "dfb_sink_ptr": 8, "dfb_sink_buf": 8}
 
 
-def boundary_provider(assume_call_effect: bool = False):
+FIRST_ARGUMENT = {"win64": 0x8, "sysv64": 0x38}  # RCX / RDI
+
+
+def abi_of(generation: Path) -> str:
+    """'win64' (PE) or 'sysv64' (ELF) from the Bundle's original binary."""
+    manifest = json.loads((generation / "manifest.json").read_text(encoding="utf-8"))
+    paths = {row["id"]: row["path"] for row in manifest["members"]}
+    head = (generation / paths[manifest["original_member_id"]]).read_bytes()[:4]
+    if head[:2] == b"MZ":
+        return "win64"
+    if head == b"\x7fELF":
+        return "sysv64"
+    raise ValueError(f"unknown executable format: {head!r}")
+
+
+def boundary_provider(assume_call_effect: bool = False, abi: str = "win64"):
     """``assume_call_effect``: TEST-ONLY declared source/sink call effects."""
     from tdo_v2.boundary import BoundaryKind
     from tdo_v2.boundary_rules import BoundaryRule, SymbolBoundaryProvider
@@ -45,7 +63,8 @@ def boundary_provider(assume_call_effect: bool = False):
                           (PhysicalRegisterSlice(0x0, size),), assume_call_effect)
              for name, size in SOURCES.items()]
     rules += [BoundaryRule(name, LANGUAGE, BoundaryKind.SINK, f"{name}.arg0",
-                           (PhysicalRegisterSlice(0x8, size),), assume_call_effect)
+                           (PhysicalRegisterSlice(FIRST_ARGUMENT[abi], size),),
+                           assume_call_effect)
               for name, size in SINKS.items()]
     return SymbolBoundaryProvider(tuple(rules))
 
@@ -74,6 +93,7 @@ def main() -> int:
     from tdo_v2.engine import analyze_frozen_bundle
 
     generation = args.generation
+    print(f"[run] ABI {abi_of(generation)} (boundary argument register)")
     manifest = json.loads((generation / "manifest.json").read_text(encoding="utf-8"))
     names = selection_names(generation)
     by_entry = {}
@@ -88,7 +108,8 @@ def main() -> int:
         run = analyze_frozen_bundle(
             generation,
             naming_exporter_source=REPO / "ghidra" / "GhidraV2CallNaming.java",
-            boundary_provider=boundary_provider(args.assume_boundary_effects),
+            boundary_provider=boundary_provider(args.assume_boundary_effects,
+                                                abi_of(generation)),
             include_explanations=False,
             assume_boundary_call_effects=args.assume_boundary_effects,
         )

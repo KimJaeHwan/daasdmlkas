@@ -156,12 +156,12 @@ def _parse_instruction(
     fallthrough = _optional_coordinate(raw, "fallthrough_present", "fallthrough", index, defects)
     data_references = _data_references(raw, index, defects)
     flow = _instruction_flow(raw, defects)
-    # A call (or tail call) through an import can name a target in Ghidra's
-    # EXTERNAL space (e.g. `call [__imp_X]`); it is not program memory and not a
-    # control successor, so it is not retained -- the naming sidecar carries it.
-    targets = _flow_targets(
-        raw, index, defects, external_calls=flow is not None and flow.is_call
-    )
+    # A call or jump through an import names a target in Ghidra's EXTERNAL
+    # space (`call [__imp_X]`, `jmp [__imp_X]`, which Ghidra types as a computed
+    # jump); it is not program memory and never this function's code, so it is
+    # not a control successor: a jump there leaves the function. It is not
+    # retained -- the naming sidecar carries call targets.
+    targets = _flow_targets(raw, index, defects, external_targets=True)
     operations_field = _field(raw, "operations")
     operations: tuple[ValidatedOperation, ...] = ()
     if operations_field.state is _FieldState.MISSING:
@@ -374,7 +374,7 @@ def _flow_targets(
     index: _AddressSpaceIndex,
     defects: _ObservationDefects,
     *,
-    external_calls: bool = False,
+    external_targets: bool = False,
 ) -> tuple[AddressCoordinate, ...]:
     field = _field(raw, "flow_targets")
     if field.state is _FieldState.MISSING:
@@ -397,7 +397,7 @@ def _flow_targets(
         target = _observation_coordinate(raw_target, defects)
         if target is not None:
             if not index.memory_coordinate(target):
-                if external_calls and index.external_coordinate(target):
+                if external_targets and index.external_coordinate(target):
                     continue
                 defects.invalid = True
             targets.append(target)

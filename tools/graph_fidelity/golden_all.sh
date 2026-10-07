@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Snapshot (dump) or compare normalization results for the whole verification
-# set: corpus variants, 09 v2 Bundles (default + TEST-ONLY assumed), zlib. WSL.
+# set: corpus variants, 09 v2 Bundles and 10 UE Bundles (default + TEST-ONLY
+# assumed), zlib. WSL.
 # usage: golden_all.sh dump <dir>
 #        golden_all.sh compare <dir-a> <dir-b> [--terminal-runs-only]
 set -u
@@ -14,6 +15,9 @@ for name in v2-win-release v2-win-debug-subset v2-win32-release; do
   SETS+=("$name|$(gen /root/tdo_bundles/$name)|" "$name-assumed|$(gen /root/tdo_bundles/$name)|--assume-boundary-effects")
 done
 SETS+=("zlib|$(gen /root/tdo_bundles/zlib)|")
+for name in ue-cpp-P0-x64 ue-cpp-P1-x64 ue-cpp-P0-x86 ue-cpp-P1-x86 ue-dll-development ue-dll-debuggame; do
+  SETS+=("$name|$(gen /root/tdo_bundles/$name)|" "$name-assumed|$(gen /root/tdo_bundles/$name)|--assume-boundary-effects")
+done
 cmd=$1; shift
 status=0
 for item in "${SETS[@]}"; do
