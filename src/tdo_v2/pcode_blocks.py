@@ -71,15 +71,18 @@ def has_internal_flow(instruction) -> bool:
 
 
 def build_pcode_block_graph(
-    observation: ValidatedFunctionObservation, entry: AddressCoordinate
+    observation: ValidatedFunctionObservation, entry: AddressCoordinate,
+    straight: frozenset = frozenset(),
 ) -> PcodeBlockGraph:
+    """``straight``: instruction addresses whose internal flow is modelled as
+    one block (recognized ``rep`` string instructions, ``rep_strings``)."""
     instructions = {row.address: row for row in observation.instructions}
     local = set(instructions)
     blocks: dict[str, PcodeBlock] = {}
     for address in sorted(instructions):
         row = instructions[address]
         key = instruction_key(address)
-        if not has_internal_flow(row):
+        if not has_internal_flow(row) or address in straight:
             raw = control_successor_coordinates(row, local_addresses=local, function_entry=entry)
             successors = tuple(instruction_key(target) for target in raw if target in local)
             blocks[key] = PcodeBlock(

@@ -63,6 +63,7 @@ def project_function_relative_memory(
     translation_namespace: str = "",
     anchored_accesses: dict | None = None,
     readonly_image=None,
+    operation_overrides: dict | None = None,
 ) -> ObservedEffectUnit:
     """Resolve provably equal indirect addresses, preserving all other debt.
 
@@ -96,6 +97,9 @@ def project_function_relative_memory(
         for instruction in observation.instructions
         for ordinal, operation in enumerate(instruction.operations)
     }
+    # rep string sites (``normalize._rep_overrides``): what the evaluator sees
+    # for their one-iteration operations (None: unknown)
+    operations.update(operation_overrides or {})
     projector = _Projector(
         context,
         address_spaces,
@@ -194,6 +198,7 @@ def _final_projector(normalized, observation) -> "_Projector":
         for instruction in observation.instructions
         for ordinal, operation in enumerate(instruction.operations)
     }
+    operations.update(dict(normalized.operation_overrides))
     return _Projector(
         scopes.resolution_context, scopes.program.evidence.address_spaces, normalized.memory_ssa,
         operations, OpaqueValueEvidenceResolver(NullOpaqueValueEvidenceProvider()),
@@ -218,6 +223,34 @@ def stack_offset_at(memory_ssa, observation, scopes, operation_key, varnode, sta
     if expression is None or expression.atoms != ((_stable_storage_key(stack_span), 1),):
         return None
     return _signed_wrap(expression.displacement, expression.byte_size)
+
+
+def expressions_at(memory_ssa, observation, scopes, requests, overrides=None) -> dict:
+    """``requests``: (operation key, input varnode). Returns request ->
+    (has atoms, displacement, is exactly the entry value of that varnode's
+    storage) for the varnode's value at that operation, or None."""
+    operations = {
+        _operation_key(instruction.address, ordinal, operation): operation
+        for instruction in observation.instructions
+        for ordinal, operation in enumerate(instruction.operations)
+    }
+    operations.update(overrides or {})
+    projector = _Projector(
+        scopes.resolution_context, scopes.program.evidence.address_spaces, memory_ssa, operations,
+        OpaqueValueEvidenceResolver(NullOpaqueValueEvidenceProvider()),
+        scopes.program.evidence.translation_namespace.language_id,
+    )
+    found = {}
+    for operation_key, varnode in requests:
+        expression = projector._expression_for_input(operation_key, varnode)
+        if expression is None:
+            found[(operation_key, varnode)] = None
+            continue
+        span = projector._resolved_span(varnode)
+        entry = span is not None and expression.atoms == ((_stable_storage_key(span), 1),)             and expression.displacement == 0
+        found[(operation_key, varnode)] = (
+            bool(expression.atoms), _unsigned_wrap(expression.displacement, expression.byte_size), entry)
+    return found
 
 
 def project_anchored_after(normalized, observation, requests) -> dict:

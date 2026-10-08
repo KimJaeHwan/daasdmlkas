@@ -20,6 +20,7 @@ from .control_dependence import (
     derive_control_dependences,
 )
 from .pcode_blocks import build_pcode_block_graph
+from .rep_strings import MAX_REP_BYTES, rep_sites
 from .may_alias import MayAliasRead, derive_may_alias_reads
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
@@ -126,6 +127,13 @@ class NormalizedFunction:
     call_below_bounds: tuple[tuple[str, object, int], ...] = ()
     # named assumption readonly-image-data-is-constant was given (``image_info``)
     assumes_readonly_image_constant: bool = False
+    # rep string sites made exact (``rep_strings``): (instruction key, count,
+    # direction); the evaluator's overrides of their operations
+    rep_blocks: tuple = ()
+    operation_overrides: tuple = ()
+    # named assumption direction-flag-clear was used (a rep site whose DF is
+    # the function's entry value)
+    assumed_direction_flag_clear: bool = False
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -434,6 +442,121 @@ class NormalizedFunction:
 _CALL_EFFECT_TEMPORARY_BASE = 1 << 48
 
 
+def _rep_overrides(sites, plan, observation) -> dict:
+    """Operation key -> the operation the address evaluator sees instead (None:
+    unknown) for rep sites in a straight block: the count register ends 0;
+    the pointer registers end advanced by direction * n * size once proven,
+    unknown before; the element-0 access is unresolved until proven (n may be
+    0). The data-dependency effects of these operations are unchanged."""
+    found: dict = {}
+    for address, site in sites.items():
+        zero = ValidatedVarnode(VarnodeKindCode.CONSTANT, AddressCoordinate(site.constant_space, 0),
+                                site.count.byte_size)
+        found[site.count_def_key] = ValidatedOperation("COPY", (zero,), site.count)
+        proven = plan.get(address)
+        for key, add, register in ((site.destination_def_key, site.destination_add, site.destination),
+                                   (site.source_def_key, site.source_add, site.source)):
+            if key is None:
+                continue
+            if proven is None:
+                found[key] = None
+                continue
+            count, direction = proven
+            bits = 8 * register.byte_size
+            delta = (direction * count * site.size - site.size) % (1 << bits)
+            found[key] = ValidatedOperation(
+                "INT_ADD",
+                (add, ValidatedVarnode(VarnodeKindCode.CONSTANT, AddressCoordinate(site.constant_space, delta),
+                                       register.byte_size)),
+                register,
+            )
+        if proven is None or proven[0] == 0:
+            for key in (site.load_key, site.store_key):
+                if key is not None:
+                    found[key] = None
+    return found
+
+
+def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, assume_clear) -> dict:
+    """Sites whose count (at the instruction start) and direction become
+    proven on the current SSA: address -> (n, direction, used the assumption)."""
+    from .relative_memory import expressions_at
+
+    pending = {address: site for address, site in sites.items() if address not in plan}
+    if not pending:
+        return {}
+    requests = []
+    for site in pending.values():
+        requests.append((site.count_key, site.count))
+        requests.append((site.direction_key, site.direction))
+    values = expressions_at(memory_ssa, observation, scopes, requests, overrides)
+    found = {}
+    for address, site in pending.items():
+        count = values.get((site.count_key, site.count))
+        if count is None or count[0]:
+            continue
+        flag = values.get((site.direction_key, site.direction))
+        if flag is None:
+            continue
+        atoms, value, entry = flag
+        assumed = False
+        if not atoms and value in (0, 1):
+            direction = 1 if value == 0 else -1
+        elif entry and assume_clear:
+            direction, assumed = 1, True
+        else:
+            continue
+        n = count[1]
+        if n * site.size > MAX_REP_BYTES:
+            continue
+        found[address] = (n, direction, assumed)
+    return found
+
+
+def _rep_element_rows(site, proven, block_key, scope, context, temporaries):
+    """Elements 1..n-1 of a proven rep site, in iteration order after the
+    real element-0 LOAD/STORE: each reads its element through the site's
+    element address (anchored at the real access, displaced by i * size)."""
+    count, direction = proven
+    rows: list[ObservedEffect] = []
+    anchored: dict = {}
+
+    def resolved(varnode):
+        result = _resolve_validated_storage(_storage_ref(varnode), context)
+        if type(result) is not ResolvedStorage:
+            raise AssertionError("rep site varnodes must resolve")
+        return result
+
+    def temporary():
+        span = ResolvedStorage(ByteSpan(
+            StorageObjectId(StorageObjectKind.FUNCTION_UNIQUE, scope, 0),
+            _CALL_EFFECT_TEMPORARY_BASE + 16 * len(temporaries), site.size,
+        ))
+        temporaries.append(span)
+        return span
+
+    for index in range(1, count):
+        displacement = direction * index * site.size
+        if site.load_key is not None:   # movs: v = [ts + d]; w = v; [td + d] = w
+            key = f"{site.load_key}~e{index}"
+            rows.append(ObservedEffect(
+                key, EffectKind.COPY, reads=(resolved(site.source_temp),), writes=(resolved(site.load_output),),
+                memory_read=UnresolvedMemoryAccess(None, site.size), block_key=block_key,
+            ))
+            anchored[key] = (site.load_key, site.source_temp, displacement, site.size, site.space_id)
+            rows.append(ObservedEffect(
+                f"{site.value_copy_key}~e{index}", EffectKind.COPY, reads=(resolved(site.load_output),),
+                writes=(resolved(site.value),), block_key=block_key,
+            ))
+        key = f"{site.store_key}~e{index}"
+        rows.append(ObservedEffect(
+            key, EffectKind.COPY, reads=(resolved(site.destination_temp), resolved(site.value)), writes=(),
+            memory_write=UnresolvedMemoryAccess(None, site.size), block_key=block_key,
+        ))
+        anchored[key] = (site.store_key, site.destination_temp, displacement, site.size, site.space_id)
+    return rows, anchored
+
+
 def _call_stack_span(call_key, proven, transitions, observation, context):
     """The caller's stack-pointer register span at a summarized call that
     clobbers below it (call shape base, or the tail jump's stack pointer)."""
@@ -696,6 +819,7 @@ class FunctionNormalizer:
         proven_call_effects: dict[str, ProvenCallEffect] | None = None,
         assume_globals_disjoint_from_stack: bool = False,
         readonly_image=None,
+        assume_direction_flag_clear: bool = False,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
         declared effect; see ``tdo_v2.assumed_call_effects``.
@@ -728,6 +852,7 @@ class FunctionNormalizer:
             proven_call_effects=proven_call_effects or {},
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             readonly_image=readonly_image,
+            assume_direction_flag_clear=assume_direction_flag_clear,
         )
 
     def normalize_configured(
@@ -776,6 +901,7 @@ class _ScopedNormalizer:
         proven_call_effects: dict[str, ProvenCallEffect] | None = None,
         assume_globals_disjoint_from_stack: bool = False,
         readonly_image=None,
+        assume_direction_flag_clear: bool = False,
     ) -> NormalizedFunction:
         assumed_call_effects = dict(assumed_call_effects or {})
         proven_call_effects = dict(proven_call_effects or {})
@@ -810,162 +936,190 @@ class _ScopedNormalizer:
         cfg = self._build_cfg(observation, function.entry)
         cfg.freeze()
         terminal_cuts = project_observed_terminal_cuts(unit.scopes, observation, cfg)
-        dependencies = RustworkxDependencyGraph()
-        effects: list[ObservedEffect] = []
-        staged_temporaries: list = []
-        anchored_call_accesses: dict = {}
-        call_transitions = {
-            row.call_operation_key: row.memory_transition
-            for row in observed_call_state_projections(observation)
-        } if proven_call_effects else {}
-        operation_nodes: dict[str, NodeId] = {}
-        constant_inputs: dict[str, list[tuple[int, NodeId]]] = {}
-
-        block_graph = build_pcode_block_graph(observation, function.entry)
-        if block_graph.unsupported is not None:
-            raise AssertionError("admitted normalization has unsupported p-code flow")
-        operation_blocks = {
-            (block.instruction, ordinal): block.key
-            for block in block_graph.blocks
-            for ordinal in range(block.start, block.stop)
-        }
-        for instruction in sorted(observation.instructions, key=lambda item: item.address):
-            for ordinal, operation in enumerate(instruction.operations):
-                operation_key = _operation_key(instruction, ordinal, operation)
-                operation_nodes[operation_key] = dependencies.add_node(
-                    NodeRecord(f"op:{operation_key}", NodeKind.OPERATION, operation.opcode)
-                )
-                operation_node = operation_nodes[operation_key]
-                effect = _scoped_effect(instruction, ordinal, operation, context)
-                if operation_key in assumed_call_effects:
-                    effect = _assumed_call_writes(
-                        effect, assumed_call_effects[operation_key], operation, context,
-                        _register_space_id(observation),
-                    )
-                block_key = operation_blocks.get((instruction.address, ordinal))
-                if block_key is not None and block_key != effect.block_key:
-                    # an operation in a p-code sub-block of an instruction with
-                    # internal control flow (pcode_blocks)
-                    effect = replace(effect, block_key=block_key)
-                for input_ordinal, varnode in enumerate(operation.inputs):
-                    if input_ordinal < _data_input_start(operation.opcode):
-                        continue
-                    if varnode.kind is VarnodeKindCode.OPAQUE:
-                        continue
-                    storage_ref = _storage_ref(varnode)
-                    resolved = _resolve_validated_storage(storage_ref, context)
-                    if type(resolved) is NonStorage:
-                        storage_key = _storage_key(storage_ref, resolved)
-                        constant_node = dependencies.add_node(
-                            NodeRecord(
-                                f"constant:{storage_key}",
-                                NodeKind.CONSTANT,
-                                storage_key,
-                            )
-                        )
-                        constant_inputs.setdefault(operation_key, []).append(
-                            (input_ordinal, constant_node)
-                        )
-                if block_key is not None and operation_key in proven_call_effects:
-                    # the callee's proven effects, placed just before the CALL so
-                    # their writes survive it (the call preserves them, see
-                    # call_clobber); every run reads the values at the call
-                    rows, anchored = _proven_call_rows(
-                        operation_key, proven_call_effects[operation_key], block_key,
-                        function.scope, _register_space_id(observation) or _program_register_space(unit),
-                        call_transitions, staged_temporaries,
-                        _call_stack_span(operation_key, proven_call_effects[operation_key],
-                                         call_transitions, observation, context),
-                    )
-                    for row in rows:
-                        operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
-                            f"op:{row.operation_key}", NodeKind.OPERATION,
-                            _CALL_EFFECT_LABELS[row.operation_key.rsplit("~", 1)[1].rstrip("0123456789")],
-                        ))
-                        effects.append(row)
-                    anchored_call_accesses.update(anchored)
-                if block_key is not None:
-                    effects.append(effect)  # operations in unreachable sub-blocks never run
-
-        call_effects = None
-        if configured_call_effects is None:
-            raw_call_ports = derive_raw_call_ports(call_seeds, context)
-            call_effects = unavailable_call_effect_evidence(
-                call_seeds,
-                raw_ports=raw_call_ports,
-            )
-
-        predecessors: dict[str, set[str]] = {block.key: set() for block in block_graph.blocks}
-        for block in block_graph.blocks:
-            for successor in block.successors:
-                if successor in predecessors:
-                    predecessors[successor].add(block.key)
-        effects_by_block: dict[str, list[ObservedEffect]] = {
-            block.key: [] for block in block_graph.blocks
-        }
-        for effect in effects:
-            assert effect.block_key is not None
-            effects_by_block[effect.block_key].append(effect)
-        effect_unit = ObservedEffectUnit(
-            EFFECT_DECODE_CONTRACT_VERSION,
-            function.scope,
-            _coordinate_key(function.entry),
-            tuple(
-                ObservedEffectBlock(
-                    block_key,
-                    tuple(sorted(predecessors[block_key])),
-                    tuple(effects_by_block[block_key]),
-                )
-                for block_key in effects_by_block
-            ),
-            tuple(sorted(block.key for block in block_graph.blocks if not block.successors)),
-            effect_evidence_digest=(
-                configured_call_effects.canonical_digest
-                if configured_call_effects is not None
-                else call_effects.effect_evidence_digest
-            ),
-        )
-        if configured_call_effects is not None:
-            effect_unit = augment_configured_call_effects_v4(
-                effect_unit,
-                configured_call_effects,
-            )
-        effect_unit = project_persistent_call_state(effect_unit, observation)
-        memory_unit = decode_effect_unit(effect_unit)
-        memory_binding = build_bound_local_memory_ssa(memory_unit)
-        memory_ssa = memory_binding.result
-        program = unit.scopes.program
-        address_spaces = program.evidence.address_spaces
-        # Each productive pass resolves at least one unresolved access, so the
-        # number of passes is bounded by those accesses (+1 for the fixed point).
-        projection_budget = 1 + sum(
-            (effect.memory_read is not None) + (effect.memory_write is not None)
-            for block in effect_unit.blocks
-            for effect in block.effects
-        )
+        # x86 rep movs/stos sites (``rep_strings``): one straight block each; the
+        # element accesses appear once the count and direction are proven
+        # (re-normalized here; the plan only grows)
+        sites = rep_sites(observation)
+        rep_plan: dict = {}
+        direction_assumed = False
         while True:
-            if projection_budget <= 0:
-                raise AssertionError("relative-memory projection did not reach a fixed point")
-            projection_budget -= 1
-            projected_effect_unit = project_function_relative_memory(
-                effect_unit,
-                observation,
-                context,
-                address_spaces,
-                memory_ssa,
-                opaque_value_provider=opaque_value_provider,
-                translation_namespace=(
-                    unit.scopes.program.evidence.translation_namespace.language_id
+            dependencies = RustworkxDependencyGraph()
+            effects: list[ObservedEffect] = []
+            staged_temporaries: list = []
+            anchored_call_accesses: dict = {}
+            call_transitions = {
+                row.call_operation_key: row.memory_transition
+                for row in observed_call_state_projections(observation)
+            } if proven_call_effects else {}
+            operation_nodes: dict[str, NodeId] = {}
+            constant_inputs: dict[str, list[tuple[int, NodeId]]] = {}
+
+            block_graph = build_pcode_block_graph(observation, function.entry, frozenset(sites))
+            if block_graph.unsupported is not None:
+                raise AssertionError("admitted normalization has unsupported p-code flow")
+            operation_blocks = {
+                (block.instruction, ordinal): block.key
+                for block in block_graph.blocks
+                for ordinal in range(block.start, block.stop)
+            }
+            for instruction in sorted(observation.instructions, key=lambda item: item.address):
+                for ordinal, operation in enumerate(instruction.operations):
+                    operation_key = _operation_key(instruction, ordinal, operation)
+                    operation_nodes[operation_key] = dependencies.add_node(
+                        NodeRecord(f"op:{operation_key}", NodeKind.OPERATION, operation.opcode)
+                    )
+                    operation_node = operation_nodes[operation_key]
+                    effect = _scoped_effect(instruction, ordinal, operation, context)
+                    if operation_key in assumed_call_effects:
+                        effect = _assumed_call_writes(
+                            effect, assumed_call_effects[operation_key], operation, context,
+                            _register_space_id(observation),
+                        )
+                    block_key = operation_blocks.get((instruction.address, ordinal))
+                    if block_key is not None and block_key != effect.block_key:
+                        # an operation in a p-code sub-block of an instruction with
+                        # internal control flow (pcode_blocks)
+                        effect = replace(effect, block_key=block_key)
+                    for input_ordinal, varnode in enumerate(operation.inputs):
+                        if input_ordinal < _data_input_start(operation.opcode):
+                            continue
+                        if varnode.kind is VarnodeKindCode.OPAQUE:
+                            continue
+                        storage_ref = _storage_ref(varnode)
+                        resolved = _resolve_validated_storage(storage_ref, context)
+                        if type(resolved) is NonStorage:
+                            storage_key = _storage_key(storage_ref, resolved)
+                            constant_node = dependencies.add_node(
+                                NodeRecord(
+                                    f"constant:{storage_key}",
+                                    NodeKind.CONSTANT,
+                                    storage_key,
+                                )
+                            )
+                            constant_inputs.setdefault(operation_key, []).append(
+                                (input_ordinal, constant_node)
+                            )
+                    if block_key is not None and operation_key in proven_call_effects:
+                        # the callee's proven effects, placed just before the CALL so
+                        # their writes survive it (the call preserves them, see
+                        # call_clobber); every run reads the values at the call
+                        rows, anchored = _proven_call_rows(
+                            operation_key, proven_call_effects[operation_key], block_key,
+                            function.scope, _register_space_id(observation) or _program_register_space(unit),
+                            call_transitions, staged_temporaries,
+                            _call_stack_span(operation_key, proven_call_effects[operation_key],
+                                             call_transitions, observation, context),
+                        )
+                        for row in rows:
+                            operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
+                                f"op:{row.operation_key}", NodeKind.OPERATION,
+                                _CALL_EFFECT_LABELS[row.operation_key.rsplit("~", 1)[1].rstrip("0123456789")],
+                            ))
+                            effects.append(row)
+                        anchored_call_accesses.update(anchored)
+                    if block_key is not None:
+                        effects.append(effect)  # operations in unreachable sub-blocks never run
+                    site = sites.get(instruction.address)
+                    if block_key is not None and site is not None and operation_key == site.store_key \
+                            and instruction.address in rep_plan:
+                        rows, anchored = _rep_element_rows(
+                            site, rep_plan[instruction.address], block_key, function.scope, context,
+                            staged_temporaries,
+                        )
+                        for row in rows:
+                            operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
+                                f"op:{row.operation_key}", NodeKind.OPERATION, "REP_ELEMENT"))
+                            effects.append(row)
+                        anchored_call_accesses.update(anchored)
+
+            call_effects = None
+            if configured_call_effects is None:
+                raw_call_ports = derive_raw_call_ports(call_seeds, context)
+                call_effects = unavailable_call_effect_evidence(
+                    call_seeds,
+                    raw_ports=raw_call_ports,
+                )
+
+            predecessors: dict[str, set[str]] = {block.key: set() for block in block_graph.blocks}
+            for block in block_graph.blocks:
+                for successor in block.successors:
+                    if successor in predecessors:
+                        predecessors[successor].add(block.key)
+            effects_by_block: dict[str, list[ObservedEffect]] = {
+                block.key: [] for block in block_graph.blocks
+            }
+            for effect in effects:
+                assert effect.block_key is not None
+                effects_by_block[effect.block_key].append(effect)
+            effect_unit = ObservedEffectUnit(
+                EFFECT_DECODE_CONTRACT_VERSION,
+                function.scope,
+                _coordinate_key(function.entry),
+                tuple(
+                    ObservedEffectBlock(
+                        block_key,
+                        tuple(sorted(predecessors[block_key])),
+                        tuple(effects_by_block[block_key]),
+                    )
+                    for block_key in effects_by_block
                 ),
-                anchored_accesses=anchored_call_accesses,
-                readonly_image=readonly_image,
+                tuple(sorted(block.key for block in block_graph.blocks if not block.successors)),
+                effect_evidence_digest=(
+                    configured_call_effects.canonical_digest
+                    if configured_call_effects is not None
+                    else call_effects.effect_evidence_digest
+                ),
             )
-            if projected_effect_unit is effect_unit:
-                break
-            effect_unit = projected_effect_unit
+            if configured_call_effects is not None:
+                effect_unit = augment_configured_call_effects_v4(
+                    effect_unit,
+                    configured_call_effects,
+                )
+            effect_unit = project_persistent_call_state(effect_unit, observation)
             memory_unit = decode_effect_unit(effect_unit)
             memory_binding = build_bound_local_memory_ssa(memory_unit)
             memory_ssa = memory_binding.result
+            program = unit.scopes.program
+            address_spaces = program.evidence.address_spaces
+            # Each productive pass resolves at least one unresolved access, so the
+            # number of passes is bounded by those accesses (+1 for the fixed point).
+            projection_budget = 2 + sum(
+                (effect.memory_read is not None) + (effect.memory_write is not None)
+                for block in effect_unit.blocks
+                for effect in block.effects
+            )
+            while True:
+                if projection_budget <= 0:
+                    raise AssertionError("relative-memory projection did not reach a fixed point")
+                projection_budget -= 1
+                projected_effect_unit = project_function_relative_memory(
+                    effect_unit,
+                    observation,
+                    context,
+                    address_spaces,
+                    memory_ssa,
+                    opaque_value_provider=opaque_value_provider,
+                    translation_namespace=(
+                        unit.scopes.program.evidence.translation_namespace.language_id
+                    ),
+                    anchored_accesses=anchored_call_accesses,
+                    readonly_image=readonly_image,
+                    operation_overrides=_rep_overrides(sites, rep_plan, observation),
+                )
+                if projected_effect_unit is effect_unit:
+                    break
+                effect_unit = projected_effect_unit
+                memory_unit = decode_effect_unit(effect_unit)
+                memory_binding = build_bound_local_memory_ssa(memory_unit)
+                memory_ssa = memory_binding.result
+            overrides_now = _rep_overrides(sites, rep_plan, observation)
+            proven = _prove_rep_sites(sites, rep_plan, memory_ssa, observation, unit.scopes, overrides_now,
+                                      assume_direction_flag_clear)
+            if not proven:
+                break
+            for address, (count, direction, assumed) in proven.items():
+                rep_plan[address] = (count, direction)
+                direction_assumed = direction_assumed or assumed
         call_port_layout = None
         call_observations = None
         if call_effects is not None:
@@ -1048,6 +1202,16 @@ class _ScopedNormalizer:
                 operation_nodes[row.dependent],
                 EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=row.decision),
             )
+        for address, (count, _) in rep_plan.items():
+            # element rows run once per iteration: like the loop body, they
+            # depend on the count test
+            site = sites[address]
+            for index in range(1, count):
+                for key in site.element_keys:
+                    dependencies.add_edge(
+                        operation_nodes[site.branch_key], operation_nodes[f"{key}~e{index}"],
+                        EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=site.branch_key),
+                    )
         dependencies.freeze()
         return NormalizedFunction(
             document=None,
@@ -1080,6 +1244,10 @@ class _ScopedNormalizer:
             assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             call_below_bounds=below_bounds,
             assumes_readonly_image_constant=readonly_image is not None,
+            rep_blocks=tuple(sorted((_coordinate_key(address), count, direction)
+                                    for address, (count, direction) in rep_plan.items())),
+            operation_overrides=tuple(sorted(_rep_overrides(sites, rep_plan, observation).items())),
+            assumed_direction_flag_clear=direction_assumed,
         )
 
     def _build_cfg(

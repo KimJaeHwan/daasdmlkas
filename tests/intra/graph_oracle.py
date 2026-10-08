@@ -42,7 +42,7 @@ def check(function, observation, *, seeds=range(8), register_pools=None,
 
     def static(reader):
         if reader not in cache:
-            node = graph.node_for_key(f"op:{reader}")
+            node = _node(graph, reader)
             cache[reader] = None if node is None else slice_from(function, node)
         return cache[reader]
 
@@ -85,13 +85,22 @@ def check(function, observation, *, seeds=range(8), register_pools=None,
     return report
 
 
+def _node(graph, key):
+    """The graph node of an operation; a rep element ``<key>~e<i>`` the graph
+    does not model element-wise (count unproven) is its element-0 operation."""
+    node = graph.node_for_key(f"op:{key}")
+    if node is None and "~e" in key:
+        node = graph.node_for_key(f"op:{key.split('~e')[0]}")
+    return node
+
+
 def _covered(function, graph, result, dependency, reg_space=REG, unique_space=UNIQUE) -> bool:
     reachable = set(result.result.reachable_nodes)
     writer = dependency.writer
     if isinstance(writer, str):
         if writer == dependency.reader:
             return True
-        node = graph.node_for_key(f"op:{writer}")
+        node = _node(graph, writer)
         if node is not None and node in reachable:
             return True
         # bytes an opaque call may have produced (or its transient return-address

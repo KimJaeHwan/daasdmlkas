@@ -288,6 +288,9 @@ def _tail_exits(normalized, observation) -> tuple[str, ...]:
         if not block.exits:
             continue
         row = instructions[block.instruction]
+        if block.stop == 0:   # an instruction without p-code falling out of the function
+            found.append(block.key)
+            continue
         last = row.operations[block.stop - 1]
         if last.opcode != "RETURN" and _operation_key(row.address, block.stop - 1, last.opcode) not in composed:
             found.append(block.key)
@@ -306,7 +309,7 @@ def _composed_tail_deltas(normalized, observation) -> dict:
     instructions = {row.address: row for row in observation.instructions}
     found = {}
     for block in graph.blocks:
-        if not block.exits:
+        if not block.exits or block.stop == 0:
             continue
         row = instructions[block.instruction]
         effect = composed.get(_operation_key(row.address, block.stop - 1, row.operations[block.stop - 1].opcode))

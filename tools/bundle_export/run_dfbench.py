@@ -133,7 +133,14 @@ def main() -> int:
                              "image memory keeps its image value (section permissions from the binary; "
                              "no VirtualProtect-style rewriting at run time). Use for packed or "
                              "protected binaries")
+    parser.add_argument("--no-assume-direction-flag-clear", dest="assume_direction_flag_clear",
+                        action="store_false",
+                        help="drop the named assumption (summary engine, on by default): the x86 "
+                             "direction flag is clear at function entry (both x86-64 ABIs require it), "
+                             "used only for rep string instructions whose function never sets DF")
     args = parser.parse_args()
+    if os.environ.get("TDO_V2_ASSUME_DIRECTION_FLAG_CLEAR") == "0":
+        args.assume_direction_flag_clear = False
     if os.environ.get("TDO_V2_ASSUME_READONLY_IMAGE") == "0":
         args.assume_readonly_image = False
     if os.environ.get("TDO_V2_EXTERNAL_MODELS") == "0":
@@ -170,6 +177,7 @@ def main() -> int:
                 assume_globals_disjoint_from_stack=args.assume_globals_not_stack,
                 external_models=external_models(generation) if args.external_models else None,
                 assume_readonly_image_constant=args.assume_readonly_image,
+                assume_direction_flag_clear=args.assume_direction_flag_clear,
             )
             print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
         else:

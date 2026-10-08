@@ -431,6 +431,27 @@ def test_tail_jump_to_an_unsummarized_target_stays_opaque():
     assert not results["1:1000"].proven
 
 
+def test_falling_out_through_an_instruction_without_pcode_is_a_tail_exit():
+    """The last instruction has no p-code (release builds: padding after a
+    noreturn call): the exit is not a RETURN, so the summary is not trusted."""
+    class Padded(FunctionBuilder):
+        def to_json(self):
+            raw = super().to_json()
+            last = raw["instructions"][-1]   # the ret becomes a nop falling out
+            last["operations"] = []
+            last["flow_type"] = {key: key in ("is_flow", "has_fallthrough", "is_unconditional")
+                                 for key in last["flow_type"]}
+            last["fallthrough_present"] = True
+            last["fallthrough"] = {**last["address"], "byte_offset": last["address"]["byte_offset"] + 4}
+            return raw
+
+    middle = Padded(entry=MIDDLE).ins(copy(reg(RDI), reg(RSI))).ret()
+    caller = FunctionBuilder().call(MIDDLE).ins(copy(reg(R9), reg(RAX))).ret()
+    results, _ = _analyze(caller, middle)
+    assert results[f"1:{MIDDLE:x}"].summary.tail_exits
+    assert not results["1:1000"].proven
+
+
 @pytest.mark.parametrize("chunk", range(4))
 def test_random_programs_with_tail_jumps(chunk):
     silent, through, runs, composed = [], 0, 0, 0

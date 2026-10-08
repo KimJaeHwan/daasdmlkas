@@ -83,6 +83,7 @@ def analyze_frozen_bundle_with_summaries(
     assume_globals_disjoint_from_stack: bool = True,
     external_models=None,
     assume_readonly_image_constant: bool = True,
+    assume_direction_flag_clear: bool = True,
 ) -> EngineRun:
     """``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
@@ -197,6 +198,7 @@ def analyze_frozen_bundle_with_summaries(
             image_info=image_info if external_models else None,
             external_models=external_models,
             readonly_image=readonly_image,
+            assume_direction_flag_clear=assume_direction_flag_clear,
         )
         assumptions = ("globals-disjoint-from-stack",) if any(
             getattr(item.normalized, "assumes_globals_disjoint_from_stack", False)
@@ -213,6 +215,9 @@ def analyze_frozen_bundle_with_summaries(
             assumptions += ("opaque-callees-restore-stack-pointer",)
         if readonly_image is not None:
             assumptions += ("readonly-image-data-is-constant",)
+        if any(getattr(item.normalized, "assumed_direction_flag_clear", False) for item in results.values()):
+            # a rep string site whose direction flag is the function's entry value
+            assumptions += ("direction-flag-clear",)
         assumptions += tuple(sorted({label for item in results.values() for label in item.declared.values()}))
         preliminary = []
         for key, item in by_key.items():

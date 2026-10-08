@@ -60,7 +60,7 @@ def function_key(coordinate) -> str:
 def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_globals_disjoint_from_stack=False, sink_roots=None,
                   image_info=None, external_models=None, readonly_image=None,
-                  declared_boundaries=None) -> dict[str, AnalyzedFunction]:
+                  declared_boundaries=None, assume_direction_flag_clear=False) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -251,6 +251,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     unit, assumed_call_effects=assumed, proven_call_effects=proven,
                     assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
                     readonly_image=readonly_image,
+                    assume_direction_flag_clear=assume_direction_flag_clear,
                 )
                 if type(normalized) is not NormalizedFunction:
                     break

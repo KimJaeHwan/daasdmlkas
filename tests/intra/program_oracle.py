@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from graph_oracle import _covered, _direct_debt, _memory_address_unknown
+from graph_oracle import _covered, _direct_debt, _memory_address_unknown, _node
 from pcode_interpreter import Dependency, Entry, Interpreter, Unsupported
 from synthetic import CONST, REG, UNIQUE, slice_from
 from tdo_v2.graph_contracts import NodeKind
@@ -82,7 +82,7 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
 
     def static(reader):
         if reader not in cache:
-            node = graph.node_for_key(f"op:{reader}")
+            node = _node(graph, reader)
             cache[reader] = None if node is None else slice_from(function, node)
         return cache[reader]
 
@@ -99,7 +99,7 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
             continue
         report.runs += 1
         for dependency in sorted(run.dependencies, key=repr):
-            if dependency.reader not in caller_operations or dependency.reader in transient:
+            if dependency.reader.split("~e")[0] not in caller_operations or dependency.reader in transient:
                 continue
             result = static(dependency.reader)
             report.checked += 1
@@ -157,7 +157,7 @@ def _input_reached(tag, function, graph, result, reachable, reader, reg_space, u
             return result.reaches(offset, 1)
         return (any(graph.node(node).kind is NodeKind.OBSERVED_INPUT for node in reachable)
                 and bool(result.memory_bytes)) or _memory_address_unknown(graph, reader)
-    node = graph.node_for_key(f"op:{writer}")
+    node = _node(graph, writer)
     if node is not None and node in reachable:
         return True
     if writer in proven and _covering_runs(proven, writer, space, offset, reachable, reg_space):

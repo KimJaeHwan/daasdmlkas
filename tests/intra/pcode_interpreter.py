@@ -125,6 +125,13 @@ class Interpreter:
                     source = copy.inputs[0] if copy.inputs else None
                     if copy.opcode == "COPY" and copy.output == operation.inputs[0]                             and source.kind is VarnodeKindCode.ADDRESS                             and (source.coordinate.space_id, source.coordinate.byte_offset) in self._externals:
                         self._external_callind[_operation_key(row.address, ordinal, "CALLIND")] =                             self._externals[(source.coordinate.space_id, source.coordinate.byte_offset)]
+        # rep movs/stos sites (``tdo_v2.rep_strings``): iteration i >= 1 of their
+        # element LOAD/STORE is keyed ``<key>~e<i>``, as the engine names them
+        from tdo_v2.rep_strings import recognize
+        self._rep = {address: site for address, row in self._instructions.items()
+                     if (site := recognize(row)) is not None}
+        self._rep_iteration = 0
+        self._previous_location = None
         self._activations: list = []          # (return location, call key)
         self._activation_written: set = set()  # bytes written in the current outermost activation
         self._call_bytes: set = set()          # bytes last written by some activation
@@ -189,7 +196,7 @@ class Interpreter:
         value = 0
         for index in range(size):
             byte, writer = self._byte(space_id, offset + index)
-            if not self._activations:
+            if not self._activations and not getattr(self, "_rep_internal", False):
                 # a read inside a call activation belongs to the callee (with
                 # recursion, its operation keys are the caller's own)
                 run.dependencies.add(Dependency(reader, space_id, offset + index, writer))
@@ -274,6 +281,9 @@ class Interpreter:
                 else (instruction.fallthrough.space_id, instruction.fallthrough.byte_offset)
             )
             operations = instruction.operations
+            site = self._rep.get(location)
+            self._rep_iteration = self._rep_iteration + 1 if site is not None and location == self._previous_location                 else 0
+            self._previous_location = location
             if self._havoc is not None and any(
                 op.opcode in ("CALL", "CALLIND") for op in operations
             ):
@@ -301,6 +311,16 @@ class Interpreter:
                     return run  # bounded: an incomplete run still yields valid dependencies
                 operation = operations[index]
                 key = _operation_key(instruction.address, index, operation.opcode)
+                # iteration i >= 1 of a rep site: the element operations are the
+                # engine's ``~e<i>`` rows; the other operations' register flow
+                # between iterations is summarized by the block (their last
+                # iteration's outputs are what later code reads)
+                self._rep_internal = False
+                if site is not None and self._rep_iteration:
+                    if key in site.element_keys:
+                        key = f"{key}~e{self._rep_iteration}"
+                    else:
+                        self._rep_internal = True
                 run.executed.append(key)
                 if self._sinks is not None and self._activations:
                     self._record_sink(operation, run)

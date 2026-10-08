@@ -347,3 +347,26 @@ PointerPath(무한 루프), 재귀 미지원. 새 설계는 **완성된 intra �
   `ProvenCallEffect` 경로로 연결(`analyze_units(declared_boundaries=…)`). 결과의 가정 목록에
   `test-only-boundary:<label>`. 요약 엔진의 TEST-ONLY 결과는 이전과 루트 단위로 동일(8개 Bundle, 차이 0).
   옛 경로는 legacy 엔진과 함수 내부 골든 "-assumed" 세트(정규화 단위)용으로만 남음.
+
+## 17. UE DebugGame 분석과 rep 문자열 명령 (2026-10-08, Fable 설계)
+
+- **보고 방식 변경**: 지표를 "N개 케이스 중 정확 a(%) / 정확+확실 b(%) / 과다 / 누락(확실) / Bundle에 없음"으로
+  출력(`dfbench_metric.sh` SUMMARY 줄). UE 테스트베드는 UE 플러그인 DLL의 손으로 쓴 22개 케이스(엔진 전체 아님).
+- **DebugGame 주원인**: MSVC 비최적화 빌드는 구조체 복사·채우기를 `rep movsb`/`rep stosb`로 만든다(DebugGame
+  33개/20함수, Development 0개). Ghidra는 명령 하나 안의 루프로 들어 올려 주소가 반복마다 바뀌므로 주소 미상
+  읽기/쓰기 → 모든 메모리 별칭 부채 → 과다 출처. 22개 중 13개 케이스 함수에 rep.
+- **해결**(`tdo_v2/rep_strings.py`, `normalize`): Ghidra 12 lifting(ia.sinc) 그대로의 `rep movs*`/`rep stos*`만
+  피연산자 동일성까지 확인해 인식(다르면 기존 루프 처리). 인식한 명령은 직선 블록 하나
+  (`build_pcode_block_graph(straight=…)`). 평가기에는 연산 대체(`operation_overrides`): 횟수 레지스터는 끝에 0,
+  포인터 레지스터와 0번째 접근은 횟수·방향 증명 전엔 미상. 횟수(명령 시작의 RCX)·방향(DF)이 증명되면
+  요소 행 `~e<i>`(movs: 읽기·값 복사·쓰기, stos: 쓰기)을 반복 순서대로 끼워 넣고 다시 정규화(겹치는 원본/대상도
+  정확), 포인터는 끝에 방향·n·크기만큼 이동. 요소 행은 횟수 분기에 제어 의존. 4096바이트 상한.
+  방향: 함수 안 CLD/STD면 증명, 함수 입구 값이면 이름 붙은 가정 `direction-flag-clear`(두 x86-64 ABI가 보장,
+  쓰일 때만 표시, 기본 켜짐, `--no-assume-direction-flag-clear`).
+- **검증**: 인터프리터가 실제 루프를 돌리며 i≥1회 요소 연산을 `~e<i>`로 기록, 블록이 요약하는 반복 간 내부
+  레지스터 흐름은 제외. 횟수 0/1/2/5/16 × movs/stos × 겹침 4배치 × 방향 2 = 80 조합 + 미증명 횟수 + 가정
+  사용 — 데이터·제어 의존 누락 0. 변위 부호/요소 하나 빠뜨린 변형을 잡음(42·51건 실패).
+- **결과**: DebugGame 22개 중 정확 6(27%) → **10(45%)**, 확실 2 → 3, 과다 14 → 10.
+- **남은 원인**(DebugGame 불확실 18): 증명된 호출인데 메모리 보존 실패 15 — UE 컨테이너 도우미(TArray/
+  FString류)가 메모리에서 읽은 포인터·heap으로 쓰는 "주소 미상 쓰기"를 가짐 → 다음 단계 "새 객체(heap)·포인터
+  체인" 과제와 직결.

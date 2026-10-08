@@ -51,4 +51,12 @@ for side in ("current", "assumed"):
     print(f"{tag:12} {label:19} cases={sum(t.values())} PASS(exact)={t[('exact','sure')] + t[('exact','unsure')]} "
           f"exact+sure={t[('exact','sure')]} "
           f"{dict(sorted(t.items()))} missing+sure={bad} absent={len(absent)}")
+    total = sum(t.values()) + len(absent)
+    exact = t[('exact', 'sure')] + t[('exact', 'unsure')]
+    extra = t[('extra-only', 'sure')] + t[('extra-only', 'unsure')]
+    missing = t[('missing', 'sure')] + t[('missing', 'unsure')]
+    pct = lambda n: f"{100 * n / total:.0f}%" if total else "-"
+    print(f"{'':12} {label:19} SUMMARY of {total} cases: exact {exact} ({pct(exact)}) | "
+          f"exact+sure {t[('exact','sure')]} ({pct(t[('exact','sure')])}) | over-reported {extra} | "
+          f"missing {missing} (sure {len(bad)}) | not in Bundle {len(absent)}")
 PY
