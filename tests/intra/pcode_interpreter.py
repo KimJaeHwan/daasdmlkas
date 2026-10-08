@@ -138,7 +138,8 @@ class Interpreter:
         self._activations: list = []          # (return location, call key)
         self._activation_written: set = set()
         self._byte_inputs: list = []
-        self._blocks: dict = {}   # external heap: block address -> size  # bytes written in the current outermost activation
+        self._blocks: dict = {}   # external heap: block address -> size
+        self._free: list = []     # freed block addresses, reused by the next allocation  # bytes written in the current outermost activation
         self._call_bytes: set = set()          # bytes last written by some activation
         self._order = [
             (row.address.space_id, row.address.byte_offset) for row in observation.instructions
@@ -557,9 +558,12 @@ class Interpreter:
                 length += 1
             result, result_tags = length, tags
         elif name in ("malloc", "FMemory::Malloc"):
-            result, result_tags = self._heap, set()
-            self._blocks[self._heap] = rcx
-            self._heap += 0x1000
+            # a freed block's address is reused first (the models assume no use
+            # after free: a stale pointer would now reach the new block)
+            result, result_tags = (self._free.pop() if self._free else self._heap), set()
+            if result == self._heap:
+                self._heap += 0x1000
+            self._blocks[result] = rcx
         elif name in ("realloc", "FMemory::Realloc"):
             # always moves: copies min(old, new) bytes to a new block; the old
             # block's bytes are havocked (the model assumes it is not used again)
@@ -579,8 +583,11 @@ class Interpreter:
                 self._put(key, memory, rcx + index, 1, self._rng.randrange(256), {("call", key)})
             self._blocks[new] = size
             result, result_tags = new, set()
-        elif name in ("free", "FMemory::Free", "FDebug::CheckVerifyFailedImpl",
-                      "UE4Array_Private::OnInvalidArrayNum"):
+        elif name in ("free", "FMemory::Free"):
+            if rcx in self._blocks:
+                del self._blocks[rcx]
+                self._free.append(rcx)
+        elif name in ("FDebug::CheckVerifyFailedImpl", "UE4Array_Private::OnInvalidArrayNum"):
             pass  # no program-visible memory; volatile registers havocked below
         elif name == "FMemory::QuantizeSize":
             result, result_tags = (rcx + 15) & ~15, rcx_tags | rdx_tags

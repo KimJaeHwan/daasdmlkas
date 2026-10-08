@@ -74,6 +74,12 @@ class SummaryRun:
     # (read span, write span) pairs that must be disjoint for this value to be
     # as stated (conditional may-alias debts on the way, see ``SinkDemand``)
     conditions: tuple[tuple[ByteSpan, ByteSpan], ...] = ()
+    # pointer value of a pointer-width COMPUTED run (``_pointer_values``):
+    # ("nonstack",) -- an address of a block a call in the function allocated
+    # (never a stack address); ("same", entry span, null_is_fresh) -- the
+    # value the entry bytes held (a copy, or, with null_is_fresh, a realloc
+    # of it: a null entry value then means a new block); None: unknown
+    value: tuple | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +180,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     conditional = {key: pairs for key, pairs in uncertain_conditions.items() if pairs is not None}
     uncertain = set(uncertain_conditions) - set(conditional)
     writer_conditions = frozenset().union(*conditional.values()) if conditional else frozenset()
-    tracer = _CopyTracer(normalized, observation, context, operation_of)
+    tracer = _CopyTracer(normalized, observation, context, operation_of, conditions_of)
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain)
     inner_calls = crossed.pop("inner_calls", ())
 
@@ -193,6 +199,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
          if item.operation_key is not None},
         key=lambda row: (row[0], row[1].kind.value, row[1].space_key),
     )
+    exits = _pointer_values(normalized, observation, exits, tracer)
     # unknown-address writers (conditional ones are ordinary writes, above)
     # leave every root incomplete
     unconditional_writers = bool(crossed.get("unknown_writers", ()))
@@ -543,7 +550,7 @@ class _CopyTracer:
     definition: ``trace(definition, span)`` is the entry span the value of
     ``span`` was copied from, or None."""
 
-    def __init__(self, normalized, observation, context, operation_of) -> None:
+    def __init__(self, normalized, observation, context, operation_of, conditional_debts=None) -> None:
         from .normalize import _storage_ref
         from .storage import _resolve_validated_storage
 
@@ -558,12 +565,86 @@ class _CopyTracer:
             f"{row.address.space_id:x}:{row.address.byte_offset:x}:{ordinal}:{operation.opcode}": operation
             for row in observation.instructions for ordinal, operation in enumerate(row.operations)
         }
+        self.joins = {row.join_definition_id: row.source_definition_ids for row in ssa.joins}
         graph = normalized.dependencies
         node_of = {key: node for node, key in operation_of.items()}
         self.indebted = {
             key for key, node in node_of.items()
             if any(graph.node(item).kind is NodeKind.MEMORY_DEBT for item in graph.predecessors(node))
         }
+        # for ``origin``: debts other than conditional may-alias ones (S3 pairs
+        # the run carries in its conditions and a caller decides)
+        conditional = set(conditional_debts or ())
+        self.hard_indebted = {
+            key for key, node in node_of.items()
+            if any(graph.node(item).kind is NodeKind.MEMORY_DEBT and item not in conditional
+                   for item in graph.predecessors(node))
+        }
+
+    def origin(self, definition_id: int, span: ByteSpan, depth: int = 0):
+        """Where the value of ``span`` comes from, through exact copies:
+        ("entry", entry span), ("row", call effect row key), ("join", the
+        distinct origins of a join's sources) or None."""
+        if depth > 64:
+            return None
+        definition = self.definitions[definition_id]
+        if not definition.span.contains(span):
+            return None
+        if definition.kind is MemoryDefinitionKind.ENTRY:
+            return ("entry", span)  # the entry value of these bytes (contained, checked above)
+        if definition.kind is MemoryDefinitionKind.JOIN:
+            found = {self.origin(source, span, depth + 1) for source in self.joins.get(definition_id, ())}
+            if None in found or not found:
+                return None
+            return found.pop() if len(found) == 1 else ("join", frozenset(found))
+        key = definition.operation_key
+        if definition.kind is not MemoryDefinitionKind.DATA_WRITE or key is None or key in self.hard_indebted:
+            return None
+        if "~" in key and key not in self.operations:  # a call effect row
+            return ("row", key) if definition.span == span else None
+        operation = self.operations.get(key)
+        if operation is None:
+            return None
+        if operation.opcode == "COPY" and len(operation.inputs) == 1:
+            value = operation.inputs[0]
+        elif operation.opcode == "STORE" and len(operation.inputs) == 3:
+            value = operation.inputs[2]
+        elif operation.opcode == "LOAD" and operation.output is not None:
+            value = None
+        else:
+            return None
+        if value is not None:
+            if value.byte_size != definition.span.size or definition.span != span:
+                return None
+            resolved = self._resolve(value)
+            if type(resolved) is not ResolvedStorage:
+                return None
+            source = resolved.span
+        else:
+            memory = [read.span for read in self.reads.get(key, ())
+                      if read.span.object_id.kind in _MEMORY_KINDS and read.span.size == definition.span.size]
+            if len(memory) != 1 or definition.span != span:
+                return None
+            source = memory[0]
+        return self._read_origin(key, source, depth)
+
+    def _read_origin(self, key, source, depth):
+        for read in self.reads.get(key, ()):
+            if read.span != source:
+                continue
+            if len(read.fragments) == 1 and read.fragments[0].span == source \
+                    and len(read.fragments[0].definition_ids) == 1:
+                return self.origin(read.fragments[0].definition_ids[0], source, depth + 1)
+        return None
+
+    def argument_origin(self, reader: str, argument):
+        """The origin of register ``argument`` as read by row ``reader``."""
+        if reader in self.hard_indebted:
+            return None
+        resolved = self._resolve(argument)
+        if type(resolved) is not ResolvedStorage:
+            return None
+        return self._read_origin(reader, resolved.span, 0)
 
     def trace(self, definition_id: int, span: ByteSpan, depth: int = 0):
         if depth > 64:
@@ -606,6 +687,95 @@ class _CopyTracer:
                 if fragment.span.contains(requested) and len(fragment.definition_ids) == 1:
                     return self.trace(fragment.definition_ids[0], requested, depth + 1)
         return None
+
+
+def _pointer_size(normalized) -> int | None:
+    from ._scope_contracts import AddressSpaceClassV2, classify_address_space_v2
+
+    sizes = {
+        row.address_size_bits // 8 for row in normalized.scopes.program.evidence.address_spaces
+        if row.classification_revision == 2 and row.addressable_unit_bytes == 1
+        and classify_address_space_v2(row) is AddressSpaceClassV2.ADDRESS
+    }
+    return sizes.pop() if len(sizes) == 1 else None
+
+
+def _pointer_values(normalized, observation, exits, tracer) -> list:
+    """Attach ``SummaryRun.value`` to pointer-width COMPUTED runs whose every
+    terminal definition traces (``_CopyTracer.origin``: exact copies, no debt,
+    single reaching definitions, equal at joins) to one origin: an entry span
+    (a copy of it), a fresh call result or a callee run already proven
+    nonstack (``("nonstack",)``), or a same-object call result (realloc) of a
+    traced entry span (null is fresh) or of a nonstack value."""
+    from dataclasses import replace as _replace
+
+    size = _pointer_size(normalized)
+    if size is None:
+        return exits
+    fresh_rows = frozenset(getattr(normalized, "fresh_rows", ()))
+    same_rows = {row: (reader, argument) for row, reader, argument in getattr(normalized, "same_object_rows", ())}
+    proven = dict(normalized.proven_call_effects)
+
+    def nested_nonstack(row):
+        base, _, index = row.rpartition("~")
+        effect = proven.get(base)
+        if effect is None or not index.isdigit():
+            return False
+        items = (*effect.runs, *effect.memory_runs)
+        return int(index) < len(items) and getattr(items[int(index)], "value", None) == ("nonstack",)
+
+    def value_of(origin):
+        if origin is None:
+            return None
+        kind, item = origin
+        if kind == "join":
+            # equal values stay; a kept entry value joined with a realloc of it
+            # is the same object, or -- for a null entry value -- null or a new
+            # block (neither a stack address): ("same", span, null is fresh)
+            values = {value_of(source) for source in item}
+            if None in values:
+                return None
+            if len(values) == 1:
+                return values.pop()
+            spans = {value[1] for value in values if value[0] == "same"}
+            if len(spans) == 1 and all(value[0] == "same" for value in values):
+                return ("same", spans.pop(), True)
+            return None
+        if kind == "entry":
+            return ("same", item, False)
+        if item in fresh_rows or nested_nonstack(item):
+            return ("nonstack",)
+        if item in same_rows:
+            reader, argument = same_rows[item]
+            inner = tracer.argument_origin(reader, argument)
+            found = value_of(inner)
+            if found is None:
+                return None
+            if found[0] == "same":
+                return ("same", found[1], True)
+            return found
+        return None
+
+    result = []
+    for exit_summary in exits:
+        runs = []
+        for run in exit_summary.runs:
+            value = None
+            # an UNKNOWN run crossed only by aliasing writes may still be taken as
+            # computed by the caller (``call_summary_effects._only_exported_aliasing``)
+            computed = run.kind is SummaryKind.COMPUTED or (
+                run.kind is SummaryKind.UNKNOWN and not run.debts and run.crossed
+                and all(label.startswith("alias:") for label in run.crossed))
+            if computed and run.span.size == size and run.definitions \
+                    and run.span.object_id.kind is not StorageObjectKind.FUNCTION_UNIQUE:
+                origins = {tracer.origin(definition, run.span) for definition in run.definitions}
+                if len(origins) == 1:
+                    value = value_of(origins.pop())
+                elif None not in origins:  # several reaching definitions: a join
+                    value = value_of(("join", frozenset(origins)))
+            runs.append(_replace(run, value=value) if value is not None else run)
+        result.append(ExitSummary(exit_summary.block_key, tuple(runs)))
+    return result
 
 
 def _object_spans(atoms, start: int, stop: int):

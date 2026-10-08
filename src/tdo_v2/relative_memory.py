@@ -69,6 +69,8 @@ def project_function_relative_memory(
     fresh_keys: frozenset = frozenset(),
     same_object: dict | None = None,
     fresh_objects: set | None = None,
+    pointer_rows: dict | None = None,
+    nonstack_objects: set | None = None,
 ) -> ObservedEffectUnit:
     """Resolve provably equal indirect addresses, preserving all other debt.
 
@@ -91,6 +93,14 @@ def project_function_relative_memory(
 
     ``fresh_objects`` collects, for ``may_alias``, the objects based on
     exactly one fresh atom.
+
+    ``pointer_rows``: call effect row key -> the pointer value a callee
+    summary states for it (``normalize._proven_call_rows``): ("nonstack",) --
+    a nonstack definition atom (once per activation, as definition atoms;
+    ``nonstack_objects``: disjoint from the stack only); ("reg", input row,
+    register varnode, null_is_fresh) / ("mem", load row, width,
+    null_is_fresh) -- the caller's value there at the call, substituted (a
+    null value with null_is_fresh is a nonstack atom).
 
     ``anchored_accesses``: effect key -> (evaluation operation key, anchor
     register varnode, displacement, width, address space id) for summarized
@@ -140,11 +150,14 @@ def project_function_relative_memory(
         once_keys if DEFINITION_ATOMS else None,
         fresh_keys,
         same_object,
+        pointer_rows,
     )
     if wild_objects is not None:
         projector.wild_objects = wild_objects
     if fresh_objects is not None:
         projector.fresh_objects = fresh_objects
+    if nonstack_objects is not None:
+        projector.nonstack_objects = nonstack_objects
     # Writes of one summarized call that bind to overlapping caller bytes: the
     # callee took its objects as distinct, so their order there is unknown here
     # (caller passed one object twice) -- they stay unresolved (debt).
@@ -416,6 +429,7 @@ class _Projector:
         once_keys=None,
         fresh_keys=frozenset(),
         same_object=None,
+        pointer_rows=None,
     ) -> None:
         self._context = context
         self._spaces = {row.space_id: row for row in address_spaces}
@@ -432,6 +446,9 @@ class _Projector:
         self._same_object = same_object or {}
         self._fresh_atoms: set[int] = set()
         self.fresh_objects: set = set()
+        self._pointer_rows = pointer_rows or {}
+        self._nonstack_atoms: set[int] = set()
+        self.nonstack_objects: set = set()
         self.wild_objects: set = set()
         self._action_ids = {
             action.operation_key: action_id
@@ -559,9 +576,12 @@ class _Projector:
             self.wild_objects.add(object_id)
         if len(address.atoms) == 1 and address.atoms[0][1] == 1 and address.atoms[0][0] in self._fresh_atoms:
             self.fresh_objects.add(object_id)
+        if len(address.atoms) == 1 and address.atoms[0][1] == 1 and address.atoms[0][0] in self._nonstack_atoms:
+            self.nonstack_objects.add(object_id)
         return object_id
 
-    def _definition_atom(self, definition, requested_span, fresh=False) -> _AddressExpression | None:
+    def _definition_atom(self, definition, requested_span, fresh=False,
+                         nonstack=False) -> _AddressExpression | None:
         """A value defined once per activation by a call (its summarized or
         modeled effect rows) or by a LOAD, exactly at its own width: an atom
         keyed by that definition (never by its inputs -- two calls with the
@@ -570,7 +590,7 @@ class _Projector:
         if key is None or definition.span != requested_span:
             return None
         base = key.split("~", 1)[0]
-        if base not in self._once or requested_span.object_id.kind not in _VALUE_KINDS:
+        if base not in self._once or (requested_span.object_id.kind not in _VALUE_KINDS and not nonstack):
             return None
         if "~" in key:
             if base.rsplit(":", 1)[-1] not in ("CALL", "CALLIND"):
@@ -580,11 +600,31 @@ class _Projector:
             if operation is None or operation.opcode != "LOAD":
                 return None
         atom = _digest_ints(b"definition-atom-v1", (*key.encode("utf-8"), _stable_storage_key(requested_span)))
-        if key not in self._fresh and not fresh:
+        if nonstack:
+            self._nonstack_atoms.add(atom)
+        elif key not in self._fresh and not fresh:
             self._definition_atoms.add(atom)
         else:
             self._fresh_atoms.add(atom)
         return _AddressExpression(((atom, 1),), 0, requested_span.size)
+
+    def _pointer_row(self, definition, requested_span) -> _AddressExpression | None:
+        """The address a call effect row holds by its callee's summary
+        (``pointer_rows``), or None."""
+        row = self._pointer_rows[definition.operation_key]
+        if row[0] == "nonstack":
+            return self._definition_atom(definition, requested_span, nonstack=True)
+        if row[0] == "reg":
+            _, reader, argument, null_is_fresh = row
+            value = self._expression_for_input(reader, argument)
+        else:
+            _, reader, width, null_is_fresh = row
+            value = self._expression_from_memory_read(reader, width)
+        if value is None or value.byte_size != requested_span.size:
+            return None
+        if not value.atoms and null_is_fresh and _unsigned_wrap(value.displacement, value.byte_size) == 0:
+            return self._definition_atom(definition, requested_span, nonstack=True)
+        return value
 
     def _candidate_expressions_for_input(
         self,
@@ -759,7 +799,12 @@ class _Projector:
             if value is not None and value.atoms and value.byte_size == requested_span.size:
                 result = value
             elif value is not None and not value.atoms:
-                result = self._definition_atom(definition, requested_span, fresh=True)
+                # realloc(NULL, n) is a new block; another constant stays that address
+                result = (self._definition_atom(definition, requested_span, fresh=True)
+                          if _unsigned_wrap(value.displacement, value.byte_size) == 0 else value)
+        if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE \
+                and definition.operation_key in self._pointer_rows and definition.span == requested_span:
+            result = self._pointer_row(definition, requested_span)
         if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE:
             result = self._definition_atom(definition, requested_span)
         self._active.remove(cache_key)

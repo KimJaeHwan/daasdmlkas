@@ -446,3 +446,38 @@ fresh. 이번 단계는 (a)(b)(c1)과, 측정 중 드러난 UE helper 원인들.
 9. **UE 다음 원인**(R001/R011): TArray helper가 Realloc 결과를 `this->Data`에 쓰고 호출자가 그 포인터를 다시
    읽어 원소를 씀 → 그 포인터가 "새 블록(스택 아님)"이라는 사실이 함수 경계를 못 넘음 = (d) 함수 간 fresh.
    그 밖: 가상 호출(레지스터 CALLIND), FString 내부, 루프 안 쓰기.
+
+## 20. (d) 함수 간 포인터 값 (2026-10-08, Fable + Astra 교차 검토)
+
+설계 과정: 같은 설계 문서(`docs/design_brief_d_interprocedural_fresh.md`)를 Fable과 Astra(gpt-6-astra, Codex CLI,
+읽기 전용)에 각각 주고, 서로의 답을 보여 준 2라운드에서 합의. 핵심 합의: (1) 첫 단계는 "정체성"이 아니라 "스택이
+아님" 분리 사실 + 정확한 값 대입(복사, realloc 지연 전달) — 새 블록끼리 서로 안 겹친다는 정체성은 미룸(같은 블록이
+두 출력으로 나갈 때의 위험); (2) 증거는 표현식 같음이 아니라 정의를 거슬러 올라가는 출처 추적(같은 식이어도
+"realloc 결과"와 "옛 포인터 복사"는 NULL일 때 다름); (3) 긍정 테스트는 `is_complete`까지 확인(검증기는 부채가 있으면
+놓침을 봐 줌), 주소 재사용(free 후 malloc) 시나리오. 내 판정: Fable의 "wild가 아니면 충분" 주장은 틀림 — 프레임이
+이미 탈출한 경우(&Arr 전달) 별칭 부채는 정책의 "스택과 안 겹침"(Astra 안)으로만 없어짐.
+
+1. **callee 요약**(`function_summary._pointer_values`, `_CopyTracer.origin`): 포인터 폭 run(COMPUTED, 또는 부채 없이
+   alias crossing만 있는 UNKNOWN — 호출 효과가 내보낸 쓰기와의 겹침으로 풀 수 있는 것)의 모든 종단 정의를 정확한
+   복사(COPY·STORE·LOAD 전달, 단일 도달 정의, 무조건 부채 없음 — S3 조건부 부채는 run 조건으로 호출 지점이 판정)로
+   거슬러 올라가 출처를 구함: 입구 범위 → `("same", 범위, False)`; fresh 호출 결과·이미 nonstack인 하위 호출 run →
+   `("nonstack",)`; same_object 결과(realloc) → 인자의 출처 위에 `("same", 범위, True)`(NULL이면 새 블록). 합류(JOIN 정의,
+   또는 run의 여러 종단 정의): 같으면 유지, "입구 값 유지 ∪ 그 값의 realloc"은 `("same", 범위, True)`(객체면 같은 객체,
+   NULL이면 NULL 또는 새 블록 — 둘 다 스택 아님), 그 밖은 없음.
+2. **호출 효과**(`call_summary_effects`): 값을 바이트별 판정의 sources에 `("pointer", 값)` 표시로 실어(값 없음도 표시)
+   출구 병합에서 다르면 버림, keeps_old면 버림, 한 run이 정확히 포인터 폭일 때만 `ProvenRunEffect/ProvenMemoryRun.value`
+   (`nonstack` / `same_reg`(레지스터) / `same_mem`(앵커 메모리)) — 대입할 입력이 그 run의 입력 행에 있을 때만.
+3. **caller**(`normalize._proven_call_rows` → `relative_memory._pointer_row`): `nonstack` → 한 번만 실행되는 호출의 행에
+   nonstack atom(스택과만 안 겹침, `may_alias._Policy.nonstack_objects`); `same_*` → 호출 시점 값의 주소식 대입(입력 행
+   `~in`/`~ld`), 상수 0 + NULL이면 새 블록 → nonstack atom, 그 밖 상수는 그 주소. 정규화 결과에 `fresh_rows`·
+   `same_object_rows` 보존(요약이 사용).
+4. **고친 버그**(Astra 지적): realloc 인자가 0이 아닌 상수여도 새 블록으로 보던 것 → 0만 새 블록, 그 밖 상수는 그 주소.
+5. **검증기**: free된 주소를 다음 malloc이 재사용(가정 no-use-after-free를 실제로 시험).
+6. **테스트**: TV2R001 모양(Data=0 → 원소 쓰기 뒤 프레임 필드 정확·확실), Data가 이미 블록일 때 realloc 너머 원소 출처
+   유지, helper가 `this->Data = &this->Num`이면 값 없음, 변형 "모든 포인터 run을 nonstack으로"를 검증기가 잡음, free 후
+   주소 재사용. 테스트 466개.
+7. **결과**(누락+확실 0): UE Development 정확 13 → **14**(64%), 누락 2 → 1(R001이 확실이 됨, 남은 과다 출처 B는 8바이트
+   구조체 복사의 바이트 정밀도 — 보류 항목); win32 확실 36 → **37**; 09 debug·release·UE DebugGame 변화 없음; 동적
+   검증 누락 0(zlib 256 기존).
+8. **다음**: DebugGame은 같은 패턴이 home space 경유로 더 깊음; 새 블록 정체성(그룹)·루프·재귀의 값; 가상 호출; 바이트
+   정밀도(R001 B).

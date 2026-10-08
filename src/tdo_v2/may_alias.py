@@ -42,6 +42,8 @@ any memory write executed before it. Both stay unresolved debt as well.
 model's assumption): disjoint from constant addresses, the stack and other
 fresh blocks (no use after free). Any other base may point into it -- even
 an entry register value, which an opaque call may have replaced.
+``nonstack_objects`` (a callee's summary states the base never addresses the
+stack, ``relative_memory`` pointer rows): disjoint from the stack only.
 
 ``wild_objects`` (``relative_memory`` definition atoms: a call's result, a
 loaded pointer) are exact objects whose base may still point anywhere, the
@@ -162,6 +164,7 @@ class _Policy:
         self.unknown_writers: frozenset[str] = frozenset()
         self.wild_objects: frozenset = frozenset()
         self.fresh_objects: frozenset = frozenset()
+        self.nonstack_objects: frozenset = frozenset()
 
     def is_private(self, object_id: StorageObjectId, offset: int, key: str, *, write: bool = False) -> bool:
         """A byte of this function's own frame no other base can reach at
@@ -179,6 +182,9 @@ class _Policy:
                 or other in self.fresh_objects
             ):
                 return False  # ASSUMPTION (the allocator model): a new block
+        for nonstack, other in ((left, right), (right, left)):
+            if nonstack in self.nonstack_objects and other == self.stack_object:
+                return False  # the callee summary: never a stack address
         if left.kind is StorageObjectKind.ADDRESS_SPACE and right.kind is StorageObjectKind.ADDRESS_SPACE:
             return False  # different spaces
         if self.globals_disjoint and (
@@ -200,6 +206,7 @@ def derive_may_alias_reads(
     wild_objects: frozenset = frozenset(),
     observed_calls: dict | None = None,
     fresh_objects: frozenset = frozenset(),
+    nonstack_objects: frozenset = frozenset(),
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -239,6 +246,7 @@ def derive_may_alias_reads(
     wild = frozenset(item for item in objects if item in wild_objects)
     policy.wild_objects = wild
     policy.fresh_objects = frozenset(item for item in objects if item in fresh_objects)
+    policy.nonstack_objects = frozenset(item for item in objects if item in nonstack_objects)
     policy.unknown_writers = unknown_writers | frozenset(
         effect.operation_key
         for block in unit.blocks

@@ -138,6 +138,11 @@ class NormalizedFunction:
     # writing private frame bytes only, and the wild objects (``may_alias``)
     private_frame_writes: frozenset = frozenset()
     wild_objects: frozenset = frozenset()
+    # call effect rows the function's own address facts rest on (pointer
+    # values of its summary, ``function_summary._pointer_values``): rows of a
+    # fresh result, and (row, input row, argument varnode) of same-object results
+    fresh_rows: frozenset = frozenset()
+    same_object_rows: tuple = ()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -695,7 +700,7 @@ _CALL_EFFECT_LABELS = {
 
 
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries,
-                      stack_span=None):
+                      stack_span=None, pointer_rows=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
@@ -828,6 +833,15 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             ))
     for index, (kind, run, stage_key, target) in enumerate(staged):
         key = f"{call_key}~{index}"
+        value = getattr(run, "value", None)
+        if pointer_rows is not None and value is not None:
+            # the pointer value the callee's summary states (``relative_memory``)
+            if value[0] == "nonstack":
+                pointer_rows[key] = value
+            elif value[0] == "same_reg":
+                pointer_rows[key] = ("reg", stage_key, anchor_varnode(value[1]), value[2])
+            elif value[1] in load_keys:
+                pointer_rows[key] = ("mem", load_keys[value[1]], value[1].size, value[2])
         if kind == "register":
             writes = tuple(ResolvedStorage(span) for span in run.writes)
             rows.append(ObservedEffect(key, EffectKind.COPY, reads=(target,), writes=writes,
@@ -1021,6 +1035,15 @@ class _ScopedNormalizer:
             once_keys = single_execution_keys(observation, block_graph, frozenset(sites))
             wild_objects: set = set()
             fresh_objects: set = set()
+            nonstack_objects: set = set()
+            pointer_rows: dict = {}
+            fresh_rows = frozenset(
+                f"{key}~{index}"
+                for key, effect in proven_call_effects.items() if effect.fresh_registers
+                for index, run in enumerate(effect.runs)
+                if run.writes and all(span in effect.fresh_registers for span in run.writes)
+            )
+            same_object_rows = _same_object_rows(proven_call_effects, observation)
             for instruction in sorted(observation.instructions, key=lambda item: item.address):
                 for ordinal, operation in enumerate(instruction.operations):
                     operation_key = _operation_key(instruction, ordinal, operation)
@@ -1068,6 +1091,7 @@ class _ScopedNormalizer:
                             call_transitions, staged_temporaries,
                             _call_stack_span(operation_key, proven_call_effects[operation_key],
                                              call_transitions, observation, context),
+                            pointer_rows,
                         )
                         for row in rows:
                             operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
@@ -1170,14 +1194,11 @@ class _ScopedNormalizer:
                     operation_overrides=_rep_overrides(sites, rep_plan, observation),
                     once_keys=once_keys if atoms_on else None,
                     wild_objects=wild_objects,
-                    fresh_keys=frozenset(
-                        f"{key}~{index}"
-                        for key, effect in proven_call_effects.items() if effect.fresh_registers
-                        for index, run in enumerate(effect.runs)
-                        if run.writes and all(span in effect.fresh_registers for span in run.writes)
-                    ),
-                    same_object=_same_object_rows(proven_call_effects, observation),
+                    fresh_keys=fresh_rows,
+                    same_object=same_object_rows,
                     fresh_objects=fresh_objects,
+                    pointer_rows=pointer_rows,
+                    nonstack_objects=nonstack_objects,
                 )
                 if projected_effect_unit is effect_unit:
                     if atoms_on or not once_keys:
@@ -1273,6 +1294,7 @@ class _ScopedNormalizer:
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             wild_objects=frozenset(wild_objects),
             fresh_objects=frozenset(fresh_objects),
+            nonstack_objects=frozenset(nonstack_objects),
             observed_calls=observed_calls,
         )
         private_writes = private_frame_writes(
@@ -1340,6 +1362,10 @@ class _ScopedNormalizer:
             assumed_direction_flag_clear=direction_assumed,
             private_frame_writes=private_writes,
             wild_objects=frozenset(wild_objects),
+            fresh_rows=fresh_rows,
+            same_object_rows=tuple(sorted(
+                ((row, reader, argument) for row, (reader, argument) in same_object_rows.items()),
+                key=lambda item: item[0])),
         )
 
     def _build_cfg(

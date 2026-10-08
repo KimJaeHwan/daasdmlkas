@@ -14,7 +14,7 @@ import tdo_v2.normalize as normalize_module
 import tdo_v2.relative_memory as relative_memory
 from program_oracle import check_program
 from synthetic import (
-    CODE_BASE, R9, RAX, RBX, RCX, RDI, RDX, REG, RSI, RSP, FunctionBuilder, add, const, copy, load,
+    CODE_BASE, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, REG, RSI, RSP, FunctionBuilder, add, const, copy, load,
     operation_node_at, program_units, reg, slice_from, store, tmp,
 )
 from test_external_models import THUNKS, _analyze, _check
@@ -273,3 +273,132 @@ def test_mutation_fresh_disjoint_from_everything_misses(monkeypatch):
 
     monkeypatch.setattr(may_alias_module._Policy, "may_alias", disjoint)
     assert _check(_analyze(_fresh_and_global(True)), pools=_global_pools).silent
+
+
+# -- (d) pointer values across calls -----------------------------------------------
+
+HELPER = CODE_BASE + 0x800
+
+
+def _grow_helper(points_into_frame=False):
+    """TArray::ResizeGrow-like: this->Data = realloc(this->Data, 32) -- or,
+    with ``points_into_frame``, this->Data = &this->Num (this + 8)."""
+    builder = FunctionBuilder(entry=HELPER).sub_rsp(0x28).ins(copy(reg(RDI), reg(RCX)))
+    if points_into_frame:
+        builder.ins(add(reg(RAX), reg(RDI), const(8)))
+    else:
+        builder.ins(load(reg(RCX), reg(RDI))).ins(copy(reg(RDX), const(32))).call(THUNKS["realloc"])
+    return builder.ins(store(reg(RDI), reg(RAX))).add_rsp(0x28).ret()
+
+
+def _array_caller(preallocated=False):
+    """Arr at [rsp+0x20]: Data, Num (= rbx). grow(&Arr); Data = Arr.Data;
+    *Data = rsi; r9 = Arr.Num; r8 = Data[1] (written before the call when
+    ``preallocated``: Data = malloc(16), Data[1] = rbp)."""
+    t = tmp(0x100)
+    builder = FunctionBuilder().sub_rsp(0x48)
+    if preallocated:
+        builder.ins(copy(reg(RCX), const(16))).call(THUNKS["malloc"])
+        builder.ins(add(t, reg(RAX), const(8)), store(t, reg(RBP)))
+        builder.ins(add(t, reg(RSP), const(0x20)), store(t, reg(RAX)))
+    else:
+        builder.ins(add(t, reg(RSP), const(0x20)), store(t, const(0)))
+    return (builder
+            .ins(add(t, reg(RSP), const(0x28)), store(t, reg(RBX)))
+            .ins(add(reg(RCX), reg(RSP), const(0x20)))
+            .call(HELPER)
+            .ins(add(t, reg(RSP), const(0x20)), load(reg(RAX), t))
+            .ins(store(reg(RAX), reg(RSI)))
+            .ins(add(t, reg(RSP), const(0x28)), load(reg(R9), t))
+            .ins(add(t, reg(RAX), const(8)), load(reg(R8), t))
+            .add_rsp(0x48).ret())
+
+
+def _program_check(caller, helper):
+    from test_external_models import MODELS, _image
+    from tdo_v2.summary_store import load_external_models
+
+    units = program_units(caller, helper)
+    results = analyze_units(units, image_info=_image(),
+                            external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
+    analyzed = results["1:1000"]
+    pools = lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000}
+    report = check_program(analyzed.normalized, analyzed.unit.observation, program, seeds=range(6),
+                           register_pools=pools, havoc_calls=HAVOC,
+                           externals={(1, address): name for name, address in THUNKS.items()})
+    return results, report
+
+
+def _load_slice(function, nth_from_end):
+    rows = [row.operation_key for row in function.effects if row.operation_key.endswith(":LOAD")
+            and "~" not in row.operation_key]
+    address = int(rows[-1 - nth_from_end].split(":")[1], 16)   # rows[-1] is the ret's own LOAD
+    return slice_from(function, operation_node_at(function, (address - CODE_BASE) // 4, 1))
+
+
+def test_a_reallocated_member_is_not_a_stack_address():
+    results, report = _program_check(_array_caller(), _grow_helper())
+    from tdo_v2.span_geometry import StorageObjectKind
+    (run,) = [run for exit_summary in results[f"1:{HELPER:x}"].summary.exits for run in exit_summary.runs
+              if run.value is not None and run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE
+              and run.value[0] == "same" and run.value[2]]   # realloc of this->Data, null is fresh
+    num = _load_slice(results["1:1000"].normalized, 2)
+    assert num.is_complete and set(range(RBX, RBX + 8)) <= num.register_bytes
+    assert not num.register_bytes & set(range(RSI, RSI + 8))
+    assert report.runs and report.silent == []
+
+
+def test_a_reallocated_member_keeps_its_contents():
+    results, report = _program_check(_array_caller(preallocated=True), _grow_helper())
+    element = _load_slice(results["1:1000"].normalized, 1)
+    assert element.is_complete and set(range(RBP, RBP + 8)) <= element.register_bytes
+    num = _load_slice(results["1:1000"].normalized, 2)
+    assert num.is_complete and set(range(RBX, RBX + 8)) <= num.register_bytes
+    assert report.runs and report.silent == []
+
+
+def test_a_member_pointing_into_the_frame_gets_no_value():
+    results, report = _program_check(_array_caller(), _grow_helper(points_into_frame=True))
+    from tdo_v2.span_geometry import StorageObjectKind
+    # this->Data = this + 8: a computed address, no pointer value
+    assert not [run for exit_summary in results[f"1:{HELPER:x}"].summary.exits for run in exit_summary.runs
+                if run.value is not None and run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE
+                and any(writer.endswith(":STORE") for writer in run.writers)]
+    assert not _load_slice(results["1:1000"].normalized, 2).is_complete
+    assert report.silent == []
+
+
+def test_mutation_frame_pointer_tagged_nonstack_misses(monkeypatch):
+    import tdo_v2.function_summary as summary_module
+    from dataclasses import replace
+    from tdo_v2.function_summary import ExitSummary, SummaryKind
+
+    original = summary_module._pointer_values
+
+    def everything_nonstack(normalized, observation, exits, tracer):
+        exits = original(normalized, observation, exits, tracer)
+        return [ExitSummary(item.block_key, tuple(
+            replace(run, value=("nonstack",)) if run.kind is SummaryKind.COMPUTED and run.span.size == 8 else run
+            for run in item.runs)) for item in exits]
+
+    monkeypatch.setattr(summary_module, "_pointer_values", everything_nonstack)
+    _, report = _program_check(_array_caller(), _grow_helper(points_into_frame=True))
+    assert report.silent
+
+
+def test_a_reused_block_after_free_is_not_missed():
+    """p = malloc(); *p = rsi; free(p); q = malloc() (the same address again);
+    *q = rdi; r9 = *q: the oracle reuses freed addresses."""
+    builder = (FunctionBuilder().sub_rsp(0x28)
+               .ins(copy(reg(RCX), const(16))).call(THUNKS["malloc"])
+               .ins(store(reg(RAX), reg(RSI)))
+               .ins(copy(reg(RCX), reg(RAX))).call(THUNKS["free"])
+               .ins(copy(reg(RCX), const(16))).call(THUNKS["malloc"])
+               .ins(store(reg(RAX), reg(RDI)))
+               .ins(load(reg(R9), reg(RAX)))
+               .add_rsp(0x28).ret())
+    results = _analyze(builder)
+    reload = _reload(results["1:1000"].normalized)
+    assert reload.is_complete and set(range(RDI, RDI + 8)) <= reload.register_bytes
+    assert _check(results).silent == []

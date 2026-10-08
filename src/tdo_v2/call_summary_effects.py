@@ -60,6 +60,11 @@ class ProvenRunEffect:
     # a pair it cannot is passed back as ``failed_conditions`` and the bytes
     # become unknown
     conditions: tuple[tuple[AnchoredSpan, AnchoredSpan], ...] = ()
+    # pointer value (``SummaryRun.value``) for the caller: ("nonstack",),
+    # ("same_reg", register span, null_is_fresh) -- the caller's value of that
+    # register at the call -- or ("same_mem", AnchoredSpan, null_is_fresh) --
+    # the caller's memory there at the call; None: unknown
+    value: tuple | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +75,7 @@ class ProvenMemoryRun:
     keeps_old: bool
     origins: tuple[str, ...] = ()
     conditions: tuple[tuple[AnchoredSpan, AnchoredSpan], ...] = ()
+    value: tuple | None = None   # as ``ProvenRunEffect.value``
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,7 +273,7 @@ def derive_proven_call_effect(
     def split_sources(sources):
         registers, loads = [], []
         for source in sources:
-            if type(source) is tuple:  # ("origin", label)
+            if type(source) is tuple:  # ("origin", label) / ("pointer", value)
                 continue
             if source.object_id.kind is StorageObjectKind.REGISTER_FILE:
                 registers.append(source)
@@ -276,13 +282,22 @@ def derive_proven_call_effect(
         return (tuple(sorted(registers, key=lambda span: span.canonical_key)),
                 tuple(sorted(set(loads), key=repr)))
 
+    # the width of the pointers whose values the summary states
+    summary_pointer_size = next((run.span.size for item in summary.exits for run in item.runs
+                                 if run.value is not None), None)
     runs = []
     for (sources, keeps_old, conditions), offsets in sorted(register_groups.items(), key=lambda item: min(item[1])):
         writes = tuple(_spans(register_object, offsets))
         registers, loads = split_sources(sources)
+        value = _pointer_value(sources, keeps_old, writes, summary_pointer_size, anchored)
+        if value is not None and value[0] == "same_reg" and value[1] not in registers:
+            value = None  # the input rows read only the run's registers
+        if value is not None and value[0] == "same_mem" and value[1] not in loads:
+            value = None
         if keeps_old:
             registers = tuple(sorted(set(registers) | set(writes), key=lambda span: span.canonical_key))
-        runs.append(ProvenRunEffect(writes, registers, loads, _origins(sources), _sorted_pairs(conditions)))
+        runs.append(ProvenRunEffect(writes, registers, loads, _origins(sources), _sorted_pairs(conditions),
+                                    value))
     memory_runs = []
     for (sources, keeps_old, conditions), items in sorted(memory_groups.items(), key=lambda item: repr(min(item[1], key=repr))):
         registers, loads = split_sources(sources)
@@ -290,9 +305,15 @@ def derive_proven_call_effect(
         for object_id, offset in items:
             by_object.setdefault(object_id, []).append(offset)
         for object_id, offsets in sorted(by_object.items(), key=repr):
-            for span in _spans(object_id, offsets):
+            spans = list(_spans(object_id, offsets))
+            for span in spans:
+                value = _pointer_value(sources, keeps_old, spans, summary_pointer_size, anchored)
+                if value is not None and value[0] == "same_reg" and value[1] not in registers:
+                    value = None
+                if value is not None and value[0] == "same_mem" and value[1] not in loads:
+                    value = None
                 memory_runs.append(ProvenMemoryRun(anchored(span), registers, loads, keeps_old, _origins(sources),
-                                                   _sorted_pairs(conditions)))
+                                                   _sorted_pairs(conditions), value))
     preserved = [offset for offset in range(register_limit) if offset not in unknown and offset not in skip]
 
     def through_register(access):
@@ -342,11 +363,29 @@ def _sink_demand(demand, anchored) -> ProvenSinkDemand:
 
 
 def _origins(sources) -> tuple[str, ...]:
-    return tuple(sorted(item[1] for item in sources if type(item) is tuple))
+    return tuple(sorted(item[1] for item in sources if type(item) is tuple and item[0] == "origin"))
 
 
 def _with_origins(sources, run) -> frozenset:
-    return frozenset(sources) | {("origin", label) for label in run.origins}
+    """The verdict's sources, origin labels and the run's pointer value (a
+    ("pointer", value) marker: bytes of one pointer stay one group, and a
+    merge of exits with different values keeps both markers -- no value)."""
+    return frozenset(sources) | {("origin", label) for label in run.origins} | {("pointer", run.value)}
+
+
+def _pointer_value(sources, keeps_old, spans, size, anchored):
+    """The caller-facing pointer value of one output run, or None."""
+    markers = [item[1] for item in sources if type(item) is tuple and item[0] == "pointer"]
+    if len(markers) != 1 or markers[0] is None or keeps_old or len(spans) != 1 or spans[0].size != size:
+        return None
+    value = markers[0]
+    if value == ("nonstack",):
+        return value
+    _, entry, null_is_fresh = value
+    if entry.object_id.kind is StorageObjectKind.REGISTER_FILE:
+        return ("same_reg", entry, null_is_fresh)
+    access = anchored(entry)
+    return None if access is None else ("same_mem", access, null_is_fresh)
 
 
 def _only_exported_aliasing(run, exported) -> bool:
