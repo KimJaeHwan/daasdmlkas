@@ -749,3 +749,32 @@ def test_stack_below_the_call_is_clobbered_and_the_rest_kept():
     assert not below.is_complete
     assert above.is_complete and set(range(RSI, RSI + 8)) <= above.register_bytes
     assert _check(results, program).silent == []
+
+
+# -- TEST-ONLY declared boundaries as call effects --------------------------------
+
+def test_declared_boundary_is_a_call_effect():
+    """A TEST-ONLY declared source writes only RAX and keeps everything else:
+    the same kind of call effect as a summary or a model, labelled."""
+    from tdo_v2.assumed_call_effects import AssumedCallEffect
+    from tdo_v2.physical_state import PhysicalRegisterSlice
+    caller = (FunctionBuilder().ins(copy(reg(RBX), reg(RSI))).call(CODE_BASE + 0xF00)
+              .ins(copy(reg(R9), reg(RAX))).ins(copy(reg(R8), reg(RBX))).ret())
+    units = program_units(caller)
+    call = "1:1004:2:CALL"
+    results = analyze_units(units, declared_boundaries={"1:1000": {
+        call: AssumedCallEffect("src.ret", (PhysicalRegisterSlice(RAX, 8),))}})
+    item = results["1:1000"]
+    effect = item.proven[call]
+    assert item.declared[call] == "test-only-boundary:src.ret"
+    assert [run.writes[0].start for run in effect.runs] == [RAX]
+    assert effect.preserves_memory and not effect.observes_registers and not effect.clobbers_below
+    function = item.normalized
+    kept = slice_from(function, operation_node_at_index(function, 3))
+    assert kept.is_complete and set(range(RSI, RSI + 8)) <= kept.register_bytes
+    assert not function.call_clobber_reads
+
+
+def operation_node_at_index(function, index):
+    from synthetic import operation_node_at
+    return operation_node_at(function, index)

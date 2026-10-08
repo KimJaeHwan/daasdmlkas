@@ -340,3 +340,9 @@ PointerPath(무한 루프), 재귀 미지원. 새 설계는 **완성된 intra �
 - 같은 부분 Bundle(09 debug)에서: 요약 엔진 정확 53 / 확실 48, 옛 엔진 39 / 28 (재귀 케이스는 옛 엔진에서 실패).
 - 남은 정리(다음): TEST-ONLY 경계 가정(`assumed_call_effects`)을 모델 파일 방식으로 통합. 옛 엔진과 함수 내부
   골든의 "-assumed" 세트가 아직 그 경로를 쓰므로, 옛 엔진을 실제로 걷어낼 때 함께.
+- **TEST-ONLY 통합(완료)**: 요약 엔진에서 TEST-ONLY 선언 경계는 더 이상 `assumed_call_effects`(정규화의 원시
+  호출 쓰기 + call_clobber·may_alias 예외) 경로를 타지 않는다. 같은 선언(`AssumedCallEffect`)을 "선언한
+  레지스터만 선언한 입력으로 쓰고 나머지는 모두 보존, SP 복원" 요약으로 바꿔 요약·모델과 같은
+  `ProvenCallEffect` 경로로 연결(`analyze_units(declared_boundaries=…)`). 결과의 가정 목록에
+  `test-only-boundary:<label>`. 요약 엔진의 TEST-ONLY 결과는 이전과 루트 단위로 동일(8개 Bundle, 차이 0).
+  옛 경로는 legacy 엔진과 함수 내부 골든 "-assumed" 세트(정규화 단위)용으로만 남음.

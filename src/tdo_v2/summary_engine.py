@@ -6,8 +6,11 @@ layer (``interprocedural.analyze_units``): every function is normalized with
 the proven effects of its summarized callees, so a sink root's local slice
 already reaches through calls. Source labels become origin nodes:
 
-* a TEST-ONLY declared source call (``assume_boundary_call_effects``): its own
-  write in the caller, as in the engine;
+* a TEST-ONLY declared source call (``assume_boundary_call_effects``): the
+  declared effect is a call effect like a summary or a model
+  (``interprocedural`` ``declared_boundaries``, labelled
+  ``test-only-boundary:<label>`` in ``EngineRun.assumptions``), so its run
+  outputs carry the label as below;
 * a call to a source function inside the Bundle: the summarized run outputs
   that write the source's state (its return register);
 * a summarized call whose runs reached a source inside the callee: those run
@@ -45,7 +48,6 @@ from .engine import (
 from .integration.configured_target_resolution import _selected_resolved_target
 from .integration.observed_function_session import open_observed_function_session
 from .interprocedural import analyze_units, function_key, run_definition_nodes
-from .memory_contracts import MemoryDefinitionKind
 from .image_info import ReadOnlyImage, load_image_info
 from .normalize import NormalizedFunction
 from .observed_call_state import observed_call_state_projections
@@ -149,44 +151,36 @@ def analyze_frozen_bundle_with_summaries(
 
         def extra_origins(key, unit, normalized, calls):
             origins: dict = {}
-            declared = dict(normalized.assumed_call_effects)
             proven = dict(normalized.proven_call_effects)
             for seed, boundary in boundaries[key]:
                 for match in source_matches(boundary):
                     call = seed.operation_key
-                    if call in declared and declared[call].label == match.label:
-                        nodes = [
-                            normalized.memory_graph.definition_nodes[index]
-                            for index, definition in enumerate(normalized.memory_ssa.definitions)
-                            if definition.operation_key == call
-                            and definition.kind is MemoryDefinitionKind.DATA_WRITE
-                        ]
-                    else:
-                        state = {
-                            offset for selector in boundary_provider.state(boundary, match)
-                            if type(selector) is PhysicalRegisterSlice
-                            for offset in range(selector.byte_offset, selector.byte_offset + selector.byte_size)
-                        }
-                        nodes = [
-                            node
-                            for index, run in enumerate(proven[call].runs)
-                            if any(offset in state for span in run.writes
-                                   for offset in range(span.start, span.end))
-                            for node in run_definition_nodes(normalized, f"{call}~{index}")
-                        ] if call in proven else []
-                        # state the call is not proven to write (an unsummarized or
-                        # partly opaque source): its later reads carry call-clobber
-                        # debt naming this call -- the debt is where the value may
-                        # come from, so it carries the label (the root stays unsure)
-                        nodes += [
-                            node
-                            for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
-                            if call in row.intervening_calls and any(
-                                span.object_id.kind is StorageObjectKind.REGISTER_FILE
-                                and any(offset in state for offset in range(span.start, span.end))
-                                for span in row.spans
-                            )
-                        ]
+                    # summarized, modeled or TEST-ONLY declared: all are call effects
+                    state = {
+                        offset for selector in boundary_provider.state(boundary, match)
+                        if type(selector) is PhysicalRegisterSlice
+                        for offset in range(selector.byte_offset, selector.byte_offset + selector.byte_size)
+                    }
+                    nodes = [
+                        node
+                        for index, run in enumerate(proven[call].runs)
+                        if any(offset in state for span in run.writes
+                               for offset in range(span.start, span.end))
+                        for node in run_definition_nodes(normalized, f"{call}~{index}")
+                    ] if call in proven else []
+                    # state the call is not proven to write (an unsummarized or
+                    # partly opaque source): its later reads carry call-clobber
+                    # debt naming this call -- the debt is where the value may
+                    # come from, so it carries the label (the root stays unsure)
+                    nodes += [
+                        node
+                        for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
+                        if call in row.intervening_calls and any(
+                            span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                            and any(offset in state for offset in range(span.start, span.end))
+                            for span in row.spans
+                        )
+                    ]
                     for node in nodes:
                         origins.setdefault(node, set()).add(match.label)
             return origins
@@ -197,7 +191,7 @@ def analyze_frozen_bundle_with_summaries(
             if assume_readonly_image_constant and image_info is not None else None
         )
         results = analyze_units(
-            [item.unit for item in evidences], assumed_call_effects=assumed, extra_origins=extra_origins,
+            [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             sink_roots=sink_roots,
             image_info=image_info if external_models else None,

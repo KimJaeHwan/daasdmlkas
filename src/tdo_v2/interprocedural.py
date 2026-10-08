@@ -59,7 +59,8 @@ def function_key(coordinate) -> str:
 
 def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_globals_disjoint_from_stack=False, sink_roots=None,
-                  image_info=None, external_models=None, readonly_image=None) -> dict[str, AnalyzedFunction]:
+                  image_info=None, external_models=None, readonly_image=None,
+                  declared_boundaries=None) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -75,7 +76,13 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     ``image_info`` + ``external_models``: calls to imported symbols (through a
     thunk or an import slot, ``image_info``) take the declared model of that
     name (``summary_store``); each use is a named assumption
-    (``AnalyzedFunction.declared``)."""
+    (``AnalyzedFunction.declared``).
+    ``declared_boundaries``: entry key -> {call key: AssumedCallEffect}, the
+    TEST-ONLY declared source/sink effects, applied as call effects of the
+    same kind as summaries and models (writes exactly the declared registers
+    from the declared reads, keeps every other byte, restores the stack
+    pointer); labelled ``test-only-boundary:<label>``. (The legacy
+    ``assumed_call_effects`` path normalizes them as raw call writes.)"""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -142,6 +149,32 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 failed_conditions=frozenset(failed),
             )
 
+        def boundaries_of(key):
+            return (declared_boundaries or {}).get(key, {})
+
+        def boundary_effect(key, call_key, declaration):
+            """A TEST-ONLY declared boundary as a call effect (see above)."""
+            from .function_summary import FUNCTION_SUMMARY_VERSION, ExitSummary, SummaryKind, SummaryRun
+
+            register_object, _, _, shapes = site(key)
+            if register_object is None:
+                return None
+
+            def span(row):
+                return ByteSpan(register_object, row.byte_offset, row.byte_size)
+
+            reads = tuple(sorted({span(row) for row in declaration.reads}, key=lambda item: item.canonical_key))
+            runs = tuple(SummaryRun(span(row), SummaryKind.COMPUTED, (0,), ("declared",), reads, (), (), ())
+                         for row in declaration.writes)
+            if call_key.endswith(":BRANCH"):
+                deltas = tuple(((item.start, item.size), item.size) for item in program_stack)
+            else:
+                deltas = tuple(((offset, size), -delta)
+                               for (offset, size), delta in shapes.get(call_key, {}).items())
+            summary = FunctionSummary(FUNCTION_SUMMARY_VERSION, (ExitSummary("declared", runs),), (), (),
+                                      register_deltas=deltas)
+            return site_effect(key, call_key, summary, {}, callee=f"test-only-boundary:{declaration.label}")
+
         def one(key, hypotheses):
             unit = functions[key]
             observation = unit.observation
@@ -164,9 +197,14 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 proven = {}
                 if register_object is None:
                     return proven
+                for call_key, declaration in boundaries_of(key).items():
+                    if call_key not in assumed:
+                        effect = boundary_effect(key, call_key, declaration)
+                        if effect is not None:
+                            proven[call_key] = effect
                 for call_key, callee in calls[key].items():
                     done = results.get(callee)
-                    if call_key in assumed:
+                    if call_key in assumed or call_key in proven:
                         continue
                     if component_of[callee] == component_of[key]:
                         # recursion: the SCC's current hypothesis (``solve``), or opaque
@@ -263,8 +301,9 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             anchors = _relative_anchors(unit, normalized) if summary is not None else {}
             return AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
                                     anchors, origins, projected, declared={
-                                        call: externals[key][call][1].label
-                                        for call in proven if call in externals[key]
+                                        call: (f"test-only-boundary:{boundaries_of(key)[call].label}"
+                                               if call in boundaries_of(key) else externals[key][call][1].label)
+                                        for call in proven if call in externals[key] or call in boundaries_of(key)
                                     })
 
         def solve(component):
