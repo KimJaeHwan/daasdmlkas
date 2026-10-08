@@ -1,0 +1,12 @@
+{
+  "format_version": 1,
+  "kind": "pcodeop-declared",
+  "id": "x86-markers",
+  "version": 1,
+  "notes": "CALLOTHER user ops of the Ghidra x86 languages, by index (verified per language version with ghidra/GhidraV2ListUserOps.java). no_effect: markers with no data effect -- LOCK/UNLOCK bracket a lock-prefixed instruction whose memory effect is already in its own p-code. Each use is a declared assumption.",
+  "languages": [
+    {"language_id": "x86:LE:64:default", "major_version": 4, "minor_version": 6},
+    {"language_id": "x86:LE:32:default", "major_version": 4, "minor_version": 6}
+  ],
+  "no_effect": {"17": "LOCK", "18": "UNLOCK"}
+}

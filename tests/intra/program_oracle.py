@@ -64,7 +64,7 @@ def _covering_runs(proven, writer, space, offset, reachable, reg_space):
 
 def check_program(function, observation, program, *, seeds=range(6), register_pools=None,
                   spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None,
-                  externals=None) -> ProgramReport:
+                  externals=None, no_effect_userops=frozenset()) -> ProgramReport:
     """``program``: callee entry (space, offset) -> observation."""
     const_space, reg_space, unique_space = spaces
     report = ProgramReport()
@@ -89,7 +89,7 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
     for seed in seeds:
         interpreter = Interpreter(observation, constant_space=const_space, seed=seed,
                                   havoc_calls=havoc_calls, image=image, program=program,
-                                  externals=externals)
+                                  externals=externals, no_effect_userops=no_effect_userops)
         for register, value in (register_pools(seed) if register_pools else {}).items():
             interpreter.preset(reg_space, register, 8, value)
         try:

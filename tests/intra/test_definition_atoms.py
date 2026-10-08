@@ -188,3 +188,88 @@ def test_without_fresh_the_spilled_pointer_stays_unsure(monkeypatch):
     results = _analyze(_spilled_heap_pointer())
     assert not _reload(results["1:1000"].normalized).is_complete
     assert _check(results).silent == []
+
+
+def _grown_buffer():
+    """DFB031: buf = malloc(16); buf[0] = rsi; buf[1] = rdi;
+    buf = realloc(buf, 32); r9 = buf[0]."""
+    t = tmp(0x100)
+    return (FunctionBuilder().sub_rsp(0x28)
+            .ins(copy(reg(RCX), const(16)))
+            .call(THUNKS["malloc"])
+            .ins(store(reg(RAX), reg(RSI)))
+            .ins(add(t, reg(RAX), const(8)), store(t, reg(RDI)))
+            .ins(copy(reg(RCX), reg(RAX)), copy(reg(RDX), const(32)))
+            .call(THUNKS["realloc"])
+            .ins(load(reg(R9), reg(RAX)))
+            .add_rsp(0x28).ret())
+
+
+def test_realloc_keeps_the_object():
+    """realloc's result addresses the old block's object (the model's
+    same_object_as, assuming the old pointer is not used afterwards): the
+    oracle moves the block for real and every byte keeps its writer."""
+    results = _analyze(_grown_buffer())
+    reload = _reload(results["1:1000"].normalized)
+    assert reload.is_complete
+    assert set(range(RSI, RSI + 8)) <= reload.register_bytes
+    assert not reload.register_bytes & set(range(RDI, RDI + 8))
+    report = _check(results)
+    assert report.runs and report.silent == []
+
+
+def test_without_same_object_the_grown_buffer_is_unsure(monkeypatch):
+    monkeypatch.setattr(normalize_module, "_same_object_rows", lambda *args: {})
+    results = _analyze(_grown_buffer())
+    assert not _reload(results["1:1000"].normalized).is_complete
+    assert _check(results).silent == []
+
+
+def _fresh_and_global(through_pointer):
+    """obj = malloc(); *obj = rsi; then either a global write (*G = rdi) or
+    G = obj; q = *rbx; *q = rdi -- rbx points to G at run time, so q is the
+    block's address back through a pointer the engine cannot follow; r9 = *obj."""
+    from synthetic import DATA_BASE
+    builder = (FunctionBuilder().sub_rsp(0x28)
+               .ins(copy(reg(RCX), const(16)))
+               .call(THUNKS["malloc"])
+               .ins(store(reg(RAX), reg(RSI))))
+    if through_pointer:
+        builder.ins(store(const(DATA_BASE + 0x40), reg(RAX)))
+        builder.ins(load(reg(RDX), reg(RBX)), store(reg(RDX), reg(RDI)))
+    else:
+        builder.ins(store(const(DATA_BASE + 0x40), reg(RDI)))
+    return builder.ins(load(reg(R9), reg(RAX))).add_rsp(0x28).ret()
+
+
+def _global_pools(seed):
+    from synthetic import DATA_BASE
+    return {**fidelity._register_inputs(seed), RSP: 0x7000_0000, RBX: DATA_BASE + 0x40}
+
+
+def test_a_fresh_block_is_disjoint_from_globals():
+    results = _analyze(_fresh_and_global(False))
+    reload = _reload(results["1:1000"].normalized)
+    assert reload.is_complete and set(range(RSI, RSI + 8)) <= reload.register_bytes
+    assert not reload.register_bytes & set(range(RDI, RDI + 8))
+    assert _check(results).silent == []
+
+
+def test_a_loaded_pointer_may_reach_a_fresh_block():
+    results = _analyze(_fresh_and_global(True))
+    reload = _reload(results["1:1000"].normalized)
+    assert not reload.is_complete
+    assert _check(results, pools=_global_pools).silent == []
+
+
+def test_mutation_fresh_disjoint_from_everything_misses(monkeypatch):
+    import tdo_v2.may_alias as may_alias_module
+    original = may_alias_module._Policy.may_alias
+
+    def disjoint(self, left, right):
+        if left in self.fresh_objects or right in self.fresh_objects:
+            return False
+        return original(self, left, right)
+
+    monkeypatch.setattr(may_alias_module._Policy, "may_alias", disjoint)
+    assert _check(_analyze(_fresh_and_global(True)), pools=_global_pools).silent

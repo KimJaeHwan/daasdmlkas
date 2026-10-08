@@ -407,3 +407,42 @@ fresh → 함수 간.
 7. 보류: Q4(함수 어디든 미해결 쓰기 → 불확실) — 미해결 쓰기에 "출력 저장소 미상" 연산이 섞여 있어(레지스터를
    덮을 수 있음) 그대로는 못 뺌, 종류 구분 후 좁히기(측정상 win32 1건). fresh 객체의 다른 기준과의 불겹침(탈출
    분석), 함수 간 fresh 반환(A3), realloc 내용 보존, x86-32 모델.
+
+## 19. 새 객체·포인터 체인 2단계: UE Core 모델 · realloc · fresh 불겹침 (2026-10-08, Fable 검토 반영)
+
+Fable 권고 순서 (a) 엔진 DLL 모델 → (b) realloc = 같은 객체 → (c1) fresh 불겹침 → (c2) 탈출 분석 → (d) 함수 간
+fresh. 이번 단계는 (a)(b)(c1)과, 측정 중 드러난 UE helper 원인들.
+
+1. **엔진 DLL 모델 매칭**(`summary_store`): 파일에 `libraries`, 항목에 `original_names`(mangled). 라이브러리 + mangled
+   이름으로만 매칭(C 런타임 파일은 짧은 이름, 단 `?` mangled import는 제외), 두 파일이 한 import에 맞으면 오류.
+   새 파일 `models/external/ue_core_win64.json`: FMemory Malloc(fresh)/Free/QuantizeSize(순수)/Realloc,
+   FDebug::CheckVerifyFailedImpl·UE4Array_Private::OnInvalidArrayNum(메모리 보존 — 가정
+   "ue-core-diagnostics-no-reentrant-callback", noreturn은 verify()에서 틀리므로 쓰지 않음).
+2. **realloc = 같은 객체**(모델 `same_object_as`, crt v3·ue-core): 결과 주소식 = 호출 시점 인자의 주소식(가정
+   no-use-of-old-pointer-after-realloc, free의 no-use-after-free와 같은 꼴), 인자가 상수(realloc(NULL))면 fresh,
+   other_memory 보존. 검증기 realloc은 항상 블록을 옮기고 각 바이트가 원래 작성자를 유지(이동), 옛 블록은 havoc.
+   DFB031 정확·확실.
+3. **fresh 불겹침(c1)**(`may_alias._Policy`): fresh 객체(fresh atom 하나 기준)는 상수 주소·스택·다른 fresh와
+   안 겹침. **입구 레지스터 기준 객체는 제외** — 불투명 호출 뒤의 레지스터 읽기는 SSA상 입구 값이지만 실제로는
+   그 호출이 돌려준 값(새 블록 주소일 수 있음)이라서(같은 원리의 기존 구멍 후보는 별도 작업으로 기록).
+   테스트: 엔진이 따라갈 수 없는 경로(실행 시 G를 가리키는 rbx)로 돌아온 포인터는 겹침 유지, 변형 "fresh는
+   무엇과도 안 겹침"을 검증기가 잡음.
+4. **CALLOTHER 표시 연산**(`models/pcodeops/x86.json`, `pcodeop_models`): Bundle에는 userop 번호만 있으므로
+   언어 버전별 번호→이름 표(`ghidra/GhidraV2ListUserOps.java`로 확인: x86 64/32 4.6에서 17=LOCK, 18=UNLOCK)로
+   LOCK/UNLOCK(출력 없고 번호 피연산자뿐)을 읽기·쓰기 없는 선언 효과로(라벨 `pcodeop-model:x86-markers/...`).
+   검증기도 같은 의미로 실행(`no_effect_userops`).
+5. **`jmp [__imp_X]` 꼬리 호출**: 모델을 BRANCHIND 꼬리(마지막 연산, fallthrough 없음 — Ghidra는 terminal로
+   표시하지 않음)에도 적용, BRANCH 꼬리와 같은 합성. 검증기는 외부 함수 실행 후 그 ret으로 호출자에 복귀.
+   스택 모양이 없는 thunk가 스택 기준 객체를 전혀 건드리지 않으면 꼬리 지점의 프레임 아래 경계 0
+   (`_stackless_tail_bounds`).
+6. **요약의 비공개 프레임 규칙**: 엔진 may_alias는 비공개 프레임 쓰기가 다른 객체에 닿지 않는다고 보는데 요약의
+   crossing은 그렇지 않아, 가변 인자 호출 전 스택 인자 쓰기만으로 입구 포인터 객체가 UNKNOWN이 됐다. 정규화가
+   `private_frame_writes`·`wild_objects`를 남기고 요약이 같은 규칙을 씀.
+7. **호출 효과의 레지스터 범위**: thunk처럼 레지스터 몇 개만 쓰는 함수의 호출 효과가 그 함수의 최대 레지스터까지만
+   보존을 계산해 RBX·RDI 같은 보존 레지스터가 빠졌다 → 프로그램 전체 범위 이상으로.
+8. **결과**(기본 모드, 누락+확실 0): 09 debug 75건 정확 63 → **64(85%)**, 확실 59 → **60(80%)**; release 51/46 →
+   **52/47**; win32·UE 케이스 지표 변화 없음. UE Dev 호출 경유 의존 1,276 → 2,428, DebugGame 796 → 1,684, 모델
+   적용 호출 5 → 70. 동적 검증 누락 0(zlib 256건은 기존과 동일, 별도 작업). 테스트 461개.
+9. **UE 다음 원인**(R001/R011): TArray helper가 Realloc 결과를 `this->Data`에 쓰고 호출자가 그 포인터를 다시
+   읽어 원소를 씀 → 그 포인터가 "새 블록(스택 아님)"이라는 사실이 함수 경계를 못 넘음 = (d) 함수 간 fresh.
+   그 밖: 가상 호출(레지스터 CALLIND), FString 내부, 루프 안 쓰기.

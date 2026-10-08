@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-sysv64",
-  "version": 2,
+  "version": 3,
   "language_id": "x86:LE:64:default",
   "abi_tag": "sysv64",
   "notes": "C runtime functions under the System V x86-64 convention (args RDI, RSI, RDX, RCX; result RAX). Preserved: RBX, RBP, R12-R15. Every entry is a declared assumption.",
@@ -224,7 +224,7 @@
     },
     {
       "name": "realloc",
-      "notes": "Returns a block holding the old contents; the old block's bytes may move: no memory is kept.",
+      "notes": "Returns a block holding the old contents: the same object as the old pointer, assuming the old pointer is not used afterwards (no-use-of-old-pointer-after-realloc); realloc(NULL, n) is a fresh block.",
       "registers": [
         {
           "write": [
@@ -240,11 +240,13 @@
               48,
               8
             ]
-          ]
+          ],
+          "same_object_as": [56, 8]
         }
       ],
       "memory": [],
-      "other_memory": "clobbered"
+      "observes": [[56, 8]],
+      "other_memory": "preserved"
     }
   ]
 }

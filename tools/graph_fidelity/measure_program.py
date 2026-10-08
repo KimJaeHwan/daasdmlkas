@@ -59,7 +59,7 @@ def main() -> int:
         default_sp = (0x10, 4) if ":32:" in language else (0x20, 8)
         units = [evidence.unit for evidence in session.iter_functions()]
     began = time.time()
-    options, externals = {}, None
+    options, externals, userops = {}, None, frozenset()
     if args.models:
         sys.path.insert(0, str(REPO / "tools" / "bundle_export"))
         import run_dfbench
@@ -67,10 +67,14 @@ def main() -> int:
 
         info = load_image_info(args.generation)
         models = run_dfbench.external_models(args.generation)
-        options = {"image_info": info, "external_models": models}
+        markers = run_dfbench.pcodeop_models()
+        options = {"image_info": info, "external_models": models, "pcodeop_models": markers}
+        namespace = units[0].scopes.program.evidence.translation_namespace if units else None
+        language = namespace and (namespace.language_id, namespace.major_version, namespace.minor_version)
+        userops = frozenset(index for model in markers if language in model.languages for index in model.no_effect)
         # every modeled import runs for real (or the run is skipped: Unsupported)
-        externals = {thunk: row.name for row in (info.imports if info else ())
-                     if models.lookup(row.name) for thunk in (*row.thunks, *row.slots)}
+        externals = {thunk: models.lookup(row)[1].name for row in (info.imports if info else ())
+                     if models.lookup(row) for thunk in (*row.thunks, *row.slots)}
     results = analyze_units(units, **options)
     totals["analysis_seconds"] = round(time.time() - began, 1)
     program = {
@@ -100,7 +104,7 @@ def main() -> int:
         report = check_program(item.normalized, observation, program, seeds=range(args.runs),
                                register_pools=pool, spaces=(const, regs, unique),
                                havoc_calls=(regs, sp_offset, sp_size), image=image,
-                               externals=externals)
+                               externals=externals, no_effect_userops=userops)
         totals["runs"] += report.runs
         totals["skipped_runs"] += report.unsupported
         totals["checked"] += report.checked

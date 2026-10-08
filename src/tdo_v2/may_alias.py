@@ -38,6 +38,11 @@ object (private frame bytes included, since a non-affine address may still
 be derived from the stack pointer), and an unknown-address read may observe
 any memory write executed before it. Both stay unresolved debt as well.
 
+``fresh_objects`` (based on one block a modeled allocator returned, the
+model's assumption): disjoint from constant addresses, the stack and other
+fresh blocks (no use after free). Any other base may point into it -- even
+an entry register value, which an opaque call may have replaced.
+
 ``wild_objects`` (``relative_memory`` definition atoms: a call's result, a
 loaded pointer) are exact objects whose base may still point anywhere, the
 private frame included: their writes reach private frame bytes, and private
@@ -156,6 +161,7 @@ class _Policy:
         # writes to wild objects
         self.unknown_writers: frozenset[str] = frozenset()
         self.wild_objects: frozenset = frozenset()
+        self.fresh_objects: frozenset = frozenset()
 
     def is_private(self, object_id: StorageObjectId, offset: int, key: str, *, write: bool = False) -> bool:
         """A byte of this function's own frame no other base can reach at
@@ -167,6 +173,12 @@ class _Policy:
     def may_alias(self, left: StorageObjectId, right: StorageObjectId) -> bool:
         if left == right:
             return False  # one object: the SSA is byte-exact
+        for fresh, other in ((left, right), (right, left)):
+            if fresh in self.fresh_objects and (
+                other.kind is StorageObjectKind.ADDRESS_SPACE or other == self.stack_object
+                or other in self.fresh_objects
+            ):
+                return False  # ASSUMPTION (the allocator model): a new block
         if left.kind is StorageObjectKind.ADDRESS_SPACE and right.kind is StorageObjectKind.ADDRESS_SPACE:
             return False  # different spaces
         if self.globals_disjoint and (
@@ -187,6 +199,7 @@ def derive_may_alias_reads(
     assume_globals_disjoint_from_stack: bool = False,
     wild_objects: frozenset = frozenset(),
     observed_calls: dict | None = None,
+    fresh_objects: frozenset = frozenset(),
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -225,6 +238,7 @@ def derive_may_alias_reads(
                            assume_globals_disjoint_from_stack, observed_calls)
     wild = frozenset(item for item in objects if item in wild_objects)
     policy.wild_objects = wild
+    policy.fresh_objects = frozenset(item for item in objects if item in fresh_objects)
     policy.unknown_writers = unknown_writers | frozenset(
         effect.operation_key
         for block in unit.blocks
@@ -236,6 +250,28 @@ def derive_may_alias_reads(
         "may-alias", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
         unit, objects, policy,
     )
+
+
+def private_frame_writes(
+    unit, observation, context, address_spaces, *, assumed_calls=frozenset(),
+    observed_calls=None,
+) -> frozenset:
+    """(write operation key, object) pairs whose written bytes are all private
+    frame bytes at the write (``_Policy.is_private``): such a write reaches
+    no other object but a wild one -- for function summaries, which use the
+    same rule (``function_summary._exit_crossings``)."""
+    policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls, False, observed_calls)
+    found = set()
+    for block in unit.blocks:
+        for effect in block.effects:
+            for evidence in effect.writes:
+                if type(evidence) is not ResolvedStorage or evidence.span.object_id.kind not in _MEMORY_KINDS:
+                    continue
+                span = evidence.span
+                if all(policy.is_private(span.object_id, offset, effect.operation_key, write=True)
+                       for offset in range(span.start, span.end)):
+                    found.add((effect.operation_key, span.object_id))
+    return frozenset(found)
 
 
 DEFAULT_ENGINE = "sparse"  # verified identical to "dense" (docs section 14)

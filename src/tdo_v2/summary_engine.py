@@ -84,6 +84,7 @@ def analyze_frozen_bundle_with_summaries(
     external_models=None,
     assume_readonly_image_constant: bool = True,
     assume_direction_flag_clear: bool = True,
+    pcodeop_models=None,
 ) -> EngineRun:
     """``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
@@ -197,6 +198,7 @@ def analyze_frozen_bundle_with_summaries(
             sink_roots=sink_roots,
             image_info=image_info if external_models else None,
             external_models=external_models,
+            pcodeop_models=pcodeop_models,
             readonly_image=readonly_image,
             assume_direction_flag_clear=assume_direction_flag_clear,
         )

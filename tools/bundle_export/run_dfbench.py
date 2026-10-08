@@ -96,6 +96,13 @@ def external_models(generation: Path):
                                 LANGUAGES[abi_of(generation)], abi_of(generation))
 
 
+def pcodeop_models():
+    """Declared CALLOTHER semantics (models/pcodeops); each use is labelled."""
+    from tdo_v2.pcodeop_models import load_pcodeop_models
+
+    return load_pcodeop_models(sorted((REPO / "models" / "pcodeops").glob("*.json")))
+
+
 def selection_names(generation: Path) -> list[str]:
     command = generation.parent.parent / (generation.parent.name + ".logs") / \
         f"{generation.name}.command.json"
@@ -176,6 +183,7 @@ def main() -> int:
                 assume_boundary_call_effects=args.assume_boundary_effects,
                 assume_globals_disjoint_from_stack=args.assume_globals_not_stack,
                 external_models=external_models(generation) if args.external_models else None,
+                pcodeop_models=pcodeop_models() if args.external_models else None,
                 assume_readonly_image_constant=args.assume_readonly_image,
                 assume_direction_flag_clear=args.assume_direction_flag_clear,
             )

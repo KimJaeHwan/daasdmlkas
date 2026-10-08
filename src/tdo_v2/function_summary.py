@@ -750,6 +750,9 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
         from .may_alias import stack_object_of
         stack = stack_object_of(normalized.scopes, observation)
 
+    private = getattr(normalized, "private_frame_writes", frozenset())
+    wild = getattr(normalized, "wild_objects", frozenset())
+
     def may_alias(left, right) -> bool:
         if left == right:
             return False
@@ -800,7 +803,10 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                             events.setdefault(call_block, []).append((position, 0, f"call:{key}"))
                     if object_id.kind in _MEMORY_KINDS:
                         for write_block, position, order, other, key in memory_writes:
-                            if may_alias(other, object_id):
+                            # a private frame write reaches no other object but a
+                            # wild one (``may_alias.private_frame_writes``)
+                            if may_alias(other, object_id) and (
+                                    (key, other) not in private or object_id in wild):
                                 events.setdefault(write_block, []).append((position, order, f"alias:{key}"))
                         for write_block, position, order, key in unknown:
                             events.setdefault(write_block, []).append((position, order, f"unknown:{key}"))

@@ -81,7 +81,8 @@ class Interpreter:
                  havoc_calls: tuple[int, int, int] | None = None,
                  image=None, assumed_calls: dict | None = None,
                  track_provenance: bool = False, program: dict | None = None,
-                 sinks: tuple | None = None, externals: dict | None = None) -> None:
+                 sinks: tuple | None = None, externals: dict | None = None,
+                 no_effect_userops: frozenset = frozenset()) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
 
         ``track_provenance``: also record, per byte, the set of entry inputs its
@@ -105,6 +106,8 @@ class Interpreter:
         # executed with its real semantics (win64 arguments) instead of havoc:
         # the oracle for declared external models (``summary_store``)
         self._externals = dict(externals or {})
+        # CALLOTHER indices with no data effect (models/pcodeops: x86 LOCK/UNLOCK)
+        self._no_effect_userops = frozenset(no_effect_userops)
         self._heap = 0x6000_0000
         self._instructions = {
             (row.address.space_id, row.address.byte_offset): row
@@ -134,7 +137,8 @@ class Interpreter:
         self._previous_location = None
         self._activations: list = []          # (return location, call key)
         self._activation_written: set = set()
-        self._byte_inputs: list = []  # bytes written in the current outermost activation
+        self._byte_inputs: list = []
+        self._blocks: dict = {}   # external heap: block address -> size  # bytes written in the current outermost activation
         self._call_bytes: set = set()          # bytes last written by some activation
         self._order = [
             (row.address.space_id, row.address.byte_offset) for row in observation.instructions
@@ -417,6 +421,8 @@ class Interpreter:
         if opcode == "CALLIND" and key in self._external_callind:
             self._run_external(self._external_callind[key], key)
             return None
+        if opcode == "CALLOTHER" and output is None and len(inputs) == 1                 and inputs[0].kind is VarnodeKindCode.CONSTANT                 and inputs[0].coordinate.byte_offset in self._no_effect_userops:
+            return None
         if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:
             for item in inputs[1:] if opcode != "CALLOTHER" else inputs:
                 if item.kind is not VarnodeKindCode.CONSTANT:
@@ -426,6 +432,17 @@ class Interpreter:
                 self._write(key, output.coordinate.space_id, output.coordinate.byte_offset,
                             output.byte_size, self._rng.getrandbits(8 * output.byte_size))
             return None
+        if opcode == "BRANCHIND" and self._externals and self._havoc is not None and inputs                 and inputs[0].kind is VarnodeKindCode.ADDRESS                 and (inputs[0].coordinate.space_id, inputs[0].coordinate.byte_offset) in self._externals:
+            # jmp [__imp_X]: the external runs; its ret pops this function's
+            # return address, returning to this function's caller
+            space_id, sp_offset, sp_size = self._havoc
+            current = sum(self._byte(space_id, sp_offset + i)[0] << (8 * i) for i in range(sp_size))
+            after = (current + 8) & ((1 << (8 * sp_size)) - 1)
+            self._stack_snapshot = [((after >> (8 * i)) & 0xFF, key) for i in range(sp_size)]
+            self._stack_provenance = [None] * sp_size
+            self._run_external(
+                self._externals[(inputs[0].coordinate.space_id, inputs[0].coordinate.byte_offset)], key)
+            return ("return", None)
         if opcode == "BRANCHIND":
             target = self._value(key, inputs[0], run)
             space_id = self._order[0][0]
@@ -539,11 +556,34 @@ class Interpreter:
                     break
                 length += 1
             result, result_tags = length, tags
-        elif name == "malloc":
+        elif name in ("malloc", "FMemory::Malloc"):
             result, result_tags = self._heap, set()
+            self._blocks[self._heap] = rcx
             self._heap += 0x1000
-        elif name == "free":
-            pass
+        elif name in ("realloc", "FMemory::Realloc"):
+            # always moves: copies min(old, new) bytes to a new block; the old
+            # block's bytes are havocked (the model assumes it is not used again)
+            size = rdx if rdx <= 0x1000 else 0
+            new = self._heap
+            self._heap += 0x1000
+            old = self._blocks.pop(rcx, 0) if rcx else 0
+            for index in range(min(old, size)):  # a move: each byte keeps its writer
+                source, target = (memory, rcx + index), (memory, new + index)
+                self._bytes[target] = self._byte(*source)
+                if source in self._call_bytes:
+                    self._call_bytes.add(target)
+                    self.provenance[target] = self.provenance.get(source, frozenset())
+                if source in self._activation_written:
+                    self._activation_written.add(target)
+            for index in range(old):
+                self._put(key, memory, rcx + index, 1, self._rng.randrange(256), {("call", key)})
+            self._blocks[new] = size
+            result, result_tags = new, set()
+        elif name in ("free", "FMemory::Free", "FDebug::CheckVerifyFailedImpl",
+                      "UE4Array_Private::OnInvalidArrayNum"):
+            pass  # no program-visible memory; volatile registers havocked below
+        elif name == "FMemory::QuantizeSize":
+            result, result_tags = (rcx + 15) & ~15, rcx_tags | rdx_tags
         else:
             raise Unsupported(f"no oracle for external {name}")
         # every volatile register is changed (the model leaves them unknown)

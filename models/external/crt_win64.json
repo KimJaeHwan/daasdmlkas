@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-win64",
-  "version": 2,
+  "version": 3,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
   "notes": "C runtime functions under the Windows x64 convention (args RCX, RDX, R8, R9; result RAX). Register offsets are Ghidra x86-64: RAX 0, RCX 8, RDX 16, RBX 24, RSP 32, RBP 40, RSI 48, RDI 56, R8 128, R9 136, R12-R15 160-184. Preserved: the non-volatile integer registers; XMM and flags are left unknown (sound, less precise). Every entry is a declared assumption.",
@@ -64,10 +64,11 @@
     },
     {
       "name": "realloc",
-      "notes": "Returns a block holding the old contents; the old block's bytes may move: no memory is kept.",
-      "registers": [{"write": [0, 8], "from": [[8, 8], [16, 8]]}],
+      "notes": "Returns a block holding the old contents: the same object as the old pointer, assuming the old pointer is not used afterwards (no-use-of-old-pointer-after-realloc); realloc(NULL, n) is a fresh block.",
+      "registers": [{"write": [0, 8], "from": [[8, 8], [16, 8]], "same_object_as": [8, 8]}],
       "memory": [],
-      "other_memory": "clobbered"
+      "observes": [[8, 8]],
+      "other_memory": "preserved"
     }
   ]
 }

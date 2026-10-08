@@ -25,6 +25,7 @@ from .normalize import _program_register_space
 from .span_geometry import ByteSpan
 from .summary_store import model_effect
 from .observed_call_state import observed_call_state_projections
+from .pcodeop_models import no_effect_calls
 from .normalize import FunctionNormalizer, NormalizedFunction, _storage_ref
 from .storage import _resolve_validated_storage
 
@@ -60,7 +61,8 @@ def function_key(coordinate) -> str:
 def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_globals_disjoint_from_stack=False, sink_roots=None,
                   image_info=None, external_models=None, readonly_image=None,
-                  declared_boundaries=None, assume_direction_flag_clear=False) -> dict[str, AnalyzedFunction]:
+                  declared_boundaries=None, assume_direction_flag_clear=False,
+                  pcodeop_models=None) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -82,7 +84,10 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     same kind as summaries and models (writes exactly the declared registers
     from the declared reads, keeps every other byte, restores the stack
     pointer); labelled ``test-only-boundary:<label>``. (The legacy
-    ``assumed_call_effects`` path normalizes them as raw call writes.)"""
+    ``assumed_call_effects`` path normalizes them as raw call writes.)
+    ``pcodeop_models``: declared CALLOTHER semantics (``pcodeop_models``):
+    no-effect user ops are declared call effects reading and writing nothing,
+    each use labelled in ``AnalyzedFunction.declared``."""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -122,6 +127,9 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             register_object, register_limit = _register_file(observation, context)
             if register_object is None:  # e.g. a thunk that is a lone tail jump
                 register_object, register_limit = program_registers
+            # every register byte the program uses: a thunk touching only a few
+            # registers still passes the others through (preserved or unknown)
+            register_limit = max(register_limit, program_registers[1])
             shapes = {
                 row.call_operation_key: {
                     (row.memory_transition.caller_base.byte_offset,
@@ -137,7 +145,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             register_object, register_limit, stack_pointers, shapes = site(key)
             if register_object is None:
                 return None
-            tail = call_key.endswith(":BRANCH")
+            tail = _is_tail(call_key)
             if tail and len(program_stack) != 1:
                 return None  # no single stack pointer to compose through
             return derive_proven_call_effect(
@@ -166,7 +174,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             reads = tuple(sorted({span(row) for row in declaration.reads}, key=lambda item: item.canonical_key))
             runs = tuple(SummaryRun(span(row), SummaryKind.COMPUTED, (0,), ("declared",), reads, (), (), ())
                          for row in declaration.writes)
-            if call_key.endswith(":BRANCH"):
+            if _is_tail(call_key):
                 deltas = tuple(((item.start, item.size), item.size) for item in program_stack)
             else:
                 deltas = tuple(((offset, size), -delta)
@@ -191,7 +199,8 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 }
                 for row in observed_call_state_projections(observation)
             }
-            assumed = (assumed_call_effects or {}).get(key, {})
+            markers = no_effect_calls(unit, pcodeop_models) if pcodeop_models else {}
+            assumed = {**markers, **(assumed_call_effects or {}).get(key, {})}
 
             def derive(failed):
                 proven = {}
@@ -213,7 +222,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         continue
                     if done is None or done.summary is None:
                         continue
-                    tail = call_key.endswith(":BRANCH")
+                    tail = _is_tail(call_key)
                     if tail and len(program_stack) != 1:
                         continue  # no single stack pointer to compose through
                     effect = site_effect(key, call_key, done.summary, done.anchors, failed.get(call_key, ()))
@@ -305,7 +314,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                         call: (f"test-only-boundary:{boundaries_of(key)[call].label}"
                                                if call in boundaries_of(key) else externals[key][call][1].label)
                                         for call in proven if call in externals[key] or call in boundaries_of(key)
-                                    })
+                                    } | {call: effect.label for call, effect in markers.items()})
 
         def solve(component):
             """Recursion (design S5): every intra-SCC call starts from the
@@ -387,8 +396,10 @@ def _program_memory_space(unit) -> int | None:
 
 def _external_sites(unit, image_info, external_models) -> dict:
     """Call key -> (model file, entry) for calls to imported symbols with a
-    model: ``CALL`` of an import thunk, or ``CALLIND`` of a value copied from
-    an import slot within the call instruction (``call [__imp_X]``)."""
+    model: ``CALL`` of an import thunk, ``CALLIND`` of a value copied from
+    an import slot within the call instruction (``call [__imp_X]``), or a
+    terminal ``BRANCHIND`` through an import slot (``jmp [__imp_X]``, a tail
+    call composed like ``BRANCH`` tails)."""
     found = {}
     for instruction in unit.observation.instructions:
         operations = instruction.operations
@@ -399,6 +410,8 @@ def _external_sites(unit, image_info, external_models) -> dict:
             target = operation.inputs[0]
             if operation.opcode == "CALL" and target.kind is VarnodeKindCode.ADDRESS:
                 symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
+            elif operation.opcode == "BRANCHIND" and target.kind is VarnodeKindCode.ADDRESS                     and instruction.fallthrough is None and ordinal == len(operations) - 1:
+                symbol = image_info.import_at_slot(target.coordinate.space_id, target.coordinate.byte_offset)
             elif operation.opcode == "CALLIND":
                 for copy in operations[:ordinal]:
                     if copy.opcode == "COPY" and copy.output == target \
@@ -407,7 +420,7 @@ def _external_sites(unit, image_info, external_models) -> dict:
                         symbol = image_info.import_at_slot(source.space_id, source.byte_offset)
             if symbol is None:
                 continue
-            model = external_models.lookup(symbol.name)
+            model = external_models.lookup(symbol)
             if model is not None:
                 found[_operation_key(instruction.address, ordinal, operation.opcode)] = model
     return found
@@ -437,6 +450,12 @@ def _prove_extents(unit, normalized, proven, constants) -> bool:
     return grown
 
 
+def _is_tail(call_key: str) -> bool:
+    """A tail jump site: ``BRANCH`` to a function, or ``BRANCHIND`` through an
+    import slot (``_external_sites``)."""
+    return call_key.endswith(":BRANCH") or call_key.endswith(":BRANCHIND")
+
+
 def _bottom_summary(stack_pointers, shapes, call_key, program_stack):
     """The optimistic start for a recursive call site: one normal exit that
     writes nothing, with the stack pointer restored (undoing the call shape's
@@ -444,7 +463,7 @@ def _bottom_summary(stack_pointers, shapes, call_key, program_stack):
     from .function_summary import FUNCTION_SUMMARY_VERSION, ExitSummary
 
     deltas = tuple(((offset, size), -delta) for (offset, size), delta in shapes.get(call_key, {}).items())
-    if call_key.endswith(":BRANCH"):
+    if _is_tail(call_key):
         deltas = tuple(((span.start, span.size), span.size) for span in program_stack)
     return FunctionSummary(FUNCTION_SUMMARY_VERSION, (ExitSummary("bottom", ()),), (), (),
                            register_deltas=deltas)

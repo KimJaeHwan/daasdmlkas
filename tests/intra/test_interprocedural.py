@@ -717,6 +717,30 @@ def test_writer_condition_decided_per_call(same_slot):
     assert bool(report.through_calls) is not same_slot and report.silent == []
 
 
+def test_private_frame_writes_do_not_disturb_entry_pointer_objects():
+    """leaf spills rdx to its own frame (private: nothing escapes) and reads
+    *rcx: its summary keeps *rcx, so the call keeps the caller's local."""
+    t = tmp(0x100)
+    leaf = (FunctionBuilder(entry=LEAF).sub_rsp(0x28)
+            .ins(add(t, reg(RSP), const(0x20)), store(t, reg(RDX)))
+            .ins(load(reg(RAX), reg(RCX)))
+            .add_rsp(0x28).ret())
+    caller = (FunctionBuilder().sub_rsp(0x40)
+              .ins(add(t, reg(RSP), const(0x20)), store(t, reg(RBX)))
+              .ins(add(reg(RCX), reg(RSP), const(0x20)))
+              .call(LEAF)
+              .ins(add(t, reg(RSP), const(0x20)), load(reg(R9), t))
+              .add_rsp(0x40).ret())
+    results, program = _analyze(caller, leaf)
+    (effect,) = results["1:1000"].proven.values()
+    assert effect.preserves_memory
+    from synthetic import operation_node_at
+    function = results["1:1000"].normalized
+    reload = slice_from(function, operation_node_at(function, 4, 1))
+    assert reload.is_complete and set(range(RBX, RBX + 8)) <= reload.register_bytes
+    assert _check(results, program).silent == []
+
+
 def _clobbering_getter(write_field, read_field):
     """spill rcx; v->write_field = rdx; return reload(v)->read_field: if the
     caller's v + write_field is the home slot, the reloaded pointer (and so

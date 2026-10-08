@@ -21,7 +21,7 @@ from .control_dependence import (
 )
 from .pcode_blocks import build_pcode_block_graph
 from .rep_strings import MAX_REP_BYTES, rep_sites
-from .may_alias import MayAliasRead, derive_may_alias_reads
+from .may_alias import MayAliasRead, derive_may_alias_reads, private_frame_writes
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
     BoundLocalMemorySsa,
@@ -134,6 +134,10 @@ class NormalizedFunction:
     # named assumption direction-flag-clear was used (a rep site whose DF is
     # the function's entry value)
     assumed_direction_flag_clear: bool = False
+    # may-alias facts the function summary reuses: (write key, object) pairs
+    # writing private frame bytes only, and the wild objects (``may_alias``)
+    private_frame_writes: frozenset = frozenset()
+    wild_objects: frozenset = frozenset()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -442,6 +446,22 @@ class NormalizedFunction:
 _CALL_EFFECT_TEMPORARY_BASE = 1 << 48
 
 
+def _same_object_rows(proven_call_effects, observation) -> dict:
+    """Call effect row -> (its input row, argument register varnode) for
+    results declared to address the argument's object (``relative_memory``)."""
+    space = _register_space_id(observation)
+    found = {}
+    if space is None:
+        return found
+    for key, effect in proven_call_effects.items():
+        for write, source in effect.same_object_registers:
+            for index, run in enumerate(effect.runs):
+                if run.writes == (write,) and source in run.reads:
+                    found[f"{key}~{index}"] = (f"{key}~in{index}", ValidatedVarnode(
+                        VarnodeKindCode.REGISTER, AddressCoordinate(space, source.start), source.size))
+    return found
+
+
 def _rep_overrides(sites, plan, observation) -> dict:
     """Operation key -> the operation the address evaluator sees instead (None:
     unknown) for rep sites in a straight block: the count register ends 0;
@@ -588,7 +608,7 @@ def _call_below_bounds(proven_call_effects, transitions, effect_unit, memory_ssa
         return ()
     found = _stack_pointer(_unit_stub(scopes), observation, context, scopes.program.evidence.address_spaces)
     if found is None:
-        return ()
+        return _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, observation)
     stack_object, bias, register_space, offset, size = found
     rows = []
     for key in keys:
@@ -602,6 +622,42 @@ def _call_below_bounds(proven_call_effects, transitions, effect_unit, memory_ssa
         transition = transitions.get(key)
         delta = 0 if proven_call_effects[key].tail_stack or transition is None else transition.displacement_delta
         rows.append((key, stack_object, bias + displacement + delta))
+    return tuple(rows)
+
+
+def _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, observation) -> tuple:
+    """A function with no stack-pointer shape of its own (a thunk ``jmp
+    [__imp_X]``) whose effects touch no object based on the tail jump's stack
+    pointer: the callee's clobbering below that pointer reaches nothing this
+    function tracks -- bound 0 (no byte below it)."""
+    from .relative_memory import _function_relative_object_id
+
+    spaces = {
+        operation.inputs[0].coordinate.byte_offset
+        for instruction in observation.instructions for operation in instruction.operations
+        if operation.opcode in ("LOAD", "STORE") and operation.inputs
+    } | {
+        operation.inputs[0].coordinate.space_id
+        for instruction in observation.instructions for operation in instruction.operations
+        if operation.opcode == "BRANCHIND" and operation.inputs
+        and operation.inputs[0].kind is VarnodeKindCode.ADDRESS
+    }
+    touched = {
+        evidence.span.object_id
+        for block in effect_unit.blocks for effect in block.effects
+        for evidence in (*effect.reads, *effect.writes) if type(evidence) is ResolvedStorage
+    }
+    rows = []
+    for key in keys:
+        effect = proven_call_effects[key]
+        if not effect.tail_stack or not spaces:
+            continue
+        objects = {_function_relative_object_id(memory_ssa.function_scope, effect.tail_stack[0], space)
+                   for space in spaces}
+        if objects & touched or any(effect.memory_write is not None or effect.memory_read is not None
+                                    for block in effect_unit.blocks for effect in block.effects):
+            continue  # stack bytes (or unknown addresses) are in play: no bound
+        rows.append((key, min(objects, key=lambda item: item.space_key), 0))
     return tuple(rows)
 
 
@@ -964,6 +1020,7 @@ class _ScopedNormalizer:
             }
             once_keys = single_execution_keys(observation, block_graph, frozenset(sites))
             wild_objects: set = set()
+            fresh_objects: set = set()
             for instruction in sorted(observation.instructions, key=lambda item: item.address):
                 for ordinal, operation in enumerate(instruction.operations):
                     operation_key = _operation_key(instruction, ordinal, operation)
@@ -1119,6 +1176,8 @@ class _ScopedNormalizer:
                         for index, run in enumerate(effect.runs)
                         if run.writes and all(span in effect.fresh_registers for span in run.writes)
                     ),
+                    same_object=_same_object_rows(proven_call_effects, observation),
+                    fresh_objects=fresh_objects,
                 )
                 if projected_effect_unit is effect_unit:
                     if atoms_on or not once_keys:
@@ -1197,21 +1256,28 @@ class _ScopedNormalizer:
             call_clobber_reads,
             operation_nodes,
         )
+        # summarized calls that never use a received register as an address
+        # cannot observe a stack-pointer copy either
+        quiet_calls = frozenset(assumed_call_effects) | frozenset(
+            key for key, row in proven_call_effects.items() if not row.observes_registers
+        )
+        # an external model declaring the registers it observes
+        observed_calls = {
+            key: frozenset(offset for span in row.observed_registers for offset in range(span.start, span.end))
+            for key, row in proven_call_effects.items()
+            if row.observes_registers and row.observed_registers is not None
+        }
         may_alias_reads = derive_may_alias_reads(
             effect_unit, observation, context, address_spaces,
-            # summarized calls that never use a received register as an address
-            # cannot observe a stack-pointer copy either
-            assumed_calls=frozenset(assumed_call_effects) | frozenset(
-                key for key, row in proven_call_effects.items() if not row.observes_registers
-            ),
+            assumed_calls=quiet_calls,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             wild_objects=frozenset(wild_objects),
-            # an external model declaring the registers it observes
-            observed_calls={
-                key: frozenset(offset for span in row.observed_registers for offset in range(span.start, span.end))
-                for key, row in proven_call_effects.items()
-                if row.observes_registers and row.observed_registers is not None
-            },
+            fresh_objects=frozenset(fresh_objects),
+            observed_calls=observed_calls,
+        )
+        private_writes = private_frame_writes(
+            effect_unit, observation, context, address_spaces,
+            assumed_calls=quiet_calls, observed_calls=observed_calls,
         )
         may_alias_nodes = _materialize_may_alias_debt(
             dependencies,
@@ -1272,6 +1338,8 @@ class _ScopedNormalizer:
                                     for address, (count, direction) in rep_plan.items())),
             operation_overrides=tuple(sorted(_rep_overrides(sites, rep_plan, observation).items())),
             assumed_direction_flag_clear=direction_assumed,
+            private_frame_writes=private_writes,
+            wild_objects=frozenset(wild_objects),
         )
 
     def _build_cfg(
@@ -1348,8 +1416,11 @@ def _assumed_call_writes(effect, assumed, operation, context, space_id):
     if operation.opcode in ("BRANCH", "CBRANCH", "BRANCHIND"):
         if assumed.writes:
             raise ValueError("a tail-called boundary cannot have declared writes")
+    elif operation.opcode == "CALLOTHER":
+        if assumed.writes or assumed.reads:  # only no-effect user ops (``pcodeop_models``)
+            raise ValueError("a declared CALLOTHER has no reads or writes")
     elif operation.opcode not in ("CALL", "CALLIND"):
-        raise ValueError("assumed call effects apply only to calls and tail calls")
+        raise ValueError("assumed call effects apply only to calls, tail calls and no-effect user ops")
     if space_id is None:
         raise ValueError("assumed call effects need one register space")
     def resolve(rows):

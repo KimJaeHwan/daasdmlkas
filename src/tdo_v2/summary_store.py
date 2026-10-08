@@ -25,7 +25,9 @@ Semantics, all sound by construction: registers neither written nor listed in
 ``preserved`` (nor the stack pointer) are UNKNOWN after the call; a register
 write depends on its ``from`` registers (``"fresh": true``: the written value
 is the address of a block the call allocates -- not an address of any memory
-existing before it, the stack included);
+existing before it, the stack included; ``"same_object_as": slice``: the
+written value addresses the same object as that register did at the call --
+realloc, under the assumption that the old pointer is not used afterwards);
 ``observes`` (optional, per entry): the registers the function may use as a
 memory address or keep -- a stack address held only in other registers does
 not escape at the call (default: every register); a memory write covers exactly
@@ -35,6 +37,12 @@ when the caller proves that register constant at the call (``constants``);
 otherwise the write is dropped and no memory is kept. ``other_memory``:
 "preserved" (only the listed writes; the callee's own frame below its entry
 stack pointer is always treated as clobbered) or "clobbered".
+
+Matching an import: a file listing ``libraries`` (e.g. a C++ engine DLL)
+matches only imports of one of those libraries whose original (mangled) name
+is in an entry's ``original_names``; a file without ``libraries`` (the C
+runtime, whose import library varies) matches by short name, never a C++
+(``?``-mangled) import. Two files matching one import is an error.
 """
 
 from __future__ import annotations
@@ -73,6 +81,8 @@ class ModelEntry:
     keeps_other_memory: bool
     fresh: tuple[tuple[int, int], ...] = ()   # register writes holding a new block's address
     observes: tuple[tuple[int, int], ...] | None = None   # None: every register
+    original_names: tuple[str, ...] = ()
+    same_object: tuple[tuple[tuple[int, int], tuple[int, int]], ...] = ()
 
     @property
     def label(self) -> str:
@@ -97,6 +107,7 @@ class ModelFile:
     stack_delta: int
     preserved: tuple[tuple[int, int], ...]
     entries: tuple[ModelEntry, ...]
+    libraries: tuple[str, ...] = ()   # upper case; empty: matched by short name
 
 
 def _slice(value, what) -> tuple[int, int]:
@@ -125,26 +136,32 @@ def load_model_file(path: str | Path) -> ModelFile:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     keys = {"format_version", "kind", "id", "version", "language_id", "abi_tag", "stack_pointer",
             "stack_delta", "preserved", "entries"}
-    if type(raw) is not dict or set(raw) - {"notes"} != keys:
+    if type(raw) is not dict or set(raw) - {"notes", "libraries"} != keys:
         raise ModelError(f"{path}: model file fields must be exactly {sorted(keys)}")
     if raw["format_version"] != FORMAT_VERSION or raw["kind"] != "declared":
         raise ModelError(f"{path}: unsupported model format or kind")
     entries = []
     for item in raw["entries"]:
-        allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes"}
+        allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
+                   "original_names"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
             raise ModelError(f"{path}: entry fields must be {sorted(allowed)}")
         if item["other_memory"] not in ("preserved", "clobbered"):
             raise ModelError(f"{path}: other_memory must be preserved or clobbered")
         for row in item["registers"]:
-            if type(row) is not dict or not {"write"} <= set(row) <= {"write", "from", "fresh"} \
-                    or type(row.get("fresh", False)) is not bool:
-                raise ModelError(f"{path}: register rows are {{write, from, fresh}}")
+            if type(row) is not dict or not {"write"} <= set(row) <= {"write", "from", "fresh", "same_object_as"} \
+                    or type(row.get("fresh", False)) is not bool \
+                    or (row.get("fresh") and "same_object_as" in row):
+                raise ModelError(f"{path}: register rows are {{write, from, fresh | same_object_as}}")
         registers = tuple(
             (_slice(row["write"], "register write"), tuple(_slice(s, "register read") for s in row.get("from", ())))
             for row in item["registers"]
         )
         fresh = tuple(_slice(row["write"], "register write") for row in item["registers"] if row.get("fresh"))
+        same_object = tuple(
+            (_slice(row["write"], "register write"), _slice(row["same_object_as"], "same object register"))
+            for row in item["registers"] if "same_object_as" in row
+        )
         memory = tuple(
             (_access(row["write"], "memory write"),
              tuple(_slice(s, "memory write input") for s in row.get("from", ())),
@@ -155,24 +172,43 @@ def load_model_file(path: str | Path) -> ModelFile:
         entries.append(ModelEntry(raw["id"], raw["version"], item["name"], tuple(names), registers, memory,
                                   item["other_memory"] == "preserved", fresh,
                                   None if "observes" not in item
-                                  else tuple(_slice(s, "observed register") for s in item["observes"])))
+                                  else tuple(_slice(s, "observed register") for s in item["observes"]),
+                                  tuple(item.get("original_names", ())), same_object))
+    libraries = tuple(str(item).upper() for item in raw.get("libraries", ()))
+    if libraries and any(not entry.original_names for entry in entries):
+        raise ModelError(f"{path}: a file with libraries matches by original_names only")
     return ModelFile(raw["id"], raw["version"], raw["language_id"], raw["abi_tag"],
                      _slice(raw["stack_pointer"], "stack pointer"), raw["stack_delta"],
-                     tuple(_slice(s, "preserved") for s in raw["preserved"]), tuple(entries))
+                     tuple(_slice(s, "preserved") for s in raw["preserved"]), tuple(entries), libraries)
 
 
 @dataclass(frozen=True, slots=True)
 class ExternalModels:
-    """Model entries by import name (the first file listing a name wins)."""
+    """Model entries for imported symbols (see the module docstring)."""
 
     files: tuple[ModelFile, ...]
 
-    def lookup(self, name: str) -> tuple[ModelFile, ModelEntry] | None:
-        candidates = {name, name.lstrip("_")}
+    def lookup(self, symbol) -> tuple[ModelFile, ModelEntry] | None:
+        """``symbol``: an ``image_info.ImportedSymbol`` (or a short name)."""
+        if type(symbol) is str:
+            name, library, original = symbol, None, None
+        else:
+            name, library, original = symbol.name, symbol.library, symbol.original_name
+        found = []
         for model_file in self.files:
             for entry in model_file.entries:
-                if candidates & set(entry.names):
-                    return model_file, entry
+                if model_file.libraries:
+                    hit = library is not None and library.upper() in model_file.libraries \
+                        and original is not None and original in entry.original_names
+                else:
+                    hit = not (original or "").startswith("?") and bool({name, name.lstrip("_")} & set(entry.names))
+                if hit:
+                    found.append((model_file, entry))
+                    break
+        if len({id(model_file) for model_file, _ in found}) > 1:
+            raise ModelError(f"import {library}!{original or name} matches several model files")
+        if found:
+            return found[0]
         return None
 
 
@@ -254,6 +290,9 @@ def model_effect(derive, model_file, entry, *args):
         observed_registers=None if entry.observes is None
         else tuple(ByteSpan(args[0], start, size) for start, size in entry.observes),
         fresh_registers=tuple(ByteSpan(args[0], start, size) for start, size in entry.fresh),
+        same_object_registers=tuple(
+            (ByteSpan(args[0], *write), ByteSpan(args[0], *source)) for write, source in entry.same_object
+        ),
     )
 
 

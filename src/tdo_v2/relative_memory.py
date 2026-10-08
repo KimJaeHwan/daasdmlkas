@@ -67,6 +67,8 @@ def project_function_relative_memory(
     once_keys: frozenset | None = None,
     wild_objects: set | None = None,
     fresh_keys: frozenset = frozenset(),
+    same_object: dict | None = None,
+    fresh_objects: set | None = None,
 ) -> ObservedEffectUnit:
     """Resolve provably equal indirect addresses, preserving all other debt.
 
@@ -80,6 +82,15 @@ def project_function_relative_memory(
     on these atoms are added to ``wild_objects`` for ``may_alias`` -- except
     ``fresh_keys``: call effect rows writing a register the call is declared
     to set to a newly allocated block (``ProvenCallEffect.fresh_registers``).
+
+    ``same_object``: call effect row key -> (key of the row reading the call's
+    arguments, argument varnode) for results declared to address the same
+    object as that argument (``ProvenCallEffect.same_object_registers``): the
+    result's address expression is the argument's (a constant argument, e.g.
+    realloc(NULL, n), makes it a fresh block instead).
+
+    ``fresh_objects`` collects, for ``may_alias``, the objects based on
+    exactly one fresh atom.
 
     ``anchored_accesses``: effect key -> (evaluation operation key, anchor
     register varnode, displacement, width, address space id) for summarized
@@ -128,9 +139,12 @@ def project_function_relative_memory(
         readonly_image,
         once_keys if DEFINITION_ATOMS else None,
         fresh_keys,
+        same_object,
     )
     if wild_objects is not None:
         projector.wild_objects = wild_objects
+    if fresh_objects is not None:
+        projector.fresh_objects = fresh_objects
     # Writes of one summarized call that bind to overlapping caller bytes: the
     # callee took its objects as distinct, so their order there is unknown here
     # (caller passed one object twice) -- they stay unresolved (debt).
@@ -401,6 +415,7 @@ class _Projector:
         readonly_image=None,
         once_keys=None,
         fresh_keys=frozenset(),
+        same_object=None,
     ) -> None:
         self._context = context
         self._spaces = {row.space_id: row for row in address_spaces}
@@ -414,6 +429,9 @@ class _Projector:
         self._once = once_keys or frozenset()
         self._definition_atoms: set[int] = set()   # wild ones
         self._fresh = fresh_keys
+        self._same_object = same_object or {}
+        self._fresh_atoms: set[int] = set()
+        self.fresh_objects: set = set()
         self.wild_objects: set = set()
         self._action_ids = {
             action.operation_key: action_id
@@ -539,9 +557,11 @@ class _Projector:
         )
         if any(atom in self._definition_atoms for atom, _ in address.atoms):
             self.wild_objects.add(object_id)
+        if len(address.atoms) == 1 and address.atoms[0][1] == 1 and address.atoms[0][0] in self._fresh_atoms:
+            self.fresh_objects.add(object_id)
         return object_id
 
-    def _definition_atom(self, definition, requested_span) -> _AddressExpression | None:
+    def _definition_atom(self, definition, requested_span, fresh=False) -> _AddressExpression | None:
         """A value defined once per activation by a call (its summarized or
         modeled effect rows) or by a LOAD, exactly at its own width: an atom
         keyed by that definition (never by its inputs -- two calls with the
@@ -560,8 +580,10 @@ class _Projector:
             if operation is None or operation.opcode != "LOAD":
                 return None
         atom = _digest_ints(b"definition-atom-v1", (*key.encode("utf-8"), _stable_storage_key(requested_span)))
-        if key not in self._fresh:
+        if key not in self._fresh and not fresh:
             self._definition_atoms.add(atom)
+        else:
+            self._fresh_atoms.add(atom)
         return _AddressExpression(((atom, 1),), 0, requested_span.size)
 
     def _candidate_expressions_for_input(
@@ -730,6 +752,14 @@ class _Projector:
             )
         else:
             result = None
+        if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE \
+                and definition.operation_key in self._same_object and definition.span == requested_span:
+            reader, argument = self._same_object[definition.operation_key]
+            value = self._expression_for_input(reader, argument)
+            if value is not None and value.atoms and value.byte_size == requested_span.size:
+                result = value
+            elif value is not None and not value.atoms:
+                result = self._definition_atom(definition, requested_span, fresh=True)
         if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE:
             result = self._definition_atom(definition, requested_span)
         self._active.remove(cache_key)

@@ -24,7 +24,7 @@ from tdo_v2.summary_store import load_external_models, load_model_file
 
 MODELS = sorted((Path(__file__).resolve().parents[2] / "models" / "external").glob("*.json"))
 THUNKS = {name: CODE_BASE + 0xE00 + 0x10 * index
-          for index, name in enumerate(("memcpy", "memset", "strlen", "malloc", "free"))}
+          for index, name in enumerate(("memcpy", "memset", "strlen", "malloc", "free", "realloc"))}
 HAVOC = (REG, RSP, 8)
 
 
@@ -77,7 +77,7 @@ def test_memcpy_with_a_constant_count_is_exact():
     results = _analyze(_memcpy_caller())
     item = results["1:1000"]
     ((call, label),) = item.declared.items()
-    assert label == "external-model:crt-win64/memcpy@v2"
+    assert label == "external-model:crt-win64/memcpy@v3"
     effect = item.proven[call]
     assert effect.preserves_memory and len(effect.memory_runs) == 1
     function = item.normalized
@@ -150,3 +150,72 @@ def test_random_external_calls_have_no_silent_misses(chunk):
         silent += [(seed, item) for item in report.silent]
     assert runs and through
     assert silent == [], silent[:3]
+
+
+# -- engine DLL models: matched by library and mangled name ---------------------
+
+def _symbol(library, name, original):
+    return ImportedSymbol(library, name, original, ((1, CODE_BASE + 0xF00),), ())
+
+
+def test_engine_models_match_by_library_and_mangled_name():
+    models = load_external_models(MODELS, "x86:LE:64:default", "win64")
+    mangled = "?Realloc@FMemory@@SAPEAXPEAX_KI@Z"
+    (_, entry) = models.lookup(_symbol("UnrealEditor-Core.dll", "Realloc", mangled))
+    assert entry.name == "FMemory::Realloc"
+    assert models.lookup(_symbol("UNREALEDITOR-CORE.DLL", "Realloc", None)) is None      # no mangled name
+    assert models.lookup(_symbol("OTHER.DLL", "Realloc", mangled)) is None               # another library
+    # a C++ import never takes a C runtime model by its short name
+    assert models.lookup(_symbol("UNREALEDITOR-CORE.DLL", "free", "?free@Other@@SAXPEAX@Z")) is None
+    assert models.lookup(_symbol("UCRTBASE.DLL", "free", None))[1].name == "free"
+
+
+def test_two_files_matching_one_import_is_an_error(tmp_path):
+    import json
+    from tdo_v2.summary_store import ModelError
+
+    raw = json.loads(MODELS[0].read_text(encoding="utf-8"))
+    raw["id"] = "copy"
+    copy_path = tmp_path / "copy.json"
+    copy_path.write_text(json.dumps(raw), encoding="utf-8")
+    models = load_external_models([MODELS[0], copy_path], raw["language_id"], raw["abi_tag"])
+    with pytest.raises(ModelError):
+        models.lookup(_symbol("UCRTBASE.DLL", raw["entries"][0]["name"], None))
+
+
+def test_tail_jump_through_an_import_slot_takes_the_model():
+    """wrapper: rcx = rsi; jmp [__imp_malloc] -- the model is composed like a
+    tail call (its ret returns to the wrapper's caller)."""
+    from synthetic import _Instruction, op, ram
+
+    slot = DATA_BASE + 0x800
+    wrapper = FunctionBuilder(entry=CODE_BASE + 0x600).ins(copy(reg(RCX), reg(RSI)))
+    wrapper._rows.append(_Instruction([op("BRANCHIND", [ram(slot)])], "return"))
+    raw_json = wrapper.to_json
+
+    def as_ghidra():  # Ghidra: a computed jump, not terminal, no fallthrough
+        raw = raw_json()
+        last = raw["instructions"][-1]
+        last["flow_type"] = {key: key in ("is_flow", "is_jump", "is_computed", "is_unconditional")
+                             for key in last["flow_type"]}
+        return raw
+
+    wrapper.to_json = as_ghidra
+    t = tmp(0x100)
+    caller = (FunctionBuilder().sub_rsp(0x28).call(CODE_BASE + 0x600)
+              .ins(store(reg(RAX), reg(RDX)))
+              .ins(add(t, reg(RAX), const(0)), load(reg(R9), t))
+              .add_rsp(0x28).ret())
+    image = ImageInfo("synthetic", (), (ImportedSymbol("CRT", "malloc", None, ((1, slot),), ()),), (), ())
+    units = program_units(caller, wrapper)
+    results = analyze_units(units, image_info=image,
+                            external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))
+    middle = results[f"1:{CODE_BASE + 0x600:x}"]
+    assert middle.summary.tail_exits == () and middle.declared
+    assert results["1:1000"].proven
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
+    analyzed = results["1:1000"]
+    pools = lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000}
+    report = check_program(analyzed.normalized, analyzed.unit.observation, program, seeds=range(6),
+                           register_pools=pools, havoc_calls=HAVOC, externals={(1, slot): "malloc"})
+    assert report.runs and report.through_calls and report.silent == []

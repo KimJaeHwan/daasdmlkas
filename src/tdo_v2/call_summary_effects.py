@@ -124,6 +124,10 @@ class ProvenCallEffect:
     # with ``observes_registers``: the registers it may use as an address or
     # keep (an external model's ``observes``); None: every register
     observed_registers: tuple[ByteSpan, ...] | None = None
+    # (written register, register at the call): the result is an address in
+    # the same object as the argument (an external model's ``same_object_as``,
+    # e.g. realloc under no-use-of-old-pointer-after-realloc)
+    same_object_registers: tuple[tuple[ByteSpan, ByteSpan], ...] = ()
 
 
 def derive_proven_call_effect(
