@@ -127,12 +127,15 @@ def main() -> int:
     parser.add_argument("--no-external-models", dest="external_models", action="store_false",
                         help="do not apply the declared models of imported functions "
                              "(models/external/*.json; each one used is a named assumption)")
-    parser.add_argument("--assume-readonly-image", action="store_true",
-                        help="named assumption (summary engine): read-only image memory keeps its "
-                             "image value (no VirtualProtect-style rewriting)")
+    parser.add_argument("--no-assume-readonly-image", dest="assume_readonly_image",
+                        action="store_false",
+                        help="drop the named assumption (summary engine, on by default): read-only "
+                             "image memory keeps its image value (section permissions from the binary; "
+                             "no VirtualProtect-style rewriting at run time). Use for packed or "
+                             "protected binaries")
     args = parser.parse_args()
-    if os.environ.get("TDO_V2_ASSUME_READONLY_IMAGE") == "1":
-        args.assume_readonly_image = True
+    if os.environ.get("TDO_V2_ASSUME_READONLY_IMAGE") == "0":
+        args.assume_readonly_image = False
     if os.environ.get("TDO_V2_EXTERNAL_MODELS") == "0":
         args.external_models = False
     if os.environ.get("TDO_V2_ASSUME_GLOBALS_NOT_STACK") == "0":

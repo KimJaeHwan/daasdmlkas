@@ -325,9 +325,10 @@ PointerPath(무한 루프), 재귀 미지원. 새 설계는 **완성된 intra �
      setjmp/longjmp, DLL 요약 내보내기/가져오기(export 표는 이제 Bundle에 있음), TEST-ONLY 경계 가정의 모델
      통합(옛 엔진 경로와 assumed 골든이 아직 그 경로를 씀 — 요약 엔진을 기본으로 바꿀 때 함께).
 3. **읽기 전용 데이터 상수**(이름 붙은 가정 `readonly-image-data-is-constant`, `image_info.ReadOnlyImage`,
-   현재 **기본 꺼짐** — 사용자 결정 대기): 로드·초기화·쓰기 불가·volatile 아님 블록의 입구 내용은 이미지 값
+   **기본 켜짐** — 2026-10-08 사용자 결정, 끄기: `--no-assume-readonly-image` / `TDO_V2_ASSUME_READONLY_IMAGE=0`;
+   권한은 바이너리 섹션 헤더(Ghidra 블록), 가정은 "실행 중 권한을 바꿔 덮어쓰지 않음"뿐): 로드·초기화·쓰기 불가·volatile 아님 블록의 입구 내용은 이미지 값
    (봉인된 블록 바이트). 주소식 평가에서만 사용(출처 추적은 그대로). MinGW `.refptr` 경유 전역 접근이 전역
-   쓰기로 해소. `run_dfbench --assume-readonly-image`. 테스트: 가정 켬/끔, 이미지가 실제로 그 포인터를 가질 때
+   쓰기로 해소. 테스트: 가정 켬/끔, 이미지가 실제로 그 포인터를 가질 때
    동적 검증 누락 0.
 4. 지표(09 debug 전체, 새 Bundle, 기본 모드 정확/확실, 누락+확실 0): 58/51 → 모델 **58/52**(DFB123) →
    + 읽기 전용 가정 **60/54**.

@@ -82,7 +82,7 @@ def analyze_frozen_bundle_with_summaries(
     assume_boundary_call_effects: bool = False,
     assume_globals_disjoint_from_stack: bool = True,
     external_models=None,
-    assume_readonly_image_constant: bool = False,
+    assume_readonly_image_constant: bool = True,
 ) -> EngineRun:
     """``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
