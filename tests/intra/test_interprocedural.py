@@ -618,6 +618,105 @@ def test_conditional_return_value_any_layout(displacement, field):
     assert report.silent == [], report.silent[:2]
 
 
+def _home_space_initializer(first, second):
+    """UE DebugGame constructor shape: spill this (RCX) to the home space and
+    reload it before each field write: v->first = rdx; v->second = r8. The
+    second write's address may see the first write (v + first could be the
+    home slot): a writer condition the caller decides."""
+    t, u = tmp(0x100), tmp(0x108)
+    return (FunctionBuilder(entry=LEAF)
+            .ins(add(t, reg(RSP), const(8)), store(t, reg(RCX)))
+            .ins(add(t, reg(RSP), const(8)), load(reg(RAX), t))
+            .ins(add(u, reg(RAX), const(first)), store(u, reg(RDX)))
+            .ins(add(t, reg(RSP), const(8)), load(reg(RAX), t))
+            .ins(add(u, reg(RAX), const(second)), store(u, reg(R8)))
+            .ret())
+
+
+def _initializer_caller(displacement, second):
+    """kept = rbx at [rsp+0x30]; s.second = rdi; init(&s at rsp + displacement);
+    r9 = s.second; rsi = kept (memory the call must be proven to keep). When
+    the second write misses s, r9 is still rdi."""
+    t = tmp(0x100)
+    return (FunctionBuilder().sub_rsp(0x40)
+            .ins(add(t, reg(RSP), const(0x30)), store(t, reg(RBX)))
+            .ins(add(t, reg(RSP), const((displacement + second) & 0xFFFFFFFFFFFFFFFF)), store(t, reg(RDI)))
+            .ins(add(reg(RCX), reg(RSP), const(displacement & 0xFFFFFFFFFFFFFFFF)))
+            .call(LEAF)
+            .ins(add(t, reg(RSP), const((displacement + second) & 0xFFFFFFFFFFFFFFFF)), load(reg(R9), t))
+            .ins(add(t, reg(RSP), const(0x30)), load(reg(RSI), t))
+            .add_rsp(0x40).ret())
+
+
+def test_conditional_writer_keeps_memory_in_context():
+    results, program = _analyze(_initializer_caller(0x10, 8), _home_space_initializer(0, 8))
+    summary = results[f"1:{LEAF:x}"].summary
+    assert summary.writer_conditions and not summary.unknown_writers
+    (effect,) = results["1:1000"].proven.values()
+    assert effect.preserves_memory and effect.restores_stack
+    from synthetic import operation_node_at
+    function = results["1:1000"].normalized
+    reload = slice_from(function, operation_node_at(function, 5, 1))
+    assert reload.is_complete and set(range(R8, R8 + 8)) <= reload.register_bytes
+    assert not reload.register_bytes & set(range(RDI, RDI + 8))
+    kept = slice_from(function, operation_node_at(function, 6, 1))
+    assert kept.is_complete and set(range(RBX, RBX + 8)) <= kept.register_bytes
+    report = _check(results, program)
+    assert report.through_calls and report.silent == []
+
+
+def test_failing_writer_condition_proves_nothing():
+    """&s + 0 is the callee's home slot (the caller's stack pointer at the
+    call): the reloaded pointer is RDX, so the second write lands elsewhere."""
+    results, program = _analyze(_initializer_caller(0, 8), _home_space_initializer(0, 8))
+    effect = results["1:1000"].proven.get(next(iter(results["1:1000"].calls)))
+    assert effect is None or not effect.preserves_memory
+    assert _check(results, program).silent == []
+
+
+@pytest.mark.parametrize("displacement", [-16, -12, -8, -4, 0, 8, 0x10])
+@pytest.mark.parametrize("first, second", [(0, 8), (4, 0), (8, 4), (0, 0), (0, 16)])
+def test_conditional_writer_any_layout(displacement, first, second):
+    results, program = _analyze(_initializer_caller(displacement, second), _home_space_initializer(first, second))
+    report = _check(results, program)
+    assert report.silent == [], report.silent[:2]
+
+
+def _reloading_writer():
+    """*rdi = rcx; *(*rsi) = rbx: the pointer is loaded after a write that may
+    alias its slot -- a writer condition ([rsi], [rdi]) no other mechanism of
+    the caller catches (the two writes land on different caller bytes)."""
+    return (FunctionBuilder(entry=LEAF)
+            .ins(store(reg(RDI), reg(RCX)))
+            .ins(load(reg(RAX), reg(RSI)), store(reg(RAX), reg(RBX)))
+            .ret())
+
+
+def _reloading_caller(same_slot):
+    """slot = &s; s = rdx; leaf(rsi = &slot, rdi = &slot or &other); r9 = s."""
+    t = tmp(0x100)
+    return (FunctionBuilder().sub_rsp(0x40)
+            .ins(add(t, reg(RSP), const(0x20)), store(t, reg(RDX)))
+            .ins(add(reg(RAX), reg(RSP), const(0x20)), add(t, reg(RSP), const(0x28)), store(t, reg(RAX)))
+            .ins(add(reg(RSI), reg(RSP), const(0x28)))
+            .ins(add(reg(RDI), reg(RSP), const(0x28 if same_slot else 0x30)))
+            .call(LEAF)
+            .ins(add(t, reg(RSP), const(0x20)), load(reg(R9), t))
+            .add_rsp(0x40).ret())
+
+
+@pytest.mark.parametrize("same_slot", [False, True])
+def test_writer_condition_decided_per_call(same_slot):
+    results, program = _analyze(_reloading_caller(same_slot), _reloading_writer())
+    assert results[f"1:{LEAF:x}"].summary.writer_conditions
+    (effect,) = results["1:1000"].proven.values()
+    assert effect.preserves_memory is not same_slot
+    report = _check(results, program)
+    # a failing condition proves nothing through the call (the mutation that
+    # trusts conditional writers misses r9's real writer here)
+    assert bool(report.through_calls) is not same_slot and report.silent == []
+
+
 def _clobbering_getter(write_field, read_field):
     """spill rcx; v->write_field = rdx; return reload(v)->read_field: if the
     caller's v + write_field is the home slot, the reloaded pointer (and so

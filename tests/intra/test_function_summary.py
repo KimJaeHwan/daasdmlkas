@@ -60,7 +60,8 @@ def test_store_through_pointer_depends_on_value_and_address():
 
 def test_uncertain_address_write_cannot_erase_an_earlier_write():
     """*(*rsi) = rdx; *rdi = rcx; *(*rsi) = rbx: the second load of *rsi may see
-    the aliasing write to *rdi, so the last store may land elsewhere."""
+    the aliasing write to *rdi, so the last store may land elsewhere -- unless
+    *rsi and *rdi do not overlap: a writer condition for the callers."""
     builder = (
         FunctionBuilder()
         .ins(load(reg(RAX), reg(RSI)), store(reg(RAX), reg(RDX)))
@@ -69,10 +70,11 @@ def test_uncertain_address_write_cannot_erase_an_earlier_write():
         .ret()
     )
     summary, observation = _summary(builder)
-    assert summary.unknown_writers
+    assert not summary.unknown_writers and summary.writer_conditions
     pools = lambda seed: {RSI: 0x2000, RDI: (0x2000, 0x3000)[seed % 2], RSP: 0x7000_0000}
     report = check_summary(summary, observation, seeds=range(8), register_pools=pools)
-    assert report.runs == 8 and report.violations == []
+    # rdi == rsi breaks the condition: those runs prove nothing (callers decide)
+    assert report.runs == 4 and report.conditional_skips == 4 and report.violations == []
 
 
 @pytest.mark.parametrize("chunk", range(4))

@@ -13,6 +13,11 @@ covers it:
   ("reg", r) by a register source byte r; ("mem", reader) by ``entry_readers``
   or by an address-unknown debt; ("call", key) by a call crossing or a
   call-clobber debt.
+
+A summary with ``writer_conditions`` claims nothing when one of them fails
+(its callers then take the call as unknown): a run where the concrete entry
+addresses of a pair overlap, or cannot be located, is skipped
+(``conditional_skips``); every other run is checked in full.
 """
 
 from __future__ import annotations
@@ -34,6 +39,62 @@ class SummaryReport:
     unsupported: int = 0
     checked: int = 0
     violations: list = field(default_factory=list)
+    conditional_skips: int = 0
+
+
+def _located(span, interpreter, register_object, reg_space, spaces):
+    """(space, start) of a summary span at this run's entry values, or None:
+    relative objects based on an entry register, or on a pointer the entry
+    memory held next to one (one level)."""
+    from tdo_v2.relative_memory import _function_relative_object_id
+    from tdo_v2.span_geometry import ByteSpan
+
+    object_id = span.object_id
+    if object_id.kind is StorageObjectKind.ADDRESS_SPACE:
+        return object_id.space_key, span.start
+    if object_id.kind is not StorageObjectKind.FUNCTION_RELATIVE or register_object is None:
+        return None
+
+    def entry_value(space, address):
+        values = [interpreter.entry_values.get((space, address + index)) for index in range(8)]
+        return None if None in values else sum(byte << (8 * index) for index, byte in enumerate(values))
+
+    bases = []   # (anchor span, its value)
+    for offset in range(0, 0x400, 8):
+        value = entry_value(reg_space, offset)
+        if value is not None:
+            bases.append((ByteSpan(register_object, offset, 8), value))
+    for anchor, value in bases:
+        for space in spaces:
+            if _function_relative_object_id(object_id.scope, anchor, space) == object_id:
+                return space, (value + span.start - (1 << 64)) % (1 << 64)
+    for anchor, value in bases:
+        for space in spaces:
+            base_object = _function_relative_object_id(object_id.scope, anchor, space)
+            for displacement in range(-0x100, 0x100):
+                slot = ByteSpan(base_object, (1 << 64) + displacement, 8)
+                if _function_relative_object_id(object_id.scope, slot, space) != object_id:
+                    continue
+                pointer = entry_value(space, (value + displacement) % (1 << 64))
+                if pointer is None:
+                    return None
+                return space, (pointer + span.start - (1 << 64)) % (1 << 64)
+    return None
+
+
+def _writer_conditions_hold(summary, interpreter, reg_space, spaces) -> bool:
+    register_object = next((run.span.object_id for item in summary.exits for run in item.runs
+                            if run.span.object_id.kind is StorageObjectKind.REGISTER_FILE), None)
+    if register_object is None:
+        return False
+    for read, write in summary.writer_conditions:
+        left = _located(read, interpreter, register_object, reg_space, spaces)
+        right = _located(write, interpreter, register_object, reg_space, spaces)
+        if left is None or right is None:
+            return False
+        if left[0] == right[0] and left[1] < right[1] + write.size and right[1] < left[1] + read.size:
+            return False
+    return True
 
 
 def _exit_for(summary, last_operation: str):
@@ -46,6 +107,14 @@ def _exit_for(summary, last_operation: str):
             if best is None or int(start or 0) > int(best.block_key.partition("#")[2] or 0):
                 best = item
     return best
+
+
+def _memory_spaces(observation):
+    return sorted({
+        operation.inputs[0].coordinate.byte_offset
+        for row in observation.instructions for operation in row.operations
+        if operation.opcode in ("LOAD", "STORE") and operation.inputs
+    })
 
 
 def check_summary(summary, observation, *, seeds=range(6), register_pools=None,
@@ -70,6 +139,10 @@ def check_summary(summary, observation, *, seeds=range(6), register_pools=None,
             report.unsupported += 1
             continue
         if not run.completed or not run.executed:
+            continue
+        if summary.writer_conditions and not _writer_conditions_hold(
+                summary, interpreter, reg_space, _memory_spaces(observation)):
+            report.conditional_skips += 1
             continue
         exit_summary = _exit_for(summary, run.executed[-1])
         last_instruction = ":".join(run.executed[-1].split(":")[:2])

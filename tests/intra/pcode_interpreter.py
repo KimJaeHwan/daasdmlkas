@@ -133,7 +133,8 @@ class Interpreter:
         self._rep_iteration = 0
         self._previous_location = None
         self._activations: list = []          # (return location, call key)
-        self._activation_written: set = set()  # bytes written in the current outermost activation
+        self._activation_written: set = set()
+        self._byte_inputs: list = []  # bytes written in the current outermost activation
         self._call_bytes: set = set()          # bytes last written by some activation
         self._order = [
             (row.address.space_id, row.address.byte_offset) for row in observation.instructions
@@ -204,9 +205,13 @@ class Interpreter:
             key = (space_id, offset + index)
             if self._activations:
                 if key in self._activation_written:
-                    self._operation_inputs |= self.provenance.get(key, frozenset())
+                    found = self.provenance.get(key, frozenset())
                 elif space_id not in self._unique_spaces:
-                    self._operation_inputs.add(("ext", writer, space_id, offset + index))
+                    found = frozenset({("ext", writer, space_id, offset + index)})
+                else:
+                    found = frozenset()
+                self._operation_inputs |= found
+                self._byte_inputs.append(found)  # per byte, for COPY
                 continue
             if key in self._call_bytes:
                 run.call_reads[(reader, space_id, offset + index)] = self.provenance.get(key, frozenset())
@@ -219,6 +224,20 @@ class Interpreter:
                 else:
                     self._operation_inputs |= self.provenance.get((space_id, offset + index), frozenset())
         return value
+
+    def _restore_identity_bytes(self) -> None:
+        """After an outermost activation: a byte it wrote whose provenance is
+        exactly its own pre-call value (a callee-saved register pushed and
+        popped, ``mov edx, edx``) keeps its pre-call writer -- by provenance,
+        never by an equal value."""
+        for key in self._activation_written:
+            tags = self.provenance.get(key, frozenset())
+            if len(tags) != 1:
+                continue
+            (tag,) = tags
+            if tag[0] == "ext" and (tag[2], tag[3]) == key and key in self._call_bytes:
+                self._bytes[key] = (self._bytes[key][0], tag[1])
+                self._call_bytes.discard(key)
 
     def _write(self, writer: str, space_id: int, offset: int, size: int, value: int) -> None:
         inside = bool(self._activations)
@@ -238,8 +257,10 @@ class Interpreter:
                 tags = frozenset({("call", operation)})
             else:
                 tags = frozenset(self._operation_inputs)
+            # a COPY moves byte i to byte i: its provenance is byte-exact
+            exact = operation.endswith(":COPY") and len(self._byte_inputs) == size
             for index in range(size):
-                self.provenance[(space_id, offset + index)] = tags
+                self.provenance[(space_id, offset + index)] = self._byte_inputs[index] if exact else tags
             return
         if self._track:
             if writer.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") or writer in self._assumed:
@@ -325,6 +346,7 @@ class Interpreter:
                 if self._sinks is not None and self._activations:
                     self._record_sink(operation, run)
                 self._operation_inputs = set()
+                self._byte_inputs = []
                 jump = self._execute(key, operation, run)
                 if jump is None:
                     index += 1
@@ -338,6 +360,7 @@ class Interpreter:
                         next_location, _ = self._activations.pop()
                         if not self._activations:
                             self._restore_call_stack_pointer()
+                            self._restore_identity_bytes()
                         break
                     run.completed = True
                     return run

@@ -23,7 +23,12 @@ File::
 
 Semantics, all sound by construction: registers neither written nor listed in
 ``preserved`` (nor the stack pointer) are UNKNOWN after the call; a register
-write depends on its ``from`` registers; a memory write covers exactly
+write depends on its ``from`` registers (``"fresh": true``: the written value
+is the address of a block the call allocates -- not an address of any memory
+existing before it, the stack included);
+``observes`` (optional, per entry): the registers the function may use as a
+memory address or keep -- a stack address held only in other registers does
+not escape at the call (default: every register); a memory write covers exactly
 ``size`` bytes at (entry value of ``base``) + ``disp`` and depends on its
 ``from`` registers and ``loads``. A size given by a register is used only
 when the caller proves that register constant at the call (``constants``);
@@ -66,6 +71,8 @@ class ModelEntry:
     registers: tuple[tuple[tuple[int, int], tuple[tuple[int, int], ...]], ...]
     memory: tuple[tuple[Access, tuple[tuple[int, int], ...], tuple[Access, ...]], ...]
     keeps_other_memory: bool
+    fresh: tuple[tuple[int, int], ...] = ()   # register writes holding a new block's address
+    observes: tuple[tuple[int, int], ...] | None = None   # None: every register
 
     @property
     def label(self) -> str:
@@ -124,15 +131,20 @@ def load_model_file(path: str | Path) -> ModelFile:
         raise ModelError(f"{path}: unsupported model format or kind")
     entries = []
     for item in raw["entries"]:
-        allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes"}
+        allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
             raise ModelError(f"{path}: entry fields must be {sorted(allowed)}")
         if item["other_memory"] not in ("preserved", "clobbered"):
             raise ModelError(f"{path}: other_memory must be preserved or clobbered")
+        for row in item["registers"]:
+            if type(row) is not dict or not {"write"} <= set(row) <= {"write", "from", "fresh"} \
+                    or type(row.get("fresh", False)) is not bool:
+                raise ModelError(f"{path}: register rows are {{write, from, fresh}}")
         registers = tuple(
             (_slice(row["write"], "register write"), tuple(_slice(s, "register read") for s in row.get("from", ())))
             for row in item["registers"]
         )
+        fresh = tuple(_slice(row["write"], "register write") for row in item["registers"] if row.get("fresh"))
         memory = tuple(
             (_access(row["write"], "memory write"),
              tuple(_slice(s, "memory write input") for s in row.get("from", ())),
@@ -141,7 +153,9 @@ def load_model_file(path: str | Path) -> ModelFile:
         )
         names = (item["name"], *item.get("aliases", ()))
         entries.append(ModelEntry(raw["id"], raw["version"], item["name"], tuple(names), registers, memory,
-                                  item["other_memory"] == "preserved"))
+                                  item["other_memory"] == "preserved", fresh,
+                                  None if "observes" not in item
+                                  else tuple(_slice(s, "observed register") for s in item["observes"])))
     return ModelFile(raw["id"], raw["version"], raw["language_id"], raw["abi_tag"],
                      _slice(raw["stack_pointer"], "stack pointer"), raw["stack_delta"],
                      tuple(_slice(s, "preserved") for s in raw["preserved"]), tuple(entries))
@@ -235,7 +249,11 @@ def model_effect(derive, model_file, entry, *args):
         effect,
         preserves_memory=effect.preserves_memory and complete and entry.keeps_other_memory,
         clobbers_below=True,       # a library function has its own frame
-        observes_registers=True,   # it may keep any pointer it receives
+        # it may keep any pointer it receives, unless the model lists what it observes
+        observes_registers=entry.observes is None or bool(entry.observes),
+        observed_registers=None if entry.observes is None
+        else tuple(ByteSpan(args[0], start, size) for start, size in entry.observes),
+        fresh_registers=tuple(ByteSpan(args[0], start, size) for start, size in entry.fresh),
     )
 
 

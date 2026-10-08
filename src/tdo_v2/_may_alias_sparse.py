@@ -54,11 +54,11 @@ def derive_sparse(unit, objects, policy):
                 order = 1 + index
                 write_spans.setdefault(span.object_id, []).append(
                     (span.start, span.end, (block.key, position, order)))
-                if not all(policy.is_private(span.object_id, offset, writer, write=True)
-                           for offset in range(span.start, span.end)):
-                    for other in tracked:
-                        if policy.may_alias(other, span.object_id):
-                            object_gens[other].append((block.key, position, order, writer))
+                private = all(policy.is_private(span.object_id, offset, writer, write=True)
+                              for offset in range(span.start, span.end))
+                for other in tracked:  # a private frame write reaches only wild objects
+                    if policy.may_alias(other, span.object_id) and (not private or other in policy.wild_objects):
+                        object_gens[other].append((block.key, position, order, writer))
                 any_gens.append((block.key, position, order, writer))
             if _unknown_write(effect):
                 order = 1 + len(effect.writes)

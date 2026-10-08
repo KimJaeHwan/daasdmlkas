@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-win64",
-  "version": 1,
+  "version": 2,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
   "notes": "C runtime functions under the Windows x64 convention (args RCX, RDX, R8, R9; result RAX). Register offsets are Ghidra x86-64: RAX 0, RCX 8, RDX 16, RBX 24, RSP 32, RBP 40, RSI 48, RDI 56, R8 128, R9 136, R12-R15 160-184. Preserved: the non-volatile integer registers; XMM and flags are left unknown (sound, less precise). Every entry is a declared assumption.",
@@ -48,16 +48,18 @@
     },
     {
       "name": "malloc", "aliases": ["calloc"],
-      "notes": "Returns a new block's address (no program data flows into it). Heap bookkeeping is not program-visible memory (assumption).",
-      "registers": [{"write": [0, 8], "from": []}],
+      "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included). Heap bookkeeping is not program-visible memory (assumption).",
+      "registers": [{"write": [0, 8], "from": [], "fresh": true}],
       "memory": [],
+      "observes": [],
       "other_memory": "preserved"
     },
     {
       "name": "free",
-      "notes": "Assumes no use after free: the freed block's contents are not read again.",
+      "notes": "Assumes no use after free: the freed block's contents are not read again. Uses no pointer it receives on program-visible memory and keeps none (observes nothing).",
       "registers": [],
       "memory": [],
+      "observes": [],
       "other_memory": "preserved"
     },
     {

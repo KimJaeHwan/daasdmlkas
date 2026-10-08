@@ -19,7 +19,12 @@ globals):
 A memory write whose *address* depends on an uncertain value (a read with
 may-alias, unresolved-address or call-clobber debt) may land on bytes other
 than its static object: it is listed in ``unknown_writers`` and treated like
-an unknown-address write.
+an unknown-address write -- unless that debt reduces to alias conditions
+(S3: "these read and write spans do not overlap"). Such a writer lands on its
+static object when the conditions hold: it is an ordinary write here, and its
+conditions are ``writer_conditions``, carried by every run that is not
+IDENTITY/UNKNOWN; a caller that cannot decide them, or finds one failing,
+treats the whole call as unknown (``call_summary_effects``).
 * ``AFFINE`` -- reserved for the stack pointer (S2).
 
 Bytes the function never touches do not appear in the terminal state; they
@@ -33,7 +38,7 @@ shared sparse solver at the exit of each terminal block.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from ._sparse_dataflow import DominatorGraph
@@ -118,6 +123,10 @@ class FunctionSummary:
     # "entry value + c" (the same c): ((offset, size), c). The stack pointer's
     # c tells a caller whether the call restores it (design S2, AFFINE).
     register_deltas: tuple[tuple[tuple[int, int], int], ...] = ()
+    # alias conditions of uncertain-address writers taken as landing on their
+    # static objects (see the module docstring); every claim of the summary
+    # holds only with them
+    writer_conditions: tuple = ()
 
 
 def summarize_function(normalized, observation, origin_labels=None, sink_roots=()) -> FunctionSummary:
@@ -160,7 +169,11 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
 
     uncertain_conditions = _uncertain_address_writers(
         normalized, observation, context, operation_of, conditions_of)
-    uncertain = set(uncertain_conditions)
+    # writers whose address debt is conditional land on their static object
+    # (the conditions travel with the summary); the others may land anywhere
+    conditional = {key: pairs for key, pairs in uncertain_conditions.items() if pairs is not None}
+    uncertain = set(uncertain_conditions) - set(conditional)
+    writer_conditions = frozenset().union(*conditional.values()) if conditional else frozenset()
     tracer = _CopyTracer(normalized, observation, context, operation_of)
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain)
     inner_calls = crossed.pop("inner_calls", ())
@@ -180,18 +193,20 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
          if item.operation_key is not None},
         key=lambda row: (row[0], row[1].kind.value, row[1].space_key),
     )
-    # unknown-address writers: an uncertain-address store whose address
-    # depends only on conditional debts lands on its own object unless one of
-    # those pairs overlaps; any other leaves every root incomplete
-    unknown_writers = set(crossed.get("unknown_writers", ()))
-    writer_conditions = set()
-    unconditional_writers = False
-    for writer in unknown_writers:
-        found = uncertain_conditions.get(writer)
-        if found is None:
-            unconditional_writers = True
-        else:
-            writer_conditions |= found
+    # unknown-address writers (conditional ones are ordinary writes, above)
+    # leave every root incomplete
+    unconditional_writers = bool(crossed.get("unknown_writers", ()))
+    # the stack pointer's delta is a claim like any other: it holds with the
+    # writer conditions, which a caller decides (or drops every claim)
+    register_deltas = _register_deltas(normalized, observation, exits)
+    if writer_conditions:
+        exits = [ExitSummary(item.block_key, tuple(
+            run if run.kind in (SummaryKind.IDENTITY, SummaryKind.UNKNOWN)
+            or run.span.object_id.kind is StorageObjectKind.FUNCTION_UNIQUE
+            else replace(run, conditions=tuple(sorted(
+                set(run.conditions) | writer_conditions,
+                key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))))
+            for run in item.runs)) for item in exits]
     demands = []
     for root in sink_roots:
         label, root_nodes, complete = root[:3]
@@ -214,7 +229,8 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     return FunctionSummary(
         FUNCTION_SUMMARY_VERSION, tuple(exits), tuple(sorted(crossed.get("unknown_writers", ()))),
         tuple(writer_objects), _tail_exits(normalized, observation), inner_calls, tuple(demands),
-        _register_deltas(normalized, observation, exits),
+        register_deltas,
+        tuple(sorted(writer_conditions, key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))),
     )
 
 

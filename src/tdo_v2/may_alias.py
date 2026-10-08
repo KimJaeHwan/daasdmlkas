@@ -37,6 +37,11 @@ unknown object: an unknown-address write may overwrite every byte of every
 object (private frame bytes included, since a non-affine address may still
 be derived from the stack pointer), and an unknown-address read may observe
 any memory write executed before it. Both stay unresolved debt as well.
+
+``wild_objects`` (``relative_memory`` definition atoms: a call's result, a
+loaded pointer) are exact objects whose base may still point anywhere, the
+private frame included: their writes reach private frame bytes, and private
+frame writes reach them, like unknown-address accesses.
 """
 
 from __future__ import annotations
@@ -147,7 +152,10 @@ class _Policy:
         self.bias = bias
         self.escape = escape if stack_object is not None else None
         self.globals_disjoint = globals_disjoint and stack_object is not None
+        # writers a private frame read still sees: unknown-address writes and
+        # writes to wild objects
         self.unknown_writers: frozenset[str] = frozenset()
+        self.wild_objects: frozenset = frozenset()
 
     def is_private(self, object_id: StorageObjectId, offset: int, key: str, *, write: bool = False) -> bool:
         """A byte of this function's own frame no other base can reach at
@@ -177,6 +185,8 @@ def derive_may_alias_reads(
     *,
     assumed_calls: frozenset[str] = frozenset(),
     assume_globals_disjoint_from_stack: bool = False,
+    wild_objects: frozenset = frozenset(),
+    observed_calls: dict | None = None,
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -212,8 +222,16 @@ def derive_may_alias_reads(
     if len(objects) < 2 and not unknown_writers and not has_unknown_read:
         return ()
     policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls,
-                           assume_globals_disjoint_from_stack)
-    policy.unknown_writers = unknown_writers
+                           assume_globals_disjoint_from_stack, observed_calls)
+    wild = frozenset(item for item in objects if item in wild_objects)
+    policy.wild_objects = wild
+    policy.unknown_writers = unknown_writers | frozenset(
+        effect.operation_key
+        for block in unit.blocks
+        for effect in block.effects
+        for evidence in effect.writes
+        if type(evidence) is ResolvedStorage and evidence.span.object_id in wild
+    )
     return run_dataflow(
         "may-alias", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
         unit, objects, policy,
@@ -340,11 +358,11 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
         else:
             cleared.pop(offset, None)
     updated[span.object_id] = _ObjectState(own.default, cleared)
-    if all(policy.is_private(span.object_id, offset, writer, write=True)
-           for offset in range(span.start, span.end)):
-        return updated  # a private frame write cannot reach any other object
+    private = all(policy.is_private(span.object_id, offset, writer, write=True)
+                  for offset in range(span.start, span.end))
     for other in objects:
-        if not policy.may_alias(other, span.object_id):
+        # a private frame write reaches no other object but a wild one
+        if not policy.may_alias(other, span.object_id) or (private and other not in policy.wild_objects):
             continue
         current = updated[other]
         updated[other] = _ObjectState(
@@ -357,14 +375,15 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
 # -- stack identity and escape ---------------------------------------------------
 
 def _stack_policy(unit, observation, context, address_spaces, assumed_calls=frozenset(),
-                  globals_disjoint=False) -> _Policy:
+                  globals_disjoint=False, observed_calls=None) -> _Policy:
     found = _stack_pointer(unit, observation, context, address_spaces)
     if found is None:
         return _Policy(None, 0)
     stack_object, bias, register_space, offset, size = found
     return _Policy(
         stack_object, bias,
-        _stack_escape(observation, register_space, offset, size, assumed_calls, unit.entry_block_key),
+        _stack_escape(observation, register_space, offset, size, assumed_calls, unit.entry_block_key,
+                      observed_calls),
         globals_disjoint,
     )
 
@@ -439,7 +458,7 @@ def _register_space_id(observation) -> int | None:
 
 
 def _stack_taint(observation, register_space: int, offset: int, size: int,
-                 assumed_calls=frozenset(), entry_key: str | None = None):
+                 assumed_calls=frozenset(), entry_key: str | None = None, observed_calls=None):
     """Forward over the p-code block graph (``pcode_blocks``), tracking which
     register and temporary bytes hold a stack-derived value at each point.
 
@@ -448,7 +467,9 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
     when it stores a stack-derived value to memory, passes one to CALLOTHER, or
     is a call that is not a declared (TEST-ONLY assumed) boundary call while a
     register other than the stack pointer holds one (every register is
-    visible to a callee). ``push rbp`` before ``mov rbp, rsp`` therefore
+    visible to a callee; ``observed_calls``: call key -> the register byte
+    offsets a call may use as an address or keep, when that is declared --
+    then only those count). ``push rbp`` before ``mov rbp, rsp`` therefore
     stores the caller's RBP, not a stack address. A switch writes the stack
     pointer with a value not derived from it (``mov rsp, [x]``).
     """
@@ -486,7 +507,10 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
                 or (
                     operation.opcode in ("CALL", "CALLIND")
                     and key not in assumed_calls
-                    and any(item[0] == register_space for item in tainted - stack_bytes)
+                    and any(item[0] == register_space
+                            and (observed is None or item[1] in observed)
+                            for item in tainted - stack_bytes
+                            for observed in ((observed_calls or {}).get(key),))
                 )
             ):
                 escapes.add(key)
@@ -563,9 +587,9 @@ def _flagged(keys, edges, escapes, reverse: bool) -> set[str]:
 
 
 def _stack_escape(observation, register_space: int, offset: int, size: int,
-                  assumed_calls=frozenset(), entry_key: str | None = None) -> _Escape:
+                  assumed_calls=frozenset(), entry_key: str | None = None, observed_calls=None) -> _Escape:
     """Where a stack-derived value may have escaped (``_Escape``)."""
-    taint = _stack_taint(observation, register_space, offset, size, assumed_calls, entry_key)
+    taint = _stack_taint(observation, register_space, offset, size, assumed_calls, entry_key, observed_calls)
     if taint is None:
         return _Escape(frozenset(), frozenset(), frozenset())  # nothing private
     keys, successors, escapes, _ = taint

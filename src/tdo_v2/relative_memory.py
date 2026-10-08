@@ -64,8 +64,22 @@ def project_function_relative_memory(
     anchored_accesses: dict | None = None,
     readonly_image=None,
     operation_overrides: dict | None = None,
+    once_keys: frozenset | None = None,
+    wild_objects: set | None = None,
+    fresh_keys: frozenset = frozenset(),
 ) -> ObservedEffectUnit:
     """Resolve provably equal indirect addresses, preserving all other debt.
+
+    ``once_keys``: operation keys executed at most once per activation
+    (``single_execution_keys``). A value with no address expression that a
+    call (its effect rows) or a LOAD among them defines is fixed for the rest
+    of the activation, so it becomes an atom of its own (``_definition_atom``):
+    accesses through it form one object, exact within itself and may-alias
+    with every other. Such a value may point anywhere, the private stack
+    frame included (a callee can return a pointer into it); the objects built
+    on these atoms are added to ``wild_objects`` for ``may_alias`` -- except
+    ``fresh_keys``: call effect rows writing a register the call is declared
+    to set to a newly allocated block (``ProvenCallEffect.fresh_registers``).
 
     ``anchored_accesses``: effect key -> (evaluation operation key, anchor
     register varnode, displacement, width, address space id) for summarized
@@ -112,7 +126,11 @@ def project_function_relative_memory(
         ),
         translation_namespace,
         readonly_image,
+        once_keys if DEFINITION_ATOMS else None,
+        fresh_keys,
     )
+    if wild_objects is not None:
+        projector.wild_objects = wild_objects
     # Writes of one summarized call that bind to overlapping caller bytes: the
     # callee took its objects as distinct, so their order there is unknown here
     # (caller passed one object twice) -- they stay unresolved (debt).
@@ -189,6 +207,84 @@ def project_function_relative_memory(
         unit.observed_terminal_block_keys,
         effect_evidence_digest=unit.effect_evidence_digest,
     )
+
+
+# definition atoms on (``project_function_relative_memory``); tests turn them off
+DEFINITION_ATOMS = True
+_VALUE_KINDS = frozenset({StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE})
+
+
+def single_execution_keys(observation, block_graph, straight=frozenset()) -> frozenset:
+    """Operation keys of blocks on no cycle of ``block_graph`` (the p-code
+    block graph the memory SSA uses, intra-instruction flow included): each
+    runs at most once per activation. Empty when the graph may miss an edge
+    (unsupported flow, or a BRANCHIND with targets outside the observation:
+    a jump table could close a loop). ``straight`` instructions (rep sites)
+    repeat inside one block and are excluded."""
+    if block_graph.unsupported is not None:
+        return frozenset()
+    instructions = {row.address: row for row in observation.instructions}
+    blocks = {block.key: block for block in block_graph.blocks}
+    for block in blocks.values():
+        last = instructions[block.instruction].operations[block.stop - 1] if block.stop else None
+        if last is not None and last.opcode == "BRANCHIND" and block.exits:
+            return frozenset()
+    cyclic = _cyclic_blocks({key: [item for item in block.successors if item in blocks]
+                             for key, block in blocks.items()})
+    found = set()
+    for key, block in blocks.items():
+        if key in cyclic or block.instruction in straight:
+            continue
+        row = instructions[block.instruction]
+        for ordinal in range(block.start, block.stop):
+            found.add(_operation_key(row.address, ordinal, row.operations[ordinal]))
+    return frozenset(found)
+
+
+def _cyclic_blocks(successors: dict) -> set:
+    """Nodes on some cycle (a strongly connected component of two or more
+    nodes, or a self loop); iterative Tarjan."""
+    index, low, on_stack, stack, cyclic = {}, {}, set(), [], set()
+    counter = 0
+    for root in successors:
+        if root in index:
+            continue
+        index[root] = low[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        work = [(root, iter(successors[root]))]
+        while work:
+            node, children = work[-1]
+            advanced = False
+            for child in children:
+                if child not in index:
+                    index[child] = low[child] = counter
+                    counter += 1
+                    stack.append(child)
+                    on_stack.add(child)
+                    work.append((child, iter(successors[child])))
+                    advanced = True
+                    break
+                if child in on_stack:
+                    low[node] = min(low[node], index[child])
+            if advanced:
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index[node]:
+                component = []
+                while True:
+                    item = stack.pop()
+                    on_stack.discard(item)
+                    component.append(item)
+                    if item == node:
+                        break
+                if len(component) > 1 or node in successors[node]:
+                    cyclic.update(component)
+    return cyclic
 
 
 def _final_projector(normalized, observation) -> "_Projector":
@@ -303,6 +399,8 @@ class _Projector:
         opaque_values,
         translation_namespace,
         readonly_image=None,
+        once_keys=None,
+        fresh_keys=frozenset(),
     ) -> None:
         self._context = context
         self._spaces = {row.space_id: row for row in address_spaces}
@@ -313,6 +411,10 @@ class _Projector:
         # named assumption readonly-image-data-is-constant (``image_info``):
         # entry contents of read-only image memory are its image bytes
         self._readonly = readonly_image
+        self._once = once_keys or frozenset()
+        self._definition_atoms: set[int] = set()   # wild ones
+        self._fresh = fresh_keys
+        self.wild_objects: set = set()
         self._action_ids = {
             action.operation_key: action_id
             for action_id, action in enumerate(first_pass.actions)
@@ -384,14 +486,7 @@ class _Projector:
                 if start + width > 1 << space.address_size_bits:
                     return None
             else:
-                object_id = StorageObjectId(
-                    StorageObjectKind.FUNCTION_RELATIVE,
-                    self._ssa.function_scope,
-                    _digest_ints(
-                        b"relative-address-space-v1",
-                        (_address_atom_key(address.atoms), space.space_id),
-                    ),
-                )
+                object_id = self._relative_object(address, space.space_id)
                 start = (1 << space.address_size_bits) + address.displacement
                 if start < 0:
                     return None
@@ -430,18 +525,44 @@ class _Projector:
             if start + width > 1 << space.address_size_bits:
                 return None
         else:
-            object_id = StorageObjectId(
-                StorageObjectKind.FUNCTION_RELATIVE,
-                self._ssa.function_scope,
-                _digest_ints(
-                    b"relative-address-space-v1",
-                    (_address_atom_key(address.atoms), space.space_id),
-                ),
-            )
+            object_id = self._relative_object(address, space.space_id)
             start = (1 << space.address_size_bits) + address.displacement + displacement
             if start < 0:
                 return None
         return (ByteSpan(object_id, start, width),)
+
+    def _relative_object(self, address, space_id) -> StorageObjectId:
+        object_id = StorageObjectId(
+            StorageObjectKind.FUNCTION_RELATIVE,
+            self._ssa.function_scope,
+            _digest_ints(b"relative-address-space-v1", (_address_atom_key(address.atoms), space_id)),
+        )
+        if any(atom in self._definition_atoms for atom, _ in address.atoms):
+            self.wild_objects.add(object_id)
+        return object_id
+
+    def _definition_atom(self, definition, requested_span) -> _AddressExpression | None:
+        """A value defined once per activation by a call (its summarized or
+        modeled effect rows) or by a LOAD, exactly at its own width: an atom
+        keyed by that definition (never by its inputs -- two calls with the
+        same arguments may return different values)."""
+        key = definition.operation_key
+        if key is None or definition.span != requested_span:
+            return None
+        base = key.split("~", 1)[0]
+        if base not in self._once or requested_span.object_id.kind not in _VALUE_KINDS:
+            return None
+        if "~" in key:
+            if base.rsplit(":", 1)[-1] not in ("CALL", "CALLIND"):
+                return None
+        else:
+            operation = self._operations.get(key)
+            if operation is None or operation.opcode != "LOAD":
+                return None
+        atom = _digest_ints(b"definition-atom-v1", (*key.encode("utf-8"), _stable_storage_key(requested_span)))
+        if key not in self._fresh:
+            self._definition_atoms.add(atom)
+        return _AddressExpression(((atom, 1),), 0, requested_span.size)
 
     def _candidate_expressions_for_input(
         self,
@@ -609,6 +730,8 @@ class _Projector:
             )
         else:
             result = None
+        if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE:
+            result = self._definition_atom(definition, requested_span)
         self._active.remove(cache_key)
         self._cache[cache_key] = result
         return result

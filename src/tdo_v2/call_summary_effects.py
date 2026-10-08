@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .function_summary import FunctionSummary, SummaryKind
+from .function_summary import ExitSummary, FunctionSummary, SummaryKind, SummaryRun
 from .span_geometry import ByteSpan, StorageObjectKind
 
 
@@ -117,6 +117,13 @@ class ProvenCallEffect:
     # registers whose value at the call the caller should prove constant (an
     # external model's extents, e.g. memcpy's count); read by a ``~ext`` row
     extent_registers: tuple[ByteSpan, ...] = ()
+    # registers the call sets to the address of a block it allocates (an
+    # external model's ``fresh``, e.g. malloc): never an address of existing
+    # memory, the stack included -- part of that model's named assumption
+    fresh_registers: tuple[ByteSpan, ...] = ()
+    # with ``observes_registers``: the registers it may use as an address or
+    # keep (an external model's ``observes``); None: every register
+    observed_registers: tuple[ByteSpan, ...] | None = None
 
 
 def derive_proven_call_effect(
@@ -162,6 +169,13 @@ def derive_proven_call_effect(
         return None
 
     stack = {(span.start, span.size) for span in excluded}
+
+    # every claim of a summary with writer conditions holds only with them: a
+    # caller that cannot locate them, or found one failing, gets nothing proven
+    # but the sink demands (registers and memory unknown, stack not restored)
+    if summary.writer_conditions and _anchored_conditions(
+            _Conditions(summary.writer_conditions), anchored, failed_conditions) is None:
+        summary = _all_unknown(summary, register_object, register_limit)
 
     def below(span: ByteSpan) -> bool:
         """Callee stack bytes entirely below its entry stack pointer."""
@@ -339,6 +353,22 @@ def _only_exported_aliasing(run, exported) -> bool:
 
 def _sorted_pairs(conditions) -> tuple:
     return tuple(sorted(conditions, key=repr))
+
+
+@dataclass(frozen=True, slots=True)
+class _Conditions:
+    conditions: tuple
+
+
+def _all_unknown(summary, register_object, register_limit):
+    from dataclasses import replace as _replace
+
+    run = SummaryRun(ByteSpan(register_object, 0, register_limit), SummaryKind.UNKNOWN, (0,),
+                     ("conditional-writer",), (), (), (), ("uncertain:conditional-writer",))
+    return _replace(
+        summary, exits=tuple(ExitSummary(item.block_key, (run,)) for item in summary.exits),
+        unknown_writers=("conditional-writer",), register_deltas=(), writer_conditions=(),
+    )
 
 
 def _anchored_conditions(run, anchored, failed):

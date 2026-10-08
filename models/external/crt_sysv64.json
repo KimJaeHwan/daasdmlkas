@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-sysv64",
-  "version": 1,
+  "version": 2,
   "language_id": "x86:LE:64:default",
   "abi_tag": "sysv64",
   "notes": "C runtime functions under the System V x86-64 convention (args RDI, RSI, RDX, RCX; result RAX). Preserved: RBX, RBP, R12-R15. Every entry is a declared assumption.",
@@ -199,24 +199,27 @@
       "aliases": [
         "calloc"
       ],
-      "notes": "Returns a new block's address (no program data flows into it). Heap bookkeeping is not program-visible memory (assumption).",
+      "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included). Heap bookkeeping is not program-visible memory (assumption).",
       "registers": [
         {
           "write": [
             0,
             8
           ],
-          "from": []
+          "from": [],
+          "fresh": true
         }
       ],
       "memory": [],
+      "observes": [],
       "other_memory": "preserved"
     },
     {
       "name": "free",
-      "notes": "Assumes no use after free: the freed block's contents are not read again.",
+      "notes": "Assumes no use after free: the freed block's contents are not read again. Uses no pointer it receives on program-visible memory and keeps none (observes nothing).",
       "registers": [],
       "memory": [],
+      "observes": [],
       "other_memory": "preserved"
     },
     {

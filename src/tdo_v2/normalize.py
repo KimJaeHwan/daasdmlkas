@@ -83,7 +83,7 @@ from .scope_identity import (
     ValidatedVarnode,
     VarnodeKindCode,
 )
-from .relative_memory import project_function_relative_memory
+from .relative_memory import project_function_relative_memory, single_execution_keys
 from .observed_call_state import observed_call_state_projections, project_persistent_call_state
 from .opaque_values import OpaqueValueEvidenceProvider
 from .storage import _resolve_validated_storage
@@ -962,6 +962,8 @@ class _ScopedNormalizer:
                 for block in block_graph.blocks
                 for ordinal in range(block.start, block.stop)
             }
+            once_keys = single_execution_keys(observation, block_graph, frozenset(sites))
+            wild_objects: set = set()
             for instruction in sorted(observation.instructions, key=lambda item: item.address):
                 for ordinal, operation in enumerate(instruction.operations):
                     operation_key = _operation_key(instruction, ordinal, operation)
@@ -1083,11 +1085,15 @@ class _ScopedNormalizer:
             address_spaces = program.evidence.address_spaces
             # Each productive pass resolves at least one unresolved access, so the
             # number of passes is bounded by those accesses (+1 for the fixed point).
-            projection_budget = 2 + sum(
+            projection_budget = 3 + sum(
                 (effect.memory_read is not None) + (effect.memory_write is not None)
                 for block in effect_unit.blocks
                 for effect in block.effects
             )
+            # definition atoms (``relative_memory``) only fill what the ordinary
+            # fixed point leaves without an address: first that fixed point,
+            # then on to the next with them
+            atoms_on = False
             while True:
                 if projection_budget <= 0:
                     raise AssertionError("relative-memory projection did not reach a fixed point")
@@ -1105,9 +1111,20 @@ class _ScopedNormalizer:
                     anchored_accesses=anchored_call_accesses,
                     readonly_image=readonly_image,
                     operation_overrides=_rep_overrides(sites, rep_plan, observation),
+                    once_keys=once_keys if atoms_on else None,
+                    wild_objects=wild_objects,
+                    fresh_keys=frozenset(
+                        f"{key}~{index}"
+                        for key, effect in proven_call_effects.items() if effect.fresh_registers
+                        for index, run in enumerate(effect.runs)
+                        if run.writes and all(span in effect.fresh_registers for span in run.writes)
+                    ),
                 )
                 if projected_effect_unit is effect_unit:
-                    break
+                    if atoms_on or not once_keys:
+                        break
+                    atoms_on = True
+                    continue
                 effect_unit = projected_effect_unit
                 memory_unit = decode_effect_unit(effect_unit)
                 memory_binding = build_bound_local_memory_ssa(memory_unit)
@@ -1188,6 +1205,13 @@ class _ScopedNormalizer:
                 key for key, row in proven_call_effects.items() if not row.observes_registers
             ),
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+            wild_objects=frozenset(wild_objects),
+            # an external model declaring the registers it observes
+            observed_calls={
+                key: frozenset(offset for span in row.observed_registers for offset in range(span.start, span.end))
+                for key, row in proven_call_effects.items()
+                if row.observes_registers and row.observed_registers is not None
+            },
         )
         may_alias_nodes = _materialize_may_alias_debt(
             dependencies,
