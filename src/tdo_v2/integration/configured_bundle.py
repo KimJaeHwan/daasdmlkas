@@ -343,6 +343,8 @@ def _verify_frozen_members(generation_fd, inventory, records) -> None:
         inventory.call_interface_profile_member,
     ]
     members.extend(row.member for row in inventory.blocks if row.member is not None)
+    if inventory.image_info_member is not None:
+        members.append(inventory.image_info_member)
     for row in inventory.functions:
         members.extend(
             (row.observation_member, row.call_names_member, row.call_effects_member)
@@ -467,6 +469,8 @@ def _load_inventory(generation_fd: int, generation: bytes, expected_version: int
     }
     if expected_version == FORMAT_VERSION_V2:
         manifest_fields.add("call_interface_profile_member")
+        if "image_info_member" in manifest:  # optional sealed image facts
+            manifest_fields.add("image_info_member")
     _exact_keys(manifest, manifest_fields, "bundle manifest")
     _exact_int(
         manifest["schema_version"],
@@ -557,6 +561,10 @@ def _load_inventory(generation_fd: int, generation: bytes, expected_version: int
                 member,
             )
         )
+    image_info = None
+    if "image_info_member" in manifest:
+        image_info = _member_reference(manifest["image_info_member"], members_by_id, "image info")
+        used.add(image_info.member_id)
     functions = []
     for raw in manifest["functions"]:
         if expected_version == FORMAT_VERSION_V1:
@@ -614,6 +622,8 @@ def _load_inventory(generation_fd: int, generation: bytes, expected_version: int
             raise BundleAdmissionError("bundle function IDs are not canonically ordered")
         role_members = [original, program, profile]
         role_members.extend(row.member for row in blocks if row.member is not None)
+        if image_info is not None:
+            role_members.append(image_info)
         for row in functions:
             role_members.extend(
                 (
@@ -644,6 +654,7 @@ def _load_inventory(generation_fd: int, generation: bytes, expected_version: int
         profile,
         tuple(blocks),
         tuple(functions),
+        image_info,
     )
     return inventory, tuple(records_by_id.values())
 

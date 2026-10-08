@@ -62,6 +62,7 @@ def project_function_relative_memory(
     opaque_value_provider: OpaqueValueEvidenceProvider | None = None,
     translation_namespace: str = "",
     anchored_accesses: dict | None = None,
+    readonly_image=None,
 ) -> ObservedEffectUnit:
     """Resolve provably equal indirect addresses, preserving all other debt.
 
@@ -106,6 +107,7 @@ def project_function_relative_memory(
             else opaque_value_provider
         ),
         translation_namespace,
+        readonly_image,
     )
     # Writes of one summarized call that bind to overlapping caller bytes: the
     # callee took its objects as distinct, so their order there is unknown here
@@ -267,6 +269,7 @@ class _Projector:
         operations,
         opaque_values,
         translation_namespace,
+        readonly_image=None,
     ) -> None:
         self._context = context
         self._spaces = {row.space_id: row for row in address_spaces}
@@ -274,6 +277,9 @@ class _Projector:
         self._operations = operations
         self._opaque_values = opaque_values
         self._translation_namespace = translation_namespace
+        # named assumption readonly-image-data-is-constant (``image_info``):
+        # entry contents of read-only image memory are its image bytes
+        self._readonly = readonly_image
         self._action_ids = {
             action.operation_key: action_id
             for action_id, action in enumerate(first_pass.actions)
@@ -528,7 +534,14 @@ class _Projector:
             return None
         self._active.add(cache_key)
         result: _AddressExpression | None
-        if definition.kind is MemoryDefinitionKind.ENTRY:
+        constant = None
+        if definition.kind is MemoryDefinitionKind.ENTRY and self._readonly is not None \
+                and requested_span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
+            constant = self._readonly.value(requested_span.object_id.space_key, requested_span.start,
+                                            requested_span.size)
+        if constant is not None:
+            result = _AddressExpression((), constant, requested_span.size)
+        elif definition.kind is MemoryDefinitionKind.ENTRY:
             result = _AddressExpression(
                 ((_stable_storage_key(requested_span), 1),),
                 0,

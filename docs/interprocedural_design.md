@@ -299,3 +299,35 @@ PointerPath(무한 루프), 재귀 미지원. 새 설계는 **완성된 intra �
    "누락+확실" 2건(DFB023/066)으로 바로 드러남, 보존 호출만으로 제한. (b) SP 델타(C1)가 부채를 지나는 정의를
    증명으로 받아들임(복원 안 하는 호출 뒤 SP) → 비균형 무작위 테스트가 잡음, 부채·조건 있는 run은 델타 증명 안 함.
 4. 지표(기본 모드, 정확/확실, 누락+확실 0): 09 debug 전체 57/47 → **58/51**(DFB062 상호 재귀 등).
+
+## 15. 외부 함수 모델 · exporter 묶음 · 읽기 전용 데이터 (2026-10-08, Fable 설계)
+
+1. **exporter 묶음 수정**(`GhidraV2BundleExport.imageInfo`): 봉인된 새 멤버 `image-info.json`
+   (스키마 tdo-v2-image-info-1) — 블록별 권한·이름(read/write/execute/volatile), import 심볼과 Ghidra가 그
+   주소를 묶은 메모리 칸(IAT, MinGW `.refptr`)·thunk, export 진입점, 재배치 주소. manifest에 선택 키
+   `image_info_member`(블록 멤버 다음 정규 순서), admission이 다른 멤버처럼 digest 검증. 기존 v2 Bundle은
+   그대로 읽힘(키 없음 → None). 블록 행·scope 다이제스트는 바꾸지 않음. 엔진 쪽 `tdo_v2.image_info`가 봉인을
+   다시 확인하고 읽음. 전 Bundle 재export: `/root/tdo_bundles3`.
+2. **외부 함수 모델**(`tdo_v2.summary_store`, `models/external/*.json`): 함수 요약 형식의 선언 모델을
+   언어+ABI별 파일로 관리(물리 레지스터 조각으로 기술 → 엔진은 호출 규약 모름). 항목: 레지스터 쓰기와 그 입력,
+   메모리 쓰기(입구 레지스터 기준 + 변위, 크기 = 바이트 또는 레지스터)와 입력·읽기, 나머지 메모리 보존 여부.
+   **명시한 보존 레지스터 외에는 모두 unknown**(빠뜨리면 보수적). 자기 프레임 아래는 항상 바뀜, 받은 포인터는
+   관찰 가능(탈출). 크기가 레지스터면 호출자가 그 값을 상수로 증명할 때만(`~ext` 행 → 재정규화) 정확한 쓰기,
+   아니면 메모리 보존 안 함. 연결: `CALL` thunk 주소 또는 `COPY t ← [import 칸]; CALLIND t`
+   (`interprocedural._external_sites`, image-info의 import 표). 쓰인 모델마다 `external-model:<파일>/<항목>
+   @v<버전>`이 `EngineRun.assumptions`에. 기본 켜짐, `run_dfbench --no-external-models`로 끔.
+   - 1차 모델: crt-win64 / crt-sysv64 — memcpy·memmove·memset(크기 증명 시 정확), strcpy 계열(메모리 보존
+     안 함), strlen·strcmp 계열(결과 unknown, 메모리 보존), malloc·calloc(새 주소, 입력 없음), free(사용 후
+     해제 없음 가정), realloc(메모리 보존 안 함). x86-32(스택 인자)는 메모리 속 포인터 베이스가 필요해 보류.
+   - 검증: 인터프리터가 외부 함수를 실제 C 의미로 실행(`Interpreter(externals=…)`), 프로그램 검증기로 모델과
+     대조 — 손 테스트 + 무작위 150개 누락 0, memcpy 모델에서 원본 읽기를 뺀 변형을 잡음.
+   - 보류(Fable): 새 객체(malloc 결과가 아무것과도 안 겹침, 루프 안전성 필요), 결과 레지스터 기준 쓰기(realloc),
+     setjmp/longjmp, DLL 요약 내보내기/가져오기(export 표는 이제 Bundle에 있음), TEST-ONLY 경계 가정의 모델
+     통합(옛 엔진 경로와 assumed 골든이 아직 그 경로를 씀 — 요약 엔진을 기본으로 바꿀 때 함께).
+3. **읽기 전용 데이터 상수**(이름 붙은 가정 `readonly-image-data-is-constant`, `image_info.ReadOnlyImage`,
+   현재 **기본 꺼짐** — 사용자 결정 대기): 로드·초기화·쓰기 불가·volatile 아님 블록의 입구 내용은 이미지 값
+   (봉인된 블록 바이트). 주소식 평가에서만 사용(출처 추적은 그대로). MinGW `.refptr` 경유 전역 접근이 전역
+   쓰기로 해소. `run_dfbench --assume-readonly-image`. 테스트: 가정 켬/끔, 이미지가 실제로 그 포인터를 가질 때
+   동적 검증 누락 0.
+4. 지표(09 debug 전체, 새 Bundle, 기본 모드 정확/확실, 누락+확실 0): 58/51 → 모델 **58/52**(DFB123) →
+   + 읽기 전용 가정 **60/54**.

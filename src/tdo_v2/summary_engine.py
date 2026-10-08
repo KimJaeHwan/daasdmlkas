@@ -46,6 +46,7 @@ from .integration.configured_target_resolution import _selected_resolved_target
 from .integration.observed_function_session import open_observed_function_session
 from .interprocedural import analyze_units, function_key, run_definition_nodes
 from .memory_contracts import MemoryDefinitionKind
+from .image_info import ReadOnlyImage, load_image_info
 from .normalize import NormalizedFunction
 from .observed_call_state import observed_call_state_projections
 from .physical_state import PhysicalRegisterSlice
@@ -78,7 +79,12 @@ def analyze_frozen_bundle_with_summaries(
     boundary_provider: BoundaryProvider,
     assume_boundary_call_effects: bool = False,
     assume_globals_disjoint_from_stack: bool = True,
+    external_models=None,
+    assume_readonly_image_constant: bool = False,
 ) -> EngineRun:
+    """``external_models``: declared models of imported functions
+    (``summary_store.ExternalModels``), bound through the Bundle's sealed image
+    facts (``image_info``); each model used is listed in ``EngineRun.assumptions``."""
     from .integration.configured_boundary_demands import (
         _analyses_from_boundary_nodes, _direct_sink_boundary_nodes,
     )
@@ -185,10 +191,18 @@ def analyze_frozen_bundle_with_summaries(
                         origins.setdefault(node, set()).add(match.label)
             return origins
 
+        image_info = load_image_info(generation_path)
+        readonly_image = (
+            ReadOnlyImage(generation_path, image_info)
+            if assume_readonly_image_constant and image_info is not None else None
+        )
         results = analyze_units(
             [item.unit for item in evidences], assumed_call_effects=assumed, extra_origins=extra_origins,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             sink_roots=sink_roots,
+            image_info=image_info if external_models else None,
+            external_models=external_models,
+            readonly_image=readonly_image,
         )
         assumptions = ("globals-disjoint-from-stack",) if any(
             getattr(item.normalized, "assumes_globals_disjoint_from_stack", False)
@@ -203,6 +217,9 @@ def analyze_frozen_bundle_with_summaries(
             for row in observed_call_state_projections(item.unit.observation)
         ):
             assumptions += ("opaque-callees-restore-stack-pointer",)
+        if readonly_image is not None:
+            assumptions += ("readonly-image-data-is-constant",)
+        assumptions += tuple(sorted({label for item in results.values() for label in item.declared.values()}))
         preliminary = []
         for key, item in by_key.items():
             normalized = results[key].normalized

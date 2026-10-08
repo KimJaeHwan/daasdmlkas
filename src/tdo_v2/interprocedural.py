@@ -17,7 +17,13 @@ from ._scope_contracts import VarnodeKindCode
 from .call_seeds import _operation_key
 from .call_summary_effects import ProvenCallEffect, derive_proven_call_effect
 from .function_summary import FunctionSummary, summarize_function
+from dataclasses import replace
+
+from .call_clobber import _register_space_id
 from .model import ResolvedStorage
+from .normalize import _program_register_space
+from .span_geometry import ByteSpan
+from .summary_store import model_effect
 from .observed_call_state import observed_call_state_projections
 from .normalize import FunctionNormalizer, NormalizedFunction, _storage_ref
 from .storage import _resolve_validated_storage
@@ -39,6 +45,9 @@ class AnalyzedFunction:
     # sink roots projected from callees: (call key, demand index, label, root
     # nodes, complete) -- the function's own roots come from ``sink_roots``
     projected_sinks: list = field(default_factory=list)
+    # external calls bound to a declared model (``summary_store``): call key ->
+    # assumption label
+    declared: dict = field(default_factory=dict)
     # a member of a recursive SCC whose summaries did not reach a verified
     # fixpoint (``MAX_RECURSION_ROUNDS``): its intra-SCC calls stayed opaque
     recursion_unresolved: bool = False
@@ -49,7 +58,8 @@ def function_key(coordinate) -> str:
 
 
 def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
-                  assume_globals_disjoint_from_stack=False, sink_roots=None) -> dict[str, AnalyzedFunction]:
+                  assume_globals_disjoint_from_stack=False, sink_roots=None,
+                  image_info=None, external_models=None, readonly_image=None) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -61,7 +71,11 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     ``sink_roots(key, unit, normalized)``: (label, root nodes, bound) per sink
     root of the function's own boundaries. Each root, and each sink root
     projected from a summarized callee (``~sink<k>`` call effects), becomes a
-    ``SinkDemand`` of the function's summary, so wrappers compose bottom-up."""
+    ``SinkDemand`` of the function's summary, so wrappers compose bottom-up.
+    ``image_info`` + ``external_models``: calls to imported symbols (through a
+    thunk or an import slot, ``image_info``) take the declared model of that
+    name (``summary_store``); each use is a named assumption
+    (``AnalyzedFunction.declared``)."""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -71,6 +85,11 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         if type(unit.scopes.function) is ConstructedFunctionScope and unit.observation is not None
     }
     calls = {key: _direct_calls(unit, functions) for key, unit in functions.items()}
+    externals = {
+        key: _external_sites(unit, image_info, external_models) if image_info and external_models else {}
+        for key, unit in functions.items()
+    }
+    memory_space = _program_memory_space(next(iter(functions.values()))) if functions else None
     if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
         assume_globals_disjoint_from_stack = False
     files = [_register_file(unit.observation, unit.scopes.resolution_context) for unit in functions.values()]
@@ -106,7 +125,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             }
             return register_object, register_limit, _preserved_stack_pointers(observation, context), shapes
 
-        def site_effect(key, call_key, summary, anchors, failed=()):
+        def site_effect(key, call_key, summary, anchors, failed=(), callee=None):
             """The effect of one call site of ``key`` from a callee summary."""
             register_object, register_limit, stack_pointers, shapes = site(key)
             if register_object is None:
@@ -115,7 +134,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             if tail and len(program_stack) != 1:
                 return None  # no single stack pointer to compose through
             return derive_proven_call_effect(
-                summary, calls[key][call_key], register_object, register_limit,
+                summary, callee or calls[key][call_key], register_object, register_limit,
                 excluded=tuple(program_stack) if tail else tuple(stack_pointers.get(call_key, ())),
                 anchors=anchors,
                 stack_deltas=shapes.get(call_key, {}),
@@ -162,6 +181,24 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     effect = site_effect(key, call_key, done.summary, done.anchors, failed.get(call_key, ()))
                     if effect is not None:
                         proven[call_key] = effect
+                register_space = _register_space_id(observation) or _program_register_space(unit)
+                for call_key, (model_file, entry) in externals[key].items():
+                    if call_key in proven or call_key in assumed or memory_space is None:
+                        continue
+                    effect = model_effect(
+                        lambda summary, anchors, call_key=call_key: site_effect(
+                            key, call_key, summary, anchors, callee=entry.label),
+                        model_file, entry, register_object, register_limit, register_space, memory_space,
+                        constants.get(call_key, {}),
+                    )
+                    if effect is None:
+                        continue
+                    missing = [slice_ for slice_ in entry.extent_registers()
+                               if slice_ not in constants.get(call_key, {})]
+                    if missing:
+                        effect = replace(effect, extent_registers=tuple(
+                            ByteSpan(register_object, offset, size) for offset, size in missing))
+                    proven[call_key] = effect
                 return proven
 
             # summarized values that hold only if alias conditions hold: the
@@ -169,11 +206,13 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             # makes those bytes unknown and the function is normalized again
             # (the failed set only grows)
             failed: dict = {}
+            constants: dict = {}   # external call -> extent register -> proven constant
             while True:
                 proven = derive(failed)
                 normalized = FunctionNormalizer().normalize(
                     unit, assumed_call_effects=assumed, proven_call_effects=proven,
                     assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+                    readonly_image=readonly_image,
                 )
                 if type(normalized) is not NormalizedFunction:
                     break
@@ -182,7 +221,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     for call, effect in proven.items()
                     for index, run in enumerate((*effect.runs, *effect.memory_runs)) if run.conditions
                 ])
-                grown = False
+                grown = _prove_extents(unit, normalized, proven, constants)
                 for (call, tag), rows in verdicts.items():
                     effect = proven[call]
                     run = (*effect.runs, *effect.memory_runs)[int(tag[2:])]
@@ -223,7 +262,10 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             )
             anchors = _relative_anchors(unit, normalized) if summary is not None else {}
             return AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
-                                    anchors, origins, projected)
+                                    anchors, origins, projected, declared={
+                                        call: externals[key][call][1].label
+                                        for call in proven if call in externals[key]
+                                    })
 
         def solve(component):
             """Recursion (design S5): every intra-SCC call starts from the
@@ -293,6 +335,66 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
 
 
 MAX_RECURSION_ROUNDS = 8
+
+
+def _program_memory_space(unit) -> int | None:
+    """The program's single loaded memory space (models address it)."""
+    spaces = [row.space_id for row in unit.scopes.program.evidence.address_spaces
+              if row.is_memory_space and row.is_loaded_memory_space and not row.is_overlay_space
+              and not row.is_external_space]
+    return spaces[0] if len(spaces) == 1 else None
+
+
+def _external_sites(unit, image_info, external_models) -> dict:
+    """Call key -> (model file, entry) for calls to imported symbols with a
+    model: ``CALL`` of an import thunk, or ``CALLIND`` of a value copied from
+    an import slot within the call instruction (``call [__imp_X]``)."""
+    found = {}
+    for instruction in unit.observation.instructions:
+        operations = instruction.operations
+        for ordinal, operation in enumerate(operations):
+            if not operation.inputs:
+                continue
+            symbol = None
+            target = operation.inputs[0]
+            if operation.opcode == "CALL" and target.kind is VarnodeKindCode.ADDRESS:
+                symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
+            elif operation.opcode == "CALLIND":
+                for copy in operations[:ordinal]:
+                    if copy.opcode == "COPY" and copy.output == target \
+                            and copy.inputs[0].kind is VarnodeKindCode.ADDRESS:
+                        source = copy.inputs[0].coordinate
+                        symbol = image_info.import_at_slot(source.space_id, source.byte_offset)
+            if symbol is None:
+                continue
+            model = external_models.lookup(symbol.name)
+            if model is not None:
+                found[_operation_key(instruction.address, ordinal, operation.opcode)] = model
+    return found
+
+
+def _prove_extents(unit, normalized, proven, constants) -> bool:
+    """Evaluate the ``~ext`` rows of model calls: a register proven constant at
+    the call makes that model's variable-size effect exact (re-derive)."""
+    from ._scope_contracts import AddressCoordinate, ValidatedVarnode
+    from .relative_memory import constant_values
+
+    register_space = _register_space_id(unit.observation) or _program_register_space(unit)
+    requests = [
+        (f"{call}~ext", ValidatedVarnode(VarnodeKindCode.REGISTER,
+                                         AddressCoordinate(register_space, span.start), span.size), call, span)
+        for call, effect in proven.items() for span in effect.extent_registers
+    ]
+    if not requests:
+        return False
+    values = constant_values(normalized, unit.observation, [(key, varnode) for key, varnode, _, _ in requests])
+    grown = False
+    for key, varnode, call, span in requests:
+        value = values.get((key, varnode))
+        if value is not None and (span.start, span.size) not in constants.get(call, {}):
+            constants.setdefault(call, {})[(span.start, span.size)] = value
+            grown = True
+    return grown
 
 
 def _bottom_summary(stack_pointers, shapes, call_key, program_stack):

@@ -39,6 +39,9 @@ def main() -> int:
     parser.add_argument("generation", type=Path)
     parser.add_argument("--runs", type=int, default=4)
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--models", action="store_true",
+                        help="apply the declared external models (win64) and run those library "
+                             "functions with their real semantics in the interpreter")
     args = parser.parse_args()
     binding = NamingBindingExpectation(
         sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
@@ -56,7 +59,19 @@ def main() -> int:
         default_sp = (0x10, 4) if ":32:" in language else (0x20, 8)
         units = [evidence.unit for evidence in session.iter_functions()]
     began = time.time()
-    results = analyze_units(units)
+    options, externals = {}, None
+    if args.models:
+        sys.path.insert(0, str(REPO / "tools" / "bundle_export"))
+        import run_dfbench
+        from tdo_v2.image_info import load_image_info
+
+        info = load_image_info(args.generation)
+        models = run_dfbench.external_models(args.generation)
+        options = {"image_info": info, "external_models": models}
+        # every modeled import runs for real (or the run is skipped: Unsupported)
+        externals = {thunk: row.name for row in (info.imports if info else ())
+                     if models.lookup(row.name) for thunk in (*row.thunks, *row.slots)}
+    results = analyze_units(units, **options)
     totals["analysis_seconds"] = round(time.time() - began, 1)
     program = {
         (item.unit.scopes.function.entry.space_id, item.unit.scopes.function.entry.byte_offset):
@@ -67,6 +82,7 @@ def main() -> int:
         totals["functions"] += 1
         totals["calls_internal"] += len(item.calls)
         totals["calls_proven"] += len(item.proven)
+        totals["calls_modeled"] += len(item.declared)
         if type(item.normalized) is not NormalizedFunction:
             totals["normalize_failures"] += 1
             continue
@@ -83,7 +99,8 @@ def main() -> int:
 
         report = check_program(item.normalized, observation, program, seeds=range(args.runs),
                                register_pools=pool, spaces=(const, regs, unique),
-                               havoc_calls=(regs, sp_offset, sp_size), image=image)
+                               havoc_calls=(regs, sp_offset, sp_size), image=image,
+                               externals=externals)
         totals["runs"] += report.runs
         totals["skipped_runs"] += report.unsupported
         totals["checked"] += report.checked

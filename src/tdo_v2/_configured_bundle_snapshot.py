@@ -254,6 +254,9 @@ class _BundleInventory:
     call_interface_profile_member: _BundleMember | None
     blocks: tuple[_BundleBlock, ...]
     functions: tuple[_BundleFunction, ...]
+    # optional sealed image facts (permissions, imports, exports, relocations;
+    # ``tdo_v2.image_info``), placed after the block members
+    image_info_member: _BundleMember | None = None
 
     def __post_init__(self) -> None:
         if type(self.container_identity) is not _BundleContainerIdentity:
@@ -300,6 +303,10 @@ class _BundleInventory:
         if self.call_interface_profile_member is not None:
             members.append(self.call_interface_profile_member)
         members.extend(row.member for row in self.blocks if row.member is not None)
+        if self.image_info_member is not None:
+            if type(self.image_info_member) is not _BundleMember:
+                raise TypeError("bundle image-info member must be exact")
+            members.append(self.image_info_member)
         for row in self.functions:
             members.append(row.observation_member)
             if row.call_names_member is not None:
@@ -414,6 +421,8 @@ class _ConfiguredBundleSnapshotBase:
         if inventory.call_interface_profile_member is not None:
             members.append(inventory.call_interface_profile_member)
         members.extend(row.member for row in inventory.blocks if row.member is not None)
+        if inventory.image_info_member is not None:
+            members.append(inventory.image_info_member)
         for row in inventory.functions:
             members.append(row.observation_member)
             if row.call_names_member is not None:

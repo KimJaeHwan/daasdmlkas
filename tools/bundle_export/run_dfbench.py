@@ -83,6 +83,14 @@ def boundary_provider(assume_call_effect: bool = False, abi: str = "win64"):
     return SymbolBoundaryProvider(tuple(rules))
 
 
+def external_models(generation: Path):
+    """Declared models (models/external) for this Bundle's language and ABI."""
+    from tdo_v2.summary_store import load_external_models
+
+    return load_external_models(sorted((REPO / "models" / "external").glob("*.json")),
+                                LANGUAGES[abi_of(generation)], abi_of(generation))
+
+
 def selection_names(generation: Path) -> list[str]:
     command = generation.parent.parent / (generation.parent.name + ".logs") / \
         f"{generation.name}.command.json"
@@ -109,7 +117,17 @@ def main() -> int:
                         help="drop the named assumption (--summaries only, on by default): constant "
                              "addresses never alias the stack; it is withdrawn automatically when a "
                              "function switches stacks. Use for firmware / custom static stacks")
+    parser.add_argument("--no-external-models", dest="external_models", action="store_false",
+                        help="do not apply the declared models of imported functions "
+                             "(models/external/*.json; each one used is a named assumption)")
+    parser.add_argument("--assume-readonly-image", action="store_true",
+                        help="named assumption (--summaries only): read-only image memory keeps its "
+                             "image value (no VirtualProtect-style rewriting)")
     args = parser.parse_args()
+    if os.environ.get("TDO_V2_ASSUME_READONLY_IMAGE") == "1":
+        args.assume_readonly_image = True
+    if os.environ.get("TDO_V2_EXTERNAL_MODELS") == "0":
+        args.external_models = False
     if os.environ.get("TDO_V2_ASSUME_GLOBALS_NOT_STACK") == "0":
         args.assume_globals_not_stack = False
     if args.assume_boundary_effects:
@@ -139,6 +157,8 @@ def main() -> int:
                                                     abi_of(generation)),
                 assume_boundary_call_effects=args.assume_boundary_effects,
                 assume_globals_disjoint_from_stack=args.assume_globals_not_stack,
+                external_models=external_models(generation) if args.external_models else None,
+                assume_readonly_image_constant=args.assume_readonly_image,
             )
             print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
         else:

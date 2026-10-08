@@ -81,7 +81,7 @@ class Interpreter:
                  havoc_calls: tuple[int, int, int] | None = None,
                  image=None, assumed_calls: dict | None = None,
                  track_provenance: bool = False, program: dict | None = None,
-                 sinks: tuple | None = None) -> None:
+                 sinks: tuple | None = None, externals: dict | None = None) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
 
         ``track_provenance``: also record, per byte, the set of entry inputs its
@@ -101,6 +101,11 @@ class Interpreter:
         size) slices): a CALL to a sink target inside an activation records the
         caller-level inputs of its argument bytes (``Run.sink_reads``)."""
         self._sinks = sinks
+        # ``externals``: call target (space, offset) -> C library function name,
+        # executed with its real semantics (win64 arguments) instead of havoc:
+        # the oracle for declared external models (``summary_store``)
+        self._externals = dict(externals or {})
+        self._heap = 0x6000_0000
         self._instructions = {
             (row.address.space_id, row.address.byte_offset): row
             for row in observation.instructions
@@ -109,6 +114,17 @@ class Interpreter:
         for callee in self._program.values():
             for row in callee.instructions:
                 self._instructions.setdefault((row.address.space_id, row.address.byte_offset), row)
+        # ``call [slot]`` (COPY t <- slot; CALLIND t): a key in ``externals``
+        # may also be an import slot address
+        self._external_callind = {}
+        for row in self._instructions.values():
+            for ordinal, operation in enumerate(row.operations):
+                if operation.opcode != "CALLIND" or not operation.inputs:
+                    continue
+                for copy in row.operations[:ordinal]:
+                    source = copy.inputs[0] if copy.inputs else None
+                    if copy.opcode == "COPY" and copy.output == operation.inputs[0]                             and source.kind is VarnodeKindCode.ADDRESS                             and (source.coordinate.space_id, source.coordinate.byte_offset) in self._externals:
+                        self._external_callind[_operation_key(row.address, ordinal, "CALLIND")] =                             self._externals[(source.coordinate.space_id, source.coordinate.byte_offset)]
         self._activations: list = []          # (return location, call key)
         self._activation_written: set = set()  # bytes written in the current outermost activation
         self._call_bytes: set = set()          # bytes last written by some activation
@@ -349,6 +365,15 @@ class Interpreter:
             target = (self._order[0][0], self._value(key, inputs[0], run))
             if target in self._program:
                 return ("call", target)
+        if opcode == "CALL" and self._externals and inputs \
+                and inputs[0].kind is VarnodeKindCode.ADDRESS \
+                and (inputs[0].coordinate.space_id, inputs[0].coordinate.byte_offset) in self._externals:
+            self._run_external(
+                self._externals[(inputs[0].coordinate.space_id, inputs[0].coordinate.byte_offset)], key)
+            return None
+        if opcode == "CALLIND" and key in self._external_callind:
+            self._run_external(self._external_callind[key], key)
+            return None
         if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:
             for item in inputs[1:] if opcode != "CALLOTHER" else inputs:
                 if item.kind is not VarnodeKindCode.CONSTANT:
@@ -418,6 +443,81 @@ class Interpreter:
             for index, item in enumerate(self._stack_snapshot):
                 self._bytes[(space_id, sp_offset + index)] = item
                 self._restore_provenance(space_id, sp_offset + index, index)
+
+    # -- external library functions (oracle for declared models) ---------------
+    _WIN64_PRESERVED = {0x18, 0x28, 0x30, 0x38, 0xA0, 0xA8, 0xB0, 0xB8}
+
+    def _peek(self, space_id, offset, size):
+        value, tags = 0, set()
+        for index in range(size):
+            byte, writer = self._byte(space_id, offset + index)
+            value |= byte << (8 * index)
+            key = (space_id, offset + index)
+            if key in self._call_bytes and self._activations:
+                tags |= self.provenance.get(key, frozenset())
+            else:
+                tags.add(("ext", writer, space_id, offset + index))
+        return value, tags
+
+    def _put(self, writer, space_id, offset, size, value, tags):
+        if self._activations:  # inside a Bundle callee: attributed to the outermost call
+            writer = self._activations[0][1]
+        for index in range(size):
+            key = (space_id, offset + index)
+            self._bytes[key] = ((value >> (8 * index)) & 0xFF, writer)
+            self._call_bytes.add(key)
+            if self._activations:
+                self._activation_written.add(key)
+            self.provenance[key] = frozenset(tags)
+
+    def _run_external(self, name: str, key: str) -> None:
+        reg = self._havoc[0]
+        memory = self._order[0][0]
+        rcx, rcx_tags = self._peek(reg, 0x08, 8)
+        rdx, rdx_tags = self._peek(reg, 0x10, 8)
+        r8, r8_tags = self._peek(reg, 0x80, 8)
+        result, result_tags = None, set()
+        if name in ("memcpy", "memmove", "memset"):
+            count = r8 if r8 <= 4096 else 0
+            if name == "memset":
+                values = [(rdx & 0xFF, rdx_tags) for _ in range(count)]
+            else:
+                values = [self._peek(memory, rdx + index, 1) for index in range(count)]
+                values = [(value, tags | rdx_tags) for value, tags in values]
+            for index, (value, tags) in enumerate(values):
+                self._put(key, memory, rcx + index, 1, value, tags | rcx_tags | r8_tags)
+            result, result_tags = rcx, rcx_tags
+        elif name == "strlen":
+            length, tags = 0, set(rcx_tags)
+            while length < 4096:
+                byte, byte_tags = self._peek(memory, rcx + length, 1)
+                tags |= byte_tags
+                if byte == 0:
+                    break
+                length += 1
+            result, result_tags = length, tags
+        elif name == "malloc":
+            result, result_tags = self._heap, set()
+            self._heap += 0x1000
+        elif name == "free":
+            pass
+        else:
+            raise Unsupported(f"no oracle for external {name}")
+        # every volatile register is changed (the model leaves them unknown)
+        for space, offset, size in self._registers:
+            if space != reg:
+                continue
+            for byte in range(offset, offset + size):
+                base = byte - byte % 8 if byte < 0x100 else byte
+                if base in self._WIN64_PRESERVED or 0x20 <= byte < 0x28:
+                    continue
+                self._put(key, reg, byte, 1, self._rng.randrange(256), {("call", key)})
+        if result is not None:
+            self._put(key, reg, 0, 8, result, result_tags)
+        sp_space, sp_offset, sp_size = self._havoc  # the callee's ret pops the return address
+        for index, item in enumerate(self._stack_snapshot):
+            self._bytes[(sp_space, sp_offset + index)] = item
+            self._restore_provenance(sp_space, sp_offset + index, index)
 
     def _record_sink(self, operation, run: Run) -> None:
         targets, arguments = self._sinks

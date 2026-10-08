@@ -114,6 +114,9 @@ class ProvenCallEffect:
     # treats its stack below the call-time stack pointer as clobbered and,
     # with ``preserves_memory``, everything else as kept
     clobbers_below: bool = False
+    # registers whose value at the call the caller should prove constant (an
+    # external model's extents, e.g. memcpy's count); read by a ``~ext`` row
+    extent_registers: tuple[ByteSpan, ...] = ()
 
 
 def derive_proven_call_effect(

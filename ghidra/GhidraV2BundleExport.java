@@ -52,6 +52,12 @@ import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.symbol.FlowType;
 import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.reloc.Relocation;
+import ghidra.program.model.symbol.ExternalLocation;
+import ghidra.program.model.symbol.ExternalManager;
+import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolTable;
+import ghidra.program.model.address.AddressIterator;
 
 public class GhidraV2BundleExport extends GhidraScript {
     private static final int FORMAT_VERSION = 2;
@@ -551,6 +557,7 @@ public class GhidraV2BundleExport extends GhidraScript {
 
             List<Map<String, Object>> blocks;
             List<Map<String, Object>> functions;
+            Map<String, Object> imageInfoMember;
             Map<String, Object> profileMember;
             try (GhidraV2CallInterfaceProfile.CaptureSession profileSession =
                     GhidraV2CallInterfaceProfile.captureSession(
@@ -565,6 +572,9 @@ public class GhidraV2BundleExport extends GhidraScript {
                     profileSession.profileJson());
                 members.add(profileMember);
                 blocks = blockRows(stage, members);
+                imageInfoMember = writeJsonMember(
+                    "image-info", stage.resolve("image-info.json"), imageInfo());
+                members.add(imageInfoMember);
                 functions = functionRows(
                     options, stage, members, profileSession, profileMember,
                     runtimeClasses(options));
@@ -580,6 +590,7 @@ public class GhidraV2BundleExport extends GhidraScript {
             manifest.put("members", members);
             manifest.put("blocks", blocks);
             manifest.put("functions", functions);
+            manifest.put("image_info_member", memberText(imageInfoMember, "id"));
             byte[] manifestBytes = jsonBytes(manifest);
             writeFile(stage.resolve("manifest.json"), manifestBytes);
 
@@ -677,6 +688,113 @@ public class GhidraV2BundleExport extends GhidraScript {
             row.put("member_id", memberId);
             result.add(row);
         }
+        return result;
+    }
+
+    /**
+     * Image facts beside the sealed memory blocks (schema tdo-v2-image-info-1):
+     * per-block permissions and names, imported symbols with the memory slots
+     * Ghidra binds to them (IAT entries, .refptr-style pointers) and their thunks,
+     * exported entry points, and relocated addresses. Order is canonical.
+     */
+    private Map<String, Object> imageInfo() throws Exception {
+        List<Map<String, Object>> permissions = new ArrayList<>();
+        MemoryBlock[] blocks = currentProgram.getMemory().getBlocks();
+        for (int index = 0; index < blocks.length; index++) {
+            MemoryBlock block = blocks[index];
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("block_id", String.format("block-%06d", index));
+            row.put("name", block.getName());
+            row.put("read", block.isRead());
+            row.put("write", block.isWrite());
+            row.put("execute", block.isExecute());
+            row.put("volatile", block.isVolatile());
+            permissions.add(row);
+        }
+
+        List<Map<String, Object>> imports = new ArrayList<>();
+        ExternalManager externals = currentProgram.getExternalManager();
+        SymbolTable symbols = currentProgram.getSymbolTable();
+        for (Symbol symbol : symbols.getExternalSymbols()) {
+            monitor.checkCancelled();
+            ExternalLocation location = externals.getExternalLocation(symbol);
+            if (location == null) {
+                continue;
+            }
+            List<Map<String, Object>> slots = new ArrayList<>();
+            List<Map<String, Object>> thunks = new ArrayList<>();
+            for (Reference reference : currentProgram.getReferenceManager().getReferencesTo(symbol.getAddress())) {
+                Address from = reference.getFromAddress();
+                if (!from.isMemoryAddress()) {
+                    continue;
+                }
+                Function function = currentProgram.getFunctionManager().getFunctionAt(from);
+                if (function != null && function.isThunk()) {
+                    thunks.add(coordinate(from));
+                }
+                else if (currentProgram.getListing().getInstructionAt(from) == null) {
+                    slots.add(coordinate(from));  // a data slot holding the import's address
+                }
+            }
+            for (Function thunk : currentProgram.getFunctionManager().getFunctions(true)) {
+                Function target = thunk.isThunk() ? thunk.getThunkedFunction(true) : null;
+                if (target != null && target.isExternal()
+                        && target.getEntryPoint().equals(symbol.getAddress())) {
+                    Map<String, Object> entry = coordinate(thunk.getEntryPoint());
+                    if (!thunks.contains(entry)) {
+                        thunks.add(entry);
+                    }
+                }
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("library", location.getLibraryName());
+            row.put("name", location.getLabel());
+            row.put("original_name", location.getOriginalImportedName());
+            row.put("slots", sortedCoordinates(slots));
+            row.put("thunks", sortedCoordinates(thunks));
+            imports.add(row);
+        }
+        imports.sort(Comparator.comparing((Map<String, Object> row) -> String.valueOf(row.get("library")))
+            .thenComparing(row -> String.valueOf(row.get("name"))));
+
+        List<Map<String, Object>> exports = new ArrayList<>();
+        AddressIterator entries = symbols.getExternalEntryPointIterator();
+        while (entries.hasNext()) {
+            Address entry = entries.next();
+            for (Symbol symbol : symbols.getSymbols(entry)) {
+                Map<String, Object> row = coordinate(entry);
+                row.put("name", symbol.getName());
+                row.put("primary", symbol.isPrimary());
+                exports.add(row);
+            }
+        }
+        exports.sort(Comparator.comparing((Map<String, Object> row) -> (BigInteger)row.get("byte_offset"))
+            .thenComparing(row -> String.valueOf(row.get("name"))));
+
+        List<Map<String, Object>> relocations = new ArrayList<>();
+        java.util.Iterator<Relocation> iterator = currentProgram.getRelocationTable().getRelocations();
+        while (iterator.hasNext()) {
+            monitor.checkCancelled();
+            Relocation relocation = iterator.next();
+            Map<String, Object> row = coordinate(relocation.getAddress());
+            row.put("byte_size", u64(relocation.getLength(), "relocation length"));
+            relocations.add(row);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("schema", "tdo-v2-image-info-1");
+        result.put("executable_format", currentProgram.getExecutableFormat());
+        result.put("block_permissions", permissions);
+        result.put("imports", imports);
+        result.put("exports", exports);
+        result.put("relocations", relocations);
+        return result;
+    }
+
+    private static List<Map<String, Object>> sortedCoordinates(List<Map<String, Object>> rows) {
+        List<Map<String, Object>> result = new ArrayList<>(rows);
+        result.sort(Comparator.comparing((Map<String, Object> row) -> (BigInteger)row.get("space_id"))
+            .thenComparing(row -> (BigInteger)row.get("byte_offset")));
         return result;
     }
 

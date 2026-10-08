@@ -124,6 +124,8 @@ class NormalizedFunction:
     # (``ProvenCallEffect.clobbers_below``): (call key, stack object, first
     # offset kept); a call whose bound is unknown keeps no memory
     call_below_bounds: tuple[tuple[str, object, int], ...] = ()
+    # named assumption readonly-image-data-is-constant was given (``image_info``)
+    assumes_readonly_image_constant: bool = False
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -509,6 +511,7 @@ def _program_register_space(unit) -> int | None:
 _CALL_EFFECT_LABELS = {
     "": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD", "sink": "CALL_EFFECT_SINK",
     "ck": "CALL_EFFECT_CHECK", "cr": "CALL_EFFECT_CHECK", "sp": "CALL_EFFECT_CHECK",
+    "ext": "CALL_EFFECT_CHECK",
 }
 
 
@@ -589,6 +592,14 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
         loaded[access] = target
         return target
 
+    if proven.extent_registers:
+        # reads the registers whose constant value would make a model's
+        # variable-size effect exact (``interprocedural``)
+        rows.append(ObservedEffect(
+            f"{call_key}~ext", EffectKind.COPY,
+            reads=tuple(ResolvedStorage(span) for span in proven.extent_registers),
+            writes=(temporary(),), block_key=block_key,
+        ))
     if proven.clobbers_below and stack_span is not None:
         # reads the stack pointer at the call: the clobbered region's bound
         rows.append(ObservedEffect(
@@ -684,6 +695,7 @@ class FunctionNormalizer:
         assumed_call_effects: dict[str, AssumedCallEffect] | None = None,
         proven_call_effects: dict[str, ProvenCallEffect] | None = None,
         assume_globals_disjoint_from_stack: bool = False,
+        readonly_image=None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
         declared effect; see ``tdo_v2.assumed_call_effects``.
@@ -715,6 +727,7 @@ class FunctionNormalizer:
             assumed_call_effects=assumed_call_effects or {},
             proven_call_effects=proven_call_effects or {},
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+            readonly_image=readonly_image,
         )
 
     def normalize_configured(
@@ -762,6 +775,7 @@ class _ScopedNormalizer:
         assumed_call_effects: dict[str, AssumedCallEffect] | None = None,
         proven_call_effects: dict[str, ProvenCallEffect] | None = None,
         assume_globals_disjoint_from_stack: bool = False,
+        readonly_image=None,
     ) -> NormalizedFunction:
         assumed_call_effects = dict(assumed_call_effects or {})
         proven_call_effects = dict(proven_call_effects or {})
@@ -944,6 +958,7 @@ class _ScopedNormalizer:
                     unit.scopes.program.evidence.translation_namespace.language_id
                 ),
                 anchored_accesses=anchored_call_accesses,
+                readonly_image=readonly_image,
             )
             if projected_effect_unit is effect_unit:
                 break
@@ -1064,6 +1079,7 @@ class _ScopedNormalizer:
             proven_call_effects=tuple(sorted(proven_call_effects.items())),
             assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             call_below_bounds=below_bounds,
+            assumes_readonly_image_constant=readonly_image is not None,
         )
 
     def _build_cfg(
