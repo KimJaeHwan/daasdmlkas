@@ -39,6 +39,9 @@ class AnalyzedFunction:
     # sink roots projected from callees: (call key, demand index, label, root
     # nodes, complete) -- the function's own roots come from ``sink_roots``
     projected_sinks: list = field(default_factory=list)
+    # a member of a recursive SCC whose summaries did not reach a verified
+    # fixpoint (``MAX_RECURSION_ROUNDS``): its intra-SCC calls stayed opaque
+    recursion_unresolved: bool = False
 
 
 def function_key(coordinate) -> str:
@@ -86,70 +89,191 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         order = _callee_first_components(calls)
         component_of = {key: index for index, component in enumerate(order) for key in component}
         results: dict[str, AnalyzedFunction] = {}
-        for component in order:
-            for key in sorted(component):
-                unit = functions[key]
-                observation = unit.observation
-                context = unit.scopes.resolution_context
+
+        def site(key):
+            unit = functions[key]
+            observation, context = unit.observation, unit.scopes.resolution_context
+            register_object, register_limit = _register_file(observation, context)
+            if register_object is None:  # e.g. a thunk that is a lone tail jump
+                register_object, register_limit = program_registers
+            shapes = {
+                row.call_operation_key: {
+                    (row.memory_transition.caller_base.byte_offset,
+                     row.memory_transition.caller_base.byte_size):
+                    row.memory_transition.displacement_delta,
+                }
+                for row in observed_call_state_projections(observation)
+            }
+            return register_object, register_limit, _preserved_stack_pointers(observation, context), shapes
+
+        def site_effect(key, call_key, summary, anchors, failed=()):
+            """The effect of one call site of ``key`` from a callee summary."""
+            register_object, register_limit, stack_pointers, shapes = site(key)
+            if register_object is None:
+                return None
+            tail = call_key.endswith(":BRANCH")
+            if tail and len(program_stack) != 1:
+                return None  # no single stack pointer to compose through
+            return derive_proven_call_effect(
+                summary, calls[key][call_key], register_object, register_limit,
+                excluded=tuple(program_stack) if tail else tuple(stack_pointers.get(call_key, ())),
+                anchors=anchors,
+                stack_deltas=shapes.get(call_key, {}),
+                tail=tail,
+                failed_conditions=frozenset(failed),
+            )
+
+        def one(key, hypotheses):
+            unit = functions[key]
+            observation = unit.observation
+            context = unit.scopes.resolution_context
+            register_object, register_limit = _register_file(observation, context)
+            if register_object is None:  # e.g. a thunk that is a lone tail jump
+                register_object, register_limit = program_registers
+            stack_pointers = _preserved_stack_pointers(observation, context)
+            shapes = {
+                row.call_operation_key: {
+                    (row.memory_transition.caller_base.byte_offset,
+                     row.memory_transition.caller_base.byte_size):
+                    row.memory_transition.displacement_delta,
+                }
+                for row in observed_call_state_projections(observation)
+            }
+            assumed = (assumed_call_effects or {}).get(key, {})
+
+            def derive(failed):
                 proven = {}
-                register_object, register_limit = _register_file(observation, context)
-                if register_object is None:  # e.g. a thunk that is a lone tail jump
-                    register_object, register_limit = program_registers
-                if register_object is not None:
-                    stack_pointers = _preserved_stack_pointers(observation, context)
-                    shapes = {
-                        row.call_operation_key: {
-                            (row.memory_transition.caller_base.byte_offset,
-                             row.memory_transition.caller_base.byte_size):
-                            row.memory_transition.displacement_delta,
-                        }
-                        for row in observed_call_state_projections(observation)
-                    }
-                    for call_key, callee in calls[key].items():
-                        done = results.get(callee)
-                        if done is None or done.summary is None or component_of[callee] == component_of[key]:
-                            continue
-                        tail = call_key.endswith(":BRANCH")
-                        if tail and len(program_stack) != 1:
-                            continue  # no single stack pointer to compose through
-                        effect = derive_proven_call_effect(
-                            done.summary, callee, register_object, register_limit,
-                            excluded=tuple(program_stack) if tail else tuple(stack_pointers.get(call_key, ())),
-                            anchors=done.anchors,
-                            stack_deltas=shapes.get(call_key, {}),
-                            tail=tail,
-                        )
-                        if effect is not None:
-                            proven[call_key] = effect
-                assumed = (assumed_call_effects or {}).get(key, {})
-                proven = {call: effect for call, effect in proven.items() if call not in assumed}
+                if register_object is None:
+                    return proven
+                for call_key, callee in calls[key].items():
+                    done = results.get(callee)
+                    if call_key in assumed:
+                        continue
+                    if component_of[callee] == component_of[key]:
+                        # recursion: the SCC's current hypothesis (``solve``), or opaque
+                        if hypotheses.get(call_key) is not None:
+                            proven[call_key] = hypotheses[call_key]
+                        continue
+                    if done is None or done.summary is None:
+                        continue
+                    tail = call_key.endswith(":BRANCH")
+                    if tail and len(program_stack) != 1:
+                        continue  # no single stack pointer to compose through
+                    effect = site_effect(key, call_key, done.summary, done.anchors, failed.get(call_key, ()))
+                    if effect is not None:
+                        proven[call_key] = effect
+                return proven
+
+            # summarized values that hold only if alias conditions hold: the
+            # caller decides them at the call; a pair it cannot prove disjoint
+            # makes those bytes unknown and the function is normalized again
+            # (the failed set only grows)
+            failed: dict = {}
+            while True:
+                proven = derive(failed)
                 normalized = FunctionNormalizer().normalize(
                     unit, assumed_call_effects=assumed, proven_call_effects=proven,
                     assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
                 )
-                origins: dict = {}
-                projected: list = []
-                roots: list = []
-                if type(normalized) is NormalizedFunction:
-                    origins = _run_origins(normalized)
-                    for node, labels in (extra_origins(key, unit, normalized, calls[key]) if extra_origins else {}).items():
-                        origins.setdefault(node, set()).update(labels)
-                    roots = list(sink_roots(key, unit, normalized)) if sink_roots else []
-                    for call, effect in normalized.proven_call_effects:
-                        for index, demand in enumerate(effect.sink_demands):
-                            nodes = run_definition_nodes(normalized, f"{call}~sink{index}")
-                            for node in nodes:  # labels reached inside the callee
-                                if demand.origins:
-                                    origins.setdefault(node, set()).update(demand.origins)
-                            projected.append((call, index, demand.label, nodes, demand.complete))
-                            roots.append((demand.label, nodes, demand.complete))
-                summary = (
-                    summarize_function(normalized, observation, origins, roots)
-                    if type(normalized) is NormalizedFunction else None
-                )
-                anchors = _relative_anchors(unit, normalized) if summary is not None else {}
-                results[key] = AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
-                                                anchors, origins, projected)
+                if type(normalized) is not NormalizedFunction:
+                    break
+                verdicts = _decide_conditions(unit, normalized, shapes, [
+                    (call, f"cr{index}", run.conditions)
+                    for call, effect in proven.items()
+                    for index, run in enumerate((*effect.runs, *effect.memory_runs)) if run.conditions
+                ])
+                grown = False
+                for (call, tag), rows in verdicts.items():
+                    effect = proven[call]
+                    run = (*effect.runs, *effect.memory_runs)[int(tag[2:])]
+                    for pair, verdict in zip(run.conditions, rows):
+                        if verdict != "ok" and pair not in failed.get(call, set()):
+                            failed.setdefault(call, set()).add(pair)
+                            grown = True
+                if not grown:
+                    break
+            origins: dict = {}
+            projected: list = []
+            roots: list = []
+            if type(normalized) is NormalizedFunction:
+                origins = _run_origins(normalized)
+                for node, labels in (extra_origins(key, unit, normalized, calls[key]) if extra_origins else {}).items():
+                    origins.setdefault(node, set()).update(labels)
+                roots = list(sink_roots(key, unit, normalized)) if sink_roots else []
+                decided = _decide_conditions(unit, normalized, shapes, [
+                    (call, f"ck{index}", demand.conditions)
+                    for call, effect in normalized.proven_call_effects
+                    for index, demand in enumerate(effect.sink_demands) if demand.conditions
+                ])
+                for call, effect in normalized.proven_call_effects:
+                    for index, demand in enumerate(effect.sink_demands):
+                        nodes = run_definition_nodes(normalized, f"{call}~sink{index}")
+                        for node in nodes:  # labels reached inside the callee
+                            if demand.origins:
+                                origins.setdefault(node, set()).update(demand.origins)
+                        rows = decided.get((call, f"ck{index}"), ())
+                        fails = any(verdict == "fail" for verdict in rows)
+                        remaining = tuple(verdict for verdict in rows if verdict not in ("ok", "fail"))
+                        complete = demand.complete and not fails
+                        projected.append((call, index, demand.label, nodes, complete and not remaining))
+                        roots.append((demand.label, nodes, complete, remaining))
+            summary = (
+                summarize_function(normalized, observation, origins, roots)
+                if type(normalized) is NormalizedFunction else None
+            )
+            anchors = _relative_anchors(unit, normalized) if summary is not None else {}
+            return AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
+                                    anchors, origins, projected)
+
+        def solve(component):
+            """Recursion (design S5): every intra-SCC call starts from the
+            optimistic hypothesis "returns doing nothing, restoring the stack
+            pointer"; members are re-analyzed with the effects derived from
+            the last round's summaries until those equal the hypotheses used.
+            Only such a verified fixpoint is published (sound by induction on
+            the depth of returning activations); otherwise intra-SCC calls
+            stay opaque. Hypotheses keep no exact writes below the callee's
+            entry stack pointer (its own frame, which re-projects deeper each
+            round): such a call keeps no memory instead. Their sink demands are
+            merged per label, and conditional values count as unknown."""
+            sites = sorted(
+                (key, call_key) for key in component for call_key, callee in calls[key].items()
+                if callee in component
+            )
+            hypotheses = {}
+            for key, call_key in sites:
+                effect = site_effect(key, call_key, _bottom_summary(*site(key)[2:], call_key, program_stack),
+                                     {})
+                hypotheses[(key, call_key)] = effect
+            for _ in range(MAX_RECURSION_ROUNDS):
+                round_results = {
+                    key: one(key, {call_key: effect for (owner, call_key), effect in hypotheses.items()
+                                   if owner == key})
+                    for key in sorted(component)
+                }
+                derived = {}
+                for key, call_key in sites:
+                    done = round_results[calls[key][call_key]]
+                    derived[(key, call_key)] = None if done.summary is None else _recursive_hypothesis(
+                        lambda failed: site_effect(key, call_key, done.summary, done.anchors, failed),
+                        tuple(site(key)[2].get(call_key, ())) or tuple(program_stack),
+                    )
+                if derived == hypotheses:
+                    return round_results
+                hypotheses = derived
+            fallback = {key: one(key, {}) for key in sorted(component)}
+            for item in fallback.values():
+                item.recursion_unresolved = True  # intra-SCC calls opaque (debt)
+            return fallback
+
+        for component in order:
+            recursive = len(component) > 1 or any(
+                callee == key for key in component for callee in calls[key].values())
+            if recursive:
+                results.update(solve(component))
+            else:
+                for key in sorted(component):
+                    results[key] = one(key, {})
         return results
 
     # indirect calls with a provably constant target (a Bundle function): resolved
@@ -166,6 +290,54 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             return results
         resolved = found
     return analyze(calls)  # not stable: no indirect resolution at all
+
+
+MAX_RECURSION_ROUNDS = 8
+
+
+def _bottom_summary(stack_pointers, shapes, call_key, program_stack):
+    """The optimistic start for a recursive call site: one normal exit that
+    writes nothing, with the stack pointer restored (undoing the call shape's
+    push, or a pointer-sized ``ret`` for a tail jump)."""
+    from .function_summary import FUNCTION_SUMMARY_VERSION, ExitSummary
+
+    deltas = tuple(((offset, size), -delta) for (offset, size), delta in shapes.get(call_key, {}).items())
+    if call_key.endswith(":BRANCH"):
+        deltas = tuple(((span.start, span.size), span.size) for span in program_stack)
+    return FunctionSummary(FUNCTION_SUMMARY_VERSION, (ExitSummary("bottom", ()),), (), (),
+                           register_deltas=deltas)
+
+
+def _recursive_hypothesis(derive, stack):
+    """A derived effect usable as a recursion hypothesis: conditional values
+    failed (they would need the caller's decision inside the fixpoint), sink
+    demands merged per label (writes below the callee's entry stack pointer,
+    which would re-project deeper each round, are already folded into
+    ``clobbers_below`` by ``derive_proven_call_effect``)."""
+    from dataclasses import replace
+    from .call_summary_effects import ProvenSinkDemand
+
+    failed: set = set()
+    while True:
+        effect = derive(failed)
+        if effect is None:
+            return None
+        pairs = {pair for run in (*effect.runs, *effect.memory_runs) for pair in run.conditions}
+        if not pairs - failed:
+            break
+        failed |= pairs
+    merged: dict = {}
+    for demand in effect.sink_demands:
+        row = merged.get(demand.label)
+        merged[demand.label] = demand if row is None else ProvenSinkDemand(
+            demand.label,
+            tuple(sorted(set(row.reads) | set(demand.reads), key=lambda span: span.canonical_key)),
+            tuple(sorted(set(row.loads) | set(demand.loads), key=repr)),
+            tuple(sorted(set(row.origins) | set(demand.origins))),
+            row.complete and demand.complete,
+            tuple(sorted(set(row.conditions) | set(demand.conditions), key=repr)),
+        )
+    return replace(effect, sink_demands=tuple(merged[label] for label in sorted(merged)))
 
 
 def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
@@ -250,6 +422,68 @@ def _callee_first_components(calls: dict[str, dict[str, str]]) -> list[set[str]]
                         break
                 order.append(component)
     return order
+
+
+def _decide_conditions(unit, normalized, shapes, pending) -> dict:
+    """``pending``: (call, row tag, alias conditions) -- the anchored (read,
+    write) pairs of a summarized run (``cr<i>``) or projected sink root
+    (``ck<k>``). Returns (call, tag) -> one verdict per pair: "ok" (disjoint),
+    "fail", or the pair as (span, span) in this function's objects (open: for
+    this function's own callers to decide). Both sides are located once, at
+    the call (the ``~<tag>`` row reads their anchors): the same object ->
+    disjoint offsets are "ok", overlap fails; different objects -> "ok" when
+    two address spaces, or a constant address and this function's stack under
+    the named globals-vs-stack assumption; otherwise open. A side that cannot
+    be located fails."""
+    from ._scope_contracts import AddressCoordinate, ValidatedVarnode
+    from .call_clobber import _register_space_id
+    from .may_alias import stack_object_of
+    from .normalize import _program_register_space
+    from .relative_memory import project_anchored_after
+    from .span_geometry import StorageObjectKind
+
+    if not pending:
+        return {}
+    observation = unit.observation
+    register_space = _register_space_id(observation) or _program_register_space(unit)
+
+    def request(call, tag, side):
+        displacement = side.displacement
+        for (offset, size), delta in shapes.get(call, {}).items():
+            if (side.anchor.start, side.anchor.size) == (offset, size):
+                displacement += delta  # the callee's entry SP is after the push
+        varnode = ValidatedVarnode(
+            VarnodeKindCode.REGISTER, AddressCoordinate(register_space, side.anchor.start), side.anchor.size,
+        )
+        return (f"{call}~{tag}", varnode, displacement, side.size, side.space_id)
+
+    requests = {
+        request(call, tag, side)
+        for call, tag, conditions in pending for pair in conditions for side in pair
+        if side.anchor is not None
+    }
+    located = project_anchored_after(normalized, observation, sorted(requests, key=repr)) \
+        if register_space is not None else {}
+    stack = stack_object_of(unit.scopes, observation) if normalized.assumes_globals_disjoint_from_stack else None
+    result = {}
+    for call, tag, conditions in pending:
+        rows = []
+        for pair in conditions:
+            left, right = [side.span if side.anchor is None else located.get(request(call, tag, side))
+                           for side in pair]
+            if left is None or right is None:
+                rows.append("fail")
+            elif left.object_id == right.object_id:
+                rows.append("fail" if left.overlaps(right) else "ok")
+            elif {left.object_id.kind, right.object_id.kind} == {StorageObjectKind.ADDRESS_SPACE}:
+                rows.append("ok")  # two address spaces
+            elif stack is not None and StorageObjectKind.ADDRESS_SPACE in (left.object_id.kind, right.object_id.kind) \
+                    and stack in (left.object_id, right.object_id):
+                rows.append("ok")  # ASSUMPTION globals-disjoint-from-stack
+            else:
+                rows.append((left, right))
+        result[(call, tag)] = rows
+    return result
 
 
 def _callind_sites(unit):
@@ -347,6 +581,18 @@ def _relative_anchors(unit, normalized) -> dict:
             if access.anchor is not None:
                 registers.add(access.anchor)
                 spaces.add(access.space_id)
+    # pointers the function reads from entry memory (an object addressed from
+    # the entry contents of a pointer-sized memory span)
+    from .memory_contracts import MemoryDefinitionKind
+    from .span_geometry import StorageObjectKind as Kind
+
+    definitions = normalized.memory_ssa.definitions
+    for read in normalized.memory_ssa.reads:
+        if read.span.object_id.kind in (Kind.ADDRESS_SPACE, Kind.FUNCTION_RELATIVE) \
+                and read.span.size in (4, 8) and any(
+                    definitions[definition].kind is MemoryDefinitionKind.ENTRY
+                    for fragment in read.fragments for definition in fragment.definition_ids):
+            registers.add(read.span)
     candidates = {}
     for span in registers:
         for space_id in spaces:

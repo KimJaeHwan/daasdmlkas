@@ -120,6 +120,10 @@ class NormalizedFunction:
     # named opt-in assumption (``may_alias``): constant addresses never alias
     # the stack; results relying on this function's may-alias rows rely on it
     assumes_globals_disjoint_from_stack: bool = False
+    # summarized calls that clobber the stack below their call-time pointer
+    # (``ProvenCallEffect.clobbers_below``): (call key, stack object, first
+    # offset kept); a call whose bound is unknown keeps no memory
+    call_below_bounds: tuple[tuple[str, object, int], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -428,6 +432,73 @@ class NormalizedFunction:
 _CALL_EFFECT_TEMPORARY_BASE = 1 << 48
 
 
+def _call_stack_span(call_key, proven, transitions, observation, context):
+    """The caller's stack-pointer register span at a summarized call that
+    clobbers below it (call shape base, or the tail jump's stack pointer)."""
+    if not proven.clobbers_below:
+        return None
+    if proven.tail_stack:
+        return proven.tail_stack[0]
+    transition = transitions.get(call_key)
+    space = _register_space_id(observation)
+    if transition is None or space is None:
+        return None
+    base = transition.caller_base
+    resolved = _resolve_validated_storage(
+        StorageRef(VarnodeKind.REGISTER, "", base.byte_offset, base.byte_size, space_id=space), context)
+    return resolved.span if type(resolved) is ResolvedStorage else None
+
+
+def _call_below_bounds(proven_call_effects, transitions, effect_unit, memory_ssa, observation, scopes,
+                       context) -> tuple:
+    """(call key, stack object, bound) for calls that clobber below the
+    call-time stack pointer: bytes of this function's stack object at offsets
+    below ``bound`` (the callee's entry stack pointer) may change."""
+    from .may_alias import _stack_pointer, _unit_stub
+    from .relative_memory import stack_offset_at
+
+    # only calls that keep all other memory: a call that keeps none clobbers it all anyway
+    keys = [key for key, row in proven_call_effects.items() if row.clobbers_below and row.preserves_memory]
+    if not keys:
+        return ()
+    found = _stack_pointer(_unit_stub(scopes), observation, context, scopes.program.evidence.address_spaces)
+    if found is None:
+        return ()
+    stack_object, bias, register_space, offset, size = found
+    rows = []
+    for key in keys:
+        span = _call_stack_span(key, proven_call_effects[key], transitions, observation, context)
+        if span is None or (span.start, span.size) != (offset, size):
+            continue
+        varnode = ValidatedVarnode(VarnodeKindCode.REGISTER, AddressCoordinate(register_space, offset), size)
+        displacement = stack_offset_at(memory_ssa, observation, scopes, f"{key}~sp", varnode, span)
+        if displacement is None:
+            continue
+        transition = transitions.get(key)
+        delta = 0 if proven_call_effects[key].tail_stack or transition is None else transition.displacement_delta
+        rows.append((key, stack_object, bias + displacement + delta))
+    return tuple(rows)
+
+
+def _memory_spans_except_below(effect_unit, object_id, bound) -> tuple:
+    """Every memory span the function's effects touch, minus the stack bytes
+    below ``bound``."""
+    spans = set()
+    for block in effect_unit.blocks:
+        for effect in block.effects:
+            for evidence in (*effect.reads, *effect.writes):
+                if type(evidence) is not ResolvedStorage or evidence.span.object_id.kind not in (
+                        StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE):
+                    continue
+                span = evidence.span
+                if span.object_id == object_id and span.start < bound:
+                    if span.end <= bound:
+                        continue
+                    span = ByteSpan(object_id, bound, span.end - bound)
+                spans.add(span)
+    return tuple(sorted(spans, key=lambda span: span.canonical_key))
+
+
 def _program_register_space(unit) -> int | None:
     """The program's register space, for a function that names no register
     itself (a thunk that only jumps) but receives summarized call effects."""
@@ -437,10 +508,12 @@ def _program_register_space(unit) -> int | None:
 
 _CALL_EFFECT_LABELS = {
     "": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD", "sink": "CALL_EFFECT_SINK",
+    "ck": "CALL_EFFECT_CHECK", "cr": "CALL_EFFECT_CHECK", "sp": "CALL_EFFECT_CHECK",
 }
 
 
-def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries):
+def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries,
+                      stack_span=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
@@ -474,12 +547,33 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
         return access.displacement
 
     loaded: dict = {}
+    load_keys: dict = {}
+
+    def base(access):
+        """(anchor reads, anchored-access base) of an anchored access: a
+        register, or ("mem", key of the ~ld row reading the pointer slot)."""
+        if access.pointer is not None:
+            slot = load(access.pointer)
+            return (slot,), ("mem", load_keys[access.pointer]), access.displacement
+        return (ResolvedStorage(access.anchor),), anchor_varnode(access.anchor), displacement(access)
 
     def load(access):
         if access in loaded:
             return loaded[access]
+        if access.pointer is not None:
+            reads, pointer, offset = base(access)
+            key = f"{call_key}~ld{len(loaded)}"
+            target = temporary()
+            rows.append(ObservedEffect(
+                key, EffectKind.COPY, reads=reads, writes=(target,),
+                memory_read=UnresolvedMemoryAccess(None, access.size), block_key=block_key,
+            ))
+            anchored[key] = (key, pointer, offset, access.size, access.space_id)
+            loaded[access], load_keys[access] = target, key
+            return target
         key = f"{call_key}~ld{len(loaded)}"
         target = temporary()
+        load_keys[access] = key
         if access.anchor is None:
             rows.append(ObservedEffect(
                 key, EffectKind.COPY, reads=(ResolvedStorage(access.span),), writes=(target,),
@@ -495,6 +589,12 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
         loaded[access] = target
         return target
 
+    if proven.clobbers_below and stack_span is not None:
+        # reads the stack pointer at the call: the clobbered region's bound
+        rows.append(ObservedEffect(
+            f"{call_key}~sp", EffectKind.COPY, reads=(ResolvedStorage(stack_span),),
+            writes=(temporary(),), block_key=block_key,
+        ))
     staged = []
     runs = [("register", run) for run in proven.runs] + [("memory", run) for run in proven.memory_runs]
     for index, (kind, run) in enumerate(runs):
@@ -502,8 +602,17 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
         if kind == "memory":
             if run.keeps_old:
                 inputs.append(load(run.write))
-            if run.write.anchor is not None:
-                inputs.append(ResolvedStorage(run.write.anchor))
+            if run.write.anchor is not None or run.write.pointer is not None:
+                inputs.extend(base(run.write)[0])
+        anchors = sorted({
+            side.anchor for pair in run.conditions for side in pair if side.anchor is not None
+        }, key=lambda span: span.canonical_key)
+        if anchors:  # locates both sides of each alias condition at the call (``interprocedural``)
+            rows.append(ObservedEffect(
+                f"{call_key}~cr{index}", EffectKind.COPY,
+                reads=tuple(ResolvedStorage(span) for span in anchors), writes=(temporary(),),
+                block_key=block_key,
+            ))
         stage_key = f"{call_key}~in{index}"
         target = temporary()
         rows.append(ObservedEffect(
@@ -516,13 +625,24 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             f"{call_key}~sink{index}", EffectKind.COPY, reads=tuple(inputs), writes=(temporary(),),
             block_key=block_key,
         ))
+        anchors = sorted({
+            side.anchor for pair in demand.conditions for side in pair if side.anchor is not None
+        }, key=lambda span: span.canonical_key)
+        if anchors:
+            # reads the anchor registers at the call, so the caller can locate
+            # both sides of each alias condition (``interprocedural``)
+            rows.append(ObservedEffect(
+                f"{call_key}~ck{index}", EffectKind.COPY,
+                reads=tuple(ResolvedStorage(span) for span in anchors), writes=(temporary(),),
+                block_key=block_key,
+            ))
     for index, (kind, run, stage_key, target) in enumerate(staged):
         key = f"{call_key}~{index}"
         if kind == "register":
             writes = tuple(ResolvedStorage(span) for span in run.writes)
             rows.append(ObservedEffect(key, EffectKind.COPY, reads=(target,), writes=writes,
                                        block_key=block_key))
-        elif run.write.anchor is None:
+        elif run.write.anchor is None and run.write.pointer is None:
             rows.append(ObservedEffect(key, EffectKind.COPY, reads=(target,),
                                        writes=(ResolvedStorage(run.write.span),), block_key=block_key))
         else:
@@ -530,8 +650,8 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
                 key, EffectKind.COPY, reads=(target,),
                 memory_write=UnresolvedMemoryAccess(None, run.write.size), block_key=block_key,
             ))
-            anchored[key] = (stage_key, anchor_varnode(run.write.anchor), displacement(run.write),
-                             run.write.size, run.write.space_id)
+            _, pointer, offset = base(run.write)
+            anchored[key] = (stage_key, pointer, offset, run.write.size, run.write.space_id)
     return rows, anchored
 
 
@@ -740,6 +860,8 @@ class _ScopedNormalizer:
                         operation_key, proven_call_effects[operation_key], block_key,
                         function.scope, _register_space_id(observation) or _program_register_space(unit),
                         call_transitions, staged_temporaries,
+                        _call_stack_span(operation_key, proven_call_effects[operation_key],
+                                         call_transitions, observation, context),
                     )
                     for row in rows:
                         operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
@@ -863,11 +985,21 @@ class _ScopedNormalizer:
             for node in expected_entry_nodes
         ):
             raise AssertionError("ENTRY definitions must materialize as observed inputs")
+        below_bounds = _call_below_bounds(
+            proven_call_effects, call_transitions, effect_unit, memory_ssa, observation, unit.scopes,
+            context,
+        )
+        proven_preserved = {key: row.preserved for key, row in proven_call_effects.items()}
+        for key, object_id, bound in below_bounds:
+            # keeps every memory byte this function tracks except its stack below the bound
+            proven_preserved[key] = tuple(proven_preserved[key]) + _memory_spans_except_below(
+                effect_unit, object_id, bound)
         call_clobber_reads = derive_call_clobber_reads(
             effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects),
-            proven_preserved={key: row.preserved for key, row in proven_call_effects.items()},
+            proven_preserved=proven_preserved,
             memory_keeping=frozenset(
-                key for key, row in proven_call_effects.items() if row.preserves_memory
+                key for key, row in proven_call_effects.items()
+                if row.preserves_memory and not row.clobbers_below
             ),
             unrestored_stack_calls=frozenset(
                 key for key, row in proven_call_effects.items() if not row.restores_stack
@@ -931,6 +1063,7 @@ class _ScopedNormalizer:
             assumed_call_effects=tuple(sorted(assumed_call_effects.items())),
             proven_call_effects=tuple(sorted(proven_call_effects.items())),
             assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+            call_below_bounds=below_bounds,
         )
 
     def _build_cfg(

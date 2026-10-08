@@ -13,8 +13,8 @@ import pytest
 import test_graph_fidelity as fidelity
 from program_oracle import check_program, check_sink_demands
 from synthetic import (
-    CODE_BASE, R8, R9, RAX, RBX, RCX, RDI, RDX, REG, RSI, RSP, FunctionBuilder, add, const,
-    copy, load, program_units, reg, slice_from, slice_op, store, tmp,
+    CODE_BASE, DATA_BASE, R8, R9, RAX, RBX, RCX, RDI, RDX, REG, RSI, RSP, FunctionBuilder, add, const,
+    copy, load, program_units, reg, slice_from, slice_op, store, sub, tmp,
 )
 from tdo_v2.interprocedural import analyze_units
 
@@ -173,15 +173,32 @@ def test_swap_through_two_pointers():
 
 def test_callee_frame_and_pointer_loaded_from_memory():
     """A balanced push/pop frame is bound to the caller's stack; a store through
-    a pointer the callee loads from memory has no anchor: memory stays debt."""
+    a pointer the callee loads from memory (*(rdi)) is anchored on that slot
+    and bound at the call to whatever the caller's slot holds."""
     from synthetic import load, store, tmp
     leaf = (FunctionBuilder(entry=LEAF).push(RBX).ins(load(tmp(0x110), reg(RDI)), store(tmp(0x110), reg(RSI)))
             .pop(RBX).ret())
     caller = _stack_local_call(leaf, [load(reg(RAX), reg(RSP))])
     results, program = _analyze(caller, leaf)
     effect = next(iter(results["1:1000"].proven.values()))
-    assert not effect.preserves_memory
-    assert results["1:1000"].normalized.call_clobber_reads
+    assert any(run.write.pointer is not None for run in effect.memory_runs)
+    assert _check(results, program).silent == []
+
+
+def test_double_pointer_outparam():
+    """DFB023: **pp = value; the caller's p = &local, pp = &p: local = value."""
+    from synthetic import load, store, tmp
+    t = tmp(0x100)
+    leaf = FunctionBuilder(entry=LEAF).ins(load(tmp(0x110), reg(RCX)), store(tmp(0x110), reg(RDX))).ret()
+    caller = (FunctionBuilder().sub_rsp(0x40)
+              .ins(add(t, reg(RSP), const(0x28)), add(tmp(0x118), reg(RSP), const(0x20)), store(t, tmp(0x118)))
+              .ins(add(reg(RCX), reg(RSP), const(0x28))).ins(copy(reg(RDX), reg(RSI)))
+              .call(LEAF).ins(add(t, reg(RSP), const(0x20)), load(reg(R9), t)).add_rsp(0x40).ret())
+    results, program = _analyze(caller, leaf)
+    function = results["1:1000"].normalized
+    from synthetic import operation_node_at
+    reload = slice_from(function, operation_node_at(function, 5, 1))
+    assert set(range(RSI, RSI + 8)) <= reload.register_bytes
     assert _check(results, program).silent == []
 
 
@@ -482,3 +499,253 @@ def test_indirect_target_reloaded_after_an_opaque_call_stays_opaque():
               .ins(load(reg(RDX), reg(RSP))).call_indirect(RDX).add_rsp(0x20).ret())
     results, _ = _analyze(caller, leaf)
     assert not any(key.endswith(":CALLIND") for key in results["1:1000"].proven)
+
+
+# -- S3: callee may-alias debt decided at the call site --------------------------
+
+def _home_space_wrapper(field):
+    """func1(v) in MSVC debug style: spill RCX to the home space, reload it to
+    write v->field = rdx, reload it again and pass it on (DFB055)."""
+    t, u = tmp(0x100), tmp(0x108)
+    return (FunctionBuilder(entry=MIDDLE)
+            .ins(add(t, reg(RSP), const(8)), store(t, reg(RCX)))
+            .ins(add(t, reg(RSP), const(8)), load(reg(RAX), t))
+            .ins(add(u, reg(RAX), const(field)), store(u, reg(RDX)))
+            .ins(add(t, reg(RSP), const(8)), load(reg(RCX), t))
+            .call(LEAF).ret())
+
+
+def _deep_sink_leaf():
+    return _sink(FunctionBuilder(entry=LEAF).ins(load(reg(RCX), reg(RCX)))).ret()
+
+
+def _home_space_caller(displacement):
+    """s.aaa = rbx at [rsp + displacement]; func1(&s)."""
+    t = tmp(0x100)
+    return (FunctionBuilder().sub_rsp(0x40)
+            .ins(add(t, reg(RSP), const(displacement & 0xFFFFFFFFFFFFFFFF)), store(t, reg(RBX)))
+            .ins(add(reg(RCX), reg(RSP), const(displacement & 0xFFFFFFFFFFFFFFFF)))
+            .call(MIDDLE).add_rsp(0x40).ret())
+
+
+def test_home_space_alias_is_discharged_by_the_caller():
+    results, program = _analyze_sinks(_home_space_caller(0x20), _home_space_wrapper(4), _deep_sink_leaf())
+    (demand,) = results[f"1:{MIDDLE:x}"].summary.sink_demands
+    assert demand.conditions  # the callee alone cannot tell
+    ((_, _, _, nodes, complete),) = results["1:1000"].projected_sinks
+    assert complete
+    assert set(range(RBX, RBX + 8)) <= slice_from(results["1:1000"].normalized, nodes[0]).register_bytes
+    report = _check_sinks(results, program)
+    assert report.through_calls and report.silent == []
+
+
+def test_overlapping_home_space_stays_incomplete():
+    """v + 12 is the callee's home slot: the reload really is clobbered."""
+    results, program = _analyze_sinks(_home_space_caller(-12), _home_space_wrapper(12), _deep_sink_leaf())
+    ((_, _, _, _, complete),) = results["1:1000"].projected_sinks
+    assert not complete
+    report = _check_sinks(results, program)
+    assert report.silent == []
+
+
+@pytest.mark.parametrize("displacement", [-16, -12, -8, -4, 0, 4, 8, 0x20])
+@pytest.mark.parametrize("field", [0, 4, 8, 12])
+def test_home_space_alias_any_layout(displacement, field):
+    results, program = _analyze_sinks(
+        _home_space_caller(displacement), _home_space_wrapper(field), _deep_sink_leaf())
+    report = _check_sinks(results, program)
+    assert report.silent == [], report.silent[:2]
+
+
+def _field_getter(field):
+    """int get(const S *v) { return v->field; } in MSVC debug style (spill/reload)."""
+    t, u = tmp(0x100), tmp(0x108)
+    return (FunctionBuilder(entry=LEAF)
+            .ins(add(t, reg(RSP), const(8)), store(t, reg(RCX)))
+            .ins(add(t, reg(RSP), const(8)), load(reg(RAX), t))
+            .ins(add(u, reg(RAX), const(field)), load(reg(RAX), u))
+            .ret())
+
+
+def _getter_caller(displacement, field):
+    """s.field = rbx at [rsp + displacement + field]; r9 = get(&s)."""
+    t = tmp(0x100)
+    return (FunctionBuilder().sub_rsp(0x40)
+            .ins(add(t, reg(RSP), const((displacement + field) & 0xFFFFFFFFFFFFFFFF)), store(t, reg(RBX)))
+            .ins(add(reg(RCX), reg(RSP), const(displacement & 0xFFFFFFFFFFFFFFFF)))
+            .call(LEAF).ins(copy(reg(R9), reg(RAX))).add_rsp(0x40).ret())
+
+
+def test_conditional_return_value_is_proven_in_context():
+    """DFB057: the callee's v->field read may alias its home-space spill; the
+    caller knows &s is elsewhere, so RAX = s.field (from RBX)."""
+    results, program = _analyze(_getter_caller(0x20, 4), _field_getter(4))
+    (run,) = [r for r in results[f"1:{LEAF:x}"].summary.exits[0].runs if r.span.start == RAX]
+    assert run.conditions and not run.debts
+    (effect,) = results["1:1000"].proven.values()
+    assert any(r.writes[0].start == RAX for r in effect.runs)
+    assert set(range(RBX, RBX + 8)) <= _entry_registers(results["1:1000"].normalized, "COPY", 4)
+    report = _check(results, program)
+    assert report.through_calls and report.silent == []
+
+
+@pytest.mark.parametrize("displacement", [-16, -12, -8, -4, 0, 4, 0x20])
+@pytest.mark.parametrize("field", [0, 4, 8])
+def test_conditional_return_value_any_layout(displacement, field):
+    results, program = _analyze(_getter_caller(displacement, field), _field_getter(field))
+    report = _check(results, program)
+    assert report.silent == [], report.silent[:2]
+
+
+def _clobbering_getter(write_field, read_field):
+    """spill rcx; v->write_field = rdx; return reload(v)->read_field: if the
+    caller's v + write_field is the home slot, the reloaded pointer (and so
+    the result) depends on RDX."""
+    t, u = tmp(0x100), tmp(0x108)
+    return (FunctionBuilder(entry=LEAF)
+            .ins(add(t, reg(RSP), const(8)), store(t, reg(RCX)))
+            .ins(add(t, reg(RSP), const(8)), load(reg(RAX), t))
+            .ins(add(u, reg(RAX), const(write_field)), store(u, reg(RDX)))
+            .ins(add(t, reg(RSP), const(8)), load(reg(RAX), t))
+            .ins(add(u, reg(RAX), const(read_field)), load(reg(RAX), u))
+            .ret())
+
+
+def _clobber_caller(displacement):
+    """*(rdx) = r8 (memory the clobbered pointer will reach), s = rbx at
+    [rsp + displacement], r9 = get(&s)."""
+    t = tmp(0x100)
+    return (FunctionBuilder().sub_rsp(0x40)
+            .ins(copy(reg(RDX), const(DATA_BASE + 0x40)), store(const(DATA_BASE + 0x4C), reg(R8)))
+            .ins(add(t, reg(RSP), const(displacement & 0xFFFFFFFFFFFFFFFF)), store(t, reg(RBX)))
+            .ins(add(reg(RCX), reg(RSP), const(displacement & 0xFFFFFFFFFFFFFFFF)))
+            .call(LEAF).ins(copy(reg(R9), reg(RAX))).add_rsp(0x40).ret())
+
+
+@pytest.mark.parametrize("displacement", [-16, -12, -8, -4, 0, 4, 0x20])
+@pytest.mark.parametrize("write_field", [0, 4, 8])
+def test_clobbered_pointer_reload_is_never_silent(displacement, write_field):
+    """Where v + write_field is the home slot, the result is *(rdx + 12): a
+    caller-written global the static value must reach, or stay unsure."""
+    units = program_units(_clobber_caller(displacement), _clobbering_getter(write_field, 12))
+    results = analyze_units(units, assume_globals_disjoint_from_stack=True)
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
+    report = _check(results, program)
+    assert report.silent == [], report.silent[:2]
+
+
+
+@pytest.mark.parametrize("chunk", range(2))
+def test_random_pointers_passed_in_memory(chunk):
+    """caller: local = rbx; slot = &local + d; leaf(&slot); r9 = local.
+    leaf: p = *slot; random reads/writes at p + k. Pointer anchors must bind
+    the right caller bytes (a wrong displacement shows as a silent miss)."""
+    silent, through, runs = [], 0, 0
+    t, u = tmp(0x100), tmp(0x118)
+    for seed in range(chunk * 30, (chunk + 1) * 30):
+        rng = random.Random(41_000 + seed)
+        d = rng.choice((0, 4, 8))
+        leaf = FunctionBuilder(entry=LEAF).ins(load(tmp(0x110), reg(RCX)))
+        for _ in range(rng.randint(1, 3)):
+            k = rng.choice((0, 4, 8, 12))
+            if rng.random() < 0.6:
+                leaf.ins(add(u, tmp(0x110), const(k)), store(u, reg(rng.choice((RDX, R8)), rng.choice((4, 8)))))
+            else:
+                leaf.ins(add(u, tmp(0x110), const(k)), load(reg(RAX), u))
+        leaf = leaf.ret()
+        caller = (FunctionBuilder().sub_rsp(0x60)
+                  .ins(add(t, reg(RSP), const(0x30)), store(t, reg(RBX)))
+                  .ins(add(t, reg(RSP), const(0x38)), store(t, reg(RSI)))
+                  .ins(add(t, reg(RSP), const(0x20)), add(u, reg(RSP), const(0x30 + d)), store(t, u))
+                  .ins(add(reg(RCX), reg(RSP), const(0x20)))
+                  .call(LEAF)
+                  .ins(add(t, reg(RSP), const(0x30)), load(reg(R9), t))
+                  .ins(add(t, reg(RSP), const(0x38)), load(reg(R10 if False else RDI), t))
+                  .add_rsp(0x60).ret())
+        results, program = _analyze(caller, leaf)
+        report = _check(results, program)
+        runs += report.runs
+        through += report.through_calls
+        silent += [(seed, item) for item in report.silent]
+    assert runs and through
+    assert silent == [], silent[:3]
+
+
+
+# -- S5: recursion through a verified fixpoint ----------------------------------
+
+def _recursive_body(rng, entry, callee):
+    """if (r9 == 0) { base } else { r9--; ...; callee(); ... } -- bounded by r9;
+    sometimes a callee-saved register is pushed around the recursive call."""
+    from synthetic import ZF, op, sub
+    builder = FunctionBuilder(entry=entry)
+    builder.cbranch("base", reg(ZF, 1), op("INT_EQUAL", [reg(R9), const(0)], reg(ZF, 1)))
+    _random_prefix(rng, builder)
+    pushed = rng.random() < 0.3
+    if pushed:
+        builder.push(RBX)
+    builder.ins(sub(reg(R9), reg(R9), const(1)))
+    builder.call(callee)
+    _random_prefix(rng, builder)
+    if pushed:
+        builder.pop(RBX)
+    builder.ret()
+    builder.label("base")
+    _random_prefix(rng, builder)
+    return builder.ret()
+
+
+@pytest.mark.parametrize("chunk", range(4))
+def test_random_recursion_has_no_silent_misses(chunk):
+    silent, through, runs, recursive = [], 0, 0, 0
+    pools = lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000, R9: seed % 4}
+    for seed in range(chunk * 40, (chunk + 1) * 40):
+        rng = random.Random(61_000 + seed)
+        mutual = rng.random() < 0.4
+        leaf = _recursive_body(rng, LEAF, MIDDLE if mutual else LEAF)
+        functions = [leaf]
+        if mutual:
+            functions.append(_recursive_body(rng, MIDDLE, LEAF))
+        caller = _random_body(rng, FunctionBuilder(), calls=(LEAF,))
+        try:
+            results, program = _analyze(caller, *functions)
+        except AssertionError:
+            continue
+        recursive += sum(1 for key, item in results.items()
+                         for call, callee in item.calls.items() if call in item.proven and key != "1:1000")
+        for key in ("1:1000", f"1:{LEAF:x}"):
+            if type(results[key].normalized).__name__ != "NormalizedFunction":
+                continue
+            analyzed = results[key]
+            report = check_program(analyzed.normalized, analyzed.unit.observation, program, seeds=range(4),
+                                   register_pools=pools, havoc_calls=HAVOC)
+            runs += report.runs
+            through += report.through_calls
+            silent += [(seed, key, item) for item in report.silent]
+    assert runs and through and recursive
+    assert silent == [], silent[:3]
+
+
+def test_stack_below_the_call_is_clobbered_and_the_rest_kept():
+    """leaf pushes rdx (its own frame: the caller's stack below its call-time
+    pointer). The caller's slot below its stack pointer is clobbered; its
+    slot above stays exact (the leaf keeps every other byte)."""
+    t = tmp(0x100)
+    leaf = FunctionBuilder(entry=LEAF).push(RDX).pop(RCX).ret()
+    caller = (FunctionBuilder()
+              .ins(sub(t, reg(RSP), const(16)), store(t, reg(RBX)))      # below the call-time SP
+              .ins(add(t, reg(RSP), const(8)), store(t, reg(RSI)))       # caller's own home slot
+              .call(LEAF)
+              .ins(sub(t, reg(RSP), const(16)), load(reg(R8), t))
+              .ins(add(t, reg(RSP), const(8)), load(reg(R9), t))
+              .ret())
+    results, program = _analyze(caller, leaf)
+    (effect,) = results["1:1000"].proven.values()
+    assert effect.preserves_memory and effect.clobbers_below
+    function = results["1:1000"].normalized
+    from synthetic import operation_node_at
+    below = slice_from(function, operation_node_at(function, 3, 1))
+    above = slice_from(function, operation_node_at(function, 4, 1))
+    assert not below.is_complete
+    assert above.is_complete and set(range(RSI, RSI + 8)) <= above.register_bytes
+    assert _check(results, program).silent == []

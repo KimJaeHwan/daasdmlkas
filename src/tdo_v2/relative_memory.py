@@ -199,6 +199,37 @@ def _final_projector(normalized, observation) -> "_Projector":
     )
 
 
+def stack_offset_at(memory_ssa, observation, scopes, operation_key, varnode, stack_span) -> int | None:
+    """The value of ``varnode`` (the stack pointer) read by ``operation_key``
+    as an offset from its own entry value, or None."""
+    operations = {
+        _operation_key(instruction.address, ordinal, operation): operation
+        for instruction in observation.instructions
+        for ordinal, operation in enumerate(instruction.operations)
+    }
+    projector = _Projector(
+        scopes.resolution_context, scopes.program.evidence.address_spaces, memory_ssa, operations,
+        OpaqueValueEvidenceResolver(NullOpaqueValueEvidenceProvider()),
+        scopes.program.evidence.translation_namespace.language_id,
+    )
+    expression = projector._expression_for_input(operation_key, varnode)
+    if expression is None or expression.atoms != ((_stable_storage_key(stack_span), 1),):
+        return None
+    return _signed_wrap(expression.displacement, expression.byte_size)
+
+
+def project_anchored_after(normalized, observation, requests) -> dict:
+    """``requests``: (evaluation key, anchor register varnode, displacement,
+    width, space id) on the final memory SSA. Returns request -> the exact
+    span in this function's objects, or None."""
+    projector = _final_projector(normalized, observation)
+    found = {}
+    for request in requests:
+        spans = projector.project_anchored(*request)
+        found[request] = None if not spans else spans[0]
+    return found
+
+
 def constant_values(normalized, observation, requests) -> dict:
     """``requests``: (operation key, input varnode). Returns request -> the
     constant the varnode provably holds at that operation (no atoms; the
@@ -346,7 +377,10 @@ class _Projector:
             or classify_address_space_v2(space) is not AddressSpaceClassV2.ADDRESS
         ):
             return None
-        address = self._expression_for_input(evaluation_key, anchor)
+        if type(anchor) is tuple:  # ("mem", key of the row reading the pointer slot)
+            address = self._expression_from_memory_read(anchor[1], space.address_size_bits // 8)
+        else:
+            address = self._expression_for_input(evaluation_key, anchor)
         if address is None or address.byte_size * 8 != space.address_size_bits:
             return None
         if not address.atoms:

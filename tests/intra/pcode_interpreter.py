@@ -173,7 +173,10 @@ class Interpreter:
         value = 0
         for index in range(size):
             byte, writer = self._byte(space_id, offset + index)
-            run.dependencies.add(Dependency(reader, space_id, offset + index, writer))
+            if not self._activations:
+                # a read inside a call activation belongs to the callee (with
+                # recursion, its operation keys are the caller's own)
+                run.dependencies.add(Dependency(reader, space_id, offset + index, writer))
             value |= byte << (8 * index)
             key = (space_id, offset + index)
             if self._activations:

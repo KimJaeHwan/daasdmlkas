@@ -32,14 +32,22 @@ from .span_geometry import ByteSpan, StorageObjectKind
 
 @dataclass(frozen=True, slots=True)
 class AnchoredSpan:
-    """Memory at (callee entry value of ``anchor``) + ``displacement``, or at a
-    global address (``anchor`` None, ``span`` the ADDRESS_SPACE bytes)."""
+    """Memory at (callee entry value of ``anchor``) + ``displacement``, at a
+    global address (``anchor`` None, ``span`` the ADDRESS_SPACE bytes), or at
+    (the pointer stored at ``pointer`` at callee entry) + ``displacement``
+    (``anchor`` and ``span`` None; a pointer passed in memory, e.g. ``**pp``
+    or a 32-bit stack argument). The caller evaluates every base once, at the
+    call (``MAX_POINTER_DEPTH`` levels)."""
 
     anchor: ByteSpan | None
     displacement: int
     size: int
     space_id: int
     span: ByteSpan | None = None
+    pointer: "AnchoredSpan | None" = None
+
+
+MAX_POINTER_DEPTH = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +56,10 @@ class ProvenRunEffect:
     reads: tuple[ByteSpan, ...]
     loads: tuple[AnchoredSpan, ...] = ()
     origins: tuple[str, ...] = ()      # source labels the value may come from (inside the callee)
+    # (read, write) pairs the caller must prove disjoint (``interprocedural``);
+    # a pair it cannot is passed back as ``failed_conditions`` and the bytes
+    # become unknown
+    conditions: tuple[tuple[AnchoredSpan, AnchoredSpan], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +69,7 @@ class ProvenMemoryRun:
     loads: tuple[AnchoredSpan, ...]
     keeps_old: bool
     origins: tuple[str, ...] = ()
+    conditions: tuple[tuple[AnchoredSpan, AnchoredSpan], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +84,9 @@ class ProvenSinkDemand:
     loads: tuple[AnchoredSpan, ...]
     origins: tuple[str, ...]
     complete: bool
+    # (read, write) pairs that must be disjoint for the root to be complete
+    # (``SinkDemand.conditions``), decided at the call site
+    conditions: tuple[tuple[AnchoredSpan, AnchoredSpan], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +109,11 @@ class ProvenCallEffect:
     # exit (None: unknown) -- the jumping function's summary adds it
     tail_stack: tuple[ByteSpan, ...] = ()
     tail_stack_delta: int | None = None
+    # the callee may also change memory below its entry stack pointer (its own
+    # frame and its callees' frames): not exported byte by byte; the caller
+    # treats its stack below the call-time stack pointer as clobbered and,
+    # with ``preserves_memory``, everything else as kept
+    clobbers_below: bool = False
 
 
 def derive_proven_call_effect(
@@ -104,6 +125,7 @@ def derive_proven_call_effect(
     anchors: dict | None = None,
     stack_deltas: dict | None = None,
     tail: bool = False,
+    failed_conditions: frozenset = frozenset(),
 ) -> ProvenCallEffect | None:
     """``register_object``: the program register file; ``register_limit``: one
     past the highest register byte the caller uses; ``excluded``: bytes the
@@ -116,18 +138,35 @@ def derive_proven_call_effect(
     anchors = anchors or {}
     skip = {offset for span in excluded for offset in range(span.start, span.end)}
 
-    def anchored(span: ByteSpan) -> AnchoredSpan | None:
+    def anchored(span: ByteSpan, depth: int = 0) -> AnchoredSpan | None:
         kind = span.object_id.kind
         if kind is StorageObjectKind.ADDRESS_SPACE:
             return AnchoredSpan(None, span.start, span.size, span.object_id.space_key, span)
         if kind is StorageObjectKind.FUNCTION_RELATIVE and span.object_id in anchors:
             anchor, space_id = anchors[span.object_id]
             # relative objects are biased by 2**(address bits) (relative_memory);
-            # an anchor is a pointer-sized register (a width mismatch fails the
-            # caller's projection: debt, not a wrong address)
-            return AnchoredSpan(anchor, span.start - (1 << (8 * anchor.size)), span.size, space_id)
+            # an anchor is pointer-sized (a width mismatch fails the caller's
+            # projection: debt, not a wrong address)
+            displacement = span.start - (1 << (8 * anchor.size))
+            if anchor.object_id.kind is StorageObjectKind.REGISTER_FILE:
+                return AnchoredSpan(anchor, displacement, span.size, space_id)
+            if depth >= MAX_POINTER_DEPTH:
+                return None
+            slot = anchored(anchor, depth + 1)  # the pointer's own location at entry
+            if slot is None:
+                return None
+            return AnchoredSpan(None, displacement, span.size, space_id, pointer=slot)
         return None
 
+    stack = {(span.start, span.size) for span in excluded}
+
+    def below(span: ByteSpan) -> bool:
+        """Callee stack bytes entirely below its entry stack pointer."""
+        row = anchors.get(span.object_id)
+        return row is not None and row[0].object_id.kind is StorageObjectKind.REGISTER_FILE \
+            and (row[0].start, row[0].size) in stack and span.end <= 1 << (8 * row[0].size)
+
+    clobbers_below = False
     sink_demands = tuple(_sink_demand(demand, anchored) for demand in summary.sink_demands)
     if summary.tail_exits or not summary.exits:
         if not sink_demands:
@@ -150,12 +189,15 @@ def derive_proven_call_effect(
             kind = run.span.object_id.kind
             if kind is StorageObjectKind.FUNCTION_UNIQUE:
                 continue
-            verdict = _verdict(run, anchored)
+            verdict = _verdict(run, anchored, failed_conditions)
+            if kind is not StorageObjectKind.REGISTER_FILE and below(run.span):
+                clobbers_below = clobbers_below or verdict != "self"
+                continue
             if verdict == "unknown" and kind is not StorageObjectKind.REGISTER_FILE                     and _only_exported_aliasing(run, exported):
                 # unknown only because an exported memory write may alias these
                 # bytes: in the caller that write is an ordinary write to the bound
                 # object, and the caller's may-alias analysis covers the overlap
-                verdict = _verdict_without_crossings(run, anchored)
+                verdict = _verdict_without_crossings(run, anchored, failed_conditions)
             if kind is not StorageObjectKind.REGISTER_FILE and verdict != "self" and (
                     verdict == "unknown" or anchored(run.span) is None):
                 memory_ok = False
@@ -172,8 +214,9 @@ def derive_proven_call_effect(
         state[item] = value
     # a register no exit mentions was untouched by the function itself, but an
     # inner call that does not provably preserve it may still have changed it
-    for _, kept, keeps_memory in summary.inner_calls:
+    for _, kept, keeps_memory, inner_below in summary.inner_calls:
         memory_ok = memory_ok and keeps_memory
+        clobbers_below = clobbers_below or inner_below
         kept_offsets = {
             offset for span in kept if span.object_id.kind is StorageObjectKind.REGISTER_FILE
             for offset in range(span.start, span.end)
@@ -213,23 +256,23 @@ def derive_proven_call_effect(
                 tuple(sorted(set(loads), key=repr)))
 
     runs = []
-    for (sources, keeps_old), offsets in sorted(register_groups.items(), key=lambda item: min(item[1])):
+    for (sources, keeps_old, conditions), offsets in sorted(register_groups.items(), key=lambda item: min(item[1])):
         writes = tuple(_spans(register_object, offsets))
         registers, loads = split_sources(sources)
         if keeps_old:
             registers = tuple(sorted(set(registers) | set(writes), key=lambda span: span.canonical_key))
-        runs.append(ProvenRunEffect(writes, registers, loads, _origins(sources)))
+        runs.append(ProvenRunEffect(writes, registers, loads, _origins(sources), _sorted_pairs(conditions)))
     memory_runs = []
-    for (sources, keeps_old), items in sorted(memory_groups.items(), key=lambda item: repr(min(item[1], key=repr))):
+    for (sources, keeps_old, conditions), items in sorted(memory_groups.items(), key=lambda item: repr(min(item[1], key=repr))):
         registers, loads = split_sources(sources)
         by_object: dict = {}
         for object_id, offset in items:
             by_object.setdefault(object_id, []).append(offset)
         for object_id, offsets in sorted(by_object.items(), key=repr):
             for span in _spans(object_id, offsets):
-                memory_runs.append(ProvenMemoryRun(anchored(span), registers, loads, keeps_old, _origins(sources)))
+                memory_runs.append(ProvenMemoryRun(anchored(span), registers, loads, keeps_old, _origins(sources),
+                                                   _sorted_pairs(conditions)))
     preserved = [offset for offset in range(register_limit) if offset not in unknown and offset not in skip]
-    stack = {(span.start, span.size) for span in excluded}
 
     def through_register(access):
         return access is not None and access.anchor is not None and             (access.anchor.start, access.anchor.size) not in stack
@@ -249,7 +292,7 @@ def derive_proven_call_effect(
         tail_delta = found.pop() if len(found) == 1 else None
     return ProvenCallEffect(
         callee, tuple(runs), tuple(_spans(register_object, preserved)), tuple(memory_runs), memory_ok,
-        observes, sink_demands, restores, tail_stack, tail_delta,
+        observes, sink_demands, restores, tail_stack, tail_delta, clobbers_below,
     )
 
 
@@ -264,9 +307,16 @@ def _sink_demand(demand, anchored) -> ProvenSinkDemand:
             complete = False  # entry memory the caller cannot locate
         else:
             loads.add(access)
+    conditions = set()
+    for left, right in demand.conditions:
+        pair = (anchored(left), anchored(right))
+        if None in pair:
+            complete = False  # a side the caller cannot locate: undecidable
+        else:
+            conditions.add(pair)
     return ProvenSinkDemand(
         demand.label, tuple(sorted(registers, key=lambda span: span.canonical_key)),
-        tuple(sorted(loads, key=repr)), demand.origins, complete,
+        tuple(sorted(loads, key=repr)), demand.origins, complete, tuple(sorted(conditions, key=repr)),
     )
 
 
@@ -284,16 +334,35 @@ def _only_exported_aliasing(run, exported) -> bool:
     )
 
 
-def _verdict_without_crossings(run, anchored):
+def _sorted_pairs(conditions) -> tuple:
+    return tuple(sorted(conditions, key=repr))
+
+
+def _anchored_conditions(run, anchored, failed):
+    """The run's alias conditions as anchored pairs, or None when one cannot
+    be located by a caller or a caller already found it failing."""
+    pairs = set()
+    for left, right in run.conditions:
+        pair = (anchored(left), anchored(right))
+        if None in pair or pair in failed:
+            return None
+        pairs.add(pair)
+    return frozenset(pairs)
+
+
+def _verdict_without_crossings(run, anchored, failed=frozenset()):
     if not run.writers and all(span.object_id == run.span.object_id for span in run.sources):
         return "self"  # entry contents, not rewritten by the function itself
     for source in run.sources:
         if source.object_id.kind is not StorageObjectKind.REGISTER_FILE and anchored(source) is None:
             return "unknown"
-    return (_with_origins(run.sources, run), False)
+    conditions = _anchored_conditions(run, anchored, failed)
+    if conditions is None:
+        return "unknown"
+    return (_with_origins(run.sources, run), False, conditions)
 
 
-def _verdict(run, anchored):
+def _verdict(run, anchored, failed=frozenset()):
     if run.kind is SummaryKind.UNKNOWN or run.debts:
         return "unknown"
     if run.kind is SummaryKind.IDENTITY:
@@ -301,19 +370,23 @@ def _verdict(run, anchored):
     for source in run.sources:
         if source.object_id.kind is not StorageObjectKind.REGISTER_FILE and anchored(source) is None:
             return "unknown"  # entry memory with no anchor the caller can bind
-    return (_with_origins(run.sources, run), False)
+    conditions = _anchored_conditions(run, anchored, failed)
+    if conditions is None:
+        return "unknown"
+    return (_with_origins(run.sources, run), False, conditions)
 
 
 def _merge(current, verdict):
+    """Values: "self", "unknown", or (sources, keeps old value, conditions)."""
     if current == "unknown" or verdict == "unknown":
         return "unknown"
     if current is None:
         return verdict
     if verdict == "self":
-        return current if current == "self" else (current[0], True)
+        return current if current == "self" else (current[0], True, current[2])
     if current == "self":
-        return (verdict[0], True)
-    return (current[0] | verdict[0], current[1] or verdict[1])
+        return (verdict[0], True, verdict[2])
+    return (current[0] | verdict[0], current[1] or verdict[1], current[2] | verdict[2])
 
 
 def _spans(object_id, offsets):

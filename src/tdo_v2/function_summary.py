@@ -66,6 +66,9 @@ class SummaryRun:
     debts: tuple[str, ...]              # debt kinds reached by the backward slice
     crossed: tuple[str, ...]            # "call:<key>", "alias:<key>", "unknown:<key>" at the exit
     origins: tuple[str, ...] = ()       # source labels reached (``origin_labels`` of the function)
+    # (read span, write span) pairs that must be disjoint for this value to be
+    # as stated (conditional may-alias debts on the way, see ``SinkDemand``)
+    conditions: tuple[tuple[ByteSpan, ByteSpan], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +89,11 @@ class SinkDemand:
     debts: tuple[str, ...]
     origins: tuple[str, ...]
     complete: bool
+    # (read span, write span) pairs in this function's objects: the root is
+    # complete only if every pair is disjoint (a may-alias debt between two
+    # exactly addressed objects, decided by a caller that knows both bases;
+    # design S3). ``complete`` already holds every other gap.
+    conditions: tuple[tuple[ByteSpan, ByteSpan], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +110,9 @@ class FunctionSummary:
     # unchanged: a byte the function never touches is preserved only if every
     # inner call preserves it too
     # (call key, register spans it preserves, whether it preserves all memory)
-    inner_calls: tuple[tuple[str, tuple[ByteSpan, ...], bool], ...] = ()
+    # (call key, register spans it preserves, whether it preserves all memory
+    # -- except, with the last flag, the stack below its call-time pointer)
+    inner_calls: tuple[tuple[str, tuple[ByteSpan, ...], bool, bool], ...] = ()
     sink_demands: tuple[SinkDemand, ...] = ()
     # pointer-sized registers whose value at every normal exit is provably
     # "entry value + c" (the same c): ((offset, size), c). The stack pointer's
@@ -138,15 +148,19 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
             if record.kind is NodeKind.OPERATION and record.key.startswith("op:"):
                 operation_of[node] = record.key[3:]
 
-    closure = _AncestorClosure(graph, operation_of, origin_labels or {})
+    conditions_of = _alias_conditions(normalized)
+    closure = _AncestorClosure(graph, operation_of, origin_labels or {}, conditions_of)
 
     def definition_slice(definition_id: int):
-        """(entry source spans, entry-memory readers, debt labels) of the
-        backward data slice from one definition (same sets as
-        ``BackwardSliceQuery`` + edge spans, computed for all nodes at once)."""
+        """(entry source spans, entry-memory readers, debt labels, origins,
+        alias conditions) of the backward data slice from one definition
+        (same sets as ``BackwardSliceQuery`` + edge spans, computed for all
+        nodes at once)."""
         return closure.of(definition_nodes[definition_id])
 
-    uncertain = _uncertain_address_writers(normalized, observation, context, operation_of)
+    uncertain_conditions = _uncertain_address_writers(
+        normalized, observation, context, operation_of, conditions_of)
+    uncertain = set(uncertain_conditions)
     tracer = _CopyTracer(normalized, observation, context, operation_of)
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain)
     inner_calls = crossed.pop("inner_calls", ())
@@ -166,20 +180,36 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
          if item.operation_key is not None},
         key=lambda row: (row[0], row[1].kind.value, row[1].space_key),
     )
+    # unknown-address writers: an uncertain-address store whose address
+    # depends only on conditional debts lands on its own object unless one of
+    # those pairs overlaps; any other leaves every root incomplete
+    unknown_writers = set(crossed.get("unknown_writers", ()))
+    writer_conditions = set()
+    unconditional_writers = False
+    for writer in unknown_writers:
+        found = uncertain_conditions.get(writer)
+        if found is None:
+            unconditional_writers = True
+        else:
+            writer_conditions |= found
     demands = []
-    for label, root_nodes, complete in sink_roots:
-        sources, debts, origins = set(), set(), set()
+    for root in sink_roots:
+        label, root_nodes, complete = root[:3]
+        sources, debts, origins, conditions = set(), set(), set(), set(root[3] if len(root) > 3 else ())
         for node in root_nodes:
-            found_sources, _, found_debts, found_origins = closure.of(node)
+            found_sources, _, found_debts, found_origins, found_conditions = closure.of(node)
             sources |= found_sources
             debts |= found_debts
             origins |= found_origins
+            conditions |= found_conditions
+        conditions |= writer_conditions
         demands.append(SinkDemand(
             label, tuple(sorted(sources, key=lambda item: item.canonical_key)), tuple(sorted(debts)),
             tuple(sorted(origins)),
             # like the engine's local completeness: any unknown-address write in
             # the function leaves every root incomplete
-            bool(complete) and not debts and not crossed.get("unknown_writers"),
+            bool(complete) and not debts and not unconditional_writers,
+            tuple(sorted(conditions, key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))),
         ))
     return FunctionSummary(
         FUNCTION_SUMMARY_VERSION, tuple(exits), tuple(sorted(crossed.get("unknown_writers", ()))),
@@ -198,8 +228,12 @@ def _register_deltas(normalized, observation, exits) -> tuple:
     requests = set()
     for exit_summary in exits:
         for run in exit_summary.runs:
+            # the evaluator follows definitions only: a value read through debt
+            # (e.g. the stack pointer after a call not proven to restore it)
+            # proves nothing
             if run.span.object_id.kind is StorageObjectKind.REGISTER_FILE and run.span.size in (4, 8) \
-                    and run.kind is not SummaryKind.UNKNOWN and run.definitions:
+                    and run.kind is not SummaryKind.UNKNOWN and run.definitions \
+                    and not run.debts and not run.conditions:
                 candidates.setdefault((run.span.start, run.span.size), []).append(run)
                 requests.update((definition, run.span) for definition in run.definitions)
     tails = _composed_tail_deltas(normalized, observation)
@@ -226,7 +260,8 @@ def _register_deltas(normalized, observation, exits) -> tuple:
                 deltas.add(extra)  # not written on this exit
                 continue
             if len(overlapping) != 1 or (overlapping[0].span.start, overlapping[0].span.size) != (start, size) \
-                    or overlapping[0].kind is SummaryKind.UNKNOWN:
+                    or overlapping[0].kind is SummaryKind.UNKNOWN or overlapping[0].debts \
+                    or overlapping[0].conditions:
                 deltas.add(None)
                 continue
             run = overlapping[0]
@@ -297,7 +332,7 @@ class _AncestorClosure:
     Control-dependence edges are not followed (data-only, like the default
     backward query). Strongly connected components share one value."""
 
-    def __init__(self, graph, operation_of, origin_labels=None) -> None:
+    def __init__(self, graph, operation_of, origin_labels=None, conditions_of=None) -> None:
         from .graph import CONTROL_DEPENDENCE_EDGE
 
         self.graph = graph
@@ -332,8 +367,13 @@ class _AncestorClosure:
                 item in carriers for item in self.predecessors.get(node, ())
             ) else frozenset()
             debts = frozenset((record.label,)) if record.kind is NodeKind.MEMORY_DEBT else frozenset()
+            conditions = (conditions_of or {}).get(node)
+            if debts and conditions:  # a may-alias debt between two exact spans: conditional
+                debts = frozenset()
+            else:
+                conditions = frozenset()
             origins = frozenset((origin_labels or {}).get(node, ()))
-            self.own[node] = (frozenset(own_sources.get(node, ())), readers, debts, origins)
+            self.own[node] = (frozenset(own_sources.get(node, ())), readers, debts, origins, conditions)
         self.value: dict[int, tuple] = {}
 
     def of(self, node: int):
@@ -385,28 +425,49 @@ class _AncestorClosure:
                     if item == node:
                         break
                 members = set(component)
-                sources, readers, debts, origins = set(), set(), set(), set()
+                parts = [set(), set(), set(), set(), set()]
+                empty = (frozenset(),) * 5
                 for item in component:
-                    own = self.own.get(item, (frozenset(), frozenset(), frozenset(), frozenset()))
-                    sources |= own[0]
-                    readers |= own[1]
-                    debts |= own[2]
-                    origins |= own[3]
+                    for part, own in zip(parts, self.own.get(item, empty)):
+                        part |= own
                     for parent_node in self.predecessors.get(item, ()):
                         if parent_node in members:
                             continue
-                        found = self.value[parent_node]
-                        sources |= found[0]
-                        readers |= found[1]
-                        debts |= found[2]
-                        origins |= found[3]
-                value = (frozenset(sources), frozenset(readers), frozenset(debts), frozenset(origins))
+                        for part, found in zip(parts, self.value[parent_node]):
+                            part |= found
+                value = tuple(frozenset(part) for part in parts)
                 for item in component:
                     self.value[item] = value
 
 
-def _uncertain_address_writers(normalized, observation, context, operation_of) -> set[str]:
-    """Memory STOREs whose address operand depends on a read with debt."""
+def _alias_conditions(normalized) -> dict:
+    """may-alias debt node -> frozenset of (read span, write span) pairs when
+    the read has an exact address and every candidate writer writes exact
+    spans (the debt holds only if some pair overlaps); other debt nodes absent."""
+    from .memory_contracts import MemoryDefinitionKind as Kind
+
+    spans_of: dict = {}
+    for definition in normalized.memory_ssa.definitions:
+        if definition.kind is Kind.DATA_WRITE and definition.operation_key is not None \
+                and definition.span.object_id.kind in _MEMORY_KINDS:
+            spans_of.setdefault(definition.operation_key, set()).add(definition.span)
+    unknown = {
+        effect.operation_key for effect in normalized.effects
+        if effect.memory_write is not None or effect.unresolved_writes
+    }
+    found = {}
+    for row, node in zip(normalized.may_alias_reads, normalized.may_alias_nodes):
+        if row.unknown_address or any(writer in unknown or writer not in spans_of for writer in row.writers):
+            continue
+        found[node] = frozenset(
+            (read, write) for read in row.spans for writer in row.writers for write in spans_of[writer]
+        )
+    return found
+
+
+def _uncertain_address_writers(normalized, observation, context, operation_of, conditions_of=None) -> dict:
+    """Memory STOREs whose address operand depends on a read with debt ->
+    the alias conditions that debt reduces to (None: unconditional)."""
     from .normalize import _storage_ref
     from .storage import _resolve_validated_storage
 
@@ -418,7 +479,14 @@ def _uncertain_address_writers(normalized, observation, context, operation_of) -
             if operation.opcode == "STORE" and len(operation.inputs) == 3:
                 key = f"{instruction.address.space_id:x}:{instruction.address.byte_offset:x}:{ordinal}:STORE"
                 stores[key] = operation.inputs[1]
-    found = set()
+    found: dict = {}
+
+    def add(key, conditions):
+        if conditions is None or (key in found and found[key] is None):
+            found[key] = None
+        else:
+            found[key] = found.get(key, frozenset()) | conditions
+
     for definition in normalized.memory_ssa.definitions:
         key = definition.operation_key
         if key is None or key not in stores or definition.span.object_id.kind not in _MEMORY_KINDS:
@@ -429,16 +497,24 @@ def _uncertain_address_writers(normalized, observation, context, operation_of) -
             continue
         resolved = _resolve_validated_storage(_storage_ref(address), context)
         if type(resolved) is not ResolvedStorage:
-            found.add(key)
+            add(key, None)
             continue
         inputs = [
             source for source, _, record in graph._graph.in_edges(node)
             if record.span is not None and record.span.overlaps(resolved.span)
         ]
         reachable = graph.backward_reachable(tuple(inputs)) if inputs else ()
-        if any(graph.node(item).kind is NodeKind.MEMORY_DEBT
-               and graph.node(item).label in _ADDRESS_UNCERTAIN for item in reachable):
-            found.add(key)
+        debts = [item for item in reachable if graph.node(item).kind is NodeKind.MEMORY_DEBT
+                 and graph.node(item).label in _ADDRESS_UNCERTAIN]
+        if debts:
+            conditions = frozenset()
+            for item in debts:
+                pairs = (conditions_of or {}).get(item)
+                if pairs is None:
+                    conditions = None
+                    break
+                conditions |= pairs
+            add(key, conditions)
     return found
 
 
@@ -537,7 +613,7 @@ def _classify(span, definition_ids, definitions, definition_slice, crossed_by_of
         definition_ids_for_identity = definition_ids
     else:
         definition_ids_for_identity = None
-    sources, readers, debts, writers, origins = set(), set(), set(), set(), set()
+    sources, readers, debts, writers, origins, conditions = set(), set(), set(), set(), set(), set()
     identity = True
     for definition_id in definition_ids:
         definition = definitions[definition_id]
@@ -549,11 +625,13 @@ def _classify(span, definition_ids, definitions, definition_slice, crossed_by_of
         identity = False
         if definition.operation_key is not None:
             writers.add(definition.operation_key)
-        found_sources, found_readers, found_debts, found_origins = definition_slice(definition_id)
+        found_sources, found_readers, found_debts, found_origins, found_conditions = \
+            definition_slice(definition_id)
         sources |= found_sources
         readers |= found_readers
         debts |= found_debts
         origins |= found_origins
+        conditions |= found_conditions
     crossings = set()
     for offset in range(span.start, span.end):
         crossings |= crossed_by_offset.get(offset, frozenset())
@@ -570,6 +648,7 @@ def _classify(span, definition_ids, definitions, definition_slice, crossed_by_of
         span, kind, tuple(sorted(definition_ids)), tuple(sorted(writers)),
         tuple(sorted(sources, key=lambda item: item.canonical_key)), tuple(sorted(readers)),
         tuple(sorted(debts)), tuple(sorted(crossings)), tuple(sorted(origins)),
+        tuple(sorted(conditions, key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))),
     )
 
 
@@ -614,10 +693,14 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
             tails.add(key)  # a composed tail jump: its stack pointer is composed by delta
             preserved[key] = tuple(preserved.get(key, ())) + effect.tail_stack
     memory_keeping = set()
+    bounds = {key: (object_id, bound) for key, object_id, bound in normalized.call_below_bounds}
+    below_calls = set()
     for key, effect in normalized.proven_call_effects:  # bytes a callee summary proves kept
         preserved[key] = tuple(preserved.get(key, ())) + tuple(effect.preserved)
-        if effect.preserves_memory:
+        if effect.preserves_memory and (not effect.clobbers_below or key in bounds):
             memory_keeping.add(key)
+            if effect.clobbers_below:
+                below_calls.add(key)
 
     calls, unknown, writes = [], [], {}       # gen sources / kills
     memory_writes = []                        # (block, position, order, object, key)
@@ -660,7 +743,8 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     result: dict = {
         "unknown_writers": unknown_writers,
         "inner_calls": tuple(sorted(
-            (key, tuple(preserved.get(key, ())), key in memory_keeping) for _, _, key in calls
+            (key, tuple(preserved.get(key, ())), key in memory_keeping, key in below_calls)
+            for _, _, key in calls
         )),
     }
     ssa = normalized.memory_ssa
@@ -686,6 +770,8 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                 keeping = frozenset(k for s, e, k in keeps if s <= offset < e)
                 if object_id.kind in _MEMORY_KINDS:
                     keeping |= memory_keeping
+                    keeping -= {key for key in below_calls
+                                if bounds[key][0] == object_id and offset < bounds[key][1]}
                 signature = (object_id, covering, keeping, block_key)
                 value = cache.get(signature)
                 if value is None:

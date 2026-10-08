@@ -106,8 +106,8 @@ def check_summary(summary, observation, *, seeds=range(6), register_pools=None,
                 report.violations.append(("write missing from summary", space, offset, writer))
                 continue
             item = covering[0]
-            if item.kind is SummaryKind.UNKNOWN:
-                continue
+            if item.kind is SummaryKind.UNKNOWN or item.conditions:
+                continue  # conditional values are decided, and checked, at call sites
             if item.kind is SummaryKind.IDENTITY:
                 if value != interpreter.entry_values.get((space, offset)):
                     report.violations.append(("identity broken", space, offset, writer))
