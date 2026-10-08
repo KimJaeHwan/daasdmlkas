@@ -8,7 +8,7 @@ then admit/normalize/run it with `tdo_v2`. None of these scripts touch `src/` or
 | `export_bundle.py` | WSL/Linux (`python3`) | Runs `analyzeHeadless` + exporter, checks the receipt, `--mirror-to` copies the result |
 | `bundle_stats.py` | WSL (`~/venvs/tdo/bin/python`) | `admit_frozen_bundle`, then session + `FunctionNormalizer` over every function; collects stats instead of stopping at the first failure; `--analyses` also runs `build_observed_function_analyses` with `NullBoundaryProvider` |
 | `scope_diagnose.py` | WSL | Prints `ScopeConstructionReason` for each function. Use it when the session fails with `observed function scope could not be constructed` |
-| `run_dfbench.py` | WSL | `analyze_frozen_bundle` with a DataFlowBench `SymbolBoundaryProvider` table, compared against `cases_manifest.json` |
+| `run_dfbench.py` | WSL | The summary engine (`tdo_v2.summary_engine`, default; `--legacy-engine` for the older `analyze_frozen_bundle`) with a DataFlowBench `SymbolBoundaryProvider` table, compared against `cases_manifest.json` |
 
 ## Requirements
 
@@ -59,16 +59,16 @@ Compare against the manifest instead.
 
 ## Known issues (as of 2026-10-06)
 
-1. **Calls through the IAT (`call [__imp_X]`) → `invalid_function_observation`.** Ghidra records an
+1. *(resolved; kept for history)* **Calls through the IAT (`call [__imp_X]`) → `invalid_function_observation`.** Ghidra records an
    EXTERNAL-space (space id 42) flow target on the instruction. `_scope_observation._flow_targets` then
    rejects that observation because it is not a memory coordinate. `ObservedFunctionSession` raises
    `ValueError: observed function scope could not be constructed` and its iterator stops, so the whole
    Bundle cannot be analyzed. In dfbench_win_core this affects DFB074, DFB075, DFB130 and DFB131 (DLL
    imports), plus `dfb_longjmp_writer` (`longjmp` import, in the closure of DFB110). The workaround
    is to drop those five cases with `--exclude-function`.
-2. **Recursion cases (DFB060–065) → `RuntimeError: interprocedural write-event fixed point did not stabilize`.**
-   The whole `analyze_frozen_bundle` run fails. Put them in a separate Bundle, or use
-   `replay_selected_finite_root` (see the repo README).
+2. **Recursion cases (DFB060–065), legacy engine only** → `RuntimeError: interprocedural write-event fixed
+   point did not stabilize` in `analyze_frozen_bundle` (`--legacy-engine`). The default summary engine
+   handles recursion (verified SCC fixpoint) and analyzes the full 09 debug Bundle with all 75 cases.
 3. **DFB111 (C++ exceptions, mingw x64 SEH: `__gxx_personality_seh0`, `.pdata/.xdata`) produces no sink root.**
    The Bundle contains only the case function, `dfb_cpp_throw_writer` and one helper. The catch block
    that calls `dfb_sink_int` is not in the observed body. The exporter only recovers landing pads from

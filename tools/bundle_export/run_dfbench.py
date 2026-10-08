@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run tdo_v2.engine.analyze_frozen_bundle on a DataFlowBench Bundle (WSL).
+"""Run the TDO_v2 engine on a DataFlowBench Bundle (WSL).
+
+Default: the summary engine (``tdo_v2.summary_engine``: bottom-up callee
+summaries, external models, named assumptions listed in the output).
+``--legacy-engine`` (or ``TDO_V2_INTERPROCEDURAL=legacy``) runs the older
+``tdo_v2.engine.analyze_frozen_bundle`` per-root completion instead.
 
 Boundary table (x86-64, Ghidra language x86:LE:64:default, register
 space offsets RAX=0x0, RCX=0x8, RDI=0x38). The first-argument register
@@ -107,21 +112,23 @@ def main() -> int:
     parser.add_argument("--binary", default="dfbench_win_core",
                         help="case filter when --expected is cases_manifest.json")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--legacy-engine", action="store_true",
+                        help="the older engine (tdo_v2.engine per-root interprocedural completion) "
+                             "instead of the default summary engine")
     parser.add_argument("--summaries", action="store_true",
-                        help="interprocedural layer on callee summaries (tdo_v2.summary_engine) "
-                             "instead of the engine's per-root completion")
+                        help="(default; kept for compatibility) the summary engine")
     parser.add_argument("--assume-boundary-effects", action="store_true",
                         help="TEST-ONLY special condition: declared source/sink call effects")
     parser.add_argument("--no-assume-globals-not-stack", dest="assume_globals_not_stack",
                         action="store_false",
-                        help="drop the named assumption (--summaries only, on by default): constant "
+                        help="drop the named assumption (summary engine, on by default): constant "
                              "addresses never alias the stack; it is withdrawn automatically when a "
                              "function switches stacks. Use for firmware / custom static stacks")
     parser.add_argument("--no-external-models", dest="external_models", action="store_false",
                         help="do not apply the declared models of imported functions "
                              "(models/external/*.json; each one used is a named assumption)")
     parser.add_argument("--assume-readonly-image", action="store_true",
-                        help="named assumption (--summaries only): read-only image memory keeps its "
+                        help="named assumption (summary engine): read-only image memory keeps its "
                              "image value (no VirtualProtect-style rewriting)")
     args = parser.parse_args()
     if os.environ.get("TDO_V2_ASSUME_READONLY_IMAGE") == "1":
@@ -147,7 +154,8 @@ def main() -> int:
 
     started = time.time()
     try:
-        if args.summaries or os.environ.get("TDO_V2_INTERPROCEDURAL") == "summaries":
+        legacy = args.legacy_engine or os.environ.get("TDO_V2_INTERPROCEDURAL") == "legacy"
+        if not legacy:
             from tdo_v2.summary_engine import analyze_frozen_bundle_with_summaries
             print("[run] interprocedural: callee summaries")
             run = analyze_frozen_bundle_with_summaries(
@@ -162,6 +170,7 @@ def main() -> int:
             )
             print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
         else:
+            print("[run] legacy engine (per-root interprocedural completion)")
             run = analyze_frozen_bundle(
                 generation,
                 naming_exporter_source=REPO / "ghidra" / "GhidraV2CallNaming.java",

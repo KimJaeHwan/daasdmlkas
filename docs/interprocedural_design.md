@@ -331,3 +331,12 @@ PointerPath(무한 루프), 재귀 미지원. 새 설계는 **완성된 intra �
    동적 검증 누락 0.
 4. 지표(09 debug 전체, 새 Bundle, 기본 모드 정확/확실, 누락+확실 0): 58/51 → 모델 **58/52**(DFB123) →
    + 읽기 전용 가정 **60/54**.
+
+## 16. 요약 엔진을 기본으로 (2026-10-08, 사용자 결정)
+
+- `run_dfbench.py`는 이제 기본으로 요약 엔진(`tdo_v2.summary_engine`)을 쓴다. 옛 엔진(`engine.
+  analyze_frozen_bundle`, 루트별 함수 간 보완)은 `--legacy-engine` 또는 `TDO_V2_INTERPROCEDURAL=legacy`.
+  `--summaries`는 호환용으로 남김(무동작). 출력에 적용된 가정 목록이 항상 찍힌다.
+- 같은 부분 Bundle(09 debug)에서: 요약 엔진 정확 53 / 확실 48, 옛 엔진 39 / 28 (재귀 케이스는 옛 엔진에서 실패).
+- 남은 정리(다음): TEST-ONLY 경계 가정(`assumed_call_effects`)을 모델 파일 방식으로 통합. 옛 엔진과 함수 내부
+  골든의 "-assumed" 세트가 아직 그 경로를 쓰므로, 옛 엔진을 실제로 걷어낼 때 함께.
