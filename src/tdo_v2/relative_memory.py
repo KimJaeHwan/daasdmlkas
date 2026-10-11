@@ -876,6 +876,21 @@ class _Projector:
                 )
         if operation.opcode == "LOAD" and len(operation.inputs) >= 2:
             return self._expression_from_memory_read(operation_key, byte_size)
+        if operation.opcode in ("INT_XOR", "INT_SUB", "BOOL_XOR") and len(operation.inputs) == 2 \
+                and operation.inputs[0] == operation.inputs[1]:
+            return _AddressExpression((), 0, byte_size)  # x ^ x, x - x (``normalize``)
+        if operation.opcode == "INT_SEXT" and len(operation.inputs) == 1:
+            value = self._expression_for_input(operation_key, operation.inputs[0])
+            if value is not None and not value.atoms and value.byte_size < byte_size:
+                return _AddressExpression(
+                    (), _unsigned_wrap(_signed_wrap(value.displacement, value.byte_size), byte_size), byte_size
+                )
+        if operation.opcode == "INT_MULT" and len(operation.inputs) == 2:
+            left, right = (self._expression_for_input(operation_key, item) for item in operation.inputs)
+            if left is not None and right is not None and not left.atoms and not right.atoms \
+                    and left.byte_size == right.byte_size == byte_size:
+                return _AddressExpression((), _unsigned_wrap(left.displacement * right.displacement, byte_size),
+                                          byte_size)
         if operation.opcode == "INT_LEFT" and len(operation.inputs) == 2:
             value = self._expression_for_input(operation_key, operation.inputs[0])
             shift = self._expression_for_input(operation_key, operation.inputs[1])

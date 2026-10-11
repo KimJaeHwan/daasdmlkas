@@ -481,3 +481,23 @@ fresh. 이번 단계는 (a)(b)(c1)과, 측정 중 드러난 UE helper 원인들.
    검증 누락 0(zlib 256 기존).
 8. **다음**: DebugGame은 같은 패턴이 home space 경유로 더 깊음; 새 블록 정체성(그룹)·루프·재귀의 값; 가상 호출; 바이트
    정밀도(R001 B).
+
+## 21. DebugGame: 조건부 별칭 너머의 값 · xor 0 · 반환 주소 슬롯 (2026-10-08)
+
+원인(측정): DebugGame의 TArray helper(ResizeGrow)는 this를 home 슬롯에서 매번 다시 읽어 쓴다. (1) `this->Data =
+Realloc(...)`의 주소가 "조건부 별칭 의심"(S3)을 지나 그 의심의 *작성자가 쓴 값*까지 거슬러 올라가, 그 값의 clobber 부채
+때문에 조건 없는 불확실 쓰기가 됐다; (2) 그 clobber는 내부 helper의 `xor edx, edx`(입력과 무관한 0)가 앞선 import
+호출이 덮은 edx를 "읽는" 것으로 처리돼 생긴 가짜 부채였다.
+
+1. `function_summary._address_slice` / `_AncestorClosure`: 조건부 may-alias 부채는 닿되 지나가지 않음(조건 성립 시 그
+   작성자는 읽은 바이트를 쓰지 않았으므로 그 값은 흐르지 않음, 실패 시 호출 전체가 unknown).
+2. `normalize._scoped_effect`·검증기: 같은 레지스터끼리의 XOR/SUB/BOOL_XOR = 입력 없는 0. 주소식 평가기도 0, 상수의
+   INT_SEXT·INT_MULT 접기.
+3. writer 조건 쌍이 배제한 (작성자 → 바이트) 별칭은 요약 crossing에서 뺌(`_exit_crossings`의 excused).
+4. 호출 모양이 push한 반환 주소 슬롯 run은 메모리 보존 판정에서 뺌(엔진이 원래 그 push를 transient로 지우고, 복귀 후
+   호출자 SP 아래의 죽은 바이트로 보는 것과 일관).
+5. 테스트: DebugGame 모양(this spill/reload, 모르는 값을 쓴 뒤 알려진 값으로 덮기) — 메모리 보존·확실, 배치 전수
+   (home 슬롯 겹침 포함) 누락 0, 변형 "옛 주소 slice"는 다시 조건 없는 불확실 작성자가 됨; xor 0. 테스트 493개.
+6. 결과: DebugGame 호출 경유 의존 1,684 → 2,466(helper가 메모리 보존으로 증명됨), 케이스 지표는 변화 없음; 다른
+   Bundle 변화 없음, 동적 검증 누락 0. R001 DebugGame의 다음 원인: 호출자에서 다시 읽은 Data가 "스택 아님"으로
+   인정되지 않는 경로(Add 안의 check() 실패 경로 등) — 조사 중.

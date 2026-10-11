@@ -24,6 +24,8 @@ from tdo_v2._scope_contracts import VarnodeKindCode
 from tdo_v2.call_seeds import _operation_key
 
 
+_SELF_CANCELLING = frozenset({"INT_XOR", "INT_SUB", "BOOL_XOR"})
+
 class Unsupported(Exception):
     """The run reached an operation outside the oracle's call-free scope."""
 
@@ -475,6 +477,10 @@ class Interpreter:
             address = self._value(key, inputs[1], run)
             value = self._value(key, inputs[2], run)
             self._write(key, space_id, address, inputs[2].byte_size, value)
+            return None
+        if opcode in _SELF_CANCELLING and len(inputs) == 2 and inputs[0] == inputs[1]                 and output is not None:
+            # x ^ x, x - x: zero whatever x holds -- no dependency (``normalize``)
+            self._write(key, output.coordinate.space_id, output.coordinate.byte_offset, output.byte_size, 0)
             return None
         values = [self._value(key, item, run) for item in inputs]
         try:

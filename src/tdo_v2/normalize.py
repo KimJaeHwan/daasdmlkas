@@ -1624,6 +1624,9 @@ def _operation_key(instruction, ordinal: int, operation) -> str:
     )
 
 
+_SELF_CANCELLING = frozenset({"INT_XOR", "INT_SUB", "BOOL_XOR"})
+
+
 def _scoped_effect(instruction, ordinal, operation, context) -> ObservedEffect:
     operation_key = _operation_key(instruction, ordinal, operation)
     block_key = _coordinate_key(instruction.address)
@@ -1637,6 +1640,11 @@ def _scoped_effect(instruction, ordinal, operation, context) -> ObservedEffect:
     reads = tuple(
         value for value in resolved_data_inputs if type(value) is ResolvedStorage
     )
+    if operation.opcode in _SELF_CANCELLING and len(operation.inputs) == 2             and operation.inputs[0] == operation.inputs[1]             and operation.inputs[0].kind in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
+        # ``xor edx, edx`` / ``sub eax, eax``: zero whatever the register
+        # holds -- the result depends on no input (a call before it may have
+        # clobbered the register without changing anything here)
+        reads = ()
     unresolved_reads = tuple(
         UnresolvedMemoryAccess(value, raw.size, raw)
         for relative_ordinal, (raw, value) in enumerate(

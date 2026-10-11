@@ -181,7 +181,8 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     uncertain = set(uncertain_conditions) - set(conditional)
     writer_conditions = frozenset().union(*conditional.values()) if conditional else frozenset()
     tracer = _CopyTracer(normalized, observation, context, operation_of, conditions_of)
-    crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain)
+    crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain,
+                              writer_conditions)
     inner_calls = crossed.pop("inner_calls", ())
 
     exits = []
@@ -400,6 +401,12 @@ class _AncestorClosure:
                 conditions = frozenset()
             origins = frozenset((origin_labels or {}).get(node, ()))
             self.own[node] = (frozenset(own_sources.get(node, ())), readers, debts, origins, conditions)
+            if conditions:
+                # a conditional may-alias debt is reached, not passed: with its
+                # conditions holding its candidate writers did not write the
+                # read bytes (their values do not flow); with one failing the
+                # caller drops the call (``writer_conditions``, run conditions)
+                self.predecessors[node] = []
         self.value: dict[int, tuple] = {}
 
     def of(self, node: int):
@@ -491,6 +498,29 @@ def _alias_conditions(normalized) -> dict:
     return found
 
 
+def _address_slice(graph, inputs, conditions_of) -> list:
+    """Data nodes reaching an address operand. A conditional may-alias debt
+    (``_alias_conditions``) is reached but not passed: with its conditions
+    holding, its candidate writers did not write the read bytes, so their
+    values do not shape the address; with one failing, the caller drops the
+    whole call (``writer_conditions``)."""
+    from .graph import CONTROL_DEPENDENCE_EDGE
+
+    pending, seen = list(inputs), set()
+    while pending:
+        node = pending.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        if node in conditions_of:
+            continue
+        pending.extend(
+            int(source) for source, _, record in graph._graph.in_edges(node)
+            if record.kind != CONTROL_DEPENDENCE_EDGE
+        )
+    return sorted(seen)
+
+
 def _uncertain_address_writers(normalized, observation, context, operation_of, conditions_of=None) -> dict:
     """Memory STOREs whose address operand depends on a read with debt ->
     the alias conditions that debt reduces to (None: unconditional)."""
@@ -529,7 +559,7 @@ def _uncertain_address_writers(normalized, observation, context, operation_of, c
             source for source, _, record in graph._graph.in_edges(node)
             if record.span is not None and record.span.overlaps(resolved.span)
         ]
-        reachable = graph.backward_reachable(tuple(inputs)) if inputs else ()
+        reachable = _address_slice(graph, inputs, conditions_of or {}) if inputs else ()
         debts = [item for item in reachable if graph.node(item).kind is NodeKind.MEMORY_DEBT
                  and graph.node(item).label in _ADDRESS_UNCERTAIN]
         if debts:
@@ -864,7 +894,8 @@ def _live_gens_at_exit(graph, events, exit_block: str) -> frozenset:
     return frozenset(found)
 
 
-def _exit_crossings(normalized, observation, context, preserved_stack_pointers, uncertain):
+def _exit_crossings(normalized, observation, context, preserved_stack_pointers, uncertain,
+                    writer_conditions=frozenset()):
     """(terminal block, object) -> {offset: crossed labels at the block exit}."""
     unit = normalized.memory_unit
     assumed = {key for key, _ in normalized.assumed_call_effects}
@@ -948,6 +979,17 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                 offsets.setdefault(atom.object_id, set()).update(range(atom.start, atom.end))
         terminal_objects[state.block_key] = offsets
 
+    # writer conditions: (read span, write span) -- a write of exactly that
+    # span by some operation does not reach the read bytes while they hold
+    spans_by_writer: dict = {}
+    for effect in normalized.effects:
+        for evidence in effect.writes:
+            if type(evidence) is ResolvedStorage and evidence.span.object_id.kind in _MEMORY_KINDS:
+                spans_by_writer.setdefault(evidence.span, set()).add(effect.operation_key)
+    excused_by: dict = {}
+    for read, write in writer_conditions:
+        for key in spans_by_writer.get(write, ()):
+            excused_by.setdefault(read.object_id, []).append((read.start, read.end, key))
     cache: dict[tuple, frozenset] = {}
     for block_key, objects in terminal_objects.items():
         for object_id, offsets in objects.items():
@@ -964,7 +1006,11 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                     keeping |= memory_keeping
                     keeping -= {key for key in below_calls
                                 if bounds[key][0] == object_id and offset < bounds[key][1]}
-                signature = (object_id, covering, keeping, block_key)
+                # writes a writer condition (read span, write span) rules out
+                # on these bytes: decided by the caller with the whole summary
+                excused = frozenset(key for start, end, key in excused_by.get(object_id, ())
+                                    if start <= offset < end)
+                signature = (object_id, covering, keeping, block_key, excused)
                 value = cache.get(signature)
                 if value is None:
                     events: dict[str, list] = {}
@@ -975,7 +1021,7 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                         for write_block, position, order, other, key in memory_writes:
                             # a private frame write reaches no other object but a
                             # wild one (``may_alias.private_frame_writes``)
-                            if may_alias(other, object_id) and (
+                            if may_alias(other, object_id) and key not in excused and (
                                     (key, other) not in private or object_id in wild):
                                 events.setdefault(write_block, []).append((position, order, f"alias:{key}"))
                         for write_block, position, order, key in unknown:

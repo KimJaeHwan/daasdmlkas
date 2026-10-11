@@ -402,3 +402,81 @@ def test_a_reused_block_after_free_is_not_missed():
     reload = _reload(results["1:1000"].normalized)
     assert reload.is_complete and set(range(RDI, RDI + 8)) <= reload.register_bytes
     assert _check(results).silent == []
+
+
+# -- DebugGame shape: this spilled and reloaded around a write of an unproven value --
+
+def _debug_grow_helper(max_field=12, data_field=0):
+    """spill this (rcx) to the home slot; free(); this->Max = eax (unknown
+    after the call); this->Data = rsi; this->Max = 16 -- each through a
+    reload of this. The Data write's address rests on "the Max write did not
+    hit the home slot" (an alias condition), not on the unknown eax."""
+    t, u = tmp(0x100), tmp(0x108)
+    return (FunctionBuilder(entry=HELPER)
+            .ins(add(t, reg(RSP), const(8)), store(t, reg(RCX)))
+            .sub_rsp(0x28)
+            .call(THUNKS["free"])
+            .ins(add(t, reg(RSP), const(0x30)), load(reg(RCX), t))
+            .ins(add(u, reg(RCX), const(max_field)), store(u, reg(RAX, 4)))
+            .ins(add(t, reg(RSP), const(0x30)), load(reg(RCX), t))
+            .ins(add(u, reg(RCX), const(data_field)), store(u, reg(RSI)))
+            .ins(add(t, reg(RSP), const(0x30)), load(reg(RCX), t))
+            .ins(add(u, reg(RCX), const(max_field)), store(u, const(16, 4)))
+            .add_rsp(0x28).ret())
+
+
+def _debug_caller(displacement=0x10):
+    """kept = rbx at [rsp+0x38]; helper(&s at rsp + displacement); r9 = kept."""
+    t = tmp(0x100)
+    return (FunctionBuilder().sub_rsp(0x48)
+            .ins(add(t, reg(RSP), const(0x38)), store(t, reg(RBX)))
+            .ins(add(reg(RCX), reg(RSP), const(displacement & 0xFFFFFFFFFFFFFFFF)))
+            .call(HELPER)
+            .ins(add(t, reg(RSP), const(0x38)), load(reg(R9), t))
+            .add_rsp(0x48).ret())
+
+
+def test_an_unproven_value_behind_a_conditional_alias_keeps_the_address():
+    """The reload of this may see the Max write only if they overlap (an
+    alias condition); the unknown eax it would then hold does not make the
+    Data write's address unconditional."""
+    results, report = _program_check(_debug_caller(), _debug_grow_helper())
+    summary = results[f"1:{HELPER:x}"].summary
+    assert not summary.unknown_writers and summary.writer_conditions
+    (effect,) = [e for k, e in results["1:1000"].proven.items() if k.endswith(":CALL")]
+    assert effect.preserves_memory
+    kept = _load_slice(results["1:1000"].normalized, 1)
+    assert kept.is_complete and set(range(RBX, RBX + 8)) <= kept.register_bytes
+    assert report.runs and report.silent == []
+
+
+@pytest.mark.parametrize("displacement", [-16, -12, -8, -4, 0, 4, 8, 0x10])
+@pytest.mark.parametrize("max_field", [8, 12, 16])
+def test_debug_grow_any_layout(displacement, max_field):
+    _, report = _program_check(_debug_caller(displacement), _debug_grow_helper(max_field))
+    assert report.silent == [], report.silent[:2]
+
+
+def test_mutation_full_address_slice_loses_the_proof(monkeypatch):
+    """The old rule (every debt behind the address, through the writers of
+    conditional debts) makes the Data write unconditional again."""
+    import tdo_v2.function_summary as summary_module
+    monkeypatch.setattr(summary_module, "_address_slice",
+                        lambda graph, inputs, conditions_of: graph.backward_reachable(tuple(inputs)))
+    results, _ = _program_check(_debug_caller(), _debug_grow_helper())
+    assert results[f"1:{HELPER:x}"].summary.unknown_writers
+
+
+def test_xor_of_a_register_with_itself_reads_nothing():
+    """free() clobbers rdx; xor edx, edx makes it zero whatever it held: no
+    call-clobber debt on the result (the oracle computes it the same way)."""
+    from synthetic import op
+    builder = (FunctionBuilder().sub_rsp(0x28)
+               .call(THUNKS["free"])
+               .ins(op("INT_XOR", [reg(RDX, 4), reg(RDX, 4)], reg(RDX, 4)))
+               .ins(add(reg(R9, 4), reg(RDX, 4), const(0, 4)))
+               .add_rsp(0x28).ret())
+    results = _analyze(builder)
+    function = results["1:1000"].normalized
+    assert not function.call_clobber_reads
+    assert _check(results).silent == []
