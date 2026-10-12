@@ -241,7 +241,8 @@ def analyze_frozen_bundle_with_summaries(
         if any(getattr(item.normalized, "assumed_direction_flag_clear", False) for item in results.values()):
             # a rep string site whose direction flag is the function's entry value
             assumptions += ("direction-flag-clear",)
-        assumptions += tuple(sorted({label for item in results.values() for label in item.declared.values()}))
+        assumptions += tuple(sorted({label for item in results.values() for label in item.declared.values()}
+                                    | {label for item in results.values() for label in item.inherited_assumptions}))
         preliminary = []
         for key, item in by_key.items():
             normalized = results[key].normalized

@@ -585,3 +585,24 @@ A(이번 트랙)/B(별도 주제)/C(정상)로 나눴다. 수정 중 필요한 �
      호출 전 작성자를 되찾음 — 보존 주장을 믿지 않고도 거짓 누락이 없음(검수 중 넣었던 완화는 Astra가 실제 누락을
      숨길 수 있음을 보여 제거).
    - 테스트: `test_open_conditions.py` 6개, `test_program_oracle_copy_back.py` 2개. 526개 통과.
+
+## 23. DLL 함수를 한 번 분석해 모델로 재사용 (2026-10-13, 사용자 결정 · Fable + Astra 설계)
+
+배경: 외부 DLL(UE Core 등) 함수는 실제 코드를 같은 엔진으로 **한 번** 분석해 모델로 저장하고, 이후엔 DLL 없이 모델을
+쓴다. 사람이 쓰는 모델은 분석이 막히는 곳(가상 할당기 등)에만. 다른 곳에서 만든 모델을 넣는 입구도 마련한다.
+실험(UnrealEditor-Core.dll 5.1): 대상 5개 함수의 호출 폐포 3,493개 — `AppendChar`/`FName` 생성자는 2,830개(서로
+부르는 2,046개 덩어리, 간접 호출 3,396개)로 끝나지 않음. 이미 모델이 있는 함수 6개에서 자르면 `AppendChar` 8개 함수,
+`~FString` 2개(FName은 이름 풀 자체가 덩어리라 그대로 → 손 모델).
+
+계획: (1) 출처와 외부 모델 입구 (2) DLL 분석 중 모델 있는 함수에서 자르기(주소로 일치; 손 모델의 "이 모듈 메모리"
+문구가 DLL 안에선 뜻이 바뀌는 점 재확인) (3) 분석 결과를 호출자와 무관한 템플릿(요약 + anchor)으로 저장·로드
+(레지스터 객체 재지정, DLL 전역은 모듈 구분 · 처음엔 보존 주장 포기, 가정은 전이적으로 수집) (4) FName 손 모델.
+
+1단계(구현): 모델 파일 `source`(hand 기본 | derived: library + sha256 필수 | external: tool …), `assumptions`(등록된
+가정 이름이나 `<namespace>:<name>`). 라벨: `external-model:`(hand, 기존 그대로) / `derived-model:…#<sha 12자리>` /
+`supplied-model:`. 사용 시 모델 라벨과 그 모델이 기대는 가정을 함께 보고. 이번 실행에서 꺼진 가정에 기대는 모델은
+적용하지 않음(호출은 불투명). 같은 import에 모델이 여럿이면 오류 — `overrides`(`<file id>/<entry>`)로만 명시 교체;
+없는 대상·자기 파일·순환·중복 file id는 로드 시 오류, 교체 후 후보가 없으면 오류. 추가 모델 폴더: `run_dfbench
+--model-dir`(반복), `TDO_V2_MODEL_DIRS`(OS 경로 구분자 `;`/`:`), 같은 폴더는 한 번만. 성능(결과 불변):
+`interprocedural.site()` 함수별 캐시, `_preserved_stack_pointers` 레지스터 공간 1회 계산 — 재귀 덩어리 분석의 반복
+계산 제거. exporter `--entry`도 호출 폐포 포함. 테스트 `test_model_sources.py` 12개, 538개 통과, 측정 불변.

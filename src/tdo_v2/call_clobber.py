@@ -268,11 +268,11 @@ def _transfer(block, state: _State, calls, preserved, rows, memory_keeping=froze
 def _preserved_stack_pointers(observation, context) -> dict[str, tuple[ByteSpan, ...]]:
     """Per call, the stack-pointer register its observed call/ret shape restores."""
     preserved = {}
+    space_id = _register_space_id(observation)  # one scan of the function, not one per call
+    if space_id is None:
+        return preserved
     for row in observed_call_state_projections(observation):
         base = row.memory_transition.caller_base
-        space_id = _register_space_id(observation)
-        if space_id is None:
-            continue
         resolved = _resolve_validated_storage(
             StorageRef(
                 VarnodeKind.REGISTER, "", base.byte_offset, base.byte_size,

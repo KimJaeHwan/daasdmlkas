@@ -85,10 +85,14 @@ REGISTRY: tuple[Assumption, ...] = (
         "TDO_V2_ASSUME_DEBUG_BREAK_TRAPS_DO_NOT_RETURN"),
     Assumption(
         "external-models", "switch", True,
-        "Imported functions behave as their declared models (models/external): each use is reported "
-        "as external-model:<file>/<entry>@v<n>; entries state their own conditions (below).",
-        "A model that does not match the real implementation.",
-        "summary_store, interprocedural._external_sites",
+        "Imported functions behave as their models (models/external, plus --model-dir directories and "
+        "TDO_V2_MODEL_DIRS). Each use is reported by provenance: external-model:<file>/<entry>@v<n> "
+        "(written by hand), derived-model:... (from the engine's analysis of the library code), "
+        "supplied-model:... (produced elsewhere, a trusted contract); with every assumption the model "
+        "lists in its source (source.assumptions). Entries state their own conditions (below).",
+        "A model that does not match the real implementation (or a library version other than the one "
+        "a derived model was built from).",
+        "summary_store (model_paths, ExternalModels.lookup), interprocedural._external_sites",
         "external_models", "--no-external-models", "TDO_V2_EXTERNAL_MODELS"),
     Assumption(
         "opaque-callees-restore-stack-pointer", "reported", True,

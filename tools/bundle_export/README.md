@@ -32,7 +32,7 @@ python3 tools/bundle_export/export_bundle.py $TB/build/win-debug/dfbench_win_cor
 
 * Selection works in one of three ways: `--functions-from-manifest` (every `case_*` function of the
   binary, or, for `libdfbench_importlib*.dll`, its 4 exported functions), `--function-name NAME`
-  (repeatable), or `--entry SPACE OFFSET`. With names, the exporter adds the transitive call/reference
+  (repeatable), or `--entry SPACE OFFSET`. With names or entries, the exporter adds the transitive call/reference
   closure itself (sources, sinks and helpers). Thunks and externals are excluded. The limit is 4096.
 * `--exclude-function NAME` drops names from the selection (see "Known issues").
 * The generation id is a random 64-hex value. The nonce is random. The script computes the original's

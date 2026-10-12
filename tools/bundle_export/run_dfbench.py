@@ -88,11 +88,12 @@ def boundary_provider(assume_call_effect: bool = False, abi: str = "win64"):
     return SymbolBoundaryProvider(tuple(rules))
 
 
-def external_models(generation: Path):
-    """Declared models (models/external) for this Bundle's language and ABI."""
-    from tdo_v2.summary_store import load_external_models
+def external_models(generation: Path, extra_dirs=()):
+    """Models (models/external, then ``--model-dir`` directories and
+    TDO_V2_MODEL_DIRS) for this Bundle's language and ABI."""
+    from tdo_v2.summary_store import load_external_models, model_paths
 
-    return load_external_models(sorted((REPO / "models" / "external").glob("*.json")),
+    return load_external_models(model_paths(REPO / "models" / "external", extra_dirs),
                                 LANGUAGES[abi_of(generation)], abi_of(generation))
 
 
@@ -119,6 +120,8 @@ def main() -> int:
     parser.add_argument("--binary", default="dfbench_win_core",
                         help="case filter when --expected is cases_manifest.json")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--model-dir", type=Path, action="append", default=[],
+                        help="extra directory of model files (repeatable; also TDO_V2_MODEL_DIRS)")
     parser.add_argument("--legacy-engine", action="store_true",
                         help="the older engine (tdo_v2.engine per-root interprocedural completion) "
                              "instead of the default summary engine")
@@ -165,7 +168,7 @@ def main() -> int:
                 boundary_provider=boundary_provider(args.assume_boundary_effects,
                                                     abi_of(generation)),
                 assume_boundary_call_effects=args.assume_boundary_effects,
-                external_models=external_models(generation) if args.external_models else None,
+                external_models=external_models(generation, args.model_dir) if args.external_models else None,
                 pcodeop_models=pcodeop_models(),  # not imported functions: --no-external-models keeps them
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},

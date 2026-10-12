@@ -42,7 +42,19 @@ Matching an import: a file listing ``libraries`` (e.g. a C++ engine DLL)
 matches only imports of one of those libraries whose original (mangled) name
 is in an entry's ``original_names``; a file without ``libraries`` (the C
 runtime, whose import library varies) matches by short name, never a C++
-(``?``-mangled) import. Two files matching one import is an error.
+(``?``-mangled) import. Two entries matching one import is an error unless one
+file lists the other entry in ``overrides`` (``"<file id>/<entry name>"``).
+
+Provenance (optional ``source``; default ``{"kind": "hand"}``): ``hand``
+(written by a person), ``derived`` (the engine's analysis of the real library
+code, e.g. ``{"kind": "derived", "library": ..., "sha256": ...}``) or
+``external`` (produced elsewhere, ``{"kind": "external", "tool": ...,
+"version": ...}``). Other keys are kept as recorded provenance. ``assumptions``
+(list of labels) are the assumptions the model itself rests on: each use
+reports them with the model's own label -- ``external-model:`` (hand),
+``derived-model:`` or ``supplied-model:`` + ``<file id>/<entry>@v<version>``.
+Extra model directories: ``model_paths`` (``--model-dir``,
+``TDO_V2_MODEL_DIRS``).
 """
 
 from __future__ import annotations
@@ -83,10 +95,24 @@ class ModelEntry:
     observes: tuple[tuple[int, int], ...] | None = None   # None: every register
     original_names: tuple[str, ...] = ()
     same_object: tuple[tuple[tuple[int, int], tuple[int, int]], ...] = ()
+    source_kind: str = "hand"
+    inherited: tuple[str, ...] = ()   # assumption labels the model rests on (``source.assumptions``)
+
+    @property
+    def model_id(self) -> str:
+        return f"{self.file_id}/{self.name}"
+
+    identity: str = ""   # derived: the first 12 hex digits of the library's sha256
 
     @property
     def label(self) -> str:
-        return f"external-model:{self.file_id}/{self.name}@v{self.version}"
+        suffix = f"#{self.identity}" if self.identity else ""
+        return f"{_LABEL_PREFIX[self.source_kind]}:{self.file_id}/{self.name}@v{self.version}{suffix}"
+
+    @property
+    def labels(self) -> tuple[str, ...]:
+        """Every assumption one use of this model reports."""
+        return (self.label, *self.inherited)
 
     def extent_registers(self) -> tuple[tuple[int, int], ...]:
         found = set()
@@ -108,6 +134,32 @@ class ModelFile:
     preserved: tuple[tuple[int, int], ...]
     entries: tuple[ModelEntry, ...]
     libraries: tuple[str, ...] = ()   # upper case; empty: matched by short name
+    source: tuple = (("kind", "hand"),)   # provenance, as sorted (key, value) pairs
+    overrides: tuple[str, ...] = ()       # "<file id>/<entry name>" this file replaces
+
+
+SOURCE_KINDS = ("hand", "derived", "external")
+_LABEL_PREFIX = {"hand": "external-model", "derived": "derived-model", "external": "supplied-model"}
+
+
+def _source(raw, path):
+    source = raw.get("source", {"kind": "hand"})
+    if type(source) is not dict or source.get("kind") not in SOURCE_KINDS:
+        raise ModelError(f"{path}: source must be an object with kind in {SOURCE_KINDS}")
+    assumptions = source.get("assumptions", [])
+    if type(assumptions) is not list or any(type(item) is not str or not item for item in assumptions):
+        raise ModelError(f"{path}: source.assumptions must be a list of labels")
+    from .assumptions import REGISTRY
+
+    registered = {item.name for item in REGISTRY}
+    for item in assumptions:
+        if item not in registered and ":" not in item:
+            raise ModelError(f"{path}: source.assumptions {item!r} is neither a registered assumption "
+                             "nor a namespaced label (<namespace>:<name>)")
+    if source["kind"] == "derived" and not (type(source.get("library")) is str and type(source.get("sha256")) is str
+                                            and len(source["sha256"]) == 64):
+        raise ModelError(f"{path}: a derived model names its library and the library file's sha256")
+    return source
 
 
 def _slice(value, what) -> tuple[int, int]:
@@ -136,10 +188,16 @@ def load_model_file(path: str | Path) -> ModelFile:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     keys = {"format_version", "kind", "id", "version", "language_id", "abi_tag", "stack_pointer",
             "stack_delta", "preserved", "entries"}
-    if type(raw) is not dict or set(raw) - {"notes", "libraries"} != keys:
+    if type(raw) is not dict or set(raw) - {"notes", "libraries", "source", "overrides"} != keys:
         raise ModelError(f"{path}: model file fields must be exactly {sorted(keys)}")
     if raw["format_version"] != FORMAT_VERSION or raw["kind"] != "declared":
         raise ModelError(f"{path}: unsupported model format or kind")
+    source = _source(raw, path)
+    overrides = raw.get("overrides", [])
+    if type(overrides) is not list or any(type(item) is not str or "/" not in item for item in overrides):
+        raise ModelError(f"{path}: overrides must be a list of \"<file id>/<entry name>\"")
+    if any(item.split("/", 1)[0] == raw["id"] for item in overrides):
+        raise ModelError(f"{path}: a file cannot override its own entries")
     entries = []
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
@@ -173,13 +231,17 @@ def load_model_file(path: str | Path) -> ModelFile:
                                   item["other_memory"] == "preserved", fresh,
                                   None if "observes" not in item
                                   else tuple(_slice(s, "observed register") for s in item["observes"]),
-                                  tuple(item.get("original_names", ())), same_object))
+                                  tuple(item.get("original_names", ())), same_object,
+                                  source["kind"], tuple(source.get("assumptions", ())),
+                                  source["sha256"][:12] if source["kind"] == "derived" else ""))
     libraries = tuple(str(item).upper() for item in raw.get("libraries", ()))
     if libraries and any(not entry.original_names for entry in entries):
         raise ModelError(f"{path}: a file with libraries matches by original_names only")
     return ModelFile(raw["id"], raw["version"], raw["language_id"], raw["abi_tag"],
                      _slice(raw["stack_pointer"], "stack pointer"), raw["stack_delta"],
-                     tuple(_slice(s, "preserved") for s in raw["preserved"]), tuple(entries), libraries)
+                     tuple(_slice(s, "preserved") for s in raw["preserved"]), tuple(entries), libraries,
+                     tuple(sorted((key, json.dumps(value, sort_keys=True)) for key, value in source.items())),
+                     tuple(overrides))
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,19 +266,73 @@ class ExternalModels:
                     hit = not (original or "").startswith("?") and bool({name, name.lstrip("_")} & set(entry.names))
                 if hit:
                     found.append((model_file, entry))
-                    break
-        if len({id(model_file) for model_file, _ in found}) > 1:
-            raise ModelError(f"import {library}!{original or name} matches several model files")
+        # an entry another matching file explicitly replaces drops out
+        replaced = {item for model_file, _ in found for item in model_file.overrides}
+        matched = len(found)
+        found = [(model_file, entry) for model_file, entry in found if entry.model_id not in replaced]
+        if matched and not found:
+            raise ModelError(f"import {library}!{original or name}: overrides remove every matching model")
+        if len(found) > 1:
+            raise ModelError(
+                f"import {library}!{original or name} matches several models "
+                f"({', '.join(entry.label for _, entry in found)}): list one in the other's overrides")
         if found:
             return found[0]
         return None
 
 
+def model_paths(builtin: Path, extra_dirs=()) -> list[Path]:
+    """Model files: ``builtin`` (the repository's models/external), then each
+    extra directory (``--model-dir``), then ``TDO_V2_MODEL_DIRS`` (os.pathsep
+    separated) -- every ``*.json`` in each, sorted. Which model applies to an
+    import never depends on this order (``ExternalModels.lookup``)."""
+    import os
+
+    dirs = [Path(builtin), *(Path(item) for item in extra_dirs)]
+    dirs += [Path(item) for item in os.environ.get("TDO_V2_MODEL_DIRS", "").split(os.pathsep) if item]
+    found, seen = [], set()
+    for directory in dirs:
+        if not directory.is_dir():
+            raise ModelError(f"model directory not found: {directory}")
+        for path in sorted(directory.glob("*.json")):
+            if path.resolve() not in seen:   # a directory given twice is read once
+                seen.add(path.resolve())
+                found.append(path)
+    return found
+
+
 def load_external_models(paths, language_id: str, abi_tag: str) -> ExternalModels:
+    """The model files for one language and ABI, validated together: file ids
+    are unique, every override names an existing entry of another file, and
+    overrides form no cycle between files."""
     files = [load_model_file(path) for path in paths]
-    return ExternalModels(tuple(
-        item for item in files if item.language_id == language_id and item.abi_tag == abi_tag
-    ))
+    files = [item for item in files if item.language_id == language_id and item.abi_tag == abi_tag]
+    ids = [item.file_id for item in files]
+    if len(set(ids)) != len(ids):
+        raise ModelError(f"model file ids are not unique: {sorted(i for i in set(ids) if ids.count(i) > 1)}")
+    entries = {entry.model_id: item.file_id for item in files for entry in item.entries}
+    edges = {}
+    for item in files:
+        for target in item.overrides:
+            if target not in entries:
+                raise ModelError(f"model file {item.file_id} overrides {target}, which no loaded file has")
+            edges.setdefault(item.file_id, set()).add(entries[target])
+
+    def cyclic(start):
+        pending, seen = list(edges.get(start, ())), set()
+        while pending:
+            current = pending.pop()
+            if current == start:
+                return True
+            if current not in seen:
+                seen.add(current)
+                pending.extend(edges.get(current, ()))
+        return False
+
+    for file_id in edges:
+        if cyclic(file_id):
+            raise ModelError(f"model overrides form a cycle through {file_id}")
+    return ExternalModels(tuple(files))
 
 
 def model_summary(model_file: ModelFile, entry: ModelEntry, register_object, register_limit: int,

@@ -49,6 +49,8 @@ class AnalyzedFunction:
     # external calls bound to a declared model (``summary_store``): call key ->
     # assumption label
     declared: dict = field(default_factory=dict)
+    # assumption labels the models used here rest on (``ModelEntry.inherited``)
+    inherited_assumptions: frozenset = frozenset()
     # a member of a recursive SCC whose summaries did not reach a verified
     # fixpoint (``MAX_RECURSION_ROUNDS``): its intra-SCC calls stayed opaque
     recursion_unresolved: bool = False
@@ -98,8 +100,16 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         if type(unit.scopes.function) is ConstructedFunctionScope and unit.observation is not None
     }
     calls = {key: _direct_calls(unit, functions) for key, unit in functions.items()}
+    # registry switches off in this run: a model resting on one is not applied
+    disabled = {name for name, on in (
+        ("globals-disjoint-from-stack", assume_globals_disjoint_from_stack),
+        ("readonly-image-data-is-constant", readonly_image is not None),
+        ("direction-flag-clear", assume_direction_flag_clear),
+        ("win64-home-space-callee-private", bool(private_frame_above)),
+        ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
+    ) if not on}
     externals = {
-        key: _external_sites(unit, image_info, external_models) if image_info and external_models else {}
+        key: _external_sites(unit, image_info, external_models, disabled) if image_info and external_models else {}
         for key, unit in functions.items()
     }
     memory_space = _program_memory_space(next(iter(functions.values()))) if functions else None
@@ -122,7 +132,15 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         component_of = {key: index for index, component in enumerate(order) for key in component}
         results: dict[str, AnalyzedFunction] = {}
 
+        sites_of: dict = {}
+
         def site(key):
+            """Call-site facts of ``key`` (fixed per function: computed once)."""
+            if key not in sites_of:
+                sites_of[key] = _site(key)
+            return sites_of[key]
+
+        def _site(key):
             unit = functions[key]
             observation, context = unit.observation, unit.scopes.resolution_context
             register_object, register_limit = _register_file(observation, context)
@@ -336,7 +354,10 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                         call: (f"test-only-boundary:{boundaries_of(key)[call].label}"
                                                if call in boundaries_of(key) else externals[key][call][1].label)
                                         for call in proven if call in externals[key] or call in boundaries_of(key)
-                                    } | {call: effect.label for call, effect in markers.items()})
+                                    } | {call: effect.label for call, effect in markers.items()},
+                                    inherited_assumptions=frozenset(
+                                        label for call in proven if call in externals[key]
+                                        for label in externals[key][call][1].inherited))
 
         def solve(component):
             """Recursion (design S5): every intra-SCC call starts from the
@@ -416,12 +437,14 @@ def _program_memory_space(unit) -> int | None:
     return spaces[0] if len(spaces) == 1 else None
 
 
-def _external_sites(unit, image_info, external_models) -> dict:
+def _external_sites(unit, image_info, external_models, disabled=frozenset()) -> dict:
     """Call key -> (model file, entry) for calls to imported symbols with a
     model: ``CALL`` of an import thunk, ``CALLIND`` of a value copied from
     an import slot within the call instruction (``call [__imp_X]``), or a
     terminal ``BRANCHIND`` through an import slot (``jmp [__imp_X]``, a tail
-    call composed like ``BRANCH`` tails)."""
+    call composed like ``BRANCH`` tails). A model resting on an assumption
+    switched off in this run (``disabled``) is not applied: the call stays
+    opaque."""
     found = {}
     for instruction in unit.observation.instructions:
         operations = instruction.operations
@@ -443,7 +466,7 @@ def _external_sites(unit, image_info, external_models) -> dict:
             if symbol is None:
                 continue
             model = external_models.lookup(symbol)
-            if model is not None:
+            if model is not None and not set(model[1].inherited) & disabled:
                 found[_operation_key(instruction.address, ordinal, operation.opcode)] = model
     return found
 

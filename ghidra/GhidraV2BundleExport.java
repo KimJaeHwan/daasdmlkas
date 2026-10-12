@@ -941,7 +941,9 @@ public class GhidraV2BundleExport extends GhidraScript {
                 }
                 result.add(matches.get(0));
             }
-
+        }
+        if (!result.isEmpty()) {
+            // names or entries: the transitive call/reference closure
             Set<Function> selected = new LinkedHashSet<>(result);
             for (int index = 0; index < result.size(); index++) {
                 monitor.checkCancelled();
