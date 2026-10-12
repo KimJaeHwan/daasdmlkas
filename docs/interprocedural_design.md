@@ -547,3 +547,31 @@ A(이번 트랙)/B(별도 주제)/C(정상)로 나눴다. 수정 중 필요한 �
      놓칠 수 있음. 합의된 설계: may_alias에 "불확실 쓰기" 종류(어디든 쓸 수 있으나 kill하지 않음) + 그 쓰기의 조건을
      실은 부채 노드(`conditions_of`) + `_uncertain_address_writers`와 고정점(`~k`/`~e` 행 포함) + rep 개수/방향 증명의
      레지스터 clobber 검증; 재귀 대신 명시적 루프. xfail 테스트가 이 문제를 표시.
+8. **불확실 주소 쓰기의 부채(구현, 2026-10-12, Fable + Astra 설계 합의)**: 주소가 부채 있는 읽기에 기대는 쓰기 W는
+   "정적 위치에 쓴다(조건부: W의 조건 하에) 또는 어디든 쓴다(무조건)".
+   - `function_summary.uncertain_writers_of`: STORE + 호출 메모리 행 `~k`·rep 원소 `~e`(anchor로 주소 slice), 호출
+     clobber 부채는 그 행의 span이 주소 레지스터와 겹칠 때 셈. → `normalize`가 고정점까지 반복(재귀 대신 명시적 루프,
+     막힌 읽기 `_blocked_reads`·막힌 rep 사이트와 함께).
+   - `may_alias(uncertain_writers=…)`: W는 평소 효과에 더해 "?W"를 모든 객체의 모든 바이트(private 포함)에 gen;
+     이후 정확한 쓰기만 kill. 행에 `MayAliasRead.uncertain`/`plain`.
+   - 부채 노드: 무조건 W는 보통 `may_alias_read`(작성자 간선 포함, 후보 출처); 조건부 W는 별도
+     `uncertain_write_read`(간선 없음, 조건=`NormalizedFunction.uncertain_nodes`). 루트 slice에선 부채(조건을 판단할
+     호출자가 없음), 함수 요약에선 투명(그 조건은 이미 `writer_conditions`로 모든 주장에 붙음), 연쇄 판정엔 조건과 함께 셈.
+   - rep: 개수의 최종 그래프 slice가 어떤 부채에도 닿으면 그 사이트는 펼치지 않음(레지스터 clobber 포함). 방향은 상수
+     또는 `direction-flag-clear`(진입과 호출 복귀 시 DF=0, 레지스트리 문구 갱신).
+   - 테스트 `test_stale_projection_alias.py` 5개(wild 포인터, callee 안 쓰기, clobber된 레지스터로 STORE, rep 개수 둘).
+   - 결과(e9): 09 debug 64/60·release 52/47·win32 44/37, UE Development 14/13 변화 없음; UE DebugGame 15/12 → 13/12
+     (R007·R008: 이미 unsure였고, 호출 뒤 다시 읽은 포인터로 쓴 무조건 불확실 쓰기의 값 B가 가능한 출처로 추가 — 과잉,
+     누락 아님). sure-missing 0, 동적 검증 누락 0(zlib 109730 기존 이슈 제외). zlib 분석 시간 55 → 90초(고정점 반복).
+9. **구현 검수(Fable + Astra 2라운드) 후 수정** — 모두 반례 테스트가 있고, 각 수정을 되돌리면 그 테스트가 실패함:
+   - `_alias_conditions`: 무조건 불확실 작성자가 보통 별칭으로도 닿아도 부채는 무조건(조건 쌍으로 바뀌지 않음).
+   - writer 조건을 호출 지점에서 **판정**(`ProvenCallEffect.writer_conditions`, `~cw` 행): 전엔 위치만 확인해 보존·
+     IDENTITY 주장이 판정 없이 쓰일 수 있었음. 재귀 가설도 writer 조건을 실패로 둠.
+   - 조건 판정·모델 extent·rep 개수/방향·호출의 below-stack 경계: 근거 값이 부채에 닿으면 쓰지 않음
+     (`normalize._reaches_debt`/`_debt_nodes`/`_row_reaches_debt`, 호출 clobber는 그 행의 span이 겹칠 때만).
+     extent 상수는 상태마다 다시 확인하고 틀리면 영구 철회. 검증은 may-alias 부채를 그래프에 만든 **뒤**에 함.
+   - DF: `direction-flag-clear`로 받아들이는 건 "부채가 모두 DF 자신을 바꿀 수 있는 호출뿐이고 방향이 정방향(0)"일
+     때만(호출 전 DF=1, 호출 뒤 다른 레지스터에서 DF 복사 → 거부).
+   - 무조건 불확실 쓰기는 kill하지 않음(dense·sparse).
+   남은 것(정밀도·성능): 중간 호출자에서 열린 조건 쌍을 위로 넘기기(BUG-5, `~cw` 포함), 불확실 집합만 바뀔 때
+   재정규화 전체 대신 may-alias·부채만 다시 만들기(zlib 55 → ~100초).

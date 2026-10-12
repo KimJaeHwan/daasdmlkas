@@ -49,7 +49,10 @@ from .span_geometry import ByteSpan, StorageObjectKind
 
 FUNCTION_SUMMARY_VERSION = 1
 _CALL_OPCODES = ("CALL", "CALLIND", "CALLOTHER")
-_ADDRESS_UNCERTAIN = {"may_alias_read", "unresolved_memory_read", "call_clobber_read"}
+_ADDRESS_UNCERTAIN = {"may_alias_read", "unresolved_memory_read", "call_clobber_read", "uncertain_write_read"}
+# debt of a read a conditional uncertain-address writer may reach: for roots
+# only -- a summary carries those writers' conditions on every claim already
+_SUMMARY_TRANSPARENT = "uncertain_write_read"
 _MEMORY_KINDS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 
 
@@ -165,12 +168,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     for source, target, record in graph.weighted_edges():
         if record.span is not None and graph.node(source).kind is NodeKind.OBSERVED_INPUT:
             observed_edges.setdefault(source, []).append((target, record.span))
-    operation_of = {}
-    for node in range(graph.node_count):
-        if graph.has_node(node):
-            record = graph.node(node)
-            if record.kind is NodeKind.OPERATION and record.key.startswith("op:"):
-                operation_of[node] = record.key[3:]
+    operation_of = _operation_nodes(graph)
 
     conditions_of = _alias_conditions(normalized)
     closure = _AncestorClosure(graph, operation_of, origin_labels or {}, conditions_of)
@@ -413,7 +411,8 @@ class _AncestorClosure:
             ) if node in operation_of and any(
                 item in carriers for item in self.predecessors.get(node, ())
             ) else frozenset()
-            debts = frozenset((record.label,)) if record.kind is NodeKind.MEMORY_DEBT else frozenset()
+            debts = frozenset((record.label,)) if record.kind is NodeKind.MEMORY_DEBT \
+                and record.label != _SUMMARY_TRANSPARENT else frozenset()
             conditions = (conditions_of or {}).get(node)
             if debts and conditions:  # a may-alias debt between two exact spans: conditional
                 debts = frozenset()
@@ -493,10 +492,34 @@ class _AncestorClosure:
                     self.value[item] = value
 
 
+def _operation_nodes(graph) -> dict:
+    """OPERATION node -> its operation key."""
+    operation_of = {}
+    for node in range(graph.node_count):
+        if graph.has_node(node):
+            record = graph.node(node)
+            if record.kind is NodeKind.OPERATION and record.key.startswith("op:"):
+                operation_of[node] = record.key[3:]
+    return operation_of
+
+
+def uncertain_writers_of(normalized, observation) -> dict:
+    """Write keys whose address rests on a read with debt -> the alias
+    conditions under which they land on their static object (None: they may
+    land anywhere). ``normalize`` feeds them back to ``may_alias``
+    (``uncertain_writers``) until this no longer grows."""
+    return _uncertain_address_writers(
+        normalized, observation, normalized.scopes.resolution_context, _operation_nodes(normalized.dependencies),
+        _alias_conditions(normalized))
+
+
 def _alias_conditions(normalized) -> dict:
     """may-alias debt node -> frozenset of (read span, write span) pairs when
     the read has an exact address and every candidate writer writes exact
-    spans (the debt holds only if some pair overlaps); other debt nodes absent."""
+    spans (the debt holds only if some pair overlaps); other debt nodes absent.
+    An unconditional uncertain-address writer (``MayAliasRead.uncertain``)
+    makes the debt unconditional; conditional ones have nodes of their own
+    (``NormalizedFunction.uncertain_nodes``, not here)."""
     from .memory_contracts import MemoryDefinitionKind as Kind
 
     spans_of: dict = {}
@@ -508,12 +531,18 @@ def _alias_conditions(normalized) -> dict:
         effect.operation_key for effect in normalized.effects
         if effect.memory_write is not None or effect.unresolved_writes
     }
+    uncertain = dict(getattr(normalized, "uncertain_writers", ()))
+    graph = normalized.dependencies
     found = {}
     for row, node in zip(normalized.may_alias_reads, normalized.may_alias_nodes):
-        if row.unknown_address or any(writer in unknown or writer not in spans_of for writer in row.writers):
+        if graph.node(node).label == _SUMMARY_TRANSPARENT:
+            continue
+        plain = row.writers if row.plain is None else row.plain
+        if row.unknown_address or any(writer in unknown or writer not in spans_of for writer in plain) \
+                or any(uncertain.get(writer) is None for writer in row.uncertain):
             continue
         found[node] = frozenset(
-            (read, write) for read in row.spans for writer in row.writers for write in spans_of[writer]
+            (read, write) for read in row.spans for writer in plain for write in spans_of[writer]
         )
     return found
 
@@ -549,6 +578,8 @@ def _uncertain_address_writers(normalized, observation, context, operation_of, c
 
     graph = normalized.dependencies
     node_of = {key: node for node, key in operation_of.items()}
+    # conditional uncertain-writer debts count here with their writers' conditions
+    conditions_of = {**(conditions_of or {}), **dict(getattr(normalized, "uncertain_nodes", ()))}
     stores = {}
     for instruction in observation.instructions:
         for ordinal, operation in enumerate(instruction.operations):
@@ -563,22 +594,7 @@ def _uncertain_address_writers(normalized, observation, context, operation_of, c
         else:
             found[key] = found.get(key, frozenset()) | conditions
 
-    for definition in normalized.memory_ssa.definitions:
-        key = definition.operation_key
-        if key is None or key not in stores or definition.span.object_id.kind not in _MEMORY_KINDS:
-            continue
-        address = stores[key]
-        node = node_of.get(key)
-        if node is None or address.kind.name == "CONSTANT":
-            continue
-        resolved = _resolve_validated_storage(_storage_ref(address), context)
-        if type(resolved) is not ResolvedStorage:
-            add(key, None)
-            continue
-        inputs = [
-            source for source, _, record in graph._graph.in_edges(node)
-            if record.span is not None and record.span.overlaps(resolved.span)
-        ]
+    def check(key, inputs):
         reachable = _address_slice(graph, inputs, conditions_of or {}) if inputs else ()
         debts = [item for item in reachable if graph.node(item).kind is NodeKind.MEMORY_DEBT
                  and graph.node(item).label in _ADDRESS_UNCERTAIN]
@@ -591,6 +607,58 @@ def _uncertain_address_writers(normalized, observation, context, operation_of, c
                     break
                 conditions |= pairs
             add(key, conditions)
+
+    # call-clobber debts sit on the reading operation without a span: the
+    # row's spans say which of its register inputs a call may have changed
+    clobbers: dict = {}
+    for row, debt in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes):
+        clobbers.setdefault(row.operation_key, []).append((row.spans, debt))
+
+    def operand_inputs(node, varnode):
+        resolved = _resolve_validated_storage(_storage_ref(varnode), context)
+        if type(resolved) is not ResolvedStorage:
+            return None
+        return [
+            source for source, _, record in graph._graph.in_edges(node)
+            if record.span is not None and record.span.overlaps(resolved.span)
+        ] + [
+            debt for spans, debt in clobbers.get(operation_of.get(node), ())
+            if any(span.overlaps(resolved.span) for span in spans)
+        ]
+
+    # call effect rows and rep element rows writing memory: their address is
+    # an anchor -- a register read by their evaluation operation, or a
+    # pointer slot read by a row (("mem", row key))
+    anchors = {row: (evaluation, anchor) for row, evaluation, anchor in getattr(normalized, "call_anchors", ())}
+    memory_writers = set()
+    for definition in normalized.memory_ssa.definitions:
+        key = definition.operation_key
+        if key is None or definition.span.object_id.kind not in _MEMORY_KINDS:
+            continue
+        memory_writers.add(key)
+        if key not in stores:
+            continue
+        address = stores[key]
+        node = node_of.get(key)
+        if node is None or address.kind.name == "CONSTANT":
+            continue
+        inputs = operand_inputs(node, address)
+        if inputs is None:
+            add(key, None)
+            continue
+        check(key, inputs)
+    for key in sorted(memory_writers & set(anchors)):
+        evaluation, anchor = anchors[key]
+        if type(anchor) is tuple:
+            node = node_of.get(anchor[1])
+            inputs = [node] if node is not None else None
+        else:
+            node = node_of.get(evaluation)
+            inputs = None if node is None else operand_inputs(node, anchor)
+        if inputs is None:
+            add(key, None)
+            continue
+        check(key, inputs)
     return found
 
 
@@ -620,7 +688,8 @@ class _CopyTracer:
         node_of = {key: node for node, key in operation_of.items()}
         self.indebted = {
             key for key, node in node_of.items()
-            if any(graph.node(item).kind is NodeKind.MEMORY_DEBT for item in graph.predecessors(node))
+            if any(graph.node(item).kind is NodeKind.MEMORY_DEBT and graph.node(item).label != _SUMMARY_TRANSPARENT
+                   for item in graph.predecessors(node))
         }
         # for ``origin``: debts other than conditional may-alias ones (S3 pairs
         # the run carries in its conditions and a caller decides)
@@ -628,6 +697,7 @@ class _CopyTracer:
         self.hard_indebted = {
             key for key, node in node_of.items()
             if any(graph.node(item).kind is NodeKind.MEMORY_DEBT and item not in conditional
+                   and graph.node(item).label != _SUMMARY_TRANSPARENT
                    for item in graph.predecessors(node))
         }
 

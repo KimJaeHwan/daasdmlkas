@@ -137,6 +137,11 @@ class ProvenCallEffect:
     # the callee never returns (every exit dead, ``FunctionSummary.dead_exits``):
     # the caller's path past the call is dead
     noreturn: bool = False
+    # the summary's writer conditions as anchored (read, write) pairs: every
+    # claim of this effect -- preserved bytes and memory included -- holds only
+    # with them, so the caller decides them at the call (``~cw`` row) and
+    # re-derives the effect with any pair not proven disjoint as failed
+    writer_conditions: tuple = ()
 
 
 def derive_proven_call_effect(
@@ -186,9 +191,12 @@ def derive_proven_call_effect(
     # every claim of a summary with writer conditions holds only with them: a
     # caller that cannot locate them, or found one failing, gets nothing proven
     # but the sink demands (registers and memory unknown, stack not restored)
-    if summary.writer_conditions and _anchored_conditions(
-            _Conditions(summary.writer_conditions), anchored, failed_conditions) is None:
-        summary = _all_unknown(summary, register_object, register_limit)
+    writer_pairs = frozenset()
+    if summary.writer_conditions:
+        writer_pairs = _anchored_conditions(_Conditions(summary.writer_conditions), anchored, failed_conditions)
+        if writer_pairs is None:
+            summary = _all_unknown(summary, register_object, register_limit)
+            writer_pairs = frozenset()
 
     def below(span: ByteSpan) -> bool:
         """Callee stack bytes entirely below its entry stack pointer."""
@@ -363,6 +371,7 @@ def derive_proven_call_effect(
     return ProvenCallEffect(
         callee, tuple(runs), tuple(_spans(register_object, preserved)), tuple(memory_runs), memory_ok,
         observes, sink_demands, restores, tail_stack, tail_delta, clobbers_below,
+        writer_conditions=_sorted_pairs(writer_pairs),
     )
 
 

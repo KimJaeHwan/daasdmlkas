@@ -55,9 +55,10 @@ REGISTRY: tuple[Assumption, ...] = (
         "assume_readonly_image_constant", "--no-assume-readonly-image", "TDO_V2_ASSUME_READONLY_IMAGE"),
     Assumption(
         "direction-flag-clear", "switch", True,
-        "The x86 direction flag is clear at function entry (both x86-64 ABIs require it); used only "
-        "for rep string instructions whose function never sets DF.",
-        "Hand-written code calling with DF set.",
+        "The x86 direction flag is clear at function entry and when a call returns (both x86-64 ABIs "
+        "require it); used for rep string instructions: the entry value of DF in a function that never "
+        "sets it, and DF kept across calls.",
+        "Hand-written code calling or returning with DF set.",
         "rep_strings / normalize._prove_rep_sites",
         "assume_direction_flag_clear", "--no-assume-direction-flag-clear",
         "TDO_V2_ASSUME_DIRECTION_FLAG_CLEAR"),

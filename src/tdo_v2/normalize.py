@@ -145,6 +145,19 @@ class NormalizedFunction:
     # fresh result, and (row, input row, argument varnode) of same-object results
     fresh_rows: frozenset = frozenset()
     same_object_rows: tuple = ()
+    # writes whose address rests on a read with debt -> conditions under which
+    # they land on their static object (None: anywhere); ``may_alias`` gave
+    # every read they may reach a debt (``function_summary.uncertain_writers_of``)
+    uncertain_writers: tuple = ()
+    # (call effect / rep element row key, evaluation key, anchor) of rows
+    # writing at an anchored address (``relative_memory.project_anchored``)
+    call_anchors: tuple = ()
+    # debt nodes ("uncertain_write_read") of reads that conditional
+    # uncertain-address writers may reach: (node, the writers' conditions).
+    # A root slice reaching one is incomplete (no caller decides them); a
+    # function summary already carries those conditions on every claim
+    # (``writer_conditions``) and passes these nodes
+    uncertain_nodes: tuple = ()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -175,8 +188,8 @@ class NormalizedFunction:
             record = self.dependencies.node(node)
             if (
                 record.kind is not NodeKind.MEMORY_DEBT
-                or record.label != "may_alias_read"
-                or not record.key.endswith(f":{row.operation_key}")
+                or record.label not in ("may_alias_read", "uncertain_write_read")
+                or not record.key.endswith((f":{row.operation_key}", f":{row.operation_key}:uncertain"))
             ):
                 raise ValueError("may-alias node does not match its read")
         if type(self.cfg) is not RustworkxDependencyGraph or type(
@@ -504,6 +517,71 @@ def _rep_overrides(sites, plan, observation) -> dict:
     return found
 
 
+def _reaches_debt(graph, node, varnode, context, clobbers=None) -> bool:
+    """Whether the value ``varnode`` has at operation ``node`` depends on any
+    debt (backward data slice of that input)."""
+    labels = _debt_labels(graph, node, varnode, context, clobbers)
+    return labels is None or bool(labels)
+
+
+def call_clobber_spans(normalized) -> dict:
+    """Call-clobber debt node -> the spans its read may have lost to a call."""
+    return dict(zip(normalized.call_clobber_nodes, (row.spans for row in normalized.call_clobber_reads)))
+
+
+def _row_reaches_debt(graph, node) -> bool:
+    """Whether any value operation ``node`` reads depends on a debt."""
+    from .function_summary import _address_slice
+
+    inputs = [source for source, _, record in graph._graph.in_edges(node)
+              if record.span is not None or graph.node(source).kind is NodeKind.MEMORY_DEBT]
+    return any(graph.node(item).kind is NodeKind.MEMORY_DEBT for item in _address_slice(graph, inputs, {}))
+
+
+def _debt_nodes(graph, node, varnode, context, clobbers=None):
+    """The debt nodes the value ``varnode`` has at operation ``node`` depends
+    on (None: cannot tell); see ``_debt_labels``."""
+    from .function_summary import _address_slice
+
+    if node is None:
+        return None
+    resolved = _resolve_validated_storage(_storage_ref(varnode), context)
+    if type(resolved) is not ResolvedStorage:
+        return None
+    inputs = [
+        source for source, _, record in graph._graph.in_edges(node)
+        if (record.span is not None and record.span.overlaps(resolved.span))
+        or (graph.node(source).kind is NodeKind.MEMORY_DEBT and (
+            clobbers is None or source not in clobbers
+            or any(span.overlaps(resolved.span) for span in clobbers[source])))
+    ]
+    return frozenset(item for item in _address_slice(graph, inputs, {})
+                     if graph.node(item).kind is NodeKind.MEMORY_DEBT)
+
+
+def _debt_labels(graph, node, varnode, context, clobbers=None):
+    """Labels of the debts the value ``varnode`` has at operation ``node``
+    depends on (None: cannot tell). Debts on the operation itself count (a
+    call clobber sits there without a span; with ``clobbers`` -- see
+    ``call_clobber_spans`` -- only one whose spans overlap ``varnode``)."""
+    from .function_summary import _address_slice
+
+    if node is None:
+        return None
+    resolved = _resolve_validated_storage(_storage_ref(varnode), context)
+    if type(resolved) is not ResolvedStorage:
+        return None
+    inputs = [
+        source for source, _, record in graph._graph.in_edges(node)
+        if (record.span is not None and record.span.overlaps(resolved.span))
+        or (graph.node(source).kind is NodeKind.MEMORY_DEBT and (
+            clobbers is None or source not in clobbers
+            or any(span.overlaps(resolved.span) for span in clobbers[source])))
+    ]
+    return frozenset(graph.node(item).label for item in _address_slice(graph, inputs, {})
+                     if graph.node(item).kind is NodeKind.MEMORY_DEBT)
+
+
 def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, assume_clear,
                      blocked=frozenset(), used=None) -> dict:
     """Sites whose count (at the instruction start) and direction become
@@ -697,7 +775,7 @@ def _program_register_space(unit) -> int | None:
 
 _CALL_EFFECT_LABELS = {
     "": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD", "sink": "CALL_EFFECT_SINK",
-    "ck": "CALL_EFFECT_CHECK", "cr": "CALL_EFFECT_CHECK", "sp": "CALL_EFFECT_CHECK",
+    "ck": "CALL_EFFECT_CHECK", "cr": "CALL_EFFECT_CHECK", "cw": "CALL_EFFECT_CHECK", "sp": "CALL_EFFECT_CHECK",
     "ext": "CALL_EFFECT_CHECK",
 }
 
@@ -823,6 +901,15 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             stage_key, EffectKind.COPY, reads=tuple(inputs), writes=(target,), block_key=block_key,
         ))
         staged.append((kind, run, stage_key, target))
+    anchors = sorted({
+        side.anchor for pair in proven.writer_conditions for side in pair if side.anchor is not None
+    }, key=lambda span: span.canonical_key)
+    if anchors:  # locates both sides of each writer condition at the call (``interprocedural``)
+        rows.append(ObservedEffect(
+            f"{call_key}~cw", EffectKind.COPY,
+            reads=tuple(ResolvedStorage(span) for span in anchors), writes=(temporary(),),
+            block_key=block_key,
+        ))
     for index, demand in enumerate(proven.sink_demands):
         inputs = [ResolvedStorage(span) for span in demand.reads] + [load(item) for item in demand.loads]
         rows.append(ObservedEffect(
@@ -973,8 +1060,56 @@ class FunctionNormalizer:
         )
 
 
+class _Retry:
+    """Normalize again with these memory reads blocked (``stale_reads``) and
+    these rep sites left unexpanded (their count or direction proof failed)."""
+
+    def __init__(self, failed: frozenset, sites: frozenset = frozenset(), bounds: frozenset = frozenset()) -> None:
+        self.failed = failed
+        self.sites = sites
+        self.bounds = bounds
+
+
+def _merge_uncertain(old: dict, new: dict) -> dict:
+    merged = dict(old)
+    for key, conditions in new.items():
+        if key in merged and (merged[key] is None or conditions is None):
+            merged[key] = None
+        else:
+            merged[key] = merged.get(key, frozenset()) | conditions if conditions is not None else None
+    return merged
+
+
 class _ScopedNormalizer:
     def normalize(
+        self,
+        unit: ScopedFunctionUnit,
+        configured_call_effects: ConfiguredFunctionCallEffectEvidenceV4 | None = None,
+        **options,
+    ) -> NormalizedFunction:
+        """Normalize to a fixed point of two facts: memory reads whose value a
+        projection may not use (``_blocked_reads``, grows on validation
+        failures) and uncertain-address writers (``_uncertain``: may-alias
+        debts on every read they may reach; their debts can make more writes
+        uncertain). Both only grow, so this ends."""
+        from .function_summary import uncertain_writers_of
+
+        blocked, sites, bounds, uncertain = frozenset(), frozenset(), frozenset(), {}
+        while True:
+            result = self._normalize_once(
+                unit, configured_call_effects, _blocked_reads=blocked, _blocked_sites=sites,
+                _blocked_bounds=bounds, _uncertain=uncertain, **options)
+            if type(result) is _Retry:
+                blocked |= result.failed
+                sites |= result.sites
+                bounds |= result.bounds
+                continue
+            merged = _merge_uncertain(uncertain, uncertain_writers_of(result, unit.observation))
+            if merged == uncertain:
+                return result
+            uncertain = merged
+
+    def _normalize_once(
         self,
         unit: ScopedFunctionUnit,
         configured_call_effects: ConfiguredFunctionCallEffectEvidenceV4 | None = None,
@@ -987,9 +1122,14 @@ class _ScopedNormalizer:
         assume_direction_flag_clear: bool = False,
         private_frame_above: int = 0,
         _blocked_reads: frozenset = frozenset(),
-    ) -> NormalizedFunction:
+        _blocked_sites: frozenset = frozenset(),
+        _blocked_bounds: frozenset = frozenset(),
+        _uncertain: dict | None = None,
+    ) -> NormalizedFunction | _Retry:
         """``_blocked_reads``: values read from memory that a projection may not
-        use (``relative_memory.stale_reads``; set by the validation below)."""
+        use (``relative_memory.stale_reads``; set by the validation below).
+        ``_uncertain``: uncertain-address writers (see ``normalize``)."""
+        _uncertain = _uncertain or {}
         assumed_call_effects = dict(assumed_call_effects or {})
         proven_call_effects = dict(proven_call_effects or {})
         if any(
@@ -1236,17 +1376,24 @@ class _ScopedNormalizer:
                         if not pending:
                             break
                         settle, settled_at = False, (effect_unit, memory_unit, memory_binding, memory_ssa, pending,
-                                                     {key: set(values) for key, values in used_reads.items()})
+                                                     {key: set(values) for key, values in used_reads.items()},
+                                                     [set(wild_objects), set(fresh_objects),
+                                                      set(nonstack_objects)])
                         continue
                     if settled_at is not None and settled_at[4] - _pending_write_keys(effect_unit):
-                        effect_unit, memory_unit, memory_binding, memory_ssa, _, used_reads = settled_at
+                        effect_unit, memory_unit, memory_binding, memory_ssa, _, used_reads, kept = settled_at
+                        for current, before in zip((wild_objects, fresh_objects, nonstack_objects), kept):
+                            current.clear()
+                            current.update(before)
                     break
                 effect_unit = projected_effect_unit
                 memory_unit = decode_effect_unit(effect_unit)
                 memory_binding = build_bound_local_memory_ssa(memory_unit)
                 memory_ssa = memory_binding.result
             overrides_now = _rep_overrides(sites, rep_plan, observation)
-            proven = _prove_rep_sites(sites, rep_plan, memory_ssa, observation, unit.scopes, overrides_now,
+            proven = _prove_rep_sites({address: site for address, site in sites.items()
+                                       if address not in _blocked_sites},
+                                      rep_plan, memory_ssa, observation, unit.scopes, overrides_now,
                                       assume_direction_flag_clear, _blocked_reads, rep_used)
             if not proven:
                 break
@@ -1287,10 +1434,10 @@ class _ScopedNormalizer:
             for node in expected_entry_nodes
         ):
             raise AssertionError("ENTRY definitions must materialize as observed inputs")
-        below_bounds = _call_below_bounds(
+        below_bounds = tuple(row for row in _call_below_bounds(
             proven_call_effects, call_transitions, effect_unit, memory_ssa, observation, unit.scopes,
             context,
-        )
+        ) if row[0] not in _blocked_bounds)
         proven_preserved = {key: row.preserved for key, row in proven_call_effects.items()}
         for key, object_id, bound in below_bounds:
             # keeps every memory byte this function tracks except its stack below the bound
@@ -1333,6 +1480,19 @@ class _ScopedNormalizer:
             nonstack_objects=frozenset(nonstack_objects),
             observed_calls=observed_calls,
             private_above=private_frame_above,
+            uncertain_writers=frozenset(_uncertain),
+            no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
+        )
+        private_writes = private_frame_writes(
+            effect_unit, observation, context, address_spaces,
+            assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
+        )
+        may_alias_nodes, uncertain_nodes = _materialize_may_alias_debt(
+            dependencies,
+            memory_ssa,
+            may_alias_reads,
+            operation_nodes,
+            _uncertain,
         )
         # every value read from memory that an address, a definition atom or a rep
         # count was built on must be the value the final state gives that read
@@ -1359,24 +1519,44 @@ class _ScopedNormalizer:
             operation_overrides=_rep_overrides(sites, rep_plan, observation),
         )
         failed -= _blocked_reads
-        if failed:
-            return self.normalize(
-                unit, configured_call_effects, opaque_value_provider=opaque_value_provider,
-                assumed_call_effects=assumed_call_effects, proven_call_effects=proven_call_effects,
-                assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
-                readonly_image=readonly_image, assume_direction_flag_clear=assume_direction_flag_clear,
-                private_frame_above=private_frame_above, _blocked_reads=_blocked_reads | failed,
-            )
-        private_writes = private_frame_writes(
-            effect_unit, observation, context, address_spaces,
-            assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
+        # a rep expansion has no condition to carry: its count and direction
+        # must reach no debt on the final graph (memory, call clobber,
+        # unresolved -- also through registers a call may have changed); a
+        # call-clobber debt on the direction flag alone is covered by
+        # direction-flag-clear (DF clear when a call returns), reported as used
+        failed_sites = set()
+        for address in rep_plan:
+            site = sites[address]
+            if _reaches_debt(dependencies, operation_nodes.get(site.count_key), site.count, context):
+                failed_sites.add(address)
+                continue
+            node = operation_nodes.get(site.direction_key)
+            debts = _debt_nodes(dependencies, node, site.direction, context)
+            if debts is None:
+                failed_sites.add(address)
+            elif debts:
+                # direction-flag-clear: DF is 0 when a call returns -- the flag
+                # is then 0 (forward) at the site only if every debt is a call
+                # possibly changing DF itself (nothing assigned after it)
+                flag = _resolve_validated_storage(_storage_ref(site.direction), context)
+                spans = dict(zip(call_clobber_nodes, (row.spans for row in call_clobber_reads)))
+                if assume_direction_flag_clear and rep_plan[address][1] == 1 \
+                        and type(flag) is ResolvedStorage and all(
+                            debt in spans and all(flag.span.contains(span) for span in spans[debt])
+                            for debt in debts):
+                    direction_assumed = True
+                else:
+                    failed_sites.add(address)
+        failed_sites = frozenset(failed_sites)
+        # a call's below-stack bound rests on its stack pointer at the call
+        # (``~sp`` row): with debt there, that bound may be another
+        failed_bounds = frozenset(
+            key for key, _, _ in below_bounds
+            if operation_nodes.get(f"{key}~sp") is not None
+            and _row_reaches_debt(dependencies, operation_nodes[f"{key}~sp"])
         )
-        may_alias_nodes = _materialize_may_alias_debt(
-            dependencies,
-            memory_ssa,
-            may_alias_reads,
-            operation_nodes,
-        )
+        if failed or failed_sites or failed_bounds:
+            return _Retry(frozenset(failed), failed_sites, failed_bounds)
         control_dependences = derive_control_dependences(observation, function.entry)
         for row in control_dependences:
             dependencies.add_edge(
@@ -1436,6 +1616,12 @@ class _ScopedNormalizer:
             same_object_rows=tuple(sorted(
                 ((row, reader, argument) for row, (reader, argument) in same_object_rows.items()),
                 key=lambda item: item[0])),
+            uncertain_writers=tuple(sorted(
+                ((key, conditions) for key, conditions in _uncertain.items()), key=lambda item: item[0])),
+            call_anchors=tuple(sorted(
+                ((key, anchored[0], anchored[1]) for key, anchored in anchored_call_accesses.items()),
+                key=lambda item: item[0])),
+            uncertain_nodes=uncertain_nodes,
         )
 
     def _build_cfg(
@@ -1631,17 +1817,39 @@ def _materialize_may_alias_debt(
     memory_ssa: LocalMemorySsaResult,
     reads: tuple[MayAliasRead, ...],
     operation_nodes: dict[str, NodeId],
-) -> tuple[NodeId, ...]:
-    """Writer -> debt -> read: possible writers stay reachable as origins."""
+    uncertain: dict | None = None,
+) -> tuple[tuple[NodeId, ...], tuple]:
+    """Writer -> debt -> read: possible writers stay reachable as origins.
+    Returns (one node per read row, uncertain nodes). Conditional
+    uncertain-address writers (``uncertain``: key -> conditions) get a node of
+    their own, "uncertain_write_read", without writer edges (under their
+    conditions they did not write there); when a row has nothing else, its
+    node is that one."""
+    uncertain = uncertain or {}
     if not reads:
-        return ()
+        return (), ()
     namespace = (
         f"may-alias-v1:{memory_ssa.function_scope.digest.hex()}:"
         f"{memory_ssa.unit_digest.hex()}"
     )
     dependencies.claim_namespace(namespace)
-    nodes = []
+    nodes, uncertain_nodes = [], []
     for row in reads:
+        conditional = [writer for writer in row.uncertain if uncertain.get(writer) is not None]
+        hard = [writer for writer in row.writers if writer not in conditional or (
+            row.plain is not None and writer in row.plain)]
+        if conditional:
+            pairs = frozenset().union(*(uncertain[writer] for writer in conditional))
+            extra = dependencies.add_node(NodeRecord(
+                f"{namespace}:{row.operation_key}:uncertain", NodeKind.MEMORY_DEBT, "uncertain_write_read"))
+            dependencies.add_edge(
+                extra, operation_nodes[row.operation_key],
+                EdgeRecord(EdgeKind.MAY_ALIAS_READ, operation=row.operation_key),
+            )
+            uncertain_nodes.append((extra, pairs))
+            if not hard:
+                nodes.append(extra)
+                continue
         node = dependencies.add_node(
             NodeRecord(
                 f"{namespace}:{row.operation_key}",
@@ -1649,7 +1857,7 @@ def _materialize_may_alias_debt(
                 "may_alias_read",
             )
         )
-        for writer in row.writers:
+        for writer in hard:
             dependencies.add_edge(
                 operation_nodes[writer],
                 node,
@@ -1661,7 +1869,7 @@ def _materialize_may_alias_debt(
             EdgeRecord(EdgeKind.MAY_ALIAS_READ, operation=row.operation_key),
         )
         nodes.append(node)
-    return tuple(nodes)
+    return tuple(nodes), tuple(uncertain_nodes)
 
 
 def _storage_ref(value: ValidatedVarnode) -> StorageRef:

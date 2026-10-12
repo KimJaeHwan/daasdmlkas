@@ -98,6 +98,11 @@ class MayAliasRead:
     spans: tuple[ByteSpan, ...]
     writers: tuple[str, ...]
     unknown_address: bool = False  # the read's own address is unknown; spans empty
+    # writers that reached the read as uncertain-address writers
+    # (``uncertain_writers`` of ``derive_may_alias_reads``) and those that
+    # reached it as ordinary writes (None: all -- rows built elsewhere)
+    uncertain: tuple[str, ...] = ()
+    plain: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if type(self.operation_key) is not str or not self.operation_key:
@@ -166,6 +171,8 @@ class _Policy:
         # writers a private frame read still sees: unknown-address writes and
         # writes to wild objects
         self.unknown_writers: frozenset[str] = frozenset()
+        self.uncertain_writers: frozenset[str] = frozenset()
+        self.no_kill_writers: frozenset[str] = frozenset()
         self.wild_objects: frozenset = frozenset()
         self.fresh_objects: frozenset = frozenset()
         self.nonstack_objects: frozenset = frozenset()
@@ -212,12 +219,22 @@ def derive_may_alias_reads(
     fresh_objects: frozenset = frozenset(),
     nonstack_objects: frozenset = frozenset(),
     private_above: int = 0,
+    uncertain_writers: frozenset = frozenset(),
+    no_kill_writers: frozenset = frozenset(),
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
     ``assumed_calls`` (TEST-ONLY) are boundary calls declared to touch only
     their listed registers; they cannot observe a stack pointer copy.
     ``assume_globals_disjoint_from_stack``: the opt-in assumption above.
+    ``uncertain_writers``: write keys whose resolved address rests on a read
+    with debt (``function_summary.uncertain_writers_of``): besides their
+    ordinary effect they may have written any byte of any object, private
+    frame bytes included -- every read they may reach gets them as
+    ``MayAliasRead.uncertain`` (later exact writes kill that only where they
+    definitely overwrite the bytes). ``no_kill_writers`` (the unconditional
+    ones): their own write is no definite overwrite of its static bytes either
+    -- earlier writers stay possible there.
     """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("may-alias analysis requires an exact effect unit")
@@ -244,7 +261,11 @@ def derive_may_alias_reads(
         if _unknown_write(effect)
     )
     has_unknown_read = any(_unknown_read(effect) for block in unit.blocks for effect in block.effects)
-    if len(objects) < 2 and not unknown_writers and not has_unknown_read:
+    uncertain = frozenset(
+        effect.operation_key for block in unit.blocks for effect in block.effects
+        if effect.operation_key in uncertain_writers
+    )
+    if len(objects) < 2 and not unknown_writers and not has_unknown_read and not uncertain:
         return ()
     policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls,
                            assume_globals_disjoint_from_stack, observed_calls, private_above)
@@ -252,13 +273,15 @@ def derive_may_alias_reads(
     policy.wild_objects = wild
     policy.fresh_objects = frozenset(item for item in objects if item in fresh_objects)
     policy.nonstack_objects = frozenset(item for item in objects if item in nonstack_objects)
+    policy.uncertain_writers = uncertain
+    policy.no_kill_writers = frozenset(no_kill_writers) & uncertain
     policy.unknown_writers = unknown_writers | frozenset(
         effect.operation_key
         for block in unit.blocks
         for effect in block.effects
         for evidence in effect.writes
         if type(evidence) is ResolvedStorage and evidence.span.object_id in wild
-    )
+    ) | frozenset(_UNCERTAIN + key for key in uncertain)
     return run_dataflow(
         "may-alias", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
         unit, objects, policy,
@@ -359,11 +382,9 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows) -> dict:
                 if dirty:
                     spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
             if spans:
-                rows.append(MayAliasRead(effect.operation_key, tuple(spans), tuple(sorted(writers))))
+                rows.append(_row(effect.operation_key, tuple(spans), writers))
             elif _unknown_read(effect) and state[_ANY_WRITE]:
-                rows.append(MayAliasRead(
-                    effect.operation_key, (), tuple(sorted(state[_ANY_WRITE])), unknown_address=True
-                ))
+                rows.append(_row(effect.operation_key, (), state[_ANY_WRITE]))
         for evidence in effect.writes:
             if type(evidence) is not ResolvedStorage or evidence.span.object_id not in state:
                 continue
@@ -371,7 +392,24 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows) -> dict:
             state[_ANY_WRITE] = state[_ANY_WRITE] | {effect.operation_key}
         if _unknown_write(effect):
             state = _written_anywhere(state, effect.operation_key, objects)
+        if effect.operation_key in policy.uncertain_writers:
+            state = _written_anywhere(state, _UNCERTAIN + effect.operation_key, objects)
     return state
+
+
+# label prefix of an uncertain-address writer's "may have written anywhere" gen
+_UNCERTAIN = "?"
+
+
+def _row(operation_key: str, spans: tuple, labels) -> MayAliasRead:
+    """The row of a read reached by ``labels`` (writer keys; ``_UNCERTAIN``
+    marks the gen of an uncertain-address writer)."""
+    plain = {label for label in labels if not label.startswith(_UNCERTAIN)}
+    uncertain = {label[len(_UNCERTAIN):] for label in labels if label.startswith(_UNCERTAIN)}
+    return MayAliasRead(
+        operation_key, spans, tuple(sorted(plain | uncertain)), unknown_address=not spans,
+        uncertain=tuple(sorted(uncertain)), plain=tuple(sorted(plain)),
+    )
 
 
 _ANY_WRITE = object()
@@ -400,14 +438,15 @@ def _written_anywhere(state: dict, writer: str, objects) -> dict:
 
 def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy) -> dict:
     updated = dict(state)
-    own = state[span.object_id]
-    cleared = dict(own.bytes)
-    for offset in range(span.start, span.end):
-        if own.default:
-            cleared[offset] = frozenset()
-        else:
-            cleared.pop(offset, None)
-    updated[span.object_id] = _ObjectState(own.default, cleared)
+    if writer not in policy.no_kill_writers:
+        own = state[span.object_id]
+        cleared = dict(own.bytes)
+        for offset in range(span.start, span.end):
+            if own.default:
+                cleared[offset] = frozenset()
+            else:
+                cleared.pop(offset, None)
+        updated[span.object_id] = _ObjectState(own.default, cleared)
     private = all(policy.is_private(span.object_id, offset, writer, write=True)
                   for offset in range(span.start, span.end))
     for other in objects:

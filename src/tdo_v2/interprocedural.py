@@ -241,11 +241,12 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     )
                     if effect is None:
                         continue
-                    missing = [slice_ for slice_ in entry.extent_registers()
-                               if slice_ not in constants.get(call_key, {})]
-                    if missing:
+                    # every extent register, proven or not: a constant taken is
+                    # checked again on each state (``_prove_extents``)
+                    slices = entry.extent_registers()
+                    if slices:
                         effect = replace(effect, extent_registers=tuple(
-                            ByteSpan(register_object, offset, size) for offset, size in missing))
+                            ByteSpan(register_object, offset, size) for offset, size in slices))
                     proven[call_key] = effect
                 return proven
 
@@ -255,6 +256,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             # (the failed set only grows)
             failed: dict = {}
             constants: dict = {}   # external call -> extent register -> proven constant
+            rejected: set = set()  # (call, extent register) whose constant failed on a later state
             while True:
                 proven = derive(failed)
                 normalized = FunctionNormalizer().normalize(
@@ -270,12 +272,16 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     (call, f"cr{index}", run.conditions)
                     for call, effect in proven.items()
                     for index, run in enumerate((*effect.runs, *effect.memory_runs)) if run.conditions
+                ] + [
+                    (call, "cw", effect.writer_conditions)
+                    for call, effect in proven.items() if effect.writer_conditions
                 ])
-                grown = _prove_extents(unit, normalized, proven, constants)
+                grown = _prove_extents(unit, normalized, proven, constants, rejected)
                 for (call, tag), rows in verdicts.items():
                     effect = proven[call]
-                    run = (*effect.runs, *effect.memory_runs)[int(tag[2:])]
-                    for pair, verdict in zip(run.conditions, rows):
+                    conditions = effect.writer_conditions if tag == "cw" else \
+                        (*effect.runs, *effect.memory_runs)[int(tag[2:])].conditions
+                    for pair, verdict in zip(conditions, rows):
                         if verdict != "ok" and pair not in failed.get(call, set()):
                             failed.setdefault(call, set()).add(pair)
                             grown = True
@@ -430,11 +436,22 @@ def _external_sites(unit, image_info, external_models) -> dict:
     return found
 
 
-def _prove_extents(unit, normalized, proven, constants) -> bool:
+def _prove_extents(unit, normalized, proven, constants, rejected=None) -> bool:
     """Evaluate the ``~ext`` rows of model calls: a register proven constant at
-    the call makes that model's variable-size effect exact (re-derive)."""
+    the call makes that model's variable-size effect exact (re-derive). The
+    value must reach no debt (a write through another object or a call may
+    have changed it); a constant taken earlier that this state no longer
+    proves the same is withdrawn for good (``rejected``)."""
     from ._scope_contracts import AddressCoordinate, ValidatedVarnode
+    from .normalize import _reaches_debt
     from .relative_memory import constant_values
+
+    from .normalize import call_clobber_spans
+
+    rejected = set() if rejected is None else rejected
+    graph = normalized.dependencies
+    clobbers = call_clobber_spans(normalized)
+    context = unit.scopes.resolution_context
 
     register_space = _register_space_id(unit.observation) or _program_register_space(unit)
     requests = [
@@ -447,9 +464,18 @@ def _prove_extents(unit, normalized, proven, constants) -> bool:
     values = constant_values(normalized, unit.observation, [(key, varnode) for key, varnode, _, _ in requests])
     grown = False
     for key, varnode, call, span in requests:
+        slot = (span.start, span.size)
         value = values.get((key, varnode))
-        if value is not None and (span.start, span.size) not in constants.get(call, {}):
-            constants.setdefault(call, {})[(span.start, span.size)] = value
+        if value is not None and _reaches_debt(graph, graph.node_for_key(f"op:{key}"), varnode, context,
+                                               clobbers):
+            value = None
+        known = constants.get(call, {})
+        if slot in known and known[slot] != value:
+            del known[slot]  # the constant used before does not hold here
+            rejected.add((call, slot))
+            grown = True
+        elif value is not None and slot not in known and (call, slot) not in rejected:
+            constants.setdefault(call, {})[slot] = value
             grown = True
     return grown
 
@@ -475,7 +501,8 @@ def _bottom_summary(stack_pointers, shapes, call_key, program_stack):
 
 def _recursive_hypothesis(derive, stack):
     """A derived effect usable as a recursion hypothesis: conditional values
-    failed (they would need the caller's decision inside the fixpoint), sink
+    and writer conditions failed (they would need the caller's decision inside
+    the fixpoint), sink
     demands merged per label (writes below the callee's entry stack pointer,
     which would re-project deeper each round, are already folded into
     ``clobbers_below`` by ``derive_proven_call_effect``)."""
@@ -487,7 +514,8 @@ def _recursive_hypothesis(derive, stack):
         effect = derive(failed)
         if effect is None:
             return None
-        pairs = {pair for run in (*effect.runs, *effect.memory_runs) for pair in run.conditions}
+        # writer conditions too: every claim of the effect rests on them
+        pairs = {pair for run in (*effect.runs, *effect.memory_runs) for pair in run.conditions}             | set(effect.writer_conditions)
         if not pairs - failed:
             break
         failed |= pairs
@@ -629,6 +657,16 @@ def _decide_conditions(unit, normalized, shapes, pending) -> dict:
     }
     located = project_anchored_after(normalized, observation, sorted(requests, key=repr)) \
         if register_space is not None else {}
+    # a side located through a value with debt is not located: its address
+    # could be another (the anchor read may have been changed)
+    from .normalize import _reaches_debt, call_clobber_spans
+    graph = normalized.dependencies
+    clobbers = call_clobber_spans(normalized)
+    located = {
+        item: span for item, span in located.items()
+        if span is not None and not _reaches_debt(
+            graph, graph.node_for_key(f"op:{item[0]}"), item[1], unit.scopes.resolution_context, clobbers)
+    }
     stack = stack_object_of(unit.scopes, observation) if normalized.assumes_globals_disjoint_from_stack else None
     result = {}
     for call, tag, conditions in pending:

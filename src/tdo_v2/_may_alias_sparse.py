@@ -26,7 +26,7 @@ _ANY = "any-write"
 
 
 def derive_sparse(unit, objects, policy):
-    from .may_alias import MayAliasRead, _unknown_read, _unknown_write
+    from .may_alias import _UNCERTAIN, _row, _unknown_read, _unknown_write
 
     tracked = set(objects)
     graph = DominatorGraph(unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks})
@@ -52,8 +52,9 @@ def derive_sparse(unit, objects, policy):
                     continue
                 span = evidence.span
                 order = 1 + index
-                write_spans.setdefault(span.object_id, []).append(
-                    (span.start, span.end, (block.key, position, order)))
+                if writer not in policy.no_kill_writers:  # an uncertain destination kills nothing
+                    write_spans.setdefault(span.object_id, []).append(
+                        (span.start, span.end, (block.key, position, order)))
                 private = all(policy.is_private(span.object_id, offset, writer, write=True)
                               for offset in range(span.start, span.end))
                 for other in tracked:  # a private frame write reaches only wild objects
@@ -65,6 +66,11 @@ def derive_sparse(unit, objects, policy):
                 for other in tracked:
                     object_gens[other].append((block.key, position, order, writer))
                 any_gens.append((block.key, position, order, writer))
+            if writer in policy.uncertain_writers:  # may have written anywhere, as the dense code
+                order = 2 + len(effect.writes)
+                for other in tracked:
+                    object_gens[other].append((block.key, position, order, _UNCERTAIN + writer))
+                any_gens.append((block.key, position, order, _UNCERTAIN + writer))
 
     # byte classes: (object, covering writes)
     class_of: dict[tuple, int] = {}
@@ -150,11 +156,9 @@ def derive_sparse(unit, objects, policy):
                 if dirty:
                     spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
             if spans:
-                rows.append(MayAliasRead(effect.operation_key, tuple(spans), tuple(sorted(writers))))
+                rows.append(_row(effect.operation_key, tuple(spans), writers))
             elif _unknown_read(effect):
                 value = value_at(_ANY, block.key, position)
                 if value:
-                    rows.append(MayAliasRead(
-                        effect.operation_key, (), tuple(sorted(value)), unknown_address=True
-                    ))
+                    rows.append(_row(effect.operation_key, (), value))
     return tuple(sorted(rows, key=lambda row: row.operation_key))

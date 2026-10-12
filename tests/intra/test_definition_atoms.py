@@ -263,8 +263,12 @@ def test_a_loaded_pointer_may_reach_a_fresh_block():
 
 
 def test_mutation_fresh_disjoint_from_everything_misses(monkeypatch):
+    """The fresh rule alone is load-bearing: with uncertain-address writers off
+    (q's read has alias debt, so *q is one and would cover this mutation)."""
+    import tdo_v2.function_summary as function_summary_module
     import tdo_v2.may_alias as may_alias_module
     original = may_alias_module._Policy.may_alias
+    monkeypatch.setattr(function_summary_module, "uncertain_writers_of", lambda normalized, observation: {})
 
     def disjoint(self, left, right):
         if left in self.fresh_objects or right in self.fresh_objects:
