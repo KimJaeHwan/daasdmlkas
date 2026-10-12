@@ -63,3 +63,16 @@ def test_dynamic_runs_agree_when_the_image_holds_the_pointer():
                    register_pools=lambda seed: {RSP: 0x7000_0000, RBX: seed, RDX: 7 * seed},
                    image=lambda space, address: image.get((space, address)))
     assert report.runs and report.silent == []
+
+
+def test_import_slots_are_not_image_constants():
+    """The loader writes the import address table: a read of an import slot
+    (or of bytes overlapping one) is not the image value at run time."""
+    from tdo_v2.image_info import BlockPermissions, ImageInfo, ImportedSymbol, ReadOnlyImage
+
+    block = BlockPermissions(1, 0x1000, 0x100, ".rdata", True, False, False, False, True)
+    info = ImageInfo("pe", (block,), (ImportedSymbol("CORE.DLL", "GData", None, ((1, 0x1040),), ()),), (), ())
+    image = ReadOnlyImage.__new__(ReadOnlyImage)
+    image._info = info
+    for offset, size in ((0x1040, 8), (0x1044, 4), (0x103c, 8)):
+        assert image.value(1, offset, size) is None

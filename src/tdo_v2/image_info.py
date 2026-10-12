@@ -117,12 +117,17 @@ def _coordinates(rows, what):
     return tuple(result)
 
 
+_SLOT_BYTES = 8   # an import slot is at most pointer-sized; wider is only more conservative
+
+
 class ReadOnlyImage:
     """Initial values of read-only image memory, for the named assumption
     ``readonly-image-data-is-constant``: bytes of a loaded, initialized,
     non-writable, non-volatile block keep their image value while the program
     runs (no ``VirtualProtect``-style rewriting). Values are the Bundle's
-    sealed memory-block bytes (Ghidra's image, relocated to its image base)."""
+    sealed memory-block bytes (Ghidra's image, relocated to its image base).
+    Import slots are excluded: the loader writes them (the image holds a
+    name-table reference, the running program the imported address)."""
 
     def __init__(self, generation_path: str | Path, info: ImageInfo) -> None:
         self._generation = Path(generation_path)
@@ -136,6 +141,9 @@ class ReadOnlyImage:
         block = self._info.block_at(space_id, offset, size)
         if block is None or not block.initialized or block.write or block.volatile or not block.read:
             return None
+        if any(slot_space == space_id and slot < offset + size and offset < slot + _SLOT_BYTES
+               for row in self._info.imports for slot_space, slot in row.slots):
+            return None  # loader-written: not the image value at run time
         member_id = self._block_members.get((block.space_id, block.start))
         if member_id is None:
             return None
