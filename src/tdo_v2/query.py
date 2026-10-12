@@ -44,6 +44,10 @@ class BackwardSliceQuery:
         unresolved_read_set = set(function.memory_graph.unresolved_read_nodes)
         unresolved_read_set.update(function.call_clobber_nodes)
         unresolved_read_set.update(function.may_alias_nodes)
+        # debts of other kinds: uncertain-writer nodes not standing for a row,
+        # alias conditions this function cannot decide
+        unresolved_read_set.update(node for node, _ in getattr(function, "uncertain_nodes", ()))
+        unresolved_read_set.update(node for node, _ in getattr(function, "open_nodes", ()))
         unresolved_reads = tuple(
             node
             for node in reachable

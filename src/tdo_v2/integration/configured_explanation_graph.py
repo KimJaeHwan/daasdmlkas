@@ -362,6 +362,8 @@ def conditional_call_byte_overlay(
     debt_nodes.update(normalized.memory_graph.unresolved_write_nodes)
     debt_nodes.update(normalized.call_clobber_nodes)
     debt_nodes.update(normalized.may_alias_nodes)
+    debt_nodes.update(node for node, _ in getattr(normalized, "uncertain_nodes", ()))
+    debt_nodes.update(node for node, _ in getattr(normalized, "open_nodes", ()))
     remaining_debt = sorted(debt_nodes & reached)
     return {
         "contract": "conditional_observed_call_byte_explanation",

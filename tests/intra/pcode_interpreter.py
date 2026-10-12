@@ -142,6 +142,12 @@ class Interpreter:
         self._activations: list = []          # (return location, call key)
         self._activation_written: set = set()
         self._byte_inputs: list = []
+        # inside an activation: byte -> the one caller byte (an "ext" tag) its
+        # value is an exact copy of, through COPY / LOAD / STORE moves only
+        # (an address is not part of the value) -- ``_restore_identity_bytes``
+        self._copy_source: dict = {}
+        self._byte_copies: list = []   # per byte read by the current operation
+        self._value_start = None       # LOAD / STORE: index of the first value byte read
         self._blocks: dict = {}   # external heap: block address -> size
         self._free: list = []     # freed block addresses, reused by the next allocation  # bytes written in the current outermost activation
         self._call_bytes: set = set()          # bytes last written by some activation
@@ -215,10 +221,13 @@ class Interpreter:
             if self._activations:
                 if key in self._activation_written:
                     found = self.provenance.get(key, frozenset())
+                    self._byte_copies.append(self._copy_source.get(key))
                 elif space_id not in self._unique_spaces:
                     found = frozenset({("ext", writer, space_id, offset + index)})
+                    self._byte_copies.append(("ext", writer, space_id, offset + index))
                 else:
                     found = frozenset()
+                    self._byte_copies.append(None)
                 self._operation_inputs |= found
                 self._byte_inputs.append(found)  # per byte, for COPY
                 continue
@@ -241,9 +250,13 @@ class Interpreter:
         never by an equal value."""
         for key in self._activation_written:
             tags = self.provenance.get(key, frozenset())
-            if len(tags) != 1:
+            copied = self._copy_source.get(key)
+            if len(tags) == 1:
+                (tag,) = tags
+            elif copied is not None:
+                tag = copied  # a push and pop through memory: exact by value moves
+            else:
                 continue
-            (tag,) = tags
             if tag[0] == "ext" and (tag[2], tag[3]) == key and key in self._call_bytes:
                 self._bytes[key] = (self._bytes[key][0], tag[1])
                 self._call_bytes.discard(key)
@@ -270,6 +283,15 @@ class Interpreter:
             exact = operation.endswith(":COPY") and len(self._byte_inputs) == size
             for index in range(size):
                 self.provenance[(space_id, offset + index)] = self._byte_inputs[index] if exact else tags
+            # value moves keep the exact copy source of each byte (not the address)
+            start = 0 if operation.endswith(":COPY") else self._value_start
+            moved = start is not None and len(self._byte_copies) - start == size and (
+                operation.endswith((":COPY", ":LOAD", ":STORE")))
+            for index in range(size):
+                if moved and self._byte_copies[start + index] is not None:
+                    self._copy_source[(space_id, offset + index)] = self._byte_copies[start + index]
+                else:
+                    self._copy_source.pop((space_id, offset + index), None)
             return
         if self._track:
             if writer.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") or writer in self._assumed:
@@ -332,6 +354,7 @@ class Interpreter:
                 # engine models the call shape
                 if not self._activations:
                     self._activation_written = set()
+                    self._copy_source = {}
                     self._call_stack_pointer = self._stack_pointer_snapshot()
                 self._activations.append((next_location, call))
             index = 0
@@ -356,6 +379,8 @@ class Interpreter:
                     self._record_sink(operation, run)
                 self._operation_inputs = set()
                 self._byte_inputs = []
+                self._byte_copies = []
+                self._value_start = None
                 jump = self._execute(key, operation, run)
                 if jump is None:
                     index += 1
@@ -474,6 +499,7 @@ class Interpreter:
         if opcode == "LOAD":
             space_id = inputs[0].coordinate.byte_offset
             address = self._value(key, inputs[1], run)
+            self._value_start = len(self._byte_copies)
             value = self._read(key, space_id, address, output.byte_size, run)
             self._write(key, output.coordinate.space_id, output.coordinate.byte_offset,
                         output.byte_size, value)
@@ -481,6 +507,7 @@ class Interpreter:
         if opcode == "STORE":
             space_id = inputs[0].coordinate.byte_offset
             address = self._value(key, inputs[1], run)
+            self._value_start = len(self._byte_copies)
             value = self._value(key, inputs[2], run)
             self._write(key, space_id, address, inputs[2].byte_size, value)
             return None

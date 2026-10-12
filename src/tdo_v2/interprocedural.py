@@ -257,6 +257,10 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             failed: dict = {}
             constants: dict = {}   # external call -> extent register -> proven constant
             rejected: set = set()  # (call, extent register) whose constant failed on a later state
+            # run pairs this function cannot decide (both sides located in its own
+            # objects): kept as conditions of its own (``open_condition`` debts),
+            # sticky -- a pair later found failing, or located elsewhere, fails
+            opened: dict = {}
             while True:
                 proven = derive(failed)
                 normalized = FunctionNormalizer().normalize(
@@ -265,6 +269,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     readonly_image=readonly_image,
                     assume_direction_flag_clear=assume_direction_flag_clear,
                     private_frame_above=private_frame_above,
+                    open_conditions=opened,
                 )
                 if type(normalized) is not NormalizedFunction:
                     break
@@ -282,9 +287,16 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     conditions = effect.writer_conditions if tag == "cw" else \
                         (*effect.runs, *effect.memory_runs)[int(tag[2:])].conditions
                     for pair, verdict in zip(conditions, rows):
-                        if verdict != "ok" and pair not in failed.get(call, set()):
-                            failed.setdefault(call, set()).add(pair)
-                            grown = True
+                        if verdict == "ok" or pair in failed.get(call, set()):
+                            continue
+                        known = opened.get(call, {}).get(pair)
+                        if tag != "cw" and verdict != "fail" and known in (None, verdict):
+                            if known is None:
+                                opened.setdefault(call, {})[pair] = verdict
+                                grown = True
+                            continue
+                        failed.setdefault(call, set()).add(pair)
+                        grown = True
                 if not grown:
                     break
             origins: dict = {}
@@ -780,6 +792,10 @@ def _relative_anchors(unit, normalized) -> dict:
         accesses = [load for run in effect.runs for load in run.loads]
         accesses += [item for run in effect.memory_runs for item in (run.write, *run.loads)]
         accesses += [load for demand in effect.sink_demands for load in demand.loads]
+        # both sides of the alias conditions the call carries (a side may be an
+        # object only the condition mentions)
+        accesses += [side for run in (*effect.runs, *effect.memory_runs) for pair in run.conditions
+                     for side in pair]
         for access in accesses:
             if access.anchor is not None:
                 registers.add(access.anchor)
@@ -801,9 +817,10 @@ def _relative_anchors(unit, normalized) -> dict:
         for space_id in spaces:
             candidates[_function_relative_object_id(unit.scopes.function.scope, span, space_id)] = (
                 span, space_id)
-    used = {
-        run.span.object_id for item in normalized.memory_ssa.atomic_spans for run in ()
-    } | {atom.object_id for atom in normalized.memory_ssa.atomic_spans}
+    used = {atom.object_id for atom in normalized.memory_ssa.atomic_spans}
+    # objects of the open conditions this function passes to its callers
+    used |= {span.object_id for _, pairs in getattr(normalized, "open_nodes", ()) for pair in pairs
+             for span in pair}
     return {object_id: row for object_id, row in candidates.items() if object_id in used}
 
 

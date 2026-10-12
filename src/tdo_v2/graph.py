@@ -82,6 +82,15 @@ class RustworkxDependencyGraph:
     def freeze(self) -> None:
         self._frozen = True
 
+    def copy(self) -> "RustworkxDependencyGraph":
+        """An unfrozen copy with the same node ids (to extend it more than one way)."""
+        other = RustworkxDependencyGraph.__new__(RustworkxDependencyGraph)
+        other._graph = self._graph.copy()
+        other._nodes_by_key = dict(self._nodes_by_key)
+        other._frozen = False
+        other._claimed_namespaces = dict(self._claimed_namespaces)
+        return other
+
     def predecessors(self, node: NodeId) -> tuple[NodeId, ...]:
         return tuple(sorted({int(item) for item in self._graph.predecessor_indices(node)}))
 

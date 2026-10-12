@@ -158,6 +158,11 @@ class NormalizedFunction:
     # function summary already carries those conditions on every claim
     # (``writer_conditions``) and passes these nodes
     uncertain_nodes: tuple = ()
+    # debt nodes ("open_condition") on summarized-run rows whose alias
+    # conditions this function cannot decide: (node, (read span, write span)
+    # pairs in this function's objects). Conditional (summaries carry the
+    # pairs to the callers; roots are unsure)
+    open_nodes: tuple = ()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -989,9 +994,14 @@ class FunctionNormalizer:
         readonly_image=None,
         assume_direction_flag_clear: bool = False,
         private_frame_above: int = 0,
+        open_conditions: dict | None = None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
         declared effect; see ``tdo_v2.assumed_call_effects``.
+        ``open_conditions``: call key -> {anchored pair of a run condition ->
+        (read span, write span) in this function's objects}: pairs this
+        function cannot decide (``interprocedural``); the run rows carrying
+        them get an "open_condition" debt with those pairs.
         ``proven_call_effects``: call operation key -> effect proven from the
         callee's summary (``tdo_v2.call_summary_effects``).
         ``assume_globals_disjoint_from_stack``: named opt-in assumption, see
@@ -1023,6 +1033,7 @@ class FunctionNormalizer:
             readonly_image=readonly_image,
             assume_direction_flag_clear=assume_direction_flag_clear,
             private_frame_above=private_frame_above,
+            open_conditions=open_conditions or {},
         )
 
     def normalize_configured(
@@ -1104,8 +1115,9 @@ class _ScopedNormalizer:
                 sites |= result.sites
                 bounds |= result.bounds
                 continue
-            merged = _merge_uncertain(uncertain, uncertain_writers_of(result, unit.observation))
-            if merged == uncertain:
+            reached = dict(result.uncertain_writers)  # its own fixed point (``_normalize_once``)
+            merged = _merge_uncertain(reached, uncertain_writers_of(result, unit.observation))
+            if merged == reached:
                 return result
             uncertain = merged
 
@@ -1125,6 +1137,7 @@ class _ScopedNormalizer:
         _blocked_sites: frozenset = frozenset(),
         _blocked_bounds: frozenset = frozenset(),
         _uncertain: dict | None = None,
+        open_conditions: dict | None = None,
     ) -> NormalizedFunction | _Retry:
         """``_blocked_reads``: values read from memory that a projection may not
         use (``relative_memory.stale_reads``; set by the validation below).
@@ -1471,29 +1484,56 @@ class _ScopedNormalizer:
             for key, row in proven_call_effects.items()
             if row.observes_registers and row.observed_registers is not None
         }
-        may_alias_reads = derive_may_alias_reads(
-            effect_unit, observation, context, address_spaces,
-            assumed_calls=quiet_calls,
-            assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
-            wild_objects=frozenset(wild_objects),
-            fresh_objects=frozenset(fresh_objects),
-            nonstack_objects=frozenset(nonstack_objects),
-            observed_calls=observed_calls,
-            private_above=private_frame_above,
-            uncertain_writers=frozenset(_uncertain),
-            no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
-        )
         private_writes = private_frame_writes(
             effect_unit, observation, context, address_spaces,
             assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
         )
-        may_alias_nodes, uncertain_nodes = _materialize_may_alias_debt(
-            dependencies,
-            memory_ssa,
-            may_alias_reads,
-            operation_nodes,
-            _uncertain,
-        )
+        # uncertain-address writers to their fixed point here: only the
+        # may-alias rows and their debt nodes depend on them (a copy of the
+        # graph so far per round), the rest of the normalization does not
+        from types import SimpleNamespace
+
+        from .function_summary import uncertain_writers_of
+
+        open_nodes = _materialize_open_conditions(
+            dependencies, memory_ssa, proven_call_effects, open_conditions or {}, operation_nodes)
+        base = dependencies
+        all_effects = tuple(effect for block in effect_unit.blocks for effect in block.effects)
+        anchors = tuple(sorted(
+            ((key, anchored[0], anchored[1]) for key, anchored in anchored_call_accesses.items()),
+            key=lambda item: item[0]))
+        while True:
+            may_alias_reads = derive_may_alias_reads(
+                effect_unit, observation, context, address_spaces,
+                assumed_calls=quiet_calls,
+                assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+                wild_objects=frozenset(wild_objects),
+                fresh_objects=frozenset(fresh_objects),
+                nonstack_objects=frozenset(nonstack_objects),
+                observed_calls=observed_calls,
+                private_above=private_frame_above,
+                uncertain_writers=frozenset(_uncertain),
+                no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
+            )
+            dependencies = base.copy()
+            may_alias_nodes, uncertain_nodes = _materialize_may_alias_debt(
+                dependencies,
+                memory_ssa,
+                may_alias_reads,
+                operation_nodes,
+                _uncertain,
+            )
+            view = SimpleNamespace(
+                dependencies=dependencies, memory_ssa=memory_ssa, effects=all_effects, scopes=unit.scopes,
+                may_alias_reads=may_alias_reads, may_alias_nodes=may_alias_nodes,
+                call_clobber_reads=call_clobber_reads, call_clobber_nodes=call_clobber_nodes,
+                uncertain_writers=tuple(_uncertain.items()), uncertain_nodes=uncertain_nodes, call_anchors=anchors,
+                open_nodes=open_nodes,
+            )
+            grown = _merge_uncertain(_uncertain, uncertain_writers_of(view, observation))
+            if grown == _uncertain:
+                break
+            _uncertain = grown
         # every value read from memory that an address, a definition atom or a rep
         # count was built on must be the value the final state gives that read
         # (no write that got its address later changed what reaches it); a rep
@@ -1618,10 +1658,9 @@ class _ScopedNormalizer:
                 key=lambda item: item[0])),
             uncertain_writers=tuple(sorted(
                 ((key, conditions) for key, conditions in _uncertain.items()), key=lambda item: item[0])),
-            call_anchors=tuple(sorted(
-                ((key, anchored[0], anchored[1]) for key, anchored in anchored_call_accesses.items()),
-                key=lambda item: item[0])),
+            call_anchors=anchors,
             uncertain_nodes=uncertain_nodes,
+            open_nodes=open_nodes,
         )
 
     def _build_cfg(
@@ -1810,6 +1849,31 @@ def _materialize_call_clobber_debt(
         )
         nodes.append(node)
     return tuple(nodes)
+
+
+def _materialize_open_conditions(dependencies, memory_ssa, proven_call_effects, open_conditions,
+                                 operation_nodes) -> tuple:
+    """An "open_condition" debt on each run row ``{call}~{i}`` whose run
+    carries pairs of ``open_conditions``: (node, pairs) rows."""
+    if not open_conditions:
+        return ()
+    namespace = f"open-condition-v1:{memory_ssa.function_scope.digest.hex()}:{memory_ssa.unit_digest.hex()}"
+    dependencies.claim_namespace(namespace)
+    found = []
+    for call, effect in sorted(proven_call_effects.items()):
+        located = open_conditions.get(call)
+        if not located:
+            continue
+        for index, run in enumerate((*effect.runs, *effect.memory_runs)):
+            pairs = frozenset(located[pair] for pair in run.conditions if pair in located)
+            row = operation_nodes.get(f"{call}~{index}")
+            if not pairs or row is None:
+                continue
+            node = dependencies.add_node(NodeRecord(f"{namespace}:{call}~{index}", NodeKind.MEMORY_DEBT,
+                                                    "open_condition"))
+            dependencies.add_edge(node, row, EdgeRecord(EdgeKind.MAY_ALIAS_READ, operation=f"{call}~{index}"))
+            found.append((node, pairs))
+    return tuple(found)
 
 
 def _materialize_may_alias_debt(

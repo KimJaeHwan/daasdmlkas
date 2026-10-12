@@ -49,7 +49,8 @@ from .span_geometry import ByteSpan, StorageObjectKind
 
 FUNCTION_SUMMARY_VERSION = 1
 _CALL_OPCODES = ("CALL", "CALLIND", "CALLOTHER")
-_ADDRESS_UNCERTAIN = {"may_alias_read", "unresolved_memory_read", "call_clobber_read", "uncertain_write_read"}
+_ADDRESS_UNCERTAIN = {"may_alias_read", "unresolved_memory_read", "call_clobber_read", "uncertain_write_read",
+                      "open_condition"}
 # debt of a read a conditional uncertain-address writer may reach: for roots
 # only -- a summary carries those writers' conditions on every claim already
 _SUMMARY_TRANSPARENT = "uncertain_write_read"
@@ -544,6 +545,8 @@ def _alias_conditions(normalized) -> dict:
         found[node] = frozenset(
             (read, write) for read in row.spans for writer in plain for write in spans_of[writer]
         )
+    # summarized runs holding only under pairs this function cannot decide
+    found.update(dict(getattr(normalized, "open_nodes", ())))
     return found
 
 
