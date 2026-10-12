@@ -24,6 +24,8 @@ from tdo_v2._scope_contracts import VarnodeKindCode
 from tdo_v2.call_seeds import _operation_key
 
 
+# x86 swi (user op 16): int 3 and int 0x29 never resume (models/pcodeops/x86.json)
+_TRAP_USEROPS = {16: frozenset({3, 0x29})}
 _SELF_CANCELLING = frozenset({"INT_XOR", "INT_SUB", "BOOL_XOR"})
 
 class Unsupported(Exception):
@@ -362,6 +364,8 @@ class Interpreter:
                 if kind == "call":  # into a function of the program (activation pushed above)
                     next_location = target
                     break
+                if kind == "halt":   # a software trap: execution does not continue
+                    return run
                 if kind == "return":
                     if self._activations:
                         next_location, _ = self._activations.pop()
@@ -424,6 +428,8 @@ class Interpreter:
         if opcode == "CALLIND" and key in self._external_callind:
             self._run_external(self._external_callind[key], key)
             return None
+        if opcode == "CALLOTHER" and len(inputs) == 2                 and all(item.kind is VarnodeKindCode.CONSTANT for item in inputs)                 and inputs[1].coordinate.byte_offset in _TRAP_USEROPS.get(inputs[0].coordinate.byte_offset, ()):
+            return ("halt", None)  # int 3 / int 0x29 (debug-break-traps-do-not-return)
         if opcode == "CALLOTHER" and output is None and len(inputs) == 1                 and inputs[0].kind is VarnodeKindCode.CONSTANT                 and inputs[0].coordinate.byte_offset in self._no_effect_userops:
             return None
         if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:

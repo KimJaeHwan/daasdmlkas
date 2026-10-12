@@ -501,3 +501,49 @@ Realloc(...)`의 주소가 "조건부 별칭 의심"(S3)을 지나 그 의심의
 6. 결과: DebugGame 호출 경유 의존 1,684 → 2,466(helper가 메모리 보존으로 증명됨), 케이스 지표는 변화 없음; 다른
    Bundle 변화 없음, 동적 검증 누락 0. R001 DebugGame의 다음 원인: 호출자에서 다시 읽은 Data가 "스택 아님"으로
    인정되지 않는 경로(Add 안의 check() 실패 경로 등) — 조사 중.
+
+## 22. 가정 레지스트리 · census 클래스 A 수정 (2026-10-12, Fable + Astra census)
+
+배경: UE DebugGame/Development의 남은 케이스를 Fable과 Astra가 각자 전수 조사(census)하고 교차 검토해 근본 원인을
+A(이번 트랙)/B(별도 주제)/C(정상)로 나눴다. 수정 중 필요한 가정이 늘어 **모든 가정을 한곳**에서 관리한다.
+
+1. 가정 레지스트리 `src/tdo_v2/assumptions.py` (`REGISTRY`): 이름·종류(switch/reported/model/test-only)·기본값·
+   주장·깨지는 경우·적용 위치. `docs/assumptions.md`는 `render_markdown()`으로 생성(테스트가 일치 확인).
+   `run_dfbench`의 `--no-…` 플래그와 환경 변수도 레지스트리에서 만든다.
+2. 새 가정 두 개, 기본 켜짐(사용자 결정 2026-10-12):
+   - `win64-home-space-callee-private`: Win64에서 진입 SP 위 반환 주소 슬롯 + 32바이트 home space는 그 함수의
+     private frame(`may_alias._Policy.private_above = 0x28`). 함수가 스택 포인터를 내보내면 기존 탈출 분석이 취소.
+   - `debug-break-traps-do-not-return`: int 3 / int 0x29(`models/pcodeops/x86.json`의 `traps`) 뒤는 죽은 경로.
+     `function_summary._dead_region`이 trap과 noreturn 호출에서 경로를 잘라 죽은 exit·호출·crossing을 뺀다; 모든
+     경로가 trap으로 끝나는 함수는 `ProvenCallEffect.noreturn`(예: `__report_gsfailure`, 그 꼬리를 가진
+     `__security_check_cookie`).
+3. 클래스 A 수정(증명, 가정 아님):
+   - A2 오래된 포인터 행 치환: 아직 주소 없는 쓰기가 남아 있으면 ENTRY에 닿는 메모리 포인터 행을 미룸.
+   - A3 JOIN(NULL / 스택 아닌 블록): 한 번만 실행되는 블록의 JOIN은 활성화마다 고정된 "스택 아님" 값. 원자는
+     블록이 아니라 **JOIN 소스 집합**으로 키(같은 소스의 JOIN 두 개는 같은 경로 → 같은 값).
+   - A6 callee 안의 realloc(NULL): 호출의 유일한 포인터 값이면 fresh(값이 둘이면 같은 블록일 수 있어 nonstack).
+   - A9 상수: 넓은 상수 쓰기의 일부 바이트, INT_AND/OR/XOR·SUBPIECE 상수 접기.
+   - A8 죽은 쓰기: 어떤 run에도 없는(나중 쓰기가 모든 경로에서 덮은) 쓰기라도 대상 객체가 anchor 가능하면
+     exported. 그 쓰기가 다른 바이트에 닿았다면 덮은 쓰기도 같은 주소에 닿고, 그건 exported라 호출자의 may-alias가 덮음.
+   - BUG-1 IAT 슬롯은 읽기 전용 상수가 아님(85b7c27).
+4. 테스트: `test_named_assumptions.py`(가정 끔/켬/위반을 oracle이 잡음), `test_dead_exported_writes.py`(같은 객체면
+   덮은 값이 보임), `test_definition_atoms.py`(병합 할당). 503개 통과.
+5. 결과(sure-missing 0 유지, 동적 검증 누락 0):
+   - UE DebugGame exact/exact+sure 10/9 → **15/12** (과잉 보고 10 → 5): R011·U008·U009 exact+sure, R007·R008은 잘못된 B가 빠져 exact
+     (아직 unsure), R001은 sure(B 과잉은 남음). 동적 검증의 부채로 덮인 차이 450 → 422.
+   - UE Development 14/12 → **14/13**(U004 sure, A8).
+   - 09 debug 64/60, release 52/47, win32 44/37 변화 없음. zlib 109730의 누락 256은 이전과 같음(기존 이슈, 별도 작업).
+6. 남은 것: 클래스 B(바이트 정밀도, FName/FString 모델, CoreUObject 핸들, 해시/루프), memcpy 크기 증명.
+7. 검수(census round 2, Fable + Astra 2라운드 + 설계 상담) 결과:
+   - **오래된 투영(stale projection)**: 주소가 나중에 풀리는 쓰기 때문에 메모리에서 읽은 값의 도달 정의가 바뀌어도,
+     이미 만든 투영은 다시 보지 않았다(HEAD에도 있던 문제, 호출 없이도 재현). 수정: `settle_pending`(주소 없는 쓰기가
+     닿을 수 있는 읽기 값은 기다림, 마지막 단계에서만 사용하고 그 단계가 쓰기의 주소를 풀면 되돌림) + 최종 검증
+     `relative_memory.stale_reads`(쓰인 값은 최종 SSA 값과 같아야 함, rep 개수는 부채도 없어야 함; 실패한 읽기는 막고 다시
+     정규화). 테스트 `test_stale_pointer_rows.py`, `test_stale_projection_alias.py`(rep).
+   - BUG-6(JOIN 원자 키를 SSA id 대신 안정 키로), BUG-7(trap 가정 보고 누락), BUG-11(pcodeop 모델 항상 전달),
+     죽은 경로 쓰기의 조건 제거.
+   - **남은 건전성 문제(설계 합의, 미구현)**: 주소가 부채 있는 읽기에 기대는 "불확실 주소 쓰기"가, 그 쓰기가 닿을 수
+     있는 읽기에 부채를 만들지 않는다 — 루트 slice(와 Astra 재현으로는 요약의 레지스터 run, 호출 안 메모리 쓰기 `~k`)가
+     놓칠 수 있음. 합의된 설계: may_alias에 "불확실 쓰기" 종류(어디든 쓸 수 있으나 kill하지 않음) + 그 쓰기의 조건을
+     실은 부채 노드(`conditions_of`) + `_uncertain_address_writers`와 고정점(`~k`/`~e` 행 포함) + rep 개수/방향 증명의
+     레지스터 clobber 검증; 재귀 대신 명시적 루프. xfail 테스트가 이 문제를 표시.

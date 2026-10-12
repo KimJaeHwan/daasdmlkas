@@ -62,21 +62,21 @@ def test_without_definition_atoms_the_heap_access_is_unknown(monkeypatch):
     assert not _reload(function).is_complete
 
 
-def test_two_allocations_merged_stay_debt():
-    """rax = cond ? malloc() : malloc(); *rax = rdx; r9 = *rax: the join of two
-    definitions has no single atom, the store stays an unknown write."""
-    t = tmp(0x100)
+def test_two_allocations_merged_are_one_nonstack_value():
+    """rax = cond ? malloc() : malloc(); *rax = rbp; r9 = *rax: the join of two
+    new blocks in a block run once is one non-stack value (the same pointer
+    both times), so the reload is exact."""
     builder = (FunctionBuilder().sub_rsp(0x28)
                .cbranch("other", reg(RSI, 1))
                .call(THUNKS["malloc"])
                .branch("join")
                .label("other").call(THUNKS["malloc"])
-               .label("join").ins(store(reg(RAX), reg(RDX)))
-               .ins(add(t, reg(RAX), const(0)), load(reg(R9), t))
+               .label("join").ins(store(reg(RAX), reg(RBP)))
+               .ins(load(reg(R9), reg(RAX)))
                .add_rsp(0x28).ret())
     results = _analyze(builder)
-    function = results["1:1000"].normalized
-    assert not _reload(function).is_complete
+    reload = _reload(results["1:1000"].normalized)
+    assert reload.is_complete and set(range(RBP, RBP + 8)) <= reload.register_bytes
     assert _check(results).silent == []
 
 

@@ -1,0 +1,171 @@
+"""The registry of every named assumption the engine may rely on.
+
+A result that relies on an assumption lists its label in
+``EngineRun.assumptions``. Each assumption is declared here once: what it
+states, when it fails, whether it is on by default, how to turn it off, and
+where it is applied. ``tools/bundle_export/run_dfbench.py`` builds its
+switches from this registry, and ``docs/assumptions.md`` is generated from it
+(``render_markdown``; a test keeps the two equal).
+
+Kinds:
+
+* ``switch`` -- an engine-wide assumption with an on/off switch
+  (``analyze_frozen_bundle_with_summaries`` keyword ``parameter``).
+* ``reported`` -- always applied when needed, reported in the run (no switch).
+* ``model`` -- carried by declared models (``models/external``,
+  ``models/pcodeops``): every use is labelled with the model entry
+  (``external-model:<file>/<entry>@v<n>``, ``pcodeop-model:<file>/<op>@v<n>``);
+  the external models as a whole are switched by ``external-models``.
+* ``test-only`` -- off by default; for benchmarks only.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class Assumption:
+    name: str               # the label reported in EngineRun.assumptions
+    kind: str               # switch | reported | model | test-only
+    default: bool
+    statement: str          # what is assumed
+    fails_when: str         # when it does not hold
+    applied_in: str         # where the engine uses it
+    parameter: str | None = None   # analyze_frozen_bundle_with_summaries keyword (switch kinds)
+    flag: str | None = None        # run_dfbench switch
+    env: str | None = None         # environment override ("0" turns it off)
+
+
+REGISTRY: tuple[Assumption, ...] = (
+    Assumption(
+        "globals-disjoint-from-stack", "switch", True,
+        "A constant address never falls in the stack (the function's frame or its callers' frames).",
+        "Stacks placed in static data (fibers on a static buffer, firmware); withdrawn automatically "
+        "when a function of the program loads its stack pointer from elsewhere.",
+        "may_alias._Policy, interprocedural._decide_conditions",
+        "assume_globals_disjoint_from_stack", "--no-assume-globals-not-stack",
+        "TDO_V2_ASSUME_GLOBALS_NOT_STACK"),
+    Assumption(
+        "readonly-image-data-is-constant", "switch", True,
+        "Bytes of a loaded, initialized, non-writable block keep their image value while the program "
+        "runs (import address table slots excluded: the loader writes them).",
+        "Packed or self-modifying binaries, VirtualProtect-style rewriting of read-only sections.",
+        "image_info.ReadOnlyImage, relative_memory (entry values of read-only memory)",
+        "assume_readonly_image_constant", "--no-assume-readonly-image", "TDO_V2_ASSUME_READONLY_IMAGE"),
+    Assumption(
+        "direction-flag-clear", "switch", True,
+        "The x86 direction flag is clear at function entry (both x86-64 ABIs require it); used only "
+        "for rep string instructions whose function never sets DF.",
+        "Hand-written code calling with DF set.",
+        "rep_strings / normalize._prove_rep_sites",
+        "assume_direction_flag_clear", "--no-assume-direction-flag-clear",
+        "TDO_V2_ASSUME_DIRECTION_FLAG_CLEAR"),
+    Assumption(
+        "win64-home-space-callee-private", "switch", True,
+        "Under the Windows x64 convention the return-address slot and the 32-byte home space above a "
+        "function's entry stack pointer belong to that function: no other base reaches them unless the "
+        "function itself lets a stack-derived pointer escape (the private-frame rule of may_alias).",
+        "Hand-written code that passes the address of its outgoing argument area to the callee "
+        "(compiler-generated code never does); code in a PE compiled for another ABI (e.g. sysv_abi "
+        "functions, not distinguished); exception funclets writing the parent frame (outside the p-code "
+        "control flow for every claim). Other ABIs: not applied there.",
+        "may_alias._Policy.is_private (private frame extended by 0x28 bytes)",
+        "assume_win64_home_space_private", "--no-assume-win64-home-space-private",
+        "TDO_V2_ASSUME_WIN64_HOME_SPACE_PRIVATE"),
+    Assumption(
+        "debug-break-traps-do-not-return", "switch", True,
+        "Execution does not continue past a software trap: int 3 (__debugbreak) and int 0x29 "
+        "(__fastfail). Code reachable only through one is dead; a function all of whose paths end in "
+        "one never returns, and so do calls to it.",
+        "A debugger attached and resuming after int 3.",
+        "function_summary (dead exits, calls and crossings), call_summary_effects (noreturn callees)",
+        "assume_debug_break_traps_do_not_return", "--no-assume-debug-break-traps-do-not-return",
+        "TDO_V2_ASSUME_DEBUG_BREAK_TRAPS_DO_NOT_RETURN"),
+    Assumption(
+        "external-models", "switch", True,
+        "Imported functions behave as their declared models (models/external): each use is reported "
+        "as external-model:<file>/<entry>@v<n>; entries state their own conditions (below).",
+        "A model that does not match the real implementation.",
+        "summary_store, interprocedural._external_sites",
+        "external_models", "--no-external-models", "TDO_V2_EXTERNAL_MODELS"),
+    Assumption(
+        "opaque-callees-restore-stack-pointer", "reported", True,
+        "A call with the observed call shape whose callee is not summarized returns with the stack "
+        "pointer restored (summarized callees are checked instead).",
+        "Callees that pop their arguments (stdcall) or switch stacks.",
+        "observed_call_state, call_clobber"),
+    Assumption(
+        "no-use-after-free", "model", True,
+        "A freed block is not used again (carried by free / FMemory::Free and by allocators: a new "
+        "block is disjoint from every block that may still be referenced).",
+        "Use-after-free bugs in the analysed program.",
+        "models/external crt_*.json, ue_core_win64.json"),
+    Assumption(
+        "no-use-of-old-pointer-after-realloc", "model", True,
+        "After realloc the old pointer is not used again; the result addresses the same object "
+        "(realloc(NULL, n) is a new block).",
+        "Programs reading through the pre-realloc pointer.",
+        "models/external crt_*.json (realloc), ue_core_win64.json (FMemory::Realloc); relative_memory._pointer_row (realloc(NULL) through a callee is a new block when it is the call's only pointer value)"),
+    Assumption(
+        "allocator-results-are-fresh", "model", True,
+        "malloc / calloc / FMemory::Malloc return a block that is not memory existing before the call "
+        "(not the stack, not a global, not another live block).",
+        "Custom allocators returning stack or static storage.",
+        "models/external crt_*.json, ue_core_win64.json (\"fresh\")"),
+    Assumption(
+        "ue-core-diagnostics-no-reentrant-callback", "model", True,
+        "FDebug::CheckVerifyFailedImpl and UE4Array_Private::OnInvalidArrayNum write no memory of the "
+        "analysed module (no error delegate or log device calls back into it).",
+        "A plugin that registers such delegates.",
+        "models/external/ue_core_win64.json"),
+    Assumption(
+        "lock-markers-have-no-data-effect", "model", True,
+        "x86 LOCK/UNLOCK user ops only bracket a lock-prefixed instruction whose memory effect is in "
+        "its own p-code (pcodeop-model:x86-markers/*).",
+        "A different Ghidra x86 language version with other user-op numbering (the model is keyed by "
+        "language version).",
+        "models/pcodeops/x86.json, pcodeop_models"),
+    Assumption(
+        "test-only-boundary", "test-only", False,
+        "Declared source/sink calls touch only their declared registers (benchmarks: the code between "
+        "source and sink is sliced as if call-free); reported as test-only-boundary:<label>.",
+        "Any real program: never use for analysis results.",
+        "summary_engine (assume_boundary_call_effects)",
+        "assume_boundary_call_effects", "--assume-boundary-effects"),
+)
+
+
+def by_name(name: str) -> Assumption:
+    for item in REGISTRY:
+        if item.name == name:
+            return item
+    raise KeyError(name)
+
+
+def switches() -> tuple[Assumption, ...]:
+    return tuple(item for item in REGISTRY if item.kind == "switch")
+
+
+def render_markdown() -> str:
+    """``docs/assumptions.md`` (generated; edit the registry instead)."""
+    lines = [
+        "# Named assumptions",
+        "",
+        "Generated from `src/tdo_v2/assumptions.py` (`render_markdown`); edit the registry, not this file.",
+        "A result that relies on an assumption lists its label in `EngineRun.assumptions`.",
+        "",
+        "| Name | Kind | Default | Switch | Assumes | Fails when | Applied in |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for item in REGISTRY:
+        switch = item.flag or "-"
+        if item.env:
+            switch += f" / {item.env}=0"
+        lines.append(
+            f"| `{item.name}` | {item.kind} | {'on' if item.default else 'off'} | {switch} | "
+            f"{item.statement} | {item.fails_when} | {item.applied_in} |")
+    return "\n".join(lines) + "\n"
+
+
+__all__ = ("Assumption", "REGISTRY", "by_name", "render_markdown", "switches")

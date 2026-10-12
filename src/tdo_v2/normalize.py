@@ -83,7 +83,9 @@ from .scope_identity import (
     ValidatedVarnode,
     VarnodeKindCode,
 )
-from .relative_memory import project_function_relative_memory, single_execution_keys
+from .relative_memory import (
+    project_function_relative_memory, single_execution_blocks, single_execution_keys, stale_reads,
+)
 from .observed_call_state import observed_call_state_projections, project_persistent_call_state
 from .opaque_values import OpaqueValueEvidenceProvider
 from .storage import _resolve_validated_storage
@@ -502,7 +504,8 @@ def _rep_overrides(sites, plan, observation) -> dict:
     return found
 
 
-def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, assume_clear) -> dict:
+def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, assume_clear,
+                     blocked=frozenset(), used=None) -> dict:
     """Sites whose count (at the instruction start) and direction become
     proven on the current SSA: address -> (n, direction, used the assumption)."""
     from .relative_memory import expressions_at
@@ -514,7 +517,7 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
     for site in pending.values():
         requests.append((site.count_key, site.count))
         requests.append((site.direction_key, site.direction))
-    values = expressions_at(memory_ssa, observation, scopes, requests, overrides)
+    values = expressions_at(memory_ssa, observation, scopes, requests, overrides, blocked, used)
     found = {}
     for address, site in pending.items():
         count = values.get((site.count_key, site.count))
@@ -699,6 +702,12 @@ _CALL_EFFECT_LABELS = {
 }
 
 
+def _pending_write_keys(effect_unit) -> frozenset:
+    """Keys of writes still without an address (``memory_write``)."""
+    return frozenset(effect.operation_key for block in effect_unit.blocks for effect in block.effects
+                     if effect.memory_write is not None)
+
+
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries,
                       stack_span=None, pointer_rows=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
@@ -831,6 +840,8 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
                 reads=tuple(ResolvedStorage(span) for span in anchors), writes=(temporary(),),
                 block_key=block_key,
             ))
+    # a value that may be a new block is fresh only as the call's sole pointer value
+    unique = sum(getattr(run, "value", None) is not None for _, run, _, _ in staged) == 1
     for index, (kind, run, stage_key, target) in enumerate(staged):
         key = f"{call_key}~{index}"
         value = getattr(run, "value", None)
@@ -839,9 +850,9 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             if value[0] == "nonstack":
                 pointer_rows[key] = value
             elif value[0] == "same_reg":
-                pointer_rows[key] = ("reg", stage_key, anchor_varnode(value[1]), value[2])
+                pointer_rows[key] = ("reg", stage_key, anchor_varnode(value[1]), value[2], unique)
             elif value[1] in load_keys:
-                pointer_rows[key] = ("mem", load_keys[value[1]], value[1].size, value[2])
+                pointer_rows[key] = ("mem", load_keys[value[1]], value[1].size, value[2], unique)
         if kind == "register":
             writes = tuple(ResolvedStorage(span) for span in run.writes)
             rows.append(ObservedEffect(key, EffectKind.COPY, reads=(target,), writes=writes,
@@ -890,6 +901,7 @@ class FunctionNormalizer:
         assume_globals_disjoint_from_stack: bool = False,
         readonly_image=None,
         assume_direction_flag_clear: bool = False,
+        private_frame_above: int = 0,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
         declared effect; see ``tdo_v2.assumed_call_effects``.
@@ -923,6 +935,7 @@ class FunctionNormalizer:
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             readonly_image=readonly_image,
             assume_direction_flag_clear=assume_direction_flag_clear,
+            private_frame_above=private_frame_above,
         )
 
     def normalize_configured(
@@ -972,7 +985,11 @@ class _ScopedNormalizer:
         assume_globals_disjoint_from_stack: bool = False,
         readonly_image=None,
         assume_direction_flag_clear: bool = False,
+        private_frame_above: int = 0,
+        _blocked_reads: frozenset = frozenset(),
     ) -> NormalizedFunction:
+        """``_blocked_reads``: values read from memory that a projection may not
+        use (``relative_memory.stale_reads``; set by the validation below)."""
         assumed_call_effects = dict(assumed_call_effects or {})
         proven_call_effects = dict(proven_call_effects or {})
         if any(
@@ -1011,6 +1028,7 @@ class _ScopedNormalizer:
         # (re-normalized here; the plan only grows)
         sites = rep_sites(observation)
         rep_plan: dict = {}
+        rep_used: dict = {}  # memory values the rep proofs used (validated at the end)
         direction_assumed = False
         while True:
             dependencies = RustworkxDependencyGraph()
@@ -1033,6 +1051,7 @@ class _ScopedNormalizer:
                 for ordinal in range(block.start, block.stop)
             }
             once_keys = single_execution_keys(observation, block_graph, frozenset(sites))
+            once_blocks = single_execution_blocks(observation, block_graph, frozenset(sites))
             wild_objects: set = set()
             fresh_objects: set = set()
             nonstack_objects: set = set()
@@ -1175,6 +1194,10 @@ class _ScopedNormalizer:
             # fixed point leaves without an address: first that fixed point,
             # then on to the next with them
             atoms_on = False
+            used_reads: dict = {}  # memory values the projections used (validated at the end)
+            # last stage: values behind writes still without an address are used
+            # (``settle_pending``); undone if it gives one of those writes an address
+            settle, settled_at = True, None
             while True:
                 if projection_budget <= 0:
                     raise AssertionError("relative-memory projection did not reach a fixed point")
@@ -1199,19 +1222,32 @@ class _ScopedNormalizer:
                     fresh_objects=fresh_objects,
                     pointer_rows=pointer_rows,
                     nonstack_objects=nonstack_objects,
+                    once_blocks=once_blocks,
+                    settle_pending=settle,
+                    blocked_reads=_blocked_reads,
+                    used_reads=used_reads,
                 )
                 if projected_effect_unit is effect_unit:
-                    if atoms_on or not once_keys:
-                        break
-                    atoms_on = True
-                    continue
+                    if not atoms_on and once_keys:
+                        atoms_on = True
+                        continue
+                    if settle:
+                        pending = _pending_write_keys(effect_unit)
+                        if not pending:
+                            break
+                        settle, settled_at = False, (effect_unit, memory_unit, memory_binding, memory_ssa, pending,
+                                                     {key: set(values) for key, values in used_reads.items()})
+                        continue
+                    if settled_at is not None and settled_at[4] - _pending_write_keys(effect_unit):
+                        effect_unit, memory_unit, memory_binding, memory_ssa, _, used_reads = settled_at
+                    break
                 effect_unit = projected_effect_unit
                 memory_unit = decode_effect_unit(effect_unit)
                 memory_binding = build_bound_local_memory_ssa(memory_unit)
                 memory_ssa = memory_binding.result
             overrides_now = _rep_overrides(sites, rep_plan, observation)
             proven = _prove_rep_sites(sites, rep_plan, memory_ssa, observation, unit.scopes, overrides_now,
-                                      assume_direction_flag_clear)
+                                      assume_direction_flag_clear, _blocked_reads, rep_used)
             if not proven:
                 break
             for address, (count, direction, assumed) in proven.items():
@@ -1296,10 +1332,44 @@ class _ScopedNormalizer:
             fresh_objects=frozenset(fresh_objects),
             nonstack_objects=frozenset(nonstack_objects),
             observed_calls=observed_calls,
+            private_above=private_frame_above,
         )
+        # every value read from memory that an address, a definition atom or a rep
+        # count was built on must be the value the final state gives that read
+        # (no write that got its address later changed what reaches it); a rep
+        # count also must carry no debt (a write through another object or a
+        # call may have changed it, and the expansion has no condition to carry
+        # that). Otherwise normalize again without those reads. (An address
+        # built on a read with debt is an uncertain-address writer instead:
+        # ``function_summary._uncertain_address_writers``.)
+        debt_readers = {row.operation_key for row in call_clobber_reads} | {
+            row.operation_key for row in may_alias_reads}
+        failed = {key for key, _ in rep_used} & debt_readers
+        failed |= stale_reads(
+            effect_unit, observation, context, address_spaces, memory_ssa, used_reads,
+            translation_namespace=unit.scopes.program.evidence.translation_namespace.language_id,
+            operation_overrides=_rep_overrides(sites, rep_plan, observation),
+            opaque_value_provider=opaque_value_provider, readonly_image=readonly_image,
+            once_keys=once_keys, fresh_keys=fresh_rows, same_object=same_object_rows,
+            pointer_rows=pointer_rows, once_blocks=once_blocks,
+        )
+        failed |= stale_reads(
+            effect_unit, observation, context, address_spaces, memory_ssa, rep_used, bare=True,
+            translation_namespace=unit.scopes.program.evidence.translation_namespace.language_id,
+            operation_overrides=_rep_overrides(sites, rep_plan, observation),
+        )
+        failed -= _blocked_reads
+        if failed:
+            return self.normalize(
+                unit, configured_call_effects, opaque_value_provider=opaque_value_provider,
+                assumed_call_effects=assumed_call_effects, proven_call_effects=proven_call_effects,
+                assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+                readonly_image=readonly_image, assume_direction_flag_clear=assume_direction_flag_clear,
+                private_frame_above=private_frame_above, _blocked_reads=_blocked_reads | failed,
+            )
         private_writes = private_frame_writes(
             effect_unit, observation, context, address_spaces,
-            assumed_calls=quiet_calls, observed_calls=observed_calls,
+            assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
         )
         may_alias_nodes = _materialize_may_alias_debt(
             dependencies,

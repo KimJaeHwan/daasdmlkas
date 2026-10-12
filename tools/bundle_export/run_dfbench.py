@@ -126,34 +126,18 @@ def main() -> int:
                         help="(default; kept for compatibility) the summary engine")
     parser.add_argument("--assume-boundary-effects", action="store_true",
                         help="TEST-ONLY special condition: declared source/sink call effects")
-    parser.add_argument("--no-assume-globals-not-stack", dest="assume_globals_not_stack",
-                        action="store_false",
-                        help="drop the named assumption (summary engine, on by default): constant "
-                             "addresses never alias the stack; it is withdrawn automatically when a "
-                             "function switches stacks. Use for firmware / custom static stacks")
-    parser.add_argument("--no-external-models", dest="external_models", action="store_false",
-                        help="do not apply the declared models of imported functions "
-                             "(models/external/*.json; each one used is a named assumption)")
-    parser.add_argument("--no-assume-readonly-image", dest="assume_readonly_image",
-                        action="store_false",
-                        help="drop the named assumption (summary engine, on by default): read-only "
-                             "image memory keeps its image value (section permissions from the binary; "
-                             "no VirtualProtect-style rewriting at run time). Use for packed or "
-                             "protected binaries")
-    parser.add_argument("--no-assume-direction-flag-clear", dest="assume_direction_flag_clear",
-                        action="store_false",
-                        help="drop the named assumption (summary engine, on by default): the x86 "
-                             "direction flag is clear at function entry (both x86-64 ABIs require it), "
-                             "used only for rep string instructions whose function never sets DF")
+    # every engine-wide named assumption comes from the registry (on by default;
+    # --no-... or <ENV>=0 turns it off; see docs/assumptions.md)
+    from tdo_v2.assumptions import switches
+
+    for item in switches():
+        parser.add_argument(item.flag, dest=item.parameter, action="store_false",
+                            help=f"drop the named assumption {item.name}: {item.statement} "
+                                 f"(fails when: {item.fails_when})")
     args = parser.parse_args()
-    if os.environ.get("TDO_V2_ASSUME_DIRECTION_FLAG_CLEAR") == "0":
-        args.assume_direction_flag_clear = False
-    if os.environ.get("TDO_V2_ASSUME_READONLY_IMAGE") == "0":
-        args.assume_readonly_image = False
-    if os.environ.get("TDO_V2_EXTERNAL_MODELS") == "0":
-        args.external_models = False
-    if os.environ.get("TDO_V2_ASSUME_GLOBALS_NOT_STACK") == "0":
-        args.assume_globals_not_stack = False
+    for item in switches():
+        if item.env and os.environ.get(item.env) == "0":
+            setattr(args, item.parameter, False)
     if args.assume_boundary_effects:
         print("[run] TEST-ONLY ASSUMPTION: source/sink call effects are declared, not observed")
     from tdo_v2.engine import analyze_frozen_bundle
@@ -181,11 +165,10 @@ def main() -> int:
                 boundary_provider=boundary_provider(args.assume_boundary_effects,
                                                     abi_of(generation)),
                 assume_boundary_call_effects=args.assume_boundary_effects,
-                assume_globals_disjoint_from_stack=args.assume_globals_not_stack,
                 external_models=external_models(generation) if args.external_models else None,
-                pcodeop_models=pcodeop_models() if args.external_models else None,
-                assume_readonly_image_constant=args.assume_readonly_image,
-                assume_direction_flag_clear=args.assume_direction_flag_clear,
+                pcodeop_models=pcodeop_models(),  # not imported functions: --no-external-models keeps them
+                **{item.parameter: getattr(args, item.parameter) for item in switches()
+                   if item.parameter != "external_models"},
             )
             print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
         else:

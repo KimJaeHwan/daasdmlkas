@@ -154,9 +154,13 @@ class _Escape:
 
 class _Policy:
     def __init__(self, stack_object: StorageObjectId | None, bias: int,
-                 escape: _Escape | None = None, globals_disjoint: bool = False) -> None:
+                 escape: _Escape | None = None, globals_disjoint: bool = False,
+                 private_above: int = 0) -> None:
         self.stack_object = stack_object
         self.bias = bias
+        # named assumption win64-home-space-callee-private: the return slot and
+        # home space above the entry stack pointer are this function's own
+        self.private_above = private_above
         self.escape = escape if stack_object is not None else None
         self.globals_disjoint = globals_disjoint and stack_object is not None
         # writers a private frame read still sees: unknown-address writes and
@@ -169,7 +173,7 @@ class _Policy:
     def is_private(self, object_id: StorageObjectId, offset: int, key: str, *, write: bool = False) -> bool:
         """A byte of this function's own frame no other base can reach at
         ``key`` (a read), or at any point after ``key`` (a write)."""
-        if self.escape is None or object_id != self.stack_object or offset >= self.bias:
+        if self.escape is None or object_id != self.stack_object or offset >= self.bias + self.private_above:
             return False
         return self.escape.private_write(key) if write else self.escape.private_read(key)
 
@@ -207,6 +211,7 @@ def derive_may_alias_reads(
     observed_calls: dict | None = None,
     fresh_objects: frozenset = frozenset(),
     nonstack_objects: frozenset = frozenset(),
+    private_above: int = 0,
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -242,7 +247,7 @@ def derive_may_alias_reads(
     if len(objects) < 2 and not unknown_writers and not has_unknown_read:
         return ()
     policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls,
-                           assume_globals_disjoint_from_stack, observed_calls)
+                           assume_globals_disjoint_from_stack, observed_calls, private_above)
     wild = frozenset(item for item in objects if item in wild_objects)
     policy.wild_objects = wild
     policy.fresh_objects = frozenset(item for item in objects if item in fresh_objects)
@@ -262,13 +267,14 @@ def derive_may_alias_reads(
 
 def private_frame_writes(
     unit, observation, context, address_spaces, *, assumed_calls=frozenset(),
-    observed_calls=None,
+    observed_calls=None, private_above=0,
 ) -> frozenset:
     """(write operation key, object) pairs whose written bytes are all private
     frame bytes at the write (``_Policy.is_private``): such a write reaches
     no other object but a wild one -- for function summaries, which use the
     same rule (``function_summary._exit_crossings``)."""
-    policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls, False, observed_calls)
+    policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls, False, observed_calls,
+                           private_above)
     found = set()
     for block in unit.blocks:
         for effect in block.effects:
@@ -419,7 +425,7 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
 # -- stack identity and escape ---------------------------------------------------
 
 def _stack_policy(unit, observation, context, address_spaces, assumed_calls=frozenset(),
-                  globals_disjoint=False, observed_calls=None) -> _Policy:
+                  globals_disjoint=False, observed_calls=None, private_above=0) -> _Policy:
     found = _stack_pointer(unit, observation, context, address_spaces)
     if found is None:
         return _Policy(None, 0)
@@ -428,7 +434,7 @@ def _stack_policy(unit, observation, context, address_spaces, assumed_calls=froz
         stack_object, bias,
         _stack_escape(observation, register_space, offset, size, assumed_calls, unit.entry_block_key,
                       observed_calls),
-        globals_disjoint,
+        globals_disjoint, private_above,
     )
 
 

@@ -26,6 +26,7 @@ class PcodeOpModel:
     version: int
     languages: frozenset   # (language id, major, minor)
     no_effect: dict        # CALLOTHER index -> name
+    traps: dict = None     # CALLOTHER index -> operands that never return (software interrupts)
 
 
 def load_pcodeop_models(paths) -> tuple[PcodeOpModel, ...]:
@@ -38,6 +39,7 @@ def load_pcodeop_models(paths) -> tuple[PcodeOpModel, ...]:
             raw["id"], raw["version"],
             frozenset((row["language_id"], row["major_version"], row["minor_version"]) for row in raw["languages"]),
             {int(index): name for index, name in raw["no_effect"].items()},
+            {int(index): frozenset(operands) for index, operands in raw.get("traps", {}).items()},
         ))
     return tuple(models)
 
@@ -65,4 +67,24 @@ def no_effect_calls(unit, models) -> dict[str, AssumedCallEffect]:
     return found
 
 
-__all__ = ("PcodeOpModel", "load_pcodeop_models", "no_effect_calls")
+def trap_operations(unit, models) -> frozenset:
+    """CALLOTHER keys of software traps (``traps``: e.g. x86 swi 3 / 0x29):
+    for the named assumption debug-break-traps-do-not-return."""
+    namespace = unit.scopes.program.evidence.translation_namespace
+    language = (namespace.language_id, namespace.major_version, namespace.minor_version)
+    applicable = [model for model in models if language in model.languages and model.traps]
+    found = set()
+    if not applicable or unit.observation is None:
+        return frozenset()
+    for instruction in unit.observation.instructions:
+        for ordinal, operation in enumerate(instruction.operations):
+            if operation.opcode != "CALLOTHER" or len(operation.inputs) != 2 \
+                    or any(item.kind is not VarnodeKindCode.CONSTANT for item in operation.inputs):
+                continue
+            index, operand = (item.coordinate.byte_offset for item in operation.inputs)
+            if any(operand in model.traps.get(index, ()) for model in applicable):
+                found.add(_operation_key(instruction.address, ordinal, operation.opcode))
+    return frozenset(found)
+
+
+__all__ = ("PcodeOpModel", "load_pcodeop_models", "no_effect_calls", "trap_operations")

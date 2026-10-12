@@ -71,8 +71,24 @@ def project_function_relative_memory(
     fresh_objects: set | None = None,
     pointer_rows: dict | None = None,
     nonstack_objects: set | None = None,
+    once_blocks: frozenset | None = None,
+    settle_pending: bool = True,
+    blocked_reads: frozenset = frozenset(),
+    used_reads: dict | None = None,
 ) -> ObservedEffectUnit:
     """Resolve provably equal indirect addresses, preserving all other debt.
+
+    ``settle_pending``: a value read from memory where a write without an
+    address yet may reach the read is not used: once that write resolves, the
+    read's reaching definition may change, and a projection made from the
+    provisional one would never be revisited. ``False`` (the caller's last
+    stage, ``normalize``) uses such values: the writes still pending are then
+    permanent unknown writers, which every later read may alias (debt).
+
+    ``used_reads`` collects (read operation key, width) -> the values read from
+    memory that projections used; ``normalize`` checks them against the final
+    state (``stale_reads``) and projects again with the failing reads in
+    ``blocked_reads`` (never used).
 
     ``once_keys``: operation keys executed at most once per activation
     (``single_execution_keys``). A value with no address expression that a
@@ -135,23 +151,15 @@ def project_function_relative_memory(
     # rep string sites (``normalize._rep_overrides``): what the evaluator sees
     # for their one-iteration operations (None: unknown)
     operations.update(operation_overrides or {})
-    projector = _Projector(
-        context,
-        address_spaces,
-        first_pass,
-        operations,
-        OpaqueValueEvidenceResolver(
-            NullOpaqueValueEvidenceProvider()
-            if opaque_value_provider is None
-            else opaque_value_provider
-        ),
-        translation_namespace,
-        readonly_image,
-        once_keys if DEFINITION_ATOMS else None,
-        fresh_keys,
-        same_object,
-        pointer_rows,
+    projector = _configured_projector(
+        unit, observation, context, address_spaces, first_pass, operations, translation_namespace,
+        opaque_value_provider=opaque_value_provider, readonly_image=readonly_image, once_keys=once_keys,
+        fresh_keys=fresh_keys, same_object=same_object, pointer_rows=pointer_rows, once_blocks=once_blocks,
     )
+    if settle_pending:
+        projector._unsettled = _unsettled_reads(unit)
+    projector._blocked = blocked_reads
+    projector.used_reads = used_reads
     if wild_objects is not None:
         projector.wild_objects = wild_objects
     if fresh_objects is not None:
@@ -268,6 +276,53 @@ def single_execution_keys(observation, block_graph, straight=frozenset()) -> fro
     return frozenset(found)
 
 
+def _unsettled_reads(unit):
+    """Predicate on operation keys: a write of ``unit`` without an address yet
+    (``memory_write``) may execute before the operation (earlier in its block,
+    or in a block that reaches the operation's block); None when no write is
+    pending."""
+    successors: dict = {block.key: set() for block in unit.blocks}
+    for block in unit.blocks:
+        for predecessor in block.predecessors:
+            successors.setdefault(predecessor, set()).add(block.key)
+    first_pending: dict = {}
+    position: dict = {}
+    for block in unit.blocks:
+        for index, effect in enumerate(block.effects):
+            position.setdefault(effect.operation_key, (block.key, index))
+            if effect.memory_write is not None and block.key not in first_pending:
+                first_pending[block.key] = index
+    if not first_pending:
+        return None
+    late, pending = set(), [item for key in first_pending for item in successors.get(key, ())]
+    while pending:
+        key = pending.pop()
+        if key not in late:
+            late.add(key)
+            pending.extend(successors.get(key, ()))
+
+    def unsettled(operation_key: str) -> bool:
+        at = position.get(operation_key)
+        if at is None:
+            return True
+        block_key, index = at
+        return block_key in late or index > first_pending.get(block_key, index)
+
+    return unsettled
+
+
+def single_execution_blocks(observation, block_graph, straight=frozenset()) -> frozenset:
+    """Block keys of ``single_execution_keys`` (joins at their entries run once)."""
+    keys = single_execution_keys(observation, block_graph, straight)
+    if not keys:
+        return frozenset()
+    rows = {row.address: row for row in observation.instructions}
+    return frozenset(
+        block.key for block in block_graph.blocks if block.stop > block.start
+        if _operation_key(block.instruction, block.start, rows[block.instruction].operations[block.start]) in keys
+    )
+
+
 def _cyclic_blocks(successors: dict) -> set:
     """Nodes on some cycle (a strongly connected component of two or more
     nodes, or a self loop); iterative Tarjan."""
@@ -348,10 +403,13 @@ def stack_offset_at(memory_ssa, observation, scopes, operation_key, varnode, sta
     return _signed_wrap(expression.displacement, expression.byte_size)
 
 
-def expressions_at(memory_ssa, observation, scopes, requests, overrides=None) -> dict:
+def expressions_at(memory_ssa, observation, scopes, requests, overrides=None, blocked=frozenset(),
+                   used=None) -> dict:
     """``requests``: (operation key, input varnode). Returns request ->
     (has atoms, displacement, is exactly the entry value of that varnode's
-    storage) for the varnode's value at that operation, or None."""
+    storage) for the varnode's value at that operation, or None.
+    ``blocked`` / ``used``: as ``blocked_reads`` / ``used_reads`` of
+    ``project_function_relative_memory`` (checked with ``bare=True``)."""
     operations = {
         _operation_key(instruction.address, ordinal, operation): operation
         for instruction in observation.instructions
@@ -363,6 +421,8 @@ def expressions_at(memory_ssa, observation, scopes, requests, overrides=None) ->
         OpaqueValueEvidenceResolver(NullOpaqueValueEvidenceProvider()),
         scopes.program.evidence.translation_namespace.language_id,
     )
+    projector._blocked = blocked
+    projector.used_reads = used
     found = {}
     for operation_key, varnode in requests:
         expression = projector._expression_for_input(operation_key, varnode)
@@ -374,6 +434,58 @@ def expressions_at(memory_ssa, observation, scopes, requests, overrides=None) ->
         found[(operation_key, varnode)] = (
             bool(expression.atoms), _unsigned_wrap(expression.displacement, expression.byte_size), entry)
     return found
+
+
+def _configured_projector(unit, observation, context, address_spaces, ssa, operations, translation_namespace,
+                          *, opaque_value_provider=None, readonly_image=None, once_keys=None,
+                          fresh_keys=frozenset(), same_object=None, pointer_rows=None, once_blocks=None):
+    projector = _Projector(
+        context,
+        address_spaces,
+        ssa,
+        operations,
+        OpaqueValueEvidenceResolver(
+            NullOpaqueValueEvidenceProvider()
+            if opaque_value_provider is None
+            else opaque_value_provider
+        ),
+        translation_namespace,
+        readonly_image,
+        once_keys if DEFINITION_ATOMS else None,
+        fresh_keys,
+        same_object,
+        pointer_rows,
+    )
+    projector._once_blocks = (once_blocks or frozenset()) if DEFINITION_ATOMS and once_keys else frozenset()
+    return projector
+
+
+def stale_reads(effect_unit, observation, context, address_spaces, memory_ssa, used, *, bare=False,
+                translation_namespace="", operation_overrides=None, **projector_options) -> frozenset:
+    """Read operation keys of ``used`` (see ``project_function_relative_memory``)
+    whose value differs on the final state: re-evaluated on ``memory_ssa``
+    with nothing pending, every value used earlier must be the same."""
+    if not used:
+        return frozenset()
+    operations = {
+        _operation_key(instruction.address, ordinal, operation): operation
+        for instruction in observation.instructions
+        for ordinal, operation in enumerate(instruction.operations)
+    }
+    operations.update(operation_overrides or {})
+    if bare:
+        projector = _Projector(context, address_spaces, memory_ssa, operations,
+                               OpaqueValueEvidenceResolver(NullOpaqueValueEvidenceProvider()),
+                               translation_namespace)
+    else:
+        projector = _configured_projector(effect_unit, observation, context, address_spaces, memory_ssa,
+                                          operations, translation_namespace, **projector_options)
+    failed = set()
+    for (operation_key, byte_size), values in used.items():
+        final = projector._expression_from_memory_read(operation_key, byte_size)
+        if any(value != final for value in values):
+            failed.add(operation_key)
+    return frozenset(failed)
 
 
 def project_anchored_after(normalized, observation, requests) -> dict:
@@ -447,6 +559,12 @@ class _Projector:
         self._fresh_atoms: set[int] = set()
         self.fresh_objects: set = set()
         self._pointer_rows = pointer_rows or {}
+        self._once_blocks: frozenset = frozenset()
+        # reader operation key -> whether a pending write may reach it
+        # (``settle_pending``); None: nothing pending
+        self._unsettled = None
+        self._blocked: frozenset = frozenset()
+        self.used_reads: dict | None = None
         self._nonstack_atoms: set[int] = set()
         self.nonstack_objects: set = set()
         self.wild_objects: set = set()
@@ -590,7 +708,8 @@ class _Projector:
         if key is None or definition.span != requested_span:
             return None
         base = key.split("~", 1)[0]
-        if base not in self._once or (requested_span.object_id.kind not in _VALUE_KINDS and not nonstack):
+        if base not in self._once or (requested_span.object_id.kind not in _VALUE_KINDS
+                                      and not nonstack and not fresh):
             return None
         if "~" in key:
             if base.rsplit(":", 1)[-1] not in ("CALL", "CALLIND"):
@@ -599,8 +718,20 @@ class _Projector:
             operation = self._operations.get(key)
             if operation is None or operation.opcode != "LOAD":
                 return None
+        if self._unsettled is not None:
+            # a value whose memory read waits for a pending write waits too: not
+            # an atom of its own now and the read's value later (``settle_pending``)
+            row = self._pointer_rows.get(key)
+            reader = row[1] if row is not None and row[0] == "mem" else key if "~" not in key else None
+            if reader is not None and self._unsettled(reader):
+                return None
+        if self._blocked:
+            row = self._pointer_rows.get(key)
+            reader = row[1] if row is not None and row[0] == "mem" else key if "~" not in key else None
+            if reader in self._blocked:
+                return None  # a value read from memory that failed validation: no identity
         atom = _digest_ints(b"definition-atom-v1", (*key.encode("utf-8"), _stable_storage_key(requested_span)))
-        if nonstack:
+        if nonstack and not fresh:
             self._nonstack_atoms.add(atom)
         elif key not in self._fresh and not fresh:
             self._definition_atoms.add(atom)
@@ -615,16 +746,31 @@ class _Projector:
         if row[0] == "nonstack":
             return self._definition_atom(definition, requested_span, nonstack=True)
         if row[0] == "reg":
-            _, reader, argument, null_is_fresh = row
+            _, reader, argument, null_is_fresh, unique = row
             value = self._expression_for_input(reader, argument)
         else:
-            _, reader, width, null_is_fresh = row
+            _, reader, width, null_is_fresh, unique = row
             value = self._expression_from_memory_read(reader, width)
         if value is None or value.byte_size != requested_span.size:
             return None
         if not value.atoms and null_is_fresh and _unsigned_wrap(value.displacement, value.byte_size) == 0:
-            return self._definition_atom(definition, requested_span, nonstack=True)
+            # realloc(NULL) inside the callee: a new block -- fresh when it is the
+            # call's only pointer value (two values could name one block)
+            return self._definition_atom(definition, requested_span, nonstack=not unique, fresh=unique)
         return value
+
+    def _stable_definition_key(self, definition_id: int) -> int:
+        definition = self._ssa.definitions[definition_id]
+        text = f"{definition.kind.name}|{definition.operation_key or ''}|{definition.block_key or ''}"
+        return _digest_ints(b"definition-key-v1", (*text.encode("utf-8"), _stable_storage_key(definition.span)))
+
+    @staticmethod
+    def _is_null(expression) -> bool:
+        return not expression.atoms and _unsigned_wrap(expression.displacement, expression.byte_size) == 0
+
+    def _is_nonstack(self, expression) -> bool:
+        return len(expression.atoms) == 1 and expression.atoms[0][1] == 1 and (
+            expression.atoms[0][0] in self._nonstack_atoms or expression.atoms[0][0] in self._fresh_atoms)
 
     def _candidate_expressions_for_input(
         self,
@@ -790,6 +936,20 @@ class _Projector:
                 and all(item == candidates[0] for item in candidates[1:])
                 else None
             )
+            if result is None and candidates and definition.block_key in self._once_blocks \
+                    and definition.span == requested_span and all(
+                        item is not None and (self._is_null(item) or self._is_nonstack(item))
+                        for item in candidates) and not all(self._is_null(item) for item in candidates):
+                # null or a non-stack block on every path into a block run once:
+                # a non-stack value fixed for the activation. Keyed by the
+                # sources, not the block: joins of the same definitions at two
+                # blocks run once pick the same one (the activation's path).
+                # Sources by stable identity: SSA ids change between passes
+                sources = sorted(self._stable_definition_key(source_id)
+                                 for source_id in self._join_sources.get(definition_id, ()))
+                atom = _digest_ints(b"join-nonstack-v3", (*sources, _stable_storage_key(requested_span)))
+                self._nonstack_atoms.add(atom)
+                result = _AddressExpression(((atom, 1),), 0, requested_span.size)
         else:
             result = None
         if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE \
@@ -811,6 +971,16 @@ class _Projector:
         self._cache[cache_key] = result
         return result
 
+    def _constant_written(self, operation_key, operation, byte_size):
+        value = None
+        if operation.opcode == "STORE" and len(operation.inputs) == 3 and operation.inputs[2].byte_size == byte_size:
+            value = self._expression_for_input(operation_key, operation.inputs[2])
+        elif operation.opcode == "COPY" and len(operation.inputs) == 1 and operation.inputs[0].byte_size == byte_size:
+            value = self._expression_for_input(operation_key, operation.inputs[0])
+        if value is None or value.atoms:
+            return None
+        return _unsigned_wrap(value.displacement, value.byte_size)
+
     def _partial_zero_extension(
         self,
         operation_key: str | None,
@@ -821,6 +991,15 @@ class _Projector:
         # Without a trusted endian/layout match, a subspan of a wider write
         # cannot be interpreted as the low-order bits of its result.
         language_parts = self._translation_namespace.split(":")
+        if operation is not None and operation_key is not None and len(language_parts) >= 2 \
+                and language_parts[1] == "LE" and written_span.object_id == requested_span.object_id \
+                and written_span.contains(requested_span):
+            # a constant written value: its little-endian bytes
+            whole = self._constant_written(operation_key, operation, written_span.size)
+            if whole is not None:
+                shift = 8 * (requested_span.start - written_span.start)
+                return _AddressExpression(
+                    (), (whole >> shift) & ((1 << (8 * requested_span.size)) - 1), requested_span.size)
         if (
             operation_key is None
             or operation is None
@@ -879,6 +1058,21 @@ class _Projector:
         if operation.opcode in ("INT_XOR", "INT_SUB", "BOOL_XOR") and len(operation.inputs) == 2 \
                 and operation.inputs[0] == operation.inputs[1]:
             return _AddressExpression((), 0, byte_size)  # x ^ x, x - x (``normalize``)
+        if operation.opcode in ("INT_AND", "INT_OR", "INT_XOR") and len(operation.inputs) == 2:
+            left, right = (self._expression_for_input(operation_key, item) for item in operation.inputs)
+            if left is not None and right is not None and not left.atoms and not right.atoms:
+                a = _unsigned_wrap(left.displacement, left.byte_size)
+                b = _unsigned_wrap(right.displacement, right.byte_size)
+                value = a & b if operation.opcode == "INT_AND" else a | b if operation.opcode == "INT_OR" else a ^ b
+                return _AddressExpression((), _unsigned_wrap(value, byte_size), byte_size)
+        if operation.opcode == "SUBPIECE" and len(operation.inputs) == 2 \
+                and operation.inputs[1].kind is VarnodeKindCode.CONSTANT:
+            value = self._expression_for_input(operation_key, operation.inputs[0])
+            if value is not None and not value.atoms:
+                shift = 8 * operation.inputs[1].coordinate.byte_offset
+                return _AddressExpression(
+                    (), (_unsigned_wrap(value.displacement, value.byte_size) >> shift) & ((1 << (8 * byte_size)) - 1),
+                    byte_size)
         if operation.opcode == "INT_SEXT" and len(operation.inputs) == 1:
             value = self._expression_for_input(operation_key, operation.inputs[0])
             if value is not None and not value.atoms and value.byte_size < byte_size:
@@ -990,6 +1184,16 @@ class _Projector:
         action_id = self._action_ids.get(operation_key)
         if action_id is None:
             return None
+        if self._unsettled is not None and self._unsettled(operation_key):
+            return None  # a pending write may still redefine these bytes (``settle_pending``)
+        if operation_key in self._blocked:
+            return None
+        value = self._memory_read_value(operation_key, byte_size, action_id)
+        if value is not None and self.used_reads is not None:
+            self.used_reads.setdefault((operation_key, byte_size), set()).add(value)
+        return value
+
+    def _memory_read_value(self, operation_key, byte_size, action_id):
         reads = tuple(
             read
             for read in self._ssa.reads

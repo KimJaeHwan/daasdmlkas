@@ -129,19 +129,28 @@ class FunctionSummary:
     # "entry value + c" (the same c): ((offset, size), c). The stack pointer's
     # c tells a caller whether the call restores it (design S2, AFFINE).
     register_deltas: tuple[tuple[tuple[int, int], int], ...] = ()
+    # exits left out as never reached: behind a software trap or a call that
+    # never returns (named assumption debug-break-traps-do-not-return); a
+    # function with no exit, no tail exit and some dead exit never returns
+    dead_exits: tuple[str, ...] = ()
     # alias conditions of uncertain-address writers taken as landing on their
     # static objects (see the module docstring); every claim of the summary
     # holds only with them
     writer_conditions: tuple = ()
 
 
-def summarize_function(normalized, observation, origin_labels=None, sink_roots=()) -> FunctionSummary:
+def summarize_function(normalized, observation, origin_labels=None, sink_roots=(),
+                       dead_ops=frozenset()) -> FunctionSummary:
     """``origin_labels``: graph node -> source labels it carries (boundary
     origins of this function, e.g. a declared source call's write, or a
     summarized call's run that reached a source inside the callee).
     ``sink_roots``: (label, root nodes, bound and complete so far) per sink
     root of the function, its own or projected from callees; each becomes a
-    ``SinkDemand``."""
+    ``SinkDemand``.
+    ``dead_ops``: operation keys execution never continues past (software
+    traps, ``debug-break-traps-do-not-return``); with calls proven never to
+    return (``ProvenCallEffect.noreturn``) they cut the paths behind them:
+    exits, calls and writes only reachable through one are left out."""
     from .call_clobber import _preserved_stack_pointers
 
     context = normalized.scopes.resolution_context
@@ -177,17 +186,25 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         normalized, observation, context, operation_of, conditions_of)
     # writers whose address debt is conditional land on their static object
     # (the conditions travel with the summary); the others may land anywhere
-    conditional = {key: pairs for key, pairs in uncertain_conditions.items() if pairs is not None}
-    uncertain = set(uncertain_conditions) - set(conditional)
+    dead_keys, dead_exit = _dead_region(normalized, observation, dead_ops)
+    # a writer only on dead paths never writes: its conditions are not needed
+    conditional = {key: pairs for key, pairs in uncertain_conditions.items()
+                   if pairs is not None and key.split("~", 1)[0] not in dead_keys}
+    uncertain = {key for key in uncertain_conditions
+                 if key not in conditional and key.split("~", 1)[0] not in dead_keys}
     writer_conditions = frozenset().union(*conditional.values()) if conditional else frozenset()
     tracer = _CopyTracer(normalized, observation, context, operation_of, conditions_of)
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain,
-                              writer_conditions)
+                              writer_conditions, dead_keys)
     inner_calls = crossed.pop("inner_calls", ())
 
     exits = []
     nodes = ssa.state_nodes
+    dead_exits = []
     for state in ssa.observed_terminal_states:
+        if dead_exit(state.block_key):
+            dead_exits.append(state.block_key)
+            continue
         runs = []
         for node in _state_runs(nodes, state.root_node_id):
             for span in _object_spans(atoms, node.start_atom, node.stop_atom):
@@ -236,8 +253,11 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         ))
     return FunctionSummary(
         FUNCTION_SUMMARY_VERSION, tuple(exits), tuple(sorted(crossed.get("unknown_writers", ()))),
-        tuple(writer_objects), _tail_exits(normalized, observation), inner_calls, tuple(demands),
+        tuple(writer_objects),
+        tuple(key for key in _tail_exits(normalized, observation) if not dead_exit(key)),
+        inner_calls, tuple(demands),
         register_deltas,
+        tuple(sorted(dead_exits)),
         tuple(sorted(writer_conditions, key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))),
     )
 
@@ -719,6 +739,61 @@ class _CopyTracer:
         return None
 
 
+def _dead_region(normalized, observation, dead_ops):
+    """(operation keys never executed on a path to an exit, predicate on
+    terminal block keys): paths are cut at ``dead_ops`` and at calls proven
+    never to return; what the entry reaches only through a cut is dead, the
+    cut operation and the rest of its block included."""
+    from .call_seeds import _operation_key
+    from .pcode_blocks import build_pcode_block_graph, instruction_key
+
+    cuts = set(dead_ops) | {key for key, effect in normalized.proven_call_effects
+                            if getattr(effect, "noreturn", False)}
+    if not cuts:
+        return frozenset(), lambda block_key: False
+    graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
+    rows = {row.address: row for row in observation.instructions}
+    blocks = {block.key: block for block in graph.blocks}
+    cut_at = {}
+    for block in graph.blocks:
+        row = rows[block.instruction]
+        for ordinal in range(block.start, block.stop):
+            if _operation_key(row.address, ordinal, row.operations[ordinal].opcode) in cuts:
+                cut_at[block.key] = ordinal
+                break
+    reached, pending = set(), [graph.entry]
+    while pending:
+        key = pending.pop()
+        if key in reached or key not in blocks:
+            continue
+        reached.add(key)
+        if key not in cut_at:
+            pending.extend(blocks[key].successors)
+    dead_points = set()
+    for block in graph.blocks:
+        start = block.start if block.key not in reached else cut_at.get(block.key)
+        if start is None:
+            continue
+        dead_points.update((block.instruction, ordinal) for ordinal in range(start, block.stop))
+    dead_keys = frozenset(
+        _operation_key(row.address, ordinal, operation.opcode)
+        for row in observation.instructions for ordinal, operation in enumerate(row.operations)
+        if (row.address, ordinal) in dead_points
+    )
+    by_key = {instruction_key(row.address): row for row in observation.instructions}
+
+    def dead_exit(block_key: str) -> bool:
+        base, _, start = block_key.partition("#")
+        row = by_key.get(base)
+        if row is None or not row.operations:
+            return False
+        block = blocks.get(block_key)
+        last = block.stop - 1 if block is not None else len(row.operations) - 1
+        return (row.address, last) in dead_points
+
+    return dead_keys, dead_exit
+
+
 def _pointer_size(normalized) -> int | None:
     from ._scope_contracts import AddressSpaceClassV2, classify_address_space_v2
 
@@ -895,7 +970,7 @@ def _live_gens_at_exit(graph, events, exit_block: str) -> frozenset:
 
 
 def _exit_crossings(normalized, observation, context, preserved_stack_pointers, uncertain,
-                    writer_conditions=frozenset()):
+                    writer_conditions=frozenset(), dead_keys=frozenset()):
     """(terminal block, object) -> {offset: crossed labels at the block exit}."""
     unit = normalized.memory_unit
     assumed = {key for key, _ in normalized.assumed_call_effects}
@@ -928,6 +1003,8 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     for block_key, effects in effects_by_block.items():
         for position, effect in enumerate(effects):
             key = effect.operation_key
+            if key.split("~", 1)[0] in dead_keys:
+                continue  # never executed on a path to an exit (``_dead_region``)
             if (key.rsplit(":", 1)[-1] in _CALL_OPCODES and key not in assumed) or key in tails:
                 calls.append((block_key, position, key))
             for index, evidence in enumerate(effect.writes):

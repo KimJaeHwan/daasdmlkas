@@ -51,10 +51,17 @@ from .interprocedural import analyze_units, function_key, run_definition_nodes
 from .image_info import ReadOnlyImage, load_image_info
 from .normalize import NormalizedFunction
 from .observed_call_state import observed_call_state_projections
+from .pcodeop_models import trap_operations
 from .physical_state import PhysicalRegisterSlice
 from .span_geometry import StorageObjectKind
 from .query_contracts import local_completeness
 from .scope_identity import ConstructedProgramScope
+
+
+def _x86_64(evidences) -> bool:
+    for item in evidences:
+        return item.unit.scopes.program.evidence.translation_namespace.language_id.startswith("x86:LE:64")
+    return False
 
 
 def _boundaries(evidence):
@@ -85,6 +92,8 @@ def analyze_frozen_bundle_with_summaries(
     assume_readonly_image_constant: bool = True,
     assume_direction_flag_clear: bool = True,
     pcodeop_models=None,
+    assume_win64_home_space_private: bool = True,
+    assume_debug_break_traps_do_not_return: bool = True,
 ) -> EngineRun:
     """``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
@@ -192,6 +201,9 @@ def analyze_frozen_bundle_with_summaries(
             ReadOnlyImage(generation_path, image_info)
             if assume_readonly_image_constant and image_info is not None else None
         )
+        # named assumption win64-home-space-callee-private: the Windows x64
+        # convention only (a PE image of a 64-bit x86 language)
+        home_space = 0x28 if assume_win64_home_space_private and image_info is not None             and image_info.executable_format.startswith("Portable Executable") and _x86_64(evidences) else 0
         results = analyze_units(
             [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
@@ -201,6 +213,8 @@ def analyze_frozen_bundle_with_summaries(
             pcodeop_models=pcodeop_models,
             readonly_image=readonly_image,
             assume_direction_flag_clear=assume_direction_flag_clear,
+            private_frame_above=home_space,
+            assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
         )
         assumptions = ("globals-disjoint-from-stack",) if any(
             getattr(item.normalized, "assumes_globals_disjoint_from_stack", False)
@@ -217,6 +231,13 @@ def analyze_frozen_bundle_with_summaries(
             assumptions += ("opaque-callees-restore-stack-pointer",)
         if readonly_image is not None:
             assumptions += ("readonly-image-data-is-constant",)
+        if home_space:
+            assumptions += ("win64-home-space-callee-private",)
+        # reported whenever a function has a trap the cut applies to: removing the
+        # paths behind it can change a summary without leaving a dead exit
+        if assume_debug_break_traps_do_not_return and pcodeop_models and any(
+                trap_operations(item.unit, pcodeop_models) for item in results.values()):
+            assumptions += ("debug-break-traps-do-not-return",)
         if any(getattr(item.normalized, "assumed_direction_flag_clear", False) for item in results.values()):
             # a rep string site whose direction flag is the function's entry value
             assumptions += ("direction-flag-clear",)

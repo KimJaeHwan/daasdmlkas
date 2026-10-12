@@ -25,7 +25,7 @@ from .normalize import _program_register_space
 from .span_geometry import ByteSpan
 from .summary_store import model_effect
 from .observed_call_state import observed_call_state_projections
-from .pcodeop_models import no_effect_calls
+from .pcodeop_models import no_effect_calls, trap_operations
 from .normalize import FunctionNormalizer, NormalizedFunction, _storage_ref
 from .storage import _resolve_validated_storage
 
@@ -62,7 +62,8 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_globals_disjoint_from_stack=False, sink_roots=None,
                   image_info=None, external_models=None, readonly_image=None,
                   declared_boundaries=None, assume_direction_flag_clear=False,
-                  pcodeop_models=None) -> dict[str, AnalyzedFunction]:
+                  pcodeop_models=None, private_frame_above=0,
+                  assume_debug_break_traps_do_not_return=False) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -261,6 +262,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
                     readonly_image=readonly_image,
                     assume_direction_flag_clear=assume_direction_flag_clear,
+                    private_frame_above=private_frame_above,
                 )
                 if type(normalized) is not NormalizedFunction:
                     break
@@ -305,7 +307,9 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         projected.append((call, index, demand.label, nodes, complete and not remaining))
                         roots.append((demand.label, nodes, complete, remaining))
             summary = (
-                summarize_function(normalized, observation, origins, roots)
+                summarize_function(normalized, observation, origins, roots,
+                                   trap_operations(unit, pcodeop_models)
+                                   if assume_debug_break_traps_do_not_return and pcodeop_models else frozenset())
                 if type(normalized) is NormalizedFunction else None
             )
             anchors = _relative_anchors(unit, normalized) if summary is not None else {}

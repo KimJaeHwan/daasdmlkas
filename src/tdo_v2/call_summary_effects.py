@@ -134,6 +134,9 @@ class ProvenCallEffect:
     # the same object as the argument (an external model's ``same_object_as``,
     # e.g. realloc under no-use-of-old-pointer-after-realloc)
     same_object_registers: tuple[tuple[ByteSpan, ByteSpan], ...] = ()
+    # the callee never returns (every exit dead, ``FunctionSummary.dead_exits``):
+    # the caller's path past the call is dead
+    noreturn: bool = False
 
 
 def derive_proven_call_effect(
@@ -207,6 +210,8 @@ def derive_proven_call_effect(
 
     clobbers_below = False
     sink_demands = tuple(_sink_demand(demand, anchored) for demand in summary.sink_demands)
+    if not summary.exits and not summary.tail_exits and summary.dead_exits:
+        return ProvenCallEffect(callee, (), (), sink_demands=sink_demands, noreturn=True)
     if summary.tail_exits or not summary.exits:
         if not sink_demands:
             return None
@@ -220,6 +225,15 @@ def derive_proven_call_effect(
         if run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE
         and anchored(run.span) is not None for writer in run.writers
     }
+    # a write to an exported object whose bytes later writes of that object
+    # cover on every path (a dead store, so in no run): had it landed on other
+    # bytes, the covering write lands on the same addresses, and that one is
+    # exported -- the caller's may-alias of it covers the overlap
+    anchored_objects = {
+        run.span.object_id for exit_summary in summary.exits for run in exit_summary.runs
+        if run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE and anchored(run.span) is not None
+    }
+    exported |= {writer for writer, object_id in summary.writer_objects if object_id in anchored_objects}
     per_exit = []
     memory_ok = not summary.unknown_writers
     for exit_summary in summary.exits:
