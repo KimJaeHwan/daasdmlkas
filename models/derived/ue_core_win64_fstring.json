@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 2,
+ "version": 3,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 1,
    "template_version": 1,
-   "semantics_version": 2
+   "semantics_version": 3
   },
   "parameters": {
    "private_frame_above": 40
@@ -33,13 +33,14 @@
    },
    {
     "file": "ue-core-win64",
-    "sha256": "475d4395c9b3a19e1871051534f32c88997c5508322f581c4ed054d3c3cb79ee"
+    "sha256": "999062f2f3b30f64ccabb0a2dce831ed85f7aa69d5aa9a48e6cda509094ad02d"
    }
   ],
   "pcodeops": "749146c1d7ef52999c899a6665c763eeedd6bba9c6779c0b694b2bfe183ca076",
   "assumptions": [
    "globals-disjoint-from-stack",
    "stack-switch-check-exceptions",
+   "entry-values-do-not-address-the-new-frame",
    "win64-home-space-callee-private",
    "debug-break-traps-do-not-return",
    "external-model:ue-core-win64/FDebug::CheckVerifyFailedImpl@v3",
@@ -52,7 +53,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "unknown",
+   "engine_revision": "1e8213bcad70ea9f0dd90a4926968f2f2281c212+dirty",
    "bundle": "ea65ba0c9345504088f51de08e477313a79135fb99ae07e159816022ec7749aa",
    "index_addresses": true,
    "stack_evidence": [

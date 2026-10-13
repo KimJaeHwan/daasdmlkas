@@ -46,8 +46,10 @@ TEMPLATE_VERSION = 1
 # bumped on any change of what a summary means: normalization, alias
 # reasoning, constant evaluation, effect derivation (not only its fields)
 # 2: stack-mixed objects wild (docs 25.7); index addresses, index objects
-# wild, the wrap seam bound (docs 25.8)
-ENGINE_SEMANTICS_VERSION = 2
+# wild, the wrap seam bound (docs 25.8). 3: templates carry the label
+# entry-values-do-not-address-the-new-frame when they rest on it (docs 25.9)
+# -- older ones rest on it unlabelled
+ENGINE_SEMANTICS_VERSION = 3
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
@@ -503,9 +505,15 @@ def refusal(model_file, entry, *, external_models, pcodeop_models, private_frame
     recorded_language = model_file.source_field("language")
     if language is None or recorded_language != {"id": language[0], "major": language[1], "minor": language[2]}:
         return f"derived for language {recorded_language}, this program is {language}"
-    parameters = model_file.source_field("parameters")
-    if parameters != {"private_frame_above": private_frame_above}:
-        return f"derived with {parameters}, this run private_frame_above={private_frame_above}"
+    parameters = dict(model_file.source_field("parameters") or {})
+    recorded_home = parameters.pop("private_frame_above", 0)
+    if parameters:
+        return f"derived with unknown parameters {parameters}"
+    # the home space matters only to a template that rests on it (reported
+    # per use, with entry-values-do-not-address-the-new-frame): then this run
+    # must take the same extent; one that never used it applies anywhere
+    if "win64-home-space-callee-private" in entry.inherited and recorded_home != private_frame_above:
+        return f"derived with private_frame_above={recorded_home}, this run private_frame_above={private_frame_above}"
     if model_file.source_field("pcodeops") != pcodeop_digest(pcodeop_models):
         return "derived with other p-code op models"
     files = {item.file_id: item for item in external_models.files}

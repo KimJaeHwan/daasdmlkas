@@ -97,6 +97,7 @@ def analyze_frozen_bundle_with_summaries(
     stack_evidence=(),
     linker=None,
     assume_import_slots_hold_exports: bool = True,
+    assume_entry_values_not_frame: bool = True,
 ) -> EngineRun:
     """``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
@@ -212,7 +213,8 @@ def analyze_frozen_bundle_with_summaries(
         )
         # named assumption win64-home-space-callee-private: the Windows x64
         # convention only (a PE image of a 64-bit x86 language)
-        home_space = 0x28 if assume_win64_home_space_private and image_info is not None             and image_info.executable_format.startswith("Portable Executable") and _x86_64(evidences) else 0
+        home_space = 0x28 if assume_win64_home_space_private and assume_entry_values_not_frame \
+            and image_info is not None             and image_info.executable_format.startswith("Portable Executable") and _x86_64(evidences) else 0
         from .stack_evidence import assumption_allowed
 
         if stack_evidence:
@@ -231,7 +233,7 @@ def analyze_frozen_bundle_with_summaries(
                 pcodeop_models=pcodeop_models, private_frame_above=home_space,
                 traps=assume_debug_break_traps_do_not_return,
                 globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear,
-                import_slots=assume_import_slots_hold_exports)
+                import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame)
             linked_evidence = tuple(load_stack_evidence(path) for path in linked_evidence)
             if linked_evidence:
                 # a switch in a linked library withdraws the assumption for the run
@@ -252,6 +254,7 @@ def analyze_frozen_bundle_with_summaries(
             private_frame_above=home_space,
             assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
             assume_import_slots_hold_exports=assume_import_slots_hold_exports,
+            assume_entry_values_not_frame=assume_entry_values_not_frame,
         )
         assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
                                       traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
@@ -418,8 +421,12 @@ def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, 
         assumptions += ("readonly-image-data-is-constant",)
     if any(getattr(item.normalized, "assumes_import_slots_hold_exports", False) for item in results.values()):
         assumptions += ("import-slots-hold-their-exports",)
-    if home_space:
-        assumptions += ("win64-home-space-callee-private",)
+    if any(getattr(item.normalized, "assumes_entry_values_not_frame", False) for item in results.values()):
+        # the private-frame rule decided some byte private; the home space
+        # extends it (no private byte, no home-space byte)
+        assumptions += ("entry-values-do-not-address-the-new-frame",)
+        if home_space:
+            assumptions += ("win64-home-space-callee-private",)
     # reported whenever a function has a trap the cut applies to: removing the
     # paths behind it can change a summary without leaving a dead exit
     if traps and pcodeop_models and any(trap_operations(item.unit, pcodeop_models) for item in results.values()):

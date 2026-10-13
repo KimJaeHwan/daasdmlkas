@@ -1098,3 +1098,35 @@ win32 160/160 · UE Dev 568(400 담음, 168 부채) · DebugGame 1063(614 담음
   상수만으로 계산한 값)으로 만든 접근의 바이트는, 스택 값이 새기 전에는 이 함수의 새 프레임과 겹치지 않음". `rdi - 16`(rdi가
   호출자 프레임 바로 위를 가리킬 때)도 같은 반례. `entry-values-do-not-address-the-new-frame`(스위치, 기본 켬, 끄면 스택이 아닌
   모든 상대 객체가 private frame에 대해 wild)로 등록·보고 예정.
+
+### 25.9 private frame 규칙을 가정으로 등록 (2026-10-14, 설계 검토 Fable·Astra)
+
+- 왜: C1 검토에서 Astra의 반례 — 진입 rdi = 진입 sp + 8(호출자 프레임 안 포인터)이면 `rdi - 0x38`이 이 함수의 새 프레임 칸.
+  지금까지 private frame 규칙(`may_alias._Policy.is_private`: 진입 sp 아래 바이트는 스택 값이 새기 전에는 다른 기준으로 닿지
+  않음)은 증명으로 취급됐지만 실제로는 **가정**이었음(등록된 것은 win64 home space 확장뿐).
+- 등록: `entry-values-do-not-address-the-new-frame`(스위치, 기본 켬; `--no-assume-entry-values-not-frame`,
+  `TDO_V2_ASSUME_ENTRY_VALUES_NOT_FRAME=0`). 내용: 스택이 아닌 진입 레지스터 값·진입 메모리 값·상수만으로 계산한 주소(어떤
+  산술·변위·폭 변화든)의 접근 바이트는, 스택 값이 새기 전에는 이 함수의 새 프레임과 겹치지 않음. 프레임에서 빠지는 기준 네
+  종류 중 이 가정이 맡는 것은 진입 값 산술뿐(상수·import → globals-disjoint / import-slots, 새 블록 → 할당 모델, nonstack →
+  callee 요약). wild 기준(읽은 포인터·호출 결과·index·스택 섞인 주소)은 언제나 프레임에 닿음. 틀리는 경우: 호출자가 준
+  포인터를 호출자 프레임 바닥 아래로 옮기거나 index(버퍼 underflow, alloca 옆 산술), 인자·TLS로 프레임 주소를 계산하는 손 코드,
+  context record로 callee 프레임을 쓰는 unwind handler.
+- 끄면: private 바이트 없음(`escape = None`) — 다른 제외(globals-disjoint, 새 블록, nonstack)는 그대로. win64 home space는 이
+  가정의 확장이라 이것이 꺼지면 효과도 보고도 없음.
+- **사용할 때만 보고**(Fable P2-1): `is_private`가 어떤 바이트를 private로 판정한 함수만 `assumes_entry_values_not_frame` →
+  실행 가정 목록. 그래서 이 규칙을 한 번도 쓰지 않은 템플릿은 이 가정을 끈 실행에서도 적용됨. `win64-home-space-callee-private`도
+  이제 이것과 함께 사용할 때만 보고(전에는 "켜져 있으면 항상"). 예전 엔진 경로(`--legacy-engine`)는 스위치를 넘기지 않아 늘 켬.
+- 템플릿 호환(Astra 구현 1·2차): 이 가정을 끄면 home space 확장도 모든 곳에서 0(요약 엔진·연결 profile·`derive_library`·
+  linker 사전 검사). 템플릿의 `private_frame_above`는 그 템플릿이 `win64-home-space-callee-private`에 기댈 때(표시가 있을 때)만
+  이 실행과 같아야 함 — 기대지 않은 템플릿은 어떤 home space에서도 적용. 꺼진 가정에 기댄 모델은 거부 이유를 기록
+  (`refused_models`: "rests on ..., switched off in this run").
+- 연결: `may_alias.ENTRY_VALUES_NOT_FRAME`(ContextVar, 기본 켬 — 직접 호출하는 도구·테스트는 지금과 같음),
+  `interprocedural.analyze_units(assume_entry_values_not_frame=...)`가 실행마다 설정하고 끝나면 되돌림; 꺼진 가정 목록
+  (`disabled`)에 들어가 그 가정에 기댄 모델은 쓰지 않음; 요약 엔진·`run_dfbench`(레지스트리에서 자동)·연결 profile·
+  `derive_models`. `ENGINE_SEMANTICS_VERSION` 2 → 3(Astra P1: 예전 템플릿은 이 가정에 기대면서 표시가 없음 → 모두 다시 만들어야
+  함). `models/derived/ue_core_win64_fstring.json` 다시 만듦(요약 3개 그대로, 출처 가정 목록에 이 이름 추가).
+- 테스트(`test_frame_assumption.py`): 켬 — 반례에서 프레임 다시 읽기는 완전·쓰기 값 없음, 가정 보고, 방향 지정 실행은 실제로
+  놓침(가정이 틀리는 경우를 고정); 끔 — 쓰기 값이 출처·불완전, 보고 없음(home space도), 방향 지정 실행 누락 0; 실행 뒤 스위치
+  복구; 프레임을 안 쓰는 함수는 보고 안 함; 끈 상태에서도 callee 자기 프레임 쓰기는 호출자 메모리 보존(구조적 규칙).
+- 결과: 테스트 758개. 켬(기본) = 지표 그대로, 모든 Bundle에서 이 가정이 실제로 쓰여 보고됨. 끔(가정의 무게): 09 debug
+  65/61 → 65/58, release 그대로, win32 44/37 → 41/30, UE DebugGame 15/15 → 13/13, UE Dev 그대로; 모든 경우 "확실한데 놓침" 0.

@@ -77,19 +77,25 @@ def function_key(coordinate) -> str:
     return f"{coordinate.space_id:x}:{coordinate.byte_offset:x}"
 
 
-def analyze_units(units, *, assume_import_slots_hold_exports=False, **options) -> dict[str, "AnalyzedFunction"]:
+def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry_values_not_frame=True,
+                  **options) -> dict[str, "AnalyzedFunction"]:
     """``_analyze_units`` (below) under the named assumption
     import-slots-hold-their-exports when ``assume_import_slots_hold_exports``
     and ``image_info`` are given (``relative_memory.IMPORT_SLOTS``; it takes
-    effect only where globals-disjoint-from-stack holds for the run)."""
+    effect only where globals-disjoint-from-stack holds for the run), and
+    entry-values-do-not-address-the-new-frame as ``assume_entry_values_not_frame``
+    (``may_alias.ENTRY_VALUES_NOT_FRAME``, reset after the run)."""
+    from .may_alias import ENTRY_VALUES_NOT_FRAME
     from .relative_memory import IMPORT_SLOTS, ImportSlots, reset_index_diagnostics
 
     reset_index_diagnostics()
     image_info = options.get("image_info")
     token = IMPORT_SLOTS.set(ImportSlots(image_info) if assume_import_slots_hold_exports and image_info else None)
+    frame = ENTRY_VALUES_NOT_FRAME.set(bool(assume_entry_values_not_frame))
     try:
         return _analyze_units(units, **options)
     finally:
+        ENTRY_VALUES_NOT_FRAME.reset(frame)
         IMPORT_SLOTS.reset(token)
 
 
@@ -146,6 +152,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # which assumptions hold in this run, and so which models may be applied
     if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
         assume_globals_disjoint_from_stack = False
+    from .may_alias import ENTRY_VALUES_NOT_FRAME
     from .relative_memory import IMPORT_SLOTS
 
     if IMPORT_SLOTS.get() is not None:
@@ -156,7 +163,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("globals-disjoint-from-stack", assume_globals_disjoint_from_stack),
         ("readonly-image-data-is-constant", readonly_image is not None),
         ("direction-flag-clear", assume_direction_flag_clear),
-        ("win64-home-space-callee-private", bool(private_frame_above)),
+        ("entry-values-do-not-address-the-new-frame", ENTRY_VALUES_NOT_FRAME.get()),
+        ("win64-home-space-callee-private", bool(private_frame_above) and ENTRY_VALUES_NOT_FRAME.get()),
         ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
         ("import-slots-hold-their-exports", _import_slots_active()),
     ) if not on}
@@ -584,7 +592,12 @@ def _external_sites(unit, image_info, external_models, disabled=frozenset(), usa
     found = {}
     for key, symbol in import_call_sites(unit, image_info).items():
         model = external_models.lookup(symbol)
-        if model is not None and not set(model[1].inherited) & disabled:
+        if model is not None and set(model[1].inherited) & disabled:
+            if refused is not None:
+                off = ", ".join(sorted(set(model[1].inherited) & disabled))
+                refused[key] = f"{model[1].label}: rests on {off}, switched off in this run"
+            continue
+        if model is not None:
             reason = usable(*model) if usable is not None else None
             if reason is not None:
                 if refused is not None:

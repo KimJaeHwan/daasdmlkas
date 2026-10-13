@@ -266,7 +266,8 @@ class Linker:
         self.report = LinkReport()
 
     def __call__(self, units, image_info, *, external_models, pcodeop_models, private_frame_above: int,
-                 traps: bool, globals_disjoint: bool, direction_flag: bool, import_slots: bool = False):
+                 traps: bool, globals_disjoint: bool, direction_flag: bool, import_slots: bool = False,
+                 entry_values_not_frame: bool = True):
         """(the run's model set with the linked templates, stack evidence
         files). The settings are the run's effective ones (``globals_disjoint``
         after the program's own withdrawal checks): templates are derived with
@@ -289,9 +290,11 @@ class Linker:
         from .relative_memory import index_addresses
 
         space_id = units[0].scopes.program.evidence.image_base.space_id
-        switches = {"private_frame_above": private_frame_above, "traps": bool(traps),
+        # the home-space extension is inactive without its base assumption
+        switches = {"private_frame_above": private_frame_above if entry_values_not_frame else 0, "traps": bool(traps),
                     "globals_disjoint": bool(globals_disjoint), "direction_flag": bool(direction_flag),
-                    "import_slots": bool(import_slots), "index_addresses": index_addresses()}
+                    "import_slots": bool(import_slots), "index_addresses": index_addresses(),
+                    "entry_values_not_frame": bool(entry_values_not_frame)}
         identity = self.provider.identity()
         declared = declared_models(models)
         checked = []
@@ -379,11 +382,13 @@ class Linker:
         disabled = {name for name, on in (
             ("globals-disjoint-from-stack", switches["globals_disjoint"]),
             ("direction-flag-clear", switches["direction_flag"]),
-            ("win64-home-space-callee-private", bool(switches["private_frame_above"])),
+            ("entry-values-do-not-address-the-new-frame", switches["entry_values_not_frame"]),
+            ("win64-home-space-callee-private",
+             bool(switches["private_frame_above"]) and switches["entry_values_not_frame"]),
             ("debug-break-traps-do-not-return", switches["traps"]),
             ("import-slots-hold-their-exports", switches["import_slots"]),
         ) if not on}
-        if self._preflight(linked, pcodeop_models=pcodeop_models, private_frame_above=private_frame_above,
+        if self._preflight(linked, pcodeop_models=pcodeop_models, private_frame_above=switches["private_frame_above"],
                            language=(namespace.language_id, namespace.major_version, namespace.minor_version),
                            disabled=disabled):
             linked = with_model_files(models, self.report.template_files)
@@ -443,7 +448,7 @@ class Linker:
                 models=declared, pcodeops=pcodeop_models, stack_evidence=[evidence] if evidence is not None else [],
                 private_frame_above=switches["private_frame_above"], traps=switches["traps"],
                 assume_globals_disjoint=switches["globals_disjoint"], direction_flag=switches["direction_flag"],
-                import_slots=switches["import_slots"],
+                import_slots=switches["import_slots"], entry_values_not_frame=switches["entry_values_not_frame"],
                 per_export=True, log=lambda line: self.log(f"[link]   {line}"))
             for raw in files.values():
                 if raw["source"]["sha256"] != exports.sha256:

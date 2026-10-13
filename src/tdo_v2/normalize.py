@@ -132,6 +132,9 @@ class NormalizedFunction:
     # named assumption import-slots-hold-their-exports: an import slot's value
     # was taken as its import's address (``relative_memory.IMPORT_SLOTS``)
     assumes_import_slots_hold_exports: bool = False
+    # named assumption entry-values-do-not-address-the-new-frame decided some
+    # byte of this function's frame private (``may_alias._Policy.is_private``)
+    assumes_entry_values_not_frame: bool = False
     # rep string sites made exact (``rep_strings``): (instruction key, count,
     # direction); the evaluator's overrides of their operations
     rep_blocks: tuple = ()
@@ -1538,9 +1541,11 @@ class _ScopedNormalizer:
             for key, row in proven_call_effects.items()
             if row.observes_registers and row.observed_registers is not None
         }
+        frame_uses: list = []
         private_writes = private_frame_writes(
             effect_unit, observation, context, address_spaces,
             assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
+            uses=frame_uses,
         )
         # uncertain-address writers to their fixed point here: only the
         # may-alias rows and their debt nodes depend on them (a copy of the
@@ -1570,6 +1575,7 @@ class _ScopedNormalizer:
                 private_above=private_frame_above,
                 uncertain_writers=frozenset(_uncertain),
                 no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
+                uses=frame_uses,
             )
             dependencies = base.copy()
             may_alias_nodes, uncertain_nodes = _materialize_may_alias_debt(
@@ -1700,6 +1706,7 @@ class _ScopedNormalizer:
             assumed_call_effects=tuple(sorted(assumed_call_effects.items())),
             proven_call_effects=tuple(sorted(proven_call_effects.items())),
             assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+            assumes_entry_values_not_frame=any(frame_uses),
             call_below_bounds=below_bounds,
             assumes_readonly_image_constant=readonly_image is not None,
             assumes_import_slots_hold_exports=_import_slots_used(memory_ssa),

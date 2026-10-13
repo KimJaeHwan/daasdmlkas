@@ -255,14 +255,29 @@ def test_a_changed_dependency_refuses_the_template(tmp_path):
     assert not analyzed.proven and "differs" in next(iter(analyzed.refused_models.values()))
 
 
-def test_another_private_frame_refuses_the_template(tmp_path):
-    body = FunctionBuilder(entry=F).ins(copy(reg(RAX), reg(RCX))).ret()
-    path, _, hand = _derive(tmp_path, body, private_frame_above=0x28)
-    models = load_external_models([hand, path], *WIN64)
-    info = ImageInfo("synthetic", (), (ImportedSymbol(LIBRARY, "F", MANGLED, (), ((1, THUNK),)),), (), ())
-    analyzed = analyze_units(program_units(_caller_writes(THUNK)), image_info=info, external_models=models,
-                             private_frame_above=8)["1:1000"]
-    assert not analyzed.proven and "private_frame_above" in next(iter(analyzed.refused_models.values()))
+def test_another_private_frame_refuses_the_template_resting_on_it(tmp_path):
+    """A template whose derivation decided private frame bytes with the home
+    space (labels entry-values-do-not-address-the-new-frame and
+    win64-home-space-callee-private) needs the same home space; one that
+    never did applies with any (docs 25.9)."""
+    t = tmp(0x100)
+    spilling = (FunctionBuilder(entry=F).sub_rsp(0x18)
+                .ins(add(t, reg(RSP), const(8)), store(t, reg(RCX)))
+                .ins(add(t, reg(RSP), const(8)), load(reg(RAX), t))
+                .add_rsp(0x18).ret())
+    plain = FunctionBuilder(entry=F).ins(copy(reg(RAX), reg(RCX))).ret()
+    for body, refused in ((spilling, True), (plain, False)):
+        directory = tmp_path / str(refused)
+        directory.mkdir()
+        path, _, hand = _derive(directory, body, private_frame_above=0x28)
+        models = load_external_models([hand, path], *WIN64)
+        info = ImageInfo("synthetic", (), (ImportedSymbol(LIBRARY, "F", MANGLED, (), ((1, THUNK),)),), (), ())
+        analyzed = analyze_units(program_units(_caller_writes(THUNK)), image_info=info, external_models=models,
+                                 private_frame_above=8)["1:1000"]
+        if refused:
+            assert not analyzed.proven and "private_frame_above" in next(iter(analyzed.refused_models.values()))
+        else:
+            assert analyzed.proven and not analyzed.refused_models
 
 
 def _image_cases():

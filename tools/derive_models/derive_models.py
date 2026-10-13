@@ -68,7 +68,8 @@ _DEFAULT = object()
 def derive_library(generation: Path, library: str, export_names, *, file_id: str, version: int = 1,
                    model_dirs=(), models=None, pcodeops=_DEFAULT, stack_evidence=(), private_frame_above: int = 0x28,
                    traps: bool = True, assume_globals_disjoint: bool = True, direction_flag: bool = False,
-                   import_slots: bool = False, per_export: bool = False, log=print):
+                   import_slots: bool = False, per_export: bool = False, log=print,
+                   entry_values_not_frame: bool = True):
     """(model file dict, {export name: refusal reason}, export names the
     Bundle does not export) -- the templates of ``export_names`` of the
     library Bundle at ``generation``, derived with the given analysis
@@ -97,6 +98,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
     from tdo_v2.summary_templates import build_file, image_provenance
 
     generation = Path(generation)
+    if not entry_values_not_frame:
+        private_frame_above = 0   # the home-space extension is inactive without its base assumption
     binding = NamingBindingExpectation(sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
                                        CALL_NAMING_GHIDRA_VERSION)
     units, failures = [], collections.Counter()
@@ -164,6 +167,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_direction_flag_clear=direction_flag,
                                        assume_globals_disjoint_from_stack=globals_disjoint,
                                        assume_import_slots_hold_exports=import_slots,
+                                       assume_entry_values_not_frame=entry_values_not_frame,
                                        own_library=library, keep_uncut=frozenset(targets))
         log(f"constants: {len(tracking.proofs[True])} proven image addresses, {len(tracking.proofs[False])} "
             f"fixed numbers, {len(tracking.proofs[None])} not understood (possibly base-dependent)")

@@ -53,6 +53,7 @@ frame writes reach them, like unknown-address accesses.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from ._scope_contracts import (
@@ -157,6 +158,12 @@ class _Escape:
         return base in self.known and base not in self.reaches
 
 
+# Named assumption entry-values-do-not-address-the-new-frame (``assumptions``):
+# set per run by ``interprocedural.analyze_units``; unset = on (direct callers,
+# tests). Off: no byte is private.
+ENTRY_VALUES_NOT_FRAME: ContextVar = ContextVar("ENTRY_VALUES_NOT_FRAME", default=True)
+
+
 class _Policy:
     def __init__(self, stack_object: StorageObjectId | None, bias: int,
                  escape: _Escape | None = None, globals_disjoint: bool = False,
@@ -176,13 +183,20 @@ class _Policy:
         self.wild_objects: frozenset = frozenset()
         self.fresh_objects: frozenset = frozenset()
         self.nonstack_objects: frozenset = frozenset()
+        # the private-frame rule decided some byte private (the assumption
+        # entry-values-do-not-address-the-new-frame was used)
+        self.private_used = False
 
     def is_private(self, object_id: StorageObjectId, offset: int, key: str, *, write: bool = False) -> bool:
         """A byte of this function's own frame no other base can reach at
-        ``key`` (a read), or at any point after ``key`` (a write)."""
+        ``key`` (a read), or at any point after ``key`` (a write) -- the
+        named assumption entry-values-do-not-address-the-new-frame."""
         if self.escape is None or object_id != self.stack_object or offset >= self.bias + self.private_above:
             return False
-        return self.escape.private_write(key) if write else self.escape.private_read(key)
+        private = self.escape.private_write(key) if write else self.escape.private_read(key)
+        if private:
+            self.private_used = True
+        return private
 
     def may_alias(self, left: StorageObjectId, right: StorageObjectId) -> bool:
         if left == right:
@@ -221,6 +235,7 @@ def derive_may_alias_reads(
     private_above: int = 0,
     uncertain_writers: frozenset = frozenset(),
     no_kill_writers: frozenset = frozenset(),
+    uses: list | None = None,
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -282,15 +297,18 @@ def derive_may_alias_reads(
         for evidence in effect.writes
         if type(evidence) is ResolvedStorage and evidence.span.object_id in wild
     ) | frozenset(_UNCERTAIN + key for key in uncertain)
-    return run_dataflow(
+    rows = run_dataflow(
         "may-alias", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
         unit, objects, policy,
     )
+    if uses is not None:   # ``uses``: whether the private-frame rule decided a byte
+        uses.append(policy.private_used)
+    return rows
 
 
 def private_frame_writes(
     unit, observation, context, address_spaces, *, assumed_calls=frozenset(),
-    observed_calls=None, private_above=0,
+    observed_calls=None, private_above=0, uses: list | None = None,
 ) -> frozenset:
     """(write operation key, object) pairs whose written bytes are all private
     frame bytes at the write (``_Policy.is_private``): such a write reaches
@@ -308,6 +326,8 @@ def private_frame_writes(
                 if all(policy.is_private(span.object_id, offset, effect.operation_key, write=True)
                        for offset in range(span.start, span.end)):
                     found.add((effect.operation_key, span.object_id))
+    if uses is not None:
+        uses.append(policy.private_used)
     return frozenset(found)
 
 
@@ -469,6 +489,9 @@ def _stack_policy(unit, observation, context, address_spaces, assumed_calls=froz
     if found is None:
         return _Policy(None, 0)
     stack_object, bias, register_space, offset, size = found
+    if not ENTRY_VALUES_NOT_FRAME.get():
+        # entry-values-do-not-address-the-new-frame off: no private bytes
+        return _Policy(stack_object, bias, None, globals_disjoint, private_above)
     return _Policy(
         stack_object, bias,
         _stack_escape(observation, register_space, offset, size, assumed_calls, unit.entry_block_key,

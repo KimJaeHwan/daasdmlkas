@@ -126,7 +126,7 @@ class FakeDeriver:
 
     def __call__(self, generation, library, names, *, file_id, models, pcodeops, stack_evidence,
                  private_frame_above, traps, assume_globals_disjoint, direction_flag, per_export, log,
-                 import_slots=False):
+                 import_slots=False, entry_values_not_frame=True):
         assert per_export
         self.calls.append({"names": sorted(names), "private_frame_above": private_frame_above,
                            "globals": assume_globals_disjoint, "direction_flag": direction_flag,
@@ -144,7 +144,8 @@ class FakeDeriver:
                                             pcodeop_models=pcodeops, own_library=library,
                                             private_frame_above=private_frame_above,
                                             assume_debug_break_traps_do_not_return=traps,
-                                            assume_direction_flag_clear=direction_flag)
+                                            assume_direction_flag_clear=direction_flag,
+                                            assume_entry_values_not_frame=entry_values_not_frame)
                 raw, _ = build_file(results, [(f"1:{F:x}", MANGLED, [MANGLED])], file_id=file_id, version=1,
                                     library=library, external_models=models, pcodeop_models=pcodeops,
                                     private_frame_above=private_frame_above, base_dependent=found, traps=traps)
@@ -432,9 +433,12 @@ def test_an_unusable_template_is_reported_and_left_out(tmp_path, monkeypatch):
     dll, sha, info, models = _setup(tmp_path)
     _called(monkeypatch, info, [MANGLED])
 
-    class Stale(FakeDeriver):   # ignores the run's setting
+    class Stale(FakeDeriver):   # derives for another language version than the run's
         def __call__(self, *args, **kwargs):
-            return super().__call__(*args, **{**kwargs, "private_frame_above": 0})
+            files, refused, missing = super().__call__(*args, **kwargs)
+            for raw in files.values():
+                raw["source"]["language"]["minor"] += 1
+            return files, refused, missing
 
     report, linked, _ = _link(tmp_path, info, models, FakeProvider(sha), Stale(sha), private_frame_above=0x28)
     assert _rows(report) == {MANGLED: ("unusable", None)} and report.template_files == []

@@ -92,10 +92,29 @@ REGISTRY: tuple[Assumption, ...] = (
         "assume_direction_flag_clear", "--no-assume-direction-flag-clear",
         "TDO_V2_ASSUME_DIRECTION_FLAG_CLEAR"),
     Assumption(
+        "entry-values-do-not-address-the-new-frame", "switch", True,
+        "A function's own frame -- the bytes below its entry stack pointer (plus the return slot and home "
+        "space under win64-home-space-callee-private) -- is not addressed by any access whose address is "
+        "computed from non-stack-derived entry register values, entry memory values and constants alone "
+        "(any arithmetic, displacement or width change), while no stack-derived value has escaped (reads: on "
+        "no path to the access; writes: on no path after it). Of the bases kept out of the frame, this "
+        "covers entry-value arithmetic (rdi - 16, rdi + rsi); constants and imports rest on "
+        "globals-disjoint-from-stack / import-slots-hold-their-exports, fresh blocks on their allocator "
+        "model, nonstack bases on a callee's summary. Wild bases (loaded pointers, call results, index and "
+        "stack-mixed addresses) are never kept out. Reported when the rule decided a byte private.",
+        "A caller-supplied pointer offset or indexed below the caller's frame bottom (buffer underflow, "
+        "alloca-adjacent arithmetic: an entry rdi = entry sp + 8 makes rdi - 16 a byte of the new frame); "
+        "hand-written code computing frame addresses from arguments or TLS; unwind handlers writing a "
+        "callee frame through context records. Off: no byte is private (the other exclusions stay).",
+        "may_alias._Policy.is_private (ENTRY_VALUES_NOT_FRAME, set per run by interprocedural.analyze_units)",
+        "assume_entry_values_not_frame", "--no-assume-entry-values-not-frame",
+        "TDO_V2_ASSUME_ENTRY_VALUES_NOT_FRAME"),
+    Assumption(
         "win64-home-space-callee-private", "switch", True,
         "Under the Windows x64 convention the return-address slot and the 32-byte home space above a "
         "function's entry stack pointer belong to that function: no other base reaches them unless the "
-        "function itself lets a stack-derived pointer escape (the private-frame rule of may_alias).",
+        "function itself lets a stack-derived pointer escape (the private-frame rule of may_alias). It "
+        "extends entry-values-do-not-address-the-new-frame: no effect, and not reported, when that is off.",
         "Hand-written code that passes the address of its outgoing argument area to the callee "
         "(compiler-generated code never does); code in a PE compiled for another ABI (e.g. sysv_abi "
         "functions, not distinguished); exception funclets writing the parent frame (outside the p-code "
