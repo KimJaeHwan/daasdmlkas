@@ -635,7 +635,37 @@ def _configured_projector(unit, observation, context, address_spaces, ssa, opera
         pointer_rows,
     )
     projector._once_blocks = (once_blocks or frozenset()) if DEFINITION_ATOMS and once_keys else frozenset()
+    projector._stack_atoms = _stack_atoms(unit, observation, context, address_spaces)
     return projector
+
+
+def _stack_atoms(unit, observation, context, address_spaces) -> tuple:
+    """(the stack object's atom -- the entry stack pointer register, every
+    entry atom of a register span overlapping it up to 2x its width, the
+    stack pointer's span) for the may-alias policy's stack pointer
+    (``may_alias._stack_pointer``); (None, empty, None) without one. The
+    projector also classifies the entry atoms it creates by overlap with the
+    span, of any width (``_stack_derived``)."""
+    from .may_alias import _stack_pointer
+
+    found = _stack_pointer(unit, observation, context, address_spaces)
+    if found is None:
+        return None, frozenset(), None
+    _, _, register_space, offset, size = found
+    resolved = _resolve_validated_storage(
+        StorageRef(VarnodeKind.REGISTER, "", offset, size, space_id=register_space), context)
+    if type(resolved) is not ResolvedStorage:
+        return None, frozenset(), None
+    span = resolved.span
+    whole = _stable_storage_key(span)
+    # every register span overlapping it, of any width an atom can have (up
+    # to twice the pointer: a pair holding it), the whole span included
+    overlapping = frozenset(
+        _stable_storage_key(ByteSpan(span.object_id, start, width))
+        for width in range(1, max(16, 2 * span.size) + 1)
+        for start in range(max(0, span.start - width + 1), span.end)
+    ) | {whole}
+    return whole, overlapping, span
 
 
 def stale_reads(effect_unit, observation, context, address_spaces, memory_ssa, used, *, bare=False,
@@ -751,6 +781,11 @@ class _Projector:
         self.used_reads: dict | None = None
         self._nonstack_atoms: set[int] = set()
         self._import_atoms: set[int] = set()   # import-slots-hold-their-exports (``IMPORT_SLOTS``)
+        # (the stack pointer's entry atom, entry atoms overlapping its register, its span)
+        self._stack_atoms: tuple = (None, frozenset(), None)
+        # entry atoms of a span overlapping the stack pointer (any width) and
+        # opaque atoms computed from a stack-derived value (transitively)
+        self._stack_derived: set[int] = set()
         self.nonstack_objects: set = set()
         self.wild_objects: set = set()
         self._action_ids = {
@@ -871,6 +906,18 @@ class _Projector:
                 return None
         return (ByteSpan(object_id, start, width),)
 
+    def _note_entry_atom(self, span: ByteSpan, atom: int) -> None:
+        """An entry value of a register span overlapping the stack pointer,
+        of any width, is stack-derived."""
+        stack_span = self._stack_atoms[2]
+        if stack_span is not None and span.object_id == stack_span.object_id                 and span.start < stack_span.end and stack_span.start < span.end:
+            self._stack_derived.add(atom)
+
+    def _is_stack_derived(self, atom: int) -> bool:
+        """An entry atom of (a part of) the stack pointer, or an opaque atom
+        computed from one."""
+        return atom in self._stack_atoms[1] or atom in self._stack_derived
+
     def _relative_object(self, address, space_id, extra: int = 0, width: int | None = None) -> StorageObjectId:
         """``extra``: a displacement added to ``address`` by the caller;
         ``width``: the access's byte size (None: not an access)."""
@@ -897,6 +944,12 @@ class _Projector:
             _digest_ints(b"relative-address-space-v1", (_address_atom_key(address.atoms), space_id)),
         )
         if any(atom in self._definition_atoms for atom, _ in address.atoms):
+            self.wild_objects.add(object_id)
+        if any(self._is_stack_derived(atom) for atom, _ in address.atoms) \
+                and address.atoms != ((self._stack_atoms[0], 1),):
+            # derived from the stack pointer but not the stack object
+            # (rsp + rdi, 2*rsp, a part of rsp): a stack address reaching the
+            # private frame -- never "another base" the frame rule excludes
             self.wild_objects.add(object_id)
         if len(address.atoms) == 1 and address.atoms[0][1] == 1 and address.atoms[0][0] in self._fresh_atoms:
             self.fresh_objects.add(object_id)
@@ -1130,11 +1183,9 @@ class _Projector:
             result = _AddressExpression((), constant, requested_span.size,
                                         None if IMAGE_BASE_TRACKING.get() is not None else 0)
         elif definition.kind is MemoryDefinitionKind.ENTRY:
-            result = _AddressExpression(
-                ((_stable_storage_key(requested_span), 1),),
-                0,
-                requested_span.size,
-            )
+            atom = _stable_storage_key(requested_span)
+            self._note_entry_atom(requested_span, atom)
+            result = _AddressExpression(((atom, 1),), 0, requested_span.size)
         elif definition.kind is MemoryDefinitionKind.DATA_WRITE:
             if definition.span != requested_span:
                 operation = self._operations.get(definition.operation_key)
@@ -1406,8 +1457,11 @@ class _Projector:
         )
         if any(item is None for item in inputs):
             return None
+        atom = _opaque_atom_key(token, inputs, byte_size)
+        if any(self._is_stack_derived(key) for item in inputs for key, _ in item.atoms):
+            self._stack_derived.add(atom)
         return _AddressExpression(
-            ((_opaque_atom_key(token, inputs, byte_size), 1),),
+            ((atom, 1),),
             0,
             byte_size,
             _opaque_image(*inputs),
