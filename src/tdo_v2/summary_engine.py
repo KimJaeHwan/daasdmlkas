@@ -94,10 +94,19 @@ def analyze_frozen_bundle_with_summaries(
     pcodeop_models=None,
     assume_win64_home_space_private: bool = True,
     assume_debug_break_traps_do_not_return: bool = True,
+    stack_evidence=(),
 ) -> EngineRun:
     """``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
-    facts (``image_info``); each model used is listed in ``EngineRun.assumptions``."""
+    facts (``image_info``); each model used is listed in ``EngineRun.assumptions``.
+    ``stack_evidence``: whole-program stack-switch evidence (``stack_evidence``)
+    for the program and the libraries it runs with: a switch in any of them
+    withdraws globals-disjoint-from-stack (``stack_evidence.assumption_allowed``)."""
+    if stack_evidence:
+        from .stack_evidence import assumption_allowed
+
+        assume_globals_disjoint_from_stack, _ = assumption_allowed(
+            stack_evidence, requested=assume_globals_disjoint_from_stack)
     from .integration.configured_boundary_demands import (
         _analyses_from_boundary_nodes, _direct_sink_boundary_nodes,
     )
@@ -278,7 +287,8 @@ def analyze_frozen_bundle_with_summaries(
 
 def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, pcodeop_models=None) -> tuple:
     """Every assumption an ``analyze_units`` run rests on (``EngineRun.assumptions``)."""
-    assumptions = ("globals-disjoint-from-stack",) if any(
+    # (its withdrawal check rests on stack-switch-check-exceptions)
+    assumptions = ("globals-disjoint-from-stack", "stack-switch-check-exceptions") if any(
         getattr(item.normalized, "assumes_globals_disjoint_from_stack", False)
         for item in results.values()
     ) else ()

@@ -14,10 +14,12 @@ assumptions of the derivation run. Functions that cannot be exported are
 listed with the reason.
 
 Analysis settings match the summary engine's defaults (Windows x64 home space
-0x28, debug-break traps do not return). The opt-in globals-disjoint-from-stack
-is never taken: a library Bundle holds a closure (exports may stop at internal
-models), which is no evidence about the library's -- or the process's -- stack
-switching (design section 24); the templates then apply in any run.
+0x28, debug-break traps do not return). globals-disjoint-from-stack is taken
+only with ``--stack-evidence``: a clean whole-program scan of THIS library
+(ghidra/GhidraV2StackSwitchScan.java over the analyzed program in the Ghidra
+project; ``tdo_v2.stack_evidence``) -- a library Bundle holds a closure, no
+evidence about the rest (design section 24.1). Templates derived with it apply
+only in runs that make it too; without it they apply in any run.
 """
 
 from __future__ import annotations
@@ -67,6 +69,8 @@ def main(argv=None) -> int:
     parser.add_argument("--version", type=int, default=1)
     parser.add_argument("-o", "--output", type=Path, required=True)
     parser.add_argument("--model-dir", action="append", default=[], type=Path)
+    parser.add_argument("--stack-evidence", action="append", default=[], type=Path,
+                        help="whole-program stack-switch evidence of the library (and others it runs with)")
     args = parser.parse_args(argv)
 
     import run_dfbench
@@ -124,15 +128,25 @@ def main(argv=None) -> int:
     space = units[0].scopes.program.evidence.image_base.space_id
     relocates = image_provenance(lambda address, size: image.value(space, address, size),
                                  [(offset, size) for space_id, offset, size in info.relocations if space_id == space])
+    from tdo_v2.stack_evidence import assumption_allowed, load_stack_evidence
+
+    evidence = [load_stack_evidence(path) for path in args.stack_evidence]
+    sha = units[0].scopes.program.evidence.executable_sha256.hex()
+    globals_disjoint, lines = assumption_allowed(evidence, requested=bool(evidence), require_for=sha)
+    for line in lines:
+        print(f"stack evidence: {line}")
     tracking = ImageBaseTracking(ranges, relocates)
     with tracking as found:
         results = ip.analyze_units(selected, image_info=info, external_models=models, pcodeop_models=pcodeops,
                                    private_frame_above=0x28, assume_debug_break_traps_do_not_return=True,
+                                   assume_globals_disjoint_from_stack=globals_disjoint,
                                    own_library=library, keep_uncut=frozenset(targets))
     rows = [(exports[name], name, [name]) for name in args.export if name in exports]
     raw, refused = build_file(results, rows, file_id=args.id, version=args.version, library=library,
                               external_models=models, pcodeop_models=pcodeops, private_frame_above=0x28,
-                              base_dependent=found, traps=True, producer=_producer(args.generation),
+                              base_dependent=found, traps=True,
+                              producer={**_producer(args.generation), "stack_evidence": [
+                                  {"file": item.digest, "summary": item.describe()} for item in evidence]},
                               notes=f"Derived by tools/derive_models from {args.generation.name}.")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(raw, indent=1) + "\n", encoding="utf-8")

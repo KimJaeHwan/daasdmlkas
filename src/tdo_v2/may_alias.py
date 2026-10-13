@@ -714,14 +714,190 @@ def _unit_stub(scopes):
     )
 
 
-def stack_switches(unit, observation, context, address_spaces) -> tuple[str, ...]:
-    """Operations that set the stack pointer to a value not derived from it."""
+def stack_switches(unit, observation, context, address_spaces, program_stack=None,
+                   call_preserved=()) -> tuple[str, ...]:
+    """Operations that may set the stack pointer to something other than
+    "the stack pointer + a number" (a stack switch: ``mov rsp, [x]``). The
+    stack pointer is the function's own (call / return shapes) or, without
+    those (a lone jump), ``program_stack``: (register offset, size) of the
+    program's; with neither, a function touching registers is "unchecked".
+    The check withdraws an assumption: it must not miss a switch (MUST
+    analysis, ``_coefficient_switches``; ``call_preserved``: register
+    (offset, size) a callee keeps, ``CALL_PRESERVED``)."""
     found = _stack_pointer(unit, observation, context, address_spaces)
-    if found is None:
+    register_space = _register_space_id(observation)
+    touched = any(varnode is not None and varnode.kind is VarnodeKindCode.REGISTER
+                  for instruction in observation.instructions for operation in instruction.operations
+                  for varnode in (*operation.inputs, operation.output))
+    if found is not None:
+        _, _, register_space, offset, size = found
+    elif program_stack is not None and register_space is not None:
+        offset, size = program_stack
+    else:
+        return ("unchecked",) if touched else ()
+    return _coefficient_switches(observation, register_space, offset, size, unit.entry_block_key,
+                                 call_preserved)
+
+
+# registers both x86-64 ABIs (Windows, System V) have a callee preserve; a
+# call keeps what they hold (the stack pointer itself: the call shape)
+# (x86-32: ebx, ebp, esi, edi -- every 32-bit x86 convention). Part of the
+# reported assumption stack-switch-check-exceptions.
+CALL_PRESERVED = {"x86:LE:64": ((0x18, 8), (0x28, 8), (0xA0, 8), (0xA8, 8), (0xB0, 8), (0xB8, 8)),
+                  "x86:LE:32": ((0xC, 4), (0x14, 4), (0x18, 4), (0x1C, 4))}
+# the largest alignment ``and rsp, -2**k`` keeps as "the stack pointer + a number"
+MAX_STACK_ALIGNMENT = 1 << 12
+
+
+def _coefficient_switches(observation, register_space: int, offset: int, size: int, entry_key,
+                          call_preserved=()) -> tuple[str, ...]:
+    """Forward MUST analysis over the p-code block graph of each register or
+    temporary's STACK COEFFICIENT: 1 -- "the stack pointer + a number" on
+    every path, 0 -- no stack pointer in it, None -- anything else (a join of
+    both, a product, a part of the pointer). A write of the stack pointer with
+    a coefficient other than 1 is a switch. Transfer: COPY keeps; INT_ADD /
+    INT_SUB add and subtract (only 0 and 1 survive: rsp - rsp = 0); INT_AND
+    of 1 with an alignment mask -2**k (k <= 12) keeps it (``and rsp,-16``),
+    with any other mask gives None; LOAD gives 0 (a restore from memory is
+    flagged; a loaded number used to adjust the stack pointer is taken as no
+    stack pointer -- stack-switch-check-exceptions); every
+    other operation is 0 from inputs all 0, else None; a CALL / CALLIND keeps
+    only the stack pointer and the call-preserved registers (the rest hold what
+    the callee left: 0 -- a call's result used to adjust the stack pointer is
+    taken as no stack pointer); a CALLOTHER defines just its output, if any
+    (both: stack-switch-check-exceptions). A location read whole as it was
+    written gets its coefficient; one overlapping part of a non-zero entry is
+    None. Instructions no path from the entry reaches are checked from the
+    entry state (the stack pointer is the stack pointer everywhere)."""
+    from .pcode_blocks import build_pcode_block_graph, instruction_key
+
+    instructions = {row.address: row for row in observation.instructions}
+    if not instructions:
         return ()
-    _, _, register_space, offset, size = found
-    taint = _stack_taint(observation, register_space, offset, size, frozenset(), unit.entry_block_key)
-    return () if taint is None else tuple(sorted(taint[3]))
+    stack = (register_space, offset, size)
+    preserved = {(register_space, start, width) for start, width in call_preserved}
+    entry = next((address for address in instructions if instruction_key(address) == entry_key),
+                 min(instructions))
+    switches: set[str] = set()
+    covered: set = set()
+    for start in [entry] + sorted(instructions):
+        if start in covered:
+            continue
+        graph = build_pcode_block_graph(observation, start)
+        if graph.unsupported is not None:
+            return ("unchecked",)
+        covered.update(block.instruction for block in graph.blocks)
+        switches |= _coefficient_pass(graph, instructions, stack, preserved)
+    return tuple(sorted(switches))
+
+
+def _coefficient_pass(graph, instructions, stack, preserved) -> set:
+    blocks = {block.key: block for block in graph.blocks}
+
+    def location(varnode):
+        return (varnode.coordinate.space_id, varnode.coordinate.byte_offset, varnode.byte_size)
+
+    def overlaps(a, b):
+        return a[0] == b[0] and a[1] < b[1] + b[2] and b[1] < a[1] + a[2]
+
+    def read(state, varnode):
+        if varnode.kind is VarnodeKindCode.CONSTANT:
+            return 0
+        key = location(varnode)
+        if key in state:
+            return state[key]
+        return None if any(value != 0 and overlaps(key, other) for other, value in state.items()) else 0
+
+    def write(state, key, value):
+        for other in [other for other in state if overlaps(key, other)]:
+            covered = key[1] <= other[1] and other[1] + other[2] <= key[1] + key[2]
+            if covered:
+                del state[other]
+            else:
+                # bytes of a non-zero entry survive the partial write: that
+                # location no longer holds a whole coefficient (``mov al, 0``)
+                state[other] = None
+        if value != 0:
+            state[key] = value
+        elif key in state:
+            del state[key]
+
+    def coefficient(operation, state):
+        opcode = operation.opcode
+        values = [read(state, item) for item in operation.inputs]
+        if opcode == "COPY" and values:
+            return values[0]
+        if opcode in ("INT_ADD", "INT_SUB") and len(values) == 2:
+            if None in values:
+                return None
+            total = values[0] + values[1] if opcode == "INT_ADD" else values[0] - values[1]
+            return total if total in (0, 1) else None
+        if opcode == "INT_AND" and len(values) == 2:
+            for index in (0, 1):
+                mask = operation.inputs[1 - index]
+                if mask.kind is VarnodeKindCode.CONSTANT and values[index] is not None:
+                    if values[index] == 0:
+                        return 0
+                    low = (1 << (8 * mask.byte_size)) - mask.coordinate.byte_offset   # 2**k for -2**k
+                    return 1 if 0 < low <= MAX_STACK_ALIGNMENT and low & (low - 1) == 0 else None
+        if opcode == "LOAD" or opcode in _BOOLEAN_OPCODES:
+            return 0
+        return 0 if all(value == 0 for value in values) else None
+
+    def transfer(block, state, switches):
+        row = instructions[block.instruction]
+        state = dict(state)
+        for ordinal in range(block.start, block.stop):
+            operation = row.operations[ordinal]
+            if operation.opcode in ("CALL", "CALLIND"):
+                # a user op (CALLOTHER) defines just its output, if any
+                for key in [key for key in state if key[0] == stack[0] and key != stack
+                            and not any(key[1] >= kept[1] and key[1] + key[2] <= kept[1] + kept[2]
+                                        for kept in preserved)]:
+                    del state[key]
+            output = operation.output
+            if output is None or output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
+                continue
+            value = coefficient(operation, state)
+            key = location(output)
+            if overlaps(key, stack):
+                if switches is not None and not (key == stack and value == 1):
+                    switches.add(_operation_key(row.address, ordinal, operation.opcode))
+                # the stack pointer stays the stack pointer after any write of it
+                # (a switch is reported where it happens)
+                write(state, key, 1)
+                write(state, stack, 1)
+                continue
+            write(state, key, value)
+        return state
+
+    def merge(a, b):
+        merged = {}
+        for key in set(a) | set(b):
+            left, right = a.get(key, 0), b.get(key, 0)
+            value = left if left == right else None
+            if value != 0:
+                merged[key] = value
+        return merged
+
+    order = {block.key: index for index, block in enumerate(graph.blocks)}
+    in_states = {graph.entry: {stack: 1}}
+    pending = {graph.entry}
+    while pending:
+        key = min(pending, key=order.__getitem__)
+        pending.remove(key)
+        out = transfer(blocks[key], in_states[key], None)
+        for target in blocks[key].successors:
+            if target not in blocks:
+                continue
+            merged = out if target not in in_states else merge(out, in_states[target])
+            if merged != in_states.get(target):
+                in_states[target] = merged
+                pending.add(target)
+    switches: set[str] = set()
+    for key, state in in_states.items():
+        transfer(blocks[key], state, switches)
+    return switches
 
 
 __all__ = ("MAY_ALIAS_CONTRACT_VERSION", "MayAliasRead", "derive_may_alias_reads", "stack_object_of",

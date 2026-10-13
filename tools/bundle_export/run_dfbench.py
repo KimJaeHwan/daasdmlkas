@@ -127,6 +127,10 @@ def main() -> int:
                              "instead of the default summary engine")
     parser.add_argument("--summaries", action="store_true",
                         help="(default; kept for compatibility) the summary engine")
+    parser.add_argument("--stack-evidence", type=Path, action="append", default=[],
+                        help="whole-program stack-switch evidence (ghidra/GhidraV2StackSwitchScan.java) of "
+                             "the program or a library it runs with (repeatable): a switch in any of them "
+                             "withdraws globals-disjoint-from-stack")
     parser.add_argument("--assume-boundary-effects", action="store_true",
                         help="TEST-ONLY special condition: declared source/sink call effects")
     # every engine-wide named assumption comes from the registry (on by default;
@@ -144,6 +148,16 @@ def main() -> int:
     if args.assume_boundary_effects:
         print("[run] TEST-ONLY ASSUMPTION: source/sink call effects are declared, not observed")
     from tdo_v2.engine import analyze_frozen_bundle
+    from tdo_v2.stack_evidence import assumption_allowed, load_stack_evidence
+
+    evidence = [load_stack_evidence(path) for path in args.stack_evidence]
+    if evidence:
+        allowed, lines = assumption_allowed(evidence, requested=args.assume_globals_disjoint_from_stack)
+        for line in lines:
+            print(f"[run] stack evidence: {line}")
+    elif args.assume_globals_disjoint_from_stack:
+        print("[run] globals-disjoint-from-stack: withdrawal checks the Bundle's functions only "
+              "(no whole-program stack evidence given: --stack-evidence)")
 
     generation = args.generation
     print(f"[run] ABI {abi_of(generation)} (boundary argument register)")
@@ -170,6 +184,7 @@ def main() -> int:
                 assume_boundary_call_effects=args.assume_boundary_effects,
                 external_models=external_models(generation, args.model_dir) if args.external_models else None,
                 pcodeop_models=pcodeop_models(),  # not imported functions: --no-external-models keeps them
+                stack_evidence=tuple(evidence),
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},
             )

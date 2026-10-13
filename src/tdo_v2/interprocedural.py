@@ -683,18 +683,35 @@ def _recursive_hypothesis(derive, stack):
 
 
 def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
-    """Entry key -> operations that set the stack pointer to a value not
-    derived from it (a stack switch: fibers, coroutines); empty for ordinary
-    programs. A switching program may run on a stack in static data, so the
-    globals-vs-stack assumption is withdrawn for all of it."""
-    from .may_alias import _unit_stub, stack_switches
+    """Entry key -> operations that may set the stack pointer to something
+    other than "the stack pointer + a number" (a stack switch: fibers,
+    coroutines;
+    "unchecked" for a function that writes registers the check cannot tell
+    apart); empty for ordinary programs. A switching program may run on a
+    stack in static data, so the globals-vs-stack assumption is withdrawn for
+    all of it. Functions without call or return shapes of their own are
+    checked with the program's stack pointer (the call shapes' base register).
+    These are the given units only: a Bundle holding part of a program is no
+    evidence about the rest (``stack_evidence``)."""
+    from .call_clobber import _preserved_stack_pointers
+    from .may_alias import CALL_PRESERVED, _return_shape, _unit_stub, stack_switches
 
+    units = list(units)
+    # the program's stack pointer: the call shapes' base register, or the
+    # register return shapes pop from
+    pointers = {(span.start, span.size) for unit in units
+                for spans in _preserved_stack_pointers(unit.observation, unit.scopes.resolution_context).values()
+                for span in spans}
+    pointers |= {shape[0] for unit in units for instruction in unit.observation.instructions
+                 if (shape := _return_shape(instruction)) is not None}
+    program_stack = next(iter(pointers)) if len(pointers) == 1 else None
     found = {}
     for unit in units:
         program = unit.scopes.program
+        language = ":".join(program.evidence.translation_namespace.language_id.split(":")[:3])
         rows = stack_switches(
             _unit_stub(unit.scopes), unit.observation, unit.scopes.resolution_context,
-            program.evidence.address_spaces,
+            program.evidence.address_spaces, program_stack, CALL_PRESERVED.get(language, ()),
         )
         if rows:
             found[function_key(unit.scopes.function.entry)] = rows

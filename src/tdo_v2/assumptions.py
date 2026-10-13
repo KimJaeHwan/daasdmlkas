@@ -47,6 +47,19 @@ REGISTRY: tuple[Assumption, ...] = (
         "assume_globals_disjoint_from_stack", "--no-assume-globals-not-stack",
         "TDO_V2_ASSUME_GLOBALS_NOT_STACK"),
     Assumption(
+        "stack-switch-check-exceptions", "reported", True,
+        "The stack-switch check that withdraws globals-disjoint-from-stack (may_alias.stack_switches, "
+        "GhidraV2StackSwitchScan) takes: a value loaded from memory or left in a register by a call, used to "
+         "adjust the stack pointer, as holding no stack pointer (alloca / __chkstk sizes); a user op (CALLOTHER) "
+         "as changing only its output; a call as preserving the "
+        "nonvolatile registers common to the language's conventions (x86-64: rbx, rbp, r12-r15; x86-32: ebx, "
+        "ebp, esi, edi). Reported with globals-disjoint-from-stack.",
+        "A stack moved to static data by arithmetic on a saved stack pointer read back from memory or "
+        "returned by a call (rsp -= saved; rsp += buffer), by a user op with hidden effects, or through a callee "
+        "that returns with a nonvolatile register set to a static address. A direct load into the stack pointer "
+        "(rsp = [x], pop rsp) is always flagged; a register copy into it is accepted only with coefficient 1.",
+        "may_alias._coefficient_switches, ghidra/GhidraV2StackSwitchScan.java, stack_evidence"),
+    Assumption(
         "readonly-image-data-is-constant", "switch", True,
         "Bytes of a loaded, initialized, non-writable block keep their image value while the program "
         "runs (import address table slots excluded: the loader writes them).",
