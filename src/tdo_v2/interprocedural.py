@@ -554,6 +554,24 @@ def _external_sites(unit, image_info, external_models, disabled=frozenset(), usa
     switched off in this run (``disabled``) is not applied: the call stays
     opaque; so is one ``usable`` finds a reason against (put in ``refused``)."""
     found = {}
+    for key, symbol in import_call_sites(unit, image_info).items():
+        model = external_models.lookup(symbol)
+        if model is not None and not set(model[1].inherited) & disabled:
+            reason = usable(*model) if usable is not None else None
+            if reason is not None:
+                if refused is not None:
+                    refused[key] = f"{model[1].label}: {reason}"
+                continue
+            found[key] = model
+    return found
+
+
+def import_call_sites(unit, image_info) -> dict:
+    """Call key -> imported symbol for the import call shapes the engine binds
+    to models: ``CALL`` of an import thunk, ``CALLIND`` of a value copied from
+    an import slot within the call instruction (``call [__imp_X]``), a
+    terminal ``BRANCHIND`` through an import slot (``jmp [__imp_X]``)."""
+    found = {}
     for instruction in unit.observation.instructions:
         operations = instruction.operations
         for ordinal, operation in enumerate(operations):
@@ -571,17 +589,8 @@ def _external_sites(unit, image_info, external_models, disabled=frozenset(), usa
                             and copy.inputs[0].kind is VarnodeKindCode.ADDRESS:
                         source = copy.inputs[0].coordinate
                         symbol = image_info.import_at_slot(source.space_id, source.byte_offset)
-            if symbol is None:
-                continue
-            model = external_models.lookup(symbol)
-            if model is not None and not set(model[1].inherited) & disabled:
-                key = _operation_key(instruction.address, ordinal, operation.opcode)
-                reason = usable(*model) if usable is not None else None
-                if reason is not None:
-                    if refused is not None:
-                        refused[key] = f"{model[1].label}: {reason}"
-                    continue
-                found[key] = model
+            if symbol is not None:
+                found[_operation_key(instruction.address, ordinal, operation.opcode)] = symbol
     return found
 
 

@@ -131,6 +131,21 @@ def main() -> int:
                         help="whole-program stack-switch evidence (ghidra/GhidraV2StackSwitchScan.java) of "
                              "the program or a library it runs with (repeatable): a switch in any of them "
                              "withdraws globals-disjoint-from-stack")
+    parser.add_argument("--link", action="append", default=[], metavar="LIBRARY=DLL",
+                        help="link the program with the real code of this library (repeatable; design section "
+                             "24): its called exports without a model get templates derived from the user's "
+                             "prepared Ghidra project (--ghidra-project), cached in --link-cache")
+    parser.add_argument("--ghidra-project", type=Path,
+                        help="the prepared Ghidra project (.gpr) holding the linked libraries, imported and "
+                             "analyzed by the user (tools/bundle_export/README.md)")
+    parser.add_argument("--link-folder", default="/libs",
+                        help="the project folder holding the libraries (Ghidra's -loader-libraryDestinationFolder)")
+    parser.add_argument("--link-cache", type=Path, default=Path.home() / "tdo_link_cache")
+    parser.add_argument("--link-refresh", action="store_true",
+                        help="derive every linked export again (after re-analyzing a library in Ghidra)")
+    parser.add_argument("--link-dry-run", action="store_true",
+                        help="report what linking would derive (and use the cache), derive nothing")
+    parser.add_argument("--link-max-mem", default="10G", help="Ghidra heap for the linking export and scan")
     parser.add_argument("--assume-boundary-effects", action="store_true",
                         help="TEST-ONLY special condition: declared source/sink call effects")
     # every engine-wide named assumption comes from the registry (on by default;
@@ -159,6 +174,22 @@ def main() -> int:
         print("[run] globals-disjoint-from-stack: withdrawal checks the Bundle's functions only "
               "(no whole-program stack evidence given: --stack-evidence)")
 
+    linker = None
+    if args.link:
+        if args.legacy_engine or args.ghidra_project is None or not args.external_models:
+            raise SystemExit("--link needs the summary engine, external models and --ghidra-project")
+        sys.path.insert(0, str(REPO / "tools" / "derive_models"))
+        from derive_models import derive_library
+        from link_provider import GhidraLinkProvider
+        from tdo_v2.linking import Linker, LinkTarget
+
+        provider = GhidraLinkProvider(args.ghidra_project, args.link_cache, folder=args.link_folder,
+                                      model_dirs=args.model_dir, max_mem=args.link_max_mem,
+                                      log=lambda line: print(line, flush=True))
+        linker = Linker([LinkTarget.parse(item) for item in args.link], args.link_cache, provider,
+                        derive_library, refresh=args.link_refresh, dry_run=args.link_dry_run,
+                        log=lambda line: print(line, flush=True))
+
     generation = args.generation
     print(f"[run] ABI {abi_of(generation)} (boundary argument register)")
     manifest = json.loads((generation / "manifest.json").read_text(encoding="utf-8"))
@@ -185,10 +216,26 @@ def main() -> int:
                 external_models=external_models(generation, args.model_dir) if args.external_models else None,
                 pcodeop_models=pcodeop_models(),  # not imported functions: --no-external-models keeps them
                 stack_evidence=tuple(evidence),
+                linker=linker,
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},
             )
             print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
+            if linker is not None:
+                for line in linker.report.lines:
+                    print(f"[link] {line}")
+                for evidence_file in linker.report.evidence_files:
+                    print(f"[link] stack evidence: {load_stack_evidence(evidence_file).describe()}")
+                counts = {}
+                for row in linker.report.rows:
+                    counts[row.status] = counts.get(row.status, 0) + 1
+                print(f"[link] imports: {counts}")
+                # applied = used at some call of this run (its label is among the run's assumptions)
+                linked_rows = [row for row in linker.report.rows if row.status in ("derived", "cached")]
+                unused = [row.name for row in linked_rows if not any(
+                    label.startswith(f"derived-model:{row.file_id}/") for label in run.assumptions)]
+                print(f"[link] templates applied in this run: {len(linked_rows) - len(unused)} of {len(linked_rows)}"
+                      + (f"; not applied (see refused models): {unused}" if unused else ""))
         else:
             print("[run] legacy engine (per-root interprocedural completion)")
             run = analyze_frozen_bundle(
@@ -225,17 +272,19 @@ def main() -> int:
         for case in cases:
             got = results.get(case["function"])
             anchor = f"{case['anchor']['callee']}.arg{case['anchor']['arg_index']}"
+            # 09 manifests: expected/forbidden_sources; 10 UE (v2): data + global sources
+            want = case.get("expected_sources",
+                            case.get("expected_data_sources", []) + case.get("expected_global_sources", []))
+            forbid = case.get("forbidden_sources", case.get("forbidden_data_sources", []))
             if got is None:
                 verdict, origins = "MISSING", set()
             else:
                 origins = {o for r in got["roots"] if r["label"] == anchor
                            for o in r["origins"]}
-                ok = set(case["expected_sources"]) <= origins and \
-                    not (set(case["forbidden_sources"]) & origins)
+                ok = set(want) <= origins and not (set(forbid) & origins)
                 verdict = "PASS" if ok else "FAIL"
             tally[verdict] += 1
-            print(f"  {case['id']} {verdict:7} got={sorted(origins)} "
-                  f"want={case['expected_sources']} forbid={case['forbidden_sources']}")
+            print(f"  {case['id']} {verdict:7} got={sorted(origins)} want={want} forbid={forbid}")
         print("[run]", tally)
     if args.json:
         args.json.write_text(json.dumps(results, indent=1), encoding="utf-8")

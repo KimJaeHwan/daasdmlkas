@@ -416,7 +416,22 @@ def load_external_models(paths, language_id: str, abi_tag: str) -> ExternalModel
     are unique, every override names an existing entry of another file, and
     overrides form no cycle between files."""
     files = [load_model_file(path) for path in paths]
-    files = [item for item in files if item.language_id == language_id and item.abi_tag == abi_tag]
+    return validated_models(item for item in files if item.language_id == language_id and item.abi_tag == abi_tag)
+
+
+def with_model_files(models: ExternalModels, paths) -> ExternalModels:
+    """``models`` and the model files at ``paths`` (of the same language and
+    ABI, else an error), validated together as ``load_external_models``."""
+    files = [load_model_file(path) for path in paths]
+    tags = {(item.language_id, item.abi_tag) for item in models.files}
+    for item in files:
+        if tags and (item.language_id, item.abi_tag) not in tags:
+            raise ModelError(f"model file {item.file_id}: {item.language_id} / {item.abi_tag} is not this run's")
+    return validated_models((*models.files, *files))
+
+
+def validated_models(files) -> ExternalModels:
+    files = list(files)
     ids = [item.file_id for item in files]
     if len(set(ids)) != len(ids):
         raise ModelError(f"model file ids are not unique: {sorted(i for i in set(ids) if ids.count(i) > 1)}")

@@ -95,18 +95,17 @@ def analyze_frozen_bundle_with_summaries(
     assume_win64_home_space_private: bool = True,
     assume_debug_break_traps_do_not_return: bool = True,
     stack_evidence=(),
+    linker=None,
 ) -> EngineRun:
     """``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
     facts (``image_info``); each model used is listed in ``EngineRun.assumptions``.
     ``stack_evidence``: whole-program stack-switch evidence (``stack_evidence``)
     for the program and the libraries it runs with: a switch in any of them
-    withdraws globals-disjoint-from-stack (``stack_evidence.assumption_allowed``)."""
-    if stack_evidence:
-        from .stack_evidence import assumption_allowed
-
-        assume_globals_disjoint_from_stack, _ = assumption_allowed(
-            stack_evidence, requested=assume_globals_disjoint_from_stack)
+    withdraws globals-disjoint-from-stack (``stack_evidence.assumption_allowed``).
+    ``linker``: ``linking.Linker`` -- called once with the functions and image
+    facts before the analysis; it returns the model set with the linked
+    libraries' templates and their stack evidence (joining ``stack_evidence``)."""
     from .integration.configured_boundary_demands import (
         _analyses_from_boundary_nodes, _direct_sink_boundary_nodes,
     )
@@ -213,6 +212,30 @@ def analyze_frozen_bundle_with_summaries(
         # named assumption win64-home-space-callee-private: the Windows x64
         # convention only (a PE image of a 64-bit x86 language)
         home_space = 0x28 if assume_win64_home_space_private and image_info is not None             and image_info.executable_format.startswith("Portable Executable") and _x86_64(evidences) else 0
+        from .stack_evidence import assumption_allowed
+
+        if stack_evidence:
+            assume_globals_disjoint_from_stack, _ = assumption_allowed(
+                stack_evidence, requested=assume_globals_disjoint_from_stack)
+        if linker is not None:
+            from .interprocedural import program_switches_stack
+            from .stack_evidence import load_stack_evidence
+
+            # the linked templates are derived with the run's effective
+            # settings: the program's own withdrawals first
+            if assume_globals_disjoint_from_stack and program_switches_stack([item.unit for item in evidences]):
+                assume_globals_disjoint_from_stack = False
+            external_models, linked_evidence = linker(
+                [item.unit for item in evidences], image_info, external_models=external_models,
+                pcodeop_models=pcodeop_models, private_frame_above=home_space,
+                traps=assume_debug_break_traps_do_not_return,
+                globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear)
+            linked_evidence = tuple(load_stack_evidence(path) for path in linked_evidence)
+            if linked_evidence:
+                # a switch in a linked library withdraws the assumption for the run
+                stack_evidence = (*stack_evidence, *linked_evidence)
+                assume_globals_disjoint_from_stack, _ = assumption_allowed(
+                    stack_evidence, requested=assume_globals_disjoint_from_stack)
         results = analyze_units(
             [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,

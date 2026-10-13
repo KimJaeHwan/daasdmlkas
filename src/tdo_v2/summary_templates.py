@@ -55,7 +55,25 @@ class TemplateError(ValueError):
 
 
 class TemplateRefused(ValueError):
-    """A function that cannot be exported as a template (the reason)."""
+    """A function that cannot be exported as a template (the reason).
+    ``kind``: "semantic" (the analysis cannot express it), "budget" (a
+    bound of the analysis was reached) or "infrastructure" (it was not
+    analyzed at all) -- how linking stores and retries it."""
+
+    def __init__(self, message: str, kind: str = "semantic"):
+        super().__init__(message)
+        self.kind = kind
+
+
+class Refusal(str):
+    """A refusal reason as ``build_file`` returns it: the text, and its ``kind``."""
+
+    kind = "semantic"
+
+    def __new__(cls, text: str, kind: str = "semantic"):
+        item = super().__new__(cls, text)
+        item.kind = kind
+        return item
 
 
 # ---------------------------------------------------------------- export
@@ -69,7 +87,7 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
         raise TemplateRefused("no summary")
     for item in _closure(analyzed, results):
         if item.recursion_unresolved:
-            raise TemplateRefused(f"{item.key}: recursion without a verified fixpoint")
+            raise TemplateRefused(f"{item.key}: recursion without a verified fixpoint", "budget")
         if item.test_only_inputs or any(label.startswith("test-only-boundary:") for label in item.declared.values()):
             raise TemplateRefused(f"{item.key}: TEST-ONLY inputs")
         if not item.image_tracked:
@@ -493,15 +511,37 @@ def refusal(model_file, entry, *, external_models, pcodeop_models, private_frame
     for file_id, digest in recorded.items():
         if file_id not in files or files[file_id].digest != digest:
             return f"model file {file_id} differs from the one it was derived with"
-    names = {name for file_id in recorded for item in files[file_id].entries
-             for name in (*item.names, *item.original_names)}
+    # what each entry can match (as ``ExternalModels.lookup``): a file naming
+    # its libraries matches (library, original name) only; any other file
+    # matches by name, whatever the import's library, with leading
+    # underscores stripped -- plain names are compared that way on both sides
+    def plain_form(names):
+        return {name.lstrip("_") for name in names}
+
+    def matches(model_file, item):
+        if model_file.libraries:
+            return {("qualified", library, name) for library in model_file.libraries
+                    for name in item.original_names}, set()
+        return set(), {*item.names, *item.original_names}
+
+    qualified, plain = set(), set()
+    for file_id in recorded:
+        for item in files[file_id].entries:
+            keys, names = matches(files[file_id], item)
+            qualified |= keys
+            plain |= names
+    every_name = plain_form(plain | {key[2] for key in qualified})
+    plain = plain_form(plain)
     for item in external_models.files:
         if item.file_id in recorded:
             continue
         if any(target.split("/", 1)[0] in recorded for target in item.overrides):
             return f"model file {item.file_id} overrides a model it was derived with"
-        if any((set(other.names) | set(other.original_names)) & names for other in item.entries):
-            return f"model file {item.file_id} also models a function a model it was derived with names"
+        for other in item.entries:
+            keys, names = matches(item, other)
+            other_names = plain_form(names | {key[2] for key in keys})
+            if keys & qualified or plain_form(names) & every_name or other_names & plain:
+                return f"model file {item.file_id} also models a function a model it was derived with names"
     return None
 
 
@@ -524,14 +564,14 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
         analyzed = results.get(key)
         try:
             if analyzed is None:
-                raise TemplateRefused("not analyzed")
+                raise TemplateRefused("not analyzed", "infrastructure")
             if any(label.startswith("derived-model:") for item in _closure(analyzed, results)
                    for label in item.declared.values()):
                 raise TemplateRefused("derived from another derived model")
             entries.append({"name": name, "original_names": list(original_names),
                             "summary": export_summary(analyzed, results, base_dependent)})
         except TemplateRefused as error:
-            refused[name] = str(error)
+            refused[name] = Refusal(str(error), error.kind)
     first = next(iter(results.values()))
     evidence = first.unit.scopes.program.evidence
     namespace = evidence.translation_namespace

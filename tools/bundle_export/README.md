@@ -104,6 +104,40 @@ Measured: UnrealEditor-Core 52,211 functions / 2.88 M instructions in ~100 s, no
 981 functions, no switch; ntdll.dll (positive control) finds `MOV RSP,[RCX+0x10]`, as does the engine's
 own check on that function's Bundle.
 
+### Linking a run with the libraries (`run_dfbench --link`)
+
+With the project prepared (steps 1-3 above; the project saved and closed in the GUI):
+```bash
+python tools/bundle_export/run_dfbench.py <plugin generation> \
+    --link "UNREALEDITOR-CORE.DLL=<path to>/UnrealEditor-Core.dll" --ghidra-project /root/ghidra_proj/link.gpr \
+    [--link-folder /libs] [--link-cache ~/tdo_link_cache] [--link-dry-run] [--link-refresh] \
+    [--stack-evidence plugin.stack.json]
+```
+(`tdo_v2.linking`, design section 24.) Before the analysis, for each `--link LIBRARY=DLL`:
+1. **Coverage**: every import of LIBRARY in the program must be an export of the DLL file given (by
+   name, or `Ordinal_N`); otherwise it is not the library the program was built against and the run
+   stops.
+2. The imports the program **calls** that no loaded model covers (a hand model always wins: such an
+   import is never derived) are looked up in the cache `<link-cache>/<LIBRARY>/<DLL sha256>/<profile>/`
+   (the profile digest: engine versions, this run's analysis settings, the p-code op and hand model
+   files, Ghidra version and exporter/scanner sources).
+3. Misses are derived from the library's real code in the project: the library is scanned once per
+   build for stack switches, the misses' call closure is exported in one Bundle (cut at the library's
+   internal hand models), and `derive_models.derive_library` derives one template per export with the
+   hand models only (each export analyzed alone). Templates and the derivation's own refusals are
+   stored with their class (semantic, budget, infrastructure); a failed Ghidra launch or export is
+   reported and retried next run. A stored template that is damaged or edited counts as missing.
+4. The run applies one template per import (checked again at each call by
+   `summary_templates.refusal`, reported as `derived-model:link-...` with the derivation's
+   assumptions); the library's stack evidence joins the run's.
+Each called import gets a `[link]` row: `model`, `cached`, `derived`, `refused (class: reason)`,
+`data`, `forwarder`, `ordinal` (the last three are not linked in v1) or `pending` (`--link-dry-run`:
+nothing derived). Before the run every template is checked as the engine will check it at a call; one
+it would refuse is reported `unusable` and left out. After the run: `templates applied in this run: N
+of M`. The project's own analysis is not part of the cache key: after re-analyzing a library, run once
+with `--link-refresh` (it deletes everything cached for that DLL build, under every profile, and scans
+it again).
+
 ## Admit / normalize / run
 
 ```bash

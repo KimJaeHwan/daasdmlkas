@@ -673,7 +673,7 @@ major/minor가 다르면 적용 안 함; TEST-ONLY 입력·추적 없이 분석�
 이미지 끝, 마스크 복원, 페이지 마스크, 부분 읽기, 상쇄, entry 기준 오프셋). Core 실험: 상수 51개 — 이미지 주소 2개 증명, 고정 49개, 모름 0; 템플릿 3개
 그대로 내보냄. 테스트 `test_summary_templates.py` 25개, `test_summary_template_roundtrip.py` 8개, 589개 통과.
 
-## 24. 진짜 DLL 연결 — 필요할 때 분석 + 저장 (2026-10-13 설계, 사용자 결정 · Fable + Astra 2차까지, 구현 전)
+## 24. 진짜 DLL 연결 — 필요할 때 분석 + 저장 (2026-10-13 설계, 사용자 결정 · Fable + Astra 2차까지; v1 구현은 24.2)
 
 사용자 의도: 분석할 때 진짜 DLL을 연결해 플러그인이 부르는 Core 함수의 실제 코드로 따라 들어가고, 한 번 분석한
 함수는 저장해 두었다가 다음부터 저장본으로 대체(23절처럼 내보낼 함수를 미리 사람이 고르지 않음).
@@ -779,4 +779,68 @@ Bundle 1,540 함수)가 같은 연산을 찾음**. 증거 파일(`tdo_v2.stack_e
 중 하나라도 전환이면 가정 철회(같은 프로세스), 라이브러리 파생은 그 라이브러리 자신의 깨끗한 증거가 있을 때만. 연결:
 `run_dfbench --stack-evidence`(범위 출력; 증거가 없으면 "Bundle 함수만 검사"), `derive_models --stack-evidence`, `tools/
 bundle_export/scan_stack_switches.py`. Core FString 템플릿을 v3 증거로 다시 파생(요약 동일, 가정에 보고 가정 포함).
-열린 결정: 플러그인 자신의 증거가 없을 때 가정 유지 여부 — 사용자 결정 대기(현재 유지 + 범위 출력).
+사용자 결정(2026-10-13): 플러그인 자신의 증거가 없을 때도 가정은 **유지**(Bundle 함수 검사로 철회만 하고, "Bundle 함수만
+검사"라고 범위를 출력).
+
+### 24.2 DLL 연결 v1 구현 (2026-10-13, Fable·Astra 리뷰 2차까지)
+
+**사용법**: `run_dfbench --link UNREALEDITOR-CORE.DLL=<DLL 경로> --ghidra-project <준비된 .gpr>` (`--link-cache`,
+`--link-refresh`, `--link-dry-run`, `--link-folder`). 설명서: `tools/bundle_export/README.md`의 "Linking a run with the
+libraries".
+
+**구조**: `tdo_v2.linking.Linker`를 요약 엔진이 분석 직전에 한 번 부름(`analyze_frozen_bundle_with_summaries(linker=)`).
+Ghidra 쪽은 `tools/bundle_export/link_provider.py`(준비된 프로젝트에서 내보내기·스택 검사만, import·분석 없음), 파생은
+`derive_models.derive_library`.
+
+**순서** (DLL마다):
+1. 확인 — 모든 DLL을 먼저 확인한 뒤에 검사·파생 시작: DLL 파일의 PE machine이 실행 언어와 맞는지, 플러그인이 그
+   DLL에서 가져오는 모든 이름(또는 `Ordinal_N`)이 DLL의 export 표에 있는지(`tdo_v2.pe_exports`). 아니면 오류로 멈춤.
+2. 스택 전환 증거 — 연결되는 DLL은 항상 검사(DLL 빌드마다 한 번, 저장; 키 = DLL sha256 + Ghidra 버전·검사기 소스).
+   증거 파일의 실행 파일 sha256이 DLL과 다르면 증거 아님. 어느 DLL이든 전환이 있으면 **파생 전에** 가정을 끔(그 실행에서
+   철회될 가정에 기대는 템플릿을 만들지 않음). `--link-dry-run`은 이미 있는 검사만 씀.
+3. 필요한 함수 = 플러그인이 실제로 부르는 import 중 그 DLL 것. 이미 모델이 있으면 그 모델(손 모델 먼저). data export·
+   forwarder·서수 전용 export는 보고만(v1).
+4. 저장본 찾기 — `<cache>/<LIB>/<DLL sha256>/<profile>/templates|refusals/`. profile = 엔진 버전, 언어·ABI, **실행 설정
+   (home space, traps, globals-disjoint 실효값, direction-flag)**, p-code 모델, 손 모델 파일(id·digest), Ghidra 버전과
+   내보내기·검사기 소스, 그 DLL 증거 파일의 digest(없으면 없음 — 나중에 깨끗한 검사가 생기면 다시 파생).
+5. 없으면 파생 — Ghidra 내보내기는 **한 번에**(Ghidra 한 번 실행, 내부 손 모델에서 멈춤), 분석·템플릿은 **함수 하나씩**
+   (`derive_library(per_export=True)`: 그 함수의 closure와 거기서 닿는 잘린 함수만). 그래서 템플릿이 같이 파생된 다른
+   함수에 따라 달라지지 않음(Astra 반례: 다른 export가 섞이면 "tail exits not composed"가 풀리는 경우). 손 모델만 써서
+   파생(파생에서 파생 금지), 실행의 p-code 모델·설정 그대로.
+6. 거부 종류 — 파생이 그 함수에 대해 내린 판정은 종류와 함께 저장(같은 Bundle·profile이면 같은 결과): 의미(분석이 표현
+   못 함), 예산(재귀 고정점 라운드 초과 — 라운드 수는 profile에 포함), 기반("not analyzed", Bundle에 없음). 종류는 문구가
+   아니라 거부를 만든 곳에서 붙임(`TemplateRefused(kind)` → `summary_templates.Refusal`). 저장 안 함: 파생 실행 자체의 실패
+   (Ghidra/내보내기 실패, Bundle sha 불일치, 한 함수 파생 중 예외) — 다음 실행에서 다시 시도. 새 결과는 이전 저장본을 대체
+   (거부가 템플릿을, 템플릿이 거부를 지움). 저장한 템플릿 옆에 sha256 파일 — 손상·수정된 파일은 없는 것으로.
+   `--link-refresh`는 그 DLL 빌드의 **모든 profile**의 저장본과 증거를 지우고 다시(다시 분석한 결과는 어느 설정의 저장본도
+   바꿀 수 있음).
+7. 적용 전 검사 — 최종 모델 묶음에 대해 엔진이 호출 지점에서 쓸 `summary_templates.refusal`과 꺼진 가정을 미리 확인,
+   못 쓰는 템플릿은 `unusable`로 보고하고 빼냄(연결됐다고 말하지 않음). 실행 후 `[link] templates applied in this run:
+   N of M`(실행 가정 목록의 `derived-model:link-...` 기준).
+8. DLL 증거는 실행의 증거에 합류(같은 프로세스): 전환이면 실행 전체에서 가정 철회.
+
+**엔진 수정**: `summary_templates.refusal`의 이름 겹침 검사를 lookup과 같게 — 라이브러리를 적은 파일끼리는 (라이브러리,
+원래 이름)이 같을 때만 겹침(Astra: ONE.DLL!F 손 모델과 TWO.DLL!F 템플릿이 공존 가능). 라이브러리를 안 적은 파일은 이름의
+앞 밑줄을 떼고 비교(lookup이 그렇게 찾음: X.DLL!_foo와 일반 모델 foo는 겹침).
+
+**리뷰 1차 반영 (Fable P1 1·P2 9, Astra P1 3·P2 4)**: 실행 설정을 무시한 파생(가정을 끈 실행에서 템플릿이 전부 버려짐) →
+실효 설정으로 파생·profile에 포함; refresh가 증거를 다시 검사하지 않음; 거부가 이전 템플릿을 지우지 않음; 거부만 있거나
+손 모델만 있을 때 증거 누락; 묶음 파생의 결과 의존 → 함수별 분석; 예산·입장 실패가 의미 거부로 저장; 적용 전 확인 없음;
+PE machine 미확인; 깨진 저장 파일에서 실행 중단 → 없는 것으로; 증거 키에 Ghidra 버전 없음; 다른 DLL 전환이 먼저 파생된
+템플릿을 무효로 만듦 → 모든 DLL 증거를 먼저 봄. 남은 한계(설명서에 명시): 사용자 Ghidra 분석 자체는 키에 없음 — 다른
+옵션으로 다시 분석했으면 `--link-refresh`.
+
+**리뷰 2차 반영 (Fable P2 7, Astra P1 2·P2 4)**: refresh가 다른 profile의 옛 템플릿을 남김 → 빌드 전체 삭제; 밑줄 뗀
+이름 겹침; 예산·기반 판정을 매 실행 다시 내보냄(78초) → 종류와 함께 저장, 재귀 라운드 수는 profile에; 문구로 종류 판단 →
+kind; 서수 import가 이름 있는 export를 가리키면 파생되지만 적용 안 됨 → v1은 `ordinal`로 보고; dry-run이 증거 없이 다른
+profile을 봄 → 저장본을 보지 않고 `pending`; dry-run이 증거 파일을 지움 → 안 지움; 입장 못 한 export 하나가 같은 묶음의
+다른 함수를 실패시킴 → 함수별로 처리(그 함수만 `not analyzed`); p-code 모델 없음(None)을 기본값으로 바꿈 → 그대로;
+구조가 깨진 저장 템플릿 → sha256 확인. 남은 P2(보고 요약 개선)는 다음에.
+
+**검증**: 합성 테스트 `tests/intra/test_linking.py`(가짜 Ghidra; 확인·손 모델 우선·저장·거부 종류·profile 변화·refresh·
+증거·적용 전 검사·엔진을 통한 끝-끝 적용 — 템플릿 결과가 같은 함수 몸체를 Bundle에 넣은 결과와 같음). UE Development
+실제 실행: Core 호출 import 9개 중 손 모델 6, 파생 3(FString(), ~FString, AppendChar — 예전에 손으로 고른 셋과 같음);
+첫 실행 241초(Core 스택 검사 146초 + 내보내기 78초, 49 파일), 다음 실행 10초(전부 저장본), 두 실행 모두 "적용 3/3".
+함수별 파생의 요약은 예전 손으로 만든 파일과 **같고**, 가정 목록만 함수별로 줄어듦(3·5·10개, 묶음일 때 11개). 연결 실행의
+결과(모든 root의 출처·완전성)는 예전 템플릿 파일을 쓴 실행과 **완전히 같음**, 지표도 같음(22건 중 exact+sure 14) — 템플릿이
+없는 실행과도 같음(AppendChar의 index 쓰기 때문, 배열 단계에서 다룸).
