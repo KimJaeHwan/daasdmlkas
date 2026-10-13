@@ -40,7 +40,8 @@ class Assumption:
 REGISTRY: tuple[Assumption, ...] = (
     Assumption(
         "globals-disjoint-from-stack", "switch", True,
-        "A constant address never falls in the stack (the function's frame or its callers' frames).",
+        "A constant address never falls in the stack (the function's frame or its callers' frames); nor "
+        "does an address in another module's image (an import's address, import-slots-hold-their-exports).",
         "Stacks placed in static data (fibers on a static buffer, firmware); withdrawn automatically "
         "when a function of the program loads its stack pointer from elsewhere.",
         "may_alias._Policy, interprocedural._decide_conditions",
@@ -66,6 +67,21 @@ REGISTRY: tuple[Assumption, ...] = (
         "Packed or self-modifying binaries, VirtualProtect-style rewriting of read-only sections.",
         "image_info.ReadOnlyImage, relative_memory (entry values of read-only memory)",
         "assume_readonly_image_constant", "--no-assume-readonly-image", "TDO_V2_ASSUME_READONLY_IMAGE"),
+    Assumption(
+        "import-slots-hold-their-exports", "switch", True,
+        "A recognized import slot (image_info: imports and their IAT slots), read whole, holds the address "
+        "its import resolves to, no write changes it while the program runs, and the module that address "
+        "is in stays loaded (so the byte at that address is in that module's image). A one-byte access at "
+        "that address (displacement 0, independent of the image base) is then image-backed static storage: "
+        "never the stack (with globals-disjoint-from-stack) or a private frame. Only the slot's entry value "
+        "is taken (a write the function makes to the slot voids it; an unknown-address write before the read "
+        "does not -- that is the assumption). Nothing is assumed about wider accesses, other displacements, "
+        "the export's extent, fresh blocks, or two imports being different storage.",
+        "IAT hooking / Detours / patching, delay-load slots read before resolution, a module unloaded "
+        "while its address is in use, run-time re-resolution.",
+        "relative_memory.IMPORT_SLOTS (import atoms, import-static objects -> may_alias nonstack objects)",
+        "assume_import_slots_hold_exports", "--no-assume-import-slots",
+        "TDO_V2_ASSUME_IMPORT_SLOTS"),
     Assumption(
         "direction-flag-clear", "switch", True,
         "The x86 direction flag is clear at function entry and when a call returns (both x86-64 ABIs "

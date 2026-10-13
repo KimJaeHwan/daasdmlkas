@@ -67,11 +67,32 @@ class AnalyzedFunction:
     image_unproven: bool = False
 
 
+def _import_slots_active() -> bool:
+    from .relative_memory import IMPORT_SLOTS
+
+    return IMPORT_SLOTS.get() is not None and IMPORT_SLOTS.get().active
+
+
 def function_key(coordinate) -> str:
     return f"{coordinate.space_id:x}:{coordinate.byte_offset:x}"
 
 
-def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
+def analyze_units(units, *, assume_import_slots_hold_exports=False, **options) -> dict[str, "AnalyzedFunction"]:
+    """``_analyze_units`` (below) under the named assumption
+    import-slots-hold-their-exports when ``assume_import_slots_hold_exports``
+    and ``image_info`` are given (``relative_memory.IMPORT_SLOTS``; it takes
+    effect only where globals-disjoint-from-stack holds for the run)."""
+    from .relative_memory import IMPORT_SLOTS, ImportSlots
+
+    image_info = options.get("image_info")
+    token = IMPORT_SLOTS.set(ImportSlots(image_info) if assume_import_slots_hold_exports and image_info else None)
+    try:
+        return _analyze_units(units, **options)
+    finally:
+        IMPORT_SLOTS.reset(token)
+
+
+def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_globals_disjoint_from_stack=False, sink_roots=None,
                   image_info=None, external_models=None, readonly_image=None,
                   declared_boundaries=None, assume_direction_flag_clear=False,
@@ -124,6 +145,11 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # which assumptions hold in this run, and so which models may be applied
     if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
         assume_globals_disjoint_from_stack = False
+    from .relative_memory import IMPORT_SLOTS
+
+    if IMPORT_SLOTS.get() is not None:
+        # an import's address is only worth "not the stack" under this assumption
+        IMPORT_SLOTS.get().active = assume_globals_disjoint_from_stack
     # registry switches off in this run: a model resting on one is not applied
     disabled = {name for name, on in (
         ("globals-disjoint-from-stack", assume_globals_disjoint_from_stack),
@@ -131,6 +157,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("direction-flag-clear", assume_direction_flag_clear),
         ("win64-home-space-callee-private", bool(private_frame_above)),
         ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
+        ("import-slots-hold-their-exports", _import_slots_active()),
     ) if not on}
     cuts = _model_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
                        image_info, external_models, own_library, disabled) \
@@ -1018,6 +1045,25 @@ def _relative_anchors(unit, normalized) -> dict:
         for space_id in spaces:
             candidates[_function_relative_object_id(unit.scopes.function.scope, span, space_id)] = (
                 span, space_id)
+    # objects built on an import slot's value (import-slots-hold-their-exports):
+    # anchored on the slot as any pointer read from entry memory is
+    from .relative_memory import IMPORT_SLOTS, import_object_ids
+
+    imports = IMPORT_SLOTS.get()
+    if imports is not None:
+        pointer_bytes = {row.space_id: row.address_size_bits // 8
+                         for row in unit.scopes.program.evidence.address_spaces}
+        for span in registers:
+            # the slot read whole at its space's pointer width (as the import
+            # atom itself requires): a narrower read of it anchors nothing here
+            if span.object_id.kind is not Kind.ADDRESS_SPACE                     or span.size != pointer_bytes.get(span.object_id.space_key):
+                continue
+            atom = imports.atom(span.object_id.space_key, span.start)
+            if atom is None:
+                continue
+            for space_id in spaces:
+                for object_id in import_object_ids(unit.scopes.function.scope, atom, space_id):
+                    candidates.setdefault(object_id, (span, space_id))
     used = {atom.object_id for atom in normalized.memory_ssa.atomic_spans}
     # objects of the open conditions this function passes to its callers
     used |= {span.object_id for _, pairs in getattr(normalized, "open_nodes", ()) for pair in pairs

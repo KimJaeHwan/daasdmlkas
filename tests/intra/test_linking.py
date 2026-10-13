@@ -125,7 +125,8 @@ class FakeDeriver:
         self.sha256, self.refusals, self.calls = sha256, dict(refusals or {}), []
 
     def __call__(self, generation, library, names, *, file_id, models, pcodeops, stack_evidence,
-                 private_frame_above, traps, assume_globals_disjoint, direction_flag, per_export, log):
+                 private_frame_above, traps, assume_globals_disjoint, direction_flag, per_export, log,
+                 import_slots=False):
         assert per_export
         self.calls.append({"names": sorted(names), "private_frame_above": private_frame_above,
                            "globals": assume_globals_disjoint, "direction_flag": direction_flag,

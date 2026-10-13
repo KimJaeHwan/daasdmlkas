@@ -66,7 +66,7 @@ _DEFAULT = object()
 def derive_library(generation: Path, library: str, export_names, *, file_id: str, version: int = 1,
                    model_dirs=(), models=None, pcodeops=_DEFAULT, stack_evidence=(), private_frame_above: int = 0x28,
                    traps: bool = True, assume_globals_disjoint: bool = True, direction_flag: bool = False,
-                   per_export: bool = False, log=print):
+                   import_slots: bool = False, per_export: bool = False, log=print):
     """(model file dict, {export name: refusal reason}, export names the
     Bundle does not export) -- the templates of ``export_names`` of the
     library Bundle at ``generation``, derived with the given analysis
@@ -161,6 +161,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_debug_break_traps_do_not_return=traps,
                                        assume_direction_flag_clear=direction_flag,
                                        assume_globals_disjoint_from_stack=globals_disjoint,
+                                       assume_import_slots_hold_exports=import_slots,
                                        own_library=library, keep_uncut=frozenset(targets))
         log(f"constants: {len(tracking.proofs[True])} proven image addresses, {len(tracking.proofs[False])} "
             f"fixed numbers, {len(tracking.proofs[None])} not understood (possibly base-dependent)")

@@ -96,6 +96,7 @@ def analyze_frozen_bundle_with_summaries(
     assume_debug_break_traps_do_not_return: bool = True,
     stack_evidence=(),
     linker=None,
+    assume_import_slots_hold_exports: bool = True,
 ) -> EngineRun:
     """``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
@@ -229,7 +230,8 @@ def analyze_frozen_bundle_with_summaries(
                 [item.unit for item in evidences], image_info, external_models=external_models,
                 pcodeop_models=pcodeop_models, private_frame_above=home_space,
                 traps=assume_debug_break_traps_do_not_return,
-                globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear)
+                globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear,
+                import_slots=assume_import_slots_hold_exports)
             linked_evidence = tuple(load_stack_evidence(path) for path in linked_evidence)
             if linked_evidence:
                 # a switch in a linked library withdraws the assumption for the run
@@ -240,13 +242,16 @@ def analyze_frozen_bundle_with_summaries(
             [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             sink_roots=sink_roots,
-            image_info=image_info if external_models else None,
+            # the image facts serve models and the import-slot assumption
+            # alike (every model use is guarded on external_models)
+            image_info=image_info,
             external_models=external_models,
             pcodeop_models=pcodeop_models,
             readonly_image=readonly_image,
             assume_direction_flag_clear=assume_direction_flag_clear,
             private_frame_above=home_space,
             assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
+            assume_import_slots_hold_exports=assume_import_slots_hold_exports,
         )
         assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
                                       traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
@@ -326,6 +331,8 @@ def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, 
         assumptions += ("opaque-callees-restore-stack-pointer",)
     if readonly_image is not None:
         assumptions += ("readonly-image-data-is-constant",)
+    if any(getattr(item.normalized, "assumes_import_slots_hold_exports", False) for item in results.values()):
+        assumptions += ("import-slots-hold-their-exports",)
     if home_space:
         assumptions += ("win64-home-space-callee-private",)
     # reported whenever a function has a trap the cut applies to: removing the

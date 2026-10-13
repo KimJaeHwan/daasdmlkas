@@ -266,7 +266,7 @@ class Linker:
         self.report = LinkReport()
 
     def __call__(self, units, image_info, *, external_models, pcodeop_models, private_frame_above: int,
-                 traps: bool, globals_disjoint: bool, direction_flag: bool):
+                 traps: bool, globals_disjoint: bool, direction_flag: bool, import_slots: bool = False):
         """(the run's model set with the linked templates, stack evidence
         files). The settings are the run's effective ones (``globals_disjoint``
         after the program's own withdrawal checks): templates are derived with
@@ -288,7 +288,8 @@ class Linker:
                 called.setdefault((symbol.library.upper(), symbol.original_name or symbol.name), symbol)
         space_id = units[0].scopes.program.evidence.image_base.space_id
         switches = {"private_frame_above": private_frame_above, "traps": bool(traps),
-                    "globals_disjoint": bool(globals_disjoint), "direction_flag": bool(direction_flag)}
+                    "globals_disjoint": bool(globals_disjoint), "direction_flag": bool(direction_flag),
+                    "import_slots": bool(import_slots)}
         identity = self.provider.identity()
         declared = declared_models(models)
         checked = []
@@ -327,6 +328,9 @@ class Linker:
                 if not load_stack_evidence(evidence).clean:
                     # the run will withdraw the assumption: no template may rest on it
                     switches["globals_disjoint"] = False
+        # import-slots-hold-their-exports only acts with globals-disjoint-from-stack:
+        # the profile and the derivation state what is actually used
+        switches["import_slots"] = switches["import_slots"] and switches["globals_disjoint"]
         for target, exports, imported in checked:
             evidence = evidences[target]
             profile_raw = profile(switches=switches, pcodeop_models=pcodeop_models, models=models,
@@ -375,6 +379,7 @@ class Linker:
             ("direction-flag-clear", switches["direction_flag"]),
             ("win64-home-space-callee-private", bool(switches["private_frame_above"])),
             ("debug-break-traps-do-not-return", switches["traps"]),
+            ("import-slots-hold-their-exports", switches["import_slots"]),
         ) if not on}
         if self._preflight(linked, pcodeop_models=pcodeop_models, private_frame_above=private_frame_above,
                            language=(namespace.language_id, namespace.major_version, namespace.minor_version),
@@ -436,6 +441,7 @@ class Linker:
                 models=declared, pcodeops=pcodeop_models, stack_evidence=[evidence] if evidence is not None else [],
                 private_frame_above=switches["private_frame_above"], traps=switches["traps"],
                 assume_globals_disjoint=switches["globals_disjoint"], direction_flag=switches["direction_flag"],
+                import_slots=switches["import_slots"],
                 per_export=True, log=lambda line: self.log(f"[link]   {line}"))
             for raw in files.values():
                 if raw["source"]["sha256"] != exports.sha256:

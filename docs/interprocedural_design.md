@@ -845,7 +845,7 @@ profile을 봄 → 저장본을 보지 않고 `pending`; dry-run이 증거 파�
 결과(모든 root의 출처·완전성)는 예전 템플릿 파일을 쓴 실행과 **완전히 같음**, 지표도 같음(22건 중 exact+sure 14) — 템플릿이
 없는 실행과도 같음(AppendChar의 index 쓰기 때문, 배열 단계에서 다룸).
 
-## 25. 배열 · index 주소 (2026-10-13 설계, Fable + Astra 2차까지; A단계 구현 25.4)
+## 25. 배열 · index 주소 (2026-10-13 설계, Fable + Astra 2차까지; A단계 25.4, B단계 25.5)
 
 ### 25.1 진단 (UE Development, 실패 8건; `.census6/why_origin.py`로 root에서 금지 출처까지의 경로 추적)
 
@@ -971,3 +971,21 @@ win32 160/160 · UE Dev 568(400 담음, 168 부채) · DebugGame 1063(614 담음
 
 **남긴 것**: C 시작 때 — 모듈러 exact/disjoint 기준 검사기, 작은 폭 전수 산술; B 동안 — import 칸 테스트; 스냅샷 비용(차분 저장),
 요약 위치 미상 72바이트 목록(C 전에 0으로), `_Locator`의 8바이트 포인터 가정(32비트 요약 전).
+
+### 25.5 B단계(import 칸 포인터) 구현 (2026-10-13, Fable 2차 · Astra 3차 승인)
+
+- 새 등록 가정 `import-slots-hold-their-exports`(기본 켬, `--no-assume-import-slots`): import 칸(IAT)을 포인터 폭으로
+  통째로 읽은 값(그 칸에 대해 함수 안에서 쓰기가 없는 ENTRY 값)은 그 import가 가리키는 주소. import마다 원자 하나(라이브러리
+  + 이름으로 키 — 적재 주소와 무관, 같은 import의 두 칸은 같은 원자). 그 주소 **바로 그 1바이트**(변위 0, 적재 주소와 무관한
+  변위)는 이미지 안 정적 데이터 → `globals-disjoint-from-stack`가 켜진 실행에서 스택과 겹치지 않음(nonstack 객체), private
+  frame에도 닿지 않음. 더 넓은 접근·다른 변위·새 블록·다른 import와의 분리는 주장하지 않음(export 크기 근거 없음, forwarder).
+- `relative_memory.IMPORT_SLOTS`(분석 1회 동안의 ContextVar), `import_object_ids`(import 원자 위 두 객체: 그 바이트 / 그 밖),
+  `interprocedural._relative_anchors`가 두 객체를 칸에 anchor(포인터 폭 읽기만) — callee가 import 포인터로 쓴 run을 호출자가
+  계속 찾음. 보고: `NormalizedFunction.assumes_import_slots_hold_exports`, 실행 가정 목록. 연결 profile·파생에도 실효값.
+- 리뷰 반영: anchor 퇴행(Fable P1), 적재 주소 추적 우회(Astra P1 — 적재 주소에 따라 바뀌는 변위는 제외), 폭 제한(1바이트),
+  폭이 다른 두 읽기 중 좁은 것이 anchor 되는 문제(Astra P1), 모델 없을 때 image_info 미전달(P2), 새 블록 분리 주장 삭제.
+- 결과: 테스트 681개(새 13개), 지표 기준선과 같음(09 64/60·52/47·44/37, UE DebugGame 13/13, Dev 14/14), 동적 누락 0(zlib 기존 256).
+- **정정**: root 출처는 데이터 의존만으로 계산함(`observed_slice` → `BackwardSliceQuery`, 제어 의존 제외). 진단 스크립트가 제어
+  간선까지 따라가서 R001의 B가 GIgnoreDebugger 경로로 들어온다고 봤으나, 지표의 B는 **byte lane** 경로: 원소 `It`(A·B 8바이트)를
+  64비트 레지스터 하나로 복사 → 그 4바이트만 읽어도 레지스터 값 노드 전체(B 포함)에 닿음. B단계는 올바른 별칭 정리지만 R001
+  지표는 바꾸지 않음. 다음: **B2 byte lane 단계**(C 전에, 두 리뷰 권고).

@@ -61,6 +61,49 @@ from contextvars import ContextVar
 
 IMAGE_BASE_TRACKING: ContextVar = ContextVar("IMAGE_BASE_TRACKING", default=None)
 
+# Named assumption import-slots-hold-their-exports (docs section 25.2 B): set
+# by ``interprocedural.analyze_units`` for one run. A pointer-sized read of a
+# whole import slot (``image_info.imports[*].slots``) whose entry value is
+# read (nothing in the function writes it) is the address the import resolves
+# to: one atom per imported symbol, the same value wherever and whenever it is
+# read. A one-byte access AT that address (displacement 0, independent of the
+# image base) is in image-backed static storage of a loaded module: never the
+# stack (with globals-disjoint-from-stack, ``active``), never a private frame.
+# No claim about wider accesses or other displacements (no extent evidence),
+# fresh blocks, or other imports.
+IMPORT_SLOTS: ContextVar = ContextVar("IMPORT_SLOTS", default=None)
+
+
+class ImportSlots:
+    """``image_info``'s import slots for one ``analyze_units`` run.
+    ``active``: the run also takes globals-disjoint-from-stack (else the
+    property gives nothing and is not used). ``used``: function scopes whose
+    analysis read an import slot this way (reported; recorded when the value
+    is evaluated, so a provisional evaluation may over-report -- never under).
+    Only an ENTRY definition qualifies: a write the function makes to the slot
+    (definite or summarized) gives another definition and nothing is assumed;
+    an unknown-address write before the read leaves the ENTRY definition with
+    its debt, and the assumption (no write changes the slot) covers it.
+    Two slots of one import give one atom; two imports never get a
+    disjointness claim (an export alias or a forwarder may be one address):
+    their objects may alias, as may ``[p]`` and ``[p + c]``."""
+
+    def __init__(self, image_info) -> None:
+        self.slots = {
+            (space_id, offset): (row.library.upper(), row.original_name or row.name)
+            for row in (image_info.imports if image_info is not None else ())
+            for space_id, offset in row.slots
+        }
+        self.active = False
+        self.used: set = set()
+
+    def atom(self, space_id: int, offset: int) -> int | None:
+        symbol = self.slots.get((space_id, offset)) if self.active else None
+        if symbol is None:
+            return None
+        return _digest_ints(b"import-slot-value-v1", tuple(
+            int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big") for text in symbol))
+
 
 class ImageBaseTracking:
     """``with ImageBaseTracking(ranges, relocates) as found:`` -- see above.
@@ -101,6 +144,19 @@ class ImageBaseTracking:
 
     def __exit__(self, *_):
         IMAGE_BASE_TRACKING.reset(self._token)
+
+
+def import_object_ids(scope, atom: int, space_id: int) -> tuple:
+    """The objects a function builds on an import atom: the one accessed AT the
+    import's address (import-static, nonstack) and the one of any other
+    displacement (``_Projector._relative_object``) -- anchorable on the slot
+    (``interprocedural._relative_anchors``)."""
+    return (
+        StorageObjectId(StorageObjectKind.FUNCTION_RELATIVE, scope,
+                        _digest_ints(b"import-static-v1", (atom, space_id))),
+        StorageObjectId(StorageObjectKind.FUNCTION_RELATIVE, scope,
+                        _digest_ints(b"relative-address-space-v1", (_address_atom_key(((atom, 1),)), space_id))),
+    )
 
 
 def _instruction_of(operation_key) -> int | None:
@@ -694,6 +750,7 @@ class _Projector:
         self._blocked: frozenset = frozenset()
         self.used_reads: dict | None = None
         self._nonstack_atoms: set[int] = set()
+        self._import_atoms: set[int] = set()   # import-slots-hold-their-exports (``IMPORT_SLOTS``)
         self.nonstack_objects: set = set()
         self.wild_objects: set = set()
         self._action_ids = {
@@ -768,7 +825,7 @@ class _Projector:
                 if start + width > 1 << space.address_size_bits:
                     return None
             else:
-                object_id = self._relative_object(address, space.space_id)
+                object_id = self._relative_object(address, space.space_id, width=width)
                 start = (1 << space.address_size_bits) + address.displacement
                 if start < 0:
                     return None
@@ -808,13 +865,28 @@ class _Projector:
             if start + width > 1 << space.address_size_bits:
                 return None
         else:
-            object_id = self._relative_object(address, space.space_id)
+            object_id = self._relative_object(address, space.space_id, displacement, width)
             start = (1 << space.address_size_bits) + address.displacement + displacement
             if start < 0:
                 return None
         return (ByteSpan(object_id, start, width),)
 
-    def _relative_object(self, address, space_id) -> StorageObjectId:
+    def _relative_object(self, address, space_id, extra: int = 0, width: int | None = None) -> StorageObjectId:
+        """``extra``: a displacement added to ``address`` by the caller;
+        ``width``: the access's byte size (None: not an access)."""
+        if len(address.atoms) == 1 and address.atoms[0][1] == 1 and address.atoms[0][0] in self._import_atoms \
+                and address.displacement + extra == 0 and address.image == 0 and width == 1:
+            # one byte AT the import's address -- the one byte the image is
+            # known to hold there (no extent evidence); a displacement that
+            # moves with the image base is not "at" it under another base
+            # an access AT an import's address: image-backed static storage
+            # (import-slots-hold-their-exports) -- its own object, never the stack
+            object_id = import_object_ids(self._ssa.function_scope, address.atoms[0][0], space_id)[0]
+            self.nonstack_objects.add(object_id)
+            return object_id
+        # (an import atom with another displacement or width gets the ordinary
+        # object below: it may alias the stack -- but, not being wild, no
+        # private frame)
         if address.image != 0:
             # an offset from an entry value (or another atom) that moves with
             # the image base: exact here, wrong under another load address
@@ -1034,6 +1106,21 @@ class _Projector:
         self._active.add(cache_key)
         result: _AddressExpression | None
         constant = None
+        imports = IMPORT_SLOTS.get()
+        space = self._spaces.get(requested_span.object_id.space_key)
+        import_atom = None
+        if imports is not None and definition.kind is MemoryDefinitionKind.ENTRY \
+                and requested_span.object_id.kind is StorageObjectKind.ADDRESS_SPACE \
+                and space is not None and requested_span.size * 8 == space.address_size_bits:
+            import_atom = imports.atom(requested_span.object_id.space_key, requested_span.start)
+        if import_atom is not None:
+            # the whole slot's entry value: the address its import resolves to
+            self._import_atoms.add(import_atom)
+            imports.used.add(self._ssa.function_scope)
+            result = _AddressExpression(((import_atom, 1),), 0, requested_span.size)
+            self._active.discard(cache_key)
+            self._cache[cache_key] = result
+            return result
         if definition.kind is MemoryDefinitionKind.ENTRY and self._readonly is not None \
                 and requested_span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
             constant = self._readonly.value(requested_span.object_id.space_key, requested_span.start,

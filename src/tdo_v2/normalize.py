@@ -129,6 +129,9 @@ class NormalizedFunction:
     call_below_bounds: tuple[tuple[str, object, int], ...] = ()
     # named assumption readonly-image-data-is-constant was given (``image_info``)
     assumes_readonly_image_constant: bool = False
+    # named assumption import-slots-hold-their-exports: an import slot's value
+    # was taken as its import's address (``relative_memory.IMPORT_SLOTS``)
+    assumes_import_slots_hold_exports: bool = False
     # rep string sites made exact (``rep_strings``): (instruction key, count,
     # direction); the evaluator's overrides of their operations
     rep_blocks: tuple = ()
@@ -1699,6 +1702,7 @@ class _ScopedNormalizer:
             assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             call_below_bounds=below_bounds,
             assumes_readonly_image_constant=readonly_image is not None,
+            assumes_import_slots_hold_exports=_import_slots_used(memory_ssa),
             rep_blocks=tuple(sorted((_coordinate_key(address), count, direction)
                                     for address, (count, direction) in rep_plan.items())),
             operation_overrides=tuple(sorted(_rep_overrides(sites, rep_plan, observation).items())),
@@ -1902,6 +1906,13 @@ def _materialize_call_clobber_debt(
         )
         nodes.append(node)
     return tuple(nodes)
+
+
+def _import_slots_used(memory_ssa) -> bool:
+    from .relative_memory import IMPORT_SLOTS
+
+    imports = IMPORT_SLOTS.get()
+    return imports is not None and memory_ssa is not None and memory_ssa.function_scope in imports.used
 
 
 def _materialize_open_conditions(dependencies, memory_ssa, proven_call_effects, open_conditions,
