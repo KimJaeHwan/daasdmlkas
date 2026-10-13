@@ -699,7 +699,7 @@ def _call_below_bounds(proven_call_effects, transitions, effect_unit, memory_ssa
         return ()
     found = _stack_pointer(_unit_stub(scopes), observation, context, scopes.program.evidence.address_spaces)
     if found is None:
-        return _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, observation)
+        return _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, observation, scopes)
     stack_object, bias, register_space, offset, size = found
     rows = []
     for key in keys:
@@ -716,11 +716,12 @@ def _call_below_bounds(proven_call_effects, transitions, effect_unit, memory_ssa
     return tuple(rows)
 
 
-def _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, observation) -> tuple:
+def _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, observation, scopes=None) -> tuple:
     """A function with no stack-pointer shape of its own (a thunk ``jmp
-    [__imp_X]``) whose effects touch no object based on the tail jump's stack
-    pointer: the callee's clobbering below that pointer reaches nothing this
-    function tracks -- bound 0 (no byte below it)."""
+    [__imp_X]``) that never writes the stack pointer (so at the jump it is the
+    entry value) and whose effects touch no object based on it: the callee's
+    clobbering below that pointer reaches nothing this function tracks --
+    bound 0 (no byte below it)."""
     from .relative_memory import _function_relative_object_id
 
     spaces = {
@@ -733,6 +734,21 @@ def _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, o
         if operation.opcode == "BRANCHIND" and operation.inputs
         and operation.inputs[0].kind is VarnodeKindCode.ADDRESS
     }
+    # a thunk ``jmp X`` touching no memory: the space of its jump / call targets,
+    # when that is the program's one loaded memory space (where its stack lives
+    # -- a separate code space would name no stack object)
+    loaded = {
+        row.space_id for row in (scopes.program.evidence.address_spaces if scopes is not None else ())
+        if row.is_memory_space and row.is_loaded_memory_space and not row.is_overlay_space
+        and not row.is_external_space
+    }
+    if len(loaded) == 1:
+        spaces |= loaded & {
+            operation.inputs[0].coordinate.space_id
+            for instruction in observation.instructions for operation in instruction.operations
+            if operation.opcode in ("BRANCH", "CALL") and operation.inputs
+            and operation.inputs[0].kind is VarnodeKindCode.ADDRESS
+        }
     touched = {
         evidence.span.object_id
         for block in effect_unit.blocks for effect in block.effects
@@ -743,6 +759,10 @@ def _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, o
         effect = proven_call_effects[key]
         if not effect.tail_stack or not spaces:
             continue
+        stack = effect.tail_stack[0]
+        if any(type(evidence) is ResolvedStorage and evidence.span.overlaps(stack)
+               for block in effect_unit.blocks for row in block.effects for evidence in row.writes):
+            continue  # the stack pointer is written: at the jump it may not be the entry one
         objects = {_function_relative_object_id(memory_ssa.function_scope, effect.tail_stack[0], space)
                    for space in spaces}
         if objects & touched or any(effect.memory_write is not None or effect.memory_read is not None

@@ -2,66 +2,174 @@
   "format_version": 1,
   "kind": "declared",
   "id": "ue-core-win64",
-  "version": 1,
+  "version": 2,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
-  "libraries": ["UNREALEDITOR-CORE.DLL"],
+  "libraries": [
+    "UNREALEDITOR-CORE.DLL"
+  ],
   "notes": "Unreal Engine Core exports a module calls through its import table, matched by library and mangled name. Windows x64 convention (args RCX, RDX, R8, R9; result RAX); register offsets as in crt_win64.json. Every entry is a declared assumption.",
-  "stack_pointer": [32, 8],
+  "stack_pointer": [
+    32,
+    8
+  ],
   "stack_delta": 8,
-  "preserved": [[24, 8], [40, 8], [48, 8], [56, 8], [160, 8], [168, 8], [176, 8], [184, 8]],
+  "preserved": [
+    [
+      24,
+      8
+    ],
+    [
+      40,
+      8
+    ],
+    [
+      48,
+      8
+    ],
+    [
+      56,
+      8
+    ],
+    [
+      160,
+      8
+    ],
+    [
+      168,
+      8
+    ],
+    [
+      176,
+      8
+    ],
+    [
+      184,
+      8
+    ]
+  ],
   "entries": [
     {
       "name": "FMemory::Malloc",
-      "original_names": ["?Malloc@FMemory@@SAPEAX_KI@Z"],
-      "notes": "FMemory::Malloc(Count, Alignment): a new block's address (fresh); the allocator's own state is not this module's memory.",
-      "registers": [{"write": [0, 8], "from": [], "fresh": true}],
+      "original_names": [
+        "?Malloc@FMemory@@SAPEAX_KI@Z"
+      ],
+      "notes": "FMemory::Malloc(Count, Alignment): a new block's address (fresh); the allocator's own state is not this module's memory. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
+      "registers": [
+        {
+          "write": [
+            0,
+            8
+          ],
+          "from": [],
+          "fresh": true
+        }
+      ],
       "memory": [],
       "observes": [],
-      "other_memory": "preserved"
+      "other_memory": "preserved",
+      "internal": true
     },
     {
       "name": "FMemory::Free",
-      "original_names": ["?Free@FMemory@@SAXPEAX@Z"],
-      "notes": "FMemory::Free(Original): assumes no use after free.",
+      "original_names": [
+        "?Free@FMemory@@SAXPEAX@Z"
+      ],
+      "notes": "FMemory::Free(Original): assumes no use after free. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
       "registers": [],
       "memory": [],
       "observes": [],
-      "other_memory": "preserved"
+      "other_memory": "preserved",
+      "internal": true
     },
     {
       "name": "FMemory::QuantizeSize",
-      "original_names": ["?QuantizeSize@FMemory@@SA_K_KI@Z"],
-      "notes": "FMemory::QuantizeSize(Count, Alignment): a size computed from its arguments; reads no memory.",
-      "registers": [{"write": [0, 8], "from": [[8, 8], [16, 8]]}],
+      "original_names": [
+        "?QuantizeSize@FMemory@@SA_K_KI@Z"
+      ],
+      "notes": "FMemory::QuantizeSize(Count, Alignment): a size computed from its arguments; reads no memory. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
+      "registers": [
+        {
+          "write": [
+            0,
+            8
+          ],
+          "from": [
+            [
+              8,
+              8
+            ],
+            [
+              16,
+              8
+            ]
+          ]
+        }
+      ],
       "memory": [],
       "observes": [],
-      "other_memory": "preserved"
+      "other_memory": "preserved",
+      "internal": true
     },
     {
       "name": "FMemory::Realloc",
-      "original_names": ["?Realloc@FMemory@@SAPEAXPEAX_KI@Z"],
-      "notes": "FMemory::Realloc(Original, Count, Alignment): returns a block holding the old contents: the same object as Original, assuming Original is not used afterwards (no-use-of-old-pointer-after-realloc); Realloc(nullptr, ...) is a fresh block.",
-      "registers": [{"write": [0, 8], "from": [[8, 8], [16, 8]], "same_object_as": [8, 8]}],
+      "original_names": [
+        "?Realloc@FMemory@@SAPEAXPEAX_KI@Z"
+      ],
+      "notes": "FMemory::Realloc(Original, Count, Alignment): returns a block holding the old contents: the same object as Original, assuming Original is not used afterwards (no-use-of-old-pointer-after-realloc); Realloc(nullptr, ...) is a fresh block. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
+      "registers": [
+        {
+          "write": [
+            0,
+            8
+          ],
+          "from": [
+            [
+              8,
+              8
+            ],
+            [
+              16,
+              8
+            ]
+          ],
+          "same_object_as": [
+            8,
+            8
+          ]
+        }
+      ],
       "memory": [],
-      "observes": [[8, 8]],
-      "other_memory": "preserved"
+      "observes": [
+        [
+          8,
+          8
+        ]
+      ],
+      "other_memory": "preserved",
+      "internal": true
     },
     {
       "name": "FDebug::CheckVerifyFailedImpl",
-      "original_names": ["?CheckVerifyFailedImpl@FDebug@@SAXPEBD0HPEAXPEB_WZZ"],
-      "notes": "check()/verify() failure report (variadic: may read every argument). Writes no memory of this module -- assumes no reentrant callback into the module (error delegates, log devices): ue-core-diagnostics-no-reentrant-callback.",
+      "original_names": [
+        "?CheckVerifyFailedImpl@FDebug@@SAXPEBD0HPEAXPEB_WZZ"
+      ],
+      "notes": "check()/verify() failure report (variadic: may read every argument). Writes no memory of this module -- assumes no reentrant callback into the module (error delegates, log devices): ue-core-diagnostics-no-reentrant-callback. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
       "registers": [],
       "memory": [],
-      "other_memory": "preserved"
+      "other_memory": "preserved",
+      "internal": true
     },
     {
       "name": "UE4Array_Private::OnInvalidArrayNum",
-      "original_names": ["?OnInvalidArrayNum@UE4Array_Private@@YAXPEB_W_K@Z"],
-      "notes": "Fatal invalid-array-size report. Writes no memory of this module -- assumes no reentrant callback into the module: ue-core-diagnostics-no-reentrant-callback.",
+      "original_names": [
+        "?OnInvalidArrayNum@UE4Array_Private@@YAXPEB_W_K@Z"
+      ],
+      "notes": "Fatal invalid-array-size report. Writes no memory of this module -- assumes no reentrant callback into the module: ue-core-diagnostics-no-reentrant-callback. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
       "registers": [],
       "memory": [],
-      "other_memory": "preserved"
+      "other_memory": "preserved",
+      "internal": true
     }
   ]
 }

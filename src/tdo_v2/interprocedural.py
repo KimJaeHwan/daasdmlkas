@@ -65,7 +65,8 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   image_info=None, external_models=None, readonly_image=None,
                   declared_boundaries=None, assume_direction_flag_clear=False,
                   pcodeop_models=None, private_frame_above=0,
-                  assume_debug_break_traps_do_not_return=False) -> dict[str, AnalyzedFunction]:
+                  assume_debug_break_traps_do_not_return=False,
+                  own_library: str | None = None) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -82,6 +83,10 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     thunk or an import slot, ``image_info``) take the declared model of that
     name (``summary_store``); each use is a named assumption
     (``AnalyzedFunction.declared``).
+    ``own_library``: the program is that library (e.g. "UNREALEDITOR-CORE.DLL");
+    a function exported under a name an ``internal`` model entry of that library
+    lists is cut -- not analyzed, its callers take the model (named assumption
+    library-internal-model-cuts, reported with each use).
     ``declared_boundaries``: entry key -> {call key: AssumedCallEffect}, the
     TEST-ONLY declared source/sink effects, applied as call effects of the
     same kind as summaries and models (writes exactly the declared registers
@@ -99,7 +104,10 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         function_key(unit.scopes.function.entry): unit for unit in units
         if type(unit.scopes.function) is ConstructedFunctionScope and unit.observation is not None
     }
-    calls = {key: _direct_calls(unit, functions) for key, unit in functions.items()}
+    # program-wide facts first (every function, cut ones included): they decide
+    # which assumptions hold in this run, and so which models may be applied
+    if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
+        assume_globals_disjoint_from_stack = False
     # registry switches off in this run: a model resting on one is not applied
     disabled = {name for name, on in (
         ("globals-disjoint-from-stack", assume_globals_disjoint_from_stack),
@@ -108,21 +116,25 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("win64-home-space-callee-private", bool(private_frame_above)),
         ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
     ) if not on}
+    cuts = _model_cuts(functions, image_info, external_models, own_library, disabled) \
+        if own_library and image_info and external_models else {}
+    program = dict(functions)   # every function of the program, cut ones included (program-wide facts)
+    functions = {key: unit for key, unit in functions.items() if key not in cuts}
+    calls = {key: _direct_calls(unit, functions) for key, unit in functions.items()}
     externals = {
-        key: _external_sites(unit, image_info, external_models, disabled) if image_info and external_models else {}
+        key: {**(_external_sites(unit, image_info, external_models, disabled) if image_info and external_models
+                 else {}), **_cut_sites(unit, cuts)}
         for key, unit in functions.items()
     }
     memory_space = _program_memory_space(next(iter(functions.values()))) if functions else None
-    if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
-        assume_globals_disjoint_from_stack = False
-    files = [_register_file(unit.observation, unit.scopes.resolution_context) for unit in functions.values()]
+    files = [_register_file(unit.observation, unit.scopes.resolution_context) for unit in program.values()]
     program_registers = (
         next((object_id for object_id, _ in files if object_id is not None), None),
         max((limit for _, limit in files), default=0),
     )
     # the program's stack pointer (the call shapes' base register), for tail jumps
     program_stack = {
-        span for unit in functions.values()
+        span for unit in program.values()
         for spans in _preserved_stack_pointers(unit.observation, unit.scopes.resolution_context).values()
         for span in spans
     }
@@ -413,16 +425,29 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # indirect calls with a provably constant target (a Bundle function): resolved
     # on the analyzed graphs, then analyzed as direct calls; repeat until the
     # resolved set is stable (each round re-checks every resolution)
+    # (a constant target that is a cut function takes its model, as a direct call)
+    base_externals = {key: dict(sites) for key, sites in externals.items()}
+
+    def use_externals(extra):
+        externals.clear()
+        externals.update({key: {**sites, **extra.get(key, {})} for key, sites in base_externals.items()})
+
     resolved: dict = {}
+    resolved_cuts: dict = {}
     for _ in range(1 + sum(1 for unit in functions.values() for _ in _callind_sites(unit))):
+        use_externals(resolved_cuts)
         results = analyze({key: {**calls[key], **resolved.get(key, {})} for key in calls})
-        found = {
-            key: targets for key, item in results.items()
-            if (targets := _indirect_targets(item, functions))
-        }
-        if found == resolved:
+        found, found_cuts = {}, {}
+        for key, item in results.items():
+            targets = _indirect_targets(item, program)
+            if direct := {call: target for call, target in targets.items() if target in functions}:
+                found[key] = direct
+            if cut := {call: cuts[target] for call, target in targets.items() if target in cuts}:
+                found_cuts[key] = cut
+        if found == resolved and found_cuts == resolved_cuts:
             return results
-        resolved = found
+        resolved, resolved_cuts = found, found_cuts
+    use_externals({})
     return analyze(calls)  # not stable: no indirect resolution at all
 
 
@@ -585,6 +610,42 @@ def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
         if rows:
             found[function_key(unit.scopes.function.entry)] = rows
     return found
+
+
+def _model_cuts(functions, image_info, external_models, own_library, disabled) -> dict:
+    """Function key -> (model file, entry with library-internal-model-cuts) for
+    functions of ``own_library`` exported under a name an ``internal`` entry of
+    a model file for that library lists."""
+    from dataclasses import replace
+
+    from .image_info import ImportedSymbol
+
+    library = own_library.upper()
+    names: dict = {}
+    for export in image_info.exports:
+        names.setdefault(function_key_of(export.space_id, export.byte_offset), []).append(export.name)
+    found = {}
+    for key in functions:
+        for name in names.get(key, ()):
+            model = external_models.lookup(ImportedSymbol(library, name, name, (), ()))
+            if model is None or not model[1].internal or library not in model[0].libraries \
+                    or set(model[1].inherited) & disabled:
+                continue
+            model_file, entry = model
+            found[key] = (model_file, replace(entry, inherited=(*entry.inherited, "library-internal-model-cuts")))
+            break
+    return found
+
+
+def _cut_sites(unit, cuts) -> dict:
+    """Call key -> model for direct calls and tail jumps to a cut function."""
+    if not cuts:
+        return {}
+    return {call: cuts[callee] for call, callee in _direct_calls(unit, cuts).items()}
+
+
+def function_key_of(space_id: int, byte_offset: int) -> str:
+    return f"{space_id:x}:{byte_offset:x}"
 
 
 def _direct_calls(unit, functions) -> dict[str, str]:

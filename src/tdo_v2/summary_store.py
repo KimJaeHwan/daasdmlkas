@@ -55,6 +55,12 @@ reports them with the model's own label -- ``external-model:`` (hand),
 ``derived-model:`` or ``supplied-model:`` + ``<file id>/<entry>@v<version>``.
 Extra model directories: ``model_paths`` (``--model-dir``,
 ``TDO_V2_MODEL_DIRS``).
+
+``"internal": true`` (per entry, files with ``libraries`` only): the entry is
+also valid for callers inside its own library, so analyzing that library
+(``interprocedural.analyze_units(own_library=...)``) may cut there -- the
+function's body is not analyzed and calls to it take the model, under the
+named assumption library-internal-model-cuts.
 """
 
 from __future__ import annotations
@@ -97,6 +103,9 @@ class ModelEntry:
     same_object: tuple[tuple[tuple[int, int], tuple[int, int]], ...] = ()
     source_kind: str = "hand"
     inherited: tuple[str, ...] = ()   # assumption labels the model rests on (``source.assumptions``)
+    # usable as a cut inside its own library (``interprocedural`` ``own_library``):
+    # its claims hold for callers inside that library too
+    internal: bool = False
 
     @property
     def model_id(self) -> str:
@@ -201,11 +210,13 @@ def load_model_file(path: str | Path) -> ModelFile:
     entries = []
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
-                   "original_names"}
+                   "original_names", "internal"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
             raise ModelError(f"{path}: entry fields must be {sorted(allowed)}")
         if item["other_memory"] not in ("preserved", "clobbered"):
             raise ModelError(f"{path}: other_memory must be preserved or clobbered")
+        if type(item.get("internal", False)) is not bool:
+            raise ModelError(f"{path}: internal must be true or false")
         for row in item["registers"]:
             if type(row) is not dict or not {"write"} <= set(row) <= {"write", "from", "fresh", "same_object_as"} \
                     or type(row.get("fresh", False)) is not bool \
@@ -232,8 +243,9 @@ def load_model_file(path: str | Path) -> ModelFile:
                                   None if "observes" not in item
                                   else tuple(_slice(s, "observed register") for s in item["observes"]),
                                   tuple(item.get("original_names", ())), same_object,
-                                  source["kind"], tuple(source.get("assumptions", ())),
-                                  source["sha256"][:12] if source["kind"] == "derived" else ""))
+                                  source_kind=source["kind"], inherited=tuple(source.get("assumptions", ())),
+                                  identity=source["sha256"][:12] if source["kind"] == "derived" else "",
+                                  internal=item.get("internal", False)))
     libraries = tuple(str(item).upper() for item in raw.get("libraries", ()))
     if libraries and any(not entry.original_names for entry in entries):
         raise ModelError(f"{path}: a file with libraries matches by original_names only")

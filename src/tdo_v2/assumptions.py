@@ -101,6 +101,18 @@ REGISTRY: tuple[Assumption, ...] = (
         "Callees that pop their arguments (stdcall) or switch stacks.",
         "observed_call_state, call_clobber"),
     Assumption(
+        "library-internal-model-cuts", "model", True,
+        "Analyzing a library itself (own_library): a function with a model entry marked internal "
+        "(models/external) is not analyzed; its callers inside the library take the model. The model is "
+        "the function's complete contract wherever it is used -- in the library, and in every program "
+        "using summaries derived from it: every effect anyone can observe (results, writes, preserved "
+        "memory) is in the model; what it leaves out (allocator bookkeeping, diagnostic/log state, "
+        "including heap storage they own and callbacks they run) is observed by no such code.",
+        "Code that observes the omitted state: reads allocator internals or the log buffer, reaches them "
+        "through exported data (GMalloc, GLog) or an escaped pointer, or registers a callback the "
+        "function runs.",
+        "interprocedural._model_cuts / _cut_sites, summary_store (internal entries)"),
+    Assumption(
         "no-use-after-free", "model", True,
         "A freed block is not used again (carried by free / FMemory::Free and by allocators: a new "
         "block is disjoint from every block that may still be referenced).",
