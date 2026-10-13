@@ -41,6 +41,117 @@ class _AddressExpression:
     atoms: tuple[tuple[int, int], ...]
     displacement: int
     byte_size: int
+    # with ``IMAGE_BASE_TRACKING`` on: 1 -- an address in the image (moves
+    # with its load base), 0 -- no image address in it, None -- may depend on
+    # the load base otherwise (masked, two addresses, a number in the image
+    # range not proven to relocate, a cancellation)
+    image: int | None = 0
+
+
+# Deriving summaries for reuse as models (``summary_templates``): a constant
+# is an image address -- it moves with the library's load base -- only when
+# its instruction proves it (``relocates``: a relocation entry or a
+# RIP-relative displacement there yields it); any other number in the image
+# (end included) may or may not move. When set, a function whose analysis
+# takes a number that may depend on the load base as a fact -- an exact place
+# relative to an entry value, an absolute place, an extent, a stack delta, a
+# null test -- is recorded in ``found`` (its function scope digest) and cannot
+# be exported. Off (None) everywhere else: no effect on analysis.
+from contextvars import ContextVar
+
+IMAGE_BASE_TRACKING: ContextVar = ContextVar("IMAGE_BASE_TRACKING", default=None)
+
+
+class ImageBaseTracking:
+    """``with ImageBaseTracking(ranges, relocates) as found:`` -- see above.
+    ``ranges``: (start, end) of every memory block of the image;
+    ``relocates(instruction address, length or None, value)``: True -- the
+    instruction's encoding proves ``value`` an image address, False -- a fixed
+    number, None -- not understood (``summary_templates.image_provenance``);
+    ``relocates`` None: nothing understood.
+    ``lengths``: instruction address -> length (from its fallthrough; filled
+    by ``interprocedural.analyze_units``) -- an instruction of unknown length
+    proves nothing."""
+
+    def __init__(self, ranges, relocates=None) -> None:
+        self.ranges, self.relocates, self.found = tuple(ranges), relocates, set()
+        self.lengths: dict = {}
+        self.proofs = {True: set(), False: set(), None: set()}   # (instruction, value) by provenance
+
+    def in_image(self, value: int) -> bool:
+        return any(start <= value <= end for start, end in self.ranges)
+
+    def provenance(self, instruction: int | None, value: int):
+        """True / False / None as ``relocates`` (``length`` None when unknown)."""
+        found = None if instruction is None or self.relocates is None             else self.relocates(instruction, self.lengths.get(instruction), value)
+        self.proofs[found].add((instruction, value))
+        return found
+
+    def coefficient(self, instruction: int | None, value: int) -> int | None:
+        """1: a proven image address (in the image range or not -- ``&end + 8``);
+        0: a fixed number outside the image; None: otherwise."""
+        found = self.provenance(instruction, value)
+        if found is True:
+            return 1
+        return 0 if found is False and not self.in_image(value) else None
+
+    def __enter__(self):
+        self._token = IMAGE_BASE_TRACKING.set(self)
+        return self.found
+
+    def __exit__(self, *_):
+        IMAGE_BASE_TRACKING.reset(self._token)
+
+
+def _instruction_of(operation_key) -> int | None:
+    """The instruction address of a p-code operation key (not a call row)."""
+    if not operation_key or "~" in operation_key:
+        return None
+    parts = operation_key.split(":")
+    return int(parts[1], 16) if len(parts) >= 2 else None
+
+
+def _image_of_constant(value: int, operation_key=None) -> int | None:
+    tracking = IMAGE_BASE_TRACKING.get()
+    if tracking is None:
+        return 0
+    return tracking.coefficient(_instruction_of(operation_key), value)
+
+
+def _sum_images(left, right) -> int | None:
+    """{0, 1, None}: an image address plus a number is one; two addresses,
+    or anything unknown, are not (no arithmetic cancels a coefficient)."""
+    if left == 0 or right == 0:
+        return right if left == 0 else left
+    return None
+
+
+def _difference_image(left, right) -> int | None:
+    """``left - right``: subtracting a number keeps ``left``; subtracting an
+    address -- even from one, ``&end - &start`` -- is taken as unknown (a
+    scalar equal to an address cancels nothing, Astra)."""
+    return left if right == 0 else None
+
+
+def _opaque_image(*expressions) -> int | None:
+    """A non-affine operation: base-dependent when any input is."""
+    return 0 if all(item.image == 0 for item in expressions) else None
+
+
+def _note_base_dependent(scope) -> None:
+    tracking = IMAGE_BASE_TRACKING.get()
+    if tracking is not None:
+        tracking.found.add(scope.digest)
+
+
+def _note_fact(scope, expression, address=False) -> None:
+    """``expression``'s number becomes a fact (a place, a count, an offset, a
+    null test): base-dependent unless it holds no image base -- or, as an
+    absolute address (``address``, no atoms), exactly one (an image address
+    is an image address under any base)."""
+    if expression.image == 0 or (address and not expression.atoms and expression.image == 1):
+        return
+    _note_base_dependent(scope)
 
 
 _KIND_MAP = {
@@ -409,6 +520,7 @@ def stack_offset_at(memory_ssa, observation, scopes, operation_key, varnode, sta
     expression = projector._expression_for_input(operation_key, varnode)
     if expression is None or expression.atoms != ((_stable_storage_key(stack_span), 1),):
         return None
+    _note_fact(memory_ssa.function_scope, expression)
     return _signed_wrap(expression.displacement, expression.byte_size)
 
 
@@ -440,6 +552,7 @@ def expressions_at(memory_ssa, observation, scopes, requests, overrides=None, bl
             continue
         span = projector._resolved_span(varnode)
         entry = span is not None and expression.atoms == ((_stable_storage_key(span), 1),)             and expression.displacement == 0
+        _note_fact(memory_ssa.function_scope, expression)
         found[(operation_key, varnode)] = (
             bool(expression.atoms), _unsigned_wrap(expression.displacement, expression.byte_size), entry)
     return found
@@ -509,15 +622,19 @@ def project_anchored_after(normalized, observation, requests) -> dict:
     return found
 
 
-def constant_values(normalized, observation, requests) -> dict:
+def constant_values(normalized, observation, requests, addresses=False) -> dict:
     """``requests``: (operation key, input varnode). Returns request -> the
     constant the varnode provably holds at that operation (no atoms; the
-    final memory SSA's single reaching definition chain); others absent."""
+    final memory SSA's single reaching definition chain); others absent.
+    ``addresses``: the values are used as addresses (a call target), so an
+    address in the image is base-independent (``IMAGE_BASE_TRACKING``)."""
     projector = _final_projector(normalized, observation)
     found = {}
     for operation_key, varnode in requests:
         expression = projector._expression_for_input(operation_key, varnode)
         if expression is not None and not expression.atoms:
+            if expression.image not in (0, 1) or (expression.image and not addresses):
+                _note_base_dependent(normalized.memory_ssa.function_scope)
             found[(operation_key, varnode)] = _unsigned_wrap(expression.displacement, expression.byte_size)
     return found
 
@@ -533,6 +650,8 @@ def register_value_deltas(normalized, observation, requests) -> dict:
         expression = projector._expression_for_definition(definition_id, span)
         if expression is not None and expression.atoms == ((_stable_storage_key(span), 1),) \
                 and expression.byte_size == span.size:
+            if expression.image != 0:
+                _note_base_dependent(normalized.memory_ssa.function_scope)
             found[(definition_id, span)] = _signed_wrap(expression.displacement, span.size)
     return found
 
@@ -639,6 +758,7 @@ class _Projector:
         spans = []
         for address in addresses:
             if not address.atoms:
+                _note_fact(self._ssa.function_scope, address, address=True)
                 object_id = StorageObjectId(
                     StorageObjectKind.ADDRESS_SPACE,
                     self._context.program_scope,
@@ -680,6 +800,7 @@ class _Projector:
         if address is None or address.byte_size * 8 != space.address_size_bits:
             return None
         if not address.atoms:
+            _note_fact(self._ssa.function_scope, address, address=True)
             object_id = StorageObjectId(
                 StorageObjectKind.ADDRESS_SPACE, self._context.program_scope, space.space_id,
             )
@@ -694,6 +815,10 @@ class _Projector:
         return (ByteSpan(object_id, start, width),)
 
     def _relative_object(self, address, space_id) -> StorageObjectId:
+        if address.image != 0:
+            # an offset from an entry value (or another atom) that moves with
+            # the image base: exact here, wrong under another load address
+            _note_base_dependent(self._ssa.function_scope)
         object_id = StorageObjectId(
             StorageObjectKind.FUNCTION_RELATIVE,
             self._ssa.function_scope,
@@ -765,6 +890,8 @@ class _Projector:
             value = self._expression_from_memory_read(reader, width)
         if value is None or value.byte_size != requested_span.size:
             return None
+        if not value.atoms and null_is_fresh:
+            _note_fact(self._ssa.function_scope, value)
         if not value.atoms and null_is_fresh and _unsigned_wrap(value.displacement, value.byte_size) == 0:
             # realloc(NULL) inside the callee: a new block -- fresh when it is the
             # call's only pointer value (two values could name one block)
@@ -776,8 +903,9 @@ class _Projector:
         text = f"{definition.kind.name}|{definition.operation_key or ''}|{definition.block_key or ''}"
         return _digest_ints(b"definition-key-v1", (*text.encode("utf-8"), _stable_storage_key(definition.span)))
 
-    @staticmethod
-    def _is_null(expression) -> bool:
+    def _is_null(self, expression) -> bool:
+        if not expression.atoms:
+            _note_fact(self._ssa.function_scope, expression)
         return not expression.atoms and _unsigned_wrap(expression.displacement, expression.byte_size) == 0
 
     def _is_nonstack(self, expression) -> bool:
@@ -867,11 +995,8 @@ class _Projector:
         varnode: ValidatedVarnode,
     ) -> _AddressExpression | None:
         if varnode.kind is VarnodeKindCode.CONSTANT:
-            return _AddressExpression(
-                (),
-                _unsigned_wrap(varnode.coordinate.byte_offset, varnode.byte_size),
-                varnode.byte_size,
-            )
+            value = _unsigned_wrap(varnode.coordinate.byte_offset, varnode.byte_size)
+            return _AddressExpression((), value, varnode.byte_size, _image_of_constant(value, operation_key))
         span = self._resolved_span(varnode)
         if span is None:
             return None
@@ -914,7 +1039,9 @@ class _Projector:
             constant = self._readonly.value(requested_span.object_id.space_key, requested_span.start,
                                             requested_span.size)
         if constant is not None:
-            result = _AddressExpression((), constant, requested_span.size)
+            # image bytes: may hold relocated addresses (base-dependent)
+            result = _AddressExpression((), constant, requested_span.size,
+                                        None if IMAGE_BASE_TRACKING.get() is not None else 0)
         elif definition.kind is MemoryDefinitionKind.ENTRY:
             result = _AddressExpression(
                 ((_stable_storage_key(requested_span), 1),),
@@ -971,6 +1098,7 @@ class _Projector:
             if value is not None and value.atoms and value.byte_size == requested_span.size:
                 result = value
             elif value is not None and not value.atoms:
+                _note_fact(self._ssa.function_scope, value)
                 # realloc(NULL, n) is a new block; another constant stays that address
                 result = (self._definition_atom(definition, requested_span, fresh=True)
                           if _unsigned_wrap(value.displacement, value.byte_size) == 0 else value)
@@ -991,7 +1119,7 @@ class _Projector:
             value = self._expression_for_input(operation_key, operation.inputs[0])
         if value is None or value.atoms:
             return None
-        return _unsigned_wrap(value.displacement, value.byte_size)
+        return value
 
     def _partial_zero_extension(
         self,
@@ -1007,11 +1135,13 @@ class _Projector:
                 and language_parts[1] == "LE" and written_span.object_id == requested_span.object_id \
                 and written_span.contains(requested_span):
             # a constant written value: its little-endian bytes
-            whole = self._constant_written(operation_key, operation, written_span.size)
-            if whole is not None:
+            written = self._constant_written(operation_key, operation, written_span.size)
+            if written is not None:
+                whole = _unsigned_wrap(written.displacement, written.byte_size)
                 shift = 8 * (requested_span.start - written_span.start)
                 return _AddressExpression(
-                    (), (whole >> shift) & ((1 << (8 * requested_span.size)) - 1), requested_span.size)
+                    (), (whole >> shift) & ((1 << (8 * requested_span.size)) - 1), requested_span.size,
+                    _opaque_image(written))
         if (
             operation_key is None
             or operation is None
@@ -1032,7 +1162,7 @@ class _Projector:
             return None
         return _AddressExpression(
             (), _unsigned_wrap(value.displacement, value.byte_size),
-            requested_span.size,
+            requested_span.size, _opaque_image(value),
         )
 
     def _expression_for_operation(
@@ -1063,7 +1193,7 @@ class _Projector:
                 and value.byte_size < byte_size
             ):
                 return _AddressExpression(
-                    (), _unsigned_wrap(value.displacement, value.byte_size), byte_size
+                    (), _unsigned_wrap(value.displacement, value.byte_size), byte_size, _opaque_image(value)
                 )
         if operation.opcode == "LOAD" and len(operation.inputs) >= 2:
             return self._expression_from_memory_read(operation_key, byte_size)
@@ -1076,7 +1206,8 @@ class _Projector:
                 a = _unsigned_wrap(left.displacement, left.byte_size)
                 b = _unsigned_wrap(right.displacement, right.byte_size)
                 value = a & b if operation.opcode == "INT_AND" else a | b if operation.opcode == "INT_OR" else a ^ b
-                return _AddressExpression((), _unsigned_wrap(value, byte_size), byte_size)
+                return _AddressExpression((), _unsigned_wrap(value, byte_size), byte_size,
+                                          _opaque_image(left, right))
         if operation.opcode == "SUBPIECE" and len(operation.inputs) == 2 \
                 and operation.inputs[1].kind is VarnodeKindCode.CONSTANT:
             value = self._expression_for_input(operation_key, operation.inputs[0])
@@ -1084,19 +1215,20 @@ class _Projector:
                 shift = 8 * operation.inputs[1].coordinate.byte_offset
                 return _AddressExpression(
                     (), (_unsigned_wrap(value.displacement, value.byte_size) >> shift) & ((1 << (8 * byte_size)) - 1),
-                    byte_size)
+                    byte_size, _opaque_image(value))
         if operation.opcode == "INT_SEXT" and len(operation.inputs) == 1:
             value = self._expression_for_input(operation_key, operation.inputs[0])
             if value is not None and not value.atoms and value.byte_size < byte_size:
                 return _AddressExpression(
-                    (), _unsigned_wrap(_signed_wrap(value.displacement, value.byte_size), byte_size), byte_size
+                    (), _unsigned_wrap(_signed_wrap(value.displacement, value.byte_size), byte_size), byte_size,
+                    _opaque_image(value),
                 )
         if operation.opcode == "INT_MULT" and len(operation.inputs) == 2:
             left, right = (self._expression_for_input(operation_key, item) for item in operation.inputs)
             if left is not None and right is not None and not left.atoms and not right.atoms \
                     and left.byte_size == right.byte_size == byte_size:
                 return _AddressExpression((), _unsigned_wrap(left.displacement * right.displacement, byte_size),
-                                          byte_size)
+                                          byte_size, _opaque_image(left, right))
         if operation.opcode == "INT_LEFT" and len(operation.inputs) == 2:
             value = self._expression_for_input(operation_key, operation.inputs[0])
             shift = self._expression_for_input(operation_key, operation.inputs[1])
@@ -1113,7 +1245,7 @@ class _Projector:
                     if amount >= byte_size * 8
                     else _unsigned_wrap(value.displacement << amount, byte_size)
                 )
-                return _AddressExpression((), result, byte_size)
+                return _AddressExpression((), result, byte_size, _opaque_image(value, shift))
         if operation.opcode == "INT_ADD" and len(operation.inputs) == 2:
             expressions = tuple(
                 self._expression_for_input(operation_key, item)
@@ -1139,6 +1271,8 @@ class _Projector:
                             byte_size,
                         ),
                         byte_size,
+                        _sum_images(base.image, _image_of_constant(
+                            _unsigned_wrap(constants[0].coordinate.byte_offset, byte_size), operation_key)),
                     )
             return None
         if (
@@ -1160,6 +1294,8 @@ class _Projector:
                 return None
             base = self._expression_for_input(operation_key, operation.inputs[0])
             if base is not None and base.byte_size == byte_size:
+                image = _image_of_constant(_unsigned_wrap(operation.inputs[1].coordinate.byte_offset, byte_size),
+                                           operation_key)
                 return _AddressExpression(
                     base.atoms,
                     _address_wrap(
@@ -1168,6 +1304,7 @@ class _Projector:
                         byte_size,
                     ),
                     byte_size,
+                    _difference_image(base.image, image),
                 )
             return None
         token = self._opaque_values.resolve(
@@ -1186,6 +1323,7 @@ class _Projector:
             ((_opaque_atom_key(token, inputs, byte_size), 1),),
             0,
             byte_size,
+            _opaque_image(*inputs),
         )
 
     def _expression_from_memory_read(
@@ -1279,6 +1417,7 @@ def _add_address_expressions(
         atoms,
         _address_wrap(base, left.displacement + right.displacement, byte_size),
         byte_size,
+        _sum_images(left.image, right.image),
     )
 
 
@@ -1296,6 +1435,7 @@ def _subtract_address_expressions(
         atoms,
         _address_wrap(base, left.displacement - right.displacement, byte_size),
         byte_size,
+        _difference_image(left.image, right.image),
     )
 
 

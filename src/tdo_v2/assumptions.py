@@ -137,6 +137,15 @@ REGISTRY: tuple[Assumption, ...] = (
         "A plugin that registers such delegates.",
         "models/external/ue_core_win64.json"),
     Assumption(
+        "derived-model-runtime-matches", "model", True,
+        "A derived model (a library function's summary saved by the engine, models/external kind summary) "
+        "describes the library the program runs with: the binary of the recorded sha256, loaded at any "
+        "address -- the derivation took no number depending on the load address as a fact "
+        "(relative_memory.ImageBaseTracking), and folded no image bytes.",
+        "The program runs with another build of the library (a patch, another configuration) under the same "
+        "name.",
+        "summary_templates, summary_store (kind summary)"),
+    Assumption(
         "ue-core-name-pool-private", "model", True,
         "The FName constructors change no memory the analysed module observes other than the FName they "
         "construct: the name pool, its locks, thread-local state and the blocks it allocates are "

@@ -59,6 +59,14 @@ reports them with the model's own label -- ``external-model:`` (hand),
 Extra model directories: ``model_paths`` (``--model-dir``,
 ``TDO_V2_MODEL_DIRS``).
 
+Derived summaries (``"kind": "summary"``, ``summary_templates``): entries
+carry a serialized function summary (``"summary"``) instead of registers /
+memory rows, matched like any entry; ``source`` is derived and records the
+derivation (library sha256, image base, engine versions, parameters, the
+model files and p-code op models it used, every assumption of that run).
+A template whose engine versions differ is loaded but never applied
+(``ModelEntry.refusal``); the run-dependent checks are ``interprocedural``'s.
+
 ``"internal": true`` (per entry, files with ``libraries`` only): the entry is
 also valid for callers inside its own library, so analyzing that library
 (``interprocedural.analyze_units(own_library=...)``) may cut there -- the
@@ -110,6 +118,8 @@ class ModelEntry:
     # its claims hold for callers inside that library too
     internal: bool = False
     unknown_memory: tuple[Access, ...] = ()   # memory written with an unstated value
+    template: dict | None = None   # a derived summary (``summary_templates``) instead of rows
+    refusal: str | None = None     # why a template is never applied (engine version mismatch)
 
     @property
     def model_id(self) -> str:
@@ -152,6 +162,10 @@ class ModelFile:
     libraries: tuple[str, ...] = ()   # upper case; empty: matched by short name
     source: tuple = (("kind", "hand"),)   # provenance, as sorted (key, value) pairs
     overrides: tuple[str, ...] = ()       # "<file id>/<entry name>" this file replaces
+    digest: str = ""                      # sha256 of the file's bytes (template dependencies)
+
+    def source_field(self, key):
+        return next((json.loads(value) for name, value in self.source if name == key), None)
 
 
 SOURCE_KINDS = ("hand", "derived", "external")
@@ -206,7 +220,13 @@ def _access(raw, what) -> Access:
 
 
 def load_model_file(path: str | Path) -> ModelFile:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    import hashlib
+
+    data = Path(path).read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    raw = json.loads(data.decode("utf-8"))
+    if type(raw) is dict and raw.get("kind") == "summary":
+        return replace(_load_summary_file(raw, path), digest=digest)
     keys = {"format_version", "kind", "id", "version", "language_id", "abi_tag", "stack_pointer",
             "stack_delta", "preserved", "entries"}
     if type(raw) is not dict or set(raw) - {"notes", "libraries", "source", "overrides"} != keys:
@@ -271,6 +291,65 @@ def load_model_file(path: str | Path) -> ModelFile:
     return ModelFile(raw["id"], raw["version"], raw["language_id"], raw["abi_tag"],
                      _slice(raw["stack_pointer"], "stack pointer"), raw["stack_delta"],
                      tuple(_slice(s, "preserved") for s in raw["preserved"]), tuple(entries), libraries,
+                     tuple(sorted((key, json.dumps(value, sort_keys=True)) for key, value in source.items())),
+                     tuple(overrides), digest)
+
+
+DERIVED_SOURCE_KEYS = {"kind", "library", "sha256", "image_base", "language", "engine", "parameters",
+                       "models", "pcodeops", "assumptions"}
+
+
+def _load_summary_file(raw, path) -> ModelFile:
+    """A ``"kind": "summary"`` file (derived templates, see the docstring)."""
+    from .function_summary import FUNCTION_SUMMARY_VERSION
+    from .summary_templates import ENGINE_SEMANTICS_VERSION, TEMPLATE_VERSION
+
+    keys = {"format_version", "kind", "id", "version", "language_id", "abi_tag", "libraries", "source", "entries"}
+    if set(raw) - {"notes", "overrides"} != keys:
+        raise ModelError(f"{path}: summary file fields must be exactly {sorted(keys)}")
+    if raw["format_version"] != FORMAT_VERSION:
+        raise ModelError(f"{path}: unsupported model format")
+    source = _source(raw, path)
+    if source["kind"] != "derived" or set(source) - {"producer"} != DERIVED_SOURCE_KEYS:
+        raise ModelError(f"{path}: a summary file's source is derived with {sorted(DERIVED_SOURCE_KEYS)}")
+    engine = source["engine"]
+    expected = {"summary_version": FUNCTION_SUMMARY_VERSION, "template_version": TEMPLATE_VERSION,
+                "semantics_version": ENGINE_SEMANTICS_VERSION}
+    if type(engine) is not dict or set(engine) != set(expected):
+        raise ModelError(f"{path}: source.engine must give {sorted(expected)}")
+    refusal = None if engine == expected else f"derived by engine {engine}, this engine is {expected}"
+    models = source["models"]
+    if type(models) is not list or any(type(row) is not dict or set(row) != {"file", "sha256"} for row in models):
+        raise ModelError(f"{path}: source.models must list {{file, sha256}}")
+    if type(source["parameters"]) is not dict or type(source["pcodeops"]) is not str:
+        raise ModelError(f"{path}: source.parameters / pcodeops")
+    language = source["language"]
+    if type(language) is not dict or set(language) != {"id", "major", "minor"} \
+            or language["id"] != raw["language_id"]:
+        raise ModelError(f"{path}: source.language must be {{id, major, minor}} of the file's language_id")
+    libraries = raw["libraries"]
+    if type(libraries) is not list or not libraries or any(type(item) is not str for item in libraries):
+        raise ModelError(f"{path}: a summary file names its libraries")
+    entries = []
+    for item in raw["entries"]:
+        if type(item) is not dict or not {"name", "original_names", "summary"} <= set(item) \
+                <= {"name", "original_names", "summary", "notes"}:
+            raise ModelError(f"{path}: summary entries are {{name, original_names, summary, notes}}")
+        if type(item["original_names"]) is not list or not item["original_names"]:
+            raise ModelError(f"{path}: {item['name']}: original_names")
+        if type(item["summary"]) is not dict:
+            raise ModelError(f"{path}: {item['name']}: summary")
+        entries.append(ModelEntry(raw["id"], raw["version"], item["name"], (item["name"],), (), (), False,
+                                  original_names=tuple(item["original_names"]), source_kind="derived",
+                                  inherited=(*_assumption_labels(source["assumptions"], path,
+                                                                 "source.assumptions"),
+                                             "derived-model-runtime-matches"),
+                                  identity=source["sha256"][:12], template=item["summary"], refusal=refusal))
+    overrides = raw.get("overrides", [])
+    if type(overrides) is not list or any(type(item) is not str or "/" not in item for item in overrides):
+        raise ModelError(f"{path}: overrides must be a list of \"<file id>/<entry name>\"")
+    return ModelFile(raw["id"], raw["version"], raw["language_id"], raw["abi_tag"], (0, 0), 0, (), tuple(entries),
+                     tuple(item.upper() for item in libraries),
                      tuple(sorted((key, json.dumps(value, sort_keys=True)) for key, value in source.items())),
                      tuple(overrides))
 

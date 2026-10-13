@@ -216,33 +216,8 @@ def analyze_frozen_bundle_with_summaries(
             private_frame_above=home_space,
             assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
         )
-        assumptions = ("globals-disjoint-from-stack",) if any(
-            getattr(item.normalized, "assumes_globals_disjoint_from_stack", False)
-            for item in results.values()
-        ) else ()
-        # a call with the observed call shape whose callee is not summarized is
-        # still taken to restore the stack pointer (the engine-wide call-shape
-        # rule); summarized callees are checked (AFFINE) instead
-        if any(
-            row.call_operation_key not in item.proven
-            for item in results.values()
-            for row in observed_call_state_projections(item.unit.observation)
-        ):
-            assumptions += ("opaque-callees-restore-stack-pointer",)
-        if readonly_image is not None:
-            assumptions += ("readonly-image-data-is-constant",)
-        if home_space:
-            assumptions += ("win64-home-space-callee-private",)
-        # reported whenever a function has a trap the cut applies to: removing the
-        # paths behind it can change a summary without leaving a dead exit
-        if assume_debug_break_traps_do_not_return and pcodeop_models and any(
-                trap_operations(item.unit, pcodeop_models) for item in results.values()):
-            assumptions += ("debug-break-traps-do-not-return",)
-        if any(getattr(item.normalized, "assumed_direction_flag_clear", False) for item in results.values()):
-            # a rep string site whose direction flag is the function's entry value
-            assumptions += ("direction-flag-clear",)
-        assumptions += tuple(sorted({label for item in results.values() for label in item.declared.values()}
-                                    | {label for item in results.values() for label in item.inherited_assumptions}))
+        assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
+                                      traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
         preliminary = []
         for key, item in by_key.items():
             normalized = results[key].normalized
@@ -299,5 +274,36 @@ def analyze_frozen_bundle_with_summaries(
             assumptions,
         )
 
+
+
+def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, pcodeop_models=None) -> tuple:
+    """Every assumption an ``analyze_units`` run rests on (``EngineRun.assumptions``)."""
+    assumptions = ("globals-disjoint-from-stack",) if any(
+        getattr(item.normalized, "assumes_globals_disjoint_from_stack", False)
+        for item in results.values()
+    ) else ()
+    # a call with the observed call shape whose callee is not summarized is
+    # still taken to restore the stack pointer (the engine-wide call-shape
+    # rule); summarized callees are checked (AFFINE) instead
+    if any(
+        row.call_operation_key not in item.proven
+        for item in results.values()
+        for row in observed_call_state_projections(item.unit.observation)
+    ):
+        assumptions += ("opaque-callees-restore-stack-pointer",)
+    if readonly_image is not None:
+        assumptions += ("readonly-image-data-is-constant",)
+    if home_space:
+        assumptions += ("win64-home-space-callee-private",)
+    # reported whenever a function has a trap the cut applies to: removing the
+    # paths behind it can change a summary without leaving a dead exit
+    if traps and pcodeop_models and any(trap_operations(item.unit, pcodeop_models) for item in results.values()):
+        assumptions += ("debug-break-traps-do-not-return",)
+    if any(getattr(item.normalized, "assumed_direction_flag_clear", False) for item in results.values()):
+        # a rep string site whose direction flag is the function's entry value
+        assumptions += ("direction-flag-clear",)
+    return assumptions + tuple(sorted(
+        {label for item in results.values() for label in item.declared.values()}
+        | {label for item in results.values() for label in item.inherited_assumptions}))
 
 __all__ = ("analyze_frozen_bundle_with_summaries",)

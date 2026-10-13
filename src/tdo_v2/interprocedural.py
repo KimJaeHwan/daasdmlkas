@@ -54,6 +54,17 @@ class AnalyzedFunction:
     # a member of a recursive SCC whose summaries did not reach a verified
     # fixpoint (``MAX_RECURSION_ROUNDS``): its intra-SCC calls stayed opaque
     recursion_unresolved: bool = False
+    # imports whose derived model (template) was not applied: call key -> why
+    refused_models: dict = field(default_factory=dict)
+    # how it was derived (``summary_templates`` export prerequisites): TEST-ONLY
+    # call effects given for it (``assumed_call_effects``, declared
+    # boundaries, extra origins), and whether ``ImageBaseTracking`` was on
+    test_only_inputs: bool = False
+    image_tracked: bool = False
+    # under ``ImageBaseTracking``: a direct memory operand in the image whose
+    # instruction does not prove it relocates (an absolute place that may not
+    # move with the library)
+    image_unproven: bool = False
 
 
 def function_key(coordinate) -> str:
@@ -66,7 +77,7 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   declared_boundaries=None, assume_direction_flag_clear=False,
                   pcodeop_models=None, private_frame_above=0,
                   assume_debug_break_traps_do_not_return=False,
-                  own_library: str | None = None) -> dict[str, AnalyzedFunction]:
+                  own_library: str | None = None, keep_uncut=frozenset()) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -86,7 +97,12 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     ``own_library``: the program is that library (e.g. "UNREALEDITOR-CORE.DLL");
     a function exported under a name an ``internal`` model entry of that library
     lists is cut -- not analyzed, its callers take the model (named assumption
-    library-internal-model-cuts, reported with each use).
+    library-internal-model-cuts, reported with each use). ``keep_uncut``:
+    function keys analyzed even so (functions whose own summary is wanted,
+    ``summary_templates``).
+    Derived models (templates) are applied like an in-Bundle callee's summary,
+    with the same alias-condition feedback, when ``summary_templates.refusal``
+    finds nothing against them in this run (``AnalyzedFunction.refused_models``).
     ``declared_boundaries``: entry key -> {call key: AssumedCallEffect}, the
     TEST-ONLY declared source/sink effects, applied as call effects of the
     same kind as summaries and models (writes exactly the declared registers
@@ -116,14 +132,38 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("win64-home-space-callee-private", bool(private_frame_above)),
         ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
     ) if not on}
-    cuts = _model_cuts(functions, image_info, external_models, own_library, disabled) \
+    cuts = _model_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
+                       image_info, external_models, own_library, disabled) \
         if own_library and image_info and external_models else {}
+    from .relative_memory import IMAGE_BASE_TRACKING
+    from .summary_templates import refusal as template_refusal
+
+    namespace = next(iter(functions.values())).scopes.program.evidence.translation_namespace if functions else None
+    language = None if namespace is None else (namespace.language_id, namespace.major_version, namespace.minor_version)
+    image_tracked = IMAGE_BASE_TRACKING.get() is not None
+    if image_tracked:
+        IMAGE_BASE_TRACKING.get().lengths.update({
+            instruction.address.byte_offset: instruction.fallthrough.byte_offset - instruction.address.byte_offset
+            for unit in functions.values() for instruction in unit.observation.instructions
+            if instruction.fallthrough is not None and instruction.fallthrough.space_id == instruction.address.space_id
+            and 0 < instruction.fallthrough.byte_offset - instruction.address.byte_offset <= 15
+        })
+
+    refused_sites: dict = {}
+
+    def usable(model_file, entry):
+        if entry.template is None:
+            return None
+        return template_refusal(model_file, entry, external_models=external_models, pcodeop_models=pcodeop_models,
+                                private_frame_above=private_frame_above, language=language)
+
     program = dict(functions)   # every function of the program, cut ones included (program-wide facts)
     functions = {key: unit for key, unit in functions.items() if key not in cuts}
     calls = {key: _direct_calls(unit, functions) for key, unit in functions.items()}
     externals = {
-        key: {**(_external_sites(unit, image_info, external_models, disabled) if image_info and external_models
-                 else {}), **_cut_sites(unit, cuts)}
+        key: {**(_external_sites(unit, image_info, external_models, disabled, usable,
+                                 refused_sites.setdefault(key, {}))
+                 if image_info and external_models else {}), **_cut_sites(unit, cuts)}
         for key, unit in functions.items()
     }
     memory_space = _program_memory_space(next(iter(functions.values()))) if functions else None
@@ -145,6 +185,16 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         results: dict[str, AnalyzedFunction] = {}
 
         sites_of: dict = {}
+        instantiated: dict = {}
+
+        def templates(entry, register_object, memory_space):
+            """A template's summary at this program (fixed object ids)."""
+            from .summary_templates import instantiate
+
+            slot = (entry.label, register_object, memory_space)
+            if slot not in instantiated:
+                instantiated[slot] = instantiate(entry.template, entry.label, register_object, memory_space)
+            return instantiated[slot]
 
         def site(key):
             """Call-site facts of ``key`` (fixed per function: computed once)."""
@@ -263,6 +313,16 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 for call_key, (model_file, entry) in externals[key].items():
                     if call_key in proven or call_key in assumed or memory_space is None:
                         continue
+                    if entry.template is not None:
+                        # a derived summary: the in-Bundle path, conditions decided here
+                        summary, anchors = templates(entry, register_object, memory_space)
+                        if _is_tail(call_key) and len(program_stack) != 1:
+                            continue
+                        effect = site_effect(key, call_key, summary, anchors, failed.get(call_key, ()),
+                                             callee=entry.label)
+                        if effect is not None:
+                            proven[call_key] = effect
+                        continue
                     effect = model_effect(
                         lambda summary, anchors, call_key=call_key: site_effect(
                             key, call_key, summary, anchors, callee=entry.label),
@@ -369,7 +429,12 @@ def analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     } | {call: effect.label for call, effect in markers.items()},
                                     inherited_assumptions=frozenset(
                                         label for call in proven if call in externals[key]
-                                        for label in externals[key][call][1].inherited))
+                                        for label in externals[key][call][1].inherited),
+                                    refused_models=dict(refused_sites.get(key, {})),
+                                    test_only_inputs=bool((assumed_call_effects or {}).get(key))
+                                    or bool(boundaries_of(key)) or extra_origins is not None,
+                                    image_tracked=image_tracked,
+                                    image_unproven=image_tracked and _unproven_image_operands(unit))
 
         def solve(component):
             """Recursion (design S5): every intra-SCC call starts from the
@@ -462,14 +527,32 @@ def _program_memory_space(unit) -> int | None:
     return spaces[0] if len(spaces) == 1 else None
 
 
-def _external_sites(unit, image_info, external_models, disabled=frozenset()) -> dict:
+def _unproven_image_operands(unit) -> bool:
+    """A data operand (ADDRESS varnode, not a branch or call target) neither
+    proven an image address nor a fixed place outside the image by its
+    instruction's encoding (``ImageBaseTracking.coefficient``)."""
+    from .relative_memory import IMAGE_BASE_TRACKING
+
+    tracking = IMAGE_BASE_TRACKING.get()
+    for instruction in unit.observation.instructions:
+        for operation in instruction.operations:
+            flow = operation.opcode in ("BRANCH", "CBRANCH", "CALL", "BRANCHIND", "CALLIND")
+            for index, varnode in enumerate((*operation.inputs, operation.output)):
+                if varnode is None or varnode.kind is not VarnodeKindCode.ADDRESS or (flow and index == 0):
+                    continue
+                if tracking.coefficient(instruction.address.byte_offset, varnode.coordinate.byte_offset) is None:
+                    return True
+    return False
+
+
+def _external_sites(unit, image_info, external_models, disabled=frozenset(), usable=None, refused=None) -> dict:
     """Call key -> (model file, entry) for calls to imported symbols with a
     model: ``CALL`` of an import thunk, ``CALLIND`` of a value copied from
     an import slot within the call instruction (``call [__imp_X]``), or a
     terminal ``BRANCHIND`` through an import slot (``jmp [__imp_X]``, a tail
     call composed like ``BRANCH`` tails). A model resting on an assumption
     switched off in this run (``disabled``) is not applied: the call stays
-    opaque."""
+    opaque; so is one ``usable`` finds a reason against (put in ``refused``)."""
     found = {}
     for instruction in unit.observation.instructions:
         operations = instruction.operations
@@ -492,7 +575,13 @@ def _external_sites(unit, image_info, external_models, disabled=frozenset()) -> 
                 continue
             model = external_models.lookup(symbol)
             if model is not None and not set(model[1].inherited) & disabled:
-                found[_operation_key(instruction.address, ordinal, operation.opcode)] = model
+                key = _operation_key(instruction.address, ordinal, operation.opcode)
+                reason = usable(*model) if usable is not None else None
+                if reason is not None:
+                    if refused is not None:
+                        refused[key] = f"{model[1].label}: {reason}"
+                    continue
+                found[key] = model
     return found
 
 
@@ -815,7 +904,8 @@ def _indirect_targets(item, functions) -> dict[str, str]:
     if not sites:
         return {}
     graph = normalized.dependencies
-    values = constant_values(normalized, item.unit.observation, [(copy, varnode) for _, copy, varnode in sites])
+    values = constant_values(normalized, item.unit.observation, [(copy, varnode) for _, copy, varnode in sites],
+                             addresses=True)
     space = item.unit.scopes.function.entry.space_id
     found = {}
     for call, copy, varnode in sites:

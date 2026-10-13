@@ -1,0 +1,5280 @@
+{
+ "format_version": 1,
+ "kind": "summary",
+ "id": "ue-core-win64-derived",
+ "version": 1,
+ "language_id": "x86:LE:64:default",
+ "abi_tag": "win64",
+ "libraries": [
+  "UNREALEDITOR-CORE.DLL"
+ ],
+ "source": {
+  "kind": "derived",
+  "library": "UNREALEDITOR-CORE.DLL",
+  "sha256": "fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942",
+  "image_base": 6442450944,
+  "language": {
+   "id": "x86:LE:64:default",
+   "major": 4,
+   "minor": 6
+  },
+  "engine": {
+   "summary_version": 1,
+   "template_version": 1,
+   "semantics_version": 1
+  },
+  "parameters": {
+   "private_frame_above": 40
+  },
+  "models": [
+   {
+    "file": "crt-win64",
+    "sha256": "0bf129e4a7e604135158c7812cec82518be941d5d117da5b08c67e608b81c7f3"
+   },
+   {
+    "file": "ue-core-win64",
+    "sha256": "999062f2f3b30f64ccabb0a2dce831ed85f7aa69d5aa9a48e6cda509094ad02d"
+   }
+  ],
+  "pcodeops": "749146c1d7ef52999c899a6665c763eeedd6bba9c6779c0b694b2bfe183ca076",
+  "assumptions": [
+   "win64-home-space-callee-private",
+   "debug-break-traps-do-not-return",
+   "external-model:ue-core-win64/FDebug::CheckVerifyFailedImpl@v3",
+   "external-model:ue-core-win64/FMemory::Free@v3",
+   "external-model:ue-core-win64/FMemory::QuantizeSize@v3",
+   "external-model:ue-core-win64/FMemory::Realloc@v3",
+   "external-model:ue-core-win64/UE4Array_Private::OnInvalidArrayNum@v3",
+   "library-internal-model-cuts",
+   "ue-core-diagnostics-no-reentrant-callback"
+  ],
+  "producer": {
+   "tool": "tools/derive_models",
+   "engine_revision": "ef2e01a08d5ed82cf3ee54e9409ce9132de5fda7+dirty",
+   "bundle": "8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50"
+  }
+ },
+ "entries": [
+  {
+   "name": "??0FString@@QEAA@XZ",
+   "original_names": [
+    "??0FString@@QEAA@XZ"
+   ],
+   "summary": {
+    "exits": [
+     {
+      "block": "dll:1b1:180037a8c",
+      "runs": [
+       {
+        "span": {
+         "object": 0,
+         "start": 18446744073709551616,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a82:1:STORE"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 0,
+         "start": 18446744073709551624,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a85:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 1,
+         "start": 18446744073709551616,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:180037a82:1:STORE",
+         "alias:dll:1b1:180037a85:2:STORE"
+        ],
+        "conditions": [],
+        "value": [
+         "same",
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         false
+        ]
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 0,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a89:0:COPY"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": [
+         "same",
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         },
+         false
+        ]
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 8,
+         "size": 8
+        },
+        "kind": "identity",
+        "writers": [],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 32,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a8c:1:INT_ADD"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 512,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a80:0:COPY"
+        ],
+        "sources": [],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 514,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a80:9:INT_EQUAL"
+        ],
+        "sources": [],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 518,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a80:5:INT_EQUAL"
+        ],
+        "sources": [],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 519,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a80:4:INT_SLESS"
+        ],
+        "sources": [],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 523,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a80:1:COPY"
+        ],
+        "sources": [],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 648,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:180037a8c:0:LOAD"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:180037a8c:0:LOAD"
+        ],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": [
+         "same",
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         false
+        ]
+       }
+      ]
+     }
+    ],
+    "unknown_writers": [],
+    "writer_objects": [
+     [
+      "dll:1b1:180037a80:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:180037a80:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:180037a80:2:INT_XOR",
+      "registers"
+     ],
+     [
+      "dll:1b1:180037a80:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:180037a80:4:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:180037a80:5:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:180037a80:6:INT_AND",
+      2
+     ],
+     [
+      "dll:1b1:180037a80:7:POPCOUNT",
+      2
+     ],
+     [
+      "dll:1b1:180037a80:8:INT_AND",
+      2
+     ],
+     [
+      "dll:1b1:180037a80:9:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:180037a82:0:COPY",
+      2
+     ],
+     [
+      "dll:1b1:180037a82:1:STORE",
+      0
+     ],
+     [
+      "dll:1b1:180037a85:0:INT_ADD",
+      2
+     ],
+     [
+      "dll:1b1:180037a85:1:COPY",
+      2
+     ],
+     [
+      "dll:1b1:180037a85:2:STORE",
+      0
+     ],
+     [
+      "dll:1b1:180037a89:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:180037a8c:0:LOAD",
+      "registers"
+     ],
+     [
+      "dll:1b1:180037a8c:1:INT_ADD",
+      "registers"
+     ]
+    ],
+    "inner_calls": [],
+    "register_deltas": [
+     [
+      [
+       8,
+       8
+      ],
+      0
+     ],
+     [
+      [
+       32,
+       8
+      ],
+      8
+     ]
+    ],
+    "dead_exits": [],
+    "writer_conditions": [],
+    "objects": [
+     {
+      "anchor": {
+       "object": "registers",
+       "start": 8,
+       "size": 8
+      }
+     },
+     {
+      "anchor": {
+       "object": "registers",
+       "start": 32,
+       "size": 8
+      }
+     },
+     {
+      "local": true
+     }
+    ]
+   }
+  },
+  {
+   "name": "??1FString@@QEAA@XZ",
+   "original_names": [
+    "??1FString@@QEAA@XZ"
+   ],
+   "summary": {
+    "exits": [
+     {
+      "block": "dll:1b1:18003bc16",
+      "runs": [
+       {
+        "span": {
+         "object": 0,
+         "start": 18446744073709551616,
+         "size": 8
+        },
+        "kind": "identity",
+        "writers": [],
+        "sources": [
+         {
+          "object": 0,
+          "start": 18446744073709551616,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 1,
+         "start": 18446744073709551616,
+         "size": 8
+        },
+        "kind": "identity",
+        "writers": [],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 8,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:18003bc04:1:COPY"
+        ],
+        "sources": [
+         {
+          "object": 0,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:18003bc04:0:LOAD"
+        ],
+        "debts": [],
+        "crossed": [
+         "call:dll:1b1:18003bc0c:2:CALL"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 32,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:18003bc16:1:INT_ADD"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 512,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:18003bc12:0:INT_CARRY"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 514,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:18003bc12:8:INT_EQUAL"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 518,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:18003bc12:4:INT_EQUAL"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 519,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:18003bc12:3:INT_SLESS"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 523,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:18003bc12:1:INT_SCARRY"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 648,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:18003bc16:0:LOAD"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:18003bc16:0:LOAD"
+        ],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": [
+         "same",
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         false
+        ]
+       }
+      ]
+     }
+    ],
+    "unknown_writers": [],
+    "writer_objects": [
+     [
+      "dll:1b1:18003bc00:0:INT_LESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc00:1:INT_SBORROW",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc00:2:INT_SUB",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc00:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc00:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc00:5:INT_AND",
+      2
+     ],
+     [
+      "dll:1b1:18003bc00:6:POPCOUNT",
+      2
+     ],
+     [
+      "dll:1b1:18003bc00:7:INT_AND",
+      2
+     ],
+     [
+      "dll:1b1:18003bc00:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc04:0:LOAD",
+      2
+     ],
+     [
+      "dll:1b1:18003bc04:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc07:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc07:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc07:2:INT_AND",
+      2
+     ],
+     [
+      "dll:1b1:18003bc07:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc07:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc07:5:INT_AND",
+      2
+     ],
+     [
+      "dll:1b1:18003bc07:6:POPCOUNT",
+      2
+     ],
+     [
+      "dll:1b1:18003bc07:7:INT_AND",
+      2
+     ],
+     [
+      "dll:1b1:18003bc07:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc0c:2:CALL~sp",
+      2
+     ],
+     [
+      "dll:1b1:18003bc12:0:INT_CARRY",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc12:1:INT_SCARRY",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc12:2:INT_ADD",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc12:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc12:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc12:5:INT_AND",
+      2
+     ],
+     [
+      "dll:1b1:18003bc12:6:POPCOUNT",
+      2
+     ],
+     [
+      "dll:1b1:18003bc12:7:INT_AND",
+      2
+     ],
+     [
+      "dll:1b1:18003bc12:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc16:0:LOAD",
+      "registers"
+     ],
+     [
+      "dll:1b1:18003bc16:1:INT_ADD",
+      "registers"
+     ]
+    ],
+    "inner_calls": [
+     [
+      "dll:1b1:18003bc0c:2:CALL",
+      [
+       {
+        "object": "registers",
+        "start": 32,
+        "size": 8
+       },
+       {
+        "object": "registers",
+        "start": 24,
+        "size": 8
+       },
+       {
+        "object": "registers",
+        "start": 40,
+        "size": 24
+       },
+       {
+        "object": "registers",
+        "start": 160,
+        "size": 32
+       }
+      ],
+      true,
+      true
+     ]
+    ],
+    "register_deltas": [
+     [
+      [
+       32,
+       8
+      ],
+      8
+     ]
+    ],
+    "dead_exits": [],
+    "writer_conditions": [],
+    "objects": [
+     {
+      "anchor": {
+       "object": "registers",
+       "start": 8,
+       "size": 8
+      }
+     },
+     {
+      "anchor": {
+       "object": "registers",
+       "start": 32,
+       "size": 8
+      }
+     },
+     {
+      "local": true
+     }
+    ]
+   }
+  },
+  {
+   "name": "?AppendChar@FString@@QEAAAEAV1@_W@Z",
+   "original_names": [
+    "?AppendChar@FString@@QEAAAEAV1@_W@Z"
+   ],
+   "summary": {
+    "exits": [
+     {
+      "block": "dll:1b1:1800f50e8",
+      "runs": [
+       {
+        "span": {
+         "object": 0,
+         "start": 6459881233,
+         "size": 1
+        },
+        "kind": "unknown",
+        "writers": [],
+        "sources": [
+         {
+          "object": 0,
+          "start": 6459881233,
+          "size": 1
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f4fd0:2:STORE",
+         "alias:dll:1b1:1800f4fd2:2:STORE",
+         "alias:dll:1b1:1800f4fe9:2:STORE",
+         "alias:dll:1b1:1800f4ff2:2:STORE",
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "alias:dll:1b1:1800f5019:2:CALL~5",
+         "alias:dll:1b1:1800f503d:2:STORE",
+         "alias:dll:1b1:1800f5056:2:STORE",
+         "alias:dll:1b1:1800f505b:2:STORE",
+         "alias:dll:1b1:1800f5093:2:STORE",
+         "alias:dll:1b1:1800f50ac:2:STORE",
+         "alias:dll:1b1:1800f50b6:2:STORE",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 1,
+         "start": 18446744073709551616,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f5019:2:CALL~3"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD",
+         "dll:1b1:1800f5019:2:CALL~ld0"
+        ],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f4fd0:2:STORE",
+         "alias:dll:1b1:1800f4fd2:2:STORE",
+         "alias:dll:1b1:1800f4fe9:2:STORE",
+         "alias:dll:1b1:1800f4ff2:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~5",
+         "alias:dll:1b1:1800f503d:2:STORE",
+         "alias:dll:1b1:1800f5056:2:STORE",
+         "alias:dll:1b1:1800f505b:2:STORE",
+         "alias:dll:1b1:1800f5093:2:STORE",
+         "alias:dll:1b1:1800f50ac:2:STORE",
+         "alias:dll:1b1:1800f50b6:2:STORE",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551584,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551592,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 1,
+         "start": 18446744073709551624,
+         "size": 4
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f500b:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD"
+        ],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f4fd0:2:STORE",
+         "alias:dll:1b1:1800f4fd2:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~5",
+         "alias:dll:1b1:1800f503d:2:STORE",
+         "alias:dll:1b1:1800f5056:2:STORE",
+         "alias:dll:1b1:1800f505b:2:STORE",
+         "alias:dll:1b1:1800f5093:2:STORE",
+         "alias:dll:1b1:1800f50ac:2:STORE",
+         "alias:dll:1b1:1800f50b6:2:STORE",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 1,
+         "start": 18446744073709551628,
+         "size": 4
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f5019:2:CALL~4"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": 1,
+          "start": 18446744073709551628,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD"
+        ],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f4fd0:2:STORE",
+         "alias:dll:1b1:1800f4fd2:2:STORE",
+         "alias:dll:1b1:1800f4fe9:2:STORE",
+         "alias:dll:1b1:1800f4ff2:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~5",
+         "alias:dll:1b1:1800f503d:2:STORE",
+         "alias:dll:1b1:1800f5056:2:STORE",
+         "alias:dll:1b1:1800f505b:2:STORE",
+         "alias:dll:1b1:1800f5093:2:STORE",
+         "alias:dll:1b1:1800f50ac:2:STORE",
+         "alias:dll:1b1:1800f50b6:2:STORE",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551520,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [],
+        "sources": [
+         {
+          "object": 2,
+          "start": 18446744073709551520,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551528,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f5019:2:CALL~5"
+        ],
+        "sources": [
+         {
+          "object": 2,
+          "start": 18446744073709551528,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551560,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f5093:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": 2,
+          "start": 18446744073709551560,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 16,
+          "size": 2
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD",
+         "dll:1b1:1800f5019:2:CALL~ld0",
+         "dll:1b1:1800f5070:0:LOAD"
+        ],
+        "debts": [
+         "may_alias_read"
+        ],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551632,
+           "size": 1
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551640,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551648,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551584,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551592,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551568,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f50ac:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": 2,
+          "start": 18446744073709551568,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD"
+        ],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551584,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f4ff2:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": 2,
+          "start": 18446744073709551584,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 56,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551592,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f4fe9:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": 2,
+          "start": 18446744073709551592,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 40,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551600,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f4fd2:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 48,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551608,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f4fd0:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 24,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551616,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [],
+        "sources": [
+         {
+          "object": 2,
+          "start": 18446744073709551616,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551624,
+         "size": 1
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f50b6:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": 2,
+          "start": 18446744073709551624,
+          "size": 1
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551632,
+         "size": 1
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f505b:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": 2,
+          "start": 18446744073709551632,
+          "size": 1
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551640,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f503d:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": 2,
+          "start": 18446744073709551640,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD"
+        ],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": 2,
+         "start": 18446744073709551648,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f5056:2:STORE"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": 2,
+          "start": 18446744073709551648,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD"
+        ],
+        "debts": [],
+        "crossed": [
+         "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~3",
+         "alias:dll:1b1:1800f5019:2:CALL~4",
+         "unknown:dll:1b1:1800f5078:3:STORE",
+         "unknown:dll:1b1:1800f50d6:3:STORE"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 0,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50df:0:COPY"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": [
+         "same",
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         },
+         false
+        ]
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 8,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50ce:0:INT_SEXT"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD"
+        ],
+        "debts": [],
+        "crossed": [],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 16,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f4fe6:3:INT_ZEXT",
+         "dll:1b1:1800f504a:0:COPY",
+         "dll:1b1:1800f50a5:0:COPY"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 16,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD"
+        ],
+        "debts": [],
+        "crossed": [
+         "call:dll:1b1:1800f5019:2:CALL",
+         "call:dll:1b1:1800f5060:2:CALL",
+         "call:dll:1b1:1800f50bb:2:CALL"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 24,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50e7:3:COPY"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 16,
+          "size": 2
+         },
+         {
+          "object": "registers",
+          "start": 24,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 40,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 48,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 56,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD",
+         "dll:1b1:1800f5019:2:CALL~ld0",
+         "dll:1b1:1800f5070:0:LOAD",
+         "dll:1b1:1800f50cb:0:LOAD"
+        ],
+        "debts": [
+         "may_alias_read"
+        ],
+        "crossed": [],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551632,
+           "size": 1
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551640,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551648,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551584,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551592,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 32,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50e8:1:INT_ADD"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 40,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50da:2:COPY"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 16,
+          "size": 2
+         },
+         {
+          "object": "registers",
+          "start": 24,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 40,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 48,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 56,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD",
+         "dll:1b1:1800f5019:2:CALL~ld0",
+         "dll:1b1:1800f5070:0:LOAD",
+         "dll:1b1:1800f50cb:0:LOAD"
+        ],
+        "debts": [
+         "may_alias_read"
+        ],
+        "crossed": [],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551632,
+           "size": 1
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551640,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551648,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551584,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551592,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 48,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50e6:3:COPY"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 16,
+          "size": 2
+         },
+         {
+          "object": "registers",
+          "start": 24,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 40,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 48,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 56,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD",
+         "dll:1b1:1800f5019:2:CALL~ld0",
+         "dll:1b1:1800f5070:0:LOAD",
+         "dll:1b1:1800f50cb:0:LOAD"
+        ],
+        "debts": [
+         "may_alias_read"
+        ],
+        "crossed": [],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551632,
+           "size": 1
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551640,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551648,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551584,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551592,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 56,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50d1:2:COPY"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 16,
+          "size": 2
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 56,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD",
+         "dll:1b1:1800f5019:2:CALL~ld0",
+         "dll:1b1:1800f5070:0:LOAD"
+        ],
+        "debts": [
+         "may_alias_read"
+        ],
+        "crossed": [],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551632,
+           "size": 1
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551640,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551648,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551584,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551592,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 128,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f507e:2:INT_SEXT",
+         "dll:1b1:1800f50a0:1:COPY"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 16,
+          "size": 2
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 128,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD",
+         "dll:1b1:1800f5019:2:CALL~ld0",
+         "dll:1b1:1800f5070:0:LOAD"
+        ],
+        "debts": [
+         "may_alias_read"
+        ],
+        "crossed": [
+         "call:dll:1b1:1800f50bb:2:CALL"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551632,
+           "size": 1
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551640,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551648,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551584,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551592,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 136,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:1800f5007:3:INT_ZEXT",
+         "dll:1b1:1800f501e:3:INT_ZEXT",
+         "dll:1b1:1800f5042:1:COPY",
+         "dll:1b1:1800f5098:1:COPY"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 136,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD"
+        ],
+        "debts": [],
+        "crossed": [
+         "call:dll:1b1:1800f5060:2:CALL",
+         "call:dll:1b1:1800f50bb:2:CALL"
+        ],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 512,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50e2:0:INT_CARRY"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 514,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50e2:8:INT_EQUAL"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 518,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50e2:4:INT_EQUAL"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 519,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50e2:3:INT_SLESS"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 523,
+         "size": 1
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50e2:1:INT_SCARRY"
+        ],
+        "sources": [
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [],
+        "conditions": [],
+        "value": null
+       },
+       {
+        "span": {
+         "object": "registers",
+         "start": 648,
+         "size": 8
+        },
+        "kind": "computed",
+        "writers": [
+         "dll:1b1:1800f50e8:0:LOAD"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": 1,
+          "start": 18446744073709551624,
+          "size": 4
+         },
+         {
+          "object": 2,
+          "start": 18446744073709551616,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 16,
+          "size": 2
+         },
+         {
+          "object": "registers",
+          "start": 24,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 40,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 48,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 56,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 8,
+          "size": 8
+         }
+        ],
+        "entry_readers": [
+         "dll:1b1:1800f4fe6:1:LOAD",
+         "dll:1b1:1800f5019:2:CALL~ld0",
+         "dll:1b1:1800f5070:0:LOAD",
+         "dll:1b1:1800f50cb:0:LOAD",
+         "dll:1b1:1800f50e8:0:LOAD"
+        ],
+        "debts": [
+         "may_alias_read"
+        ],
+        "crossed": [],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551632,
+           "size": 1
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551640,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551648,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551584,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551592,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551528,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551600,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 2,
+           "start": 18446744073709551608,
+           "size": 8
+          }
+         ]
+        ],
+        "value": null
+       }
+      ]
+     }
+    ],
+    "unknown_writers": [
+     "dll:1b1:1800f5078:3:STORE",
+     "dll:1b1:1800f50d6:3:STORE"
+    ],
+    "writer_objects": [
+     [
+      "dll:1b1:1800f4fd0:0:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fd0:1:INT_SUB",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fd0:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f4fd2:0:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fd2:1:INT_SUB",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fd2:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f4fd3:0:INT_LESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fd3:1:INT_SBORROW",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fd3:2:INT_SUB",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fd3:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fd3:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fd3:5:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fd3:6:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fd3:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fd3:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fd7:0:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fd7:1:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fda:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fdd:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fdd:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fdd:2:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fdd:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fdd:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fdd:5:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fdd:6:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fdd:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fdd:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fe6:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fe6:1:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fe6:2:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fe6:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fe9:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fe9:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fe9:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f4fee:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fee:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fee:2:INT_XOR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fee:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fee:4:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fee:5:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4fee:6:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fee:7:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fee:8:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4fee:9:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ff0:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ff0:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ff0:2:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4ff0:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ff0:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ff0:5:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4ff0:6:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f4ff0:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f4ff0:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ff2:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f4ff2:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f4ff2:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f4ff7:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ff7:1:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ffa:0:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f4ffa:1:BOOL_OR",
+      3
+     ],
+     [
+      "dll:1b1:1800f4ffa:2:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ffe:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f4ffe:1:SUBPIECE",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f4ffe:2:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5001:0:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5001:1:BOOL_OR",
+      3
+     ],
+     [
+      "dll:1b1:1800f5001:2:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f5001:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5001:4:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5001:6:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5004:0:INT_SCARRY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5004:1:INT_ADD",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5004:2:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5004:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5004:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5004:5:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5004:6:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5004:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5004:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5007:0:INT_MULT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5007:1:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f5007:2:SUBPIECE",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5007:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f500b:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f500b:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f500b:2:STORE",
+      1
+     ],
+     [
+      "dll:1b1:1800f500f:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f500f:1:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f500f:2:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f500f:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5012:0:INT_LESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5012:1:INT_SBORROW",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5012:2:INT_SUB",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5012:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5012:4:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5012:5:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5012:6:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5012:7:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5012:8:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5012:9:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5014:0:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f5014:1:INT_LESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5014:2:INT_SBORROW",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5014:3:INT_SUB",
+      3
+     ],
+     [
+      "dll:1b1:1800f5014:4:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5014:5:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5014:6:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5014:7:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5014:8:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5014:9:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5017:0:BOOL_OR",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~0",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~1",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~2",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~3",
+      1
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~4",
+      1
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~5",
+      2
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~in0",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~in1",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~in2",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~in3",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~in4",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~in5",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~ld0",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~ld1",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~ld2",
+      3
+     ],
+     [
+      "dll:1b1:1800f5019:2:CALL~sp",
+      3
+     ],
+     [
+      "dll:1b1:1800f501e:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f501e:1:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f501e:2:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f501e:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5022:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5022:1:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5024:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5024:1:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5026:0:INT_NEGATE",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5026:1:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5028:0:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:10:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:11:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:12:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5028:13:INT_EQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:14:INT_SLESS",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:15:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:16:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:17:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:18:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5028:19:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:20:INT_SLESS",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:21:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:22:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:23:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:24:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5028:25:INT_EQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:26:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:27:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:28:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:29:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5028:2:INT_RIGHT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5028:30:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:31:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:32:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:33:INT_EQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:34:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:35:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:36:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:37:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5028:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5028:4:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:5:INT_SUB",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:6:INT_RIGHT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:8:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5028:9:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f502b:0:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f502b:1:INT_LESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f502b:2:INT_SBORROW",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f502b:3:INT_SUB",
+      3
+     ],
+     [
+      "dll:1b1:1800f502b:4:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f502b:5:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f502b:6:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f502b:7:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f502b:8:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f502b:9:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f502e:0:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f502e:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f502e:2:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f502e:3:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f502e:5:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5031:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5031:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5031:2:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5031:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5031:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5031:5:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5031:6:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5031:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5031:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5033:0:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5035:0:INT_SEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5038:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f5038:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f503d:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f503d:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f503d:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f5042:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f5042:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5047:0:INT_SEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f504a:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5051:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f5051:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5056:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f5056:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f5056:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f505b:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f505b:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f505b:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f5060:2:CALL~0",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5060:2:CALL~1",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5060:2:CALL~in0",
+      3
+     ],
+     [
+      "dll:1b1:1800f5060:2:CALL~in1",
+      3
+     ],
+     [
+      "dll:1b1:1800f5060:2:CALL~ld0",
+      3
+     ],
+     [
+      "dll:1b1:1800f5060:2:CALL~sp",
+      3
+     ],
+     [
+      "dll:1b1:1800f5065:0:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f5065:1:INT_LESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5065:2:INT_SBORROW",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5065:3:INT_SUB",
+      3
+     ],
+     [
+      "dll:1b1:1800f5065:4:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5065:5:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5065:6:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5065:7:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5065:8:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5065:9:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f506c:0:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f506f:0:CALLOTHER",
+      3
+     ],
+     [
+      "dll:1b1:1800f5070:0:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f5070:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5073:0:INT_SEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5076:0:INT_SCARRY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5076:1:INT_ADD",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5076:2:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5076:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5076:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5076:5:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5076:6:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5076:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5076:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5078:0:INT_MULT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5078:1:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f5078:2:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f507c:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f507c:1:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f507e:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f507e:1:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f507e:2:INT_SEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5082:0:INT_NEGATE",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5082:1:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5084:0:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:10:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:11:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:12:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5084:13:INT_EQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:14:INT_SLESS",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:15:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:16:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:17:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:18:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5084:19:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:20:INT_SLESS",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:21:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:22:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:23:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:24:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5084:25:INT_EQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:26:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:27:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:28:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:29:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5084:2:INT_RIGHT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5084:30:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:31:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:32:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:33:INT_EQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:34:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:35:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:36:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:37:INT_OR",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5084:3:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5084:4:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:5:INT_SUB",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:6:INT_RIGHT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:8:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f5084:9:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5087:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5087:1:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5089:0:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f5089:1:INT_LESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5089:2:INT_SBORROW",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5089:3:INT_SUB",
+      3
+     ],
+     [
+      "dll:1b1:1800f5089:4:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5089:5:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5089:6:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5089:7:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f5089:8:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f5089:9:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f508c:0:INT_NOTEQUAL",
+      3
+     ],
+     [
+      "dll:1b1:1800f508c:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f508c:2:INT_ZEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f508c:3:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f508c:5:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f508f:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f508f:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f508f:2:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f508f:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f508f:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f508f:5:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f508f:6:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f508f:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f508f:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f5091:0:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f5093:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f5093:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f5093:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f5098:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f5098:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f509d:0:INT_SEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50a0:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50a0:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50a5:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50ac:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50ac:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f50ac:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f50b1:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50b1:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50b6:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50b6:1:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f50b6:2:STORE",
+      2
+     ],
+     [
+      "dll:1b1:1800f50bb:2:CALL~0",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50bb:2:CALL~1",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50bb:2:CALL~in0",
+      3
+     ],
+     [
+      "dll:1b1:1800f50bb:2:CALL~in1",
+      3
+     ],
+     [
+      "dll:1b1:1800f50bb:2:CALL~ld0",
+      3
+     ],
+     [
+      "dll:1b1:1800f50bb:2:CALL~sp",
+      3
+     ],
+     [
+      "dll:1b1:1800f50c0:0:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f50c0:1:INT_LESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50c0:2:INT_SBORROW",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50c0:3:INT_SUB",
+      3
+     ],
+     [
+      "dll:1b1:1800f50c0:4:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50c0:5:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50c0:6:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f50c0:7:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f50c0:8:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f50c0:9:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50c7:0:BOOL_NEGATE",
+      3
+     ],
+     [
+      "dll:1b1:1800f50ca:0:CALLOTHER",
+      3
+     ],
+     [
+      "dll:1b1:1800f50cb:0:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50cb:1:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50ce:0:INT_SEXT",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50d1:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50d1:1:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50d1:2:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50d6:0:INT_MULT",
+      3
+     ],
+     [
+      "dll:1b1:1800f50d6:1:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50d6:2:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f50da:0:INT_ADD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50da:1:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50da:2:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50df:0:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e2:0:INT_CARRY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e2:1:INT_SCARRY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e2:2:INT_ADD",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e2:3:INT_SLESS",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e2:4:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e2:5:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f50e2:6:POPCOUNT",
+      3
+     ],
+     [
+      "dll:1b1:1800f50e2:7:INT_AND",
+      3
+     ],
+     [
+      "dll:1b1:1800f50e2:8:INT_EQUAL",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e6:0:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f50e6:1:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50e6:2:INT_ADD",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e6:3:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e7:0:COPY",
+      3
+     ],
+     [
+      "dll:1b1:1800f50e7:1:LOAD",
+      3
+     ],
+     [
+      "dll:1b1:1800f50e7:2:INT_ADD",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e7:3:COPY",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e8:0:LOAD",
+      "registers"
+     ],
+     [
+      "dll:1b1:1800f50e8:1:INT_ADD",
+      "registers"
+     ]
+    ],
+    "inner_calls": [
+     [
+      "dll:1b1:1800f5019:2:CALL",
+      [
+       {
+        "object": "registers",
+        "start": 32,
+        "size": 8
+       },
+       {
+        "object": "registers",
+        "start": 0,
+        "size": 8
+       },
+       {
+        "object": "registers",
+        "start": 24,
+        "size": 8
+       },
+       {
+        "object": "registers",
+        "start": 40,
+        "size": 24
+       },
+       {
+        "object": "registers",
+        "start": 160,
+        "size": 32
+       },
+       {
+        "object": "registers",
+        "start": 512,
+        "size": 1
+       },
+       {
+        "object": "registers",
+        "start": 514,
+        "size": 1
+       },
+       {
+        "object": "registers",
+        "start": 518,
+        "size": 2
+       },
+       {
+        "object": "registers",
+        "start": 523,
+        "size": 1
+       },
+       {
+        "object": "registers",
+        "start": 648,
+        "size": 8
+       }
+      ],
+      true,
+      true
+     ],
+     [
+      "dll:1b1:1800f5060:2:CALL",
+      [
+       {
+        "object": "registers",
+        "start": 32,
+        "size": 8
+       },
+       {
+        "object": "registers",
+        "start": 24,
+        "size": 8
+       },
+       {
+        "object": "registers",
+        "start": 40,
+        "size": 24
+       },
+       {
+        "object": "registers",
+        "start": 160,
+        "size": 32
+       },
+       {
+        "object": "registers",
+        "start": 512,
+        "size": 1
+       },
+       {
+        "object": "registers",
+        "start": 514,
+        "size": 1
+       },
+       {
+        "object": "registers",
+        "start": 518,
+        "size": 2
+       },
+       {
+        "object": "registers",
+        "start": 523,
+        "size": 1
+       },
+       {
+        "object": "registers",
+        "start": 648,
+        "size": 8
+       }
+      ],
+      true,
+      true
+     ],
+     [
+      "dll:1b1:1800f50bb:2:CALL",
+      [
+       {
+        "object": "registers",
+        "start": 32,
+        "size": 8
+       },
+       {
+        "object": "registers",
+        "start": 24,
+        "size": 8
+       },
+       {
+        "object": "registers",
+        "start": 40,
+        "size": 24
+       },
+       {
+        "object": "registers",
+        "start": 160,
+        "size": 32
+       },
+       {
+        "object": "registers",
+        "start": 512,
+        "size": 1
+       },
+       {
+        "object": "registers",
+        "start": 514,
+        "size": 1
+       },
+       {
+        "object": "registers",
+        "start": 518,
+        "size": 2
+       },
+       {
+        "object": "registers",
+        "start": 523,
+        "size": 1
+       },
+       {
+        "object": "registers",
+        "start": 648,
+        "size": 8
+       }
+      ],
+      true,
+      true
+     ]
+    ],
+    "register_deltas": [
+     [
+      [
+       32,
+       8
+      ],
+      8
+     ]
+    ],
+    "dead_exits": [
+     "dll:1b1:1800f506f",
+     "dll:1b1:1800f50ca"
+    ],
+    "writer_conditions": [],
+    "objects": [
+     {
+      "local": true
+     },
+     {
+      "anchor": {
+       "object": "registers",
+       "start": 8,
+       "size": 8
+      }
+     },
+     {
+      "anchor": {
+       "object": "registers",
+       "start": 32,
+       "size": 8
+      }
+     },
+     {
+      "local": true
+     }
+    ]
+   }
+  }
+ ],
+ "notes": "Derived by tools/derive_models from 8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50."
+}
