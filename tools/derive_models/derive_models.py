@@ -14,9 +14,10 @@ assumptions of the derivation run. Functions that cannot be exported are
 listed with the reason.
 
 Analysis settings match the summary engine's defaults (Windows x64 home space
-0x28, debug-break traps do not return); ``--assume-globals-disjoint-from-stack``
-derives under that opt-in assumption too (templates are then applied only in
-runs that make it as well).
+0x28, debug-break traps do not return). The opt-in globals-disjoint-from-stack
+is never taken: a library Bundle holds a closure (exports may stop at internal
+models), which is no evidence about the library's -- or the process's -- stack
+switching (design section 24); the templates then apply in any run.
 """
 
 from __future__ import annotations
@@ -66,7 +67,6 @@ def main(argv=None) -> int:
     parser.add_argument("--version", type=int, default=1)
     parser.add_argument("-o", "--output", type=Path, required=True)
     parser.add_argument("--model-dir", action="append", default=[], type=Path)
-    parser.add_argument("--assume-globals-disjoint-from-stack", action="store_true")
     args = parser.parse_args(argv)
 
     import run_dfbench
@@ -113,8 +113,6 @@ def main(argv=None) -> int:
             continue
         reach.add(key)
         pending.extend(calls[key].values())
-    # program-wide facts from every function of the library, not only the closure
-    globals_disjoint = args.assume_globals_disjoint_from_stack and not ip.program_switches_stack(by_key.values())
     selected = [by_key[key] for key in sorted(reach | set(cuts))]
     ranges = image_ranges(info, units[0].scopes.program.evidence.image_base.space_id)
     print(f"closure {len(reach)} functions + {len(cuts)} cut; image blocks "
@@ -130,7 +128,6 @@ def main(argv=None) -> int:
     with tracking as found:
         results = ip.analyze_units(selected, image_info=info, external_models=models, pcodeop_models=pcodeops,
                                    private_frame_above=0x28, assume_debug_break_traps_do_not_return=True,
-                                   assume_globals_disjoint_from_stack=globals_disjoint,
                                    own_library=library, keep_uncut=frozenset(targets))
     rows = [(exports[name], name, [name]) for name in args.export if name in exports]
     raw, refused = build_file(results, rows, file_id=args.id, version=args.version, library=library,

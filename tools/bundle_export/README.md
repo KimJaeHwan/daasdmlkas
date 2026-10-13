@@ -44,6 +44,43 @@ python3 tools/bundle_export/export_bundle.py $TB/build/win-debug/dfbench_win_cor
   matches `function-%06d`.
 * One binary takes about 60–100 s (Ghidra import + auto-analysis + export).
 
+## Exporting library (DLL) code from a prepared Ghidra project
+
+Linking a program with the real code of the DLLs it imports (design section 24) reads the libraries
+from a Ghidra project **the user prepares and analyzes**. The tools never import or analyze a library
+on their own: which DLLs to load, with which analysis options (PDB, analyzers), and when to spend the
+time (UnrealEditor-Core: ~9 min; Engine is much larger) is the user's decision.
+
+1. Import the program with its libraries loaded and linked, into a project kept on disk. In the GUI:
+   File > Import, Options: *Load Libraries From Disk*, a library search path holding the DLLs to link,
+   destination folder `/libs`, *Link Existing Project Libraries*. Headless (Ghidra 12.0.4):
+   ```bash
+   analyzeHeadless /root/ghidra_proj link -import <plugin.dll>        -loader-loadLibraries true -loader-libraryLoadDepth 1 -librarySearchPaths <folder with the DLLs>        -loader-libraryDestinationFolder /libs -loader-linkExistingProjectLibraries true
+   ```
+   Only DLLs found on the search path are loaded; put only the ones to link there. Ghidra analyzes the
+   imported program, **not** the loaded libraries.
+2. Analyze each library to link, once (GUI: open it, Analysis > Auto Analyze; headless:
+   `analyzeHeadless /root/ghidra_proj link/libs -process UNREALEDITOR-CORE.DLL`). The project keeps the
+   result; exports never re-analyze it.
+3. Check the links: the program's *External Programs* (Symbol Tree > Imports, or Window > External
+   Programs) name `/libs/<LIBRARY>` for each linked library.
+4. Export library functions from the project:
+   ```bash
+   python3 tools/bundle_export/export_bundle.py "<path to>/UnrealEditor-Core.dll"        --ghidra-project /root/ghidra_proj/link.gpr --project-program /libs/UNREALEDITOR-CORE.DLL        --stop-at-internal-models UNREALEDITOR-CORE.DLL --entry 433 6442678912 --output-root <dir>
+   ```
+   **Save and close the project in the GUI first** (an open project is locked; the export then fails).
+   The program is processed as it is in the project (`-process -noanalysis -readOnly`: nothing is
+   saved back). The exporter **refuses** a program that is not analyzed, one whose recorded executable
+   SHA-256 differs from the DLL file given, and one whose exception landing pads would need disassembly
+   and analysis first (export such a library by import instead). `--stop-at-internal-models LIB` (or
+   `--stop-at-name SYMBOL`, an error when no function has it) exports the library's functions with an
+   internal model (models/external, `--model-dir`) without following their calls: the derivation
+   (`tools/derive_models`) cuts there anyway. Such a Bundle holds only the closure up to those
+   functions: it is no evidence about the rest of the library (the derivation never takes
+   globals-disjoint-from-stack). Measured on UnrealEditor-Core (FString(), ~FString,
+   AppendChar): 49 files / 43 MB in 98 s, against 10,495 files / 510 MB in 632 s (new project, import +
+   analysis each time) -- and the same templates.
+
 ## Admit / normalize / run
 
 ```bash

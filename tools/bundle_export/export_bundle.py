@@ -14,7 +14,15 @@ that will run the engine.  --mirror-to copies the published files elsewhere
 
 Function selection: exactly one of --function-name (repeatable; the exporter
 adds the transitive call/reference closure), --functions-from-manifest, or
---entry SPACE OFFSET.
+--entry SPACE OFFSET. --stop-at-name SYMBOL (repeatable) / --stop-at-internal-models
+LIBRARY: those functions are exported but the closure does not follow their
+calls (a library's functions with an internal model: the derivation cuts there,
+tools/derive_models).
+
+A prepared Ghidra project (--ghidra-project path/to/Name.gpr --project-program
+/folder/FILE): the program the user imported AND analyzed there is processed
+as is (-process -noanalysis -readOnly); the exporter refuses a program that is
+not analyzed, and one whose recorded executable SHA-256 differs from BINARY.
 
 Example:
   python3 tools/bundle_export/export_bundle.py       /mnt/d/01_gitproject/09_tdo_testbed/build/win-debug/dfbench_win_core.exe       --functions-from-manifest /mnt/d/01_gitproject/09_tdo_testbed/manifests/cases_manifest.json       --output-root /root/tdo_bundles/win-debug --mirror-to output/bundles/win-debug
@@ -76,6 +84,25 @@ def manifest_functions(manifest: Path, binary_stem: str) -> list[str]:
     return sorted(set(names))
 
 
+def internal_model_names(library: str, extra_dirs=()) -> list[str]:
+    """Original names of the internal entries of model files for ``library``
+    (models/external, then ``extra_dirs`` and TDO_V2_MODEL_DIRS, as
+    ``summary_store.model_paths``): where the library's own derivation cuts."""
+    names = []
+    dirs = [REPO / "models" / "external", *extra_dirs]
+    dirs += [Path(item) for item in os.environ.get("TDO_V2_MODEL_DIRS", "").split(os.pathsep) if item]
+    for path in sorted({path for directory in dirs for path in Path(directory).glob("*.json")}):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("kind") != "declared" or library.upper() not in {
+                item.upper() for item in data.get("libraries", ())}:
+            continue
+        names += [name for entry in data["entries"] if entry.get("internal")
+                  for name in entry.get("original_names", ())]
+    if not names:
+        raise SystemExit(f"no internal models for {library}")
+    return names
+
+
 def mirror(published: Path, target_root: Path) -> Path:
     target_root.mkdir(parents=True, exist_ok=True)
     target = target_root / published.name
@@ -104,7 +131,18 @@ def main() -> int:
     parser.add_argument("--mirror-to", type=Path,
                         help="also copy the published generation under this directory")
     parser.add_argument("--keep-project", action="store_true")
+    parser.add_argument("--stop-at-name", action="append", default=[],
+                        help="export this function but do not follow its calls (exact symbol)")
+    parser.add_argument("--stop-at-internal-models", metavar="LIBRARY",
+                        help="stop at every function an internal model of LIBRARY names (models/external)")
+    parser.add_argument("--model-dir", action="append", default=[], type=Path,
+                        help="extra model directory for --stop-at-internal-models (as the derivation's)")
+    parser.add_argument("--ghidra-project", type=Path,
+                        help="a prepared project (.gpr): process its analyzed program, no import, no analysis")
+    parser.add_argument("--project-program", help="the program's path in the project, e.g. /libs/CORE.DLL")
     args = parser.parse_args()
+    if (args.ghidra_project is None) != (args.project_program is None):
+        raise SystemExit("--ghidra-project and --project-program go together")
 
     binary = args.binary.resolve()
     if not binary.is_file():
@@ -129,6 +167,13 @@ def main() -> int:
     for flag, name in SOURCES.items():
         script_args += [flag, sha256_file(GHIDRA_DIR / name)]
     script_args += ["--receipt-path", str(receipt), "--receipt-nonce", nonce]
+    stops = list(args.stop_at_name)
+    if args.stop_at_internal_models:
+        stops += internal_model_names(args.stop_at_internal_models, args.model_dir)
+    for name in sorted(set(stops)):
+        script_args += ["--stop-at-name", name]
+    if args.ghidra_project is not None:
+        script_args += ["--require-analyzed"]
     if args.entry:
         for space, offset in args.entry:
             script_args += ["--entry", space, offset]
@@ -139,12 +184,19 @@ def main() -> int:
         for name in names:
             script_args += ["--function-name", name]
 
-    project_dir = Path(tempfile.mkdtemp(prefix="tdo_ghidra_proj_"))
     headless = args.ghidra / "support" / (
         "analyzeHeadless.bat" if os.name == "nt" else "analyzeHeadless")
+    if args.ghidra_project is not None:
+        project = args.ghidra_project.resolve()
+        folder, _, program = args.project_program.rpartition("/")
+        project_dir = None
+        target = [str(project.parent), project.stem + (folder if folder else ""),
+                  "-process", program, "-noanalysis"]
+    else:
+        project_dir = Path(tempfile.mkdtemp(prefix="tdo_ghidra_proj_"))
+        target = [str(project_dir), "tdo_export", "-import", str(binary)]
     command = [
-        *(() if os.name == "nt" else ("bash",)), str(headless), str(project_dir), "tdo_export",
-        "-import", str(binary),
+        *(() if os.name == "nt" else ("bash",)), str(headless), *target,
         "-readOnly",
         "-analysisTimeoutPerFile", str(args.analysis_timeout),
         "-scriptPath", str(GHIDRA_DIR),
@@ -164,7 +216,7 @@ def main() -> int:
     started = time.time()
     result = subprocess.run(command, env=env)
     elapsed = time.time() - started
-    if not args.keep_project:
+    if project_dir is not None and not args.keep_project:
         shutil.rmtree(project_dir, ignore_errors=True)
 
     published = out_root / generation
@@ -180,7 +232,10 @@ def main() -> int:
           f"{elapsed:.0f}s)")
     index = logs / "index.jsonl"
     record = {"generation": generation, "binary": str(binary),
-              "sha256": sha256_file(binary), "files": len(files), "bytes": total}
+              "sha256": sha256_file(binary), "files": len(files), "bytes": total,
+              "stop_at": sorted(set(stops)), "seconds": round(elapsed),
+              "ghidra_project": None if args.ghidra_project is None
+              else [str(args.ghidra_project), args.project_program]}
     if args.mirror_to:
         record["mirror"] = str(mirror(published, args.mirror_to.resolve()))
         print(f"[export] mirrored to {record['mirror']}")

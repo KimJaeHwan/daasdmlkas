@@ -45,6 +45,7 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
+import ghidra.program.model.listing.Program;
 import ghidra.program.model.lang.RegisterValue;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.mem.MemoryBlockType;
@@ -117,6 +118,11 @@ public class GhidraV2BundleExport extends GhidraScript {
         String receiptNonce;
         final List<Entry> entries = new ArrayList<>();
         final List<String> functionNames = new ArrayList<>();
+        // functions exported themselves but not followed into (a library's
+        // functions with an internal model: the derivation cuts there)
+        final List<String> stopNames = new ArrayList<>();
+        // the program must already be analyzed (a prepared project, -noanalysis)
+        boolean requireAnalyzed;
     }
 
     private static final class ExceptionCallSite {
@@ -157,7 +163,16 @@ public class GhidraV2BundleExport extends GhidraScript {
     @Override
     protected void run() throws Exception {
         Options options = parseOptions(getScriptArgs());
+        if (options.requireAnalyzed && !currentProgram.getOptions(Program.PROGRAM_INFO)
+                .getBoolean(Program.ANALYZED_OPTION_NAME, false)) {
+            throw new IllegalStateException(
+                "the program is not analyzed: analyze it in the Ghidra project first");
+        }
         exceptionRegions = captureExceptionRegions();
+        if (options.requireAnalyzed && !recoveredExceptionCode.isEmpty()) {
+            throw new IllegalStateException("exception landing pads need disassembly and analysis the " +
+                "prepared project lacks: analyze them in the project, or export by import");
+        }
         analyzeRecoveredExceptionCode();
         // Keep exact metadata-directed analysis in this transient read-only
         // program view, then freeze it for publication. Headless discards the
@@ -357,6 +372,20 @@ public class GhidraV2BundleExport extends GhidraScript {
                 }
                 values.entries.add(new Entry(decimal(args[index + 1]), decimal(args[index + 2])));
                 index += 3;
+                continue;
+            }
+            if ("--require-analyzed".equals(arg)) {
+                values.requireAnalyzed = true;
+                index += 1;
+                continue;
+            }
+            if ("--stop-at-name".equals(arg)) {
+                if (index + 1 >= args.length || args[index + 1].isEmpty() ||
+                        args[index + 1].indexOf('\0') >= 0) {
+                    throw new IllegalArgumentException("--stop-at-name requires exact symbol text");
+                }
+                values.stopNames.add(args[index + 1]);
+                index += 2;
                 continue;
             }
             if ("--function-name".equals(arg)) {
@@ -826,7 +855,8 @@ public class GhidraV2BundleExport extends GhidraScript {
             GhidraV2CallInterfaceProfile.CaptureSession profileSession,
             Map<String, Object> profileMember,
             List<Map<String, Object>> runtimeClasses) throws Exception {
-        List<Function> functions = selectFunctions(options.entries, options.functionNames);
+        List<Function> functions = selectFunctions(options.entries, options.functionNames,
+            options.stopNames);
         List<Map<String, Object>> result = new ArrayList<>();
         for (int index = 0; index < functions.size(); index++) {
             monitor.checkCancelled();
@@ -899,8 +929,38 @@ public class GhidraV2BundleExport extends GhidraScript {
         return text;
     }
 
-    private List<Function> selectFunctions(List<Entry> entries, List<String> functionNames)
-            throws Exception {
+    private Set<Function> stopFunctions(List<String> names) throws Exception {
+        Set<Function> stops = new LinkedHashSet<>();
+        SymbolTable symbols = currentProgram.getSymbolTable();
+        for (String name : names) {
+            List<String> found = new ArrayList<>();
+            for (Symbol symbol : symbols.getSymbols(name)) {
+                Function function = currentProgram.getFunctionManager()
+                    .getFunctionAt(symbol.getAddress());
+                if (function == null) {
+                    continue;
+                }
+                // a thunk export (jmp to the body): the closure walk replaces thunks
+                // by their terminal, so the boundary is the terminal
+                Function terminal = function.isThunk() ? resolvedThunkTerminal(function) : function;
+                if (terminal == null) {
+                    throw new IllegalArgumentException("stop-at " + name + ": unresolved thunk");
+                }
+                stops.add(terminal);
+                found.add(terminal.getEntryPoint().toString());
+            }
+            if (found.isEmpty()) {
+                throw new IllegalArgumentException("stop-at " + name + ": no function has this symbol");
+            }
+            println("stop-at " + name + ": " + found.size() + " function(s) " + found +
+                (found.size() > 1 ? " (WARNING: several)" : ""));
+        }
+        return stops;
+    }
+
+    private List<Function> selectFunctions(List<Entry> entries, List<String> functionNames,
+            List<String> stopNames) throws Exception {
+        Set<Function> stops = stopFunctions(stopNames);
         List<Function> result = new ArrayList<>();
         Map<BigInteger, AddressSpace> spaces = new HashMap<>();
         for (AddressSpace space : currentProgram.getAddressFactory().getAllAddressSpaces()) {
@@ -943,10 +1003,15 @@ public class GhidraV2BundleExport extends GhidraScript {
             }
         }
         if (!result.isEmpty()) {
-            // names or entries: the transitive call/reference closure
+            // names or entries: the transitive call/reference closure (not
+            // followed into a stop function other than a selected one)
             Set<Function> selected = new LinkedHashSet<>(result);
+            Set<Function> targets = new LinkedHashSet<>(result);
             for (int index = 0; index < result.size(); index++) {
                 monitor.checkCancelled();
+                if (stops.contains(result.get(index)) && !targets.contains(result.get(index))) {
+                    continue;
+                }
                 ObservedFunction observed = observedFunction(result.get(index));
                 Set<Function> closureSet = new LinkedHashSet<>(
                     result.get(index).getCalledFunctions(monitor));

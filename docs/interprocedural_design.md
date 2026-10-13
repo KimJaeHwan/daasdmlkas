@@ -672,3 +672,71 @@ major/minor가 다르면 적용 안 함; TEST-ONLY 입력·추적 없이 분석�
 검사를 끄고 내보낸 "masked restore"는 이 오라클이 잡음), 리뷰 반례 거부 테스트 9종(고정 상수, 빼고 더하기, 주소 두 개,
 이미지 끝, 마스크 복원, 페이지 마스크, 부분 읽기, 상쇄, entry 기준 오프셋). Core 실험: 상수 51개 — 이미지 주소 2개 증명, 고정 49개, 모름 0; 템플릿 3개
 그대로 내보냄. 테스트 `test_summary_templates.py` 25개, `test_summary_template_roundtrip.py` 8개, 589개 통과.
+
+## 24. 진짜 DLL 연결 — 필요할 때 분석 + 저장 (2026-10-13 설계, 사용자 결정 · Fable + Astra 2차까지, 구현 전)
+
+사용자 의도: 분석할 때 진짜 DLL을 연결해 플러그인이 부르는 Core 함수의 실제 코드로 따라 들어가고, 한 번 분석한
+함수는 저장해 두었다가 다음부터 저장본으로 대체(23절처럼 내보낼 함수를 미리 사람이 고르지 않음).
+
+구조(B — 둘 다 동의): 플러그인 분석은 지금처럼 한 프로그램. 연결된 라이브러리의 import 중 유효한 저장본이 없는 것은
+그 라이브러리 Bundle에서 바로 파생(23절 템플릿)해 같은 실행에 적용하고 저장. 두 Bundle을 한 분석으로 합치는 A는
+(함수 키 충돌 0x180000000, 프로그램 범위 사실, 이미지 간 별칭) 비용이 커서 보류 — B의 손실은 정확도뿐: DLL 전역 쓰기는
+메모리 보존 포기, 템플릿은 원천/sink 경계를 담지 않음, 콜백·가상 호출은 둘 다 불투명.
+
+사용자 결정: (a) **손 모델 먼저** — 손 모델이 있는 import는 파생하지 않음(꺼진 손 모델이어도; 그때는 불투명). (b) v1은
+**내보낸 함수만 저장** — 내부 함수는 배치마다 다시 분석; 함수 단위 저장(의존 digest)은 다음 단계.
+
+v1 설계(Fable·Astra 2차 합의):
+1. `--link LIB=<DLL 경로>` 반복. 공급자 확인: 파일 sha256 = 저장된 라이브러리 Bundle의 executable_sha256 = 템플릿에
+   기록된 sha256 (선택한 DLL 바이트 → Bundle → 파생 기록 → 템플릿 → import 이름까지 사슬로). **이름 커버리지**: 플러그인이
+   그 라이브러리에서 가져오는 모든 이름(손 모델·데이터 포함)이 DLL export 표에 있어야 함, 하나라도 없으면 그 연결 거부(잘못된
+   DLL). **파생 자격**은 따로: 이름 있는, forward 아닌, 몸체가 있는 함수 export만(데이터·forwarder·서수 전용은 손/불투명).
+   이름이 같아도 다른 빌드일 수 있음 → `derived-model-runtime-matches` 유지, 버전 리소스·해시 보고.
+2. 필요한 export: 기존 import 호출 인식 패턴(모델 유무와 무관하게) − 손 모델 있는 이름.
+3. 환경을 먼저 고정: 플러그인 실행의 유효 설정 → 파생 설정(읽기 전용 이미지 접기는 항상 끔; `globals-disjoint-from-stack`은
+   연결 실행 전체에서 끔 — 일부 폐포의 스캔은 DLL 전체의 증거가 아니고, 연결된 코드가 플러그인 정적 버퍼에서 실행될 수도
+   있음; 원래 기본은 꺼짐) → 파생 프로필 = 실제로 쓴 설정(엔진 버전들, private_frame_above, 스위치 상태, p-code op
+   digest, 손 모델 파일 (id, sha256) 집합, 언어, Ghidra·SLEIGH·exporter·naming 식별자). 순서: 손 모델 확정 → 유효 가정
+   → **적용 가능한 잘림만** 계산 → 그 잘림으로 내보내기·파생 → 적용 시 `refusal()` + 상속 가정 꺼짐 검사 둘 다.
+   가정이 꺼져 적용할 수 없는 잘림은 몸체를 내보내거나 명시적 불투명 경계로(몸체 없는 빈 함수로 두지 않음).
+4. 저장소: `<cache>/<LIB>/<dll sha256>/<프로필 digest>/` — 불변 템플릿 파일 + 시도 기록. 거부 분류: 의미(같은 입력이면
+   재시도 안 함) / 예산(더 큰 예산·작은 배치로 재시도) / 인프라(복구 후 재시도). 배치 실패를 export의 영구 성질로 만들지
+   않음. v1은 export 하나씩 파생(배치 1개). import마다 후보 하나만 골라 적용(저장된 배치 파일을 통째로 싣지 않음).
+5. 파생은 손 모델 파일만 싣고, 어떤 라이브러리의 저장본도 싣지 않음(파생 위의 파생 거부가 저장되는 것 방지).
+6. 내보내기 비용: DLL·번역 설정마다 Ghidra 프로젝트 유지(직렬 접근, 결과 Bundle은 불변·식별). 잘림 함수를 몸체 없이
+   내보내는 최적화는 잘림이 주소로 걸리도록 고친 뒤(Fable P1-A: 지금 `derive_models`는 몸체 없는 잘림을 못 찾아 불투명이
+   됨) 전체 폐포 파생과 같은 결과인지 테스트로 확인한 다음에만.
+7. 보고(import마다): 저장본 사용 / 새로 파생 / 맞지 않는 저장본(이유) / 의미 거부 / 예산 / 손 모델 적용 / 손 모델 있으나 꺼짐 /
+   불투명 경계; 템플릿 파일 식별자; 파생 안의 경계(다른 DLL import, 간접 호출).
+8. 보류: 중첩 연결(Core → 다른 UE DLL), 데이터 객체 연결(GMalloc/GLog), 내부 함수 저장, 동적 오라클에서 DLL 코드 실행
+   (명령어 주소·데이터 안 포인터·import·TLS까지 옮기는 로더 어댑터가 필요 — ImageBaseTracking의 증명은 재배치 명세가
+   아님; 그때까지 그런 호출은 "검증 안 됨"으로 보고), 플러그인 자체의 적재 주소 의존(열린 항목).
+구현 전 필수 테스트: 잘림 뒤에 숨은 스택 전환, 가정 철회로 꺼진 잘림, 데이터/forward export와 없는 이름 구분, 다른 DLL의
+저장본, 겹치는 저장 배치, 예산 그대로 재시도해 성공하는 인프라 실패.
+
+**Ghidra 실험(2026-10-13, Ghidra 12.0.4 headless, 엔진 코드 변경 없음)** — 플러그인 `UnrealEditor-TraceUnrealPlayground.dll`
+(Development), 유지되는 프로젝트 하나:
+- `-import <플러그인> -loader-loadLibraries true -loader-libraryLoadDepth 1 -librarySearchPaths <폴더>
+  -loader-libraryDestinationFolder /libs -loader-linkExistingProjectLibraries true`: 검색 폴더에 둔 Core·CoreUObject를
+  `/libs`에 불러와 플러그인의 External Program으로 연결(Core·CoreUObject 서로도 연결). 158초. **분석은 주 프로그램
+  (플러그인)만** — 불러온 라이브러리는 분석되지 않음(별도 `-process`로 분석).
+- 연결 확인 스크립트(모든 외부 심볼, C++ 클래스 namespace 포함; original imported name으로 연결된 프로그램에서 찾기):
+  Core import 24개 모두 있음(분석 후 함수 19, 데이터 5 — 데이터 export도 구분됨), CoreUObject 141개 모두 있음, 없는 이름 0.
+  → 설계 1번의 이름 커버리지·함수/데이터 구분을 Ghidra 연결 정보로 할 수 있음(Engine은 검색 폴더에 안 둠 → 연결 없음).
+- Core를 프로젝트에서 한 번 분석·저장(`-process UNREALEDITOR-CORE.DLL`): 557초.
+- 분석된 Core에서 FString 3개 폐포 내보내기(`-process ... -noanalysis`): **138초**(전에는 매번 새로 분석해 632초).
+  Bundle 크기는 같음(10,495 파일, 510 MB — 내보내기가 손 모델 잘림을 모름, 설계 6번의 잘림 반영 내보내기 필요).
+- 이 Bundle에서 파생한 템플릿은 기존 `models/derived/ue_core_win64_fstring.json`과 **완전히 같음**(생성 정보 제외).
+설계 반영: 6번 — DLL마다 Ghidra 프로젝트 유지가 실제로 동작(라이브러리 분석은 한 번, 내보내기만 반복); 1번 — import→export
+연결과 함수/데이터 구분은 Ghidra의 External Program 연결을 쓰고, 우리는 sha256·커버리지를 확인. 라이브러리 분석은 import 때
+자동이 아님 → 연결 모드는 "필요한 라이브러리만 `-process`로 분석"을 명시적으로 수행.
+
+**사용자 결정(2026-10-13): Ghidra 프로젝트는 사용자가 준비** — 연결할 DLL을 프로젝트에 올리고(라이브러리 불러오기·연결)
+분석까지 끝내 두는 것은 사용자 몫, 도구는 스스로 import·분석하지 않고 준비 상태를 확인만 함(설명서
+`tools/bundle_export/README.md`에 순서 명시). 구현(`export_bundle.py --ghidra-project X.gpr --project-program
+/libs/LIB`): 프로젝트의 프로그램을 그대로 처리(`-process -noanalysis -readOnly`), 분석 안 된 프로그램 거부(exporter
+`--require-analyzed`), 기록된 실행 파일 SHA-256이 주어진 DLL과 다르면 거부(기존 검사). **잘림 반영 내보내기**
+(`--stop-at-internal-models LIB` / `--stop-at-name`): 내부 손 모델 함수는 내보내되 그 호출은 따라가지 않음(몸체가 있어
+`derive_models`가 이름으로 찾아 자름 — Fable P1-A 해결). Core FString 3개: 49 파일·43 MB·98초(전: 10,495 파일·510 MB),
+템플릿은 전체 폐포 파생과 **완전히 같음**; 잘린 함수 6개 모두 찾음; 분석 안 된 CoreUObject는 거부됨; import 방식
+내보내기도 그대로 동작(회귀 확인).
