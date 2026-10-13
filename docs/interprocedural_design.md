@@ -989,3 +989,49 @@ win32 160/160 · UE Dev 568(400 담음, 168 부채) · DebugGame 1063(614 담음
   간선까지 따라가서 R001의 B가 GIgnoreDebugger 경로로 들어온다고 봤으나, 지표의 B는 **byte lane** 경로: 원소 `It`(A·B 8바이트)를
   64비트 레지스터 하나로 복사 → 그 4바이트만 읽어도 레지스터 값 노드 전체(B 포함)에 닿음. B단계는 올바른 별칭 정리지만 R001
   지표는 바꾸지 않음. 다음: **B2 byte lane 단계**(C 전에, 두 리뷰 권고).
+
+### 25.6 B2a단계(byte lane을 따르는 root 출처) 구현 (2026-10-14, Fable · Astra 리뷰)
+
+- 문제(25.5 정정): 8바이트 레지스터 하나에 A·B를 함께 담고 그중 4바이트(A)만 sink에 넘겨도, 기존 슬라이스는 값 노드 단위라
+  B까지 출처로 잡음. B2a는 **root 출처 라벨만** 바이트 단위로 좁힘. 완전성 판정·노드 슬라이스·요약은 그대로(B2a′/B2b에서).
+- `src/tdo_v2/lane_slice.py`: 기존 의존 그래프 위를 거꾸로 따라가며 노드마다 "필요한 바이트"를 들고 감. 정의 노드는 저장소의
+  절대 바이트, 연산 노드는 결과 바이트 번호, `FULL`(전부)은 흡수. 정확한 바이트 대응은 리틀 엔디언(`language_id`의 `:LE:`)이고
+  모양(입력 개수·폭)이 맞을 때만: COPY/INT_NEGATE, LOAD(+주소 전부), STORE(+주소 전부), 상수 SUBPIECE, PIECE, ZEXT,
+  SEXT(맨 위 바이트는 전부), AND/OR/XOR 바이트별. 그 밖의 연산·호출·빚(debt)·알 수 없는 간선은 전부 FULL(보수적).
+  JOIN: 필요한 바이트를 덮지 못하는 바이트가 있거나 다른 객체의 소스가 있으면 모든 소스 FULL.
+  seed: sink 행의 선택자 span이 정의와 같은 객체이고 겹칠 때만 그 바이트, 아니면 FULL(x86-32에서 스택 칸 선택자 vs 임시
+  정의 → 빈 요구로 출처를 다 잃던 문제 수정, 회귀 테스트).
+- `summary_engine._raw_root_groups`: root를 raw sink 행 (label, occurrence)마다 그 occurrence의 **모든** 노드로 만듦. 정규화
+  (`(kind, label, node)`마다 한 행)는 다른 occurrence가 이미 묶은 노드의 행을 지움 — 그룹 전체든 일부든(Astra 2차 P1: occ0이 A,
+  occ1이 A+B면 occ1은 B만 남아 A의 출처를 잃던 문제, B2a 이전부터 있던 것). 빠진 노드는 다른 root의 같은 노드 슬라이스를 재사용,
+  없으면 노드 질의(라벨은 닿은 SOURCE 행). 노드가 보충된 그룹 수 = `LANE_DIAGNOSTICS["restored"]`. 회귀 테스트. lane 결과는 노드 결과의 부분집합이어야 하며 아니면 노드 결과로 되돌림
+  (`not_subset`, 현재 0). SOURCE 행의 span은 그 노드 자신의 정의와 같은 객체일 때만 바이트로, 아니면 span 없음(닿으면 셈).
+  끄기: `TDO_V2_LANE_ORIGINS=0`.
+- 검증기(`tests/intra/lane_oracle.py`): 바이트마다 출처 집합을 들고 실제 실행. 함수 자신의 연산 결과·STORE 대상 바이트를 seed로
+  `lane_slice` 결과와 비교. 진입 레지스터 바이트·전역 바이트는 정확히, 진입 레지스터 기준 상대 객체는 그 레지스터의 실행 값으로
+  주소를 맞춰 정확히. 함수 자신의 호출이 쓴 레지스터 바이트는 그 호출 행이 쓴 정의에서 그 바이트가 요구되어야 함.
+  분류 불가(통과로 치지 않음): 빚에 닿음, 위치를 못 맞춘 상대 객체, 호출이 쓴 메모리, 실행 중 할당된 블록의 안 쓴 바이트
+  (할당 호출의 내용). callee 안에서 중첩 호출이 쓴 바이트는 활성 동안 `nested`로 표시하고, 바깥 호출이 반환할 때 그 활성이
+  남긴 바이트마다 **현재 위치**의 `("call", 바깥 호출, 위치)`로 다시 붙임(callee가 rax→rbx로 옮겼으면 rbx) → 정확한 레지스터
+  바이트 검사가 그대로 적용(Fable·Astra 2차 P1: "바깥 호출의 정의 중 하나에 닿으면 통과"는 틀린 바이트 대응을 숨겼음 — 회귀
+  테스트가 caller COPY 1바이트 이동을 잡음). 다시 붙지 못한 `nested`(모델이 옮긴 바이트)는 분류 불가.
+  callee가 push/pop으로 되돌린 레지스터(인터프리터가 출처로 "호출 전 값 그대로"라고 복원하는 바이트 — 프로그램 검증기와 같은
+  규칙)는 호출 전 lane으로 복원(push/pop의 스택 주소는 값의 출처가 아님; UE Dev 2,656건 오탐 수정, 회귀 테스트).
+  rep 문자열 지점·callee 활성 안 연산은 실행마다 비교 안 함.
+  변이 검사(무작위 함수 60개): 변이 없음 0 / LOAD 메모리 1바이트 회전 34,538 / STORE 값 이동 2,658 / SUBPIECE-1 3,013 /
+  COPY 이동 54,720 / LOAD 주소 빠짐 283,070 / ZEXT 빠짐 2,035 — 모두 잡힘.
+  Bundle lane 검증기(`.census6/run19.sh`): 09 debug·release·win32·UE DebugGame·UE Dev·zlib 모두 lane_missing 0, nested 0,
+  not_subset 0.
+- root 수준 검증(`.census6/root_lane_oracle.py`): 모든 Bundle 함수를 실제로 실행, source 호출이 반환할 때 rax에 라벨을 붙이고,
+  함수 자신의 sink 호출 시점에 선택자 바이트 출처의 라벨이 엔진 출처 안에 있어야 함. 09 debug sink 실행 295·라벨 64·위반 1
+  (DFB064 간접 재귀, root가 unsure로 보고되는 기존 한계 — lane 끈 상태와 같음), release 28/4/0, UE DebugGame 76/17/0,
+  UE Dev 24/1/0. lane 켬/끔 결과 같음.
+- 사례별(raw occurrence 단위, `.census6/run20.sh`): 기대 출처를 잃은 것 0, 넓어진 것 0, root 누락 0. 사라진 것은 금지 출처 B뿐
+  (09 debug DFB046 occ2, UE DebugGame TV2R004 occ2 · TV2R001 occ7, UE Dev TV2R001 · TV2R011 occ5).
+  지표: 09 debug 65/61(전 64/60), UE DebugGame 15/15(13/13), UE Dev 16/16(14/14), release·win32 그대로.
+- B2a′(lane 단위 완전성)는 구현 전에 효과를 측정: 불완전한 root 중 "닿는 미해결 읽기 때문에만" 불완전하고 lane 슬라이스는
+  그 읽기를 하나도 안 지나는 것 = 모든 Bundle에서 0(09 debug 12개 중 0, release 8개 중 0, UE DebugGame 5개 중 0, Dev 3개 중 0;
+  `.census6/diag_lane_completeness.py`) → 보류.
+- 알려진 한계: 완전성 판정은 노드 단위, 요약 경계를 넘는 lane은 FULL(B2b), 빅 엔디언은 전부 FULL, 검증기의 호출 메모리·할당
+  블록 내용·다시 붙지 못한 중첩 호출 바이트는 분류 불가로만 셈, root 수준 검증기는 occurrence를 합쳐서 비교.
+- 리뷰: Fable 1·2·3차, Astra 1·2·3차(`.census6/lanes_impl*_{fable,astra}.md`).

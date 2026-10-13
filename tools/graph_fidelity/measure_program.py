@@ -39,6 +39,8 @@ def main() -> int:
     parser.add_argument("generation", type=Path)
     parser.add_argument("--runs", type=int, default=4)
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--lanes", action="store_true",
+                        help="also run the byte-lane oracle (tests/intra/lane_oracle.check_lanes) per function")
     parser.add_argument("--models", action="store_true",
                         help="apply the declared external models (win64) and run those library "
                              "functions with their real semantics in the interpreter")
@@ -56,6 +58,7 @@ def main() -> int:
         regs = next(row.space_id for row in spaces if row.is_register_space)
         unique = next(row.space_id for row in spaces if row.is_unique_space)
         address_bits = {row.space_id: row.address_size_bits for row in spaces if row.is_memory_space}
+        memory_space_ids = sorted(address_bits)
         language = session.program_result.evidence.translation_namespace.language_id
         default_sp = (0x10, 4) if ":32:" in language else (0x20, 8)
         units = [evidence.unit for evidence in session.iter_functions()]
@@ -112,6 +115,20 @@ def main() -> int:
         totals["through_calls"] += report.through_calls
         totals["missing"] += len(report.silent)
         totals["unexplained"] += len(report.covered_by_debt)
+        if args.lanes:
+            from lane_oracle import check_lanes
+            lanes = check_lanes(item.normalized, item.unit, seeds=range(args.runs), register_pools=pool,
+                                const_space=const, havoc_calls=(regs, sp_offset, sp_size), reg_space=regs,
+                                unique_space=unique, program=program, externals=externals, image=image,
+                                no_effect_userops=userops, address_bits=address_bits)
+            totals["lane_checked"] += lanes.checked
+            totals["lane_missing"] += len(lanes.missing)
+            totals["lane_unclassified"] += lanes.unclassified
+            totals["lane_nested"] += lanes.nested
+            totals["lane_not_subset"] += lanes.not_subset
+            for row in lanes.missing[:2]:
+                if len(samples) < 6:
+                    samples.append((key, "lane " + repr(row)[:200]))
         # bytes calls wrote, checked against the places of their runs
         # (program_oracle: covered / only unevaluable places / failed, failed
         # but explained by a debt), and the footprints of preserving calls

@@ -288,22 +288,22 @@ def analyze_frozen_bundle_with_summaries(
         analyses = _analyses_from_boundary_nodes(preliminary, nodes)
 
         roots = []
+        lane_indexes: dict = {}
+        for key in LANE_DIAGNOSTICS:   # per run
+            LANE_DIAGNOSTICS[key] = 0
         for analysis in analyses:
-            groups: dict = {}
-            for local_slice in analysis.slices:
-                groups.setdefault((local_slice.root.label, local_slice.root.occurrence_ordinal), []).append(
-                    local_slice)
-            for (label, occurrence), group in sorted(groups.items()):
-                root_nodes = tuple(sorted({item.root.node for item in group}))
-                results_for_root = tuple(item.result for item in group)
+            for label, occurrence, root_nodes, results_for_root, node_labels in _raw_root_groups(
+                    analysis, nodes[analysis.entry]):
                 unbound = _unbound_roots(analysis.normalized, root_nodes)
                 completeness = _with_unbound(local_completeness(results_for_root), unbound)
                 if (analysis.entry, label, occurrence) in incomplete_roots:
                     # the callee part of a projected root is incomplete
                     completeness = replace(completeness, complete=False)
+                labels = _lane_origin_labels(analysis, by_key[function_key(analysis.entry)].unit,
+                                             nodes[analysis.entry], label, occurrence, node_labels, lane_indexes)
                 roots.append(RootSlice(
                     analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence, root_nodes,
-                    tuple(sorted({origin for item in group for origin in item.reached_origin_labels})),
+                    tuple(sorted(labels)),
                     (), {}, completeness, completeness,
                 ))
         return EngineRun(
@@ -311,6 +311,91 @@ def analyze_frozen_bundle_with_summaries(
             assumptions,
         )
 
+
+
+LANE_DIAGNOSTICS = {"roots": 0, "narrowed": 0, "not_subset": 0, "restored": 0}
+
+
+def _raw_root_groups(analysis, rows):
+    """(label, occurrence, root nodes, slice results, node-slice origin labels)
+    per raw sink occurrence. Every raw occurrence is a root with all its own
+    nodes: canonicalization (one row per (kind, label, node)) drops a row whose
+    node another occurrence already binds -- the whole group or part of it; such
+    a node takes that other root's slice, or a fresh node query (labels: the
+    SOURCE rows it reaches). A group missing nodes is counted ``restored``."""
+    groups: dict = {}
+    for local_slice in analysis.slices:
+        groups.setdefault((local_slice.root.label, local_slice.root.occurrence_ordinal), []).append(local_slice)
+    raw_groups: dict = {}
+    for row in rows:
+        if row.kind is BoundaryKind.SINK:
+            raw_groups.setdefault((row.label, row.occurrence_ordinal), []).append(row)
+    sliced = {item.root.node: item for item in analysis.slices}
+    found = []
+    for label, occurrence in sorted(set(groups) | set(raw_groups)):
+        group = groups.get((label, occurrence), [])
+        results = [item.result for item in group]
+        node_labels = {origin for item in group for origin in item.reached_origin_labels}
+        group_nodes = {item.root.node for item in group}
+        extra = sorted({row.node for row in raw_groups.get((label, occurrence), ())} - group_nodes)
+        for node in extra:
+            if node in sliced:   # the same node's slice of another root
+                results.append(sliced[node].result)
+                node_labels |= set(sliced[node].reached_origin_labels)
+                continue
+            from .query import BackwardSliceQuery
+
+            result = BackwardSliceQuery().run(analysis.normalized, node)
+            results.append(result)
+            reached = set(result.reachable_nodes)
+            node_labels |= {row.label for row in rows if row.kind is BoundaryKind.SOURCE and row.node in reached}
+        if extra:
+            LANE_DIAGNOSTICS["restored"] += 1
+        found.append((label, occurrence, tuple(sorted(group_nodes | set(extra))), tuple(results), node_labels))
+    return found
+
+
+def _lane_origin_labels(analysis, unit, rows, label, occurrence, node_labels, indexes=None) -> set:
+    """A root's origin labels from the byte-lane slice (``lane_slice``, docs
+    25.6 B2a): seeded with every raw sink row of the root (all fragments, with
+    their physical spans); a SOURCE row with physical spans counts only if a
+    demanded byte of its node lies in them, a spanless one (summary-derived
+    origins) when its node is reached at all. Never more than the node slice
+    gives (``node_labels``; a violation keeps those and is counted).
+    TDO_V2_LANE_ORIGINS=0: the node slice's labels."""
+    import os
+
+    from .lane_slice import FULL, lane_index, lane_slice
+
+    if os.environ.get("TDO_V2_LANE_ORIGINS") == "0":
+        return set(node_labels)
+    seeds = [(row.node, row.physical_spans) for row in rows
+             if row.kind is BoundaryKind.SINK and row.label == label and row.occurrence_ordinal == occurrence]
+    if not seeds:
+        return set(node_labels)
+    indexes = {} if indexes is None else indexes
+    if id(analysis.normalized) not in indexes:
+        indexes[id(analysis.normalized)] = lane_index(analysis.normalized, unit)
+    index = indexes[id(analysis.normalized)]
+    lanes = lane_slice(analysis.normalized, unit, seeds, index)
+    found = set()
+    for row in rows:
+        if row.kind is not BoundaryKind.SOURCE or row.node not in lanes.demands:
+            continue
+        demand = lanes.demands[row.node]
+        span_of = lanes.definition_span(index, row.node)
+        # spans count only as bytes of the node's own storage (a row bound to
+        # an operation node, or with spans of another object: as spanless)
+        spans = [span for span in row.physical_spans if span_of is not None and span.object_id == span_of.object_id]
+        if not spans or demand is FULL or any(byte in demand for span in spans for byte in range(span.start, span.end)):
+            found.add(row.label)
+    LANE_DIAGNOSTICS["roots"] += 1
+    if not found <= node_labels:
+        LANE_DIAGNOSTICS["not_subset"] += 1
+        return set(node_labels)
+    if found != node_labels:
+        LANE_DIAGNOSTICS["narrowed"] += 1
+    return found
 
 
 def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, pcodeop_models=None) -> tuple:

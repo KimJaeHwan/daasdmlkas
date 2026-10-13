@@ -221,6 +221,8 @@ def main() -> int:
                    if item.parameter != "external_models"},
             )
             print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
+            from tdo_v2.summary_engine import LANE_DIAGNOSTICS
+            print(f"[run] lane origins (docs 25.6): {LANE_DIAGNOSTICS}")
             if linker is not None:
                 for line in linker.report.lines:
                     print(f"[link] {line}")
