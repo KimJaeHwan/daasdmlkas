@@ -422,6 +422,28 @@ def project_function_relative_memory(
 
 # definition atoms on (``project_function_relative_memory``); tests turn them off
 DEFINITION_ATOMS = True
+
+
+def index_addresses() -> bool:
+    """Array step C1 (docs 25.8): scaled atoms (INT_MULT / INT_LEFT by a
+    constant) and boundary atoms (INT_SEXT / INT_ZEXT of an expression with
+    atoms) in address expressions. TDO_V2_INDEX_ADDRESSES=0: off (the
+    corrected baseline: the wrap seam bound and the wild rules stay)."""
+    import os
+
+    return os.environ.get("TDO_V2_INDEX_ADDRESSES", "1") != "0"
+
+
+# per run (diagnostics only): relative objects with a boundary atom or a
+# coefficient other than 1 (index objects, all wild), accesses refused at the
+# wrap seam
+INDEX_DIAGNOSTICS = {"index_objects": set(), "seam_refusals": 0}
+
+
+def reset_index_diagnostics() -> None:
+    """At the start of one analysis run (``interprocedural.analyze_units``)."""
+    INDEX_DIAGNOSTICS["index_objects"] = set()
+    INDEX_DIAGNOSTICS["seam_refusals"] = 0
 _VALUE_KINDS = frozenset({StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE})
 
 
@@ -783,6 +805,9 @@ class _Projector:
         self._import_atoms: set[int] = set()   # import-slots-hold-their-exports (``IMPORT_SLOTS``)
         # (the stack pointer's entry atom, entry atoms overlapping its register, its span)
         self._stack_atoms: tuple = (None, frozenset(), None)
+        # boundary atoms (C1): key -> (kind, from bytes, to bytes, (low, high))
+        # -- the range is for C2 (relations), unused here
+        self._boundary: dict[int, tuple] = {}
         # entry atoms of a span overlapping the stack pointer (any width) and
         # opaque atoms computed from a stack-derived value (transitively)
         self._stack_derived: set[int] = set()
@@ -860,10 +885,10 @@ class _Projector:
                 if start + width > 1 << space.address_size_bits:
                     return None
             else:
-                object_id = self._relative_object(address, space.space_id, width=width)
-                start = (1 << space.address_size_bits) + address.displacement
-                if start < 0:
+                start = _relative_start(address.displacement, space.address_size_bits, width)
+                if start is None:
                     return None
+                object_id = self._relative_object(address, space.space_id, width=width)
             spans.append(ByteSpan(object_id, start, width))
         return tuple(sorted(set(spans), key=lambda span: span.canonical_key))
 
@@ -900,11 +925,22 @@ class _Projector:
             if start + width > 1 << space.address_size_bits:
                 return None
         else:
-            object_id = self._relative_object(address, space.space_id, displacement, width)
-            start = (1 << space.address_size_bits) + address.displacement + displacement
-            if start < 0:
+            start = _relative_start(address.displacement + displacement, space.address_size_bits, width)
+            if start is None:
                 return None
+            object_id = self._relative_object(address, space.space_id, displacement, width)
         return (ByteSpan(object_id, start, width),)
+
+    def _note_opaque_atom(self, atom: int, inputs) -> None:
+        """An opaque atom inherits its inputs' classes: stack-derived; wild for
+        an input with a wild (definition) atom, a boundary atom or a scaled
+        atom -- an opaque value of an index may still be a caller-frame
+        pointer moved into this function's frame (docs 25.8)."""
+        if any(self._is_stack_derived(key) for item in inputs for key, _ in item.atoms):
+            self._stack_derived.add(atom)
+        if any(key in self._definition_atoms or key in self._boundary or coefficient != 1
+               for item in inputs for key, coefficient in item.atoms):
+            self._definition_atoms.add(atom)
 
     def _note_entry_atom(self, span: ByteSpan, atom: int) -> None:
         """An entry value of a register span overlapping the stack pointer,
@@ -912,6 +948,30 @@ class _Projector:
         stack_span = self._stack_atoms[2]
         if stack_span is not None and span.object_id == stack_span.object_id                 and span.start < stack_span.end and stack_span.start < span.end:
             self._stack_derived.add(atom)
+
+    def _boundary_expression(self, kind: str, value: _AddressExpression, byte_size: int):
+        """INT_SEXT / INT_ZEXT of an expression with atoms (C1): a new atom, a
+        deterministic function of the input expression -- single-valued when
+        its atoms are (every atom in an expression was admitted when it was
+        built: entry/import atoms, definition atoms under the once / settled /
+        unblocked discipline, opaque atoms of those); recomputed with the
+        expression on every projection, never cached apart from it, so a
+        revalidation that blocks an input read dissolves it. Refused (no
+        expression) when the input may move with the image base."""
+        if not index_addresses() or value.image != 0:
+            return None
+        bits = 8 * value.byte_size
+        displacement = _unsigned_wrap(value.displacement, value.byte_size)
+        atom = _digest_ints(b"boundary-atom-v1", (
+            0 if kind == "zext" else 1, value.byte_size, byte_size,
+            _address_atom_key(value.atoms), displacement))
+        low, high = (0, (1 << bits) - 1) if kind == "zext" else (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+        self._boundary[atom] = (kind, value.byte_size, byte_size, (low, high))
+        if any(self._is_stack_derived(key) for key, _ in value.atoms):
+            self._stack_derived.add(atom)
+        if any(key in self._definition_atoms for key, _ in value.atoms):
+            self._definition_atoms.add(atom)   # wild like its input
+        return _AddressExpression(((atom, 1),), 0, byte_size, 0)
 
     def _is_stack_derived(self, atom: int) -> bool:
         """An entry atom of (a part of) the stack pointer, or an opaque atom
@@ -945,6 +1005,12 @@ class _Projector:
         )
         if any(atom in self._definition_atoms for atom, _ in address.atoms):
             self.wild_objects.add(object_id)
+        if any(atom in self._boundary or coefficient != 1 for atom, coefficient in address.atoms):
+            # an index object (a boundary atom, a scaled atom; rdi - rsi too):
+            # its base may be a caller-frame pointer and its index negative --
+            # it may reach the private frame (docs 25.8)
+            self.wild_objects.add(object_id)
+            INDEX_DIAGNOSTICS["index_objects"].add(object_id)
         if any(self._is_stack_derived(atom) for atom, _ in address.atoms) \
                 and address.atoms != ((self._stack_atoms[0], 1),):
             # derived from the stack pointer but not the stack object
@@ -1333,6 +1399,8 @@ class _Projector:
                 return _AddressExpression(
                     (), _unsigned_wrap(value.displacement, value.byte_size), byte_size, _opaque_image(value)
                 )
+            if value is not None and value.atoms and value.byte_size < byte_size:
+                return self._boundary_expression("zext", value, byte_size)
         if operation.opcode == "LOAD" and len(operation.inputs) >= 2:
             return self._expression_from_memory_read(operation_key, byte_size)
         if operation.opcode in ("INT_XOR", "INT_SUB", "BOOL_XOR") and len(operation.inputs) == 2 \
@@ -1361,12 +1429,19 @@ class _Projector:
                     (), _unsigned_wrap(_signed_wrap(value.displacement, value.byte_size), byte_size), byte_size,
                     _opaque_image(value),
                 )
+            if value is not None and value.atoms and value.byte_size < byte_size:
+                return self._boundary_expression("sext", value, byte_size)
         if operation.opcode == "INT_MULT" and len(operation.inputs) == 2:
             left, right = (self._expression_for_input(operation_key, item) for item in operation.inputs)
             if left is not None and right is not None and not left.atoms and not right.atoms \
                     and left.byte_size == right.byte_size == byte_size:
                 return _AddressExpression((), _unsigned_wrap(left.displacement * right.displacement, byte_size),
                                           byte_size, _opaque_image(left, right))
+            if left is not None and right is not None and left.byte_size == right.byte_size == byte_size \
+                    and bool(left.atoms) != bool(right.atoms) and index_addresses():
+                value, factor = (left, right) if left.atoms else (right, left)
+                if factor.image == 0:
+                    return _scaled(value, _unsigned_wrap(factor.displacement, byte_size), byte_size)
         if operation.opcode == "INT_LEFT" and len(operation.inputs) == 2:
             value = self._expression_for_input(operation_key, operation.inputs[0])
             shift = self._expression_for_input(operation_key, operation.inputs[1])
@@ -1384,6 +1459,10 @@ class _Projector:
                     else _unsigned_wrap(value.displacement << amount, byte_size)
                 )
                 return _AddressExpression((), result, byte_size, _opaque_image(value, shift))
+            if value is not None and shift is not None and value.atoms and not shift.atoms \
+                    and value.byte_size == byte_size and shift.image == 0 and index_addresses():
+                amount = _unsigned_wrap(shift.displacement, shift.byte_size)
+                return _scaled(value, 0 if amount >= byte_size * 8 else 1 << amount, byte_size)
         if operation.opcode == "INT_ADD" and len(operation.inputs) == 2:
             expressions = tuple(
                 self._expression_for_input(operation_key, item)
@@ -1458,8 +1537,7 @@ class _Projector:
         if any(item is None for item in inputs):
             return None
         atom = _opaque_atom_key(token, inputs, byte_size)
-        if any(self._is_stack_derived(key) for item in inputs for key, _ in item.atoms):
-            self._stack_derived.add(atom)
+        self._note_opaque_atom(atom, inputs)
         return _AddressExpression(
             ((atom, 1),),
             0,
@@ -1535,6 +1613,32 @@ def _signed_wrap(value: int, byte_size: int) -> int:
     unsigned = value % modulus
     sign = modulus >> 1
     return unsigned - modulus if unsigned >= sign else unsigned
+
+
+def _relative_start(displacement: int, bits: int, width: int) -> int | None:
+    """The span start of a relative access (``2^bits + d``, d signed in the
+    address ring) or None at the wrap seam: |d| >= 2^(bits-2) (or a width
+    that large) -- two accepted accesses on one atom tuple then differ by less
+    than half the ring, so comparing their linear spans is comparing the
+    addresses modulo 2^bits (docs 25.8)."""
+    d = _signed_wrap(displacement, bits // 8)
+    bound = 1 << (bits - 2)
+    if not -bound < d < bound or width >= bound:
+        INDEX_DIAGNOSTICS["seam_refusals"] += 1
+        return None
+    return (1 << bits) + d
+
+
+def _scaled(value: _AddressExpression, factor: int, byte_size: int) -> _AddressExpression:
+    """``value * factor`` in the ring of ``byte_size`` bytes: every coefficient
+    and the displacement scaled; a coefficient 0 drops its atom (C1)."""
+    atoms = tuple(sorted(
+        (atom, _signed_wrap(coefficient * factor, byte_size)) for atom, coefficient in value.atoms
+        if _signed_wrap(coefficient * factor, byte_size)))
+    base = _AddressExpression(atoms, 0, byte_size)
+    # an image-relative value scaled by k != 1 moves by k times the base shift
+    return _AddressExpression(atoms, _address_wrap(base, value.displacement * factor, byte_size), byte_size,
+                              value.image if factor == 1 else (0 if value.image == 0 else None))
 
 
 def _unsigned_wrap(value: int, byte_size: int) -> int:

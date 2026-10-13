@@ -48,8 +48,10 @@ def _producer(generation: Path) -> dict:
                                     capture_output=True, text=True, check=True).stdout.strip())
     except (OSError, subprocess.CalledProcessError):
         revision, dirty = "unknown", False
+    from tdo_v2.relative_memory import index_addresses
+
     return {"tool": "tools/derive_models", "engine_revision": revision + ("+dirty" if dirty else ""),
-            "bundle": generation.name}
+            "bundle": generation.name, "index_addresses": index_addresses()}
 
 
 def image_ranges(info, space_id: int) -> tuple:

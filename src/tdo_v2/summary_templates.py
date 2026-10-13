@@ -45,7 +45,9 @@ from .span_geometry import ByteSpan, StorageObjectId, StorageObjectKind, Storage
 TEMPLATE_VERSION = 1
 # bumped on any change of what a summary means: normalization, alias
 # reasoning, constant evaluation, effect derivation (not only its fields)
-ENGINE_SEMANTICS_VERSION = 1
+# 2: stack-mixed objects wild (docs 25.7); index addresses, index objects
+# wild, the wrap seam bound (docs 25.8)
+ENGINE_SEMANTICS_VERSION = 2
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

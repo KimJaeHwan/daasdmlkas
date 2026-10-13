@@ -3,7 +3,7 @@
 import pytest
 
 from synthetic import (
-    RAX, RCX, RDI, RDX,
+    RAX, RCX, RDI, RDX, RSI,
     add, const, load, normalize, op, operation_node_at, reg, slice_from, store,
     straight,
 )
@@ -26,14 +26,14 @@ def test_complete_slice_reports_no_debt():
 
 
 def test_unresolved_address_is_reported_with_counts():
-    """RCX = RDI*2; *(RCX) = RDX; RAX = *(RCX).
+    """RCX = RDI*RSI (no linear address); *(RCX) = RDX; RAX = *(RCX).
 
     The unknown-address read carries two debts (unresolved address, and the
     possible earlier unknown-address writer); the store is one write debt.
     """
     (result,) = _results(
         straight(
-            [op("INT_MULT", [reg(RDI), const(2)], reg(RCX))],
+            [op("INT_MULT", [reg(RDI), reg(RSI)], reg(RCX))],
             [store(reg(RCX), reg(RDX))],
             [load(reg(RAX), reg(RCX))],
         ),
@@ -44,7 +44,7 @@ def test_unresolved_address_is_reported_with_counts():
 
 def test_one_incomplete_root_node_makes_the_occurrence_incomplete():
     builder = straight(
-        [op("INT_MULT", [reg(RDI), const(2)], reg(RCX))],
+        [op("INT_MULT", [reg(RDI), reg(RSI)], reg(RCX))],
         [load(reg(RAX), reg(RCX))],
         [add(reg(RDX), reg(RDI), const(1))],
     )
@@ -57,7 +57,7 @@ def test_one_incomplete_root_node_makes_the_occurrence_incomplete():
 
 def test_shared_debt_nodes_are_counted_once():
     builder = straight(
-        [op("INT_MULT", [reg(RDI), const(2)], reg(RCX))],
+        [op("INT_MULT", [reg(RDI), reg(RSI)], reg(RCX))],
         [load(reg(RAX), reg(RCX))],
     )
     (result,) = _results(builder, 1)

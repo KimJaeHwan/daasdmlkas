@@ -60,13 +60,25 @@ def test_double_dereference_is_tracked():
 
 
 def test_non_affine_address_stays_unresolved():
-    """RCX = RDI*2; *(RCX) = RDX; RAX = *(RCX) -> debt, not a guess."""
+    """RCX = RDI*RSI; *(RCX) = RDX; RAX = *(RCX) -> debt, not a guess."""
+    result = sliced_at(straight(
+        [op("INT_MULT", [reg(RDI), reg(RSI)], reg(RCX))],
+        [store(reg(RCX), reg(RDX))],
+        [load(reg(RAX), reg(RCX))],
+    ), 2)
+    assert not result.is_complete
+
+
+def test_a_scaled_address_is_one_exact_place():
+    """RCX = RDI*2; *(RCX) = RDX; RAX = *(RCX): the same atom tuple twice --
+    the same address on every run (array step C1): RAX is RDX, complete."""
     result = sliced_at(straight(
         [op("INT_MULT", [reg(RDI), const(2)], reg(RCX))],
         [store(reg(RCX), reg(RDX))],
         [load(reg(RAX), reg(RCX))],
     ), 2)
-    assert not result.is_complete
+    assert result.is_complete
+    assert "RDX" in result.registers()
 
 
 def test_read_before_write_is_not_affected():

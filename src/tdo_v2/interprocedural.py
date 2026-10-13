@@ -82,8 +82,9 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, **options) -
     import-slots-hold-their-exports when ``assume_import_slots_hold_exports``
     and ``image_info`` are given (``relative_memory.IMPORT_SLOTS``; it takes
     effect only where globals-disjoint-from-stack holds for the run)."""
-    from .relative_memory import IMPORT_SLOTS, ImportSlots
+    from .relative_memory import IMPORT_SLOTS, ImportSlots, reset_index_diagnostics
 
+    reset_index_diagnostics()
     image_info = options.get("image_info")
     token = IMPORT_SLOTS.set(ImportSlots(image_info) if assume_import_slots_hold_exports and image_info else None)
     try:

@@ -223,6 +223,10 @@ def main() -> int:
             print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
             from tdo_v2.summary_engine import LANE_DIAGNOSTICS
             print(f"[run] lane origins (docs 25.6): {LANE_DIAGNOSTICS}")
+            from tdo_v2.relative_memory import INDEX_DIAGNOSTICS, index_addresses
+            print(f"[run] index addresses (docs 25.8): {'on' if index_addresses() else 'off'}, "
+                  f"index objects {len(INDEX_DIAGNOSTICS['index_objects'])}, "
+                  f"seam refusals {INDEX_DIAGNOSTICS['seam_refusals']}")
             if linker is not None:
                 for line in linker.report.lines:
                     print(f"[link] {line}")

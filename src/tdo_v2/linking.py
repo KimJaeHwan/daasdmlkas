@@ -286,10 +286,12 @@ class Linker:
         for unit in units:
             for symbol in import_call_sites(unit, image_info).values():
                 called.setdefault((symbol.library.upper(), symbol.original_name or symbol.name), symbol)
+        from .relative_memory import index_addresses
+
         space_id = units[0].scopes.program.evidence.image_base.space_id
         switches = {"private_frame_above": private_frame_above, "traps": bool(traps),
                     "globals_disjoint": bool(globals_disjoint), "direction_flag": bool(direction_flag),
-                    "import_slots": bool(import_slots)}
+                    "import_slots": bool(import_slots), "index_addresses": index_addresses()}
         identity = self.provider.identity()
         declared = declared_models(models)
         checked = []
