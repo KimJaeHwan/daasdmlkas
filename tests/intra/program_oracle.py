@@ -7,6 +7,9 @@ and checks the caller's graph:
   path (as ``graph_oracle.check``); a byte written inside a call activation is
   attributed to the call and is covered by the call's proven run effect that
   writes it (node ``op:<call>~<i>``), or by call-clobber debt on the reader;
+* a byte the call wrote as unknown memory (``~u<j>`` rows, an
+  "opaque_call_write" debt each) is covered when the reader's slice reaches
+  such a row: its value is declared unknown, so no input is required;
 * when it is covered by a proven run effect, every caller-level input the
   activation computed that byte from must be reached by the reader's
   backward slice too (``Run.call_reads``): a caller operation's node, an
@@ -53,6 +56,39 @@ def _proven_runs(function):
     return found
 
 
+def _opaque_rows(function):
+    """call key -> nodes of its unknown-memory rows (``~u<j>``)."""
+    graph = function.dependencies
+    return {
+        call: [graph.node_for_key(f"op:{call}~u{index}") for index in range(len(effect.unknown_memory))]
+        for call, effect in function.proven_call_effects if effect.unknown_memory
+    }
+
+
+def _all_opaque(graph, reader, rows) -> bool:
+    """Every memory definition the reader's operation reads directly is
+    written by one of ``rows`` (a call's ``~u`` rows) alone -- no join of
+    several reaching writes."""
+    if not rows:
+        return False
+    node = _node(graph, reader)
+    if node is None:
+        return False
+    definitions = [
+        source for source, _, record in graph._graph.in_edges(node)
+        if record.span is not None
+        and record.span.object_id.kind in (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
+    ]
+    if not definitions:
+        return False
+    for definition in definitions:
+        writers = graph._graph.in_edges(definition)
+        if not writers or any(record.kind != "memory_defines" or writer not in rows
+                              for writer, _, record in writers):
+            return False
+    return True
+
+
 def _covering_runs(proven, writer, space, offset, reachable, reg_space):
     """Reached proven run nodes of call ``writer`` that may have written the byte:
     register runs writing that register byte; for memory, any memory run (the
@@ -78,6 +114,7 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
         key for row in observed_call_state_projections(observation) for key in row.transient_operation_keys
     }
     proven = _proven_runs(function)
+    opaque = _opaque_rows(function)
     cache = {}
 
     def static(reader):
@@ -107,6 +144,15 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
                 report.silent.append((dependency, "reader operation has no graph node"))
                 continue
             writer = dependency.writer
+            if isinstance(writer, str) and dependency.space_id not in (reg_space, unique_space) \
+                    and not result.is_complete and _all_opaque(graph, dependency.reader, opaque.get(writer, ())):
+                # a byte the call wrote with a value it does not state: debt.
+                # Only when every memory byte the reader reads is one of that
+                # call's unknown-memory rows (the dynamic byte is not mapped to
+                # a static one: a wider read also taking other bytes keeps the
+                # usual checks); a complete slice stays a silent miss below
+                report.through_calls += 1
+                continue
             if isinstance(writer, str) and writer in proven and dependency.space_id != unique_space:
                 reachable = set(result.result.reachable_nodes)
                 runs = _covering_runs(proven, writer, dependency.space_id, dependency.offset,

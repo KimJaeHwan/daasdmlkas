@@ -137,6 +137,16 @@ REGISTRY: tuple[Assumption, ...] = (
         "A plugin that registers such delegates.",
         "models/external/ue_core_win64.json"),
     Assumption(
+        "ue-core-name-pool-private", "model", True,
+        "The FName constructors change no memory the analysed module observes other than the FName they "
+        "construct: the name pool, its locks, thread-local state and the blocks it allocates are "
+        "Core-private, and no callback into the module runs (no allocator hook, ensure/log delegate or "
+        "other reentrant diagnostic). The FName is 12 bytes (UE 5.1 editor build, case preserving).",
+        "A module reading name-pool internals directly (FNamePool / name entry memory through an escaped "
+        "pointer or export), hooking name creation, installing an allocator or diagnostic callback that "
+        "writes module memory, or a Core build with a different FName layout (non-editor: 8 bytes).",
+        "models/external/ue_core_win64.json (FName::FName)"),
+    Assumption(
         "lock-markers-have-no-data-effect", "model", True,
         "x86 LOCK/UNLOCK user ops only bracket a lock-prefixed instruction whose memory effect is in "
         "its own p-code (pcodeop-model:x86-markers/*).",

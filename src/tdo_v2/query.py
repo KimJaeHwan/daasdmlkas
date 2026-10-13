@@ -48,6 +48,7 @@ class BackwardSliceQuery:
         # alias conditions this function cannot decide
         unresolved_read_set.update(node for node, _ in getattr(function, "uncertain_nodes", ()))
         unresolved_read_set.update(node for node, _ in getattr(function, "open_nodes", ()))
+        unresolved_read_set.update(getattr(function, "opaque_nodes", ()))
         unresolved_reads = tuple(
             node
             for node in reachable

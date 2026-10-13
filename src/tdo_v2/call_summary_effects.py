@@ -14,8 +14,12 @@ site may assume, without calling conventions:
   register at the call (relative-memory projection, once -- no re-substitution).
 * ``preserved``: register bytes the call leaves exactly as they were (plus the
   written ones: normalization places the run effects just before the CALL).
-* ``preserves_memory``: every memory byte the call may change is a memory run;
-  otherwise (unknown-address writes, unanchored objects, UNKNOWN memory runs,
+* ``unknown_memory``: anchored or global memory the callee writes with a value
+  the summary cannot state (UNKNOWN runs, runs computed through debts): the
+  place is exact, the value is not -- the caller writes those bytes with an
+  "opaque_call_write" debt.
+* ``preserves_memory``: every memory byte the call may change is a memory run
+  or unknown memory; otherwise (unknown-address writes, unanchored objects,
   opaque inner calls) all memory keeps call-clobber debt.
 
 Register bytes UNKNOWN on some exit, computed through debts or from
@@ -137,6 +141,9 @@ class ProvenCallEffect:
     # the callee never returns (every exit dead, ``FunctionSummary.dead_exits``):
     # the caller's path past the call is dead
     noreturn: bool = False
+    # anchored or global memory the callee writes with an unknown value: exact
+    # places (``preserves_memory`` keeps the rest), each byte with debt
+    unknown_memory: tuple[AnchoredSpan, ...] = ()
     # the summary's writer conditions as anchored (read, write) pairs: every
     # claim of this effect -- preserved bytes and memory included -- holds only
     # with them, so the caller decides them at the call (``~cw`` row) and
@@ -261,8 +268,10 @@ def derive_proven_call_effect(
                 # bytes: in the caller that write is an ordinary write to the bound
                 # object, and the caller's may-alias analysis covers the overlap
                 verdict = _verdict_without_crossings(run, anchored, failed_conditions)
-            if kind is not StorageObjectKind.REGISTER_FILE and verdict != "self" and (
-                    verdict == "unknown" or anchored(run.span) is None):
+            # an unknown value at an anchored place is unknown memory there; a
+            # write the caller cannot locate leaves no memory kept
+            if kind is not StorageObjectKind.REGISTER_FILE and verdict != "self" \
+                    and anchored(run.span) is None:
                 memory_ok = False
             for offset in range(run.span.start, run.span.end):
                 verdicts[(run.span.object_id, offset)] = verdict
@@ -291,6 +300,7 @@ def derive_proven_call_effect(
     register_groups: dict[tuple, list[int]] = {}
     memory_groups: dict[tuple, list[tuple]] = {}
     unknown: set[int] = set()
+    unknown_bytes: dict = {}   # memory object -> offsets of unknown value
     for (object_id, offset), value in state.items():
         is_register = object_id.kind is StorageObjectKind.REGISTER_FILE
         if is_register and offset in skip:
@@ -300,6 +310,8 @@ def derive_proven_call_effect(
         if value == "unknown":
             if is_register:
                 unknown.add(offset)
+            elif anchored(ByteSpan(object_id, offset, 1)) is not None:
+                unknown_bytes.setdefault(object_id, []).append(offset)
             continue
         if is_register:
             register_groups.setdefault(value, []).append(offset)
@@ -351,6 +363,10 @@ def derive_proven_call_effect(
                 memory_runs.append(ProvenMemoryRun(anchored(span), registers, loads, keeps_old, _origins(sources),
                                                    _sorted_pairs(conditions), value))
     preserved = [offset for offset in range(register_limit) if offset not in unknown and offset not in skip]
+    unknown_memory = tuple(
+        anchored(span) for object_id, offsets in sorted(unknown_bytes.items(), key=repr)
+        for span in _spans(object_id, offsets)
+    )
 
     def through_register(access):
         return access is not None and access.anchor is not None and             (access.anchor.start, access.anchor.size) not in stack
@@ -358,7 +374,8 @@ def derive_proven_call_effect(
         through_register(run.write) or any(through_register(load) for load in run.loads)
         or (run.write.anchor is None and run.reads)  # a register value kept in global memory
         for run in memory_runs
-    ) or any(through_register(load) for run in runs for load in run.loads)
+    ) or any(through_register(load) for run in runs for load in run.loads) \
+        or any(through_register(access) for access in unknown_memory)
     deltas = dict(summary.register_deltas)
     restores = all(
         deltas.get(key) == -delta for key, delta in (stack_deltas or {}).items()
@@ -371,7 +388,7 @@ def derive_proven_call_effect(
     return ProvenCallEffect(
         callee, tuple(runs), tuple(_spans(register_object, preserved)), tuple(memory_runs), memory_ok,
         observes, sink_demands, restores, tail_stack, tail_delta, clobbers_below,
-        writer_conditions=_sorted_pairs(writer_pairs),
+        writer_conditions=_sorted_pairs(writer_pairs), unknown_memory=unknown_memory,
     )
 
 

@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "ue-core-win64",
-  "version": 2,
+  "version": 3,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
   "libraries": [
@@ -158,7 +158,10 @@
       "registers": [],
       "memory": [],
       "other_memory": "preserved",
-      "internal": true
+      "internal": true,
+      "assumptions": [
+        "ue-core-diagnostics-no-reentrant-callback"
+      ]
     },
     {
       "name": "UE4Array_Private::OnInvalidArrayNum",
@@ -169,7 +172,106 @@
       "registers": [],
       "memory": [],
       "other_memory": "preserved",
-      "internal": true
+      "internal": true,
+      "assumptions": [
+        "ue-core-diagnostics-no-reentrant-callback"
+      ]
+    },
+    {
+      "name": "FName::FName(const WIDECHAR*, EFindName)",
+      "original_names": [
+        "??0FName@@QEAA@PEB_WW4EFindName@@@Z"
+      ],
+      "notes": "FName::FName(const WIDECHAR* Name, EFindName FindType): this = rcx. Writes exactly the FName at [rcx, rcx+12) -- ComparisonIndex, DisplayIndex, Number: UE 5.1 UnrealEditor builds are case preserving (WITH_CASE_PRESERVING_NAME), 12 bytes; checked against the UE testbed DLLs, whose code copies 12 bytes of the constructed FName -- with a value this model does not state (the name pool's index for the string at rdx; read with debt). Returns rcx. Reads the string at rdx and keeps no pointer it receives. Other memory this module can observe is unchanged: the name pool and its locks and allocations are Core-private state, and the constructor runs no callback into the module -- no allocator hook, ensure/log delegate (ue-core-name-pool-private).",
+      "registers": [
+        {
+          "write": [
+            0,
+            8
+          ],
+          "from": [
+            [
+              8,
+              8
+            ]
+          ]
+        }
+      ],
+      "memory": [
+        {
+          "write": {
+            "base": [
+              8,
+              8
+            ],
+            "disp": 0,
+            "size": 12
+          },
+          "value": "unknown"
+        }
+      ],
+      "observes": [
+        [
+          8,
+          8
+        ],
+        [
+          16,
+          8
+        ]
+      ],
+      "other_memory": "preserved",
+      "assumptions": [
+        "ue-core-name-pool-private"
+      ]
+    },
+    {
+      "name": "FName::FName(const ANSICHAR*, EFindName)",
+      "original_names": [
+        "??0FName@@QEAA@PEBDW4EFindName@@@Z"
+      ],
+      "notes": "FName::FName(const ANSICHAR* Name, EFindName FindType): this = rcx. Writes exactly the FName at [rcx, rcx+12) -- ComparisonIndex, DisplayIndex, Number: UE 5.1 UnrealEditor builds are case preserving (WITH_CASE_PRESERVING_NAME), 12 bytes; checked against the UE testbed DLLs, whose code copies 12 bytes of the constructed FName -- with a value this model does not state (the name pool's index for the string at rdx; read with debt). Returns rcx. Reads the string at rdx and keeps no pointer it receives. Other memory this module can observe is unchanged: the name pool and its locks and allocations are Core-private state, and the constructor runs no callback into the module -- no allocator hook, ensure/log delegate (ue-core-name-pool-private).",
+      "registers": [
+        {
+          "write": [
+            0,
+            8
+          ],
+          "from": [
+            [
+              8,
+              8
+            ]
+          ]
+        }
+      ],
+      "memory": [
+        {
+          "write": {
+            "base": [
+              8,
+              8
+            ],
+            "disp": 0,
+            "size": 12
+          },
+          "value": "unknown"
+        }
+      ],
+      "observes": [
+        [
+          8,
+          8
+        ],
+        [
+          16,
+          8
+        ]
+      ],
+      "other_memory": "preserved",
+      "assumptions": [
+        "ue-core-name-pool-private"
+      ]
     }
   ]
 }

@@ -168,9 +168,12 @@ def project_function_relative_memory(
         projector.nonstack_objects = nonstack_objects
     # Writes of one summarized call that bind to overlapping caller bytes: the
     # callee took its objects as distinct, so their order there is unknown here
-    # (caller passed one object twice) -- they stay unresolved (debt).
+    # (caller passed one object twice) -- they stay unresolved (debt). An
+    # anchored write landing on a global the same call writes directly (an
+    # exact row) stays unresolved too: the row order says nothing.
     blocked: set[str] = set()
     by_call: dict[str, list] = {}
+    fixed: dict[str, list] = {}
     for block in unit.blocks:
         for effect in block.effects:
             anchored = (anchored_accesses or {}).get(effect.operation_key)
@@ -179,8 +182,14 @@ def project_function_relative_memory(
                 if spans:
                     by_call.setdefault(effect.operation_key.split("~")[0], []).append(
                         (effect.operation_key, spans[0]))
-    for rows in by_call.values():
+            elif "~" in effect.operation_key:
+                fixed.setdefault(effect.operation_key.split("~")[0], []).extend(
+                    item.span for item in effect.writes
+                    if type(item) is ResolvedStorage and item.span.object_id.kind is StorageObjectKind.ADDRESS_SPACE)
+    for call, rows in by_call.items():
         for index, (key, span) in enumerate(rows):
+            if any(span.overlaps(other) for other in fixed.get(call, ())):
+                blocked.add(key)
             for other_key, other in rows[index + 1:]:
                 if span.overlaps(other):
                     blocked.update((key, other_key))
@@ -703,7 +712,10 @@ class _Projector:
         """A value defined once per activation by a call (its summarized or
         modeled effect rows) or by a LOAD, exactly at its own width: an atom
         keyed by that definition (never by its inputs -- two calls with the
-        same arguments may return different values)."""
+        same arguments may return different values). A value a call wrote
+        without stating it (a ``~u`` row) is such an atom too, a wild one:
+        stores through it are uncertain-address writers ("opaque_call_write"
+        is address-uncertain, ``function_summary._ADDRESS_UNCERTAIN``)."""
         key = definition.operation_key
         if key is None or definition.span != requested_span:
             return None

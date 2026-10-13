@@ -30,7 +30,7 @@ from tdo_v2.function_summary import SummaryKind
 from tdo_v2.observed_call_state import observed_call_state_projections
 from tdo_v2.span_geometry import StorageObjectKind
 
-_ADDRESS_UNKNOWN = {"unresolved_memory_read", "may_alias_read", "call_clobber_read"}
+_ADDRESS_UNKNOWN = {"unresolved_memory_read", "may_alias_read", "call_clobber_read", "opaque_call_write"}
 
 
 @dataclass
@@ -198,6 +198,6 @@ def check_summary(summary, observation, *, seeds=range(6), register_pools=None,
                 elif kind == "mem" and detail not in item.entry_readers and not address_unknown:
                     report.violations.append(("memory source missing", space, offset, writer, detail))
                 elif kind == "call" and f"call:{detail}" not in item.crossed \
-                        and "call_clobber_read" not in item.debts:
+                        and not {"call_clobber_read", "opaque_call_write"} & set(item.debts):
                     report.violations.append(("call effect missing", space, offset, writer, detail))
     return report

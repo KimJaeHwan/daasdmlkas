@@ -875,6 +875,7 @@ def _relative_anchors(unit, normalized) -> dict:
     for _, effect in normalized.proven_call_effects:
         accesses = [load for run in effect.runs for load in run.loads]
         accesses += [item for run in effect.memory_runs for item in (run.write, *run.loads)]
+        accesses += list(effect.unknown_memory)
         accesses += [load for demand in effect.sink_demands for load in demand.loads]
         # both sides of the alias conditions the call carries (a side may be an
         # object only the condition mentions)

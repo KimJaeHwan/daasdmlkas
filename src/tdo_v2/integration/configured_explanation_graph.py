@@ -130,6 +130,21 @@ def root_local_explanation(
                 "writers": list(row.writers),
                 "spans": [_span_report(span) for span in row.spans],
             })
+    # debts of other kinds (as ``query``): a call's write of a value it does not
+    # state, conditional uncertain-address writers, undecided run conditions
+    listed = {row["node"] for row in gaps}
+    others = [*getattr(normalized, "opaque_nodes", ()),
+              *(node for node, _ in getattr(normalized, "uncertain_nodes", ())),
+              *(node for node, _ in getattr(normalized, "open_nodes", ()))]
+    for node in others:
+        if node in owned and node not in listed:
+            listed.add(node)
+            gaps.append({
+                "kind": graph.node(node).label,
+                "node": node,
+                "operation_key": next(
+                    (record.operation for _, _, record in graph._graph.out_edges(node)), None),
+            })
     if interprocedural_proof_count:
         gaps.append({
             "kind": "unanchored_interprocedural_proofs",
@@ -364,6 +379,7 @@ def conditional_call_byte_overlay(
     debt_nodes.update(normalized.may_alias_nodes)
     debt_nodes.update(node for node, _ in getattr(normalized, "uncertain_nodes", ()))
     debt_nodes.update(node for node, _ in getattr(normalized, "open_nodes", ()))
+    debt_nodes.update(getattr(normalized, "opaque_nodes", ()))
     remaining_debt = sorted(debt_nodes & reached)
     return {
         "contract": "conditional_observed_call_byte_explanation",

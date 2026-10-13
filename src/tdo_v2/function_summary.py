@@ -50,7 +50,7 @@ from .span_geometry import ByteSpan, StorageObjectKind
 FUNCTION_SUMMARY_VERSION = 1
 _CALL_OPCODES = ("CALL", "CALLIND", "CALLOTHER")
 _ADDRESS_UNCERTAIN = {"may_alias_read", "unresolved_memory_read", "call_clobber_read", "uncertain_write_read",
-                      "open_condition"}
+                      "open_condition", "opaque_call_write"}
 # debt of a read a conditional uncertain-address writer may reach: for roots
 # only -- a summary carries those writers' conditions on every claim already
 _SUMMARY_TRANSPARENT = "uncertain_write_read"

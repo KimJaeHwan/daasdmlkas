@@ -148,7 +148,7 @@ def _memory_address_unknown(graph, reader: str) -> bool:
     ]
     return any(
         graph.node(item).kind is NodeKind.MEMORY_DEBT
-        and graph.node(item).label == "call_clobber_read"
+        and graph.node(item).label in ("call_clobber_read", "opaque_call_write")
         for item in graph.backward_reachable(operands)
     ) if operands else False
 

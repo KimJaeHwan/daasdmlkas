@@ -616,3 +616,19 @@ A(이번 트랙)/B(별도 주제)/C(정상)로 나눴다. 수정 중 필요한 �
 **스택 포인터를 쓰지 않을 때만**(`add rsp; jmp`는 제외 — Astra 반례). 실험: FString 대상 3개의 분석 범위 2,830 → 6개
 함수(+6 잘림, 명령 154개), 1초 미만; `FString()`·`~FString` 메모리 보존, `AppendChar`는 `Data[Num] = c`(인덱스 주소)
 쓰기 2개가 주소 모르는 쓰기로 남음 → 3단계 전에 "객체 안 어딘가" 표현 필요. 테스트 `test_library_cuts.py` 5개.
+
+4단계(구현, 3단계보다 먼저 — 사용자 결정 A→B): **"정확한 위치, 모르는 값" 쓰기**와 FName 손 모델. 모델 메모리 행
+`{"write": ..., "value": "unknown"}`: 그 바이트만 값을 말하지 않고 쓴다(나머지 메모리는 `other_memory` 대로).
+일반화: 요약에서도 값이 UNKNOWN(빚·풀 수 없는 원천·실패한 조건)이지만 **위치가 anchor로 정확한** 메모리 run은 더 이상
+"메모리 전부 보존 안 함"이 아니라 `ProvenCallEffect.unknown_memory`가 된다(위치를 못 찾는 쓰기, 주소 모르는 쓰기, 불투명
+내부 호출은 그대로 보존 포기). 호출자: `~iu<j>`(다른 입력과 함께, 출력보다 먼저 주소를 계산 — Astra 반례: 래퍼가 호출 뒤
+rcx를 바꾸면 위치가 틀렸음) → `~u<j>`(그 위치 쓰기 + 무조건 빚 "opaque_call_write"; query·설명 그래프·주소 불확실
+목록에 포함 — 그 값으로 만든 주소의 쓰기는 주소 불확실 쓰기). 같은 호출의 anchor 쓰기가 그 호출이 직접 쓰는 전역과
+겹치면 anchor 쓰기를 미해결로 둠(행 순서는 실제 순서를 말하지 않음 — HEAD에도 있던 구멍, 테스트로 확인). 모델 항목별
+`assumptions` 허용(파일 `source.assumptions`와 같은 검사). FName 생성자 2개(WIDECHAR/ANSICHAR, `ue-core-win64` v3):
+`[rcx, rcx+12)` 값 모름, `rax = rcx`, observes rcx·rdx, 나머지 보존 — 새 가정 `ue-core-name-pool-private`(이름 풀·락·
+TLS·할당은 Core 내부, 모듈로 들어오는 콜백 없음, UE 5.1 에디터 빌드 FName 12바이트). 진단 항목 2개는
+`ue-core-diagnostics-no-reentrant-callback`를 사용마다 보고. 오라클: 읽기가 그 호출의 `~u` 행만 읽고 슬라이스가
+불완전할 때만 빚으로 설명(넓은 읽기가 다른 바이트를 같이 읽으면 원래 검사 — Fable·Astra 2차). 결과(e21): UE DebugGame
+13/12 → 13/13, Development 14/13 → 14/14(R006 확실), 09 64/60·52/47·44/37 불변, 동적 누락 0(zlib 256 기존),
+설명 안 된 의존 09·Dev 0, DebugGame 1270 → 1226. 테스트 `test_opaque_call_writes.py` 14개, 556개 통과.

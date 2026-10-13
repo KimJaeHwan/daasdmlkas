@@ -158,6 +158,9 @@ class NormalizedFunction:
     # function summary already carries those conditions on every claim
     # (``writer_conditions``) and passes these nodes
     uncertain_nodes: tuple = ()
+    # debt nodes ("opaque_call_write") on the rows writing a call's unknown
+    # memory (``ProvenCallEffect.unknown_memory``): unconditional
+    opaque_nodes: tuple = ()
     # debt nodes ("open_condition") on summarized-run rows whose alias
     # conditions this function cannot decide: (node, (read span, write span)
     # pairs in this function's objects). Conditional (summaries carry the
@@ -801,7 +804,7 @@ def _program_register_space(unit) -> int | None:
 _CALL_EFFECT_LABELS = {
     "": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD", "sink": "CALL_EFFECT_SINK",
     "ck": "CALL_EFFECT_CHECK", "cr": "CALL_EFFECT_CHECK", "cw": "CALL_EFFECT_CHECK", "sp": "CALL_EFFECT_CHECK",
-    "ext": "CALL_EFFECT_CHECK",
+    "ext": "CALL_EFFECT_CHECK", "u": "CALL_EFFECT", "iu": "CALL_EFFECT_INPUT",
 }
 
 
@@ -817,8 +820,12 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
     each callee sink root (the projected root), ``~<i>`` the run outputs
-    (register runs first, then memory runs). Anchored memory is projected later
-    (``relative_memory``): returns the effects and their anchored accesses."""
+    (register runs first, then memory runs), ``~u<j>`` the unknown memory (an
+    "opaque_call_write" debt each, ``_materialize_opaque_call_writes``) at the
+    address its ``~iu<j>`` row evaluates with the other inputs, before any
+    output.
+    Anchored memory is projected later (``relative_memory``): returns the
+    effects and their anchored accesses."""
     rows: list[ObservedEffect] = []
     anchored: dict = {}
 
@@ -926,6 +933,18 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             stage_key, EffectKind.COPY, reads=tuple(inputs), writes=(target,), block_key=block_key,
         ))
         staged.append((kind, run, stage_key, target))
+    unknown_staged = []
+    for index, access in enumerate(proven.unknown_memory):
+        if access.anchor is None and access.pointer is None:
+            unknown_staged.append((access, None, None))
+            continue
+        # the address at the call: evaluated before the outputs change its base
+        stage_key = f"{call_key}~iu{index}"
+        target = temporary()
+        rows.append(ObservedEffect(
+            stage_key, EffectKind.COPY, reads=tuple(base(access)[0]), writes=(target,), block_key=block_key,
+        ))
+        unknown_staged.append((access, stage_key, target))
     anchors = sorted({
         side.anchor for pair in proven.writer_conditions for side in pair if side.anchor is not None
     }, key=lambda span: span.canonical_key)
@@ -979,6 +998,18 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             ))
             _, pointer, offset = base(run.write)
             anchored[key] = (stage_key, pointer, offset, run.write.size, run.write.space_id)
+    for index, (access, stage_key, target) in enumerate(unknown_staged):
+        key = f"{call_key}~u{index}"
+        if stage_key is None:
+            rows.append(ObservedEffect(key, EffectKind.COPY, reads=(), writes=(ResolvedStorage(access.span),),
+                                       block_key=block_key))
+            continue
+        _, pointer, offset = base(access)
+        rows.append(ObservedEffect(
+            key, EffectKind.COPY, reads=(target,),
+            memory_write=UnresolvedMemoryAccess(None, access.size), block_key=block_key,
+        ))
+        anchored[key] = (stage_key, pointer, offset, access.size, access.space_id)
     return rows, anchored
 
 
@@ -1517,6 +1548,8 @@ class _ScopedNormalizer:
 
         open_nodes = _materialize_open_conditions(
             dependencies, memory_ssa, proven_call_effects, open_conditions or {}, operation_nodes)
+        opaque_nodes = _materialize_opaque_call_writes(dependencies, memory_ssa, proven_call_effects,
+                                                       operation_nodes)
         base = dependencies
         all_effects = tuple(effect for block in effect_unit.blocks for effect in block.effects)
         anchors = tuple(sorted(
@@ -1548,7 +1581,7 @@ class _ScopedNormalizer:
                 may_alias_reads=may_alias_reads, may_alias_nodes=may_alias_nodes,
                 call_clobber_reads=call_clobber_reads, call_clobber_nodes=call_clobber_nodes,
                 uncertain_writers=tuple(_uncertain.items()), uncertain_nodes=uncertain_nodes, call_anchors=anchors,
-                open_nodes=open_nodes,
+                open_nodes=open_nodes, opaque_nodes=opaque_nodes,
             )
             grown = _merge_uncertain(_uncertain, uncertain_writers_of(view, observation))
             if grown == _uncertain:
@@ -1680,7 +1713,7 @@ class _ScopedNormalizer:
                 ((key, conditions) for key, conditions in _uncertain.items()), key=lambda item: item[0])),
             call_anchors=anchors,
             uncertain_nodes=uncertain_nodes,
-            open_nodes=open_nodes,
+            open_nodes=open_nodes, opaque_nodes=opaque_nodes,
         )
 
     def _build_cfg(
@@ -1894,6 +1927,23 @@ def _materialize_open_conditions(dependencies, memory_ssa, proven_call_effects, 
             dependencies.add_edge(node, row, EdgeRecord(EdgeKind.MAY_ALIAS_READ, operation=f"{call}~{index}"))
             found.append((node, pairs))
     return tuple(found)
+
+
+def _materialize_opaque_call_writes(dependencies, memory_ssa, proven_call_effects, operation_nodes) -> tuple:
+    """An "opaque_call_write" debt on each ``{call}~u{j}`` row: the call wrote
+    those bytes with a value its summary or model does not state."""
+    keys = [f"{call}~u{index}" for call, effect in sorted(proven_call_effects.items())
+            for index in range(len(effect.unknown_memory)) if f"{call}~u{index}" in operation_nodes]
+    if not keys:
+        return ()
+    namespace = f"opaque-call-write-v1:{memory_ssa.function_scope.digest.hex()}:{memory_ssa.unit_digest.hex()}"
+    dependencies.claim_namespace(namespace)
+    nodes = []
+    for key in keys:
+        node = dependencies.add_node(NodeRecord(f"{namespace}:{key}", NodeKind.MEMORY_DEBT, "opaque_call_write"))
+        dependencies.add_edge(node, operation_nodes[key], EdgeRecord(EdgeKind.CALL_CLOBBER_READ, operation=key))
+        nodes.append(node)
+    return tuple(nodes)
 
 
 def _materialize_may_alias_debt(

@@ -32,7 +32,10 @@ realloc, under the assumption that the old pointer is not used afterwards);
 memory address or keep -- a stack address held only in other registers does
 not escape at the call (default: every register); a memory write covers exactly
 ``size`` bytes at (entry value of ``base``) + ``disp`` and depends on its
-``from`` registers and ``loads``. A size given by a register is used only
+``from`` registers and ``loads`` (``"value": "unknown"`` instead of ``from``
+/ ``loads``: exactly those bytes get a value the model does not state -- the
+caller reads them with debt, the rest of memory is as ``other_memory`` says).
+A size given by a register is used only
 when the caller proves that register constant at the call (``constants``);
 otherwise the write is dropped and no memory is kept. ``other_memory``:
 "preserved" (only the listed writes; the callee's own frame below its entry
@@ -50,7 +53,7 @@ Provenance (optional ``source``; default ``{"kind": "hand"}``): ``hand``
 code, e.g. ``{"kind": "derived", "library": ..., "sha256": ...}``) or
 ``external`` (produced elsewhere, ``{"kind": "external", "tool": ...,
 "version": ...}``). Other keys are kept as recorded provenance. ``assumptions``
-(list of labels) are the assumptions the model itself rests on: each use
+(list of labels; also per entry) are the assumptions the model itself rests on: each use
 reports them with the model's own label -- ``external-model:`` (hand),
 ``derived-model:`` or ``supplied-model:`` + ``<file id>/<entry>@v<version>``.
 Extra model directories: ``model_paths`` (``--model-dir``,
@@ -106,6 +109,7 @@ class ModelEntry:
     # usable as a cut inside its own library (``interprocedural`` ``own_library``):
     # its claims hold for callers inside that library too
     internal: bool = False
+    unknown_memory: tuple[Access, ...] = ()   # memory written with an unstated value
 
     @property
     def model_id(self) -> str:
@@ -129,6 +133,9 @@ class ModelEntry:
             for access in (write, *loads):
                 if type(access.size) is tuple:
                     found.add(access.size)
+        for access in self.unknown_memory:
+            if type(access.size) is tuple:
+                found.add(access.size)
         return tuple(sorted(found))
 
 
@@ -151,20 +158,25 @@ SOURCE_KINDS = ("hand", "derived", "external")
 _LABEL_PREFIX = {"hand": "external-model", "derived": "derived-model", "external": "supplied-model"}
 
 
-def _source(raw, path):
-    source = raw.get("source", {"kind": "hand"})
-    if type(source) is not dict or source.get("kind") not in SOURCE_KINDS:
-        raise ModelError(f"{path}: source must be an object with kind in {SOURCE_KINDS}")
-    assumptions = source.get("assumptions", [])
+def _assumption_labels(assumptions, path, what) -> tuple[str, ...]:
+    """Registered assumption names or namespaced labels (``<namespace>:<name>``)."""
     if type(assumptions) is not list or any(type(item) is not str or not item for item in assumptions):
-        raise ModelError(f"{path}: source.assumptions must be a list of labels")
+        raise ModelError(f"{path}: {what} must be a list of labels")
     from .assumptions import REGISTRY
 
     registered = {item.name for item in REGISTRY}
     for item in assumptions:
         if item not in registered and ":" not in item:
-            raise ModelError(f"{path}: source.assumptions {item!r} is neither a registered assumption "
+            raise ModelError(f"{path}: {what} {item!r} is neither a registered assumption "
                              "nor a namespaced label (<namespace>:<name>)")
+    return tuple(assumptions)
+
+
+def _source(raw, path):
+    source = raw.get("source", {"kind": "hand"})
+    if type(source) is not dict or source.get("kind") not in SOURCE_KINDS:
+        raise ModelError(f"{path}: source must be an object with kind in {SOURCE_KINDS}")
+    _assumption_labels(source.get("assumptions", []), path, "source.assumptions")
     if source["kind"] == "derived" and not (type(source.get("library")) is str and type(source.get("sha256")) is str
                                             and len(source["sha256"]) == 64):
         raise ModelError(f"{path}: a derived model names its library and the library file's sha256")
@@ -210,7 +222,7 @@ def load_model_file(path: str | Path) -> ModelFile:
     entries = []
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
-                   "original_names", "internal"}
+                   "original_names", "internal", "assumptions"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
             raise ModelError(f"{path}: entry fields must be {sorted(allowed)}")
         if item["other_memory"] not in ("preserved", "clobbered"):
@@ -231,21 +243,28 @@ def load_model_file(path: str | Path) -> ModelFile:
             (_slice(row["write"], "register write"), _slice(row["same_object_as"], "same object register"))
             for row in item["registers"] if "same_object_as" in row
         )
+        for row in item["memory"]:
+            if type(row) is not dict or "write" not in row or (
+                    set(row) - {"write", "from", "loads"} if "value" not in row
+                    else set(row) != {"write", "value"} or row["value"] != "unknown"):
+                raise ModelError(f"{path}: memory rows are {{write, from, loads}} or {{write, value: unknown}}")
         memory = tuple(
             (_access(row["write"], "memory write"),
              tuple(_slice(s, "memory write input") for s in row.get("from", ())),
              tuple(_access(load, "memory load") for load in row.get("loads", ())))
-            for row in item["memory"]
+            for row in item["memory"] if "value" not in row
         )
+        unknown_memory = tuple(_access(row["write"], "memory write") for row in item["memory"] if "value" in row)
         names = (item["name"], *item.get("aliases", ()))
         entries.append(ModelEntry(raw["id"], raw["version"], item["name"], tuple(names), registers, memory,
                                   item["other_memory"] == "preserved", fresh,
                                   None if "observes" not in item
                                   else tuple(_slice(s, "observed register") for s in item["observes"]),
                                   tuple(item.get("original_names", ())), same_object,
-                                  source_kind=source["kind"], inherited=tuple(source.get("assumptions", ())),
+                                  source_kind=source["kind"], inherited=(*source.get("assumptions", ()), *_assumption_labels(
+                                      item.get("assumptions", []), path, f"{item['name']}: assumptions")),
                                   identity=source["sha256"][:12] if source["kind"] == "derived" else "",
-                                  internal=item.get("internal", False)))
+                                  internal=item.get("internal", False), unknown_memory=unknown_memory))
     libraries = tuple(str(item).upper() for item in raw.get("libraries", ()))
     if libraries and any(not entry.original_names for entry in entries):
         raise ModelError(f"{path}: a file with libraries matches by original_names only")
@@ -387,6 +406,13 @@ def model_summary(model_file: ModelFile, entry: ModelEntry, register_object, reg
             continue
         inputs = [register(s) for s in sources] + [memory_span(load, n) for load, n in zip(loads, load_sizes)]
         runs.append(_computed(memory_span(write, size), tuple(inputs)))
+    for write in entry.unknown_memory:
+        size = extent(write)
+        if size is None:
+            complete = False
+            continue
+        runs.append(SummaryRun(memory_span(write, size), SummaryKind.UNKNOWN, (0,), ("model",),
+                               (), (), (), ("call:model",)))
     kept = {offset for slice_ in model_file.preserved for offset in range(slice_[0], slice_[0] + slice_[1])}
     sp = range(model_file.stack_pointer[0], sum(model_file.stack_pointer))
     unknown = [offset for offset in range(register_limit)
