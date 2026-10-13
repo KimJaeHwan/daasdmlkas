@@ -845,7 +845,7 @@ profile을 봄 → 저장본을 보지 않고 `pending`; dry-run이 증거 파�
 결과(모든 root의 출처·완전성)는 예전 템플릿 파일을 쓴 실행과 **완전히 같음**, 지표도 같음(22건 중 exact+sure 14) — 템플릿이
 없는 실행과도 같음(AppendChar의 index 쓰기 때문, 배열 단계에서 다룸).
 
-## 25. 배열 · index 주소 (2026-10-13 설계, Fable + Astra 2차까지, 구현 전)
+## 25. 배열 · index 주소 (2026-10-13 설계, Fable + Astra 2차까지; A단계 구현 25.4)
 
 ### 25.1 진단 (UE Development, 실패 8건; `.census6/why_origin.py`로 root에서 금지 출처까지의 경로 추적)
 
@@ -944,3 +944,30 @@ mod 2^64 wrap, 폭 경계, 그룹 ≠ 소유, (O,T) 객체 대신 접근 관계,
 15개 모두 동의(모듈별 분리 주장 철회, D가 E보다 먼저 가능 인정), strong update 제외; Astra는 구간 조건 반례(상수 + 접근 폭,
 2^63 근처)를 내고 [A,B] 번역 창 공식으로 대체(작은 폭 161,280건 검사, 거짓 분리 0), `p + 상수`의 이미지 포함 유지 반대,
 스택 index 보류, 기존 지름길 3곳. 기록: `.census6/design_array_{prompt,prompt2,fable,astra,2_fable,2_astra}.md`.
+
+### 25.4 A단계(검증기 보강) 구현 (2026-10-13, Fable 3차 · Astra 4차 승인)
+
+**왜**: 요약 검증기는 "그 명령이 쓴다고 적힌 run이 있는가"만, 프로그램 검증기는 "그 호출의 아무 메모리 run에 닿는가"만 봐서,
+run의 **위치**가 틀린 요약도 통과할 수 있었음(위치를 8바이트 옮긴 요약을 옛 검증기는 둘 다 통과시킴 — 테스트로 확인).
+
+**바뀐 점** (`tests/intra/pcode_interpreter.py`, `program_oracle.py`, `summary_oracle.py`, `tools/graph_fidelity/measure_program.py`):
+- 실행기: 바깥쪽 호출마다 **callee 입구 시점**(반환 주소 push 뒤)의 값 스냅샷, 각 바이트를 쓴 활성화 번호, 읽기마다 쓴 호출별
+  활성화 집합, 다른 호출의 입력 꼬리표에도 활성화 번호, 주소는 공간의 **선언 폭**으로 wrap(Bundle 증거; 기본 64비트), 활성화별
+  최저 스택 포인터, 쓴 바이트 목록(footprint), realloc으로 옮겨진 바이트의 원래 자리, 값을 되돌려 쓴 바이트의 이전 상태 복원.
+- 프로그램 검증기: 호출이 쓴 바이트는 그 활성화 시점으로 계산한 run 위치 안에 있어야 함(앞선 호출의 입력, `~u` 행도); 위치가 안
+  맞으면 **그 호출**을 이름 붙인 clobber 부채·주소 미상·그 호출의 open_condition만 인정(호출 노드에 닿는 것만으론 안 됨);
+  `preserves_memory` 호출은 쓴 모든 바이트가 run/`unknown_memory` 위치 안이어야 함(자기 프레임·반환 주소·home space·할당
+  모델이 옮기거나 해제한 바이트 제외).
+- 요약 검증기: 메모리 바이트는 그 writer run의 위치(입구 값으로 계산; 레지스터 기준, 포인터 2단계, 변위는 상수 + 실제로 읽은
+  입구 칸에서)가 담아야 함; UNKNOWN 대체도 위치 확인; writer 조건 겹침도 wrap.
+- 집계: place_checked / covered / unlocated_only / failed / failed_debt / no_activation, footprint_checked / unlocated.
+
+**결과**: 테스트 668개(새 위치 테스트 20개: ±1·±8·16 이동, 스택 포인터 기준, 앞선 호출 입력, footprint, wrap, 되돌려 쓰기,
+home space 경계, 합성 변위, wrap 걸친 포인터, realloc 이동, 선언 폭). 실제 Bundle: 누락 0(zlib 기존 256 제외), 설명 안 됨
+0/0/0/DebugGame 1227/0 — **DebugGame은 옛 검증기와 같은 집합(차이 0)**, 위치 확인 09 debug 320/320 · release 224/224 ·
+win32 160/160 · UE Dev 568(400 담음, 168 부채) · DebugGame 1063(614 담음), 위치 미상만인 경우 0, footprint 위반 0.
+→ **지금까지의 "동작함" 판정은 더 강한 기준에서도 그대로**. 리뷰 중 검증기 자체의 오류 3개(스냅샷 시점 −8, 외부 호출 push
+슬롯, 피연산자 폭)를 찾아 고침(그 사이 거짓 경보가 테스트·Bundle에서 드러남).
+
+**남긴 것**: C 시작 때 — 모듈러 exact/disjoint 기준 검사기, 작은 폭 전수 산술; B 동안 — import 칸 테스트; 스냅샷 비용(차분 저장),
+요약 위치 미상 72바이트 목록(C 전에 0으로), `_Locator`의 8바이트 포인터 가정(32비트 요약 전).

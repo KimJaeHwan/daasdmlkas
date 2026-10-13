@@ -55,6 +55,7 @@ def main() -> int:
         const = next(row.space_id for row in spaces if row.is_constant_space)
         regs = next(row.space_id for row in spaces if row.is_register_space)
         unique = next(row.space_id for row in spaces if row.is_unique_space)
+        address_bits = {row.space_id: row.address_size_bits for row in spaces if row.is_memory_space}
         language = session.program_result.evidence.translation_namespace.language_id
         default_sp = (0x10, 4) if ":32:" in language else (0x20, 8)
         units = [evidence.unit for evidence in session.iter_functions()]
@@ -104,13 +105,19 @@ def main() -> int:
         report = check_program(item.normalized, observation, program, seeds=range(args.runs),
                                register_pools=pool, spaces=(const, regs, unique),
                                havoc_calls=(regs, sp_offset, sp_size), image=image,
-                               externals=externals, no_effect_userops=userops)
+                               externals=externals, no_effect_userops=userops, address_bits=address_bits)
         totals["runs"] += report.runs
         totals["skipped_runs"] += report.unsupported
         totals["checked"] += report.checked
         totals["through_calls"] += report.through_calls
         totals["missing"] += len(report.silent)
         totals["unexplained"] += len(report.covered_by_debt)
+        # bytes calls wrote, checked against the places of their runs
+        # (program_oracle: covered / only unevaluable places / failed, failed
+        # but explained by a debt), and the footprints of preserving calls
+        for name in ("place_checked", "place_covered", "place_unlocated_only", "place_failed",
+                     "place_failed_debt", "place_no_activation", "footprint_checked", "footprint_unlocated"):
+            totals[name] += getattr(report, name)
         for row in report.silent[:2]:
             if len(samples) < 6:
                 samples.append((key, repr(row)[:240]))

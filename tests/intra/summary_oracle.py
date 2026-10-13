@@ -5,9 +5,12 @@ left through, every byte the run wrote is compared with the summary run that
 covers it:
 
 * a register byte must be covered by a register run; a memory byte by a run
-  whose writers include the operation that last wrote it (or the function
-  must list that operation as an unknown-address writer; a call's transient
-  return-address push is skipped: its bytes are dead below the stack pointer);
+  whose writers include the operation that last wrote it **and whose place,
+  evaluated at this run's entry values, holds that byte** (a run whose place
+  cannot be evaluated -- an object no entry value locates -- still covers it
+  and is counted in ``unlocated``) -- or the function must list that
+  operation as an unknown-address writer; a call's transient return-address
+  push is skipped: its bytes are dead below the stack pointer;
 * an ``IDENTITY`` run must still hold the entry value;
 * unless the run is ``UNKNOWN``, every provenance element must be explained:
   ("reg", r) by a register source byte r; ("mem", reader) by ``entry_readers``
@@ -40,59 +43,115 @@ class SummaryReport:
     checked: int = 0
     violations: list = field(default_factory=list)
     conditional_skips: int = 0
+    # memory bytes checked against the places (at this run's entry values) of
+    # the runs listing their writer, or of UNKNOWN runs of its objects:
+    place_checked: int = 0
+    place_covered: int = 0           # a run's place holds the byte
+    place_unlocated_only: int = 0    # only runs whose place could not be evaluated
+    place_failed: int = 0            # none holds it (a violation)
 
 
-def _located(span, interpreter, register_object, reg_space, spaces):
-    """(space, start) of a summary span at this run's entry values, or None:
-    relative objects based on an entry register, or on a pointer the entry
-    memory held next to one (one level)."""
-    from tdo_v2.relative_memory import _function_relative_object_id
-    from tdo_v2.span_geometry import ByteSpan
+class _Locator:
+    """Places of summary spans at one run's entry values: global bytes, objects
+    based on an entry register, and objects based on a pointer the entry
+    memory held at (base + d) -- two levels, d any constant of the function
+    (or 0). Independent of the engine's anchors: every candidate base is
+    rebuilt from entry values and matched by object identity."""
 
-    object_id = span.object_id
-    if object_id.kind is StorageObjectKind.ADDRESS_SPACE:
-        return object_id.space_key, span.start
-    if object_id.kind is not StorageObjectKind.FUNCTION_RELATIVE or register_object is None:
-        return None
+    _LEVELS = 2
 
-    def entry_value(space, address):
-        values = [interpreter.entry_values.get((space, address + index)) for index in range(8)]
+    def __init__(self, interpreter, observation, register_object, reg_space, spaces):
+        self.interpreter, self.register_object = interpreter, register_object
+        self.reg_space, self.spaces = reg_space, spaces
+        self.displacements = sorted({0} | {
+            _signed(varnode.coordinate.byte_offset, varnode.byte_size)
+            for row in observation.instructions for operation in row.operations
+            for varnode in operation.inputs
+            if varnode.kind.name == "CONSTANT" and abs(_signed(varnode.coordinate.byte_offset, varnode.byte_size)) < 1 << 20
+        })
+        self.bases: dict = {}   # scope -> {object id: (space, base value)}
+        # entry memory the run read, 8 bytes at a time: a slot at (base + d)
+        # whose d is not a literal (base + 0x120 + 0xe0) is still a candidate
+        present = {key for key in interpreter.entry_values if key[0] in spaces}
+        self.slots = {(space, address) for space, address in present
+                      if all((space, (address + index) % interpreter._moduli.get(space, 1 << 64)) in present
+                             for index in range(8))}
+
+    def _value(self, space, address):
+        modulus = self.interpreter._moduli.get(space, 1 << 64)
+        values = [self.interpreter.entry_values.get((space, (address + index) % modulus)) for index in range(8)]
         return None if None in values else sum(byte << (8 * index) for index, byte in enumerate(values))
 
-    bases = []   # (anchor span, its value)
-    for offset in range(0, 0x400, 8):
-        value = entry_value(reg_space, offset)
-        if value is not None:
-            bases.append((ByteSpan(register_object, offset, 8), value))
-    for anchor, value in bases:
-        for space in spaces:
-            if _function_relative_object_id(object_id.scope, anchor, space) == object_id:
-                return space, (value + span.start - (1 << 64)) % (1 << 64)
-    for anchor, value in bases:
-        for space in spaces:
-            base_object = _function_relative_object_id(object_id.scope, anchor, space)
-            for displacement in range(-0x100, 0x100):
-                slot = ByteSpan(base_object, (1 << 64) + displacement, 8)
-                if _function_relative_object_id(object_id.scope, slot, space) != object_id:
-                    continue
-                pointer = entry_value(space, (value + displacement) % (1 << 64))
-                if pointer is None:
-                    return None
-                return space, (pointer + span.start - (1 << 64)) % (1 << 64)
-    return None
+    def _objects(self, scope):
+        if scope in self.bases:
+            return self.bases[scope]
+        from tdo_v2.relative_memory import _function_relative_object_id
+        from tdo_v2.span_geometry import ByteSpan
+
+        found, level = {}, []
+        for offset in range(0, 0x400, 8):
+            value = self._value(self.reg_space, offset)
+            if value is None:
+                continue
+            anchor = ByteSpan(self.register_object, offset, 8)
+            for space in self.spaces:
+                object_id = _function_relative_object_id(scope, anchor, space)
+                found.setdefault(object_id, (space, value))
+                level.append((object_id, space, value))
+        for _ in range(self._LEVELS):
+            following = []
+            for base_object, space, base in level:
+                modulus = self.interpreter._moduli.get(space, 1 << 64)
+                read = {(address - base + (modulus >> 1)) % modulus - (modulus >> 1)
+                        for slot_space, address in self.slots if slot_space == space}
+                for displacement in sorted(set(self.displacements) | {d for d in read if abs(d) < 1 << 20}):
+                    pointer = self._value(space, base + displacement)
+                    if pointer is None:
+                        continue
+                    slot = ByteSpan(base_object, (1 << 64) + displacement, 8)
+                    object_id = _function_relative_object_id(scope, slot, space)
+                    if object_id not in found:
+                        found[object_id] = (space, pointer)
+                        following.append((object_id, space, pointer))
+            level = following
+        self.bases[scope] = found
+        return found
+
+    def place(self, span):
+        """(space, start, size) of ``span`` at the entry values, or None."""
+        object_id = span.object_id
+        size = span.end - span.start
+        if object_id.kind is StorageObjectKind.ADDRESS_SPACE:
+            return object_id.space_key, span.start, size
+        if object_id.kind is not StorageObjectKind.FUNCTION_RELATIVE or self.register_object is None:
+            return None
+        base = self._objects(object_id.scope).get(object_id)
+        if base is None:
+            return None
+        space, value = base
+        return space, (value + span.start - (1 << 64)) % self.interpreter._moduli.get(space, 1 << 64), size
 
 
-def _writer_conditions_hold(summary, interpreter, reg_space, spaces) -> bool:
-    register_object = next((run.span.object_id for item in summary.exits for run in item.runs
-                            if run.span.object_id.kind is StorageObjectKind.REGISTER_FILE), None)
-    if register_object is None:
+def _signed(value: int, size: int) -> int:
+    bits = 8 * size
+    return value - (1 << bits) if value >> (bits - 1) & 1 else value
+
+
+def _holds(place, space, offset, modulus=1 << 64) -> bool:
+    return place[0] == space and (offset - place[1]) % modulus < place[2]
+
+
+def _writer_conditions_hold(summary, locator) -> bool:
+    if locator.register_object is None:
         return False
     for read, write in summary.writer_conditions:
-        left = _located(read, interpreter, register_object, reg_space, spaces)
-        right = _located(write, interpreter, register_object, reg_space, spaces)
+        left, right = locator.place(read), locator.place(write)
         if left is None or right is None:
             return False
-        if left[0] == right[0] and left[1] < right[1] + write.size and right[1] < left[1] + read.size:
+        # overlap modulo the address width
+        modulus = locator.interpreter._moduli.get(left[0], 1 << 64)
+        if left[0] == right[0] and ((right[1] - left[1]) % modulus < left[2]
+                                    or (left[1] - right[1]) % modulus < right[2]):
             return False
     return True
 
@@ -118,7 +177,8 @@ def _memory_spaces(observation):
 
 
 def check_summary(summary, observation, *, seeds=range(6), register_pools=None,
-                  spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None) -> SummaryReport:
+                  spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None,
+                  address_bits=None) -> SummaryReport:
     const_space, reg_space, unique_space = spaces
     report = SummaryReport()
     unknown_writers = set(summary.unknown_writers)
@@ -130,7 +190,8 @@ def check_summary(summary, observation, *, seeds=range(6), register_pools=None,
     }
     for seed in seeds:
         interpreter = Interpreter(observation, constant_space=const_space, seed=seed,
-                                  havoc_calls=havoc_calls, image=image, track_provenance=True)
+                                  havoc_calls=havoc_calls, image=image, track_provenance=True,
+                                  address_bits=address_bits)
         for register, value in (register_pools(seed) if register_pools else {}).items():
             interpreter.preset(reg_space, register, 8, value)
         try:
@@ -140,8 +201,10 @@ def check_summary(summary, observation, *, seeds=range(6), register_pools=None,
             continue
         if not run.completed or not run.executed:
             continue
-        if summary.writer_conditions and not _writer_conditions_hold(
-                summary, interpreter, reg_space, _memory_spaces(observation)):
+        register_object = next((r.span.object_id for item in summary.exits for r in item.runs
+                                if r.span.object_id.kind is StorageObjectKind.REGISTER_FILE), None)
+        locator = _Locator(interpreter, observation, register_object, reg_space, _memory_spaces(observation))
+        if summary.writer_conditions and not _writer_conditions_hold(summary, locator):
             report.conditional_skips += 1
             continue
         exit_summary = _exit_for(summary, run.executed[-1])
@@ -155,6 +218,21 @@ def check_summary(summary, observation, *, seeds=range(6), register_pools=None,
         report.runs += 1
         register_runs = [r for r in exit_summary.runs
                          if r.span.object_id.kind is StorageObjectKind.REGISTER_FILE]
+        places: dict = {}
+
+        def classify(runs, space, offset):
+            """(runs whose place holds the byte, runs whose place is unknown)."""
+            holding, unlocated = [], []
+            for item in runs:
+                if item.span not in places:
+                    places[item.span] = locator.place(item.span)
+                where = places[item.span]
+                if where is None:
+                    unlocated.append(item)
+                elif _holds(where, space, offset, interpreter._moduli.get(space, 1 << 64)):
+                    holding.append(item)
+            return holding, unlocated
+
         by_writer: dict[str, list] = {}
         for item in exit_summary.runs:
             for writer in item.writers:
@@ -168,14 +246,33 @@ def check_summary(summary, observation, *, seeds=range(6), register_pools=None,
             else:
                 if writer in unknown_writers or writer in transient:
                     continue
-                covering = by_writer.get(writer, [])
+                listed = by_writer.get(writer, [])
+                report.place_checked += 1
+                holding, unlocated = classify(listed, space, offset)
+                if not holding:
+                    # a write the summary lost to a later uncertain-address write
+                    # of the same object: covered by an UNKNOWN run of that
+                    # object whose place holds the byte
+                    objects = {obj for key, obj in summary.writer_objects if key == writer}
+                    unknown_holding, unknown_unlocated = classify(
+                        [r for r in exit_summary.runs
+                         if r.kind is SummaryKind.UNKNOWN and r.span.object_id in objects], space, offset)
+                    if unknown_holding:
+                        report.place_covered += 1
+                        continue
+                    if not unlocated and not unknown_unlocated:
+                        report.place_failed += 1
+                        report.violations.append(("write outside its run" if listed
+                                                  else "write missing from summary", space, offset, writer))
+                        continue
+                    report.place_unlocated_only += 1
+                    if not unlocated:
+                        continue   # only an UNKNOWN run whose place is unknown: nothing more to check
+                    covering = unlocated
+                else:
+                    report.place_covered += 1
+                    covering = holding
             if not covering:
-                # a write the summary lost to a later uncertain-address write of
-                # the same object: covered when that object's content is UNKNOWN
-                objects = {obj for key, obj in summary.writer_objects if key == writer}
-                if any(r.kind is SummaryKind.UNKNOWN and r.span.object_id in objects
-                       for r in exit_summary.runs):
-                    continue
                 report.violations.append(("write missing from summary", space, offset, writer))
                 continue
             item = covering[0]

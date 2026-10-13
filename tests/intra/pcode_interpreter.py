@@ -55,11 +55,19 @@ class Run:
     branch_decisions: list[tuple[str, bool]] = field(default_factory=list)
     completed: bool = False
     # program mode: (caller reader, space, offset) -> the caller-level inputs
-    # ("ext", writer, space, offset) a call activation computed that byte from
+    # ("ext", writer, space, offset, serial) a call activation computed that
+    # byte from, over every execution of the reader (``serial``: the outermost
+    # activation that last wrote that input byte, None for a caller byte)
     call_reads: dict = field(default_factory=dict)
     # program mode with ``sinks``: (outermost call key, frozenset of caller-level
     # inputs) per sink call executed inside an activation (its argument bytes)
     sink_reads: list = field(default_factory=list)
+    # program mode: (caller reader, space, offset) -> {writer call key: serials
+    # of its outermost activations whose write of that byte the reader read}
+    reader_activations: dict = field(default_factory=dict)
+    # program mode: (caller reader, space, offset) -> (space, offset) the byte
+    # had when its writer wrote it (an allocator model moved it since: realloc)
+    reader_moved: dict = field(default_factory=dict)
 
 
 class _Masks(dict):
@@ -86,7 +94,7 @@ class Interpreter:
                  image=None, assumed_calls: dict | None = None,
                  track_provenance: bool = False, program: dict | None = None,
                  sinks: tuple | None = None, externals: dict | None = None,
-                 no_effect_userops: frozenset = frozenset()) -> None:
+                 no_effect_userops: frozenset = frozenset(), address_bits: dict | None = None) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
 
         ``track_provenance``: also record, per byte, the set of entry inputs its
@@ -141,6 +149,12 @@ class Interpreter:
         self._previous_location = None
         self._activations: list = []          # (return location, call key)
         self._activation_written: set = set()
+        self._activation_serial = 0            # of the current / last outermost activation
+        self._byte_activation: dict = {}       # byte -> serial of the activation that last wrote it
+        # outermost activation (program callee, or external run by the caller)
+        # serial -> (call key, byte values at its start {(space, offset): byte};
+        # a byte missing there was not touched before: ``entry_values``)
+        self.activation_snapshots: dict = {}
         self._byte_inputs: list = []
         # inside an activation: byte -> the one caller byte (an "ext" tag) its
         # value is an exact copy of, through COPY / LOAD / STORE moves only
@@ -188,17 +202,56 @@ class Interpreter:
         }
         self._register_spaces = {space for space, kind in kinds if kind is VarnodeKindCode.REGISTER}
         self._unique_spaces = {space for space, kind in kinds if kind is VarnodeKindCode.UNIQUE}
+        # memory addresses wrap at the declared width of their space
+        # (``address_bits``: space -> bits, the Bundle's address-space
+        # evidence; 64 when not given): byte keys are taken modulo it. Every
+        # LOAD / STORE space is a memory space.
+        address_bits = dict(address_bits or {})
+        self._moduli = {}
+        for row in self._instructions.values():
+            for operation in row.operations:
+                if operation.opcode in ("LOAD", "STORE") and len(operation.inputs) >= 2:
+                    space = operation.inputs[0].coordinate.byte_offset
+                    self._moduli[space] = 1 << address_bits.get(space, 64)
+        for space, bits in address_bits.items():
+            self._moduli.setdefault(space, 1 << bits)
+        # outermost activation serial -> the bytes it left written (its footprint;
+        # a byte restored to its pre-call writer is not one)
+        self.activation_writes: dict = {}
+        # bytes an allocator model released (freed / moved-from: dead under the
+        # model's assumption) or moved (realloc copies: the same object's
+        # contents): not writes of a footprint
+        self._model_moved: set = set()
+        # outermost activation serial -> the lowest stack pointer value seen
+        # while it ran (callee frames below its entry: not its footprint)
+        self.activation_min_sp: dict = {}
+        # byte -> its state before the current outermost activation first wrote
+        # it (provenance, call byte, writing activation): restored with the writer
+        # when the activation only copied the byte back (``_restore_identity_bytes``)
+        self._pre_activation: dict = {}
+        # byte -> the (space, offset) it was written at, for bytes an allocator
+        # model moved (realloc); dropped when the byte is written again
+        self._relocated: dict = {}
+
+    def _key(self, space_id: int, offset: int) -> tuple[int, int]:
+        modulus = self._moduli.get(space_id)
+        return (space_id, offset % modulus) if modulus else (space_id, offset)
 
     # -- storage -------------------------------------------------------------
     def _byte(self, space_id: int, offset: int) -> tuple[int, object]:
-        key = (space_id, offset)
+        key = self._key(space_id, offset)
         if key not in self._bytes:
-            byte = None if self._image is None else self._image(space_id, offset)
+            byte = None if self._image is None else self._image(*key)
             if byte is None:
                 byte = self._rng.randrange(256)
-            self._bytes[key] = (byte, Entry(space_id, offset))
+            self._bytes[key] = (byte, Entry(*key))
             self.entry_values[key] = byte
         return self._bytes[key]
+
+    def _ext(self, writer, key) -> tuple:
+        """The caller-level input tag of a byte read inside an activation."""
+        serial = self._byte_activation.get(key) if key in self._call_bytes else None
+        return ("ext", writer, key[0], key[1], serial)
 
     def preset(self, space_id: int, offset: int, size: int, value: int) -> None:
         """Seed an entry value (little-endian) without making it a write."""
@@ -212,19 +265,20 @@ class Interpreter:
         value = 0
         for index in range(size):
             byte, writer = self._byte(space_id, offset + index)
+            key = self._key(space_id, offset + index)
             if not self._activations and not getattr(self, "_rep_internal", False):
                 # a read inside a call activation belongs to the callee (with
                 # recursion, its operation keys are the caller's own)
-                run.dependencies.add(Dependency(reader, space_id, offset + index, writer))
+                run.dependencies.add(Dependency(reader, key[0], key[1], writer))
             value |= byte << (8 * index)
-            key = (space_id, offset + index)
             if self._activations:
                 if key in self._activation_written:
                     found = self.provenance.get(key, frozenset())
                     self._byte_copies.append(self._copy_source.get(key))
                 elif space_id not in self._unique_spaces:
-                    found = frozenset({("ext", writer, space_id, offset + index)})
-                    self._byte_copies.append(("ext", writer, space_id, offset + index))
+                    tag = self._ext(writer, key)
+                    found = frozenset({tag})
+                    self._byte_copies.append(tag)
                 else:
                     found = frozenset()
                     self._byte_copies.append(None)
@@ -232,15 +286,20 @@ class Interpreter:
                 self._byte_inputs.append(found)  # per byte, for COPY
                 continue
             if key in self._call_bytes:
-                run.call_reads[(reader, space_id, offset + index)] = self.provenance.get(key, frozenset())
+                place = (reader, key[0], key[1])
+                run.call_reads[place] = run.call_reads.get(place, frozenset()) | self.provenance.get(key, frozenset())
+                run.reader_activations.setdefault(place, {}).setdefault(writer, set()).add(
+                    self._byte_activation.get(key))
+                if key in self._relocated:
+                    run.reader_moved[place] = self._relocated[key]
             if self._track:
                 if isinstance(writer, Entry):
                     if space_id in self._register_spaces:
-                        self._operation_inputs.add(("reg", offset + index))
+                        self._operation_inputs.add(("reg", key[1]))
                     elif space_id not in self._unique_spaces:
                         self._operation_inputs.add(("mem", reader))
                 else:
-                    self._operation_inputs |= self.provenance.get((space_id, offset + index), frozenset())
+                    self._operation_inputs |= self.provenance.get(key, frozenset())
         return value
 
     def _restore_identity_bytes(self) -> None:
@@ -259,19 +318,39 @@ class Interpreter:
                 continue
             if tag[0] == "ext" and (tag[2], tag[3]) == key and key in self._call_bytes:
                 self._bytes[key] = (self._bytes[key][0], tag[1])
-                self._call_bytes.discard(key)
+                provenance, call_byte, serial, moved = self._pre_activation.get(key, (None, False, None, None))
+                if moved is not None:
+                    self._relocated[key] = moved
+                if provenance is None:
+                    self.provenance.pop(key, None)
+                else:
+                    self.provenance[key] = provenance
+                if call_byte:
+                    self._call_bytes.add(key)
+                else:
+                    self._call_bytes.discard(key)
+                if serial is None:
+                    self._byte_activation.pop(key, None)
+                else:
+                    self._byte_activation[key] = serial
 
     def _write(self, writer: str, space_id: int, offset: int, size: int, value: int) -> None:
         inside = bool(self._activations)
         operation = writer
         if inside:
             writer = self._activations[0][1]  # attributed to the outermost call
-        for index in range(size):
-            key = (space_id, offset + index)
+        keys = [self._key(space_id, offset + index) for index in range(size)]
+        for index, key in enumerate(keys):
+            if inside and key not in self._activation_written:
+                self._pre_activation[key] = (self.provenance.get(key), key in self._call_bytes,
+                                             self._byte_activation.get(key), self._relocated.get(key))
             self._bytes[key] = ((value >> (8 * index)) & 0xFF, writer)
+            self._model_moved.discard(key)
+            self._relocated.pop(key, None)
             if inside:
                 self._activation_written.add(key)
                 self._call_bytes.add(key)
+                self._byte_activation[key] = self._activation_serial
             else:
                 self._call_bytes.discard(key)
         if inside:
@@ -281,25 +360,25 @@ class Interpreter:
                 tags = frozenset(self._operation_inputs)
             # a COPY moves byte i to byte i: its provenance is byte-exact
             exact = operation.endswith(":COPY") and len(self._byte_inputs) == size
-            for index in range(size):
-                self.provenance[(space_id, offset + index)] = self._byte_inputs[index] if exact else tags
+            for index, key in enumerate(keys):
+                self.provenance[key] = self._byte_inputs[index] if exact else tags
             # value moves keep the exact copy source of each byte (not the address)
             start = 0 if operation.endswith(":COPY") else self._value_start
             moved = start is not None and len(self._byte_copies) - start == size and (
                 operation.endswith((":COPY", ":LOAD", ":STORE")))
-            for index in range(size):
+            for index, key in enumerate(keys):
                 if moved and self._byte_copies[start + index] is not None:
-                    self._copy_source[(space_id, offset + index)] = self._byte_copies[start + index]
+                    self._copy_source[key] = self._byte_copies[start + index]
                 else:
-                    self._copy_source.pop((space_id, offset + index), None)
+                    self._copy_source.pop(key, None)
             return
         if self._track:
             if writer.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") or writer in self._assumed:
                 tags = frozenset({("call", writer)})
             else:
                 tags = frozenset(self._operation_inputs)
-            for index in range(size):
-                self.provenance[(space_id, offset + index)] = tags
+            for key in keys:
+                self.provenance[key] = tags
 
     def final_bytes(self):
         """(space, offset) -> (value, writer, provenance) of every byte the run wrote."""
@@ -333,6 +412,8 @@ class Interpreter:
                 else (instruction.fallthrough.space_id, instruction.fallthrough.byte_offset)
             )
             operations = instruction.operations
+            if self._activations and self._havoc is not None:
+                self._note_stack_pointer()
             site = self._rep.get(location)
             self._rep_iteration = self._rep_iteration + 1 if site is not None and location == self._previous_location                 else 0
             self._previous_location = location
@@ -354,8 +435,10 @@ class Interpreter:
                 # engine models the call shape
                 if not self._activations:
                     self._activation_written = set()
+                    self._pre_activation = {}
                     self._copy_source = {}
                     self._call_stack_pointer = self._stack_pointer_snapshot()
+                    self._snapshot(call)   # retaken at the callee's entry (below)
                 self._activations.append((next_location, call))
             index = 0
             while index < len(operations):
@@ -387,6 +470,10 @@ class Interpreter:
                     continue
                 kind, target = jump
                 if kind == "call":  # into a function of the program (activation pushed above)
+                    if len(self._activations) == 1:
+                        # the callee's entry state (return address pushed): what
+                        # its summary's places are relative to
+                        self._snapshot(self._activations[0][1], again=True)
                     next_location = target
                     break
                 if kind == "halt":   # a software trap: execution does not continue
@@ -397,6 +484,7 @@ class Interpreter:
                         if not self._activations:
                             self._restore_call_stack_pointer()
                             self._restore_identity_bytes()
+                            self._record_footprint()
                         break
                     run.completed = True
                     return run
@@ -552,25 +640,65 @@ class Interpreter:
         for index in range(size):
             byte, writer = self._byte(space_id, offset + index)
             value |= byte << (8 * index)
-            key = (space_id, offset + index)
+            key = self._key(space_id, offset + index)
             if key in self._call_bytes and self._activations:
                 tags |= self.provenance.get(key, frozenset())
             else:
-                tags.add(("ext", writer, space_id, offset + index))
+                tags.add(self._ext(writer, key))
         return value, tags
 
     def _put(self, writer, space_id, offset, size, value, tags):
         if self._activations:  # inside a Bundle callee: attributed to the outermost call
             writer = self._activations[0][1]
         for index in range(size):
-            key = (space_id, offset + index)
+            key = self._key(space_id, offset + index)
+            if self._activations and key not in self._activation_written:
+                self._pre_activation[key] = (self.provenance.get(key), key in self._call_bytes,
+                                             self._byte_activation.get(key), self._relocated.get(key))
             self._bytes[key] = ((value >> (8 * index)) & 0xFF, writer)
+            self._model_moved.discard(key)
+            self._relocated.pop(key, None)
             self._call_bytes.add(key)
             if self._activations:
                 self._activation_written.add(key)
+            self._byte_activation[key] = self._activation_serial
             self.provenance[key] = frozenset(tags)
 
+    def _snapshot(self, call, again: bool = False) -> None:
+        """A new outermost activation of ``call`` (or, ``again``, the current
+        one at its callee's entry): its serial and the byte values then."""
+        if not again:
+            self._activation_serial += 1
+        self.activation_snapshots[self._activation_serial] = (
+            call, {key: byte for key, (byte, _) in self._bytes.items()})
+
+    def _note_stack_pointer(self) -> None:
+        space_id, sp_offset, sp_size = self._havoc
+        value = sum(self._byte(space_id, sp_offset + index)[0] << (8 * index) for index in range(sp_size))
+        serial = self._activation_serial
+        self.activation_min_sp[serial] = min(self.activation_min_sp.get(serial, value), value)
+
+    def _record_footprint(self) -> None:
+        serial = self._activation_serial
+        self.activation_writes[serial] = frozenset(
+            key for key in self._call_bytes
+            if self._byte_activation.get(key) == serial and key not in self._model_moved)
+
     def _run_external(self, name: str, key: str) -> None:
+        outermost = not self._activations
+        if outermost:
+            self._snapshot(key)
+        elif self._havoc is not None:
+            # inside an activation: its CALL pushed a return address below the
+            # stack pointer seen at the instruction's start
+            self._note_stack_pointer()
+        try:
+            self._run_external_body(name, key)
+        finally:
+            if outermost:
+                self._record_footprint()
+
+    def _run_external_body(self, name: str, key: str) -> None:
         reg = self._havoc[0]
         memory = self._order[0][0]
         rcx, rcx_tags = self._peek(reg, 0x08, 8)
@@ -611,15 +739,20 @@ class Interpreter:
             self._heap += 0x1000
             old = self._blocks.pop(rcx, 0) if rcx else 0
             for index in range(min(old, size)):  # a move: each byte keeps its writer
-                source, target = (memory, rcx + index), (memory, new + index)
+                source, target = self._key(memory, rcx + index), self._key(memory, new + index)
                 self._bytes[target] = self._byte(*source)
                 if source in self._call_bytes:
                     self._call_bytes.add(target)
                     self.provenance[target] = self.provenance.get(source, frozenset())
+                if source in self._byte_activation:   # moved bytes keep their writing activation
+                    self._byte_activation[target] = self._byte_activation[source]
+                self._model_moved.add(target)
+                self._relocated[target] = self._relocated.get(source, source)
                 if source in self._activation_written:
                     self._activation_written.add(target)
             for index in range(old):
                 self._put(key, memory, rcx + index, 1, self._rng.randrange(256), {("call", key)})
+                self._model_moved.add(self._key(memory, rcx + index))
             self._blocks[new] = size
             result, result_tags = new, set()
         elif name in ("free", "FMemory::Free"):
@@ -663,7 +796,7 @@ class Interpreter:
                 if key in self._activation_written:
                     tags |= self.provenance.get(key, frozenset())
                 else:
-                    tags.add(("ext", self._byte(*key)[1], space_id, offset + index))
+                    tags.add(self._ext(self._byte(*key)[1], key))
         run.sink_reads.append((self._activations[0][1], frozenset(tags)))
 
     def _program_call(self, instruction):
