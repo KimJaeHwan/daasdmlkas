@@ -1196,3 +1196,7 @@ D 완화(opaque index 항, realloc 모델의 기존 가정 위 같은 객체 기
 - **효과 상한 먼저 측정**(B2a′와 같은 방식): 안전장치 없이 가장 낙관적으로 적용한 진단 버전(`.census6/p_entry_frame_ub.py`,
   `run_entry_frame_ub.sh`, 커밋 안 함)으로 모든 Bundle을 돌림 → **바뀐 root 0개**(09 debug·release·win32·UE DebugGame·UE Dev).
   → 보류. R005에서는 index 쓰기(#2)가 남아 있는 한 이것만으로는 의미 없음; #2 뒤에 다시 측정.
+- 같은 방식으로 25.10의 #2(SUBPIECE 경계 원자 + 한 번 실행되는 블록의 일반 합류 원자)도 상한 측정(`.census6/p_index_ub.py`,
+  `run_index_ub.sh`, 커밋 안 함): 주소 모르는 쓰기 09 debug 3 → 2, release 2 → 1, win32 11 그대로, UE DebugGame 86 → 88, UE Dev
+  31 → 28, zlib 628 → 616; **바뀐 root 0개**(모든 Bundle). → #2 단독으로는 보류. R005는 #2 + #3(D-lite, 요약의 index 쓰기를
+  호출한 쪽에서 위치 결정) + 호출한 쪽 판단이 한 묶음이어야 움직임.
