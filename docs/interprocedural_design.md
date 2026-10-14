@@ -1181,3 +1181,18 @@ D 완화(opaque index 항, realloc 모델의 기존 가정 위 같은 객체 기
   frame이 아님 — 그러나 rcx 같은 진입 레지스터 객체는 `entry-values-do-not-address-the-new-frame` 아래서 새 프레임을 가리킬 수
   없으므로 정밀도 개선 여지), (3) ResizeGrow의 메모리 쓰기와 겹칠 수 있음.
 - 남은 P2(두 리뷰): `~ld` 거부를 그 load의 주소 사슬로만 좁히기(지금은 호출 전체 — 보수적).
+
+### 25.12 진입 레지스터 객체 vs 자기 새 프레임 — 효과 0으로 보류 (2026-10-14, 설계 검토 Antigravity·Astra 2차)
+
+- 아이디어: `this`(진입 rcx + 변위)처럼 **진입 레지스터 값 하나 + 변위**인 객체는, 스택 값이 새 나간 뒤에도 이 함수의 새 프레임
+  (진입 sp 아래 바이트)에 닿지 않는다고 보고, 프레임 쓰기 ↔ 그 객체 사이의 별칭을 없앰(AppendChar의 `[this+0]` run을 UNKNOWN으로
+  만드는 원인 중 하나).
+- 검토에서 나온 필수 조건(나중에 다시 할 때): 등록 가정의 **강화**로 명시(지금 문장은 "새기 전에는"만 말함 — Astra); 호출이
+  바꿨을 수 있는 레지스터는 내부 표현이 여전히 진입 원자라서(`.census6/diag_clobber_entry.py`: 결과는 call_clobber 부채로 불완전 —
+  지금도 건전) call_clobber 부채에서 앞으로 닿는 접근의 객체는 제외(Antigravity P0); 메모리를 거쳐 온 포인터(`[rdi]=rax; [rsi]=rsp;
+  rbx=[rdi]`)도 may-alias 부채가 있으면 제외(둘 다 P0); 제외 자격은 새 규칙 없이 수렴한 분석에서 정하고 고정(Astra — 순환 방지);
+  쓰기 주체 조건(주소 모르는/불확실한 쓰기가 섞이면 제외), (연산, 객체) 쌍은 모든 범위가 진입 sp 아래일 때만, 출구 판정에서만 쓰인
+  경우도 사용 보고. 기록: `.census6/entry_frame_{prompt,prompt2,agy,astra,2_agy,2_astra}.md`.
+- **효과 상한 먼저 측정**(B2a′와 같은 방식): 안전장치 없이 가장 낙관적으로 적용한 진단 버전(`.census6/p_entry_frame_ub.py`,
+  `run_entry_frame_ub.sh`, 커밋 안 함)으로 모든 Bundle을 돌림 → **바뀐 root 0개**(09 debug·release·win32·UE DebugGame·UE Dev).
+  → 보류. R005에서는 index 쓰기(#2)가 남아 있는 한 이것만으로는 의미 없음; #2 뒤에 다시 측정.
