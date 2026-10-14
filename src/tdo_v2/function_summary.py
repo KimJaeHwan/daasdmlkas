@@ -144,7 +144,7 @@ class FunctionSummary:
 
 
 def summarize_function(normalized, observation, origin_labels=None, sink_roots=(),
-                       dead_ops=frozenset()) -> FunctionSummary:
+                       dead_ops=frozenset(), noreturn_jumps=frozenset()) -> FunctionSummary:
     """``origin_labels``: graph node -> source labels it carries (boundary
     origins of this function, e.g. a declared source call's write, or a
     summarized call's run that reached a source inside the callee).
@@ -154,7 +154,10 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     ``dead_ops``: operation keys execution never continues past (software
     traps, ``debug-break-traps-do-not-return``); with calls proven never to
     return (``ProvenCallEffect.noreturn``) they cut the paths behind them:
-    exits, calls and writes only reachable through one are left out."""
+    exits, calls and writes only reachable through one are left out.
+    ``noreturn_jumps``: conditional jumps whose taken edge leaves the function
+    for a function that never returns (``interprocedural._noreturn_jumps``):
+    that edge is no tail exit; the fall-through path stays."""
     from .call_clobber import _preserved_stack_pointers
 
     context = normalized.scopes.resolution_context
@@ -253,7 +256,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     return FunctionSummary(
         FUNCTION_SUMMARY_VERSION, tuple(exits), tuple(sorted(crossed.get("unknown_writers", ()))),
         tuple(writer_objects),
-        tuple(key for key in _tail_exits(normalized, observation) if not dead_exit(key)),
+        tuple(key for key in _tail_exits(normalized, observation, noreturn_jumps) if not dead_exit(key)),
         inner_calls, tuple(demands),
         register_deltas,
         tuple(sorted(dead_exits)),
@@ -317,9 +320,11 @@ def _register_deltas(normalized, observation, exits) -> tuple:
     return tuple(found)
 
 
-def _tail_exits(normalized, observation) -> tuple[str, ...]:
+def _tail_exits(normalized, observation, noreturn_jumps=frozenset()) -> tuple[str, ...]:
     """Blocks leaving other than by RETURN, except tail jumps composed with the
-    target's summary (``ProvenCallEffect.tail_stack``)."""
+    target's summary (``ProvenCallEffect.tail_stack``) and blocks with a local
+    successor ending in a jump to a function that never returns
+    (``noreturn_jumps``: that jump was their only way out)."""
     from .call_seeds import _operation_key
     from .pcode_blocks import build_pcode_block_graph
 
@@ -335,7 +340,10 @@ def _tail_exits(normalized, observation) -> tuple[str, ...]:
             found.append(block.key)
             continue
         last = row.operations[block.stop - 1]
-        if last.opcode != "RETURN" and _operation_key(row.address, block.stop - 1, last.opcode) not in composed:
+        last_key = _operation_key(row.address, block.stop - 1, last.opcode)
+        if last_key in noreturn_jumps and block.successors:
+            continue
+        if last.opcode != "RETURN" and last_key not in composed:
             found.append(block.key)
     return tuple(sorted(found))
 

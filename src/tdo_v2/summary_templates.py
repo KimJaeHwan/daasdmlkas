@@ -51,8 +51,10 @@ TEMPLATE_VERSION = 1
 # -- older ones rest on it unlabelled. 4: nested same-object pointer values
 # composed (a callee's "same as what I was passed" through the caller's own
 # copies, docs 25.11). 5: a call not keeping memory keeps the bytes its
-# external model's memory runs write at an exactly known place (docs 25.15)
-ENGINE_SEMANTICS_VERSION = 5
+# external model's memory runs write at an exactly known place (docs 25.15).
+# 6: jumps to the import thunk of a function that never returns end their
+# path (``noreturn`` models, docs 25.16)
+ENGINE_SEMANTICS_VERSION = 6
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

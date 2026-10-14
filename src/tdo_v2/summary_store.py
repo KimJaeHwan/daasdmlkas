@@ -42,6 +42,9 @@ otherwise the write is dropped and no memory is kept. ``other_memory``:
 stack pointer is always treated as clobbered) or "clobbered" (everything but
 the listed writes: those are the bytes' values when the call returns, and the
 caller keeps them where it places them exactly -- ``normalize._kept_call_memory``).
+``noreturn`` (optional, per entry): the function never returns to its caller
+(no register or memory rows; ``observes`` declared): a call of it, or a jump
+to its import thunk, ends the paths through it.
 
 Matching an import: a file listing ``libraries`` (e.g. a C++ engine DLL)
 matches only imports of one of those libraries whose original (mangled) name
@@ -123,6 +126,9 @@ class ModelEntry:
     unknown_memory: tuple[Access, ...] = ()   # memory written with an unstated value
     template: dict | None = None   # a derived summary (``summary_templates``) instead of rows
     refusal: str | None = None     # why a template is never applied (engine version mismatch)
+    # never returns to its caller (e.g. abort): the paths through a call of it,
+    # or a jump to it (``interprocedural._noreturn_jumps``), end there
+    noreturn: bool = False
 
     @property
     def model_id(self) -> str:
@@ -245,13 +251,18 @@ def load_model_file(path: str | Path) -> ModelFile:
     entries = []
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
-                   "original_names", "internal", "assumptions"}
+                   "original_names", "internal", "assumptions", "noreturn"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
             raise ModelError(f"{path}: entry fields must be {sorted(allowed)}")
         if item["other_memory"] not in ("preserved", "clobbered"):
             raise ModelError(f"{path}: other_memory must be preserved or clobbered")
         if type(item.get("internal", False)) is not bool:
             raise ModelError(f"{path}: internal must be true or false")
+        if type(item.get("noreturn", False)) is not bool:
+            raise ModelError(f"{path}: noreturn must be true or false")
+        if item.get("noreturn") and (item["registers"] or item["memory"] or "observes" not in item):
+            # what it observes is declared, not implied by never returning
+            raise ModelError(f"{path}: a noreturn entry has no register or memory rows and declares observes")
         for row in item["registers"]:
             if type(row) is not dict or not {"write"} <= set(row) <= {"write", "from", "fresh", "same_object_as"} \
                     or type(row.get("fresh", False)) is not bool \
@@ -287,7 +298,8 @@ def load_model_file(path: str | Path) -> ModelFile:
                                   source_kind=source["kind"], inherited=(*source.get("assumptions", ()), *_assumption_labels(
                                       item.get("assumptions", []), path, f"{item['name']}: assumptions")),
                                   identity=source["sha256"][:12] if source["kind"] == "derived" else "",
-                                  internal=item.get("internal", False), unknown_memory=unknown_memory))
+                                  internal=item.get("internal", False), unknown_memory=unknown_memory,
+                                  noreturn=item.get("noreturn", False)))
     libraries = tuple(str(item).upper() for item in raw.get("libraries", ()))
     if libraries and any(not entry.original_names for entry in entries):
         raise ModelError(f"{path}: a file with libraries matches by original_names only")
@@ -540,6 +552,7 @@ def model_effect(derive, model_file, entry, *args):
         effect,
         preserves_memory=effect.preserves_memory and complete and entry.keeps_other_memory,
         memory_runs_final=True,    # the listed writes; other_memory is about the rest
+        noreturn=entry.noreturn,   # the path behind the call is cut (``function_summary._dead_region``)
         clobbers_below=True,       # a library function has its own frame
         # it may keep any pointer it receives, unless the model lists what it observes
         observes_registers=entry.observes is None or bool(entry.observes),

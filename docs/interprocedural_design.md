@@ -1290,3 +1290,37 @@ call_clobber 부채의 읽기와 사이에 있는 호출의 대상), `.census6/w
   win32 44/37·UE DebugGame 15/15·Dev 16/16 그대로; oracle 그대로(missing 0 — zlib 256 기존, DebugGame unexplained 1227 기존,
   calls_modeled 19·13 같음). 테스트 798개 통과(그 뒤 리뷰 P2 테스트 2개 추가).
 - 기록: `.census6/strcpy_{prompt,agy,astra}.md`, `.census6/strcpy_impl_{prompt,agy,astra}.md`.
+
+### 25.16 돌아오지 않는 함수(abort)와 그 import thunk로의 점프 (DFB091 1단계, 2026-10-14, 설계 검토 1차, 구현 검토 4차 Antigravity·Astra)
+
+- 원인: 09 testbed는 MinGW gcc로 빌드돼서 `__thread` 변수를 libgcc의 `__emutls_get_address`(정적 링크, debug 0x140004b00 ·
+  release 0x140003c40)로 읽고 씀. 이 함수는 요약이 있지만 `je <abort import thunk>` 4곳이 tail exit로 남아
+  `derive_proven_call_effect`가 효과를 만들지 않음 → 이 함수를 부르는 호출은 모두 opaque.
+- **모델**(crt v5, win64·sysv64): 항목 필드 `noreturn`(엄격한 bool; register·memory 행이 없어야 하고 `observes`를 반드시 선언).
+  `abort`: noreturn, observes [] (C11 7.22.4.1: 호출한 곳으로 돌아오지 않음). `model_effect`가 `noreturn`을 넘겨 직접 호출은
+  기존 `_dead_region`이 경로를 자름.
+- **점프**(`interprocedural._noreturn_jumps`): 명령어의 마지막 연산이고(명령어 안 흐름 없음) 목적지가 함수 밖의 import
+  thunk이며 그 모델이 noreturn인 점프만:
+  - BRANCH: fall-through 없음, 관찰된 flow target이 thunk 하나뿐, Bundle 함수로의 tail call(`calls`)이 아님 →
+    `summarize_function`의 `dead_ops`(기존 자르기 → dead exit);
+  - CBRANCH: fall-through가 함수 안이고 관찰된 flow target이 thunk 또는 함수 안 → 가져간 쪽 edge만 죽음:
+    `noreturn_jumps`로 넘겨 `_tail_exits`가 그 블록을(지역 후속이 있을 때만) tail exit로 세지 않음. fall-through 경로는 그대로.
+  - 꺼진 가정·`usable` 거부 검사는 `_external_sites`와 같음; 적용된 점프만 `declared`에 모델 라벨로 보고(+ 상속 가정).
+- **돌아오지 않는 효과의 공통 검사**(`interprocedural._unplaced_noreturn`, 검토 중 나온 기존 경로까지): 함수의 효과를 만든 뒤,
+  noreturn 효과인데 그 명령어에 관찰된 다른 후속(자기 목적지 — 직접 BRANCH·CALL의 주소 — 와 CALL의 fall-through 말고)이
+  있으면, 함수 안이든 밖이든, 그 효과를 빼고 호출을 opaque로 둠(`_dead_region`이 그 edge까지 자르기 때문). `jmp [__imp_abort]`,
+  Bundle 함수인 abort thunk로의 tail jump, 착지점 있는 call 모두 해당. (검증 단계가 EXTERNAL 공간 target을 `flow_targets`에서
+  빼므로 실제 `jmp [slot]`은 target 없음 — UE Bundle의 모든 `jmp [slot]`이 EXTERNAL target 하나뿐.)
+- `ENGINE_SEMANTICS_VERSION` 5 → 6, FString 템플릿 다시 만듦(내용 같음). oracle 인터프리터: abort로의 CALL·BRANCH·가져간
+  CBRANCH에서 실행 멈춤.
+- 테스트 `tests/intra/test_noreturn_models.py`(13): 모델 로드·검증 3종, `je abort` 도우미(tail exit 없음, 호출자가 효과를 받고
+  rax→rbx 완전, 도우미를 실제로 실행하는 oracle 포함), 모델 없으면 tail exit 유지, 무조건 `jmp abort`(dead exit), 두 쪽 다
+  함수 밖으로 나가는 `je abort`는 제외, 다른 지역 target도 있는 `jmp abort`는 제외, 다른 target이 있는 `jmp [__imp_abort]`·Bundle thunk로의 `jmp`(함수 안·밖)는
+  noreturn 아님. 각 검사를 끄면 해당 테스트 실패.
+- 결과: `__emutls_get_address` 호출이 opaque가 아니게 됨(debug·release). 기본 지표·oracle 그대로(테스트 813개; oracle
+  calls_modeled debug 19 → 24, release 13 → 18). DFB091은 여전히 불확실 — 이 함수 안의 libwinpthread 호출 때문.
+- **libwinpthread-1.dll 연결 측정**(2단계 조사, `.census6/run_linkpthread.sh`; DLL은 `C:\Strawberry\c\bin`, Ghidra 프로젝트
+  `/libswinpthread`): 7개 import 중 `pthread_mutex_init`·`lock`·`unlock`은 템플릿이 만들어지고 적용됨; `pthread_getspecific`·
+  `setspecific`·`once`·`key_create`는 거부("depends on the library's load address" — 공통으로 쓰는 내부 함수 0x2e36570d7이
+  라이브러리 자신의 코드 주소를 값으로 씀). DFB091은 연결해도 불확실. 남은 원인과 진행 여부는 사용자 결정 대기.
+- 기록: `.census6/noreturn_{prompt,agy,astra}.md`, `.census6/noreturn_impl_{prompt,agy,astra}.md`.

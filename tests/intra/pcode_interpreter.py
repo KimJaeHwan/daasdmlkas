@@ -532,6 +532,8 @@ class Interpreter:
             target = (self._order[0][0], self._value(key, inputs[0], run))
             if target in self._program:
                 return ("call", target)
+        if opcode in ("CALL", "BRANCH") and self._noreturn_external(inputs):
+            return ("halt", None)  # abort: execution does not continue
         if opcode == "CALL" and self._externals and inputs \
                 and inputs[0].kind is VarnodeKindCode.ADDRESS \
                 and (inputs[0].coordinate.space_id, inputs[0].coordinate.byte_offset) in self._externals:
@@ -583,6 +585,8 @@ class Interpreter:
             if key == self._flip and not self._flipped:
                 taken, self._flipped = not taken, True
             run.branch_decisions.append((key, taken))
+            if taken and self._noreturn_external(inputs):
+                return ("halt", None)  # je abort
             return self._destination(inputs[0]) if taken else None
         if opcode == "LOAD":
             space_id = inputs[0].coordinate.byte_offset
@@ -677,6 +681,11 @@ class Interpreter:
         value = sum(self._byte(space_id, sp_offset + index)[0] << (8 * index) for index in range(sp_size))
         serial = self._activation_serial
         self.activation_min_sp[serial] = min(self.activation_min_sp.get(serial, value), value)
+
+    def _noreturn_external(self, inputs) -> bool:
+        """The destination is an external that never returns (abort)."""
+        return bool(inputs) and inputs[0].kind is VarnodeKindCode.ADDRESS and self._externals.get(
+            (inputs[0].coordinate.space_id, inputs[0].coordinate.byte_offset)) == "abort"
 
     def _record_footprint(self) -> None:
         serial = self._activation_serial

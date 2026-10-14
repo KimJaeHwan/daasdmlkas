@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-win64",
-  "version": 4,
+  "version": 5,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
   "notes": "C runtime functions under the Windows x64 convention (args RCX, RDX, R8, R9; result RAX). Register offsets are Ghidra x86-64: RAX 0, RCX 8, RDX 16, RBX 24, RSP 32, RBP 40, RSI 48, RDI 56, R8 128, R9 136, R12-R15 160-184. Preserved: the non-volatile integer registers; XMM and flags are left unknown (sound, less precise). Every entry is a declared assumption.",
@@ -49,6 +49,11 @@
       "registers": [{"write": [0, 8], "from": [[8, 8]]}],
       "memory": [],
       "other_memory": "clobbered"
+    },
+    {
+      "name": "abort",
+      "notes": "Never returns to its caller (C11 7.22.4.1): the paths through it end there. Uses no pointer it receives (observes nothing).",
+      "registers": [], "memory": [], "observes": [], "other_memory": "preserved", "noreturn": true
     },
     {
       "name": "strlen", "aliases": ["strcmp", "strncmp", "memcmp"],

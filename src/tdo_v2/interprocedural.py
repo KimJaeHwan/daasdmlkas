@@ -202,6 +202,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                  if image_info and external_models else {}), **_cut_sites(unit, cuts)}
         for key, unit in functions.items()
     }
+    noreturn_jumps = {
+        key: _noreturn_jumps(unit, image_info, external_models, calls[key], disabled, usable,
+                             refused_sites.setdefault(key, {}))
+        if image_info and external_models else {}
+        for key, unit in functions.items()
+    }
     memory_space = _program_memory_space(next(iter(functions.values()))) if functions else None
     files = [_register_file(unit.observation, unit.scopes.resolution_context) for unit in program.values()]
     program_registers = (
@@ -374,6 +380,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         effect = replace(effect, extent_registers=tuple(
                             ByteSpan(register_object, offset, size) for offset, size in slices))
                     proven[call_key] = effect
+                for call_key in _unplaced_noreturn(unit, proven):
+                    del proven[call_key]  # opaque: the cut would drop an observed edge
                 return proven
 
             # summarized values that hold only if alias conditions hold: the
@@ -450,10 +458,13 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         complete = demand.complete and not fails
                         projected.append((call, index, demand.label, nodes, complete and not remaining))
                         roots.append((demand.label, nodes, complete, remaining))
+            jumps = noreturn_jumps[key]
             summary = (
                 summarize_function(normalized, observation, origins, roots,
-                                   trap_operations(unit, pcodeop_models)
-                                   if assume_debug_break_traps_do_not_return and pcodeop_models else frozenset())
+                                   (trap_operations(unit, pcodeop_models)
+                                    if assume_debug_break_traps_do_not_return and pcodeop_models else frozenset())
+                                   | {jump for jump in jumps if jump.endswith(":BRANCH")},
+                                   noreturn_jumps=frozenset(jump for jump in jumps if jump.endswith(":CBRANCH")))
                 if type(normalized) is NormalizedFunction else None
             )
             anchors = _relative_anchors(unit, normalized) if summary is not None else {}
@@ -462,10 +473,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                         call: (f"test-only-boundary:{boundaries_of(key)[call].label}"
                                                if call in boundaries_of(key) else externals[key][call][1].label)
                                         for call in proven if call in externals[key] or call in boundaries_of(key)
-                                    } | {call: effect.label for call, effect in markers.items()},
+                                    } | {call: effect.label for call, effect in markers.items()}
+                                    | {jump: entry.label for jump, (_, entry) in jumps.items()},
                                     inherited_assumptions=frozenset(
                                         label for call in proven if call in externals[key]
-                                        for label in externals[key][call][1].inherited),
+                                        for label in externals[key][call][1].inherited)
+                                    | {label for _, entry in jumps.values() for label in entry.inherited},
                                     refused_models=dict(refused_sites.get(key, {})),
                                     test_only_inputs=bool((assumed_call_effects or {}).get(key))
                                     or bool(boundaries_of(key)) or extra_origins is not None,
@@ -603,6 +616,102 @@ def _external_sites(unit, image_info, external_models, disabled=frozenset(), usa
                     refused[key] = f"{model[1].label}: {reason}"
                 continue
             found[key] = model
+    return found
+
+
+def _unplaced_noreturn(unit, proven) -> list:
+    """Call / tail-jump keys whose effect never returns but whose instruction
+    has an observed successor other than its own destination (and a call's
+    fall-through) -- a landing pad, another jump target, inside the function
+    or not: ``_dead_region`` would cut that edge too, so such an effect is
+    not applied. (Validation leaves EXTERNAL-space targets out of
+    ``flow_targets``: a ``jmp [slot]`` lists none.)"""
+    from .control_projection import control_successor_coordinates
+
+    observation = unit.observation
+    rows = {(row.address.space_id, row.address.byte_offset): row for row in observation.instructions}
+    local = {row.address for row in observation.instructions}
+    entry = unit.scopes.function.entry
+    found = []
+    for key, effect in proven.items():
+        if not effect.noreturn:
+            continue
+        space, offset, ordinal, opcode = key.split(":")
+        row = rows.get((int(space, 16), int(offset, 16)))
+        if row is None:
+            continue
+        operation = row.operations[int(ordinal)]
+        kept = set()
+        if opcode in ("BRANCH", "CALL") and operation.inputs                 and operation.inputs[0].kind is VarnodeKindCode.ADDRESS:
+            kept.add(operation.inputs[0].coordinate)  # its own destination (an indirect one names a slot)
+        if opcode in ("CALL", "CALLIND"):
+            kept.add(row.fallthrough)  # the edge a call that never returns cuts
+        observed = set(row.flow_targets) | set(
+            control_successor_coordinates(row, local_addresses=local, function_entry=entry))
+        if observed - kept:
+            found.append(key)
+    return found
+
+
+def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset(), usable=None,
+                    refused=None) -> dict:
+    """Jump key -> (model file, entry) for a jump to an import thunk whose
+    model never returns (``noreturn``, e.g. ``je abort``). Only shapes where
+    the jump is the instruction's only way out of the function:
+    - ``BRANCH``: the last operation of an instruction without internal flow,
+      without a fall-through and whose observed flow targets are the thunk
+      only, not a tail call to a Bundle function (``calls``, which composes
+      the thunk's own summary) -- ``summarize_function`` cuts the path at it
+      (``dead_ops``);
+    - ``CBRANCH``: the last operation of an instruction without internal
+      flow whose fall-through is in the function and whose observed flow
+      targets are the thunk or in the function -- only its taken edge leaves,
+      and never comes back (``summarize_function``'s ``noreturn_jumps``: not a
+      tail exit; the fall-through path stays).
+    The checks of ``_external_sites`` apply (switched-off assumptions,
+    ``usable``)."""
+    from .pcode_blocks import has_internal_flow
+
+    observation = unit.observation
+    if observation is None:
+        return {}
+    local = {row.address for row in observation.instructions}
+    found = {}
+    for row in observation.instructions:
+        if not row.operations or has_internal_flow(row):
+            continue
+        ordinal = len(row.operations) - 1
+        operation = row.operations[ordinal]
+        if operation.opcode not in ("BRANCH", "CBRANCH") or not operation.inputs:
+            continue
+        target = operation.inputs[0]
+        if target.kind is not VarnodeKindCode.ADDRESS or target.coordinate in local:
+            continue
+        key = _operation_key(row.address, ordinal, operation.opcode)
+        if key in calls:
+            continue
+        if operation.opcode == "BRANCH" and (
+                row.fallthrough is not None or any(item != target.coordinate for item in row.flow_targets)):
+            continue
+        if operation.opcode == "CBRANCH" and (
+                row.fallthrough not in local
+                or any(item != target.coordinate and item not in local for item in row.flow_targets)):
+            continue
+        symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
+        model = external_models.lookup(symbol) if symbol is not None else None
+        if model is None or not model[1].noreturn:
+            continue
+        if set(model[1].inherited) & disabled:
+            if refused is not None:
+                off = ", ".join(sorted(set(model[1].inherited) & disabled))
+                refused[key] = f"{model[1].label}: rests on {off}, switched off in this run"
+            continue
+        reason = usable(*model) if usable is not None else None
+        if reason is not None:
+            if refused is not None:
+                refused[key] = f"{model[1].label}: {reason}"
+            continue
+        found[key] = model
     return found
 
 

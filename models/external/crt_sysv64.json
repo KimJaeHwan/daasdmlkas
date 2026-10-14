@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-sysv64",
-  "version": 4,
+  "version": 5,
   "language_id": "x86:LE:64:default",
   "abi_tag": "sysv64",
   "notes": "C runtime functions under the System V x86-64 convention (args RDI, RSI, RDX, RCX; result RAX). Preserved: RBX, RBP, R12-R15. Every entry is a declared assumption.",
@@ -231,6 +231,15 @@
       ],
       "memory": [],
       "other_memory": "clobbered"
+    },
+    {
+      "name": "abort",
+      "notes": "Never returns to its caller (C11 7.22.4.1): the paths through it end there. Uses no pointer it receives (observes nothing).",
+      "registers": [],
+      "memory": [],
+      "observes": [],
+      "other_memory": "preserved",
+      "noreturn": true
     },
     {
       "name": "strlen",
