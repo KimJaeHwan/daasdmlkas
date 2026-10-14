@@ -1154,3 +1154,30 @@ win32 160/160 · UE Dev 568(400 담음, 168 부채) · DebugGame 1063(614 담음
 4. 둘 다 거부: (b) 블록 단위 요약 + E(지금은 불필요, 비쌈), (a) 후보 쓰기(JOIN이 SUBPIECE/ZEXT 아래에 있어 비쌈, 정밀도만).
 사용자 결정: R005의 목표(가능한 출처 A vs 정확+확실), 순서(D-lite vs 포인터 다시 읽기 먼저 — 1번은 어느 쪽이든 먼저),
 D 완화(opaque index 항, realloc 모델의 기존 가정 위 같은 객체 기준, E 없음) 승인 여부, once-join 원자를 일반 규칙으로 할지.
+
+### 25.11 중첩된 "같은 포인터" 값 합성 (25.10의 #1, 2026-10-14, 설계·구현 검토 Antigravity·Astra)
+
+리뷰어 변경: Claude 사용량 한도 때문에 Fable 대신 Antigravity(`agy` CLI, Gemini 4 Argon High, 읽기 전용 계획 모드)를 씀.
+기록: `.census6/nested_same_{prompt,agy,astra,impl_prompt,impl_agy,impl_astra}.md`.
+
+- 문제: 함수 요약은 포인터 크기 출력에 값("이 출력은 진입 시 X와 같은 포인터")을 붙임. 호출된 함수의 값은 호출 지점에서
+  `same_reg`/`same_mem`(호출 시점의 레지스터/메모리 값)으로 넘어오고 호출한 쪽 정규화가 `pointer_rows`로 받지만, 호출한 쪽이
+  **자기 요약을 만들 때**(`function_summary._pointer_values`)는 이것을 합성하지 않아 한 단계만 지나도 값이 사라졌음.
+- 수정: `NormalizedFunction.pointer_rows`를 내보내고, `_pointer_values`가 호출 행의 값을 "호출 시점에 넘긴 값의 출처"
+  (staging 행이 읽은 레지스터 / 포인터 칸 load 행이 읽은 메모리 — 정확한 복사만 따라감)와 합성: ("same", 그 진입 span,
+  안쪽 flag 또는 바깥 flag). 새 가정 없음(두 증명된 사실의 합성; flag는 realloc 모델의 기존 null-is-fresh).
+- 안전장치: 행 자체나 그 호출의 **어느** `~ld` 행에든 hard debt가 있으면 거부(두 단계 load는 앞 load가 가리킨 곳을 읽음 —
+  Antigravity P1); 같은 경로에서 이미 합성 중인 호출 행을 다시 만나면 값 없음(루프가 호출에 자기 결과를 넘기는 경우의 무한
+  재귀 — Astra P1; 기존 realloc 경로에도 같은 재귀 가능성이 있었고 함께 막음).
+- 함께 고친 것(`call_summary_effects._with_origins`): 호출 지점에서 값이 같은 두 포인터(rax, rcx 둘 다 rdi의 복사)가 16바이트
+  레지스터 묶음 하나로 합쳐져 값을 잃었음 → 값이 있는 run의 표시에 위치(span)를 넣어 각자 포인터 크기 run으로 남김(여러 출구의
+  같은 위치는 그대로 합쳐짐; 출구마다 값이 다르면 값 없음).
+- `ENGINE_SEMANTICS_VERSION` 3 → 4, FString 템플릿 다시 만듦.
+- 테스트 8개(수정 없이 3개 실패; 두 안전장치를 각각 빼면 해당 테스트 실패): 레지스터·메모리 합성, 복사가 아닌 인자는 값 없음,
+  루프 종료, 호출자의 호출자(H → F → G가 rcx를 돌려줌)에서 `*(rax)`가 `*(rdi)`로 정확·완전, 그 프로그램의 실행 대조, 출구마다
+  다른 포인터는 값 없음, 두 단계 load 부채 거부.
+- 결과: 테스트 768개, 모든 Bundle 지표·검증기 그대로. **R005는 아직 그대로**: AppendChar 템플릿의 `[this+0]` run은 합성 문제가
+  아니라 UNKNOWN 판정 때문 — (1) 주소 없는 index 쓰기 2개(25.10의 #2), (2) 이 함수 자신의 스택 쓰기(스택 값이 새 나간 뒤라 private
+  frame이 아님 — 그러나 rcx 같은 진입 레지스터 객체는 `entry-values-do-not-address-the-new-frame` 아래서 새 프레임을 가리킬 수
+  없으므로 정밀도 개선 여지), (3) ResizeGrow의 메모리 쓰기와 겹칠 수 있음.
+- 남은 P2(두 리뷰): `~ld` 거부를 그 load의 주소 사슬로만 좁히기(지금은 호출 전체 — 보수적).

@@ -760,6 +760,17 @@ class _CopyTracer:
                 return self.origin(read.fragments[0].definition_ids[0], source, depth + 1)
         return None
 
+    def load_origin(self, reader: str, size: int):
+        """The origin of the one memory read of ``size`` bytes row ``reader``
+        makes (a call's pointer-slot load, ``normalize._proven_call_rows``)."""
+        if reader in self.hard_indebted:
+            return None
+        memory = [read.span for read in self.reads.get(reader, ())
+                  if read.span.object_id.kind in _MEMORY_KINDS and read.span.size == size]
+        if len(memory) != 1:
+            return None
+        return self._read_origin(reader, memory[0], 0)
+
     def argument_origin(self, reader: str, argument):
         """The origin of register ``argument`` as read by row ``reader``."""
         if reader in self.hard_indebted:
@@ -892,7 +903,26 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
         return exits
     fresh_rows = frozenset(getattr(normalized, "fresh_rows", ()))
     same_rows = {row: (reader, argument) for row, reader, argument in getattr(normalized, "same_object_rows", ())}
+    pointer_rows = dict(getattr(normalized, "pointer_rows", ()))
     proven = dict(normalized.proven_call_effects)
+
+    def nested_same(row):
+        """A callee run's ("same_reg" / "same_mem") value composed with this
+        function's value of that register / memory at the call: the origin
+        of what the staging row / pointer-slot load row read, or None. Any
+        hard debt on the row, its staging row or any pointer-slot load of the
+        call (a two-level load reads where an earlier load pointed) refuses."""
+        found = pointer_rows.get(row)
+        if found is None or found[0] not in ("reg", "mem") or row in tracer.hard_indebted:
+            return None, False
+        call = row.rsplit("~", 1)[0]
+        if any(key.startswith(f"{call}~ld") for key in tracer.hard_indebted):
+            return None, False
+        if found[0] == "reg":
+            _, reader, argument, flag, _ = found
+            return tracer.argument_origin(reader, argument), flag
+        _, reader, size, flag, _ = found
+        return tracer.load_origin(reader, size), flag
 
     def nested_nonstack(row):
         base, _, index = row.rpartition("~")
@@ -902,7 +932,9 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
         items = (*effect.runs, *effect.memory_runs)
         return int(index) < len(items) and getattr(items[int(index)], "value", None) == ("nonstack",)
 
-    def value_of(origin):
+    def value_of(origin, active=frozenset()):
+        """``active``: the call rows being composed on this path -- a row
+        reached again (a loop feeding a call its own result) is no value."""
         if origin is None:
             return None
         kind, item = origin
@@ -910,7 +942,7 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
             # equal values stay; a kept entry value joined with a realloc of it
             # is the same object, or -- for a null entry value -- null or a new
             # block (neither a stack address): ("same", span, null is fresh)
-            values = {value_of(source) for source in item}
+            values = {value_of(source, active) for source in item}
             if None in values:
                 return None
             if len(values) == 1:
@@ -923,14 +955,28 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
             return ("same", item, False)
         if item in fresh_rows or nested_nonstack(item):
             return ("nonstack",)
+        if item in active:
+            return None
+        active = active | {item}
         if item in same_rows:
             reader, argument = same_rows[item]
             inner = tracer.argument_origin(reader, argument)
-            found = value_of(inner)
+            found = value_of(inner, active)
             if found is None:
                 return None
             if found[0] == "same":
                 return ("same", found[1], True)
+            return found
+        inner, flag = nested_same(item)
+        if inner is not None:
+            # a callee's same-object value of what this function passed: the
+            # same object as that value's own origin (null may be a new block
+            # if either step says so)
+            found = value_of(inner, active)
+            if found is None:
+                return None
+            if found[0] == "same":
+                return ("same", found[1], found[2] or flag)
             return found
         return None
 

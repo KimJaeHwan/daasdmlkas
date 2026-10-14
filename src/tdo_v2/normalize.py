@@ -151,6 +151,10 @@ class NormalizedFunction:
     # fresh result, and (row, input row, argument varnode) of same-object results
     fresh_rows: frozenset = frozenset()
     same_object_rows: tuple = ()
+    # the pointer values of proven call effect rows (``_proven_call_rows``):
+    # (row, ("reg", staging row, register varnode, null_is_fresh, unique) |
+    # ("mem", load row, size, null_is_fresh, unique) | ("nonstack",))
+    pointer_rows: tuple = ()
     # writes whose address rests on a read with debt -> conditions under which
     # they land on their static object (None: anywhere); ``may_alias`` gave
     # every read they may reach a debt (``function_summary.uncertain_writers_of``)
@@ -1720,6 +1724,7 @@ class _ScopedNormalizer:
             same_object_rows=tuple(sorted(
                 ((row, reader, argument) for row, (reader, argument) in same_object_rows.items()),
                 key=lambda item: item[0])),
+            pointer_rows=tuple(sorted(pointer_rows.items(), key=lambda item: item[0])),
             uncertain_writers=tuple(sorted(
                 ((key, conditions) for key, conditions in _uncertain.items()), key=lambda item: item[0])),
             call_anchors=anchors,

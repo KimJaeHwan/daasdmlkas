@@ -48,8 +48,10 @@ TEMPLATE_VERSION = 1
 # 2: stack-mixed objects wild (docs 25.7); index addresses, index objects
 # wild, the wrap seam bound (docs 25.8). 3: templates carry the label
 # entry-values-do-not-address-the-new-frame when they rest on it (docs 25.9)
-# -- older ones rest on it unlabelled
-ENGINE_SEMANTICS_VERSION = 3
+# -- older ones rest on it unlabelled. 4: nested same-object pointer values
+# composed (a callee's "same as what I was passed" through the caller's own
+# copies, docs 25.11)
+ENGINE_SEMANTICS_VERSION = 4
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

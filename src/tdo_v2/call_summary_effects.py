@@ -422,9 +422,12 @@ def _origins(sources) -> tuple[str, ...]:
 
 def _with_origins(sources, run) -> frozenset:
     """The verdict's sources, origin labels and the run's pointer value (a
-    ("pointer", value) marker: bytes of one pointer stay one group, and a
-    merge of exits with different values keeps both markers -- no value)."""
-    return frozenset(sources) | {("origin", label) for label in run.origins} | {("pointer", run.value)}
+    ("pointer", value[, span]) marker: bytes of one pointer stay one group, a
+    merge of exits with different values keeps both markers -- no value --
+    and two pointers with equal values (rax and rcx both a copy of rdi) stay
+    two groups, each its own pointer-size run)."""
+    marker = ("pointer", run.value) if run.value is None else ("pointer", run.value, run.span)
+    return frozenset(sources) | {("origin", label) for label in run.origins} | {marker}
 
 
 def _pointer_value(sources, keeps_old, spans, size, anchored):
