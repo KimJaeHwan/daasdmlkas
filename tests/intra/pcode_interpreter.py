@@ -715,6 +715,14 @@ class Interpreter:
             for index, (value, tags) in enumerate(values):
                 self._put(key, memory, rcx + index, 1, value, tags | rcx_tags | r8_tags)
             result, result_tags = rcx, rcx_tags
+        elif name == "strcpy":
+            # copies src up to and including its NUL (at most 4096 bytes)
+            for index in range(4096):
+                value, tags = self._peek(memory, rdx + index, 1)
+                self._put(key, memory, rcx + index, 1, value, tags | rdx_tags | rcx_tags)
+                if value == 0:
+                    break
+            result, result_tags = rcx, rcx_tags
         elif name == "strlen":
             length, tags = 0, set(rcx_tags)
             while length < 4096:

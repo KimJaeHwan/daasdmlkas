@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-win64",
-  "version": 3,
+  "version": 4,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
   "notes": "C runtime functions under the Windows x64 convention (args RCX, RDX, R8, R9; result RAX). Register offsets are Ghidra x86-64: RAX 0, RCX 8, RDX 16, RBX 24, RSP 32, RBP 40, RSI 48, RDI 56, R8 128, R9 136, R12-R15 160-184. Preserved: the non-volatile integer registers; XMM and flags are left unknown (sound, less precise). Every entry is a declared assumption.",
@@ -33,8 +33,19 @@
       "other_memory": "preserved"
     },
     {
-      "name": "strcpy", "aliases": ["strcat", "strncpy", "strncat"],
-      "notes": "Writes an extent known only at run time: no memory is kept. Returns dst.",
+      "name": "strcpy",
+      "notes": "For a defined call (src NUL-terminated, dst writable and large enough, no overlap -- otherwise undefined behaviour): dst[0] = src[0] when it returns (strcpy copies at least the terminating NUL, src[0] first); the rest has an extent known only at run time: all other memory is unknown. Returns dst.",
+      "registers": [{"write": [0, 8], "from": [[8, 8]]}],
+      "memory": [{
+        "write": {"base": [8, 8], "disp": 0, "size": 1},
+        "from": [[8, 8], [16, 8]],
+        "loads": [{"base": [16, 8], "disp": 0, "size": 1}]
+      }],
+      "other_memory": "clobbered"
+    },
+    {
+      "name": "strcat", "aliases": ["strncpy", "strncat"],
+      "notes": "Writes an extent known only at run time (strncpy with n == 0 writes nothing; strcat writes after dst's string): no memory is kept. Returns dst.",
       "registers": [{"write": [0, 8], "from": [[8, 8]]}],
       "memory": [],
       "other_memory": "clobbered"

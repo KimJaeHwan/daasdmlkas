@@ -39,7 +39,9 @@ A size given by a register is used only
 when the caller proves that register constant at the call (``constants``);
 otherwise the write is dropped and no memory is kept. ``other_memory``:
 "preserved" (only the listed writes; the callee's own frame below its entry
-stack pointer is always treated as clobbered) or "clobbered".
+stack pointer is always treated as clobbered) or "clobbered" (everything but
+the listed writes: those are the bytes' values when the call returns, and the
+caller keeps them where it places them exactly -- ``normalize._kept_call_memory``).
 
 Matching an import: a file listing ``libraries`` (e.g. a C++ engine DLL)
 matches only imports of one of those libraries whose original (mangled) name
@@ -537,6 +539,7 @@ def model_effect(derive, model_file, entry, *args):
     return replace(
         effect,
         preserves_memory=effect.preserves_memory and complete and entry.keeps_other_memory,
+        memory_runs_final=True,    # the listed writes; other_memory is about the rest
         clobbers_below=True,       # a library function has its own frame
         # it may keep any pointer it receives, unless the model lists what it observes
         observes_registers=entry.observes is None or bool(entry.observes),

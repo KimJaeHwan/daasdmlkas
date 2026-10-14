@@ -1260,3 +1260,33 @@ call_clobber 부채의 읽기와 사이에 있는 호출의 대상), `.census6/w
 - DFB075(`dfb_external_no_summary`)는 "요약 없는 외부 호출"로 설계된 케이스지만 DLL 안의 함수가 `return x`라서 연결하면 정답대로
   확실해짐. manifest의 `unresolved_call_boundary` 경고는 연결이 없을 때의 기대임.
 - 기록: `.census6/linkfix{,2..7}_{prompt,agy,astra}.md`.
+
+### 25.15 strcpy 모델과 "모델이 적은 쓰기는 호출 뒤에도 남음" (DFB122, 2026-10-14, 설계·구현 검토 Antigravity·Astra)
+
+- 원인(25.13): 두 64-bit 빌드 모두 CRT import `strcpy`를 부름. 예전 모델(crt v3)은 "메모리 결과 없음, 나머지 메모리 모름" →
+  호출 뒤 `dst[0]` 읽기가 call_clobber 부채.
+- **모델**(crt v4, win64·sysv64): `strcpy`를 따로 둠 — 반환값 = dst, 정확한 쓰기 하나 dst[0,1) = src[0,1), 나머지 메모리 모름.
+  근거: 정의된 호출(src가 NUL로 끝남, dst가 충분히 큼, 겹치지 않음 — 아니면 미정의 동작)이면 strcpy는 적어도 끝의 NUL을 복사하고
+  src[0]을 먼저 옮기므로 돌아왔을 때 dst[0] == 호출 때의 src[0]. `strcat`(별칭 strncpy, strncat)은 예전 항목 그대로(strncpy는
+  n == 0이면 아무것도 안 씀, strcat은 dst 문자열 뒤에 씀). 모델은 지금처럼 선언된 가정으로 사용마다 보고
+  (`external-model:crt-win64/strcpy@v4`).
+- **엔진**: 모델만 바꾸면 DFB122는 exact가 되지만 여전히 불확실 — 모델의 쓰기는 CALL 바로 앞에 놓이는데, 메모리를 지키지 않는
+  호출은 CALL에서 모든 메모리를 덮은 것으로 봐서 방금 쓴 바이트까지 덮음. 모델 형식의 뜻("적은 쓰기는 정확히 그 바이트,
+  나머지는 other_memory대로")과 어긋남. 고침(범위 B — 외부 모델만):
+  - `ProvenCallEffect.memory_runs_final`(외부 모델만 True). `normalize._kept_call_memory`: 그 효과의 메모리 run 행
+    `<call>~<len(runs)+i>`마다, memory SSA의 쓰기 정의가 모두 DATA_WRITE이고 wild 아닌 한 객체 안의 이어진 범위로 run 크기와 같고,
+    주소 모르는 쓰기가 아니고, 주소가 불확실한 쓰기(`_uncertain`)가 아니고, 조건·writer 조건·keeps_old가 없을 때만 그 바이트를
+    호출이 지키는 것으로(`proven_preserved`에 추가). 안쪽 고정점에서 지킨 행이 불확실한 주소로 바뀌면 `_Retry(uncertain=...)`로
+    다시 정규화(불확실 목록은 늘기만 하므로 끝남).
+  - `NormalizedFunction.kept_call_memory` → `function_summary._exit_crossings`도 같은 바이트를 지킴(지역 그래프와 요약이 같은 말).
+  - 범위 A(파생 요약까지)는 안 함: tail exit·언급 안 된 exit의 "self" 합치기·exported aliasing 복구 경우가 먼저 검증돼야 함
+    (Antigravity P0-2, Astra P1).
+  - `ENGINE_SEMANTICS_VERSION` 4 → 5, `models/derived/ue_core_win64_fstring.json` 다시 만듦(템플릿 내용 같음).
+- 테스트 `tests/intra/test_model_memory_runs_kept.py`: DFB122 모양(dst[0] 완전, dst[1] 불완전, oracle 놓침 없음), src 바이트의
+  부채 유지, 뒤의 opaque 호출이 다시 덮음, 불확실한 목적지(다시 정규화 경로), wrapper 요약은 dst[0]을 run으로 내보내지만 그
+  호출자는 여전히 덮음(범위 B), dense/sparse 교차 확인, 8바이트 쓰기(여러 원자), 호출 시점 스택 아래 목적지. 변형 확인: 모델 표시
+  끔 → 3개 실패, exit crossing 변경 되돌림 → wrapper 테스트 실패, 불확실 제외 제거 → 불확실 테스트 실패.
+- 결과: DFB122 debug·release 모두 missing·불확실 → exact·확실. 기본 지표 09 debug 65/61 → 66/62, release 52/47 → 53/48,
+  win32 44/37·UE DebugGame 15/15·Dev 16/16 그대로; oracle 그대로(missing 0 — zlib 256 기존, DebugGame unexplained 1227 기존,
+  calls_modeled 19·13 같음). 테스트 798개 통과(그 뒤 리뷰 P2 테스트 2개 추가).
+- 기록: `.census6/strcpy_{prompt,agy,astra}.md`, `.census6/strcpy_impl_{prompt,agy,astra}.md`.

@@ -20,7 +20,9 @@ site may assume, without calling conventions:
   "opaque_call_write" debt.
 * ``preserves_memory``: every memory byte the call may change is a memory run
   or unknown memory; otherwise (unknown-address writes, unanchored objects,
-  opaque inner calls) all memory keeps call-clobber debt.
+  opaque inner calls) all memory keeps call-clobber debt -- except, with
+  ``memory_runs_final`` (external models), the bytes its memory runs write at
+  an exactly known place (``normalize._kept_call_memory``).
 
 Register bytes UNKNOWN on some exit, computed through debts or from
 unanchored memory, or that an inner call may change, stay opaque.
@@ -149,6 +151,11 @@ class ProvenCallEffect:
     # with them, so the caller decides them at the call (``~cw`` row) and
     # re-derives the effect with any pair not proven disjoint as failed
     writer_conditions: tuple = ()
+    # the memory runs are the values of their bytes when the call returns,
+    # whatever else it clobbers (an external model: "the rest of memory is as
+    # other_memory says"): a call not keeping memory still keeps the bytes
+    # its runs write at an exactly known place (``normalize._kept_call_memory``)
+    memory_runs_final: bool = False
 
 
 def derive_proven_call_effect(

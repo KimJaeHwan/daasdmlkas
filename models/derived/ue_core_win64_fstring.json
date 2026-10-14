@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 4,
+ "version": 5,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 1,
    "template_version": 1,
-   "semantics_version": 4
+   "semantics_version": 5
   },
   "parameters": {
    "private_frame_above": 40
@@ -29,7 +29,7 @@
   "models": [
    {
     "file": "crt-win64",
-    "sha256": "0bf129e4a7e604135158c7812cec82518be941d5d117da5b08c67e608b81c7f3"
+    "sha256": "404b277adda902c3954e0fbc47e5c93e5ba199dc097ff8ec11723ca9b08c728d"
    },
    {
     "file": "ue-core-win64",
@@ -53,7 +53,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "8ca4b1bbdf9749c90719050c670d927ca0bc3341+dirty",
+   "engine_revision": "e985dfc0ec840f39e6712dc7b63df36d7ecb49ba+dirty",
    "bundle": "ea65ba0c9345504088f51de08e477313a79135fb99ae07e159816022ec7749aa",
    "index_addresses": true,
    "stack_evidence": [

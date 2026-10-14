@@ -77,7 +77,7 @@ def test_memcpy_with_a_constant_count_is_exact():
     results = _analyze(_memcpy_caller())
     item = results["1:1000"]
     ((call, label),) = item.declared.items()
-    assert label == "external-model:crt-win64/memcpy@v3"
+    assert label == "external-model:crt-win64/memcpy@v4"
     effect = item.proven[call]
     assert effect.preserves_memory and len(effect.memory_runs) == 1
     function = item.normalized

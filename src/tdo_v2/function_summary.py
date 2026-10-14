@@ -1109,8 +1109,9 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     memory_keeping = set()
     bounds = {key: (object_id, bound) for key, object_id, bound in normalized.call_below_bounds}
     below_calls = set()
+    kept = dict(normalized.kept_call_memory)  # a model's memory runs (``normalize._kept_call_memory``)
     for key, effect in normalized.proven_call_effects:  # bytes a callee summary proves kept
-        preserved[key] = tuple(preserved.get(key, ())) + tuple(effect.preserved)
+        preserved[key] = tuple(preserved.get(key, ())) + tuple(effect.preserved) + tuple(kept.get(key, ()))
         if effect.preserves_memory and (not effect.clobbers_below or key in bounds):
             memory_keeping.add(key)
             if effect.clobbers_below:

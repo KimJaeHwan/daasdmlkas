@@ -159,6 +159,9 @@ class NormalizedFunction:
     # they land on their static object (None: anywhere); ``may_alias`` gave
     # every read they may reach a debt (``function_summary.uncertain_writers_of``)
     uncertain_writers: tuple = ()
+    # (call key, memory spans) a call not keeping memory keeps anyway: its
+    # model's memory runs at an exactly known place (``_kept_call_memory``)
+    kept_call_memory: tuple = ()
     # (call effect / rep element row key, evaluation key, anchor) of rows
     # writing at an anchored address (``relative_memory.project_anchored``)
     call_anchors: tuple = ()
@@ -698,6 +701,50 @@ def _call_stack_span(call_key, proven, transitions, observation, context):
     return resolved.span if type(resolved) is ResolvedStorage else None
 
 
+def _kept_call_memory(proven_call_effects, memory_ssa, wild_objects, uncertain) -> dict:
+    """Call key -> (memory spans, their run rows) the call keeps although it
+    does not keep memory: the bytes an effect with ``memory_runs_final`` (an
+    external model) writes in a memory run whose place memory SSA resolved
+    exactly -- the run row's data writes all in one object (not wild), one
+    contiguous range of the run's size, no unresolved write, the row not an
+    uncertain-address writer (``uncertain``; the caller normalizes again when
+    one becomes so) -- and whose run carries no condition (no alias or writer
+    conditions) and does not keep old bytes. The rows sit just before the
+    CALL (``_proven_call_rows``), so the call keeping those bytes leaves the
+    run's value there."""
+    action_of = {action.operation_key: action for action in memory_ssa.actions}
+    unresolved = {memory_ssa.actions[item.action_id].operation_key for item in memory_ssa.unresolved_writes}
+    found = {}
+    for key, effect in proven_call_effects.items():
+        if not effect.memory_runs_final or effect.preserves_memory or effect.writer_conditions:
+            continue
+        spans, rows = [], []
+        for index, run in enumerate(effect.memory_runs):
+            row = f"{key}~{len(effect.runs) + index}"
+            action = action_of.get(row)
+            if action is None or row in unresolved or row in uncertain or run.keeps_old or run.conditions:
+                continue
+            definitions = [memory_ssa.definitions[item] for item in action.write_definition_ids]
+            if not definitions or any(item.kind is not MemoryDefinitionKind.DATA_WRITE for item in definitions):
+                continue
+            objects = {item.span.object_id for item in definitions}
+            if len(objects) != 1 or objects & set(wild_objects):
+                continue
+            covered = sorted((item.span.start, item.span.end) for item in definitions)
+            start, end = covered[0][0], covered[0][1]
+            for low, high in covered[1:]:
+                if low != end:
+                    break
+                end = high
+            else:
+                if end - start == run.write.size:
+                    spans.append(ByteSpan(objects.pop(), start, end - start))
+                    rows.append(row)
+        if spans:
+            found[key] = (tuple(spans), tuple(rows))
+    return found
+
+
 def _call_below_bounds(proven_call_effects, transitions, effect_unit, memory_ssa, observation, scopes,
                        context) -> tuple:
     """(call key, stack object, bound) for calls that clobber below the
@@ -1136,10 +1183,12 @@ class _Retry:
     """Normalize again with these memory reads blocked (``stale_reads``) and
     these rep sites left unexpanded (their count or direction proof failed)."""
 
-    def __init__(self, failed: frozenset, sites: frozenset = frozenset(), bounds: frozenset = frozenset()) -> None:
+    def __init__(self, failed: frozenset, sites: frozenset = frozenset(), bounds: frozenset = frozenset(),
+                 uncertain: dict | None = None) -> None:
         self.failed = failed
         self.sites = sites
         self.bounds = bounds
+        self.uncertain = uncertain or {}  # uncertain-address writers found (``_kept_call_memory``)
 
 
 def _merge_uncertain(old: dict, new: dict) -> dict:
@@ -1175,6 +1224,7 @@ class _ScopedNormalizer:
                 blocked |= result.failed
                 sites |= result.sites
                 bounds |= result.bounds
+                uncertain = _merge_uncertain(uncertain, result.uncertain)
                 continue
             reached = dict(result.uncertain_writers)  # its own fixed point (``_normalize_once``)
             merged = _merge_uncertain(reached, uncertain_writers_of(result, unit.observation))
@@ -1513,6 +1563,10 @@ class _ScopedNormalizer:
             context,
         ) if row[0] not in _blocked_bounds)
         proven_preserved = {key: row.preserved for key, row in proven_call_effects.items()}
+        kept_memory = _kept_call_memory(proven_call_effects, memory_ssa, wild_objects, _uncertain)
+        for key, (spans, _) in kept_memory.items():
+            # a model's memory runs survive its clobber of the rest of memory
+            proven_preserved[key] = tuple(proven_preserved[key]) + spans
         for key, object_id, bound in below_bounds:
             # keeps every memory byte this function tracks except its stack below the bound
             proven_preserved[key] = tuple(proven_preserved[key]) + _memory_spans_except_below(
@@ -1600,6 +1654,10 @@ class _ScopedNormalizer:
             if grown == _uncertain:
                 break
             _uncertain = grown
+        if any(set(rows) & set(_uncertain) for _, rows in kept_memory.values()):
+            # a kept run's write turned out uncertain-address: its place may be
+            # another, so the call keeps nothing there -- normalize again
+            return _Retry(frozenset(), uncertain=_uncertain)
         # every value read from memory that an address, a definition atom or a rep
         # count was built on must be the value the final state gives that read
         # (no write that got its address later changed what reaches it); a rep
@@ -1730,6 +1788,7 @@ class _ScopedNormalizer:
             call_anchors=anchors,
             uncertain_nodes=uncertain_nodes,
             open_nodes=open_nodes, opaque_nodes=opaque_nodes,
+            kept_call_memory=tuple(sorted((key, spans) for key, (spans, _) in kept_memory.items())),
         )
 
     def _build_cfg(

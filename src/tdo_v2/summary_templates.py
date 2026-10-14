@@ -50,8 +50,9 @@ TEMPLATE_VERSION = 1
 # entry-values-do-not-address-the-new-frame when they rest on it (docs 25.9)
 # -- older ones rest on it unlabelled. 4: nested same-object pointer values
 # composed (a callee's "same as what I was passed" through the caller's own
-# copies, docs 25.11)
-ENGINE_SEMANTICS_VERSION = 4
+# copies, docs 25.11). 5: a call not keeping memory keeps the bytes its
+# external model's memory runs write at an exactly known place (docs 25.15)
+ENGINE_SEMANTICS_VERSION = 5
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
