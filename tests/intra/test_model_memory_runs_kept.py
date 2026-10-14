@@ -177,8 +177,10 @@ def test_an_eight_byte_write_split_into_atoms_is_kept_whole(tmp_path):
 
 
 def test_a_destination_below_the_stack_pointer_has_no_silent_miss():
-    # dst below the call-time stack pointer (the callee's frame): undefined
-    # behaviour in C; the graph must still not hide a real dependency
+    # dst below the call-time stack pointer (the callee's frame): outside the
+    # model's preconditions (dst must be the caller's writable storage), and
+    # the oracle's strcpy writes no frame of its own -- this only checks the
+    # graph against that run; the keeping itself rests on the model contract
     builder = _src(FunctionBuilder().sub_rsp(0x48))
     builder = _strcpy(builder, add(reg(RCX), reg(RSP), const(-0x40 & 0xFFFF_FFFF_FFFF_FFFF)))
     builder = (builder.ins(add(T, reg(RSP), const(-0x40 & 0xFFFF_FFFF_FFFF_FFFF)), load(reg(R9, 1), T))
