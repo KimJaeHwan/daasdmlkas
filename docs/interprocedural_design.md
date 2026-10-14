@@ -1219,3 +1219,44 @@ call_clobber 부채의 읽기와 사이에 있는 호출의 대상), `.census6/w
   순.
 - UE 케이스(R002/R005/R007/R008/R009/R010)는 may_alias·call_clobber·opaque_call_write·주소 모르는 쓰기가 섞여 있음 — 앞 절들의
   분석(컨테이너, 포인터 다시 읽기, D)과 같음.
+
+### 25.14 09 testbed의 import DLL 연결(DFB130/131) (2026-10-14, 구현 검토 Antigravity·Astra 7차 승인)
+
+25.13에서 DFB130/131의 불확실은 "DLL 연결(24.2)을 안 켬"이 원인이었음. 켜 보니 두 결함이 나와 고침.
+
+- **C DLL의 template이 적용되지 않던 문제**(`summary_store.ExternalModels.lookup`): `libraries`를 적은 모델 파일은 import를
+  (라이브러리, `original_name`)으로만 찾았는데, C export는 `original_name`이 None → 연결이 만든 template이 한 번도 적용 안 됨(UE
+  Core는 mangled 이름이 있어서 됐음). 이제 (라이브러리, original이 있으면 original, 없으면 import 이름) — `linking`이 template을
+  만들 때 쓰는 열쇠와 같음. `libraries` 없는 파일(CRT)은 그대로(짧은 이름, `?`-mangled 제외).
+- **debug 빌드의 import 호출 모양**(`interprocedural._slot_loaded_register`): debug 빌드는 `mov rax, [__imp_X]; call rax`로 DLL을
+  부름(`call [__imp_X]`가 아님) → "호출 0개". 이 모양을 import 호출로 인정하는 조건(엔진의 p-code block 그래프 위에서):
+  - CALLIND가 있는 block B가 자기 명령어의 시작이고, 함수 시작 block이 아니며, 앞 block P가 정확히 하나(P ≠ B);
+  - P는 **평범한 명령어 하나 전체**(`_plain_into`): fallthrough가 B의 명령어, flow target 없음, call/override 아님, CALL·CALLIND·
+    CALLOTHER·BRANCH·CBRANCH·BRANCHIND·RETURN 연산 없음 → P의 연산이 모두 순서대로 실행된 뒤 B로 들어감(관찰된 흐름과 p-code 중
+    무엇을 믿든);
+  - P에서 R과 겹치는 마지막 쓰기가 import 칸 주소에서 R 전체로의 COPY;
+  - B에서 CALLIND 앞에 호출 없음, 대상은 R 자신(그 앞에 R과 겹치는 쓰기 없음) 또는 R의 COPY인 임시값(`UNIQUE`만 — 메모리는
+    STORE가 이름 없이 덮을 수 있음);
+  - BRANCHIND가 있는 함수(대상 모름)·그래프가 unsupported인 함수는 인정 안 함.
+  - 이 연결은 `call [slot]`과 같은 사실(import 칸에 그 export 주소가 있음)에 기댐. `import-slots-hold-their-exports` 가정 보고는
+    두 모양 모두에 아직 없음 — 한 번에 따로 다룰 일(두 리뷰 동의).
+- **p-code block 그래프 보강**(`pcode_blocks`, 검토 중 나온 기존 결함): 관찰된 흐름과 p-code가 어긋날 수 있는 모양을 추측하지
+  않고 unsupported로 보고: 마지막이 아닌 RETURN; 지역 flow target(예외 착지점)이 있는 call은 한 덩어리이고 마지막 연산이 유일한
+  CALL/CALLIND일 때만; 쪼개진 명령어가 착지점 있는 call이거나 override 표시가 있음; 쪼개진 명령어에서 관찰된 다음 명령어가
+  실행되는 sub-block에서 닿지 않거나, flow target이 실행되는 branch의 목적지가 아님. `.census6/graph_census.py`로 모든 Bundle의
+  모든 함수(09 debug 125·release 91·win32 81, UE DebugGame 119·Dev 71, zlib 25)에서 HEAD와 새 코드 모두 전부 supported → 지금
+  결과에 영향 없음. 쪼개지지 않은 명령어는 엔진 전체가 Ghidra의 관찰된 흐름을 믿는 기존 전제 그대로.
+- 테스트: `tests/intra/test_model_lookup_c_imports.py`(2), `tests/intra/test_import_call_shapes.py`(22, 반례마다 그 반례를 막는
+  조건으로 거부되는지 확인; 각 검토 차수의 새 반례 테스트는 이전 코드에서 실패).
+- **결과**(DLL 연결 켬, `.census6/run_link09.sh`): debug: template 4개 중 4개 적용, DFB130 missing·불확실 → exact·확실,
+  DFB131 missing → exact·확실, DFB075 missing → exact·확실(바뀐 root 3개). release: 2개 중 2개 적용, DFB130 exact·불확실 →
+  exact·확실, DFB131 missing → exact·확실(바뀐 root 2개). 연결 없는 기본 지표는 그대로(09 debug 65/61, release 52/47, win32 44/37,
+  UE DebugGame 15/15, Dev 16/16), oracle도 그대로(missing 0 — zlib 256은 기존, DebugGame unexplained 1227 기존; calls_modeled
+  debug 19·release 13으로 HEAD와 같음). 테스트 792개 통과.
+- 실행 방법: DLL을 Ghidra 프로젝트에 먼저 import·분석(`analyzeHeadless /root/ghidra_link_proj link/libs09<cfg> -import <사본
+  LIBDFBENCH_IMPORTLIB.DLL>`), 그다음 `run_dfbench --link LIBDFBENCH_IMPORTLIB.DLL=<dll> --ghidra-project
+  /root/ghidra_link_proj/link.gpr --link-cache /root/tdo_link_cache --link-folder /libs09<cfg>`. 기본 지표 실행(`dfbench_metric.sh`)은
+  연결 없이 그대로 둠(기준선 비교용) — 연결 결과는 이 절의 숫자로 따로 기록.
+- DFB075(`dfb_external_no_summary`)는 "요약 없는 외부 호출"로 설계된 케이스지만 DLL 안의 함수가 `return x`라서 연결하면 정답대로
+  확실해짐. manifest의 `unresolved_call_boundary` 경고는 연결이 없을 때의 기대임.
+- 기록: `.census6/linkfix{,2..7}_{prompt,agy,astra}.md`.

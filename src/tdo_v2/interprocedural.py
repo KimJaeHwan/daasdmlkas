@@ -583,10 +583,9 @@ def _unproven_image_operands(unit) -> bool:
 
 def _external_sites(unit, image_info, external_models, disabled=frozenset(), usable=None, refused=None) -> dict:
     """Call key -> (model file, entry) for calls to imported symbols with a
-    model: ``CALL`` of an import thunk, ``CALLIND`` of a value copied from
-    an import slot within the call instruction (``call [__imp_X]``), or a
-    terminal ``BRANCHIND`` through an import slot (``jmp [__imp_X]``, a tail
-    call composed like ``BRANCH`` tails). A model resting on an assumption
+    model, at the import call shapes ``import_call_sites`` recognizes
+    (``call [__imp_X]``, ``mov rax, [__imp_X]; call rax``, a terminal ``jmp
+    [__imp_X]`` -- a tail call composed like ``BRANCH`` tails, ...). A model resting on an assumption
     switched off in this run (``disabled``) is not applied: the call stays
     opaque; so is one ``usable`` finds a reason against (put in ``refused``)."""
     found = {}
@@ -611,8 +610,11 @@ def import_call_sites(unit, image_info) -> dict:
     """Call key -> imported symbol for the import call shapes the engine binds
     to models: ``CALL`` of an import thunk, ``CALLIND`` of a value copied from
     an import slot within the call instruction (``call [__imp_X]``), a
-    terminal ``BRANCHIND`` through an import slot (``jmp [__imp_X]``)."""
+    terminal ``BRANCHIND`` through an import slot (``jmp [__imp_X]``), and a
+    ``CALLIND`` of a register an import slot was loaded into on the only way
+    into the call (``mov rax, [__imp_X]; call rax``, ``_slot_loaded_register``)."""
     found = {}
+    loaded = _slot_loaded_register(unit, image_info)
     for instruction in unit.observation.instructions:
         operations = instruction.operations
         for ordinal, operation in enumerate(operations):
@@ -620,9 +622,11 @@ def import_call_sites(unit, image_info) -> dict:
                 continue
             symbol = None
             target = operation.inputs[0]
+            key = _operation_key(instruction.address, ordinal, operation.opcode)
             if operation.opcode == "CALL" and target.kind is VarnodeKindCode.ADDRESS:
                 symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
-            elif operation.opcode == "BRANCHIND" and target.kind is VarnodeKindCode.ADDRESS                     and instruction.fallthrough is None and ordinal == len(operations) - 1:
+            elif operation.opcode == "BRANCHIND" and target.kind is VarnodeKindCode.ADDRESS \
+                    and instruction.fallthrough is None and ordinal == len(operations) - 1:
                 symbol = image_info.import_at_slot(target.coordinate.space_id, target.coordinate.byte_offset)
             elif operation.opcode == "CALLIND":
                 for copy in operations[:ordinal]:
@@ -630,9 +634,111 @@ def import_call_sites(unit, image_info) -> dict:
                             and copy.inputs[0].kind is VarnodeKindCode.ADDRESS:
                         source = copy.inputs[0].coordinate
                         symbol = image_info.import_at_slot(source.space_id, source.byte_offset)
+                if symbol is None:
+                    symbol = loaded.get(key)
             if symbol is not None:
-                found[_operation_key(instruction.address, ordinal, operation.opcode)] = symbol
+                found[key] = symbol
     return found
+
+
+_CALL_OPCODES_ALL = ("CALL", "CALLIND", "CALLOTHER")
+
+
+def _overlaps(varnode, other) -> bool:
+    return varnode is not None and other is not None and varnode.kind is other.kind \
+        and varnode.coordinate.space_id == other.coordinate.space_id \
+        and varnode.coordinate.byte_offset < other.coordinate.byte_offset + other.byte_size \
+        and other.coordinate.byte_offset < varnode.coordinate.byte_offset + varnode.byte_size
+
+
+def _slot_loaded_register(unit, image_info) -> dict:
+    """CALLIND key -> import for ``mov rax, [__imp_X]; call rax`` (the 09
+    testbed's debug build calls its import DLL this way), on the engine's
+    p-code block graph (``pcode_blocks``, the flow memory SSA uses):
+    - the block B holding the CALLIND starts its instruction, is not the entry
+      block and has exactly one predecessor block P (P is not B): every
+      execution of the call comes from the end of P; P is a whole plain
+      instruction falling through into B (``_plain_into``);
+    - in B before the CALLIND: no call, and the target is the register R
+      itself (no write overlapping R) or a temporary (``UNIQUE``; never
+      memory, which a ``STORE`` may overwrite unnamed) whose last write is a
+      COPY of R (no write overlapping R before that COPY);
+    - in P: the last write overlapping R is a COPY of all of R from an import
+      slot (P has no call that could change R with no output).
+    Functions with a BRANCHIND (unknown targets) or an unsupported graph: none."""
+    from .pcode_blocks import build_pcode_block_graph
+
+    observation = unit.observation
+    function = unit.scopes.function
+    entry = getattr(function, "entry", None)
+    if entry is None or any(operation.opcode == "BRANCHIND" for row in observation.instructions
+                            for operation in row.operations):
+        return {}
+    graph = build_pcode_block_graph(observation, entry)
+    if graph.unsupported is not None:
+        return {}
+    rows = {row.address: row for row in observation.instructions}
+    predecessors: dict = {}
+    for block in graph.blocks:
+        for successor in block.successors:
+            predecessors.setdefault(successor, []).append(block)
+    found = {}
+    for block in graph.blocks:
+        row = rows[block.instruction]
+        operations = row.operations[block.start:block.stop]
+        for index, operation in enumerate(operations):
+            if operation.opcode != "CALLIND" or not operation.inputs:
+                continue
+            target, prefix = operation.inputs[0], operations[:index]
+            if any(item.opcode in _CALL_OPCODES_ALL for item in prefix):
+                continue
+            if target.kind is VarnodeKindCode.REGISTER:
+                register, before = target, prefix
+            elif target.kind is VarnodeKindCode.UNIQUE:
+                # a temporary: only operations naming it write it (memory a
+                # STORE may reach is not one)
+                writes = [position for position, item in enumerate(prefix) if _overlaps(item.output, target)]
+                if not writes:
+                    continue
+                last = prefix[writes[-1]]
+                if last.opcode != "COPY" or last.output != target or last.inputs[0].kind is not VarnodeKindCode.REGISTER:
+                    continue
+                register, before = last.inputs[0], prefix[:writes[-1]]
+            else:
+                continue
+            if any(_overlaps(item.output, register) for item in before):
+                continue
+            into = predecessors.get(block.key, [])
+            if block.key == graph.entry or len(into) != 1 or into[0].key == block.key:
+                continue
+            source = into[0]
+            if block.start != 0 or not _plain_into(rows[source.instruction], source, row.address):
+                continue
+            source_operations = rows[source.instruction].operations
+            writes = [position for position, item in enumerate(source_operations) if _overlaps(item.output, register)]
+            if not writes:
+                continue
+            last = source_operations[writes[-1]]
+            if last.opcode != "COPY" or last.output != register or last.inputs[0].kind is not VarnodeKindCode.ADDRESS:
+                continue
+            slot = last.inputs[0].coordinate
+            symbol = image_info.import_at_slot(slot.space_id, slot.byte_offset)
+            if symbol is not None:
+                found[_operation_key(row.address, block.start + index, operation.opcode)] = symbol
+    return found
+
+
+def _plain_into(source_row, source, call_address) -> bool:
+    """P is a whole plain instruction that only falls through into the call
+    instruction: no flow targets (no override, landing pad or jump), no flow
+    override flag, not a call, and no branch, return or call operation -- so
+    its operations all run, in order, before the call instruction, whatever
+    the observed flow and the p-code would otherwise have to agree on."""
+    return source.start == 0 and source.stop == len(source_row.operations) \
+        and source_row.fallthrough == call_address and not source_row.flow_targets \
+        and not source_row.flow.is_call and not source_row.flow.is_override \
+        and not any(item.opcode in _CALL_OPCODES_ALL + ("BRANCH", "CBRANCH", "BRANCHIND", "RETURN")
+                    for item in source_row.operations)
 
 
 def _prove_extents(unit, normalized, proven, constants, rejected=None) -> bool:

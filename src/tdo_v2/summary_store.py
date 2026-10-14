@@ -43,7 +43,8 @@ stack pointer is always treated as clobbered) or "clobbered".
 
 Matching an import: a file listing ``libraries`` (e.g. a C++ engine DLL)
 matches only imports of one of those libraries whose original (mangled) name
-is in an entry's ``original_names``; a file without ``libraries`` (the C
+-- or, for an import with no separate original (a C export), its name -- is
+in an entry's ``original_names``; a file without ``libraries`` (the C
 runtime, whose import library varies) matches by short name, never a C++
 (``?``-mangled) import. Two entries matching one import is an error unless one
 file lists the other entry in ``overrides`` (``"<file id>/<entry name>"``).
@@ -370,8 +371,12 @@ class ExternalModels:
         for model_file in self.files:
             for entry in model_file.entries:
                 if model_file.libraries:
+                    # (library, the name as imported): an import with no separate
+                    # original (a C export) is imported under its name -- as
+                    # ``linking`` keys the calls it derives for
+                    imported = original if original is not None else name
                     hit = library is not None and library.upper() in model_file.libraries \
-                        and original is not None and original in entry.original_names
+                        and imported in entry.original_names
                 else:
                     hit = not (original or "").startswith("?") and bool({name, name.lstrip("_")} & set(entry.names))
                 if hit:

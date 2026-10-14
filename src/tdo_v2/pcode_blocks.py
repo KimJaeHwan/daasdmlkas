@@ -14,7 +14,16 @@ instruction's own address), from ``fallthrough``, and from the instruction's
 observed successors when its last operation ends it. Blocks unreachable from
 the function entry (operations after an unconditional branch) execute never
 and are dropped. Unsupported shapes are reported, not guessed: a relative
-branch outside its instruction, or an indirect branch that is not last.
+branch outside its instruction, an indirect branch or a return that is not
+last; and,
+where the observed flow and the p-code could disagree (none occurs in the
+corpus, ``.census6/graph_census.py``): a call with local flow targets
+(exception landing pads) unless it is one straight block ending in its only
+call operation (operations after it would seem to run before the exceptional
+edge); a split instruction that is a call with such targets or carries a flow
+override; a split instruction whose observed successors its reachable
+sub-blocks do not all reach, or whose flow targets are not all destinations of
+its reachable branches.
 """
 
 from __future__ import annotations
@@ -25,6 +34,7 @@ from ._scope_contracts import AddressCoordinate, ValidatedFunctionObservation, V
 from .control_projection import control_successor_coordinates
 
 _BRANCHES = ("BRANCH", "CBRANCH", "BRANCHIND")
+_CALLS = ("CALL", "CALLIND")
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +92,16 @@ def build_pcode_block_graph(
     for address in sorted(instructions):
         row = instructions[address]
         key = instruction_key(address)
+        if any(item.opcode == "RETURN" for item in row.operations[:-1]):
+            return PcodeBlockGraph(instruction_key(entry), (), "a return that is not last")
         if not has_internal_flow(row) or address in straight:
             raw = control_successor_coordinates(row, local_addresses=local, function_entry=entry)
+            operations = row.operations
+            if _landing_pads(row, local, entry) and not (
+                operations and operations[-1].opcode in _CALLS
+                and not any(item.opcode in _CALLS + ("CALLOTHER",) for item in operations[:-1])
+            ):
+                return PcodeBlockGraph(instruction_key(entry), (), "a call with landing pads that does not end in its call")
             successors = tuple(instruction_key(target) for target in raw if target in local)
             blocks[key] = PcodeBlock(
                 key, address, 0, len(row.operations), tuple(sorted(set(successors))),
@@ -141,6 +159,10 @@ def _split(row, local, entry):
         else:
             targets[ordinal] = ("address", destination.coordinate)
     starts = sorted(leaders)
+    if _landing_pads(row, local, entry):
+        return "a split call with landing pads"
+    if row.flow.is_override:
+        return "a split instruction with a flow override"
 
     def segment_key(start: int) -> str:
         return base if start == 0 else f"{base}#{start}"
@@ -186,7 +208,38 @@ def _split(row, local, entry):
         rows.append(PcodeBlock(
             segment_key(start), row.address, start, stop, tuple(sorted(set(successors))), exits
         ))
+    # the observed flow must agree with the p-code's: every observed successor
+    # reached from a sub-block that runs, every flow target a destination of a
+    # branch that runs (a branch in an unreachable sub-block places none)
+    by_key = {block.key: block for block in rows}
+    reached, pending = set(), [base]
+    while pending:
+        key = pending.pop()
+        if key in reached or key not in by_key:
+            continue
+        reached.add(key)
+        pending.extend(by_key[key].successors)
+    leaving = {successor for key in reached for successor in by_key[key].successors if successor not in by_key}
+    observed = control_successor_coordinates(row, local_addresses=local, function_entry=entry)
+    if {instruction_key(target) for target in observed if target in local} - leaving:
+        return "observed successors the instruction's p-code does not reach"
+    if operations[-1].opcode != "BRANCHIND":  # a terminal BRANCHIND takes the observed targets
+        placed = {
+            targets[block.stop - 1][1] for block in rows
+            if block.key in reached and block.stop - 1 in targets and targets[block.stop - 1][0] == "address"
+            and operations[block.stop - 1].opcode in ("BRANCH", "CBRANCH")
+        }
+        if {target for target in row.flow_targets if target in local} - placed:
+            return "flow targets the instruction's branches do not place"
     return rows
+
+
+def _landing_pads(row, local, entry) -> tuple:
+    """A call instruction's local flow targets (``control_successor_coordinates``
+    adds them; the fallthrough too when listed)."""
+    if not row.flow.is_call:
+        return ()
+    return tuple(target for target in row.flow_targets if target in local and target != entry)
 
 
 __all__ = ("PcodeBlock", "PcodeBlockGraph", "build_pcode_block_graph", "has_internal_flow", "instruction_key")
