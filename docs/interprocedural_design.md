@@ -1130,3 +1130,27 @@ win32 160/160 · UE Dev 568(400 담음, 168 부채) · DebugGame 1063(614 담음
   복구; 프레임을 안 쓰는 함수는 보고 안 함; 끈 상태에서도 callee 자기 프레임 쓰기는 호출자 메모리 보존(구조적 규칙).
 - 결과: 테스트 758개. 켬(기본) = 지표 그대로, 모든 Bundle에서 이 가정이 실제로 쓰여 보고됨. 끔(가정의 무게): 09 debug
   65/61 → 65/58, release 그대로, win32 44/37 → 41/30, UE DebugGame 15/15 → 13/13, UE Dev 그대로; 모든 경우 "확실한데 놓침" 0.
+
+### 25.10 D단계 전 진단: R005(FString::AppendChar)는 승인된 D로 안 풀림 (2026-10-14, Fable·Astra 의견 — 사용자 결정 필요)
+
+진단(`.census6/diag_appendchar.py`, Core 라이브러리 Bundle의 AppendChar 폐포를 C1 켠 엔진으로 파생): 파생 템플릿에 주소 없는 쓰기
+2개가 남음 — 1800f5078(`Data[i] = c`, 2바이트), 1800f50d6(`Data[i+1] = 0`). 주소 = RAX + 2*sext(EDI).
+- 기준(RAX = 1800f5070의 `[rbx]` 다시 읽기, ResizeGrow 경로와 합류): 처음엔 wild로 봤으나 Fable 확인 결과 **진입 `*(this+0)` 원자**
+  — realloc 모델의 같은 객체 행(`same_mem`, null_is_fresh)을 `_pointer_row`가 합성. 기준은 막히지 않음.
+- index(EDI): `lea edi, [rdx-1]`(rdx = Num) 뒤 `cmovz edi, ebp`(ebp = 0) → index = (Num == 0) ? 0 : Num - 1. 식 사슬:
+  INT_ADD(Num, -1) 됨 → SUBPIECE(경계 원자 없음) → cmov JOIN {없음, 0} → INT_ZEXT → 없음. **여기서 끊김.**
+- 두 번째 끊김(Fable): 파생 템플릿의 `[this+0]` run 값이 None — `function_summary._pointer_values.value_of`가 안쪽 행의
+  ("nonstack",)만 합성하고 ("same", span, flag)는 합성 안 함. 호출자의 `S[0]` 읽기가 알 수 없는 포인터를 거침.
+- 그래서 승인된 D(진입 값만의 선형 index 식)는 지금 실패 사례 어느 것도 고치지 못함(R002/R009/R010 컨테이너·루프, R007/R008
+  포인터 다시 읽기).
+
+선택지(기록: `.census6/d_diagnosis_{prompt,astra,fable}.md`):
+1. **두 의견 공통 첫걸음**: `_pointer_values`에서 안쪽 ("same", span, flag) 합성(가정 없음, 20절 (d)를 한 단계 더). R007/R008에도
+   도움될 수 있음.
+2. Fable "D-lite": SUBPIECE 경계 원자 + 한 번 실행되는 JOIN의 opaque 원자(일반 C1 규칙, 검증기로 확인) → 두 쓰기가 정확한 원자
+   묶음 위치 하나를 얻음; 그다음 D를 줄여서(기준 = null_is_fresh 진입 칸 값, index = opaque 항, 범위만). 기대: R005에서 A가 가능한
+   출처, B 없음. "확실"은 미검증, "정확"은 경로 조건(F단계)이 필요.
+3. Astra: 배열 트랙은 여기서 멈추고(B/B2a/C1 완료) 포인터 다시 읽기(R007/R008)부터 — 1번은 그 일부.
+4. 둘 다 거부: (b) 블록 단위 요약 + E(지금은 불필요, 비쌈), (a) 후보 쓰기(JOIN이 SUBPIECE/ZEXT 아래에 있어 비쌈, 정밀도만).
+사용자 결정: R005의 목표(가능한 출처 A vs 정확+확실), 순서(D-lite vs 포인터 다시 읽기 먼저 — 1번은 어느 쪽이든 먼저),
+D 완화(opaque index 항, realloc 모델의 기존 가정 위 같은 객체 기준, E 없음) 승인 여부, once-join 원자를 일반 규칙으로 할지.
