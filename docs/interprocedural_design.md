@@ -1200,3 +1200,22 @@ D 완화(opaque index 항, realloc 모델의 기존 가정 위 같은 객체 기
   `run_index_ub.sh`, 커밋 안 함): 주소 모르는 쓰기 09 debug 3 → 2, release 2 → 1, win32 11 그대로, UE DebugGame 86 → 88, UE Dev
   31 → 28, zlib 628 → 616; **바뀐 root 0개**(모든 Bundle). → #2 단독으로는 보류. R005는 #2 + #3(D-lite, 요약의 index 쓰기를
   호출한 쪽에서 위치 결정) + 호출한 쪽 판단이 한 묶음이어야 움직임.
+
+### 25.13 남은 불확실·실패의 원인 분류 (2026-10-14, 진단만)
+
+도구: `.census6/why_unknown.py`(주소 모르는 접근이 어디서 끊기나), `.census6/why_unsure.py`(케이스 root가 어떤 부채로 불확실한가,
+call_clobber 부채의 읽기와 사이에 있는 호출의 대상), `.census6/what_target.py`(호출 대상 이름·import).
+
+- **09 Bundle의 불확실은 거의 전부 `call_clobber_read`**(호출이 레지스터·메모리를 바꿨을 수 있음): debug 10개 중 9개(6개는 이것
+  하나만), release 8개 모두, win32 10개 중 8개. 사이에 있는 호출의 종류:
+  - 다른 DLL의 import(DFB130 arg→ret, DFB131 outparam): **이미 있는 DLL 연결(24.2, `--link`)**을 지표 실행에서 안 켬.
+  - 함수 포인터 테이블(DFB072): 간접 호출 대상이 읽기 전용 테이블에서 옴 — 테이블의 후보 대상을 모두 합치는 기능이 없음.
+  - 모델 없는 CRT 함수: strcpy(DFB122), setjmp(DFB110, 예외적 흐름도 있음).
+  - TLS 접근 함수(DFB091, function-000109가 요약되지 않음 — 원인 미조사).
+  - 원래 풀 수 없게 설계된 것: DFB074(unresolved indirect), DFB075(요약 없는 외부 호출) — 불확실이 정답.
+  - DFB064: 간접 재귀(알려진 한계).
+- **주소 모르는 접근**은 09에서는 몇 개뿐이고 케이스 결과에 거의 영향 없음(DFB044, win32 DFB122·DFB201의 함수에만). UE에서는
+  루프 안에서 읽은 포인터(DebugGame 61 읽기·16 쓰기), rep 문자열(16·33), 판정 거부(32·21), 호출된 함수의 쓰기(16), 합류(Dev 26·6)
+  순.
+- UE 케이스(R002/R005/R007/R008/R009/R010)는 may_alias·call_clobber·opaque_call_write·주소 모르는 쓰기가 섞여 있음 — 앞 절들의
+  분석(컨테이너, 포인터 다시 읽기, D)과 같음.
