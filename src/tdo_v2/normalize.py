@@ -146,6 +146,13 @@ class NormalizedFunction:
     # writing private frame bytes only, and the wild objects (``may_alias``)
     private_frame_writes: frozenset = frozenset()
     wild_objects: frozenset = frozenset()
+    # diagnostics only (``origin_witnesses``): a summarized memory run's
+    # ``~in<i>`` row -> how many of its leading reads are the run's value
+    # (the rest: its destination address), and the relative objects' atom
+    # tuples / atom descriptions recorded by the projector
+    call_value_inputs: tuple = ()
+    address_objects: tuple = ()   # (object id, (atom tuple, space id))
+    address_atoms: tuple = ()     # (atom, description)
     # call effect rows the function's own address facts rest on (pointer
     # values of its summary, ``function_summary._pointer_values``): rows of a
     # fresh result, and (row, input row, argument varnode) of same-object results
@@ -872,7 +879,7 @@ def _pending_write_keys(effect_unit) -> frozenset:
 
 
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries,
-                      stack_span=None, pointer_rows=None):
+                      stack_span=None, pointer_rows=None, value_inputs=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
@@ -973,6 +980,10 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
         if kind == "memory":
             if run.keeps_old:
                 inputs.append(load(run.write))
+            if value_inputs is not None:
+                # the leading reads are the run's value; the rest its destination
+                # address (``origin_witnesses``)
+                value_inputs[f"{call_key}~in{index}"] = len(inputs)
             if run.write.anchor is not None or run.write.pointer is not None:
                 inputs.extend(base(run.write)[0])
         anchors = sorted({
@@ -1320,6 +1331,8 @@ class _ScopedNormalizer:
             fresh_objects: set = set()
             nonstack_objects: set = set()
             pointer_rows: dict = {}
+            value_inputs: dict = {}
+            address_metadata: dict = {"objects": {}, "atoms": {}}
             fresh_rows = frozenset(
                 f"{key}~{index}"
                 for key, effect in proven_call_effects.items() if effect.fresh_registers
@@ -1374,7 +1387,7 @@ class _ScopedNormalizer:
                             call_transitions, staged_temporaries,
                             _call_stack_span(operation_key, proven_call_effects[operation_key],
                                              call_transitions, observation, context),
-                            pointer_rows,
+                            pointer_rows, value_inputs,
                         )
                         for row in rows:
                             operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
@@ -1488,6 +1501,7 @@ class _ScopedNormalizer:
                     nonstack_objects=nonstack_objects,
                     once_blocks=once_blocks,
                     settle_pending=settle,
+                    address_metadata=address_metadata,
                     blocked_reads=_blocked_reads,
                     used_reads=used_reads,
                 )
@@ -1783,6 +1797,9 @@ class _ScopedNormalizer:
                 ((row, reader, argument) for row, (reader, argument) in same_object_rows.items()),
                 key=lambda item: item[0])),
             pointer_rows=tuple(sorted(pointer_rows.items(), key=lambda item: item[0])),
+            call_value_inputs=tuple(sorted(value_inputs.items())),
+            address_objects=tuple(address_metadata["objects"].items()),
+            address_atoms=tuple(address_metadata["atoms"].items()),
             uncertain_writers=tuple(sorted(
                 ((key, conditions) for key, conditions in _uncertain.items()), key=lambda item: item[0])),
             call_anchors=anchors,

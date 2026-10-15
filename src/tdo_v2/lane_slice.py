@@ -112,14 +112,25 @@ def lane_index(normalized, unit) -> "_Index":
     return _Index(normalized, unit)
 
 
-def lane_slice(normalized, unit, seeds, index=None) -> LaneSlice:
+def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False) -> LaneSlice:
     """``seeds``: (node, spans) -- spans: the absolute ByteSpans demanded of a
-    definition node, or None / () for FULL. ``index``: ``lane_index``'s."""
+    definition node, or None / () for FULL. ``index``: ``lane_index``'s.
+    ``ignore_debts``: never enter a MEMORY_DEBT node (seeds included), nor
+    follow a read fragment a call may have changed (a call-clobber debt on
+    that operation overlapping it: the value before the call reaches it only
+    if the call did not change it) -- the paths that cross no debt
+    (``origin_witnesses``)."""
     index = index or _Index(normalized, unit)
     demands: dict = {}
     pending: list = []
+    clobbered: dict = {}
+    if ignore_debts:
+        for row in getattr(normalized, "call_clobber_reads", ()):
+            clobbered.setdefault(row.operation_key, []).extend(row.spans)
 
     def add(node, demand):
+        if ignore_debts and index.graph.node(node).kind is NodeKind.MEMORY_DEBT:
+            return
         if node in demands:
             old = demands[node]
             if old is FULL:
@@ -154,7 +165,7 @@ def lane_slice(normalized, unit, seeds, index=None) -> LaneSlice:
         if node in index.definition_of:
             _definition(index, node, demand, add)
         elif node in index.action_of:
-            _operation(index, node, demand, add)
+            _operation(index, node, demand, add, clobbered)
         else:
             _other(index, node, add)
     return LaneSlice(demands, frozenset(demands))
@@ -225,10 +236,11 @@ def _value_bytes(index, writer, span, wanted):
     return frozenset(byte - span.start for byte in wanted)
 
 
-def _operation(index, node, demand, add):
+def _operation(index, node, demand, add, clobbered=None):
     action_id = index.action_of[node]
     found = index.operation(action_id)
     reads = index.reads.get(action_id, ())
+    changed = (clobbered or {}).get(index.ssa.actions[action_id].operation_key, ())
     operand_demands = None if demand is FULL or found is None or not index.little \
         else _operand_demands(found, demand)
     for read in reads:
@@ -241,6 +253,9 @@ def _operation(index, node, demand, add):
                 bytes_ = _whole(fragment.span)
             else:
                 bytes_ = frozenset(read.span.start + offset for offset in wanted) & _whole(fragment.span)
+            # ``ignore_debts``: not the bytes a call may have changed
+            bytes_ -= frozenset(byte for span in changed if span.object_id == fragment.span.object_id
+                                for byte in range(span.start, span.end))
             if not bytes_:
                 continue
             for definition_id in fragment.definition_ids:

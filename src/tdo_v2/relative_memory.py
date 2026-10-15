@@ -238,6 +238,7 @@ def project_function_relative_memory(
     fresh_objects: set | None = None,
     pointer_rows: dict | None = None,
     nonstack_objects: set | None = None,
+    address_metadata: dict | None = None,
     once_blocks: frozenset | None = None,
     settle_pending: bool = True,
     blocked_reads: frozenset = frozenset(),
@@ -333,6 +334,8 @@ def project_function_relative_memory(
         projector.fresh_objects = fresh_objects
     if nonstack_objects is not None:
         projector.nonstack_objects = nonstack_objects
+    if address_metadata is not None:
+        projector.address_metadata = address_metadata
     # Writes of one summarized call that bind to overlapping caller bytes: the
     # callee took its objects as distinct, so their order there is unknown here
     # (caller passed one object twice) -- they stay unresolved (debt). An
@@ -813,6 +816,10 @@ class _Projector:
         self._stack_derived: set[int] = set()
         self.nonstack_objects: set = set()
         self.wild_objects: set = set()
+        # diagnostics (``origin_witnesses``): relative object -> (atom tuple,
+        # space id) -- the object id is a function of exactly these, so entries
+        # from any pass stay true -- and atom -> what defined it
+        self.address_metadata: dict = {"objects": {}, "atoms": {}}
         self._action_ids = {
             action.operation_key: action_id
             for action_id, action in enumerate(first_pass.actions)
@@ -1035,6 +1042,9 @@ class _Projector:
             self._ssa.function_scope,
             _digest_ints(b"relative-address-space-v1", (_address_atom_key(address.atoms), space_id)),
         )
+        metadata = getattr(self, "address_metadata", None)   # diagnostics only
+        if metadata is not None:
+            metadata["objects"][object_id] = (address.atoms, space_id)
         if any(atom in self._definition_atoms for atom, _ in address.atoms):
             self.wild_objects.add(object_id)
         if any(atom in self._boundary or coefficient != 1 for atom, coefficient in address.atoms):
@@ -1091,6 +1101,8 @@ class _Projector:
             if reader in self._blocked:
                 return None  # a value read from memory that failed validation: no identity
         atom = _digest_ints(b"definition-atom-v1", (*key.encode("utf-8"), _stable_storage_key(requested_span)))
+        if getattr(self, "address_metadata", None) is not None:
+            self.address_metadata["atoms"][atom] = f"value of {key} #{atom & 0xffffffff:08x}"
         if nonstack and not fresh:
             self._nonstack_atoms.add(atom)
         elif key not in self._fresh and not fresh:
@@ -1282,6 +1294,10 @@ class _Projector:
                                         None if IMAGE_BASE_TRACKING.get() is not None else 0)
         elif definition.kind is MemoryDefinitionKind.ENTRY:
             atom = _stable_storage_key(requested_span)
+            if getattr(self, "address_metadata", None) is not None:
+                self.address_metadata["atoms"][atom] = (
+                    f"entry {requested_span.object_id.kind.value}+{requested_span.start:#x}:{requested_span.size}"
+                    f" #{atom & 0xffffffff:08x}")
             self._note_entry_atom(requested_span, atom)
             result = _AddressExpression(((atom, 1),), 0, requested_span.size)
         elif definition.kind is MemoryDefinitionKind.DATA_WRITE:

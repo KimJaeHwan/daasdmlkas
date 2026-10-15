@@ -1449,3 +1449,40 @@ Data가 `this` 안을 가리키는 경우(할당 모델 식별자가 없으면 1
 **10. 예상과 순서(구현할 때).** E 끔: 2단계 전과 같음(R005 missing). E 켬: R005에서 A만, B 없음, 불확실(정확·확실은 경로 조건이나
 정방향 사실). 순서: 0번(따로 구현 가능, 2단계 전 뜻 회복) → 1~5번과 7번 한 묶음 → 6번은 정방향 분석기와 함께. 기록:
 `.census6/bundle_*`(설계 1차), `.census6/step3_*`(설계 2차), `.census6/step3b_*`(설계 3차).
+
+### 25.19 출처 증거(origin witnesses): 보고된 출처가 왜 있는지 (R007/R008, 가정 없음, 2026-10-15, 설계 검토 3차·구현 검토 Antigravity·Astra)
+
+사용자 요청: R007/R008을 **가정 없이** 개선. 확인 결과 "같은 칸을 다시 읽으면 같은 값"은 memory SSA가 이미 함; R007에서는 읽기 사이에
+Get 호출(느린 경로가 간접 호출 결과를 돌려줘 rax가 "모름")과 주소 모르는 포인터 쓰기가 있어서 가정 없이는 p1 = p2 = p3를 증명 못 함 →
+판정은 그대로("A·B 가능, 불확실"). 대신 **진단만** 하는 기능: 각 출처가 어떤 부채를 거쳐 오는지 보고(출처·완전성은 바뀌지 않음).
+- **`has_debt_free_path`**: `_lane_origin_labels`와 같은 lane slice에서 MEMORY_DEBT 노드를 빼고(시드 포함), 호출이 바꿨을 수 있는
+  읽기 조각(그 연산의 call-clobber 부채 span과 겹침 — 호출 전 값은 호출이 안 바꿨을 때만 옴)도 따라가지 않을 때 닿는가.
+  그래프 성질일 뿐 "증명된 출처"가 아님. (첫 구현에서 R007의 B가 "부채 없는 길"로 나와 확인해 보니, Get 호출 뒤 rax를 읽는 연결이
+  call-clobber 부채 노드를 거치지 않고 호출 전 rax(= B)로 이어짐 → 겹치는 조각 규칙을 더함.)
+- **증거(witness)**, 출처마다 최대 8개(`truncated`): may_alias 부채는 (쓰기, 읽기) 전달마다 따로 — 그 쓰기의 **저장 값**(STORE의 값
+  피연산자, 요약된 메모리 run의 값 읽기 `NormalizedFunction.call_value_inputs`, rep 원소의 값 읽기)에서 출처에 닿을 때만(주소 입력
+  제외), 피호출자가 붙인 출처는 `provenance: callee`. call_clobber 부채는 그 연산의 겹치는 입력 조각의 호출 전 값에서 닿는 출처 —
+  "the value from before <calls>, if they leave it unchanged". 그 밖의 부채는 종류와 위치.
+- **주소 차이 조건**(may_alias 전달): 쓰기가 주소 불확실 쓰기가 아니고, 읽기·쓰기가 각각 relative span 하나, 두 주소 피연산자가
+  부채에 기대지 않고(그 연산의 겹치는 call-clobber 부채 포함; 호출·rep 행은 `call_anchors`로), 원자 묶음이 서로 한 원자씩만 다르고
+  계수 1일 때: 쓰기 원자 − 읽기 원자 ∈ [dr − dw − sw + 1, dr − dw + sr − 1] (mod 2^비트) = 어느 바이트든 겹침의 조건(값 전체 전달·
+  충분 조건 아님). 0이 구간 밖이면 "equal pointers exclude this transfer". 문장은 "이 전달은 …일 때만"(그 출처 전체가 아님).
+  원자 묶음은 projector가 객체를 만들 때 기록(`address_objects`: 객체 id → (원자 묶음, 공간) — id가 바로 그 묶음의 해시라 어느
+  단계에서 기록해도 맞음; `address_atoms`: 원자 → 무엇의 값).
+- 쓰는 법: `run_dfbench --witnesses`(기본 끔): JSON의 root에 `witnesses`, 케이스 줄 아래에 부채 없는 길이 없는 출처의 증거.
+- **R007/R008에서 나온 것**(UE Development·DebugGame): A·B 모두 부채 없는 길 없음; B는 (1) Get 호출들이 rax(또는 메모리 칸)를
+  바꾸지 않았다면 그 전 값 B가 포인터·값으로 쓰임, (2) 주소가 불확실한 쓰기 `[p2+0x34] = B`를 통해 옴 — 주소 조건은 나오지 않음
+  (Get 결과가 "모름"이라 쓰기 주소가 불확실). 즉 진짜 원인은 Get 요약의 rax가 "모름"인 것(느린 경로의 간접 호출).
+- 구현 검토 1차(Astra P1·P2, Antigravity P2) 반영: 모든 시작점은 **그 바이트만**(STORE 값 피연산자의 span, run의 값 읽기 span,
+  호출이 바꿨을 수 있는 span)으로 시드 — 정의 전체(FULL)로 하면 `PIECE(B, A)`의 아래 4바이트만 저장해도 B가 붙음; ignore_debts는
+  겹치는 조각을 통째로 버리지 않고 바뀌었을 수 있는 바이트만 뺌; call-clobber 부채 노드 자체에 붙은 출처는 `call_value`("a value
+  <calls> may have produced"); `traversal`: "lane" 또는 lane 출처가 꺼졌거나 node slice로 대체됐을 때 "node-fallback"; 원자 이름은
+  전체 16진; 텍스트에 `(callee)` 표시; 조건은 메모리 span이 정확히 하나(그리고 relative)일 때만.
+- 구현 검토 2차(Astra P1·P2) 반영: 시드는 요청 span을 들어오는 연결의 span과 **교집합**(저장 전에 덮인 바이트 제외); `traversal`은
+  `summary_engine._witnesses`가 `_lane_origin_labels`와 같은 기준으로 정함; 원자 설명에 짧은 id(`#하위 32비트`).
+- 테스트 `tests/intra/test_origin_witnesses.py`(9 — 아래 7개 + 저장 전에 덮인 바이트는 저장 값 아님(교집합을 빼면 실패), 서로 다른
+  포인터는 다르게 출력): 전달마다 따로 구간(A [-3,3] 문구 없음, B [-7,-1] "equal pointers exclude"),
+  주소 불확실 쓰기는 조건 없음, 주소에만 쓰인 출처는 저장 값 증거가 아님(값 대신 연산 노드에서 찾게 바꾸면 실패), 호출 전 값 증거,
+  넓은 값의 저장된 바이트만(바이트를 버리고 FULL로 시드하면 실패), 부채 노드의 출처는 call_value(그 증거를 빼면 실패),
+  lane 출처 끔 → node-fallback.
+- 기록: `.census6/cond_report{,2,3}_*`(설계 검토 3차), `.census6/witness_impl{,2,3}_*`(구현 검토 3차, 둘 다 승인). 결과: 테스트 831개, 지표·oracle 그대로.

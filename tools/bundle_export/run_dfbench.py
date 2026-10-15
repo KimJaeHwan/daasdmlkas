@@ -120,6 +120,8 @@ def main() -> int:
     parser.add_argument("--binary", default="dfbench_win_core",
                         help="case filter when --expected is cases_manifest.json")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--witnesses", action="store_true",
+                        help="origin witnesses per root: why each label is reported (diagnostics, docs 25.19)")
     parser.add_argument("--model-dir", type=Path, action="append", default=[],
                         help="extra directory of model files (repeatable; also TDO_V2_MODEL_DIRS)")
     parser.add_argument("--legacy-engine", action="store_true",
@@ -217,6 +219,7 @@ def main() -> int:
                 pcodeop_models=pcodeop_models(),  # not imported functions: --no-external-models keeps them
                 stack_evidence=tuple(evidence),
                 linker=linker,
+                origin_witnesses=args.witnesses,
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},
             )
@@ -268,6 +271,7 @@ def main() -> int:
             "interprocedural": list(root.interprocedural_origin_labels),
             "complete": getattr(root, "is_locally_complete", None),
             "effective": getattr(root, "is_effectively_complete", None),
+            **({"witnesses": root.explanation} if args.witnesses and root.explanation else {}),
         })
     if args.expected:
         expected = json.loads(args.expected.read_text(encoding="utf-8"))
@@ -291,10 +295,32 @@ def main() -> int:
                 verdict = "PASS" if ok else "FAIL"
             tally[verdict] += 1
             print(f"  {case['id']} {verdict:7} got={sorted(origins)} want={want} forbid={forbid}")
+            for line in _witness_lines(got, anchor) if args.witnesses and got else ():
+                print("      " + line)
         print("[run]", tally)
     if args.json:
         args.json.write_text(json.dumps(results, indent=1), encoding="utf-8")
     return 0
+
+
+def _witness_lines(got, anchor) -> list:
+    """Text lines for a case's root labels with no debt-free path (docs 25.19)."""
+    lines = []
+    for root in got["roots"]:
+        if root["label"] != anchor or "witnesses" not in root:
+            continue
+        for label, item in root["witnesses"].get("origin_witnesses", {}).items():
+            if item["has_debt_free_path"]:
+                continue
+            for witness in item["witnesses"]:
+                where = (f"{witness['writer']} -> {witness['reader']}" if witness["kind"] == "may_alias"
+                         else ", ".join(witness.get("sites", ())))
+                why = witness["condition"] or f"(no condition: {witness.get('reason') or 'not an alias transfer'})"
+                callee = " (callee)" if witness.get("provenance") == "callee" else ""
+                lines.append(f"{label} via {witness['kind']}{callee} {where}: {why}")
+            if item["truncated"]:
+                lines.append(f"{label}: more witnesses not shown")
+    return lines
 
 
 if __name__ == "__main__":

@@ -98,8 +98,11 @@ def analyze_frozen_bundle_with_summaries(
     linker=None,
     assume_import_slots_hold_exports: bool = True,
     assume_entry_values_not_frame: bool = True,
+    origin_witnesses: bool = False,
 ) -> EngineRun:
-    """``external_models``: declared models of imported functions
+    """``origin_witnesses``: put per-root origin witnesses (diagnostics,
+    ``origin_witnesses``) in ``RootSlice.explanation``.
+    ``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
     facts (``image_info``); each model used is listed in ``EngineRun.assumptions``.
     ``stack_evidence``: whole-program stack-switch evidence (``stack_evidence``)
@@ -304,10 +307,13 @@ def analyze_frozen_bundle_with_summaries(
                     completeness = replace(completeness, complete=False)
                 labels = _lane_origin_labels(analysis, by_key[function_key(analysis.entry)].unit,
                                              nodes[analysis.entry], label, occurrence, node_labels, lane_indexes)
+                explanation = _witnesses(analysis, by_key[function_key(analysis.entry)].unit, nodes[analysis.entry],
+                                         label, occurrence, labels, node_labels, lane_indexes,
+                                         results[function_key(analysis.entry)].origins)                     if origin_witnesses else {}
                 roots.append(RootSlice(
                     analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence, root_nodes,
                     tuple(sorted(labels)),
-                    (), {}, completeness, completeness,
+                    (), explanation, completeness, completeness,
                 ))
         return EngineRun(
             program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(roots),
@@ -317,6 +323,28 @@ def analyze_frozen_bundle_with_summaries(
 
 
 LANE_DIAGNOSTICS = {"roots": 0, "narrowed": 0, "not_subset": 0, "restored": 0}
+
+
+def _witnesses(analysis, unit, rows, label, occurrence, labels, node_labels, indexes, origins) -> dict:
+    """Origin witnesses of one root (diagnostics, ``origin_witnesses``); the
+    traversal decided as ``_lane_origin_labels`` decides it."""
+    import os
+
+    from .lane_slice import lane_index, lane_slice
+    from .origin_witnesses import labels_in_lanes, root_witnesses
+
+    seeds = [(row.node, row.physical_spans) for row in rows
+             if row.kind is BoundaryKind.SINK and row.label == label and row.occurrence_ordinal == occurrence]
+    if not seeds or not labels:
+        return {}
+    if id(analysis.normalized) not in indexes:
+        indexes[id(analysis.normalized)] = lane_index(analysis.normalized, unit)
+    index = indexes[id(analysis.normalized)]
+    traversal = "lane"
+    if os.environ.get("TDO_V2_LANE_ORIGINS") == "0" \
+            or not labels_in_lanes(lane_slice(analysis.normalized, unit, seeds, index), index, rows) <= node_labels:
+        traversal = "node-fallback"
+    return root_witnesses(analysis.normalized, unit, rows, seeds, labels, index, origins, traversal)
 
 
 def _raw_root_groups(analysis, rows):
@@ -368,7 +396,8 @@ def _lane_origin_labels(analysis, unit, rows, label, occurrence, node_labels, in
     TDO_V2_LANE_ORIGINS=0: the node slice's labels."""
     import os
 
-    from .lane_slice import FULL, lane_index, lane_slice
+    from .lane_slice import lane_index, lane_slice
+    from .origin_witnesses import labels_in_lanes
 
     if os.environ.get("TDO_V2_LANE_ORIGINS") == "0":
         return set(node_labels)
@@ -381,17 +410,9 @@ def _lane_origin_labels(analysis, unit, rows, label, occurrence, node_labels, in
         indexes[id(analysis.normalized)] = lane_index(analysis.normalized, unit)
     index = indexes[id(analysis.normalized)]
     lanes = lane_slice(analysis.normalized, unit, seeds, index)
-    found = set()
-    for row in rows:
-        if row.kind is not BoundaryKind.SOURCE or row.node not in lanes.demands:
-            continue
-        demand = lanes.demands[row.node]
-        span_of = lanes.definition_span(index, row.node)
-        # spans count only as bytes of the node's own storage (a row bound to
-        # an operation node, or with spans of another object: as spanless)
-        spans = [span for span in row.physical_spans if span_of is not None and span.object_id == span_of.object_id]
-        if not spans or demand is FULL or any(byte in demand for span in spans for byte in range(span.start, span.end)):
-            found.add(row.label)
+    # spans count only as bytes of the node's own storage (a row bound to an
+    # operation node, or with spans of another object: as spanless)
+    found = labels_in_lanes(lanes, index, rows)
     LANE_DIAGNOSTICS["roots"] += 1
     if not found <= node_labels:
         LANE_DIAGNOSTICS["not_subset"] += 1
