@@ -159,7 +159,8 @@ class ProvenCallEffect:
     # an accessor model under same-result-functions (docs 25.20): (model id,
     # identity -- the entry's label and its file's digest --, result register
     # span, input register spans, the read slot as an AnchoredSpan, nonstack,
-    # write_back)
+    # write_back, the result_separate_from_reads extent under
+    # accessor-result-separate or None)
     same_result: tuple | None = None
     # model ids (or "*") whose accessor state this call leaves unchanged
     preserves_accessor_state: tuple[str, ...] = ()

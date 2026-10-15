@@ -106,7 +106,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   pcodeop_models=None, private_frame_above=0,
                   assume_debug_break_traps_do_not_return=False,
                   own_library: str | None = None, keep_uncut=frozenset(),
-                  assume_same_result_functions=False) -> dict[str, AnalyzedFunction]:
+                  assume_same_result_functions=False,
+                  assume_accessor_result_separate=False) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -144,7 +145,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     ``assume_same_result_functions``: the named assumption same-result-functions
     (docs 25.20): model entries with ``same_result`` / ``preserves_accessor_state``
     carry them into their call effects; reported where a call used them
-    (``NormalizedFunction.same_result_uses``)."""
+    (``NormalizedFunction.same_result_uses``). ``assume_accessor_result_separate``:
+    accessor-result-separate -- their ``result_separate_from_reads`` extents
+    (``NormalizedFunction.accessor_separations``)."""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -173,6 +176,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
         ("import-slots-hold-their-exports", _import_slots_active()),
         ("same-result-functions", assume_same_result_functions),
+        ("accessor-result-separate", assume_accessor_result_separate),
     ) if not on}
     cuts = _model_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
                        image_info, external_models, own_library, disabled) \
@@ -380,7 +384,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     if effect is None:
                         continue
                     if "same-result-functions" not in disabled:
-                        effect = _accessor_effect(effect, model_file, entry, register_object, memory_space)
+                        effect = _accessor_effect(effect, model_file, entry, register_object, memory_space,
+                                                  "accessor-result-separate" not in disabled)
                     # every extent register, proven or not: a constant taken is
                     # checked again on each state (``_prove_extents``)
                     slices = entry.extent_registers()
@@ -584,19 +589,21 @@ def _same_result_labels(normalized) -> set:
     if not uses:
         return set()
     return {"same-result-functions"} | {f"accessor-state-preserved-by:{label}"
-                                        for _, _, claims, _ in uses for label in claims}
+                                        for _, _, claims, _ in uses for label in claims} \
+        | ({"accessor-result-separate"} if getattr(normalized, "accessor_separations", ()) else set())
 
 
-def _accessor_effect(effect, model_file, entry, register_object, memory_space):
+def _accessor_effect(effect, model_file, entry, register_object, memory_space, separate=False):
     """``effect`` with the entry's accessor claims (docs 25.20), under
-    same-result-functions: its ``same_result`` and ``preserves_accessor_state``."""
+    same-result-functions: its ``same_result`` and ``preserves_accessor_state``
+    (``separate``: accessor-result-separate is on -- the extent too)."""
     if entry.same_result is not None:
         result, inputs, read, nonstack, write_back = entry.same_result
         effect = replace(effect, same_result=(
             entry.model_id, f"{entry.label}#{model_file.digest[:16]}", ByteSpan(register_object, *result),
             tuple(ByteSpan(register_object, *item) for item in inputs),
             AnchoredSpan(ByteSpan(register_object, *read.base), read.disp, read.size, memory_space), nonstack,
-            write_back))
+            write_back, entry.separate_extent if separate else None))
     if entry.preserves_accessor_state:
         effect = replace(effect, preserves_accessor_state=entry.preserves_accessor_state)
     return effect

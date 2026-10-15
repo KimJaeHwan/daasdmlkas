@@ -226,6 +226,19 @@ REGISTRY: tuple[Assumption, ...] = (
         "_proven_call_rows (~sr rows), relative_memory._same_result_key",
         "assume_same_result_functions", "--assume-same-result-functions"),
     Assumption(
+        "accessor-result-separate", "switch", False,
+        "A model entry with same_result and result_separate_from_reads {extent: N}: the bytes [result, "
+        "result + N) of every call of it never overlap the read-slot bytes of any call of it in the same "
+        "activation (the resolved object is not where its handles live). Byte-level and symmetric: a write "
+        "lying inside [result, result + N) does not reach a slot, a write lying inside a slot does not reach "
+        "[result, result + N); a write extending beyond either range is not separated. Reported where a "
+        "function's accesses were separated by it.",
+        "A handle stored inside the object it resolves to within the first N bytes (a self-reference); "
+        "an extent larger than the resolved objects.",
+        "summary_store (result_separate_from_reads), relative_memory.accessor_separations, "
+        "may_alias._Policy.excluded / _written",
+        "assume_accessor_result_separate", "--assume-accessor-result-separate"),
+    Assumption(
         "test-only-boundary", "test-only", False,
         "Declared source/sink calls touch only their declared registers (benchmarks: the code between "
         "source and sink is sliced as if call-free); reported as test-only-boundary:<label>.",

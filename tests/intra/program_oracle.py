@@ -327,12 +327,43 @@ def _check_same_results(report, interpreter, function, effects, reg_space) -> No
                 continue
             value = tuple(returned.get((reg_space, result.start + index)) for index in range(result.size))
             by_atom.setdefault(atom, []).append((call, serial, value))
+    _check_separations(report, interpreter, effects, uses, reg_space)
     for atom, seen in by_atom.items():
         if len(seen) < 2:
             continue
         report.same_result_checked += 1
         if len({value for _, _, value in seen}) != 1:
             report.same_result_violations.append((atom, seen))
+
+
+def _check_separations(report, interpreter, effects, uses, reg_space) -> None:
+    """accessor-result-separate: no activation's [result, result + N) holds a
+    byte of any activation's read slot, per accessor (an assumption violation
+    otherwise) -- the calls the run executed."""
+    used = {identity for _, identity, _, _ in uses}
+    results: dict = {}
+    slots: dict = {}
+    for call, effect in effects.items():
+        same = effect.same_result
+        if same is None or len(same) < 8 or same[7] is None or same[1] not in used:
+            continue
+        for serial, (key, entry) in interpreter.activation_snapshots.items():
+            returned = interpreter.activation_returns.get(serial)
+            if key != call or returned is None:
+                continue
+            value = [returned.get((reg_space, same[2].start + index)) for index in range(same[2].size)]
+            place = _place(same[4], entry, interpreter.entry_values, reg_space, moduli=interpreter._moduli)
+            if None not in value:
+                results.setdefault(same[1], []).append(
+                    (sum(byte << (8 * index) for index, byte in enumerate(value)), same[7], same[4].space_id))
+            if place is not None:
+                slots.setdefault(same[1], []).append(place)
+    for identity, found in results.items():
+        for value, extent, space in found:
+            modulus = interpreter._moduli.get(space, 1 << 64)
+            for slot_space, start, size in slots.get(identity, ()):
+                if slot_space == space and any((start + index - value) % modulus < extent for index in range(size)):
+                    report.same_result_violations.append(("separation", identity, value, start))
 
 
 def _clobbered_by(function, reader, call) -> bool:

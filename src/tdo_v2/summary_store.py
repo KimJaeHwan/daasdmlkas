@@ -57,6 +57,10 @@ thread's stack. One read slot. ``"write_back": true``: the call may rewrite
 the slot with a value of the same class (a normalizing cache: an unresolved
 handle becomes the resolved pointer) -- the entry then has one memory row
 writing exactly the slot and loading it (its value rests on the old one).
+``result_separate_from_reads`` (optional, with ``same_result``; named
+assumption accessor-result-separate, off by default): ``{"extent": N}`` --
+the bytes [result, result + N) never overlap the read slot of any call of
+the entry in the caller's activation.
 ``preserves_accessor_state`` (optional, per entry): ``["<file id>/<entry>",
 ...]`` or ``["*"]`` -- a call of this entry leaves those accessors' hidden
 state unchanged (its transitive effects, callbacks included); every other
@@ -153,6 +157,8 @@ class ModelEntry:
     preserves_accessor_state: tuple[str, ...] = ()
     # (register write, the memory it also depends on: Access loads)
     register_loads: tuple = ()
+    # result_separate_from_reads extent (bytes), or None
+    separate_extent: int | None = None
 
     @property
     def model_id(self) -> str:
@@ -280,7 +286,7 @@ def load_model_file(path: str | Path) -> ModelFile:
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
                    "original_names", "internal", "assumptions", "noreturn", "same_result",
-                   "preserves_accessor_state"}
+                   "preserves_accessor_state", "result_separate_from_reads"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
             raise ModelError(f"{path}: entry fields must be {sorted(allowed)}")
         if item["other_memory"] not in ("preserved", "clobbered"):
@@ -324,6 +330,12 @@ def load_model_file(path: str | Path) -> ModelFile:
         )
         unknown_memory = tuple(_access(row["write"], "memory write") for row in item["memory"] if "value" in row)
         same_result = _same_result(item, registers, fresh, same_object, register_loads, path)
+        separate = item.get("result_separate_from_reads")
+        if separate is not None and (same_result is None or type(separate) is not dict or set(separate) != {"extent"}
+                                     or type(separate["extent"]) is not int
+                                     or not 0 < separate["extent"] <= MAX_MODEL_EXTENT):
+            raise ModelError(f"{path}: {item['name']}: result_separate_from_reads is {{extent: bytes}} "
+                             "of a same_result entry")
         preserving = item.get("preserves_accessor_state", [])
         if type(preserving) is not list or any(
                 type(name) is not str or (name != "*" and name.count("/") != 1) for name in preserving):
@@ -339,7 +351,8 @@ def load_model_file(path: str | Path) -> ModelFile:
                                   identity=source["sha256"][:12] if source["kind"] == "derived" else "",
                                   internal=item.get("internal", False), unknown_memory=unknown_memory,
                                   noreturn=item.get("noreturn", False), same_result=same_result,
-                                  preserves_accessor_state=tuple(preserving), register_loads=register_loads))
+                                  preserves_accessor_state=tuple(preserving), register_loads=register_loads,
+                                  separate_extent=None if separate is None else separate["extent"]))
     libraries = tuple(str(item).upper() for item in raw.get("libraries", ()))
     if libraries and any(not entry.original_names for entry in entries):
         raise ModelError(f"{path}: a file with libraries matches by original_names only")

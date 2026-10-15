@@ -69,7 +69,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                    model_dirs=(), models=None, pcodeops=_DEFAULT, stack_evidence=(), private_frame_above: int = 0x28,
                    traps: bool = True, assume_globals_disjoint: bool = True, direction_flag: bool = False,
                    import_slots: bool = False, per_export: bool = False, log=print,
-                   entry_values_not_frame: bool = True, same_result: bool = False):
+                   entry_values_not_frame: bool = True, same_result: bool = False,
+                   accessor_separate: bool = False):
     """(model file dict, {export name: refusal reason}, export names the
     Bundle does not export) -- the templates of ``export_names`` of the
     library Bundle at ``generation``, derived with the given analysis
@@ -169,6 +170,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_import_slots_hold_exports=import_slots,
                                        assume_entry_values_not_frame=entry_values_not_frame,
                                        assume_same_result_functions=same_result,
+                                       assume_accessor_result_separate=accessor_separate,
                                        own_library=library, keep_uncut=frozenset(targets))
         log(f"constants: {len(tracking.proofs[True])} proven image addresses, {len(tracking.proofs[False])} "
             f"fixed numbers, {len(tracking.proofs[None])} not understood (possibly base-dependent)")
@@ -217,11 +219,14 @@ def main(argv=None) -> int:
                         help="derive without debug-break-traps-do-not-return")
     parser.add_argument("--assume-same-result-functions", dest="same_result", action="store_true",
                         help="derive under same-result-functions (docs 25.20)")
+    parser.add_argument("--assume-accessor-result-separate", dest="accessor_separate", action="store_true",
+                        help="derive under accessor-result-separate (docs 25.20)")
     args = parser.parse_args(argv)
     raw, refused, missing = derive_library(
         args.generation, args.library, args.export, file_id=args.id, version=args.version,
         model_dirs=args.model_dir, stack_evidence=args.stack_evidence,
-        private_frame_above=args.private_frame_above, traps=args.traps, same_result=args.same_result)
+        private_frame_above=args.private_frame_above, traps=args.traps, same_result=args.same_result,
+        accessor_separate=args.accessor_separate)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(raw, indent=1) + chr(10), encoding="utf-8")
     print(f"wrote {len(raw['entries'])} templates to {args.output}")

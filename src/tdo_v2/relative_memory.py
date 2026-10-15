@@ -448,6 +448,7 @@ def reset_index_diagnostics() -> None:
     INDEX_DIAGNOSTICS["index_objects"] = set()
     INDEX_DIAGNOSTICS["seam_refusals"] = 0
 _VALUE_KINDS = frozenset({StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE})
+_WAIT = object()   # an accessor result whose key waits for pending writes (``_same_result_atom``)
 
 
 def single_execution_keys(observation, block_graph, straight=frozenset()) -> frozenset:
@@ -725,6 +726,49 @@ def stale_reads(effect_unit, observation, context, address_spaces, memory_ssa, u
         if any(value != final for value in values):
             failed.add(operation_key)
     return frozenset(failed)
+
+
+def accessor_separations(effect_unit, observation, context, address_spaces, memory_ssa, used, *,
+                         translation_namespace="", operation_overrides=None, **projector_options) -> tuple:
+    """accessor-result-separate (docs 25.20 D): for every accessor (identity)
+    whose used keys (``used``: (("same_result", row, ~sr), width) -> atoms)
+    carry a ``result_separate_from_reads`` extent N, the pairs (result object,
+    its bytes [0, N) as a span start and end, slot span, the slot's call) for
+    each result atom and each of that accessor's slot reads (one exact span).
+    The contract covers the calls the activation runs: a pair applies to a
+    write only where its slot's call has run (``may_alias._Policy.excluded``).
+    A slot without one exact span adds no pair (its bytes stay unseparated)."""
+    operations = {
+        _operation_key(instruction.address, ordinal, operation): operation
+        for instruction in observation.instructions
+        for ordinal, operation in enumerate(instruction.operations)
+    }
+    operations.update(operation_overrides or {})
+    projector = _configured_projector(effect_unit, observation, context, address_spaces, memory_ssa,
+                                      operations, translation_namespace, **projector_options)
+    spaces = {row.space_id: row for row in address_spaces}
+    results: dict = {}
+    slots: dict = {}
+    for (key, _), atoms in used.items():
+        if type(key) is not tuple:
+            continue
+        row = projector._pointer_rows.get(key[1])
+        if row is None or len(row) < 12 or row[10] is None or spaces.get(row[11]) is None:
+            continue
+        identity, extent, space_id = row[1], row[10], row[11]
+        start = 1 << spaces[space_id].address_size_bits   # the relative bias (``_relative_start``)
+        for atom in atoms:
+            object_id = StorageObjectId(
+                StorageObjectKind.FUNCTION_RELATIVE, memory_ssa.function_scope,
+                _digest_ints(b"relative-address-space-v1", (_address_atom_key(((atom, 1),)), space_id)))
+            results.setdefault(identity, set()).add((object_id, start, start + extent))
+        slot = projector._slot_span(row[6], row[7])
+        if slot is not None:
+            slots.setdefault(identity, set()).add((slot, key[1].rsplit("~", 1)[0]))
+    return tuple(sorted(
+        ((object_id, start, end, slot, call) for identity in results for object_id, start, end in results[identity]
+         for slot, call in slots.get(identity, ()) if slot.object_id != object_id),
+        key=lambda item: (repr(item[0]), item[1], item[3].canonical_key, item[4])))
 
 
 def project_anchored_after(normalized, observation, requests) -> dict:
@@ -1152,6 +1196,10 @@ class _Projector:
         (("same_result", row, ~sr row), width): ``stale_reads`` recomputes the
         key on the final state and ``normalize`` checks the ~sr row for debt."""
         atom = self._same_result_key(row, requested_span.size)
+        if atom is None and self._unsettled is not None and self._settles(row, requested_span.size):
+            # only pending writes keep the key from being made: no value now
+            # (a per-row atom would fix accesses to another object meanwhile)
+            return _WAIT
         if atom is None:
             return None
         if self.used_reads is not None:
@@ -1184,13 +1232,25 @@ class _Projector:
         text = repr((size, expect, token))
         return _digest_ints(b"same-result-v1", tuple(text.encode("utf-8")))
 
+    def _settles(self, row, size) -> bool:
+        """Whether ``row``'s key could be made were no write pending (the
+        same computation with the pending-write check off; the expression
+        cache and the used-read record are restored -- atom classifications
+        it adds are content-addressed facts of atoms, true in any pass)."""
+        unsettled, used, cache = self._unsettled, self.used_reads, dict(self._cache)
+        self._unsettled, self.used_reads = None, None
+        try:
+            return self._same_result_key(row, size) is not None
+        finally:
+            self._unsettled, self.used_reads, self._cache = unsettled, used, cache
+
     def _key_parts(self, row):
         """Every part of an accessor key but the slot's class: (identity,
         input and slot base expressions, slot displacement, width, state), or
         None (``_same_result_key``)."""
         if row is None or row[0] != "same_result" or not self._atoms_on:
             return None
-        _, identity, reader, inputs, base, displacement, slot_reader, width, _, state = row
+        _, identity, reader, inputs, base, displacement, slot_reader, width, _, state = row[:10]
         if state is None or reader in self._blocked or slot_reader in self._blocked:
             return None
         if self._unsettled is not None and (self._unsettled(reader) or self._unsettled(slot_reader)):
@@ -1227,6 +1287,14 @@ class _Projector:
         if fragment.span != reads[0].span or len(fragment.definition_ids) != 1:
             return None
         return self._definition_class(fragment.definition_ids[0], fragment.span, active, expect)
+
+    def _slot_span(self, operation_key, width):
+        """The bytes an accessor's slot load reads (one exact read), or None."""
+        action_id = self._action_ids.get(operation_key)
+        reads = [read for read in self._ssa.reads
+                 if read.action_id == action_id and read.span.size == width
+                 and read.span.object_id.kind in {StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE}]
+        return reads[0].span if action_id is not None and len(reads) == 1 else None
 
     def _definition_class(self, definition_id, span, active, expect):
         if definition_id in active:
@@ -1479,10 +1547,13 @@ class _Projector:
                 # realloc(NULL, n) is a new block; another constant stays that address
                 result = (self._definition_atom(definition, requested_span, fresh=True)
                           if _unsigned_wrap(value.displacement, value.byte_size) == 0 else value)
+        waiting = False
         if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE \
                 and definition.operation_key in self._pointer_rows and definition.span == requested_span:
             result = self._pointer_row(definition, requested_span)
-        if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE:
+            if result is _WAIT:
+                result, waiting = None, True
+        if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE and not waiting:
             result = self._definition_atom(definition, requested_span)
         self._active.remove(cache_key)
         self._cache[cache_key] = result

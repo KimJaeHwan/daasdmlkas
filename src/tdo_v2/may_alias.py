@@ -186,6 +186,29 @@ class _Policy:
         # the private-frame rule decided some byte private (the assumption
         # entry-values-do-not-address-the-new-frame was used)
         self.private_used = False
+        # accessor-result-separate (docs 25.20 D): (result object, start, end,
+        # slot span, the slot's call) -- ``excluded``; ``ran(call, writer)``:
+        # the call has run whenever the writer does
+        self.separations: tuple = ()
+        self.ran = None
+
+    def excluded(self, span: ByteSpan, other: StorageObjectId, writer: str) -> frozenset:
+        """Bytes of ``other`` a write of ``span`` by ``writer`` cannot reach
+        under accessor-result-separate: the slot bytes, for a write lying
+        wholly inside a result's [start, end); the result's [start, end), for
+        a write lying wholly inside a slot. A write extending beyond either is
+        not separated; nor is any write the slot's call may not have run
+        before (the contract covers the calls the activation runs: a slot of
+        a call on another path names no handle)."""
+        found = set()
+        for result, start, end, slot, call in self.separations:
+            if self.ran is None or not self.ran(call, writer):
+                continue
+            if span.object_id == result and other == slot.object_id and start <= span.start and span.end <= end:
+                found.update(range(slot.start, slot.end))
+            if span.object_id == slot.object_id and other == result and slot.contains(span):
+                found.update(range(start, end))
+        return frozenset(found)
 
     def is_private(self, object_id: StorageObjectId, offset: int, key: str, *, write: bool = False) -> bool:
         """A byte of this function's own frame no other base can reach at
@@ -236,6 +259,7 @@ def derive_may_alias_reads(
     uncertain_writers: frozenset = frozenset(),
     no_kill_writers: frozenset = frozenset(),
     uses: list | None = None,
+    separations: tuple = (),
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -249,7 +273,9 @@ def derive_may_alias_reads(
     ``MayAliasRead.uncertain`` (later exact writes kill that only where they
     definitely overwrite the bytes). ``no_kill_writers`` (the unconditional
     ones): their own write is no definite overwrite of its static bytes either
-    -- earlier writers stay possible there.
+    -- earlier writers stay possible there. ``separations``: the
+    accessor-result-separate pairs (``relative_memory.accessor_separations``);
+    with any, the dense engine (it keeps per-byte states).
     """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("may-alias analysis requires an exact effect unit")
@@ -297,13 +323,43 @@ def derive_may_alias_reads(
         for evidence in effect.writes
         if type(evidence) is ResolvedStorage and evidence.span.object_id in wild
     ) | frozenset(_UNCERTAIN + key for key in uncertain)
-    rows = run_dataflow(
-        "may-alias", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
-        unit, objects, policy,
-    )
+    policy.separations = tuple(separations)
+    if policy.separations:
+        policy.ran = _ran_before(unit)
+        rows = _dense_rows(unit, objects, policy)   # the sparse engine gens whole objects
+    else:
+        rows = run_dataflow(
+            "may-alias", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
+            unit, objects, policy,
+        )
     if uses is not None:   # ``uses``: whether the private-frame rule decided a byte
         uses.append(policy.private_used)
     return rows
+
+
+def _ran_before(unit):
+    """``ran(call, writer)``: every path to effect ``writer`` runs the call
+    operation ``call`` first -- the writer is one of the call's own rows, or
+    the call's block dominates the writer's (earlier in one block)."""
+    from ._sparse_dataflow import DominatorGraph
+
+    graph = DominatorGraph(unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks})
+    position = {}
+    for block in unit.blocks:
+        for index, effect in enumerate(block.effects):
+            position.setdefault(effect.operation_key, (block.key, index))
+
+    def ran(call: str, writer: str) -> bool:
+        if writer.split("~", 1)[0] == call:
+            return True
+        here, there = position.get(writer), position.get(call)
+        if here is None or there is None or here[0] not in graph.reachable or there[0] not in graph.reachable:
+            return False
+        if here[0] == there[0]:
+            return there[1] < here[1]
+        return graph._dominates(there[0], here[0])
+
+    return ran
 
 
 def private_frame_writes(
@@ -474,10 +530,10 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
         if not policy.may_alias(other, span.object_id) or (private and other not in policy.wild_objects):
             continue
         current = updated[other]
-        updated[other] = _ObjectState(
-            current.default | {writer},
-            {offset: calls | {writer} for offset, calls in current.bytes.items()},
-        )
+        excluded = policy.excluded(span, other, writer) if policy.separations else frozenset()
+        values = {offset: calls | {writer} for offset, calls in current.bytes.items() if offset not in excluded}
+        values.update({offset: current.at(offset) for offset in excluded})   # (kept as they were)
+        updated[other] = _ObjectState(current.default | {writer}, values)
     return updated
 
 

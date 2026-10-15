@@ -55,14 +55,14 @@ def _models(tmp_path, entries=ENTRIES):
     return load_external_models([path], "x86:LE:64:default", "win64")
 
 
-def _analyze(tmp_path, builder, on=True, entries=ENTRIES):
+def _analyze(tmp_path, builder, on=True, entries=ENTRIES, separate=False):
     image = ImageInfo("synthetic", (), (
         ImportedSymbol("CORE", "GetObj", None, (), ((1, GET),)),
         ImportedSymbol("CORE", "Touch", None, (), ((1, TOUCH),)),
         ImportedSymbol("CORE", "Keep", None, (), ((1, KEEP),)),
     ), (), ())
     results = analyze_units(program_units(builder), image_info=image, external_models=_models(tmp_path, entries),
-                            assume_same_result_functions=on)
+                            assume_same_result_functions=on, assume_accessor_result_separate=separate)
     return results["1:1000"]
 
 
@@ -539,3 +539,132 @@ def test_a_write_back_by_a_call_with_other_inputs_is_an_ordinary_write(tmp_path)
     builder.add_rsp(0x28).ret()
     atoms = [atom for *_, atom in sorted(_analyze(tmp_path, builder, entries=entries).normalized.same_result_uses)]
     assert len(atoms) == 3 and len(set(atoms)) == 3
+
+
+# -- S3: accessor-result-separate (docs 25.20 D) ----------------------------------
+
+SEPARATE = [_get_written_back(result_separate_from_reads={"extent": 0x38}), *ENTRIES[1:]]
+
+
+def _r007(*after, store_at=0x30):
+    """R007's shape: p1 = Get(this) (rbp); [p1+``store_at``] = A (edi);
+    p2 = Get(this); [p2+0x34] = B (r12d); p3 = Get(this); ``after``;
+    r9d = [p3+0x30]."""
+    builder = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), reg(RCX))).call(GET).ins(copy(reg(RBP), reg(RAX)))
+    builder.ins(add(T, reg(RBP), const(store_at)), store(T, reg(RDI, 4)))
+    builder.ins(copy(reg(RCX), reg(RBX))).call(GET)
+    builder.ins(add(T, reg(RAX), const(0x34)), store(T, reg(R12, 4)))
+    builder.ins(copy(reg(RCX), reg(RBX))).call(GET)
+    for row in after:
+        builder.ins(*row)
+    builder.ins(add(T, reg(RAX), const(0x30)), load(reg(R9, 4), T))
+    return builder.add_rsp(0x28).ret()
+
+
+def test_r007_with_separation_reads_a_only(tmp_path):
+    builder = _r007()
+    analyzed = _analyze(tmp_path, builder, entries=SEPARATE, separate=True)
+    atoms = [atom for *_, atom in analyzed.normalized.same_result_uses]
+    assert len(atoms) == 3 and len(set(atoms)) == 1
+    read = _read(analyzed, builder)
+    assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and read.is_complete
+    assert {"same-result-functions", "accessor-result-separate"} <= analyzed.inherited_assumptions
+    assert analyzed.normalized.accessor_separations
+
+
+def test_r007_without_separation_keeps_b(tmp_path):
+    builder = _r007()
+    analyzed = _analyze(tmp_path, builder, entries=SEPARATE, separate=False)
+    read = _read(analyzed, builder)
+    assert read.reaches(RDI, 4) and read.reaches(R12, 4)
+    assert analyzed.normalized.accessor_separations == ()
+    assert "accessor-result-separate" not in analyzed.inherited_assumptions
+
+
+def test_a_slot_of_a_call_that_may_not_run_separates_nothing(tmp_path):
+    # p = Get(this); if rdx == 0: q = Get(r12), [q+0x30] read; [r12] = A;
+    # x = [p+0x30] -- when Get(r12) does not run, r12 may be p+0x30
+    builder = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), reg(RCX))).call(GET).ins(copy(reg(RBP), reg(RAX)))
+    builder.cbranch("skip", FLAG, op("INT_NOTEQUAL", [reg(RDX), const(0)], FLAG))
+    builder.ins(copy(reg(RCX), reg(R12))).call(GET).ins(add(T, reg(RAX), const(0x30)), load(reg(RSI, 4), T))
+    builder.label("skip").ins(store(reg(R12), reg(RDI, 4)))
+    builder.ins(add(T, reg(RBP), const(0x30)), load(reg(R9, 4), T))
+    builder.add_rsp(0x28).ret()
+    # (no write-back: Get(this)'s would put debt on Get(r12)'s slot read)
+    entries = [_get(result_separate_from_reads={"extent": 0x38}), *ENTRIES[1:]]
+    analyzed = _analyze(tmp_path, builder, entries=entries, separate=True)
+    calls = {pair[4] for pair in analyzed.normalized.accessor_separations}
+    assert len(calls) == 2   # both slots have pairs, but the store may come without Get(r12)
+    read = _read(analyzed, builder)
+    assert read.reaches(RDI, 4)
+    (callee,) = program_units(_body([load(reg(RAX), reg(RCX))]))
+    report = check_program(analyzed.normalized, analyzed.unit.observation, {(1, GET): callee.observation},
+                           seeds=range(8),
+                           register_pools=lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000,
+                                                        RDX: seed % 2},
+                           havoc_calls=(REG, RSP, 8))
+    assert report.silent == []
+
+
+def test_a_store_outside_the_extent_is_not_separated(tmp_path):
+    # [p1+0x40] lies beyond the 0x38 bytes: it may be the slot
+    builder = _r007(store_at=0x40)
+    analyzed = _analyze(tmp_path, builder, entries=SEPARATE, separate=True)
+    assert len(analyzed.normalized.same_result_uses) == 1   # Get2's slot read carries the store's debt
+    assert _read(analyzed, builder).reaches(R12, 4)
+
+
+def test_a_write_beside_the_slot_still_reaches_the_result(tmp_path):
+    # [this+8] = rdx after the last Get: the slot's object but not the slot's
+    # bytes -- it may still be [p3+0x30]
+    builder = _r007([add(T2, reg(RBX), const(8)), store(T2, reg(RDX))])
+    analyzed = _analyze(tmp_path, builder, entries=SEPARATE, separate=True)
+    read = _read(analyzed, builder)
+    assert not read.is_complete and read.reaches(RDX)
+
+
+def test_a_store_through_the_result_in_a_loop_stays_unseparated(tmp_path):
+    # v1 limit: the loop's slot read waits for the store through the previous
+    # round's result, whose address waits for the key -- resolved only in the
+    # last stage, which the pending-write rule undoes: no key, no separation
+    entries = [_get(result_separate_from_reads={"extent": 0x38}), *ENTRIES[1:]]
+    analyzed = _analyze(tmp_path, _looping([add(T, reg(RAX), const(0x30)), store(T, reg(RDI, 4))]),
+                        entries=entries, separate=True)
+    assert analyzed.normalized.same_result_uses == () and analyzed.normalized.accessor_separations == ()
+
+
+@pytest.mark.parametrize("change, problem", [
+    ({"same_result": None, "result_separate_from_reads": {"extent": 0x38}}, "no same_result"),
+    ({"result_separate_from_reads": {"extent": 0}}, "empty extent"),
+    ({"result_separate_from_reads": {"extent": 1 << 20}}, "too large"),
+    ({"result_separate_from_reads": {"extent": 8, "start": 0}}, "unknown key"),
+])
+def test_a_separation_entry_is_validated(tmp_path, change, problem):
+    entry = _get(**change)
+    if entry.get("same_result") is None:
+        entry.pop("same_result")
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps({**HEADER, "entries": [entry]}), encoding="utf-8")
+    with pytest.raises(ModelError):
+        load_model_file(path)
+
+
+def _r007_oracle(tmp_path, body):
+    builder = _r007()
+    analyzed = _analyze(tmp_path, builder, entries=SEPARATE, separate=True)
+    (callee,) = program_units(body)
+    return check_program(analyzed.normalized, analyzed.unit.observation, {(1, GET): callee.observation},
+                         seeds=range(8),
+                         register_pools=lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000},
+                         havoc_calls=(REG, RSP, 8))
+
+
+def test_the_oracle_finds_no_separation_violation_for_a_resolver(tmp_path):
+    report = _r007_oracle(tmp_path, _resolver())
+    assert report.same_result_checked and report.same_result_violations == [] and report.silent == []
+
+
+def test_the_oracle_reports_a_result_holding_its_own_slot(tmp_path):
+    # returns the slot's own address: [result, result + 0x38) holds the slot
+    report = _r007_oracle(tmp_path, _body([copy(reg(RAX), reg(RCX))]))
+    assert any(item[0] == "separation" for item in report.same_result_violations)

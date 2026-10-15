@@ -84,7 +84,8 @@ from .scope_identity import (
     VarnodeKindCode,
 )
 from .relative_memory import (
-    project_function_relative_memory, single_execution_blocks, single_execution_keys, stale_reads,
+    accessor_separations, project_function_relative_memory, single_execution_blocks, single_execution_keys,
+    stale_reads,
 )
 from .observed_call_state import observed_call_state_projections, project_persistent_call_state
 from .opaque_values import OpaqueValueEvidenceProvider
@@ -172,6 +173,9 @@ class NormalizedFunction:
     # (result row, accessor identity, preserves_accessor_state claims, atom) of
     # each call result made a same-result atom (same-result-functions, docs 25.20)
     same_result_uses: tuple = ()
+    # (result object, start, end, slot span): accessor-result-separate pairs
+    # the may-alias analysis used (``relative_memory.accessor_separations``)
+    accessor_separations: tuple = ()
     # (call effect / rep element row key, evaluation key, anchor) of rows
     # writing at an anchored address (``relative_memory.project_anchored``)
     call_anchors: tuple = ()
@@ -1136,7 +1140,7 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             ))
     accessor = None
     if proven.same_result is not None and accessor_state is not None and pointer_rows is not None:
-        _, identity, result, inputs, read, nonstack, write_back = proven.same_result
+        _, identity, result, inputs, read, nonstack, write_back, extent = proven.same_result
         index = next((index for index, (kind, run, _, _) in enumerate(staged)
                       if kind == "register" and tuple(run.writes) == (result,)), None)
         written = next((index for index, (kind, run, _, _) in enumerate(staged)
@@ -1151,7 +1155,7 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             accessor = (f"{call_key}~{index}", (
                 "same_result", identity, f"{call_key}~sr", tuple(anchor_varnode(span) for span in inputs),
                 anchor_varnode(read.anchor), displacement(read), load_keys[read], read.size, nonstack,
-                accessor_state), None if written is None else f"{call_key}~{written}")
+                accessor_state, extent, read.space_id), None if written is None else f"{call_key}~{written}")
     # a value that may be a new block is fresh only as the call's sole pointer value
     unique = sum(getattr(run, "value", None) is not None for _, run, _, _ in staged) == 1
     for index, (kind, run, stage_key, target) in enumerate(staged):
@@ -1746,6 +1750,16 @@ class _ScopedNormalizer:
 
         from .function_summary import uncertain_writers_of
 
+        # accessor-result-separate (docs 25.20 D): (result object, start, end,
+        # slot span) pairs, from the keys used -- each validated below with them
+        separations = accessor_separations(
+            effect_unit, observation, context, address_spaces, memory_ssa, used_reads,
+            translation_namespace=unit.scopes.program.evidence.translation_namespace.language_id,
+            operation_overrides=_rep_overrides(sites, rep_plan, observation),
+            opaque_value_provider=opaque_value_provider, readonly_image=readonly_image,
+            once_keys=once_keys, fresh_keys=fresh_rows, same_object=same_object_rows,
+            pointer_rows=pointer_rows, once_blocks=once_blocks,
+        ) if any(type(key[0]) is tuple for key in used_reads) else ()
         open_nodes = _materialize_open_conditions(
             dependencies, memory_ssa, proven_call_effects, open_conditions or {}, operation_nodes)
         opaque_nodes = _materialize_opaque_call_writes(dependencies, memory_ssa, proven_call_effects,
@@ -1767,7 +1781,7 @@ class _ScopedNormalizer:
                 private_above=private_frame_above,
                 uncertain_writers=frozenset(_uncertain),
                 no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
-                uses=frame_uses,
+                uses=frame_uses, separations=separations,
             )
             dependencies = base.copy()
             may_alias_nodes, uncertain_nodes = _materialize_may_alias_debt(
@@ -1934,6 +1948,7 @@ class _ScopedNormalizer:
             uncertain_nodes=uncertain_nodes,
             open_nodes=open_nodes, opaque_nodes=opaque_nodes,
             kept_call_memory=tuple(sorted((key, spans) for key, (spans, _) in kept_memory.items())),
+            accessor_separations=separations,
             same_result_uses=tuple(
                 (row, pointer_rows[row][1], tuple(sorted(accessor_states[row.rsplit("~", 1)[0]][1])),
                  next(iter(values)))
