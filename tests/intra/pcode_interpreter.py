@@ -155,6 +155,8 @@ class Interpreter:
         # serial -> (call key, byte values at its start {(space, offset): byte};
         # a byte missing there was not touched before: ``entry_values``)
         self.activation_snapshots: dict = {}
+        # serial -> byte values when that outermost activation returned
+        self.activation_returns: dict = {}
         self._byte_inputs: list = []
         # inside an activation: byte -> the one caller byte (an "ext" tag) its
         # value is an exact copy of, through COPY / LOAD / STORE moves only
@@ -482,6 +484,8 @@ class Interpreter:
                     if self._activations:
                         next_location, _ = self._activations.pop()
                         if not self._activations:
+                            self.activation_returns[self._activation_serial] = {
+                                key: byte for key, (byte, _) in self._bytes.items()}
                             self._restore_call_stack_pointer()
                             self._restore_identity_bytes()
                             self._record_footprint()

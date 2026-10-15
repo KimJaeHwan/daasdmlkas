@@ -150,14 +150,15 @@ def main() -> int:
     parser.add_argument("--link-max-mem", default="10G", help="Ghidra heap for the linking export and scan")
     parser.add_argument("--assume-boundary-effects", action="store_true",
                         help="TEST-ONLY special condition: declared source/sink call effects")
-    # every engine-wide named assumption comes from the registry (on by default;
-    # --no-... or <ENV>=0 turns it off; see docs/assumptions.md)
+    # every engine-wide named assumption comes from the registry (on by default:
+    # --no-... or <ENV>=0 turns it off; off by default: --assume-... turns it
+    # on; see docs/assumptions.md)
     from tdo_v2.assumptions import switches
 
     for item in switches():
-        parser.add_argument(item.flag, dest=item.parameter, action="store_false",
-                            help=f"drop the named assumption {item.name}: {item.statement} "
-                                 f"(fails when: {item.fails_when})")
+        parser.add_argument(item.flag, dest=item.parameter, action="store_false" if item.default else "store_true",
+                            help=f"{'drop' if item.default else 'take'} the named assumption {item.name}: "
+                                 f"{item.statement} (fails when: {item.fails_when})")
     args = parser.parse_args()
     for item in switches():
         if item.env and os.environ.get(item.env) == "0":

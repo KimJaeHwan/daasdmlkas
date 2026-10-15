@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from ._scope_contracts import VarnodeKindCode
 from .call_seeds import _operation_key
-from .call_summary_effects import ProvenCallEffect, derive_proven_call_effect
+from .call_summary_effects import AnchoredSpan, ProvenCallEffect, derive_proven_call_effect
 from .function_summary import FunctionSummary, summarize_function
 from dataclasses import replace
 
@@ -105,7 +105,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   declared_boundaries=None, assume_direction_flag_clear=False,
                   pcodeop_models=None, private_frame_above=0,
                   assume_debug_break_traps_do_not_return=False,
-                  own_library: str | None = None, keep_uncut=frozenset()) -> dict[str, AnalyzedFunction]:
+                  own_library: str | None = None, keep_uncut=frozenset(),
+                  assume_same_result_functions=False) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -139,7 +140,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     ``assumed_call_effects`` path normalizes them as raw call writes.)
     ``pcodeop_models``: declared CALLOTHER semantics (``pcodeop_models``):
     no-effect user ops are declared call effects reading and writing nothing,
-    each use labelled in ``AnalyzedFunction.declared``."""
+    each use labelled in ``AnalyzedFunction.declared``.
+    ``assume_same_result_functions``: the named assumption same-result-functions
+    (docs 25.20): model entries with ``same_result`` / ``preserves_accessor_state``
+    carry them into their call effects; reported where a call used them
+    (``NormalizedFunction.same_result_uses``)."""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -167,6 +172,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("win64-home-space-callee-private", bool(private_frame_above) and ENTRY_VALUES_NOT_FRAME.get()),
         ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
         ("import-slots-hold-their-exports", _import_slots_active()),
+        ("same-result-functions", assume_same_result_functions),
     ) if not on}
     cuts = _model_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
                        image_info, external_models, own_library, disabled) \
@@ -373,6 +379,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     )
                     if effect is None:
                         continue
+                    if "same-result-functions" not in disabled:
+                        effect = _accessor_effect(effect, model_file, entry, register_object, memory_space)
                     # every extent register, proven or not: a constant taken is
                     # checked again on each state (``_prove_extents``)
                     slices = entry.extent_registers()
@@ -478,7 +486,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     inherited_assumptions=frozenset(
                                         label for call in proven if call in externals[key]
                                         for label in externals[key][call][1].inherited)
-                                    | {label for _, entry in jumps.values() for label in entry.inherited},
+                                    | {label for _, entry in jumps.values() for label in entry.inherited}
+                                    | _same_result_labels(normalized),
                                     refused_models=dict(refused_sites.get(key, {})),
                                     test_only_inputs=bool((assumed_call_effects or {}).get(key))
                                     or bool(boundaries_of(key)) or extra_origins is not None,
@@ -566,6 +575,30 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
 
 
 MAX_RECURSION_ROUNDS = 8
+
+
+def _same_result_labels(normalized) -> set:
+    """same-result-functions and each preserves_accessor_state claim a
+    same-result atom of the function rests on (docs 25.20)."""
+    uses = getattr(normalized, "same_result_uses", ())
+    if not uses:
+        return set()
+    return {"same-result-functions"} | {f"accessor-state-preserved-by:{label}"
+                                        for _, _, claims, _ in uses for label in claims}
+
+
+def _accessor_effect(effect, model_file, entry, register_object, memory_space):
+    """``effect`` with the entry's accessor claims (docs 25.20), under
+    same-result-functions: its ``same_result`` and ``preserves_accessor_state``."""
+    if entry.same_result is not None:
+        result, inputs, read, nonstack = entry.same_result
+        effect = replace(effect, same_result=(
+            entry.model_id, f"{entry.label}#{model_file.digest[:16]}", ByteSpan(register_object, *result),
+            tuple(ByteSpan(register_object, *item) for item in inputs),
+            AnchoredSpan(ByteSpan(register_object, *read.base), read.disp, read.size, memory_space), nonstack))
+    if entry.preserves_accessor_state:
+        effect = replace(effect, preserves_accessor_state=entry.preserves_accessor_state)
+    return effect
 
 
 def _program_memory_space(unit) -> int | None:

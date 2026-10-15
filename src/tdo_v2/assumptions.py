@@ -211,6 +211,21 @@ REGISTRY: tuple[Assumption, ...] = (
         "language version).",
         "models/pcodeops/x86.json, pcodeop_models"),
     Assumption(
+        "same-result-functions", "switch", False,
+        "A model entry with same_result (models/external): within one activation of the analysed function "
+        "(one thread, no fiber switch between the calls), two calls of it with equal input values, the same "
+        "read-slot address and a read-slot value of the same class, at the same accessor state, return the "
+        "same bits in its result register, failure (null) included. The accessor state changes only at calls "
+        "not of a same-result entry and not declaring preserves_accessor_state for it; hidden state (handle "
+        "tables, TLS) changes nowhere else. With nonstack, the result addresses no thread's stack. Reported "
+        "with the entry's label and every preserves_accessor_state claim a used call relied on.",
+        "Transient failure (null, later success for the same key); destruction, handle reuse, hot reload, "
+        "callbacks or reentrancy changing what a key denotes between the calls; a resolver depending on "
+        "state no call changes visibly; a call wrongly declared to preserve the accessor state.",
+        "summary_store (same_result, preserves_accessor_state), normalize._accessor_states / "
+        "_proven_call_rows (~sr rows), relative_memory._same_result_key",
+        "assume_same_result_functions", "--assume-same-result-functions"),
+    Assumption(
         "test-only-boundary", "test-only", False,
         "Declared source/sink calls touch only their declared registers (benchmarks: the code between "
         "source and sink is sliced as if call-free); reported as test-only-boundary:<label>.",

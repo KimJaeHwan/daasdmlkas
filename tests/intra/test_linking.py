@@ -126,10 +126,11 @@ class FakeDeriver:
 
     def __call__(self, generation, library, names, *, file_id, models, pcodeops, stack_evidence,
                  private_frame_above, traps, assume_globals_disjoint, direction_flag, per_export, log,
-                 import_slots=False, entry_values_not_frame=True):
+                 import_slots=False, entry_values_not_frame=True, same_result=False):
         assert per_export
         self.calls.append({"names": sorted(names), "private_frame_above": private_frame_above,
                            "globals": assume_globals_disjoint, "direction_flag": direction_flag,
+                           "same_result": same_result,
                            "evidence": [Path(item).name for item in stack_evidence]})
         files, refused = {}, {}
         for name in names:
@@ -145,7 +146,8 @@ class FakeDeriver:
                                             private_frame_above=private_frame_above,
                                             assume_debug_break_traps_do_not_return=traps,
                                             assume_direction_flag_clear=direction_flag,
-                                            assume_entry_values_not_frame=entry_values_not_frame)
+                                            assume_entry_values_not_frame=entry_values_not_frame,
+                                            assume_same_result_functions=same_result)
                 raw, _ = build_file(results, [(f"1:{F:x}", MANGLED, [MANGLED])], file_id=file_id, version=1,
                                     library=library, external_models=models, pcodeop_models=pcodeops,
                                     private_frame_above=private_frame_above, base_dependent=found, traps=traps)
@@ -193,12 +195,13 @@ UNIT = program_units(FunctionBuilder().ret())[0]
 
 
 def _link(tmp_path, info, models, provider, deriver, *, units=None, private_frame_above=0, refresh=False,
-          dry_run=False, globals_disjoint=True, direction_flag=True, traps=True):
+          dry_run=False, globals_disjoint=True, direction_flag=True, traps=True, same_result=False):
     linker = Linker([LinkTarget(LIBRARY, tmp_path / "synth.dll")], tmp_path / "cache", provider, deriver,
                     refresh=refresh, dry_run=dry_run, log=lambda line: None)
     linked, evidence = linker(units or [UNIT], info, external_models=models, pcodeop_models=None,
                               private_frame_above=private_frame_above, traps=traps,
-                              globals_disjoint=globals_disjoint, direction_flag=direction_flag)
+                              globals_disjoint=globals_disjoint, direction_flag=direction_flag,
+                              same_result=same_result)
     return linker.report, linked, evidence
 
 
@@ -266,7 +269,8 @@ def test_rows_cache_and_refusal_classes(tmp_path, monkeypatch):
     assert provider2.exports == [] and provider2.scans == 0 and evidence2 == evidence
 
     # another analysis setting is another profile: everything derived again, with it
-    for change in ({"private_frame_above": 0x28}, {"globals_disjoint": False}, {"direction_flag": False}):
+    for change in ({"private_frame_above": 0x28}, {"globals_disjoint": False}, {"direction_flag": False},
+                   {"same_result": True}):
         provider3, deriver3 = FakeProvider(sha), FakeDeriver(sha)
         report3, _, _ = _link(tmp_path, info, models, provider3, deriver3, **change)
         assert provider3.exports == [sorted([MANGLED, SECOND, BROKEN])], change
@@ -274,6 +278,7 @@ def test_rows_cache_and_refusal_classes(tmp_path, monkeypatch):
         assert call["private_frame_above"] == change.get("private_frame_above", 0)
         assert call["globals"] == change.get("globals_disjoint", True)
         assert call["direction_flag"] == change.get("direction_flag", True)
+        assert call["same_result"] == change.get("same_result", False)
 
     # --link-refresh ignores the cache and scans the library again
     provider4 = FakeProvider(sha)

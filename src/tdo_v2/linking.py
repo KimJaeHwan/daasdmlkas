@@ -267,7 +267,7 @@ class Linker:
 
     def __call__(self, units, image_info, *, external_models, pcodeop_models, private_frame_above: int,
                  traps: bool, globals_disjoint: bool, direction_flag: bool, import_slots: bool = False,
-                 entry_values_not_frame: bool = True):
+                 entry_values_not_frame: bool = True, same_result: bool = False):
         """(the run's model set with the linked templates, stack evidence
         files). The settings are the run's effective ones (``globals_disjoint``
         after the program's own withdrawal checks): templates are derived with
@@ -294,7 +294,7 @@ class Linker:
         switches = {"private_frame_above": private_frame_above if entry_values_not_frame else 0, "traps": bool(traps),
                     "globals_disjoint": bool(globals_disjoint), "direction_flag": bool(direction_flag),
                     "import_slots": bool(import_slots), "index_addresses": index_addresses(),
-                    "entry_values_not_frame": bool(entry_values_not_frame)}
+                    "entry_values_not_frame": bool(entry_values_not_frame), "same_result": bool(same_result)}
         identity = self.provider.identity()
         declared = declared_models(models)
         checked = []
@@ -387,6 +387,7 @@ class Linker:
              bool(switches["private_frame_above"]) and switches["entry_values_not_frame"]),
             ("debug-break-traps-do-not-return", switches["traps"]),
             ("import-slots-hold-their-exports", switches["import_slots"]),
+            ("same-result-functions", switches["same_result"]),
         ) if not on}
         if self._preflight(linked, pcodeop_models=pcodeop_models, private_frame_above=switches["private_frame_above"],
                            language=(namespace.language_id, namespace.major_version, namespace.minor_version),
@@ -449,7 +450,7 @@ class Linker:
                 private_frame_above=switches["private_frame_above"], traps=switches["traps"],
                 assume_globals_disjoint=switches["globals_disjoint"], direction_flag=switches["direction_flag"],
                 import_slots=switches["import_slots"], entry_values_not_frame=switches["entry_values_not_frame"],
-                per_export=True, log=lambda line: self.log(f"[link]   {line}"))
+                same_result=switches["same_result"], per_export=True, log=lambda line: self.log(f"[link]   {line}"))
             for raw in files.values():
                 if raw["source"]["sha256"] != exports.sha256:
                     raise ProviderError(f"the exported Bundle is of {raw['source']['sha256'][:12]}, "

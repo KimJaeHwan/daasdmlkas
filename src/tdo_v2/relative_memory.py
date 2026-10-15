@@ -715,6 +715,12 @@ def stale_reads(effect_unit, observation, context, address_spaces, memory_ssa, u
                                           operations, translation_namespace, **projector_options)
     failed = set()
     for (operation_key, byte_size), values in used.items():
+        if type(operation_key) is tuple:
+            # ("same_result", row, ~sr row): the result's key, recomputed whole
+            final = projector._same_result_key(projector._pointer_rows.get(operation_key[1]), byte_size)
+            if any(value != final for value in values):
+                failed.add(operation_key[2])
+            continue
         final = projector._expression_from_memory_read(operation_key, byte_size)
         if any(value != final for value in values):
             failed.add(operation_key)
@@ -792,6 +798,7 @@ class _Projector:
         # entry contents of read-only image memory are its image bytes
         self._readonly = readonly_image
         self._once = once_keys or frozenset()
+        self._atoms_on = once_keys is not None   # definition / same-result atoms (``_configured_projector``)
         self._definition_atoms: set[int] = set()   # wild ones
         self._fresh = fresh_keys
         self._same_object = same_object or {}
@@ -1115,6 +1122,8 @@ class _Projector:
         """The address a call effect row holds by its callee's summary
         (``pointer_rows``), or None."""
         row = self._pointer_rows[definition.operation_key]
+        if row[0] == "same_result":
+            return self._same_result_atom(definition, requested_span, row)
         if row[0] == "nonstack":
             return self._definition_atom(definition, requested_span, nonstack=True)
         if row[0] == "reg":
@@ -1132,6 +1141,96 @@ class _Projector:
             # call's only pointer value (two values could name one block)
             return self._definition_atom(definition, requested_span, nonstack=not unique, fresh=unique)
         return value
+
+    def _same_result_atom(self, definition, requested_span, row) -> _AddressExpression | None:
+        """An accessor call's result (same-result-functions, docs 25.20): the
+        atom of its key (``_same_result_key``) -- equal keys, one value. Not
+        fresh; nonstack only by the entry's contract, else wild like a
+        definition atom. Each use is recorded in ``used_reads`` under
+        (("same_result", row, ~sr row), width): ``stale_reads`` recomputes the
+        key on the final state and ``normalize`` checks the ~sr row for debt."""
+        atom = self._same_result_key(row, requested_span.size)
+        if atom is None:
+            return None
+        if self.used_reads is not None:
+            self.used_reads.setdefault((("same_result", definition.operation_key, row[2]), requested_span.size),
+                                       set()).add(atom)
+        if row[8]:
+            self._nonstack_atoms.add(atom)
+        else:
+            self._definition_atoms.add(atom)
+        if getattr(self, "address_metadata", None) is not None:
+            self.address_metadata["atoms"][atom] = (
+                f"same_result:{row[1]} of {definition.operation_key} #{atom & 0xffffffff:08x}")
+        return _AddressExpression(((atom, 1),), 0, requested_span.size)
+
+    def _same_result_key(self, row, size) -> int | None:
+        """The key of an accessor call's result (``row``: a ("same_result",
+        identity, ~sr row, input varnodes, slot base varnode, slot
+        displacement, slot load row, slot width, nonstack, state token)
+        pointer row): identity, result width, every input's and the slot
+        base's value expression at the call (settled, unblocked, not moving
+        with the image base), the slot's displacement and width, the slot
+        value's class (``_slot_class``) and the accessor state token -- as one
+        atom; None when any part is missing."""
+        if row is None or not self._atoms_on:
+            return None
+        _, identity, reader, inputs, base, displacement, slot_reader, width, _, state = row
+        if state is None or reader in self._blocked or slot_reader in self._blocked:
+            return None
+        if self._unsettled is not None and (self._unsettled(reader) or self._unsettled(slot_reader)):
+            return None
+        parts = []
+        for varnode in (*inputs, base):
+            value = self._expression_for_input(reader, varnode)
+            if value is None or value.image != 0:
+                return None
+            parts.append((_address_atom_key(value.atoms), _unsigned_wrap(value.displacement, value.byte_size),
+                          value.byte_size))
+        token = self._slot_class(slot_reader, width)
+        if token is None:
+            return None
+        text = repr((identity, size, tuple(parts), displacement, width, token, state))
+        return _digest_ints(b"same-result-v1", tuple(text.encode("utf-8")))
+
+    def _slot_class(self, operation_key, width):
+        """The class of the value an accessor's slot load reads (docs 25.20
+        B): one read of ``width`` bytes from one definition d --
+        ("entry", span) for its entry value; ("def", d, span) for a write
+        executed at most once per activation (a later store of the same bits
+        is another class); a join of acyclic sources all of one class; None
+        otherwise (several or partial definitions, a repeated write, a cycle)."""
+        action_id = self._action_ids.get(operation_key)
+        if action_id is None:
+            return None
+        reads = [read for read in self._ssa.reads
+                 if read.action_id == action_id and read.span.size == width
+                 and read.span.object_id.kind in {StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE}]
+        if len(reads) != 1 or len(reads[0].fragments) != 1:
+            return None
+        fragment = reads[0].fragments[0]
+        if fragment.span != reads[0].span or len(fragment.definition_ids) != 1:
+            return None
+        return self._definition_class(fragment.definition_ids[0], fragment.span, frozenset())
+
+    def _definition_class(self, definition_id, span, active):
+        if definition_id in active:
+            return None   # a cycle: no class through it (v1)
+        definition = self._ssa.definitions[definition_id]
+        if not definition.span.contains(span):
+            return None
+        if definition.kind is MemoryDefinitionKind.ENTRY:
+            return ("entry", _stable_storage_key(span))
+        if definition.kind is MemoryDefinitionKind.DATA_WRITE:
+            key = definition.operation_key
+            if key is None or key.split("~", 1)[0] not in self._once:
+                return None
+            return ("def", self._stable_definition_key(definition_id), _stable_storage_key(span))
+        if definition.kind is MemoryDefinitionKind.JOIN:
+            sources = self._join_sources.get(definition_id, ())
+            tokens = {self._definition_class(source, span, active | {definition_id}) for source in sources}
+            return next(iter(tokens)) if len(tokens) == 1 and None not in tokens else None
+        return None
 
     def _stable_definition_key(self, definition_id: int) -> int:
         definition = self._ssa.definitions[definition_id]

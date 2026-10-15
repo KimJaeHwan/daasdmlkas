@@ -52,6 +52,12 @@ class ProgramReport:
     # bytes left written by activations of calls claiming ``preserves_memory``
     footprint_checked: int = 0
     footprint_unlocated: int = 0     # outside every evaluable place, some place not evaluable
+    # same-result atoms (same-result-functions, docs 25.20): activations of
+    # calls whose results share one atom must return equal results
+    same_result_checked: int = 0     # atoms with two or more activations in a run
+    same_result_violations: list = field(default_factory=list)
+    # obligations the run cannot check independently (none before write-back)
+    same_result_unchecked: int = 0
 
 
 def _proven_runs(function):
@@ -211,6 +217,7 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
         report.runs += 1
         places = _Places(interpreter, reg_space)
         _check_footprints(report, interpreter, effects, places, havoc_calls, private_frame_above)
+        _check_same_results(report, interpreter, function, effects, reg_space)
         for dependency in sorted(run.dependencies, key=repr):
             if dependency.reader.split("~e")[0] not in caller_operations or dependency.reader in transient:
                 continue
@@ -285,6 +292,28 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
             bucket = report.covered_by_debt if not result.is_complete else report.silent
             bucket.append((dependency, "writer not reached"))
     return report
+
+
+def _check_same_results(report, interpreter, function, effects, reg_space) -> None:
+    """Every outermost activation of the calls whose result rows share a
+    same-result atom returned the same bytes there (an assumption violation
+    otherwise -- counted apart from silent misses)."""
+    by_atom: dict = {}
+    for row, _, _, atom in getattr(function, "same_result_uses", ()):
+        call = row.rsplit("~", 1)[0]
+        result = effects[call].same_result[2]
+        for serial, (key, _) in interpreter.activation_snapshots.items():
+            returned = interpreter.activation_returns.get(serial)
+            if key != call or returned is None:
+                continue
+            value = tuple(returned.get((reg_space, result.start + index)) for index in range(result.size))
+            by_atom.setdefault(atom, []).append((call, serial, value))
+    for atom, seen in by_atom.items():
+        if len(seen) < 2:
+            continue
+        report.same_result_checked += 1
+        if len({value for _, _, value in seen}) != 1:
+            report.same_result_violations.append((atom, seen))
 
 
 def _clobbered_by(function, reader, call) -> bool:

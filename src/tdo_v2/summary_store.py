@@ -23,7 +23,8 @@ File::
 
 Semantics, all sound by construction: registers neither written nor listed in
 ``preserved`` (nor the stack pointer) are UNKNOWN after the call; a register
-write depends on its ``from`` registers (``"fresh": true``: the written value
+write depends on its ``from`` registers and ``loads`` (memory at entry, as a
+memory row's ``loads``) (``"fresh": true``: the written value
 is the address of a block the call allocates -- not an address of any memory
 existing before it, the stack included; ``"same_object_as": slice``: the
 written value addresses the same object as that register did at the call --
@@ -45,6 +46,18 @@ caller keeps them where it places them exactly -- ``normalize._kept_call_memory`
 ``noreturn`` (optional, per entry): the function never returns to its caller
 (no register or memory rows; ``observes`` declared): a call of it, or a jump
 to its import thunk, ends the paths through it.
+``same_result`` (optional, per entry; docs 25.20, named assumption
+same-result-functions, off by default): ``{"result": slice, "inputs":
+[slices], "reads": [{base, disp, size}], "nonstack": bool}`` -- an accessor:
+within one activation of the caller, two calls with equal ``inputs`` values,
+the same read-slot address and a read-slot value of the same class, at the
+same accessor state, return the same bits in ``result`` (one of the entry's
+register writes), failure included; ``nonstack``: the result addresses no
+thread's stack. One read slot; ``write_back`` is not supported yet.
+``preserves_accessor_state`` (optional, per entry): ``["<file id>/<entry>",
+...]`` or ``["*"]`` -- a call of this entry leaves those accessors' hidden
+state unchanged (its transitive effects, callbacks included); every other
+call changes it.
 
 Matching an import: a file listing ``libraries`` (e.g. a C++ engine DLL)
 matches only imports of one of those libraries whose original (mangled) name
@@ -129,6 +142,14 @@ class ModelEntry:
     # never returns to its caller (e.g. abort): the paths through a call of it,
     # or a jump to it (``interprocedural._noreturn_jumps``), end there
     noreturn: bool = False
+    # an accessor (docs 25.20): (result slice, input slices, the read slot's
+    # Access, nonstack) -- applied under same-result-functions only
+    same_result: tuple | None = None
+    # model ids ("<file>/<entry>", or "*") whose accessor state a call of this
+    # entry leaves unchanged
+    preserves_accessor_state: tuple[str, ...] = ()
+    # (register write, the memory it also depends on: Access loads)
+    register_loads: tuple = ()
 
     @property
     def model_id(self) -> str:
@@ -150,6 +171,10 @@ class ModelEntry:
         found = set()
         for write, _, loads in self.memory:
             for access in (write, *loads):
+                if type(access.size) is tuple:
+                    found.add(access.size)
+        for _, loads in self.register_loads:
+            for access in loads:
                 if type(access.size) is tuple:
                     found.add(access.size)
         for access in self.unknown_memory:
@@ -251,7 +276,8 @@ def load_model_file(path: str | Path) -> ModelFile:
     entries = []
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
-                   "original_names", "internal", "assumptions", "noreturn"}
+                   "original_names", "internal", "assumptions", "noreturn", "same_result",
+                   "preserves_accessor_state"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
             raise ModelError(f"{path}: entry fields must be {sorted(allowed)}")
         if item["other_memory"] not in ("preserved", "clobbered"):
@@ -264,15 +290,20 @@ def load_model_file(path: str | Path) -> ModelFile:
             # what it observes is declared, not implied by never returning
             raise ModelError(f"{path}: a noreturn entry has no register or memory rows and declares observes")
         for row in item["registers"]:
-            if type(row) is not dict or not {"write"} <= set(row) <= {"write", "from", "fresh", "same_object_as"} \
+            if type(row) is not dict or not {"write"} <= set(row) <= {"write", "from", "loads", "fresh", "same_object_as"} \
                     or type(row.get("fresh", False)) is not bool \
                     or (row.get("fresh") and "same_object_as" in row):
-                raise ModelError(f"{path}: register rows are {{write, from, fresh | same_object_as}}")
+                raise ModelError(f"{path}: register rows are {{write, from, loads, fresh | same_object_as}}")
         registers = tuple(
             (_slice(row["write"], "register write"), tuple(_slice(s, "register read") for s in row.get("from", ())))
             for row in item["registers"]
         )
         fresh = tuple(_slice(row["write"], "register write") for row in item["registers"] if row.get("fresh"))
+        register_loads = tuple(
+            (_slice(row["write"], "register write"), tuple(_access(load, "register load") for load in row["loads"]))
+            for row in item["registers"] if row.get("loads"))
+        if len({write for write, _ in registers}) != len(registers):
+            raise ModelError(f"{path}: {item['name']}: a register is written by one row")
         same_object = tuple(
             (_slice(row["write"], "register write"), _slice(row["same_object_as"], "same object register"))
             for row in item["registers"] if "same_object_as" in row
@@ -289,6 +320,11 @@ def load_model_file(path: str | Path) -> ModelFile:
             for row in item["memory"] if "value" not in row
         )
         unknown_memory = tuple(_access(row["write"], "memory write") for row in item["memory"] if "value" in row)
+        same_result = _same_result(item, registers, fresh, same_object, register_loads, path)
+        preserving = item.get("preserves_accessor_state", [])
+        if type(preserving) is not list or any(
+                type(name) is not str or (name != "*" and name.count("/") != 1) for name in preserving):
+            raise ModelError(f"{path}: {item['name']}: preserves_accessor_state lists \"<file id>/<entry>\" or \"*\"")
         names = (item["name"], *item.get("aliases", ()))
         entries.append(ModelEntry(raw["id"], raw["version"], item["name"], tuple(names), registers, memory,
                                   item["other_memory"] == "preserved", fresh,
@@ -299,7 +335,8 @@ def load_model_file(path: str | Path) -> ModelFile:
                                       item.get("assumptions", []), path, f"{item['name']}: assumptions")),
                                   identity=source["sha256"][:12] if source["kind"] == "derived" else "",
                                   internal=item.get("internal", False), unknown_memory=unknown_memory,
-                                  noreturn=item.get("noreturn", False)))
+                                  noreturn=item.get("noreturn", False), same_result=same_result,
+                                  preserves_accessor_state=tuple(preserving), register_loads=register_loads))
     libraries = tuple(str(item).upper() for item in raw.get("libraries", ()))
     if libraries and any(not entry.original_names for entry in entries):
         raise ModelError(f"{path}: a file with libraries matches by original_names only")
@@ -308,6 +345,39 @@ def load_model_file(path: str | Path) -> ModelFile:
                      tuple(_slice(s, "preserved") for s in raw["preserved"]), tuple(entries), libraries,
                      tuple(sorted((key, json.dumps(value, sort_keys=True)) for key, value in source.items())),
                      tuple(overrides), digest)
+
+
+def _same_result(item, registers, fresh, same_object, register_loads, path):
+    """An entry's ``same_result`` (see the docstring), or None. The result's
+    register row states every input in its ``from`` and the read slot in its
+    ``loads``: the result's ordinary dependencies, with the switch off too."""
+    raw = item.get("same_result")
+    if raw is None:
+        return None
+    where = f"{path}: {item['name']}: same_result"
+    if type(raw) is not dict or not {"result", "inputs", "reads"} <= set(raw)             <= {"result", "inputs", "reads", "write_back", "nonstack"}:
+        raise ModelError(f"{where} has result, inputs, reads (write_back, nonstack)")
+    if raw.get("write_back", False) is not False:
+        raise ModelError(f"{where}: write_back is not supported yet (docs 25.20 S2)")
+    if type(raw.get("nonstack", False)) is not bool:
+        raise ModelError(f"{where}: nonstack must be true or false")
+    if item.get("noreturn"):
+        raise ModelError(f"{where}: a noreturn entry returns nothing")
+    result = _slice(raw["result"], "same_result result")
+    if result not in [write for write, _ in registers] or result in fresh             or result in [write for write, _ in same_object]:
+        raise ModelError(f"{where}: result must be one of the entry's plain register writes")
+    if type(raw["inputs"]) is not list:
+        raise ModelError(f"{where}: inputs must be a list of register slices")
+    inputs = tuple(_slice(s, "same_result input") for s in raw["inputs"])
+    if type(raw["reads"]) is not list or len(raw["reads"]) != 1:
+        raise ModelError(f"{where}: exactly one read slot")
+    read = _access(raw["reads"][0], "same_result read")
+    if type(read.size) is not int:
+        raise ModelError(f"{where}: the read slot's size is bytes")
+    sources = dict(registers)[result]
+    if any(item not in sources for item in inputs) or read not in dict(register_loads).get(result, ()):
+        raise ModelError(f"{where}: the result's register row reads every input (from) and the slot (loads)")
+    return result, inputs, read, raw.get("nonstack", False)
 
 
 DERIVED_SOURCE_KEYS = {"kind", "library", "sha256", "image_base", "language", "engine", "parameters",
@@ -476,6 +546,13 @@ def validated_models(files) -> ExternalModels:
     for file_id in edges:
         if cyclic(file_id):
             raise ModelError(f"model overrides form a cycle through {file_id}")
+    accessors = {entry.model_id for item in files for entry in item.entries if entry.same_result is not None}
+    for item in files:
+        for entry in item.entries:
+            for name in entry.preserves_accessor_state:
+                if name != "*" and name not in accessors:
+                    raise ModelError(f"model {entry.model_id}: preserves_accessor_state names {name}, "
+                                     "which is no loaded entry with same_result")
     return ExternalModels(tuple(files))
 
 
@@ -507,10 +584,18 @@ def model_summary(model_file: ModelFile, entry: ModelEntry, register_object, reg
     runs = []
     written = set()
     complete = True
+    register_loads = dict(entry.register_loads)
     for target, sources in entry.registers:
         span = register(target)
         written.update(range(span.start, span.end))
-        runs.append(_computed(span, tuple(register(s) for s in sources)))
+        loads = register_loads.get(target, ())
+        sizes = [extent(load) for load in loads]
+        if None in sizes:
+            # a load of unknown extent: the value may come from anywhere there
+            runs.append(SummaryRun(span, SummaryKind.UNKNOWN, (0,), ("model",), (), (), (), ("call:model",)))
+            continue
+        runs.append(_computed(span, tuple(register(s) for s in sources)
+                              + tuple(memory_span(load, n) for load, n in zip(loads, sizes))))
     for write, sources, loads in entry.memory:
         size = extent(write)
         load_sizes = [extent(load) for load in loads]

@@ -39,7 +39,7 @@ def test_every_switch_is_an_engine_parameter():
     parameters = inspect.signature(analyze_frozen_bundle_with_summaries).parameters
     for item in switches():
         assert item.parameter in parameters, item.name
-        assert item.flag and item.flag.startswith("--no-")
+        assert item.flag and item.flag.startswith("--no-" if item.default else "--assume-")
     assert len({item.name for item in REGISTRY}) == len(REGISTRY)
 
 

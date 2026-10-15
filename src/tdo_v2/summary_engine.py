@@ -99,8 +99,11 @@ def analyze_frozen_bundle_with_summaries(
     assume_import_slots_hold_exports: bool = True,
     assume_entry_values_not_frame: bool = True,
     origin_witnesses: bool = False,
+    assume_same_result_functions: bool = False,
 ) -> EngineRun:
-    """``origin_witnesses``: put per-root origin witnesses (diagnostics,
+    """``assume_same_result_functions``: the named assumption
+    same-result-functions (off by default; model entries with ``same_result``).
+    ``origin_witnesses``: put per-root origin witnesses (diagnostics,
     ``origin_witnesses``) in ``RootSlice.explanation``.
     ``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
@@ -236,7 +239,8 @@ def analyze_frozen_bundle_with_summaries(
                 pcodeop_models=pcodeop_models, private_frame_above=home_space,
                 traps=assume_debug_break_traps_do_not_return,
                 globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear,
-                import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame)
+                import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame,
+                same_result=assume_same_result_functions)
             linked_evidence = tuple(load_stack_evidence(path) for path in linked_evidence)
             if linked_evidence:
                 # a switch in a linked library withdraws the assumption for the run
@@ -258,6 +262,7 @@ def analyze_frozen_bundle_with_summaries(
             assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
             assume_import_slots_hold_exports=assume_import_slots_hold_exports,
             assume_entry_values_not_frame=assume_entry_values_not_frame,
+            assume_same_result_functions=assume_same_result_functions,
         )
         assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
                                       traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)

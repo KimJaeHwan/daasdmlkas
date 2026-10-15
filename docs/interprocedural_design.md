@@ -1566,3 +1566,45 @@ S1은 다시 쓰기 설정을 거부(건전한 일반 모델이 남지 않으면
 보존 주장, 접근 함수 A만 보존·B는 아님, A가 관찰한 바이트를 쓰는 보존 호출(결과 같음은 유지, 그 메모리 값은 무효), nonstack 반례,
 S를 넘는 쓰기, 범위 밖 접근, image ≠ 0, 다 끄면 지금과 같음.
 - 기록: `.census6/same_result{,2,3}_{prompt,agy,astra}.md`(설계 검토 3차; 1차 둘 다 보류, 2차 Antigravity 승인·Astra 보류, 3차 둘 다 승인).
+
+### 25.21 같은 결과 접근 함수 1단계(S1) 구현: 열쇠·칸 종류·상태 토큰 (2026-10-15, 구현 검토 2차 Antigravity·Astra 승인)
+
+25.20의 S1. 가정 `same-result-functions`(스위치, **기본 끔**, `--assume-same-result-functions`,
+`analyze_frozen_bundle_with_summaries(assume_same_result_functions=...)`). 끄면 결과가 지금과 정확히 같음(전체 실행으로 확인).
+- **모델 형식**(`summary_store`): 엔트리 `same_result {result, inputs, reads(정확히 하나, 바이트 크기), nonstack}`(`write_back`은 S2 전까지
+  거부); `preserves_accessor_state`(["<file>/<entry>"] 또는 ["*"], 불러온 접근 함수만 — `validated_models`에서 확인); 레지스터 줄에
+  `loads`(결과가 진입 메모리에 기댐: `ModelEntry.register_loads`, `model_summary`). 레지스터 하나는 한 줄만 씀; 결과 줄은 모든
+  입력을 `from`에, 읽는 칸을 `loads`에 적어야 함(스위치를 꺼도 결과의 일반 의존이 맞도록 — Antigravity 1차 P1-1).
+- **효과**: `ProvenCallEffect.same_result`(모델 id, 정체 = 라벨 + 파일 digest, 결과·입력 레지스터, 칸 AnchoredSpan, nonstack),
+  `preserves_accessor_state`. `interprocedural._accessor_effect`가 스위치가 켜졌을 때만 붙임; `_same_result_labels`가 같은 결과
+  원자를 실제로 쓴 함수에만 `same-result-functions`와 `accessor-state-preserved-by:<label>`을 기록.
+- **상태 토큰**(`normalize._accessor_states`): 접근 함수(모델 id)마다 p-code 블록 그래프 위 정방향 must 흐름 — 진입 ("entry",);
+  접근 함수 호출·보존 선언 호출(주장 기록)·효과 없다고 선언된 CALLOTHER는 유지, 그 밖의 CALL/CALLIND/CALLOTHER는 블록이 한 번
+  실행될 때 ("call", key), 아니면 None; 합류는 같은 토큰만; 진입에서 시작하는 최대 고정점(호출 없는 반복은 토큰 유지).
+- **행**(`_proven_call_rows`): 토큰이 있는 접근 호출만 칸을 읽고(`~ld<j>`, 결과 줄의 load와 공유) `~sr` 행이 입력·칸 base·칸 load를
+  읽음; 결과 줄의 pointer row = ("same_result", 정체, ~sr, 입력, base, disp, ~ld, 폭, nonstack, 상태).
+- **원자**(`relative_memory._same_result_key`): 정체·폭·입력과 base의 식(settled, unblocked, image 0)·disp·칸 종류·상태의 digest.
+  칸 종류(`_slot_class`/`_definition_class`): 읽기 하나·조각 하나·정의 하나 — ENTRY → ("entry", span); 한 번 실행되는 쓰기 →
+  ("def", 안정 정의 키, span); 반복 없는 JOIN은 모든 출처가 같은 종류일 때만; 그 밖(일부 쓰기, 반복 쓰기, 순환)은 없음.
+  nonstack 원자는 엔트리가 nonstack일 때만, 아니면 wild(정의 원자처럼). 원자는 함수 안에서만 — 요약의 rax에는 pointer value 없음.
+- **재확인**: 쓴 열쇠는 `used_reads`에 (("same_result", row, ~sr), 폭)로 기록 → `stale_reads`가 마지막 상태에서 열쇠 전체를 다시
+  계산; `~sr` 행이 부채에 닿으면(전이적) 실패 → `_blocked_reads` → `_Retry`(그 호출은 행별 원자로). 원자는 `once_keys`가 비어도
+  접근 상태가 있으면 켬(Antigravity 1차 P1-2).
+- **연결·캐시**: `Linker(same_result=...)`가 프로필 스위치·preflight `disabled`·deriver에 전달; `derive_models --assume-same-result-functions`.
+  `ENGINE_SEMANTICS_VERSION` 7 → 8, `models/derived/ue_core_win64_fstring.json` 다시 만듦(템플릿 같음).
+- **oracle**: `program_oracle._check_same_results` — 같은 원자를 받은 호출들의 실제 반환값이 같아야 함(`same_result_checked`,
+  `same_result_violations`; `same_result_unchecked`는 다시 쓰기 전까지 0); `pcode_interpreter.activation_returns`.
+- **테스트** `tests/intra/test_same_result_models.py`(32): 기본 끔(A·B, 보고 없음); 같은 열쇠 → 원자 하나, A exact·B 제외·complete·보고;
+  칸 재할당 / 같은 비트 다시 쓰기 / 다른 포인터로 쓰기 / 쓰는 곳 정해진 모델 호출 / 모르는 호출 → 다른 원자; 보존 선언 호출 유지·보고;
+  다른 칸 주소·다른 입력; 다른 상태의 합류 → 행 없음, 같은 상태 합류 유지; 열쇠가 그대로인 반복은 원자 공유; 결과로 쓰는 반복 →
+  원자 없음(S3 필요); 반복마다 칸을 쓰면 원자 없음; nonstack 없으면 wild; 4바이트 일부 쓰기 → 종류 없음; 한 접근 함수만 보존;
+  모르는 상태 뒤 보존 주장은 모름 유지; 그 뒤 한 번 실행되는 무효화 호출은 새 상태; 마지막 상태 재확인이 바뀐 열쇠를 잡음;
+  요약 경계에서 정체를 버림; 모델 검증 7가지; 실제 getter 본문 oracle(위반 없음, silent 없음)과 약속을 어기는 본문(위반 보고).
+  변형 확인: 반복 쓰기의 def 토큰, def = entry, 호출이 상태 유지, ~sr 부채 검사 없음, 입력이 열쇠에 없음, 합류가 아무 토큰,
+  재확인 없음 — 각각 테스트 하나 이상 실패.
+- R007(Development) 실제 모양: `p1 = Get(this+0x478); [p1+0x30] = A; source_B(); p2 = Get; [p2+0x34] = B; p3 = Get; x = [p3+0x30]` —
+  source_B 호출이 사이에 있어 p1 ≠ p2(상태가 바뀜), p2 = p3. 그래서 S4 뒤 예상: B 제외(exact), A는 p1 객체에서 may-alias로(unsure).
+  Get(0x180004e10): `[rcx]`가 미해결(최하위 비트)이면 전역 함수 포인터로 간접 호출해 풀고 `[rcx]`에 다시 씀, 추적 테이블 카운터를
+  LOCK으로 올렸다 내리고 추적 함수를 부름, 푼 포인터를 돌려줌 — 다시 쓰기(S2)·내부 상태(S4)·떨어짐(S3)이 모두 필요.
+- 기록: `.census6/sr_impl{,2}_{prompt,agy,astra}.md`(구현 검토 2차, 둘 다 승인; Astra P2: 늦게 풀리는 같은 비트 저장을 정규화
+  전체로 거치는 통합 테스트는 아직 없음 — 재확인 함수 단위 테스트로 대신).

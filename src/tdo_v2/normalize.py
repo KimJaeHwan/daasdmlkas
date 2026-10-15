@@ -169,6 +169,9 @@ class NormalizedFunction:
     # (call key, memory spans) a call not keeping memory keeps anyway: its
     # model's memory runs at an exactly known place (``_kept_call_memory``)
     kept_call_memory: tuple = ()
+    # (result row, accessor identity, preserves_accessor_state claims, atom) of
+    # each call result made a same-result atom (same-result-functions, docs 25.20)
+    same_result_uses: tuple = ()
     # (call effect / rep element row key, evaluation key, anchor) of rows
     # writing at an anchored address (``relative_memory.project_anchored``)
     call_anchors: tuple = ()
@@ -868,8 +871,94 @@ def _program_register_space(unit) -> int | None:
 _CALL_EFFECT_LABELS = {
     "": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD", "sink": "CALL_EFFECT_SINK",
     "ck": "CALL_EFFECT_CHECK", "cr": "CALL_EFFECT_CHECK", "cw": "CALL_EFFECT_CHECK", "sp": "CALL_EFFECT_CHECK",
-    "ext": "CALL_EFFECT_CHECK", "u": "CALL_EFFECT", "iu": "CALL_EFFECT_INPUT",
+    "ext": "CALL_EFFECT_CHECK", "u": "CALL_EFFECT", "iu": "CALL_EFFECT_INPUT", "sr": "CALL_EFFECT_CHECK",
 }
+
+
+_CALL_OPCODES = frozenset({"CALL", "CALLIND", "CALLOTHER"})
+
+
+def _accessor_states(observation, block_graph, entry_block, proven_call_effects, assumed_call_effects,
+                     once_blocks) -> dict:
+    """Accessor state tokens (docs 25.20 C3): call key of an accessor call
+    (``ProvenCallEffect.same_result``) -> (its accessor's state before the
+    call, the preserves_accessor_state claims that state rests on). Per
+    accessor (model id) a forward must-dataflow over ``block_graph``: at entry
+    ("entry",); a call leaves it unchanged when it is a call of an accessor
+    (its own normalization, or another accessor -- independent under
+    same-result-functions), declares ``preserves_accessor_state`` for it (a
+    named claim, recorded), or is a user op declared to have no effect;
+    every other call -- an opaque one, a summarized one, a model with a finite
+    footprint -- makes it ("call", key) when its block runs once per
+    activation, else no token (None). At a join the token survives only if
+    every predecessor that reaches it has the identical token (greatest fixed
+    point from the entry: a cycle without such a call keeps it); a block not
+    reached from the entry has none."""
+    domains = sorted({effect.same_result[0] for effect in proven_call_effects.values()
+                      if effect.same_result is not None})
+    if not domains or block_graph.unsupported is not None:
+        return {}
+    instructions = {row.address: row for row in observation.instructions}
+    blocks = {block.key: block for block in block_graph.blocks}
+    if entry_block not in blocks:
+        return {}
+    predecessors: dict = {key: [] for key in blocks}
+    for block in blocks.values():
+        for successor in block.successors:
+            if successor in predecessors:
+                predecessors[successor].append(block.key)
+    calls = {}
+    for key, block in blocks.items():
+        row = instructions[block.instruction]
+        calls[key] = [_operation_key(row, ordinal, row.operations[ordinal]) for ordinal in range(block.start, block.stop)
+                      if row.operations[ordinal].opcode in _CALL_OPCODES]
+
+    def meet(key, out):
+        values = [out[item] for item in predecessors[key] if item in out]
+        if key == entry_block:
+            values.append((("entry",), frozenset()))
+        if not values:
+            return None
+        tokens = {value[0] for value in values}
+        if len(tokens) != 1 or None in tokens:
+            return (None, frozenset())
+        return (tokens.pop(), frozenset().union(*(value[1] for value in values)))
+
+    found: dict = {}
+    for domain in domains:
+        def transfer(key, state, record=None):
+            for call in calls[key]:
+                effect = proven_call_effects.get(call)
+                if record is not None and effect is not None and effect.same_result is not None \
+                        and effect.same_result[0] == domain:
+                    record[call] = state
+                if effect is not None and effect.same_result is not None:
+                    continue
+                if effect is not None and (domain in effect.preserves_accessor_state
+                                           or "*" in effect.preserves_accessor_state):
+                    if state[0] is not None:
+                        state = (state[0], state[1] | {effect.callee})
+                    continue
+                if call.endswith(":CALLOTHER") and call in assumed_call_effects:
+                    continue   # a user op declared to have no effect
+                state = ((("call", call) if key in once_blocks else None), frozenset())
+            return state
+
+        out: dict = {}
+        pending = [entry_block]
+        while pending:
+            key = pending.pop()
+            new = transfer(key, meet(key, out))
+            if out.get(key) != new:
+                out[key] = new
+                pending.extend(item for item in blocks[key].successors if item in blocks)
+        record: dict = {}
+        for key in blocks:
+            state = meet(key, out)
+            if state is not None:
+                transfer(key, state, record)
+        found.update(record)
+    return found
 
 
 def _pending_write_keys(effect_unit) -> frozenset:
@@ -879,7 +968,7 @@ def _pending_write_keys(effect_unit) -> frozenset:
 
 
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries,
-                      stack_span=None, pointer_rows=None, value_inputs=None):
+                      stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
@@ -887,7 +976,11 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     (register runs first, then memory runs), ``~u<j>`` the unknown memory (an
     "opaque_call_write" debt each, ``_materialize_opaque_call_writes``) at the
     address its ``~iu<j>`` row evaluates with the other inputs, before any
-    output.
+    output. An accessor call (``same_result``, docs 25.20) with a state token
+    (``accessor_state``, ``_accessor_states``) also loads its read slot
+    (``~ld<j>``) and reads its inputs, the slot's base register and that load
+    in a ``~sr`` row -- the key its result's same-result atom is made from
+    (a ("same_result", ...) pointer row, ``relative_memory._same_result_key``).
     Anchored memory is projected later (``relative_memory``): returns the
     effects and their anchored accesses."""
     rows: list[ObservedEffect] = []
@@ -1039,6 +1132,22 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
                 reads=tuple(ResolvedStorage(span) for span in anchors), writes=(temporary(),),
                 block_key=block_key,
             ))
+    accessor = None
+    if proven.same_result is not None and accessor_state is not None and pointer_rows is not None:
+        _, identity, result, inputs, read, nonstack = proven.same_result
+        index = next((index for index, (kind, run, _, _) in enumerate(staged)
+                      if kind == "register" and tuple(run.writes) == (result,)), None)
+        if index is not None:
+            slot = load(read)
+            spans = list(dict.fromkeys((*inputs, read.anchor)))
+            rows.append(ObservedEffect(
+                f"{call_key}~sr", EffectKind.COPY, reads=(*(ResolvedStorage(span) for span in spans), slot),
+                writes=(temporary(),), block_key=block_key,
+            ))
+            accessor = (f"{call_key}~{index}", (
+                "same_result", identity, f"{call_key}~sr", tuple(anchor_varnode(span) for span in inputs),
+                anchor_varnode(read.anchor), displacement(read), load_keys[read], read.size, nonstack,
+                accessor_state))
     # a value that may be a new block is fresh only as the call's sole pointer value
     unique = sum(getattr(run, "value", None) is not None for _, run, _, _ in staged) == 1
     for index, (kind, run, stage_key, target) in enumerate(staged):
@@ -1052,6 +1161,8 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
                 pointer_rows[key] = ("reg", stage_key, anchor_varnode(value[1]), value[2], unique)
             elif value[1] in load_keys:
                 pointer_rows[key] = ("mem", load_keys[value[1]], value[1].size, value[2], unique)
+        if accessor is not None and accessor[0] == key:
+            pointer_rows[key] = accessor[1]
         if kind == "register":
             writes = tuple(ResolvedStorage(span) for span in run.writes)
             rows.append(ObservedEffect(key, EffectKind.COPY, reads=(target,), writes=writes,
@@ -1327,6 +1438,8 @@ class _ScopedNormalizer:
             }
             once_keys = single_execution_keys(observation, block_graph, frozenset(sites))
             once_blocks = single_execution_blocks(observation, block_graph, frozenset(sites))
+            accessor_states = _accessor_states(observation, block_graph, _coordinate_key(function.entry),
+                                               proven_call_effects, assumed_call_effects, once_blocks)
             wild_objects: set = set()
             fresh_objects: set = set()
             nonstack_objects: set = set()
@@ -1387,7 +1500,7 @@ class _ScopedNormalizer:
                             call_transitions, staged_temporaries,
                             _call_stack_span(operation_key, proven_call_effects[operation_key],
                                              call_transitions, observation, context),
-                            pointer_rows, value_inputs,
+                            pointer_rows, value_inputs, accessor_states.get(operation_key, (None,))[0],
                         )
                         for row in rows:
                             operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
@@ -1506,7 +1619,8 @@ class _ScopedNormalizer:
                     used_reads=used_reads,
                 )
                 if projected_effect_unit is effect_unit:
-                    if not atoms_on and once_keys:
+                    # (accessor keys need atoms on even with nothing run once)
+                    if not atoms_on and (once_keys or accessor_states):
                         atoms_on = True
                         continue
                     if settle:
@@ -1696,6 +1810,14 @@ class _ScopedNormalizer:
             translation_namespace=unit.scopes.program.evidence.translation_namespace.language_id,
             operation_overrides=_rep_overrides(sites, rep_plan, observation),
         )
+        # a same-result atom (docs 25.20) rests on its whole key: recomputed on
+        # the final state above (``stale_reads``), and no debt on any value its
+        # ``~sr`` row reads (inputs, slot base, slot load -- transitively)
+        same_result_used = sorted({key[0] for key in used_reads if type(key[0]) is tuple})
+        for _, _, reader in same_result_used:
+            node = operation_nodes.get(reader)
+            if node is None or _row_reaches_debt(dependencies, node):
+                failed.add(reader)
         failed -= _blocked_reads
         # a rep expansion has no condition to carry: its count and direction
         # must reach no debt on the final graph (memory, call clobber,
@@ -1806,6 +1928,11 @@ class _ScopedNormalizer:
             uncertain_nodes=uncertain_nodes,
             open_nodes=open_nodes, opaque_nodes=opaque_nodes,
             kept_call_memory=tuple(sorted((key, spans) for key, (spans, _) in kept_memory.items())),
+            same_result_uses=tuple(
+                (row, pointer_rows[row][1], tuple(sorted(accessor_states[row.rsplit("~", 1)[0]][1])),
+                 next(iter(values)))
+                for (key, _), values in sorted(used_reads.items(), key=lambda item: repr(item[0]))
+                if type(key) is tuple for _, row, _ in (key,)),
         )
 
     def _build_cfg(
