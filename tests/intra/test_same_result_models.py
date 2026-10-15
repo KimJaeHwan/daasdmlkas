@@ -403,3 +403,139 @@ def test_the_oracle_reports_a_body_breaking_the_contract(tmp_path):
     body = _body([load(reg(RAX), ram(DATA_BASE))], [add(T, reg(RAX), const(8)), store(ram(DATA_BASE), T)])
     report = _oracle(tmp_path, body)
     assert report.same_result_checked and report.same_result_violations
+
+
+# -- S2: write-back (docs 25.20) -------------------------------------------------
+
+WRITE_BACK = {"write": SLOT, "from": [[RCX, 8]], "loads": [SLOT]}
+
+
+def _get_written_back(**changes):
+    return _get(**{"memory": [WRITE_BACK], "same_result": {"result": [RAX, 8], "inputs": [], "reads": [SLOT],
+                                                           "nonstack": True, "write_back": True}, **changes})
+
+
+WRITTEN_BACK = [_get_written_back(), *ENTRIES[1:]]
+
+
+def _three(*between):
+    """p1 = Get(this) (rbp); ``between``; p2 = Get(this) (rsi); p3 = Get(this);
+    [p1+0x30] = A (edi); [p2+0x34] = B (r12d); r9d = [p3+0x30]."""
+    builder = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), reg(RCX))).call(GET).ins(copy(reg(RBP), reg(RAX)))
+    for row in between:
+        row(builder)
+    builder.ins(copy(reg(RCX), reg(RBX))).call(GET).ins(copy(reg(RSI), reg(RAX)))
+    builder.ins(copy(reg(RCX), reg(RBX))).call(GET)
+    builder.ins(add(T, reg(RBP), const(0x30)), store(T, reg(RDI, 4)))
+    builder.ins(add(T, reg(RSI), const(0x34)), store(T, reg(R12, 4)))
+    builder.ins(add(T, reg(RAX), const(0x30)), load(reg(R9, 4), T))
+    return builder.add_rsp(0x28).ret()
+
+
+def test_a_written_back_slot_keeps_its_class(tmp_path):
+    builder = _three()
+    analyzed = _analyze(tmp_path, builder, entries=WRITTEN_BACK)
+    atoms = [atom for *_, atom in analyzed.normalized.same_result_uses]
+    assert len(atoms) == 3 and len(set(atoms)) == 1
+    read = _read(analyzed, builder)
+    assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and read.is_complete
+
+
+def test_a_write_back_under_another_key_is_an_ordinary_write(tmp_path):
+    # Touch changes the state: Get2's key differs from Get1's, so Get1's
+    # write-back is an ordinary (once) write for it; Get3 inherits Get2's class
+    analyzed = _analyze(tmp_path, _three(_call(TOUCH)), entries=WRITTEN_BACK)
+    uses = sorted(analyzed.normalized.same_result_uses)
+    atoms = [atom for *_, atom in uses]
+    assert len(atoms) == 3 and atoms[0] != atoms[1] and atoms[1] == atoms[2]
+
+
+def test_a_write_back_in_a_loop_gives_no_class(tmp_path):
+    # the slot at the call joins its entry value and the call's own write-back
+    # (a cycle): no class in v1
+    analyzed = _analyze(tmp_path, _looping([add(T, reg(RAX), const(0x30)), load(reg(RDX, 4), T)]),
+                        entries=WRITTEN_BACK)
+    assert analyzed.normalized.same_result_uses == ()
+
+
+@pytest.mark.parametrize("entry, problem", [
+    (_get(same_result={"result": [RAX, 8], "inputs": [], "reads": [SLOT], "write_back": True}), "no write row"),
+    (_get(memory=[WRITE_BACK]), "a slot write without write_back"),
+    (_get_written_back(memory=[{"write": SLOT, "from": [[RCX, 8]]}]), "the write does not load the slot"),
+    (_get_written_back(
+        registers=[{"write": [RAX, 8], "from": [[RCX, 8], [RDX, 8]], "loads": [SLOT]}],
+        same_result={"result": [RAX, 8], "inputs": [[RDX, 8]], "reads": [SLOT], "write_back": True}),
+     "the write does not read an input"),
+    (_get_written_back(memory=[WRITE_BACK, {"write": {"base": [RCX, 8], "disp": 4, "size": 4}, "value": "unknown"}]),
+     "an unknown write over the slot"),
+    (_get_written_back(memory=[WRITE_BACK, {"write": {"base": [RCX, 8], "disp": -4, "size": 8}, "from": []}]),
+     "another write overlapping the slot"),
+])
+def test_a_write_back_entry_is_validated(tmp_path, entry, problem):
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps({**HEADER, "entries": [entry]}), encoding="utf-8")
+    with pytest.raises(ModelError):
+        load_model_file(path)
+
+
+def _resolver():
+    """rax = [rcx]; if rax & 1 (unresolved): rax ^= 1, [rcx] = rax; ret --
+    a lazy resolver writing the resolved value back."""
+    builder = FunctionBuilder(entry=GET).ins(load(reg(RAX), reg(RCX)))
+    builder.cbranch("done", FLAG, op("INT_AND", [reg(RAX, 1), const(1, 1)], tmp(0x310, 1)),
+                    op("INT_EQUAL", [tmp(0x310, 1), const(0, 1)], FLAG))
+    builder.ins(op("INT_XOR", [reg(RAX), const(1)], reg(RAX))).ins(store(reg(RCX), reg(RAX)))
+    return builder.label("done").ret()
+
+
+def test_the_oracle_counts_write_backs_whose_results_are_unused(tmp_path):
+    # Get1's result is discarded; Get2 / Get3 inherit the class its write-back left
+    builder = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), reg(RCX))).call(GET)
+    builder.ins(copy(reg(RCX), reg(RBX))).call(GET).ins(copy(reg(RSI), reg(RAX)))
+    builder.ins(copy(reg(RCX), reg(RBX))).call(GET)
+    builder.ins(add(T, reg(RSI), const(0x34)), store(T, reg(R12, 4)))
+    builder.ins(add(T, reg(RAX), const(0x30)), load(reg(R9, 4), T))
+    builder.add_rsp(0x28).ret()
+    analyzed = _analyze(tmp_path, builder, entries=WRITTEN_BACK)
+    assert len(analyzed.normalized.same_result_uses) == 2
+    (callee,) = program_units(_resolver())
+    report = check_program(analyzed.normalized, analyzed.unit.observation, {(1, GET): callee.observation},
+                           seeds=range(8),
+                           register_pools=lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000},
+                           havoc_calls=(REG, RSP, 8))
+    assert report.same_result_checked and report.same_result_violations == []
+    assert report.same_result_unchecked   # Get1's write-backs, counted though its result is unused
+
+
+def test_the_oracle_runs_a_write_back_resolver(tmp_path):
+    builder = _three()
+    analyzed = _analyze(tmp_path, builder, entries=WRITTEN_BACK)
+    (callee,) = program_units(_resolver())
+    report = check_program(analyzed.normalized, analyzed.unit.observation, {(1, GET): callee.observation},
+                           seeds=range(8),
+                           register_pools=lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000},
+                           havoc_calls=(REG, RSP, 8))
+    assert report.same_result_checked and report.same_result_violations == []
+    assert report.same_result_unchecked   # some runs start unresolved: the write-back is unchecked
+    assert report.silent == []
+
+
+def test_a_write_back_by_a_call_with_other_inputs_is_an_ordinary_write(tmp_path):
+    # Get(this, rdi); Get(this, r12); Get(this, rdi): the second call may
+    # normalize the slot to another form for its input -- the third does not
+    # inherit the first call's class through it
+    entries = [_get_written_back(
+        registers=[{"write": [RAX, 8], "from": [[RCX, 8], [RDX, 8]], "loads": [SLOT]}],
+        memory=[{"write": SLOT, "from": [[RCX, 8], [RDX, 8]], "loads": [SLOT]}],
+        same_result={"result": [RAX, 8], "inputs": [[RDX, 8]], "reads": [SLOT], "nonstack": True,
+                     "write_back": True}), *ENTRIES[1:]]
+    builder = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), reg(RCX)))
+    for value, keep in ((RDI, RBP), (R12, RSI), (RDI, None)):
+        builder.ins(copy(reg(RCX), reg(RBX)), copy(reg(RDX), reg(value))).call(GET)
+        if keep is not None:
+            builder.ins(copy(reg(keep), reg(RAX)))
+    for base in (RBP, RSI, RAX):
+        builder.ins(add(T, reg(base), const(0x30)), load(reg(R9, 4), T))
+    builder.add_rsp(0x28).ret()
+    atoms = [atom for *_, atom in sorted(_analyze(tmp_path, builder, entries=entries).normalized.same_result_uses)]
+    assert len(atoms) == 3 and len(set(atoms)) == 3

@@ -53,7 +53,10 @@ within one activation of the caller, two calls with equal ``inputs`` values,
 the same read-slot address and a read-slot value of the same class, at the
 same accessor state, return the same bits in ``result`` (one of the entry's
 register writes), failure included; ``nonstack``: the result addresses no
-thread's stack. One read slot; ``write_back`` is not supported yet.
+thread's stack. One read slot. ``"write_back": true``: the call may rewrite
+the slot with a value of the same class (a normalizing cache: an unresolved
+handle becomes the resolved pointer) -- the entry then has one memory row
+writing exactly the slot and loading it (its value rests on the old one).
 ``preserves_accessor_state`` (optional, per entry): ``["<file id>/<entry>",
 ...]`` or ``["*"]`` -- a call of this entry leaves those accessors' hidden
 state unchanged (its transitive effects, callbacks included); every other
@@ -347,6 +350,14 @@ def load_model_file(path: str | Path) -> ModelFile:
                      tuple(overrides), digest)
 
 
+def _overlaps(write, read) -> bool:
+    """Two accesses on one base register may share a byte (a register-sized
+    write may)."""
+    if type(write.size) is not int:
+        return True
+    return write.disp < read.disp + read.size and read.disp < write.disp + write.size
+
+
 def _same_result(item, registers, fresh, same_object, register_loads, path):
     """An entry's ``same_result`` (see the docstring), or None. The result's
     register row states every input in its ``from`` and the read slot in its
@@ -357,8 +368,8 @@ def _same_result(item, registers, fresh, same_object, register_loads, path):
     where = f"{path}: {item['name']}: same_result"
     if type(raw) is not dict or not {"result", "inputs", "reads"} <= set(raw)             <= {"result", "inputs", "reads", "write_back", "nonstack"}:
         raise ModelError(f"{where} has result, inputs, reads (write_back, nonstack)")
-    if raw.get("write_back", False) is not False:
-        raise ModelError(f"{where}: write_back is not supported yet (docs 25.20 S2)")
+    if type(raw.get("write_back", False)) is not bool:
+        raise ModelError(f"{where}: write_back must be true or false")
     if type(raw.get("nonstack", False)) is not bool:
         raise ModelError(f"{where}: nonstack must be true or false")
     if item.get("noreturn"):
@@ -377,7 +388,20 @@ def _same_result(item, registers, fresh, same_object, register_loads, path):
     sources = dict(registers)[result]
     if any(item not in sources for item in inputs) or read not in dict(register_loads).get(result, ()):
         raise ModelError(f"{where}: the result's register row reads every input (from) and the slot (loads)")
-    return result, inputs, read, raw.get("nonstack", False)
+    rows = [row for row in item["memory"] if "value" not in row and _access(row["write"], "memory write") == read]
+    if raw.get("write_back", False) and (
+            len(rows) != 1 or read not in [_access(load, "memory load") for load in rows[0].get("loads", ())]
+            or any(item not in [_slice(s, "memory write input") for s in rows[0].get("from", ())]
+                   for item in inputs)):
+        raise ModelError(f"{where}: write_back: one memory row writes exactly the slot, loads it and reads "
+                         "every input (from)")
+    for row in item["memory"]:
+        write = _access(row["write"], "memory write")
+        if write.base == read.base and _overlaps(write, read) and not (
+                raw.get("write_back") and "value" not in row and write == read):
+            raise ModelError(f"{where}: another memory row writes the slot's bytes "
+                             "(only the one write-back row may)")
+    return result, inputs, read, raw.get("nonstack", False), raw.get("write_back", False)
 
 
 DERIVED_SOURCE_KEYS = {"kind", "library", "sha256", "image_base", "language", "engine", "parameters",

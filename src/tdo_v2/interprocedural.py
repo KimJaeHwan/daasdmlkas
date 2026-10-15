@@ -591,11 +591,12 @@ def _accessor_effect(effect, model_file, entry, register_object, memory_space):
     """``effect`` with the entry's accessor claims (docs 25.20), under
     same-result-functions: its ``same_result`` and ``preserves_accessor_state``."""
     if entry.same_result is not None:
-        result, inputs, read, nonstack = entry.same_result
+        result, inputs, read, nonstack, write_back = entry.same_result
         effect = replace(effect, same_result=(
             entry.model_id, f"{entry.label}#{model_file.digest[:16]}", ByteSpan(register_object, *result),
             tuple(ByteSpan(register_object, *item) for item in inputs),
-            AnchoredSpan(ByteSpan(register_object, *read.base), read.disp, read.size, memory_space), nonstack))
+            AnchoredSpan(ByteSpan(register_object, *read.base), read.disp, read.size, memory_space), nonstack,
+            write_back))
     if entry.preserves_accessor_state:
         effect = replace(effect, preserves_accessor_state=entry.preserves_accessor_state)
     return effect

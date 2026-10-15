@@ -158,7 +158,8 @@ class ProvenCallEffect:
     memory_runs_final: bool = False
     # an accessor model under same-result-functions (docs 25.20): (model id,
     # identity -- the entry's label and its file's digest --, result register
-    # span, input register spans, the read slot as an AnchoredSpan, nonstack)
+    # span, input register spans, the read slot as an AnchoredSpan, nonstack,
+    # write_back)
     same_result: tuple | None = None
     # model ids (or "*") whose accessor state this call leaves unchanged
     preserves_accessor_state: tuple[str, ...] = ()

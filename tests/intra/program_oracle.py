@@ -56,7 +56,8 @@ class ProgramReport:
     # calls whose results share one atom must return equal results
     same_result_checked: int = 0     # atoms with two or more activations in a run
     same_result_violations: list = field(default_factory=list)
-    # obligations the run cannot check independently (none before write-back)
+    # obligations the run cannot check independently: write-backs that
+    # changed the slot (the same class by contract, docs 25.20 H)
     same_result_unchecked: int = 0
 
 
@@ -299,7 +300,25 @@ def _check_same_results(report, interpreter, function, effects, reg_space) -> No
     same-result atom returned the same bytes there (an assumption violation
     otherwise -- counted apart from silent misses)."""
     by_atom: dict = {}
-    for row, _, _, atom in getattr(function, "same_result_uses", ()):
+    uses = getattr(function, "same_result_uses", ())
+    used = {identity for _, identity, _, _ in uses}
+    # every write-back of an accessor whose keys the function used: a class a
+    # later key may inherit, whether or not that call's own result is used
+    for call, effect in effects.items():
+        if effect.same_result is None or not effect.same_result[6] or effect.same_result[1] not in used:
+            continue
+        for serial, (key, entry) in interpreter.activation_snapshots.items():
+            returned = interpreter.activation_returns.get(serial)
+            place = _place(effect.same_result[4], entry, interpreter.entry_values, reg_space,
+                           moduli=interpreter._moduli)
+            if key != call or returned is None or place is None:
+                continue
+            space, start, size = place
+            before = [entry.get((space, start + index), interpreter.entry_values.get((space, start + index)))
+                      for index in range(size)]
+            if before != [returned.get((space, start + index)) for index in range(size)]:
+                report.same_result_unchecked += 1
+    for row, _, _, atom in uses:
         call = row.rsplit("~", 1)[0]
         result = effects[call].same_result[2]
         for serial, (key, _) in interpreter.activation_snapshots.items():

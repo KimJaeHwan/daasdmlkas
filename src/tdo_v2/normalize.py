@@ -980,7 +980,9 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     (``accessor_state``, ``_accessor_states``) also loads its read slot
     (``~ld<j>``) and reads its inputs, the slot's base register and that load
     in a ``~sr`` row -- the key its result's same-result atom is made from
-    (a ("same_result", ...) pointer row, ``relative_memory._same_result_key``).
+    (a ("same_result", ...) pointer row, ``relative_memory._same_result_key``);
+    its write-back run (``write_back``) gets a ("write_back", result row)
+    pointer row: the slot class it leaves (``relative_memory._definition_class``).
     Anchored memory is projected later (``relative_memory``): returns the
     effects and their anchored accesses."""
     rows: list[ObservedEffect] = []
@@ -1134,9 +1136,11 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             ))
     accessor = None
     if proven.same_result is not None and accessor_state is not None and pointer_rows is not None:
-        _, identity, result, inputs, read, nonstack = proven.same_result
+        _, identity, result, inputs, read, nonstack, write_back = proven.same_result
         index = next((index for index, (kind, run, _, _) in enumerate(staged)
                       if kind == "register" and tuple(run.writes) == (result,)), None)
+        written = next((index for index, (kind, run, _, _) in enumerate(staged)
+                        if kind == "memory" and run.write == read), None) if write_back else None
         if index is not None:
             slot = load(read)
             spans = list(dict.fromkeys((*inputs, read.anchor)))
@@ -1147,7 +1151,7 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             accessor = (f"{call_key}~{index}", (
                 "same_result", identity, f"{call_key}~sr", tuple(anchor_varnode(span) for span in inputs),
                 anchor_varnode(read.anchor), displacement(read), load_keys[read], read.size, nonstack,
-                accessor_state))
+                accessor_state), None if written is None else f"{call_key}~{written}")
     # a value that may be a new block is fresh only as the call's sole pointer value
     unique = sum(getattr(run, "value", None) is not None for _, run, _, _ in staged) == 1
     for index, (kind, run, stage_key, target) in enumerate(staged):
@@ -1163,6 +1167,8 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
                 pointer_rows[key] = ("mem", load_keys[value[1]], value[1].size, value[2], unique)
         if accessor is not None and accessor[0] == key:
             pointer_rows[key] = accessor[1]
+        if accessor is not None and accessor[2] == key:
+            pointer_rows[key] = ("write_back", accessor[0])
         if kind == "register":
             writes = tuple(ResolvedStorage(span) for span in run.writes)
             rows.append(ObservedEffect(key, EffectKind.COPY, reads=(target,), writes=writes,

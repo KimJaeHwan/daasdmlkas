@@ -1124,6 +1124,8 @@ class _Projector:
         row = self._pointer_rows[definition.operation_key]
         if row[0] == "same_result":
             return self._same_result_atom(definition, requested_span, row)
+        if row[0] == "write_back":
+            return None   # the slot's new value: a value of its own (``_definition_atom``)
         if row[0] == "nonstack":
             return self._definition_atom(definition, requested_span, nonstack=True)
         if row[0] == "reg":
@@ -1173,7 +1175,20 @@ class _Projector:
         with the image base), the slot's displacement and width, the slot
         value's class (``_slot_class``) and the accessor state token -- as one
         atom; None when any part is missing."""
-        if row is None or not self._atoms_on:
+        expect = self._key_parts(row)
+        if expect is None:
+            return None
+        token = self._slot_class(row[6], row[7], expect)
+        if token is None:
+            return None
+        text = repr((size, expect, token))
+        return _digest_ints(b"same-result-v1", tuple(text.encode("utf-8")))
+
+    def _key_parts(self, row):
+        """Every part of an accessor key but the slot's class: (identity,
+        input and slot base expressions, slot displacement, width, state), or
+        None (``_same_result_key``)."""
+        if row is None or row[0] != "same_result" or not self._atoms_on:
             return None
         _, identity, reader, inputs, base, displacement, slot_reader, width, _, state = row
         if state is None or reader in self._blocked or slot_reader in self._blocked:
@@ -1187,19 +1202,19 @@ class _Projector:
                 return None
             parts.append((_address_atom_key(value.atoms), _unsigned_wrap(value.displacement, value.byte_size),
                           value.byte_size))
-        token = self._slot_class(slot_reader, width)
-        if token is None:
-            return None
-        text = repr((identity, size, tuple(parts), displacement, width, token, state))
-        return _digest_ints(b"same-result-v1", tuple(text.encode("utf-8")))
+        return identity, tuple(parts), displacement, width, state
 
-    def _slot_class(self, operation_key, width):
+    def _slot_class(self, operation_key, width, expect, active=frozenset()):
         """The class of the value an accessor's slot load reads (docs 25.20
         B): one read of ``width`` bytes from one definition d --
-        ("entry", span) for its entry value; ("def", d, span) for a write
-        executed at most once per activation (a later store of the same bits
-        is another class); a join of acyclic sources all of one class; None
-        otherwise (several or partial definitions, a repeated write, a cycle)."""
+        ("entry", span) for its entry value; for exactly the slot written back
+        by a call of the same accessor whose key but the slot equals
+        ``expect`` (``_key_parts``), the class that call read (S2: the
+        normalized value is the same handle); ("def", d, span) for any other
+        write executed at most once per activation (a later store of the same
+        bits is another class); a join of acyclic sources all of one class;
+        None otherwise (several or partial definitions, a repeated write, a
+        cycle)."""
         action_id = self._action_ids.get(operation_key)
         if action_id is None:
             return None
@@ -1211,9 +1226,9 @@ class _Projector:
         fragment = reads[0].fragments[0]
         if fragment.span != reads[0].span or len(fragment.definition_ids) != 1:
             return None
-        return self._definition_class(fragment.definition_ids[0], fragment.span, frozenset())
+        return self._definition_class(fragment.definition_ids[0], fragment.span, active, expect)
 
-    def _definition_class(self, definition_id, span, active):
+    def _definition_class(self, definition_id, span, active, expect):
         if definition_id in active:
             return None   # a cycle: no class through it (v1)
         definition = self._ssa.definitions[definition_id]
@@ -1223,12 +1238,18 @@ class _Projector:
             return ("entry", _stable_storage_key(span))
         if definition.kind is MemoryDefinitionKind.DATA_WRITE:
             key = definition.operation_key
+            row = self._pointer_rows.get(key) if key is not None else None
+            if row is not None and row[0] == "write_back" and definition.span == span:
+                writer = self._pointer_rows.get(row[1])
+                if writer is not None and self._key_parts(writer) == expect:
+                    # the call's pre-state class: write-back keeps it (S2)
+                    return self._slot_class(writer[6], writer[7], expect, active | {definition_id})
             if key is None or key.split("~", 1)[0] not in self._once:
                 return None
             return ("def", self._stable_definition_key(definition_id), _stable_storage_key(span))
         if definition.kind is MemoryDefinitionKind.JOIN:
             sources = self._join_sources.get(definition_id, ())
-            tokens = {self._definition_class(source, span, active | {definition_id}) for source in sources}
+            tokens = {self._definition_class(source, span, active | {definition_id}, expect) for source in sources}
             return next(iter(tokens)) if len(tokens) == 1 and None not in tokens else None
         return None
 
