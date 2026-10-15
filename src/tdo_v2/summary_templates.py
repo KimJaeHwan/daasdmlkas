@@ -53,8 +53,9 @@ TEMPLATE_VERSION = 1
 # copies, docs 25.11). 5: a call not keeping memory keeps the bytes its
 # external model's memory runs write at an exactly known place (docs 25.15).
 # 6: jumps to the import thunk of a function that never returns end their
-# path (``noreturn`` models, docs 25.16)
-ENGINE_SEMANTICS_VERSION = 6
+# path (``noreturn`` models, docs 25.16). 7: SUBPIECE boundary atoms, once-join
+# atoms, the low bytes of ZEXT(x) at x's width are x (docs 25.17)
+ENGINE_SEMANTICS_VERSION = 7
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

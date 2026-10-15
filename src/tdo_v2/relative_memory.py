@@ -949,8 +949,9 @@ class _Projector:
         if stack_span is not None and span.object_id == stack_span.object_id                 and span.start < stack_span.end and stack_span.start < span.end:
             self._stack_derived.add(atom)
 
-    def _boundary_expression(self, kind: str, value: _AddressExpression, byte_size: int):
-        """INT_SEXT / INT_ZEXT of an expression with atoms (C1): a new atom, a
+    def _boundary_expression(self, kind: str, value: _AddressExpression, byte_size: int, offset: int = 0):
+        """INT_SEXT / INT_ZEXT of an expression with atoms (C1), or SUBPIECE
+        (``offset``: the first byte kept, narrower output; docs 25.17): a new atom, a
         deterministic function of the input expression -- single-valued when
         its atoms are (every atom in an expression was admitted when it was
         built: entry/import atoms, definition atoms under the once / settled /
@@ -962,16 +963,47 @@ class _Projector:
             return None
         bits = 8 * value.byte_size
         displacement = _unsigned_wrap(value.displacement, value.byte_size)
-        atom = _digest_ints(b"boundary-atom-v1", (
-            0 if kind == "zext" else 1, value.byte_size, byte_size,
-            _address_atom_key(value.atoms), displacement))
-        low, high = (0, (1 << bits) - 1) if kind == "zext" else (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+        if kind == "subpiece":
+            if not 0 < byte_size < value.byte_size or offset + byte_size > value.byte_size:
+                return None
+            atom = _digest_ints(b"boundary-atom-v1", (
+                2, value.byte_size, byte_size, offset, _address_atom_key(value.atoms), displacement))
+            low, high = 0, (1 << (8 * byte_size)) - 1   # the kept bytes, unsigned
+        else:
+            atom = _digest_ints(b"boundary-atom-v1", (
+                0 if kind == "zext" else 1, value.byte_size, byte_size,
+                _address_atom_key(value.atoms), displacement))
+            low, high = (0, (1 << bits) - 1) if kind == "zext" else (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
         self._boundary[atom] = (kind, value.byte_size, byte_size, (low, high))
         if any(self._is_stack_derived(key) for key, _ in value.atoms):
             self._stack_derived.add(atom)
         if any(key in self._definition_atoms for key, _ in value.atoms):
             self._definition_atoms.add(atom)   # wild like its input
         return _AddressExpression(((atom, 1),), 0, byte_size, 0)
+
+    def _once_join_expression(self, definition_id, requested_span, candidates) -> _AddressExpression:
+        """A join, at a block run once per activation (after the first fixed
+        point: ``_once_blocks``), of values that all have expressions (each
+        admitted under the atom discipline -- an unsettled or blocked read has
+        none): this activation's value is one of them -- a new atom (C1,
+        docs 25.17), a boundary (index) atom, so objects on it are wild.
+        Keyed by the joined definitions' stable identities and the
+        candidates' expressions: a later pass that changes a candidate makes
+        another atom, so a read whose value rested on it is seen as stale.
+        Range: min..max of the candidates when all are constants (unsigned at
+        the join's width), else none. Candidates that may move with the
+        image base are refused by the caller."""
+        sources = sorted(self._stable_definition_key(source_id)
+                         for source_id in self._join_sources.get(definition_id, ()))
+        shapes = sorted((_address_atom_key(item.atoms), _unsigned_wrap(item.displacement, item.byte_size))
+                        for item in candidates)
+        atom = _digest_ints(b"once-join-v1", (
+            *sources, _stable_storage_key(requested_span), len(shapes), *(part for shape in shapes for part in shape)))
+        values = [_unsigned_wrap(item.displacement, item.byte_size) for item in candidates if not item.atoms]
+        span = (min(values), max(values)) if len(values) == len(candidates) else None
+        self._boundary[atom] = ("once-join", requested_span.size, requested_span.size, span)
+        self._note_opaque_atom(atom, candidates)
+        return _AddressExpression(((atom, 1),), 0, requested_span.size)
 
     def _is_stack_derived(self, atom: int) -> bool:
         """An entry atom of (a part of) the stack pointer, or an opaque atom
@@ -1293,6 +1325,11 @@ class _Projector:
                 atom = _digest_ints(b"join-nonstack-v3", (*sources, _stable_storage_key(requested_span)))
                 self._nonstack_atoms.add(atom)
                 result = _AddressExpression(((atom, 1),), 0, requested_span.size)
+            if result is None and candidates and index_addresses() and definition.block_key in self._once_blocks \
+                    and definition.span == requested_span and all(
+                        item is not None and item.image == 0 and item.byte_size == requested_span.size
+                        for item in candidates):
+                result = self._once_join_expression(definition_id, requested_span, candidates)
         else:
             result = None
         if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE \
@@ -1362,6 +1399,10 @@ class _Projector:
         ):
             return None
         value = self._expression_for_input(operation_key, operation.inputs[0])
+        if value is not None and value.atoms and index_addresses() and value.byte_size == requested_span.size:
+            # the low bytes of ZEXT(x) at x's own width are x (docs 25.17; a
+            # 32-bit register write's zero extension read back as the 32-bit part)
+            return value
         if value is None or value.atoms:
             return None
         return _AddressExpression(
@@ -1422,6 +1463,10 @@ class _Projector:
                 return _AddressExpression(
                     (), (_unsigned_wrap(value.displacement, value.byte_size) >> shift) & ((1 << (8 * byte_size)) - 1),
                     byte_size, _opaque_image(value))
+            if value is not None and value.atoms \
+                    and operation.inputs[1].coordinate.byte_offset + byte_size <= value.byte_size:
+                return self._boundary_expression("subpiece", value, byte_size,
+                                                 operation.inputs[1].coordinate.byte_offset)
         if operation.opcode == "INT_SEXT" and len(operation.inputs) == 1:
             value = self._expression_for_input(operation_key, operation.inputs[0])
             if value is not None and not value.atoms and value.byte_size < byte_size:

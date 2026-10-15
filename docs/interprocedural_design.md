@@ -1324,3 +1324,29 @@ call_clobber 부채의 읽기와 사이에 있는 호출의 대상), `.census6/w
   `setspecific`·`once`·`key_create`는 거부("depends on the library's load address" — 공통으로 쓰는 내부 함수 0x2e36570d7이
   라이브러리 자신의 코드 주소를 값으로 씀). DFB091은 연결해도 불확실. 남은 원인과 진행 여부는 사용자 결정 대기.
 - 기록: `.census6/noreturn_{prompt,agy,astra}.md`, `.census6/noreturn_impl_{prompt,agy,astra}.md`.
+
+### 25.17 배열 묶음 2단계: SUBPIECE 경계 원자, once-join 원자, ZEXT 아래 바이트 (R005, 2026-10-15, 설계 검토 Antigravity·Astra)
+
+R005(FString)의 막힘을 25.10의 D-lite 순서대로. 이 단계는 가정 없는 일반 C1 규칙(모든 함수, `TDO_V2_INDEX_ADDRESSES`로 끔).
+- **2a SUBPIECE 경계 원자**: 원자가 있는 식의 SUBPIECE(e, k)(출력이 더 좁음, k + 출력 ≤ 입력, image 0) → 새 경계 원자. 키 =
+  (subpiece, 입력 폭, 출력 폭, k, e의 원자 묶음, e의 변위 mod 2^입력). 범위 [0, 2^(8·출력)-1]. 성질은 입력에서 이어받음(스택 유래,
+  wild). 경계 원자이므로 그 위의 객체는 wild.
+- **2b once-join 원자**: 한 번만 실행되는 블록(`_once_blocks`, 첫 고정점 뒤)의 JOIN이고 요청 span이 JOIN span이며 모든 후보가
+  식을 가지고(미정·막힌 읽기면 식이 없음) image가 0이고 폭이 같을 때 → 새 원자: 이번 실행의 값은 후보 중 하나. 키 = 합류한
+  정의들의 안정 키 + span + **후보들의 식**(나중 단계에서 후보가 바뀌면 원자도 바뀌어 오래된 읽기로 잡힘 — Antigravity P0-1;
+  안정 키도 유지 — Astra). 범위는 후보가 모두 상수일 때만(최소·최대). 기존 같은-후보 규칙·join-nonstack 규칙 뒤에 적용.
+  경계(index) 원자이므로 그 위의 객체는 wild. `_note_opaque_atom`으로 성질 이어받음.
+- **2c ZEXT 아래 바이트**: ZEXT(x)가 쓴 칸을 x의 폭으로 다시 읽으면 x의 식(원자가 있어도). 32비트 레지스터 쓰기의 zero
+  extension을 32비트로 다시 읽는 경우(AppendChar의 cmov 앞 `zext edi`). 전에는 상수만.
+- AppendChar(`.census6/diag_oncejoin.py`, `diag_appendchar.py`): index = sext(once-join{subpiece(Num-1), 0}) → 두 쓰기 모두 주소
+  식(기준 진입 `*(this+0)` 원자 + 2 × index 원자)을 얻음 → wild index 객체. 그 결과 AppendChar 템플릿은 **거부됨**("writer
+  conditions on objects no caller can locate") — 전에는 주소 모르는 쓰기 2개를 가진 템플릿이었음. 3단계(요약의 index 쓰기)가
+  이것을 다룸.
+- `ENGINE_SEMANTICS_VERSION` 6 → 7; `models/derived/ue_core_win64_fstring.json` 다시 만듦(생성자·소멸자 2개, AppendChar 거부).
+- 테스트 `tests/intra/test_index_atoms_once.py`(9): 잘린 index는 정확한 한 곳(두 번째 쓰기가 첫 쓰기를 덮음), cmov로 고른
+  index도 정확한 한 곳, C1 스위치 끄면 모름, 루프 안 join은 원자 없음(쓰기 주소 모름 — 블록 검사를 빼면 실패), 무작위 cmov·
+  SUBPIECE index 함수 180개 × 6실행 graph 검증기 누락 0, ZEXT를 다른 폭(2바이트)으로 다시 읽으면 주소 없음·같은 폭이면 주소 있음.
+  HEAD 코드에서 "정확한 한 곳"·"같은 폭" 테스트는 실패.
+- 결과(AppendChar 거부 상태): 테스트 813개(+ 새 9개); 지표 전부 그대로(09 debug 66/62, release 53/48, win32 44/37, UE DebugGame 15/15,
+  Dev 16/16 — R005는 이미 missing); oracle 그대로(missing 0, zlib 256 기존; DebugGame unexplained 1227 기존).
+- 기록: `.census6/bundle_{prompt,agy,astra}.md`(설계 1차), `.census6/step2_impl{,2}_*`(구현 검토 2차, 둘 다 승인).
