@@ -222,9 +222,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     program = dict(functions)   # every function of the program, cut ones included (program-wide facts)
     functions = {key: unit for key, unit in functions.items() if key not in cuts}
     calls = {key: _direct_calls(unit, functions) for key, unit in functions.items()}
+    local_entries = frozenset((unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset)
+                              for unit in program.values())
     externals = {
         key: {**(_external_sites(unit, image_info, external_models, disabled, usable,
-                                 refused_sites.setdefault(key, {}))
+                                 refused_sites.setdefault(key, {}), local_entries)
                  if image_info and external_models else {}), **_cut_sites(unit, cuts)}
         for key, unit in functions.items()
     }
@@ -263,6 +265,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             if slot not in instantiated:
                 instantiated[slot] = instantiate(entry.template, entry.label, register_object, memory_space)
             return instantiated[slot]
+
+        state_proofs: dict = {}   # callee key -> ``_state_proof`` (computed once)
 
         def site(key):
             """Call-site facts of ``key`` (fixed per function: computed once)."""
@@ -375,6 +379,17 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     if tail and len(program_stack) != 1:
                         continue  # no single stack pointer to compose through
                     effect = site_effect(key, call_key, done.summary, done.anchors, failed.get(call_key, ()))
+                    if effect is not None and call_key.endswith(":CALL") and not failed.get(call_key) \
+                            and site(key)[3].get(call_key) == {(0x20, 8): -8} \
+                            and int(call_key.split(":", 1)[0], 16) == memory_space \
+                            and _plain_push_call(functions[key], call_key, memory_space) \
+                            and effect.restores_stack and effect.preserves_memory \
+                            and not (effect.noreturn or effect.memory_runs or effect.unknown_memory
+                                     or effect.writer_conditions or effect.tail_stack):
+                        if callee not in state_proofs:
+                            state_proofs[callee] = _state_proof(done.unit, done.normalized)
+                        if state_proofs[callee] is not None:
+                            effect = replace(effect, state_proof=state_proofs[callee])
                     if effect is not None:
                         proven[call_key] = effect
                 register_space = _register_space_id(observation) or _program_register_space(unit)
@@ -651,13 +666,128 @@ def _bound_cuts(functions, bindings, disabled, external_models, refusals) -> dic
 
 def _same_result_labels(normalized) -> set:
     """same-result-functions and each preserves_accessor_state claim a
-    same-result atom of the function rests on (docs 25.20)."""
+    same-result atom of the function rests on (docs 25.20); a state kept by a
+    body proof ("proof:<reason>", diagnostic only) rests on the premise
+    accessor-hidden-state-in-memory (docs 25.26)."""
     uses = getattr(normalized, "same_result_uses", ())
     if not uses:
         return set()
+    claims = {label for _, _, found, _ in uses for label in found}
     return {"same-result-functions"} | {f"accessor-state-preserved-by:{label}"
-                                        for _, _, claims, _ in uses for label in claims} \
+                                        for label in claims if not label.startswith("proof:")} \
+        | ({"accessor-hidden-state-in-memory"} if any(label.startswith("proof:") for label in claims) else set()) \
         | ({"accessor-result-separate"} if getattr(normalized, "accessor_separations", ()) else set())
+
+
+def _plain_push_call(unit, call_key, memory_space) -> bool:
+    """The CALL instruction of ``call_key`` is exactly ``RSP = RSP - 8;
+    STORE [RSP] <- its fall-through address (8 bytes, the program's memory);
+    CALL`` -- nothing between the push and the call can move RSP or
+    overwrite the pushed continuation (the state proof's return lands there)."""
+    space, offset, _, _ = call_key.split(":")
+    row = next((item for item in unit.observation.instructions
+                if (item.address.space_id, item.address.byte_offset) == (int(space, 16), int(offset, 16))), None)
+    if row is None or row.fallthrough is None or len(row.operations) != 3:
+        return False
+    adjust, push, call = row.operations
+    rsp = adjust.output
+    return (
+        adjust.opcode == "INT_SUB" and rsp is not None and rsp.kind is VarnodeKindCode.REGISTER
+        and (rsp.coordinate.byte_offset, rsp.byte_size) == (0x20, 8) and len(adjust.inputs) == 2
+        and adjust.inputs[0] == rsp and adjust.inputs[1].kind is VarnodeKindCode.CONSTANT
+        and adjust.inputs[1].coordinate.byte_offset == 8
+        and push.opcode == "STORE" and len(push.inputs) == 3
+        and push.inputs[0].kind is VarnodeKindCode.CONSTANT and push.inputs[0].coordinate.byte_offset == memory_space
+        and push.inputs[1] == rsp and push.inputs[2].kind is VarnodeKindCode.CONSTANT
+        and push.inputs[2].byte_size == 8 and push.inputs[2].coordinate.byte_offset == row.fallthrough.byte_offset
+        and call.opcode == "CALL"
+    )
+
+
+_X64_GENERAL = ((0x00, 0x40), (0x80, 0xC0))          # rax..rdi, r8..r15 (not segments / FS, GS bases)
+_X64_FLAGS = frozenset({0x200, 0x202, 0x204, 0x206, 0x207, 0x20B})   # CF PF AF ZF SF OF (not TF IF DF)
+_X64_RIP = (0x288, 0x290)
+
+
+def _state_proof(unit, normalized) -> str | None:
+    """Why a call of this function keeps every accessor's hidden state, or
+    None (docs 25.26; premise accessor-hidden-state-in-memory): x86-64 (v1);
+    no STORE, CALL, CALLIND, CALLOTHER or BRANCHIND; every output a unique,
+    a general register, an arithmetic flag or RIP; no instruction with
+    internal p-code flow, calls or overrides; every flow target, branch
+    target and fall-through inside the function; every RETURN the pop-return
+    shape (``may_alias._return_shape``) whose LOAD reads at the entry stack
+    pointer -- with no store, the caller's return address: the original
+    continuation."""
+    from .control_projection import control_successor_coordinates
+    from .may_alias import _return_shape
+    from .pcode_blocks import build_pcode_block_graph, has_internal_flow
+    from .relative_memory import stack_offset_at
+
+    observation = unit.observation
+    evidence = unit.scopes.program.evidence
+    if type(normalized) is not NormalizedFunction or observation is None or not observation.instructions \
+            or not evidence.translation_namespace.language_id.startswith("x86:LE:64"):
+        return None
+    if build_pcode_block_graph(observation, unit.scopes.function.entry, frozenset()).unsupported is not None:
+        return None
+    registers = {row.space_id for row in evidence.address_spaces if row.is_register_space}
+    uniques = {row.space_id for row in evidence.address_spaces if row.is_unique_space}
+    memory_space = _program_memory_space(unit)
+    if memory_space is None:
+        return None
+
+    def allowed(varnode) -> bool:
+        space, start, size = varnode.coordinate.space_id, varnode.coordinate.byte_offset, varnode.byte_size
+        if space in uniques:
+            return True
+        if space not in registers:
+            return False
+        return any(low <= start and start + size <= high for low, high in (*_X64_GENERAL, _X64_RIP)) \
+            or all(byte in _X64_FLAGS for byte in range(start, start + size))
+
+    local = {row.address for row in observation.instructions}
+    returns = 0
+    for row in observation.instructions:
+        operations = row.operations
+        if not operations or has_internal_flow(row) or row.flow.is_call or row.flow.is_override \
+                or any(target not in local for target in row.flow_targets):
+            return None
+        for operation in operations:
+            if operation.opcode in ("STORE", "CALL", "CALLIND", "CALLOTHER", "BRANCHIND"):
+                return None
+            if operation.output is not None and not allowed(operation.output):
+                return None
+        last = operations[-1]
+        # the successors the p-code implies must be exactly the observed ones
+        # the CFG (and so the callee's SSA) is built from
+        if last.opcode == "RETURN":
+            implied = set()
+        elif last.opcode in ("BRANCH", "CBRANCH"):
+            if last.inputs[0].kind is not VarnodeKindCode.ADDRESS or (
+                    last.opcode == "CBRANCH" and row.fallthrough is None):
+                return None
+            implied = {last.inputs[0].coordinate} | ({row.fallthrough} if last.opcode == "CBRANCH" else set())
+        elif row.fallthrough is None:
+            return None
+        else:
+            implied = {row.fallthrough}
+        if set(control_successor_coordinates(row)) != implied or not implied <= local:
+            return None
+        if last.opcode == "RETURN":
+            if _return_shape(row) != ((0x20, 8), memory_space) or operations[0].output.byte_size != 8:
+                return None   # the eight-byte pop return through RSP in the program's memory
+            load = operations[0]
+            stack = _resolve_validated_storage(_storage_ref(load.inputs[1]), unit.scopes.resolution_context)
+            if load.inputs[1].coordinate.space_id not in registers or type(stack) is not ResolvedStorage \
+                    or stack_offset_at(normalized.memory_ssa, observation, unit.scopes,
+                                       _operation_key(row.address, 0, load.opcode), load.inputs[1], stack.span) != 0:
+                return None
+            returns += 1
+    if not returns:
+        return None
+    entry = unit.scopes.function.entry
+    return f"no calls, no stores, pop return at the entry stack pointer: {entry.space_id:x}:{entry.byte_offset:x}"
 
 
 def _accessor_effect(effect, model_file, entry, register_object, memory_space, separate=False):
@@ -702,7 +832,8 @@ def _unproven_image_operands(unit) -> bool:
     return False
 
 
-def _external_sites(unit, image_info, external_models, disabled=frozenset(), usable=None, refused=None) -> dict:
+def _external_sites(unit, image_info, external_models, disabled=frozenset(), usable=None, refused=None,
+                    local_functions=frozenset()) -> dict:
     """Call key -> (model file, entry) for calls to imported symbols with a
     model, at the import call shapes ``import_call_sites`` recognizes
     (``call [__imp_X]``, ``mov rax, [__imp_X]; call rax``, a terminal ``jmp
@@ -710,8 +841,10 @@ def _external_sites(unit, image_info, external_models, disabled=frozenset(), usa
     switched off in this run (``disabled``) is not applied: the call stays
     opaque; so is one ``usable`` finds a reason against (put in ``refused``)."""
     found = {}
-    for key, symbol in import_call_sites(unit, image_info).items():
+    for key, symbol in import_call_sites(unit, image_info, local_functions).items():
         model = external_models.lookup(symbol)
+        if model is not None and model[1].noreturn and key.endswith(":BRANCH"):
+            continue   # a jump to a function that never returns: ``_noreturn_jumps``
         if model is not None and set(model[1].inherited) & disabled:
             if refused is not None:
                 off = ", ".join(sorted(set(model[1].inherited) & disabled))
@@ -823,13 +956,17 @@ def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset
     return found
 
 
-def import_call_sites(unit, image_info) -> dict:
+def import_call_sites(unit, image_info, local_functions=frozenset()) -> dict:
     """Call key -> imported symbol for the import call shapes the engine binds
-    to models: ``CALL`` of an import thunk, ``CALLIND`` of a value copied from
+    to models: ``CALL`` of an import thunk, a terminal ``BRANCH`` to one (``jmp
+    free``: a tail call), ``CALLIND`` of a value copied from
     an import slot within the call instruction (``call [__imp_X]``), a
     terminal ``BRANCHIND`` through an import slot (``jmp [__imp_X]``), and a
     ``CALLIND`` of a register an import slot was loaded into on the only way
-    into the call (``mov rax, [__imp_X]; call rax``, ``_slot_loaded_register``)."""
+    into the call (``mov rax, [__imp_X]; call rax``, ``_slot_loaded_register``).
+    ``local_functions``: entries (space id, offset) of the program's functions
+    -- a jump to one of them is a tail call to that body (``_direct_calls``),
+    never the import's model, even at an import thunk's address."""
     found = {}
     loaded = _slot_loaded_register(unit, image_info)
     for instruction in unit.observation.instructions:
@@ -841,6 +978,13 @@ def import_call_sites(unit, image_info) -> dict:
             target = operation.inputs[0]
             key = _operation_key(instruction.address, ordinal, operation.opcode)
             if operation.opcode == "CALL" and target.kind is VarnodeKindCode.ADDRESS:
+                symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
+            elif operation.opcode == "BRANCH" and target.kind is VarnodeKindCode.ADDRESS \
+                    and instruction.fallthrough is None and ordinal == len(operations) - 1 \
+                    and all(item == target.coordinate for item in instruction.flow_targets) \
+                    and (target.coordinate.space_id, target.coordinate.byte_offset) not in local_functions:
+                # a terminal jmp to an import thunk outside the Bundle (a tail call;
+                # a thunk that is a Bundle function is composed as its own summary)
                 symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
             elif operation.opcode == "BRANCHIND" and target.kind is VarnodeKindCode.ADDRESS \
                     and instruction.fallthrough is None and ordinal == len(operations) - 1:

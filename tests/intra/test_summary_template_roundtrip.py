@@ -33,9 +33,11 @@ def _bodies(seed, target):
 def _canonical(effect):
     """The effect without its callee name, its memory runs in a fixed order
     (derive orders them by object ids, which differ; the order carries no
-    meaning: overlapping writes of one call stay unresolved)."""
+    meaning: overlapping writes of one call stay unresolved), and without
+    the in-Bundle body proof (``state_proof``, docs 25.26: a template has
+    no body to prove it from -- it is only weaker)."""
     return replace(effect, callee="", memory_runs=tuple(sorted(effect.memory_runs, key=repr)),
-                   unknown_memory=tuple(sorted(effect.unknown_memory, key=repr)))
+                   unknown_memory=tuple(sorted(effect.unknown_memory, key=repr)), state_proof=None)
 
 
 def _views(analyzed):

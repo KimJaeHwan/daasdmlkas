@@ -226,6 +226,16 @@ REGISTRY: tuple[Assumption, ...] = (
         "_proven_call_rows (~sr rows), relative_memory._same_result_key",
         "assume_same_result_functions", "--assume-same-result-functions"),
     Assumption(
+        "accessor-hidden-state-in-memory", "reported", True,
+        "Used with same-result-functions where a call is proven to keep every accessor's state (a body with "
+        "no call, no store and a pop return at its entry stack pointer, docs 25.26): an accessor's hidden "
+        "state lives in memory outside any stack frame and in the machine context (segment / TLS bases, "
+        "control registers); its result depends on registers only through its declared inputs; the memory "
+        "such a body reads has no access side effects (ordinary RAM of a user-mode program).",
+        "A register-resident selector or context outside the accessor's inputs; memory-mapped device "
+        "registers or read-to-clear memory; kernel code.",
+        "interprocedural._state_proof, normalize._accessor_states"),
+    Assumption(
         "accessor-result-separate", "switch", False,
         "A model entry with same_result and result_separate_from_reads {extent: N}: the bytes [result, "
         "result + N) of every call of it never overlap the read-slot bytes of any call of it in the same "

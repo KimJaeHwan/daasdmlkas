@@ -189,7 +189,7 @@ def _called(monkeypatch, info, names):
 
     symbols = {symbol.original_name: symbol for symbol in info.imports}
     monkeypatch.setattr(interprocedural, "import_call_sites",
-                        lambda unit, image_info: {f"call{index}": symbols[name] for index, name in enumerate(names)})
+                        lambda unit, image_info, *rest: {f"call{index}": symbols[name] for index, name in enumerate(names)})
 
 
 UNIT = program_units(FunctionBuilder().ret())[0]

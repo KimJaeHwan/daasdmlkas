@@ -1527,7 +1527,8 @@ getter·singleton, TLS 접근(`__errno_location`, `pthread_getspecific`, `__emut
 Astra 2차 P1): 접근 함수마다 정방향 데이터 흐름. 진입 ("state", entry); 모든 호출은 토큰을 ("state", c)로 바꿈 — 예외: 같은 엔트리
 호출, 독립이라고 선언된 다른 same-result 엔트리, 모델이 `preserves_accessor_state: [엔트리 이름 | "*"]`를 명시한 호출(이름은 모호하지
 않은 엔트리 정체로 풀고, 사용마다 보고, 캐시 의존에 포함; 콜백·재진입을 포함한 전이 효과를 덮는 주장). 쓰는 곳이 정해진 모델이나
-요약된 내부 함수도 상태를 보존하지 않음(핸들 테이블 setter도 쓰는 곳이 정해짐; Antigravity의 내부 요약 예외안은 Astra 따라 안 씀).
+요약된 내부 함수도 상태를 보존하지 않음(핸들 테이블 setter도 쓰는 곳이 정해짐; Antigravity의 내부 요약 예외안은 Astra 따라 안 씀) — 예외: 25.26의
+본문 증명(호출·저장 없음, 진입 스택 위치의 pop 반환; 전제 accessor-hidden-state-in-memory)이 붙은 호출.
 보존 호출은 들어온 토큰을 그대로(토큰 없음이면 계속 없음); ("state", c)는 c가 한 번만 실행될 때만; JOIN은 모든 앞쪽이 같은 알려진
 토큰일 때만; 반복·미해결 → 토큰 없음. 상태 토큰은 A의 바이트에 대해 아무 말도 안 함(그건 일반 메모리 효과). (4) 그 밖의 메모리:
 엔트리의 `memory` 줄; 라이브러리 내부 쓰기(lock·접근 추적 카운터)는 `accessor-private-state`가 켜졌을 때만 생략(프로그램 포인터·
@@ -1704,10 +1705,47 @@ S를 넘는 쓰기, 범위 밖 접근, image ≠ 0, 다 끄면 지금과 같음.
 | 콜백 (DFB091) | [정방향] + [가정] | 넘겨진 함수 포인터가 호출받은 함수 안 CALLIND까지 가는지는 정방향; 콜백이 하는 일은 그 함수 요약 또는 가정 |
 | 크기가 레지스터인 모델 효과 (memcpy 등 `constants`) | [정방향] | 지금은 역방향 상수 증명(`_prove_extents`); 호출을 건너 계산된 값은 정방향이 더 넓게 앎 |
 | accessor-result-separate (25.23) | 일부 [정방향] | 결과 객체가 어느 할당에서 왔는지·그 크기를 알면 범위 가정 일부를 증명으로 바꿈; 핸들과 객체의 관계 자체는 [가정] |
-| R007/R008 "확실" (source_B 호출이 상태를 끊음) | [역방향] | source_B 요약이 "호출 없음, 스택 밖 쓰기 없음"을 증명하면 상태를 안 바꾼다고 할 수 있음 — 새 증명 규칙, 설계·검토 필요 |
+| R007/R008 "확실" (source_B 호출이 상태를 끊음) | [역방향] — 해결(25.26) | 본문 증명: 호출·저장 없음, 진입 스택 위치의 pop 반환; 전제 accessor-hidden-state-in-memory |
 | same-result-functions 자체 (해석기가 결정적) | [가정] | 해석기가 간접 호출 + 숨은 상태라 어느 방향으로도 증명 못 함 |
 | accessor-private-state | [가정] | 라이브러리 내부 상태에 프로그램이 닿지 않음 — 라이브러리 전체를 보지 않고는 증명 못 함 |
 | 반복문 안에서 결과로 저장 (25.23 v1 한계) | [역방향] | 투영 순서와 대기 쓰기 규칙의 문제 — 정방향과 무관 |
 | 요약 수준 떨어짐 (`_exit_crossings`, 25.23) | [역방향] | 요약에 짝을 실어 보내는 일 — 정방향과 무관 |
 | 모델 `observes`(포인터가 새 나감) 정밀도 | 일부 [정방향] | 어떤 레지스터가 실제로 포인터인지 정방향 points-to가 알려 줌 |
 | 플랫폼 가정(globals-disjoint, 홈 공간, 방향 플래그 등) | [가정] | ABI·실행 환경 규칙 — 증명 대상이 아님 |
+
+### 25.26 상태를 바꾸지 않는 호출의 본문 증명 + import thunk로의 꼬리 점프 (2026-10-16, 설계 검토 4차·구현 검토 Antigravity·Astra) [역방향]
+
+**증명**(`interprocedural._state_proof`, `ProvenCallEffect.state_proof`): Bundle 안 함수를 직접 CALL하고 그 요약이 정상으로 붙은
+자리에서만(모델·템플릿·연결·시험 경계·재귀 가설·실패한 함수 제외), 다음이 모두 맞으면 그 호출은 모든 접근 함수의 상태를 바꾸지 않음:
+- x86:LE:64(v1); 본문에 STORE·CALL·CALLIND·CALLOTHER·BRANCHIND 없음(저장이 없으니 반환 주소 칸도 그대로; 실제 CALL은 반환 주소를
+  STORE하므로 호출 금지는 저장 금지와 겹침);
+- 모든 출력이 unique·일반 레지스터([0x00,0x40), [0x80,0xC0) — 0x40..0x80의 세그먼트·FS/GS 기준 제외)·산술 플래그(CF PF AF ZF SF OF —
+  TF IF DF 제외)·RIP;
+- 명령 내부 p-code 흐름 없음, call·override 흐름 없음; 명령마다 p-code가 말하는 다음 위치 집합(RETURN → 없음, BRANCH → 대상, CBRANCH →
+  대상 + fall-through, 그 밖 → fall-through)이 관찰된 다음 위치(`control_successor_coordinates`)와 **같고** 모두 함수 안(메타데이터와
+  p-code가 다르면 스택 계산과 실제 경로가 갈라짐 — Astra 재현);
+- 모든 RETURN이 RSP를 통한 pop 반환 모양(`may_alias._return_shape` = ((0x20, 8), 프로그램 메모리 공간))이고 그 LOAD에서 RSP가 진입
+  값과 같음(`stack_offset_at` == 0) — 저장이 없으니 [S]는 호출한 쪽이 넣은 반환 주소: 원래 자리로 돌아감(`lea rsp,[rsp-8]; ret 8`,
+  다른 레지스터로의 반환 모두 거부);
+- 모든 RETURN의 LOAD는 8바이트;
+- 호출 자리: 관찰된 호출 모양이 정확히 {RSP(0x20, 8): -8}이고 CALL이 프로그램 메모리 공간(돌아갈 자리를 넣은 push가 본문의 pop과 같은
+  것 — 다른 레지스터로 push하는 CALL은 거부, Astra 구현 1차 재현), CALL 명령이 정확히 `RSP -= 8; STORE [RSP] <- 다음 명령 주소(8바이트);
+  CALL` 세 연산(`_plain_push_call` — push 뒤에 덮어쓰면 반환이 다른 곳으로, Astra 구현 2차 재현), `restores_stack`, `preserves_memory`, 메모리 run·unknown memory·
+  writer 조건·꼬리 합성·실패 조건 없음, 돌아오지 않음 아님.
+**전제**(Astra 2차 P0): `accessor-hidden-state-in-memory`(reported) — 접근 함수의 숨은 상태는 스택 밖 메모리와 기계 상태(세그먼트·TLS
+기준·제어 레지스터)에 있고, 결과는 레지스터에는 선언된 inputs로만 기대며, 증명된 본문이 읽는 메모리는 읽어도 부작용이 없음(사용자
+모드 프로그램의 일반 RAM). 증명을 쓴 열쇠가 있으면 보고. `normalize._accessor_states`는 그 호출에서 상태를 그대로 두고 출처에
+"proof:<이유>"(진단용, 가정 라벨 아님)를 남김. 1차안("호출 없음"만)은 테이블에 직접 쓰는 setter 반례로 거부됨(Astra), 2차안은
+레지스터에 있는 숨은 상태·반환 주소 덮어쓰기·세그먼트 쓰기·MMIO, 3차안은 원래 자리로 돌아감 증명, 4차안은 메타데이터와 p-code의
+다음 위치 일치가 빠져 각각 보완. 전이(순수 함수만 부르는 함수)는 나중.
+**꼬리 점프**: 끝 명령의 `jmp` 대상이 Bundle 밖 import thunk면(관찰된 흐름도 그 thunk 하나) `jmp [slot]`처럼 그 모델을 꼬리 호출로
+적용(`import_call_sites`); 대상이 프로그램 함수의 입구면(잘린 함수 포함) 그 본문으로 합성하거나 모르는 꼬리 출구로 남김 — 모델로 대신하지도,
+외부 모델 사용으로 보고하지도 않음(Astra 구현 1차 재현); 돌아오지 않는 모델(abort)은 계속 `_noreturn_jumps`. 09에 debug 1·release 4개
+(`jmp free`) — oracle의 모델 호출 수 debug 24 → 25, release 18 → 22, 지표·누락 그대로.
+**결과**(접근 함수 가정 셋 + 연결): UE Development exact+sure 16 → **18**, DebugGame 15 → **17** — R007·R008이 A만·**확실**.
+`ENGINE_SEMANTICS_VERSION` 8 → 9(FString 템플릿 다시 만듦, 같음).
+**테스트**: 순수 함수 사이 → 원자 하나·A exact·sure·전제 보고; 거부 8가지(테이블 setter, push/pop, 순수 함수 호출(전이 없음),
+CALLOTHER, 세그먼트 쓰기, `ret 8` 모양, 레지스터 RETURN, pop 후 다른 레지스터로 반환); 메타데이터와 p-code가 다른 분기 거부; 실제 순수
+본문 oracle; 템플릿 왕복 테스트는 증명 없음을 "더 약함"으로 허용; `jmp free` 꼬리 호출 3가지. 변형: 다음 위치 검사 끔, 저장 허용,
+출력 검사 끔, 반환 모양 검사 끔, 증명 안 붙임 — 각각 실패("호출 허용"은 저장 금지와 겹쳐 같은 동작).
+- 기록: `.census6/callfree{,2,3,4}_{prompt,agy,astra}.md`, `.census6/diag_callfree.py`, `.census6/thunk_tail_status.py`.

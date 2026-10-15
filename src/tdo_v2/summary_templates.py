@@ -55,8 +55,10 @@ TEMPLATE_VERSION = 1
 # 6: jumps to the import thunk of a function that never returns end their
 # path (``noreturn`` models, docs 25.16). 7: SUBPIECE boundary atoms, once-join
 # atoms, the low bytes of ZEXT(x) at x's width are x (docs 25.17). 8:
-# same-result accessor atoms under same-result-functions (docs 25.20/25.21)
-ENGINE_SEMANTICS_VERSION = 8
+# same-result accessor atoms under same-result-functions (docs 25.20/25.21).
+# 9: proven state-keeping calls (docs 25.26); terminal jmp to an import thunk
+# takes the model as a tail call
+ENGINE_SEMANTICS_VERSION = 9
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

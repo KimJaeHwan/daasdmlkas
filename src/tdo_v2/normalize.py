@@ -938,6 +938,11 @@ def _accessor_states(observation, block_graph, entry_block, proven_call_effects,
                     record[call] = state
                 if effect is not None and effect.same_result is not None:
                     continue
+                if effect is not None and effect.state_proof is not None:
+                    # a body proven to change no memory and run no call (docs 25.26)
+                    if state[0] is not None:
+                        state = (state[0], state[1] | {f"proof:{effect.state_proof}"})
+                    continue
                 if effect is not None and (domain in effect.preserves_accessor_state
                                            or "*" in effect.preserves_accessor_state):
                     if state[0] is not None:

@@ -164,6 +164,10 @@ class ProvenCallEffect:
     same_result: tuple | None = None
     # model ids (or "*") whose accessor state this call leaves unchanged
     preserves_accessor_state: tuple[str, ...] = ()
+    # a proof that the call keeps every accessor's hidden state (docs 25.26):
+    # its callee runs no call and no store and returns at its entry stack
+    # pointer -- the reason, or None
+    state_proof: str | None = None
     # its model leaves out library-private writes (accessor-private-state):
     # the program oracle counts such writes outside the footprint apart
     omits_private_writes: bool = False

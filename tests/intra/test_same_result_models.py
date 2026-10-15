@@ -13,8 +13,8 @@ import pytest
 import test_graph_fidelity as fidelity
 from program_oracle import check_program
 from synthetic import (
-    CODE_BASE, DATA_BASE, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, REG, RSI, RSP, FunctionBuilder, add, const, copy,
-    load, op, operation_node_at, program_units, ram, reg, slice_from, store, tmp,
+    CODE_BASE, DATA_BASE, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, REG, RIP, RSI, RSP, FunctionBuilder, add, const, copy,
+    load, op, operation_node_at, program_units, ram, reg, slice_from, store, sub, tmp,
 )
 from tdo_v2.image_info import ImageInfo, ImportedSymbol
 from tdo_v2.interprocedural import analyze_units
@@ -888,3 +888,144 @@ def test_the_oracle_runs_the_bound_body(tmp_path):
                            havoc_calls=(REG, RSP, 8))
     assert report.same_result_checked and report.same_result_violations == [] and report.silent == []
     assert report.same_result_unchecked
+
+
+# -- proven state-keeping calls (docs 25.26) --------------------------------------
+
+PURE = CODE_BASE + 0x600
+
+
+def _between_pure(*callee_rows, builder_class=FunctionBuilder, finish=None):
+    """R007's shape with ``call PURE`` between Get1 and Get2 (source_B's place);
+    PURE is a program function made of ``callee_rows`` then ``ret``."""
+    caller = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), reg(RCX))).call(GET).ins(copy(reg(RBP), reg(RAX)))
+    caller.ins(add(T, reg(RBP), const(0x30)), store(T, reg(RDI, 4)))
+    caller.call(PURE)
+    caller.ins(copy(reg(RCX), reg(RBX))).call(GET)
+    caller.ins(add(T, reg(RAX), const(0x34)), store(T, reg(R12, 4)))
+    caller.ins(copy(reg(RCX), reg(RBX))).call(GET)
+    caller.ins(add(T, reg(RAX), const(0x30)), load(reg(R9, 4), T))
+    caller.add_rsp(0x28).ret()
+    callee = builder_class(entry=PURE)
+    for row in callee_rows:
+        row(callee) if callable(row) else callee.ins(*row)
+    (finish or (lambda builder: builder.ret()))(callee)
+    return caller, callee
+
+
+PURE2 = CODE_BASE + 0x700
+
+
+def _analyze_pure(tmp_path, caller, callee):
+    image = ImageInfo("synthetic", (), (ImportedSymbol("CORE", "GetObj", None, (), ((1, GET),)),), (), ())
+    other = FunctionBuilder(entry=PURE2).ins(load(reg(RAX, 4), const(DATA_BASE, 8))).ret()   # pure too
+    results = analyze_units(program_units(caller, callee, other), image_info=image,
+                            external_models=_models(tmp_path, SEPARATE), assume_same_result_functions=True,
+                            assume_accessor_result_separate=True)
+    return results["1:1000"]
+
+
+def _return_row(builder, *ops):
+    """A terminal (return) instruction of exactly ``ops``."""
+    from synthetic import _Instruction
+
+    builder._rows.append(_Instruction(list(ops), "return"))
+    return builder
+
+
+READS_A_GLOBAL = [(load(reg(RAX, 4), const(DATA_BASE, 8)),), (add(reg(RAX, 4), reg(RAX, 4), const(2, 4)),)]
+
+
+def test_a_pure_callee_keeps_the_accessor_state(tmp_path):
+    caller, callee = _between_pure(*READS_A_GLOBAL)
+    analyzed = _analyze_pure(tmp_path, caller, callee)
+    uses = analyzed.normalized.same_result_uses
+    assert len(uses) == 3 and len({atom for *_, atom in uses}) == 1
+    assert any(claim.startswith("proof:") for _, _, claims, _ in uses for claim in claims)
+    read = _read(analyzed, caller)
+    assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and read.is_complete
+    assert "accessor-hidden-state-in-memory" in analyzed.inherited_assumptions
+    assert not any(label.startswith("accessor-state-preserved-by:proof") for label in analyzed.inherited_assumptions)
+
+
+def _refused(tmp_path, caller, callee):
+    """Whether Get2 (after the call of PURE) sees another accessor state than Get1."""
+    analyzed = _analyze_pure(tmp_path, caller, callee)
+    states = [value[9] for _, value in sorted(analyzed.normalized.pointer_rows) if value[0] == "same_result"]
+    return analyzed, len(states) < 2 or states[1] != states[0]
+
+
+@pytest.mark.parametrize("rows, finish", [
+    ([(store(const(DATA_BASE, 8), reg(RDX)),)], None),                                  # the leaf table setter
+    ([lambda builder: builder.push(RBX), lambda builder: builder.pop(RBX)], None),        # a stack store (v1)
+    ([lambda builder: builder.call(PURE2)], None),                                       # a call, even of a pure one
+    ([(op("CALLOTHER", [const(0x11, 4)]),)], None),                                       # a user op
+    ([(copy(reg(0x40, 2), reg(RDX, 2)),)], None),                                         # a segment register
+    ([(op("INT_SUB", [reg(RSP), const(8)], reg(RSP)),)],                                  # lea rsp,[rsp-8]; ret 8
+     lambda builder: _return_row(builder, load(reg(RIP), reg(RSP)), add(reg(RSP), reg(RSP), const(16)),
+                                 op("RETURN", [reg(RIP)]))),
+    ([], lambda builder: builder.ret(realistic=False)),                                   # RETURN of a register
+    ([], lambda builder: _return_row(builder, load(reg(RIP), reg(RSP)), add(reg(RSP), reg(RSP), const(8)),
+                                     op("RETURN", [reg(RAX)]))),                           # pops, returns elsewhere
+], ids=["table-setter", "push-pop", "call", "callother", "segment", "ret-8", "bare-return", "returns-elsewhere"])
+def test_a_callee_without_the_proof_changes_the_state(tmp_path, rows, finish):
+    caller, callee = _between_pure(*READS_A_GLOBAL, *rows, finish=finish)
+    _, refused = _refused(tmp_path, caller, callee)
+    assert refused
+
+
+def test_a_call_pushing_through_another_register_gets_no_proof(tmp_path):
+    # the caller's "call" pushes its continuation through rax; the callee
+    # adds 8 to rax (so the shape's stack delta checks out) and returns
+    # through rsp: [rsp] is not that continuation
+    caller, callee = _between_pure((op("INT_ADD", [reg(RAX), const(8)], reg(RAX)),))
+    row = next(item for item in caller._rows if item.kind == "call" and item.call_target == PURE)
+    row.ops = [sub(reg(RAX), reg(RAX), const(8)), store(reg(RAX), const(caller._address(caller._rows.index(row) + 1))),
+               op("CALL", [ram(PURE)])]
+    _, refused = _refused(tmp_path, caller, callee)
+    assert refused
+
+
+def test_a_call_overwriting_its_pushed_continuation_gets_no_proof(tmp_path):
+    # push the continuation, overwrite it, call: the callee's ordinary ret
+    # goes to the overwritten address
+    caller, callee = _between_pure(*READS_A_GLOBAL)
+    row = next(item for item in caller._rows if item.kind == "call" and item.call_target == PURE)
+    row.ops = [sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), const(caller._address(caller._rows.index(row) + 1))),
+               store(reg(RSP), const(PURE + 0x100)), op("CALL", [ram(PURE)])]
+    _, refused = _refused(tmp_path, caller, callee)
+    assert refused
+
+
+class _MisroutedBranch(FunctionBuilder):
+    """Row 0's CBRANCH goes to ``bad`` in p-code, its observed flow to ``prep``."""
+
+    def to_json(self) -> dict:
+        raw = super().to_json()
+        raw["instructions"][0]["flow_targets"] = [self._coordinate(self._address(self._labels["prep"]))]
+        return raw
+
+
+def test_a_branch_whose_metadata_disagrees_refuses(tmp_path):
+    # observed: CBRANCH -> prep (rsp -= 8), bad (rsp += 8), jmp done: the stack
+    # balances; real p-code skips prep: RET reads [S+8]
+    def body(builder):
+        builder.cbranch("bad", FLAG, op("INT_EQUAL", [reg(RDX), const(0)], FLAG))
+        builder.label("done").ret()
+        builder.label("prep").ins(op("INT_SUB", [reg(RSP), const(8)], reg(RSP)))
+        builder.label("bad").ins(op("INT_ADD", [reg(RSP), const(8)], reg(RSP)))
+        builder.branch("done")
+    caller, callee = _between_pure(body, builder_class=_MisroutedBranch, finish=lambda builder: None)
+    _, refused = _refused(tmp_path, caller, callee)
+    assert refused
+
+
+def test_the_oracle_runs_a_pure_callee(tmp_path):
+    caller, callee = _between_pure(*READS_A_GLOBAL)
+    analyzed = _analyze_pure(tmp_path, caller, callee)
+    units = program_units(_resolver(), callee)
+    report = check_program(analyzed.normalized, analyzed.unit.observation,
+                           {(1, GET): units[0].observation, (1, PURE): units[1].observation}, seeds=range(6),
+                           register_pools=lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000},
+                           havoc_calls=(REG, RSP, 8))
+    assert report.same_result_checked and report.same_result_violations == [] and report.silent == []
