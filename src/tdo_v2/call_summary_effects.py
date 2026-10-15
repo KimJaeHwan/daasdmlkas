@@ -164,6 +164,9 @@ class ProvenCallEffect:
     same_result: tuple | None = None
     # model ids (or "*") whose accessor state this call leaves unchanged
     preserves_accessor_state: tuple[str, ...] = ()
+    # its model leaves out library-private writes (accessor-private-state):
+    # the program oracle counts such writes outside the footprint apart
+    omits_private_writes: bool = False
 
 
 def derive_proven_call_effect(

@@ -15,7 +15,9 @@ M=${4:-/mnt/d/01_gitproject/09_tdo_testbed/manifests/cases_manifest.json}
 mkdir -p /root/tdo_compare
 rm -f "/root/tdo_compare/$TAG.current.json" "/root/tdo_compare/$TAG.assumed.json"
 cd "$REPO"
-timeout "${METRIC_TIMEOUT:-1200}" ~/venvs/tdo/bin/python tools/bundle_export/run_dfbench.py "$G" \
+# METRIC_ARGS: extra run_dfbench arguments for the default mode (e.g. opt-in
+# assumptions and --binding files)
+timeout "${METRIC_TIMEOUT:-1200}" ~/venvs/tdo/bin/python tools/bundle_export/run_dfbench.py "$G" ${METRIC_ARGS:-} \
     --json "/root/tdo_compare/$TAG.current.json" > "/root/tdo_compare/$TAG.current.log" 2>&1
 timeout "${METRIC_TIMEOUT:-1200}" ~/venvs/tdo/bin/python tools/bundle_export/run_dfbench.py "$G" --assume-boundary-effects \
     --json "/root/tdo_compare/$TAG.assumed.json" > "/root/tdo_compare/$TAG.assumed.log" 2>&1

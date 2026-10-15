@@ -61,6 +61,10 @@ writing exactly the slot and loading it (its value rests on the old one).
 assumption accessor-result-separate, off by default): ``{"extent": N}`` --
 the bytes [result, result + N) never overlap the read slot of any call of
 the entry in the caller's activation.
+``omits_private_writes`` (optional, per entry; named assumption
+accessor-private-state, off by default): the entry leaves out writes to
+library-private state (locks, tracking tables, a resolver's caches) -- applied
+only under that assumption.
 ``preserves_accessor_state`` (optional, per entry): ``["<file id>/<entry>",
 ...]`` or ``["*"]`` -- a call of this entry leaves those accessors' hidden
 state unchanged (its transitive effects, callbacks included); every other
@@ -286,13 +290,15 @@ def load_model_file(path: str | Path) -> ModelFile:
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
                    "original_names", "internal", "assumptions", "noreturn", "same_result",
-                   "preserves_accessor_state", "result_separate_from_reads"}
+                   "preserves_accessor_state", "result_separate_from_reads", "omits_private_writes"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
             raise ModelError(f"{path}: entry fields must be {sorted(allowed)}")
         if item["other_memory"] not in ("preserved", "clobbered"):
             raise ModelError(f"{path}: other_memory must be preserved or clobbered")
         if type(item.get("internal", False)) is not bool:
             raise ModelError(f"{path}: internal must be true or false")
+        if type(item.get("omits_private_writes", False)) is not bool:
+            raise ModelError(f"{path}: omits_private_writes must be true or false")
         if type(item.get("noreturn", False)) is not bool:
             raise ModelError(f"{path}: noreturn must be true or false")
         if item.get("noreturn") and (item["registers"] or item["memory"] or "observes" not in item):
@@ -347,7 +353,8 @@ def load_model_file(path: str | Path) -> ModelFile:
                                   else tuple(_slice(s, "observed register") for s in item["observes"]),
                                   tuple(item.get("original_names", ())), same_object,
                                   source_kind=source["kind"], inherited=(*source.get("assumptions", ()), *_assumption_labels(
-                                      item.get("assumptions", []), path, f"{item['name']}: assumptions")),
+                                      item.get("assumptions", []), path, f"{item['name']}: assumptions"),
+                                      *(("accessor-private-state",) if item.get("omits_private_writes") else ())),
                                   identity=source["sha256"][:12] if source["kind"] == "derived" else "",
                                   internal=item.get("internal", False), unknown_memory=unknown_memory,
                                   noreturn=item.get("noreturn", False), same_result=same_result,
@@ -593,6 +600,74 @@ def validated_models(files) -> ExternalModels:
     return ExternalModels(tuple(files))
 
 
+@dataclass(frozen=True, slots=True)
+class ModelBinding:
+    """A binding file (``"kind": "binding"``, docs 25.20 F): model entries for
+    functions of one exact binary that export no name, by entry RVA::
+
+        {"format_version": 1, "kind": "binding", "id": "...",
+         "executable_sha256": "<64 hex>", "language_id": "...", "abi_tag": "...",
+         "models": ["<model file, relative to this file>", ...],
+         "bindings": [{"rva": "0x4e10", "model": "<file id>/<entry>", "symbol": "..."}]}
+
+    Applied only to the binary of that SHA-256 (``interprocedural._bound_cuts``):
+    the function at image base + RVA is cut and its callers take the model, each
+    use labelled ``bound-model:<id>@<rva>``. ``symbol`` is a note for people,
+    never a locator. The model files load only through bindings (never matched
+    by import name)."""
+
+    binding_id: str
+    executable_sha256: str
+    language_id: str
+    abi_tag: str
+    models: ExternalModels
+    rows: tuple[tuple[int, str, str | None], ...]   # (rva, model id, symbol)
+    digest: str
+
+    def entry(self, model_id: str) -> tuple[ModelFile, ModelEntry]:
+        for model_file in self.models.files:
+            for entry in model_file.entries:
+                if entry.model_id == model_id:
+                    return model_file, entry
+        raise ModelError(f"binding {self.binding_id}: no model {model_id}")
+
+
+def load_binding_file(path: str | Path) -> ModelBinding:
+    import hashlib
+
+    path = Path(path)
+    data = path.read_bytes()
+    raw = json.loads(data.decode("utf-8"))
+    keys = {"format_version", "kind", "id", "executable_sha256", "language_id", "abi_tag", "models", "bindings"}
+    if type(raw) is not dict or set(raw) - {"notes"} != keys or raw["kind"] != "binding" \
+            or raw["format_version"] != FORMAT_VERSION:
+        raise ModelError(f"{path}: binding file fields must be exactly {sorted(keys)} (kind binding)")
+    sha = raw["executable_sha256"]
+    if type(sha) is not str or len(sha) != 64 or any(char not in "0123456789abcdef" for char in sha):
+        raise ModelError(f"{path}: executable_sha256 is 64 lower-case hex digits")
+    if type(raw["models"]) is not list or not raw["models"]:
+        raise ModelError(f"{path}: models lists model files")
+    files = [load_model_file(path.parent / item) for item in raw["models"]]
+    if any((item.language_id, item.abi_tag) != (raw["language_id"], raw["abi_tag"]) for item in files):
+        raise ModelError(f"{path}: every model file is of the binding's language and ABI")
+    if any(entry.template is not None for item in files for entry in item.entries):
+        # a derived summary has run-dependent compatibility checks a cut skips
+        raise ModelError(f"{path}: bindings take declared models only, not derived summaries")
+    models = validated_models(files)
+    rows, seen = [], set()
+    known = {entry.model_id for item in files for entry in item.entries}
+    for row in raw["bindings"]:
+        if type(row) is not dict or not {"rva", "model"} <= set(row) <= {"rva", "model", "symbol"}:
+            raise ModelError(f"{path}: bindings are {{rva, model, symbol}}")
+        rva = int(row["rva"], 16) if type(row["rva"]) is str else row["rva"]
+        if type(rva) is not int or rva <= 0 or rva in seen or row["model"] not in known:
+            raise ModelError(f"{path}: binding {row}: a new positive rva and a model of the listed files")
+        seen.add(rva)
+        rows.append((rva, row["model"], row.get("symbol")))
+    return ModelBinding(raw["id"], sha, raw["language_id"], raw["abi_tag"], models, tuple(rows),
+                        hashlib.sha256(data).hexdigest())
+
+
 def model_summary(model_file: ModelFile, entry: ModelEntry, register_object, register_limit: int,
                   register_space_id: int, memory_space_id: int, constants: dict):
     """(FunctionSummary, anchors, complete) of one model at one call site.
@@ -710,5 +785,5 @@ def _digest(text: str) -> bytes:
     return hashlib.sha256(text.encode()).digest()
 
 
-__all__ = ("Access", "ExternalModels", "ModelEntry", "ModelError", "ModelFile", "load_external_models",
-           "load_model_file", "model_effect", "model_summary")
+__all__ = ("Access", "ExternalModels", "ModelBinding", "ModelEntry", "ModelError", "ModelFile",
+           "load_binding_file", "load_external_models", "load_model_file", "model_effect", "model_summary")

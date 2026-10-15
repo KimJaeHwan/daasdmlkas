@@ -239,6 +239,17 @@ REGISTRY: tuple[Assumption, ...] = (
         "may_alias._Policy.excluded / _written",
         "assume_accessor_result_separate", "--assume-accessor-result-separate"),
     Assumption(
+        "accessor-private-state", "switch", False,
+        "A model entry with omits_private_writes leaves out writes to library-private state (locks, "
+        "access-tracking counters and tables, a resolver's own caches and the objects it loads): no "
+        "pointer the analysed code holds or receives reaches them, no export or callback exposes them, and "
+        "they change no later result except as the entry's own contract states. Off: such an entry is not "
+        "applied (the call stays opaque; a bound function's body is analysed).",
+        "Code reading the tracking state or the resolver's caches; a resolver callback into the analysed "
+        "code; a pointer to the private state escaping.",
+        "summary_store (omits_private_writes), interprocedural._external_sites / _bound_cuts",
+        "assume_accessor_private_state", "--assume-accessor-private-state"),
+    Assumption(
         "test-only-boundary", "test-only", False,
         "Declared source/sink calls touch only their declared registers (benchmarks: the code between "
         "source and sink is sliced as if call-free); reported as test-only-boundary:<label>.",

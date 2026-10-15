@@ -94,8 +94,14 @@ class Interpreter:
                  image=None, assumed_calls: dict | None = None,
                  track_provenance: bool = False, program: dict | None = None,
                  sinks: tuple | None = None, externals: dict | None = None,
-                 no_effect_userops: frozenset = frozenset(), address_bits: dict | None = None) -> None:
+                 no_effect_userops: frozenset = frozenset(), address_bits: dict | None = None,
+                 abi_calls: dict | None = None) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
+
+        ``abi_calls``: call key -> register byte offsets; a call havocked inside
+        an outermost activation of that call leaves those bytes alone (the
+        ABI its model's contract states for the calls it makes, e.g. a
+        resolver keeping win64 non-volatile registers).
 
         ``track_provenance``: also record, per byte, the set of entry inputs its
         value was computed from (all operands of every operation on the way,
@@ -157,6 +163,9 @@ class Interpreter:
         self.activation_snapshots: dict = {}
         # serial -> byte values when that outermost activation returned
         self.activation_returns: dict = {}
+        # serial -> per-byte provenance when that outermost activation returned
+        # (a ("call", key) tag: the byte rests on a havocked call's value)
+        self.activation_return_tags: dict = {}
         self._byte_inputs: list = []
         # inside an activation: byte -> the one caller byte (an "ext" tag) its
         # value is an exact copy of, through COPY / LOAD / STORE moves only
@@ -178,6 +187,7 @@ class Interpreter:
         self._flip = flip  # CBRANCH key whose first decision is inverted
         self._flipped = False
         self._havoc = havoc_calls
+        self._abi_calls = dict(abi_calls or {})
         self._image = image  # (space, address) -> byte | None: loaded image contents
         # TEST-ONLY declared boundary calls: key -> (reads, writes) register slices
         self._assumed = assumed_calls or {}
@@ -486,6 +496,7 @@ class Interpreter:
                         if not self._activations:
                             self.activation_returns[self._activation_serial] = {
                                 key: byte for key, (byte, _) in self._bytes.items()}
+                            self.activation_return_tags[self._activation_serial] = dict(self.provenance)
                             self._restore_call_stack_pointer()
                             self._restore_identity_bytes()
                             self._record_footprint()
@@ -629,11 +640,12 @@ class Interpreter:
     def _havoc_registers(self, key: str, *, pop_return: bool) -> None:
         space_id, sp_offset, sp_size = self._havoc
         stack = set(range(sp_offset, sp_offset + sp_size))
+        kept = self._abi_calls.get(self._activations[0][1], frozenset()) if self._activations else frozenset()
         for space, offset, size in self._registers:
             if space != space_id:
                 continue
             for byte in range(offset, offset + size):
-                if byte not in stack:
+                if byte not in stack and byte not in kept:
                     self._write(key, space, byte, 1, self._rng.randrange(256))
         if pop_return:
             for index, item in enumerate(self._stack_snapshot):

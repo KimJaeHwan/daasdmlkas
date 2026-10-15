@@ -55,7 +55,11 @@ class AnalyzedFunction:
     # fixpoint (``MAX_RECURSION_ROUNDS``): its intra-SCC calls stayed opaque
     recursion_unresolved: bool = False
     # imports whose derived model (template) was not applied: call key -> why
+    # (and "bound-model@<rva>" -> why a binding of this function was not applied)
     refused_models: dict = field(default_factory=dict)
+    # calls taking a bound model (docs 25.20 F): call key -> (binding id, binding
+    # file digest, rva, executable sha256, model label, model file digest)
+    bound_calls: dict = field(default_factory=dict)
     # how it was derived (``summary_templates`` export prerequisites): TEST-ONLY
     # call effects given for it (``assumed_call_effects``, declared
     # boundaries, extra origins), and whether ``ImageBaseTracking`` was on
@@ -107,7 +111,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_debug_break_traps_do_not_return=False,
                   own_library: str | None = None, keep_uncut=frozenset(),
                   assume_same_result_functions=False,
-                  assume_accessor_result_separate=False) -> dict[str, AnalyzedFunction]:
+                  assume_accessor_result_separate=False,
+                  assume_accessor_private_state=False, model_bindings=()) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -147,7 +152,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     carry them into their call effects; reported where a call used them
     (``NormalizedFunction.same_result_uses``). ``assume_accessor_result_separate``:
     accessor-result-separate -- their ``result_separate_from_reads`` extents
-    (``NormalizedFunction.accessor_separations``)."""
+    (``NormalizedFunction.accessor_separations``). ``assume_accessor_private_state``:
+    accessor-private-state -- entries with ``omits_private_writes`` apply.
+    ``model_bindings``: ``summary_store.ModelBinding`` files; the bound
+    functions of this binary are cut (``_bound_cuts``) unless an assumption
+    their entry rests on is off -- then their bodies are analyzed."""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -177,10 +186,15 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("import-slots-hold-their-exports", _import_slots_active()),
         ("same-result-functions", assume_same_result_functions),
         ("accessor-result-separate", assume_accessor_result_separate),
+        ("accessor-private-state", assume_accessor_private_state),
     ) if not on}
     cuts = _model_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
                        image_info, external_models, own_library, disabled) \
         if own_library and image_info and external_models else {}
+    bound_refusals: dict = {}
+    bound = _bound_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
+                        model_bindings, disabled, external_models, bound_refusals) if model_bindings else {}
+    cuts = {**cuts, **{key: (model_file, entry) for key, (model_file, entry, _) in bound.items()}}
     from .relative_memory import IMAGE_BASE_TRACKING
     from .summary_templates import refusal as template_refusal
 
@@ -196,6 +210,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         })
 
     refused_sites: dict = {}
+    for key, reasons in bound_refusals.items():
+        refused_sites.setdefault(key, {}).update(reasons)
 
     def usable(model_file, entry):
         if entry.template is None:
@@ -386,6 +402,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     if "same-result-functions" not in disabled:
                         effect = _accessor_effect(effect, model_file, entry, register_object, memory_space,
                                                   "accessor-result-separate" not in disabled)
+                    if "accessor-private-state" in entry.inherited:
+                        effect = replace(effect, omits_private_writes=True)
                     # every extent register, proven or not: a constant taken is
                     # checked again on each state (``_prove_extents``)
                     slices = entry.extent_registers()
@@ -494,6 +512,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     | {label for _, entry in jumps.values() for label in entry.inherited}
                                     | _same_result_labels(normalized),
                                     refused_models=dict(refused_sites.get(key, {})),
+                                    bound_calls={call: bound[callee][2] for call, callee in _direct_calls(
+                                        unit, bound).items() if call in proven},
                                     test_only_inputs=bool((assumed_call_effects or {}).get(key))
                                     or bool(boundaries_of(key)) or extra_origins is not None,
                                     image_tracked=image_tracked,
@@ -580,6 +600,53 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
 
 
 MAX_RECURSION_ROUNDS = 8
+
+
+def _bound_cuts(functions, bindings, disabled, external_models, refusals) -> dict:
+    """Function key -> (model file, entry, provenance) for the functions
+    ``bindings`` bind in this binary (docs 25.20 F): the binding's executable
+    SHA-256 and language must be this program's, its ABI the run's (the ABI
+    of the run's models -- a binding of this binary under another ABI, or a
+    run without models to say, is an error); the function at image base + RVA
+    must be one of the program's (else an error: a stale or wrong binding);
+    two bindings of one function are an error; an entry resting on a
+    switched-off assumption is not applied -- the body is analyzed, the
+    reason recorded in ``refusals`` (function key -> {"bound-model@<rva>":
+    why}). Each use adds the label bound-model:<binding id>@<rva>#<binding
+    digest>; provenance: (binding id, binding digest, rva, executable sha256,
+    model label, model file digest)."""
+    from .summary_store import ModelError
+
+    if not functions or not bindings:
+        return {}
+    evidence = next(iter(functions.values())).scopes.program.evidence
+    sha = evidence.executable_sha256.hex()
+    base = evidence.image_base
+    abis = {item.abi_tag for item in external_models.files} if external_models is not None else set()
+    found, seen = {}, set()
+    for binding in bindings:
+        if binding.executable_sha256 != sha or binding.language_id != evidence.translation_namespace.language_id:
+            continue
+        if abis != {binding.abi_tag}:
+            raise ModelError(f"binding {binding.binding_id}: ABI {binding.abi_tag} is not this run's "
+                             f"({', '.join(sorted(abis)) or 'no models given'})")
+        for rva, model_id, _ in binding.rows:
+            key = function_key_of(base.space_id, base.byte_offset + rva)
+            if key not in functions:
+                raise ModelError(f"binding {binding.binding_id}: no function at rva {rva:#x} of this binary")
+            if key in seen:
+                raise ModelError(f"binding {binding.binding_id}: rva {rva:#x} is bound twice")
+            seen.add(key)
+            model_file, entry = binding.entry(model_id)
+            off = set(entry.inherited) & disabled
+            if off:
+                refusals.setdefault(key, {})[f"bound-model@{rva:#x}"] = \
+                    f"{entry.label} rests on {', '.join(sorted(off))} (off): the body is analyzed"
+                continue
+            label = f"bound-model:{binding.binding_id}@{rva:#x}#{binding.digest[:12]}"
+            found[key] = (model_file, replace(entry, inherited=(*entry.inherited, label)),
+                          (binding.binding_id, binding.digest, rva, sha, entry.label, model_file.digest))
+    return found
 
 
 def _same_result_labels(normalized) -> set:

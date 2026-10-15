@@ -52,6 +52,12 @@ class ProgramReport:
     # bytes left written by activations of calls claiming ``preserves_memory``
     footprint_checked: int = 0
     footprint_unlocated: int = 0     # outside every evaluable place, some place not evaluable
+    # ... outside the footprint of a call whose model leaves out library-private
+    # writes (accessor-private-state): not checkable here; a byte the caller
+    # reads stays checked as a dependency (its place and inputs) -- only an
+    # input that is a call the interpreter havocked inside it (a resolver the
+    # contract constrains, arbitrary here) counts here instead
+    private_unchecked: int = 0
     # same-result atoms (same-result-functions, docs 25.20): activations of
     # calls whose results share one atom must return equal results
     same_result_checked: int = 0     # atoms with two or more activations in a run
@@ -194,6 +200,20 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
     }
     proven = _proven_runs(function)
     effects = dict(function.proven_call_effects)
+    # a bound model keeps its preserved registers across the calls its body
+    # makes (the ABI of its contract): calls the interpreter havocks inside it
+    # leave them (``Interpreter.abi_calls``)
+    # (the registers it keeps, not the ones it writes: ``preserved`` also
+    # lists the bytes its runs write, placed before the CALL)
+    abi_calls = {
+        call: frozenset(byte for span in effect.preserved
+                        if span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                        for byte in range(span.start, span.end))
+        - frozenset(byte for run in effect.runs for span in run.writes
+                    if span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                    for byte in range(span.start, span.end))
+        for call, effect in effects.items() if effect.omits_private_writes
+    }
     opaque = _opaque_rows(function)
     cache = {}
 
@@ -207,7 +227,7 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
         interpreter = Interpreter(observation, constant_space=const_space, seed=seed,
                                   havoc_calls=havoc_calls, image=image, program=program,
                                   externals=externals, no_effect_userops=no_effect_userops,
-                                  address_bits=address_bits)
+                                  address_bits=address_bits, abi_calls=abi_calls)
         for register, value in (register_pools(seed) if register_pools else {}).items():
             interpreter.preset(reg_space, register, 8, value)
         try:
@@ -255,6 +275,13 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
                     report.through_calls += 1
                     for tag in run.call_reads.get(
                             (dependency.reader, dependency.space_id, dependency.offset), ()):
+                        if tag[0] == "call" and effects[writer].omits_private_writes:
+                            # a value of a call the interpreter havocked inside an
+                            # activation whose model's contract constrains it (a
+                            # resolver): not checkable -- the byte's place and its
+                            # other inputs are checked as usual
+                            report.private_unchecked += 1
+                            continue
                         if not _input_reached(tag, function, graph, result, reachable, dependency.reader,
                                               reg_space, unique_space, proven, places, report):
                             # excused only while the slice admits a gap (debt), as in graph_oracle
@@ -325,6 +352,9 @@ def _check_same_results(report, interpreter, function, effects, reg_space) -> No
             returned = interpreter.activation_returns.get(serial)
             if key != call or returned is None:
                 continue
+            if _havocked(interpreter, serial, reg_space, result):
+                report.same_result_unchecked += 1   # an arbitrary resolver: not the contract's
+                continue
             value = tuple(returned.get((reg_space, result.start + index)) for index in range(result.size))
             by_atom.setdefault(atom, []).append((call, serial, value))
     _check_separations(report, interpreter, effects, uses, reg_space)
@@ -334,6 +364,14 @@ def _check_same_results(report, interpreter, function, effects, reg_space) -> No
         report.same_result_checked += 1
         if len({value for _, _, value in seen}) != 1:
             report.same_result_violations.append((atom, seen))
+
+
+def _havocked(interpreter, serial, reg_space, span) -> bool:
+    """The register bytes ``span`` an activation returned rest on a call the
+    interpreter havocked inside it (an arbitrary value, not the contract's)."""
+    tags = interpreter.activation_return_tags.get(serial, {})
+    return any(tag[0] == "call" for index in range(span.size)
+               for tag in tags.get((reg_space, span.start + index), ()))
 
 
 def _check_separations(report, interpreter, effects, uses, reg_space) -> None:
@@ -352,6 +390,8 @@ def _check_separations(report, interpreter, effects, uses, reg_space) -> None:
             if key != call or returned is None:
                 continue
             value = [returned.get((reg_space, same[2].start + index)) for index in range(same[2].size)]
+            if _havocked(interpreter, serial, reg_space, same[2]):
+                value = [None]   # an arbitrary resolver's result: its slot still counts
             place = _place(same[4], entry, interpreter.entry_values, reg_space, moduli=interpreter._moduli)
             if None not in value:
                 results.setdefault(same[1], []).append(
@@ -475,6 +515,9 @@ def _check_footprints(report, interpreter, effects, places, havoc_calls, private
                 continue
             if any(place is None for place in evaluated):
                 report.footprint_unlocated += 1
+                continue
+            if effect.omits_private_writes:
+                report.private_unchecked += 1
                 continue
             report.silent.append((("footprint", call, space, offset), "write outside the call's footprint"))
 

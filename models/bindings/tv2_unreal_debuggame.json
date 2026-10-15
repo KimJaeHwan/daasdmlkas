@@ -1,0 +1,14 @@
+{
+ "format_version": 1,
+ "kind": "binding",
+ "id": "tv2-unreal-debuggame",
+ "executable_sha256": "440c863ed5ce6bdbca892b51dadec20fa601a64cfb150b60740fc51df6608c6a",
+ "language_id": "x86:LE:64:default",
+ "abi_tag": "win64",
+ "notes": "tv2_unreal DebugGame DLL (Bundle f86ff7a7...): TObjectPtr resolution and access tracking as two calls.",
+ "models": ["../bound/tv2_tobjectptr_win64.json"],
+ "bindings": [
+  {"rva": "0xa970", "model": "tv2-tobjectptr/ResolveHandle", "symbol": "TObjectPtr resolve (function-000033)"},
+  {"rva": "0x9200", "model": "tv2-tobjectptr/TrackAccess", "symbol": "TObjectPtr access tracking (function-000032)"}
+ ]
+}

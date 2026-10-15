@@ -1,0 +1,13 @@
+{
+ "format_version": 1,
+ "kind": "binding",
+ "id": "tv2-unreal-development",
+ "executable_sha256": "2b17d005adcde0e25673aaf58e3bd39423e0ff24965f2782b5a33345cb691c0c",
+ "language_id": "x86:LE:64:default",
+ "abi_tag": "win64",
+ "notes": "tv2_unreal Development DLL (Bundle 9f628c7b...): TObjectPtr resolution with inline tracking.",
+ "models": ["../bound/tv2_tobjectptr_win64.json"],
+ "bindings": [
+  {"rva": "0x4e10", "model": "tv2-tobjectptr/ResolveHandle", "symbol": "TObjectPtr resolve (function-000029)"}
+ ]
+}

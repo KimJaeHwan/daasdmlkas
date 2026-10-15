@@ -64,6 +64,21 @@ def _x86_64(evidences) -> bool:
     return False
 
 
+def _tail_boundaries(evidence):
+    """CallBoundary per tail jump of one function (as ``_bind_tail_call_sinks``)."""
+    unit = evidence.unit
+    entry = unit.scopes.function.entry
+    language = unit.scopes.program.evidence.translation_namespace.language_id
+    found = []
+    for tail, naming in zip(evidence.tails, evidence.naming.tail_rows, strict=True):
+        target = _selected_resolved_target(naming)
+        aliases = tuple(sorted({alias.value for alias in (() if target is None else target.aliases)
+                                if alias.policy_admissible}))
+        found.append(CallBoundary(f"{entry.space_id:x}:{entry.byte_offset:x}", tail.operation_key, aliases,
+                                  language))
+    return found
+
+
 def _boundaries(evidence):
     """(seed, CallBoundary) per call site of one function."""
     unit = evidence.unit
@@ -101,11 +116,16 @@ def analyze_frozen_bundle_with_summaries(
     origin_witnesses: bool = False,
     assume_same_result_functions: bool = False,
     assume_accessor_result_separate: bool = False,
+    assume_accessor_private_state: bool = False,
+    model_bindings=(),
 ) -> EngineRun:
     """``assume_same_result_functions``: the named assumption
     same-result-functions (off by default; model entries with ``same_result``);
     ``assume_accessor_result_separate``: accessor-result-separate (off by
-    default; their ``result_separate_from_reads`` extents).
+    default; their ``result_separate_from_reads`` extents);
+    ``assume_accessor_private_state``: accessor-private-state (off by
+    default); ``model_bindings``: ``summary_store.ModelBinding`` files for
+    this binary's unexported functions (docs 25.20 F).
     ``origin_witnesses``: put per-root origin witnesses (diagnostics,
     ``origin_witnesses``) in ``RootSlice.explanation``.
     ``external_models``: declared models of imported functions
@@ -267,11 +287,20 @@ def analyze_frozen_bundle_with_summaries(
             assume_entry_values_not_frame=assume_entry_values_not_frame,
             assume_same_result_functions=assume_same_result_functions,
             assume_accessor_result_separate=assume_accessor_result_separate,
+            assume_accessor_private_state=assume_accessor_private_state,
+            model_bindings=tuple(model_bindings),
         )
         assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
                                       traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
         preliminary = []
         for key, item in by_key.items():
+            if key not in results:
+                # a function a model binding cuts (``interprocedural._bound_cuts``):
+                # its callers take the model; it must hold no boundary of its own
+                if any(boundary_provider.classify(boundary) for _, boundary in boundaries.get(key, ())) \
+                        or any(boundary_provider.classify(boundary) for boundary in _tail_boundaries(item)):
+                    raise ValueError(f"function {key} is bound to a model but has source / sink calls")
+                continue
             normalized = results[key].normalized
             if type(normalized) is not NormalizedFunction:
                 raise ValueError(f"function {key} does not normalize: {normalized.reason.value}")

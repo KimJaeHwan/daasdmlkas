@@ -1651,3 +1651,42 @@ S를 넘는 쓰기, 범위 밖 접근, image ≠ 0, 다 끄면 지금과 같음.
   (oracle silent 없음); 반복 한계; 검증 4가지; 실제 해석 본문 oracle 위반 없음, 칸 주소를 그대로 돌려주는 본문은 위반. 변형: 떨어뜨림 없음,
   결과 쪽 범위 넘음, 칸 쪽 아무 쓰기, 칸 쪽 끔, 기다림 없음, 호출 실행 무시, 지배 무시 — 각각 실패.
 - 기록: `.census6/sr3_impl{,2}_{prompt,agy,astra}.md`.
+
+### 25.24 같은 결과 접근 함수 4단계(S4): 라이브러리 내부 상태와 바이너리 안 함수 연결 → R007/R008 (2026-10-15, 구현 검토 Antigravity·Astra)
+
+- **가정** `accessor-private-state`(스위치, 기본 끔). 엔트리 필드 `omits_private_writes` → `inherited`에 이 가정이 붙음: 끄면 기존
+  검사(inherited ∩ disabled)로 import 호출은 opaque, 연결된 함수는 본문 분석.
+- **연결 파일**(`summary_store.ModelBinding`, `load_binding_file`, `models/bindings/*.json`): id, executable_sha256(64 hex), language_id,
+  abi_tag, models(그 파일 기준 경로 — import 이름으로는 절대 안 맞춤, 함께 검증, **선언 모델만**: 파생 요약은 거부), bindings
+  [{rva, model, symbol?}](rva 하나씩, 모델 있어야 함; symbol은 사람용 메모).
+- **적용**(`interprocedural._bound_cuts`): SHA-256·language가 이 프로그램과 같고 ABI가 이 실행의 모델 ABI와 같아야 함(다르거나 모델이
+  없으면 오류); image base + rva가 프로그램의 함수여야 함(아니면 오류); 한 함수 두 번 연결은 오류; 꺼진 가정에 기대면 적용 안 하고 그
+  함수의 `refused_models`에 이유. 적용하면 cut(`_cut_sites`가 호출·꼬리 점프를 모델 자리로) + 라벨
+  `bound-model:<id>@<rva>#<연결 파일 digest 12>`, `AnalyzedFunction.bound_calls`(호출마다 연결 id·digest·rva·바이너리 SHA·모델 라벨·
+  모델 파일 digest). summary_engine은 잘린 함수를 건너뜀 — 그 안의 호출이나 꼬리 점프가 출처/싱크면 오류.
+- **도구**: run_dfbench `--binding`, dfbench_metric `METRIC_ARGS`, measure_program `--binding`(세 가정 켬 + run_dfbench와 같은 틀 가정:
+  홈 공간 0x28·globals-disjoint·debug-break traps — 없으면 호출한 쪽 홈 공간 저장이 칸과 겹쳐 열쇠가 막힘; 모든 함수 본문을 실제로
+  실행).
+- **oracle**: 내부 쓰기를 뺀 모델의 호출이 범위 밖에 쓴 바이트 → `private_unchecked`; 호출한 쪽 읽기의 입력 중 그 활성 안에서 havoc된
+  호출 값(("call", key))만 → `private_unchecked`(자리와 다른 입력은 그대로 검사; 첫 구현의 "의존 통째 면제"는 진짜 누락을 숨겨 Astra가
+  재현 — 없앰); 인터프리터는 그런 활성 안에서 havoc하는 호출이 모델의 보존 레지스터를 건드리지 않게 함(`Interpreter(abi_calls=...)`:
+  계약이 말하는 ABI — 실제 해석기는 win64 비휘발 레지스터를 지킴; 2차의 "보존 레지스터 면제"는 본문이 직접 덮어쓴 경우까지 숨겨 Astra가
+  재현 — 없앰, 직접 덮어쓰기는 누락으로 보고); 결과가 havoc 값에 기대면 같은 결과·떨어짐 검사를 `same_result_unchecked`로.
+- **모델**(`models/bound/tv2_tobjectptr_win64.json`, 실제 코드에서 읽음): ResolveHandle(rcx = 핸들 칸; 결과 rax는 rcx·rsp(본문이 값을
+  스택에 저장했다 읽음)·칸에서; 다시 쓰기 줄; 그 밖 메모리 보존; observes rcx; omits_private_writes; same_result nonstack + write_back;
+  떨어짐 범위 0x400 — R008은 +0x130/+0x138에 쓰고 핸들은 owner+0x478/0x480) / TrackAccess(DebugGame 추적 절반: 줄 없음,
+  omits_private_writes, ResolveHandle 상태 보존). 연결: Development 0x4e10(해석 + 추적 inline), DebugGame 0xa970(해석) + 0x9200(추적).
+- **결과**(세 가정 + 연결, `--assume-same-result-functions --assume-accessor-result-separate --assume-accessor-private-state --binding`):
+  UE Development exact 16 → **18**(exact+sure 16 그대로), DebugGame 15 → **17**(15 그대로). R007·R008 모두 **A만**(B 제외), unsure —
+  source_B 호출이 Get1과 Get2 사이에 있어 p1 ≠ p2(상태 바뀜), A는 p1 객체에서 may-alias로 옴(25.21의 예상대로). missing+sure 없음.
+  oracle(같은 설정): Development missing 0·unexplained 0, 같은 결과 검사 0·위반 0·검사 못 함 16, private_unchecked 160; DebugGame
+  missing 0, 같은 결과 검사 0·검사 못 함 20, private_unchecked 256 — UE에서는 모든 결과가 havoc된 호출 값에 기댐(인터프리터는 보존
+  레지스터만 지키고 출력은 덮음 — 3차의 "rax까지 지킴"은 Astra가 재현한 잘못, 그때의 "검사 2"는 그 탓), 그래서 같은 결과는 합성 해석
+  본문 테스트로만 검증됨. 스위치를 끄면 지표·oracle 그대로(전체 실행).
+- **테스트**(70): 연결된 프로그램 안 함수가 잘리고 R007 모양 호출한 쪽이 A만·complete·라벨·호출별 출처; 내부 상태 끄면 본문 분석 +
+  거부 이유; 다른 바이너리 SHA는 무시; 함수 아닌 rva·다른 ABI·모델 없는 실행은 오류; 연결 파일 검증 5가지 + 파생 요약 거부; import
+  모델의 omits_private_writes는 스위치 필요; 연결된 본문 oracle(위반·누락 없음, 다시 쓰기 unchecked); 호출한 쪽이 보는 전역에 쓴 havoc
+  값은 "write outside its run"으로 보고; 본문이 보존 레지스터를 직접 덮어쓰면 누락으로 보고; 한 함수 두 연결은 순서·스위치와 상관없이
+  오류. 변형: 바이너리 무시, 스위치 무시, 내부 쓰기 라벨 없음 — 각각 실패. 한계: `bound_calls`는 직접 호출·꼬리 점프만(간접 호출이
+  연결된 대상으로 풀려도 라벨은 inherited에 남음).
+- 기록: `.census6/sr4_impl{,2}_{prompt,agy,astra}.md`, `.census6/run_ue_accessor.sh`, `.census6/diag_accessor.py`.

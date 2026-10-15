@@ -148,6 +148,8 @@ def main() -> int:
     parser.add_argument("--link-dry-run", action="store_true",
                         help="report what linking would derive (and use the cache), derive nothing")
     parser.add_argument("--link-max-mem", default="10G", help="Ghidra heap for the linking export and scan")
+    parser.add_argument("--binding", action="append", default=[], type=Path,
+                        help="a model binding file for this binary's unexported functions (docs 25.20 F)")
     parser.add_argument("--assume-boundary-effects", action="store_true",
                         help="TEST-ONLY special condition: declared source/sink call effects")
     # every engine-wide named assumption comes from the registry (on by default:
@@ -167,6 +169,7 @@ def main() -> int:
         print("[run] TEST-ONLY ASSUMPTION: source/sink call effects are declared, not observed")
     from tdo_v2.engine import analyze_frozen_bundle
     from tdo_v2.stack_evidence import assumption_allowed, load_stack_evidence
+    from tdo_v2.summary_store import load_binding_file
 
     evidence = [load_stack_evidence(path) for path in args.stack_evidence]
     if evidence:
@@ -221,6 +224,7 @@ def main() -> int:
                 stack_evidence=tuple(evidence),
                 linker=linker,
                 origin_witnesses=args.witnesses,
+                model_bindings=tuple(load_binding_file(path) for path in args.binding),
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},
             )

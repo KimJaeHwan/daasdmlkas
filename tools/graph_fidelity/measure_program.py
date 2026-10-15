@@ -44,6 +44,12 @@ def main() -> int:
     parser.add_argument("--models", action="store_true",
                         help="apply the declared external models (win64) and run those library "
                              "functions with their real semantics in the interpreter")
+    parser.add_argument("--binding", action="append", default=[], type=Path,
+                        help="a model binding file (docs 25.20 F), with same-result-functions, "
+                             "accessor-result-separate and accessor-private-state on; the bound bodies run "
+                             "for real in the interpreter. The analysis then also takes run_dfbench's "
+                             "frame and globals assumptions (home space 0x28, globals-disjoint-from-stack, "
+                             "debug-break traps), as the real runs do")
     args = parser.parse_args()
     binding = NamingBindingExpectation(
         sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
@@ -79,12 +85,19 @@ def main() -> int:
         # every modeled import runs for real (or the run is skipped: Unsupported)
         externals = {thunk: models.lookup(row)[1].name for row in (info.imports if info else ())
                      if models.lookup(row) for thunk in (*row.thunks, *row.slots)}
+    if args.binding:
+        from tdo_v2.summary_store import load_binding_file
+
+        options.update(model_bindings=tuple(load_binding_file(path) for path in args.binding),
+                       assume_same_result_functions=True, assume_accessor_result_separate=True,
+                       assume_accessor_private_state=True, private_frame_above=0x28,
+                       assume_globals_disjoint_from_stack=True, assume_debug_break_traps_do_not_return=True)
     results = analyze_units(units, **options)
     totals["analysis_seconds"] = round(time.time() - began, 1)
+    # every function of the program runs for real (a bound one included)
     program = {
-        (item.unit.scopes.function.entry.space_id, item.unit.scopes.function.entry.byte_offset):
-            item.unit.observation
-        for item in results.values()
+        (unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset): unit.observation
+        for unit in units if unit.observation is not None
     }
     for key, item in sorted(results.items()):
         totals["functions"] += 1
@@ -108,7 +121,8 @@ def main() -> int:
         report = check_program(item.normalized, observation, program, seeds=range(args.runs),
                                register_pools=pool, spaces=(const, regs, unique),
                                havoc_calls=(regs, sp_offset, sp_size), image=image,
-                               externals=externals, no_effect_userops=userops, address_bits=address_bits)
+                               externals=externals, no_effect_userops=userops, address_bits=address_bits,
+                               private_frame_above=options.get("private_frame_above", 0))
         totals["runs"] += report.runs
         totals["skipped_runs"] += report.unsupported
         totals["checked"] += report.checked
@@ -133,8 +147,11 @@ def main() -> int:
         # (program_oracle: covered / only unevaluable places / failed, failed
         # but explained by a debt), and the footprints of preserving calls
         for name in ("place_checked", "place_covered", "place_unlocated_only", "place_failed",
-                     "place_failed_debt", "place_no_activation", "footprint_checked", "footprint_unlocated"):
+                     "place_failed_debt", "place_no_activation", "footprint_checked", "footprint_unlocated",
+                     "same_result_checked", "same_result_unchecked", "private_unchecked"):
             totals[name] += getattr(report, name)
+        totals["same_result_violations"] += len(report.same_result_violations)
+        totals["same_result_uses"] += len(getattr(item.normalized, "same_result_uses", ()))
         for row in report.silent[:2]:
             if len(samples) < 6:
                 samples.append((key, repr(row)[:240]))
