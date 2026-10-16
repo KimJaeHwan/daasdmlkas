@@ -120,6 +120,9 @@ def main() -> int:
     parser.add_argument("--binary", default="dfbench_win_core",
                         help="case filter when --expected is cases_manifest.json")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--records", action="store_true",
+                        help="operation records per root: the p-code operations each root's value went through "
+                             "(diagnostics, docs 25.28; in --json, and printed for the expected cases)")
     parser.add_argument("--witnesses", action="store_true",
                         help="origin witnesses per root: why each label is reported (diagnostics, docs 25.19)")
     parser.add_argument("--model-dir", type=Path, action="append", default=[],
@@ -224,6 +227,7 @@ def main() -> int:
                 stack_evidence=tuple(evidence),
                 linker=linker,
                 origin_witnesses=args.witnesses,
+                operation_records=args.records,
                 model_bindings=tuple(load_binding_file(path) for path in args.binding),
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},
@@ -276,7 +280,9 @@ def main() -> int:
             "interprocedural": list(root.interprocedural_origin_labels),
             "complete": getattr(root, "is_locally_complete", None),
             "effective": getattr(root, "is_effectively_complete", None),
-            **({"witnesses": root.explanation} if args.witnesses and root.explanation else {}),
+            **({"witnesses": {key: value for key, value in root.explanation.items() if key != "record"}}
+               if args.witnesses and root.explanation else {}),
+            **({"record": root.explanation["record"]} if args.records and "record" in root.explanation else {}),
         })
     if args.expected:
         expected = json.loads(args.expected.read_text(encoding="utf-8"))
@@ -302,10 +308,24 @@ def main() -> int:
             print(f"  {case['id']} {verdict:7} got={sorted(origins)} want={want} forbid={forbid}")
             for line in _witness_lines(got, anchor) if args.witnesses and got else ():
                 print("      " + line)
+            for line in _record_lines(got, anchor) if args.records and got else ():
+                print("      " + line)
         print("[run]", tally)
     if args.json:
         args.json.write_text(json.dumps(results, indent=1), encoding="utf-8")
     return 0
+
+
+def _record_lines(got, anchor, limit=60) -> list:
+    """The rendered operation records of a case's roots (docs 25.28)."""
+    from tdo_v2.operation_records import render
+
+    lines = []
+    for root in got["roots"]:
+        if root["label"] == anchor and "record" in root:
+            text = render(root["record"]).splitlines()
+            lines.extend(text[:limit] + ([f"... {len(text) - limit} more lines (--json)"] if len(text) > limit else []))
+    return lines
 
 
 def _witness_lines(got, anchor) -> list:

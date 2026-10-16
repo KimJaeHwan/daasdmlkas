@@ -114,6 +114,7 @@ def analyze_frozen_bundle_with_summaries(
     assume_import_slots_hold_exports: bool = True,
     assume_entry_values_not_frame: bool = True,
     origin_witnesses: bool = False,
+    operation_records: bool = False,
     assume_same_result_functions: bool = False,
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
@@ -128,6 +129,8 @@ def analyze_frozen_bundle_with_summaries(
     this binary's unexported functions (docs 25.20 F).
     ``origin_witnesses``: put per-root origin witnesses (diagnostics,
     ``origin_witnesses``) in ``RootSlice.explanation``.
+    ``operation_records``: put each root's operation record (diagnostics,
+    ``operation_records``, docs 25.28) in ``RootSlice.explanation["record"]``.
     ``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
     facts (``image_info``); each model used is listed in ``EngineRun.assumptions``.
@@ -347,7 +350,12 @@ def analyze_frozen_bundle_with_summaries(
                                              nodes[analysis.entry], label, occurrence, node_labels, lane_indexes)
                 explanation = _witnesses(analysis, by_key[function_key(analysis.entry)].unit, nodes[analysis.entry],
                                          label, occurrence, labels, node_labels, lane_indexes,
-                                         results[function_key(analysis.entry)].origins)                     if origin_witnesses else {}
+                                         results[function_key(analysis.entry)].origins) \
+                    if origin_witnesses else {}
+                if operation_records:
+                    explanation = {**explanation, "record": _root_record(
+                        analysis, by_key[function_key(analysis.entry)].unit, nodes[analysis.entry], label,
+                        occurrence, results[function_key(analysis.entry)], completeness)}
                 roots.append(RootSlice(
                     analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence, root_nodes,
                     tuple(sorted(labels)),
@@ -383,6 +391,22 @@ def _witnesses(analysis, unit, rows, label, occurrence, labels, node_labels, ind
             or not labels_in_lanes(lane_slice(analysis.normalized, unit, seeds, index), index, rows) <= node_labels:
         traversal = "node-fallback"
     return root_witnesses(analysis.normalized, unit, rows, seeds, labels, index, origins, traversal)
+
+
+def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness) -> dict:
+    """The operation record of one root (diagnostics, ``operation_records``):
+    seeded as ``_lane_origin_labels`` seeds its slice; SOURCE rows' labels as
+    node origins."""
+    from .operation_records import root_record
+
+    seeds = [(row.node, row.physical_spans) for row in rows
+             if row.kind is BoundaryKind.SINK and row.label == label and row.occurrence_ordinal == occurrence]
+    origins: dict = {}
+    for row in rows:
+        if row.kind is BoundaryKind.SOURCE:
+            origins.setdefault(row.node, set()).add(row.label)
+    return root_record(analysis.normalized, unit, seeds, origins=origins, declared=analyzed.declared,
+                       completeness=completeness)
 
 
 def _raw_root_groups(analysis, rows):

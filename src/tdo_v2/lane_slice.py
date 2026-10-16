@@ -52,6 +52,10 @@ _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_R
 class LaneSlice:
     demands: dict = field(default_factory=dict)   # node -> FULL | frozenset of bytes
     nodes: frozenset = frozenset()
+    # ``budget`` ran out (``operation_records``): the demands are not a fixed
+    # point, ``frontier`` the nodes left unprocessed
+    exhausted: bool = False
+    frontier: frozenset = frozenset()
 
     def reaches(self, node) -> bool:
         return node in self.demands
@@ -112,14 +116,17 @@ def lane_index(normalized, unit) -> "_Index":
     return _Index(normalized, unit)
 
 
-def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False) -> LaneSlice:
+def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False, budget=None,
+               byte_budget=None) -> LaneSlice:
     """``seeds``: (node, spans) -- spans: the absolute ByteSpans demanded of a
     definition node, or None / () for FULL. ``index``: ``lane_index``'s.
     ``ignore_debts``: never enter a MEMORY_DEBT node (seeds included), nor
     follow a read fragment a call may have changed (a call-clobber debt on
     that operation overlapping it: the value before the call reaches it only
     if the call did not change it) -- the paths that cross no debt
-    (``origin_witnesses``)."""
+    (``origin_witnesses``). ``budget`` / ``byte_budget``: at most that many
+    worklist steps / demanded bytes materialized (diagnostics); when one runs
+    out the result is ``exhausted``."""
     index = index or _Index(normalized, unit)
     demands: dict = {}
     pending: list = []
@@ -127,6 +134,8 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False) -> LaneS
     if ignore_debts:
         for row in getattr(normalized, "call_clobber_reads", ()):
             clobbered.setdefault(row.operation_key, []).extend(row.spans)
+
+    materialized = [0]
 
     def add(node, demand):
         if ignore_debts and index.graph.node(node).kind is NodeKind.MEMORY_DEBT:
@@ -146,6 +155,17 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False) -> LaneS
             demands[node] = demand
         pending.append(node)
 
+    def over(cost):
+        """Charge ``cost`` bytes about to be materialized: True when the
+        byte budget would be exceeded (nothing is materialized then)."""
+        if byte_budget is None:
+            return False
+        if materialized[0] + cost > byte_budget:
+            materialized[0] = byte_budget + 1
+            return True
+        materialized[0] += cost
+        return False
+
     for node, spans in seeds:
         if not spans or node not in index.definition_of:
             add(node, FULL)
@@ -154,12 +174,20 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False) -> LaneS
         # another object (a stack argument slot whose value is bound to the
         # temporary that holds it) or one not overlapping it: FULL
         definition = index.ssa.definitions[index.definition_of[node]]
+        if over(definition.span.size + sum(span.size for span in spans)):
+            pending.append(node)   # (left unprocessed: the frontier)
+            break
         whole = _whole(definition.span)
         if any(span.object_id != definition.span.object_id or not (_whole(span) & whole) for span in spans):
             add(node, FULL)   # a selector with no known correspondence to this storage
             continue
         add(node, frozenset(byte for span in spans for byte in range(span.start, span.end)) & whole)
+    steps = 0
     while pending:
+        if (budget is not None and steps >= budget) or (byte_budget is not None and materialized[0] > byte_budget) \
+                or over(_cost(index, pending[-1])):
+            return LaneSlice(demands, frozenset(demands), True, frozenset(pending))
+        steps += 1
         node = pending.pop()
         demand = demands[node]
         if node in index.definition_of:
@@ -173,6 +201,18 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False) -> LaneS
 
 def _whole(span):
     return frozenset(range(span.start, span.end))
+
+
+def _cost(index, node) -> int:
+    """Bytes processing ``node`` may materialize (a byte budget's charge): its
+    span (a JOIN: and its sources' spans), or its reads' spans."""
+    if node in index.definition_of:
+        definition_id = index.definition_of[node]
+        return index.ssa.definitions[definition_id].span.size + sum(
+            index.ssa.definitions[source].span.size for source in index.joins.get(definition_id, ()))
+    if node in index.action_of:
+        return sum(read.span.size for read in index.reads.get(index.action_of[node], ()))
+    return 0
 
 
 def _definition(index, node, demand, add):

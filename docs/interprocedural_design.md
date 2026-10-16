@@ -1806,3 +1806,57 @@ esp 일부 겹침, 메모리 출력 COPY, index 주소로 불완전, 안쪽 호�
 `test_definition_atoms.py`의 wild 변형 테스트는 탈출 집합도 비워야 놓침이 드러남(새 규칙이 같은 구멍을 함께 막음). 변형 9개 중 8개
 잡힘; 포인터 사슬 따라가기는 뿌리 레지스터가 이미 reads에 있어(주소 입력도 출처) 보조로 남김.
 - 기록: `.census6/batch{,2,3,4}_{prompt,agy,astra}.md`, `.census6/noreturn_imports.py`, `.census6/why_append*.sh`, `.census6/oracle_bisect*.sh`.
+
+### 25.28 연산 기록(operation records): 값이 어떤 연산을 거쳐 왔는지 (2026-10-16, 설계 검토 3차·구현 검토 Antigravity 4차·Astra 4차) [역방향]
+
+**목적**(사용자): 결과 확인·디버깅, 그리고 나중에 가상화(VM) 코드·인터프리터 분석 — 핸들러의 의미("vreg[a] = vreg[b] + vreg[c]")는
+그 핸들러 함수 각 출력의 연산 식. 지금 요약은 출력이 기대는 바이트(종류 + sources)만 갖고 연산은 버림. 진단 전용: 켜도 라벨·완전성·
+요약·템플릿·가정은 그대로(09 debug·release·win32·UE Development에서 켜기/끄기 JSON이 기록 말고 같음을 확인).
+
+**형식**(`src/tdo_v2/operation_records.py`, 기록 하나 = 식 그래프, 노드 표 + id):
+- `op`: 연산 키·주소·순번·opcode·출력, `operands`는 p-code 입력 순서, 각 입력은 `parts`(`{node, bytes: [a,b), at: [c,d)}` — 만든 쪽 값의
+  a..b 바이트가 입력의 c..d 바이트; 여러 정의의 조각을 이어 붙임, `al` 쓰고 `rax` 읽기 등)로 조립; 결과에 안 쓰이는 바이트는
+  `pruned`(정확한 바이트 지도가 있는 연산만; 계산에서는 0). 역할: value / address / space / target. LOAD는 `memory`(후보 자리별 읽은 바이트),
+  STORE는 주소·값 입력을 가진 `op`. 같은 레지스터끼리 xor/sub(엔진이 읽지 않음)는 `value: 0`.
+- `const`, `entry`(레지스터, 절대 주소, 상대 객체는 원자 설명 + 변위), `phi`(**대안**: 이 중 하나 — JOIN, 출구 run의 여러 정의, 조각의
+  여러 정의, 여러 writer; SSA에 선행자 선택이 없어 어느 쪽인지는 모름), `call`(요약된 호출의 출력 행 하나 — `~in`·`~ld`·`~iu` 등 준비
+  행은 접어서 역할 붙은 `inputs`로; callee·출처(summary / external-model / derived-model / test-only-boundary ...)·모델 라벨·판단 사실:
+  restores_stack, preserves_memory, escapes_stack, noreturn, state_proof, writer 조건 수), `debt`(종류·자리·선행 노드 — may-alias는
+  writer STORE 노드, 주소·값 둘 다), `override`(증명된 rep 뒤 주소 평가기가 쓰는 연산, 관찰된 연산은 `replaced`; 증명 안 된 rep은
+  `override: "unproven"`), rep 원소(`rep_iteration`, 원소 크기, 방향, 변위), `cut`(한도).
+- `origins`: 엔진이 라벨을 붙인 노드(입구 정의, 호출 run 정의, 선언된 source 호출, call-clobber 부채, `~sink`)에 그 라벨.
+- 반복으로 돌아오는 값은 `loop: true` 표시가 붙은 역참조.
+- 요약 run 기록은 run 종류·crossing·조건·부채·writer 조건·`unknown_writers`·`tail_exits`를 같이 실음(`7을 쓰고 모르는 호출 뒤 반환`이
+  "7"로만 보이지 않게). root 기록은 완전성과 함수 전체의 풀리지 않은 쓰기 수를 따로 실음.
+- **root별 가정 목록은 없음**: 쓰기·부채를 빼는 방식으로 작동하는 가정(개인 프레임, 전역·스택 분리, 읽기 전용 이미지, import 칸,
+  불투명 호출의 스택 복구, 트랩)은 root 하나에 귀속할 수 없음 — 실행 전체 목록(`EngineRun.assumptions`)이 기준. 기록은 호출 노드에서
+  관찰된 출처만(`partial_provenance` 명시).
+
+**만들기**: 먼저 `lane_slice`로 바이트 수요의 고정점을 구하고(새 `budget` — 다 못 하면 `truncated`, 고정점 주장 안 함), 그 수요로 노드를
+만듦(그래프 노드당 하나). 시작점: root는 sink 행(노드 + 물리 바이트), 요약 run은 그 정의들(여럿이면 phi). 한도: 노드·간선·깊이·부채당
+writer 수(`Limits`); 넘으면 `cut`과 `truncated`(분석의 완전성과 별개).
+
+**계산과 검증**(`evaluate`, `eligibility`): 잘림·반복·부채·rep·증명 안 된 rep·지원 안 하는 연산·결정 못 한 입력·정확하지 않은 run이
+없는 기록만 같음을 검사(반복 검사는 phi보다 먼저); phi는 기록 전체에서 값 집합(같은 phi는 한 번의 선택, 조합 수 한도) — 포함 검사이지
+경로 가능성 검사는 아님. 호출 출력은 주입 함수가 있어야 계산. 오라클(`tests/intra/record_oracle.py`): 함수를 실제 값으로 실행해, 나간
+출구의 레지스터 run 기록이 최종 레지스터 바이트를 허용하는지 — 값 계산 함수 100개에서 3,426개 계산·실패 0, 별칭·반복이 섞인 무작위
+함수 100개에서 1,254개 계산·실패 0(건너뜀은 이유별로 셈: 부채 256, 반복 275, 정확하지 않은 run 21 ...). 대안 중 하나라도 계산할 수
+없으면 결과 없음(그것이 실제로 간 쪽일 수 있음); 실행이 읽지 않은 입구 바이트는 오라클이 고정값을 줌(실행 값이 그에 기대지 않음).
+망가뜨린 기록(피연산자 뒤바꿈, 상수 틀림, 바이트 범위 틀림, phi 대안 빠짐)은 검사기가 거부.
+**구현 검토에서 고친 것**: 접힌 준비 행의 부채·라벨을 호출 노드에(Antigravity P1-1); 여러 writer phi의 바이트 범위(P1-2); LOAD가
+합류를 거쳐 입구 메모리를 읽을 때 실제 주소에서 읽음(P1-3); 호출 한 행이 쓴 서로 다른 출력(rax, rbx)은 `output`으로 구별(Astra P1-1);
+선택 범위가 여러 개이거나 겹치는 root는 계산 안 함(Astra P1-2, Antigravity P2-1); 깊은 사슬에서 Python 재귀 한도 대신 깊이 한도로
+자름 — 만들기·계산 모두(Astra P1-3, P2); 한도로 멈춘 노드도 모양을 갖추고 `interrupted` 표시(Astra P2-4); 수요 계산의 바이트 한도는
+만들기 전에 누적 차감(Astra P2-5, 4차); 한도·수요 한도 넘으면 `cut`.
+
+**도구**: `run_dfbench --records`(root마다 `--json`의 `record`, 기대 케이스는 텍스트로 출력), `tools/graph_fidelity/derivations.py
+<generation> --function <entry>`(함수 하나의 출구별 출력 식 — 핸들러 분석용).
+
+**남은 한계**: callee 안까지 식 이어 붙이기(2단계, 호출 노드가 callee와 쓴 바이트를 이름으로 가짐) [역방향]; 식 정리·같음 판정(z3,
+3단계) [역방향]; phi의 어느 쪽 경로였는지 [정방향](분기 조건 사실); 반복의 최종 값 [정방향]; 가상화 디스패치·operand로 고르는 가상
+레지스터 [정방향]; root별 가정 귀속(제외 방식 가정) [가정 — 귀속 불가, 실행 단위 목록만].
+**테스트**: `test_operation_records.py`(오라클 8), `test_operation_record_shapes.py` 29개(조각난 입력, x op x, LOAD/STORE 역할, phi, 반복,
+요약 호출 접기와 판단 사실, 준비 행 부채, 한 행의 두 출력, may-alias writer, 합류를 거친 입구 메모리, 한도·수요 한도·바이트 누적,
+깊은 사슬 만들기·계산, origins, rep·override·증명 안 된 rep의 횟수 레지스터, 잘린 바이트 0, 계산 못 하는 대안, 여러·겹친 선택 범위,
+망가뜨린 기록 거부). 변형 13개 잡힘(합류 대안이 조각 일부만 덮는 경우의 보호 장치 1개는 실제로 생기지 않아 남음).
+- 기록: `.census6/oprec{,2,3}_{prompt,agy,astra}.md`, `.census6/records_identity.sh`.

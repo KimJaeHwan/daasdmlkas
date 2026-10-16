@@ -108,6 +108,14 @@ PYTHONPATH=src python -m pytest tests/intra -q
   (`run_dfbench --link LIB=DLL --ghidra-project X.gpr`). 템플릿은 `ENGINE_SEMANTICS_VERSION`이 바뀌면 다시 만들어야 합니다.
 - **바인딩**: 바이너리 안 함수(내보내지 않은 함수)에 모델을 붙일 때는 sha256 + RVA + ABI로 확인합니다(`--binding`).
 
+## 진단 출력 (결과는 바뀌지 않음)
+
+- `run_dfbench --witnesses`: 출처 증거 — 보고된 라벨이 어떤 부채(쓰기 → 읽기)를 거쳐 왔는지 (문서 25.19).
+- `run_dfbench --records`: 연산 기록 — root마다 값이 거친 p-code 연산의 식 그래프(입력 조각·바이트 범위, 합류의 대안, 요약된 호출과
+  그 판단 사실, 부채)를 `--json`에 넣고 기대 케이스는 텍스트로 출력 (문서 25.28).
+- `tools/graph_fidelity/derivations.py <generation> --function <entry>`: 함수 하나의 출구별 출력을 입구 값의 식으로 출력 —
+  핸들러 함수(가상화 핸들러 등)의 의미를 볼 때.
+
 ## 검증
 
 - **지표**: `tools/graph_fidelity/dfbench_metric.sh` — 케이스마다 정확/누락/초과 × 확실/불확실.
