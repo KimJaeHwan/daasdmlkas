@@ -1,7 +1,9 @@
 """Long chains of dependent values (docs 25.29): the analysis follows them
 with a raised recursion bound; a function deeper still fails alone
 (``NormalizationFailureReason.ANALYSIS_DEPTH``) -- its callers see an opaque
-call, the run goes on."""
+call, the run goes on. These run on the main thread
+(TDO_V2_ANALYSIS_WORKER=0): the worker's bound is far larger
+(``test_resource_limits``)."""
 
 import sys
 
@@ -28,6 +30,7 @@ def test_a_chain_of_a_thousand_dependent_values_is_analyzed():
 
 
 def test_a_function_deeper_than_the_bound_fails_alone(monkeypatch):
+    monkeypatch.setenv("TDO_V2_ANALYSIS_WORKER", "0")
     monkeypatch.setattr(interprocedural, "ANALYSIS_RECURSION_LIMIT", 400)
     previous = sys.getrecursionlimit()
     sys.setrecursionlimit(400)
@@ -51,13 +54,15 @@ def _wide_chain(per, count):
     return builder.ret()
 
 
-def test_six_thousand_dependent_values_analyze_without_exhausting_the_c_stack():
+def test_six_thousand_dependent_values_analyze_without_exhausting_the_c_stack(monkeypatch):
+    monkeypatch.setenv("TDO_V2_ANALYSIS_WORKER", "0")
     """The recursive evaluation crosses no generator frame (each would cost C
     stack: Antigravity, step A review 1, P0-1)."""
     result = analyze_units(program_units(_wide_chain(6, 1000)))["1:1000"]
     assert type(result.normalized) is NormalizedFunction and result.summary is not None
 
 
-def test_a_chain_beyond_the_bound_fails_that_function_without_a_crash():
+def test_a_chain_beyond_the_bound_fails_that_function_without_a_crash(monkeypatch):
+    monkeypatch.setenv("TDO_V2_ANALYSIS_WORKER", "0")
     result = analyze_units(program_units(_wide_chain(10, 1000)))["1:1000"]
     assert result.summary is None and result.normalized.reason is NormalizationFailureReason.ANALYSIS_DEPTH

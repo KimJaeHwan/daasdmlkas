@@ -55,6 +55,12 @@ CONTRACT = {
 }
 
 
+# fields added after the first baselines: omitted while at this value, so
+# older snapshots stay comparable (a non-default value is encoded and differs)
+ADDED_FIELDS = {
+    "EngineRun": {"failed_functions": ()},
+}
+
 # identity / authority tokens with no content (each is a unique object; only
 # its presence is semantic)
 TOKENS = {"_BoundSsaIdentity"}
@@ -98,9 +104,11 @@ def encode(value, path="$"):
         }
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         excluded = _check_contract(value, path) or set()
+        added = ADDED_FIELDS.get(type(value).__name__, {})
         return {"type": type(value).__name__, **{
             field.name: encode(getattr(value, field.name), f"{path}.{field.name}")
             for field in dataclasses.fields(value) if field.name not in excluded
+            and not (field.name in added and getattr(value, field.name) == added[field.name])
         }}
     if type(value) in (tuple, list):
         return [encode(item, f"{path}[{index}]") for index, item in enumerate(value)]

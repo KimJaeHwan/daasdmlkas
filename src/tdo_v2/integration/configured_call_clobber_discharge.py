@@ -31,6 +31,8 @@ reads, so the trace fails.
 
 from __future__ import annotations
 
+from ..resource_limits import RESOURCE_FAILURES
+
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -472,6 +474,8 @@ class _Frame:
     def build(view: _FunctionView) -> "_Frame | None":
         try:
             inventory = build_recursive_frame_inventory(view.analysis)
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception:  # an inventory we cannot build proves nothing
             return None
         anchors = {

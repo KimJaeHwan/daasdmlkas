@@ -35,6 +35,8 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "tools" / "bundle_export"))
 
+from tdo_v2.resource_limits import analysis_entry  # noqa: E402
+
 
 def _producer(generation: Path) -> dict:
     """Recorded with the templates (never compared): the engine revision and
@@ -65,6 +67,7 @@ def image_ranges(info, space_id: int) -> tuple:
 _DEFAULT = object()
 
 
+@analysis_entry
 def derive_library(generation: Path, library: str, export_names, *, file_id: str, version: int = 1,
                    model_dirs=(), models=None, pcodeops=_DEFAULT, stack_evidence=(), private_frame_above: int = 0x28,
                    traps: bool = True, assume_globals_disjoint: bool = True, direction_flag: bool = False,
@@ -194,6 +197,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
             continue
         try:
             raw, refusals = derive([name])
+        except MemoryError:   # the process state: the run fails, never one export
+            raise
         except Exception as error:  # noqa: BLE001 -- this export only; never stored by linking
             refused[name] = Refusal(f"derivation failed: {type(error).__name__}: {error}", "transient")
             continue

@@ -41,20 +41,24 @@ from hashlib import sha256
 from pathlib import Path
 
 from .boundary import BoundaryKind, BoundaryProvider, CallBoundary
+from .call_seeds import _operation_key
 from .configured_naming_contracts import CALL_NAMING_GHIDRA_VERSION, NamingBindingExpectation
 from .engine import (
     EngineRun, RootSlice, _unbound_roots, _with_unbound, assumed_boundary_effects,
 )
 from .integration.configured_target_resolution import _selected_resolved_target
 from .integration.observed_function_session import open_observed_function_session
-from .interprocedural import analyze_units, function_key, run_definition_nodes
+from .interprocedural import (
+    ANALYSIS_FAILURES, _failure_reason, analyze_units, function_key, run_definition_nodes,
+)
 from .image_info import ReadOnlyImage, load_image_info
-from .normalize import NormalizedFunction
+from .normalize import NormalizationFailureReason, NormalizedFunction
 from .observed_call_state import observed_call_state_projections
 from .pcodeop_models import trap_operations
 from .physical_state import PhysicalRegisterSlice
 from .span_geometry import StorageObjectKind
-from .query_contracts import local_completeness
+from .query_contracts import LocalCompleteness, local_completeness
+from .resource_limits import analysis_entry
 from .scope_identity import ConstructedProgramScope
 
 
@@ -96,6 +100,7 @@ def _boundaries(evidence):
     return rows
 
 
+@analysis_entry
 def analyze_frozen_bundle_with_summaries(
     generation_path: str | Path,
     *,
@@ -299,6 +304,7 @@ def analyze_frozen_bundle_with_summaries(
         assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
                                       traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
         preliminary = []
+        failed: dict = {}   # function key -> NormalizationFailureReason (resource failures)
         for key, item in by_key.items():
             if key not in results:
                 # a function a model binding cuts (``interprocedural._bound_cuts``):
@@ -309,20 +315,24 @@ def analyze_frozen_bundle_with_summaries(
                 continue
             normalized = results[key].normalized
             if type(normalized) is not NormalizedFunction:
+                if normalized.reason in RESOURCE_REASONS:
+                    failed[key] = normalized.reason
+                    continue
                 raise ValueError(f"function {key} does not normalize: {normalized.reason.value}")
             preliminary.append(ConfiguredFunctionAnalysis(item, normalized, EMPTY_OBSERVED_BOUNDARIES, ()))
-        preliminary = tuple(preliminary)
-        views = {analysis.entry: _FunctionView(analysis) for analysis in preliminary}
-        nodes = {analysis.entry: [] for analysis in preliminary}
+        nodes: dict = {}
         incomplete_roots: set = set()  # (entry, label, occurrence) of projected roots
-        for analysis in preliminary:
+
+        def bind(analysis):
+            """The function's ObservedBoundaryNode rows (its origins, own sinks
+            and projected roots)."""
             key = function_key(analysis.entry)
-            view = views[analysis.entry]
+            rows = []
+            view = _FunctionView(analysis)
             for fragment, (node, labels) in enumerate(sorted(results[key].origins.items())):
                 for label in sorted(labels):
-                    nodes[analysis.entry].append(
-                        ObservedBoundaryNode(BoundaryKind.SOURCE, label, node, 0, fragment))
-            nodes[analysis.entry].extend(own_sink_nodes(analysis, view))
+                    rows.append(ObservedBoundaryNode(BoundaryKind.SOURCE, label, node, 0, fragment))
+            rows.extend(own_sink_nodes(analysis, view))
             # projected roots: occurrences after the function's own call sites and tails
             base = len(analysis.evidence.seeds.callsites) + len(analysis.evidence.tails)
             for index, (call, _, label, root_nodes, complete) in enumerate(results[key].projected_sinks):
@@ -331,17 +341,16 @@ def analyze_frozen_bundle_with_summaries(
                     root_nodes = [analysis.normalized.dependencies.node_for_key(f"op:{call}")]
                     complete = False
                 for fragment, node in enumerate(root_nodes):
-                    nodes[analysis.entry].append(
-                        ObservedBoundaryNode(BoundaryKind.SINK, label, node, occurrence, fragment))
+                    rows.append(ObservedBoundaryNode(BoundaryKind.SINK, label, node, occurrence, fragment))
                 if not complete:
                     incomplete_roots.add((analysis.entry, label, occurrence))
-        analyses = _analyses_from_boundary_nodes(preliminary, nodes)
+            return rows
 
-        roots = []
-        lane_indexes: dict = {}
-        for key in LANE_DIAGNOSTICS:   # per run
-            LANE_DIAGNOSTICS[key] = 0
-        for analysis in analyses:
+        def function_roots(analysis):
+            """The RootSlices of one bound function."""
+            key = function_key(analysis.entry)
+            unit = by_key[key].unit
+            found = []
             for label, occurrence, root_nodes, results_for_root, node_labels in _raw_root_groups(
                     analysis, nodes[analysis.entry]):
                 unbound = _unbound_roots(analysis.normalized, root_nodes)
@@ -349,27 +358,131 @@ def analyze_frozen_bundle_with_summaries(
                 if (analysis.entry, label, occurrence) in incomplete_roots:
                     # the callee part of a projected root is incomplete
                     completeness = replace(completeness, complete=False)
-                labels = _lane_origin_labels(analysis, by_key[function_key(analysis.entry)].unit,
-                                             nodes[analysis.entry], label, occurrence, node_labels, lane_indexes)
-                explanation = _witnesses(analysis, by_key[function_key(analysis.entry)].unit, nodes[analysis.entry],
-                                         label, occurrence, labels, node_labels, lane_indexes,
-                                         results[function_key(analysis.entry)].origins) \
+                labels = _lane_origin_labels(analysis, unit, nodes[analysis.entry], label, occurrence, node_labels,
+                                             lane_indexes)
+                explanation = _witnesses(analysis, unit, nodes[analysis.entry], label, occurrence, labels,
+                                         node_labels, lane_indexes, results[key].origins) \
                     if origin_witnesses else {}
                 if operation_records:
                     explanation = {**explanation, "record": _root_record(
-                        analysis, by_key[function_key(analysis.entry)].unit, nodes[analysis.entry], label,
-                        occurrence, results[function_key(analysis.entry)], completeness)}
-                roots.append(RootSlice(
+                        analysis, unit, nodes[analysis.entry], label, occurrence, results[key], completeness)}
+                found.append(RootSlice(
                     analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence, root_nodes,
                     tuple(sorted(labels)),
                     (), explanation, completeness, completeness,
                 ))
+            return found
+
+        # sink binding and root slicing per function: a function that runs out
+        # of a resource there fails alone (its partial rows are dropped)
+        analyses = []
+        late: set = set()   # failed after the analysis: their summaries were used
+        for analysis in preliminary:
+            try:
+                nodes[analysis.entry] = bind(analysis)
+                analyses.extend(_analyses_from_boundary_nodes((analysis,), nodes))
+            except ANALYSIS_FAILURES as error:
+                failed[function_key(analysis.entry)] = _failure_reason(error)
+                late.add(function_key(analysis.entry))
+                nodes.pop(analysis.entry, None)
+                incomplete_roots.difference_update(
+                    {row for row in incomplete_roots if row[0] == analysis.entry})
+        roots = []
+        lane_indexes: dict = {}
+        for key in LANE_DIAGNOSTICS:   # per run
+            LANE_DIAGNOSTICS[key] = 0
+        for analysis in analyses:
+            try:
+                roots.extend(function_roots(analysis))
+            except ANALYSIS_FAILURES as error:
+                failed[function_key(analysis.entry)] = _failure_reason(error)
+                late.add(function_key(analysis.entry))
+                lane_indexes.pop(id(analysis.normalized), None)
+        if late:
+            roots = _dependents_incomplete(roots, late, results, by_key)
+        for key in sorted(failed):
+            roots.extend(_failure_roots(by_key[key], boundaries[key], boundary_provider, failed[key]))
         return EngineRun(
             program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(roots),
-            assumptions,
+            assumptions, tuple((key, failed[key].value) for key in sorted(failed)),
         )
 
 
+def _dependents_incomplete(roots, failed, results, by_key) -> list:
+    """Roots projected through a call whose callee reaches a function of
+    ``failed`` (call graph of the run): incomplete, ``explanation["rests_on_failed"]``
+    naming those functions -- a function that fails after its summary was used
+    (sink binding / root slicing) takes its dependents with it. (One failing in
+    the analysis itself was an opaque call to its callers: not listed here.)"""
+    reach: dict = {}
+
+    def reached(key) -> frozenset:
+        """Failed functions ``key`` reaches (iterative: no recursion)."""
+        if key not in reach:
+            seen, pending = set(), [key]
+            while pending:
+                item = pending.pop()
+                if item in seen or item not in results:
+                    continue
+                seen.add(item)
+                pending.extend(results[item].calls.values())
+            reach[key] = frozenset(seen & set(failed))
+        return reach[key]
+
+    found = []
+    for root in roots:
+        key = f"{root.function_space_id:x}:{root.function_byte_offset:x}"
+        evidence = by_key[key]
+        base = len(evidence.seeds.callsites) + len(evidence.tails)
+        index = root.occurrence_ordinal - base
+        projected = results[key].projected_sinks
+        if 0 <= index < len(projected):
+            callee = results[key].calls.get(projected[index][0])
+            failures = reached(callee) if callee is not None else frozenset()
+            if failures:
+                local = replace(root.local_completeness, complete=False)
+                effective = replace(root.effective_completeness, complete=False)
+                root = replace(root, local_completeness=local, effective_completeness=effective,
+                               explanation={**root.explanation, "rests_on_failed": sorted(failures)})
+        found.append(root)
+    return found
+
+
+def _failure_roots(evidence, boundaries, provider, reason) -> list:
+    """Incomplete roots of a function whose analysis ran out of a resource
+    (``EngineRun.failed_functions``): one per syntactic sink occurrence -- a
+    call site classified SINK (occurrence = its call-seed index) or a tail jump
+    (call-seed count + tail index), numbered as a bound function's are and
+    never compacted -- with no nodes, no origin labels and completeness false;
+    ``explanation["failure"]`` names the reason. Occurrences outside the
+    observation are skipped, as binding skips them."""
+    unit = evidence.unit
+    entry = unit.scopes.function.entry
+    observed = {
+        _operation_key(instruction.address, ordinal, operation.opcode)
+        for instruction in unit.observation.instructions
+        for ordinal, operation in enumerate(instruction.operations)
+    }
+    occurrences = [(occurrence, seed.operation_key, boundary)
+                   for occurrence, (seed, boundary) in enumerate(boundaries)]
+    base = len(evidence.seeds.callsites)
+    occurrences += [(base + index, tail.operation_key, boundary)
+                    for index, (tail, boundary) in enumerate(zip(evidence.tails, _tail_boundaries(evidence),
+                                                                 strict=True))]
+    incomplete = LocalCompleteness(False, 0, 0)
+    found = []
+    for occurrence, operation_key, boundary in occurrences:
+        if operation_key not in observed:
+            continue
+        for label in sorted({match.label for match in provider.classify(boundary)
+                             if match.kind is BoundaryKind.SINK}):
+            found.append(RootSlice(entry.space_id, entry.byte_offset, label, occurrence, (), (), (),
+                                   {"failure": reason.value}, incomplete, incomplete))
+    return found
+
+
+# the failures ``analyze_units`` reports as a function's resource failure
+RESOURCE_REASONS = frozenset({NormalizationFailureReason.ANALYSIS_DEPTH, NormalizationFailureReason.ANALYSIS_BUDGET})
 
 LANE_DIAGNOSTICS = {"roots": 0, "narrowed": 0, "not_subset": 0, "restored": 0}
 

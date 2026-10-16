@@ -1895,3 +1895,68 @@ win64 보존 레지스터로만 실행해 `rax = rcx`로 계산. 고침: `Interp
 
 **기타**: 브랜치를 오가며 git이 `.sh`를 CRLF로 다시 써 WSL 지표 스크립트가 깨짐 → `.gitattributes`에 `*.sh text eol=lf`.
 - 기록: `.census6/stepA{,2}_{prompt,agy,astra}.md`, `.census6/zlib_missing.sh`, `.census6/zlib_probe.py`.
+
+### 25.30 A-5 큰 함수: 멈추지 않고, 결과는 그대로, 넘치면 "불완전"으로 (2026-10-16, 설계 검토 6차·K1a 구현 검토 Antigravity 3차·Astra 3차)
+
+**목표(사용자)**: 검수 중인 게임 클라이언트의 한 함수 — 코드 194,636바이트(명령 약 4.3~4.5만 개, p-code 약 20~26만 개), 서로 다른
+피호출 함수 980개(내부 977, import 3), std::function·COM·가상 호출과 값 난독화 래퍼(`_ZtlSecureGet_*`)가 많고 실행 파일 약 256 MB —
+"이 정도도 대응 가능해야 함". 지금까지 가장 큰 함수는 zlib inflate(명령 2,343, p-code 13,737). 계약: 프로세스가 죽지 않고, 지금
+분석하는 모든 것의 결과는 바뀌지 않으며, 시간·메모리는 한정되고, 한도를 넘으면 그 사실이 형식이 있는 "불완전" 결과로 남음.
+
+**phase 0~1(17e9bea)**: 의미 스냅샷(`tools/graph_fidelity/semantic_snapshot.py` — 모든 Bundle·설정의 정규화 결과·요약·호출 효과·루트를
+정해진 형식으로 기록, 비교; 큰 함수 예제 `tests/intra/large_fixtures.py`)과 action별 읽기 색인(선형 탐색 5곳 제거, zlib 144 s → 118 s).
+이후 모든 단계는 이 스냅샷과 같아야 함.
+
+**설계 결정(검토 4~6차)**:
+- 재귀 문제는 **T+C**: 지금은 큰 스택의 분석 전용 스레드(T, 엔진 코드 변경 없음 → 결과는 구조상 같음), 계산기를 코루틴으로 바꾸는 것(C)은
+  측정에서 T의 한도가 실제로 문제일 때만(두 리뷰어 같은 의견). 측정: 1 GiB 스택에서 의존 값 3만 개 사슬 7 s / 415 MB, 2 GiB에서
+  6만 개 14.5 s / 820 MB.
+- 순서(Astra): **K1 격리**(작업 스레드, 함수별 실패 계약, 예산 장부, 외부 감독) → **K2 측정**(250k op까지 키운 합성 함수, 단계별 계측) →
+  **K3 동작 보존 최적화**(스냅샷이 같아야 함) → **K4 실제 대상**(선택 함수 내보내기 모드 + 범위 계약, PE x64 예외 영역 포함) →
+  **K5 코루틴**(필요한 곳만).
+- 받아들이는 기준(잠정, K2 뒤 확정): 기존 스냅샷 그대로; 250k op 예제 10분 / 8 GiB 안; 실제 대상은 끝나거나 형식 있는 불완전 실패;
+  감독 프로세스 12 GiB 강제 한도, 마감 + 30 s 유예, 고아 프로세스 없음; 협력적 만료는 1 s 안에 관측.
+
+**K1a 구현(이 커밋)**:
+- `resource_limits.py`: `RESOURCE_FAILURES`(RecursionError, MemoryError, `AnalysisBudgetExceeded`); `run_analysis` / `@analysis_entry` —
+  바깥 진입점 하나마다 분석 스레드 하나(Linux CPython ≥ 3.14만; 그 밖이나 `TDO_V2_ANALYSIS_WORKER=0`이면 그 자리에서 실행), 안쪽
+  진입점은 그 스레드에서 그대로, 재진입 잠금(RLock, 그 자리 실행도 잡음), contextvars 한 번 복사, `TDO_V2_ANALYSIS_STACK_MB`(64~16384,
+  기본 1024) 검증, 재귀 한도는 MB × 200으로 올렸다가 끝나면 복원, 결과·예외(traceback 포함) 전달 후 참조 순환 끊음. Ctrl-C는 스레드를
+  만들기 전부터 끝날 때까지 기록만 하고, 끝난 뒤 원래 처리기에 전달(기본은 KeyboardInterrupt; 돌아오는 처리기면 결과 유지).
+- 진입점 4곳: `analyze_units`, `analyze_frozen_bundle_with_summaries`, 예전 엔진 `analyze_frozen_bundle`, `derive_library`.
+- 함수별 실패(`interprocedural`): RecursionError → `ANALYSIS_DEPTH`, `AnalysisBudgetExceeded` → 새 `ANALYSIS_BUDGET`, 그 함수만 실패하고
+  실행 동안 고정(재귀 묶음·간접 호출 라운드에서 다시 시도하지 않음); MemoryError는 실행 실패. 스택 전환 검사가 넘치면 그 함수
+  `("unchecked",)`(가정 철회); 간접 호출 대상 검사가 넘치면 그 함수 실패(한 라운드 추가, 함수마다 최대 한 번); 상태 증명이 넘치면 그
+  증명이 필요한 함수 실패(조용히 "증명 없음"으로 두지 않음).
+- `summary_engine`: 자원 실패 함수는 더 이상 실행 전체의 ValueError가 아님 — `EngineRun.failed_functions`((키, 이유) 정렬)와,
+  그 함수의 문법상 싱크 위치마다 불완전 루트(호출 위치 = 호출 seed 번호, 꼬리 점프 = 호출 수 + 꼬리 번호, 묶을 때와 같은 번호; 노드 없음,
+  라벨 없음, 완전성 거짓, `explanation["failure"]`). 그 함수의 호출을 거친 투영 루트는 나열하지 않음(`failed_functions`에 문서화).
+  싱크 묶기·루트 slicing도 함수별: 거기서 넘치면 그 함수의 중간 결과를 버리고 실패 함수로; 그 요약을 이미 쓴 호출자의 투영 루트는
+  불완전 + `explanation["rests_on_failed"]`(분석 중 실패한 함수는 호출자에게 이미 모르는 호출이라 해당 없음). 다른 정규화 실패는 그대로 ValueError.
+- 넓은 예외 처리: 오류를 판정으로 바꾸는 `except Exception` 16곳과 RuntimeError를 잡던 2곳(`configured_finite_root_replay`,
+  Bundle 입력 `configured_bundle`)에서 자원 실패는 먼저 다시 던짐. `linking.py`의 것은 다시 시도하는 INFRASTRUCTURE 실패라 그대로.
+  `configured_recursive_frame_inventory`의 RecursionError → `BUDGET_EXHAUSTED` 빚(명시적 불완전)은 유지. 연산 기록(25.28)은
+  계약상 예외: 깊어서 잘리면 기록 안에 `cut`(reason "recursion")이 남고 루트 완전성은 영향 없음.
+- 파생 템플릿: 내보낼 함수의 닫힘에 자원 실패 함수가 있으면 `TemplateRefused(kind="transient")` — linking이 저장하지 않고 다음 실행에서
+  다시 시도(예전에는 "no summary" 의미 거부로 저장됐음). `derive_library`의 export별 처리에서 MemoryError는 실행 실패.
+- 도구: `semantic_snapshot`의 `ADDED_FIELDS`(빈 `failed_functions`는 기록하지 않아 예전 기준과 비교 가능), `fixture_snapshot`도 분석
+  스레드에서 실행.
+
+**검토**: Astra 1차 4건(P1 Ctrl-C가 살아 있는 스레드를 두고 잠금을 풂, P1 나중 실패의 의존 루트가 완전으로 남음, P2 RuntimeError 처리,
+P2 기록), Antigravity 1차 6건(P1 간접 대상·상태 증명 실패가 조용히 사라짐, P1 Ctrl-C, P2 참조 순환, P2 그 자리 실행의 잠금·검증,
+P2 derive의 MemoryError) — 모두 반영. 2차: Astra P2(돌아오는 처리기에서 결과 유실), Antigravity 승인 + P2 3건(간접 라운드 예산, 같은 건,
+나중 실패만 의존 표시) — 반영. 3차: 아래 기록.
+
+**검증**: 전체 테스트, 의미 스냅샷이 phase 1 기준과 모두 같음 — 의도한 차이 하나: 예제 chain-8k(예전 주 스레드에서 `ANALYSIS_DEPTH`,
+지금 분석 스레드에서 분석됨). 기준의 알려진 실패(`v2-win-debug-full.legacy`: write-event 고정점 불안정)는 그대로. 테스트:
+`test_resource_limits.py`(스레드·한도 복원·안쪽 진입점·traceback·contextvars·끄기·크기 검증·서명·1만 개 사슬; 고정 실패·이유·
+MemoryError; 스택 전환·간접 대상·상태 증명; 넓은 처리기; 실제 Bundle에서 강제 실패한 함수의 실패 루트; 템플릿 transient; Ctrl-C 유예와
+돌아오는 처리기; 의존 루트), `test_analysis_depth.py`는 주 스레드에서(작업 스레드 끔).
+
+**남은 한계**:
+- [역방향] 실패한 함수의 호출을 거친 투영 루트는 나열되지 않음(`failed_functions`가 그 공백을 알림). 요약을 함수 일부만이라도 만들면 줄어듦.
+- [역방향] 한도는 사라진 것이 아니라 옮겨짐(스택 크기와 메모리에 묶임): K5에서 필요한 곳만 반복형으로.
+- [가정] 작업 스레드는 Linux CPython ≥ 3.14에서만 검증(3.14는 실제 C 스택을 검사); Windows·3.13에서는 예전 한도로 그 자리 실행.
+- 아직 없음(다음): K1b 예전 엔진의 함수별 실패 계약, K1c 예산 장부·구조 한도·ValueError 상한 → `ANALYSIS_BUDGET`, K1d cgroup-v2 감독 +
+  내보내기 시간 한도, K2~K5.
+- 기록: `.census6/stepA5{,b,c,d,e,f,g,h,i}_{prompt,agy,astra}.md`, `.census6/k1a.diff`.

@@ -6,6 +6,8 @@ an origin query, lower legacy events, or authorize public completion.
 
 from __future__ import annotations
 
+from ..resource_limits import RESOURCE_FAILURES
+
 from dataclasses import dataclass
 from enum import StrEnum
 from time import monotonic
@@ -131,6 +133,8 @@ class _Scheduler:
             _stop(SchedulerDebtReason.INVALID_REQUEST, "exact prepared request required")
         try:
             replay = replay_configured_finite_context_request(request)
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception as error:
             _stop(SchedulerDebtReason.INVALID_REQUEST, f"request replay failed: {error}")
         if replay.input_digest != request.input_digest:

@@ -34,6 +34,7 @@ def main() -> int:
     name, out = sys.argv[1], Path(sys.argv[2])
     started = time.time()
     # the probes run outside analyze_units: the same room it gives the evaluator
+    # (on the analysis worker where it runs, else the main thread's raised limit)
     from tdo_v2.interprocedural import ANALYSIS_RECURSION_LIMIT
 
     sys.setrecursionlimit(max(sys.getrecursionlimit(), ANALYSIS_RECURSION_LIMIT))
@@ -70,4 +71,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from tdo_v2.resource_limits import run_analysis
+
+    raise SystemExit(run_analysis(main))

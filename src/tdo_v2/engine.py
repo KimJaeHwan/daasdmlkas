@@ -37,6 +37,7 @@ from .normalize import (
     NormalizedFunction,
 )
 from .opaque_values import OpaqueValueEvidenceProvider
+from .resource_limits import analysis_entry
 from .query_contracts import (
     LocalCompleteness,
     effective_completeness,
@@ -109,8 +110,15 @@ class EngineRun:
     # named opt-in assumptions the results rely on (e.g.
     # "globals-disjoint-from-stack"); empty for evidence-only runs
     assumptions: tuple[str, ...] = ()
+    # (function key, failure reason) of every function whose analysis ran out
+    # of a resource (``NormalizationFailureReason.ANALYSIS_DEPTH`` /
+    # ``ANALYSIS_BUDGET``): its syntactic sink occurrences are incomplete roots
+    # with no nodes; roots projected through its calls are not enumerated, so
+    # an empty origin set anywhere in the run is no evidence of absence for it
+    failed_functions: tuple[tuple[str, str], ...] = ()
 
 
+@analysis_entry
 def analyze_frozen_bundle(
     generation_path: str | Path,
     *,

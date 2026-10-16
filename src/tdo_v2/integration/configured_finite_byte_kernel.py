@@ -7,6 +7,8 @@ that the later finite scheduler must discharge explicitly.
 
 from __future__ import annotations
 
+from ..resource_limits import RESOURCE_FAILURES
+
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -303,6 +305,8 @@ class FiniteByteKernel:
             _stop(KernelDebtReason.INVALID_REQUEST, "exact prepared request required")
         try:
             replay = replay_configured_finite_context_request(request)
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception as error:
             _stop(KernelDebtReason.INVALID_REQUEST, f"request replay failed: {error}")
         if replay.input_digest != request.input_digest:

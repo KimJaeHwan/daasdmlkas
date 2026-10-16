@@ -76,8 +76,10 @@ class TemplateError(ValueError):
 class TemplateRefused(ValueError):
     """A function that cannot be exported as a template (the reason).
     ``kind``: "semantic" (the analysis cannot express it), "budget" (a
-    bound of the analysis was reached) or "infrastructure" (it was not
-    analyzed at all) -- how linking stores and retries it."""
+    bound of the analysis was reached), "infrastructure" (it was not
+    analyzed at all) or "transient" (a function of its closure ran out of a
+    resource: ``NormalizationFailureReason.ANALYSIS_DEPTH`` / ``ANALYSIS_BUDGET``
+    -- never stored, retried next run) -- how linking stores and retries it."""
 
     def __init__(self, message: str, kind: str = "semantic"):
         super().__init__(message)
@@ -101,10 +103,18 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
     """The serialized template of ``analyzed`` (an ``AnalyzedFunction``).
     ``results``: the whole run (callees are checked too); ``base_dependent``:
     function scope digests ``IMAGE_BASE_TRACKING`` recorded."""
+    from .normalize import NormalizationFailureReason
+
+    closure = _closure(analyzed, results)
+    resource = (NormalizationFailureReason.ANALYSIS_DEPTH, NormalizationFailureReason.ANALYSIS_BUDGET)
+    for item in closure:
+        # (its callers saw an opaque call: a resource failure is no verdict on the export)
+        if getattr(item.normalized, "reason", None) in resource:
+            raise TemplateRefused(f"{item.key}: {item.normalized.reason.value}", "transient")
     summary = analyzed.summary
     if summary is None:
         raise TemplateRefused("no summary")
-    for item in _closure(analyzed, results):
+    for item in closure:
         if item.recursion_unresolved:
             raise TemplateRefused(f"{item.key}: recursion without a verified fixpoint", "budget")
         if item.test_only_inputs or any(label.startswith("test-only-boundary:") for label in item.declared.values()):

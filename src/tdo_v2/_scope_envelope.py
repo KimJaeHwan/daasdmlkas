@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .resource_limits import RESOURCE_FAILURES
+
 from collections.abc import Iterator
 from threading import current_thread
 from typing import Protocol
@@ -145,6 +147,8 @@ class ConfiguredExtractionEnvelope:
         self._function_iterator_claimed = True
         try:
             handles = iter(self._provider.function_handles())
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception as exc:
             raise RuntimeError("function handle enumeration failed") from exc
         iterator = _ScopedFunctionIterator(self, handles)
@@ -164,6 +168,8 @@ class ConfiguredExtractionEnvelope:
             return _program_failure(ScopeConstructionReason.MISSING_EXECUTABLE_SHA256), None
         try:
             executable_digest = _original_executable_digest(size_method(), chunks_method())
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception:
             return _program_failure(ScopeConstructionReason.INVALID_EXECUTABLE_SHA256), None
 
@@ -181,11 +187,15 @@ class ConfiguredExtractionEnvelope:
                 _MemoryFailureKind.MISSING: ScopeConstructionReason.MISSING_LOADED_MEMORY_DIGEST,
             }
             return _program_failure(reasons[exc.kind]), None
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception:
             return _program_failure(ScopeConstructionReason.INCOMPLETE_PROGRAM_SNAPSHOT), None
 
         try:
             spaces_complete = self._provider.spaces_complete()
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception:
             spaces_complete = None
         validation = _validate_program_candidate(candidate, spaces_complete, memory.runs)
@@ -217,6 +227,8 @@ class ConfiguredExtractionEnvelope:
     def _safe_program_candidate(self) -> object:
         try:
             return self._provider.program_candidate()
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception:
             return None
 
@@ -233,6 +245,8 @@ class ConfiguredExtractionEnvelope:
         assert self._index is not None
         try:
             raw = self._provider.function_candidate(handle)
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception:
             function = UnresolvedFunctionScope(
                 ScopeConstructionStage.FUNCTION_OBSERVATION,
@@ -248,6 +262,8 @@ class ConfiguredExtractionEnvelope:
         validation = _validate_function_candidate(raw, self._index)
         try:
             complete = self._provider.observation_complete(handle)
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception:
             complete = None
         function, observation = self._reduce_function(validation, complete)

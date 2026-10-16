@@ -7,6 +7,8 @@ bind to exact static and executed evidence before reverse traversal begins.
 
 from __future__ import annotations
 
+from ..resource_limits import RESOURCE_FAILURES
+
 from dataclasses import dataclass
 from enum import StrEnum
 from collections import deque
@@ -184,6 +186,8 @@ class _Query:
             _stop(CutDebtReason.INVALID_INPUT, "exact request, expansion, provider and limits required")
         try:
             replay = replay_configured_finite_context_request(request)
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception as error:
             _stop(CutDebtReason.IDENTITY_MISMATCH, f"request replay failed: {error}")
         scheduler_revision, kernel_revision = (
@@ -268,6 +272,8 @@ class _Query:
     def _provider_matches(self, boundary):
         try:
             matches = self.provider.classify(boundary)
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception as error:
             _stop(CutDebtReason.SOURCE_BINDING, f"provider classification failed: {error}")
         if (type(matches) is not tuple
@@ -285,6 +291,8 @@ class _Query:
     def _provider_state(self, binding, match):
         try:
             return self.provider.state(binding.boundary, match)
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception as error:
             _stop(CutDebtReason.SOURCE_BINDING, f"provider physical state failed: {error}")
 

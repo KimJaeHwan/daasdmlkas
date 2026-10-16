@@ -1233,7 +1233,11 @@ class NormalizationFailureReason(StrEnum):
     # a chain of dependent values deeper than the analysis follows (Python's
     # recursion bound, ``interprocedural.ANALYSIS_RECURSION_LIMIT``): the
     # function is analyzed as not normalizing -- its callers see an opaque call
+    # (on the analysis worker the bound is the worker's: ``resource_limits``)
     ANALYSIS_DEPTH = "analysis_depth"
+    # a per-function budget ran out (``resource_limits.AnalysisBudgetExceeded``):
+    # likewise not normalizing, opaque for callers
+    ANALYSIS_BUDGET = "analysis_budget"
 
 
 @dataclass(frozen=True, slots=True)

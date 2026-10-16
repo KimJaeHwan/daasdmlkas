@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .resource_limits import RESOURCE_FAILURES
+
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -75,6 +77,8 @@ def _loaded_memory_commitment(
             marker = snapshot_complete() if callable(snapshot_complete) else snapshot_complete
             require_bool(marker, "snapshot completeness")
             completeness_ok = marker is True
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception:
             completeness_ok = False
     if not completeness_ok:
@@ -97,6 +101,8 @@ def _loaded_memory_commitment(
                 ):
                     builder.update_bytes(chunk.data)
             except _MemoryCommitmentError:
+                raise
+            except RESOURCE_FAILURES:  # a resource failure is no verdict
                 raise
             except Exception as exc:
                 raise _MemoryCommitmentError(_MemoryFailureKind.INCOMPLETE) from exc
@@ -214,6 +220,8 @@ def _consume_positioned(
             chunk = next(iterator)
         except StopIteration:
             break
+        except RESOURCE_FAILURES:  # a resource failure is no verdict
+            raise
         except Exception as exc:
             raise _MemoryCommitmentError(_MemoryFailureKind.INCOMPLETE) from exc
         if type(chunk) is not PositionedChunk or chunk.offset != offset:

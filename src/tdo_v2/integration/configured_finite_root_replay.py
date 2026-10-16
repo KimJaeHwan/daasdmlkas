@@ -8,6 +8,8 @@ derived from the admitted observations.
 
 from __future__ import annotations
 
+from ..resource_limits import RESOURCE_FAILURES
+
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -184,6 +186,8 @@ def _from_snapshot(snapshot, naming_binding, provider, external_provider, limits
         # functions. Only the root-reachable closure receives that analysis.
         return tuple(ConfiguredFunctionAnalysis(evidence, normalized,
                      EMPTY_OBSERVED_BOUNDARIES, ()) for evidence, normalized in rows)
+    except RESOURCE_FAILURES:  # a resource failure is no verdict
+        raise
     except (TypeError, ValueError, RuntimeError) as error:
         if type(error) is FiniteRootReplayIncomplete:
             raise

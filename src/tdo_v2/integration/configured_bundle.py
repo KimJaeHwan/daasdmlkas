@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..resource_limits import RESOURCE_FAILURES
+
 from dataclasses import dataclass
 import fcntl
 import hashlib
@@ -313,7 +315,9 @@ def _admit_frozen_bundle(generation_path, max_total_bytes, expected_receipt):
         return snapshot
     except BundleAdmissionError:
         raise
-    except (OSError, RecursionError, TypeError, ValueError) as exc:
+    except RESOURCE_FAILURES:  # a resource failure, not an inadmissible Bundle
+        raise
+    except (OSError, TypeError, ValueError) as exc:
         raise BundleAdmissionError("frozen bundle admission failed") from exc
     finally:
         if source is not None:

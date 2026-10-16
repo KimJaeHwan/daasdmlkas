@@ -23,6 +23,7 @@ from dataclasses import replace
 
 from .call_clobber import _register_space_id
 from .model import ResolvedStorage
+from .resource_limits import AnalysisBudgetExceeded, analysis_entry
 from .normalize import _program_register_space
 from .span_geometry import ByteSpan
 from .summary_store import model_effect
@@ -91,6 +92,7 @@ def function_key(coordinate) -> str:
     return f"{coordinate.space_id:x}:{coordinate.byte_offset:x}"
 
 
+@analysis_entry
 def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry_values_not_frame=True,
                   assume_opaque_callees_leave_no_stack_addresses=True,
                   **options) -> dict[str, "AnalyzedFunction"]:
@@ -125,6 +127,21 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
 
 
 ANALYSIS_RECURSION_LIMIT = 20000
+# what fails one function (or one per-function check) alone: the recursion
+# bound and a per-function budget; MemoryError fails the run (process state)
+ANALYSIS_FAILURES = (RecursionError, AnalysisBudgetExceeded)
+
+
+def _failure_reason(error) -> "NormalizationFailureReason":
+    return (NormalizationFailureReason.ANALYSIS_DEPTH if isinstance(error, RecursionError)
+            else NormalizationFailureReason.ANALYSIS_BUDGET)
+
+
+def _resource_error(reason, detail: str) -> Exception:
+    """A fresh exception of ``reason``'s kind (a recorded failure raised again)."""
+    if reason is NormalizationFailureReason.ANALYSIS_DEPTH:
+        return RecursionError(detail)
+    return AnalysisBudgetExceeded("recorded", detail)
 
 
 def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
@@ -277,6 +294,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         for span in spans
     }
 
+    # function key -> NormalizationFailureReason of a resource failure (sticky)
+    resource_failures: dict = {}
+
     def analyze(calls):
         order = _callee_first_components(calls)
         component_of = {key: index for index, component in enumerate(order) for key in component}
@@ -366,17 +386,20 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
 
         def one(key, hypotheses):
             """``analyze_one``; a function whose dependent-value chains exceed
-            the recursion bound is a typed failure of that function alone."""
-            try:
-                return analyze_one(key, hypotheses)
-            except RecursionError:
-                from .relative_memory import IMPORT_SLOTS
+            the recursion bound (or whose budget runs out) is a typed failure
+            of that function alone, sticky for the run: every later round
+            (recursion, indirect targets) sees the same failure, never a retry."""
+            if key not in resource_failures:
+                try:
+                    return analyze_one(key, hypotheses)
+                except ANALYSIS_FAILURES as error:
+                    from .relative_memory import IMPORT_SLOTS
 
-                unit = functions[key]
-                if IMPORT_SLOTS.get() is not None:   # (its analysis is discarded)
-                    IMPORT_SLOTS.get().used.discard(unit.scopes.function.scope)
-                return AnalyzedFunction(key, unit, UnresolvedNormalizedFunction(
-                    unit.scopes, NormalizationFailureReason.ANALYSIS_DEPTH), None, calls[key])
+                    if IMPORT_SLOTS.get() is not None:   # (its analysis is discarded)
+                        IMPORT_SLOTS.get().used.discard(functions[key].scopes.function.scope)
+                    resource_failures[key] = _failure_reason(error)
+            return AnalyzedFunction(key, functions[key], UnresolvedNormalizedFunction(
+                functions[key].scopes, resource_failures[key]), None, calls[key])
 
         def analyze_one(key, hypotheses):
             unit = functions[key]
@@ -429,7 +452,13 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             and not (effect.noreturn or effect.memory_runs or effect.unknown_memory
                                      or effect.writer_conditions or effect.tail_stack):
                         if callee not in state_proofs:
-                            state_proofs[callee] = _state_proof(done.unit, done.normalized)
+                            try:
+                                state_proofs[callee] = _state_proof(done.unit, done.normalized)
+                            except ANALYSIS_FAILURES as error:
+                                state_proofs[callee] = _failure_reason(error)
+                        if type(state_proofs[callee]) is NormalizationFailureReason:
+                            # out of a resource: the function needing it fails (never a silent "no proof")
+                            raise _resource_error(state_proofs[callee], "state proof of " + callee)
                         if state_proofs[callee] is not None:
                             effect = replace(effect, state_proof=state_proofs[callee])
                     if effect is not None:
@@ -639,18 +668,32 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
 
     resolved: dict = {}
     resolved_cuts: dict = {}
-    for _ in range(1 + sum(1 for unit in functions.values() for _ in _callind_sites(unit))):
+    rounds = 1 + sum(1 for unit in functions.values() for _ in _callind_sites(unit))
+    done = 0
+    while done < rounds:
+        done += 1
         use_externals(resolved_cuts)
         results = analyze({key: {**calls[key], **resolved.get(key, {})} for key in calls})
         found, found_cuts = {}, {}
+        newly_failed = False
         for key, item in results.items():
-            targets = _indirect_targets(item, program)
+            if key in resource_failures:
+                continue   # (failed: no targets; each function adds at most one round)
+            try:
+                targets = _indirect_targets(item, program)
+            except ANALYSIS_FAILURES as error:
+                # the function fails (sticky): one more round, its callers see an opaque call
+                resource_failures[key] = _failure_reason(error)
+                newly_failed = True
+                continue
             if direct := {call: target for call, target in targets.items() if target in functions}:
                 found[key] = direct
             if cut := {call: cuts[target] for call, target in targets.items() if target in cuts}:
                 found_cuts[key] = cut
-        if found == resolved and found_cuts == resolved_cuts:
+        if found == resolved and found_cuts == resolved_cuts and not newly_failed:
             return results
+        if newly_failed:
+            rounds += 1   # (one more round for the failure; each function fails once)
         resolved, resolved_cuts = found, found_cuts
     use_externals({})
     return analyze(calls)  # not stable: no indirect resolution at all
@@ -1272,10 +1315,13 @@ def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
     for unit in units:
         program = unit.scopes.program
         language = ":".join(program.evidence.translation_namespace.language_id.split(":")[:3])
-        rows = stack_switches(
-            _unit_stub(unit.scopes), unit.observation, unit.scopes.resolution_context,
-            program.evidence.address_spaces, program_stack, CALL_PRESERVED.get(language, ()),
-        )
+        try:
+            rows = stack_switches(
+                _unit_stub(unit.scopes), unit.observation, unit.scopes.resolution_context,
+                program.evidence.address_spaces, program_stack, CALL_PRESERVED.get(language, ()),
+            )
+        except ANALYSIS_FAILURES:
+            rows = ("unchecked",)   # a check that ran out of a resource is no evidence
         if rows:
             found[function_key(unit.scopes.function.entry)] = rows
     return found
