@@ -112,6 +112,23 @@ REGISTRY: tuple[Assumption, ...] = (
         "assume_entry_values_not_frame", "--no-assume-entry-values-not-frame",
         "TDO_V2_ASSUME_ENTRY_VALUES_NOT_FRAME"),
     Assumption(
+        "opaque-callees-leave-no-stack-addresses", "switch", True,
+        "A call whose callee is not summarized (no model, template or in-Bundle summary; not a TEST-ONLY "
+        "boundary) leaves no value derived from the callee's own stack pointer where the caller can read it "
+        "after the return: in a register, or in memory the caller reads. The private-frame rule "
+        "(entry-values-do-not-address-the-new-frame) then takes such a call as a stack escape only when a "
+        "register it may see holds a stack-derived value. Summarized calls are checked instead "
+        "(ProvenCallEffect.escapes_stack); models state what they keep. Reported per use: when a byte was "
+        "decided private only because the opaque calls were not escapes.",
+        "A callee returning or saving the address of its stack-passed arguments or of its home space (it lies "
+        "in the caller's frame), a va_list kept past the call, stack-address introspection, addresses "
+        "encoded as integers, saved execution contexts (setjmp / getcontext not modeled), hand-written "
+        "code. Off: every opaque call is a stack escape.",
+        "may_alias._stack_policy / _Policy.is_private (OPAQUE_NO_STACK_ADDRESSES, set per run by "
+        "interprocedural.analyze_units)",
+        "assume_opaque_callees_leave_no_stack_addresses", "--no-assume-opaque-callees-no-stack-addresses",
+        "TDO_V2_ASSUME_OPAQUE_CALLEES_NO_STACK_ADDRESSES"),
+    Assumption(
         "win64-home-space-callee-private", "switch", True,
         "Under the Windows x64 convention the return-address slot and the 32-byte home space above a "
         "function's entry stack pointer belong to that function: no other base reaches them unless the "

@@ -61,8 +61,10 @@ TEMPLATE_VERSION = 2   # 2: stack_values_out
 # registers its complete effect reads; one that may let a stack-derived value
 # out (or is not exported whole) is a stack escape (docs 25.27); once-join
 # addresses at a LOAD read each candidate place; noreturn longjmp /
-# __stack_chk_fail models; import-slot-bound models carry their label
-ENGINE_SEMANTICS_VERSION = 10
+# __stack_chk_fail models; import-slot-bound models carry their label. 11:
+# templates carry opaque-callees-leave-no-stack-addresses when they rest on it
+# (docs 25.29) -- older ones rest on it unlabelled
+ENGINE_SEMANTICS_VERSION = 11
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

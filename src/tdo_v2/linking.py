@@ -268,7 +268,7 @@ class Linker:
     def __call__(self, units, image_info, *, external_models, pcodeop_models, private_frame_above: int,
                  traps: bool, globals_disjoint: bool, direction_flag: bool, import_slots: bool = False,
                  entry_values_not_frame: bool = True, same_result: bool = False,
-                 accessor_separate: bool = False):
+                 accessor_separate: bool = False, opaque_no_stack: bool = True):
         """(the run's model set with the linked templates, stack evidence
         files). The settings are the run's effective ones (``globals_disjoint``
         after the program's own withdrawal checks): templates are derived with
@@ -296,7 +296,7 @@ class Linker:
                     "globals_disjoint": bool(globals_disjoint), "direction_flag": bool(direction_flag),
                     "import_slots": bool(import_slots), "index_addresses": index_addresses(),
                     "entry_values_not_frame": bool(entry_values_not_frame), "same_result": bool(same_result),
-                    "accessor_separate": bool(accessor_separate)}
+                    "accessor_separate": bool(accessor_separate), "opaque_no_stack": bool(opaque_no_stack)}
         identity = self.provider.identity()
         declared = declared_models(models)
         checked = []
@@ -387,6 +387,7 @@ class Linker:
             ("entry-values-do-not-address-the-new-frame", switches["entry_values_not_frame"]),
             ("win64-home-space-callee-private",
              bool(switches["private_frame_above"]) and switches["entry_values_not_frame"]),
+            ("opaque-callees-leave-no-stack-addresses", switches["opaque_no_stack"]),
             ("debug-break-traps-do-not-return", switches["traps"]),
             ("import-slots-hold-their-exports", switches["import_slots"]),
             ("same-result-functions", switches["same_result"]),
@@ -454,7 +455,7 @@ class Linker:
                 assume_globals_disjoint=switches["globals_disjoint"], direction_flag=switches["direction_flag"],
                 import_slots=switches["import_slots"], entry_values_not_frame=switches["entry_values_not_frame"],
                 same_result=switches["same_result"], accessor_separate=switches["accessor_separate"],
-                per_export=True, log=lambda line: self.log(f"[link]   {line}"))
+                opaque_no_stack=switches["opaque_no_stack"], per_export=True, log=lambda line: self.log(f"[link]   {line}"))
             for raw in files.values():
                 if raw["source"]["sha256"] != exports.sha256:
                     raise ProviderError(f"the exported Bundle is of {raw['source']['sha256'][:12]}, "

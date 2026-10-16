@@ -1860,3 +1860,38 @@ writer 수(`Limits`); 넘으면 `cut`과 `truncated`(분석의 완전성과 별�
 깊은 사슬 만들기·계산, origins, rep·override·증명 안 된 rep의 횟수 레지스터, 잘린 바이트 0, 계산 못 하는 대안, 여러·겹친 선택 범위,
 망가뜨린 기록 거부). 변형 13개 잡힘(합류 대안이 조각 일부만 덮는 경우의 보호 장치 1개는 실제로 생기지 않아 남음).
 - 기록: `.census6/oprec{,2,3}_{prompt,agy,astra}.md`, `.census6/records_identity.sh`.
+
+### 25.29 A단계: 정방향 전에 결과를 믿을 수 있게 — 오라클 규약, 분석 깊이, 이름 없는 가정 (2026-10-16, 검토 Antigravity·Astra)
+
+**A-1 zlib 오라클 누락 256 — 오라클 결함**: 함수 `1b1:109730`의 `call memcpy@plt` 뒤 `mov rcx, rax`. 엔진은 crt-sysv64 모델대로
+`rax = rdi`(맞음), 오라클 해석기는 모델이 붙은 외부 함수(memcpy, strcpy, strlen, malloc, realloc, free ...)를 win64 인자(rcx, rdx, r8)와
+win64 보존 레지스터로만 실행해 `rax = rcx`로 계산. 고침: `Interpreter(external_abi="win64"|"sysv64")` — 인자 레지스터
+(rcx, rdx, r8 / rdi, rsi, rdx)와 보존 레지스터를 규약별로; `program_oracle.check_program`·`lane_oracle`(measure_program --lanes)도 넘김;
+`measure_program.py`는 `run_dfbench.abi_of`가 sysv64면 그 규약. zlib 누락 256 → **0**. 엔진 결과는 처음부터 맞았음(이 불일치에 한해).
+테스트: `test_external_models_sysv.py`(sysv 규약은 누락 0, win64 규약은 같은 거짓 누락을 재현).
+
+**A-2 분석 깊이**: 서로 기대는 값 약 250개의 사슬에서 `relative_memory`의 식 계산(정의 → 연산 → 입력, 재귀)이 Python 재귀 한도에 걸려
+분석 전체가 멈춤. 고침(계산 방식은 그대로): `analyze_units`가 실행 동안 Python 재귀 한도를 `ANALYSIS_RECURSION_LIMIT`(20000)로
+올림(끝나면 되돌림; 프로세스 전체 설정이라 분석은 직렬); 재귀 경로의 generator 식을 리스트로 바꿔 단계마다 C 스택을 쓰지 않게 함
+(Antigravity P0 — generator는 C 스택을 써서 Python 한도보다 먼저 프로세스가 죽을 수 있음); 그래도 넘는 함수는 그 함수만
+`NormalizationFailureReason.ANALYSIS_DEPTH`(요약 없음 → 부르는 쪽은 모르는 호출), 그 함수의 import 칸 사용 표시도 지움. 깊이 제한에서
+`None`(모름)을 돌려주는 방식은 캐시 때문에 결과가 계산 순서에 따라 달라져서 택하지 않음(두 리뷰어 같은 의견). 측정: 6,000개 사슬 2초에
+분석, 10,000개는 그 함수만 실패. 테스트: `test_analysis_depth.py`. [역방향] 반복형 계산기로 바꾸면 한도 자체가 사라짐(나중).
+
+**A-3 가정 `opaque-callees-leave-no-stack-addresses`**(switch, 기본 켬): 25.27에서 찾은 이름 없는 가정을 등록. 요약 없는(불투명) 호출은
+자기가 볼 수 있는 레지스터에 스택에서 나온 값이 있을 때만 스택 탈출로 봤음 — 호출받는 쪽이 자기 스택 포인터에서 만든 주소(스택으로 넘어온
+인자·홈 공간의 주소 = 호출한 쪽 프레임)를 돌려주거나 남기는 경우는 못 봄. 끄면 모든 불투명 호출이 탈출. **사용 단위로 보고**: 실제 탈출과
+"불투명 호출도 탈출"인 두 번째 탈출 구조를 같이 계산해, 앞의 것으로는 개인이고 뒤의 것으로는 아닌 바이트가 있을 때만(읽기 앞·쓰기 뒤·
+반복 경로 모두 같은 구조) 보고. 요약된 호출은 25.27의 `escapes_stack`, 선언 모델은 계약. 연결(linking)·`derive_models`·
+`summary_engine`·`run_dfbench`(`--no-assume-opaque-callees-no-stack-addresses`) 모두 전달; 끈 실행에서는 그 가정에 기댄 템플릿 거부.
+`ENGINE_SEMANTICS_VERSION` 10 → **11**(예전 템플릿은 이 가정에 이름 없이 기댐 — Astra); FString 다시 만듦(같음, 불투명 호출 없음).
+문구에서 "C/C++ 수명이 보장" 주장은 뺌(수명이 끝나도 값은 레지스터·메모리에 남음 — Astra). sret(구조체 반환 버퍼)은 예외 아님:
+호출한 쪽이 준 주소를 돌려줌(두 리뷰어 확인). 테스트: `test_opaque_stack_addresses.py` 10개(켬/끔, 이미 탈출인 호출, 불투명 호출
+없음, 템플릿이 라벨을 실음·끈 실행에서 거부·켠 실행에서 적용·버전 10 거부, 호출 앞 읽기는 기대지 않음·호출 앞 쓰기는 기댐·반복으로
+호출이 읽기 앞에 오면 기댐). 보고가 조금 넘칠 수 있음(쓰기 판정은 겹칠 객체가 없어도 이뤄짐 — 안전한 쪽, entry-values와 같은
+방식; Antigravity P2). [가정]
+
+**A-4**: 예전 의심(`function_summary.stack_pointer_escapes`)은 `1dec4e0`에서 `_stack_taint`로 바뀌며 이미 해결 — 닫음(두 리뷰어 동의).
+
+**기타**: 브랜치를 오가며 git이 `.sh`를 CRLF로 다시 써 WSL 지표 스크립트가 깨짐 → `.gitattributes`에 `*.sh text eol=lf`.
+- 기록: `.census6/stepA{,2}_{prompt,agy,astra}.md`, `.census6/zlib_missing.sh`, `.census6/zlib_probe.py`.

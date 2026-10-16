@@ -134,7 +134,7 @@ PYTHONPATH=src python -m pytest tests/intra -q
 | UE DLL DebugGame | 22 | 15 / 15 (접근 함수 가정 + 바인딩: 17) |
 | UE DLL Development | 22 | 16 / 16 (접근 함수 가정 + 바인딩: 18) |
 
-어느 Bundle에서도 "누락 + 확실"은 0이고, 프로그램 오라클의 누락은 0입니다(zlib의 256은 예전부터 있던 것).
+어느 Bundle에서도 "누락 + 확실"은 0이고, 프로그램 오라클의 누락은 zlib를 포함해 0입니다(zlib의 256건은 오라클 해석기의 호출 규약 결함이었음 — 문서 25.29).
 테스트 935개가 통과합니다.
 
 ## 문서

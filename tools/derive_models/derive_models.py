@@ -70,7 +70,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                    traps: bool = True, assume_globals_disjoint: bool = True, direction_flag: bool = False,
                    import_slots: bool = False, per_export: bool = False, log=print,
                    entry_values_not_frame: bool = True, same_result: bool = False,
-                   accessor_separate: bool = False):
+                   accessor_separate: bool = False, opaque_no_stack: bool = True):
     """(model file dict, {export name: refusal reason}, export names the
     Bundle does not export) -- the templates of ``export_names`` of the
     library Bundle at ``generation``, derived with the given analysis
@@ -169,6 +169,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_globals_disjoint_from_stack=globals_disjoint,
                                        assume_import_slots_hold_exports=import_slots,
                                        assume_entry_values_not_frame=entry_values_not_frame,
+                                       assume_opaque_callees_leave_no_stack_addresses=opaque_no_stack,
                                        assume_same_result_functions=same_result,
                                        assume_accessor_result_separate=accessor_separate,
                                        own_library=library, keep_uncut=frozenset(targets))

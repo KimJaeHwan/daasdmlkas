@@ -11,6 +11,8 @@ stay opaque (call-clobber debt) -- design S5 handles recursion.
 
 from __future__ import annotations
 
+import sys
+
 from dataclasses import dataclass, field
 
 from ._scope_contracts import VarnodeKindCode
@@ -26,7 +28,9 @@ from .span_geometry import ByteSpan
 from .summary_store import model_effect
 from .observed_call_state import observed_call_state_projections
 from .pcodeop_models import no_effect_calls, trap_operations
-from .normalize import FunctionNormalizer, NormalizedFunction, _storage_ref
+from .normalize import (
+    FunctionNormalizer, NormalizationFailureReason, NormalizedFunction, UnresolvedNormalizedFunction, _storage_ref,
+)
 from .storage import _resolve_validated_storage
 
 
@@ -88,25 +92,39 @@ def function_key(coordinate) -> str:
 
 
 def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry_values_not_frame=True,
+                  assume_opaque_callees_leave_no_stack_addresses=True,
                   **options) -> dict[str, "AnalyzedFunction"]:
     """``_analyze_units`` (below) under the named assumption
     import-slots-hold-their-exports when ``assume_import_slots_hold_exports``
     and ``image_info`` are given (``relative_memory.IMPORT_SLOTS``; it takes
     effect only where globals-disjoint-from-stack holds for the run), and
     entry-values-do-not-address-the-new-frame as ``assume_entry_values_not_frame``
-    (``may_alias.ENTRY_VALUES_NOT_FRAME``, reset after the run)."""
-    from .may_alias import ENTRY_VALUES_NOT_FRAME
+    (``may_alias.ENTRY_VALUES_NOT_FRAME``, reset after the run), and
+    opaque-callees-leave-no-stack-addresses likewise
+    (``may_alias.OPAQUE_NO_STACK_ADDRESSES``)."""
+    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES
     from .relative_memory import IMPORT_SLOTS, ImportSlots, reset_index_diagnostics
 
     reset_index_diagnostics()
     image_info = options.get("image_info")
     token = IMPORT_SLOTS.set(ImportSlots(image_info) if assume_import_slots_hold_exports and image_info else None)
     frame = ENTRY_VALUES_NOT_FRAME.set(bool(assume_entry_values_not_frame))
+    opaque = OPAQUE_NO_STACK_ADDRESSES.set(bool(assume_opaque_callees_leave_no_stack_addresses))
+    # the address-expression evaluation (``relative_memory``) follows a chain
+    # of dependent values recursively: room for long chains; a function deeper
+    # still fails alone (``NormalizationFailureReason.ANALYSIS_DEPTH``)
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous, ANALYSIS_RECURSION_LIMIT))
     try:
         return _analyze_units(units, **options)
     finally:
+        sys.setrecursionlimit(previous)
+        OPAQUE_NO_STACK_ADDRESSES.reset(opaque)
         ENTRY_VALUES_NOT_FRAME.reset(frame)
         IMPORT_SLOTS.reset(token)
+
+
+ANALYSIS_RECURSION_LIMIT = 20000
 
 
 def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
@@ -175,7 +193,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # which assumptions hold in this run, and so which models may be applied
     if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
         assume_globals_disjoint_from_stack = False
-    from .may_alias import ENTRY_VALUES_NOT_FRAME
+    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES
     from .relative_memory import IMPORT_SLOTS
 
     if IMPORT_SLOTS.get() is not None:
@@ -188,6 +206,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("direction-flag-clear", assume_direction_flag_clear),
         ("entry-values-do-not-address-the-new-frame", ENTRY_VALUES_NOT_FRAME.get()),
         ("win64-home-space-callee-private", bool(private_frame_above) and ENTRY_VALUES_NOT_FRAME.get()),
+        ("opaque-callees-leave-no-stack-addresses", OPAQUE_NO_STACK_ADDRESSES.get()),
         ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
         # (the switch alone: binding a model at an import slot needs the slot to
         # hold the export's address, not globals-disjoint-from-stack -- the
@@ -346,6 +365,20 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             return site_effect(key, call_key, summary, {}, callee=f"test-only-boundary:{declaration.label}")
 
         def one(key, hypotheses):
+            """``analyze_one``; a function whose dependent-value chains exceed
+            the recursion bound is a typed failure of that function alone."""
+            try:
+                return analyze_one(key, hypotheses)
+            except RecursionError:
+                from .relative_memory import IMPORT_SLOTS
+
+                unit = functions[key]
+                if IMPORT_SLOTS.get() is not None:   # (its analysis is discarded)
+                    IMPORT_SLOTS.get().used.discard(unit.scopes.function.scope)
+                return AnalyzedFunction(key, unit, UnresolvedNormalizedFunction(
+                    unit.scopes, NormalizationFailureReason.ANALYSIS_DEPTH), None, calls[key])
+
+        def analyze_one(key, hypotheses):
             unit = functions[key]
             observation = unit.observation
             context = unit.scopes.resolution_context

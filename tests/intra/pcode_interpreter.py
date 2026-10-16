@@ -95,8 +95,12 @@ class Interpreter:
                  track_provenance: bool = False, program: dict | None = None,
                  sinks: tuple | None = None, externals: dict | None = None,
                  no_effect_userops: frozenset = frozenset(), address_bits: dict | None = None,
-                 abi_calls: dict | None = None) -> None:
+                 abi_calls: dict | None = None, external_abi: str = "win64") -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
+
+        ``external_abi``: the calling convention ``externals`` run with --
+        "win64" (arguments rcx, rdx, r8) or "sysv64" (rdi, rsi, rdx), and the
+        registers they keep.
 
         ``abi_calls``: call key -> register byte offsets; a call havocked inside
         an outermost activation of that call leaves those bytes alone (the
@@ -188,6 +192,9 @@ class Interpreter:
         self._flipped = False
         self._havoc = havoc_calls
         self._abi_calls = dict(abi_calls or {})
+        if external_abi not in self._EXTERNAL_ABIS:
+            raise ValueError(f"unknown external ABI {external_abi!r}")
+        self._external_abi = external_abi
         self._image = image  # (space, address) -> byte | None: loaded image contents
         # TEST-ONLY declared boundary calls: key -> (reads, writes) register slices
         self._assumed = assumed_calls or {}
@@ -654,6 +661,11 @@ class Interpreter:
 
     # -- external library functions (oracle for declared models) ---------------
     _WIN64_PRESERVED = {0x18, 0x28, 0x30, 0x38, 0xA0, 0xA8, 0xB0, 0xB8}
+    # (argument registers 1..3, registers an external keeps) per convention
+    _EXTERNAL_ABIS = {
+        "win64": ((0x08, 0x10, 0x80), _WIN64_PRESERVED),
+        "sysv64": ((0x38, 0x30, 0x10), {0x18, 0x28, 0xA0, 0xA8, 0xB0, 0xB8}),
+    }
 
     def _peek(self, space_id, offset, size):
         value, tags = 0, set()
@@ -726,9 +738,11 @@ class Interpreter:
     def _run_external_body(self, name: str, key: str) -> None:
         reg = self._havoc[0]
         memory = self._order[0][0]
-        rcx, rcx_tags = self._peek(reg, 0x08, 8)
-        rdx, rdx_tags = self._peek(reg, 0x10, 8)
-        r8, r8_tags = self._peek(reg, 0x80, 8)
+        # (named after the win64 registers: arguments 1, 2, 3 of the convention)
+        (first, second, third), preserved = self._EXTERNAL_ABIS[self._external_abi]
+        rcx, rcx_tags = self._peek(reg, first, 8)
+        rdx, rdx_tags = self._peek(reg, second, 8)
+        r8, r8_tags = self._peek(reg, third, 8)
         result, result_tags = None, set()
         if name in ("memcpy", "memmove", "memset"):
             count = r8 if r8 <= 4096 else 0
@@ -804,7 +818,7 @@ class Interpreter:
                 continue
             for byte in range(offset, offset + size):
                 base = byte - byte % 8 if byte < 0x100 else byte
-                if base in self._WIN64_PRESERVED or 0x20 <= byte < 0x28:
+                if base in preserved or 0x20 <= byte < 0x28:
                     continue
                 self._put(key, reg, byte, 1, self._rng.randrange(256), {("call", key)})
         if result is not None:

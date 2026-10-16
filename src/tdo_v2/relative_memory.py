@@ -1521,10 +1521,10 @@ class _Projector:
                     definition.span.size,
                 )
         elif definition.kind is MemoryDefinitionKind.JOIN:
-            candidates = tuple(
+            candidates = tuple([   # (a list comprehension: no generator frame per level)
                 self._expression_for_definition(source_id, requested_span)
                 for source_id in self._join_sources.get(definition_id, ())
-            )
+            ])
             result = (
                 candidates[0]
                 if candidates
@@ -1672,7 +1672,7 @@ class _Projector:
                 and operation.inputs[0] == operation.inputs[1]:
             return _AddressExpression((), 0, byte_size)  # x ^ x, x - x (``normalize``)
         if operation.opcode in ("INT_AND", "INT_OR", "INT_XOR") and len(operation.inputs) == 2:
-            left, right = (self._expression_for_input(operation_key, item) for item in operation.inputs)
+            left, right = [self._expression_for_input(operation_key, item) for item in operation.inputs]
             if left is not None and right is not None and not left.atoms and not right.atoms:
                 a = _unsigned_wrap(left.displacement, left.byte_size)
                 b = _unsigned_wrap(right.displacement, right.byte_size)
@@ -1701,7 +1701,7 @@ class _Projector:
             if value is not None and value.atoms and value.byte_size < byte_size:
                 return self._boundary_expression("sext", value, byte_size)
         if operation.opcode == "INT_MULT" and len(operation.inputs) == 2:
-            left, right = (self._expression_for_input(operation_key, item) for item in operation.inputs)
+            left, right = [self._expression_for_input(operation_key, item) for item in operation.inputs]
             if left is not None and right is not None and not left.atoms and not right.atoms \
                     and left.byte_size == right.byte_size == byte_size:
                 return _AddressExpression((), _unsigned_wrap(left.displacement * right.displacement, byte_size),
@@ -1733,10 +1733,10 @@ class _Projector:
                 amount = _unsigned_wrap(shift.displacement, shift.byte_size)
                 return _scaled(value, 0 if amount >= byte_size * 8 else 1 << amount, byte_size)
         if operation.opcode == "INT_ADD" and len(operation.inputs) == 2:
-            expressions = tuple(
+            expressions = tuple([
                 self._expression_for_input(operation_key, item)
                 for item in operation.inputs
-            )
+            ])
             if all(
                 item is not None and item.byte_size == byte_size
                 for item in expressions
@@ -1799,10 +1799,10 @@ class _Projector:
         )
         if token is None:
             return None
-        inputs = tuple(
+        inputs = tuple([
             self._expression_for_input(operation_key, item)
             for item in operation.inputs
-        )
+        ])
         if any(item is None for item in inputs):
             return None
         atom = _opaque_atom_key(token, inputs, byte_size)

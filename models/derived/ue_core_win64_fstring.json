@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 1,
    "template_version": 2,
-   "semantics_version": 10
+   "semantics_version": 11
   },
   "parameters": {
    "private_frame_above": 40
@@ -33,7 +33,7 @@
    },
    {
     "file": "ue-core-win64",
-    "sha256": "999062f2f3b30f64ccabb0a2dce831ed85f7aa69d5aa9a48e6cda509094ad02d"
+    "sha256": "475d4395c9b3a19e1871051534f32c88997c5508322f581c4ed054d3c3cb79ee"
    }
   ],
   "pcodeops": "749146c1d7ef52999c899a6665c763eeedd6bba9c6779c0b694b2bfe183ca076",
@@ -53,7 +53,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "9078189776bcd047261de64c89c790eca817a7b3+dirty",
+   "engine_revision": "660098303165c2f0fd3c8ee5532bd62a4ff813df+dirty",
    "bundle": "ea65ba0c9345504088f51de08e477313a79135fb99ae07e159816022ec7749aa",
    "index_addresses": true,
    "stack_evidence": [

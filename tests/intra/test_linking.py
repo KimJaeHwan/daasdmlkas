@@ -126,7 +126,8 @@ class FakeDeriver:
 
     def __call__(self, generation, library, names, *, file_id, models, pcodeops, stack_evidence,
                  private_frame_above, traps, assume_globals_disjoint, direction_flag, per_export, log,
-                 import_slots=False, entry_values_not_frame=True, same_result=False, accessor_separate=False):
+                 import_slots=False, entry_values_not_frame=True, same_result=False, accessor_separate=False,
+                 opaque_no_stack=True):
         assert per_export
         self.calls.append({"names": sorted(names), "private_frame_above": private_frame_above,
                            "globals": assume_globals_disjoint, "direction_flag": direction_flag,
@@ -147,6 +148,7 @@ class FakeDeriver:
                                             assume_debug_break_traps_do_not_return=traps,
                                             assume_direction_flag_clear=direction_flag,
                                             assume_entry_values_not_frame=entry_values_not_frame,
+                                            assume_opaque_callees_leave_no_stack_addresses=opaque_no_stack,
                                             assume_same_result_functions=same_result,
                                             assume_accessor_result_separate=accessor_separate)
                 raw, _ = build_file(results, [(f"1:{F:x}", MANGLED, [MANGLED])], file_id=file_id, version=1,

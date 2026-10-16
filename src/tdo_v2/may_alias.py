@@ -162,12 +162,16 @@ class _Escape:
 # set per run by ``interprocedural.analyze_units``; unset = on (direct callers,
 # tests). Off: no byte is private.
 ENTRY_VALUES_NOT_FRAME: ContextVar = ContextVar("ENTRY_VALUES_NOT_FRAME", default=True)
+# Named assumption opaque-callees-leave-no-stack-addresses (docs 25.29): set per
+# run by ``interprocedural.analyze_units``; unset = on. Off: every opaque call
+# (no proven effect, not a TEST-ONLY assumed boundary) is a stack escape.
+OPAQUE_NO_STACK_ADDRESSES: ContextVar = ContextVar("OPAQUE_NO_STACK_ADDRESSES", default=True)
 
 
 class _Policy:
     def __init__(self, stack_object: StorageObjectId | None, bias: int,
                  escape: _Escape | None = None, globals_disjoint: bool = False,
-                 private_above: int = 0) -> None:
+                 private_above: int = 0, escape_without_opaque: _Escape | None = None) -> None:
         self.stack_object = stack_object
         self.bias = bias
         # named assumption win64-home-space-callee-private: the return slot and
@@ -186,6 +190,11 @@ class _Policy:
         # the private-frame rule decided some byte private (the assumption
         # entry-values-do-not-address-the-new-frame was used)
         self.private_used = False
+        # opaque-callees-leave-no-stack-addresses: the escapes were the opaque
+        # calls escapes too (``escape_without_opaque``); a byte decided private
+        # only because they are not used the assumption (``opaque_used``)
+        self.escape_without_opaque = escape_without_opaque if stack_object is not None else None
+        self.opaque_used = False
         # accessor-result-separate (docs 25.20 D): (result object, start, end,
         # slot span, the slot's call) -- ``excluded``; ``ran(call, writer)``:
         # the call has run whenever the writer does
@@ -219,6 +228,9 @@ class _Policy:
         private = self.escape.private_write(key) if write else self.escape.private_read(key)
         if private:
             self.private_used = True
+            other = self.escape_without_opaque
+            if other is not None and not (other.private_write(key) if write else other.private_read(key)):
+                self.opaque_used = True
         return private
 
     def may_alias(self, left: StorageObjectId, right: StorageObjectId) -> bool:
@@ -261,6 +273,8 @@ def derive_may_alias_reads(
     uses: list | None = None,
     separations: tuple = (),
     escaping_calls: frozenset = frozenset(),
+    opaque_calls: frozenset = frozenset(),
+    opaque_uses: list | None = None,
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -279,6 +293,10 @@ def derive_may_alias_reads(
     with any, the dense engine (it keeps per-byte states). ``escaping_calls``:
     calls that are stack escapes whatever registers are tainted
     (``ProvenCallEffect.escapes_stack``), assumed or quiet ones included.
+    ``opaque_calls``: calls with no proven effect (not TEST-ONLY assumed):
+    escapes too when opaque-callees-leave-no-stack-addresses is off; when on,
+    ``opaque_uses`` records whether a byte was decided private only because
+    they are not.
     """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("may-alias analysis requires an exact effect unit")
@@ -312,7 +330,8 @@ def derive_may_alias_reads(
     if len(objects) < 2 and not unknown_writers and not has_unknown_read and not uncertain:
         return ()
     policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls,
-                           assume_globals_disjoint_from_stack, observed_calls, private_above, escaping_calls)
+                           assume_globals_disjoint_from_stack, observed_calls, private_above, escaping_calls,
+                           opaque_calls)
     wild = frozenset(item for item in objects if item in wild_objects)
     policy.wild_objects = wild
     policy.fresh_objects = frozenset(item for item in objects if item in fresh_objects)
@@ -337,6 +356,8 @@ def derive_may_alias_reads(
         )
     if uses is not None:   # ``uses``: whether the private-frame rule decided a byte
         uses.append(policy.private_used)
+    if opaque_uses is not None:
+        opaque_uses.append(policy.opaque_used)
     return rows
 
 
@@ -368,13 +389,14 @@ def _ran_before(unit):
 def private_frame_writes(
     unit, observation, context, address_spaces, *, assumed_calls=frozenset(),
     observed_calls=None, private_above=0, uses: list | None = None, escaping_calls=frozenset(),
+    opaque_calls=frozenset(), opaque_uses: list | None = None,
 ) -> frozenset:
     """(write operation key, object) pairs whose written bytes are all private
     frame bytes at the write (``_Policy.is_private``): such a write reaches
     no other object but a wild one -- for function summaries, which use the
     same rule (``function_summary._exit_crossings``)."""
     policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls, False, observed_calls,
-                           private_above, escaping_calls)
+                           private_above, escaping_calls, opaque_calls)
     found = set()
     for block in unit.blocks:
         for effect in block.effects:
@@ -387,6 +409,8 @@ def private_frame_writes(
                     found.add((effect.operation_key, span.object_id))
     if uses is not None:
         uses.append(policy.private_used)
+    if opaque_uses is not None:
+        opaque_uses.append(policy.opaque_used)
     return frozenset(found)
 
 
@@ -544,7 +568,7 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
 
 def _stack_policy(unit, observation, context, address_spaces, assumed_calls=frozenset(),
                   globals_disjoint=False, observed_calls=None, private_above=0,
-                  escaping_calls=frozenset()) -> _Policy:
+                  escaping_calls=frozenset(), opaque_calls=frozenset()) -> _Policy:
     found = _stack_pointer(unit, observation, context, address_spaces)
     if found is None:
         return _Policy(None, 0)
@@ -552,12 +576,16 @@ def _stack_policy(unit, observation, context, address_spaces, assumed_calls=froz
     if not ENTRY_VALUES_NOT_FRAME.get():
         # entry-values-do-not-address-the-new-frame off: no private bytes
         return _Policy(stack_object, bias, None, globals_disjoint, private_above)
-    return _Policy(
-        stack_object, bias,
-        _stack_escape(observation, register_space, offset, size, assumed_calls, unit.entry_block_key,
-                      observed_calls, escaping_calls),
-        globals_disjoint, private_above,
-    )
+    opaque = frozenset(opaque_calls) - frozenset(escaping_calls)
+    if not OPAQUE_NO_STACK_ADDRESSES.get():
+        # opaque-callees-leave-no-stack-addresses off: each opaque call escapes
+        escaping_calls, opaque = frozenset(escaping_calls) | opaque, frozenset()
+    escape = _stack_escape(observation, register_space, offset, size, assumed_calls, unit.entry_block_key,
+                           observed_calls, escaping_calls)
+    # (with the assumption on: the escapes it removes, for per-use reporting)
+    without = _stack_escape(observation, register_space, offset, size, assumed_calls, unit.entry_block_key,
+                            observed_calls, frozenset(escaping_calls) | opaque) if opaque else None
+    return _Policy(stack_object, bias, escape, globals_disjoint, private_above, without)
 
 
 def _stack_pointer(unit, observation, context, address_spaces):

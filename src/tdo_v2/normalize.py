@@ -136,6 +136,9 @@ class NormalizedFunction:
     # named assumption entry-values-do-not-address-the-new-frame decided some
     # byte of this function's frame private (``may_alias._Policy.is_private``)
     assumes_entry_values_not_frame: bool = False
+    # named assumption opaque-callees-leave-no-stack-addresses decided some
+    # byte private (it would not be with the opaque calls as escapes)
+    assumes_opaque_callees_leave_no_stack_addresses: bool = False
     # rep string sites made exact (``rep_strings``): (instruction key, count,
     # direction); the evaluator's overrides of their operations
     rep_blocks: tuple = ()
@@ -515,6 +518,20 @@ def _same_object_rows(proven_call_effects, observation) -> dict:
                     found[f"{key}~{index}"] = (f"{key}~in{index}", ValidatedVarnode(
                         VarnodeKindCode.REGISTER, AddressCoordinate(space, source.start), source.size))
     return found
+
+
+def _opaque_calls(observation, proven_call_effects, assumed_call_effects) -> frozenset:
+    """CALL / CALLIND operation keys with no proven effect that are no
+    TEST-ONLY assumed boundary: their callees are opaque."""
+    from .call_seeds import _operation_key
+
+    return frozenset(
+        key for instruction in observation.instructions
+        for ordinal, operation in enumerate(instruction.operations)
+        if operation.opcode in ("CALL", "CALLIND")
+        for key in (_operation_key(instruction.address, ordinal, operation.opcode),)
+        if key not in proven_call_effects and key not in assumed_call_effects
+    )
 
 
 def _rep_overrides(sites, plan, observation) -> dict:
@@ -1213,6 +1230,10 @@ class NormalizationFailureReason(StrEnum):
     ENTRY_NOT_IN_OBSERVATION = "entry_not_in_observation"
     DISCONNECTED_OBSERVED_CFG = "disconnected_observed_cfg"
     UNSUPPORTED_INTRA_INSTRUCTION_FLOW = "unsupported_intra_instruction_flow"
+    # a chain of dependent values deeper than the analysis follows (Python's
+    # recursion bound, ``interprocedural.ANALYSIS_RECURSION_LIMIT``): the
+    # function is analyzed as not normalizing -- its callers see an opaque call
+    ANALYSIS_DEPTH = "analysis_depth"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1745,11 +1766,14 @@ class _ScopedNormalizer:
         # calls that may leave a stack-pointer-derived value out of sight
         # (``ProvenCallEffect.escapes_stack``): stack escapes whatever is tainted
         escaping_calls = frozenset(key for key, row in proven_call_effects.items() if row.escapes_stack)
+        # calls with no proven effect (opaque-callees-leave-no-stack-addresses)
+        opaque_calls = _opaque_calls(observation, proven_call_effects, assumed_call_effects)
         frame_uses: list = []
+        opaque_uses: list = []
         private_writes = private_frame_writes(
             effect_unit, observation, context, address_spaces,
             assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
-            uses=frame_uses, escaping_calls=escaping_calls,
+            uses=frame_uses, escaping_calls=escaping_calls, opaque_calls=opaque_calls, opaque_uses=opaque_uses,
         )
         # uncertain-address writers to their fixed point here: only the
         # may-alias rows and their debt nodes depend on them (a copy of the
@@ -1786,7 +1810,7 @@ class _ScopedNormalizer:
                 fresh_objects=frozenset(fresh_objects),
                 nonstack_objects=frozenset(nonstack_objects),
                 observed_calls=observed_calls,
-                escaping_calls=escaping_calls,
+                escaping_calls=escaping_calls, opaque_calls=opaque_calls, opaque_uses=opaque_uses,
                 private_above=private_frame_above,
                 uncertain_writers=frozenset(_uncertain),
                 no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
@@ -1934,6 +1958,7 @@ class _ScopedNormalizer:
             proven_call_effects=tuple(sorted(proven_call_effects.items())),
             assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             assumes_entry_values_not_frame=any(frame_uses),
+            assumes_opaque_callees_leave_no_stack_addresses=any(opaque_uses),
             call_below_bounds=below_bounds,
             assumes_readonly_image_constant=readonly_image is not None,
             assumes_import_slots_hold_exports=_import_slots_used(memory_ssa),

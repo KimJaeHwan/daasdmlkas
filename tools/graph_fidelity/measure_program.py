@@ -69,7 +69,7 @@ def main() -> int:
         default_sp = (0x10, 4) if ":32:" in language else (0x20, 8)
         units = [evidence.unit for evidence in session.iter_functions()]
     began = time.time()
-    options, externals, userops = {}, None, frozenset()
+    options, externals, userops, external_abi = {}, None, frozenset(), "win64"
     if args.models:
         sys.path.insert(0, str(REPO / "tools" / "bundle_export"))
         import run_dfbench
@@ -86,6 +86,8 @@ def main() -> int:
         language = namespace and (namespace.language_id, namespace.major_version, namespace.minor_version)
         userops = frozenset(index for model in markers if language in model.languages for index in model.no_effect)
         # every modeled import runs for real (or the run is skipped: Unsupported)
+        # the models' convention is the binary's (models/external per ABI)
+        external_abi = "sysv64" if run_dfbench.abi_of(args.generation) == "sysv64" else "win64"
         externals = {thunk: models.lookup(row)[1].name for row in (info.imports if info else ())
                      if models.lookup(row) for thunk in (*row.thunks, *row.slots)}
     if args.binding:
@@ -125,6 +127,7 @@ def main() -> int:
                                register_pools=pool, spaces=(const, regs, unique),
                                havoc_calls=(regs, sp_offset, sp_size), image=image,
                                externals=externals, no_effect_userops=userops, address_bits=address_bits,
+                               external_abi=external_abi,
                                private_frame_above=options.get("private_frame_above", 0))
         totals["runs"] += report.runs
         totals["skipped_runs"] += report.unsupported
@@ -135,6 +138,7 @@ def main() -> int:
         if args.lanes:
             from lane_oracle import check_lanes
             lanes = check_lanes(item.normalized, item.unit, seeds=range(args.runs), register_pools=pool,
+                                external_abi=external_abi,
                                 const_space=const, havoc_calls=(regs, sp_offset, sp_size), reg_space=regs,
                                 unique_space=unique, program=program, externals=externals, image=image,
                                 no_effect_userops=userops, address_bits=address_bits)

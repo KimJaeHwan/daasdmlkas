@@ -113,6 +113,7 @@ def analyze_frozen_bundle_with_summaries(
     linker=None,
     assume_import_slots_hold_exports: bool = True,
     assume_entry_values_not_frame: bool = True,
+    assume_opaque_callees_leave_no_stack_addresses: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
     assume_same_result_functions: bool = False,
@@ -266,6 +267,7 @@ def analyze_frozen_bundle_with_summaries(
                 traps=assume_debug_break_traps_do_not_return,
                 globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear,
                 import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame,
+                opaque_no_stack=assume_opaque_callees_leave_no_stack_addresses,
                 same_result=assume_same_result_functions, accessor_separate=assume_accessor_result_separate)
             linked_evidence = tuple(load_stack_evidence(path) for path in linked_evidence)
             if linked_evidence:
@@ -288,6 +290,7 @@ def analyze_frozen_bundle_with_summaries(
             assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
             assume_import_slots_hold_exports=assume_import_slots_hold_exports,
             assume_entry_values_not_frame=assume_entry_values_not_frame,
+            assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
             assume_same_result_functions=assume_same_result_functions,
             assume_accessor_result_separate=assume_accessor_result_separate,
             assume_accessor_private_state=assume_accessor_private_state,
@@ -510,6 +513,10 @@ def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, 
         assumptions += ("entry-values-do-not-address-the-new-frame",)
         if home_space:
             assumptions += ("win64-home-space-callee-private",)
+    # a byte decided private only because the opaque calls were not escapes
+    if any(getattr(item.normalized, "assumes_opaque_callees_leave_no_stack_addresses", False)
+           for item in results.values()):
+        assumptions += ("opaque-callees-leave-no-stack-addresses",)
     # reported whenever a function has a trap the cut applies to: removing the
     # paths behind it can change a summary without leaving a dead exit
     if traps and pcodeop_models and any(trap_operations(item.unit, pcodeop_models) for item in results.values()):
