@@ -77,7 +77,7 @@ def test_memcpy_with_a_constant_count_is_exact():
     results = _analyze(_memcpy_caller())
     item = results["1:1000"]
     ((call, label),) = item.declared.items()
-    assert label == "external-model:crt-win64/memcpy@v5"
+    assert label == "external-model:crt-win64/memcpy@v6"
     effect = item.proven[call]
     assert effect.preserves_memory and len(effect.memory_runs) == 1
     function = item.normalized
@@ -209,10 +209,18 @@ def test_tail_jump_through_an_import_slot_takes_the_model():
     image = ImageInfo("synthetic", (), (ImportedSymbol("CRT", "malloc", None, ((1, slot),), ()),), (), ())
     units = program_units(caller, wrapper)
     results = analyze_units(units, image_info=image,
-                            external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))
+                            external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"),
+                            assume_import_slots_hold_exports=True)
     middle = results[f"1:{CODE_BASE + 0x600:x}"]
     assert middle.summary.tail_exits == () and middle.declared
+    assert "import-slots-hold-their-exports" in middle.inherited_assumptions   # bound through the slot
     assert results["1:1000"].proven
+    # without the assumption the slot says nothing about its target: opaque, with the reason
+    off = analyze_units(units, image_info=image,
+                        external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))
+    middle = off[f"1:{CODE_BASE + 0x600:x}"]
+    assert not middle.declared and middle.summary.tail_exits
+    assert any("import-slots-hold-their-exports" in reason for reason in middle.refused_models.values())
     program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
     analyzed = results["1:1000"]
     pools = lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000}

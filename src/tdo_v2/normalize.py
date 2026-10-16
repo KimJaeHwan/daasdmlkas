@@ -1742,11 +1742,14 @@ class _ScopedNormalizer:
             for key, row in proven_call_effects.items()
             if row.observes_registers and row.observed_registers is not None
         }
+        # calls that may leave a stack-pointer-derived value out of sight
+        # (``ProvenCallEffect.escapes_stack``): stack escapes whatever is tainted
+        escaping_calls = frozenset(key for key, row in proven_call_effects.items() if row.escapes_stack)
         frame_uses: list = []
         private_writes = private_frame_writes(
             effect_unit, observation, context, address_spaces,
             assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
-            uses=frame_uses,
+            uses=frame_uses, escaping_calls=escaping_calls,
         )
         # uncertain-address writers to their fixed point here: only the
         # may-alias rows and their debt nodes depend on them (a copy of the
@@ -1783,6 +1786,7 @@ class _ScopedNormalizer:
                 fresh_objects=frozenset(fresh_objects),
                 nonstack_objects=frozenset(nonstack_objects),
                 observed_calls=observed_calls,
+                escaping_calls=escaping_calls,
                 private_above=private_frame_above,
                 uncertain_writers=frozenset(_uncertain),
                 no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),

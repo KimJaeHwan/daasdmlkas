@@ -79,7 +79,9 @@ REGISTRY: tuple[Assumption, ...] = (
         "the export's extent, fresh blocks, or two imports being different storage.",
         "IAT hooking / Detours / patching, delay-load slots read before resolution, a module unloaded "
         "while its address is in use, run-time re-resolution.",
-        "relative_memory.IMPORT_SLOTS (import atoms, import-static objects -> may_alias nonstack objects)",
+        "relative_memory.IMPORT_SLOTS (import atoms, import-static objects -> may_alias nonstack objects); "
+        "interprocedural._external_sites (a model bound at call [slot] / jmp [slot] / mov r, [slot]; call r -- "
+        "the slot holds the export's address; reported per use, the call stays opaque when off)",
         "assume_import_slots_hold_exports", "--no-assume-import-slots",
         "TDO_V2_ASSUME_IMPORT_SLOTS"),
     Assumption(

@@ -42,7 +42,7 @@ from .function_summary import (
 )
 from .span_geometry import ByteSpan, StorageObjectId, StorageObjectKind, StorageScopeId, StorageScopeKind
 
-TEMPLATE_VERSION = 1
+TEMPLATE_VERSION = 2   # 2: stack_values_out
 # bumped on any change of what a summary means: normalization, alias
 # reasoning, constant evaluation, effect derivation (not only its fields)
 # 2: stack-mixed objects wild (docs 25.7); index addresses, index objects
@@ -57,8 +57,12 @@ TEMPLATE_VERSION = 1
 # atoms, the low bytes of ZEXT(x) at x's width are x (docs 25.17). 8:
 # same-result accessor atoms under same-result-functions (docs 25.20/25.21).
 # 9: proven state-keeping calls (docs 25.26); terminal jmp to an import thunk
-# takes the model as a tail call
-ENGINE_SEMANTICS_VERSION = 9
+# takes the model as a tail call. 10: a summarized call observes exactly the
+# registers its complete effect reads; one that may let a stack-derived value
+# out (or is not exported whole) is a stack escape (docs 25.27); once-join
+# addresses at a LOAD read each candidate place; noreturn longjmp /
+# __stack_chk_fail models; import-slot-bound models carry their label
+ENGINE_SEMANTICS_VERSION = 10
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
@@ -134,6 +138,7 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
         "register_deltas": [[list(slot), delta] for slot, delta in summary.register_deltas],
         "dead_exits": [_key(key) for key in summary.dead_exits],
         "writer_conditions": [table.pair(pair) for pair in summary.writer_conditions],
+        "stack_values_out": summary.stack_values_out,
     }
     if any(table.local(side) for pair in summary.writer_conditions for side in pair):
         raise TemplateRefused("writer conditions on objects no caller can locate")
@@ -225,7 +230,9 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
     ``memory_space_id``. Object ids are fixed per template ``label`` (stable
     across re-derivations: alias-condition feedback compares them)."""
     _exact(template, ("exits", "unknown_writers", "writer_objects", "inner_calls", "register_deltas",
-                      "dead_exits", "writer_conditions", "objects"), "template")
+                      "dead_exits", "writer_conditions", "stack_values_out", "objects"), "template")
+    if type(template["stack_values_out"]) is not bool:
+        raise TemplateError("stack_values_out must be a bool")
     scope = StorageScopeId(StorageScopeKind.FUNCTION, hashlib.sha256(f"template:{label}".encode()).digest())
     rows = template["objects"]
     if type(rows) is not list:
@@ -303,6 +310,7 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
         FUNCTION_SUMMARY_VERSION, tuple(exits), _strings(template["unknown_writers"]), tuple(writer_objects),
         (), tuple(inner), (), tuple(deltas), _strings(template["dead_exits"]),
         tuple(pair(item) for item in template["writer_conditions"]),
+        template["stack_values_out"],
     )
     return summary, anchors
 

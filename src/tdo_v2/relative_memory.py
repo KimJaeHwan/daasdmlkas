@@ -1341,8 +1341,25 @@ class _Projector:
         varnode: ValidatedVarnode,
     ) -> tuple[_AddressExpression, ...] | None:
         singular = self._expression_for_input(operation_key, varnode)
+        if singular is not None and self._once_join(singular):
+            # a bare once-join atom: each of the join's candidate places when all
+            # are known (each read a place of its own), else the atom
+            candidates = self._input_candidates(operation_key, varnode)
+            return candidates if candidates is not None and len(candidates) > 1 else (singular,)
         if singular is not None:
             return (singular,)
+        return self._input_candidates(operation_key, varnode)
+
+    def _once_join(self, expression) -> bool:
+        """Exactly one once-join atom (coefficient 1, displacement 0, no image
+        part): a LOAD reads the join's candidate places instead
+        (``_candidate_expressions_for_input``; a STORE keeps the atom)."""
+        return len(expression.atoms) == 1 and expression.atoms[0][1] == 1 and expression.displacement == 0 \
+            and expression.image == 0 and self._boundary.get(expression.atoms[0][0], (None,))[0] == "once-join"
+
+    def _input_candidates(self, operation_key, varnode):
+        """The candidate expressions of ``varnode``'s single reaching
+        definition at ``operation_key`` (joins expanded, at most 8), or None."""
         span = self._resolved_span(varnode)
         if span is None:
             return None

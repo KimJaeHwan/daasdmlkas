@@ -1711,6 +1711,9 @@ S를 넘는 쓰기, 범위 밖 접근, image ≠ 0, 다 끄면 지금과 같음.
 | 반복문 안에서 결과로 저장 (25.23 v1 한계) | [역방향] | 투영 순서와 대기 쓰기 규칙의 문제 — 정방향과 무관 |
 | 요약 수준 떨어짐 (`_exit_crossings`, 25.23) | [역방향] | 요약에 짝을 실어 보내는 일 — 정방향과 무관 |
 | 모델 `observes`(포인터가 새 나감) 정밀도 | 일부 [정방향] | 어떤 레지스터가 실제로 포인터인지 정방향 points-to가 알려 줌 |
+| 요약된 호출의 관찰 레지스터·스택 탈출 (25.27) | [역방향] — 해결 | 완전한 효과만 정확한 집합; 불완전은 무조건 탈출(안쪽 호출 출력 추적이면 줄어듦 [역방향]) |
+| 불투명 호출이 자기 스택 주소를 돌려줌 (25.27) | [가정] | 돌아온 뒤 수명이 끝난 주소 — 이름 붙은 가정으로 정리할 일 |
+| once-join 주소 LOAD (25.27) | [역방향] — 해결 | 후보 자리마다 읽음; STORE는 원자 유지 |
 | 플랫폼 가정(globals-disjoint, 홈 공간, 방향 플래그 등) | [가정] | ABI·실행 환경 규칙 — 증명 대상이 아님 |
 
 ### 25.26 상태를 바꾸지 않는 호출의 본문 증명 + import thunk로의 꼬리 점프 (2026-10-16, 설계 검토 4차·구현 검토 Antigravity·Astra) [역방향]
@@ -1749,3 +1752,57 @@ CALLOTHER, 세그먼트 쓰기, `ret 8` 모양, 레지스터 RETURN, pop 후 다
 본문 oracle; 템플릿 왕복 테스트는 증명 없음을 "더 약함"으로 허용; `jmp free` 꼬리 호출 3가지. 변형: 다음 위치 검사 끔, 저장 허용,
 출력 검사 끔, 반환 모양 검사 끔, 증명 안 붙임 — 각각 실패("호출 허용"은 저장 금지와 겹쳐 같은 동작).
 - 기록: `.census6/callfree{,2,3,4}_{prompt,agy,astra}.md`, `.census6/diag_callfree.py`, `.census6/thunk_tail_status.py`.
+
+### 25.27 역방향 정밀도 묶음: 호출의 스택 탈출 · 관찰 레지스터, once-join 읽기, import 칸 보고, 돌아오지 않는 모델 (2026-10-16, 설계 검토 2차·구현 검토 2차 Antigravity·Astra) [역방향]
+
+**1. 요약된 호출이 보는 레지스터와 스택 탈출**(`call_summary_effects.derive_proven_call_effect`, `ProvenCallEffect.escapes_stack`).
+- 발견한 구멍(Astra 재현): 호출받는 함수가 `rax = rcx; ret`이면 예전에는 "레지스터를 주소로 쓰지 않음"(`observes_registers` 거짓)으로
+  보아, rcx에 프레임 주소가 있어도 호출이 탈출이 아니었음. 호출한 쪽의 스택 오염 추적(`_stack_taint`)은 호출 출력을 따라가지 않으므로
+  `mov [전역], rax`도 탈출로 안 잡힘 → 개인 프레임 규칙이 프레임을 잘못 믿음.
+- **완전한 효과**: 안쪽 호출 없음, 메모리 보존, 어느 바이트도 값 모름 아님(스택 포인터 바이트 포함 — 빼기 전에 검사), 스택 포인터 복구,
+  모든 sink 요구 완전. 그때만 `observed_registers` = 모든 레지스터 run·메모리 run·sink 요구의 reads + 읽기·쓰기·모르는 메모리·조건
+  자리의 뿌리 기준 레지스터(포인터 사슬을 따라감) − 호출한 쪽 자신의 스택 포인터. 완전하지 않으면 None(모든 레지스터).
+  `rax = rcx; ret` → rcx를 봄 → rcx가 프레임 주소면 그 호출이 탈출. `rax = rdx + 1` → rdx만 봄 → rcx의 프레임 주소는 그대로 개인.
+- **스택 탈출**: `escapes_stack = 완전하지 않음 또는 summary.stack_values_out`. `stack_values_out`(`may_alias.stack_values_out`)은
+  호출받는 함수 자신의 p-code에 스택 오염 추적을 돌려, 스택 포인터에서 나온 값이 스택 포인터 말고 다른 레지스터에 남은 채 RETURN에
+  닿거나, 안에서 탈출(그런 값을 STORE·메모리 출력·CALLOTHER로 내보내거나, 그런 값이 레지스터에 있는 채 CALL)하면 참; 스택 포인터나
+  블록 그래프를 모르면 참. 이런 호출은 호출한 쪽에서 무엇이 오염됐든 탈출(`escaping_calls` → `private_frame_writes`·
+  `derive_may_alias_reads`, 조용한·가정된 호출보다 우선). 설계 2차의 "reads가 스택 레지스터와 겹침" 규칙은 모든 함수의 `ret`
+  (rip = [rsp])과 프레임 다시 읽기가 rsp를 주소로 읽어 모든 호출을 탈출로 만들어(Antigravity 2차 P1, 측정으로 확인) 이것으로 바꿈;
+  불완전 → 탈출은 Astra 의견대로 유지(Antigravity는 정밀도 손실을 우려 — 지표는 그대로).
+- 구현 검토 1차 Astra 반례: `COPY ram[x], rsp`(STORE 없이 메모리 varnode로 직접 씀)를 놓침 → 출력이 레지스터·unique가 아닌 연산에
+  오염된 입력이 있으면 탈출(연산 종류 무관; 호출한 쪽 추적에도 적용). Antigravity 제안: 재귀 가설(`_bottom_summary`)은 탈출 없음에서
+  시작해 반복으로 올림.
+- 선언된 모델(`model_effect`)은 바뀌지 않음: 선언된 `observes`, `escapes_stack` 거짓. 시험용 경계도 거짓.
+- 템플릿에 `stack_values_out` 실음(`TEMPLATE_VERSION` 2). FString 다시 만듦: 생성자·소멸자 그대로(거짓); `AppendChar`는 HEAD에서
+  "어느 호출자도 못 찾는 객체의 writer 조건"으로 거부됐는데, 안에서 탈출이 늘어 그 writer들이 조건 없는 모르는 writer가 되면서 템플릿이
+  됨(모르는 writer 2개 — 메모리 보존 아님, 이 변경으로 이분 탐색해 확인).
+- 남은 한계: 불투명(요약 없는) 호출이 자기 스택 포인터에서 만든 주소를 돌려주는 경우는 호출한 쪽 추적이 못 봄 — 지금까지와 같음
+  (C/C++에서는 돌아온 뒤 그 주소는 수명이 끝난 매개변수·지역 변수) **[가정]** — 이름 붙이기는 다음 일; 요약된 호출의 불완전 효과는
+  무조건 탈출이라 정밀도를 잃음 — 안쪽 호출의 출력을 따라가는 추적이면 줄어듦 **[역방향]**; 어떤 레지스터가 실제 포인터인지
+  **[정방향]**.
+
+**2. import 칸으로 붙인 모델 보고**(`interprocedural._external_sites`): `call [slot]`, 끝 `jmp [slot]`, `mov r, [slot]; call r`(`:CALLIND`·
+`:BRANCHIND` 열쇠)에 붙은 모델은 상속 라벨에 `import-slots-hold-their-exports`가 붙음 — 스위치(`_import_slots_switched_on`)만으로 판단
+(전역·스택 분리와 묶지 않음); 끄면 그 호출은 불투명 + 거부 이유. `measure_program.py --models`는 실행 기본값처럼 이 가정을 켬(안 켜면
+UE 오라클의 모델 호출 수가 71 → 11로 줄었음 — 칸으로 붙인 모델이 이제 정직하게 가정을 요구하기 때문). [가정]
+
+**3. once-join 주소의 LOAD**(`relative_memory._Projector._candidate_expressions_for_input`): 25.17 이후 JOIN이 once-join 원자 하나(wild
+index 객체)가 되어 LOAD가 정확한 후보 자리 대신 wild 객체 하나를 읽던 것을, 원자가 정확히 once-join 하나(계수 1, 변위 0)이고 JOIN의
+후보 식이 모두 알려지고 2개 이상(최대 8)이면 각 후보 자리를 읽음. STORE는 원자 유지(어느 자리에 썼는지 확정 못 함). [역방향]
+
+**4. 돌아오지 않는 모델**: `longjmp`(crt_win64 observes rcx, crt_sysv64 observes rdi — jmp_buf를 읽음; setjmp 쪽은 영향 없음, 호출 뒤
+경로만 끊김), `__stack_chk_fail`(sysv, observes 없음). 모델 파일 v6. 실제 import: 09 debug·release·win32 longjmp 각 1, zlib
+`__stack_chk_fail` 5. `TerminateProcess`는 다른 프로세스 핸들이면 돌아오므로 제외. [가정](모델)
+
+**결과**: dfbench 지표 모두 그대로(09 66/62, release 53/48, win32 44/37, UE 15/15, 16/16; 접근 함수 가정 셋 + 연결 17, 18); 프로그램
+오라클 누락 0(zlib 256은 원래). 오라클 모델 호출 수 09 debug 25 → 26, release 22 → 23(longjmp·칸 모델), UE 71·73 그대로.
+UE Development의 place_failed 168 → 232: 탈출이 늘어 점검한 자리가 568 → 632, 늘어난 실패 64개는 모두 부채로 설명됨
+(place_failed_debt = place_failed; 탈출 집합을 비우면 168로 돌아감 — `.census6/dev_place_bisect.sh`). 더 보수적이 된 것이지 놓친 것 없음.
+`ENGINE_SEMANTICS_VERSION` 9 → 10.
+**테스트**: `test_call_stack_escape.py` 9개(rcx를 돌려줌 → 탈출, rdx만 읽음 → 개인 유지, 프레임 주소 없으면 개인, `lea rax,[rsp+8]` 탈출,
+esp 일부 겹침, 메모리 출력 COPY, index 주소로 불완전, 안쪽 호출, 선언 모델 그대로), `test_precision_batch.py`(once-join LOAD 후보 —
+변경을 끄면 실패, once-join STORE, JOIN 뒤 다시 쓴 후보 자리, 모델 항목, longjmp 경로 끊김), `test_external_models.py`(칸 꼬리 점프 라벨·끔).
+`test_definition_atoms.py`의 wild 변형 테스트는 탈출 집합도 비워야 놓침이 드러남(새 규칙이 같은 구멍을 함께 막음). 변형 9개 중 8개
+잡힘; 포인터 사슬 따라가기는 뿌리 레지스터가 이미 reads에 있어(주소 입력도 출처) 보조로 남김.
+- 기록: `.census6/batch{,2,3,4}_{prompt,agy,astra}.md`, `.census6/noreturn_imports.py`, `.census6/why_append*.sh`, `.census6/oracle_bisect*.sh`.

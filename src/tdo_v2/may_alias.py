@@ -260,6 +260,7 @@ def derive_may_alias_reads(
     no_kill_writers: frozenset = frozenset(),
     uses: list | None = None,
     separations: tuple = (),
+    escaping_calls: frozenset = frozenset(),
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -275,7 +276,9 @@ def derive_may_alias_reads(
     ones): their own write is no definite overwrite of its static bytes either
     -- earlier writers stay possible there. ``separations``: the
     accessor-result-separate pairs (``relative_memory.accessor_separations``);
-    with any, the dense engine (it keeps per-byte states).
+    with any, the dense engine (it keeps per-byte states). ``escaping_calls``:
+    calls that are stack escapes whatever registers are tainted
+    (``ProvenCallEffect.escapes_stack``), assumed or quiet ones included.
     """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("may-alias analysis requires an exact effect unit")
@@ -309,7 +312,7 @@ def derive_may_alias_reads(
     if len(objects) < 2 and not unknown_writers and not has_unknown_read and not uncertain:
         return ()
     policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls,
-                           assume_globals_disjoint_from_stack, observed_calls, private_above)
+                           assume_globals_disjoint_from_stack, observed_calls, private_above, escaping_calls)
     wild = frozenset(item for item in objects if item in wild_objects)
     policy.wild_objects = wild
     policy.fresh_objects = frozenset(item for item in objects if item in fresh_objects)
@@ -364,14 +367,14 @@ def _ran_before(unit):
 
 def private_frame_writes(
     unit, observation, context, address_spaces, *, assumed_calls=frozenset(),
-    observed_calls=None, private_above=0, uses: list | None = None,
+    observed_calls=None, private_above=0, uses: list | None = None, escaping_calls=frozenset(),
 ) -> frozenset:
     """(write operation key, object) pairs whose written bytes are all private
     frame bytes at the write (``_Policy.is_private``): such a write reaches
     no other object but a wild one -- for function summaries, which use the
     same rule (``function_summary._exit_crossings``)."""
     policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls, False, observed_calls,
-                           private_above)
+                           private_above, escaping_calls)
     found = set()
     for block in unit.blocks:
         for effect in block.effects:
@@ -540,7 +543,8 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
 # -- stack identity and escape ---------------------------------------------------
 
 def _stack_policy(unit, observation, context, address_spaces, assumed_calls=frozenset(),
-                  globals_disjoint=False, observed_calls=None, private_above=0) -> _Policy:
+                  globals_disjoint=False, observed_calls=None, private_above=0,
+                  escaping_calls=frozenset()) -> _Policy:
     found = _stack_pointer(unit, observation, context, address_spaces)
     if found is None:
         return _Policy(None, 0)
@@ -551,7 +555,7 @@ def _stack_policy(unit, observation, context, address_spaces, assumed_calls=froz
     return _Policy(
         stack_object, bias,
         _stack_escape(observation, register_space, offset, size, assumed_calls, unit.entry_block_key,
-                      observed_calls),
+                      observed_calls, escaping_calls),
         globals_disjoint, private_above,
     )
 
@@ -626,18 +630,24 @@ def _register_space_id(observation) -> int | None:
 
 
 def _stack_taint(observation, register_space: int, offset: int, size: int,
-                 assumed_calls=frozenset(), entry_key: str | None = None, observed_calls=None):
+                 assumed_calls=frozenset(), entry_key: str | None = None, observed_calls=None,
+                 escaping_calls=frozenset(), returning: set | None = None):
     """Forward over the p-code block graph (``pcode_blocks``), tracking which
     register and temporary bytes hold a stack-derived value at each point.
 
     Returns (operation keys per reached block, block successors, escape keys,
     switch keys), or None when the graph is unsupported. An operation escapes
-    when it stores a stack-derived value to memory, passes one to CALLOTHER, or
+    when it stores a stack-derived value to memory (a STORE, or any operation
+    with a memory output), passes one to CALLOTHER, or
     is a call that is not a declared (TEST-ONLY assumed) boundary call while a
     register other than the stack pointer holds one (every register is
     visible to a callee; ``observed_calls``: call key -> the register byte
     offsets a call may use as an address or keep, when that is declared --
-    then only those count). ``push rbp`` before ``mov rbp, rsp`` therefore
+    then only those count), or is one of ``escaping_calls`` (a call that may
+    leave a stack-derived value in an output, which this forward pass does not
+    follow: an escape whatever is tainted). ``returning`` collects the
+    RETURNs reached with a register other than the stack pointer holding a
+    stack-derived value. ``push rbp`` before ``mov rbp, rsp`` therefore
     stores the caller's RBP, not a stack address. A switch writes the stack
     pointer with a value not derived from it (``mov rsp, [x]``).
     """
@@ -672,6 +682,11 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
             if escapes is not None and (
                 (operation.opcode == "STORE" and len(operation.inputs) == 3 and touches(operation.inputs[2]))
                 or (operation.opcode == "CALLOTHER" and any(touches(item) for item in operation.inputs))
+                or key in escaping_calls
+                # a direct memory output (``COPY ram[x], rsp``) is a store too
+                or (operation.output is not None
+                    and operation.output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE)
+                    and any(touches(item) for item in operation.inputs))
                 or (
                     operation.opcode in ("CALL", "CALLIND")
                     and key not in assumed_calls
@@ -682,6 +697,9 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
                 )
             ):
                 escapes.add(key)
+            if returning is not None and escapes is not None and operation.opcode == "RETURN" \
+                    and any(item[0] == register_space for item in tainted - stack_bytes):
+                returning.add(key)
             output = operation.output
             if output is None or output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
                 continue
@@ -755,9 +773,11 @@ def _flagged(keys, edges, escapes, reverse: bool) -> set[str]:
 
 
 def _stack_escape(observation, register_space: int, offset: int, size: int,
-                  assumed_calls=frozenset(), entry_key: str | None = None, observed_calls=None) -> _Escape:
+                  assumed_calls=frozenset(), entry_key: str | None = None, observed_calls=None,
+                  escaping_calls=frozenset()) -> _Escape:
     """Where a stack-derived value may have escaped (``_Escape``)."""
-    taint = _stack_taint(observation, register_space, offset, size, assumed_calls, entry_key, observed_calls)
+    taint = _stack_taint(observation, register_space, offset, size, assumed_calls, entry_key, observed_calls,
+                         escaping_calls)
     if taint is None:
         return _Escape(frozenset(), frozenset(), frozenset())  # nothing private
     keys, successors, escapes, _ = taint
@@ -771,6 +791,26 @@ def _stack_escape(observation, register_space: int, offset: int, size: int,
         frozenset(_flagged(keys, successors, escapes, reverse=False)),
         frozenset(_flagged(keys, predecessors, escapes, reverse=True)),
     )
+
+
+def stack_values_out(normalized, observation) -> bool:
+    """Whether a value derived from the function's entry stack pointer may
+    leave it other than in the stack pointer (``_stack_taint`` over its own
+    p-code): a register other than the stack pointer holding one at a RETURN,
+    or an escape inside (a store or user op of one, a call while a register
+    holds one). True when the stack pointer or the block graph is not
+    identified. A value kept in memory is a store (an escape) whether or not
+    it is read back."""
+    scopes = normalized.scopes
+    stub = _unit_stub(scopes)
+    found = _stack_pointer(stub, observation, scopes.resolution_context, scopes.program.evidence.address_spaces)
+    if found is None:
+        return True
+    _, _, register_space, offset, size = found
+    returning: set = set()
+    taint = _stack_taint(observation, register_space, offset, size, entry_key=stub.entry_block_key,
+                         returning=returning)
+    return taint is None or bool(taint[2]) or bool(returning)
 
 
 def stack_object_of(scopes, observation) -> StorageObjectId | None:

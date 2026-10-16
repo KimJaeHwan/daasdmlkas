@@ -180,7 +180,7 @@ def test_a_tail_jump_to_the_model_passes_unknown_memory_on(tmp_path):
     info = ImageInfo("synthetic", (), (ImportedSymbol("TEST", "fill", None, ((1, slot),), ()),), (), ())
     models = load_external_models([_file(tmp_path, UNKNOWN_12)], *WIN64)
     results = analyze_units(program_units(_caller(thunk), jump), image_info=info, external_models=models,
-                            assume_globals_disjoint_from_stack=True)
+                            assume_globals_disjoint_from_stack=True, assume_import_slots_hold_exports=True)
     assert results[f"1:{thunk:x}"].declared and not results[f"1:{thunk:x}"].summary.tail_exits
     (effect,) = [effect for _, effect in results["1:1000"].normalized.proven_call_effects]
     assert len(effect.unknown_memory) == 1

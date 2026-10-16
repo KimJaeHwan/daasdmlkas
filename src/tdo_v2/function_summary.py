@@ -141,6 +141,10 @@ class FunctionSummary:
     # static objects (see the module docstring); every claim of the summary
     # holds only with them
     writer_conditions: tuple = ()
+    # a value derived from the entry stack pointer may leave the function other
+    # than in the stack pointer: in another register at a RETURN, or by an
+    # escape inside (``may_alias.stack_values_out``); True when not known
+    stack_values_out: bool = True
 
 
 def summarize_function(normalized, observation, origin_labels=None, sink_roots=(),
@@ -159,6 +163,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     for a function that never returns (``interprocedural._noreturn_jumps``):
     that edge is no tail exit; the fall-through path stays."""
     from .call_clobber import _preserved_stack_pointers
+    from .may_alias import stack_values_out
 
     context = normalized.scopes.resolution_context
 
@@ -261,6 +266,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         register_deltas,
         tuple(sorted(dead_exits)),
         tuple(sorted(writer_conditions, key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))),
+        stack_values_out(normalized, observation),
     )
 
 

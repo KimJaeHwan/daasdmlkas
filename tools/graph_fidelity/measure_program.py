@@ -78,7 +78,10 @@ def main() -> int:
         info = load_image_info(args.generation)
         models = run_dfbench.external_models(args.generation)
         markers = run_dfbench.pcodeop_models()
-        options = {"image_info": info, "external_models": models, "pcodeop_models": markers}
+        # as the runs (summary_engine): import-slots-hold-their-exports on -- a
+        # model bound at an import slot rests on it
+        options = {"image_info": info, "external_models": models, "pcodeop_models": markers,
+                   "assume_import_slots_hold_exports": True}
         namespace = units[0].scopes.program.evidence.translation_namespace if units else None
         language = namespace and (namespace.language_id, namespace.major_version, namespace.minor_version)
         userops = frozenset(index for model in markers if language in model.languages for index in model.no_effect)

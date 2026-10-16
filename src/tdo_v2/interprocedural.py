@@ -71,6 +71,12 @@ class AnalyzedFunction:
     image_unproven: bool = False
 
 
+def _import_slots_switched_on() -> bool:
+    from .relative_memory import IMPORT_SLOTS
+
+    return IMPORT_SLOTS.get() is not None
+
+
 def _import_slots_active() -> bool:
     from .relative_memory import IMPORT_SLOTS
 
@@ -183,7 +189,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("entry-values-do-not-address-the-new-frame", ENTRY_VALUES_NOT_FRAME.get()),
         ("win64-home-space-callee-private", bool(private_frame_above) and ENTRY_VALUES_NOT_FRAME.get()),
         ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
-        ("import-slots-hold-their-exports", _import_slots_active()),
+        # (the switch alone: binding a model at an import slot needs the slot to
+        # hold the export's address, not globals-disjoint-from-stack -- the
+        # non-stack inference keeps its own stronger gate, ``_import_slots_active``)
+        ("import-slots-hold-their-exports", _import_slots_switched_on()),
         ("same-result-functions", assume_same_result_functions),
         ("accessor-result-separate", assume_accessor_result_separate),
         ("accessor-private-state", assume_accessor_private_state),
@@ -333,7 +342,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 deltas = tuple(((offset, size), -delta)
                                for (offset, size), delta in shapes.get(call_key, {}).items())
             summary = FunctionSummary(FUNCTION_SUMMARY_VERSION, (ExitSummary("declared", runs),), (), (),
-                                      register_deltas=deltas)
+                                      register_deltas=deltas, stack_values_out=False)
             return site_effect(key, call_key, summary, {}, callee=f"test-only-boundary:{declaration.label}")
 
         def one(key, hypotheses):
@@ -843,6 +852,9 @@ def _external_sites(unit, image_info, external_models, disabled=frozenset(), usa
     found = {}
     for key, symbol in import_call_sites(unit, image_info, local_functions).items():
         model = external_models.lookup(symbol)
+        if model is not None and (key.endswith(":CALLIND") or key.endswith(":BRANCHIND")):
+            # bound through an import slot: the slot holds the export's address
+            model = (model[0], replace(model[1], inherited=(*model[1].inherited, "import-slots-hold-their-exports")))
         if model is not None and model[1].noreturn and key.endswith(":BRANCH"):
             continue   # a jump to a function that never returns: ``_noreturn_jumps``
         if model is not None and set(model[1].inherited) & disabled:
@@ -1161,8 +1173,9 @@ def _bottom_summary(stack_pointers, shapes, call_key, program_stack):
     deltas = tuple(((offset, size), -delta) for (offset, size), delta in shapes.get(call_key, {}).items())
     if _is_tail(call_key):
         deltas = tuple(((span.start, span.size), span.size) for span in program_stack)
+    # (no stack-derived value out either: the rounds raise it like the rest)
     return FunctionSummary(FUNCTION_SUMMARY_VERSION, (ExitSummary("bottom", ()),), (), (),
-                           register_deltas=deltas)
+                           register_deltas=deltas, stack_values_out=False)
 
 
 def _recursive_hypothesis(derive, stack):

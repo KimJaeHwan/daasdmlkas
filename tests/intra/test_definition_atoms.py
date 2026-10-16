@@ -115,7 +115,10 @@ def test_mutation_without_wild_objects_misses(monkeypatch):
     original = normalize_module.derive_may_alias_reads
 
     def no_wild(*args, **kwargs):
+        # (the leaf's stack-derived result also makes its call an escape,
+        # docs 25.27: off too, so the wild rule is the one left to miss)
         kwargs["wild_objects"] = frozenset()
+        kwargs["escaping_calls"] = frozenset()
         return original(*args, **kwargs)
 
     monkeypatch.setattr(normalize_module, "derive_may_alias_reads", no_wild)

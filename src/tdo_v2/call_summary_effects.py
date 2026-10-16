@@ -171,6 +171,12 @@ class ProvenCallEffect:
     # its model leaves out library-private writes (accessor-private-state):
     # the program oracle counts such writes outside the footprint apart
     omits_private_writes: bool = False
+    # the call may leave a value derived from the caller's stack pointer where
+    # the caller cannot see it (an output read from the stack pointer, e.g.
+    # ``lea rax, [rsp+8]; ret``, or an effect not exported whole): the caller's
+    # stack taint follows no call output, so the call itself is a stack escape
+    # (``may_alias._stack_taint``); a declared model never sets it
+    escapes_stack: bool = False
 
 
 def derive_proven_call_effect(
@@ -239,7 +245,8 @@ def derive_proven_call_effect(
         removes that transient push -- after the return they lie below its
         stack pointer and are not read (``observed_call_state``)."""
         row = anchors.get(span.object_id)
-        if row is None or row[0].object_id.kind is not StorageObjectKind.REGISTER_FILE                 or (row[0].start, row[0].size) not in stack or tail:
+        if row is None or row[0].object_id.kind is not StorageObjectKind.REGISTER_FILE \
+                or (row[0].start, row[0].size) not in stack or tail:
             return False
         push = -(stack_deltas or {}).get((row[0].start, row[0].size), 0)
         bias = 1 << (8 * row[0].size)
@@ -248,13 +255,13 @@ def derive_proven_call_effect(
     clobbers_below = False
     sink_demands = tuple(_sink_demand(demand, anchored) for demand in summary.sink_demands)
     if not summary.exits and not summary.tail_exits and summary.dead_exits:
-        return ProvenCallEffect(callee, (), (), sink_demands=sink_demands, noreturn=True)
+        return ProvenCallEffect(callee, (), (), sink_demands=sink_demands, noreturn=True, escapes_stack=True)
     if summary.tail_exits or not summary.exits:
         if not sink_demands:
             return None
         # no state is proven, but the callee's sink roots still bind at the call
         # (a wrapper that never returns normally must not lose its sink)
-        return ProvenCallEffect(callee, (), (), sink_demands=sink_demands)
+        return ProvenCallEffect(callee, (), (), sink_demands=sink_demands, escapes_stack=True)
 
     # memory writers the call exports as memory runs (anchored or global)
     exported = {
@@ -285,7 +292,8 @@ def derive_proven_call_effect(
                 continue
             if kind is not StorageObjectKind.REGISTER_FILE and return_slot(run.span):
                 continue
-            if verdict == "unknown" and kind is not StorageObjectKind.REGISTER_FILE                     and _only_exported_aliasing(run, exported):
+            if verdict == "unknown" and kind is not StorageObjectKind.REGISTER_FILE \
+                    and _only_exported_aliasing(run, exported):
                 # unknown only because an exported memory write may alias these
                 # bytes: in the caller that write is an ordinary write to the bound
                 # object, and the caller's may-alias analysis covers the overlap
@@ -390,18 +398,25 @@ def derive_proven_call_effect(
         for span in _spans(object_id, offsets)
     )
 
-    def through_register(access):
-        return access is not None and access.anchor is not None and             (access.anchor.start, access.anchor.size) not in stack
-    observes = not memory_ok or any(
-        through_register(run.write) or any(through_register(load) for load in run.loads)
-        or (run.write.anchor is None and run.reads)  # a register value kept in global memory
-        for run in memory_runs
-    ) or any(through_register(load) for run in runs for load in run.loads) \
-        or any(through_register(access) for access in unknown_memory)
     deltas = dict(summary.register_deltas)
     restores = all(
         deltas.get(key) == -delta for key, delta in (stack_deltas or {}).items()
     )
+    # every effect of the call is exported: no inner call, memory kept, no
+    # byte of unknown value (the stack pointer's included), the stack pointer
+    # restored, every sink root complete -- then the registers the effects read
+    # are all the call can use or keep
+    complete = not summary.inner_calls and memory_ok and restores \
+        and all(value != "unknown" for value in state.values()) and all(demand.complete for demand in sink_demands)
+    observed = _observed_registers(runs, memory_runs, unknown_memory, writer_pairs, sink_demands, skip) \
+        if complete else None
+    observes = observed is None or bool(observed)
+    # a value derived from the callee's stack pointer it lets out (its own
+    # stack taint: ``FunctionSummary.stack_values_out`` -- the summary's reads
+    # also hold the stack pointer as a LOAD / STORE address), or an effect not
+    # exported whole: the caller's stack taint, which follows no call output
+    # and leaves the stack pointer out, cannot see where that value went
+    escapes = not complete or summary.stack_values_out
     tail_stack, tail_delta = (), None
     if tail:
         tail_stack = tuple(excluded)
@@ -411,7 +426,41 @@ def derive_proven_call_effect(
         callee, tuple(runs), tuple(_spans(register_object, preserved)), tuple(memory_runs), memory_ok,
         observes, sink_demands, restores, tail_stack, tail_delta, clobbers_below,
         writer_conditions=_sorted_pairs(writer_pairs), unknown_memory=unknown_memory,
+        observed_registers=observed, escapes_stack=escapes,
     )
+
+
+def _observed_registers(runs, memory_runs, unknown_memory, writer_pairs, sink_demands, skip) -> tuple:
+    """The register bytes at the call an exported effect depends on: the
+    reads of every register and memory run and sink root, and the root anchor
+    register of every place it reads or writes (a pointer chain's first
+    level), its conditions' included -- but the caller's own stack pointer
+    (``skip``: its taint is the stack pointer itself)."""
+    found = set()
+
+    def anchor_of(access):
+        while access is not None and access.anchor is None and access.pointer is not None:
+            access = access.pointer
+        if access is not None and access.anchor is not None:
+            found.add(access.anchor)
+
+    def pairs(conditions):
+        for left, right in conditions:
+            anchor_of(left)
+            anchor_of(right)
+
+    for row in (*runs, *memory_runs, *sink_demands):
+        found.update(row.reads)
+        for access in row.loads:
+            anchor_of(access)
+        pairs(row.conditions)
+    for row in memory_runs:
+        anchor_of(row.write)
+    for access in unknown_memory:
+        anchor_of(access)
+    pairs(writer_pairs)
+    return tuple(sorted((span for span in found if not set(range(span.start, span.end)) <= skip),
+                        key=lambda span: span.canonical_key))
 
 
 def _sink_demand(demand, anchored) -> ProvenSinkDemand:

@@ -755,6 +755,7 @@ def model_effect(derive, model_file, entry, *args):
         observes_registers=entry.observes is None or bool(entry.observes),
         observed_registers=None if entry.observes is None
         else tuple(ByteSpan(args[0], start, size) for start, size in entry.observes),
+        escapes_stack=False,       # declared: what it observes is what it may keep
         fresh_registers=tuple(ByteSpan(args[0], start, size) for start, size in entry.fresh),
         same_object_registers=tuple(
             (ByteSpan(args[0], *write), ByteSpan(args[0], *source)) for write, source in entry.same_object
