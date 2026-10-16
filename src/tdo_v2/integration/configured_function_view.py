@@ -147,6 +147,10 @@ class _FunctionView(
             action.operation_key: action_id
             for action_id, action in enumerate(self.memory.actions)
         }
+        # reads per action, in ``memory.reads`` order (duplicates kept)
+        self.reads_of_action: dict = {}
+        for read in self.memory.reads:
+            self.reads_of_action.setdefault(read.action_id, []).append(read)
         self.storage_actions = {
             action.operation_key: action
             for block in analysis.normalized.memory_unit.blocks

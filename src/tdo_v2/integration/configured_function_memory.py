@@ -91,7 +91,7 @@ class _FunctionMemoryViewMixin:
             return None
         reads = tuple(
             read
-            for read in self.memory.reads
+            for read in self.reads_of_action.get(action_id, ())
             if read.action_id == action_id and read.span == span
         )
         if len(reads) != 1 or len(reads[0].fragments) != 1:

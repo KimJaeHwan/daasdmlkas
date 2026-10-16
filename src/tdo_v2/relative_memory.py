@@ -835,6 +835,11 @@ class _Projector:
         self._context = context
         self._spaces = {row.space_id: row for row in address_spaces}
         self._ssa = first_pass
+        # reads per action, in ``first_pass.reads`` order (duplicates kept):
+        # every lookup below filters this instead of all reads
+        self._reads_of_action: dict = {}
+        for read in first_pass.reads:
+            self._reads_of_action.setdefault(read.action_id, []).append(read)
         self._operations = operations
         self._opaque_values = opaque_values
         self._translation_namespace = translation_namespace
@@ -1278,7 +1283,7 @@ class _Projector:
         action_id = self._action_ids.get(operation_key)
         if action_id is None:
             return None
-        reads = [read for read in self._ssa.reads
+        reads = [read for read in self._reads_of_action.get(action_id, ())
                  if read.action_id == action_id and read.span.size == width
                  and read.span.object_id.kind in {StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE}]
         if len(reads) != 1 or len(reads[0].fragments) != 1:
@@ -1291,7 +1296,7 @@ class _Projector:
     def _slot_span(self, operation_key, width):
         """The bytes an accessor's slot load reads (one exact read), or None."""
         action_id = self._action_ids.get(operation_key)
-        reads = [read for read in self._ssa.reads
+        reads = [read for read in self._reads_of_action.get(action_id, ())
                  if read.action_id == action_id and read.span.size == width
                  and read.span.object_id.kind in {StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE}]
         return reads[0].span if action_id is not None and len(reads) == 1 else None
@@ -1368,7 +1373,7 @@ class _Projector:
             return None
         definition_ids = {
             fragment.definition_ids[0]
-            for read in self._ssa.reads
+            for read in self._reads_of_action.get(action_id, ())
             if read.action_id == action_id and read.span == span
             for fragment in read.fragments
         }
@@ -1445,7 +1450,7 @@ class _Projector:
             return None
         definition_ids = {
             fragment.definition_ids[0]
-            for read in self._ssa.reads
+            for read in self._reads_of_action.get(action_id, ())
             if read.action_id == action_id and read.span == span
             for fragment in read.fragments
         }
@@ -1834,7 +1839,7 @@ class _Projector:
     def _memory_read_value(self, operation_key, byte_size, action_id):
         reads = tuple(
             read
-            for read in self._ssa.reads
+            for read in self._reads_of_action.get(action_id, ())
             if read.action_id == action_id
             and read.span.size == byte_size
             and read.span.object_id.kind
