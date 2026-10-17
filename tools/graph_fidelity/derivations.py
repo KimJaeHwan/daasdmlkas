@@ -28,7 +28,7 @@ from tdo_v2.configured_naming_contracts import (  # noqa: E402
 from tdo_v2.integration.configured_bundle import admit_frozen_bundle  # noqa: E402
 from tdo_v2.integration.observed_function_session import open_observed_function_session  # noqa: E402
 from tdo_v2.interprocedural import analyze_units  # noqa: E402
-from tdo_v2.operation_records import Limits, render, run_records  # noqa: E402
+from tdo_v2.operation_records import Limits, mermaid, render, root_record, run_records  # noqa: E402
 
 
 def main() -> int:
@@ -40,6 +40,10 @@ def main() -> int:
     parser.add_argument("--json", type=Path)
     parser.add_argument("--models", action="store_true", help="apply the external models (models/external)")
     parser.add_argument("--max-nodes", type=int, default=Limits.nodes)
+    parser.add_argument("--expand-calls", action="store_true",
+                        help="connect raw callee computations and pre-call register/RAM state")
+    parser.add_argument("--operation", help="query this operation's output SSA bytes instead of exit runs")
+    parser.add_argument("--mermaid", type=Path, help="write the complete record graph (one record only)")
     args = parser.parse_args()
     binding = NamingBindingExpectation(
         sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
@@ -56,7 +60,10 @@ def main() -> int:
         options.update(image_info=load_image_info(args.generation),
                        external_models=run_dfbench.external_models(args.generation),
                        pcodeop_models=run_dfbench.pcodeop_models())
-    results = analyze_units(units, **options)
+    from tdo_v2.call_expressions import RecordProvider
+
+    provider = RecordProvider() if args.expand_calls else None
+    results = analyze_units(units, record_provider=provider, **options)
     if args.list or not args.function:
         for key in sorted(results):
             print(key)
@@ -70,10 +77,21 @@ def main() -> int:
     if analyzed.summary is None:
         print(f"{matches[0]}: no summary (the function did not normalize)", file=sys.stderr)
         return 1
-    records = [record for record in run_records(analyzed.normalized, analyzed.unit, analyzed.summary,
-                                                origins=analyzed.origins, declared=analyzed.declared,
-                                                limits=Limits(nodes=args.max_nodes))
-               if args.exit is None or record.get("exit") == args.exit]
+    if args.operation:
+        ssa = analyzed.normalized.memory_ssa
+        action = next((row for row in ssa.actions if row.operation_key == args.operation), None)
+        if action is None or not action.write_definition_ids:
+            parser.error('--operation must name an operation with physical output definitions')
+        seeds = [(analyzed.normalized.memory_graph.definition_nodes[d], (ssa.definitions[d].span,))
+                 for d in action.write_definition_ids]
+        records = [root_record(analyzed.normalized, analyzed.unit, seeds, provider=provider,
+                               limits=Limits(nodes=args.max_nodes), origins=analyzed.origins,
+                               declared=analyzed.declared)]
+    else:
+        records = [record for record in run_records(analyzed.normalized, analyzed.unit, analyzed.summary,
+                                                    origins=analyzed.origins, declared=analyzed.declared,
+                                                    limits=Limits(nodes=args.max_nodes), provider=provider)
+                   if args.exit is None or record.get("exit") == args.exit]
     for record in records:
         if record.get("run_kind") == "identity":
             continue
@@ -81,6 +99,10 @@ def main() -> int:
         print()
     if args.json:
         args.json.write_text(json.dumps(records, indent=1), encoding="utf-8")
+    if args.mermaid:
+        if len(records) != 1:
+            parser.error('--mermaid requires one record (use --operation)')
+        args.mermaid.write_text(mermaid(records[0]) + '\n', encoding='utf-8')
     return 0
 
 

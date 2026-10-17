@@ -103,8 +103,13 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     token = IMPORT_SLOTS.set(ImportSlots(image_info) if assume_import_slots_hold_exports and image_info else None)
     frame = ENTRY_VALUES_NOT_FRAME.set(bool(assume_entry_values_not_frame))
     try:
-        return _analyze_units(units, **options)
+        results = _analyze_units(units, **options)
+        if options.get("record_provider") is not None:
+            options["record_provider"].publish(results)
+        return results
     finally:
+        if options.get("record_provider") is not None:
+            options["record_provider"].discard_trials()
         ENTRY_VALUES_NOT_FRAME.reset(frame)
         IMPORT_SLOTS.reset(token)
 
@@ -118,7 +123,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   own_library: str | None = None, keep_uncut=frozenset(),
                   assume_same_result_functions=False,
                   assume_accessor_result_separate=False,
-                  assume_accessor_private_state=False, model_bindings=()) -> dict[str, AnalyzedFunction]:
+                  assume_accessor_private_state=False, model_bindings=(),
+                  record_provider=None) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -365,6 +371,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             assumed = {**markers, **(assumed_call_effects or {}).get(key, {})}
 
             def derive(failed):
+                if record_provider is not None:
+                    derivations.clear()
                 proven = {}
                 if register_object is None:
                     return proven
@@ -401,6 +409,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             effect = replace(effect, state_proof=state_proofs[callee])
                     if effect is not None:
                         proven[call_key] = effect
+                        if record_provider is not None and not failed.get(call_key):
+                            derivations[call_key] = (done.unit, done.normalized, done.summary, effect,
+                                                     tuple(done.anchors.items()))
                 register_space = _register_space_id(observation) or _program_register_space(unit)
                 for call_key, (model_file, entry) in externals[key].items():
                     if call_key in proven or call_key in assumed or memory_space is None:
@@ -450,6 +461,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             # objects): kept as conditions of its own (``open_condition`` debts),
             # sticky -- a pair later found failing, or located elsewhere, fails
             opened: dict = {}
+            derivations: dict = {}   # diagnostic candidates, replaced on every derivation
             while True:
                 proven = derive(failed)
                 normalized = FunctionNormalizer().normalize(
@@ -459,6 +471,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     assume_direction_flag_clear=assume_direction_flag_clear,
                     private_frame_above=private_frame_above,
                     open_conditions=opened,
+                    record_observer=record_provider,
                 )
                 if type(normalized) is not NormalizedFunction:
                     break
@@ -523,6 +536,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 if type(normalized) is NormalizedFunction else None
             )
             anchors = _relative_anchors(unit, normalized) if summary is not None else {}
+            if record_provider is not None:
+                record_provider.selected(unit, normalized, derivations)
             return AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
                                     anchors, origins, projected, declared={
                                         call: (f"test-only-boundary:{boundaries_of(key)[call].label}"

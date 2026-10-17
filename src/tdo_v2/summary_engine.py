@@ -115,6 +115,7 @@ def analyze_frozen_bundle_with_summaries(
     assume_entry_values_not_frame: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
+    expand_call_records: bool = False,
     assume_same_result_functions: bool = False,
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
@@ -131,6 +132,9 @@ def analyze_frozen_bundle_with_summaries(
     ``origin_witnesses``) in ``RootSlice.explanation``.
     ``operation_records``: put each root's operation record (diagnostics,
     ``operation_records``, docs 25.28) in ``RootSlice.explanation["record"]``.
+    ``expand_call_records``: imply operation_records and connect raw callee
+    computations to pre-call SSA (record v2). Unsupported outputs remain
+    explicitly unavailable; this does not change analysis semantics.
     ``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
     facts (``image_info``); each model used is listed in ``EngineRun.assumptions``.
@@ -149,6 +153,7 @@ def analyze_frozen_bundle_with_summaries(
     from .integration.configured_bundle import admit_frozen_bundle  # POSIX-only
     from .observed_boundary_projection import EMPTY_OBSERVED_BOUNDARIES, ObservedBoundaryNode
 
+    operation_records = operation_records or expand_call_records
     binding = NamingBindingExpectation(
         sha256(Path(naming_exporter_source).read_bytes()).digest(), CALL_NAMING_GHIDRA_VERSION,
     )
@@ -273,6 +278,9 @@ def analyze_frozen_bundle_with_summaries(
                 stack_evidence = (*stack_evidence, *linked_evidence)
                 assume_globals_disjoint_from_stack, _ = assumption_allowed(
                     stack_evidence, requested=assume_globals_disjoint_from_stack)
+        from .call_expressions import RecordProvider
+
+        record_provider = RecordProvider() if operation_records and expand_call_records else None
         results = analyze_units(
             [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
@@ -292,6 +300,7 @@ def analyze_frozen_bundle_with_summaries(
             assume_accessor_result_separate=assume_accessor_result_separate,
             assume_accessor_private_state=assume_accessor_private_state,
             model_bindings=tuple(model_bindings),
+            record_provider=record_provider,
         )
         assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
                                       traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
@@ -355,7 +364,7 @@ def analyze_frozen_bundle_with_summaries(
                 if operation_records:
                     explanation = {**explanation, "record": _root_record(
                         analysis, by_key[function_key(analysis.entry)].unit, nodes[analysis.entry], label,
-                        occurrence, results[function_key(analysis.entry)], completeness)}
+                        occurrence, results[function_key(analysis.entry)], completeness, record_provider)}
                 roots.append(RootSlice(
                     analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence, root_nodes,
                     tuple(sorted(labels)),
@@ -393,7 +402,7 @@ def _witnesses(analysis, unit, rows, label, occurrence, labels, node_labels, ind
     return root_witnesses(analysis.normalized, unit, rows, seeds, labels, index, origins, traversal)
 
 
-def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness) -> dict:
+def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness, provider=None) -> dict:
     """The operation record of one root (diagnostics, ``operation_records``):
     seeded as ``_lane_origin_labels`` seeds its slice; SOURCE rows' labels as
     node origins."""
@@ -406,7 +415,7 @@ def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness
         if row.kind is BoundaryKind.SOURCE:
             origins.setdefault(row.node, set()).add(row.label)
     return root_record(analysis.normalized, unit, seeds, origins=origins, declared=analyzed.declared,
-                       completeness=completeness)
+                       completeness=completeness, provider=provider)
 
 
 def _raw_root_groups(analysis, rows):

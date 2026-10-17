@@ -123,6 +123,8 @@ def main() -> int:
     parser.add_argument("--records", action="store_true",
                         help="operation records per root: the p-code operations each root's value went through "
                              "(diagnostics, docs 25.28; in --json, and printed for the expected cases)")
+    parser.add_argument("--expand-call-records", action="store_true",
+                        help="with --records: connect raw callee operations to pre-call register/RAM state")
     parser.add_argument("--witnesses", action="store_true",
                         help="origin witnesses per root: why each label is reported (diagnostics, docs 25.19)")
     parser.add_argument("--model-dir", type=Path, action="append", default=[],
@@ -165,6 +167,10 @@ def main() -> int:
                             help=f"{'drop' if item.default else 'take'} the named assumption {item.name}: "
                                  f"{item.statement} (fails when: {item.fails_when})")
     args = parser.parse_args()
+    if args.expand_call_records:
+        if args.legacy_engine:
+            parser.error('--expand-call-records requires the summary engine')
+        args.records = True
     for item in switches():
         if item.env and os.environ.get(item.env) == "0":
             setattr(args, item.parameter, False)
@@ -228,6 +234,7 @@ def main() -> int:
                 linker=linker,
                 origin_witnesses=args.witnesses,
                 operation_records=args.records,
+                expand_call_records=args.expand_call_records,
                 model_bindings=tuple(load_binding_file(path) for path in args.binding),
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},

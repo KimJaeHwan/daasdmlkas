@@ -977,7 +977,8 @@ def _pending_write_keys(effect_unit) -> frozenset:
 
 
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries,
-                      stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None):
+                      stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None,
+                      record_stages=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
@@ -1204,6 +1205,14 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             memory_write=UnresolvedMemoryAccess(None, access.size), block_key=block_key,
         ))
         anchored[key] = (stage_key, pointer, offset, access.size, access.space_id)
+    if record_stages is not None:
+        transition = transitions.get(call_key)
+        record_stages[call_key] = (
+            tuple(load_keys.items()),
+            None if transition is None else (
+                transition.caller_base.byte_offset, transition.caller_base.byte_size,
+                transition.displacement_delta),
+        )
     return rows, anchored
 
 
@@ -1240,6 +1249,7 @@ class FunctionNormalizer:
         assume_direction_flag_clear: bool = False,
         private_frame_above: int = 0,
         open_conditions: dict | None = None,
+        record_observer=None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
         declared effect; see ``tdo_v2.assumed_call_effects``.
@@ -1279,6 +1289,7 @@ class FunctionNormalizer:
             assume_direction_flag_clear=assume_direction_flag_clear,
             private_frame_above=private_frame_above,
             open_conditions=open_conditions or {},
+            record_observer=record_observer,
         )
 
     def normalize_configured(
@@ -1386,6 +1397,7 @@ class _ScopedNormalizer:
         _blocked_bounds: frozenset = frozenset(),
         _uncertain: dict | None = None,
         open_conditions: dict | None = None,
+        record_observer=None,
     ) -> NormalizedFunction | _Retry:
         """``_blocked_reads``: values read from memory that a projection may not
         use (``relative_memory.stale_reads``; set by the validation below).
@@ -1436,6 +1448,7 @@ class _ScopedNormalizer:
             effects: list[ObservedEffect] = []
             staged_temporaries: list = []
             anchored_call_accesses: dict = {}
+            record_stages = {} if record_observer is not None else None
             call_transitions = {
                 row.call_operation_key: row.memory_transition
                 for row in observed_call_state_projections(observation)
@@ -1516,6 +1529,7 @@ class _ScopedNormalizer:
                             _call_stack_span(operation_key, proven_call_effects[operation_key],
                                              call_transitions, observation, context),
                             pointer_rows, value_inputs, accessor_states.get(operation_key, (None,))[0],
+                            record_stages=record_stages,
                         )
                         for row in rows:
                             operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
@@ -1904,7 +1918,7 @@ class _ScopedNormalizer:
                         EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=site.branch_key),
                     )
         dependencies.freeze()
-        return NormalizedFunction(
+        result = NormalizedFunction(
             document=None,
             scopes=unit.scopes,
             cfg=cfg,
@@ -1964,6 +1978,9 @@ class _ScopedNormalizer:
                 for (key, _), values in sorted(used_reads.items(), key=lambda item: repr(item[0]))
                 if type(key) is tuple for _, row, _ in (key,)),
         )
+        if record_observer is not None:
+            record_observer.normalized(unit, result, record_stages)
+        return result
 
     def _build_cfg(
         self,

@@ -33,6 +33,15 @@ reaching a node that is being expanded (a loop-carried value) are marked
 ``loop: true``. ``evaluate`` computes a record's value from concrete entry
 values when it is eligible (no cut, loop, debt, rep element, unproven
 override or unsupported operation): the set of values its alternatives allow.
+
+With a ``call_expressions.RecordProvider`` these APIs emit record v2:
+``binding`` links callee entry bytes to pre-call SSA fragments (memory has
+an entry-address expression); ``call_output`` selects an exit's original
+SSA computation, with one choice group shared by all outputs of that call.
+The original ``call`` and its output-byte selectors remain. Unsupported
+expansions have explicit ``unavailable`` nodes. ``evaluate_joint`` shares
+exit choices across output records; local phis are still may alternatives,
+not path-feasibility proofs. No engine summary or analysis result is changed.
 """
 
 from __future__ import annotations
@@ -728,14 +737,20 @@ def _span_dict(span):
             "size": span.size}
 
 
-def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, limits=None):
+def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, limits=None, provider=None):
     from .lane_slice import lane_slice
 
     limits = limits or Limits()
     demand_seeds = [(node, spans) for node, spans in seeds]
     demands = lane_slice(normalized, unit, demand_seeds, budget=limits.demand_steps,
                          byte_budget=limits.demand_bytes)
-    builder = _Builder(normalized, unit, origins=origins, declared=declared, limits=limits, demands=demands)
+    options = dict(origins=origins, declared=declared, limits=limits, demands=demands)
+    if provider is None:
+        builder = _Builder(normalized, unit, **options)
+    else:
+        from .call_expressions import ExpressionBuilder
+
+        builder = ExpressionBuilder(normalized, unit, provider=provider, **options)
     root = []
     # one expansion level takes a few Python frames: room for ``limits.depth``
     previous = sys.getrecursionlimit()
@@ -754,7 +769,11 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
     evidence = unit.scopes.program.evidence
     language = evidence.translation_namespace.language_id
     return {
-        "version": RECORD_VERSION,
+        "version": RECORD_VERSION if provider is None else 2,
+        **({"semantics": "may-expression; shared call exits; local phis not path-correlated"}
+           if provider is not None else {}),
+        **({"address_bits": builder.address_bits, "analysis_id": provider.analysis_id}
+           if provider is not None else {}),
         "function": f"{entry.space_id:x}:{entry.byte_offset:x}",
         "program": evidence.executable_sha256.hex() if hasattr(evidence, "executable_sha256") else None,
         "language": language,
@@ -771,7 +790,8 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
     }
 
 
-def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=None, completeness=None):
+def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=None, completeness=None,
+                provider=None):
     """The record of a sink root: ``seeds`` as ``lane_slice`` takes them
     ((node, spans) of the root's raw sink rows)."""
     metadata = {"record": "root"}
@@ -782,10 +802,11 @@ def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=
     # function-wide unresolved writes (outside the slice too)
     metadata["function_unresolved_writes"] = len(normalized.memory_graph.unresolved_write_nodes) \
         if normalized.memory_graph is not None else None
-    return _build(normalized, unit, seeds, metadata, origins=origins, declared=declared, limits=limits)
+    return _build(normalized, unit, seeds, metadata, origins=origins, declared=declared, limits=limits,
+                  provider=provider)
 
 
-def run_records(normalized, unit, summary, *, origins=None, declared=None, limits=None):
+def run_records(normalized, unit, summary, *, origins=None, declared=None, limits=None, provider=None):
     """One record per output run of every normal exit of ``summary`` (the
     function's ``FunctionSummary``), with the run's own facts."""
     found = []
@@ -807,18 +828,18 @@ def run_records(normalized, unit, summary, *, origins=None, declared=None, limit
                 found.append({**metadata, "truncated": False, "demand_complete": True, "root": [], "nodes": []})
                 continue
             if len(nodes) > 1:
-                record = _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits)
+                record = _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits, provider)
             else:
                 record = _build(normalized, unit, [(node, (run.span,)) for node in nodes], metadata,
-                                origins=origins, declared=declared, limits=limits)
+                                origins=origins, declared=declared, limits=limits, provider=provider)
             found.append(record)
     return found
 
 
-def _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits):
+def _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits, provider=None):
     """A run with several definitions: a synthesized phi over them."""
     record = _build(normalized, unit, [(node, (run.span,)) for node in nodes], metadata,
-                    origins=origins, declared=declared, limits=limits)
+                    origins=origins, declared=declared, limits=limits, provider=provider)
     alternatives = list(record["root"])
     phi = {"kind": "phi", "reason": "exit run definitions", "span": _span_text(run.span), "size": run.span.size,
            "alternatives": alternatives, "id": len(record["nodes"])}
@@ -895,6 +916,17 @@ def _render_node(node, nodes=None):
         return f"0x{node['value']:x}:{node['size']}"
     if kind == "entry":
         return f"entry {node.get('name') or node['span']}{origins}"
+    if kind == "binding":
+        text = "+".join(_render_parts(node["parts"], nodes))
+        return f"entry-binding {node['span']} <- {text}" + \
+            (f" adjustments={node['adjustments']}" if node.get("adjustments") else "") + \
+            (f" unbound={node['unbound_ranges']}" if node.get("unbound_ranges") else "")
+    if kind == "call_output":
+        alternatives = "; ".join(item["exit"] + ": " + "+".join(_render_parts(item["parts"], nodes))
+                                 for item in node["alternatives"])
+        return f"call-output {node['callee']} {{{alternatives}}} choice={node['choice_group']}"
+    if kind == "unavailable":
+        return "unavailable: " + node["reason"]
     if kind == "phi":
         return "phi(" + ", ".join(_render_parts(node["alternatives"], nodes)) + f") [{node['reason']}]{origins}"
     if kind == "cut":
@@ -904,7 +936,9 @@ def _render_node(node, nodes=None):
             ", ".join(f"n{item['node']}" for item in node.get("from", ())) + origins
     if kind == "call":
         inputs = "; ".join(f"{item['role']}=" + "+".join(_render_parts(item["parts"], nodes)) for item in node["inputs"])
-        return f"call {node['callee']} ~{node['row']} [{node.get('source')}] ({inputs}){origins}"
+        expanded = "; outputs=" + ",".join(f"{_span_text_of(item['output'])}:n{item['node']}"
+                                             for item in node["expansions"]) if node.get("expansions") else ""
+        return f"call {node['callee']} ~{node['row']} [{node.get('source')}] ({inputs}){expanded}{origins}"
     if kind in ("op", "override"):
         operands = []
         for operand in node.get("operands", ()):
@@ -935,6 +969,83 @@ def _render_node(node, nodes=None):
 
 # -- evaluation -----------------------------------------------------------------
 
+def record_edges(record):
+    """Every recorded dependency as (producer, consumer, role).
+
+    This renders the actual record DAG, including address computations and
+    call-entry bindings; it is not a source-label-only reconstruction.
+    Folded summary inputs are distinguished from expanded body expressions.
+    """
+    edges = []
+    for node in record.get('nodes', ()):
+        def parts(items, role):
+            for part in items:
+                if 'node' in part:
+                    suffix = '' if 'bytes' not in part else f" {part['bytes'][0]}:{part['bytes'][1]}"
+                    edges.append((part['node'], node['id'], role + suffix))
+        for operand in node.get('operands', ()):
+            parts(operand.get('parts', ()), f"{operand.get('role', 'value')}:{operand['index']}")
+        for item in node.get('memory', ()):
+            parts(item['parts'], 'memory')
+        for item in node.get('reads', ()):
+            parts(item['parts'], 'read')
+        parts(node.get('parts', ()), 'entry binding')
+        if isinstance(node.get('address'), dict):
+            parts(node['address'].get('parts', ()), 'entry address')
+        for item in node.get('alternatives', ()):
+            parts(item.get('parts', ()), 'exit ' + item.get('exit', '?'))
+            if 'node' in item:
+                parts((item,), 'phi')
+        for item in node.get('inputs', ()):
+            parts(item['parts'], 'summary ' + item['role'])
+        for item in node.get('expansions', ()):
+            edges.append((item['node'], node['id'], 'body ' + _span_text_of(item['output'])))
+        for item in node.get('from', ()):
+            edges.append((item['node'], node['id'], item.get('edge', 'debt')))
+        for debt in node.get('debts', ()):
+            edges.append((debt, node['id'], 'debt'))
+        if isinstance(node.get('override'), int):
+            edges.append((node['override'], node['id'], 'override'))
+    return edges
+
+
+def mermaid(record):
+    """All nodes/edges of an operation record, not a hand-drawn synopsis."""
+    from html import escape
+
+    lines = ['flowchart BT']
+    for node in record.get('nodes', ()):
+        kind = node['kind']
+        if kind == 'op':
+            label = node['opcode'] + (f" @{node['address']:x}:{node['ordinal']}"
+                                      if node.get('address') is not None else '')
+        elif kind == 'const':
+            label = f"0x{node['value']:x}:{node['size']}"
+        elif kind == 'entry':
+            label = 'ENTRY ' + node['span']
+        elif kind == 'binding':
+            label = 'BIND ' + node['span']
+            if node.get('adjustments'):
+                label += ' SP delta=' + str(node['adjustments'][0]['addend'])
+            if node.get('unbound_ranges'):
+                label += ' (unbound ranges recorded)'
+        elif kind == 'call':
+            label = 'CALL ' + node['callee'] + ' ~' + node['row']
+        elif kind == 'call_output':
+            label = 'EXIT OUTPUT ' + node['callee'] + ' ' + _span_text_of(node['output'])
+        else:
+            label = kind + ' ' + node.get('reason', node.get('key', ''))
+        lines.append(f'  n{node["id"]}["n{node["id"]} {escape(label, quote=True)}"]')
+    lines.append('  result["QUERY RESULT"]')
+    for source, target, role in record_edges(record):
+        arrow = '-.->' if role.startswith('summary ') else '-->'
+        lines.append(f'  n{source} {arrow}|"{escape(role, quote=True)}"| n{target}')
+    for part in record.get('root', ()):
+        if 'node' in part:
+            lines.append(f'  n{part["node"]} --> result')
+    return '\n'.join(lines)
+
+
 class Ineligible(Exception):
     """The record is not checked for equality (the reason)."""
 
@@ -959,7 +1070,10 @@ def eligibility(record) -> str | None:
     if any(node["kind"] == "cut" or node.get("interrupted") for node in nodes):
         return "cut"
     for node in nodes:
-        parts = [*node.get("alternatives", ()),
+        parts = [*(part for part in node.get("alternatives", ()) if "node" in part),
+                 *node.get("parts", ()),
+                 *(node.get("address", {}).get("parts", ()) if isinstance(node.get("address"), dict) else ()),
+                 *(part for alternative in node.get("alternatives", ()) for part in alternative.get("parts", ())),
                  *(part for operand in node.get("operands", ()) for part in operand.get("parts", ())),
                  *(part for item in node.get("memory", ()) for part in item["parts"])]
         if any(part.get("loop") for part in parts):
@@ -967,6 +1081,8 @@ def eligibility(record) -> str | None:
     if any(part.get("loop") for part in record.get("root", ())):
         return "loop"
     for node in nodes:
+        if node["kind"] == "unavailable" or node.get("unavailable"):
+            return "unavailable call expression"
         if node["kind"] == "debt" or node.get("debts"):
             return "debt"
         if node.get("override") == "unproven":
@@ -1007,29 +1123,57 @@ def evaluate(record, entry, *, call=None, max_choices=256):
     known), ``entry(("memory", space, address, size))`` -> entry memory at a
     concrete address or None; ``call(node, part)`` -> a call output's bytes or
     None. Raises ``Ineligible`` with the reason when not evaluable."""
-    reason = eligibility(record)
-    if reason is not None:
-        raise Ineligible(reason)
-    nodes = {node["id"]: node for node in record["nodes"]}
-    choices = [node["id"] for node in record["nodes"] if node["kind"] == "phi"] + \
-              [node["id"] for node in record["nodes"]
-               if node["kind"] == "op" and node["opcode"] == "LOAD" and len(node.get("memory", ())) > 1]
-    sizes = {identifier: max(1, len(nodes[identifier].get("alternatives", nodes[identifier].get("memory", ()))))
-             for identifier in choices}
+    return {values[0] for values in evaluate_joint((record,), entry, call=call, max_choices=max_choices)}
+
+
+def evaluate_joint(records, entry, *, call=None, max_choices=256):
+    """Evaluate several outputs with ONE call-exit selection environment.
+
+    Ordinary local phis remain independent may choices; this does not claim
+    path feasibility. An unknown alternative invalidates the whole result.
+    """
+    records = tuple(records)
+    if len({record['analysis_id'] for record in records if record.get('analysis_id') is not None}) > 1:
+        raise Ineligible('different analysis snapshots')
+    sizes, groups, local = {}, {}, []
+    for number, record in enumerate(records):
+        reason = eligibility(record)
+        if reason is not None:
+            raise Ineligible(reason)
+        choices = {}
+        for node in record["nodes"]:
+            if node["kind"] == "call_output":
+                group, domain = node["choice_group"], tuple(node["exit_domain"])
+                if group in groups and groups[group] != domain:
+                    raise Ineligible("call exit domain mismatch")
+                groups[group] = domain
+                sizes[group] = len(domain)
+            elif node["kind"] == "phi" or (node["kind"] == "op" and node["opcode"] == "LOAD"
+                                            and len(node.get("memory", ())) > 1):
+                key = (number, node["id"])
+                sizes[key] = max(1, len(node.get("alternatives", node.get("memory", ()))))
+                choices[node["id"]] = key
+        local.append(choices)
     total = 1
-    for identifier in choices:
-        total *= sizes[identifier]
+    for size in sizes.values():
+        total *= size
     if total > max_choices:
         raise Ineligible("alternatives")
     results = set()
     unknown = False
     for number in range(total):
         assignment = {}
-        for identifier in choices:
-            assignment[identifier] = number % sizes[identifier]
-            number //= sizes[identifier]
+        for key, size in sizes.items():
+            assignment[key] = number % size
+            number //= size
         try:
-            results.add(_evaluate_once(nodes, entry, call, assignment, record))
+            values = []
+            for record, choices in zip(records, local):
+                selected = {**{group: assignment[group] for group in groups},
+                            **{identifier: assignment[key] for identifier, key in choices.items()}}
+                values.append(_evaluate_once({node["id"]: node for node in record["nodes"]},
+                                             entry, call, selected, record))
+            results.add(tuple(values))
         except _Unknown:
             unknown = True
     if unknown or not results:
@@ -1050,7 +1194,7 @@ def _evaluate_once(nodes, entry, call, assignment, record):
     previous = sys.getrecursionlimit()
     sys.setrecursionlimit(max(previous, 16 * depth + 2000))   # (the build cut deeper chains)
     try:
-        return _Evaluator(nodes, entry, call, assignment).root(record["root"])
+        return _Evaluator(nodes, entry, call, assignment, record.get('address_bits')).root(record["root"])
     except RecursionError:
         raise Ineligible("recursion") from None
     finally:
@@ -1058,8 +1202,9 @@ def _evaluate_once(nodes, entry, call, assignment, record):
 
 
 class _Evaluator:
-    def __init__(self, nodes, entry, call, assignment):
+    def __init__(self, nodes, entry, call, assignment, address_bits=None):
         self.nodes, self.entry, self.call, self.assignment = nodes, entry, call, assignment
+        self.address_bits = {int(space): bits for space, bits in (address_bits or {}).items()}
         self.memo: dict = {}
 
     def root(self, parts):
@@ -1073,7 +1218,14 @@ class _Evaluator:
     def part(self, part, node_value=None):
         a, b = part["bytes"]
         node = self.nodes[part["node"]]
+        if node["kind"] == "binding":
+            return self._binding_part(node, a, b)
         if node["kind"] == "call":
+            expansion = next((item for item in node.get("expansions", ())
+                              if item["output"] == part.get("output")), None)
+            if expansion is not None:
+                value = self.value(expansion["node"])
+                return (value >> (8 * a)) & ((1 << (8 * (b - a))) - 1)
             if self.call is None:
                 raise _Unknown()
             found = self.call(node, part)
@@ -1082,6 +1234,37 @@ class _Evaluator:
             return found
         value = self.value(part["node"]) if node_value is None else node_value
         return (value >> (8 * a)) & ((1 << (8 * (b - a))) - 1)
+
+    def _binding_part(self, node, start, end, located=None):
+        from .call_expressions import _covered, _slice
+
+        parts = _slice(node['parts'], start, end)
+        if not _covered(parts, end - start):
+            raise _Unknown()
+        address = node.get('address')
+        if located is None and address is not None:
+            base = address['value'] if 'value' in address else \
+                self.operand({'parts': address['parts']}) + address['displacement']
+            base &= (1 << address['bits']) - 1
+            located = (address['space'], base)
+        if located is not None:
+            space, base = located
+            value = sum(self._located_part(part, space, base + start + part['at'][0] - part['bytes'][0])
+                        << (8 * part['at'][0]) for part in parts)
+        else:
+            value = self.operand({'parts': parts})
+        for adjustment in node.get('adjustments', ()):
+            low, high = adjustment['at']
+            if low >= end or high <= start:
+                continue
+            segment = _slice(node['parts'], low, high)
+            if not _covered(segment, high - low):
+                raise _Unknown()
+            adjusted = (self.operand({'parts': segment}) + adjustment['addend']) & ((1 << (8 * (high - low))) - 1)
+            a, b = max(start, low), min(end, high)
+            mask = ((1 << (8 * (b - a))) - 1) << (8 * (a - start))
+            value = (value & ~mask) | (((adjusted >> (8 * (a - low))) << (8 * (a - start))) & mask)
+        return value
 
     def _alternative(self, node, choice, read):
         """A phi's value: the chosen alternative's bytes at their place; a
@@ -1097,10 +1280,15 @@ class _Evaluator:
         node = self.nodes[part["node"]]
         a, b = part["bytes"]
         if node["kind"] == "entry" and "register" not in node:
-            found = self.entry(("memory", space, address + a, b - a))
+            offset = address + a
+            if space in self.address_bits:
+                offset &= (1 << self.address_bits[space]) - 1
+            found = self.entry(("memory", space, offset, b - a))
             if found is None:
                 raise _Unknown()
             return found
+        if node['kind'] == 'binding' and node.get('address') is not None:
+            return self._binding_part(node, a, b, located=(space, address))
         if node["kind"] == "phi":
             # the phi's bytes start at ``address``; its chosen alternative's
             # producer at address + at[0] - bytes[0]
@@ -1135,6 +1323,14 @@ class _Evaluator:
                 raise _Unknown()
         elif kind == "phi":
             found = self._alternative(node, self.assignment[identifier], self.part)
+        elif kind == "binding":
+            found = self._binding_part(node, 0, node['size'])
+        elif kind == "call_output":
+            choice = self.assignment[node["choice_group"]]
+            alternative = node["alternatives"][choice]
+            if alternative["exit"] != node["exit_domain"][choice]:
+                raise _Unknown()
+            found = self.operand({"parts": alternative["parts"]})
         elif kind == "op":
             found = self._op(identifier, node)
         else:

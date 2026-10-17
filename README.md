@@ -115,6 +115,27 @@ PYTHONPATH=src python -m pytest tests/intra -q
   그 판단 사실, 부채)를 `--json`에 넣고 기대 케이스는 텍스트로 출력 (문서 25.28).
 - `tools/graph_fidelity/derivations.py <generation> --function <entry>`: 함수 하나의 출구별 출력을 입구 값의 식으로 출력 —
   핸들러 함수(가상화 핸들러 등)의 의미를 볼 때.
+- `derivations.py ... --expand-calls --operation <p-code key> --json out.json --mermaid out.mmd`:
+  호출 전 레지스터·RAM의 SSA 조각을 피호출 함수의 원래 연산과 연결합니다. 출력 바이트별 계산과 호출별 문맥,
+  동일 호출 출력들의 공통 출구 선택을 유지하며, 메모리 주소 계산·저장·호출 후 읽기도 그래프에 포함합니다.
+  `run_dfbench --expand-call-records`도 같은 기능을 사용합니다(`--records` 포함).
+  분석 결과·요약·가정을 바꾸지 않는 선택 기능입니다. 확장된 기록은 v2이며, 재귀·외부 모델·조건부 요약 등
+  원래 본문과의 연결 근거가 없는 출력은 `unavailable`, 확장 제한은 `cut`으로 남습니다.
+  함수 내부 phi의 경로 실행 가능성이나 임의 프로그램의 정확한 상태 변환까지 증명하지는 않습니다.
+
+Python에서는 `RecordProvider()`를 `analyze_units(..., record_provider=provider)`에 넘긴 뒤,
+`root_record` / `run_records`에 `provider=provider`를 넘깁니다. 여러 출력의 상관관계가 필요하면
+`evaluate_joint(records, entry)`를 사용합니다. 서로 다른 분석 스냅샷을 섞는 평가는 거부합니다.
+
+실제 x64 DFB054의 보관 Bundle 회귀 테스트(네이티브 실행이 아닌, 실제 추출 raw p-code 실행과 식 평가 비교):
+
+```bash
+TDO_DFBENCH054_BUNDLE=/path/to/c6edcb2c812de6b6b226bcd7a83c9d418e1858a21e56cbadffb7ef92d63109d1 \
+  PYTHONPATH=src:tests/intra python -m pytest tests/corpus/intra/test_call_expression_dfbench054.py -q
+```
+
+과거 naming-v1을 현재 naming-v2로 가장하지 않고, 봉인 검증된 원본·함수 관찰만 사용합니다.
+해당 Bundle이 없으면 이 테스트는 명시적으로 skip합니다. 한 케이스의 106개 입력 비교이지 suite09 전체 통과가 아닙니다.
 
 ## 검증
 
@@ -135,7 +156,8 @@ PYTHONPATH=src python -m pytest tests/intra -q
 | UE DLL Development | 22 | 16 / 16 (접근 함수 가정 + 바인딩: 18) |
 
 어느 Bundle에서도 "누락 + 확실"은 0이고, 프로그램 오라클의 누락은 0입니다(zlib의 256은 예전부터 있던 것).
-테스트 935개가 통과합니다.
+2026-10-17 이 브랜치의 자동 테스트는 990개 통과했습니다(실제 DFB054 Bundle 테스트 1개 포함;
+위 `TDO_DFBENCH054_BUNDLE`을 제공하지 않으면 그 1개는 skip).
 
 ## 문서
 
