@@ -32,6 +32,8 @@ class FunctionView:
     declared: tuple
     stages: tuple
     derivations: tuple
+    approved: tuple
+    pending_proofs: tuple
 
 
 class RecordProvider:
@@ -51,10 +53,12 @@ class RecordProvider:
     def normalized(self, unit, normalized, stages):
         self._normalizations[_key(unit)] = (normalized, tuple(stages.items()))
 
-    def selected(self, unit, normalized, derivations):
+    def selected(self, unit, normalized, derivations, approved=None, pending_proofs=None):
         candidate = self._normalizations.pop(_key(unit), None)
         stages = candidate[1] if candidate is not None and candidate[0] is normalized else ()
-        self._selected[_key(unit)] = (normalized, stages, tuple(derivations.items()))
+        self._selected[_key(unit)] = (normalized, stages, tuple(derivations.items()),
+                                     tuple((call, frozenset(pairs)) for call, pairs in (approved or {}).items()),
+                                     tuple((call, tuple(pairs.items())) for call, pairs in (pending_proofs or {}).items()))
 
     def publish(self, results):
         self.analysis_id = uuid4().hex
@@ -74,7 +78,7 @@ class RecordProvider:
             views[key] = FunctionView(
                 item.unit, item.normalized, item.summary, tuple(item.anchors.items()),
                 tuple((node, tuple(labels)) for node, labels in item.origins.items()),
-                tuple(item.declared.items()), candidate[1], tuple(derivations),
+                tuple(item.declared.items()), candidate[1], tuple(derivations), candidate[3], candidate[4],
             )
         self.views = views
         self.discard_trials()
@@ -166,7 +170,7 @@ class ExpressionBuilder(_Builder):
     """One context's local SSA index, sharing ONE bounded record DAG."""
 
     def __init__(self, normalized, unit, *, provider, parent=None, call=None, owner=None,
-                 context=None, base_depth=0, **options):
+                 context=None, base_depth=0, approved=frozenset(), **options):
         super().__init__(normalized, unit, **options)
         self.provider = provider
         self.view = provider.view(unit, normalized)
@@ -176,6 +180,8 @@ class ExpressionBuilder(_Builder):
         self.base_depth = base_depth
         self.current_depth = base_depth
         self.children = {}
+        self.approved = approved
+        self.alias_conditions = None
         if owner is not None:
             self.records = owner.records   # references, no copies of callee graphs/RAM
 
@@ -206,6 +212,43 @@ class ExpressionBuilder(_Builder):
 
     def _unavailable(self, reason, size):
         return self._new(None, {"kind": "unavailable", "reason": reason, "size": size})["id"]
+
+    def _conditions_hold(self, pairs):
+        anchors = dict(self.view.anchors) if self.view is not None else {}
+        return all((left := _anchored(read, anchors)) is not None
+                   and (right := _anchored(write, anchors)) is not None
+                   and (left, right) in self.approved for read, write in pairs)
+
+    def _approved_disjoint(self, read, write):
+        """Cover a crossing with final, symmetric non-alias range proofs."""
+        anchors = dict(self.view.anchors) if self.view is not None else {}
+        left, right = _anchored(read, anchors), _anchored(write, anchors)
+        if left is None or right is None:
+            return False
+        covered = []
+        for first, second in self.approved:
+            for a, b in ((first, second), (second, first)):
+                if _same_base(a, left) and a.displacement <= left.displacement \
+                        and left.displacement + left.size <= a.displacement + a.size and _same_base(b, right):
+                    low = max(right.displacement, b.displacement)
+                    high = min(right.displacement + right.size, b.displacement + b.size)
+                    if low < high:
+                        covered.append((low, high))
+        return not any(_gaps(covered, right.displacement, right.displacement + right.size))
+
+    def _debt(self, node, depth):
+        if self.parent is not None:
+            if self.alias_conditions is None:
+                from .function_summary import _alias_conditions
+                self.alias_conditions = _alias_conditions(self.normalized)
+            pairs = self.alias_conditions.get(node)
+            if pairs and self._conditions_hold(pairs):
+                if node not in self.id_of:
+                    self._new(node, {'kind': 'condition', 'status': 'caller-proven disjoint',
+                                     'call': self.call_key,
+                                     'pairs': [[_span_dict(a), _span_dict(b)] for a, b in pairs]})
+                return self.id_of[node]
+        return super()._debt(node, depth)
 
     def _entry(self, node, definition):
         if self.parent is None:
@@ -275,7 +318,7 @@ class ExpressionBuilder(_Builder):
                     if read.span.object_id.kind in (Kind.ADDRESS_SPACE, Kind.FUNCTION_RELATIVE) \
                             and read.span.size == loaded.size:
                         candidates.append((read, loaded.displacement - access.displacement, action_id))
-        parts, debts = [], set()
+        parts, debts = self._pushed_parts(span), set()
         for read, offset, action_id in candidates:
             # deterministic cover: the same register can occur in several staging rows
             low, high = max(0, offset), min(span.size, offset + read.span.size)
@@ -287,6 +330,54 @@ class ExpressionBuilder(_Builder):
                 debts.update(parent._debts(parent.normalized.memory_graph.action_nodes[action_id],
                                            self.current_depth + 1))
         return _coalesce(parts), sorted(debts), adjustments
+
+    def _pushed_parts(self, span):
+        """An observed CALL's transient STORE supplies these entry bytes.
+
+        The core deliberately removes that push from caller SSA. Reading the
+        old caller stack slot instead would be wrong when expanding callee
+        RETURN-address calculations. No ABI or return-register guess is used.
+        """
+        access = _anchored(span, dict(self.view.anchors)) if self.view is not None else None
+        if access is None or access.anchor is None or (access.anchor.start, access.anchor.size) != (0x20, 8) \
+                or access.pointer is not None:
+            return []
+        low, high = max(0, access.displacement), min(8, access.displacement + access.size)
+        if low >= high:
+            return []
+        space, address = self.call_key.split(':')[:2]
+        instruction = next(row for row in self.parent.unit.observation.instructions
+                           if (row.address.space_id, row.address.byte_offset) == (int(space, 16), int(address, 16)))
+        from ._scope_contracts import VarnodeKindCode as V
+        operations = instruction.operations
+        if instruction.fallthrough is None or len(operations) not in (3, 4):
+            return []
+        adjust, push, call = operations[-3:]
+        rsp = adjust.output
+        if rsp is None or rsp.kind is not V.REGISTER or (rsp.coordinate.byte_offset, rsp.byte_size) != (0x20, 8) \
+                or adjust.opcode != 'INT_SUB' or len(adjust.inputs) != 2 or adjust.inputs[0] != rsp \
+                or adjust.inputs[1].kind is not V.CONSTANT or adjust.inputs[1].coordinate.byte_offset != 8 \
+                or push.opcode != 'STORE' or len(push.inputs) != 3 or push.inputs[1] != rsp \
+                or push.inputs[0].kind is not V.CONSTANT or push.inputs[0].coordinate.byte_offset != access.space_id \
+                or push.inputs[2].kind is not V.CONSTANT or push.inputs[2].byte_size != 8 \
+                or push.inputs[2].coordinate.byte_offset != instruction.fallthrough.byte_offset:
+            return []
+        if len(operations) == 3:
+            if call.opcode != 'CALL':
+                return []
+        else:
+            target = operations[0]
+            if call.opcode != 'CALLIND' or len(call.inputs) != 1 or target.opcode != 'COPY' \
+                    or len(target.inputs) != 1 or target.output is None or target.output.kind is not V.UNIQUE \
+                    or target.output != call.inputs[0]:
+                return []
+        literal = push.inputs[2]
+        identifier = self._new(None, {'kind': 'const', 'value': literal.coordinate.byte_offset,
+                                     'size': literal.byte_size, 'witness': 'observed CALL push',
+                                     'call': self.call_key})['id']
+        self._edge()
+        return [{'node': identifier, 'bytes': [low, high],
+                 'at': [low - access.displacement, high - access.displacement]}]
 
     def _named(self, part, definition):
         part = super()._named(part, definition)
@@ -300,6 +391,54 @@ class ExpressionBuilder(_Builder):
                 self._edge()
         return part
 
+    def _exit_aliases_disjoint(self, run, caller_span, callee, anchors, effect, call, child):
+        """Use final output projections to discharge exported-write crossings.
+
+        Reuse final approved non-alias ranges, or the final projections of
+        separately exported writes. Only exact same-object disjoint bytes
+        (or distinct physical address spaces) prove anything in the latter
+        case. Different symbolic objects are NOT assumed disjoint.
+        """
+        if not run.crossed or run.debts or any(not label.startswith('alias:') for label in run.crossed):
+            return False
+        for label in run.crossed:
+            writer = label[len('alias:'):]
+            writes = [d.span for d in callee.memory_ssa.definitions if d.operation_key == writer
+                      and d.span.object_id.kind in (Kind.ADDRESS_SPACE, Kind.FUNCTION_RELATIVE)]
+            if not writes:
+                return False
+            for written in writes:
+                access = _anchored(written, anchors)
+                # Coalesced exit writes can cover several individually
+                # approved condition ranges. Reuse those final proofs only
+                # when their union covers the entire crossing writer.
+                proven = child._approved_disjoint(run.span, written)
+                if proven:
+                    continue
+                for index, output in enumerate(effect.memory_runs, start=len(effect.runs)):
+                    target = output.write
+                    if not _same_base(access, target) or target.displacement > access.displacement \
+                            or access.displacement + access.size > target.displacement + target.size:
+                        continue
+                    node = self.graph.node_for_key(f'op:{call}~{index}')
+                    action = self.index.action_of.get(node)
+                    if action is None:
+                        continue
+                    projected = [self.ssa.definitions[d].span for d in self.ssa.actions[action].write_definition_ids]
+                    if len(projected) != 1 or projected[0].size != target.size:
+                        continue
+                    span = ByteSpan(projected[0].object_id,
+                                    projected[0].start + access.displacement - target.displacement, access.size)
+                    if span.object_id == caller_span.object_id:
+                        proven = not span.overlaps(caller_span)
+                    elif span.object_id.kind is Kind.ADDRESS_SPACE and caller_span.object_id.kind is Kind.ADDRESS_SPACE:
+                        proven = span.object_id.space_key != caller_span.object_id.space_key
+                    if proven:
+                        break
+                if not proven:
+                    return False
+        return True
+
     def _expand(self, call, caller_span):
         depth = self.current_depth + 1
         if depth > self.limits.depth:
@@ -310,8 +449,15 @@ class ExpressionBuilder(_Builder):
         unit, normalized, summary, effect, anchors = receipt
         if effect is not self.proven.get(call["call"]) or not call["row"].isdigit():
             return self._unavailable("effect/row witness mismatch", caller_span.size)
-        if summary.tail_exits or summary.writer_conditions or effect.writer_conditions:
-            return self._unavailable("tail or conditional writer expansion unsupported", caller_span.size)
+        approved = dict(self.view.approved).get(call['call'], frozenset())
+        # An inner call's condition may be open in its own function but proven
+        # at an outer caller. Follow the selected physical pair, not names or
+        # transitive assumptions about arbitrary pointers.
+        approved = approved | frozenset(pair for pair, located in
+                                       dict(self.view.pending_proofs).get(call['call'], ())
+                                       if self._conditions_hold((located,)))
+        if summary.tail_exits or any(pair not in approved for pair in effect.writer_conditions):
+            return self._unavailable("tail or unproven writer conditions", caller_span.size)
         if not summary.exits:
             return self._unavailable("callee has no normal exit", caller_span.size)
         child_view = self.provider.view(unit, normalized)
@@ -322,7 +468,7 @@ class ExpressionBuilder(_Builder):
             self.children[context] = ExpressionBuilder(
                 normalized, unit, provider=self.provider, parent=self, call=call["call"], owner=self.owner,
                 context=context, base_depth=depth, origins=dict(child_view.origins),
-                declared=dict(child_view.declared), limits=self.limits,
+                declared=dict(child_view.declared), limits=self.limits, approved=approved,
             )
         child = self.children[context]
         child.current_depth = depth
@@ -346,8 +492,10 @@ class ExpressionBuilder(_Builder):
             if not any(span.contains(caller_span) for span in run.writes):
                 return self._unavailable("register output selector mismatch", caller_span.size)
             target, displacement = None, caller_span.start
-        if run.conditions:
-            return self._unavailable("conditional output expansion unsupported", caller_span.size)
+        if any(pair not in approved for pair in run.conditions):
+            return self._unavailable("unproven output conditions", caller_span.size)
+        if not child._conditions_hold(summary.writer_conditions):
+            return self._unavailable("unproven callee writer conditions", caller_span.size)
         record = self._new(None, {
             "kind": "call_output", "call": call["call"], "callee": _key(unit), "size": caller_span.size,
             "output": _span_dict(caller_span), "choice_group": context,
@@ -369,14 +517,25 @@ class ExpressionBuilder(_Builder):
                 if low >= high:
                     continue
                 selected = ByteSpan(callee_run.span.object_id, callee_run.span.start + low - start, high - low)
+                placed = ByteSpan(caller_span.object_id, caller_span.start + low - displacement, high - low)
+                cleared_crossings = memory and self._exit_aliases_disjoint(
+                    callee_run, placed, normalized, dict(anchors), effect, call['call'], child)
                 if callee_run.kind.value == "identity":
                     identifier = child._bind(selected)
                     produced = [{"node": identifier, "bytes": [0, selected.size], "at": [0, selected.size]}]
-                elif callee_run.kind.value == "unknown" or callee_run.conditions or callee_run.debts or callee_run.crossed:
+                elif (callee_run.kind.value == "unknown" and not cleared_crossings) \
+                        or not child._conditions_hold(callee_run.conditions) or callee_run.debts \
+                        or (callee_run.crossed and not cleared_crossings):
                     identifier = child._unavailable("callee exit run not exact", selected.size)
                     produced = [{"node": identifier, "bytes": [0, selected.size], "at": [0, selected.size]}]
                 else:
                     produced = child._run_parts(callee_run, selected, depth + 1)
+                    if cleared_crossings:
+                        proof = self._new(None, {'kind': 'condition', 'status': 'caller output bytes disjoint',
+                                                  'call': call['call'], 'crossings': list(callee_run.crossed),
+                                                  'output': _span_dict(placed)})
+                        record.setdefault('debts', []).append(proof['id'])
+                        self._edge()
                 parts.extend({**part, "at": [part["at"][0] + low - displacement,
                                              part["at"][1] + low - displacement]} for part in produced)
                 covered.append((low - displacement, high - displacement))

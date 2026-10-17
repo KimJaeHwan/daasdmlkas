@@ -409,7 +409,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             effect = replace(effect, state_proof=state_proofs[callee])
                     if effect is not None:
                         proven[call_key] = effect
-                        if record_provider is not None and not failed.get(call_key):
+                        if record_provider is not None:
                             derivations[call_key] = (done.unit, done.normalized, done.summary, effect,
                                                      tuple(done.anchors.items()))
                 register_space = _register_space_id(observation) or _program_register_space(unit)
@@ -537,7 +537,19 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             )
             anchors = _relative_anchors(unit, normalized) if summary is not None else {}
             if record_provider is not None:
-                record_provider.selected(unit, normalized, derivations)
+                approved = {}
+                pending_proofs = {}
+                if type(normalized) is NormalizedFunction:
+                    for (call, tag), decisions in verdicts.items():
+                        effect = proven[call]
+                        pairs = effect.writer_conditions if tag == 'cw' else \
+                            (*effect.runs, *effect.memory_runs)[int(tag[2:])].conditions
+                        approved.setdefault(call, set()).update(
+                            pair for pair, decision in zip(pairs, decisions) if decision == 'ok')
+                        pending_proofs.setdefault(call, {}).update(
+                            (pair, decision) for pair, decision in zip(pairs, decisions)
+                            if type(decision) is tuple)
+                record_provider.selected(unit, normalized, derivations, approved, pending_proofs)
             return AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
                                     anchors, origins, projected, declared={
                                         call: (f"test-only-boundary:{boundaries_of(key)[call].label}"

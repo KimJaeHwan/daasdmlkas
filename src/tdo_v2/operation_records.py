@@ -351,6 +351,10 @@ class _Builder:
                         and not self.index.reads.get(action_id) and len(operation.inputs) == 2 \
                         and operation.inputs[0] == operation.inputs[1]:
                     record["value"] = 0   # self-cancelling: the engine reads nothing
+                    for operand in record['operands']:
+                        operand.pop('unresolved', None)
+                        operand.pop('parts', None)
+                        operand['pruned'] = True
             override = self.overrides.get(key, "absent")
             if override != "absent":
                 instruction = ":".join(key.split(":")[:2])
@@ -927,6 +931,8 @@ def _render_node(node, nodes=None):
         return f"call-output {node['callee']} {{{alternatives}}} choice={node['choice_group']}"
     if kind == "unavailable":
         return "unavailable: " + node["reason"]
+    if kind == 'condition':
+        return node['status'] + ' at ' + node['call']
     if kind == "phi":
         return "phi(" + ", ".join(_render_parts(node["alternatives"], nodes)) + f") [{node['reason']}]{origins}"
     if kind == "cut":
@@ -1067,6 +1073,7 @@ def eligibility(record) -> str | None:
     if record.get("truncated"):
         return "truncated"
     nodes = record.get("nodes", ())
+    nodes_by_id = {node.get('id'): node for node in nodes}
     if any(node["kind"] == "cut" or node.get("interrupted") for node in nodes):
         return "cut"
     for node in nodes:
@@ -1083,7 +1090,8 @@ def eligibility(record) -> str | None:
     for node in nodes:
         if node["kind"] == "unavailable" or node.get("unavailable"):
             return "unavailable call expression"
-        if node["kind"] == "debt" or node.get("debts"):
+        if node["kind"] == "debt" or any(
+                nodes_by_id.get(debt, {}).get('kind') != 'condition' for debt in node.get('debts', ())):
             return "debt"
         if node.get("override") == "unproven":
             return "unproven rep"

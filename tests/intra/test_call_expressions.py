@@ -295,3 +295,117 @@ def test_memory_expressions_match_concrete_program_runs_without_call_injection()
             vm.preset(2, RDX, 4, rng.getrandbits(32))
             assert vm.run().completed
             assert evaluate(record, entry_reader(vm)) == {final_register(vm, R9, 4)}
+
+
+def test_caller_proof_and_observed_call_push_connect_return_address_bytes():
+    from synthetic import RSI, RIP
+    leaf = (FunctionBuilder(entry=LEAF).push(RBX).ins(store(reg(RDI), reg(RSI)))
+            .pop(RBX).ret())
+    caller = (FunctionBuilder().sub_rsp(16).ins(copy(reg(RDI), reg(RSP)))
+              .ins(copy(reg(RSI), const(17))))
+    continuation = caller._address(len(caller._rows) + 1)
+    caller.call(LEAF).ins(copy(reg(R9), reg(RIP))).add_rsp(16).ret()
+    results, provider = analyze(caller, leaf, assume_globals_disjoint_from_stack=True)
+    record = output(results, provider, R9)
+    assert evaluate(record, entry({RSP: 0x70000000})) == {continuation}
+    assert any(node['kind'] == 'condition' for node in record['nodes'])
+    assert any(node.get('witness') == 'observed CALL push' for node in record['nodes'])
+
+
+def test_overlapping_call_condition_is_not_approved_or_hidden():
+    from synthetic import RSI, RIP
+    leaf = (FunctionBuilder(entry=LEAF).push(RBX).ins(store(reg(RDI), reg(RSI)))
+            .pop(RBX).ret())
+    caller = (FunctionBuilder().ins(sub(reg(RDI), reg(RSP), const(8)))
+              .ins(copy(reg(RSI), const(17))).call(LEAF).ins(copy(reg(R9), reg(RIP))).ret())
+    results, provider = analyze(caller, leaf, assume_globals_disjoint_from_stack=True)
+    record = output(results, provider, R9)
+    with pytest.raises(Ineligible):
+        evaluate(record, entry({RSP: 0x70000000}))
+
+
+def test_nested_call_uses_outer_proof_without_erasing_unknown_aliases():
+    from synthetic import RSI, RIP
+    middle = 0x1600
+    leaf = (FunctionBuilder(entry=LEAF).push(RBX).ins(store(reg(RDI), reg(RSI)))
+            .pop(RBX).ret())
+    wrapper = FunctionBuilder(entry=middle).call(LEAF).ins(copy(reg(RAX), reg(RIP))).ret()
+    caller = (FunctionBuilder().sub_rsp(16).ins(copy(reg(RDI), reg(RSP)))
+              .ins(copy(reg(RSI), const(17))).call(middle).ins(copy(reg(R9), reg(RAX))).add_rsp(16).ret())
+    provider = RecordProvider()
+    results = analyze_units(program_units(caller, wrapper, leaf), record_provider=provider,
+                            assume_globals_disjoint_from_stack=True)
+    record = output(results, provider, R9)
+    assert evaluate(record, entry({RSP: 0x70000000})) == {wrapper._address(1)}
+
+
+def test_indirect_call_push_binds_the_observed_continuation_not_old_stack_memory():
+    from synthetic import RIP
+    leaf = FunctionBuilder(entry=LEAF).ret()
+    caller = FunctionBuilder().ins(copy(reg(RAX), const(LEAF)))
+    continuation = caller._address(len(caller._rows) + 1)
+    caller.call_indirect(RAX).ins(copy(reg(R9), reg(RIP))).ret()
+    results, provider = analyze(caller, leaf, assume_globals_disjoint_from_stack=True)
+    assert evaluate(output(results, provider, R9), entry({RSP: 0x70000000})) == {continuation}
+
+
+def test_disjoint_projected_outputs_expand_swap_without_assuming_symbolic_bases_disjoint():
+    from synthetic import RSI
+    left, right = tmp(0x100, 4), tmp(0x108, 4)
+    leaf = (FunctionBuilder(entry=LEAF).ins(load(left, reg(RDI)))
+            .ins(load(right, reg(RSI))).ins(store(reg(RDI), right)).ins(store(reg(RSI), left)).ret())
+    caller = (FunctionBuilder().sub_rsp(16).ins(copy(reg(RDI), reg(RSP)))
+              .ins(add(reg(RSI), reg(RSP), const(4))).ins(store(reg(RDI), const(13, 4)))
+              .ins(store(reg(RSI), const(29, 4))).call(LEAF).ins(load(reg(R9, 4), reg(RDI)))
+              .add_rsp(16).ret())
+    results, provider = analyze(caller, leaf, assume_globals_disjoint_from_stack=True)
+    record = output(results, provider, R9)
+    assert evaluate(record, entry({RSP: 0x70000000})) == {29}
+    assert any(node.get('status') == 'caller output bytes disjoint' for node in record['nodes'])
+    # With unconstrained entry pointers, no such disjointness proof exists.
+    unknown_caller = FunctionBuilder().call(LEAF).ins(load(reg(R9, 4), reg(RDI))).ret()
+    results, provider = analyze(unknown_caller, leaf, assume_globals_disjoint_from_stack=True)
+    with pytest.raises(Ineligible):
+        evaluate(output(results, provider, R9), entry({RDI: 0x4000, RSI: 0x4000, RSP: 0x70000000}))
+
+
+def test_nested_field_writes_reuse_all_approved_subranges_of_coalesced_output():
+    pointer, value, previous = tmp(0x100), tmp(0x108, 4), tmp(0x110, 4)
+    sink = (FunctionBuilder(entry=0x1c00).ins(load(value, reg(RDI)))
+            .ins(load(previous, const(0x4000))).ins(op('INT_XOR', [value, previous], value))
+            .ins(store(const(0x4000), value)).ret())
+    inner = (FunctionBuilder(entry=LEAF).ins(add(pointer, reg(RDI), const(4)))
+             .ins(store(pointer, const(4, 4))).ins(add(pointer, reg(RDI), const(8)))
+             .ins(store(pointer, const(6, 4))).call(0x1c00).ret())
+    outer = (FunctionBuilder(entry=0x1600).ins(add(pointer, reg(RDI), const(4)))
+             .ins(store(pointer, const(2, 4))).ins(add(pointer, reg(RDI), const(8)))
+             .ins(store(pointer, const(4, 4))).call(LEAF).ret())
+    caller = (FunctionBuilder().sub_rsp(16).ins(copy(reg(RDI), reg(RSP)))
+              .ins(store(reg(RDI), const(29, 4))).ins(store(const(0x4000), const(0, 4))).call(0x1600)
+              .ins(load(reg(R9, 4), const(0x4000))).add_rsp(16).ret())
+    provider = RecordProvider()
+    results = analyze_units(program_units(caller, outer, inner, sink), record_provider=provider,
+                            assume_globals_disjoint_from_stack=True)
+    assert evaluate(output(results, provider, R9), entry({RSP: 0x70000000})) == {29}
+    # Without the named stack/global assumption the proof must not appear.
+    provider = RecordProvider()
+    results = analyze_units(program_units(caller, outer, inner, sink), record_provider=provider)
+    with pytest.raises(Ineligible):
+        evaluate(output(results, provider, R9), entry({RSP: 0x70000000}))
+
+
+@pytest.mark.parametrize('distance', [0, 2])
+def test_projected_swap_full_or_partial_overlap_is_not_disjoint(distance):
+    from synthetic import RSI
+    left, right = tmp(0x100, 4), tmp(0x108, 4)
+    leaf = (FunctionBuilder(entry=LEAF).ins(load(left, reg(RDI)))
+            .ins(load(right, reg(RSI))).ins(store(reg(RDI), right)).ins(store(reg(RSI), left)).ret())
+    caller = (FunctionBuilder().sub_rsp(16).ins(copy(reg(RDI), reg(RSP)))
+              .ins(add(reg(RSI), reg(RSP), const(distance))).ins(store(reg(RDI), const(13, 4)))
+              .ins(store(reg(RSI), const(29, 4))).call(LEAF).ins(load(reg(R9, 4), reg(RDI)))
+              .add_rsp(16).ret())
+    results, provider = analyze(caller, leaf, assume_globals_disjoint_from_stack=True)
+    record = output(results, provider, R9)
+    assert not any(node.get('status') == 'caller output bytes disjoint' for node in record['nodes'])
+    with pytest.raises(Ineligible):
+        evaluate(record, entry({RSP: 0x70000000}))
