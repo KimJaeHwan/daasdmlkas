@@ -1805,6 +1805,7 @@ class _ScopedNormalizer:
                 uncertain_writers=frozenset(_uncertain),
                 no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
                 uses=frame_uses, separations=separations,
+                address_metadata=address_metadata,
             )
             dependencies = base.copy()
             may_alias_nodes, uncertain_nodes = _materialize_may_alias_debt(

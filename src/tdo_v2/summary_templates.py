@@ -62,7 +62,9 @@ TEMPLATE_VERSION = 2   # 2: stack_values_out
 # out (or is not exported whole) is a stack escape (docs 25.27); once-join
 # addresses at a LOAD read each candidate place; noreturn longjmp /
 # __stack_chk_fail models; import-slot-bound models carry their label
-ENGINE_SEMANTICS_VERSION = 10
+# 11: final call-copy / readonly values reach target resolution; masked index
+# ranges and exact modular relations refine alias candidates (no new assumption).
+ENGINE_SEMANTICS_VERSION = 11
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

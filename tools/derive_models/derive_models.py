@@ -113,6 +113,9 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
             else:
                 failures[unit.scopes.function.stage.name] += 1
     info = load_image_info(generation)
+    if info is None:
+        raise ValueError('library Bundle has no sealed image-info (export/import/relocation facts); '
+                         're-export the same library with the current Ghidra exporter')
     if models is None:
         models = run_dfbench.external_models(generation, model_dirs)
     if pcodeops is _DEFAULT:

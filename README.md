@@ -148,22 +148,93 @@ TDO_SUITE09_X64=/path/to/suite09_fresh_x64_baseline_39 \
   PYTHONPATH=src:tests/intra python -m pytest tests/corpus/intra/test_call_expression_suite09.py -q
 ```
 
-2026-10-17 raw 본문 기준 결과: 5,384개 출력 조회 중 54개 케이스에서 연결의 미해결 표시가 없고,
-20개에는 명시적인 부채/제한이 남습니다. 최종 호출 전 증명 전달·출력 간 비중첩·CALL 스택 쓰기 수정 후
-44개에서 54개로 늘었습니다. CALLIND의 잘못 연결된 반환 주소 값도 수정했습니다.
-60개 케이스 × 4입력의 raw p-code 실행과 16,614개 값을 대조해 불일치는 없었습니다.
+2026-10-18 정리한 raw 본문 기준 최신 결과: 5,392개 출력 조회 중 56개 케이스에서 연결의 미해결 표시가 없고,
+18개에는 명시적인 부채/제한이 남습니다. 앞선 증명 전달·출력 간 비중첩·CALL 스택 쓰기 수정으로
+44→54개, 이번 최종 call-copy 값 전달(071)·마스크 인덱스 범위/모듈러 비중첩 연결(044)로 54→56개가 됐습니다.
+CALLIND의 잘못 연결된 반환 주소 값도 수정했습니다. readonly 이미지의 호출 대상 값도 최종 대상 해석에 전달하며,
+그 사이 실제 STORE가 슬롯을 바꾸면 이미지 값으로 덮어쓰지 않습니다.
+60개 케이스 × 4입력의 raw p-code 실행과 16,742개 값·880개 STORE 주소를 대조해 불일치는 없었습니다.
 이것은 네이티브 실행이나 모든 경로의 완전성 증명이 아니며, phi는 추가 후보를 허용하는 may 식입니다.
 
 | 남은 공통 원인 | 케이스 |
 |---|---|
 | 외부 본문/런타임 동작 부재: 실행 대조 중단 | 030–033, 074–075, 090, 092, 110–111, 122–123, 130–131 |
-| 등록 콜백·함수 포인터 테이블·가상 호출의 대상 전파 | 071, 072, 080 |
-| 가변 인덱스/TLS 주소의 alias 미해결 | 044, 091 |
+| 유한한 여러 함수 포인터 대상의 합류/호출 효과 연결이 필요(엔진 잔여 작업) | 072 |
+| vtable의 읽기 전용 권한·relocation 근거가 없는 보관 데이터 | 080 |
+| TLS 기준 주소와 스택/전역의 분리 근거 없음 | 091 |
 | 상태 머신의 간접 주소·순환 메모리, 후보 writer 출력 제한 | 201 |
 
 이 보관 세트에는 현재 image-info/import 모델 연결용 메타데이터가 없습니다. 옛 naming/ABI 정보를 현재 증거로
 가장하거나 외부 호출 값을 주입하지 않았습니다. 스택/전역 분리 가정은 사용하며, 미실행·미해결·반복식·주소 미확인
 출력은 성공한 값 비교로 세지 않습니다. 이 결과를 suite09 전체 PASS로 해석하지 않습니다.
+
+### 남은 케이스에 필요한 정보
+
+이 세트의 `dfbench_win_core`는 이름과 달리 **Linux x86-64 ELF PIE**입니다. 원본에서
+`libdfbench_importlib.so`, `libc.so.6`, `GLIBC_2.34` 심볼 의존을 확인했습니다.
+Windows DLL/Win64 모델로 대체할 수 없습니다. 이름 목록은 누락 자료를 설명하기 위한 것이며,
+옛 naming-v1을 새 import/ABI 증거로 승인하지 않습니다.
+
+| 케이스 | 빠진 함수/동작 | 필요한 근거와 잔여 구현 |
+|---|---|---|
+| 030–033 | malloc/free/realloc | 실제 libc 빌드와 import/ABI 연결 정보. SysV64 CRT 모델은 이미 있지만 선언된 메모리 경계 효과이며 내부 raw 연산 증명은 아님 |
+| 122, 123 | strcpy/memset | 같은 libc 자료와 복사/설정 범위. 현재 strcpy 모델은 첫 바이트만 확정하며 나머지는 미확정이므로 전체 복사를 증명하려면 범위 근거/본문 필요 |
+| 074, 075, 130, 131 | dfb_get_opaque_fn, dfb_external_no_summary, dfb_import_identity, dfb_import_write_out | 라이브러리와 봉인 Bundle은 아래 경로에서 확인. 남은 자료는 import 슬롯/라이브러리 연결, export/relocation과 현재 naming-v2/ABI 증거이며, 실제 본문까지 보이려면 모듈 간 raw 그래프 연결도 필요 |
+| 090, 092 | pthread_create/join | 생성 콜백·상태 전달·join 동기화 근거. 라이브러리 본문 외에도 스레드 실행/합류 연결 구현 필요 |
+| 110 | _setjmp/longjmp | jmp_buf의 실제 물리 상태 저장·복원 및 재개 지점 근거, 비지역 제어 이동 연결 구현 필요 |
+| 111 | __cxa_allocate_exception/throw/begin_catch/end_catch, _Unwind_Resume | 대응 C++ 런타임/언와인더 및 landing-pad/복원 흐름 근거, 예외 제어 이동 연결 구현 필요 |
+| 080 | 읽기 전용 vtable/target 슬롯 | 최신 exporter의 봉인된 image-info(권한·relocation·import), 기존 원본 메모리 바이트와 일치해야 함 |
+| 091 | TLS 기준 레지스터(실제 raw register 0x110) | 실제 TLS 주소/메모리 매핑 또는 명시적 플랫폼 분리 계약. 현재 상태만으로는 분리라고 가정하지 않음 |
+
+최신 Ghidra 12.0.4 exporter로 **같은 원본**을 다시 추출하면 image-info와 naming-v2/ABI 연결 자료를 얻을 수 있습니다.
+추가 검색에서 `../tdo_testbed/dist/docker-linux/linux_amd64/build/libdfbench_importlib.so`를 찾았습니다.
+같은 디렉터리의 실행 파일 SHA-256은 이 보관 원본과 일치하며, 라이브러리 SHA-256
+`f0ec5debef288747673743b7de5f24370111621f1f9e34b211236ca10d1090e7`도 보관된 라이브러리 Bundle
+`../lowpcode_data_origin_v2/output/evidence/c09-importlib-inputs-20261003/bundle/ee8961c5e91dff967166272e88fe84262caf499ba261212e687cf25592290e81`
+원본과 일치합니다. 이 라이브러리까지 새로 제공할 필요는 없지만, 보관 Bundle에도 image-info가 없어 현재 유도/연결 경로에
+바로 넣을 수 없습니다. 현재 Docker daemon은 실행 중이 아니며, 대응 libc/C++ 런타임과 UE 원본 파생 Bundle은 찾지 못했습니다.
+로컬 실행도 시도했지만 Docker.app은 실행 파일 부재(`kLSNoExecutableErr`, -10827)로 열리지 않아 재추출을 진행하지 못했습니다.
+자료만 확보해도 스레드·비지역 이동·072의 다중 대상·201의 순환 상태 분석이 자동으로 완성되는 것은 아닙니다.
+
+091은 원본 p-code로 반례도 실행했습니다. SP=0x70000000, TLS 기준=0x70000004이면
+`[TLS기준 - 4] = source_A`가 반환 주소를 실제로 1로 바꿉니다. 이때 엔진은 may-alias 부채를 유지합니다.
+마스크 범위 밖·중간 인덱스 오염·넓은 인덱스의 전역 접근 반례도 회귀 테스트에 포함합니다.
+
+alias/상수 추론 변경에 따라 `ENGINE_SEMANTICS_VERSION`을 11로 올렸습니다. 기존 배포된 UE FString 파생 모델(v10)은
+안전하게 거부되며, `test_shipped_derived_models_match_this_engine`가 현재 실패합니다. 버전 숫자만 바꿔 승인하지 않습니다.
+재생성에는 원래 Bundle `ea65ba0c9345504088f51de08e477313a79135fb99ae07e159816022ec7749aa`,
+Core DLL SHA-256 `fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942`와 그 stack scan 근거가 필요합니다.
+따라서 이 변경은 UE 파생 모델 재생성까지 전체 회귀 완료/병합 가능 상태라고 보고하지 않습니다.
+이번 최종 전체 회귀는 1,011개 통과·위 모델 호환성 검사 1개 실패입니다. 044/071은 각각 경계값·무작위값을 포함한
+108입력 추가 실행에서도 값/주소 불일치가 없었습니다. 라이브러리 유도 경로의 image-info 부재도 실제로 재현했고,
+일반 AttributeError 대신 필요한 export/import/relocation 정보를 명시하는 거부 메시지로 수정했습니다.
+
+### 다른 PC에서 브랜치 검토하기 (2026-10-18)
+
+검토 브랜치는 `feature/callee-operation-records`이며, 기준 커밋은 `6600983`입니다. main에 병합하지 않은
+작업 중 스냅샷입니다. 다른 PC의 main 작업 폴더를 바꾸지 않고 별도 폴더에서 검토하려면, 해당 저장소에서 실행합니다
+(아래 폴더가 이미 있으면 새 경로를 사용).
+
+```bash
+git fetch origin
+git worktree add --detach ../tdo-callee-review origin/feature/callee-operation-records
+cd ../tdo-callee-review
+git diff --stat 6600983..HEAD
+python3 -m venv .venv
+.venv/bin/python -m pip install -e . pytest
+PYTHONPATH=src:tests/intra .venv/bin/python -m pytest tests/intra/test_call_expressions.py tests/intra/test_call_value_targets.py tests/intra/test_bounded_index_aliases.py -q
+```
+
+핵심 검토 위치는 `call_expressions.py` / `operation_records.py`의 호출 전 SSA와 실제 연산 연결,
+`relative_memory.py` / `may_alias.py`의 값·범위 전달과 불확실한 alias 유지입니다.
+실제 데이터 비교는 위 `TDO_SUITE09_X64`와 `TDO_DFBENCH054_BUNDLE`을 지정하고 `.venv/bin/python -m pytest -q`로 재실행합니다.
+Bundle·원본 바이너리·로컬 환경은 Git 관리 대상이 아니며 이 브랜치의 push에 포함하지 않습니다. 다른 PC에는 같은 봉인된
+자료를 별도로 준비해야 하며, 지정하지 않으면 실제 데이터 테스트는 skip합니다.
+
+검토 시점의 잔여 작업은 위 18개 케이스와 UE 파생 모델 v11의 정식 재생성입니다. 모델 원본 자료가 없어
+호환성 검사 1개가 실패한 상태입니다. 전체 PASS나 main 병합 가능 상태로 해석하지 않습니다.
+푸시 전 핵심 회귀 테스트(위 3개 파일) 37개와 실제 Bundle 회귀 테스트 5개를 다시 실행해 모두 통과했고,
+기존 UE 모델 호환성 검사 실패도 별도로 재현했습니다.
 
 ## 검증
 
@@ -173,7 +244,7 @@ TDO_SUITE09_X64=/path/to/suite09_fresh_x64_baseline_39 \
   `unexplained`로 따로 셉니다.
 - **golden 비교**: `tools/graph_fidelity/golden_all.sh compare <golden> <new>`.
 
-현재(2026-10-16) 지표 (정확 / 정확+확실):
+이전 main 기준(2026-10-16) 지표 (정확 / 정확+확실; 위 raw 연산식 검증과는 다른 지표):
 
 | Bundle | 케이스 | 결과 |
 |---|---|---|
@@ -184,8 +255,8 @@ TDO_SUITE09_X64=/path/to/suite09_fresh_x64_baseline_39 \
 | UE DLL Development | 22 | 16 / 16 (접근 함수 가정 + 바인딩: 18) |
 
 어느 Bundle에서도 "누락 + 확실"은 0이고, 프로그램 오라클의 누락은 0입니다(zlib의 256은 예전부터 있던 것).
-2026-10-17 이 브랜치의 자동 테스트는 990개 통과했습니다(실제 DFB054 Bundle 테스트 1개 포함;
-위 `TDO_DFBENCH054_BUNDLE`을 제공하지 않으면 그 1개는 skip).
+이 브랜치의 최신 전체 자동 테스트는 1,011개 통과·1개 실패입니다(위에 설명한 UE 파생 모델 버전 불일치).
+실제 DFB054 1개·suite09 4개 테스트를 포함하며, 해당 Bundle 환경 변수를 제공하지 않으면 이 5개는 skip합니다.
 
 ## 문서
 
@@ -198,8 +269,10 @@ TDO_SUITE09_X64=/path/to/suite09_fresh_x64_baseline_39 \
 
 ## 한계와 다음 단계
 
-- 간접 호출 대상과 콜백은 아직 설계만 되어 있습니다(모르는 호출로 남음).
-- 배열 index 쓰기의 "버퍼 안" 증명은 설계만 되어 있고(문서 25.18), 정방향 분석의 사실과 함께 구현할 예정입니다.
+- 단일 값으로 증명된 간접 호출 대상과 콜백의 실제 본문 연결은 구현했습니다. 여러 대상의 효과 합류(072),
+  외부 콜백·스레드의 실행 연결은 남아 있습니다.
+- 마스크로 제한된 index와 모듈러 주소의 비중첩 판정은 구현했습니다. 임의 index의 범위나 모든 버퍼 경계를
+  증명하는 일반 정방향 분석은 아직 아닙니다.
 - 비트 단위 정밀도(마스크·비트필드)는 미뤄 두었습니다. 엔진은 바이트 단위입니다.
-- 다음 큰 단계는 **정방향 분석 설계**입니다. 값의 범위, 함수 포인터 값 같은 정방향 사실로 가정 일부를 증명으로 바꾸는 것이
-  목표입니다.
+- 다음 작업은 위 18개 잔여 케이스를 공통 원인별로 해결하고, 같은 원본을 다시 내보내 외부 연결 근거와
+  UE 파생 모델을 갱신하는 것입니다. 재귀는 이번 검토 범위에서 제외합니다.

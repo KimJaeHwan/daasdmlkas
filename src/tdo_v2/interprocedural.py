@@ -638,7 +638,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         results = analyze({key: {**calls[key], **resolved.get(key, {})} for key in calls})
         found, found_cuts = {}, {}
         for key, item in results.items():
-            targets = _indirect_targets(item, program)
+            targets = _indirect_targets(item, program, readonly_image=readonly_image)
             if direct := {call: target for call, target in targets.items() if target in functions}:
                 found[key] = direct
             if cut := {call: cuts[target] for call, target in targets.items() if target in cuts}:
@@ -1464,7 +1464,7 @@ def _callind_sites(unit):
                            _operation_key(instruction.address, index, "COPY"), copy.inputs[0])
 
 
-def _indirect_targets(item, functions) -> dict[str, str]:
+def _indirect_targets(item, functions, *, readonly_image=None) -> dict[str, str]:
     """CALLIND key -> Bundle function the call provably reaches: the target
     register's value at the call is a constant address (address-expression
     evaluator) of a function entry, and its backward slice reaches no debt."""
@@ -1479,7 +1479,7 @@ def _indirect_targets(item, functions) -> dict[str, str]:
         return {}
     graph = normalized.dependencies
     values = constant_values(normalized, item.unit.observation, [(copy, varnode) for _, copy, varnode in sites],
-                             addresses=True)
+                             addresses=True, readonly_image=readonly_image)
     space = item.unit.scopes.function.entry.space_id
     found = {}
     for call, copy, varnode in sites:

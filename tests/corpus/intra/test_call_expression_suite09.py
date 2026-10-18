@@ -294,13 +294,29 @@ def execute_queries(suite, key, seeds=range(4)):
                 counts['not evaluable:' + str(error)] += 1
                 continue
             place = _place(span, item, vm, register, unique)
+            # An indexed object may have no entry-register anchor. Check its
+            # real address expression rather than skipping the STORE or
+            # guessing the object address from this execution's memory.
+            stores = [n for n in record['nodes'] if n['kind'] == 'op' and n.get('key') == action
+                      and n.get('function') == key and n.get('opcode') == 'STORE']
+            address_values = None
+            if len(stores) == 1:
+                operand = next(o for o in stores[0]['operands'] if o['index'] == 1)
+                address_values = evaluate({**record, 'root': operand['parts']}, entry)
             if place is None:
-                counts['unlocated output'] += 1
-                unlocated[action] += 1
-                continue
+                if address_values is None or len(record['root']) != 1:
+                    counts['unlocated output'] += 1
+                    unlocated[action] += 1
+                    continue
             for space, address, size, value in produced:
-                delta = (place[1] - address) % vm._moduli.get(space, 1 << 64)
-                if space != place[0] or delta + span.size > size:
+                if address_values is not None:
+                    counts['checked memory addresses'] += 1
+                    if space != stores[0]['space'] or address not in address_values:
+                        failures.append((seed, action, 'address', (space, address), sorted(address_values)[:8]))
+                        continue
+                delta = record['root'][0]['bytes'][0] if place is None else \
+                    (place[1] - address) % vm._moduli.get(space, 1 << 64)
+                if (place is not None and space != place[0]) or delta + span.size > size:
                     counts['output place mismatch'] += 1
                     failures.append((seed, action, 'place', place, (space, address, size)))
                     continue
@@ -348,13 +364,13 @@ def test_real_intermediate_and_memory_records_do_not_regress(actual_suites):
     assert sum(row['queries'] for row in rows) >= 5384
     # Remaining unknowns are explicit. Resolving any of them is welcome;
     # introducing new unknown cases fails, rather than silently counting PASS.
-    pending = {30, 31, 32, 33, 44, 71, 72, 74, 75, 80, 90, 91, 92,
+    pending = {30, 31, 32, 33, 72, 74, 75, 80, 90, 91, 92,
                110, 111, 122, 123, 130, 131, 201}
     for row in rows:
         number = int(row['case'].split('DFB')[1][:3])
         if number not in pending:
             assert not row['reasons'], (row['case'], row['reasons'])
-    assert sum(not row['reasons'] for row in rows) >= 54
+    assert sum(not row['reasons'] for row in rows) >= 56
 
 
 def test_real_raw_execution_matches_intermediate_and_memory_values(actual_suites):
@@ -374,5 +390,33 @@ def test_real_raw_execution_matches_intermediate_and_memory_values(actual_suites
     assert len(completed) >= 60, stopped
     assert counts['checked values'] >= 16614
     assert not counts['output place mismatch']
+    assert counts['checked memory addresses'] > 0
+    assert not counts['unlocated output']
     # This is not an all-cases PASS assertion: stopped calls, loop expressions,
     # debts and unlocated outputs above are unverified, not successful values.
+
+
+def test_actual_tls_base_can_alias_return_memory_without_platform_evidence(actual_suites):
+    """The raw observation alone does not promise that FS_BASE is outside SP."""
+    from pcode_interpreter import Interpreter
+
+    suite = actual_suites['dfbench_win_core']
+    key = next(key for key, name in suite['cases'].items() if 'DFB091_' in name)
+    item = suite['results'][key]
+    program = {(u.scopes.function.entry.space_id, u.scopes.function.entry.byte_offset): u.observation
+               for u in suite['units'].values()}
+    vm = Interpreter(item.unit.observation, constant_space=48, program=program, seed=0, havoc_calls=(548, 0x20, 8))
+    vm.preset(548, 0, 0x400, 0)
+    vm.preset(548, 0x20, 8, 0x70000000)
+    vm.preset(433, 0x70000000, 8, 0xfeedface)
+    # Actual extracted instruction: STORE ram[register(0x110) - 4].
+    vm.preset(548, 0x110, 8, 0x70000004)
+    vm.preset(433, 0x109098, 4, 0)  # pinned binary's source seed -> source_A = 1
+    assert vm.run().completed and not vm.opaque_opcodes
+    returned = sum(vm._byte(548, 0x288 + i)[0] << (8 * i) for i in range(8))
+    assert returned == 1  # not the original 0xfeedface return coordinate
+    record = next(record for action, span, record in query_records(item, suite['provider'])
+                  if action == '1b1:1057bb:0:LOAD')
+    assert record_issues(record)['debt:may_alias_read']
+    with pytest.raises(Ineligible):
+        evaluate(record, lambda _: 0)

@@ -783,13 +783,20 @@ def project_anchored_after(normalized, observation, requests) -> dict:
     return found
 
 
-def constant_values(normalized, observation, requests, addresses=False) -> dict:
+def constant_values(normalized, observation, requests, addresses=False, *, readonly_image=None) -> dict:
     """``requests``: (operation key, input varnode). Returns request -> the
     constant the varnode provably holds at that operation (no atoms; the
     final memory SSA's single reaching definition chain); others absent.
     ``addresses``: the values are used as addresses (a call target), so an
     address in the image is base-independent (``IMAGE_BASE_TRACKING``)."""
     projector = _final_projector(normalized, observation)
+    projector._readonly = readonly_image
+    # Final call rows already carry exact register/memory copy witnesses.
+    # Without these, e.g. registering a callback through a helper loses the
+    # address at the very next LOAD. Consumers still reject indebted requests
+    # (_indirect_targets / _prove_extents); this is not an alias assumption.
+    projector._pointer_rows = {key: row for key, row in normalized.pointer_rows
+                               if row[0] in ('reg', 'mem')}
     found = {}
     for operation_key, varnode in requests:
         expression = projector._expression_for_input(operation_key, varnode)
@@ -1032,12 +1039,40 @@ class _Projector:
                 0 if kind == "zext" else 1, value.byte_size, byte_size,
                 _address_atom_key(value.atoms), displacement))
             low, high = (0, (1 << bits) - 1) if kind == "zext" else (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+        # A narrow unsigned range survives extension (and a low SUBPIECE)
+        # without widening back to the entire source type. Never interpret
+        # a possibly negative/wrapping interval as unsigned here.
+        source_range = self._simple_range(value)
+        limit = 1 << (8 * byte_size if kind == 'subpiece' else bits - (kind == 'sext'))
+        if source_range is not None and offset == 0 and 0 <= source_range[0] <= source_range[1] < limit:
+            low, high = source_range
         self._boundary[atom] = (kind, value.byte_size, byte_size, (low, high))
+        self.address_metadata.setdefault('ranges', {})[atom] = (low, high)
         if any(self._is_stack_derived(key) for key, _ in value.atoms):
             self._stack_derived.add(atom)
         if any(key in self._definition_atoms for key, _ in value.atoms):
             self._definition_atoms.add(atom)   # wild like its input
         return _AddressExpression(((atom, 1),), 0, byte_size, 0)
+
+    def _simple_range(self, value):
+        if value.displacement == 0 and len(value.atoms) == 1 and value.atoms[0][1] == 1:
+            return self._boundary.get(value.atoms[0][0], (None, None, None, None))[3]
+        return None
+
+    def _masked_expression(self, value, mask, byte_size):
+        if not index_addresses() or value.image != 0 or value.byte_size != byte_size:
+            return None
+        mask = _unsigned_wrap(mask, byte_size)
+        if mask == 0:
+            return _AddressExpression((), 0, byte_size)
+        if mask == (1 << (8 * byte_size)) - 1:
+            return value
+        atom = _digest_ints(b'masked-address-atom-v1', (
+            byte_size, mask, _address_atom_key(value.atoms), _unsigned_wrap(value.displacement, byte_size)))
+        self._boundary[atom] = ('mask', byte_size, byte_size, (0, mask))
+        self.address_metadata.setdefault('ranges', {})[atom] = (0, mask)
+        self._note_opaque_atom(atom, (value,))
+        return _AddressExpression(((atom, 1),), 0, byte_size)
 
     def _once_join_expression(self, definition_id, requested_span, candidates) -> _AddressExpression:
         """A join, at a block run once per activation (after the first fixed
@@ -1126,6 +1161,7 @@ class _Projector:
         stores through it are uncertain-address writers ("opaque_call_write"
         is address-uncertain, ``function_summary._ADDRESS_UNCERTAIN``)."""
         key = definition.operation_key
+        mask = None
         if key is None or definition.span != requested_span:
             return None
         base = key.split("~", 1)[0]
@@ -1137,7 +1173,12 @@ class _Projector:
                 return None
         else:
             operation = self._operations.get(key)
-            if operation is None or operation.opcode != "LOAD":
+            if operation is not None and operation.opcode == 'INT_AND' and index_addresses() \
+                    and len(operation.inputs) == 2:
+                constants = [v for v in operation.inputs if _is_sized_constant(v, requested_span.size)]
+                if len(constants) == 1:
+                    mask = _unsigned_wrap(constants[0].coordinate.byte_offset, requested_span.size)
+            if operation is None or (operation.opcode != "LOAD" and mask is None):
                 return None
         if self._unsettled is not None:
             # a value whose memory read waits for a pending write waits too: not
@@ -1160,6 +1201,11 @@ class _Projector:
             self._definition_atoms.add(atom)
         else:
             self._fresh_atoms.add(atom)
+        if mask is not None:
+            # Even when the input has no exact address expression, this raw
+            # operation's once-produced value is stable and within [0, mask].
+            self._boundary[atom] = ('mask', requested_span.size, requested_span.size, (0, mask))
+            self.address_metadata.setdefault('ranges', {})[atom] = (0, mask)
         return _AddressExpression(((atom, 1),), 0, requested_span.size)
 
     def _pointer_row(self, definition, requested_span) -> _AddressExpression | None:
@@ -1679,6 +1725,11 @@ class _Projector:
                 value = a & b if operation.opcode == "INT_AND" else a | b if operation.opcode == "INT_OR" else a ^ b
                 return _AddressExpression((), _unsigned_wrap(value, byte_size), byte_size,
                                           _opaque_image(left, right))
+            if operation.opcode == 'INT_AND' and left is not None and right is not None \
+                    and bool(left.atoms) != bool(right.atoms):
+                value, mask = (left, right) if left.atoms else (right, left)
+                if mask.image == 0:
+                    return self._masked_expression(value, mask.displacement, byte_size)
         if operation.opcode == "SUBPIECE" and len(operation.inputs) == 2 \
                 and operation.inputs[1].kind is VarnodeKindCode.CONSTANT:
             value = self._expression_for_input(operation_key, operation.inputs[0])

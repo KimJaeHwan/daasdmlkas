@@ -261,6 +261,7 @@ def derive_may_alias_reads(
     uses: list | None = None,
     separations: tuple = (),
     escaping_calls: frozenset = frozenset(),
+    address_metadata: dict | None = None,
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -337,7 +338,91 @@ def derive_may_alias_reads(
         )
     if uses is not None:   # ``uses``: whether the private-frame rule decided a byte
         uses.append(policy.private_used)
-    return rows
+    return _refine_index_aliases(rows, unit, address_spaces, policy, address_metadata) if address_metadata else rows
+
+
+def _refine_index_aliases(rows, unit, spaces, policy, metadata):
+    """Remove only proved-disjoint candidate writers, never uncertain ones.
+
+    The address identities/ranges come from the projection which built this
+    exact effect unit. Stale/indebted address inputs are still revalidated by
+    normalize; different atom identities by themselves prove nothing.
+    """
+    from dataclasses import replace
+    from .index_relation import Atom, DISJOINT, Exact, Form, relation
+
+    objects, ranges = metadata['objects'], metadata.get('ranges', {})
+    bits_of = {s.space_id: s.address_size_bits for s in spaces if s.is_memory_space}
+    writes, unknown = {}, set(policy.uncertain_writers)
+    for block in unit.blocks:
+        for effect in block.effects:
+            if _unknown_write(effect):
+                unknown.add(effect.operation_key)
+            writes.setdefault(effect.operation_key, []).extend(
+                e.span for e in effect.writes if type(e) is ResolvedStorage and e.span.object_id.kind in _MEMORY_KINDS)
+
+    def form(span):
+        if span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
+            space, terms, constant = span.object_id.space_key, (), span.start
+        elif span.object_id in objects:
+            terms, space = objects[span.object_id]
+            constant = span.start - (1 << bits_of[space])
+        else:
+            return None
+        bits = bits_of.get(space)
+        if bits is None:
+            return None
+        return space, Form.of(bits, constant, [(Atom(key, *(ranges.get(key) or (None, None))), k) for key, k in terms])
+
+    stack = objects.get(policy.stack_object)
+    frame = [e.span for block in unit.blocks for effect in block.effects for e in (*effect.reads, *effect.writes)
+             if type(e) is ResolvedStorage and e.span.object_id == policy.stack_object]
+    frame_low = min((s.start - policy.bias for s in frame), default=0)
+    frame_high = max((s.end - policy.bias for s in frame), default=0)
+
+    def bounded_stack(value, size):
+        if not stack or stack[1] != value[0]:
+            return False
+        base = Form.of(value[1].bits, 0, [(Atom(key), k) for key, k in stack[0]])
+        difference = value[1].minus(base)
+        if any(atom.low is None for atom, _ in difference.terms):
+            return False
+        modulus = 1 << difference.bits
+        signed = lambda x: x - modulus if x >= modulus // 2 else x
+        low = high = signed(difference.constant)
+        for atom, coefficient in difference.terms:
+            ends = (signed(coefficient) * atom.low, signed(coefficient) * atom.high)
+            low += min(ends)
+            high += max(ends)
+        # A merely finite range can span gigabytes or wrap into globals.
+        # Use the named stack/global rule only inside the observed frame.
+        return frame_low <= low and high + size <= frame_high
+
+    def disjoint(a, b):
+        left, right = form(a), form(b)
+        if left is None or right is None:
+            return False
+        if left[0] != right[0]:
+            return True
+        if policy.globals_disjoint and (
+                (a.object_id.kind is StorageObjectKind.ADDRESS_SPACE and bounded_stack(right, b.size))
+                or (b.object_id.kind is StorageObjectKind.ADDRESS_SPACE and bounded_stack(left, a.size))):
+            return True
+        result = relation(left[1], a.size, right[1], b.size)
+        return result == DISJOINT or (type(result) is Exact and not result.overlaps(a.size, b.size, left[1].bits))
+
+    found = []
+    for row in rows:
+        if row.unknown_address:
+            found.append(row)
+            continue
+        kept = tuple(writer for writer in row.writers if writer in unknown or not writes.get(writer)
+                     or any(not disjoint(read, written) for read in row.spans for written in writes[writer]))
+        if kept:
+            found.append(replace(row, writers=kept,
+                                 uncertain=tuple(w for w in row.uncertain if w in kept),
+                                 plain=None if row.plain is None else tuple(w for w in row.plain if w in kept)))
+    return tuple(found)
 
 
 def _ran_before(unit):
