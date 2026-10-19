@@ -12,6 +12,7 @@ from .resource_limits import step
 
 import os
 from bisect import bisect_right
+from collections import deque
 
 DATAFLOW_ENGINE_ENV = "TDO_V2_DATAFLOW_ENGINE"          # dense | sparse (call-clobber, may-alias)
 DATAFLOW_CROSSCHECK_ENV = "TDO_V2_DATAFLOW_CROSSCHECK"  # second engine to compare with
@@ -190,11 +191,11 @@ class DominatorGraph:
             for point in points_in:
                 if point in phis and point not in writes:
                     dependents.setdefault(point, set()).add(item)
-        pending = sorted(phis, key=self.pre.__getitem__)
+        pending = deque(sorted(phis, key=self.pre.__getitem__))   # FIFO (docs 25.31 B0-5)
         queued = set(pending)
         while pending:
             step()   # (budget: docs 25.30 K1c)
-            item = pending.pop(0)
+            item = pending.popleft()
             queued.discard(item)
             value = entry_value if item == self.entry else frozenset()
             for point in sources[item]:
@@ -276,11 +277,11 @@ class DominatorGraph:
             kills, after_kill, gens = row
             return after_kill if kills else value_in[point] | gens
 
-        pending = sorted(points, key=self.pre.__getitem__)
+        pending = deque(sorted(points, key=self.pre.__getitem__))   # FIFO (docs 25.31 B0-5)
         queued = set(pending)
         while pending:
             step()   # (budget: docs 25.30 K1c)
-            item = pending.pop(0)
+            item = pending.popleft()
             queued.discard(item)
             value = frozenset()
             for point in sources[item]:
