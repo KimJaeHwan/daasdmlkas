@@ -27,7 +27,7 @@ from .control_dependence import (
 )
 from .pcode_blocks import build_pcode_block_graph
 from .rep_strings import MAX_REP_BYTES, rep_sites
-from .may_alias import MayAliasRead, derive_may_alias_reads, private_frame_writes
+from .may_alias import EscapeMemo, MayAliasRead, derive_may_alias_reads, private_frame_writes
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
     BoundLocalMemorySsa,
@@ -1788,10 +1788,13 @@ class _ScopedNormalizer:
         opaque_calls = _opaque_calls(observation, proven_call_effects, assumed_call_effects)
         frame_uses: list = []
         opaque_uses: list = []
+        # the stack escapes once for this normalization (docs 25.31 B0-4)
+        escape_memo = EscapeMemo(effect_unit, observation, context, address_spaces)
         private_writes = private_frame_writes(
             effect_unit, observation, context, address_spaces,
             assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
             uses=frame_uses, escaping_calls=escaping_calls, opaque_calls=opaque_calls, opaque_uses=opaque_uses,
+            escape_memo=escape_memo,
         )
         # uncertain-address writers to their fixed point here: only the
         # may-alias rows and their debt nodes depend on them (a copy of the
@@ -1833,7 +1836,7 @@ class _ScopedNormalizer:
                 private_above=private_frame_above,
                 uncertain_writers=frozenset(_uncertain),
                 no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
-                uses=frame_uses, separations=separations,
+                uses=frame_uses, separations=separations, escape_memo=escape_memo,
             )
             dependencies = base.copy()
             phase_count("fixpoint_rounds", 1)   # (K2 sizes: a graph copy per round, docs 25.31)
