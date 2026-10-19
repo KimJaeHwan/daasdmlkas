@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .resource_limits import step
+
 from collections import Counter
 from typing import Iterable
 
@@ -109,6 +111,7 @@ class RustworkxDependencyGraph:
         visited: set[NodeId] = set()
         ordered: list[NodeId] = []
         while pending:
+            step()   # (budget: docs 25.30 K1c)
             node = pending.pop()
             if node in visited:
                 continue

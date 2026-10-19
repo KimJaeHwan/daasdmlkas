@@ -59,6 +59,7 @@ CONTRACT = {
 # older snapshots stay comparable (a non-default value is encoded and differs)
 ADDED_FIELDS = {
     "EngineRun": {"failed_functions": ()},
+    "AnalyzedFunction": {"failure_detail": "", "superseded": None},
 }
 
 # identity / authority tokens with no content (each is a unique object; only

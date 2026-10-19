@@ -325,8 +325,8 @@ def test_a_failed_function_keeps_its_sink_occurrences_as_incomplete_roots(monkey
     target = max(own, key=lambda offset: len(own[offset]))
     _failing(monkeypatch, target, AnalysisBudgetExceeded("work", "test"))
     after = run()
-    key = next(name for name, _ in after.failed_functions)
-    assert after.failed_functions == ((key, "analysis_budget"),) and key.endswith(f":{target:x}")
+    key = next(name for name, _, _ in after.failed_functions)
+    assert after.failed_functions == ((key, "analysis_budget", "function:work"),) and key.endswith(f":{target:x}")
     failed = [root for root in after.roots if root.function_byte_offset == target]
     # every own (syntactic) sink occurrence, under the same occurrence numbers
     occurrences = {(root.label, root.occurrence_ordinal) for root in failed}
@@ -404,3 +404,125 @@ def test_only_late_failures_take_dependents_with_them():
     assert kept.is_locally_complete
     (marked,) = _dependents_incomplete([kept], {"1:c"}, results, by_key)
     assert not marked.is_locally_complete and marked.explanation["rests_on_failed"] == ["1:c"]
+
+
+# -- the legacy engine (K1b: run-level, typed) ------------------------------------
+
+def _legacy(generation):
+    sys.path.insert(0, str(REPO / "tools" / "bundle_export"))
+    import run_dfbench
+    from tdo_v2 import engine
+
+    return engine.analyze_frozen_bundle(
+        generation, naming_exporter_source=REPO / "ghidra" / "GhidraV2CallNaming.java",
+        boundary_provider=run_dfbench.boundary_provider(False, run_dfbench.abi_of(generation)),
+        include_explanations=False)
+
+
+@pytest.mark.skipif(_generation() is None, reason="v2-win-release Bundle not exported here")
+def test_the_legacy_engine_fails_the_run_with_the_typed_reason(monkeypatch):
+    from tdo_v2.engine import UnresolvedBundleFunctionError
+
+    generation = _generation()
+    first = _legacy(generation).roots[0].function_byte_offset
+    _failing(monkeypatch, first, AnalysisBudgetExceeded("work", "test"))
+    with pytest.raises(UnresolvedBundleFunctionError) as caught:
+        _legacy(generation)
+    assert caught.value.reason is NormalizationFailureReason.ANALYSIS_BUDGET
+    assert caught.value.entry.byte_offset == first
+
+
+@pytest.mark.skipif(_generation() is None, reason="v2-win-release Bundle not exported here")
+def test_a_legacy_whole_program_resource_failure_returns_no_roots(monkeypatch):
+    from tdo_v2 import engine
+
+    def fails(*args, **kwargs):
+        raise RecursionError("whole program")
+
+    monkeypatch.setattr(engine, "complete_configured_interprocedural_slices", fails)
+    with pytest.raises(RecursionError, match="whole program"):
+        _legacy(_generation())
+
+
+
+# -- typed refusals fail one function (K1c item 7) --------------------------------
+
+@pytest.mark.skipif(_generation() is None, reason="v2-win-release Bundle not exported here")
+def test_an_unsupported_function_fails_alone_with_its_reason(monkeypatch):
+    """A typed normalization refusal no longer aborts the run: listed, its sink
+    occurrences failure roots, the rest analysed."""
+    sys.path.insert(0, str(REPO / "tools" / "bundle_export"))
+    import run_dfbench
+    from tdo_v2 import summary_engine
+    from tdo_v2.normalize import UnresolvedNormalizedFunction
+
+    generation = _generation()
+
+    def run():
+        return summary_engine.analyze_frozen_bundle_with_summaries(
+            generation, naming_exporter_source=REPO / "ghidra" / "GhidraV2CallNaming.java",
+            boundary_provider=run_dfbench.boundary_provider(False, run_dfbench.abi_of(generation)),
+            pcodeop_models=run_dfbench.pcodeop_models())
+
+    before = run()
+    target = before.roots[0].function_byte_offset
+    original = FunctionNormalizer.normalize
+
+    def normalize(self, unit, *args, **kwargs):
+        if unit.scopes.function.entry.byte_offset == target:
+            return UnresolvedNormalizedFunction(unit.scopes,
+                                                NormalizationFailureReason.UNSUPPORTED_INTRA_INSTRUCTION_FLOW)
+        return original(self, unit, *args, **kwargs)
+
+    monkeypatch.setattr(FunctionNormalizer, "normalize", normalize)
+    after = run()
+    assert [(key.endswith(f":{target:x}"), reason, detail) for key, reason, detail in after.failed_functions] ==         [(True, "unsupported_intra_instruction_flow", "")]
+    failed = [root for root in after.roots if root.function_byte_offset == target]
+    assert failed and all(root.explanation == {"failure": "unsupported_intra_instruction_flow"}
+                          and not root.is_locally_complete for root in failed)
+    assert any(root.function_byte_offset != target for root in after.roots)
+
+
+def test_a_stack_switch_check_without_the_entry_is_unchecked():
+    from tdo_v2.may_alias import _coefficient_switches
+
+    (unit,) = program_units(_wide_chain(1, 3))
+    observation = unit.observation
+    assert _coefficient_switches(observation, 1, 0x20, 8, "not-the-entry") == ("unchecked",)
+
+
+
+def test_the_public_stack_check_without_the_entry_is_unchecked():
+    """Before any fast path: an empty observation, or one missing the entry,
+    with or without registers (Astra K1b/K1c-1 implementation round 1, P1-1)."""
+    from types import SimpleNamespace
+
+    from tdo_v2.may_alias import stack_switches
+
+    (unit,) = program_units(_wide_chain(1, 3))
+    stub = SimpleNamespace(entry_block_key="not-the-entry")
+    assert stack_switches(stub, unit.observation, None, None) == ("unchecked",)
+    assert stack_switches(stub, SimpleNamespace(instructions=()), None, None) == ("unchecked",)
+
+
+def test_a_template_over_a_refused_callee_is_refused(monkeypatch):
+    """A calls B, B is refused (an unsupported shape): A's export is a semantic
+    refusal, never a template with B's call left opaque."""
+    from tdo_v2.normalize import UnresolvedNormalizedFunction
+    from tdo_v2.summary_templates import TemplateRefused, export_summary
+
+    original = FunctionNormalizer.normalize
+
+    def normalize(self, unit, *args, **kwargs):
+        if unit.scopes.function.entry.byte_offset == 0x1800:
+            return UnresolvedNormalizedFunction(unit.scopes,
+                                                NormalizationFailureReason.UNSUPPORTED_INTRA_INSTRUCTION_FLOW)
+        return original(self, unit, *args, **kwargs)
+
+    monkeypatch.setattr(FunctionNormalizer, "normalize", normalize)
+    caller = FunctionBuilder().sub_rsp(0x28).call(0x1800).add_rsp(0x28).ret()
+    results = analyze_units(program_units(caller, _wide_chain(1, 3, 0x1800)))
+    assert results["1:1000"].summary is not None
+    with pytest.raises(TemplateRefused, match="unsupported_intra_instruction_flow") as caught:
+        export_summary(results["1:1000"], results, set())
+    assert caught.value.kind == "semantic"

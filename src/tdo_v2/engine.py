@@ -31,10 +31,12 @@ from .integration.observed_function_session import (
     ObservedFunctionEvidence,
     open_observed_function_session,
 )
+from .interprocedural import ANALYSIS_FAILURES, _failure_reason
 from .normalize import (
     FunctionNormalizer,
     NormalizationFailureReason,
     NormalizedFunction,
+    UnresolvedNormalizedFunction,
 )
 from .opaque_values import OpaqueValueEvidenceProvider
 from .resource_limits import analysis_entry
@@ -110,12 +112,13 @@ class EngineRun:
     # named opt-in assumptions the results rely on (e.g.
     # "globals-disjoint-from-stack"); empty for evidence-only runs
     assumptions: tuple[str, ...] = ()
-    # (function key, failure reason) of every function whose analysis ran out
-    # of a resource (``NormalizationFailureReason.ANALYSIS_DEPTH`` /
-    # ``ANALYSIS_BUDGET``): its syntactic sink occurrences are incomplete roots
+    # (function key, failure reason) of every function that did not normalize
+    # (summary engine): a resource failure (``NormalizationFailureReason.ANALYSIS_DEPTH``
+    # / ``ANALYSIS_BUDGET``) or a typed refusal of an admitted function (an
+    # unsupported shape): its syntactic sink occurrences are incomplete roots
     # with no nodes; roots projected through its calls are not enumerated, so
     # an empty origin set anywhere in the run is no evidence of absence for it
-    failed_functions: tuple[tuple[str, str], ...] = ()
+    failed_functions: tuple[tuple[str, str, str], ...] = ()   # (key, reason, detail)
 
 
 @analysis_entry
@@ -139,7 +142,11 @@ def analyze_frozen_bundle(
 
     This is engine output, not an independent path-verification or corpus grade.
     Every function must normalize successfully; partial inventories never become
-    apparently complete results.
+    apparently complete results. A function whose normalization runs out of a
+    resource fails the run the same way (``UnresolvedBundleFunctionError`` with
+    ``ANALYSIS_DEPTH`` / ``ANALYSIS_BUDGET``); a resource failure in the
+    whole-program or per-root stages propagates out of the entry (no partial
+    roots) -- docs 25.30 K1b.
     """
     if type(include_explanations) is not bool:
         raise TypeError("include_explanations must be an exact bool")
@@ -161,15 +168,20 @@ def analyze_frozen_bundle(
         rows = []
         normalizer = FunctionNormalizer()
         for index, evidence in enumerate(session.iter_functions()):
-            normalized = normalizer.normalize(
-                evidence.unit,
-                opaque_value_provider=opaque_value_provider,
-                assumed_call_effects=(
-                    assumed_boundary_effects(evidence, boundary_provider)
-                    if assume_boundary_call_effects
-                    else None
-                ),
-            )
+            try:
+                normalized = normalizer.normalize(
+                    evidence.unit,
+                    opaque_value_provider=opaque_value_provider,
+                    assumed_call_effects=(
+                        assumed_boundary_effects(evidence, boundary_provider)
+                        if assume_boundary_call_effects
+                        else None
+                    ),
+                )
+            except ANALYSIS_FAILURES as error:
+                # (a reference engine: the run fails with the typed reason --
+                # its whole-program stages cannot leave one function out)
+                normalized = UnresolvedNormalizedFunction(evidence.unit.scopes, _failure_reason(error))
             if type(normalized) is not NormalizedFunction:
                 function = evidence.unit.scopes.function
                 raise UnresolvedBundleFunctionError(
@@ -255,6 +267,7 @@ def assumed_boundary_effects(
     return effects
 
 
+@analysis_entry
 def analyze_observed_functions(
     rows: tuple[tuple[ObservedFunctionEvidence, NormalizedFunction], ...],
     boundary_provider: BoundaryProvider,

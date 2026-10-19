@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .resource_limits import limit
+
+from .resource_limits import step
+
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -973,6 +977,7 @@ def _accessor_states(observation, block_graph, entry_block, proven_call_effects,
         out: dict = {}
         pending = [entry_block]
         while pending:
+            step()   # (budget: docs 25.30 K1c)
             key = pending.pop()
             new = transfer(key, meet(key, out))
             if out.get(key) != new:
@@ -1238,6 +1243,9 @@ class NormalizationFailureReason(StrEnum):
     # a per-function budget ran out (``resource_limits.AnalysisBudgetExceeded``):
     # likewise not normalizing, opaque for callers
     ANALYSIS_BUDGET = "analysis_budget"
+    # the RUN's budget ran out before this function was analysed (or its
+    # result could be published: docs 25.30 K1c-3)
+    ANALYSIS_RUN_BUDGET = "analysis_run_budget"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1379,6 +1387,7 @@ class _ScopedNormalizer:
 
         blocked, sites, bounds, uncertain = frozenset(), frozenset(), frozenset(), {}
         while True:
+            step()   # (budget: docs 25.30 K1c)
             result = self._normalize_once(
                 unit, configured_call_effects, _blocked_reads=blocked, _blocked_sites=sites,
                 _blocked_bounds=bounds, _uncertain=uncertain, **options)
@@ -1457,6 +1466,7 @@ class _ScopedNormalizer:
         rep_used: dict = {}  # memory values the rep proofs used (validated at the end)
         direction_assumed = False
         while True:
+            step()   # (budget: docs 25.30 K1c)
             dependencies = RustworkxDependencyGraph()
             effects: list[ObservedEffect] = []
             staged_temporaries: list = []
@@ -1629,6 +1639,7 @@ class _ScopedNormalizer:
             # (``settle_pending``); undone if it gives one of those writes an address
             settle, settled_at = True, None
             while True:
+                step()   # (budget: docs 25.30 K1c)
                 if projection_budget <= 0:
                     raise AssertionError("relative-memory projection did not reach a fixed point")
                 projection_budget -= 1
@@ -1806,6 +1817,7 @@ class _ScopedNormalizer:
             ((key, anchored[0], anchored[1]) for key, anchored in anchored_call_accesses.items()),
             key=lambda item: item[0]))
         while True:
+            step()   # (budget: docs 25.30 K1c)
             may_alias_reads = derive_may_alias_reads(
                 effect_unit, observation, context, address_spaces,
                 assumed_calls=quiet_calls,
@@ -1931,6 +1943,9 @@ class _ScopedNormalizer:
                         operation_nodes[site.branch_key], operation_nodes[f"{key}~e{index}"],
                         EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=site.branch_key),
                     )
+        limit("graph_nodes", dependencies.node_count)
+        limit("graph_edges", dependencies.edge_count)
+        limit("memory_definitions", len(memory_ssa.definitions) if memory_ssa is not None else 0)
         dependencies.freeze()
         return NormalizedFunction(
             document=None,
@@ -2130,6 +2145,7 @@ def _cfg_admission_failure(
     pending = [entry_key]
     reached: set[str] = set()
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         block_key = pending.pop()
         if block_key in reached:
             continue

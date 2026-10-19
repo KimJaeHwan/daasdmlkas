@@ -53,6 +53,8 @@ frame writes reach them, like unknown-address accesses.
 
 from __future__ import annotations
 
+from .resource_limits import step
+
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -435,6 +437,7 @@ def _dense_rows(unit, objects, policy) -> tuple[MayAliasRead, ...]:
     in_states: dict[str, dict] = {unit.entry_block_key: start}
     pending = {unit.entry_block_key}
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         key = min(pending)
         pending.remove(key)
         state = _transfer(blocks[key], in_states[key], objects, policy, None)
@@ -748,6 +751,7 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
     in_states = {graph.entry: stack_bytes}
     pending = {graph.entry}
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         key = min(pending, key=order.__getitem__)
         pending.remove(key)
         out = transfer(blocks[key], in_states[key], None, None)
@@ -871,6 +875,11 @@ def stack_switches(unit, observation, context, address_spaces, program_stack=Non
     The check withdraws an assumption: it must not miss a switch (MUST
     analysis, ``_coefficient_switches``; ``call_preserved``: register
     (offset, size) a callee keeps, ``CALL_PRESERVED``)."""
+    from .pcode_blocks import instruction_key
+
+    if not any(instruction_key(row.address) == unit.entry_block_key for row in observation.instructions):
+        # the entry is not observed (or nothing is): what runs first is unknown
+        return ("unchecked",)
     found = _stack_pointer(unit, observation, context, address_spaces)
     register_space = _register_space_id(observation)
     touched = any(varnode is not None and varnode.kind is VarnodeKindCode.REGISTER
@@ -915,7 +924,8 @@ def _coefficient_switches(observation, register_space: int, offset: int, size: i
     (both: stack-switch-check-exceptions). A location read whole as it was
     written gets its coefficient; one overlapping part of a non-zero entry is
     None. Instructions no path from the entry reaches are checked from the
-    entry state (the stack pointer is the stack pointer everywhere)."""
+    entry state (the stack pointer is the stack pointer everywhere). An entry
+    missing from the observation is "unchecked"."""
     from .pcode_blocks import build_pcode_block_graph, instruction_key
 
     instructions = {row.address: row for row in observation.instructions}
@@ -923,8 +933,10 @@ def _coefficient_switches(observation, register_space: int, offset: int, size: i
         return ()
     stack = (register_space, offset, size)
     preserved = {(register_space, start, width) for start, width in call_preserved}
-    entry = next((address for address in instructions if instruction_key(address) == entry_key),
-                 min(instructions))
+    entry = next((address for address in instructions if instruction_key(address) == entry_key), None)
+    if entry is None:
+        # the entry is not observed: what runs before the observed code is unknown
+        return ("unchecked",)
     switches: set[str] = set()
     covered: set = set()
     for start in [entry] + sorted(instructions):
@@ -1031,6 +1043,7 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
     in_states = {graph.entry: {stack: 1}}
     pending = {graph.entry}
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         key = min(pending, key=order.__getitem__)
         pending.remove(key)
         out = transfer(blocks[key], in_states[key], None)

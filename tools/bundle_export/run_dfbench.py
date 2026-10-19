@@ -312,7 +312,10 @@ def main() -> int:
                 print("      " + line)
         print("[run]", tally)
     if args.json:
-        args.json.write_text(json.dumps(results, indent=1), encoding="utf-8")
+        # atomically: a failed run leaves no partial artifact (docs 25.30 K1c-3)
+        partial = args.json.with_name(args.json.name + ".partial")
+        partial.write_text(json.dumps(results, indent=1), encoding="utf-8")
+        partial.replace(args.json)
     return 0
 
 

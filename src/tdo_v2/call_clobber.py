@@ -20,6 +20,8 @@ pointer escaping, so frame preservation needs callee-side evidence.
 
 from __future__ import annotations
 
+from .resource_limits import step
+
 from dataclasses import dataclass
 
 from ._scope_contracts import ValidatedFunctionObservation, VarnodeKindCode
@@ -219,6 +221,7 @@ def _dense_rows(unit, calls, preserved, memory_keeping=frozenset()) -> tuple[Cal
     in_states: dict[str, _State] = {unit.entry_block_key: _EMPTY}
     pending = {unit.entry_block_key}
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         key = min(pending)
         pending.remove(key)
         state = _transfer(blocks[key], in_states[key], calls, preserved, None, memory_keeping)

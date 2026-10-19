@@ -8,6 +8,8 @@ call-clobber / may-alias analyses.
 
 from __future__ import annotations
 
+from .resource_limits import step
+
 import os
 from bisect import bisect_right
 
@@ -58,6 +60,7 @@ class DominatorGraph:
         all_successors = {key: tuple(sorted(values)) for key, values in successors.items()}
         reachable, pending = set(), [entry]
         while pending:
+            step()   # (budget: docs 25.30 K1c)
             node = pending.pop()
             if node not in reachable:
                 reachable.add(node)
@@ -103,6 +106,7 @@ class DominatorGraph:
 
         changed = True
         while changed:
+            step()   # (budget: docs 25.30 K1c)
             changed = False
             for node in order[1:]:
                 processed = [item for item in self.predecessors[node] if item in idom]
@@ -138,6 +142,7 @@ class DominatorGraph:
         counter = 0
         stack = [(self.entry, False)]
         while stack:
+            step()   # (budget: docs 25.30 K1c)
             node, done = stack.pop()
             if done:
                 self.post[node] = counter
@@ -157,6 +162,7 @@ class DominatorGraph:
         phis = {self.entry}
         pending = list(writes)
         while pending:  # iterated dominance frontier of the writing blocks
+            step()   # (budget: docs 25.30 K1c)
             node = pending.pop()
             for item in self.frontier[node]:
                 if item not in phis:
@@ -187,6 +193,7 @@ class DominatorGraph:
         pending = sorted(phis, key=self.pre.__getitem__)
         queued = set(pending)
         while pending:
+            step()   # (budget: docs 25.30 K1c)
             item = pending.pop(0)
             queued.discard(item)
             value = entry_value if item == self.entry else frozenset()
@@ -213,6 +220,7 @@ class DominatorGraph:
         phis = {self.entry}
         pending = [item for item in blocks if item in self.pre]
         while pending:
+            step()   # (budget: docs 25.30 K1c)
             node = pending.pop()
             for item in self.frontier[node]:
                 if item not in phis:
@@ -271,6 +279,7 @@ class DominatorGraph:
         pending = sorted(points, key=self.pre.__getitem__)
         queued = set(pending)
         while pending:
+            step()   # (budget: docs 25.30 K1c)
             item = pending.pop(0)
             queued.discard(item)
             value = frozenset()

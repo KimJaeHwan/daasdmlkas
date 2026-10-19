@@ -38,6 +38,10 @@ shared sparse solver at the exit of each terminal block.
 
 from __future__ import annotations
 
+from .resource_limits import limit
+
+from .resource_limits import step
+
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -258,6 +262,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
             bool(complete) and not debts and not unconditional_writers,
             tuple(sorted(conditions, key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))),
         ))
+    limit("summary_runs", sum(len(item.runs) for item in exits))
     return FunctionSummary(
         FUNCTION_SUMMARY_VERSION, tuple(exits), tuple(sorted(crossed.get("unknown_writers", ()))),
         tuple(writer_objects),
@@ -379,6 +384,7 @@ def _state_runs(nodes, root):
     """The runs of one serialized terminal state, ordered by atom."""
     found, pending = [], [root] if root is not None else []
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         node = nodes[pending.pop()]
         found.append(node)
         pending.extend(item for item in (node.left_node_id, node.right_node_id) if item is not None)
@@ -410,6 +416,7 @@ class _AncestorClosure:
                     carriers.add(source)
         changed = True
         while changed:  # JOINs over entry memory carry it too
+            step()   # (budget: docs 25.30 K1c)
             changed = False
             for node, sources in self.predecessors.items():
                 if node not in carriers and graph.node(node).kind is NodeKind.MEMORY_JOIN \
@@ -442,6 +449,7 @@ class _AncestorClosure:
                 # caller drops the call (``writer_conditions``, run conditions)
                 self.predecessors[node] = []
         self.value: dict[int, tuple] = {}
+        self.members = 0   # set memberships materialized (structural limit "fact_members")
 
     def of(self, node: int):
         if node not in self.value:
@@ -503,6 +511,8 @@ class _AncestorClosure:
                         for part, found in zip(parts, self.value[parent_node]):
                             part |= found
                 value = tuple(frozenset(part) for part in parts)
+                self.members += sum(map(len, value))
+                limit("fact_members", self.members)
                 for item in component:
                     self.value[item] = value
 
@@ -574,6 +584,7 @@ def _address_slice(graph, inputs, conditions_of) -> list:
 
     pending, seen = list(inputs), set()
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         node = pending.pop()
         if node in seen:
             continue
@@ -861,6 +872,7 @@ def _dead_region(normalized, observation, dead_ops):
                 break
     reached, pending = set(), [graph.entry]
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         key = pending.pop()
         if key in reached or key not in blocks:
             continue
@@ -1087,6 +1099,7 @@ def _live_gens_at_exit(graph, events, exit_block: str) -> frozenset:
     seen: set[str] = set()
     pending = [exit_block]
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         block = pending.pop()
         if block in seen or block not in graph.pre:
             continue

@@ -23,6 +23,8 @@ Edges run decision operation -> dependent operation with kind
 
 from __future__ import annotations
 
+from .resource_limits import step
+
 from dataclasses import dataclass
 
 from ._scope_contracts import AddressCoordinate, ValidatedFunctionObservation
@@ -105,6 +107,7 @@ def _connect_exitless(successors) -> None:
     reaches = set()
     pending = [_EXIT]
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         node = pending.pop()
         if node in reaches:
             continue
@@ -126,6 +129,7 @@ def _immediate_postdominators(successors) -> dict[object, object]:
     seen = {_EXIT}
     stack = [(_EXIT, iter(sorted(predecessors[_EXIT], key=repr)))]
     while stack:
+        step()   # (budget: docs 25.30 K1c)
         node, children = stack[-1]
         for child in children:
             if child not in seen:
@@ -148,6 +152,7 @@ def _immediate_postdominators(successors) -> dict[object, object]:
 
     changed = True
     while changed:
+        step()   # (budget: docs 25.30 K1c)
         changed = False
         for node in reversed(order):
             if node == _EXIT:

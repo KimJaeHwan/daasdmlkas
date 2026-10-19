@@ -32,6 +32,8 @@ oracle checks this against concrete runs).
 
 from __future__ import annotations
 
+from .resource_limits import step
+
 from dataclasses import dataclass, field
 
 from ._scope_contracts import VarnodeKindCode
@@ -184,6 +186,7 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False, budget=N
         add(node, frozenset(byte for span in spans for byte in range(span.start, span.end)) & whole)
     steps = 0
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         if (budget is not None and steps >= budget) or (byte_budget is not None and materialized[0] > byte_budget) \
                 or over(_cost(index, pending[-1])):
             return LaneSlice(demands, frozenset(demands), True, frozenset(pending))

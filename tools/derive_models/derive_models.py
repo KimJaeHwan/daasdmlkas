@@ -191,7 +191,12 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
     files, refused = {}, {}
     from tdo_v2.summary_templates import Refusal
 
+    from tdo_v2.resource_limits import run_exhausted
+
     for name in present:
+        if run_exhausted():   # the run's budget ran out: no further derivation (retried next run)
+            refused[name] = Refusal("run budget exhausted", "transient")
+            continue
         if exports[name] not in by_key:   # exported, but its function was not admitted
             refused[name] = Refusal("not analyzed", "infrastructure")
             continue

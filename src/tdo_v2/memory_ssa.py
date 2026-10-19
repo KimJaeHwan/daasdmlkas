@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .resource_limits import step
+
 from bisect import bisect_left
 from dataclasses import dataclass
 import heapq
@@ -112,6 +114,7 @@ def _dense_states(unit, partition, write_ids, entry_state, pool, *, compress_cha
     queued = set(pending)
 
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         block_key = heapq.heappop(pending)
         queued.remove(block_key)
         delta = pending_deltas.pop(block_key)
@@ -482,6 +485,7 @@ def _serialize_terminal_states(
 
         stack = [(root, False)]
         while stack:
+            step()   # (budget: docs 25.30 K1c)
             node, expanded = stack.pop()
             identity = id(node)
             if identity in encoded:

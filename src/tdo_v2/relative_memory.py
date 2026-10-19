@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .resource_limits import step
+
 from dataclasses import dataclass, replace
 import hashlib
 
@@ -498,6 +500,7 @@ def _unsettled_reads(unit):
         return None
     late, pending = set(), [item for key in first_pending for item in successors.get(key, ())]
     while pending:
+        step()   # (budget: docs 25.30 K1c)
         key = pending.pop()
         if key not in late:
             late.add(key)
@@ -1472,6 +1475,7 @@ class _Projector:
             return self._cache[cache_key]
         if cache_key in self._active:
             return None
+        step()
         definition = self._ssa.definitions[definition_id]
         if not definition.span.contains(requested_span):
             self._cache[cache_key] = None

@@ -23,7 +23,7 @@ from dataclasses import replace
 
 from .call_clobber import _register_space_id
 from .model import ResolvedStorage
-from .resource_limits import AnalysisBudgetExceeded, analysis_entry
+from .resource_limits import AnalysisBudgetExceeded, activation, analysis_entry, checkpoint, run_exhausted
 from .normalize import _program_register_space
 from .span_geometry import ByteSpan
 from .summary_store import model_effect
@@ -62,6 +62,13 @@ class AnalyzedFunction:
     # imports whose derived model (template) was not applied: call key -> why
     # (and "bound-model@<rva>" -> why a binding of this function was not applied)
     refused_models: dict = field(default_factory=dict)
+    # a resource failure's detail ("function:depth", "function:work",
+    # "run:time" ...; ``EngineRun.failed_functions``)
+    failure_detail: str = ""
+    # a failure published over a round-1 result after a run exhaustion
+    # (docs 25.30 K1c-3): that round-1 result, whose summary its callers used --
+    # its assumptions are still the run's (``summary_engine.run_assumptions``)
+    superseded: object = None
     # calls taking a bound model (docs 25.20 F): call key -> (binding id, binding
     # file digest, rva, executable sha256, model label, model file digest)
     bound_calls: dict = field(default_factory=dict)
@@ -133,15 +140,54 @@ ANALYSIS_FAILURES = (RecursionError, AnalysisBudgetExceeded)
 
 
 def _failure_reason(error) -> "NormalizationFailureReason":
-    return (NormalizationFailureReason.ANALYSIS_DEPTH if isinstance(error, RecursionError)
-            else NormalizationFailureReason.ANALYSIS_BUDGET)
+    if isinstance(error, RecursionError):
+        return NormalizationFailureReason.ANALYSIS_DEPTH
+    if getattr(error, "scope", "function") == "run":
+        return NormalizationFailureReason.ANALYSIS_RUN_BUDGET
+    return NormalizationFailureReason.ANALYSIS_BUDGET
+
+
+def _run_budget_failure(key, unit, calls) -> "AnalyzedFunction":
+    """A function left unanalysed (or unpublished) by a run exhaustion."""
+    from .resource_limits import current_run
+
+    run = current_run()
+    detail = f"run:{run.exhausted if run is not None and run.exhausted else 'unknown'}"
+    return AnalyzedFunction(key, unit, UnresolvedNormalizedFunction(
+        unit.scopes, NormalizationFailureReason.ANALYSIS_RUN_BUDGET), None, calls, failure_detail=detail)
+
+
+def _failure_detail(error) -> str:
+    """"function:depth", "function:work", "run:time" ... (``EngineRun.failed_functions``)."""
+    if isinstance(error, RecursionError):
+        return "function:depth"
+    return f"{getattr(error, 'scope', 'function')}:{getattr(error, 'kind', 'unknown')}"
+
+
+def _is_run_exhaustion(error) -> bool:
+    return isinstance(error, AnalysisBudgetExceeded) and error.scope == "run"
 
 
 def _resource_error(reason, detail: str) -> Exception:
     """A fresh exception of ``reason``'s kind (a recorded failure raised again)."""
     if reason is NormalizationFailureReason.ANALYSIS_DEPTH:
         return RecursionError(detail)
-    return AnalysisBudgetExceeded("recorded", detail)
+    kind = detail.split(":", 1)[1] if ":" in detail else "recorded"
+    return AnalysisBudgetExceeded(kind, "recorded", scope="function")
+
+
+def _ledger_key(unit):
+    """A function's budget ledger: its scope identity (addresses repeat across
+    nested library runs)."""
+    return ("function", unit.scopes.function.scope)
+
+
+class _Interrupted(Exception):
+    """Run exhaustion inside ``analyze``: the components it published."""
+
+    def __init__(self, results) -> None:
+        super().__init__("run budget exhausted")
+        self.results = results
 
 
 def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
@@ -206,6 +252,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         function_key(unit.scopes.function.entry): unit for unit in units
         if type(unit.scopes.function) is ConstructedFunctionScope and unit.observation is not None
     }
+    if run_exhausted():
+        # (finalization: nothing more is analysed -- docs 25.30 K1c-3)
+        return {key: _run_budget_failure(key, unit, {}) for key, unit in functions.items()}
     # program-wide facts first (every function, cut ones included): they decide
     # which assumptions hold in this run, and so which models may be applied
     if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
@@ -294,7 +343,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         for span in spans
     }
 
-    # function key -> NormalizationFailureReason of a resource failure (sticky)
+    # function key -> (NormalizationFailureReason, detail) of a resource
+    # failure of that function (sticky; run exhaustion is never recorded here)
     resource_failures: dict = {}
 
     def analyze(calls):
@@ -391,15 +441,21 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             (recursion, indirect targets) sees the same failure, never a retry."""
             if key not in resource_failures:
                 try:
-                    return analyze_one(key, hypotheses)
+                    with activation(_ledger_key(functions[key])):
+                        result = analyze_one(key, hypotheses)
+                        checkpoint()   # (limits checked before the result is published)
+                        return result
                 except ANALYSIS_FAILURES as error:
                     from .relative_memory import IMPORT_SLOTS
 
                     if IMPORT_SLOTS.get() is not None:   # (its analysis is discarded)
                         IMPORT_SLOTS.get().used.discard(functions[key].scopes.function.scope)
-                    resource_failures[key] = _failure_reason(error)
+                    if _is_run_exhaustion(error):
+                        raise   # (finalization: ``analyze`` publishes verified components only)
+                    resource_failures[key] = (_failure_reason(error), _failure_detail(error))
+            reason, detail = resource_failures[key]
             return AnalyzedFunction(key, functions[key], UnresolvedNormalizedFunction(
-                functions[key].scopes, resource_failures[key]), None, calls[key])
+                functions[key].scopes, reason), None, calls[key], failure_detail=detail)
 
         def analyze_one(key, hypotheses):
             unit = functions[key]
@@ -453,12 +509,19 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                      or effect.writer_conditions or effect.tail_stack):
                         if callee not in state_proofs:
                             try:
-                                state_proofs[callee] = _state_proof(done.unit, done.normalized)
+                                # (charged to the callee: a caller near its own limit
+                                # does not decide the callee's proof)
+                                with activation(_ledger_key(done.unit)):
+                                    proof = _state_proof(done.unit, done.normalized)
+                                    checkpoint()
+                                    state_proofs[callee] = proof
                             except ANALYSIS_FAILURES as error:
-                                state_proofs[callee] = _failure_reason(error)
-                        if type(state_proofs[callee]) is NormalizationFailureReason:
+                                if _is_run_exhaustion(error):
+                                    raise
+                                state_proofs[callee] = (_failure_reason(error), _failure_detail(error))
+                        if type(state_proofs[callee]) is tuple:
                             # out of a resource: the function needing it fails (never a silent "no proof")
-                            raise _resource_error(state_proofs[callee], "state proof of " + callee)
+                            raise _resource_error(*state_proofs[callee])
                         if state_proofs[callee] is not None:
                             effect = replace(effect, state_proof=state_proofs[callee])
                     if effect is not None:
@@ -646,14 +709,26 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 item.recursion_unresolved = True  # intra-SCC calls opaque (debt)
             return fallback
 
-        for component in order:
+        for index, component in enumerate(order):
             recursive = len(component) > 1 or any(
                 callee == key for key in component for callee in calls[key].values())
-            if recursive:
-                results.update(solve(component))
-            else:
-                for key in sorted(component):
-                    results[key] = one(key, {})
+            try:
+                if recursive:
+                    results.update(solve(component))
+                else:
+                    for key in sorted(component):
+                        results[key] = one(key, {})
+            except AnalysisBudgetExceeded as error:
+                if not _is_run_exhaustion(error):
+                    raise
+                # finalization (docs 25.30 K1c-3): the components completed so far
+                # rest on completed callees only; the interrupted one publishes
+                # none of its members (they may rest on unverified hypotheses)
+                for rest in order[index:]:
+                    for key in rest:
+                        results[key] = one(key, {}) if key in resource_failures else \
+                            _run_budget_failure(key, functions[key], calls[key])
+                raise _Interrupted(results) from None
         return results
 
     # indirect calls with a provably constant target (a Bundle function): resolved
@@ -670,33 +745,61 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     resolved_cuts: dict = {}
     rounds = 1 + sum(1 for unit in functions.values() for _ in _callind_sites(unit))
     done = 0
-    while done < rounds:
-        done += 1
-        use_externals(resolved_cuts)
-        results = analyze({key: {**calls[key], **resolved.get(key, {})} for key in calls})
-        found, found_cuts = {}, {}
-        newly_failed = False
-        for key, item in results.items():
-            if key in resource_failures:
-                continue   # (failed: no targets; each function adds at most one round)
-            try:
-                targets = _indirect_targets(item, program)
-            except ANALYSIS_FAILURES as error:
-                # the function fails (sticky): one more round, its callers see an opaque call
-                resource_failures[key] = _failure_reason(error)
-                newly_failed = True
-                continue
-            if direct := {call: target for call, target in targets.items() if target in functions}:
-                found[key] = direct
-            if cut := {call: cuts[target] for call, target in targets.items() if target in cuts}:
-                found_cuts[key] = cut
-        if found == resolved and found_cuts == resolved_cuts and not newly_failed:
-            return results
-        if newly_failed:
-            rounds += 1   # (one more round for the failure; each function fails once)
-        resolved, resolved_cuts = found, found_cuts
-    use_externals({})
-    return analyze(calls)  # not stable: no indirect resolution at all
+    # round 1 resolves no indirect call: its results rest on no hypothesis --
+    # what a run exhaustion in a later round publishes (docs 25.30 K1c-3)
+    first = None
+
+    def with_failures(published):
+        """``published`` with every function failure recorded since (a failed
+        function is never reported analysed; its round-1 summary its callers
+        used rests on no hypothesis)."""
+        found = dict(published)
+        for key, (reason, detail) in resource_failures.items():
+            if key in found:
+                replaced = found[key] if type(found[key].normalized) is NormalizedFunction else found[key].superseded
+                found[key] = AnalyzedFunction(key, functions[key], UnresolvedNormalizedFunction(
+                    functions[key].scopes, reason), None, calls[key], failure_detail=detail, superseded=replaced)
+        return found
+    try:
+        while done < rounds:
+            done += 1
+            use_externals(resolved_cuts)
+            results = analyze({key: {**calls[key], **resolved.get(key, {})} for key in calls})
+            if first is None:
+                first = results
+            found, found_cuts = {}, {}
+            newly_failed = False
+            for key, item in results.items():
+                if key in resource_failures or type(item.normalized) is not NormalizedFunction:
+                    continue   # (failed / refused: no targets; each function adds at most one round)
+                try:
+                    with activation(_ledger_key(item.unit)):
+                        targets = _indirect_targets(item, program)
+                        checkpoint()
+                except ANALYSIS_FAILURES as error:
+                    if _is_run_exhaustion(error):
+                        raise
+                    # the function fails (sticky): one more round, its callers see an opaque call
+                    resource_failures[key] = (_failure_reason(error), _failure_detail(error))
+                    newly_failed = True
+                    continue
+                if direct := {call: target for call, target in targets.items() if target in functions}:
+                    found[key] = direct
+                if cut := {call: cuts[target] for call, target in targets.items() if target in cuts}:
+                    found_cuts[key] = cut
+            if found == resolved and found_cuts == resolved_cuts and not newly_failed:
+                return results
+            if newly_failed:
+                rounds += 1   # (one more round for the failure; each function fails once)
+            resolved, resolved_cuts = found, found_cuts
+        use_externals({})
+        return analyze(calls)  # not stable: no indirect resolution at all
+    except _Interrupted as stop:
+        return stop.results if first is None else with_failures(first)
+    except AnalysisBudgetExceeded as error:
+        if not _is_run_exhaustion(error) or first is None:
+            raise
+        return with_failures(first)   # (round 1 finished; later rounds rest on unrevalidated resolutions)
 
 
 MAX_RECURSION_ROUNDS = 8
@@ -1316,11 +1419,15 @@ def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
         program = unit.scopes.program
         language = ":".join(program.evidence.translation_namespace.language_id.split(":")[:3])
         try:
-            rows = stack_switches(
-                _unit_stub(unit.scopes), unit.observation, unit.scopes.resolution_context,
-                program.evidence.address_spaces, program_stack, CALL_PRESERVED.get(language, ()),
-            )
-        except ANALYSIS_FAILURES:
+            with activation(_ledger_key(unit)):
+                rows = stack_switches(
+                    _unit_stub(unit.scopes), unit.observation, unit.scopes.resolution_context,
+                    program.evidence.address_spaces, program_stack, CALL_PRESERVED.get(language, ()),
+                )
+                checkpoint()
+        except ANALYSIS_FAILURES as error:
+            if _is_run_exhaustion(error):
+                raise   # (a whole-program check left undone: the run fails)
             rows = ("unchecked",)   # a check that ran out of a resource is no evidence
         if rows:
             found[function_key(unit.scopes.function.entry)] = rows

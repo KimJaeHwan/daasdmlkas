@@ -49,7 +49,8 @@ from .engine import (
 from .integration.configured_target_resolution import _selected_resolved_target
 from .integration.observed_function_session import open_observed_function_session
 from .interprocedural import (
-    ANALYSIS_FAILURES, _failure_reason, analyze_units, function_key, run_definition_nodes,
+    ANALYSIS_FAILURES, _failure_detail, _failure_reason, _is_run_exhaustion, _ledger_key, analyze_units,
+    function_key, run_definition_nodes,
 )
 from .image_info import ReadOnlyImage, load_image_info
 from .normalize import NormalizationFailureReason, NormalizedFunction
@@ -58,7 +59,9 @@ from .pcodeop_models import trap_operations
 from .physical_state import PhysicalRegisterSlice
 from .span_geometry import StorageObjectKind
 from .query_contracts import LocalCompleteness, local_completeness
-from .resource_limits import analysis_entry
+from .resource_limits import (
+    activation, analysis_entry, checkpoint, current_run, limit, reporting, run_exhausted, step,
+)
 from .scope_identity import ConstructedProgramScope
 
 
@@ -304,7 +307,7 @@ def analyze_frozen_bundle_with_summaries(
         assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
                                       traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
         preliminary = []
-        failed: dict = {}   # function key -> NormalizationFailureReason (resource failures)
+        failed: dict = {}   # function key -> (NormalizationFailureReason, detail)
         for key, item in by_key.items():
             if key not in results:
                 # a function a model binding cuts (``interprocedural._bound_cuts``):
@@ -315,10 +318,11 @@ def analyze_frozen_bundle_with_summaries(
                 continue
             normalized = results[key].normalized
             if type(normalized) is not NormalizedFunction:
-                if normalized.reason in RESOURCE_REASONS:
-                    failed[key] = normalized.reason
-                    continue
-                raise ValueError(f"function {key} does not normalize: {normalized.reason.value}")
+                # a typed refusal of an admitted function (a resource failure or
+                # an unsupported shape): it fails alone -- its callers saw an
+                # opaque call; its sink occurrences are failure roots (docs 25.30 K1c)
+                failed[key] = (normalized.reason, results[key].failure_detail)
+                continue
             preliminary.append(ConfiguredFunctionAnalysis(item, normalized, EMPTY_OBSERVED_BOUNDARIES, ()))
         nodes: dict = {}
         incomplete_roots: set = set()  # (entry, label, occurrence) of projected roots
@@ -371,41 +375,83 @@ def analyze_frozen_bundle_with_summaries(
                     tuple(sorted(labels)),
                     (), explanation, completeness, completeness,
                 ))
+                limit("output_items", len(found))
             return found
 
         # sink binding and root slicing per function: a function that runs out
         # of a resource there fails alone (its partial rows are dropped)
         analyses = []
         late: set = set()   # failed after the analysis: their summaries were used
-        for analysis in preliminary:
+
+        def fail_late(analysis, error):
+            key = function_key(analysis.entry)
+            failed[key] = (_failure_reason(error), _failure_detail(error))
+            late.add(key)
+
+        def run_budget(remaining):
+            """Finalization: every function not yet done (docs 25.30 K1c-3)."""
+            run = current_run()
+            detail = f"run:{run.exhausted if run is not None and run.exhausted else 'unknown'}"
+            for analysis in remaining:
+                key = function_key(analysis.entry)
+                failed[key] = (NormalizationFailureReason.ANALYSIS_RUN_BUDGET, detail)
+                late.add(key)
+
+        for index, analysis in enumerate(preliminary):
+            if run_exhausted():
+                run_budget(preliminary[index:])
+                break
             try:
-                nodes[analysis.entry] = bind(analysis)
-                analyses.extend(_analyses_from_boundary_nodes((analysis,), nodes))
+                with activation(_ledger_key(analysis.evidence.unit)):
+                    rows = bind(analysis)
+                    bound = _analyses_from_boundary_nodes((analysis,), {analysis.entry: rows})
+                    checkpoint()   # (limits checked before the rows are kept)
+                    nodes[analysis.entry] = rows
+                    analyses.extend(bound)
             except ANALYSIS_FAILURES as error:
-                failed[function_key(analysis.entry)] = _failure_reason(error)
-                late.add(function_key(analysis.entry))
                 nodes.pop(analysis.entry, None)
                 incomplete_roots.difference_update(
                     {row for row in incomplete_roots if row[0] == analysis.entry})
+                if _is_run_exhaustion(error):
+                    run_budget(preliminary[index:])
+                    break
+                fail_late(analysis, error)
         roots = []
         lane_indexes: dict = {}
         for key in LANE_DIAGNOSTICS:   # per run
             LANE_DIAGNOSTICS[key] = 0
-        for analysis in analyses:
+        for index, analysis in enumerate(analyses):
+            if run_exhausted():
+                run_budget(analyses[index:])
+                break
             try:
-                roots.extend(function_roots(analysis))
+                with activation(_ledger_key(analysis.evidence.unit)):
+                    found_roots = function_roots(analysis)
+                    checkpoint()
+                    roots.extend(found_roots)
             except ANALYSIS_FAILURES as error:
-                failed[function_key(analysis.entry)] = _failure_reason(error)
-                late.add(function_key(analysis.entry))
                 lane_indexes.pop(id(analysis.normalized), None)
-        if late:
-            roots = _dependents_incomplete(roots, late, results, by_key)
-        for key in sorted(failed):
-            roots.extend(_failure_roots(by_key[key], boundaries[key], boundary_provider, failed[key]))
-        return EngineRun(
-            program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(roots),
-            assumptions, tuple((key, failed[key].value) for key in sorted(failed)),
-        )
+                if _is_run_exhaustion(error):
+                    run_budget(analyses[index:])
+                    break
+                fail_late(analysis, error)
+
+        def report():
+            checkpoint()
+            found = _dependents_incomplete(roots, late, results, by_key) if late else list(roots)
+            checkpoint()
+            for key in sorted(failed):
+                found.extend(_failure_roots(by_key[key], boundaries[key], boundary_provider, failed[key][0]))
+                checkpoint()
+            run = EngineRun(
+                program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(found),
+                assumptions, tuple((key, failed[key][0].value, failed[key][1]) for key in sorted(failed)),
+            )
+            checkpoint()   # (never returned after the reporting deadline)
+            return run
+
+        with reporting():   # (bounded: TDO_V2_REPORTING_SECONDS; no analysis)
+            return report()
 
 
 def _dependents_incomplete(roots, failed, results, by_key) -> list:
@@ -421,6 +467,7 @@ def _dependents_incomplete(roots, failed, results, by_key) -> list:
         if key not in reach:
             seen, pending = set(), [key]
             while pending:
+                step()
                 item = pending.pop()
                 if item in seen or item not in results:
                     continue
@@ -436,6 +483,7 @@ def _dependents_incomplete(roots, failed, results, by_key) -> list:
         base = len(evidence.seeds.callsites) + len(evidence.tails)
         index = root.occurrence_ordinal - base
         projected = results[key].projected_sinks
+        checkpoint()
         if 0 <= index < len(projected):
             callee = results[key].calls.get(projected[index][0])
             failures = reached(callee) if callee is not None else frozenset()
@@ -449,8 +497,8 @@ def _dependents_incomplete(roots, failed, results, by_key) -> list:
 
 
 def _failure_roots(evidence, boundaries, provider, reason) -> list:
-    """Incomplete roots of a function whose analysis ran out of a resource
-    (``EngineRun.failed_functions``): one per syntactic sink occurrence -- a
+    """Incomplete roots of a function that did not normalize -- out of a
+    resource, or refused (``EngineRun.failed_functions``): one per syntactic sink occurrence -- a
     call site classified SINK (occurrence = its call-seed index) or a tail jump
     (call-seed count + tail index), numbered as a bound function's are and
     never compacted -- with no nodes, no origin labels and completeness false;
@@ -458,6 +506,7 @@ def _failure_roots(evidence, boundaries, provider, reason) -> list:
     observation are skipped, as binding skips them."""
     unit = evidence.unit
     entry = unit.scopes.function.entry
+    step(len(unit.observation.instructions) + 1)   # (the reporting deadline is checked)
     observed = {
         _operation_key(instruction.address, ordinal, operation.opcode)
         for instruction in unit.observation.instructions
@@ -482,7 +531,8 @@ def _failure_roots(evidence, boundaries, provider, reason) -> list:
 
 
 # the failures ``analyze_units`` reports as a function's resource failure
-RESOURCE_REASONS = frozenset({NormalizationFailureReason.ANALYSIS_DEPTH, NormalizationFailureReason.ANALYSIS_BUDGET})
+RESOURCE_REASONS = frozenset({NormalizationFailureReason.ANALYSIS_DEPTH, NormalizationFailureReason.ANALYSIS_BUDGET,
+                              NormalizationFailureReason.ANALYSIS_RUN_BUDGET})
 
 LANE_DIAGNOSTICS = {"roots": 0, "narrowed": 0, "not_subset": 0, "restored": 0}
 
@@ -602,6 +652,9 @@ def _lane_origin_labels(analysis, unit, rows, label, occurrence, node_labels, in
 
 def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, pcodeop_models=None) -> tuple:
     """Every assumption an ``analyze_units`` run rests on (``EngineRun.assumptions``)."""
+    # a round-1 result replaced by a later failure: its callers used its summary
+    results = {**results, **{f"{key}~superseded": item.superseded for key, item in results.items()
+                             if getattr(item, "superseded", None) is not None}}
     # (its withdrawal check rests on stack-switch-check-exceptions)
     assumptions = ("globals-disjoint-from-stack", "stack-switch-check-exceptions") if any(
         getattr(item.normalized, "assumes_globals_disjoint_from_stack", False)

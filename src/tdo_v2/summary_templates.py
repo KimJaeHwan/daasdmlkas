@@ -106,7 +106,8 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
     from .normalize import NormalizationFailureReason
 
     closure = _closure(analyzed, results)
-    resource = (NormalizationFailureReason.ANALYSIS_DEPTH, NormalizationFailureReason.ANALYSIS_BUDGET)
+    resource = (NormalizationFailureReason.ANALYSIS_DEPTH, NormalizationFailureReason.ANALYSIS_BUDGET,
+                NormalizationFailureReason.ANALYSIS_RUN_BUDGET)
     for item in closure:
         # (its callers saw an opaque call: a resource failure is no verdict on the export)
         if getattr(item.normalized, "reason", None) in resource:
@@ -114,6 +115,11 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
     summary = analyzed.summary
     if summary is None:
         raise TemplateRefused("no summary")
+    for item in closure:
+        # a function of the closure the analysis refused (an unsupported shape):
+        # the export is refused too, never shipped with that call left opaque
+        if item is not analyzed and getattr(item.normalized, "reason", None) is not None:
+            raise TemplateRefused(f"{item.key}: {item.normalized.reason.value}")
     for item in closure:
         if item.recursion_unresolved:
             raise TemplateRefused(f"{item.key}: recursion without a verified fixpoint", "budget")
