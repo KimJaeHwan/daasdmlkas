@@ -755,18 +755,65 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
         return None
     blocks = {block.key: block for block in graph.blocks}
 
-    def bytes_of(varnode):
-        return {
-            (varnode.coordinate.space_id, varnode.coordinate.byte_offset + index)
-            for index in range(varnode.byte_size)
-        }
+    # the tainted bytes as one int per state over the (space, byte) pairs the
+    # graph's varnodes touch (docs 25.31 B0-6; were frozensets of pairs, one
+    # per block -- 277 MB at the 10k scale point): the same sets, so the same
+    # fixed point, worklist pops and answers
+    bit_of: dict = {}
+    masks: dict = {}
+
+    def mask_of(varnode) -> int:
+        location = (varnode.coordinate.space_id, varnode.coordinate.byte_offset, varnode.byte_size)
+        found = masks.get(location)
+        if found is None:
+            found = 0
+            for index in range(varnode.byte_size):
+                pair = (location[0], location[1] + index)
+                bit = bit_of.get(pair)
+                if bit is None:
+                    bit = bit_of[pair] = len(bit_of)
+                found |= 1 << bit
+            masks[location] = found
+        return found
+
+    stack_mask = 0
+    for pair in sorted(stack_bytes):
+        bit_of[pair] = len(bit_of)
+        stack_mask |= 1 << bit_of[pair]
+    for block in graph.blocks:
+        row = instructions[block.instruction]
+        for ordinal in range(block.start, block.stop):
+            operation = row.operations[ordinal]
+            for varnode in (*operation.inputs, operation.output):
+                if varnode is not None:
+                    mask_of(varnode)
+    register_mask = 0
+    for (space, _), bit in bit_of.items():
+        if space == register_space:
+            register_mask |= 1 << bit
+    observed_masks: dict = {}
+
+    def observed_mask(key) -> int:
+        """The register bytes a call may observe (all of them unless declared)."""
+        found = observed_masks.get(key)
+        if found is None:
+            observed = (observed_calls or {}).get(key)
+            if observed is None:
+                found = register_mask
+            else:
+                found = 0
+                for (space, byte), bit in bit_of.items():
+                    if space == register_space and byte in observed:
+                        found |= 1 << bit
+            observed_masks[key] = found
+        return found
 
     def transfer(block, state, escapes, switches):
         row = instructions[block.instruction]
-        tainted = set(state)
+        tainted = state
         for ordinal in range(block.start, block.stop):
             operation = row.operations[ordinal]
-            touches = lambda varnode: varnode is not None and bool(bytes_of(varnode) & tainted)
+            touches = lambda varnode: varnode is not None and bool(mask_of(varnode) & tainted)
             key = _operation_key(row.address, ordinal, operation.opcode)
             if escapes is not None and (
                 (operation.opcode == "STORE" and len(operation.inputs) == 3 and touches(operation.inputs[2]))
@@ -779,15 +826,12 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
                 or (
                     operation.opcode in ("CALL", "CALLIND")
                     and key not in assumed_calls
-                    and any(item[0] == register_space
-                            and (observed is None or item[1] in observed)
-                            for item in tainted - stack_bytes
-                            for observed in ((observed_calls or {}).get(key),))
+                    and bool(tainted & ~stack_mask & observed_mask(key))
                 )
             ):
                 escapes.add(key)
             if returning is not None and escapes is not None and operation.opcode == "RETURN" \
-                    and any(item[0] == register_space for item in tainted - stack_bytes):
+                    and bool(tainted & ~stack_mask & register_mask):
                 returning.add(key)
             output = operation.output
             if output is None or output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
@@ -797,16 +841,16 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
                 and operation.opcode not in _BOOLEAN_OPCODES
                 and any(touches(item) for item in operation.inputs)
             )
-            written = bytes_of(output)
-            if switches is not None and written & stack_bytes and not produced:
+            written = mask_of(output)
+            if switches is not None and written & stack_mask and not produced:
                 switches.add(key)
-            tainted -= written
+            tainted &= ~written
             if produced:
                 tainted |= written
-        return frozenset(tainted)
+        return tainted
 
     order = {block.key: index for index, block in enumerate(graph.blocks)}
-    in_states = {graph.entry: stack_bytes}
+    in_states = {graph.entry: stack_mask}
     pending = {graph.entry}
     while pending:
         step()   # (budget: docs 25.30 K1c)
@@ -818,7 +862,7 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
         for target in blocks[key].successors:
             if target not in blocks:
                 continue
-            merged = out | in_states.get(target, frozenset())
+            merged = out | in_states.get(target, 0)
             if merged != in_states.get(target):
                 in_states[target] = merged
                 pending.add(target)
