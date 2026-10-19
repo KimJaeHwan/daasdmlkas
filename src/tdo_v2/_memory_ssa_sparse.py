@@ -46,13 +46,17 @@ def build_sparse_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult
     writes_by_action: dict[str, list[int]] = {}
     for (operation_key, _), definition_id in write_ids.items():
         writes_by_action.setdefault(operation_key, []).append(definition_id)
-    entry_of_connected = {
-        index: next(
-            ordinal for ordinal, definition in enumerate(raw_definitions)
-            if definition.kind is MemoryDefinitionKind.ENTRY and definition.span == span
-        )
-        for index, span in enumerate(partition.connected)
-    }
+    # the first ENTRY definition per span, one pass (docs 25.31 B0-2; was a
+    # scan of every definition per connected span)
+    first_entry: dict = {}
+    for ordinal, definition in enumerate(raw_definitions):
+        if definition.kind is MemoryDefinitionKind.ENTRY:
+            first_entry.setdefault(definition.span, ordinal)
+    entry_of_connected = {}
+    for index, span in enumerate(partition.connected):
+        if span not in first_entry:
+            raise StopIteration   # (as the scan's next() did; _raw_definitions makes one per span)
+        entry_of_connected[index] = first_entry[span]
     classes = build_atom_classes(unit, partition, write_ids)
     class_of_atom = classes.class_of_atom
     blocks = {block.key: block for block in unit.blocks}
