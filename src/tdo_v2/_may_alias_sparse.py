@@ -19,6 +19,7 @@ from __future__ import annotations
 from bisect import bisect_right
 
 from ._sparse_dataflow import DominatorGraph
+from .phases import count as phase_count, enabled as phases_enabled
 from .model import ResolvedStorage
 from .span_geometry import ByteSpan
 
@@ -108,6 +109,10 @@ def derive_sparse(unit, objects, policy):
 
     class_events: dict[object, dict[str, list]] = {}
     entry_values: dict[tuple, frozenset] = {}
+    counting = phases_enabled()   # (K2 sizes, docs 25.31)
+    replays = [0]
+    if counting:
+        phase_count("ma_classes", len(needed))
     for index, blocks_needed in needed.items():
         events: dict[str, list] = {}
         gens = any_gens if index is _ANY else object_gens[class_object[index]]
@@ -119,6 +124,8 @@ def derive_sparse(unit, objects, policy):
         for rows in events.values():
             rows.sort(key=lambda row: (row[0], row[1], row[2] is not None))
         class_events[index] = events
+        if counting:
+            phase_count("ma_class_events", sum(len(rows) for rows in events.values()))
         transfers = {}
         for block_key, rows in events.items():
             kills = any(label is None for _, _, label in rows)
@@ -134,6 +141,7 @@ def derive_sparse(unit, objects, policy):
         for event_position, _, label in class_events[index].get(block_key, ()):
             if event_position >= position:
                 break
+            replays[0] += 1
             value = frozenset() if label is None else value | {label}
         return value
 
@@ -161,4 +169,6 @@ def derive_sparse(unit, objects, policy):
                 value = value_at(_ANY, block.key, position)
                 if value:
                     rows.append(_row(effect.operation_key, (), value))
+    if counting:
+        phase_count("ma_value_at_replays", replays[0])
     return tuple(sorted(rows, key=lambda row: row.operation_key))

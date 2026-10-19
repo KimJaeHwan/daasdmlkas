@@ -15,6 +15,7 @@ from __future__ import annotations
 from bisect import bisect_right
 
 from ._sparse_dataflow import DominatorGraph
+from .phases import count as phase_count, enabled as phases_enabled
 from .model import ResolvedStorage
 from .span_geometry import ByteSpan, StorageObjectKind
 
@@ -106,9 +107,15 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
 
     entry_values: dict[tuple[int, str], frozenset] = {}
     class_events: dict[int, dict] = {}
+    counting = phases_enabled()   # (K2 sizes, docs 25.31)
+    replays = [0]
+    if counting:
+        phase_count("cc_classes", len(reads_by_class))
     for index, needed in reads_by_class.items():
         events = events_of(index)
         class_events[index] = events
+        if counting:
+            phase_count("cc_class_events", sum(len(rows) for rows in events.values()))
         transfers = {}
         for block_key, rows in events.items():
             kills = any(label is None for _, _, label in rows)
@@ -124,6 +131,7 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
         for event_position, _, label in class_events[index].get(block_key, ()):
             if event_position >= position:
                 break
+            replays[0] += 1
             value = frozenset() if label is None else value | {label}
         return value
 
@@ -146,4 +154,6 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
                     spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
             if spans:
                 rows.append(CallClobberRead(effect.operation_key, tuple(spans), tuple(sorted(crossed))))
+    if counting:
+        phase_count("cc_value_at_replays", replays[0])
     return tuple(sorted(rows, key=lambda row: row.operation_key))

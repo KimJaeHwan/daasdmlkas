@@ -32,7 +32,7 @@ back to it) -- the witnesses still use lane slices.
 
 from __future__ import annotations
 
-from .phases import measured
+from .phases import count as phase_count, measured
 
 from .graph_contracts import NodeKind
 from .span_geometry import ByteSpan, StorageObjectKind
@@ -118,6 +118,7 @@ def root_witnesses(normalized, unit, rows, seeds, labels, index, origins, traver
                 add(label, {"kind": record.label, "sites": sites, "condition": None})
             continue
         root_debts.append({"kind": record.label, "sites": [row.operation_key]})
+        phase_count("witness_writer_slices", len(row.writers))   # (K2 sizes, docs 25.31)
         for writer in sorted(row.writers):
             seeds_of_writer, callee = context.value_seeds(writer)
             if seeds_of_writer is None:

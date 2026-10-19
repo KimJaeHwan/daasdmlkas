@@ -1836,6 +1836,8 @@ class _ScopedNormalizer:
                 uses=frame_uses, separations=separations,
             )
             dependencies = base.copy()
+            phase_count("fixpoint_rounds", 1)   # (K2 sizes: a graph copy per round, docs 25.31)
+            phase_count("fixpoint_copied_edges", base.edge_count)
             may_alias_nodes, uncertain_nodes = _materialize_may_alias_debt(
                 dependencies,
                 memory_ssa,
@@ -2298,6 +2300,7 @@ def _materialize_may_alias_debt(
                 "may_alias_read",
             )
         )
+        phase_count("may_alias_write_edges", len(hard))
         for writer in hard:
             dependencies.add_edge(
                 operation_nodes[writer],

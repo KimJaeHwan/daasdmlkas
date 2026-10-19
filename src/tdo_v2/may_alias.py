@@ -53,7 +53,7 @@ frame writes reach them, like unknown-address accesses.
 
 from __future__ import annotations
 
-from .phases import measured
+from .phases import count as phase_count, enabled as phases_enabled, measured
 
 from .resource_limits import step
 
@@ -359,6 +359,10 @@ def derive_may_alias_reads(
             "may-alias", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
             unit, objects, policy,
         )
+    if phases_enabled():   # (K2 sizes: rows x writers, docs 25.31)
+        phase_count("ma_rows", len(rows))
+        phase_count("ma_row_writers", sum(len(row.writers) for row in rows))
+        phase_count("ma_row_uncertain", sum(len(row.uncertain) for row in rows))
     if uses is not None:   # ``uses``: whether the private-frame rule decided a byte
         uses.append(policy.private_used)
     if opaque_uses is not None:
@@ -535,6 +539,8 @@ def _unknown_write(effect) -> bool:
 def _written_anywhere(state: dict, writer: str, objects) -> dict:
     """An unknown-address write: every byte of every object may now hold it."""
     updated = dict(state)
+    if phases_enabled():
+        phase_count("ma_written_anywhere_bytes", sum(len(state[item].bytes) for item in objects))
     for item in objects:
         current = updated[item]
         updated[item] = _ObjectState(

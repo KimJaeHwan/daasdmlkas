@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .phases import count as phase_count
 from .resource_limits import step
 
 from collections import Counter
@@ -130,6 +131,8 @@ class RustworkxDependencyGraph:
             for predecessor in reversed(predecessors):
                 if predecessor not in visited:
                     pending.append(predecessor)
+        phase_count("backward_walks", 1)   # (K2 sizes: walks x reached nodes, docs 25.31)
+        phase_count("backward_reached", len(ordered))
         return tuple(ordered)
 
     def weighted_edges(self) -> tuple[tuple[NodeId, NodeId, EdgeRecord], ...]:

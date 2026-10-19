@@ -577,6 +577,7 @@ def _alias_conditions(normalized) -> dict:
         )
     # summarized runs holding only under pairs this function cannot decide
     found.update(dict(getattr(normalized, "open_nodes", ())))
+    phase_count("alias_condition_pairs", sum(map(len, found.values())))
     return found
 
 
@@ -601,6 +602,8 @@ def _address_slice(graph, inputs, conditions_of) -> list:
             int(source) for source, _, record in graph._graph.in_edges(node)
             if record.kind != CONTROL_DEPENDENCE_EDGE
         )
+    phase_count("address_slices", 1)   # (K2 sizes: one DFS per store per round, docs 25.31)
+    phase_count("address_slice_visits", len(seen))
     return sorted(seen)
 
 
@@ -1262,8 +1265,12 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                         rows.sort(key=lambda row: (row[0], row[1], row[2] is not None))
                     value = _live_gens_at_exit(graph, events, block_key)
                     cache[signature] = value
+                    # (K2 sizes: signatures x events, docs 25.31)
+                    phase_count("exit_signatures", 1)
+                    phase_count("exit_events", sum(map(len, events.values())))
                 if value:
                     per_offset[offset] = value
+                    phase_count("exit_crossed_labels", len(value))
             result[(block_key, object_id)] = per_offset
     return result
 

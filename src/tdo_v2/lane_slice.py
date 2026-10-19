@@ -32,7 +32,7 @@ oracle checks this against concrete runs).
 
 from __future__ import annotations
 
-from .phases import measured
+from .phases import count as phase_count, measured
 
 from .resource_limits import step
 
@@ -202,6 +202,8 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False, budget=N
             _operation(index, node, demand, add, clobbered)
         else:
             _other(index, node, add)
+    phase_count("lane_slices", 1)   # (K2 sizes: slices x steps, docs 25.31)
+    phase_count("lane_steps", steps)
     return LaneSlice(demands, frozenset(demands))
 
 

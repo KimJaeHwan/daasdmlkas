@@ -138,6 +138,21 @@ def main(argv) -> int:
     stop = threading.Event()
     progress = threading.Thread(target=_progress, args=(telemetry, stop), daemon=True)
     progress.start()
+    # the cyclic collector's share (K2: phase times grew faster than their sizes)
+    import gc
+
+    collections = {0: [0, 0.0], 1: [0, 0.0], 2: [0, 0.0]}
+    started_gc = [0.0]
+
+    def on_gc(event, info):
+        if event == "start":
+            started_gc[0] = time.perf_counter()
+        else:
+            row = collections[info["generation"]]
+            row[0] += 1
+            row[1] += time.perf_counter() - started_gc[0]
+
+    gc.callbacks.append(on_gc)
     try:
         with telemetry.stage("analysis") as stage:
             run = analyze_observed_with_summaries(
@@ -149,6 +164,7 @@ def main(argv) -> int:
         stop.set()
         progress.join()
         phases.LISTENER = None
+        gc.callbacks.remove(on_gc)
     last = resource_limits.last_run()
     with telemetry.stage("result") as stage:
         sys.path.insert(0, str(REPO / "tools" / "graph_fidelity"))
@@ -173,6 +189,8 @@ def main(argv) -> int:
                  "caller": None if caller is None else caller.work, "caller_seconds": None if caller is None
                  else round(caller.seconds, 4), "callees": callee_work, "callees_seconds": round(callee_seconds, 4)},
         "phases": getattr(last, "phases", None),
+        "gc": {str(generation): {"collections": count, "seconds": round(seconds, 3)}
+               for generation, (count, seconds) in collections.items()},
     }
     if record["work"]["run"] is not None and caller is not None:
         record["work"]["shared"] = record["work"]["run"] - caller.work - callee_work

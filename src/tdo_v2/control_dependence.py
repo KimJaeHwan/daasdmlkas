@@ -23,7 +23,7 @@ Edges run decision operation -> dependent operation with kind
 
 from __future__ import annotations
 
-from .phases import measured
+from .phases import count as phase_count, measured
 
 from .resource_limits import step
 
@@ -80,6 +80,7 @@ def derive_control_dependences(
         )
 
     rows: set[ControlDependence] = set()
+    walked = 0   # (K2 sizes: postdominator walk steps, docs 25.31)
     for key, targets in successors.items():
         if key == _EXIT or len(set(targets)) < 2:
             continue
@@ -98,6 +99,9 @@ def derive_control_dependences(
                     for dependent in operation_keys(blocks[node])
                 )
                 node = immediate[node]
+                walked += 1
+    phase_count("cd_walk_steps", walked)
+    phase_count("cd_pairs", len(rows))
     return tuple(sorted(rows, key=lambda row: (row.decision, row.dependent)))
 
 

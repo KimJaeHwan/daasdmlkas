@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from ._memory_ssa_classes import build_atom_classes
 from ._sparse_dataflow import DominatorGraph
+from .phases import count as phase_count
 from ._memory_ssa_state import DefinitionSetPool, Run, make_state
 from .memory_contracts import LocalMemorySsaResult, LocalMemoryUnit, MemoryDefinitionKind
 from .model import ByteSpan
@@ -139,6 +140,8 @@ def build_sparse_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult
                     current[index] = value
 
     terminal_out_states = {}
+    phase_count("mssa_classes", len(classes.classes))   # (K2 sizes, docs 25.31)
+    phase_count("mssa_terminal_atoms", len(terminals) * len(atoms))
     for key in terminals:
         runs = []
         for atom in range(len(atoms)):

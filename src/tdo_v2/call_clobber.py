@@ -20,7 +20,7 @@ pointer escaping, so frame preservation needs callee-side evidence.
 
 from __future__ import annotations
 
-from .phases import measured
+from .phases import count as phase_count, enabled as phases_enabled, measured
 
 from .resource_limits import step
 
@@ -198,10 +198,15 @@ def derive_call_clobber_reads(
     for key, spans in (proven_preserved or {}).items():
         # bytes a callee summary proves unchanged (or rewrites just before the call)
         preserved[key] = tuple(preserved.get(key, ())) + tuple(spans)
-    return run_dataflow(
+    rows = run_dataflow(
         "call-clobber", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
         unit, calls, preserved, frozenset(memory_keeping) & calls,
     )
+    if phases_enabled():   # (K2 sizes: reads x intervening calls, docs 25.31)
+        phase_count("cc_calls", len(calls))
+        phase_count("cc_rows", len(rows))
+        phase_count("cc_intervening_calls", sum(len(row.intervening_calls) for row in rows))
+    return rows
 
 
 DEFAULT_ENGINE = "sparse"  # verified identical to "dense" (docs section 14)
