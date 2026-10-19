@@ -57,6 +57,7 @@ from .phases import count as phase_count, enabled as phases_enabled, measured
 
 from .resource_limits import step
 
+from bisect import bisect_left
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -969,16 +970,48 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
     def overlaps(a, b):
         return a[0] == b[0] and a[1] < b[1] + b[2] and b[1] < a[1] + a[2]
 
+    # the overlap table, once per pass (docs 25.31 B0-3; was a scan of the
+    # whole state per read and write): the keys a state can hold -- the stack
+    # pointer and the REGISTER / UNIQUE outputs -- and, per location read or
+    # written, those of them it overlaps
+    held = {stack}
+    used = {stack}
+    for block in graph.blocks:
+        row = instructions[block.instruction]
+        for ordinal in range(block.start, block.stop):
+            operation = row.operations[ordinal]
+            output = operation.output
+            if output is not None and output.kind in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
+                held.add(location(output))
+                used.add(location(output))
+            used.update(location(item) for item in operation.inputs if item.kind is not VarnodeKindCode.CONSTANT)
+    spaces: dict = {}
+    for key in held:
+        spaces.setdefault(key[0], []).append(key)
+    for members in spaces.values():
+        members.sort(key=lambda item: (item[1], item[2]))
+    widest = {space: max(item[2] for item in members) for space, members in spaces.items()}
+    starts = {space: [item[1] for item in members] for space, members in spaces.items()}
+    over: dict = {}
+    for key in used:
+        members = spaces.get(key[0], ())
+        if not members:
+            over[key] = ()
+            continue
+        low = bisect_left(starts[key[0]], key[1] - widest[key[0]] + 1)
+        high = bisect_left(starts[key[0]], key[1] + key[2])
+        over[key] = tuple(other for other in members[low:high] if overlaps(key, other))
+
     def read(state, varnode):
         if varnode.kind is VarnodeKindCode.CONSTANT:
             return 0
         key = location(varnode)
         if key in state:
             return state[key]
-        return None if any(value != 0 and overlaps(key, other) for other, value in state.items()) else 0
+        return None if any(state.get(other, 0) != 0 for other in over[key]) else 0
 
     def write(state, key, value):
-        for other in [other for other in state if overlaps(key, other)]:
+        for other in [other for other in over[key] if other in state]:
             covered = key[1] <= other[1] and other[1] + other[2] <= key[1] + key[2]
             if covered:
                 del state[other]
@@ -1013,6 +1046,16 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
             return 0
         return 0 if all(value == 0 for value in values) else None
 
+    kept_keys: dict = {}
+
+    def wholly_kept(key) -> bool:
+        """Whether ``key`` lies wholly inside a call-preserved register."""
+        found = kept_keys.get(key)
+        if found is None:
+            found = kept_keys[key] = any(key[1] >= kept[1] and key[1] + key[2] <= kept[1] + kept[2]
+                                         for kept in preserved)
+        return found
+
     def transfer(block, state, switches):
         row = instructions[block.instruction]
         state = dict(state)
@@ -1021,8 +1064,7 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
             if operation.opcode in ("CALL", "CALLIND"):
                 # a user op (CALLOTHER) defines just its output, if any
                 for key in [key for key in state if key[0] == stack[0] and key != stack
-                            and not any(key[1] >= kept[1] and key[1] + key[2] <= kept[1] + kept[2]
-                                        for kept in preserved)]:
+                            and not wholly_kept(key)]:
                     del state[key]
             output = operation.output
             if output is None or output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
