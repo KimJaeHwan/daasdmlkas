@@ -112,6 +112,115 @@ def mirror(published: Path, target_root: Path) -> Path:
     return target
 
 
+CLEANUP_SECONDS = 30.0
+
+
+def _members(group: int) -> list[tuple[int, int, str]]:
+    """(pid, parent pid, state) of every process of ``group`` (Linux /proc)."""
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", encoding="ascii", errors="replace") as handle:
+                fields = handle.read().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        if int(fields[2]) == group:
+            found.append((int(entry), int(fields[1]), fields[0]))
+    return found
+
+
+def _threads_running(pid: int) -> bool:
+    """A process shown as a zombie may still have running threads (its main
+    thread called pthread_exit): any thread not dead counts (Astra K1d impl.
+    round 2, P1)."""
+    try:
+        tasks = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return False
+    for task in tasks:
+        try:
+            with open(f"/proc/{pid}/task/{task}/stat", encoding="ascii", errors="replace") as handle:
+                if handle.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X"):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def run_bounded(command, env, total: float):
+    """(returncode, timed out, stopped): ``command`` with a total monotonic
+    deadline (docs 25.30 K1d). Linux / WSL: its own session and process group;
+    this process becomes a child subreaper (adopted orphans are reaped). The
+    leader is NOT reaped until every signal to its group has been sent: its
+    unreaped pid anchors the group id, which the kernel cannot reuse meanwhile
+    (Astra K1d impl. P1-1). On timeout, error, KeyboardInterrupt AND after a
+    normal exit of the leader the group's live members are stopped (TERM,
+    5 s, KILL), adopted zombies reaped, until no live member is left (bounded
+    by CLEANUP_SECONDS; ``stopped`` False: not shown gone). Descendants that
+    leave the process group escape this cleanup (run_supervised's cgroup
+    contains them). Elsewhere: a plain timeout of the leader (documented)."""
+    if not sys.platform.startswith("linux"):
+        try:
+            return subprocess.run(command, env=env, timeout=total).returncode, False, True
+        except subprocess.TimeoutExpired:
+            return None, True, True
+    import ctypes
+    import signal
+
+    PR_SET_CHILD_SUBREAPER = 36
+    ctypes.CDLL(None, use_errno=True).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    process = subprocess.Popen(command, env=env, start_new_session=True)
+    group = leader = process.pid
+    me = os.getpid()
+    timed_out = False
+
+    def live():
+        return [pid for pid, _, state in _members(group)
+                if state not in ("Z", "X") or _threads_running(pid)]
+
+    def reap_adopted():   # zombies adopted from the group, never the leader
+        for pid, parent, state in _members(group):
+            if state == "Z" and parent == me and pid != leader and not _threads_running(pid):
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+
+    try:
+        limit = time.monotonic() + total
+        while True:   # the leader's exit, observed without reaping it
+            if os.waitid(os.P_PID, leader, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                break
+            if time.monotonic() > limit:
+                timed_out = True
+                break
+            time.sleep(0.1)
+    finally:
+        for sig, pause in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 0.0)):
+            reap_adopted()
+            if not live():
+                break
+            os.killpg(group, sig)   # (anchored: the leader is unreaped)
+            until = time.monotonic() + pause
+            while time.monotonic() < until and live():
+                reap_adopted()
+                time.sleep(0.05)
+        deadline = time.monotonic() + CLEANUP_SECONDS
+        while live() and time.monotonic() < deadline:
+            reap_adopted()
+            time.sleep(0.05)
+        stopped = not live()
+        reap_adopted()
+        if stopped:
+            try:
+                process.wait(CLEANUP_SECONDS)   # the anchor released last (bounded)
+            except subprocess.TimeoutExpired:
+                stopped = False
+    return process.returncode, timed_out, stopped
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -131,6 +240,9 @@ def main() -> int:
     parser.add_argument("--mirror-to", type=Path,
                         help="also copy the published generation under this directory")
     parser.add_argument("--keep-project", action="store_true")
+    parser.add_argument("--total-timeout", type=float, default=None,
+                        help="seconds for the whole Ghidra run (default: analysis timeout + 1 h); "
+                             "on expiry the run fails and its process group is stopped")
     parser.add_argument("--stop-at-name", action="append", default=[],
                         help="export this function but do not follow its calls (exact symbol)")
     parser.add_argument("--stop-at-internal-models", metavar="LIBRARY",
@@ -214,16 +326,24 @@ def main() -> int:
         encoding="utf-8")
     print(f"[export] generation {generation}", flush=True)
     started = time.time()
-    result = subprocess.run(command, env=env)
+    total = args.total_timeout if args.total_timeout is not None else args.analysis_timeout + 3600
+    returncode, timed_out, stopped = run_bounded(command, env, total)
     elapsed = time.time() - started
+    if not stopped:
+        # the process group could not be shown gone: keep the project for inspection
+        print(f"[export] FAILED: Ghidra processes did not stop; project kept at {project_dir}", file=sys.stderr)
+        return 1
     if project_dir is not None and not args.keep_project:
         shutil.rmtree(project_dir, ignore_errors=True)
+    if timed_out:
+        print(f"[export] FAILED: total timeout {total:.0f}s exceeded", file=sys.stderr)
+        return 1
 
     published = out_root / generation
     expected_receipt = f"{generation}\n{nonce}\n".encode("ascii")
     if not published.is_dir() or not receipt.is_file() or \
             receipt.read_bytes() != expected_receipt:
-        print(f"[export] FAILED (rc={result.returncode}, {elapsed:.0f}s); "
+        print(f"[export] FAILED (rc={returncode}, {elapsed:.0f}s); "
               f"see {logs / (generation + '.script.log')}", file=sys.stderr)
         return 1
     files = sorted(published.iterdir())

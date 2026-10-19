@@ -1960,3 +1960,64 @@ MemoryError; 스택 전환·간접 대상·상태 증명; 넓은 처리기; 실�
 - 아직 없음(다음): K1b 예전 엔진의 함수별 실패 계약, K1c 예산 장부·구조 한도·ValueError 상한 → `ANALYSIS_BUDGET`, K1d cgroup-v2 감독 +
   내보내기 시간 한도, K2~K5.
 - 기록: `.census6/stepA5{,b,c,d,e,f,g,h,i}_{prompt,agy,astra}.md`, `.census6/k1a.diff`.
+
+**K1b·K1c (2026-10-19, 설계 검토 3차·구현 검토 Antigravity·Astra)** — 위 "아직 없음"의 K1b·K1c.
+- **K1b 예전 엔진(기준용)**: 함수 하나의 정규화가 자원을 다 쓰면 실행 전체가 형식 있는 실패(`UnresolvedBundleFunctionError`,
+  `ANALYSIS_DEPTH` / `ANALYSIS_BUDGET`); 전체 프로그램 단계·루트 단계의 자원 실패는 진입점 밖으로(부분 루트 없음). 함수별 계약(L2)을
+  택하지 않은 이유: 이 엔진은 호출 대상이 분석에 있어야 싱크를 묶음(`configured_interprocedural_slice.py`의 `if not targets: continue`)
+  — 실패한 함수를 빼면 부르는 쪽의 싱크가 조용히 사라짐(두 리뷰어 같은 의견). `analyze_observed_functions`도 진입점.
+- **K1c-1 형식 있는 거부**: 요약 엔진에서 정규화가 이유와 함께 거부된 함수(지원하지 않는 모양 등, 입력 검증을 통과한 함수만)는 실행 전체를
+  멈추지 않고 그 함수만 실패(`failed_functions`, 실패 루트; 부르는 쪽은 이미 모르는 호출). 잘못된 Bundle·풀리지 않은 범위·임의의
+  ValueError는 그대로 실행 실패. 스택 전환 검사: 입구 명령이 관찰에 없거나 관찰이 비면 모든 빠른 경로보다 먼저 "unchecked". 템플릿:
+  닫힘 안의 다른 함수가 거부됐으면 내보내기도 의미 거부(저장됨).
+- **K1c-2 예산 장부**(`resource_limits`): 함수별 누적 장부(함수 범위 식별자로 구분 — 라이브러리 실행에서 주소가 겹침; 활동 시간 누적,
+  안쪽 활동 동안 바깥은 멈춤)와 실행 장부(하나의 마감). `step(n)`은 정확히 차감(빠른 카운터, QUANTUM 4096을 남은 한도로 잘라 정확한
+  단위에서 멈춤, 활동이 바뀔 때·예외 때 한 번만 넘김), 느린 경로에서 시계(시간 한도가 있을 때만)·RSS(실행 RSS 한도가 있을 때만)·취소
+  확인; 활동 시작마다 1단위와 강제 확인, 결과를 내기 전 강제 확인(`checkpoint`); `charge(n)`은 할당 전에 거절. 메모리는 실행 단위만
+  (`/proc/self/statm`, 근사 — 강제 한도는 K1d). 구조 한도: 그래프 노드·간선, memory-SSA 정의, 집합 원소(`_AncestorClosure`), 요약
+  run 수, 함수당 루트 수. 확인 지점: 주요 반복문 30곳(memory SSA, relative_memory + 주소식 계산마다, may_alias, call_clobber,
+  function_summary, normalize 투영 반복, lane_slice, control_dependence, 그래프 역방향 도달, sparse dataflow)과 보고 단계.
+  모든 한도는 기본 꺼짐(`TDO_V2_FUNCTION_WORK|SECONDS`, `TDO_V2_RUN_WORK|SECONDS|RSS_MB`, `TDO_V2_REPORTING_SECONDS`(기본 60),
+  `TDO_V2_LIMIT_<구조>`) — K2에서 기본값을 정함. 잘못된 값은 오류. 꺼진 상태 비용: zlib 126.6 s → 132.7 s(+5%).
+- **K1c-3 실행 예산 소진 = 마무리**: 검증된 근거 위의 결과만 냄, 소진 뒤에는 대체 분석을 하지 않음. 컴포넌트는 피호출자 먼저 —
+  끝난 컴포넌트는 냄, 끊긴 재귀 컴포넌트는 구성원 하나도 내지 않음(낙관 가정 위의 결과), 그 뒤는 모두 `ANALYSIS_RUN_BUDGET`; 간접 호출
+  라운드 2 이후에 끊기면 가정 없는 1라운드 결과를 냄(그 사이 기록된 함수 실패는 덮어씀); 이미 소진된 채 들어오면 아무것도 분석하지 않음;
+  전체 프로그램 검사(스택 전환)가 끊기면 실행 실패. 요약 엔진: 끝나지 않은 함수는 `ANALYSIS_RUN_BUDGET`(그 요약을 쓴 쪽은
+  `rests_on_failed`). 보고(실패 루트·의존 표시·EngineRun)는 언제나 따로 묶인 보고 단계에서 — 분석 한도는 멈추고 자기 마감만, 분석 진입
+  거절; 마감을 넘기면 `AnalysisReportingFailed`(실행 실패, 부분 결과 없음). `failed_functions`는 (키, 이유, 자세히: "function:work",
+  "run:time", "function:depth", 거부는 "") 셋. 연결 중 소진: `derive_library`가 남은 export를 일시 거부로 멈춤. `run_dfbench`는
+  JSON을 임시 파일 + 이름 바꾸기로 씀.
+- **K1c-4 취소**: 기본 SIGINT 처리기면 Ctrl-C가 취소 표시를 세우고 작업 스레드가 다음 확인에서 `AnalysisCancelled`(BaseException —
+  함수별 처리에 잡히지 않음)로 멈춘 뒤 KeyboardInterrupt; SIG_IGN이면 가로채지 않음; 사용자 처리기면 끝난 뒤 전달(취소 없음).
+- 테스트: `test_budgets.py`(정확한 단위, 누적, 안쪽 활동, 실행 소진 고정, 할당 전 거절, 구조 한도, 마무리 규칙 — 끝난 피호출자/
+  끊긴 재귀/간접 검사/이미 소진, 보고 마감, Ctrl-C, v2-win-release를 절반 예산으로 돌리면 모든 실패가 실행 예산이고 낸 루트는 전체
+  실행과 같거나 불완전), `test_resource_limits.py`(K1b, 형식 있는 거부, 입구 없는 스택 검사, 거부된 피호출자 템플릿).
+- 남은 것: K1d(감독 프로세스, 설계 4차 검토 남음), K2~K3. [가정] 시간 한도 실패는 기계 속도에 따라 달라짐(그렇게 표시됨);
+  작업량 한도는 순회·캐시 순서가 같을 때 재현됨.
+
+**K1d 외부 감독 (2026-10-19, 설계 검토 5차·구현 검토 Antigravity·Astra)** — `tools/run_supervised.py` + `tools/_launcher.py`
+(WSL/Linux, root, systemd; Windows 거절).
+- 실행: `systemd-run --scope --expand-environment=no -p Delegate=yes -p MemoryMax=<12G> -p MemorySwapMax=0 -p OOMPolicy=continue
+  -p TasksMax -p RuntimeMaxSec=<마감+유예+여유>` 안에서 launcher가 먼저 돎. cgroup이 `memory_localevents`로 마운트돼 있으면 시작 거절
+  (범위의 memory.events가 하위를 세지 못함).
+- 두 하위 cgroup: launcher는 `launcher/`로 옮기고 `work/`를 만든 뒤 `+memory +pids`를 켬(내부 프로세스 금지 규칙을 지킴, 한도는
+  범위에). 작업 프로세스는 `work/`로 옮기고 setsid, oom_score_adj +500(launcher는 -1000) 뒤 확인 바이트, exec(실행 실패는
+  close-on-exec 파이프로 알림 → infrastructure). 작업 트리를 끝낼 때는 숫자 PID에 신호를 보내지 않음: `work/cgroup.kill`(커널이
+  재귀로, fork 중이거나 작업이 만든 하위 cgroup까지), 비었는지는 `work/cgroup.events populated 0`. TERM은 아직 거두지 않은 자식의
+  프로세스 그룹에만(거둔 뒤에는 보내지 않음 — waitpid와 표시를 신호 차단 안에서 함께).
+- 대기 중: 작업 종료, 범위 memory.events의 oom_kill 증가(→ 작업 트리 종료), 감독의 TERM(→ 그룹에 TERM, 유예 뒤 cgroup.kill).
+  작업이 끝나면 작업 트리를 다 지우고 나서 memory.events를 마지막으로 읽음(배경 자손의 OOM까지 셈) → 최종 상태 한 줄.
+- 감독: "ready" 또는 유효한 최종 줄이면 시작으로 인정(곧바로 끝난 실행도 정상 분류); 마감은 먼저 기록하고 TERM, 유예+5 s 뒤
+  범위 cgroup.kill(뒷받침); 자신의 Ctrl-C/TERM은 취소로 기록하고 같은 길; 모든 끝에서 launcher를 거두고(한도 안, 안 되면
+  강제 종료 뒤 다시 거둠) 범위가 비었음을 15 s 안에 확인(ENOENT/ENODEV = 사라짐) — 못 하면 cleanup-failed(유닛을 남김), 정리
+  중의 신호는 기록만. 우선순위: cleanup-failed > cancelled > (시작 못 함) infrastructure > deadline > oom > launcher
+  cleanup-failed > signalled > exited > completed. 결과 JSON(원래 증거 포함), 종료 코드. 분석 완전성은 명령 자신의 출력.
+- `export_bundle.run_bounded`(Linux): 자기 세션·그룹, subreaper, 전체 시간 한도(`--total-timeout`, 기본 분석 한도 + 1 h). 지도자
+  프로세스는 모든 신호를 보낼 때까지 거두지 않음(거두지 않은 PID가 그룹 번호의 재사용을 막음); /proc에서 살아 있는 구성원을 찾아
+  TERM 5 s → KILL, 입양된 좀비만 거둠, 정상 종료 뒤에도 같은 정리; 그룹이 사라졌음을 보이지 못하면 내보내기 실패(프로젝트 보존).
+  다른 플랫폼은 단순 시간 한도(문서화).
+- [가정] 감독받는 명령(우리 분석기)은 자기 프로세스를 cgroup 밖으로 옮기지 않음 — root로 돌기 때문에 `Delegate=yes`가 막지 못함.
+  [가정] 그룹을 떠난 자손은 독립 실행 내보내기의 정리에서 빠짐(감독 안에서는 cgroup이 잡음).
+- 테스트 `test_supervisor.py`(WSL root): 정상, 종료 코드 3, OOM, 정상 종료 뒤 배경 자손 OOM, TERM을 무시하는 트리의 마감, 작업이
+  만든 하위 cgroup, `$`가 든 인자 그대로, 감독 Ctrl-C, launcher 강제 종료, memory_localevents 거절, 실행 실패, 내보내기 정상 종료 뒤
+  남은 자손, 내보내기 전체 시간 한도.
