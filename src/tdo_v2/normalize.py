@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .phases import count as phase_count, measured
+
 from .resource_limits import limit
 
 from .resource_limits import step
@@ -1372,6 +1374,7 @@ def _merge_uncertain(old: dict, new: dict) -> dict:
 
 
 class _ScopedNormalizer:
+    @measured("normalize")
     def normalize(
         self,
         unit: ScopedFunctionUnit,
@@ -1946,6 +1949,9 @@ class _ScopedNormalizer:
         limit("graph_nodes", dependencies.node_count)
         limit("graph_edges", dependencies.edge_count)
         limit("memory_definitions", len(memory_ssa.definitions) if memory_ssa is not None else 0)
+        phase_count("graph_nodes", dependencies.node_count, "normalize")
+        phase_count("graph_edges", dependencies.edge_count, "normalize")
+        phase_count("memory_definitions", len(memory_ssa.definitions) if memory_ssa is not None else 0, "normalize")
         dependencies.freeze()
         return NormalizedFunction(
             document=None,

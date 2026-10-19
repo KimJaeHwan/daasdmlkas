@@ -185,12 +185,20 @@ def main(argv: list[str]) -> int:
         time.sleep(0.05)
     cleaned = not _populated(scope + "/work")
     oom_after = _read_events(scope + "/memory.events").get("oom_kill", 0)   # (after the work subtree is gone)
+    peaks = {}
+    for label, path in (("scope", scope), ("work", scope + "/work")):   # (read while the cgroups exist)
+        try:
+            with open(path + "/memory.peak", encoding="ascii") as handle:
+                peaks[label] = int(handle.read().strip())
+        except (OSError, ValueError):
+            peaks[label] = None
     final = {
         **record, "kind": "final", "child": child,
         "exit_code": os.WEXITSTATUS(exit_status) if os.WIFEXITED(exit_status) else None,
         "signal": os.WTERMSIG(exit_status) if os.WIFSIGNALED(exit_status) else None,
         "oom_kill_before": oom_before, "oom_kill_after": oom_after,
         "terminated": terminate["at"] is not None, "cleanup": "ok" if cleaned else "failed",
+        "memory_peak_scope": peaks["scope"], "memory_peak_work": peaks["work"],
         "finished": time.time(),
     }
     final["status"] = ("oom" if oom_after > oom_before else "cleanup-failed" if not cleaned

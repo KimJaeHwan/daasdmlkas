@@ -301,6 +301,27 @@ def current_run() -> RunBudget | None:
     return _RUN.get()
 
 
+_LAST: RunBudget | None = None
+
+
+def last_run() -> RunBudget | None:
+    """The most recently finished outer run (its ledgers, work and ``phases``
+    table: docs 25.30 K2) -- kept after the run context is reset."""
+    return _LAST
+
+
+def logical_work() -> int:
+    """The run's work so far INCLUDING the pending units of the current
+    quantum -- read-only: no flush, no rearm, no check (docs 25.30 K2). Work
+    is not charged while reporting."""
+    run = _RUN.get()
+    if run is None:
+        return 0
+    if run.reporting:
+        return run.work
+    return run.work + (_quantum - _left)
+
+
 def run_exhausted() -> bool:
     run = _RUN.get()
     return run is not None and run.exhausted is not None
@@ -490,15 +511,24 @@ def _begin_run():
     _CANCEL.clear()
     _active, _active_since = None, 0.0
     run = RunBudget(Limits.from_environment())
+    run.phases = None
     token = _RUN.set(run)
     _rearm(run)
+    from . import phases
+
+    phases.begin(logical_work)
     return token
 
 
 def _end_run(token) -> None:
-    global _active
+    global _active, _LAST
     if token is not None:
-        _flush(_RUN.get())   # (the last pending units; never raises)
+        run = _RUN.get()
+        _flush(run)   # (the last pending units; never raises)
+        from . import phases
+
+        run.phases = phases.end()   # (the sampler stopped and joined first)
+        _LAST = run
         _RUN.reset(token)
         _active = None
         _rearm(None)

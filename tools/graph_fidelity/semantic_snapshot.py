@@ -60,6 +60,7 @@ CONTRACT = {
 ADDED_FIELDS = {
     "EngineRun": {"failed_functions": ()},
     "AnalyzedFunction": {"failure_detail": "", "superseded": None},
+    "RootSlice": {"inherited_incomplete": False},
 }
 
 # identity / authority tokens with no content (each is a unique object; only

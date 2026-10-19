@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .phases import measured
+
 from .resource_limits import step
 
 from dataclasses import dataclass, replace
@@ -222,6 +224,7 @@ _KIND_MAP = {
 }
 
 
+@measured("relative_memory")
 def project_function_relative_memory(
     unit: ObservedEffectUnit,
     observation: ValidatedFunctionObservation,

@@ -11,6 +11,8 @@ stay opaque (call-clobber debt) -- design S5 handles recursion.
 
 from __future__ import annotations
 
+from .phases import measured
+
 import sys
 
 from dataclasses import dataclass, field
@@ -190,6 +192,7 @@ class _Interrupted(Exception):
         self.results = results
 
 
+@measured("analyze_units")
 def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_globals_disjoint_from_stack=False, sink_roots=None,
                   image_info=None, external_models=None, readonly_image=None,
@@ -1391,6 +1394,7 @@ def _recursive_hypothesis(derive, stack):
     return replace(effect, sink_demands=tuple(merged[label] for label in sorted(merged)))
 
 
+@measured("program_checks")
 def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
     """Entry key -> operations that may set the stack pointer to something
     other than "the stack pointer + a number" (a stack switch: fibers,
@@ -1623,6 +1627,7 @@ def _callind_sites(unit):
                            _operation_key(instruction.address, index, "COPY"), copy.inputs[0])
 
 
+@measured("indirect_targets")
 def _indirect_targets(item, functions) -> dict[str, str]:
     """CALLIND key -> Bundle function the call provably reaches: the target
     register's value at the call is a constant address (address-expression

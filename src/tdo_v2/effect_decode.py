@@ -1,5 +1,6 @@
 """Structural projection from observed effects to local memory actions."""
 
+from .phases import measured
 from .effects import EffectKind as _EffectKind
 from .effects import ObservedEffectUnit as _ObservedEffectUnit
 from .effects import UnresolvedMemoryAccess as _UnresolvedMemoryAccess
@@ -15,6 +16,7 @@ from .model import StorageRef as _StorageRef
 __all__ = ("decode_effect_unit",)
 
 
+@measured("effect_decode")
 def decode_effect_unit(
     unit: _ObservedEffectUnit, /
 ) -> _LocalMemoryUnit:

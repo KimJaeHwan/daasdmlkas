@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .phases import measured
+
 from dataclasses import dataclass
 import hashlib
 import json
@@ -123,6 +125,7 @@ class BoundLocalMemorySsa:
         raise TypeError("bound local-memory SSA receipts cannot be serialized")
 
 
+@measured("memory_ssa")
 def build_bound_local_memory_ssa(
     unit: LocalMemoryUnit,
     /,

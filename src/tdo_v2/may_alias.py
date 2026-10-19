@@ -53,6 +53,8 @@ frame writes reach them, like unknown-address accesses.
 
 from __future__ import annotations
 
+from .phases import measured
+
 from .resource_limits import step
 
 from contextvars import ContextVar
@@ -257,6 +259,7 @@ class _Policy:
         return True
 
 
+@measured("may_alias")
 def derive_may_alias_reads(
     unit: ObservedEffectUnit,
     observation: ValidatedFunctionObservation,
@@ -865,6 +868,7 @@ def _unit_stub(scopes):
     )
 
 
+@measured("stack_switch_check")
 def stack_switches(unit, observation, context, address_spaces, program_stack=None,
                    call_preserved=()) -> tuple[str, ...]:
     """Operations that may set the stack pointer to something other than

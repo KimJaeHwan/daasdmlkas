@@ -37,6 +37,8 @@ override or unsupported operation): the set of values its alternatives allow.
 
 from __future__ import annotations
 
+from .phases import measured
+
 import sys
 from dataclasses import dataclass
 
@@ -771,6 +773,7 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
     }
 
 
+@measured("records")
 def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=None, completeness=None):
     """The record of a sink root: ``seeds`` as ``lane_slice`` takes them
     ((node, spans) of the root's raw sink rows)."""

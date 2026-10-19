@@ -89,6 +89,10 @@ class RootSlice:
     explanation: dict[str, object]
     local_completeness: LocalCompleteness
     effective_completeness: LocalCompleteness
+    # incomplete for a reason no counter of the completeness shows: the callee
+    # part of a projected root, or a callee that failed after its summary was
+    # used (summary engine; docs 25.30 K2)
+    inherited_incomplete: bool = False
 
     @property
     def is_locally_complete(self) -> bool:

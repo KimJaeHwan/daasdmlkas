@@ -32,6 +32,8 @@ back to it) -- the witnesses still use lane slices.
 
 from __future__ import annotations
 
+from .phases import measured
+
 from .graph_contracts import NodeKind
 from .span_geometry import ByteSpan, StorageObjectKind
 
@@ -60,6 +62,7 @@ def labels_in_lanes(lanes, index, rows) -> set:
     return found
 
 
+@measured("witnesses")
 def root_witnesses(normalized, unit, rows, seeds, labels, index, origins, traversal="lane") -> dict:
     """``seeds``: the root's lane seeds; ``labels``: its reported labels;
     ``origins``: node -> labels attached by summarized calls; ``traversal``:

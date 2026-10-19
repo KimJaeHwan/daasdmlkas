@@ -20,6 +20,8 @@ pointer escaping, so frame preservation needs callee-side evidence.
 
 from __future__ import annotations
 
+from .phases import measured
+
 from .resource_limits import step
 
 from dataclasses import dataclass
@@ -153,6 +155,7 @@ class _State:
 _EMPTY = _State(frozenset(), {})
 
 
+@measured("call_clobber")
 def derive_call_clobber_reads(
     unit: ObservedEffectUnit,
     observation: ValidatedFunctionObservation,

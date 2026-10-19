@@ -38,6 +38,8 @@ shared sparse solver at the exit of each terminal block.
 
 from __future__ import annotations
 
+from .phases import count as phase_count, measured
+
 from .resource_limits import limit
 
 from .resource_limits import step
@@ -151,6 +153,7 @@ class FunctionSummary:
     stack_values_out: bool = True
 
 
+@measured("summarize")
 def summarize_function(normalized, observation, origin_labels=None, sink_roots=(),
                        dead_ops=frozenset(), noreturn_jumps=frozenset()) -> FunctionSummary:
     """``origin_labels``: graph node -> source labels it carries (boundary
@@ -511,8 +514,10 @@ class _AncestorClosure:
                         for part, found in zip(parts, self.value[parent_node]):
                             part |= found
                 value = tuple(frozenset(part) for part in parts)
-                self.members += sum(map(len, value))
+                members = sum(map(len, value))
+                self.members += members
                 limit("fact_members", self.members)
+                phase_count("fact_members", members, "summarize")
                 for item in component:
                     self.value[item] = value
 
@@ -528,6 +533,7 @@ def _operation_nodes(graph) -> dict:
     return operation_of
 
 
+@measured("uncertain_writers")
 def uncertain_writers_of(normalized, observation) -> dict:
     """Write keys whose address rests on a read with debt -> the alias
     conditions under which they land on their static object (None: they may

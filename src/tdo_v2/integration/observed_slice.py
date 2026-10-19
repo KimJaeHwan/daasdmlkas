@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..phases import measured
+
 from dataclasses import dataclass
 
 from ..normalize import NormalizedFunction
@@ -24,6 +26,7 @@ class ObservedBoundarySlice:
         return tuple(sorted({item.label for item in self.reached_origins}))
 
 
+@measured("slices")
 def run_observed_boundary_slices(
     function: NormalizedFunction,
     boundaries: ObservedBoundaryProjection,

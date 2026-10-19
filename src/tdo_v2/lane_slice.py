@@ -32,6 +32,8 @@ oracle checks this against concrete runs).
 
 from __future__ import annotations
 
+from .phases import measured
+
 from .resource_limits import step
 
 from dataclasses import dataclass, field
@@ -118,6 +120,7 @@ def lane_index(normalized, unit) -> "_Index":
     return _Index(normalized, unit)
 
 
+@measured("lanes")
 def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False, budget=None,
                byte_budget=None) -> LaneSlice:
     """``seeds``: (node, spans) -- spans: the absolute ByteSpans demanded of a

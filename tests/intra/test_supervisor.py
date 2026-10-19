@@ -86,11 +86,18 @@ def test_arguments_are_passed_literally():
 
 def test_supervisor_cancellation_stops_the_tree():
     marker = "tdo-k1d-cancel-marker"
+    ready = Path("/tmp/tdo_k1d_cancel_ready")
+    ready.unlink(missing_ok=True)
     process = subprocess.Popen([sys.executable, str(REPO / "tools" / "run_supervised.py"), "--memory", "200M",
                                 "--deadline", "60", "--grace", "1", "--", "bash", "-c",
-                                f"(exec -a {marker} sleep 300) & sleep 300"],
+                                f"(exec -a {marker} sleep 300) & touch {ready}; sleep 300"],
                                stdout=subprocess.PIPE, text=True)
-    time.sleep(2)
+    # the signal only once the workload runs (it creates the file): a fixed pause
+    # raced a slow startup under load; pgrep would match the supervisor's own
+    # command line, which carries the marker
+    limit = time.monotonic() + 60
+    while not ready.exists() and time.monotonic() < limit:
+        time.sleep(0.1)
     process.send_signal(signal.SIGINT)
     out, _ = process.communicate(timeout=60)
     record = json.loads(out)

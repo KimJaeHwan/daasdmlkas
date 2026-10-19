@@ -23,6 +23,8 @@ Edges run decision operation -> dependent operation with kind
 
 from __future__ import annotations
 
+from .phases import measured
+
 from .resource_limits import step
 
 from dataclasses import dataclass
@@ -46,6 +48,7 @@ class ControlDependence:
                 raise TypeError("control dependence requires exact operation keys")
 
 
+@measured("control_dependence")
 def derive_control_dependences(
     observation: ValidatedFunctionObservation,
     entry: AddressCoordinate,

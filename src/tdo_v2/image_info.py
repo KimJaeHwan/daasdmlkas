@@ -137,6 +137,19 @@ class ReadOnlyImage:
         self._block_members = {(row["space_id"], row["byte_start"]): row["member_id"] for row in manifest["blocks"]}
         self._cache: dict = {}
 
+    @classmethod
+    def from_bytes(cls, info: ImageInfo, blocks: dict) -> "ReadOnlyImage":
+        """The same values from bytes in memory (synthetic programs, docs 25.30
+        K2): ``blocks`` maps each ImageInfo block's (space id, start) to its
+        bytes; ``value`` applies the same permission / import-slot rules."""
+        image = cls.__new__(cls)
+        image._generation = None
+        image._info = info
+        image._members = {}
+        image._block_members = {key: key for key in blocks}
+        image._cache = dict(blocks)
+        return image
+
     def value(self, space_id: int, offset: int, size: int) -> int | None:
         block = self._info.block_at(space_id, offset, size)
         if block is None or not block.initialized or block.write or block.volatile or not block.read:
@@ -154,7 +167,13 @@ class ReadOnlyImage:
             if hashlib.sha256(data).hexdigest() != member["sha256"]:
                 raise ImageInfoError("memory block does not match the sealed manifest")
             self._cache[member_id] = data
+            from .phases import count
+
+            count("image_bytes_loaded", len(data))
         start = offset - block.start
+        from .phases import count
+
+        count("image_reads", 1)
         return int.from_bytes(data[start:start + size], "little")
 
 

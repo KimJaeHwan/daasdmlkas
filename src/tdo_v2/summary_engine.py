@@ -36,6 +36,8 @@ is.
 
 from __future__ import annotations
 
+from .phases import phase
+
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -167,291 +169,399 @@ def analyze_frozen_bundle_with_summaries(
         program = session.program_result
         if type(program) is not ConstructedProgramScope:
             raise ValueError("Bundle program scope is unresolved")
-        evidences = list(session.iter_functions())
-        by_key = {function_key(item.unit.scopes.function.entry): item for item in evidences}
-        assumed = {
-            key: assumed_boundary_effects(item, boundary_provider)
-            for key, item in by_key.items()
-        } if assume_boundary_call_effects else {}
-        boundaries = {key: _boundaries(item) for key, item in by_key.items()}
-
-        def own_sink_nodes(analysis, view):
-            """ObservedBoundaryNode SINK rows of the function's own boundaries."""
-            key = function_key(analysis.entry)
-            rows: list = []
-            for occurrence, (seed, boundary) in enumerate(boundaries[key]):
-                position = view.position(seed.operation_key)
-                if position is None:
-                    continue
-                for match in boundary_provider.classify(boundary):
-                    if match.kind is BoundaryKind.SINK:
-                        bound = _direct_sink_boundary_nodes(
-                            view, match.label, seed.operation_key, position, occurrence,
-                            boundary_provider.state(boundary, match),
-                        )
-                        if not bound:  # unrepresentable state: unbound root, not a lost one
-                            node = analysis.normalized.dependencies.node_for_key(f"op:{seed.operation_key}")
-                            bound = (ObservedBoundaryNode(BoundaryKind.SINK, match.label, node, occurrence, 0),)
-                        rows.extend(bound)
-            tails = {analysis.entry: []}
-            _bind_tail_call_sinks((analysis,), {analysis.entry: view}, boundary_provider, tails)
-            return rows + tails[analysis.entry]
-
-        def sink_roots(key, unit, normalized):
-            analysis = ConfiguredFunctionAnalysis(by_key[key], normalized, EMPTY_OBSERVED_BOUNDARIES, ())
-            groups: dict = {}
-            for row in own_sink_nodes(analysis, _FunctionView(analysis)):
-                groups.setdefault((row.label, row.occurrence_ordinal), []).append(row.node)
-            return [
-                (label, tuple(sorted(set(group))), not _unbound_roots(normalized, group))
-                for (label, _), group in sorted(groups.items())
-            ]
-
-        def source_matches(boundary):
-            return [match for match in boundary_provider.classify(boundary)
-                    if match.kind is BoundaryKind.SOURCE]
-
-        def extra_origins(key, unit, normalized, calls):
-            origins: dict = {}
-            proven = dict(normalized.proven_call_effects)
-            for seed, boundary in boundaries[key]:
-                for match in source_matches(boundary):
-                    call = seed.operation_key
-                    # summarized, modeled or TEST-ONLY declared: all are call effects
-                    state = {
-                        offset for selector in boundary_provider.state(boundary, match)
-                        if type(selector) is PhysicalRegisterSlice
-                        for offset in range(selector.byte_offset, selector.byte_offset + selector.byte_size)
-                    }
-                    nodes = [
-                        node
-                        for index, run in enumerate(proven[call].runs)
-                        if any(offset in state for span in run.writes
-                               for offset in range(span.start, span.end))
-                        for node in run_definition_nodes(normalized, f"{call}~{index}")
-                    ] if call in proven else []
-                    # state the call is not proven to write (an unsummarized or
-                    # partly opaque source): its later reads carry call-clobber
-                    # debt naming this call -- the debt is where the value may
-                    # come from, so it carries the label (the root stays unsure)
-                    nodes += [
-                        node
-                        for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
-                        if call in row.intervening_calls and any(
-                            span.object_id.kind is StorageObjectKind.REGISTER_FILE
-                            and any(offset in state for offset in range(span.start, span.end))
-                            for span in row.spans
-                        )
-                    ]
-                    for node in nodes:
-                        origins.setdefault(node, set()).add(match.label)
-            return origins
-
         image_info = load_image_info(generation_path)
         readonly_image = (
             ReadOnlyImage(generation_path, image_info)
             if assume_readonly_image_constant and image_info is not None else None
         )
-        # named assumption win64-home-space-callee-private: the Windows x64
-        # convention only (a PE image of a 64-bit x86 language)
-        home_space = 0x28 if assume_win64_home_space_private and assume_entry_values_not_frame \
-            and image_info is not None             and image_info.executable_format.startswith("Portable Executable") and _x86_64(evidences) else 0
-        from .stack_evidence import assumption_allowed
-
-        if stack_evidence:
-            assume_globals_disjoint_from_stack, _ = assumption_allowed(
-                stack_evidence, requested=assume_globals_disjoint_from_stack)
-        if linker is not None:
-            from .interprocedural import program_switches_stack
-            from .stack_evidence import load_stack_evidence
-
-            # the linked templates are derived with the run's effective
-            # settings: the program's own withdrawals first
-            if assume_globals_disjoint_from_stack and program_switches_stack([item.unit for item in evidences]):
-                assume_globals_disjoint_from_stack = False
-            external_models, linked_evidence = linker(
-                [item.unit for item in evidences], image_info, external_models=external_models,
-                pcodeop_models=pcodeop_models, private_frame_above=home_space,
-                traps=assume_debug_break_traps_do_not_return,
-                globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear,
-                import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame,
-                opaque_no_stack=assume_opaque_callees_leave_no_stack_addresses,
-                same_result=assume_same_result_functions, accessor_separate=assume_accessor_result_separate)
-            linked_evidence = tuple(load_stack_evidence(path) for path in linked_evidence)
-            if linked_evidence:
-                # a switch in a linked library withdraws the assumption for the run
-                stack_evidence = (*stack_evidence, *linked_evidence)
-                assume_globals_disjoint_from_stack, _ = assumption_allowed(
-                    stack_evidence, requested=assume_globals_disjoint_from_stack)
-        results = analyze_units(
-            [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
+        return _analyze_session(
+            program, list(session.iter_functions()), image_info, readonly_image,
+            boundary_provider=boundary_provider,
+            assume_boundary_call_effects=assume_boundary_call_effects,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
-            sink_roots=sink_roots,
-            # the image facts serve models and the import-slot assumption
-            # alike (every model use is guarded on external_models)
-            image_info=image_info,
             external_models=external_models,
-            pcodeop_models=pcodeop_models,
-            readonly_image=readonly_image,
             assume_direction_flag_clear=assume_direction_flag_clear,
-            private_frame_above=home_space,
+            pcodeop_models=pcodeop_models,
+            assume_win64_home_space_private=assume_win64_home_space_private,
             assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
+            stack_evidence=stack_evidence,
+            linker=linker,
             assume_import_slots_hold_exports=assume_import_slots_hold_exports,
             assume_entry_values_not_frame=assume_entry_values_not_frame,
             assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
+            origin_witnesses=origin_witnesses,
+            operation_records=operation_records,
             assume_same_result_functions=assume_same_result_functions,
             assume_accessor_result_separate=assume_accessor_result_separate,
             assume_accessor_private_state=assume_accessor_private_state,
-            model_bindings=tuple(model_bindings),
+            model_bindings=model_bindings,
         )
-        assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
-                                      traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
-        preliminary = []
-        failed: dict = {}   # function key -> (NormalizationFailureReason, detail)
-        for key, item in by_key.items():
-            if key not in results:
-                # a function a model binding cuts (``interprocedural._bound_cuts``):
-                # its callers take the model; it must hold no boundary of its own
-                if any(boundary_provider.classify(boundary) for _, boundary in boundaries.get(key, ())) \
-                        or any(boundary_provider.classify(boundary) for boundary in _tail_boundaries(item)):
-                    raise ValueError(f"function {key} is bound to a model but has source / sink calls")
+
+
+@analysis_entry
+def analyze_observed_with_summaries(program, evidences, *, image_info=None, readonly_image=None,
+    boundary_provider: BoundaryProvider,
+    assume_boundary_call_effects: bool = False,
+    assume_globals_disjoint_from_stack: bool = True,
+    external_models=None,
+    assume_direction_flag_clear: bool = True,
+    pcodeop_models=None,
+    assume_win64_home_space_private: bool = True,
+    assume_debug_break_traps_do_not_return: bool = True,
+    stack_evidence=(),
+    linker=None,
+    assume_import_slots_hold_exports: bool = True,
+    assume_entry_values_not_frame: bool = True,
+    assume_opaque_callees_leave_no_stack_addresses: bool = True,
+    origin_witnesses: bool = False,
+    operation_records: bool = False,
+    assume_same_result_functions: bool = False,
+    assume_accessor_result_separate: bool = False,
+    assume_accessor_private_state: bool = False,
+    model_bindings=(),
+) -> EngineRun:
+    """The summary engine on already-admitted evidences (the in-memory path:
+    synthetic programs, docs 25.30 K2) -- the same analysis as
+    ``analyze_frozen_bundle_with_summaries`` after admission; ``image_info`` /
+    ``readonly_image`` as that entry derives them from a Bundle (None: no
+    image facts)."""
+    return _analyze_session(
+        program, list(evidences), image_info, readonly_image,
+        boundary_provider=boundary_provider,
+        assume_boundary_call_effects=assume_boundary_call_effects,
+        assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+        external_models=external_models,
+        assume_direction_flag_clear=assume_direction_flag_clear,
+        pcodeop_models=pcodeop_models,
+        assume_win64_home_space_private=assume_win64_home_space_private,
+        assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
+        stack_evidence=stack_evidence,
+        linker=linker,
+        assume_import_slots_hold_exports=assume_import_slots_hold_exports,
+        assume_entry_values_not_frame=assume_entry_values_not_frame,
+        assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
+        origin_witnesses=origin_witnesses,
+        operation_records=operation_records,
+        assume_same_result_functions=assume_same_result_functions,
+        assume_accessor_result_separate=assume_accessor_result_separate,
+        assume_accessor_private_state=assume_accessor_private_state,
+        model_bindings=model_bindings,
+    )
+
+
+def _analyze_session(program, evidences, image_info, readonly_image, *,
+    boundary_provider: BoundaryProvider,
+    assume_boundary_call_effects: bool = False,
+    assume_globals_disjoint_from_stack: bool = True,
+    external_models=None,
+    assume_direction_flag_clear: bool = True,
+    pcodeop_models=None,
+    assume_win64_home_space_private: bool = True,
+    assume_debug_break_traps_do_not_return: bool = True,
+    stack_evidence=(),
+    linker=None,
+    assume_import_slots_hold_exports: bool = True,
+    assume_entry_values_not_frame: bool = True,
+    assume_opaque_callees_leave_no_stack_addresses: bool = True,
+    origin_witnesses: bool = False,
+    operation_records: bool = False,
+    assume_same_result_functions: bool = False,
+    assume_accessor_result_separate: bool = False,
+    assume_accessor_private_state: bool = False,
+    model_bindings=(),
+) -> EngineRun:
+    """The post-admission body of the summary engine (unchanged)."""
+    from .integration.configured_boundary_demands import (
+        _analyses_from_boundary_nodes, _direct_sink_boundary_nodes,
+    )
+    from .integration.configured_function_view import _FunctionView
+    from .integration.configured_interprocedural_contracts import ConfiguredFunctionAnalysis
+    from .integration.configured_interprocedural_slice import _bind_tail_call_sinks
+    from .observed_boundary_projection import EMPTY_OBSERVED_BOUNDARIES, ObservedBoundaryNode
+
+    if type(program) is not ConstructedProgramScope:
+        raise ValueError("program scope is unresolved")
+    evidences = list(evidences)
+    by_key = {function_key(item.unit.scopes.function.entry): item for item in evidences}
+    assumed = {
+        key: assumed_boundary_effects(item, boundary_provider)
+        for key, item in by_key.items()
+    } if assume_boundary_call_effects else {}
+    boundaries = {key: _boundaries(item) for key, item in by_key.items()}
+
+    def own_sink_nodes(analysis, view):
+        """ObservedBoundaryNode SINK rows of the function's own boundaries."""
+        key = function_key(analysis.entry)
+        rows: list = []
+        for occurrence, (seed, boundary) in enumerate(boundaries[key]):
+            position = view.position(seed.operation_key)
+            if position is None:
                 continue
-            normalized = results[key].normalized
-            if type(normalized) is not NormalizedFunction:
-                # a typed refusal of an admitted function (a resource failure or
-                # an unsupported shape): it fails alone -- its callers saw an
-                # opaque call; its sink occurrences are failure roots (docs 25.30 K1c)
-                failed[key] = (normalized.reason, results[key].failure_detail)
-                continue
-            preliminary.append(ConfiguredFunctionAnalysis(item, normalized, EMPTY_OBSERVED_BOUNDARIES, ()))
-        nodes: dict = {}
-        incomplete_roots: set = set()  # (entry, label, occurrence) of projected roots
+            for match in boundary_provider.classify(boundary):
+                if match.kind is BoundaryKind.SINK:
+                    bound = _direct_sink_boundary_nodes(
+                        view, match.label, seed.operation_key, position, occurrence,
+                        boundary_provider.state(boundary, match),
+                    )
+                    if not bound:  # unrepresentable state: unbound root, not a lost one
+                        node = analysis.normalized.dependencies.node_for_key(f"op:{seed.operation_key}")
+                        bound = (ObservedBoundaryNode(BoundaryKind.SINK, match.label, node, occurrence, 0),)
+                    rows.extend(bound)
+        tails = {analysis.entry: []}
+        _bind_tail_call_sinks((analysis,), {analysis.entry: view}, boundary_provider, tails)
+        return rows + tails[analysis.entry]
 
-        def bind(analysis):
-            """The function's ObservedBoundaryNode rows (its origins, own sinks
-            and projected roots)."""
+    def sink_roots(key, unit, normalized):
+        analysis = ConfiguredFunctionAnalysis(by_key[key], normalized, EMPTY_OBSERVED_BOUNDARIES, ())
+        groups: dict = {}
+        for row in own_sink_nodes(analysis, _FunctionView(analysis)):
+            groups.setdefault((row.label, row.occurrence_ordinal), []).append(row.node)
+        return [
+            (label, tuple(sorted(set(group))), not _unbound_roots(normalized, group))
+            for (label, _), group in sorted(groups.items())
+        ]
+
+    def source_matches(boundary):
+        return [match for match in boundary_provider.classify(boundary)
+                if match.kind is BoundaryKind.SOURCE]
+
+    def extra_origins(key, unit, normalized, calls):
+        origins: dict = {}
+        proven = dict(normalized.proven_call_effects)
+        for seed, boundary in boundaries[key]:
+            for match in source_matches(boundary):
+                call = seed.operation_key
+                # summarized, modeled or TEST-ONLY declared: all are call effects
+                state = {
+                    offset for selector in boundary_provider.state(boundary, match)
+                    if type(selector) is PhysicalRegisterSlice
+                    for offset in range(selector.byte_offset, selector.byte_offset + selector.byte_size)
+                }
+                nodes = [
+                    node
+                    for index, run in enumerate(proven[call].runs)
+                    if any(offset in state for span in run.writes
+                           for offset in range(span.start, span.end))
+                    for node in run_definition_nodes(normalized, f"{call}~{index}")
+                ] if call in proven else []
+                # state the call is not proven to write (an unsummarized or
+                # partly opaque source): its later reads carry call-clobber
+                # debt naming this call -- the debt is where the value may
+                # come from, so it carries the label (the root stays unsure)
+                nodes += [
+                    node
+                    for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
+                    if call in row.intervening_calls and any(
+                        span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                        and any(offset in state for offset in range(span.start, span.end))
+                        for span in row.spans
+                    )
+                ]
+                for node in nodes:
+                    origins.setdefault(node, set()).add(match.label)
+        return origins
+
+    # named assumption win64-home-space-callee-private: the Windows x64
+    # convention only (a PE image of a 64-bit x86 language)
+    home_space = 0x28 if assume_win64_home_space_private and assume_entry_values_not_frame \
+        and image_info is not None             and image_info.executable_format.startswith("Portable Executable") and _x86_64(evidences) else 0
+    from .stack_evidence import assumption_allowed
+
+    if stack_evidence:
+        assume_globals_disjoint_from_stack, _ = assumption_allowed(
+            stack_evidence, requested=assume_globals_disjoint_from_stack)
+    if linker is not None:
+        from .interprocedural import program_switches_stack
+        from .stack_evidence import load_stack_evidence
+
+        # the linked templates are derived with the run's effective
+        # settings: the program's own withdrawals first
+        if assume_globals_disjoint_from_stack and program_switches_stack([item.unit for item in evidences]):
+            assume_globals_disjoint_from_stack = False
+        external_models, linked_evidence = linker(
+            [item.unit for item in evidences], image_info, external_models=external_models,
+            pcodeop_models=pcodeop_models, private_frame_above=home_space,
+            traps=assume_debug_break_traps_do_not_return,
+            globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear,
+            import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame,
+            opaque_no_stack=assume_opaque_callees_leave_no_stack_addresses,
+            same_result=assume_same_result_functions, accessor_separate=assume_accessor_result_separate)
+        linked_evidence = tuple(load_stack_evidence(path) for path in linked_evidence)
+        if linked_evidence:
+            # a switch in a linked library withdraws the assumption for the run
+            stack_evidence = (*stack_evidence, *linked_evidence)
+            assume_globals_disjoint_from_stack, _ = assumption_allowed(
+                stack_evidence, requested=assume_globals_disjoint_from_stack)
+    results = analyze_units(
+        [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
+        assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+        sink_roots=sink_roots,
+        # the image facts serve models and the import-slot assumption
+        # alike (every model use is guarded on external_models)
+        image_info=image_info,
+        external_models=external_models,
+        pcodeop_models=pcodeop_models,
+        readonly_image=readonly_image,
+        assume_direction_flag_clear=assume_direction_flag_clear,
+        private_frame_above=home_space,
+        assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
+        assume_import_slots_hold_exports=assume_import_slots_hold_exports,
+        assume_entry_values_not_frame=assume_entry_values_not_frame,
+        assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
+        assume_same_result_functions=assume_same_result_functions,
+        assume_accessor_result_separate=assume_accessor_result_separate,
+        assume_accessor_private_state=assume_accessor_private_state,
+        model_bindings=tuple(model_bindings),
+    )
+    assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
+                                  traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
+    preliminary = []
+    failed: dict = {}   # function key -> (NormalizationFailureReason, detail)
+    for key, item in by_key.items():
+        if key not in results:
+            # a function a model binding cuts (``interprocedural._bound_cuts``):
+            # its callers take the model; it must hold no boundary of its own
+            if any(boundary_provider.classify(boundary) for _, boundary in boundaries.get(key, ())) \
+                    or any(boundary_provider.classify(boundary) for boundary in _tail_boundaries(item)):
+                raise ValueError(f"function {key} is bound to a model but has source / sink calls")
+            continue
+        normalized = results[key].normalized
+        if type(normalized) is not NormalizedFunction:
+            # a typed refusal of an admitted function (a resource failure or
+            # an unsupported shape): it fails alone -- its callers saw an
+            # opaque call; its sink occurrences are failure roots (docs 25.30 K1c)
+            failed[key] = (normalized.reason, results[key].failure_detail)
+            continue
+        preliminary.append(ConfiguredFunctionAnalysis(item, normalized, EMPTY_OBSERVED_BOUNDARIES, ()))
+    nodes: dict = {}
+    incomplete_roots: set = set()  # (entry, label, occurrence) of projected roots
+
+    def bind(analysis):
+        """The function's ObservedBoundaryNode rows (its origins, own sinks
+        and projected roots)."""
+        key = function_key(analysis.entry)
+        rows = []
+        view = _FunctionView(analysis)
+        for fragment, (node, labels) in enumerate(sorted(results[key].origins.items())):
+            for label in sorted(labels):
+                rows.append(ObservedBoundaryNode(BoundaryKind.SOURCE, label, node, 0, fragment))
+        rows.extend(own_sink_nodes(analysis, view))
+        # projected roots: occurrences after the function's own call sites and tails
+        base = len(analysis.evidence.seeds.callsites) + len(analysis.evidence.tails)
+        for index, (call, _, label, root_nodes, complete) in enumerate(results[key].projected_sinks):
+            occurrence = base + index
+            if not root_nodes:  # the ~sink row did not materialize: bind the call
+                root_nodes = [analysis.normalized.dependencies.node_for_key(f"op:{call}")]
+                complete = False
+            for fragment, node in enumerate(root_nodes):
+                rows.append(ObservedBoundaryNode(BoundaryKind.SINK, label, node, occurrence, fragment))
+            if not complete:
+                incomplete_roots.add((analysis.entry, label, occurrence))
+        return rows
+
+    def function_roots(analysis):
+        """The RootSlices of one bound function."""
+        key = function_key(analysis.entry)
+        unit = by_key[key].unit
+        found = []
+        for label, occurrence, root_nodes, results_for_root, node_labels in _raw_root_groups(
+                analysis, nodes[analysis.entry]):
+            unbound = _unbound_roots(analysis.normalized, root_nodes)
+            completeness = _with_unbound(local_completeness(results_for_root), unbound)
+            inherited = (analysis.entry, label, occurrence) in incomplete_roots
+            if inherited:
+                # the callee part of a projected root is incomplete
+                completeness = replace(completeness, complete=False)
+            labels = _lane_origin_labels(analysis, unit, nodes[analysis.entry], label, occurrence, node_labels,
+                                         lane_indexes)
+            explanation = _witnesses(analysis, unit, nodes[analysis.entry], label, occurrence, labels,
+                                     node_labels, lane_indexes, results[key].origins) \
+                if origin_witnesses else {}
+            if operation_records:
+                explanation = {**explanation, "record": _root_record(
+                    analysis, unit, nodes[analysis.entry], label, occurrence, results[key], completeness)}
+            found.append(RootSlice(
+                analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence, root_nodes,
+                tuple(sorted(labels)),
+                (), explanation, completeness, completeness, inherited,
+            ))
+            limit("output_items", len(found))
+        return found
+
+    # sink binding and root slicing per function: a function that runs out
+    # of a resource there fails alone (its partial rows are dropped)
+    analyses = []
+    late: set = set()   # failed after the analysis: their summaries were used
+
+    def fail_late(analysis, error):
+        key = function_key(analysis.entry)
+        failed[key] = (_failure_reason(error), _failure_detail(error))
+        late.add(key)
+
+    def run_budget(remaining):
+        """Finalization: every function not yet done (docs 25.30 K1c-3)."""
+        run = current_run()
+        detail = f"run:{run.exhausted if run is not None and run.exhausted else 'unknown'}"
+        for analysis in remaining:
             key = function_key(analysis.entry)
-            rows = []
-            view = _FunctionView(analysis)
-            for fragment, (node, labels) in enumerate(sorted(results[key].origins.items())):
-                for label in sorted(labels):
-                    rows.append(ObservedBoundaryNode(BoundaryKind.SOURCE, label, node, 0, fragment))
-            rows.extend(own_sink_nodes(analysis, view))
-            # projected roots: occurrences after the function's own call sites and tails
-            base = len(analysis.evidence.seeds.callsites) + len(analysis.evidence.tails)
-            for index, (call, _, label, root_nodes, complete) in enumerate(results[key].projected_sinks):
-                occurrence = base + index
-                if not root_nodes:  # the ~sink row did not materialize: bind the call
-                    root_nodes = [analysis.normalized.dependencies.node_for_key(f"op:{call}")]
-                    complete = False
-                for fragment, node in enumerate(root_nodes):
-                    rows.append(ObservedBoundaryNode(BoundaryKind.SINK, label, node, occurrence, fragment))
-                if not complete:
-                    incomplete_roots.add((analysis.entry, label, occurrence))
-            return rows
-
-        def function_roots(analysis):
-            """The RootSlices of one bound function."""
-            key = function_key(analysis.entry)
-            unit = by_key[key].unit
-            found = []
-            for label, occurrence, root_nodes, results_for_root, node_labels in _raw_root_groups(
-                    analysis, nodes[analysis.entry]):
-                unbound = _unbound_roots(analysis.normalized, root_nodes)
-                completeness = _with_unbound(local_completeness(results_for_root), unbound)
-                if (analysis.entry, label, occurrence) in incomplete_roots:
-                    # the callee part of a projected root is incomplete
-                    completeness = replace(completeness, complete=False)
-                labels = _lane_origin_labels(analysis, unit, nodes[analysis.entry], label, occurrence, node_labels,
-                                             lane_indexes)
-                explanation = _witnesses(analysis, unit, nodes[analysis.entry], label, occurrence, labels,
-                                         node_labels, lane_indexes, results[key].origins) \
-                    if origin_witnesses else {}
-                if operation_records:
-                    explanation = {**explanation, "record": _root_record(
-                        analysis, unit, nodes[analysis.entry], label, occurrence, results[key], completeness)}
-                found.append(RootSlice(
-                    analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence, root_nodes,
-                    tuple(sorted(labels)),
-                    (), explanation, completeness, completeness,
-                ))
-                limit("output_items", len(found))
-            return found
-
-        # sink binding and root slicing per function: a function that runs out
-        # of a resource there fails alone (its partial rows are dropped)
-        analyses = []
-        late: set = set()   # failed after the analysis: their summaries were used
-
-        def fail_late(analysis, error):
-            key = function_key(analysis.entry)
-            failed[key] = (_failure_reason(error), _failure_detail(error))
+            failed[key] = (NormalizationFailureReason.ANALYSIS_RUN_BUDGET, detail)
             late.add(key)
 
-        def run_budget(remaining):
-            """Finalization: every function not yet done (docs 25.30 K1c-3)."""
-            run = current_run()
-            detail = f"run:{run.exhausted if run is not None and run.exhausted else 'unknown'}"
-            for analysis in remaining:
-                key = function_key(analysis.entry)
-                failed[key] = (NormalizationFailureReason.ANALYSIS_RUN_BUDGET, detail)
-                late.add(key)
-
-        for index, analysis in enumerate(preliminary):
-            if run_exhausted():
+    for index, analysis in enumerate(preliminary):
+        if run_exhausted():
+            run_budget(preliminary[index:])
+            break
+        try:
+            with activation(_ledger_key(analysis.evidence.unit)), phase("binding"):
+                rows = bind(analysis)
+                bound = _analyses_from_boundary_nodes((analysis,), {analysis.entry: rows})
+                checkpoint()   # (limits checked before the rows are kept)
+                nodes[analysis.entry] = rows
+                analyses.extend(bound)
+        except ANALYSIS_FAILURES as error:
+            nodes.pop(analysis.entry, None)
+            incomplete_roots.difference_update(
+                {row for row in incomplete_roots if row[0] == analysis.entry})
+            if _is_run_exhaustion(error):
                 run_budget(preliminary[index:])
                 break
-            try:
-                with activation(_ledger_key(analysis.evidence.unit)):
-                    rows = bind(analysis)
-                    bound = _analyses_from_boundary_nodes((analysis,), {analysis.entry: rows})
-                    checkpoint()   # (limits checked before the rows are kept)
-                    nodes[analysis.entry] = rows
-                    analyses.extend(bound)
-            except ANALYSIS_FAILURES as error:
-                nodes.pop(analysis.entry, None)
-                incomplete_roots.difference_update(
-                    {row for row in incomplete_roots if row[0] == analysis.entry})
-                if _is_run_exhaustion(error):
-                    run_budget(preliminary[index:])
-                    break
-                fail_late(analysis, error)
-        roots = []
-        lane_indexes: dict = {}
-        for key in LANE_DIAGNOSTICS:   # per run
-            LANE_DIAGNOSTICS[key] = 0
-        for index, analysis in enumerate(analyses):
-            if run_exhausted():
+            fail_late(analysis, error)
+    roots = []
+    lane_indexes: dict = {}
+    for key in LANE_DIAGNOSTICS:   # per run
+        LANE_DIAGNOSTICS[key] = 0
+    for index, analysis in enumerate(analyses):
+        if run_exhausted():
+            run_budget(analyses[index:])
+            break
+        try:
+            with activation(_ledger_key(analysis.evidence.unit)), phase("roots"):
+                found_roots = function_roots(analysis)
+                checkpoint()
+                roots.extend(found_roots)
+        except ANALYSIS_FAILURES as error:
+            lane_indexes.pop(id(analysis.normalized), None)
+            if _is_run_exhaustion(error):
                 run_budget(analyses[index:])
                 break
-            try:
-                with activation(_ledger_key(analysis.evidence.unit)):
-                    found_roots = function_roots(analysis)
-                    checkpoint()
-                    roots.extend(found_roots)
-            except ANALYSIS_FAILURES as error:
-                lane_indexes.pop(id(analysis.normalized), None)
-                if _is_run_exhaustion(error):
-                    run_budget(analyses[index:])
-                    break
-                fail_late(analysis, error)
+            fail_late(analysis, error)
 
-        def report():
+    def report():
+        checkpoint()
+        found = _dependents_incomplete(roots, late, results, by_key) if late else list(roots)
+        checkpoint()
+        for key in sorted(failed):
+            found.extend(_failure_roots(by_key[key], boundaries[key], boundary_provider, failed[key][0]))
             checkpoint()
-            found = _dependents_incomplete(roots, late, results, by_key) if late else list(roots)
-            checkpoint()
-            for key in sorted(failed):
-                found.extend(_failure_roots(by_key[key], boundaries[key], boundary_provider, failed[key][0]))
-                checkpoint()
-            run = EngineRun(
-                program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(found),
-                assumptions, tuple((key, failed[key][0].value, failed[key][1]) for key in sorted(failed)),
-            )
-            checkpoint()   # (never returned after the reporting deadline)
-            return run
+        run = EngineRun(
+            program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(found),
+            assumptions, tuple((key, failed[key][0].value, failed[key][1]) for key in sorted(failed)),
+        )
+        checkpoint()   # (never returned after the reporting deadline)
+        return run
 
-        with reporting():   # (bounded: TDO_V2_REPORTING_SECONDS; no analysis)
-            return report()
+    with reporting(), phase("reporting"):   # (bounded: TDO_V2_REPORTING_SECONDS; no analysis)
+        return report()
 
 
 def _dependents_incomplete(roots, failed, results, by_key) -> list:
@@ -491,7 +601,8 @@ def _dependents_incomplete(roots, failed, results, by_key) -> list:
                 local = replace(root.local_completeness, complete=False)
                 effective = replace(root.effective_completeness, complete=False)
                 root = replace(root, local_completeness=local, effective_completeness=effective,
-                               explanation={**root.explanation, "rests_on_failed": sorted(failures)})
+                               explanation={**root.explanation, "rests_on_failed": sorted(failures)},
+                               inherited_incomplete=True)
         found.append(root)
     return found
 

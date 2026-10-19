@@ -49,6 +49,22 @@ CODE_BASE, CODE_SIZE = 0x1000, 0x1000
 DATA_BASE, DATA_SIZE = 0x4000, 0x1000
 
 
+@dataclass(frozen=True)
+class Layout:
+    """The synthetic image's memory blocks (docs 25.30 K2: large functions
+    need a larger code block; the default is every existing test's)."""
+
+    code_base: int = CODE_BASE
+    code_size: int = CODE_SIZE
+    data_base: int = DATA_BASE
+    data_size: int = DATA_SIZE
+
+
+DEFAULT_LAYOUT = Layout()
+# 2M instructions at stride 4; data well above it
+LARGE_LAYOUT = Layout(0x100000, 8 << 20, 0x1000000, 1 << 20)
+
+
 # --------------------------------------------------------------------------
 # Varnodes and P-code operations
 # --------------------------------------------------------------------------
@@ -325,30 +341,42 @@ def _space(space_id, *, const=False, reg=False, unique=False, mem=False, externa
 @dataclass
 class _Provider:
     functions: list[FunctionBuilder]
-    code: bytes = field(default=b"\x90" * CODE_SIZE)
-    data: bytes = field(default=b"\x00" * DATA_SIZE)
+    layout: Layout = DEFAULT_LAYOUT
+    code: bytes = b""
+    data: bytes = b""
+
+    def __post_init__(self) -> None:
+        self.code = self.code or b"\x90" * self.layout.code_size
+        self.data = self.data or b"\x00" * self.layout.data_size
 
     def original_executable_size(self) -> int:
         return len(self.code) + len(self.data)
 
     def original_executable_chunks(self):
-        yield PositionedChunk(0, self.code + self.data)
+        # bounded chunks (a large layout), code then data, never concatenated
+        position = 0
+        for source in (self.code, self.data):
+            for start in range(0, len(source), 1 << 20):
+                piece = source[start:start + (1 << 20)]
+                yield PositionedChunk(position, piece)
+                position += len(piece)
 
     def memory_descriptors(self):
         return (
             FrozenMemoryBlockDescriptor(
-                "code", RAM, CODE_BASE, CODE_SIZE,
+                "code", RAM, self.layout.code_base, self.layout.code_size,
                 True, True, False, False, False,
             ),
             FrozenMemoryBlockDescriptor(
-                "data", RAM, DATA_BASE, DATA_SIZE,
+                "data", RAM, self.layout.data_base, self.layout.data_size,
                 True, True, False, False, False,
             ),
         )
 
     def read_exact(self, handle, offset, length):
         source = self.code if handle == "code" else self.data
-        yield PositionedChunk(offset, source[offset:offset + length])
+        for start in range(offset, offset + length, 1 << 20):
+            yield PositionedChunk(start, source[start:min(offset + length, start + (1 << 20))])
 
     def snapshot_complete(self) -> bool:
         return True
@@ -371,7 +399,7 @@ class _Provider:
                 _space(UNIQUE, unique=True),
                 _space(EXTERNAL, external=True),
             ],
-            "image_base": {"space_id": RAM, "byte_offset": CODE_BASE},
+            "image_base": {"space_id": RAM, "byte_offset": self.layout.code_base},
         }))
 
     def function_handles(self):
@@ -387,12 +415,12 @@ class _Provider:
         pass
 
 
-def normalize_program(*functions: FunctionBuilder) -> list[NormalizedFunction]:
+def normalize_program(*functions: FunctionBuilder, layout: Layout = DEFAULT_LAYOUT) -> list[NormalizedFunction]:
     """Normalize several functions of one program (distinct ``entry`` values)."""
     entries = [function.entry for function in functions]
     if len(set(entries)) != len(entries):
         raise ValueError("program functions need distinct entries")
-    provider = _Provider(list(functions))
+    provider = _Provider(list(functions), layout)
     with open_configured_extraction(
         provider, _mint_orchestrator_capability()
     ) as envelope:
@@ -408,21 +436,21 @@ def normalize_program(*functions: FunctionBuilder) -> list[NormalizedFunction]:
     return results
 
 
-def program_units(*functions: FunctionBuilder) -> list:
+def program_units(*functions: FunctionBuilder, layout: Layout = DEFAULT_LAYOUT) -> list:
     """Scoped units of several functions of one program (distinct ``entry`` values)."""
     entries = [function.entry for function in functions]
     if len(set(entries)) != len(entries):
         raise ValueError("program functions need distinct entries")
     with open_configured_extraction(
-        _Provider(list(functions)), _mint_orchestrator_capability()
+        _Provider(list(functions), layout), _mint_orchestrator_capability()
     ) as envelope:
         return list(envelope.iter_scoped_functions())
 
 
-def normalize_with_observation(function: FunctionBuilder):
+def normalize_with_observation(function: FunctionBuilder, layout: Layout = DEFAULT_LAYOUT):
     """Return (NormalizedFunction, ValidatedFunctionObservation) for one function."""
     with open_configured_extraction(
-        _Provider([function]), _mint_orchestrator_capability()
+        _Provider([function], layout), _mint_orchestrator_capability()
     ) as envelope:
         (unit,) = envelope.iter_scoped_functions()
     result = FunctionNormalizer().normalize(unit)
@@ -521,11 +549,12 @@ def slice_from(function: NormalizedFunction, seed: int) -> Slice:
     return Slice(result, frozenset(register_bytes), frozenset(memory_bytes))
 
 
-def slice_op(function: NormalizedFunction, opcode: str, index: int | None = None) -> Slice:
+def slice_op(function: NormalizedFunction, opcode: str, index: int | None = None,
+             code_base: int = CODE_BASE) -> Slice:
     """Slice from the only ``opcode`` operation, or the one in instruction ``index``."""
     seeds = operation_nodes(function, opcode)
     if index is not None:
-        prefix = f"op:{RAM}:{CODE_BASE + index * 4:x}:"
+        prefix = f"op:{RAM}:{code_base + index * 4:x}:"
         seeds = [node for node in seeds if function.dependencies.node(node).key.startswith(prefix)]
     (seed,) = seeds
     return slice_from(function, seed)
@@ -634,7 +663,7 @@ def boundary(sources: dict[str, int] = (), sinks: dict[str, int] = (), *,
     return SymbolBoundaryProvider(tuple(rules))
 
 
-def analyze_program(functions: dict[str, FunctionBuilder], provider, *,
+def analyze_program(functions: dict[str, FunctionBuilder], provider, *, layout: Layout = DEFAULT_LAYOUT,
                     assume_boundary_call_effects: bool = False, **kwargs):
     """Run ``engine.analyze_observed_functions`` on named synthetic functions."""
     from tdo_v2.call_seeds import seed_function_calls, seed_tail_calls
@@ -644,7 +673,7 @@ def analyze_program(functions: dict[str, FunctionBuilder], provider, *,
     builders = list(functions.values())
     names = {builder.entry: name for name, builder in functions.items()}
     with open_configured_extraction(
-        _Provider(builders), _mint_orchestrator_capability()
+        _Provider(builders, layout), _mint_orchestrator_capability()
     ) as envelope:
         units = list(envelope.iter_scoped_functions())
     rows = []
@@ -669,3 +698,72 @@ def analyze_program(functions: dict[str, FunctionBuilder], provider, *,
     return {
         (by_entry[root.function_byte_offset], root.label): root for root in roots
     }
+
+
+def analyze_summaries(functions, provider, *, names=None, layout: Layout = DEFAULT_LAYOUT, data: bytes = b"",
+                      image: bool = False, **options):
+    """The summary engine (``summary_engine.analyze_observed_with_summaries``)
+    on synthetic functions: ``functions`` -- FunctionBuilders (bodies);
+    ``names`` -- address -> symbol for call targets, bodies or not (opaque
+    named sources / sinks need no body); ``image`` -- PE image facts and a
+    read-only image (``synthetic_image``); the EngineRun (every root
+    occurrence kept)."""
+    from tdo_v2.summary_engine import analyze_observed_with_summaries
+
+    inputs = summary_inputs(functions, names, layout=layout, data=data, image=image)
+    return analyze_observed_with_summaries(inputs.program, inputs.evidences, image_info=inputs.image_info,
+                                           readonly_image=inputs.readonly_image, boundary_provider=provider,
+                                           **options)
+
+
+def synthetic_image(layout: Layout = DEFAULT_LAYOUT, data: bytes = b"", imports=()):
+    """(ImageInfo, ReadOnlyImage) describing the synthetic image as a PE x64
+    image (docs 25.30 K2): .text = the code block (r-x), .rdata = the first
+    half of the data block (r--, initialized), .data = the second half (rw-);
+    the read-only image backed by the provider's bytes."""
+    from tdo_v2.image_info import BlockPermissions, ImageInfo, ReadOnlyImage
+
+    data = data or b"\x00" * layout.data_size
+    half = layout.data_size // 2
+    blocks = (
+        BlockPermissions(RAM, layout.code_base, layout.code_size, ".text", True, False, True, False, True),
+        BlockPermissions(RAM, layout.data_base, half, ".rdata", True, False, False, False, True),
+        BlockPermissions(RAM, layout.data_base + half, layout.data_size - half, ".data", True, True, False, False, True),
+    )
+    info = ImageInfo("Portable Executable (PE)", blocks, tuple(imports), (), ())
+    image = ReadOnlyImage.from_bytes(info, {
+        (RAM, layout.code_base): b"\x90" * layout.code_size,
+        (RAM, layout.data_base): data[:half],
+        (RAM, layout.data_base + half): data[half:],
+    })
+    return info, image
+
+
+@dataclass
+class SummaryInputs:
+    program: object
+    evidences: list
+    image_info: object
+    readonly_image: object
+
+
+def summary_inputs(functions, names=None, *, layout: Layout = DEFAULT_LAYOUT, data: bytes = b"", image: bool = True,
+                   imports=()) -> SummaryInputs:
+    """Admitted program, evidences (built as ``analyze_program`` builds them,
+    never pre-normalized) and image facts for ``analyze_observed_with_summaries``."""
+    from tdo_v2.call_seeds import seed_function_calls, seed_tail_calls
+    from tdo_v2.integration.observed_function_session import ObservedFunctionEvidence
+
+    names = dict(names or {})
+    with open_configured_extraction(
+        _Provider(list(functions), layout, data=data), _mint_orchestrator_capability()
+    ) as envelope:
+        program = envelope.program_result
+        units = list(envelope.iter_scoped_functions())
+    evidences = []
+    for unit in units:
+        seeds = seed_function_calls(unit)
+        tails = seed_tail_calls(unit)
+        evidences.append(ObservedFunctionEvidence(unit, seeds, _naming_for(unit, seeds, names, tails), tails))
+    info, readonly = synthetic_image(layout, data, imports) if image else (None, None)
+    return SummaryInputs(program, evidences, info, readonly)
