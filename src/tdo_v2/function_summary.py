@@ -49,6 +49,7 @@ from enum import StrEnum
 
 from ._sparse_dataflow import DominatorGraph
 from .graph_contracts import NodeKind
+from .label_sets import LabelUniverse
 from .memory_contracts import MemoryDefinitionKind
 from .model import ResolvedStorage
 from .span_geometry import ByteSpan, StorageObjectKind
@@ -189,8 +190,10 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         """(entry source spans, entry-memory readers, debt labels, origins,
         alias conditions) of the backward data slice from one definition
         (same sets as ``BackwardSliceQuery`` + edge spans, computed for all
-        nodes at once)."""
+        nodes at once), as the closure's five int bitsets."""
         return closure.of(definition_nodes[definition_id])
+
+    definition_slice.decode = closure.decode
 
     uncertain_conditions = _uncertain_address_writers(
         normalized, observation, context, operation_of, conditions_of)
@@ -246,12 +249,15 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     for root in sink_roots:
         label, root_nodes, complete = root[:3]
         sources, debts, origins, conditions = set(), set(), set(), set(root[3] if len(root) > 3 else ())
+        facts = [0, 0, 0, 0, 0]
         for node in root_nodes:
-            found_sources, _, found_debts, found_origins, found_conditions = closure.of(node)
-            sources |= found_sources
-            debts |= found_debts
-            origins |= found_origins
-            conditions |= found_conditions
+            for part, found in enumerate(closure.of(node)):
+                facts[part] |= found
+        found_sources, _, found_debts, found_origins, found_conditions = closure.decode(facts)
+        sources |= set(found_sources)
+        debts |= set(found_debts)
+        origins |= set(found_origins)
+        conditions |= set(found_conditions)
         conditions |= writer_conditions
         demands.append(SinkDemand(
             label, tuple(sorted(sources, key=lambda item: item.canonical_key)), tuple(sorted(debts)),
@@ -447,13 +453,31 @@ class _AncestorClosure:
                 # read bytes (their values do not flow); with one failing the
                 # caller drops the call (``writer_conditions``, run conditions)
                 self.predecessors[node] = []
+        # the facts as int bitsets over five universes -- entry source spans,
+        # entry-memory readers, debt labels, origins, alias-condition pairs --
+        # built from the own facts, the only facts a value can hold (docs 25.31
+        # B2-d1; were five frozensets per component); equal tuples interned
+        keys = (lambda span: span.canonical_key, None, None, None,
+                lambda pair: (pair[0].canonical_key, pair[1].canonical_key))
+        self.universes = tuple(
+            LabelUniverse((fact for own in self.own.values() for fact in own[part]), key=keys[part])
+            for part in range(5))
+        self.interned: dict = {}
+        for node, own in self.own.items():
+            facts = tuple(universe.mask(part) for universe, part in zip(self.universes, own))
+            self.own[node] = self.interned.setdefault(facts, facts)
         self.value: dict[int, tuple] = {}
         self.members = 0   # set memberships materialized (structural limit "fact_members")
 
     def of(self, node: int):
+        """The node's facts: five int bitsets (``decode`` turns an OR of such
+        tuples into the five label lists)."""
         if node not in self.value:
             self._solve(node)
         return self.value[node]
+
+    def decode(self, facts) -> tuple:
+        return tuple(universe.decode(part) for universe, part in zip(self.universes, facts))
 
     def _solve(self, root: int) -> None:
         """Iterative Tarjan over predecessor edges: components are finished
@@ -499,18 +523,19 @@ class _AncestorClosure:
                     if item == node:
                         break
                 members = set(component)
-                parts = [set(), set(), set(), set(), set()]
-                empty = (frozenset(),) * 5
+                parts = [0, 0, 0, 0, 0]
+                empty = (0,) * 5
                 for item in component:
-                    for part, own in zip(parts, self.own.get(item, empty)):
-                        part |= own
+                    for part, own in enumerate(self.own.get(item, empty)):
+                        parts[part] |= own
                     for parent_node in self.predecessors.get(item, ()):
                         if parent_node in members:
                             continue
-                        for part, found in zip(parts, self.value[parent_node]):
-                            part |= found
-                value = tuple(frozenset(part) for part in parts)
-                members = sum(map(len, value))
+                        for part, found in enumerate(self.value[parent_node]):
+                            parts[part] |= found
+                value = tuple(parts)
+                value = self.interned.setdefault(value, value)
+                members = sum(part.bit_count() for part in value)
                 self.members += members
                 limit("fact_members", self.members)
                 phase_count("fact_members", members, "summarize")
@@ -1058,6 +1083,7 @@ def _classify(span, definition_ids, definitions, definition_slice, crossed_by_of
     else:
         definition_ids_for_identity = None
     sources, readers, debts, writers, origins, conditions = set(), set(), set(), set(), set(), set()
+    facts = [0, 0, 0, 0, 0]   # the closure's bitsets, decoded once below
     identity = True
     for definition_id in definition_ids:
         definition = definitions[definition_id]
@@ -1069,13 +1095,14 @@ def _classify(span, definition_ids, definitions, definition_slice, crossed_by_of
         identity = False
         if definition.operation_key is not None:
             writers.add(definition.operation_key)
-        found_sources, found_readers, found_debts, found_origins, found_conditions = \
-            definition_slice(definition_id)
-        sources |= found_sources
-        readers |= found_readers
-        debts |= found_debts
-        origins |= found_origins
-        conditions |= found_conditions
+        for part, found in enumerate(definition_slice(definition_id)):
+            facts[part] |= found
+    found_sources, found_readers, found_debts, found_origins, found_conditions = definition_slice.decode(facts)
+    sources |= set(found_sources)
+    readers |= set(found_readers)
+    debts |= set(found_debts)
+    origins |= set(found_origins)
+    conditions |= set(found_conditions)
     crossings = set()
     for offset in range(span.start, span.end):
         crossings |= crossed_by_offset.get(offset, frozenset())
