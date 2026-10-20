@@ -57,6 +57,7 @@ from .phases import count as phase_count, enabled as phases_enabled, measured
 
 from .resource_limits import step
 
+from array import array
 from bisect import bisect_left
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1063,6 +1064,10 @@ def _coefficient_switches(observation, register_space: int, offset: int, size: i
     return tuple(sorted(switches))
 
 
+# the decoded states ``_coefficient_pass`` keeps for pending blocks
+_LIVE_STATES = 256
+
+
 def _coefficient_pass(graph, instructions, stack, preserved) -> set:
     blocks = {block.key: block for block in graph.blocks}
 
@@ -1103,28 +1108,37 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
         low = bisect_left(starts[key[0]], key[1] - widest[key[0]] + 1)
         high = bisect_left(starts[key[0]], key[1] + key[2])
         over[key] = tuple(other for other in members[low:high] if overlaps(key, other))
+    # a state's keys are the indices of the locations of ``held`` (docs 25.31
+    # B0-10: ints hash at no cost -- stored states are decoded per visit)
+    keys = sorted(held)
+    index_of = {key: index for index, key in enumerate(keys)}
+    over = {key: tuple(index_of[other] for other in found) for key, found in over.items()}
+    stack_index = index_of[stack]
 
     def read(state, varnode):
         if varnode.kind is VarnodeKindCode.CONSTANT:
             return 0
         key = location(varnode)
-        if key in state:
-            return state[key]
+        index = index_of.get(key)
+        if index is not None and index in state:
+            return state[index]
         return None if any(state.get(other, 0) != 0 for other in over[key]) else 0
 
     def write(state, key, value):
         for other in [other for other in over[key] if other in state]:
-            covered = key[1] <= other[1] and other[1] + other[2] <= key[1] + key[2]
+            place = keys[other]
+            covered = key[1] <= place[1] and place[1] + place[2] <= key[1] + key[2]
             if covered:
                 del state[other]
             else:
                 # bytes of a non-zero entry survive the partial write: that
                 # location no longer holds a whole coefficient (``mov al, 0``)
                 state[other] = None
+        index = index_of[key]
         if value != 0:
-            state[key] = value
-        elif key in state:
-            del state[key]
+            state[index] = value
+        elif index in state:
+            del state[index]
 
     def coefficient(operation, state):
         opcode = operation.opcode
@@ -1159,15 +1173,15 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
         return found
 
     def transfer(block, state, switches):
+        """(``state``: a fresh decoded dict, changed in place and returned)"""
         row = instructions[block.instruction]
-        state = dict(state)
         for ordinal in range(block.start, block.stop):
             operation = row.operations[ordinal]
             if operation.opcode in ("CALL", "CALLIND"):
                 # a user op (CALLOTHER) defines just its output, if any
-                for key in [key for key in state if key[0] == stack[0] and key != stack
-                            and not wholly_kept(key)]:
-                    del state[key]
+                for index in [index for index in state if keys[index][0] == stack[0] and index != stack_index
+                              and not wholly_kept(keys[index])]:
+                    del state[index]
             output = operation.output
             if output is None or output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
                 continue
@@ -1193,24 +1207,60 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
                 merged[key] = value
         return merged
 
+    # the stored states (docs 25.31 B0-10; as dicts they were the check's
+    # peak -- 817 MB traced at 60k): a state holds only locations of ``held``
+    # with coefficient 1 or None (0 is never stored), kept as an array of
+    # their indices and one flag byte per index (1: coefficient 1); a pending
+    # block keeps its state as a dict too (``live``, dropped when popped; at
+    # most ``_LIVE_STATES`` of them -- the others are decoded when used).
+    # The transfer, merge and the "changed?" test work on dicts as before.
+    values = (None, 1)
+
+    def encode(state):
+        return array("I", state), bytes(map(bool, state.values()))
+
+    def decode(stored):
+        return dict(zip(stored[0], map(values.__getitem__, stored[1])))
+
     order = {block.key: index for index, block in enumerate(graph.blocks)}
-    in_states = {graph.entry: {stack: 1}}
+    entry_state = {stack_index: 1}
+    in_states = {graph.entry: encode(entry_state)}
+    live = {graph.entry: entry_state}   # pending block -> its state (never mutated)
+
+    def keep(target, state):
+        if target in live or len(live) < _LIVE_STATES:
+            live[target] = state
+
     pending = {graph.entry}
     while pending:
         step()   # (budget: docs 25.30 K1c)
         key = min(pending, key=order.__getitem__)
         pending.remove(key)
-        out = transfer(blocks[key], in_states[key], None)
+        state = live.pop(key, None)
+        out = transfer(blocks[key], decode(in_states[key]) if state is None else dict(state), None)
+        encoded = None   # (``out`` encoded once, shared by the new targets)
         for target in blocks[key].successors:
             if target not in blocks:
                 continue
-            merged = out if target not in in_states else merge(out, in_states[target])
-            if merged != in_states.get(target):
-                in_states[target] = merged
+            stored = in_states.get(target)
+            if stored is None:
+                if encoded is None:
+                    encoded = encode(out)
+                in_states[target] = encoded
+                keep(target, out)
+                pending.add(target)
+                continue
+            known = live.get(target)
+            if known is None:
+                known = decode(stored)
+            merged = merge(out, known)
+            if merged != known:
+                in_states[target] = encode(merged)
+                keep(target, merged)
                 pending.add(target)
     switches: set[str] = set()
-    for key, state in in_states.items():
-        transfer(blocks[key], state, switches)
+    for key, stored in in_states.items():
+        transfer(blocks[key], decode(stored), switches)
     return switches
 
 

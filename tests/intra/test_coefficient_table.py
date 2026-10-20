@@ -175,3 +175,20 @@ def test_scale_fixture_switch_checks_match_the_scan(compared):
                                       data=program.data, image=True)
     program_switches_stack([evidence.unit for evidence in inputs.evidences])
     assert compared
+
+
+@pytest.mark.parametrize("live", [0, 1, 4])
+def test_stored_states_decoded_when_not_kept_live(live, compared, monkeypatch):
+    """B0-10: pending blocks beyond ``_LIVE_STATES`` decode their stored
+    state -- the same switches as the scan whatever the bound."""
+    sys.path.insert(0, str(REPO / "tests" / "intra"))
+    import scale_fixtures
+    import synthetic
+    from tdo_v2.interprocedural import program_switches_stack
+
+    monkeypatch.setattr(may_alias, "_LIVE_STATES", live)
+    program = scale_fixtures.realistic(3000, 1)
+    inputs = synthetic.summary_inputs(program.functions, program.names, layout=program.layout,
+                                      data=program.data, image=True)
+    program_switches_stack([evidence.unit for evidence in inputs.evidences])
+    assert compared
