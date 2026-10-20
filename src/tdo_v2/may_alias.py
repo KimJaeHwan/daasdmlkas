@@ -67,6 +67,7 @@ from ._scope_contracts import (
     VarnodeKindCode,
 )
 from .call_seeds import _operation_key
+from .label_sets import LabelUniverse
 from .effects import ObservedEffectUnit
 from .model import (
     ResolvedStorage,
@@ -1150,9 +1151,27 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
                                          for kept in preserved)
         return found
 
+    # the stored per-block states as two bitsets over ``held`` (docs 25.31
+    # B0-9; one dict per block was 817 MB at the 60k scale point): bit i of
+    # ``ones`` -- held key i has coefficient 1, of ``nones`` -- None (0 is
+    # never stored); a block's transfer works on a dict decoded from them
+    held_keys = LabelUniverse(held)
+
+    def encode(state) -> tuple:
+        ones = held_keys.mask(key for key, value in state.items() if value == 1)
+        nones = held_keys.mask(key for key, value in state.items() if value is None)
+        return ones, nones
+
+    def decode(pair) -> dict:
+        ones, nones = pair
+        labels = held_keys.labels
+        state = {labels[index]: 1 for index in held_keys.indices(ones)}
+        state.update((labels[index], None) for index in held_keys.indices(nones))
+        return state
+
     def transfer(block, state, switches):
         row = instructions[block.instruction]
-        state = dict(state)
+        state = decode(state)
         for ordinal in range(block.start, block.stop):
             operation = row.operations[ordinal]
             if operation.opcode in ("CALL", "CALLIND"):
@@ -1174,19 +1193,16 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
                 write(state, stack, 1)
                 continue
             write(state, key, value)
-        return state
+        return encode(state)
 
     def merge(a, b):
-        merged = {}
-        for key in set(a) | set(b):
-            left, right = a.get(key, 0), b.get(key, 0)
-            value = left if left == right else None
-            if value != 0:
-                merged[key] = value
-        return merged
+        """Equal coefficients kept (1 / 1, None / None); any difference --
+        absent (0) included -- None."""
+        ones = a[0] & b[0]
+        return ones, (a[0] | a[1] | b[0] | b[1]) & ~ones
 
     order = {block.key: index for index, block in enumerate(graph.blocks)}
-    in_states = {graph.entry: {stack: 1}}
+    in_states = {graph.entry: encode({stack: 1})}
     pending = {graph.entry}
     while pending:
         step()   # (budget: docs 25.30 K1c)
