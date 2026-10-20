@@ -122,20 +122,44 @@ def derive_sparse(unit, objects, policy):
     replays = [0]
     if counting:
         phase_count("ma_classes", len(needed))
+    # the gen events are the same for every class of one object (and for the
+    # any-write pseudo-class): built once per object -- block -> its gens'
+    # events, already in (position, order) order, and the gen-only blocks'
+    # transfers; per class only the blocks holding one of its kills get a
+    # merged, sorted list of their own (docs 25.31 B2-a1; per-class copies
+    # were 173 MB of normalize's traced peak at 60k). Same events per block,
+    # same transfers in the same insertion order, same solve.
+    shared: dict = {}
+
+    def gens_for(owner):
+        found = shared.get(owner)
+        if found is None:
+            by_block: dict[str, list] = {}
+            for block_key, position, order, writer in (any_gens if owner is _ANY else object_gens[owner]):
+                by_block.setdefault(block_key, []).append((position, order, index_of[writer]))
+            transfers = {}
+            for block_key, rows in by_block.items():
+                gens = 0
+                for _, _, label in rows:
+                    gens |= 1 << label
+                transfers[block_key] = (False, gens, gens)
+            found = shared[owner] = (by_block, transfers, sum(map(len, by_block.values())))
+        return found
+
     for index, blocks_needed in needed.items():
+        gens_by_block, gen_transfers, gen_events = gens_for(_ANY if index is _ANY else class_object[index])
         events: dict[str, list] = {}
-        gens = any_gens if index is _ANY else object_gens[class_object[index]]
-        for block_key, position, order, writer in gens:
-            events.setdefault(block_key, []).append((position, order, index_of[writer]))
         if index is not _ANY:
             for block_key, position, order in class_kills[index]:
                 events.setdefault(block_key, []).append((position, order, None))
-        for rows in events.values():
+        for block_key, rows in events.items():
+            rows[:0] = gens_by_block.get(block_key, ())   # (gens first, as before; then the stable sort)
             rows.sort(key=lambda row: (row[0], row[1], row[2] is not None))
-        class_events[index] = events
+        class_events[index] = (gens_by_block, events)
         if counting:
-            phase_count("ma_class_events", sum(len(rows) for rows in events.values()))
-        transfers = {}
+            phase_count("ma_class_events",
+                        gen_events + (len(class_kills[index]) if index is not _ANY else 0))   # (gens + kills)
+        transfers = dict(gen_transfers)
         for block_key, rows in events.items():
             kills = any(label is None for _, _, label in rows)
             last = max((i for i, (_, _, label) in enumerate(rows) if label is None), default=-1)
@@ -153,7 +177,11 @@ def derive_sparse(unit, objects, policy):
 
     def value_at(index, block_key: str, position: int) -> int:
         value = entry_values[(index, block_key)]
-        for event_position, _, label in class_events[index].get(block_key, ()):
+        gens_by_block, kill_blocks = class_events[index]
+        rows = kill_blocks.get(block_key)
+        if rows is None:
+            rows = gens_by_block.get(block_key, ())
+        for event_position, _, label in rows:
             if event_position >= position:
                 break
             replays[0] += 1
