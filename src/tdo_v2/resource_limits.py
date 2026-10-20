@@ -218,6 +218,11 @@ class AnalysisCancelled(BaseException):
     catches it); ``run_analysis`` turns it into KeyboardInterrupt."""
 
 
+class DiagnosticExhausted(Exception):
+    """A diagnostic's own work budget ran out (``diagnostic``): only that
+    diagnostic is cut; no analysis result depends on it."""
+
+
 class AnalysisReportingFailed(Exception):
     """The bounded reporting phase after a run exhaustion did not finish: the
     run fails (never a partial inventory without its failures)."""
@@ -282,6 +287,9 @@ class RunBudget:
         self.exhausted: str | None = None
         self.reporting = False
         self.reporting_deadline = None
+        self.diagnostic: _Ledger | None = None   # an open ``diagnostic`` context's ledger
+        self.diagnostic_limit: int | None = None
+        self.diagnostic_work = 0                 # every diagnostic context's units, summed
 
     def ledger(self, key) -> _Ledger:
         if key not in self.ledgers:
@@ -317,7 +325,7 @@ def logical_work() -> int:
     run = _RUN.get()
     if run is None:
         return 0
-    if run.reporting:
+    if run.reporting or run.diagnostic is not None:
         return run.work
     return run.work + (_quantum - _left)
 
@@ -355,7 +363,7 @@ def limit(name: str, count: int) -> None:
     if run is None:
         return
     bound = run.limits.structures.get(name)
-    if bound is not None and count > bound and not run.reporting:
+    if bound is not None and count > bound and not run.reporting and run.diagnostic is None:
         raise AnalysisBudgetExceeded("structure", f"{name} {count} > {bound}", scope="function")
 
 
@@ -365,7 +373,9 @@ def _flush(run) -> None:
     global _quantum
     consumed = _quantum - _left
     _quantum = _left
-    if consumed and run is not None and not run.reporting:
+    if consumed and run is not None and run.diagnostic is not None:
+        run.diagnostic.work += consumed   # (diagnostic units: never the run's or a function's)
+    elif consumed and run is not None and not run.reporting:
         run.work += consumed
         if _active is not None:
             _active.work += consumed
@@ -375,7 +385,10 @@ def _rearm(run) -> None:
     """The next quantum, clamped so a work limit trips at the exact unit."""
     global _left, _quantum
     size = QUANTUM
-    if run is not None and not run.reporting:
+    if run is not None and run.diagnostic is not None:
+        if run.diagnostic_limit is not None:
+            size = min(size, max(1, run.diagnostic_limit - run.diagnostic.work + 1))
+    elif run is not None and not run.reporting:
         limits = run.limits
         if limits.run_work is not None:
             size = min(size, max(1, limits.run_work - run.work + 1))
@@ -398,6 +411,10 @@ def _slow() -> None:
     if _CANCEL.is_set():
         raise AnalysisCancelled()
     if run is None:
+        return
+    if run.diagnostic is not None:
+        if run.diagnostic_limit is not None and run.diagnostic.work > run.diagnostic_limit:
+            raise DiagnosticExhausted(f"diagnostic work {run.diagnostic.work} > {run.diagnostic_limit}")
         return
     limits = run.limits
     if run.reporting:
@@ -438,7 +455,7 @@ class activation:
 
         global _active, _active_since
         self.run = _RUN.get()
-        if self.run is None or self.run.reporting:
+        if self.run is None or self.run.reporting or self.run.diagnostic is not None:
             self.ledger = None
             return None
         _flush(self.run)
@@ -496,6 +513,59 @@ class reporting:
             self.run.reporting = False
             self.run.reporting_deadline = None
             _rearm(self.run)
+        return False
+
+
+class diagnostic:
+    """``with diagnostic(work):`` -- work that no analysis result depends on
+    (operation records, docs 25.31 C9-0): the pending analysis units are
+    flushed once into their ledgers (no check), the active function's timing
+    pauses, and inside, every unit is charged to this context's own ledger
+    only -- no run / function / RSS / deadline check, structural limits off,
+    ``logical_work`` constant; cancellation is still checked. More than
+    ``work`` units (None: no bound) raise ``DiagnosticExhausted`` (the
+    diagnostic is cut; nothing else is). The units are added to
+    ``run.diagnostic_work``."""
+
+    def __init__(self, work: int | None = None) -> None:
+        self.work = work
+
+    def __enter__(self):
+        import time
+
+        global _active, _active_since
+        self.run = run = _RUN.get()
+        self.entered = run is not None and run.diagnostic is None
+        if not self.entered:
+            return None
+        _flush(run)
+        self.previous = _active
+        if _active is not None:
+            _active.seconds += time.monotonic() - _active_since
+        _active = None
+        run.diagnostic = _Ledger()
+        run.diagnostic_limit = self.work
+        _rearm(run)
+        try:   # a cancellation is seen at every diagnostic, however short (Astra)
+            _slow()
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+        return run.diagnostic
+
+    def __exit__(self, kind, value, traceback) -> bool:
+        import time
+
+        global _active, _active_since
+        if not self.entered:
+            return False
+        run = self.run
+        _flush(run)
+        run.diagnostic_work += run.diagnostic.work
+        run.diagnostic = None
+        run.diagnostic_limit = None
+        _active, _active_since = self.previous, time.monotonic()
+        _rearm(run)
         return False
 
 

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from .phases import phase
 
+import os
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -477,9 +478,9 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             explanation = _witnesses(analysis, unit, nodes[analysis.entry], label, occurrence, labels,
                                      node_labels, lane_indexes, results[key].origins) \
                 if origin_witnesses else {}
-            if operation_records:
-                explanation = {**explanation, "record": _root_record(
-                    analysis, unit, nodes[analysis.entry], label, occurrence, results[key], completeness)}
+            if operation_records:   # (built after the final completeness: ``_with_records``)
+                record_inputs[(analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence)] = (
+                    analysis, unit, nodes[analysis.entry], results[key])
             found.append(RootSlice(
                 analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence, root_nodes,
                 tuple(sorted(labels)),
@@ -528,6 +529,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             fail_late(analysis, error)
     roots = []
     lane_indexes: dict = {}
+    record_inputs: dict = {}   # (operation records, built after reporting)
     for key in LANE_DIAGNOSTICS:   # per run
         LANE_DIAGNOSTICS[key] = 0
     for index, analysis in enumerate(analyses):
@@ -561,7 +563,44 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         return run
 
     with reporting(), phase("reporting"):   # (bounded: TDO_V2_REPORTING_SECONDS; no analysis)
-        return report()
+        run = report()
+    if operation_records:
+        run = _with_records(run, record_inputs)
+    return run
+
+
+def _with_records(run, record_inputs) -> "EngineRun":
+    """Each root's operation record (diagnostics, docs 25.28), built after
+    every root's completeness is final (late failures included) and under
+    its own diagnostic budget (docs 25.31 C9-0): records charge no analysis
+    ledger, so no analysis result depends on them; a record over
+    TDO_V2_RECORD_WORK units is cut. Roots without nodes (failures) get none."""
+    from .resource_limits import DiagnosticExhausted, diagnostic
+
+    limit = os.environ.get("TDO_V2_RECORD_WORK")
+    work = int(limit) if limit else None
+    roots = []
+    for root in run.roots:
+        inputs = record_inputs.get(
+            (root.function_space_id, root.function_byte_offset, root.label, root.occurrence_ordinal))
+        if inputs is None or not root.root_nodes:   # (a failure root: no record, even if its
+            # function's roots were built before it failed -- Astra)
+            roots.append(root)
+            continue
+        analysis, unit, rows, analyzed = inputs
+        try:
+            with diagnostic(work):
+                record = _root_record(analysis, unit, rows, root.label, root.occurrence_ordinal, analyzed,
+                                      root.effective_completeness)
+        except DiagnosticExhausted:
+            record = {"record": "root", "truncated": True, "cut": "diagnostic budget", "root": [], "nodes": []}
+        # (the record before ``rests_on_failed``, the key order it had)
+        explanation = {key: value for key, value in root.explanation.items() if key != "rests_on_failed"}
+        explanation["record"] = record
+        if "rests_on_failed" in root.explanation:
+            explanation["rests_on_failed"] = root.explanation["rests_on_failed"]
+        roots.append(replace(root, explanation=explanation))
+    return replace(run, roots=tuple(roots))
 
 
 def _dependents_incomplete(roots, failed, results, by_key) -> list:
