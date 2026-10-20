@@ -112,3 +112,21 @@ def test_a_debt_out_edge_query_builds_no_reverse_index():
     assert list(virtual.out_edges(debt)) == list(physical.out_edges(debt))
     assert virtual.successors(debt) == physical.successors(debt)
     assert virtual._virtual_out is None
+
+
+@pytest.mark.parametrize("seed", range(150))
+def test_the_closure_reads_virtual_writers_as_physical_ones(seed):
+    """B2-b3: _AncestorClosure over virtual writer edges builds the same
+    predecessor dict -- key order (it drives the JOIN rounds' step count)
+    and sources -- and the same values and member counts as over the
+    physical edges."""
+    from tdo_v2.function_summary import _AncestorClosure
+
+    physical, virtual = _twin_graphs(seed)
+    closures = [_AncestorClosure(graph, {}, {}, {}) for graph in (physical, virtual)]
+    assert list(closures[1].predecessors) == list(closures[0].predecessors)
+    for node, sources in closures[0].predecessors.items():
+        assert list(closures[1].predecessors[node]) == list(sources)
+    for node in range(physical.node_count):
+        assert closures[1].decode(closures[1].of(node)) == closures[0].decode(closures[0].of(node))
+    assert closures[1].members == closures[0].members

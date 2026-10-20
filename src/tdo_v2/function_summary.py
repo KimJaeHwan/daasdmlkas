@@ -397,6 +397,20 @@ def _state_runs(nodes, root):
     return sorted(found, key=lambda node: node.start_atom)
 
 
+class _LazySources:
+    """A debt node's virtual writer sources, decoded on each iteration
+    (ascending node id, as the sorted edge scan listed them)."""
+
+    __slots__ = ("graph", "node")
+
+    def __init__(self, graph, node) -> None:
+        self.graph = graph
+        self.node = node
+
+    def __iter__(self):
+        return iter(self.graph.virtual_sources(self.node))
+
+
 class _AncestorClosure:
     """Per node, the union over its data ancestors (and itself) of: entry
     source spans (spans of OBSERVED_INPUT -> node edges), operations reading
@@ -412,7 +426,7 @@ class _AncestorClosure:
         self.predecessors: dict[int, list[int]] = {}
         own_sources: dict[int, set] = {}
         carriers: set[int] = set()
-        for source, target, record in graph.weighted_edges():
+        for source, target, record in graph.physical_weighted_edges():
             if record.kind == CONTROL_DEPENDENCE_EDGE:
                 continue
             self.predecessors.setdefault(target, []).append(source)
@@ -420,6 +434,26 @@ class _AncestorClosure:
                 own_sources.setdefault(target, set()).add(record.span)
                 if record.span.object_id.kind in _MEMORY_KINDS:
                     carriers.add(source)
+        # the virtual writer edges (docs 25.31 B2-b; no span, never control):
+        # a debt's writers are read lazily, not expanded and kept; the dict
+        # keeps the order the sorted edge scan gave it -- a target first
+        # appears at its smallest source, ties by target -- since the JOIN
+        # rounds below iterate it (their step() count depends on the order)
+        debts = graph.virtual_debts()
+        if debts:
+            first = {target: sources[0] for target, sources in self.predecessors.items()}
+            entries = dict(self.predecessors)
+            for debt in debts:
+                writers = graph.virtual_sources(debt)
+                physical = entries.get(debt)
+                if physical is None:
+                    entries[debt] = _LazySources(graph, debt)
+                    first[debt] = writers[0]
+                else:   # (no physical edge enters a may-alias debt today; kept exact anyway)
+                    entries[debt] = sorted(physical + writers)
+                    first[debt] = min(first[debt], writers[0])
+            self.predecessors = {target: entries[target]
+                                 for target in sorted(first, key=lambda node: (first[node], node))}
         changed = True
         while changed:  # JOINs over entry memory carry it too
             step()   # (budget: docs 25.30 K1c)

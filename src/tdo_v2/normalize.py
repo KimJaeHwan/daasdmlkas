@@ -2292,12 +2292,12 @@ def _materialize_may_alias_debt(
 
     # (the table from the writers that get an edge only, as before only those
     # needed an operation node -- Fable)
-    universe = LabelUniverse({writer for row in reads for writer in split(row)[1]})
+    splits = [split(row) for row in reads]
+    universe = LabelUniverse({writer for _, hard in splits for writer in hard})
     writers_table = VirtualWriters(
         universe, [operation_nodes[key] for key in universe.labels],
         [EdgeRecord(EdgeKind.MAY_ALIAS_WRITE, operation=key) for key in universe.labels])
-    for row in reads:
-        conditional, hard = split(row)
+    for row, (conditional, hard) in zip(reads, splits):
         if conditional:
             pairs = frozenset().union(*(uncertain[writer] for writer in conditional))
             extra = dependencies.add_node(NodeRecord(

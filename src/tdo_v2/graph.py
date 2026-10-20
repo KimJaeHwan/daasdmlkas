@@ -23,6 +23,18 @@ from .graph_contracts import (
 CONTROL_DEPENDENCE_EDGE = EdgeKind.CONTROL_DEPENDENCE.value
 
 
+def _edge_order(item):
+    """``weighted_edges``' sort key."""
+    return (
+        item[0],
+        item[1],
+        item[2].kind,
+        item[2].operation or "",
+        -1 if item[2].occurrence is None else item[2].occurrence,
+        () if item[2].span is None else item[2].span.canonical_key,
+    )
+
+
 class VirtualWriters:
     """The writers of one may-alias materialization (docs 25.31 B2-b): a
     LabelUniverse of their operation keys, each index's operation node and
@@ -242,19 +254,22 @@ class RustworkxDependencyGraph:
             yield from self._virtual_in(debt)
 
     def weighted_edges(self) -> tuple[tuple[NodeId, NodeId, EdgeRecord], ...]:
-        return tuple(
-            sorted(
-                self._all_edges(),
-                key=lambda item: (
-                    item[0],
-                    item[1],
-                    item[2].kind,
-                    item[2].operation or "",
-                    -1 if item[2].occurrence is None else item[2].occurrence,
-                    () if item[2].span is None else item[2].span.canonical_key,
-                ),
-            )
-        )
+        return tuple(sorted(self._all_edges(), key=_edge_order))
+
+    def physical_weighted_edges(self) -> tuple[tuple[NodeId, NodeId, EdgeRecord], ...]:
+        """``weighted_edges`` without the virtual writer edges (same order)."""
+        return tuple(sorted(
+            ((int(source), int(target), record) for source, target, record in self._graph.weighted_edge_list()),
+            key=_edge_order))
+
+    def virtual_debts(self) -> tuple[NodeId, ...]:
+        """The nodes with virtual writer edges into them."""
+        return tuple(self._virtual)
+
+    def virtual_sources(self, node: NodeId) -> list:
+        """The sources of ``node``'s virtual writer edges, ascending node id
+        (decoded on each call -- nothing retained)."""
+        return sorted(source for source, _, _ in self._virtual_in(node))
 
     def incident_edge_multiplicities(
         self, nodes: Iterable[NodeId]
