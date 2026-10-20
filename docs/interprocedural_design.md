@@ -2095,7 +2095,9 @@ MAY_ALIAS_WRITE 간선은 그래프에 저장하지 않고 API가 지금과 같�
 - B0-10(fc1168a) 스택 전환 검사: 계산은 dict 그대로, 블록별로 저장하는 상태만 (위치 번호 배열, 값 플래그 bytes)로 압축하고 대기 중인
   블록은 풀린 dict를 잠시 보관(최대 256개). 100k 최고 메모리 2715 → 2211 MB(이 검사가 더는 최고점이 아님), 그 단계 시간 3.5 → 6.3 s
   (1.8배; 전체 255 → 257 s). 저장 상태는 블록 수 × 살아 있는 위치 수(제곱)라 250k에서 더 중요.
-- 측정(target, seed 0, fc1168a): 30k 29 s / 0.46 GB, 100k 257 s / 2.2 GB. 250k는 아직 normalize에서 메모리 부족(12.9 GB, 그 전 측정).
+- 측정(target, seed 0, fc1168a): 30k 29 s / 0.46 GB, 100k 257 s / 2.2 GB. 250k(7ee9d53) 처음으로 완료: 3027 s / 9.19 GB
+  (최고점 normalize), 탐침 모두 맞음; 느린 단계 call_clobber 598 s, may_alias 495, slices 458, lanes 407, memory_ssa 237, summarize 176.
+  목표(10분 / 8 GiB)까지 남음.
   60k normalize 최고점의 남은 큰 항목: 객체별 gen 사건 146 MB(`_may_alias_sparse`), 행의 writers 튜플 ~170 MB(`may_alias._row`) —
   다음은 B2-a2b(행을 비트로, 승인된 설계)와 gen 사건의 압축. [역방향]
 
@@ -2122,5 +2124,14 @@ MAY_ALIAS_WRITE 간선은 그래프에 저장하지 않고 API가 지금과 같�
 - Bundle 집계(기록 켬, 7개): 루트 기록 220개, 이어 붙은 호출 9개(v3-win-release), 잘림: loads 237, 레지스터 출력 아님 122, 스택 포인터 16,
   모델 9 — 대부분 메모리로 전달되는 값(32비트 스택 인자, 포인터 체인)이라 다음 증분(C9-1: 스택 포인터 + displacement_delta 변환,
   리턴 주소 겹침, 포인터 체인 단계별 평가와 `~ld` 재사용 조건)이 필요.
+- 증분 2(22b597e, 기록 전용): 호출 모양이 바꾸는 스택 포인터 = INT_ADD(호출 지점의 호출자 SP(push 전), displacement_delta),
+  피호출 함수 입구 SP + 변위의 메모리(스택 인자) = 호출자의 그 호출 `~ld<j>` 읽기(바이트 단위; 리턴 주소 자리 [0, push)는 "return address"
+  구멍). 그 밖의 입구 메모리([rcx], 포인터 단계, 전역)는 "memory: overlay unproven" 구멍 — 호출 모양이 없앤 리턴 주소 push가 거기
+  있을 수 있음(예: 호출자 rcx = rsp - 8). 구멍은 실제로 쓰일 때만 자름. `call_load_keys`(`~ld` 키 순서)를 `_proven_call_rows`가 assert로
+  확인. 집계: 이어 붙은 호출 9 → 38(+중첩 3), 남은 잘림 대부분 "memory: overlay unproven" 223.
+- 증분 3 계획(Astra 상담, 미구현): 호출자 좌표에서 리턴 주소 자리와 겹치지 않음을 증명할 때만 연결 — 같은 호출의 SP 직접 `~ld`가 있으면
+  그 해석 위치 s와 변위 d로 B = s - d(= o_sp + delta), 겹침 = 호출자 스택 객체 [B, B + push); 호출자 스택 객체로 해석된 읽기는 이 구간과
+  비교, 전역은 globals-disjoint-from-stack 가정이 켜진 함수에서만(연결 노드에 가정 이름), 포인터 체인은 슬롯마다 같은 검사 + 주소에
+  빚이 없을 것. entry-values-do-not-address-the-new-frame만으로는 부족(경계는 호출자의 입구 SP). [역방향]
 - 남은 것: C9-1 메모리·스택 변환, C9-3 조건이 있는 행(판정 메타데이터를 붙여 설명용으로), C9-4 "stitched" 평가 경로, C9-6 프로그램 전체
   구체 실행 오라클(호출마다 반환 바이트를 기록, 돌연변이 거부). 기록: `.census6/stepC9_*`, `c9_stitch_census.py`.
