@@ -1021,6 +1021,10 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     effects and their anchored accesses."""
     rows: list[ObservedEffect] = []
     anchored: dict = {}
+    # (the ~ld keys records rely on: ``call_load_keys`` must name each the same)
+    from .call_summary_effects import call_load_keys
+
+    planned = call_load_keys(call_key, proven)
 
     def temporary():
         span = ResolvedStorage(ByteSpan(
@@ -1062,6 +1066,7 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
         if access.pointer is not None:
             reads, pointer, offset = base(access)
             key = f"{call_key}~ld{len(loaded)}"
+            assert planned.get(access, key) == key, (key, planned.get(access))
             target = temporary()
             rows.append(ObservedEffect(
                 key, EffectKind.COPY, reads=reads, writes=(target,),
@@ -1071,6 +1076,7 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             loaded[access], load_keys[access] = target, key
             return target
         key = f"{call_key}~ld{len(loaded)}"
+        assert planned.get(access, key) == key, (key, planned.get(access))
         target = temporary()
         load_keys[access] = key
         if access.anchor is None:

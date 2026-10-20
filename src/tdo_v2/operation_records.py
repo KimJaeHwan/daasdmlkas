@@ -130,13 +130,93 @@ class StitchContext:
 
 
 class _Binding:
-    """A stitched call instance's callee entry registers -> the caller's
-    values at the call: the call's ``~in<k>`` reads (the caller register at
-    the call is the callee's entry register, same offsets -- except the
-    call shape's stack-pointer base, which the call changes: cut)."""
+    """A stitched call instance's callee entry values -> the caller's at the
+    call: entry registers from the call's ``~in<k>`` reads (the caller
+    register at the call is the callee's entry register, same offsets --
+    the call shape's stack-pointer base ``stack`` is the caller's pre-push
+    value + ``delta``); entry memory at a direct stack slot (callee entry SP
+    + displacement, outside the return-address overlay [0, push)) from the
+    caller's ``~ld<j>`` row loading it (docs 25.32, increment 2)."""
 
-    def __init__(self, caller, reads, stack):
+    def __init__(self, caller, reads, stack, delta=0, anchors=None, loads=None):
         self.caller, self.reads, self.stack = caller, reads, stack
+        self.delta, self.anchors, self.loads = delta, anchors or {}, loads or {}
+
+    def _stack_value(self, builder):
+        """An op node: the caller's stack-pointer read at the call + delta."""
+        offset, size = self.stack
+        read = next((read for read in self.reads if read.span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                     and read.span.start <= offset and offset + size <= read.span.end), None)
+        if read is None:
+            return None
+        parts = _slice_parts(self.caller._fragments(read, None, 0), offset - read.span.start,
+                             offset + size - read.span.start)
+        constant = builder._new(None, {"kind": "const", "value": self.delta & ((1 << (8 * size)) - 1),
+                                       "size": size})["id"]
+        record = builder._new(None, {"kind": "op", "key": "stitch:call-shape", "opcode": "INT_ADD",
+                                     "output": {"size": size}, "call_shape": self.delta, "operands": [
+                                         {"index": 0, "width": size, "role": "value", "parts": parts},
+                                         {"index": 1, "width": size, "role": "value", "parts": [
+                                             {"node": constant, "bytes": [0, size], "at": [0, size]}]}]})
+        builder._done(record)
+        return record["id"]
+
+    def _memory(self, builder, node, span):
+        """A ``bound`` node for a callee entry memory definition (possibly
+        coalesced), byte range by byte range: the caller's ``~ld<j>`` load of
+        a direct stack slot, or a gap ("return address" / "unbound memory" /
+        "memory: overlay unproven") -- cut only if an import uses it."""
+        from .call_summary_effects import anchored_span
+
+        place = anchored_span(span, self.anchors)
+        classes: list = []
+        if place is None:
+            classes = ["unbound memory"] * span.size
+        elif place.pointer is not None or place.anchor is None                 or (place.anchor.start, place.anchor.size) != self.stack:
+            classes = ["memory: overlay unproven"] * span.size
+        else:
+            push = -self.delta
+            for index in range(span.size):
+                displacement = place.displacement + index
+                if 0 <= displacement < push:
+                    classes.append("return address")
+                    continue
+                classes.append(next((item for item in self.loads if item.pointer is None and item.anchor is not None
+                                     and item.anchor == place.anchor and item.space_id == place.space_id
+                                     and item.displacement <= displacement < item.displacement + item.size),
+                                    "unbound memory"))
+        reads: dict = {}
+        parts, gaps, used = [], [], []
+        position = 0
+        while position < len(classes):
+            found = classes[position]
+            end = position
+            while end < len(classes) and (classes[end] == found if isinstance(found, str) else classes[end] is found):
+                end += 1
+            if not isinstance(found, str):
+                if found not in reads:
+                    rows = [read for read in self.caller._staged_reads(self.loads[found])
+                            if read.span.object_id.kind in _MEMORY_OBJECTS and read.span.size == found.size]
+                    reads[found] = rows[0] if len(rows) == 1 else None
+                if reads[found] is None:
+                    found = "unbound memory"
+            if isinstance(found, str):
+                gaps.append({"at": [position, end], "reason": found})
+            else:
+                low = place.displacement + position - found.displacement
+                for piece in _slice_parts(self.caller._fragments(reads[found], None, 0), low, low + end - position):
+                    piece["at"] = [piece["at"][0] + position, piece["at"][1] + position]
+                    parts.append(piece)
+                if self.loads[found] not in used:
+                    used.append(self.loads[found])
+            position = end
+        record = {"kind": "bound", "callee_entry": _span_text(span), "size": span.size, "parts": parts}
+        if gaps:
+            record["gaps"] = gaps
+        if used:
+            record["loaded_by"] = used
+        record = builder._new(node, record)
+        return record["id"]
 
     def parts(self, start, end):
         if start < self.stack[0] + self.stack[1] and self.stack[0] < end:
@@ -153,11 +233,15 @@ class _Binding:
         value, or a gap ("stack pointer" / "unbound register") -- an
         import using a gap byte is cut (``_gap_used``)."""
         if span.object_id.kind is not StorageObjectKind.REGISTER_FILE:
-            raise _StitchCut("entry memory")
+            return self._memory(builder, node, span)
+        whole_stack = span.start <= self.stack[0] and self.stack[0] + self.stack[1] <= span.end
+        stack_value = None
         classes = []
         for offset in range(span.start, span.end):
             if self.stack[0] <= offset < self.stack[0] + self.stack[1]:
-                classes.append("stack pointer")
+                if whole_stack and stack_value is None:
+                    stack_value = self._stack_value(builder) or "unbound register"
+                classes.append(stack_value if whole_stack else "stack pointer")
                 continue
             read = next((read for read in self.reads if read.span.object_id.kind is StorageObjectKind.REGISTER_FILE
                          and read.span.start <= offset < read.span.end), None)
@@ -173,6 +257,8 @@ class _Binding:
             found = classes[position]
             if isinstance(found, str):
                 gaps.append({"at": [position, end], "reason": found})
+            elif isinstance(found, int):   # the stack pointer: the call-shape op node
+                parts.append({"node": found, "bytes": [0, end - position], "at": [position, end]})
             else:
                 for piece in _slice_parts(self.caller._fragments(found, None, 0), low - found.span.start,
                                           high - found.span.start):
@@ -835,9 +921,10 @@ class _Builder:
         action_id = self._actions.get(row_key)
         return self.index.reads.get(action_id, ()) if action_id is not None else ()
 
-    def _stack_base(self, call_key):
+    def _stack_base(self, call_key, delta=False):
         """(offset, size) of the register the observed call shape adjusts (the
-        stack pointer), or None (no observed shape)."""
+        stack pointer), or None (no observed shape); ``delta``: its
+        displacement delta instead."""
         if self._transitions is None:
             from .observed_call_state import observed_call_state_projections
 
@@ -846,6 +933,8 @@ class _Builder:
         transition = self._transitions.get(call_key)
         if transition is None:
             return None
+        if delta:
+            return transition.displacement_delta
         return transition.caller_base.byte_offset, transition.caller_base.byte_size
 
     def _stitch_reason(self, record):
@@ -867,8 +956,6 @@ class _Builder:
         if not tag.isdigit() or int(tag) >= len(effect.runs):
             return "not a register output"
         run = effect.runs[int(tag)]
-        if run.loads:
-            return "loads"
         if run.conditions or effect.writer_conditions:
             return "conditions"
         if effect.tail_stack or done.summary.tail_exits:
@@ -891,6 +978,8 @@ class _Builder:
         if reason is not None:
             record["stitch_cut"] = reason
             return
+        from .call_summary_effects import call_load_keys
+
         base, tag = record["call"], record["row"]
         done = self.provenance.sources[base][1]
         run = self.proven[base].runs[int(tag)]
@@ -908,7 +997,9 @@ class _Builder:
             nested = _Builder(done.normalized, done.unit, origins=done.origins, declared=done.declared,
                               limits=self.limits, provenance=self.stitch.provenance(done), stitch=self.stitch,
                               records=self.records, ledger=self.ledger, parent=self,
-                              binding=_Binding(self, self._staged_reads(f"{base}~in{tag}"), self._stack_base(base)),
+                              binding=_Binding(self, self._staged_reads(f"{base}~in{tag}"), self._stack_base(base),
+                                               self._stack_base(base, delta=True), done.anchors,
+                                               call_load_keys(base, self.proven[base])),
                               path=path, index=self.stitch.index(done.normalized, done.unit))
             outputs = [{"output": _span_dict(span), "part": nested._stitched_output(span, done.summary, instance)}
                        for span in run.writes]

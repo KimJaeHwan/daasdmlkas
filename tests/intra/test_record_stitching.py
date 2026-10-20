@@ -66,6 +66,10 @@ def _values(record, part, registers):
             (item,) = node["stitched"]
             return parts([item["part"]])
         assert kind == "op", node
+        if node["opcode"] == "STORE":   # (its value: the stored operand)
+            return parts(next(operand for operand in node["operands"] if operand["index"] == 2)["parts"])
+        if node["opcode"] == "LOAD":   # (the loaded bytes: each candidate place)
+            return set().union(*(parts(place["parts"]) for place in node["memory"]))
         operands = [operand for operand in node["operands"] if "parts" in operand]
         results = {0}
         widths = [operand["width"] for operand in operands]
@@ -159,9 +163,10 @@ def _cut(functions):
 
 
 def test_cuts_name_their_reason():
-    assert _cut([_caller(), FunctionBuilder(entry=F).ins(copy(reg(RAX), reg(RSP))).ret()]) == "stack pointer"
+    # [rcx] with rcx = the caller's stack pointer: the pushed return address
+    # may be there -- only direct stack slots are bound (increment 2)
     assert _cut([_caller(copy(reg(RCX), reg(RSP))),
-                 FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "loads"
+                 FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "memory: overlay unproven"
     flag = tmp(0x300, 1)
     recursive = (FunctionBuilder(entry=F)
                  .cbranch("done", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
@@ -223,3 +228,52 @@ def test_an_import_out_of_limits_is_rolled_back():
         assert [n for n in record["nodes"]] == [dict(n, stitch_cut="limit") if n["kind"] == "call" else n
                                                for n in plain["nodes"]]
 
+
+
+# -- increment 2: the stack pointer and direct stack slots ----------------------
+
+ENTRY_SP = 0x7000_0000
+CALL_SP = ENTRY_SP - 0x28   # (the caller's stack pointer at the call, before the push)
+
+
+def test_the_callee_stack_pointer_is_the_callers_minus_the_push():
+    record = _record([_caller(), FunctionBuilder(entry=F).ins(add(reg(RAX), reg(RSP), const(0x10))).ret()])
+    _, part = _stitched(record)
+    assert any(node.get("call_shape") == -8 for node in record["nodes"])
+    assert _values(record, part, {RSP: ENTRY_SP}) == {CALL_SP - 8 + 0x10}
+
+
+def test_a_stack_argument_is_the_callers_store():
+    """The callee reads [rsp+8] at entry: the caller's [rsp] at the call."""
+    t = tmp(0x100)
+    callee = FunctionBuilder(entry=F).ins(add(t, reg(RSP), const(8)), load(reg(RAX), t)).ret()
+    from synthetic import store
+
+    record = _record([_caller(store(reg(RSP), reg(RBX))), callee])
+    _, part = _stitched(record)
+    assert any(node["kind"] == "bound" and node.get("loaded_by") for node in record["nodes"])
+    assert _values(record, part, {RSP: ENTRY_SP, RBX: 0x1234_5678_9ABC_DEF0}) == {0x1234_5678_9ABC_DEF0}
+
+
+def test_part_of_a_larger_store():
+    t = tmp(0x100)
+    callee = FunctionBuilder(entry=F).ins(add(t, reg(RSP), const(12)), load(reg(RAX, 4), t)).ret()
+    from synthetic import store
+
+    record = _record([_caller(store(reg(RSP), reg(RBX))), callee])
+    _, part = _stitched(record)
+    assert _values(record, part, {RSP: ENTRY_SP, RBX: 0x1234_5678_9ABC_DEF0}) == {0x1234_5678}
+
+
+def test_memory_cuts():
+    t = tmp(0x100)
+    # the return-address slot itself
+    assert _cut([_caller(), FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RSP))).ret()]) == "return address"
+    # rcx = rsp - 8 in the caller: [rcx] is the pushed return address -- not bound
+    from synthetic import sub
+
+    assert _cut([_caller(sub(reg(RCX), reg(RSP), const(8))),
+                 FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "memory: overlay unproven"
+    # a pointer chain p = [rsp+8]; rax = [p]
+    chain = FunctionBuilder(entry=F).ins(add(t, reg(RSP), const(8)), load(t, t), load(reg(RAX), t)).ret()
+    assert _cut([_caller(), chain]) in ("memory: overlay unproven", "unbound memory")

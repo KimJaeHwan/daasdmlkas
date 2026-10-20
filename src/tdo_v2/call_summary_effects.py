@@ -56,6 +56,64 @@ class AnchoredSpan:
 MAX_POINTER_DEPTH = 2
 
 
+def anchored_span(span: ByteSpan, anchors: dict, depth: int = 0) -> "AnchoredSpan | None":
+    """Where a caller finds callee bytes ``span`` at the call (``anchors``:
+    the callee's FUNCTION_RELATIVE object -> (entry register span, space)):
+    a global, (an entry register's value) + displacement, or (the pointer
+    at another anchored place) + displacement (``MAX_POINTER_DEPTH``
+    levels); None when the caller cannot locate it."""
+    kind = span.object_id.kind
+    if kind is StorageObjectKind.ADDRESS_SPACE:
+        return AnchoredSpan(None, span.start, span.size, span.object_id.space_key, span)
+    if kind is StorageObjectKind.FUNCTION_RELATIVE and span.object_id in anchors:
+        anchor, space_id = anchors[span.object_id]
+        # relative objects are biased by 2**(address bits) (relative_memory);
+        # an anchor is pointer-sized (a width mismatch fails the caller's
+        # projection: debt, not a wrong address)
+        displacement = span.start - (1 << (8 * anchor.size))
+        if anchor.object_id.kind is StorageObjectKind.REGISTER_FILE:
+            return AnchoredSpan(anchor, displacement, span.size, space_id)
+        if depth >= MAX_POINTER_DEPTH:
+            return None
+        slot = anchored_span(anchor, anchors, depth + 1)  # the pointer's own location at entry
+        if slot is None:
+            return None
+        return AnchoredSpan(None, displacement, span.size, space_id, pointer=slot)
+    return None
+
+
+def call_load_keys(call_key: str, proven) -> dict:
+    """AnchoredSpan -> the key of the ``~ld<j>`` row that loads it at the
+    call, in the order ``normalize._proven_call_rows`` creates them (runs'
+    loads, memory runs' kept old values and pointer bases, unknown memory's
+    pointer bases, sink demands' loads; a pointer slot before its target).
+    An accessor's slot, loaded last, is not listed."""
+    keys: dict = {}
+
+    def load(access):
+        if access in keys:
+            return
+        if access.pointer is not None:
+            load(access.pointer)
+        keys[access] = f"{call_key}~ld{len(keys)}"
+
+    for run in (*proven.runs, *proven.memory_runs):
+        for item in run.loads:
+            load(item)
+        if isinstance(run, ProvenMemoryRun):
+            if run.keeps_old:
+                load(run.write)
+            if run.write.pointer is not None:
+                load(run.write.pointer)
+    for access in proven.unknown_memory:
+        if access.pointer is not None:
+            load(access.pointer)
+    for demand in proven.sink_demands:
+        for item in demand.loads:
+            load(item)
+    return keys
+
+
 @dataclass(frozen=True, slots=True)
 class ProvenRunEffect:
     writes: tuple[ByteSpan, ...]
@@ -206,25 +264,8 @@ def derive_proven_call_effect(
     anchors = anchors or {}
     skip = {offset for span in excluded for offset in range(span.start, span.end)}
 
-    def anchored(span: ByteSpan, depth: int = 0) -> AnchoredSpan | None:
-        kind = span.object_id.kind
-        if kind is StorageObjectKind.ADDRESS_SPACE:
-            return AnchoredSpan(None, span.start, span.size, span.object_id.space_key, span)
-        if kind is StorageObjectKind.FUNCTION_RELATIVE and span.object_id in anchors:
-            anchor, space_id = anchors[span.object_id]
-            # relative objects are biased by 2**(address bits) (relative_memory);
-            # an anchor is pointer-sized (a width mismatch fails the caller's
-            # projection: debt, not a wrong address)
-            displacement = span.start - (1 << (8 * anchor.size))
-            if anchor.object_id.kind is StorageObjectKind.REGISTER_FILE:
-                return AnchoredSpan(anchor, displacement, span.size, space_id)
-            if depth >= MAX_POINTER_DEPTH:
-                return None
-            slot = anchored(anchor, depth + 1)  # the pointer's own location at entry
-            if slot is None:
-                return None
-            return AnchoredSpan(None, displacement, span.size, space_id, pointer=slot)
-        return None
+    def anchored(span: ByteSpan) -> AnchoredSpan | None:
+        return anchored_span(span, anchors)
 
     stack = {(span.start, span.size) for span in excluded}
 
@@ -623,6 +664,8 @@ def _spans(object_id, offsets):
 
 
 __all__ = (
+    "anchored_span",
+    "call_load_keys",
     "AnchoredSpan", "ProvenCallEffect", "ProvenMemoryRun", "ProvenRunEffect", "ProvenSinkDemand",
     "derive_proven_call_effect",
 )
