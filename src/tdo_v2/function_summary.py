@@ -210,6 +210,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain,
                               writer_conditions, dead_keys)
     inner_calls = crossed.pop("inner_calls", ())
+    crossing_labels = crossed.pop("label_universe")
 
     exits = []
     nodes = ssa.state_nodes
@@ -223,7 +224,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
             for span in _object_spans(atoms, node.start_atom, node.stop_atom):
                 runs.append(_classify(span, node.definition_ids, definitions, definition_slice,
                                       crossed.get((state.block_key, span.object_id), {}), uncertain,
-                                      tracer))
+                                      tracer, crossing_labels))
         exits.append(ExitSummary(state.block_key, tuple(runs)))
     writer_objects = sorted(
         {(item.operation_key, item.span.object_id) for item in definitions
@@ -1074,7 +1075,7 @@ def _object_spans(atoms, start: int, stop: int):
 
 
 def _classify(span, definition_ids, definitions, definition_slice, crossed_by_offset, uncertain,
-              tracer=None):
+              tracer=None, crossing_labels=None):
     if tracer is not None and definition_ids and all(
             tracer.trace(definition_id, span) == span for definition_id in definition_ids):
         # the value is the entry value of these very bytes, copied through
@@ -1103,9 +1104,10 @@ def _classify(span, definition_ids, definitions, definition_slice, crossed_by_of
     debts |= set(found_debts)
     origins |= set(found_origins)
     conditions |= set(found_conditions)
-    crossings = set()
+    crossed_bits = 0   # (``_exit_crossings``' bitsets over ``crossing_labels``)
     for offset in range(span.start, span.end):
-        crossings |= crossed_by_offset.get(offset, frozenset())
+        crossed_bits |= crossed_by_offset.get(offset, 0)
+    crossings = set(crossing_labels.decode(crossed_bits)) if crossed_bits else set()
     # a write whose address is uncertain may have missed these bytes: the
     # earlier value can survive, so the content is not known
     crossings |= {f"uncertain:{writer}" for writer in writers & uncertain}
@@ -1123,11 +1125,12 @@ def _classify(span, definition_ids, definitions, definition_slice, crossed_by_of
     )
 
 
-def _live_gens_at_exit(graph, events, exit_block: str) -> frozenset:
+def _live_gens_at_exit(graph, events, exit_block: str) -> int:
     """Gen labels live at the end of ``exit_block``: those with a path to the
     exit that crosses no kill. Walk blocks backwards from the exit; inside a
-    block read events from the end until the first kill (and stop there)."""
-    found: set = set()
+    block read events from the end until the first kill (and stop there).
+    Events carry label indices; the result is their int bitset."""
+    found = 0
     seen: set[str] = set()
     pending = [exit_block]
     while pending:
@@ -1141,10 +1144,10 @@ def _live_gens_at_exit(graph, events, exit_block: str) -> frozenset:
             if label is None:
                 killed = True
                 break
-            found.add(label)
+            found |= 1 << label
         if not killed:
             pending.extend(graph.predecessors[block])
-    return frozenset(found)
+    return found
 
 
 def _exit_crossings(normalized, observation, context, preserved_stack_pointers, uncertain,
@@ -1200,6 +1203,16 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                 unknown.append((block_key, position, 1 + len(effect.writes), key))
                 unknown_writers.add(key)
 
+    # the crossing labels as int bitsets (docs 25.31 B2-d2; were frozensets of
+    # "call:" / "alias:" / "unknown:" strings): one universe, events carry
+    # indices, per-offset values are ints decoded by ``_classify``
+    crossing_labels = LabelUniverse(
+        [f"call:{key}" for _, _, key in calls] + [f"alias:{row[4]}" for row in memory_writes]
+        + [f"unknown:{row[3]}" for row in unknown])
+    call_index = {key: crossing_labels.index_of[f"call:{key}"] for _, _, key in calls}
+    alias_index = {row[4]: crossing_labels.index_of[f"alias:{row[4]}"] for row in memory_writes}
+    unknown_index = {row[3]: crossing_labels.index_of[f"unknown:{row[3]}"] for row in unknown}
+
     # the named assumption the function was normalized under (``may_alias``):
     # constant addresses never alias its stack object
     stack = None
@@ -1220,6 +1233,7 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                     and right.kind is StorageObjectKind.ADDRESS_SPACE)
 
     result: dict = {
+        "label_universe": crossing_labels,
         "unknown_writers": unknown_writers,
         "inner_calls": tuple(sorted(
             (key, tuple(preserved.get(key, ())), key in memory_keeping, key in below_calls)
@@ -1272,16 +1286,16 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                     events: dict[str, list] = {}
                     for call_block, position, key in calls:
                         if key not in keeping:
-                            events.setdefault(call_block, []).append((position, 0, f"call:{key}"))
+                            events.setdefault(call_block, []).append((position, 0, call_index[key]))
                     if object_id.kind in _MEMORY_KINDS:
                         for write_block, position, order, other, key in memory_writes:
                             # a private frame write reaches no other object but a
                             # wild one (``may_alias.private_frame_writes``)
                             if may_alias(other, object_id) and key not in excused and (
                                     (key, other) not in private or object_id in wild):
-                                events.setdefault(write_block, []).append((position, order, f"alias:{key}"))
+                                events.setdefault(write_block, []).append((position, order, alias_index[key]))
                         for write_block, position, order, key in unknown:
-                            events.setdefault(write_block, []).append((position, order, f"unknown:{key}"))
+                            events.setdefault(write_block, []).append((position, order, unknown_index[key]))
                     for write_block, position, order in covering:
                         events.setdefault(write_block, []).append((position, order, None))
                     for rows in events.values():
@@ -1293,7 +1307,7 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                     phase_count("exit_events", sum(map(len, events.values())))
                 if value:
                     per_offset[offset] = value
-                    phase_count("exit_crossed_labels", len(value))
+                    phase_count("exit_crossed_labels", value.bit_count())
             result[(block_key, object_id)] = per_offset
     return result
 

@@ -29,12 +29,14 @@ class LabelUniverse:
         """The set of the given labels (labels outside the universe ignored):
         built in a byte buffer, one pass, then one conversion."""
         index_of = self.index_of
-        buffer = bytearray((len(self.labels) + 7) // 8)
+        buffer = None
         for label in labels:
             index = index_of.get(label)
             if index is not None:
+                if buffer is None:   # (no buffer for an empty set)
+                    buffer = bytearray((len(self.labels) + 7) // 8)
                 buffer[index >> 3] |= 1 << (index & 7)
-        return int.from_bytes(buffer, "little")
+        return 0 if buffer is None else int.from_bytes(buffer, "little")
 
     def decode(self, bits: int) -> list:
         """The labels of ``bits``, in universe order."""
