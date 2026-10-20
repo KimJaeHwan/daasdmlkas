@@ -180,10 +180,6 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     definitions = ssa.definitions
     definition_nodes = normalized.memory_graph.definition_nodes
 
-    observed_edges: dict[int, list] = {}
-    for source, target, record in graph.weighted_edges():
-        if record.span is not None and graph.node(source).kind is NodeKind.OBSERVED_INPUT:
-            observed_edges.setdefault(source, []).append((target, record.span))
     operation_of = _operation_nodes(graph)
 
     conditions_of = _alias_conditions(normalized)

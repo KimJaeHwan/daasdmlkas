@@ -113,7 +113,7 @@ def derive_sparse(unit, objects, policy):
     # and rows
     # (every object gen above is also an any-write gen: any_gens has every label)
     universe = LabelUniverse(writer for *_, writer in any_gens)
-    bit_of = universe.bit_of
+    index_of = universe.index_of   # events carry indices (label_sets)
     unknown_mask = universe.mask(policy.unknown_writers)
 
     class_events: dict[object, dict[str, list]] = {}
@@ -126,7 +126,7 @@ def derive_sparse(unit, objects, policy):
         events: dict[str, list] = {}
         gens = any_gens if index is _ANY else object_gens[class_object[index]]
         for block_key, position, order, writer in gens:
-            events.setdefault(block_key, []).append((position, order, bit_of[writer]))
+            events.setdefault(block_key, []).append((position, order, index_of[writer]))
         if index is not _ANY:
             for block_key, position, order in class_kills[index]:
                 events.setdefault(block_key, []).append((position, order, None))
@@ -142,11 +142,11 @@ def derive_sparse(unit, objects, policy):
             after = 0
             for _, _, label in rows[last + 1:]:
                 if label is not None:
-                    after |= label
+                    after |= 1 << label
             all_gens = 0
             for _, _, label in rows:
                 if label is not None:
-                    all_gens |= label
+                    all_gens |= 1 << label
             transfers[block_key] = (kills, after, all_gens)
         for block_key, value in graph.solve_gen_kill(transfers, blocks_needed, empty=0).items():
             entry_values[(index, block_key)] = value
@@ -157,7 +157,7 @@ def derive_sparse(unit, objects, policy):
             if event_position >= position:
                 break
             replays[0] += 1
-            value = 0 if label is None else value | label
+            value = 0 if label is None else value | (1 << label)
         return value
 
     rows = []

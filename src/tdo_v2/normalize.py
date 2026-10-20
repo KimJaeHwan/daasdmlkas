@@ -2280,6 +2280,9 @@ def _materialize_may_alias_debt(
     )
     dependencies.claim_namespace(namespace)
     nodes, uncertain_nodes = [], []
+    # one (frozen, value-compared) record per writer for all its debts
+    # (docs 25.31 B0-8: one per edge was 84 MB at the 30k scale point)
+    writer_records: dict = {}
     for row in reads:
         conditional = [writer for writer in row.uncertain if uncertain.get(writer) is not None]
         hard = [writer for writer in row.writers if writer not in conditional or (
@@ -2305,11 +2308,10 @@ def _materialize_may_alias_debt(
         )
         phase_count("may_alias_write_edges", len(hard))
         for writer in hard:
-            dependencies.add_edge(
-                operation_nodes[writer],
-                node,
-                EdgeRecord(EdgeKind.MAY_ALIAS_WRITE, operation=writer),
-            )
+            record = writer_records.get(writer)
+            if record is None:
+                record = writer_records[writer] = EdgeRecord(EdgeKind.MAY_ALIAS_WRITE, operation=writer)
+            dependencies.add_edge(operation_nodes[writer], node, record)
         dependencies.add_edge(
             node,
             operation_nodes[row.operation_key],

@@ -86,7 +86,7 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
     # the crossed calls as int bitsets over the call sites' keys (docs 25.31
     # B2; were frozensets of keys): the same sets, fixed points, pops and rows
     universe = LabelUniverse(key for _, _, key in call_sites)
-    bit_of = universe.bit_of
+    index_of = universe.index_of   # events carry indices (label_sets)
 
     def events_of(index: int) -> dict[str, list[tuple[int, int, str | None]]]:
         """block -> ordered events (position, order, gen label or None for kill)."""
@@ -94,7 +94,7 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
         keeping = class_preserving[index]
         for block_key, position, key in call_sites:
             if key not in keeping:
-                events.setdefault(block_key, []).append((position, 0, bit_of[key]))
+                events.setdefault(block_key, []).append((position, 0, index_of[key]))
         for block_key, position, write in class_writes[index]:
             events.setdefault(block_key, []).append((position, 1 + write, None))
         for rows in events.values():
@@ -130,11 +130,11 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
             after = 0
             for _, _, label in rows[last + 1:]:
                 if label is not None:
-                    after |= label
+                    after |= 1 << label
             gens = 0
             for _, _, label in rows:
                 if label is not None:
-                    gens |= label
+                    gens |= 1 << label
             transfers[block_key] = (kills, after, gens)
         for block_key, value in graph.solve_gen_kill(transfers, needed, empty=0).items():
             entry_values[(index, block_key)] = value
@@ -145,7 +145,7 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
             if event_position >= position:
                 break
             replays[0] += 1
-            value = 0 if label is None else value | label
+            value = 0 if label is None else value | (1 << label)
         return value
 
     rows = []

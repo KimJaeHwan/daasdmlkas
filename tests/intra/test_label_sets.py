@@ -34,8 +34,8 @@ def test_single_labels_and_the_highest_bit():
     assert one.decode(one.mask(["only"])) == ["only"]
     universe = LabelUniverse(f"k{index:05d}" for index in range(40000))
     last = universe.labels[-1]
-    assert universe.decode(universe.bit_of[last]) == [last]
-    assert universe.decode(universe.bit_of[universe.labels[0]] | universe.bit_of[last]) == [universe.labels[0], last]
+    assert universe.decode(universe.bit(last)) == [last]
+    assert universe.decode(universe.bit(universe.labels[0]) | universe.bit(last)) == [universe.labels[0], last]
 
 
 def _counted(function):

@@ -55,6 +55,9 @@ class EdgeKind(StrEnum):
 
 
 _EDGE_KINDS = frozenset(item.value for item in EdgeKind)
+# each kind's own value str: str() of a StrEnum member makes a new str per
+# record (docs 25.31 B0-7: 80 MB of the 30k scale point's MAY_ALIAS_WRITE records)
+_KIND_VALUES = {item: item.value for item in EdgeKind}
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +71,7 @@ class EdgeRecord:
         if self.kind not in _EDGE_KINDS:
             raise TypeError(f"edge kind must be an EdgeKind: {self.kind!r}")
         if type(self.kind) is not str:
-            object.__setattr__(self, "kind", str(self.kind))
+            object.__setattr__(self, "kind", _KIND_VALUES[self.kind])
         if self.operation is not None and type(self.operation) is not str:
             raise TypeError("edge operation must be an exact str or None")
         if self.occurrence is not None and (
