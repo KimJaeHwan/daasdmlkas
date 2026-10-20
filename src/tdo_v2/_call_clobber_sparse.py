@@ -88,16 +88,38 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
     universe = LabelUniverse(key for _, _, key in call_sites)
     index_of = universe.index_of   # events carry indices (label_sets)
 
-    def events_of(index: int) -> dict[str, list[tuple[int, int, str | None]]]:
-        """block -> ordered events (position, order, gen label or None for kill)."""
+    # the call events are the same for every class with the same keeping set:
+    # built once per keeping set (block -> its calls' events, in position
+    # order, and the call-only blocks' transfers); per class only the blocks
+    # holding one of its kills get merged events of their own (docs 25.31
+    # B2-c; per-class copies of every call event were 366 MB of the 30k scale
+    # point's traced peak). Same events per block, same transfers, same solve.
+    shared: dict = {}
+
+    def calls_for(keeping):
+        found = shared.get(keeping)
+        if found is None:
+            by_block: dict[str, list] = {}
+            for block_key, position, key in call_sites:   # (blocks in order, positions ascending)
+                if key not in keeping:
+                    by_block.setdefault(block_key, []).append((position, 0, index_of[key]))
+            transfers = {}
+            for block_key, rows in by_block.items():
+                gens = 0
+                for _, _, label in rows:
+                    gens |= 1 << label
+                transfers[block_key] = (False, gens, gens)
+            found = shared[keeping] = (by_block, transfers, sum(map(len, by_block.values())))
+        return found
+
+    def kill_events_of(index: int, calls_by_block) -> dict[str, list]:
+        """block -> ordered events (position, order, gen label index or None
+        for a kill) of the blocks where class ``index`` has a kill."""
         events: dict[str, list] = {}
-        keeping = class_preserving[index]
-        for block_key, position, key in call_sites:
-            if key not in keeping:
-                events.setdefault(block_key, []).append((position, 0, index_of[key]))
         for block_key, position, write in class_writes[index]:
             events.setdefault(block_key, []).append((position, 1 + write, None))
-        for rows in events.values():
+        for block_key, rows in events.items():
+            rows.extend(calls_by_block.get(block_key, ()))
             # (position, order) never ties: one call per effect at order 0,
             # one kill per covering write at 1 + its ordinal
             rows.sort(key=lambda row: (row[0], row[1]))
@@ -119,11 +141,12 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
     if counting:
         phase_count("cc_classes", len(reads_by_class))
     for index, needed in reads_by_class.items():
-        events = events_of(index)
-        class_events[index] = events
+        calls_by_block, call_transfers, call_events = calls_for(class_preserving[index])
+        events = kill_events_of(index, calls_by_block)
+        class_events[index] = (calls_by_block, events)
         if counting:
-            phase_count("cc_class_events", sum(len(rows) for rows in events.values()))
-        transfers = {}
+            phase_count("cc_class_events", call_events + len(class_writes[index]))   # (calls + kills)
+        transfers = dict(call_transfers)
         for block_key, rows in events.items():
             kills = any(label is None for _, _, label in rows)
             last = max((i for i, (_, _, label) in enumerate(rows) if label is None), default=-1)
@@ -141,7 +164,11 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
 
     def value_at(index: int, block_key: str, position: int) -> int:
         value = entry_values[(index, block_key)]
-        for event_position, _, label in class_events[index].get(block_key, ()):
+        calls_by_block, kill_blocks = class_events[index]
+        rows = kill_blocks.get(block_key)
+        if rows is None:
+            rows = calls_by_block.get(block_key, ())
+        for event_position, _, label in rows:
             if event_position >= position:
                 break
             replays[0] += 1
