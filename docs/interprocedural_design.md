@@ -2098,6 +2098,12 @@ MAY_ALIAS_WRITE 간선은 그래프에 저장하지 않고 API가 지금과 같�
 - 측정(target, seed 0, fc1168a): 30k 29 s / 0.46 GB, 100k 257 s / 2.2 GB. 250k(7ee9d53) 처음으로 완료: 3027 s / 9.19 GB
   (최고점 normalize), 탐침 모두 맞음; 느린 단계 call_clobber 598 s, may_alias 495, slices 458, lanes 407, memory_ssa 237, summarize 176.
   목표(10분 / 8 GiB)까지 남음.
+- B2-a2c(6282fb2) 행마다 "?쓰기키"의 "?"를 떼어 새 문자열을 만들던 것을 엔진 호출마다 하나로: 120k normalize 최고점 1876 MB 중
+  427 MB였음. 100k 최고 메모리 2211 → 1765 MB, 60k normalize 최고점 654 → 537 MB(같은 시간). **250k(6282fb2): 2960 s / 6.16 GB —
+  메모리 목표(8 GiB) 안.** 시간은 아직 49분(목표 10분): call_clobber 572 s, may_alias 493, slices 452, lanes 405, normalize 388,
+  memory_ssa 233, summarize 174 — 다음은 K3 시간(작업량 단위가 바뀌어도 결과가 같으면 허용, 2026-10-20 결정).
+- 거절: B2-a1c(객체별 gen 사건을 블록마다 정수 배열 3개로) — 블록 대부분이 사건 1~2개라 배열 고정 비용이 더 커서 60k 최고점
+  537 → 592 MB, 100k 1765 → 1818 MB로 나빠져 커밋하지 않음. 다음 안: 소유자마다 평평한 배열 하나 + 블록별 범위.
   60k normalize 최고점의 남은 큰 항목: 객체별 gen 사건 146 MB(`_may_alias_sparse`), 행의 writers 튜플 ~170 MB(`may_alias._row`) —
   다음은 B2-a2b(행을 비트로, 승인된 설계)와 gen 사건의 압축. [역방향]
 
