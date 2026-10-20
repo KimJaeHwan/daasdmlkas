@@ -57,7 +57,8 @@ from .effects import (
     ObservedEffectUnit,
     UnresolvedMemoryAccess,
 )
-from .graph import RustworkxDependencyGraph
+from .graph import RustworkxDependencyGraph, VirtualWriters
+from .label_sets import LabelUniverse
 from .graph_contracts import EdgeKind, EdgeRecord, NodeId, NodeKind, NodeRecord
 from .memory_contracts import (
     LocalMemorySsaResult,
@@ -2280,13 +2281,23 @@ def _materialize_may_alias_debt(
     )
     dependencies.claim_namespace(namespace)
     nodes, uncertain_nodes = [], []
-    # one (frozen, value-compared) record per writer for all its debts
-    # (docs 25.31 B0-8: one per edge was 84 MB at the 30k scale point)
-    writer_records: dict = {}
-    for row in reads:
+    # the writer edges as bitsets over this materialization's writers, held
+    # by the graph instead of physical edges (docs 25.31 B2-b; one record per
+    # writer, B0-8); the facade presents them as the edges they stand for
+    def split(row):
+        """(conditional uncertain writers, writers with an edge) of a row."""
         conditional = [writer for writer in row.uncertain if uncertain.get(writer) is not None]
-        hard = [writer for writer in row.writers if writer not in conditional or (
+        return conditional, [writer for writer in row.writers if writer not in conditional or (
             row.plain is not None and writer in row.plain)]
+
+    # (the table from the writers that get an edge only, as before only those
+    # needed an operation node -- Fable)
+    universe = LabelUniverse({writer for row in reads for writer in split(row)[1]})
+    writers_table = VirtualWriters(
+        universe, [operation_nodes[key] for key in universe.labels],
+        [EdgeRecord(EdgeKind.MAY_ALIAS_WRITE, operation=key) for key in universe.labels])
+    for row in reads:
+        conditional, hard = split(row)
         if conditional:
             pairs = frozenset().union(*(uncertain[writer] for writer in conditional))
             extra = dependencies.add_node(NodeRecord(
@@ -2307,11 +2318,8 @@ def _materialize_may_alias_debt(
             )
         )
         phase_count("may_alias_write_edges", len(hard))
-        for writer in hard:
-            record = writer_records.get(writer)
-            if record is None:
-                record = writer_records[writer] = EdgeRecord(EdgeKind.MAY_ALIAS_WRITE, operation=writer)
-            dependencies.add_edge(operation_nodes[writer], node, record)
+        # (``hard`` is in sorted key order: the universe's ascending order)
+        dependencies.add_virtual_writers(node, writers_table, universe.mask(hard))
         dependencies.add_edge(
             node,
             operation_nodes[row.operation_key],

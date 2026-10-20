@@ -38,6 +38,18 @@ class LabelUniverse:
                 buffer[index >> 3] |= 1 << (index & 7)
         return 0 if buffer is None else int.from_bytes(buffer, "little")
 
+    def indices(self, bits: int) -> list:
+        """The indices of ``bits``, ascending."""
+        if not bits:
+            return []
+        text = format(bits, "b")[::-1]
+        found = []
+        index = text.find("1")
+        while index >= 0:
+            found.append(index)
+            index = text.find("1", index + 1)
+        return found
+
     def decode(self, bits: int) -> list:
         """The labels of ``bits``, in universe order."""
         if not bits:
