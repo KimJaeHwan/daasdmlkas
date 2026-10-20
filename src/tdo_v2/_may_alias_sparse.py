@@ -59,20 +59,22 @@ def derive_sparse(unit, objects, policy):
                         (span.start, span.end, (block.key, position, order)))
                 private = all(policy.is_private(span.object_id, offset, writer, write=True)
                               for offset in range(span.start, span.end))
+                # (one event tuple, shared by every list it goes to -- docs 25.31 B2-a2a)
+                event = (block.key, position, order, writer)
                 for other in tracked:  # a private frame write reaches only wild objects
                     if policy.may_alias(other, span.object_id) and (not private or other in policy.wild_objects):
-                        object_gens[other].append((block.key, position, order, writer))
-                any_gens.append((block.key, position, order, writer))
+                        object_gens[other].append(event)
+                any_gens.append(event)
             if _unknown_write(effect):
-                order = 1 + len(effect.writes)
+                event = (block.key, position, 1 + len(effect.writes), writer)
                 for other in tracked:
-                    object_gens[other].append((block.key, position, order, writer))
-                any_gens.append((block.key, position, order, writer))
+                    object_gens[other].append(event)
+                any_gens.append(event)
             if writer in policy.uncertain_writers:  # may have written anywhere, as the dense code
-                order = 2 + len(effect.writes)
+                event = (block.key, position, 2 + len(effect.writes), _UNCERTAIN + writer)
                 for other in tracked:
-                    object_gens[other].append((block.key, position, order, _UNCERTAIN + writer))
-                any_gens.append((block.key, position, order, _UNCERTAIN + writer))
+                    object_gens[other].append(event)
+                any_gens.append(event)
 
     # byte classes: (object, covering writes)
     class_of: dict[tuple, int] = {}
@@ -189,6 +191,7 @@ def derive_sparse(unit, objects, policy):
         return value
 
     rows = []
+    intern: dict = {}
     for block in sorted(blocks, key=lambda item: item.key):
         for position, effect in enumerate(block.effects):
             spans, writers = [], 0
@@ -207,11 +210,11 @@ def derive_sparse(unit, objects, policy):
                 if dirty:
                     spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
             if spans:
-                rows.append(_row(effect.operation_key, tuple(spans), universe.decode(writers)))
+                rows.append(_row(effect.operation_key, tuple(spans), universe.decode(writers), intern))
             elif _unknown_read(effect):
                 value = value_at(_ANY, block.key, position)
                 if value:
-                    rows.append(_row(effect.operation_key, (), universe.decode(value)))
+                    rows.append(_row(effect.operation_key, (), universe.decode(value), intern))
     if counting:
         phase_count("ma_value_at_replays", replays[0])
     return tuple(sorted(rows, key=lambda row: row.operation_key))

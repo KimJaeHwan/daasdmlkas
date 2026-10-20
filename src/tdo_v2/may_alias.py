@@ -459,8 +459,9 @@ def _dense_rows(unit, objects, policy) -> tuple[MayAliasRead, ...]:
                 pending.add(successor)
 
     rows: list[MayAliasRead] = []
+    intern: dict = {}
     for key in sorted(in_states):
-        _transfer(blocks[key], in_states[key], objects, policy, rows)
+        _transfer(blocks[key], in_states[key], objects, policy, rows, intern)
     return tuple(sorted(rows, key=lambda row: row.operation_key))
 
 
@@ -479,7 +480,7 @@ def _meet(left: dict, right: dict) -> dict:
     return merged
 
 
-def _transfer(block, state: dict, objects, policy: _Policy, rows) -> dict:
+def _transfer(block, state: dict, objects, policy: _Policy, rows, intern=None) -> dict:
     for effect in block.effects:
         if rows is not None:
             spans, writers = [], set()
@@ -498,9 +499,9 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows) -> dict:
                 if dirty:
                     spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
             if spans:
-                rows.append(_row(effect.operation_key, tuple(spans), writers))
+                rows.append(_row(effect.operation_key, tuple(spans), writers, intern))
             elif _unknown_read(effect) and state[_ANY_WRITE]:
-                rows.append(_row(effect.operation_key, (), state[_ANY_WRITE]))
+                rows.append(_row(effect.operation_key, (), state[_ANY_WRITE], intern))
         for evidence in effect.writes:
             if type(evidence) is not ResolvedStorage or evidence.span.object_id not in state:
                 continue
@@ -517,14 +518,21 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows) -> dict:
 _UNCERTAIN = "?"
 
 
-def _row(operation_key: str, spans: tuple, labels) -> MayAliasRead:
+def _row(operation_key: str, spans: tuple, labels, intern: dict | None = None) -> MayAliasRead:
     """The row of a read reached by ``labels`` (writer keys; ``_UNCERTAIN``
-    marks the gen of an uncertain-address writer)."""
+    marks the gen of an uncertain-address writer). ``intern``: one dict per
+    engine call -- equal tuples of different rows become one object (docs
+    25.31 B2-a2a: the rows' tuples were the largest item of normalize's
+    traced peak at 60k); the values are the same."""
     plain = {label for label in labels if not label.startswith(_UNCERTAIN)}
     uncertain = {label[len(_UNCERTAIN):] for label in labels if label.startswith(_UNCERTAIN)}
+    writers, uncertain, plain = tuple(sorted(plain | uncertain)), tuple(sorted(uncertain)), tuple(sorted(plain))
+    if intern is not None:
+        writers = intern.setdefault(writers, writers)
+        uncertain = intern.setdefault(uncertain, uncertain)
+        plain = intern.setdefault(plain, plain)
     return MayAliasRead(
-        operation_key, spans, tuple(sorted(plain | uncertain)), unknown_address=not spans,
-        uncertain=tuple(sorted(uncertain)), plain=tuple(sorted(plain)),
+        operation_key, spans, writers, unknown_address=not spans, uncertain=uncertain, plain=plain,
     )
 
 
