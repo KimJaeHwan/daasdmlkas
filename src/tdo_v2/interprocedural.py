@@ -101,6 +101,29 @@ def function_key(coordinate) -> str:
     return f"{coordinate.space_id:x}:{coordinate.byte_offset:x}"
 
 
+
+@dataclass(frozen=True)
+class CallProvenance:
+    """Operation records only (docs 25.31 C9-5), never part of a result: per
+    call of one analysis instance, where its effect came from -- ("summary",
+    the callee's AnalyzedFunction), ("recursive hypothesis", callee key),
+    ("model" | "derived model" | "test-only-boundary", label) -- and every
+    alias-condition decision: pairs dropped at derivation (``rejections``:
+    (where, callee pair, "unlocatable" | "failed"); for a recursive
+    hypothesis also its own derivation's rows and ("recursive hypothesis",
+    anchored pair, "failed") per pair it failed by construction), the accumulated
+    ``failed`` / ``opened`` sets, the last pass's run / writer verdicts
+    (``final``: (call, "cr<i>" | "cw") -> verdicts in pair order) and the
+    sink-demand pass (``sink``: (call, "ck<i>") -> verdicts)."""
+
+    sources: dict
+    rejections: dict
+    failed: dict
+    opened: dict
+    final: dict
+    sink: dict
+
+
 @analysis_entry
 def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry_values_not_frame=True,
                   assume_opaque_callees_leave_no_stack_addresses=True,
@@ -202,7 +225,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   own_library: str | None = None, keep_uncut=frozenset(),
                   assume_same_result_functions=False,
                   assume_accessor_result_separate=False,
-                  assume_accessor_private_state=False, model_bindings=()) -> dict[str, AnalyzedFunction]:
+                  assume_accessor_private_state=False, model_bindings=(),
+                  record_provenance: dict | None = None) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -394,7 +418,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             }
             return register_object, register_limit, _preserved_stack_pointers(observation, context), shapes
 
-        def site_effect(key, call_key, summary, anchors, failed=(), callee=None):
+        def site_effect(key, call_key, summary, anchors, failed=(), callee=None, rejections=None):
             """The effect of one call site of ``key`` from a callee summary."""
             register_object, register_limit, stack_pointers, shapes = site(key)
             if register_object is None:
@@ -409,6 +433,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 stack_deltas=shapes.get(call_key, {}),
                 tail=tail,
                 failed_conditions=frozenset(failed),
+                rejections=rejections,
             )
 
         def boundaries_of(key):
@@ -436,6 +461,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             summary = FunctionSummary(FUNCTION_SUMMARY_VERSION, (ExitSummary("declared", runs),), (), (),
                                       register_deltas=deltas, stack_values_out=False)
             return site_effect(key, call_key, summary, {}, callee=f"test-only-boundary:{declaration.label}")
+
+        # (operation records only, C9-5) (caller, call) -> the recursion
+        # hypothesis in use: {"failed": pairs, "rejections": rows}
+        hypothesis_notes: dict = {}
 
         def one(key, hypotheses):
             """``analyze_one``; a function whose dependent-value chains exceed
@@ -479,8 +508,14 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             markers = no_effect_calls(unit, pcodeop_models) if pcodeop_models else {}
             assumed = {**markers, **(assumed_call_effects or {}).get(key, {})}
 
+            # (operation records only, docs 25.31 C9-5: where each effect came from)
+            sources: dict = {}
+            rejections: dict = {}
+
             def derive(failed):
                 proven = {}
+                sources.clear()
+                rejections.clear()
                 if register_object is None:
                     return proven
                 for call_key, declaration in boundaries_of(key).items():
@@ -488,6 +523,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         effect = boundary_effect(key, call_key, declaration)
                         if effect is not None:
                             proven[call_key] = effect
+                            sources[call_key] = ("test-only-boundary", declaration.label)
                 for call_key, callee in calls[key].items():
                     done = results.get(callee)
                     if call_key in assumed or call_key in proven:
@@ -496,13 +532,21 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         # recursion: the SCC's current hypothesis (``solve``), or opaque
                         if hypotheses.get(call_key) is not None:
                             proven[call_key] = hypotheses[call_key]
+                            sources[call_key] = ("recursive hypothesis", callee)
+                            note = hypothesis_notes.get((key, call_key))
+                            if note:   # (its derivation: every condition failed by construction)
+                                rejections[call_key] = [*note["rejections"], *(
+                                    ("recursive hypothesis", pair, "failed")
+                                    for pair in sorted(note["failed"], key=repr))]
                         continue
                     if done is None or done.summary is None:
                         continue
                     tail = _is_tail(call_key)
                     if tail and len(program_stack) != 1:
                         continue  # no single stack pointer to compose through
-                    effect = site_effect(key, call_key, done.summary, done.anchors, failed.get(call_key, ()))
+                    effect = site_effect(key, call_key, done.summary, done.anchors, failed.get(call_key, ()),
+                                         rejections=rejections.setdefault(call_key, [])
+                                         if record_provenance is not None else None)
                     if effect is not None and call_key.endswith(":CALL") and not failed.get(call_key) \
                             and site(key)[3].get(call_key) == {(0x20, 8): -8} \
                             and int(call_key.split(":", 1)[0], 16) == memory_space \
@@ -529,6 +573,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             effect = replace(effect, state_proof=state_proofs[callee])
                     if effect is not None:
                         proven[call_key] = effect
+                        sources[call_key] = ("summary", done)
                 register_space = _register_space_id(observation) or _program_register_space(unit)
                 for call_key, (model_file, entry) in externals[key].items():
                     if call_key in proven or call_key in assumed or memory_space is None:
@@ -539,9 +584,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         if _is_tail(call_key) and len(program_stack) != 1:
                             continue
                         effect = site_effect(key, call_key, summary, anchors, failed.get(call_key, ()),
-                                             callee=entry.label)
+                                             callee=entry.label,
+                                             rejections=rejections.setdefault(call_key, [])
+                                             if record_provenance is not None else None)
                         if effect is not None:
                             proven[call_key] = effect
+                            sources[call_key] = ("derived model", entry.label)
                         continue
                     effect = model_effect(
                         lambda summary, anchors, call_key=call_key: site_effect(
@@ -563,6 +611,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         effect = replace(effect, extent_registers=tuple(
                             ByteSpan(register_object, offset, size) for offset, size in slices))
                     proven[call_key] = effect
+                    sources[call_key] = ("model", entry.label)
                 for call_key in _unplaced_noreturn(unit, proven):
                     del proven[call_key]  # opaque: the cut would drop an observed edge
                 return proven
@@ -578,6 +627,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             # objects): kept as conditions of its own (``open_condition`` debts),
             # sticky -- a pair later found failing, or located elsewhere, fails
             opened: dict = {}
+            verdicts: dict = {}
             while True:
                 proven = derive(failed)
                 normalized = FunctionNormalizer().normalize(
@@ -651,7 +701,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 if type(normalized) is NormalizedFunction else None
             )
             anchors = _relative_anchors(unit, normalized) if summary is not None else {}
-            return AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
+            result = AnalyzedFunction(key, unit, normalized, summary, calls[key], proven,
                                     anchors, origins, projected, declared={
                                         call: (f"test-only-boundary:{boundaries_of(key)[call].label}"
                                                if call in boundaries_of(key) else externals[key][call][1].label)
@@ -670,6 +720,17 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     or bool(boundaries_of(key)) or extra_origins is not None,
                                     image_tracked=image_tracked,
                                     image_unproven=image_tracked and _unproven_image_operands(unit))
+            if record_provenance is not None:   # (keyed by the instance; it keeps the objects alive)
+                record_provenance[id(result)] = (result, CallProvenance(
+                    sources={call: source for call, source in sources.items() if call in proven},
+                    rejections={call: tuple(rows) for call, rows in rejections.items() if rows},
+                    failed={call: frozenset(pairs) for call, pairs in failed.items()},
+                    opened={call: dict(pairs) for call, pairs in opened.items()},
+                    final={(call, tag): tuple(rows) for (call, tag), rows in verdicts.items()},
+                    sink={(call, tag): tuple(rows) for (call, tag), rows in decided.items()}
+                    if type(normalized) is NormalizedFunction else {},
+                ))
+            return result
 
         def solve(component):
             """Recursion (design S5): every intra-SCC call starts from the
@@ -691,6 +752,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 effect = site_effect(key, call_key, _bottom_summary(*site(key)[2:], call_key, program_stack),
                                      {})
                 hypotheses[(key, call_key)] = effect
+            hypothesis_notes.clear()   # (the bottom hypotheses: no conditions)
             for _ in range(MAX_RECURSION_ROUNDS):
                 round_results = {
                     key: one(key, {call_key: effect for (owner, call_key), effect in hypotheses.items()
@@ -698,15 +760,21 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     for key in sorted(component)
                 }
                 derived = {}
+                notes: dict = {}
                 for key, call_key in sites:
                     done = round_results[calls[key][call_key]]
+                    note = notes[(key, call_key)] = {} if record_provenance is not None else None
                     derived[(key, call_key)] = None if done.summary is None else _recursive_hypothesis(
-                        lambda failed: site_effect(key, call_key, done.summary, done.anchors, failed),
+                        lambda failed, rows=None: site_effect(key, call_key, done.summary, done.anchors, failed,
+                                                              rejections=rows),
                         tuple(site(key)[2].get(call_key, ())) or tuple(program_stack),
+                        note,
                     )
                 if derived == hypotheses:
                     return round_results
                 hypotheses = derived
+                hypothesis_notes.clear()
+                hypothesis_notes.update((where, note) for where, note in notes.items() if note)
             fallback = {key: one(key, {}) for key in sorted(component)}
             for item in fallback.values():
                 item.recursion_unresolved = True  # intra-SCC calls opaque (debt)
@@ -1360,19 +1428,24 @@ def _bottom_summary(stack_pointers, shapes, call_key, program_stack):
                            register_deltas=deltas, stack_values_out=False)
 
 
-def _recursive_hypothesis(derive, stack):
+def _recursive_hypothesis(derive, stack, notes=None):
     """A derived effect usable as a recursion hypothesis: conditional values
     and writer conditions failed (they would need the caller's decision inside
     the fixpoint), sink
     demands merged per label (writes below the callee's entry stack pointer,
     which would re-project deeper each round, are already folded into
-    ``clobbers_below`` by ``derive_proven_call_effect``)."""
+    ``clobbers_below`` by ``derive_proven_call_effect``). ``notes`` (operation
+    records only): set to the failed pairs and the last derivation's
+    rejections (docs 25.31 C9-5)."""
     from dataclasses import replace
     from .call_summary_effects import ProvenSinkDemand
 
     failed: set = set()
     while True:
-        effect = derive(failed)
+        rows = None if notes is None else []
+        effect = derive(failed) if rows is None else derive(failed, rows)
+        if notes is not None:
+            notes.update(failed=frozenset(failed), rejections=tuple(rows))
         if effect is None:
             return None
         # writer conditions too: every claim of the effect rests on them

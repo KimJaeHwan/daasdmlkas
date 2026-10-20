@@ -189,6 +189,7 @@ def derive_proven_call_effect(
     stack_deltas: dict | None = None,
     tail: bool = False,
     failed_conditions: frozenset = frozenset(),
+    rejections: list | None = None,
 ) -> ProvenCallEffect | None:
     """``register_object``: the program register file; ``register_limit``: one
     past the highest register byte the caller uses; ``excluded``: bytes the
@@ -197,7 +198,11 @@ def derive_proven_call_effect(
     address space id) for objects addressed from one entry register value;
     ``stack_deltas``: excluded register (offset, size) -> the call shape's
     displacement delta (callee entry stack pointer - caller's); ``tail``: the
-    site is a tail jump (``excluded`` = the stack pointer, composed by delta)."""
+    site is a tail jump (``excluded`` = the stack pointer, composed by delta).
+    ``rejections`` (operation records only, docs 25.31 C9-5): every alias
+    condition dropped here is appended as (where, callee pair, reason) --
+    "unlocatable" (a side the caller cannot locate) or "failed" (the caller
+    already found it failing)."""
     anchors = anchors or {}
     skip = {offset for span in excluded for offset in range(span.start, span.end)}
 
@@ -228,7 +233,8 @@ def derive_proven_call_effect(
     # but the sink demands (registers and memory unknown, stack not restored)
     writer_pairs = frozenset()
     if summary.writer_conditions:
-        writer_pairs = _anchored_conditions(_Conditions(summary.writer_conditions), anchored, failed_conditions)
+        writer_pairs = _anchored_conditions(_Conditions(summary.writer_conditions), anchored, failed_conditions,
+                                            rejections, "writer")
         if writer_pairs is None:
             summary = _all_unknown(summary, register_object, register_limit)
             writer_pairs = frozenset()
@@ -253,7 +259,8 @@ def derive_proven_call_effect(
         return push > 0 and bias <= span.start and span.end <= bias + push
 
     clobbers_below = False
-    sink_demands = tuple(_sink_demand(demand, anchored) for demand in summary.sink_demands)
+    sink_demands = tuple(_sink_demand(demand, anchored, rejections, f"sink{index}")
+                         for index, demand in enumerate(summary.sink_demands))
     if not summary.exits and not summary.tail_exits and summary.dead_exits:
         return ProvenCallEffect(callee, (), (), sink_demands=sink_demands, noreturn=True, escapes_stack=True)
     if summary.tail_exits or not summary.exits:
@@ -286,7 +293,7 @@ def derive_proven_call_effect(
             kind = run.span.object_id.kind
             if kind is StorageObjectKind.FUNCTION_UNIQUE:
                 continue
-            verdict = _verdict(run, anchored, failed_conditions)
+            verdict = _verdict(run, anchored, failed_conditions, rejections, (exit_summary.block_key, run.span))
             if kind is not StorageObjectKind.REGISTER_FILE and below(run.span):
                 clobbers_below = clobbers_below or verdict != "self"
                 continue
@@ -297,7 +304,8 @@ def derive_proven_call_effect(
                 # unknown only because an exported memory write may alias these
                 # bytes: in the caller that write is an ordinary write to the bound
                 # object, and the caller's may-alias analysis covers the overlap
-                verdict = _verdict_without_crossings(run, anchored, failed_conditions)
+                verdict = _verdict_without_crossings(run, anchored, failed_conditions, rejections,
+                                                     (exit_summary.block_key, run.span))
             # an unknown value at an anchored place is unknown memory there; a
             # write the caller cannot locate leaves no memory kept
             if kind is not StorageObjectKind.REGISTER_FILE and verdict != "self" \
@@ -463,7 +471,7 @@ def _observed_registers(runs, memory_runs, unknown_memory, writer_pairs, sink_de
                         key=lambda span: span.canonical_key))
 
 
-def _sink_demand(demand, anchored) -> ProvenSinkDemand:
+def _sink_demand(demand, anchored, rejections=None, where=None) -> ProvenSinkDemand:
     registers, loads, complete = [], set(), demand.complete
     for source in demand.sources:
         if source.object_id.kind is StorageObjectKind.REGISTER_FILE:
@@ -479,6 +487,8 @@ def _sink_demand(demand, anchored) -> ProvenSinkDemand:
         pair = (anchored(left), anchored(right))
         if None in pair:
             complete = False  # a side the caller cannot locate: undecidable
+            if rejections is not None:
+                rejections.append((where, (left, right), "unlocatable"))
         else:
             conditions.add(pair)
     return ProvenSinkDemand(
@@ -542,31 +552,37 @@ def _all_unknown(summary, register_object, register_limit):
     )
 
 
-def _anchored_conditions(run, anchored, failed):
+def _anchored_conditions(run, anchored, failed, rejections=None, where=None):
     """The run's alias conditions as anchored pairs, or None when one cannot
-    be located by a caller or a caller already found it failing."""
+    be located by a caller or a caller already found it failing
+    (``rejections``: each such pair appended with its reason)."""
     pairs = set()
+    dropped = False
     for left, right in run.conditions:
         pair = (anchored(left), anchored(right))
         if None in pair or pair in failed:
-            return None
+            if rejections is None:
+                return None
+            rejections.append((where, (left, right), "unlocatable" if None in pair else "failed"))
+            dropped = True
+            continue
         pairs.add(pair)
-    return frozenset(pairs)
+    return None if dropped else frozenset(pairs)
 
 
-def _verdict_without_crossings(run, anchored, failed=frozenset()):
+def _verdict_without_crossings(run, anchored, failed=frozenset(), rejections=None, where=None):
     if not run.writers and all(span.object_id == run.span.object_id for span in run.sources):
         return "self"  # entry contents, not rewritten by the function itself
     for source in run.sources:
         if source.object_id.kind is not StorageObjectKind.REGISTER_FILE and anchored(source) is None:
             return "unknown"
-    conditions = _anchored_conditions(run, anchored, failed)
+    conditions = _anchored_conditions(run, anchored, failed, rejections, where)
     if conditions is None:
         return "unknown"
     return (_with_origins(run.sources, run), False, conditions)
 
 
-def _verdict(run, anchored, failed=frozenset()):
+def _verdict(run, anchored, failed=frozenset(), rejections=None, where=None):
     if run.kind is SummaryKind.UNKNOWN or run.debts:
         return "unknown"
     if run.kind is SummaryKind.IDENTITY:
@@ -574,7 +590,7 @@ def _verdict(run, anchored, failed=frozenset()):
     for source in run.sources:
         if source.object_id.kind is not StorageObjectKind.REGISTER_FILE and anchored(source) is None:
             return "unknown"  # entry memory with no anchor the caller can bind
-    conditions = _anchored_conditions(run, anchored, failed)
+    conditions = _anchored_conditions(run, anchored, failed, rejections, where)
     if conditions is None:
         return "unknown"
     return (_with_origins(run.sources, run), False, conditions)

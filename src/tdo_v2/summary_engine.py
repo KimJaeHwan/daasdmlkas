@@ -393,6 +393,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             stack_evidence = (*stack_evidence, *linked_evidence)
             assume_globals_disjoint_from_stack, _ = assumption_allowed(
                 stack_evidence, requested=assume_globals_disjoint_from_stack)
+    # (operation records only, docs 25.31 C9-5: id(AnalyzedFunction) -> (it, CallProvenance))
+    record_provenance: dict | None = {} if operation_records else None
     results = analyze_units(
         [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
         assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
@@ -413,6 +415,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         assume_accessor_result_separate=assume_accessor_result_separate,
         assume_accessor_private_state=assume_accessor_private_state,
         model_bindings=tuple(model_bindings),
+        record_provenance=record_provenance,
     )
     assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
                                   traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
@@ -565,11 +568,11 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     with reporting(), phase("reporting"):   # (bounded: TDO_V2_REPORTING_SECONDS; no analysis)
         run = report()
     if operation_records:
-        run = _with_records(run, record_inputs)
+        run = _with_records(run, record_inputs, record_provenance)
     return run
 
 
-def _with_records(run, record_inputs) -> "EngineRun":
+def _with_records(run, record_inputs, provenance=None) -> "EngineRun":
     """Each root's operation record (diagnostics, docs 25.28), built after
     every root's completeness is final (late failures included) and under
     its own diagnostic budget (docs 25.31 C9-0): records charge no analysis
@@ -588,10 +591,12 @@ def _with_records(run, record_inputs) -> "EngineRun":
             roots.append(root)
             continue
         analysis, unit, rows, analyzed = inputs
+        found = (provenance or {}).get(id(analyzed))
+        calls = found[1] if found is not None and found[0] is analyzed else None
         try:
             with diagnostic(work):
                 record = _root_record(analysis, unit, rows, root.label, root.occurrence_ordinal, analyzed,
-                                      root.effective_completeness)
+                                      root.effective_completeness, calls)
         except DiagnosticExhausted:
             record = {"record": "root", "truncated": True, "cut": "diagnostic budget", "root": [], "nodes": []}
         # (the record before ``rests_on_failed``, the key order it had)
@@ -709,7 +714,7 @@ def _witnesses(analysis, unit, rows, label, occurrence, labels, node_labels, ind
     return root_witnesses(analysis.normalized, unit, rows, seeds, labels, index, origins, traversal)
 
 
-def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness) -> dict:
+def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness, provenance=None) -> dict:
     """The operation record of one root (diagnostics, ``operation_records``):
     seeded as ``_lane_origin_labels`` seeds its slice; SOURCE rows' labels as
     node origins."""
@@ -722,7 +727,7 @@ def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness
         if row.kind is BoundaryKind.SOURCE:
             origins.setdefault(row.node, set()).add(row.label)
     return root_record(analysis.normalized, unit, seeds, origins=origins, declared=analyzed.declared,
-                       completeness=completeness)
+                       completeness=completeness, provenance=provenance)
 
 
 def _raw_root_groups(analysis, rows):

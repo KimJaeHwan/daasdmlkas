@@ -76,7 +76,8 @@ class _Truncated(Exception):
 
 
 class _Builder:
-    def __init__(self, normalized, unit, *, origins=None, declared=None, limits=None, demands=None):
+    def __init__(self, normalized, unit, *, origins=None, declared=None, limits=None, demands=None,
+                 provenance=None):
         from .lane_slice import lane_index
 
         self.normalized = normalized
@@ -87,6 +88,7 @@ class _Builder:
         self.limits = limits or Limits()
         self.origins = {node: sorted(labels) for node, labels in (origins or {}).items()}
         self.declared = dict(declared or {})
+        self.provenance = provenance   # interprocedural.CallProvenance of this instance, or None
         self.proven = dict(normalized.proven_call_effects)
         self.value_inputs = dict(normalized.call_value_inputs)
         self.overrides = dict(normalized.operation_overrides)
@@ -556,6 +558,8 @@ class _Builder:
             record["output"] = {"sink": demand.label, "complete": demand.complete}
         elif tag.startswith("u") and tag[1:].isdigit():
             record["output"] = {"kind": "unknown memory write", "index": int(tag[1:])}
+        if self.provenance is not None:
+            record["provenance"] = _call_provenance(self.provenance, base, effect, tag)
         self._with_origins(record, node)
         self.expanding.add(node)
         try:
@@ -677,6 +681,67 @@ class _Builder:
         return [{"node": self.operation(node, depth), "whole": True}]
 
 
+def _call_provenance(provenance, call, effect, tag) -> dict:
+    """A call row's provenance (docs 25.31 C9-5): where the effect came from,
+    the published verdict of each alias condition of the row (and of the
+    effect's writer conditions) in pair order, and the call's derivation-time
+    rejections. A verdict is "proven" only when the last pass decided the
+    pair disjoint and it never failed; "failed" / "open" otherwise, and
+    "undecided" where no decision is kept -- absence never means proven. A
+    "recursive hypothesis" source had every condition failed by construction
+    (``interprocedural._recursive_hypothesis``)."""
+    source = provenance.sources.get(call)
+    found: dict = {"source": None if source is None else source[0]}
+    if source is not None:
+        if source[0] == "summary":
+            found["function"] = source[1].key
+        else:
+            found["label"] = source[1]
+    failed = provenance.failed.get(call, frozenset())
+
+    def verdicts(pairs, rows):
+        published = []
+        for position, pair in enumerate(pairs):
+            row = rows[position] if position < len(rows) else None
+            if pair in failed or row == "fail":
+                verdict = "failed"
+            elif row == "ok":
+                verdict = "proven"
+            elif row is None:
+                verdict = "undecided"
+            else:
+                verdict = "open"
+            published.append({"pair": [_anchored_text(side) for side in pair], "verdict": verdict})
+        return published
+
+    runs = (*effect.runs, *effect.memory_runs)
+    if tag.isdigit() and int(tag) < len(runs) and runs[int(tag)].conditions:
+        found["conditions"] = verdicts(runs[int(tag)].conditions, provenance.final.get((call, f"cr{tag}"), ()))
+    elif tag.startswith("sink") and tag[4:].isdigit() and int(tag[4:]) < len(effect.sink_demands) \
+            and effect.sink_demands[int(tag[4:])].conditions:
+        found["conditions"] = verdicts(effect.sink_demands[int(tag[4:])].conditions,
+                                       provenance.sink.get((call, f"ck{tag[4:]}"), ()))
+    if effect.writer_conditions:
+        found["writer_conditions"] = verdicts(effect.writer_conditions, provenance.final.get((call, "cw"), ()))
+    rejections = provenance.rejections.get(call, ())
+    if rejections:
+        found["rejections"] = [
+            {"where": where if isinstance(where, str) else f"{where[0]} {_span_text(where[1])}",
+             "pair": [_anchored_text(side) if hasattr(side, "displacement") else _span_text(side)
+                      for side in pair], "reason": reason}
+            for where, pair, reason in rejections]
+    return found
+
+
+def _anchored_text(place) -> str:
+    """An ``AnchoredSpan`` (a caller-located callee address) as text."""
+    if place.pointer is not None:
+        return f"[{_anchored_text(place.pointer)}]{place.displacement:+#x}+{place.size}"
+    if place.anchor is not None:
+        return f"{_span_text(place.anchor)}{place.displacement:+#x}+{place.size}"
+    return f"{place.space_id:x}:{place.displacement:x}+{place.size}"
+
+
 def _effect_source(callee, label):
     if label is None:
         return "summary" if ":" in callee and not callee.startswith("test-only") else "unknown"
@@ -730,14 +795,15 @@ def _span_dict(span):
             "size": span.size}
 
 
-def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, limits=None):
+def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, limits=None, provenance=None):
     from .lane_slice import lane_slice
 
     limits = limits or Limits()
     demand_seeds = [(node, spans) for node, spans in seeds]
     demands = lane_slice(normalized, unit, demand_seeds, budget=limits.demand_steps,
                          byte_budget=limits.demand_bytes)
-    builder = _Builder(normalized, unit, origins=origins, declared=declared, limits=limits, demands=demands)
+    builder = _Builder(normalized, unit, origins=origins, declared=declared, limits=limits, demands=demands,
+                       provenance=provenance)
     root = []
     # one expansion level takes a few Python frames: room for ``limits.depth``
     previous = sys.getrecursionlimit()
@@ -774,9 +840,11 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
 
 
 @measured("records")
-def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=None, completeness=None):
+def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=None, completeness=None,
+                provenance=None):
     """The record of a sink root: ``seeds`` as ``lane_slice`` takes them
-    ((node, spans) of the root's raw sink rows)."""
+    ((node, spans) of the root's raw sink rows); ``provenance``: the
+    instance's ``CallProvenance`` (call nodes then carry it, docs 25.31 C9-5)."""
     metadata = {"record": "root"}
     if completeness is not None:
         metadata["completeness"] = {"complete": completeness.complete,
@@ -785,7 +853,8 @@ def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=
     # function-wide unresolved writes (outside the slice too)
     metadata["function_unresolved_writes"] = len(normalized.memory_graph.unresolved_write_nodes) \
         if normalized.memory_graph is not None else None
-    return _build(normalized, unit, seeds, metadata, origins=origins, declared=declared, limits=limits)
+    return _build(normalized, unit, seeds, metadata, origins=origins, declared=declared, limits=limits,
+                  provenance=provenance)
 
 
 def run_records(normalized, unit, summary, *, origins=None, declared=None, limits=None):
