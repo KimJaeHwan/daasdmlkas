@@ -525,7 +525,19 @@ def _row(operation_key: str, spans: tuple, labels, intern: dict | None = None) -
     25.31 B2-a2a: the rows' tuples were the largest item of normalize's
     traced peak at 60k); the values are the same."""
     plain = {label for label in labels if not label.startswith(_UNCERTAIN)}
-    uncertain = {label[len(_UNCERTAIN):] for label in labels if label.startswith(_UNCERTAIN)}
+    if intern is None:
+        uncertain = {label[len(_UNCERTAIN):] for label in labels if label.startswith(_UNCERTAIN)}
+    else:
+        # the writer key of an uncertain label: one string per engine call,
+        # not one per row (docs 25.31 B2-a2c: 427 MB of normalize's traced
+        # peak at 120k were these copies)
+        uncertain = set()
+        for label in labels:
+            if label.startswith(_UNCERTAIN):
+                name = intern.get(label)
+                if name is None:
+                    name = intern[label] = label[len(_UNCERTAIN):]
+                uncertain.add(name)
     writers, uncertain, plain = tuple(sorted(plain | uncertain)), tuple(sorted(uncertain)), tuple(sorted(plain))
     if intern is not None:
         writers = intern.setdefault(writers, writers)
