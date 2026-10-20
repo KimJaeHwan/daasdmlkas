@@ -94,6 +94,17 @@ class RustworkxDependencyGraph:
         other._claimed_namespaces = dict(self._claimed_namespaces)
         return other
 
+    def in_edges(self, node: NodeId):
+        """(source, target, record) of the edges into ``node``, in the
+        backend's order (rustworkx: reverse insertion) -- the one entry point
+        for edge-level reads of a node (docs 25.31 B2-b)."""
+        return self._graph.in_edges(node)
+
+    def out_edges(self, node: NodeId):
+        """(source, target, record) of the edges out of ``node``, in the
+        backend's order."""
+        return self._graph.out_edges(node)
+
     def predecessors(self, node: NodeId) -> tuple[NodeId, ...]:
         return tuple(sorted({int(item) for item in self._graph.predecessor_indices(node)}))
 

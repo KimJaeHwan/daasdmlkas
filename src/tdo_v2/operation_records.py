@@ -166,7 +166,7 @@ class _Builder:
             return self._entry(node, definition), 0, False
         if definition.kind is MemoryDefinitionKind.JOIN:
             return self._phi_join(node, definition_id, definition, depth), 0, loop
-        writers = [source for source, _, record in self.graph._graph.in_edges(node)
+        writers = [source for source, _, record in self.graph.in_edges(node)
                    if record.kind == EdgeKind.MEMORY_DEFINES.value]
         if len(writers) == 1:
             writer = writers[0]
@@ -496,7 +496,7 @@ class _Builder:
 
     def _debts(self, node, depth):
         found = []
-        for source, _, record in self.graph._graph.in_edges(node):
+        for source, _, record in self.graph.in_edges(node):
             if record.kind in _DEBT_EDGES:
                 found.append(self._debt(source, depth + 1))
                 self._edge()
@@ -602,7 +602,7 @@ class _Builder:
                         staged.append(self.index.definition_node[definition_id])
             if staged:
                 for definition_node in staged:
-                    for source, _, record in self.graph._graph.in_edges(definition_node):
+                    for source, _, record in self.graph.in_edges(definition_node):
                         if record.kind == EdgeKind.MEMORY_DEFINES.value:
                             stage = self.graph.node(source).key[len("op:"):].partition("~")[2]
                             found.extend(self._call_inputs(source, base, depth, this_role, stage, seen))
@@ -632,7 +632,7 @@ class _Builder:
         writers = 0
         self.expanding.add(node)
         try:
-            for source, _, edge in self.graph._graph.in_edges(node):
+            for source, _, edge in self.graph.in_edges(node):
                 if edge.kind == EdgeKind.CONTROL_DEPENDENCE.value:
                     continue
                 if edge.kind == EdgeKind.MAY_ALIAS_WRITE.value:

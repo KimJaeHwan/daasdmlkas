@@ -177,7 +177,7 @@ class _Context:
 
     def consumers(self, debt) -> set:
         found = set()
-        for _, target, _ in self.graph._graph.out_edges(debt):
+        for _, target, _ in self.graph.out_edges(debt):
             key = self.graph.node(int(target)).key
             if key.startswith("op:"):
                 found.add(key[3:])
@@ -191,7 +191,7 @@ class _Context:
         if node is None:
             return []
         found = []
-        for source, _, record in self.graph._graph.in_edges(node):
+        for source, _, record in self.graph.in_edges(node):
             if record.span is None:
                 continue
             # each part: the bytes of that span this edge supplies
@@ -211,7 +211,7 @@ class _Context:
         if node is None or not hasattr(resolved, "span"):
             return None
         return [
-            int(source) for source, _, record in self.graph._graph.in_edges(node)
+            int(source) for source, _, record in self.graph.in_edges(node)
             if record.span is not None and record.span.overlaps(resolved.span)
         ] + [
             debt for spans, debt in self.clobbers.get(key, ())

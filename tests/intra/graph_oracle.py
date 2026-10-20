@@ -141,7 +141,7 @@ def _memory_address_unknown(graph, reader: str) -> bool:
         return False
     operands = [
         source
-        for source, _, record in graph._graph.in_edges(node)
+        for source, _, record in graph.in_edges(node)
         if record.kind == "memory_read"
         and record.span is not None
         and record.span.object_id.kind.value in ("register_file", "function_unique")
@@ -180,7 +180,7 @@ def check_control(function, observation, *, seeds=range(4), register_pools=None,
             seen, pending = set(), [start]
             while pending:
                 node = pending.pop()
-                for _, target, record in graph._graph.out_edges(node):
+                for _, target, record in graph.out_edges(node):
                     if record.kind == "control_dependence" and target not in seen:
                         seen.add(target)
                         pending.append(target)

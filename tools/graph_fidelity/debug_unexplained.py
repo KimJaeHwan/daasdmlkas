@@ -92,7 +92,7 @@ def describe_reader(normalized, reader: str) -> None:
     print("reader node", node)
     if node is None:
         return
-    for source, _, record in graph._graph.in_edges(node):
+    for source, _, record in graph.in_edges(node):
         item = graph.node(source)
         print("   <-", record.kind, getattr(item, "kind", None), getattr(item, "label", None),
               item.key[:90], record.span)

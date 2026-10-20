@@ -621,7 +621,7 @@ def _address_slice(graph, inputs, conditions_of) -> list:
         if node in conditions_of:
             continue
         pending.extend(
-            int(source) for source, _, record in graph._graph.in_edges(node)
+            int(source) for source, _, record in graph.in_edges(node)
             if record.kind != CONTROL_DEPENDENCE_EDGE
         )
     phase_count("address_slices", 1)   # (K2 sizes: one DFS per store per round, docs 25.31)
@@ -678,7 +678,7 @@ def _uncertain_address_writers(normalized, observation, context, operation_of, c
         if type(resolved) is not ResolvedStorage:
             return None
         return [
-            source for source, _, record in graph._graph.in_edges(node)
+            source for source, _, record in graph.in_edges(node)
             if record.span is not None and record.span.overlaps(resolved.span)
         ] + [
             debt for spans, debt in clobbers.get(operation_of.get(node), ())

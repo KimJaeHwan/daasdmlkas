@@ -591,7 +591,7 @@ def _row_reaches_debt(graph, node) -> bool:
     """Whether any value operation ``node`` reads depends on a debt."""
     from .function_summary import _address_slice
 
-    inputs = [source for source, _, record in graph._graph.in_edges(node)
+    inputs = [source for source, _, record in graph.in_edges(node)
               if record.span is not None or graph.node(source).kind is NodeKind.MEMORY_DEBT]
     return any(graph.node(item).kind is NodeKind.MEMORY_DEBT for item in _address_slice(graph, inputs, {}))
 
@@ -607,7 +607,7 @@ def _debt_nodes(graph, node, varnode, context, clobbers=None):
     if type(resolved) is not ResolvedStorage:
         return None
     inputs = [
-        source for source, _, record in graph._graph.in_edges(node)
+        source for source, _, record in graph.in_edges(node)
         if (record.span is not None and record.span.overlaps(resolved.span))
         or (graph.node(source).kind is NodeKind.MEMORY_DEBT and (
             clobbers is None or source not in clobbers
@@ -630,7 +630,7 @@ def _debt_labels(graph, node, varnode, context, clobbers=None):
     if type(resolved) is not ResolvedStorage:
         return None
     inputs = [
-        source for source, _, record in graph._graph.in_edges(node)
+        source for source, _, record in graph.in_edges(node)
         if (record.span is not None and record.span.overlaps(resolved.span))
         or (graph.node(source).kind is NodeKind.MEMORY_DEBT and (
             clobbers is None or source not in clobbers

@@ -147,14 +147,14 @@ def _all_opaque(graph, reader, rows) -> bool:
     if node is None:
         return False
     definitions = [
-        source for source, _, record in graph._graph.in_edges(node)
+        source for source, _, record in graph.in_edges(node)
         if record.span is not None
         and record.span.object_id.kind in (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
     ]
     if not definitions:
         return False
     for definition in definitions:
-        writers = graph._graph.in_edges(definition)
+        writers = graph.in_edges(definition)
         if not writers or any(record.kind != "memory_defines" or writer not in rows
                               for writer, _, record in writers):
             return False

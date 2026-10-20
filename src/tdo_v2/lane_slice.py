@@ -230,7 +230,7 @@ def _definition(index, node, demand, add):
     wanted = _whole(span) if demand is FULL else demand & _whole(span)
     # debts (and any edge other than the definition's own data edges) of every
     # reached node: FULL, as node reachability keeps them
-    for source, _, record in index.graph._graph.in_edges(node):
+    for source, _, record in index.graph.in_edges(node):
         if record.kind not in (EdgeKind.MEMORY_DEFINES.value, EdgeKind.MEMORY_JOIN_INPUT.value,
                                EdgeKind.CONTROL_DEPENDENCE.value):
             add(source, FULL)
@@ -255,7 +255,7 @@ def _definition(index, node, demand, add):
         return
     # a write: its writer operation, as value bytes when the definition is
     # exactly that writer's output (or a STORE's destination)
-    writers = [source for source, _, record in index.graph._graph.in_edges(node)
+    writers = [source for source, _, record in index.graph.in_edges(node)
                if record.kind == EdgeKind.MEMORY_DEFINES.value]
     for writer in writers:
         precise = definition.kind is MemoryDefinitionKind.DATA_WRITE and index.little
@@ -310,7 +310,7 @@ def _operation(index, node, demand, add, clobbered=None):
                 add(index.definition_node[definition_id], bytes_)
     # debts and every other predecessor that is not one of its reads or a
     # constant input (CONTROL_DEPENDENCE: data-only)
-    for source, _, record in index.graph._graph.in_edges(node):
+    for source, _, record in index.graph.in_edges(node):
         if record.kind not in (EdgeKind.MEMORY_READ.value, EdgeKind.VALUE_INPUT.value,
                                EdgeKind.CONTROL_DEPENDENCE.value):
             add(source, FULL)
@@ -318,7 +318,7 @@ def _operation(index, node, demand, add, clobbered=None):
 
 def _other(index, node, add):
     """A debt or other node: every data predecessor, FULL."""
-    for source, _, record in index.graph._graph.in_edges(node):
+    for source, _, record in index.graph.in_edges(node):
         if record.kind != EdgeKind.CONTROL_DEPENDENCE.value:
             add(source, FULL)
 

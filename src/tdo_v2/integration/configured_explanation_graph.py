@@ -143,7 +143,7 @@ def root_local_explanation(
                 "kind": graph.node(node).label,
                 "node": node,
                 "operation_key": next(
-                    (record.operation for _, _, record in graph._graph.out_edges(node)), None),
+                    (record.operation for _, _, record in graph.out_edges(node)), None),
             })
     if interprocedural_proof_count:
         gaps.append({

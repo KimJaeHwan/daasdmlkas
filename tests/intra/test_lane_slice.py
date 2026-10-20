@@ -215,7 +215,7 @@ def test_a_join_byte_no_source_covers_demands_every_source_fully():
     join = NS(kind=MemoryDefinitionKind.JOIN, span=ByteSpan(obj, 0x100, 8))
     narrow = NS(kind=MemoryDefinitionKind.DATA_WRITE, span=ByteSpan(obj, 0x100, 4))
     index = NS(definition_of={10: 0}, ssa=NS(definitions=[join, narrow]), joins={0: (1,)}, definition_node=[10, 11],
-               graph=NS(_graph=NS(in_edges=lambda node: [])))
+               graph=NS(in_edges=lambda node: []))
     added = []
     _definition(index, 10, frozenset({0x105}), lambda node, demand: added.append((node, demand)))
     assert added == [(11, FULL)]
