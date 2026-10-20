@@ -19,6 +19,7 @@ from __future__ import annotations
 from bisect import bisect_right
 
 from ._sparse_dataflow import DominatorGraph
+from .label_sets import LabelUniverse
 from .phases import count as phase_count, enabled as phases_enabled
 from .model import ResolvedStorage
 from .span_geometry import ByteSpan
@@ -107,8 +108,16 @@ def derive_sparse(unit, objects, policy):
     if unknown_read_blocks:
         needed[_ANY] = unknown_read_blocks
 
+    # the labels as int bitsets over every gen's label (docs 25.31 B2; were
+    # frozensets of labels): the same sets, so the same fixed points, pops
+    # and rows
+    # (every object gen above is also an any-write gen: any_gens has every label)
+    universe = LabelUniverse(writer for *_, writer in any_gens)
+    bit_of = universe.bit_of
+    unknown_mask = universe.mask(policy.unknown_writers)
+
     class_events: dict[object, dict[str, list]] = {}
-    entry_values: dict[tuple, frozenset] = {}
+    entry_values: dict[tuple, int] = {}
     counting = phases_enabled()   # (K2 sizes, docs 25.31)
     replays = [0]
     if counting:
@@ -117,7 +126,7 @@ def derive_sparse(unit, objects, policy):
         events: dict[str, list] = {}
         gens = any_gens if index is _ANY else object_gens[class_object[index]]
         for block_key, position, order, writer in gens:
-            events.setdefault(block_key, []).append((position, order, writer))
+            events.setdefault(block_key, []).append((position, order, bit_of[writer]))
         if index is not _ANY:
             for block_key, position, order in class_kills[index]:
                 events.setdefault(block_key, []).append((position, order, None))
@@ -130,25 +139,31 @@ def derive_sparse(unit, objects, policy):
         for block_key, rows in events.items():
             kills = any(label is None for _, _, label in rows)
             last = max((i for i, (_, _, label) in enumerate(rows) if label is None), default=-1)
-            after = frozenset(label for _, _, label in rows[last + 1:] if label is not None)
-            all_gens = frozenset(label for _, _, label in rows if label is not None)
+            after = 0
+            for _, _, label in rows[last + 1:]:
+                if label is not None:
+                    after |= label
+            all_gens = 0
+            for _, _, label in rows:
+                if label is not None:
+                    all_gens |= label
             transfers[block_key] = (kills, after, all_gens)
-        for block_key, value in graph.solve_gen_kill(transfers, blocks_needed).items():
+        for block_key, value in graph.solve_gen_kill(transfers, blocks_needed, empty=0).items():
             entry_values[(index, block_key)] = value
 
-    def value_at(index, block_key: str, position: int) -> frozenset:
+    def value_at(index, block_key: str, position: int) -> int:
         value = entry_values[(index, block_key)]
         for event_position, _, label in class_events[index].get(block_key, ()):
             if event_position >= position:
                 break
             replays[0] += 1
-            value = frozenset() if label is None else value | {label}
+            value = 0 if label is None else value | label
         return value
 
     rows = []
     for block in sorted(blocks, key=lambda item: item.key):
         for position, effect in enumerate(block.effects):
-            spans, writers = [], set()
+            spans, writers = [], 0
             for evidence in effect.reads:
                 if type(evidence) is not ResolvedStorage or evidence.span.object_id not in tracked:
                     continue
@@ -157,18 +172,18 @@ def derive_sparse(unit, objects, policy):
                 for offset in range(span.start, span.end):
                     found = value_at(class_of[(span.object_id, offset)], block.key, position)
                     if policy.is_private(span.object_id, offset, effect.operation_key):
-                        found = found & policy.unknown_writers
+                        found = found & unknown_mask
                     if found:
                         dirty.append(offset)
                         writers |= found
                 if dirty:
                     spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
             if spans:
-                rows.append(_row(effect.operation_key, tuple(spans), writers))
+                rows.append(_row(effect.operation_key, tuple(spans), universe.decode(writers)))
             elif _unknown_read(effect):
                 value = value_at(_ANY, block.key, position)
                 if value:
-                    rows.append(_row(effect.operation_key, (), value))
+                    rows.append(_row(effect.operation_key, (), universe.decode(value)))
     if counting:
         phase_count("ma_value_at_replays", replays[0])
     return tuple(sorted(rows, key=lambda row: row.operation_key))

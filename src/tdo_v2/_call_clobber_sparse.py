@@ -15,6 +15,7 @@ from __future__ import annotations
 from bisect import bisect_right
 
 from ._sparse_dataflow import DominatorGraph
+from .label_sets import LabelUniverse
 from .phases import count as phase_count, enabled as phases_enabled
 from .model import ResolvedStorage
 from .span_geometry import ByteSpan, StorageObjectKind
@@ -82,6 +83,10 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
         for position, effect in enumerate(block.effects)
         if effect.operation_key in calls
     ]
+    # the crossed calls as int bitsets over the call sites' keys (docs 25.31
+    # B2; were frozensets of keys): the same sets, fixed points, pops and rows
+    universe = LabelUniverse(key for _, _, key in call_sites)
+    bit_of = universe.bit_of
 
     def events_of(index: int) -> dict[str, list[tuple[int, int, str | None]]]:
         """block -> ordered events (position, order, gen label or None for kill)."""
@@ -89,11 +94,13 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
         keeping = class_preserving[index]
         for block_key, position, key in call_sites:
             if key not in keeping:
-                events.setdefault(block_key, []).append((position, 0, key))
+                events.setdefault(block_key, []).append((position, 0, bit_of[key]))
         for block_key, position, write in class_writes[index]:
             events.setdefault(block_key, []).append((position, 1 + write, None))
         for rows in events.values():
-            rows.sort()
+            # (position, order) never ties: one call per effect at order 0,
+            # one kill per covering write at 1 + its ordinal
+            rows.sort(key=lambda row: (row[0], row[1]))
         return events
 
     reads_by_class: dict[int, set[str]] = {}
@@ -105,7 +112,7 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
                     for offset in range(span.start, span.end):
                         reads_by_class.setdefault(class_of[(span.object_id, offset)], set()).add(block.key)
 
-    entry_values: dict[tuple[int, str], frozenset] = {}
+    entry_values: dict[tuple[int, str], int] = {}
     class_events: dict[int, dict] = {}
     counting = phases_enabled()   # (K2 sizes, docs 25.31)
     replays = [0]
@@ -120,26 +127,32 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
         for block_key, rows in events.items():
             kills = any(label is None for _, _, label in rows)
             last = max((i for i, (_, _, label) in enumerate(rows) if label is None), default=-1)
-            after = frozenset(label for _, _, label in rows[last + 1:] if label is not None)
-            gens = frozenset(label for _, _, label in rows if label is not None)
+            after = 0
+            for _, _, label in rows[last + 1:]:
+                if label is not None:
+                    after |= label
+            gens = 0
+            for _, _, label in rows:
+                if label is not None:
+                    gens |= label
             transfers[block_key] = (kills, after, gens)
-        for block_key, value in graph.solve_gen_kill(transfers, needed).items():
+        for block_key, value in graph.solve_gen_kill(transfers, needed, empty=0).items():
             entry_values[(index, block_key)] = value
 
-    def value_at(index: int, block_key: str, position: int) -> frozenset:
+    def value_at(index: int, block_key: str, position: int) -> int:
         value = entry_values[(index, block_key)]
         for event_position, _, label in class_events[index].get(block_key, ()):
             if event_position >= position:
                 break
             replays[0] += 1
-            value = frozenset() if label is None else value | {label}
+            value = 0 if label is None else value | label
         return value
 
     rows = []
     for block in sorted(blocks, key=lambda item: item.key):
         for position, effect in enumerate(block.effects):
             spans = []
-            crossed: set[str] = set()
+            crossed = 0
             for evidence in effect.reads:
                 if type(evidence) is not ResolvedStorage:
                     continue
@@ -153,7 +166,7 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
                 if dirty:
                     spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
             if spans:
-                rows.append(CallClobberRead(effect.operation_key, tuple(spans), tuple(sorted(crossed))))
+                rows.append(CallClobberRead(effect.operation_key, tuple(spans), tuple(universe.decode(crossed))))
     if counting:
         phase_count("cc_value_at_replays", replays[0])
     return tuple(sorted(rows, key=lambda row: row.operation_key))

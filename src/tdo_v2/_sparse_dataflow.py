@@ -243,9 +243,10 @@ class DominatorGraph:
 
         return nearest
 
-    def solve_gen_kill(self, transfers: dict, needed) -> dict[str, frozenset]:
+    def solve_gen_kill(self, transfers: dict, needed, empty=frozenset()) -> dict:
         """Least fixed point of one per-class gen/kill problem (union at joins,
-        empty at the entry), evaluated sparsely.
+        empty at the entry), evaluated sparsely. ``empty``: the empty value --
+        frozenset() for sets of labels, 0 for int bitsets (``label_sets``).
 
         ``transfers[block] = (kills, gens_after_last_kill, all_gens)`` for the
         blocks with events: a killing block exits with the gens after its last
@@ -268,9 +269,9 @@ class DominatorGraph:
         for item, upstream in sources.items():
             for point in upstream:
                 dependents.setdefault(point, set()).add(item)
-        value_in = {item: frozenset() for item in points}
+        value_in = {item: empty for item in points}
 
-        def value_out(point: str) -> frozenset:
+        def value_out(point: str):
             row = transfers.get(point)
             if row is None:
                 return value_in[point]
@@ -283,7 +284,7 @@ class DominatorGraph:
             step()   # (budget: docs 25.30 K1c)
             item = pending.popleft()
             queued.discard(item)
-            value = frozenset()
+            value = empty
             for point in sources[item]:
                 value |= value_out(point)
             if value != value_in[item]:
