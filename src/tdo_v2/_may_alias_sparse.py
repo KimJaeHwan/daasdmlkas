@@ -130,12 +130,18 @@ def derive_sparse(unit, objects, policy):
     # transfers; per class only the blocks holding one of its kills get a
     # merged, sorted list of their own (docs 25.31 B2-a1; per-class copies
     # were 173 MB of normalize's traced peak at 60k). Same events per block,
-    # same transfers in the same insertion order, same solve.
+    # same transfers in the same insertion order, same solve. An object's
+    # transfers go once its last class is solved (B2-a1b: kept to the end
+    # they were 406 MB at 60k); its events stay (``value_at``).
     shared: dict = {}
+    remaining: dict = {}   # owner -> its classes not solved yet
+    for index in needed:
+        owner = _ANY if index is _ANY else class_object[index]
+        remaining[owner] = remaining.get(owner, 0) + 1
 
     def gens_for(owner):
         found = shared.get(owner)
-        if found is None:
+        if found is None or found[1] is None:
             by_block: dict[str, list] = {}
             for block_key, position, order, writer in (any_gens if owner is _ANY else object_gens[owner]):
                 by_block.setdefault(block_key, []).append((position, order, index_of[writer]))
@@ -149,7 +155,11 @@ def derive_sparse(unit, objects, policy):
         return found
 
     for index, blocks_needed in needed.items():
-        gens_by_block, gen_transfers, gen_events = gens_for(_ANY if index is _ANY else class_object[index])
+        owner = _ANY if index is _ANY else class_object[index]
+        gens_by_block, gen_transfers, gen_events = gens_for(owner)
+        remaining[owner] -= 1
+        if not remaining[owner]:
+            shared[owner] = (gens_by_block, None, gen_events)
         events: dict[str, list] = {}
         if index is not _ANY:
             for block_key, position, order in class_kills[index]:
