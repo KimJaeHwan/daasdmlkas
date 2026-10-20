@@ -28,6 +28,19 @@ normalized dependency graph:
 * ``cut`` -- a node not expanded (limits or the demand budget), with the
   target and the reason; the record is then ``truncated``.
 
+Stitching (docs 25.31 C-9, increment 1; only with a ``stitch`` context): after
+the record is built, each ``call`` node of a register output whose effect is
+a callee summary of this run gets ``stitched`` -- per output register span
+the callee's own expression of those bytes: per callee exit an ``assemble``
+of its runs' bytes (bytes an exit leaves unchanged: the caller's value at the
+call), several exits a phi "callee exits" (alternatives: an overapproximation,
+no path feasibility). The callee's entry registers are ``bound`` nodes: the
+caller's values of those registers at the call (the call's ``~in`` read).
+Imported nodes carry ``import`` (the call instance: call keys from the
+root); a call not stitched carries ``stitch_cut`` (the reason). Imports never
+change the caller's own nodes, ``truncated`` flag or evaluation (route
+"injected": an import is ignored by ``eligibility`` / ``evaluate``).
+
 ``origins`` lists the source labels the engine attached to a node. Parts
 reaching a node that is being expanded (a loop-carried value) are marked
 ``loop: true``. ``evaluate`` computes a record's value from concrete entry
@@ -42,12 +55,14 @@ from .phases import measured
 import sys
 from dataclasses import dataclass
 
+from .resource_limits import DiagnosticExhausted
+
 from ._scope_contracts import VarnodeKindCode
 from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 1
+RECORD_VERSION = 2   # (2: stitched calls, docs 25.31 C-9)
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -69,20 +84,156 @@ class Limits:
     writers: int = 8            # writers kept per may-alias debt
     demand_steps: int = 200000  # the demand (lane) pass: worklist steps
     demand_bytes: int = 8000000  # ... and bytes it may materialize (charged per step)
+    call_depth: int = 4         # stitched call levels (docs 25.31 C-9)
 
 
 class _Truncated(Exception):
     pass
 
 
+class _StitchCut(Exception):
+    """One call instance not stitched (the reason)."""
+
+
+class _Ledger:
+    """What a record's builders share (the caller's and every stitched
+    callee's): the edge count, the start of the innermost stitch attempt
+    (records older than it are never changed by it) and whether an attempt
+    ran out of a limit (no more attempts)."""
+
+    def __init__(self):
+        self.edges = 0
+        self.frozen = 0
+        self.exhausted = False
+
+
+class StitchContext:
+    """The run's analysis instances (``interprocedural._analyze_units``'
+    ``record_provenance``: id(AnalyzedFunction) -> (it, CallProvenance)) and
+    the callees' lane indexes, built once."""
+
+    def __init__(self, table):
+        self.table = table
+        self.indices: dict = {}
+
+    def provenance(self, analyzed):
+        found = self.table.get(id(analyzed))
+        return found[1] if found is not None and found[0] is analyzed else None
+
+    def index(self, normalized, unit):
+        found = self.indices.get(id(normalized))
+        if found is None or found[0] is not normalized:
+            from .lane_slice import lane_index
+
+            found = self.indices[id(normalized)] = (normalized, lane_index(normalized, unit))
+        return found[1]
+
+
+class _Binding:
+    """A stitched call instance's callee entry registers -> the caller's
+    values at the call: the call's ``~in<k>`` reads (the caller register at
+    the call is the callee's entry register, same offsets -- except the
+    call shape's stack-pointer base, which the call changes: cut)."""
+
+    def __init__(self, caller, reads, stack):
+        self.caller, self.reads, self.stack = caller, reads, stack
+
+    def parts(self, start, end):
+        if start < self.stack[0] + self.stack[1] and self.stack[0] < end:
+            raise _StitchCut("stack pointer")
+        for read in self.reads:
+            span = read.span
+            if span.object_id.kind is StorageObjectKind.REGISTER_FILE and span.start <= start and end <= span.end:
+                return _slice_parts(self.caller._fragments(read, None, 0), start - span.start, end - span.start)
+        raise _StitchCut("unbound register")
+
+    def bind(self, builder, node, span):
+        """A ``bound`` node for a callee entry definition (the SSA may
+        coalesce several registers into one): per byte range the caller's
+        value, or a gap ("stack pointer" / "unbound register") -- an
+        import using a gap byte is cut (``_gap_used``)."""
+        if span.object_id.kind is not StorageObjectKind.REGISTER_FILE:
+            raise _StitchCut("entry memory")
+        classes = []
+        for offset in range(span.start, span.end):
+            if self.stack[0] <= offset < self.stack[0] + self.stack[1]:
+                classes.append("stack pointer")
+                continue
+            read = next((read for read in self.reads if read.span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                         and read.span.start <= offset < read.span.end), None)
+            classes.append("unbound register" if read is None else read)
+        parts, gaps = [], []
+        position = 0
+        while position < len(classes):
+            end = position
+            while end < len(classes) and (classes[end] == classes[position] if isinstance(classes[position], str)
+                                          else classes[end] is classes[position]):
+                end += 1
+            low, high = span.start + position, span.start + end
+            found = classes[position]
+            if isinstance(found, str):
+                gaps.append({"at": [position, end], "reason": found})
+            else:
+                for piece in _slice_parts(self.caller._fragments(found, None, 0), low - found.span.start,
+                                          high - found.span.start):
+                    piece["at"] = [piece["at"][0] + position, piece["at"][1] + position]
+                    parts.append(piece)
+            position = end
+        record = {"kind": "bound", "callee_entry": _span_text(span), "size": span.size, "parts": parts}
+        if gaps:
+            record["gaps"] = gaps
+        return builder._new(node, record)["id"]
+
+
+def _node_parts(node):
+    """Every part a record node holds (whatever its kind)."""
+    for name in ("alternatives", "parts", "root"):
+        yield from node.get(name, ())
+    for name in ("operands", "inputs", "memory", "reads"):
+        for item in node.get(name, ()):
+            yield from item.get("parts", ())
+
+
+def _gap_used(records, start, outputs):
+    """The reason of a ``bound`` gap byte an import (records from ``start``,
+    and the stitched outputs) uses, or None."""
+    for part in (*(part for record in records[start:] for part in _node_parts(record)),
+                 *(item["part"] for item in outputs)):
+        target = records[part["node"]] if "node" in part and part["node"] < len(records) else None
+        if target is None or target["kind"] != "bound" or not target.get("gaps") or "bytes" not in part:
+            continue
+        a, b = part["bytes"]
+        for gap in target["gaps"]:
+            if a < gap["at"][1] and gap["at"][0] < b:
+                return gap["reason"]
+    return None
+
+
+def _slice_parts(parts, low, high):
+    """Bytes [low, high) of a value given as ``parts`` (placed by ``at``)."""
+    found = []
+    for part in parts:
+        a, b = part["at"]
+        start, end = max(a, low), min(b, high)
+        if start >= end:
+            continue
+        piece = dict(part)
+        if "bytes" in part:
+            piece["bytes"] = [part["bytes"][0] + start - a, part["bytes"][0] + end - a]
+        piece["at"] = [start - low, end - low]
+        found.append(piece)
+    return found
+
+
 class _Builder:
     def __init__(self, normalized, unit, *, origins=None, declared=None, limits=None, demands=None,
-                 provenance=None):
+                 provenance=None, stitch=None, records=None, ledger=None, parent=None, binding=None, path=(),
+                 index=None):
         from .lane_slice import lane_index
 
         self.normalized = normalized
         self.unit = unit
-        self.index = lane_index(normalized, unit)
+        self.index = index if index is not None else lane_index(normalized, unit)
         self.graph = normalized.dependencies
         self.ssa = normalized.memory_ssa
         self.limits = limits or Limits()
@@ -101,11 +252,20 @@ class _Builder:
                             (normalized.may_alias_reads, normalized.may_alias_nodes)):
             for row, node in zip(rows, nodes):
                 self.debt_rows[node] = row
-        self.records: list = []
+        self.records: list = records if records is not None else []
         self.id_of: dict = {}
         self.expanding: set = set()
-        self.edges = 0
+        self.ledger = ledger or _Ledger()
         self.truncated = False
+        # stitching (docs 25.31 C-9): the run's instances, the caller builder,
+        # its binding of this callee's entry registers, the call path
+        # ((function key, call key) from the root) and this builder's calls
+        self.stitch, self.parent, self.binding, self.path = stitch, parent, binding, path
+        self.call_ids: list = []
+        self._actions = None
+        self._transitions = None
+        entry = unit.scopes.function.entry
+        self.function_key = f"{entry.space_id:x}:{entry.byte_offset:x}"
         self.demands = demands
         self.register_space = _register_space(unit)
         evidence = unit.scopes.program.evidence
@@ -147,6 +307,8 @@ class _Builder:
         return record["id"]
 
     def _with_origins(self, record, *nodes):
+        if record["id"] < self.ledger.frozen:
+            return   # (a record older than the stitch attempt: unchanged)
         labels = sorted({label for node in nodes for label in self.origins.get(node, ())})
         if labels:
             record["origins"] = sorted(set(record.get("origins", ())) | set(labels))
@@ -216,6 +378,8 @@ class _Builder:
     def _entry(self, node, definition):
         if node in self.id_of:
             return self.id_of[node]
+        if self.binding is not None:   # a stitched callee: the caller's value at the call
+            return self.binding.bind(self, node, definition.span)
         span = definition.span
         record = {"kind": "entry", "span": _span_text(span)}
         if span.object_id.kind is StorageObjectKind.REGISTER_FILE:
@@ -287,8 +451,8 @@ class _Builder:
         return "full" if found is None else found if found == "none" else sorted(found)
 
     def _edge(self):
-        self.edges += 1
-        if self.edges > self.limits.edges:
+        self.ledger.edges += 1
+        if self.ledger.edges > self.limits.edges:
             self.truncated = True
             raise _Truncated()
 
@@ -560,6 +724,7 @@ class _Builder:
             record["output"] = {"kind": "unknown memory write", "index": int(tag[1:])}
         if self.provenance is not None:
             record["provenance"] = _call_provenance(self.provenance, base, effect, tag)
+        self.call_ids.append(record["id"])
         self._with_origins(record, node)
         self.expanding.add(node)
         try:
@@ -656,6 +821,200 @@ class _Builder:
         record["from"] = sources
         self._done(record)
         return record["id"]
+
+    # -- stitching (docs 25.31 C-9, increment 1) -------------------------------
+    def stitch_all(self):
+        """Phase 2: try every call node this builder made (in id order)."""
+        for identifier in list(self.call_ids):
+            if identifier < len(self.records):
+                self._stitch(self.records[identifier])
+
+    def _staged_reads(self, row_key):
+        if self._actions is None:
+            self._actions = {action.operation_key: action_id for action_id, action in enumerate(self.ssa.actions)}
+        action_id = self._actions.get(row_key)
+        return self.index.reads.get(action_id, ()) if action_id is not None else ()
+
+    def _stack_base(self, call_key):
+        """(offset, size) of the register the observed call shape adjusts (the
+        stack pointer), or None (no observed shape)."""
+        if self._transitions is None:
+            from .observed_call_state import observed_call_state_projections
+
+            self._transitions = {row.call_operation_key: row.memory_transition
+                                 for row in observed_call_state_projections(self.unit.observation)}
+        transition = self._transitions.get(call_key)
+        if transition is None:
+            return None
+        return transition.caller_base.byte_offset, transition.caller_base.byte_size
+
+    def _stitch_reason(self, record):
+        """Why a call node is not stitched, or None."""
+        base, tag = record["call"], record["row"]
+        if self.ledger.exhausted:
+            return "limit"
+        if self.provenance is None or self.stitch is None:
+            return "no provenance"
+        source = self.provenance.sources.get(base)
+        if source is None:
+            return "source: none"
+        if source[0] != "summary":
+            return f"source: {source[0]}"
+        done = source[1]
+        if done.summary is None or type(done.normalized).__name__ != "NormalizedFunction":
+            return "no callee body"
+        effect = self.proven[base]
+        if not tag.isdigit() or int(tag) >= len(effect.runs):
+            return "not a register output"
+        run = effect.runs[int(tag)]
+        if run.loads:
+            return "loads"
+        if run.conditions or effect.writer_conditions:
+            return "conditions"
+        if effect.tail_stack or done.summary.tail_exits:
+            return "tail"
+        if not done.summary.exits:
+            return "no exit"
+        if len(self.path) >= self.limits.call_depth:
+            return "depth"
+        if done.key == self.function_key or any(done.key == key for key, _ in self.path):
+            return "recursion"
+        if self._stack_base(base) is None:
+            return "no call shape"
+        return None
+
+    def _stitch(self, record):
+        """One call instance: built whole, or rolled back with the reason;
+        the records before the attempt, every builder's ``id_of`` and
+        ``truncated`` flag end as they were."""
+        reason = self._stitch_reason(record)
+        if reason is not None:
+            record["stitch_cut"] = reason
+            return
+        base, tag = record["call"], record["row"]
+        done = self.provenance.sources[base][1]
+        run = self.proven[base].runs[int(tag)]
+        start = len(self.records)
+        chain = []
+        builder = self
+        while builder is not None:
+            chain.append(builder)
+            builder = builder.parent
+        saved = [(item, item.truncated) for item in chain]
+        frozen, self.ledger.frozen = self.ledger.frozen, start
+        path = (*self.path, (self.function_key, base))
+        instance = "/".join(call for _, call in path)
+        try:
+            nested = _Builder(done.normalized, done.unit, origins=done.origins, declared=done.declared,
+                              limits=self.limits, provenance=self.stitch.provenance(done), stitch=self.stitch,
+                              records=self.records, ledger=self.ledger, parent=self,
+                              binding=_Binding(self, self._staged_reads(f"{base}~in{tag}"), self._stack_base(base)),
+                              path=path, index=self.stitch.index(done.normalized, done.unit))
+            outputs = [{"output": _span_dict(span), "part": nested._stitched_output(span, done.summary, instance)}
+                       for span in run.writes]
+            if nested.truncated or any(item.truncated != flag for item, flag in saved):
+                raise _StitchCut("limit")   # (a cut inside: never a partial import)
+            gap = _gap_used(self.records, start, outputs)
+            if gap is not None:
+                raise _StitchCut(gap)
+            nested.stitch_all()
+            if nested.truncated or any(item.truncated != flag for item, flag in saved):
+                raise _StitchCut("limit")
+        except (_StitchCut, _Truncated, RecursionError, DiagnosticExhausted) as error:
+            for item in chain:
+                for key in [key for key, value in item.id_of.items() if value >= start]:
+                    del item.id_of[key]
+                item.call_ids = [identifier for identifier in item.call_ids if identifier < start]
+            del self.records[start:]
+            reason = str(error) if isinstance(error, _StitchCut) else "limit"
+            if reason == "limit":
+                self.ledger.exhausted = True   # (out of a limit: no more attempts)
+            record["stitch_cut"] = reason
+        else:
+            for item in self.records[start:]:
+                item.setdefault("import", instance)   # (nested instances tagged theirs first)
+            record["stitched"] = outputs
+        finally:
+            for item, flag in saved:
+                item.truncated = flag
+            self.ledger.frozen = frozen
+
+    def _stitched_output(self, span, summary, instance):
+        """This callee's value of the caller's output bytes ``span``
+        (register offsets) as one part: per exit the runs' bytes assembled
+        (bytes the exit does not write: the caller's value at the call);
+        several exits -> a phi "callee exits"."""
+        from .span_geometry import ByteSpan
+
+        alternatives = []
+        definition_nodes = self.normalized.memory_graph.definition_nodes
+        for exit_summary in summary.exits:
+            parts, covered = [], set()
+            for run in exit_summary.runs:
+                if run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE:
+                    continue
+                low, high = max(run.span.start, span.start), min(run.span.end, span.end)
+                if low >= high or run.kind.value == "identity":
+                    continue
+                if run.kind.value != "computed" or run.crossed or run.debts or run.conditions:
+                    raise _StitchCut("run not exact")
+                nodes = [definition_nodes[item] for item in run.definitions if 0 <= item < len(definition_nodes)]
+                if not nodes:
+                    raise _StitchCut("run not exact")
+                piece = ByteSpan(run.span.object_id, low, high - low)
+                values = [self._whole(self.seed(node, (piece,)), high - low) for node in nodes]
+                if len(values) == 1:
+                    part = values[0]
+                else:
+                    phi = self._new(None, {"kind": "phi", "reason": "exit run definitions",
+                                           "span": _span_text(piece), "size": high - low, "alternatives": values})
+                    self._done(phi)
+                    part = {"node": phi["id"], "bytes": [0, high - low]}
+                parts.append({**part, "at": [low - span.start, high - span.start]})
+                covered.update(range(low, high))
+            offset = span.start
+            while offset < span.end:   # bytes this exit leaves as they were before the call
+                if offset in covered:
+                    offset += 1
+                    continue
+                end = offset
+                while end < span.end and end not in covered:
+                    end += 1
+                bound = self._new(None, {"kind": "bound", "callee_entry": f"unchanged at {exit_summary.block_key}",
+                                         "unchanged": True, "size": end - offset,
+                                         "parts": self.binding.parts(offset, end)})
+                parts.append({"node": bound["id"], "bytes": [0, end - offset],
+                              "at": [offset - span.start, end - span.start]})
+                offset = end
+            parts.sort(key=lambda part: part["at"][0])
+            alternatives.append(self._whole(parts, span.size))
+        if len(alternatives) == 1:
+            return alternatives[0]
+        phi = self._new(None, {"kind": "phi", "reason": "callee exits", "instance": instance, "size": span.size,
+                               "alternatives": alternatives})
+        self._done(phi)
+        return {"node": phi["id"], "bytes": [0, span.size], "at": [0, span.size]}
+
+    def _whole(self, parts, size):
+        """One part holding a ``size``-byte value given as ``parts``: the
+        part itself when it is the whole value, else an ``assemble`` node."""
+        if any(part.get("whole") or part.get("pruned") or "node" not in part for part in parts):
+            raise _StitchCut("run not exact")
+        position = 0
+        for a, b in sorted(tuple(part["at"]) for part in parts):
+            if a != position:
+                raise _StitchCut("run not exact")   # (a gap or an overlap)
+            position = b
+        if position != size:
+            raise _StitchCut("run not exact")
+        if len(parts) == 1:
+            piece = {key: value for key, value in parts[0].items() if key in ("node", "bytes", "output", "loop")}
+            piece["at"] = [0, size]
+            return piece
+        record = self._new(None, {"kind": "assemble", "size": size, "parts": [
+            {key: value for key, value in part.items() if key in ("node", "bytes", "at", "output", "loop")}
+            for part in parts]})
+        return {"node": record["id"], "bytes": [0, size], "at": [0, size]}
 
     # -- seeds ---------------------------------------------------------------
     def seed(self, node, spans, depth=0):
@@ -795,7 +1154,8 @@ def _span_dict(span):
             "size": span.size}
 
 
-def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, limits=None, provenance=None):
+def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, limits=None, provenance=None,
+           stitch=None):
     from .lane_slice import lane_slice
 
     limits = limits or Limits()
@@ -803,7 +1163,7 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
     demands = lane_slice(normalized, unit, demand_seeds, budget=limits.demand_steps,
                          byte_budget=limits.demand_bytes)
     builder = _Builder(normalized, unit, origins=origins, declared=declared, limits=limits, demands=demands,
-                       provenance=provenance)
+                       provenance=provenance, stitch=stitch)
     root = []
     # one expansion level takes a few Python frames: room for ``limits.depth``
     previous = sys.getrecursionlimit()
@@ -816,6 +1176,12 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
     except RecursionError:
         builder.truncated = True
         builder.records.append({"kind": "cut", "target": None, "reason": "recursion", "id": len(builder.records)})
+    except BaseException:
+        sys.setrecursionlimit(previous)
+        raise
+    try:
+        if stitch is not None:
+            builder.stitch_all()   # (after the record is whole; an attempt never changes it)
     finally:
         sys.setrecursionlimit(previous)
     entry = unit.scopes.function.entry
@@ -841,7 +1207,7 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
 
 @measured("records")
 def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=None, completeness=None,
-                provenance=None):
+                provenance=None, stitch=None):
     """The record of a sink root: ``seeds`` as ``lane_slice`` takes them
     ((node, spans) of the root's raw sink rows); ``provenance``: the
     instance's ``CallProvenance`` (call nodes then carry it, docs 25.31 C9-5)."""
@@ -854,7 +1220,7 @@ def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=
     metadata["function_unresolved_writes"] = len(normalized.memory_graph.unresolved_write_nodes) \
         if normalized.memory_graph is not None else None
     return _build(normalized, unit, seeds, metadata, origins=origins, declared=declared, limits=limits,
-                  provenance=provenance)
+                  provenance=provenance, stitch=stitch)
 
 
 def run_records(normalized, unit, summary, *, origins=None, declared=None, limits=None):
@@ -976,7 +1342,16 @@ def _render_node(node, nodes=None):
             ", ".join(f"n{item['node']}" for item in node.get("from", ())) + origins
     if kind == "call":
         inputs = "; ".join(f"{item['role']}=" + "+".join(_render_parts(item["parts"], nodes)) for item in node["inputs"])
-        return f"call {node['callee']} ~{node['row']} [{node.get('source')}] ({inputs}){origins}"
+        text = f"call {node['callee']} ~{node['row']} [{node.get('source')}] ({inputs}){origins}"
+        for item in node.get("stitched", ()):
+            text += f" => {_render_parts([item['part']], nodes)[0]}"
+        if node.get("stitch_cut"):
+            text += f" [not stitched: {node['stitch_cut']}]"
+        return text
+    if kind == "bound":
+        return f"bound {node['callee_entry']} = " + "+".join(_render_parts(node["parts"], nodes))
+    if kind == "assemble":
+        return "assemble(" + ", ".join(_render_parts(node["parts"], nodes)) + ")"
     if kind in ("op", "override"):
         operands = []
         for operand in node.get("operands", ()):
@@ -1027,7 +1402,9 @@ def eligibility(record) -> str | None:
         return "identity"   # unchanged: nothing to evaluate
     if record.get("truncated"):
         return "truncated"
-    nodes = record.get("nodes", ())
+    # (route "injected": a stitched call's imported subtree is not this
+    # record's value -- docs 25.31 C-9)
+    nodes = [node for node in record.get("nodes", ()) if "import" not in node]
     if any(node["kind"] == "cut" or node.get("interrupted") for node in nodes):
         return "cut"
     for node in nodes:
@@ -1083,8 +1460,9 @@ def evaluate(record, entry, *, call=None, max_choices=256):
     if reason is not None:
         raise Ineligible(reason)
     nodes = {node["id"]: node for node in record["nodes"]}
-    choices = [node["id"] for node in record["nodes"] if node["kind"] == "phi"] + \
-              [node["id"] for node in record["nodes"]
+    own = [node for node in record["nodes"] if "import" not in node]   # (route "injected")
+    choices = [node["id"] for node in own if node["kind"] == "phi"] + \
+              [node["id"] for node in own
                if node["kind"] == "op" and node["opcode"] == "LOAD" and len(node.get("memory", ())) > 1]
     sizes = {identifier: max(1, len(nodes[identifier].get("alternatives", nodes[identifier].get("memory", ()))))
              for identifier in choices}
@@ -1298,5 +1676,5 @@ def _compute(opcode, values, widths, out_size):
     return table[opcode]()
 
 
-__all__ = ("Ineligible", "Limits", "RECORD_VERSION", "eligibility", "evaluate", "render", "root_record",
-           "run_records")
+__all__ = ("Ineligible", "Limits", "RECORD_VERSION", "StitchContext", "eligibility", "evaluate", "render",
+           "root_record", "run_records")

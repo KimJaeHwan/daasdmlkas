@@ -580,8 +580,11 @@ def _with_records(run, record_inputs, provenance=None) -> "EngineRun":
     TDO_V2_RECORD_WORK units is cut. Roots without nodes (failures) get none."""
     from .resource_limits import DiagnosticExhausted, diagnostic
 
+    from .operation_records import StitchContext
+
     limit = os.environ.get("TDO_V2_RECORD_WORK")
     work = int(limit) if limit else None
+    stitch = StitchContext(provenance) if provenance is not None else None   # (docs 25.31 C-9)
     roots = []
     for root in run.roots:
         inputs = record_inputs.get(
@@ -596,7 +599,7 @@ def _with_records(run, record_inputs, provenance=None) -> "EngineRun":
         try:
             with diagnostic(work):
                 record = _root_record(analysis, unit, rows, root.label, root.occurrence_ordinal, analyzed,
-                                      root.effective_completeness, calls)
+                                      root.effective_completeness, calls, stitch)
         except DiagnosticExhausted:
             record = {"record": "root", "truncated": True, "cut": "diagnostic budget", "root": [], "nodes": []}
         # (the record before ``rests_on_failed``, the key order it had)
@@ -714,7 +717,8 @@ def _witnesses(analysis, unit, rows, label, occurrence, labels, node_labels, ind
     return root_witnesses(analysis.normalized, unit, rows, seeds, labels, index, origins, traversal)
 
 
-def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness, provenance=None) -> dict:
+def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness, provenance=None,
+                 stitch=None) -> dict:
     """The operation record of one root (diagnostics, ``operation_records``):
     seeded as ``_lane_origin_labels`` seeds its slice; SOURCE rows' labels as
     node origins."""
@@ -727,7 +731,7 @@ def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness
         if row.kind is BoundaryKind.SOURCE:
             origins.setdefault(row.node, set()).add(row.label)
     return root_record(analysis.normalized, unit, seeds, origins=origins, declared=analyzed.declared,
-                       completeness=completeness, provenance=provenance)
+                       completeness=completeness, provenance=provenance, stitch=stitch)
 
 
 def _raw_root_groups(analysis, rows):
