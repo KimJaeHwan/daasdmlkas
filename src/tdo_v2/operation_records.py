@@ -297,13 +297,17 @@ class _Binding:
             # a direct slot: the overlay is [0, push) in callee entry-SP coordinates
             if load.displacement < push and 0 < load.displacement + load.size:
                 return "return address", None
+            key = self.loads.get(load)
+            node = None if key is None else self.caller.graph.node_for_key(f"op:{key}")
+            if node is not None and _row_reaches_debt(self.caller.graph, node):
+                return "memory: debt", None   # (a writer the SSA fragments do not show)
             return None, None
         key = self.loads.get(load)
         node = None if key is None else self.caller.graph.node_for_key(f"op:{key}")
         if node is None:
             return "unbound memory", None
         if _row_reaches_debt(self.caller.graph, node):
-            return "memory: address debt", None
+            return "memory: debt", None   # (one name for a debt-bearing load, direct or not)
         read = self._memory_read(load)
         if read is None:
             return "unbound memory", None
@@ -388,10 +392,14 @@ class _Binding:
                 if 0 <= displacement < push:
                     classes.append("return address")
                     continue
-                classes.append(next((item for item in self.loads if item.pointer is None and item.anchor is not None
-                                     and item.anchor == place.anchor and item.space_id == place.space_id
-                                     and item.displacement <= displacement < item.displacement + item.size),
-                                    "unbound memory"))
+                load = next((item for item in self.loads if item.pointer is None and item.anchor is not None
+                             and item.anchor == place.anchor and item.space_id == place.space_id
+                             and item.displacement <= displacement < item.displacement + item.size), None)
+                if load is None:
+                    classes.append("unbound memory")
+                    continue
+                reason, _ = self._level(load)
+                classes.append(load if reason is None else reason)
         reads: dict = {}
         parts, gaps, used = [], [], []
         position = 0
@@ -563,6 +571,7 @@ class _Builder:
         self._transitions = None
         self._projections: dict = {}
         self._pcode = None
+        self._backs = None
         entry = unit.scopes.function.entry
         self.function_key = f"{entry.space_id:x}:{entry.byte_offset:x}"
         self.demands = demands
@@ -1151,6 +1160,13 @@ class _Builder:
             return transition.displacement_delta
         return transition.caller_base.byte_offset, transition.caller_base.byte_size
 
+    def _write_backs(self) -> frozenset:
+        """Accessor write-back rows (``pointer_rows`` ("write_back", ...))."""
+        if self._backs is None:
+            self._backs = frozenset(key for key, value in self.normalized.pointer_rows
+                                    if value and value[0] == "write_back")
+        return self._backs
+
     def _projection(self, call_key):
         self._stack_base(call_key)
         return self._projections.get(call_key)
@@ -1184,9 +1200,11 @@ class _Builder:
         if done.summary is None or type(done.normalized).__name__ != "NormalizedFunction":
             return "no callee body"
         effect = self.proven[base]
-        if not tag.isdigit() or int(tag) >= len(effect.runs):
-            return "not a register output"
-        run = effect.runs[int(tag)]
+        run = _output_run(effect, tag)
+        if run is None:
+            return "not an output run"   # (a sink or unknown-memory row)
+        if f"{base}~{tag}" in self._write_backs():
+            return "accessor write-back"
         if run.conditions or effect.writer_conditions:
             return "conditions"
         if effect.tail_stack or done.summary.tail_exits:
@@ -1213,7 +1231,7 @@ class _Builder:
 
         base, tag = record["call"], record["row"]
         done = self.provenance.sources[base][1]
-        run = self.proven[base].runs[int(tag)]
+        run = _output_run(self.proven[base], tag)
         start = len(self.records)
         chain = []
         builder = self
@@ -1234,8 +1252,13 @@ class _Builder:
                                                call_load_keys(base, self.proven[base]), call=base,
                                                effect=self.proven[base]),
                               path=path, index=self.stitch.index(done.normalized, done.unit))
-            outputs = [{"output": _span_dict(span), "part": nested._stitched_output(span, done.summary, instance)}
-                       for span in run.writes]
+            if hasattr(run, "writes"):   # (a register run)
+                outputs = [{"output": _span_dict(span),
+                            "part": nested._stitched_output(span, done.summary, instance)}
+                           for span in run.writes]
+            else:   # (a memory run, docs 25.32 increment 4)
+                part, callee_span = nested._stitched_memory_output(run, done.summary, instance)
+                outputs = [{"output": {"place": _anchored_text(run.write), "callee": callee_span}, "part": part}]
             if nested.truncated or any(item.truncated != flag for item, flag in saved):
                 raise _StitchCut("limit")   # (a cut inside: never a partial import)
             gap = _gap_used(self.records, start, outputs)
@@ -1329,6 +1352,101 @@ class _Builder:
                                "alternatives": alternatives})
         self._done(phi)
         return {"node": phi["id"], "bytes": [0, span.size], "at": [0, span.size]}
+
+    def _stitched_memory_output(self, run, summary, instance):
+        """This callee's value of a memory output row's write W (an
+        AnchoredSpan) as one part, and the callee span W is: W's object X is
+        the one callee memory object whose runs anchor to W's base with
+        overlapping bytes (two or more: "ambiguous object"); per exit the
+        bytes from X's runs (COMPUTED: seeded at its definitions), bytes an
+        exit leaves unchanged hold their callee-entry value -- bound like
+        entry memory (the overlay proofs; the keeps_old ``~ld`` of W);
+        several exits -> a phi "callee exits" (docs 25.32 increment 4)."""
+        from .call_summary_effects import anchored_span
+        from .span_geometry import ByteSpan
+
+        write = run.write
+        size = write.size
+        anchors = self.binding.anchors
+
+        def same_base(place):
+            return place is not None and place.anchor == write.anchor and place.pointer == write.pointer \
+                and place.space_id == write.space_id
+
+        objects: dict = {}   # X -> offset of W's first byte in X
+        for exit_summary in summary.exits:
+            for item in exit_summary.runs:
+                if item.span.object_id.kind not in _MEMORY_OBJECTS:
+                    continue
+                place = anchored_span(item.span, anchors)
+                if same_base(place) and place.displacement < write.displacement + size \
+                        and write.displacement < place.displacement + place.size:
+                    objects[item.span.object_id] = item.span.start - place.displacement + write.displacement
+        if len(objects) != 1:
+            raise _StitchCut("ambiguous object" if objects else "run not exact")
+        (target, start), = objects.items()
+        if write.pointer is None and write.anchor is not None \
+                and (write.anchor.start, write.anchor.size) == self.binding.stack \
+                and write.displacement < -self.binding.delta:
+            # (below the callee's entry SP, or crossing into the pushed slot)
+            raise _StitchCut("below entry stack pointer" if write.displacement + size <= 0 else "return address")
+        end = start + size
+        alternatives = []
+        definition_nodes = self.normalized.memory_graph.definition_nodes
+        for exit_summary in summary.exits:
+            parts, covered = [], set()
+            for item in exit_summary.runs:
+                if item.span.object_id != target:
+                    continue
+                low, high = max(item.span.start, start), min(item.span.end, end)
+                if low >= high or item.kind.value == "identity":
+                    continue
+                if item.kind.value != "computed" or item.crossed or item.debts or item.conditions:
+                    raise _StitchCut("run not exact")
+                nodes = [definition_nodes[index] for index in item.definitions
+                         if 0 <= index < len(definition_nodes)]
+                if not nodes:
+                    raise _StitchCut("run not exact")
+                piece = ByteSpan(target, low, high - low)
+                values = []
+                for node in nodes:
+                    definition = self.ssa.definitions[self.index.definition_of[node]] \
+                        if node in self.index.definition_of else None
+                    if definition is None or definition.span.object_id != target:
+                        raise _StitchCut("run not exact")   # (a seed must not widen to another object)
+                    values.append(self._whole(self.seed(node, (piece,)), high - low))
+                if len(values) == 1:
+                    part = values[0]
+                else:
+                    phi = self._new(None, {"kind": "phi", "reason": "exit run definitions",
+                                           "span": _span_text(piece), "size": high - low, "alternatives": values})
+                    self._done(phi)
+                    part = {"node": phi["id"], "bytes": [0, high - low]}
+                parts.append({**part, "at": [low - start, high - start]})
+                covered.update(range(low, high))
+            offset = start
+            while offset < end:   # bytes this exit leaves: their callee-entry value
+                if offset in covered:
+                    offset += 1
+                    continue
+                stop = offset
+                while stop < end and stop not in covered:
+                    stop += 1
+                if not run.keeps_old:
+                    raise _StitchCut("run not exact")
+                bound = self.binding._memory(self, None, ByteSpan(target, offset, stop - offset))
+                self.records[bound]["unchanged"] = True
+                parts.append({"node": bound, "bytes": [0, stop - offset], "at": [offset - start, stop - start]})
+                offset = stop
+            parts.sort(key=lambda part: part["at"][0])
+            alternatives.append(self._whole(parts, size))
+        callee_span = _span_text(ByteSpan(target, start, size))
+        if len(alternatives) == 1:
+            return alternatives[0], callee_span
+        phi = self._new(None, {"kind": "phi", "reason": "callee exits", "instance": instance, "size": size,
+                               "alternatives": alternatives})
+        self._done(phi)
+        return {"node": phi["id"], "bytes": [0, size], "at": [0, size]}, callee_span
 
     def _whole(self, parts, size):
         """One part holding a ``size``-byte value given as ``parts``: the
@@ -1425,6 +1543,18 @@ def _call_provenance(provenance, call, effect, tag) -> dict:
                       for side in pair], "reason": reason}
             for where, pair, reason in rejections]
     return found
+
+
+def _output_run(effect, tag):
+    """The register or memory run of output row ``~<tag>``, or None (a sink
+    or unknown-memory row)."""
+    if not tag.isdigit():
+        return None
+    index = int(tag)
+    if index < len(effect.runs):
+        return effect.runs[index]
+    index -= len(effect.runs)
+    return effect.memory_runs[index] if index < len(effect.memory_runs) else None
 
 
 def _anchored_text(place) -> str:

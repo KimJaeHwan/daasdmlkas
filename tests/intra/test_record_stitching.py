@@ -380,3 +380,194 @@ def test_an_unexpected_error_cuts_only_that_call(monkeypatch):
     assert call["stitch_cut"] == "error: ValueError"
     assert [node for node in record["nodes"]] == [dict(node, stitch_cut="error: ValueError")
                                                   if node["kind"] == "call" else node for node in plain["nodes"]]
+
+
+# -- increment 4: memory output rows ---------------------------------------------
+
+def _memory_caller(*setup, pointer=None):
+    """The caller passes rcx = &local (or ``pointer``), calls F, returns the
+    local (rax)."""
+    t = tmp(0x100)
+    return (FunctionBuilder().sub_rsp(0x28)
+            .ins(add(t, reg(RSP), const(0x20)), *setup, pointer or add(reg(RCX), reg(RSP), const(0x20)))
+            .call(F)
+            .ins(add(t, reg(RSP), const(0x20)), load(reg(RAX), t))
+            .add_rsp(0x28).ret())
+
+
+def _memory_call(record):
+    return [node for node in _call_nodes(record) if "import" not in node and node["output"].get("kind") == "memory"]
+
+
+def test_a_memory_output_is_the_callees_store():
+    from synthetic import store
+
+    u = tmp(0x200)
+    callee = FunctionBuilder(entry=F).ins(add(u, reg(RDX), const(1)), store(reg(RCX), u)).ret()
+    record = _record([_memory_caller(copy(reg(RDX), reg(RBX))), callee])
+    (call,) = _memory_call(record)
+    assert call.get("stitched"), call.get("stitch_cut")
+    assert call["stitched"][0]["output"]["place"]
+    assert _values(record, {"node": call["id"], "bytes": [0, 8], "at": [0, 8]}, {RSP: ENTRY_SP, RBX: 41}) == {42}
+
+
+def test_an_exit_keeping_memory_is_its_old_value():
+    """One exit stores rdx at [rcx], the other leaves it: the old value is
+    the caller's store before the call (through the entry-memory binding)."""
+    from synthetic import store
+
+    flag = tmp(0x300, 1)
+    callee = (FunctionBuilder(entry=F)
+              .cbranch("keep", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
+              .ins(store(reg(RCX), reg(RDX))).ret()
+              .label("keep").ret())
+    t = tmp(0x100)
+    record = _record([_memory_caller(store(t, reg(RBX)), copy(reg(RDX), const(7))), callee])
+    (call,) = _memory_call(record)
+    assert call.get("stitched"), call.get("stitch_cut")
+    assert any(node.get("unchanged") for node in record["nodes"] if node["kind"] == "bound")
+    assert _values(record, {"node": call["id"], "bytes": [0, 8], "at": [0, 8]}, {RSP: ENTRY_SP, RBX: 5}) == {5, 7}
+
+
+def test_a_global_output():
+    from synthetic import DATA_BASE, store
+
+    callee = FunctionBuilder(entry=F).ins(store(const(DATA_BASE + 0x10), reg(RDX))).ret()
+    caller = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RDX), reg(RBX))).call(F)
+              .ins(load(reg(RAX), const(DATA_BASE + 0x10))).add_rsp(0x28).ret())
+    record = _record([caller, callee])
+    calls = _memory_call(record)
+    assert calls and calls[0].get("stitched"), [node.get("stitch_cut") for node in calls]
+    assert _values(record, {"node": calls[0]["id"], "bytes": [0, 8], "at": [0, 8]}, {RBX: 9}) == {9}
+
+
+
+def _keeping_callee(target):
+    """One exit stores rdx at ``target``, the other leaves it."""
+    from synthetic import store
+
+    flag = tmp(0x300, 1)
+    return (FunctionBuilder(entry=F)
+            .cbranch("keep", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
+            .ins(store(target, reg(RDX))).ret()
+            .label("keep").ret())
+
+
+def _memory_cut(functions, **options):
+    record = _record(functions, **options)
+    calls = _memory_call(record)
+    assert calls, "no memory output row reached"
+    assert "stitched" not in calls[0]
+    return calls[0]["stitch_cut"]
+
+
+def test_memory_output_cuts():
+    from synthetic import R8, store, sub
+
+    t = tmp(0x100)
+    # W is the pushed return address (rcx = rsp - 8), kept on one exit; the
+    # caller reads it back through rbx (the callee keeps rbx)
+    caller = (FunctionBuilder().sub_rsp(0x28)
+              .ins(sub(reg(RCX), reg(RSP), const(8)), copy(reg(RBX), reg(RCX)))
+              .call(F)
+              .ins(load(reg(RAX), reg(RBX)))
+              .add_rsp(0x28).ret())
+    record = _record([caller, _keeping_callee(reg(RCX))])
+    (call,) = _memory_call(record)   # (the old value at W is the return address: never bound)
+    assert "stitched" not in call and call["stitch_cut"] == "return address"
+    # W through rcx (a register anchor): its old-value load is checked whole,
+    # and the engine gives that read a may-alias debt with the store through
+    # r8 before the call -- cut (the direct-slot case of
+    # test_an_entry_pointer_store_before_the_call has no such debt)
+    assert _memory_cut([_memory_caller(store(t, reg(RBX)), store(reg(R8), reg(RBX))),
+                        _keeping_callee(reg(RCX))]) == "memory: debt"
+
+
+def test_memory_outputs_at_the_entry_stack_pointer():
+    """An 8-byte callee store at its [rsp-4] crosses the entry SP (into the
+    pushed slot): the row is cut "return address"; a store wholly below the
+    entry SP is no output row at all (derivation folds it into
+    ``clobbers_below``). The caller reads the bytes back through rbx."""
+    from synthetic import store, sub
+
+    u = tmp(0x200)
+
+    def program(offset):
+        callee = FunctionBuilder(entry=F).ins(sub(u, reg(RSP), const(offset)), store(u, reg(RDX))).ret()
+        # callee [rsp - offset] = caller [rsp_at_call - 8 - offset]
+        caller = (FunctionBuilder().sub_rsp(0x28)
+                  .ins(sub(reg(RBX), reg(RSP), const(8 + offset)))
+                  .call(F)
+                  .ins(load(reg(RAX), reg(RBX)))
+                  .add_rsp(0x28).ret())
+        return [caller, callee]
+
+    crossing = _memory_call(_record(program(4)))
+    assert crossing and all(call.get("stitch_cut") == "return address" for call in crossing), crossing
+    below = _memory_call(_record(program(0x20)))
+    assert all("stitched" not in call for call in below)
+    assert not below or all(call.get("stitch_cut") == "below entry stack pointer" for call in below)
+
+
+def test_a_pointer_chain_memory_output():
+    """[rsp+8] holds &local: the callee stores rdx through it."""
+    from synthetic import store
+
+    t = tmp(0x100)
+    u = tmp(0x200)
+    caller = (FunctionBuilder().sub_rsp(0x28)
+              .ins(add(t, reg(RSP), const(0x20)), store(reg(RSP), t))
+              .call(F)
+              .ins(add(t, reg(RSP), const(0x20)), load(reg(RAX), t))
+              .add_rsp(0x28).ret())
+    callee = FunctionBuilder(entry=F).ins(add(u, reg(RSP), const(8)), load(u, u), store(u, reg(RDX))).ret()
+    record = _record([caller, callee])
+    calls = _memory_call(record)
+    assert calls and calls[0].get("stitched"), [call.get("stitch_cut") for call in calls]
+
+
+def test_a_kept_global_needs_the_named_assumption():
+    from synthetic import DATA_BASE, store
+
+    t = tmp(0x100)
+    callee = _keeping_callee(const(DATA_BASE + 0x10))
+    caller = (FunctionBuilder().sub_rsp(0x28)
+              .ins(add(t, reg(RSP), const(0x20)), store(t, reg(RBX)), copy(reg(RDX), const(3)))
+              .call(F)
+              .ins(load(reg(RAX), const(DATA_BASE + 0x10))).add_rsp(0x28).ret())
+    assert _memory_cut([caller, callee]) == "memory: overlay unproven"
+    record = _record([caller, callee], assume_globals_disjoint_from_stack=True)
+    calls = _memory_call(record)
+    assert calls and calls[0].get("stitched"), [call.get("stitch_cut") for call in calls]
+    assert any(node.get("assumptions") == ["globals-disjoint-from-stack"] for node in _bound_memory(record))
+
+
+def test_an_entry_pointer_store_before_the_call():
+    """Astra's case: the caller stores 5 at [rsp+0x38], then 99 through rdi;
+    the callee stores 7 at its [rsp+0x40] on one exit only. Under the named
+    assumption entry-values-do-not-address-the-new-frame (default on) rdi
+    cannot reach the caller's new frame, so the engine has no debt there and
+    the old value is 5: the stitched output is {5, 7}, as the engine's own
+    model of the call. Without the assumption the store may alias: the
+    old-value load then carries a debt and the call is cut "memory: debt"."""
+    from synthetic import RDI, store
+
+    t = tmp(0x100)
+    u = tmp(0x200)
+    flag = tmp(0x300, 1)
+    callee = (FunctionBuilder(entry=F)
+              .cbranch("keep", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
+              .ins(add(u, reg(RSP), const(0x40)), store(u, const(7))).ret()
+              .label("keep").ret())
+    caller = (FunctionBuilder().sub_rsp(0x48)
+              .ins(add(t, reg(RSP), const(0x38)), store(t, const(5)), store(reg(RDI), const(99)))
+              .call(F)
+              .ins(add(t, reg(RSP), const(0x38)), load(reg(RAX), t))
+              .add_rsp(0x48).ret())
+    record = _record([caller, callee])
+    (call,) = _memory_call(record)
+    assert call.get("stitched"), call.get("stitch_cut")
+    assert _values(record, {"node": call["id"], "bytes": [0, 8], "at": [0, 8]}, {RSP: ENTRY_SP}) == {5, 7}
+    record = _record([caller, callee], assume_entry_values_not_frame=False)
+    (call,) = _memory_call(record)
+    assert "stitched" not in call and call["stitch_cut"] == "memory: debt", call
