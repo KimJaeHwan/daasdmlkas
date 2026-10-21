@@ -55,7 +55,7 @@ from .phases import measured
 import sys
 from dataclasses import dataclass
 
-from .resource_limits import DiagnosticExhausted
+from .resource_limits import AnalysisBudgetExceeded, AnalysisReportingFailed, DiagnosticExhausted
 
 from ._scope_contracts import VarnodeKindCode
 from .graph_contracts import EdgeKind, NodeKind
@@ -449,7 +449,9 @@ class _Binding:
         for offset in range(span.start, span.end):
             if self.stack[0] <= offset < self.stack[0] + self.stack[1]:
                 if whole_stack and stack_value is None:
-                    stack_value = self._stack_value(builder) or "unbound register"
+                    stack_value = self._stack_value(builder)
+                    if stack_value is None:
+                        stack_value = "unbound register"
                 classes.append(stack_value if whole_stack else "stack pointer")
                 continue
             read = next((read for read in self.reads if read.span.object_id.kind is StorageObjectKind.REGISTER_FILE
@@ -1219,6 +1221,7 @@ class _Builder:
             chain.append(builder)
             builder = builder.parent
         saved = [(item, item.truncated) for item in chain]
+        edges = self.ledger.edges   # (refunded on rollback: a cut attempt costs no budget)
         frozen, self.ledger.frozen = self.ledger.frozen, start
         path = (*self.path, (self.function_key, base))
         instance = "/".join(call for _, call in path)
@@ -1241,19 +1244,30 @@ class _Builder:
             nested.stitch_all()
             if nested.truncated or any(item.truncated != flag for item, flag in saved):
                 raise _StitchCut("limit")
-        except (_StitchCut, _Truncated, RecursionError, DiagnosticExhausted) as error:
+        except (MemoryError, AnalysisBudgetExceeded, AnalysisReportingFailed):
+            raise   # (process state and the run's own limits are never a record's cut)
+        except Exception as error:   # (_StitchCut, _Truncated, RecursionError, DiagnosticExhausted, a bug)
             for item in chain:
                 for key in [key for key, value in item.id_of.items() if value >= start]:
                     del item.id_of[key]
                 item.call_ids = [identifier for identifier in item.call_ids if identifier < start]
             del self.records[start:]
-            reason = str(error) if isinstance(error, _StitchCut) else "limit"
+            self.ledger.edges = edges
+            if isinstance(error, _StitchCut):
+                reason = str(error)
+            elif isinstance(error, (_Truncated, RecursionError, DiagnosticExhausted)):
+                reason = "limit"
+            else:   # (records are diagnostics: an unexpected error cuts this call only)
+                reason = f"error: {type(error).__name__}"
             if reason == "limit":
                 self.ledger.exhausted = True   # (out of a limit: no more attempts)
             record["stitch_cut"] = reason
         else:
             for item in self.records[start:]:
                 item.setdefault("import", instance)   # (nested instances tagged theirs first)
+                if item["kind"] == "call" and "stitched" not in item and "stitch_cut" not in item:
+                    # (a caller-side call reached while binding: never tried)
+                    item["stitch_cut"] = "not tried: reached while binding"
             record["stitched"] = outputs
         finally:
             for item, flag in saved:

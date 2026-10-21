@@ -361,3 +361,22 @@ def test_a_global_needs_the_named_assumption():
     record = _record([caller, callee], assume_globals_disjoint_from_stack=True)
     _stitched(record)
     assert any(node.get("assumptions") == ["globals-disjoint-from-stack"] for node in _bound_memory(record))
+
+
+def test_an_unexpected_error_cuts_only_that_call(monkeypatch):
+    """Records are diagnostics: a bug inside one stitch attempt cuts that
+    call ("error: <type>"), rolled back like a limit; the run goes on."""
+    from tdo_v2 import operation_records
+
+    def broken(self, span, summary, instance):
+        raise ValueError("boom")
+
+    callee = FunctionBuilder(entry=F).ins(add(reg(RAX), reg(RCX), reg(RDX))).ret()
+    functions = [_caller(copy(reg(RCX), const(0x10)), copy(reg(RDX), reg(RBX))), callee]
+    plain = _record(functions, stitch=False)
+    monkeypatch.setattr(operation_records._Builder, "_stitched_output", broken)
+    record = _record(functions)
+    (call,) = _call_nodes(record)
+    assert call["stitch_cut"] == "error: ValueError"
+    assert [node for node in record["nodes"]] == [dict(node, stitch_cut="error: ValueError")
+                                                  if node["kind"] == "call" else node for node in plain["nodes"]]
