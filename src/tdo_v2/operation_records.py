@@ -138,9 +138,187 @@ class _Binding:
     + displacement, outside the return-address overlay [0, push)) from the
     caller's ``~ld<j>`` row loading it (docs 25.32, increment 2)."""
 
-    def __init__(self, caller, reads, stack, delta=0, anchors=None, loads=None):
+    def __init__(self, caller, reads, stack, delta=0, anchors=None, loads=None, call=None, effect=None):
         self.caller, self.reads, self.stack = caller, reads, stack
         self.delta, self.anchors, self.loads = delta, anchors or {}, loads or {}
+        self.call, self.effect = call, effect
+        self._pointer = self._witness = None   # (computed once; False: none)
+        self._levels: dict = {}
+
+    # -- the return-address overlay in the caller's coordinates (increment 3) --
+    def _stack_pointer(self):
+        """(stack object, bias, register space, offset, size) of the caller's
+        stack pointer when it is this call shape's base, else False."""
+        if self._pointer is None:
+            from .may_alias import _stack_pointer, _unit_stub
+
+            scopes = self.caller.unit.scopes
+            found = _stack_pointer(_unit_stub(scopes), self.caller.unit.observation, scopes.resolution_context,
+                                   scopes.program.evidence.address_spaces)
+            self._pointer = found if found is not None and (found[3], found[4]) == self.stack else False
+        return self._pointer
+
+    def overlay(self):
+        """(stack object, low, high): the caller's stack-object bytes the call
+        shape's push wrote (the projection removed it), from a debt-free
+        witness of the pre-push stack pointer at the call -- the call's
+        ``~sp`` or an SP-reading ``~in<k>`` row, a direct-SP ``~ld`` (B = s -
+        d), or the last observed operation before the call on a straight
+        path that reads it exactly with no write of it since -- or None."""
+        if self._witness is None:
+            self._witness = self._find_witness() or False
+        return self._witness or None
+
+    def _find_witness(self):
+        from .normalize import _row_reaches_debt, _storage_ref
+        from .relative_memory import stack_offset_at
+        from .scope_identity import AddressCoordinate, ValidatedVarnode
+        from .storage import _resolve_validated_storage
+
+        pointer = self._stack_pointer()
+        if not pointer:
+            return None
+        stack_object, bias, register_space, offset, size = pointer
+        caller, push = self.caller, -self.delta
+        unit = caller.unit
+        varnode = ValidatedVarnode(VarnodeKindCode.REGISTER, AddressCoordinate(register_space, offset), size)
+        resolved = _resolve_validated_storage(_storage_ref(varnode), unit.scopes.resolution_context)
+        stack_span = getattr(resolved, "span", None)
+        if stack_span is None:
+            return None
+
+        def at(key):
+            node = caller.graph.node_for_key(f"op:{key}")
+            if node is None or _row_reaches_debt(caller.graph, node):
+                return None
+            displacement = stack_offset_at(caller.ssa, unit.observation, unit.scopes, key, varnode, stack_span,
+                                           note=False)
+            if displacement is None:
+                return None
+            low = bias + displacement + self.delta
+            return stack_object, low, low + push
+
+        runs = len(self.effect.runs) + len(self.effect.memory_runs) if self.effect is not None else 0
+        for key in (f"{self.call}~sp", *(f"{self.call}~in{index}" for index in range(runs))):
+            if any(read.span == stack_span for read in caller._staged_reads(key)):
+                found = at(key)
+                if found is not None:
+                    return found
+        for load, key in self.loads.items():   # a direct stack-pointer load: B = s - d
+            if load.pointer is None and load.anchor is not None and (load.anchor.start, load.anchor.size) == self.stack:
+                node = caller.graph.node_for_key(f"op:{key}")
+                if node is None or _row_reaches_debt(caller.graph, node):
+                    continue
+                read = self._memory_read(load)
+                if read is not None and read.span.object_id == stack_object:
+                    low = read.span.start - load.displacement
+                    return stack_object, low, low + push
+        key = self._preceding_reader(register_space, offset, size)
+        return at(key) if key is not None else None
+
+    def _preceding_reader(self, register_space, offset, size):
+        """The last observed operation before the call on a straight path
+        (each crossed block edge the only one both ways; no call, branch or
+        return on the way; this shape's push skipped) that reads exactly the
+        stack-pointer register, with no write of any byte of it in [it, the
+        call) -- its key, or None."""
+        from .call_seeds import _operation_key
+        from .pcode_blocks import instruction_key
+
+        caller = self.caller
+        graph = caller._pcode_graph()
+        if graph is None:
+            return None
+        space, address, ordinal = _key_parts(self.call)
+        if address is None:
+            return None
+        call_instruction = f"{space}:{address:x}"
+        instructions = {instruction_key(row.address): row for row in caller.unit.observation.instructions}
+        row = instructions.get(call_instruction)
+        if row is None:
+            return None
+        block = graph.block_of(row.address, ordinal)
+        if block is None:
+            return None
+        blocks = {item.key: item for item in graph.blocks}
+        predecessors: dict = {}
+        for item in graph.blocks:
+            for successor in item.successors:
+                predecessors.setdefault(successor, []).append(item.key)
+        projection = caller._projection(self.call)
+        transient = frozenset(projection.transient_operation_keys) if projection is not None else frozenset()
+        barriers = ("CALL", "CALLIND", "CALLOTHER", "BRANCH", "CBRANCH", "BRANCHIND", "RETURN")
+        stop, budget = ordinal, 256
+        while True:
+            instruction = instructions[instruction_key(block.instruction)]
+            for index in range(stop - 1, block.start - 1, -1):
+                operation = instruction.operations[index]
+                if _operation_key(instruction.address, index, operation.opcode) in transient:
+                    continue
+                if operation.opcode in barriers:
+                    return None
+                output = operation.output
+                if output is not None and output.kind is VarnodeKindCode.REGISTER \
+                        and output.coordinate.space_id == register_space \
+                        and output.coordinate.byte_offset < offset + size \
+                        and offset < output.coordinate.byte_offset + output.byte_size:
+                    return None   # (a write of it, the reading operation's own included)
+                if any(item.kind is VarnodeKindCode.REGISTER and item.coordinate.space_id == register_space
+                       and item.coordinate.byte_offset == offset and item.byte_size == size
+                       for item in operation.inputs):
+                    return _operation_key(instruction.address, index, operation.opcode)
+                budget -= 1
+                if budget <= 0:
+                    return None
+            sources = predecessors.get(block.key, ())
+            if block.key == graph.entry or len(sources) != 1 or len(blocks[sources[0]].successors) != 1:
+                return None
+            block = blocks[sources[0]]
+            stop = block.stop
+
+    def _memory_read(self, load):
+        rows = [read for read in self.caller._staged_reads(self.loads[load])
+                if read.span.object_id.kind in _MEMORY_OBJECTS and read.span.size == load.size]
+        return rows[0] if len(rows) == 1 else None
+
+    def _level(self, load):
+        """(reason or None, assumption or None) for one loaded level."""
+        found = self._levels.get(load)
+        if found is not None:
+            return found
+        found = self._levels[load] = self._check_level(load)
+        return found
+
+    def _check_level(self, load):
+        from .normalize import _row_reaches_debt
+
+        push = -self.delta
+        if load.pointer is None and load.anchor is not None and (load.anchor.start, load.anchor.size) == self.stack:
+            # a direct slot: the overlay is [0, push) in callee entry-SP coordinates
+            if load.displacement < push and 0 < load.displacement + load.size:
+                return "return address", None
+            return None, None
+        key = self.loads.get(load)
+        node = None if key is None else self.caller.graph.node_for_key(f"op:{key}")
+        if node is None:
+            return "unbound memory", None
+        if _row_reaches_debt(self.caller.graph, node):
+            return "memory: address debt", None
+        read = self._memory_read(load)
+        if read is None:
+            return "unbound memory", None
+        pointer = self._stack_pointer()
+        if pointer and read.span.object_id == pointer[0]:
+            overlay = self.overlay()
+            if overlay is None:
+                return "memory: no stack witness", None
+            if read.span.start < overlay[2] and overlay[1] < read.span.end:
+                return "return address", None
+            return None, None
+        if read.span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
+            if self.caller.normalized.assumes_globals_disjoint_from_stack:
+                return None, "globals-disjoint-from-stack"
+        return "memory: overlay unproven", None
 
     def _stack_value(self, builder):
         """An op node: the caller's stack-pointer read at the call + delta."""
@@ -170,10 +348,39 @@ class _Binding:
 
         place = anchored_span(span, self.anchors)
         classes: list = []
+        labels: set = set()   # (assumptions a binding rests on)
         if place is None:
             classes = ["unbound memory"] * span.size
-        elif place.pointer is not None or place.anchor is None                 or (place.anchor.start, place.anchor.size) != self.stack:
-            classes = ["memory: overlay unproven"] * span.size
+        elif place.pointer is not None or place.anchor is None \
+                or (place.anchor.start, place.anchor.size) != self.stack:
+            # (increment 3) every pointer slot, then the target: a debt-free
+            # caller load outside the overlay
+            slots, item = [], place.pointer
+            while item is not None:
+                slots.append(item)
+                item = item.pointer
+            reason = None
+            for slot in reversed(slots):
+                reason, label = self._level(slot)
+                if label is not None:
+                    labels.add(label)
+                if reason is not None:
+                    break
+            if reason is not None:
+                classes = [reason] * span.size
+            else:
+                for index in range(span.size):
+                    displacement = place.displacement + index
+                    load = next((item for item in self.loads if item.pointer == place.pointer
+                                 and item.anchor == place.anchor and item.space_id == place.space_id
+                                 and item.displacement <= displacement < item.displacement + item.size), None)
+                    if load is None:
+                        classes.append("unbound memory")
+                        continue
+                    reason, label = self._level(load)
+                    if label is not None:
+                        labels.add(label)
+                    classes.append(load if reason is None else reason)
         else:
             push = -self.delta
             for index in range(span.size):
@@ -215,6 +422,8 @@ class _Binding:
             record["gaps"] = gaps
         if used:
             record["loaded_by"] = used
+        if labels:
+            record["assumptions"] = sorted(labels)
         record = builder._new(node, record)
         return record["id"]
 
@@ -350,6 +559,8 @@ class _Builder:
         self.call_ids: list = []
         self._actions = None
         self._transitions = None
+        self._projections: dict = {}
+        self._pcode = None
         entry = unit.scopes.function.entry
         self.function_key = f"{entry.space_id:x}:{entry.byte_offset:x}"
         self.demands = demands
@@ -928,14 +1139,32 @@ class _Builder:
         if self._transitions is None:
             from .observed_call_state import observed_call_state_projections
 
-            self._transitions = {row.call_operation_key: row.memory_transition
+            self._projections = {row.call_operation_key: row
                                  for row in observed_call_state_projections(self.unit.observation)}
+            self._transitions = {key: row.memory_transition for key, row in self._projections.items()}
         transition = self._transitions.get(call_key)
         if transition is None:
             return None
         if delta:
             return transition.displacement_delta
         return transition.caller_base.byte_offset, transition.caller_base.byte_size
+
+    def _projection(self, call_key):
+        self._stack_base(call_key)
+        return self._projections.get(call_key)
+
+    def _pcode_graph(self):
+        """The function's p-code block graph from its entry (cached), or None."""
+        if self._pcode is None:
+            from .pcode_blocks import build_pcode_block_graph, instruction_key
+
+            entry = self.unit.scopes.function.entry
+            key = f"{entry.space_id:x}:{entry.byte_offset:x}"
+            start = next((row.address for row in self.unit.observation.instructions
+                          if instruction_key(row.address) == key), None)
+            graph = None if start is None else build_pcode_block_graph(self.unit.observation, start)
+            self._pcode = graph if graph is not None and graph.unsupported is None else False
+        return self._pcode or None
 
     def _stitch_reason(self, record):
         """Why a call node is not stitched, or None."""
@@ -999,7 +1228,8 @@ class _Builder:
                               records=self.records, ledger=self.ledger, parent=self,
                               binding=_Binding(self, self._staged_reads(f"{base}~in{tag}"), self._stack_base(base),
                                                self._stack_base(base, delta=True), done.anchors,
-                                               call_load_keys(base, self.proven[base])),
+                                               call_load_keys(base, self.proven[base]), call=base,
+                                               effect=self.proven[base]),
                               path=path, index=self.stitch.index(done.normalized, done.unit))
             outputs = [{"output": _span_dict(span), "part": nested._stitched_output(span, done.summary, instance)}
                        for span in run.writes]

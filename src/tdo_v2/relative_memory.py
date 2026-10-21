@@ -592,9 +592,11 @@ def _final_projector(normalized, observation) -> "_Projector":
     )
 
 
-def stack_offset_at(memory_ssa, observation, scopes, operation_key, varnode, stack_span) -> int | None:
+def stack_offset_at(memory_ssa, observation, scopes, operation_key, varnode, stack_span,
+                    note: bool = True) -> int | None:
     """The value of ``varnode`` (the stack pointer) read by ``operation_key``
-    as an offset from its own entry value, or None."""
+    as an offset from its own entry value, or None. ``note``: record the
+    number as a fact (off for diagnostics: operation records)."""
     operations = {
         _operation_key(instruction.address, ordinal, operation): operation
         for instruction in observation.instructions
@@ -608,7 +610,8 @@ def stack_offset_at(memory_ssa, observation, scopes, operation_key, varnode, sta
     expression = projector._expression_for_input(operation_key, varnode)
     if expression is None or expression.atoms != ((_stable_storage_key(stack_span), 1),):
         return None
-    _note_fact(memory_ssa.function_scope, expression)
+    if note:
+        _note_fact(memory_ssa.function_scope, expression)
     return _signed_wrap(expression.displacement, expression.byte_size)
 
 
