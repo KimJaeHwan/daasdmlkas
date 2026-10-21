@@ -30,6 +30,7 @@ import enum
 import gzip
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -239,6 +240,21 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
     sections = {f"function:{key}:{part}": data for key, item in functions.items() for part, data in item.items()}
     sections.update({f"root:{index}": root for index, root in enumerate(roots)})
     sections.update({f"run:{name}": data for name, data in run_level.items()})
+    if os.environ.get("TDO_V2_FORWARD") == "1":
+        # forward value facts (docs 25.33 F0): nothing in the engine reads them;
+        # recorded only when asked, so forward-off snapshots stay as they were
+        from tdo_v2.forward import forward_facts
+        from tdo_v2.image_info import ReadOnlyImage, load_image_info
+        from tdo_v2.normalize import NormalizedFunction
+
+        info = load_image_info(generation)
+        readonly = ReadOnlyImage(generation, info)             if info is not None and (options or {}).get("assume_readonly_image_constant") else None
+        for key, item in sorted(results.items()):
+            if type(item.normalized) is NormalizedFunction:
+                labels = (*run.assumptions, *item.inherited_assumptions, *item.declared.values())
+                sections[f"forward:{key}"] = encode(forward_facts(
+                    item.normalized, item.unit, readonly_image=readonly, assumptions=labels), f"{key}.forward")
+        meta["forward"] = "F0"
     return _write(out, meta, sections, f"{len(functions)} functions, {len(roots)} roots")
 
 

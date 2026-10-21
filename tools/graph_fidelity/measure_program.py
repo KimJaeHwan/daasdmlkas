@@ -41,6 +41,9 @@ def main() -> int:
     parser.add_argument("--json", type=Path)
     parser.add_argument("--lanes", action="store_true",
                         help="also run the byte-lane oracle (tests/intra/lane_oracle.check_lanes) per function")
+    parser.add_argument("--forward", action="store_true",
+                        help="also check every forward value fact (docs 25.33 F0, tdo_v2.forward) on the runs "
+                             "(tests/intra/forward_oracle.check_forward)")
     parser.add_argument("--models", action="store_true",
                         help="apply the declared external models (win64) and run those library "
                              "functions with their real semantics in the interpreter")
@@ -99,6 +102,12 @@ def main() -> int:
                        assume_globals_disjoint_from_stack=True, assume_debug_break_traps_do_not_return=True)
     results = analyze_units(units, **options)
     totals["analysis_seconds"] = round(time.time() - began, 1)
+    if args.forward:   # (every fact rests on the run's assumptions)
+        from tdo_v2.summary_engine import run_assumptions
+
+        run_labels = run_assumptions(results, home_space=options.get("private_frame_above", 0),
+                                     traps=options.get("assume_debug_break_traps_do_not_return", False),
+                                     pcodeop_models=options.get("pcodeop_models"))
     # every function of the program runs for real (a bound one included)
     program = {
         (unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset): unit.observation
@@ -150,6 +159,23 @@ def main() -> int:
             for row in lanes.missing[:2]:
                 if len(samples) < 6:
                     samples.append((key, "lane " + repr(row)[:200]))
+        if args.forward:
+            from forward_oracle import check_forward
+            from tdo_v2.forward import forward_facts
+
+            facts = forward_facts(item.normalized, item.unit,
+                                  assumptions=(*run_labels, *item.inherited_assumptions, *item.declared.values()))
+            forward = check_forward(item.unit, facts, seeds=range(args.runs), register_pools=pool,
+                                    const_space=const, reg_space=regs, havoc_calls=(regs, sp_offset, sp_size),
+                                    image=image, program=program, externals=externals,
+                                    no_effect_userops=userops, address_bits=address_bits,
+                                    external_abi=external_abi)
+            totals["forward_facts"] += len(facts)
+            totals["forward_checked"] += forward.checked
+            totals["forward_failures"] += len(forward.failures)
+            for row in forward.failures[:2]:
+                if len(samples) < 6:
+                    samples.append((key, "forward " + repr(row)[:200]))
         # bytes calls wrote, checked against the places of their runs
         # (program_oracle: covered / only unevaluable places / failed, failed
         # but explained by a debt), and the footprints of preserving calls
