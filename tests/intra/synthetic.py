@@ -64,6 +64,10 @@ DEFAULT_LAYOUT = Layout()
 # 2M instructions at stride 4; data well above it
 LARGE_LAYOUT = Layout(0x100000, 8 << 20, 0x1000000, 1 << 20)
 
+# the callbacks / frees declaration every model entry carries (docs 25.33):
+# test models run no user code and free nothing
+NO_CALLBACKS = {"callbacks": "none", "callbacks_evidence": "test model", "frees": "none"}
+
 
 # --------------------------------------------------------------------------
 # Varnodes and P-code operations

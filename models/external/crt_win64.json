@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-win64",
-  "version": 6,
+  "version": 7,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
   "notes": "C runtime functions under the Windows x64 convention (args RCX, RDX, R8, R9; result RAX). Register offsets are Ghidra x86-64: RAX 0, RCX 8, RDX 16, RBX 24, RSP 32, RBP 40, RSI 48, RDI 56, R8 128, R9 136, R12-R15 160-184. Preserved: the non-volatile integer registers; XMM and flags are left unknown (sound, less precise). Every entry is a declared assumption.",
@@ -19,6 +19,9 @@
         "from": [[8, 8], [16, 8], [128, 8]],
         "loads": [{"base": [16, 8], "disp": 0, "size": {"reg": [128, 8]}}]
       }],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (MS docs: memcpy, memmove); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved"
     },
     {
@@ -30,6 +33,9 @@
         "from": [[8, 8], [16, 8], [128, 8]],
         "loads": []
       }],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (MS docs: memset); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved"
     },
     {
@@ -41,6 +47,9 @@
         "from": [[8, 8], [16, 8]],
         "loads": [{"base": [16, 8], "disp": 0, "size": 1}]
       }],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (MS docs: strcpy -- the non-_s form has no invalid-parameter handler call); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "clobbered"
     },
     {
@@ -48,23 +57,37 @@
       "notes": "Writes an extent known only at run time (strncpy with n == 0 writes nothing; strcat writes after dst's string): no memory is kept. Returns dst.",
       "registers": [{"write": [0, 8], "from": [[8, 8]]}],
       "memory": [],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (MS docs: strcat); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "clobbered"
     },
     {
       "name": "abort",
       "notes": "Never returns to its caller (C11 7.22.4.1): the paths through it end there. Uses no pointer it receives (observes nothing).",
-      "registers": [], "memory": [], "observes": [], "other_memory": "preserved", "noreturn": true
+      "registers": [], "memory": [], "observes": [],
+      "callbacks": {"registered": ["SIGABRT signal handler (signal / sigaction)", "Windows error reporting per _set_abort_behavior"]},
+      "callbacks_evidence": "ISO C17 7.22.4.1 (raises SIGABRT); MS docs: abort (signal handler, _set_abort_behavior); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
+      "other_memory": "preserved", "noreturn": true
     },
     {
       "name": "longjmp",
       "notes": "Never returns to its caller (C11 7.13.2.1, _Noreturn): only the paths after the call end; the setjmp side is not modeled here (an opaque call). Reads the jmp_buf rcx points to (observes rcx).",
-      "registers": [], "memory": [], "observes": [[8, 8]], "other_memory": "preserved", "noreturn": true
+      "registers": [], "memory": [], "observes": [[8, 8]],
+      "callbacks": {"registered": ["unwind handlers of the frames left (__finally blocks, C++ destructors under MSVC x64 unwinding semantics)"]},
+      "callbacks_evidence": "MS docs: longjmp (x64: uses exception-handling unwinding semantics); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
+      "other_memory": "preserved", "noreturn": true
     },
     {
       "name": "strlen", "aliases": ["strcmp", "strncmp", "memcmp"],
       "notes": "Reads memory of unknown extent: the result is left unknown; memory unchanged.",
       "registers": [],
       "memory": [],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (MS docs: strlen); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved"
     },
     {
@@ -73,6 +96,9 @@
       "registers": [{"write": [0, 8], "from": [], "fresh": true}],
       "memory": [],
       "observes": [],
+      "callbacks": {"registered": ["new handler (_set_new_handler; malloc/realloc call it on failure when _set_new_mode(1))", "CRT allocation hook (_CrtSetAllocHook, debug CRT)"]},
+      "callbacks_evidence": "MS docs: malloc, _set_new_mode, _set_new_handler; MS docs: _CrtSetAllocHook (debug CRT: every allocation call); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved"
     },
     {
@@ -81,6 +107,9 @@
       "registers": [],
       "memory": [],
       "observes": [],
+      "callbacks": {"registered": ["CRT allocation hook (_CrtSetAllocHook, debug CRT)"]},
+      "callbacks_evidence": "MS docs: free (frees its argument's block); _CrtSetAllocHook (debug CRT: the hook runs on every free); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": [[8, 8]],
       "other_memory": "preserved"
     },
     {
@@ -89,6 +118,9 @@
       "registers": [{"write": [0, 8], "from": [[8, 8], [16, 8]], "same_object_as": [8, 8]}],
       "memory": [],
       "observes": [[8, 8]],
+      "callbacks": {"registered": ["new handler (_set_new_handler; malloc/realloc call it on failure when _set_new_mode(1))", "CRT allocation hook (_CrtSetAllocHook, debug CRT)"]},
+      "callbacks_evidence": "MS docs: realloc, _set_new_mode (may free / move the old block); MS docs: _CrtSetAllocHook (debug CRT: every allocation call); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": [[8, 8]],
       "other_memory": "preserved"
     }
   ]

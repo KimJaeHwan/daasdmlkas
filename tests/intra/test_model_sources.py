@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from synthetic import CODE_BASE, R9, RAX, RCX, FunctionBuilder, copy, reg
+from synthetic import NO_CALLBACKS, CODE_BASE, R9, RAX, RCX, FunctionBuilder, copy, reg
 from tdo_v2.image_info import ImageInfo, ImportedSymbol
 from tdo_v2.interprocedural import analyze_units
 from tdo_v2.summary_store import ModelError, load_external_models, load_model_file, model_paths
@@ -34,7 +34,7 @@ def _file(directory, name, entries, source=None, overrides=None, file_id="suppli
 def _identity(name):
     """rax = rcx; no memory."""
     return {"name": name, "registers": [{"write": [0, 8], "from": [[8, 8]]}], "memory": [],
-            "other_memory": "preserved"}
+            **NO_CALLBACKS, "other_memory": "preserved"}
 
 
 SUPPLIED = {"kind": "external", "tool": "other-analyzer", "version": "1.0", "assumptions": ["other-analyzer:tool-trusted"]}

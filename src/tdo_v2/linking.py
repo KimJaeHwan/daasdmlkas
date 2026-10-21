@@ -131,6 +131,23 @@ def declared_models(models):
                                 if all(entry.template is None for entry in item.entries)))
 
 
+def _disabled(switches: dict) -> set:
+    """The registry assumptions a link run with ``switches`` has switched off."""
+    return {name for name, on in (
+        ("globals-disjoint-from-stack", switches["globals_disjoint"]),
+        ("direction-flag-clear", switches["direction_flag"]),
+        ("entry-values-do-not-address-the-new-frame", switches["entry_values_not_frame"]),
+        ("win64-home-space-callee-private",
+         bool(switches["private_frame_above"]) and switches["entry_values_not_frame"]),
+        ("opaque-callees-leave-no-stack-addresses", switches["opaque_no_stack"]),
+        ("debug-break-traps-do-not-return", switches["traps"]),
+        ("import-slots-hold-their-exports", switches["import_slots"]),
+        ("same-result-functions", switches["same_result"]),
+        ("accessor-result-separate", switches["accessor_separate"]),
+        ("registered-handlers-are-not-observed", switches["registered_handlers"]),
+    ) if not on}
+
+
 def profile(*, switches: dict, pcodeop_models, models, language_id: str, abi_tag: str,
             provider_identity: dict, evidence: str | None) -> dict:
     """Everything a linked template depends on besides the DLL itself:
@@ -268,7 +285,7 @@ class Linker:
     def __call__(self, units, image_info, *, external_models, pcodeop_models, private_frame_above: int,
                  traps: bool, globals_disjoint: bool, direction_flag: bool, import_slots: bool = False,
                  entry_values_not_frame: bool = True, same_result: bool = False,
-                 accessor_separate: bool = False, opaque_no_stack: bool = True):
+                 accessor_separate: bool = False, opaque_no_stack: bool = True, registered_handlers: bool = True):
         """(the run's model set with the linked templates, stack evidence
         files). The settings are the run's effective ones (``globals_disjoint``
         after the program's own withdrawal checks): templates are derived with
@@ -296,7 +313,8 @@ class Linker:
                     "globals_disjoint": bool(globals_disjoint), "direction_flag": bool(direction_flag),
                     "import_slots": bool(import_slots), "index_addresses": index_addresses(),
                     "entry_values_not_frame": bool(entry_values_not_frame), "same_result": bool(same_result),
-                    "accessor_separate": bool(accessor_separate), "opaque_no_stack": bool(opaque_no_stack)}
+                    "accessor_separate": bool(accessor_separate), "opaque_no_stack": bool(opaque_no_stack),
+                    "registered_handlers": bool(registered_handlers)}
         identity = self.provider.identity()
         declared = declared_models(models)
         checked = []
@@ -353,7 +371,14 @@ class Linker:
                 symbol = called[(target.library, name)]
                 export = _export_of(exports, name)
                 found = models.lookup(symbol)
-                if found is not None:
+                off = set(found[1].inherited) & _disabled(switches) if found is not None else set()
+                if found is not None and (found[1].refusal is not None or off):
+                    # (not replaced by a derived template: two models of one
+                    # import conflict; the call stays opaque, as the hand
+                    # model's application would be refused)
+                    why = found[1].refusal or f"rests on {', '.join(sorted(off))}, switched off in this run"
+                    self._row(target, name, "model-unusable", f"{found[1].label}: {why}")
+                elif found is not None:
                     self._row(target, name, "model", found[1].label)
                 elif export.kind == "data":
                     self._row(target, name, "data", "a data export: nothing to derive")
@@ -381,18 +406,7 @@ class Linker:
                              pcodeop_models)
         linked = with_model_files(models, self.report.template_files)
         namespace = units[0].scopes.program.evidence.translation_namespace
-        disabled = {name for name, on in (
-            ("globals-disjoint-from-stack", switches["globals_disjoint"]),
-            ("direction-flag-clear", switches["direction_flag"]),
-            ("entry-values-do-not-address-the-new-frame", switches["entry_values_not_frame"]),
-            ("win64-home-space-callee-private",
-             bool(switches["private_frame_above"]) and switches["entry_values_not_frame"]),
-            ("opaque-callees-leave-no-stack-addresses", switches["opaque_no_stack"]),
-            ("debug-break-traps-do-not-return", switches["traps"]),
-            ("import-slots-hold-their-exports", switches["import_slots"]),
-            ("same-result-functions", switches["same_result"]),
-            ("accessor-result-separate", switches["accessor_separate"]),
-        ) if not on}
+        disabled = _disabled(switches)
         if self._preflight(linked, pcodeop_models=pcodeop_models, private_frame_above=switches["private_frame_above"],
                            language=(namespace.language_id, namespace.major_version, namespace.minor_version),
                            disabled=disabled):
@@ -455,7 +469,8 @@ class Linker:
                 assume_globals_disjoint=switches["globals_disjoint"], direction_flag=switches["direction_flag"],
                 import_slots=switches["import_slots"], entry_values_not_frame=switches["entry_values_not_frame"],
                 same_result=switches["same_result"], accessor_separate=switches["accessor_separate"],
-                opaque_no_stack=switches["opaque_no_stack"], per_export=True, log=lambda line: self.log(f"[link]   {line}"))
+                opaque_no_stack=switches["opaque_no_stack"], registered_handlers=switches["registered_handlers"],
+                per_export=True, log=lambda line: self.log(f"[link]   {line}"))
             for raw in files.values():
                 if raw["source"]["sha256"] != exports.sha256:
                     raise ProviderError(f"the exported Bundle is of {raw['source']['sha256'][:12]}, "

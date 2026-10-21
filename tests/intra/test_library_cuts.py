@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from synthetic import (
+    NO_CALLBACKS,
     CODE_BASE, R9, RAX, RBX, RCX, FunctionBuilder, copy, operation_node_at, program_units, reg, slice_from,
 )
 from tdo_v2.image_info import ExportedSymbol, ImageInfo
@@ -19,7 +20,7 @@ MANGLED = "?Helper@@YA_K_K@Z"
 
 def _models(tmp_path, internal=True):
     entry = {"name": "Helper", "original_names": [MANGLED], "registers": [{"write": [0, 8], "from": [[8, 8]]}],
-             "memory": [], "other_memory": "preserved"}
+             "memory": [], **NO_CALLBACKS, "other_memory": "preserved"}
     if internal:
         entry["internal"] = True
     raw = {"format_version": 1, "kind": "declared", "id": "synth", "version": 1,

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from synthetic import RAX, RCX, RDX, RSI, FunctionBuilder, copy, program_units, reg, store
+from synthetic import NO_CALLBACKS, RAX, RCX, RDX, RSI, FunctionBuilder, copy, program_units, reg, store
 from test_summary_templates import (
     F, IMAGE, LIBRARY, MANGLED, POINTS, THUNK, WIN64, _caller_writes, _effect, _every_constant_relocates, _hand_file,
     _views,
@@ -127,7 +127,7 @@ class FakeDeriver:
     def __call__(self, generation, library, names, *, file_id, models, pcodeops, stack_evidence,
                  private_frame_above, traps, assume_globals_disjoint, direction_flag, per_export, log,
                  import_slots=False, entry_values_not_frame=True, same_result=False, accessor_separate=False,
-                 opaque_no_stack=True):
+                 opaque_no_stack=True, registered_handlers=True):
         assert per_export
         self.calls.append({"names": sorted(names), "private_frame_above": private_frame_above,
                            "globals": assume_globals_disjoint, "direction_flag": direction_flag,
@@ -170,7 +170,7 @@ def _hand_library_file(directory):
            "language_id": WIN64[0], "abi_tag": WIN64[1], "libraries": [LIBRARY],
            "stack_pointer": [32, 8], "stack_delta": 8, "preserved": [[24, 8], [40, 8], [48, 8], [56, 8]],
            "entries": [{"name": "F4", "original_names": [UNCALLED], "registers": [], "memory": [],
-                        "other_memory": "preserved"}]}
+                        **NO_CALLBACKS, "other_memory": "preserved"}]}
     path = Path(directory) / "lib_hand.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
@@ -503,7 +503,8 @@ def test_a_linked_template_is_applied_as_the_body_would_be(tmp_path):
         "format_version": 1, "kind": "declared", "id": "other-f", "version": 1, "language_id": WIN64[0],
         "abi_tag": WIN64[1], "libraries": ["OTHER2.DLL"], "stack_pointer": [32, 8], "stack_delta": 8,
         "preserved": [[24, 8]], "entries": [{"name": "F", "original_names": [MANGLED], "registers": [],
-                                             "memory": [], "other_memory": "preserved"}]}), encoding="utf-8")
+                                             "memory": [],
+                                             **NO_CALLBACKS, "other_memory": "preserved"}]}), encoding="utf-8")
     # derived with OTHER2.DLL's F loaded (a recorded model of the same name)
     models = load_external_models([_hand_file(hand_dir), other], *WIN64)
     info = ImageInfo("synthetic", (), (ImportedSymbol(LIBRARY, "F", MANGLED, (), ((1, THUNK),)),), (), ())
@@ -541,12 +542,13 @@ def test_a_plain_model_matching_a_recorded_name_without_its_underscore_blocks_th
         "format_version": 1, "kind": "declared", "id": "x-foo", "version": 1, "language_id": WIN64[0],
         "abi_tag": WIN64[1], "libraries": ["X.DLL"], "stack_pointer": [32, 8], "stack_delta": 8,
         "preserved": [[24, 8]], "entries": [{"name": "_foo", "original_names": ["_foo"], "registers": [],
-                                             "memory": [], "other_memory": "preserved"}]}), encoding="utf-8")
+                                             "memory": [],
+                                             **NO_CALLBACKS, "other_memory": "preserved"}]}), encoding="utf-8")
     plain = tmp_path / "plain_foo.json"
     plain.write_text(json.dumps({
         "format_version": 1, "kind": "declared", "id": "plain-foo", "version": 1, "language_id": WIN64[0],
         "abi_tag": WIN64[1], "stack_pointer": [32, 8], "stack_delta": 8, "preserved": [[24, 8]],
-        "entries": [{"name": "foo", "registers": [], "memory": [], "other_memory": "preserved"}]}),
+        "entries": [{"name": "foo", "registers": [], "memory": [], **NO_CALLBACKS, "other_memory": "preserved"}]}),
         encoding="utf-8")
     models = load_external_models([_hand_file(hand_dir), qualified], *WIN64)
     info = ImageInfo("synthetic", (), (ImportedSymbol(LIBRARY, "F", MANGLED, (), ((1, THUNK),)),), (), ())

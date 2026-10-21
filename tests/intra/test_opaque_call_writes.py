@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from synthetic import (
-    CODE_BASE, DATA_BASE, R8, R9, RBX, RCX, RDX, RSI, RSP, FunctionBuilder, add, const, copy, load,
+    NO_CALLBACKS, CODE_BASE, DATA_BASE, R8, R9, RBX, RCX, RDX, RSI, RSP, FunctionBuilder, add, const, copy, load,
     operation_node_at, program_units, reg, slice_from, store, tmp,
 )
 from tdo_v2.image_info import ImageInfo, ImportedSymbol
@@ -23,7 +23,7 @@ WIN64 = ("x86:LE:64:default", "win64")
 
 def _file(tmp_path, memory, other_memory="preserved"):
     entry = {"name": "fill", "registers": [{"write": [0, 8], "from": [[8, 8]]}], "memory": memory,
-             "other_memory": other_memory, "observes": [[8, 8]]}
+             **NO_CALLBACKS, "other_memory": other_memory, "observes": [[8, 8]]}
     raw = {"format_version": 1, "kind": "declared", "id": "opaque-test", "version": 1,
            "language_id": WIN64[0], "abi_tag": WIN64[1], "stack_pointer": [32, 8], "stack_delta": 8,
            "preserved": [[24, 8], [40, 8], [48, 8], [56, 8]], "entries": [entry]}

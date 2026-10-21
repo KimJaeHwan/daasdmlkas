@@ -131,13 +131,16 @@ def analyze_frozen_bundle_with_summaries(
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
     model_bindings=(),
+    assume_registered_handlers_not_observed: bool = True,
 ) -> EngineRun:
     """``assume_same_result_functions``: the named assumption
     same-result-functions (off by default; model entries with ``same_result``);
     ``assume_accessor_result_separate``: accessor-result-separate (off by
     default; their ``result_separate_from_reads`` extents);
     ``assume_accessor_private_state``: accessor-private-state (off by
-    default); ``model_bindings``: ``summary_store.ModelBinding`` files for
+    default); ``assume_registered_handlers_not_observed``:
+    registered-handlers-are-not-observed (on by default: model entries
+    declaring callbacks.registered apply); ``model_bindings``: ``summary_store.ModelBinding`` files for
     this binary's unexported functions (docs 25.20 F).
     ``origin_witnesses``: put per-root origin witnesses (diagnostics,
     ``origin_witnesses``) in ``RootSlice.explanation``.
@@ -196,6 +199,7 @@ def analyze_frozen_bundle_with_summaries(
             assume_accessor_result_separate=assume_accessor_result_separate,
             assume_accessor_private_state=assume_accessor_private_state,
             model_bindings=model_bindings,
+            assume_registered_handlers_not_observed=assume_registered_handlers_not_observed,
         )
 
 
@@ -220,6 +224,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
     model_bindings=(),
+    assume_registered_handlers_not_observed: bool = True,
 ) -> EngineRun:
     """The summary engine on already-admitted evidences (the in-memory path:
     synthetic programs, docs 25.30 K2) -- the same analysis as
@@ -247,6 +252,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
         assume_accessor_result_separate=assume_accessor_result_separate,
         assume_accessor_private_state=assume_accessor_private_state,
         model_bindings=model_bindings,
+        assume_registered_handlers_not_observed=assume_registered_handlers_not_observed,
     )
 
 
@@ -270,6 +276,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
     model_bindings=(),
+    assume_registered_handlers_not_observed: bool = True,
 ) -> EngineRun:
     """The post-admission body of the summary engine (unchanged)."""
     from .integration.configured_boundary_demands import (
@@ -386,7 +393,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear,
             import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame,
             opaque_no_stack=assume_opaque_callees_leave_no_stack_addresses,
-            same_result=assume_same_result_functions, accessor_separate=assume_accessor_result_separate)
+            same_result=assume_same_result_functions, accessor_separate=assume_accessor_result_separate,
+            registered_handlers=assume_registered_handlers_not_observed)
         linked_evidence = tuple(load_stack_evidence(path) for path in linked_evidence)
         if linked_evidence:
             # a switch in a linked library withdraws the assumption for the run
@@ -415,6 +423,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         assume_accessor_result_separate=assume_accessor_result_separate,
         assume_accessor_private_state=assume_accessor_private_state,
         model_bindings=tuple(model_bindings),
+        assume_registered_handlers_not_observed=assume_registered_handlers_not_observed,
         record_provenance=record_provenance,
     )
     assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,

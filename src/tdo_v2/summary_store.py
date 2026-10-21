@@ -69,6 +69,21 @@ only under that assumption.
 ...]`` or ``["*"]`` -- a call of this entry leaves those accessors' hidden
 state unchanged (its transitive effects, callbacks included); every other
 call changes it.
+``callbacks`` / ``callbacks_evidence`` / ``frees`` (per entry; docs 25.33 --
+every model file of this repository declares them, a test checks it): what
+user code the function runs and what it frees, audited from its documented
+behaviour. ``callbacks``: ``"none"`` or ``{"registered": [mechanism, ...],
+"invokes": [register slice, ...]}`` -- ``registered``: handlers registered
+earlier that the function may run (a new handler, a signal handler, an
+allocator object's virtual functions, ...): the entry rests on the named
+assumption registered-handlers-are-not-observed (reported per use; off: the
+entry is not applied); ``invokes``: code pointers it calls (not applied --
+the call stays opaque -- until callbacks are composed). ``callbacks_evidence``:
+the audit's documentation reference, date and reviewer. ``frees``:
+``"none"`` or the register slices whose pointed-to block the function frees
+or may move. An entry declaring none of the three is loaded but never
+applied (``ModelEntry.refusal``), so models from other directories keep
+loading.
 
 Matching an import: a file listing ``libraries`` (e.g. a C++ engine DLL)
 matches only imports of one of those libraries whose original (mangled) name
@@ -163,6 +178,12 @@ class ModelEntry:
     register_loads: tuple = ()
     # result_separate_from_reads extent (bytes), or None
     separate_extent: int | None = None
+    # callbacks / frees (docs 25.33): registered handler mechanisms, code
+    # pointer registers it calls, register slices whose block it frees;
+    # None: not declared
+    callbacks_registered: tuple[str, ...] = ()
+    callbacks_invokes: tuple[tuple[int, int], ...] = ()
+    frees: tuple[tuple[int, int], ...] | None = None
 
     @property
     def model_id(self) -> str:
@@ -266,6 +287,44 @@ def _access(raw, what) -> Access:
     return Access(_slice(raw["base"], f"{what} base"), raw["disp"], extent)
 
 
+def _callbacks(item, path):
+    """(registered mechanisms, invoked code pointer slices, freed slices | None,
+    refusal | None) of a declared entry's callbacks / callbacks_evidence /
+    frees (docs 25.33)."""
+    keys = {"callbacks", "callbacks_evidence", "frees"} & set(item)
+    if not keys:
+        return (), (), None, "callbacks / frees not declared (callbacks, callbacks_evidence, frees)"
+    if len(keys) != 3:
+        raise ModelError(f"{path}: {item['name']}: callbacks, callbacks_evidence and frees go together")
+    evidence = item["callbacks_evidence"]
+    if type(evidence) is not str or not evidence.strip():
+        raise ModelError(f"{path}: {item['name']}: callbacks_evidence names the audit (reference, date, reviewer)")
+    callbacks = item["callbacks"]
+    registered, invokes = (), ()
+    if callbacks != "none":
+        if type(callbacks) is not dict or not callbacks or set(callbacks) - {"registered", "invokes"}:
+            raise ModelError(f"{path}: {item['name']}: callbacks is \"none\" or {{registered, invokes}}")
+        mechanisms = callbacks.get("registered", [])
+        if type(mechanisms) is not list or any(type(name) is not str or not name for name in mechanisms):
+            raise ModelError(f"{path}: {item['name']}: callbacks.registered lists mechanism names")
+        registered = tuple(mechanisms)
+        pointers = callbacks.get("invokes", [])
+        if type(pointers) is not list:
+            raise ModelError(f"{path}: {item['name']}: callbacks.invokes lists register slices")
+        invokes = tuple(_slice(s, "invoked code pointer") for s in pointers)
+        if not registered and not invokes:
+            raise ModelError(f"{path}: {item['name']}: empty callbacks: use \"none\"")
+    frees = item["frees"]
+    if frees == "none":
+        frees = ()
+    elif type(frees) is list and frees:
+        frees = tuple(_slice(s, "freed pointer") for s in frees)
+    else:
+        raise ModelError(f"{path}: {item['name']}: frees is \"none\" or register slices")
+    refusal = "invokes callbacks (not composed yet)" if invokes else None
+    return registered, invokes, frees, refusal
+
+
 def load_model_file(path: str | Path) -> ModelFile:
     import hashlib
 
@@ -290,7 +349,8 @@ def load_model_file(path: str | Path) -> ModelFile:
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
                    "original_names", "internal", "assumptions", "noreturn", "same_result",
-                   "preserves_accessor_state", "result_separate_from_reads", "omits_private_writes"}
+                   "preserves_accessor_state", "result_separate_from_reads", "omits_private_writes",
+                   "callbacks", "callbacks_evidence", "frees"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
             raise ModelError(f"{path}: entry fields must be {sorted(allowed)}")
         if item["other_memory"] not in ("preserved", "clobbered"):
@@ -346,6 +406,7 @@ def load_model_file(path: str | Path) -> ModelFile:
         if type(preserving) is not list or any(
                 type(name) is not str or (name != "*" and name.count("/") != 1) for name in preserving):
             raise ModelError(f"{path}: {item['name']}: preserves_accessor_state lists \"<file id>/<entry>\" or \"*\"")
+        registered, invokes, frees, refusal = _callbacks(item, path)
         names = (item["name"], *item.get("aliases", ()))
         entries.append(ModelEntry(raw["id"], raw["version"], item["name"], tuple(names), registers, memory,
                                   item["other_memory"] == "preserved", fresh,
@@ -354,12 +415,15 @@ def load_model_file(path: str | Path) -> ModelFile:
                                   tuple(item.get("original_names", ())), same_object,
                                   source_kind=source["kind"], inherited=(*source.get("assumptions", ()), *_assumption_labels(
                                       item.get("assumptions", []), path, f"{item['name']}: assumptions"),
-                                      *(("accessor-private-state",) if item.get("omits_private_writes") else ())),
+                                      *(("accessor-private-state",) if item.get("omits_private_writes") else ()),
+                                      *(("registered-handlers-are-not-observed",) if registered else ())),
                                   identity=source["sha256"][:12] if source["kind"] == "derived" else "",
                                   internal=item.get("internal", False), unknown_memory=unknown_memory,
                                   noreturn=item.get("noreturn", False), same_result=same_result,
                                   preserves_accessor_state=tuple(preserving), register_loads=register_loads,
-                                  separate_extent=None if separate is None else separate["extent"]))
+                                  separate_extent=None if separate is None else separate["extent"],
+                                  callbacks_registered=registered, callbacks_invokes=invokes, frees=frees,
+                                  refusal=refusal))
     libraries = tuple(str(item).upper() for item in raw.get("libraries", ()))
     if libraries and any(not entry.original_names for entry in entries):
         raise ModelError(f"{path}: a file with libraries matches by original_names only")

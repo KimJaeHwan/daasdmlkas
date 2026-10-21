@@ -13,6 +13,7 @@ import pytest
 import test_graph_fidelity as fidelity
 from program_oracle import check_program
 from synthetic import (
+    NO_CALLBACKS,
     CODE_BASE, DATA_BASE, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, REG, RIP, RSI, RSP, FunctionBuilder, add, const, copy,
     load, op, operation_node_at, program_units, ram, reg, slice_from, store, sub, tmp,
 )
@@ -35,7 +36,7 @@ SLOT = {"base": [RCX, 8], "disp": 0, "size": 8}
 
 def _get(**changes):
     entry = {"name": "GetObj", "registers": [{"write": [RAX, 8], "from": [[RCX, 8]], "loads": [SLOT]}],
-             "memory": [], "other_memory": "preserved", "observes": [[RCX, 8]],
+             "memory": [], **NO_CALLBACKS, "other_memory": "preserved", "observes": [[RCX, 8]],
              "same_result": {"result": [RAX, 8], "inputs": [], "reads": [SLOT], "nonstack": True}}
     entry.update(changes)
     return entry
@@ -43,8 +44,8 @@ def _get(**changes):
 
 ENTRIES = [
     _get(),
-    {"name": "Touch", "registers": [], "memory": [], "other_memory": "preserved", "observes": []},
-    {"name": "Keep", "registers": [], "memory": [], "other_memory": "preserved", "observes": [],
+    {"name": "Touch", "registers": [], "memory": [], **NO_CALLBACKS, "other_memory": "preserved", "observes": []},
+    {"name": "Keep", "registers": [], "memory": [], **NO_CALLBACKS, "other_memory": "preserved", "observes": [],
      "preserves_accessor_state": ["acc-test/GetObj"]},
 ]
 
@@ -367,7 +368,7 @@ def test_the_summary_boundary_drops_the_identity(tmp_path):
 
 
 def test_a_preservation_claim_must_name_an_accessor(tmp_path):
-    entries = [_get(), {"name": "Keep", "registers": [], "memory": [], "other_memory": "preserved",
+    entries = [_get(), {"name": "Keep", "registers": [], "memory": [], **NO_CALLBACKS, "other_memory": "preserved",
                         "observes": [], "preserves_accessor_state": ["acc-test/Touch"]}]
     with pytest.raises(ModelError):
         _models(tmp_path, entries)

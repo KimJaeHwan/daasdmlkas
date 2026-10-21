@@ -6,6 +6,7 @@ None) and is imported under its name -- linked templates of C DLLs (docs
 import json
 from pathlib import Path
 
+from synthetic import NO_CALLBACKS
 from tdo_v2.image_info import ImportedSymbol
 from tdo_v2.summary_store import load_external_models
 
@@ -17,7 +18,7 @@ def _library_file(directory, library, original_names):
            "language_id": WIN64[0], "abi_tag": WIN64[1], "libraries": [library],
            "stack_pointer": [32, 8], "stack_delta": 8, "preserved": [[24, 8], [40, 8], [48, 8], [56, 8]],
            "entries": [{"name": "f", "original_names": list(original_names), "registers": [], "memory": [],
-                        "other_memory": "preserved"}]}
+                        **NO_CALLBACKS, "other_memory": "preserved"}]}
     path = Path(directory) / "lib.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     return load_external_models([path], *WIN64)

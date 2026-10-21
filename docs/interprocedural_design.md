@@ -2259,6 +2259,17 @@ CALLIND는 이동이 아니라 호출. 요약 템플릿에 이 출구 필드(판
 분석으로 만든 모델은 본문의 간접 호출이 이미 opaque라 선언 불필요; 다른 곳에서 받은 모델에 칸이 없으면 그 호출은 opaque. 결과를
 바꾸는 점검 수정(콜백을 부르는 모델, 받은 모델의 opaque, `frees`)은 F0 전에 별도 커밋과 새 기준선으로. `invokes`의 합성은 F5.
 
+**0단계 결과(모델 점검, 설계 6차·구현 Astra 3차·Fable 2차)**: 사용자 결정(2026-10-21) — 점검에서 등록된 핸들러를 부르는 모델이
+여럿 나와(MSVC malloc/realloc의 new handler, 디버그 CRT 할당 훅, abort의 SIGABRT 핸들러, longjmp의 unwind 처리기, glibc 할당 훅,
+UE의 GMalloc·에러 처리기, TObjectPtr 해석기) 그것들을 opaque로 만드는 대신 좁은 가정 하나로 드러냄: `registered-handlers-are-not-observed`
+(switch, 기본 켬; 핸들러의 모든 효과 — 읽기·탈출·해제·결과·쓰기·흐름, 그것이 부르는 것까지 — 가 모델 계약 안, 프로그램 데이터를 싱크로
+보내지 않음, longjmp로 빠져나가지 않음; 끄면 그 모델은 적용 안 함 — import 호출 opaque, 바인딩·내부 잘림은 몸체 분석). 모델 항목마다
+`callbacks`(none | registered | invokes) / `callbacks_evidence` / `frees`, 셋 다 없으면 불러오되 적용 안 함(다른 디렉터리 모델 호환), invokes는
+적용 안 함(F5까지), 저장소 모델은 테스트가 선언을 강제. 거부·꺼진 가정 모델은 네 적용 경로 모두에서 빠지고, 연결에서는 대신 만들지 않고
+보고(opaque). 스위치는 연결·템플릿 생성까지 전달. ENGINE_SEMANTICS_VERSION 12, FString 템플릿 다시 만듦(요약 바이트 동일). 검증: 분석
+결과 그대로 — 스냅샷은 가정 표시만 다르고, UE accessor 두 스냅샷의 나머지 차이(같은 결과 원자의 식별 해시와 그 순서)는 모델 파일
+해시·버전만 예전 값으로 되돌리면 0(`.census6/audit_identity_probe.py`), 시드 고정 작업량·장부 7개 Bundle 같음. 새 기준선 `audit1`.
+
 **사실·검증**: `Fact(id, subject, context, claim, evidence, requires, fingerprints)`(25.18의 6번), id는 실행마다 같은 순서로
 정해짐; 실행의 사실은 스냅샷의 새 단면(정방향 끔이면 없음, 나머지 단면 같음). 검증기: p-code 해석기(함수 단위·프로그램 모드)로
 공개된 값·대상 사실을 구체 실행에서 확인(값이 집합 안, 도달한 대상이 집합 안), 돌연변이(줄인 집합) 거부, 실행이 어긴 가정에

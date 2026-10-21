@@ -73,7 +73,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                    traps: bool = True, assume_globals_disjoint: bool = True, direction_flag: bool = False,
                    import_slots: bool = False, per_export: bool = False, log=print,
                    entry_values_not_frame: bool = True, same_result: bool = False,
-                   accessor_separate: bool = False, opaque_no_stack: bool = True):
+                   accessor_separate: bool = False, opaque_no_stack: bool = True,
+                   registered_handlers: bool = True):
     """(model file dict, {export name: refusal reason}, export names the
     Bundle does not export) -- the templates of ``export_names`` of the
     library Bundle at ``generation``, derived with the given analysis
@@ -148,7 +149,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
         targets = {exports[name] for name in group if exports[name] in by_key}
         # the targets' closure, cut at internal models (the targets themselves kept)
         cuts = ip._model_cuts({key: unit for key, unit in by_key.items() if key not in targets},
-                              info, models, library, set())
+                              info, models, library,
+                              set() if registered_handlers else {"registered-handlers-are-not-observed"})
         kept = {key: unit for key, unit in by_key.items() if key not in cuts}
         reach, reached_cuts, pending = set(), set(), list(targets)
         while pending:
@@ -175,6 +177,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_opaque_callees_leave_no_stack_addresses=opaque_no_stack,
                                        assume_same_result_functions=same_result,
                                        assume_accessor_result_separate=accessor_separate,
+                                       assume_registered_handlers_not_observed=registered_handlers,
                                        own_library=library, keep_uncut=frozenset(targets))
         log(f"constants: {len(tracking.proofs[True])} proven image addresses, {len(tracking.proofs[False])} "
             f"fixed numbers, {len(tracking.proofs[None])} not understood (possibly base-dependent)")

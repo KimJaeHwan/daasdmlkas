@@ -9,7 +9,7 @@ from pathlib import Path
 import test_graph_fidelity as fidelity
 from program_oracle import check_program
 from synthetic import (
-    CODE_BASE, R8, R9, RAX, RBX, RCX, RDI, RDX, REG, RSI, RSP, FunctionBuilder, add, const, load,
+    NO_CALLBACKS, CODE_BASE, R8, R9, RAX, RBX, RCX, RDI, RDX, REG, RSI, RSP, FunctionBuilder, add, const, load,
     operation_node_at, program_units, reg, slice_from, store, tmp,
 )
 from tdo_v2.image_info import ImageInfo, ImportedSymbol
@@ -66,7 +66,7 @@ def test_strcpy_keeps_dst0_equal_to_src0():
     results = _analyze(builder)
     item = results["1:1000"]
     ((call, label),) = item.declared.items()
-    assert label == "external-model:crt-win64/strcpy@v6"
+    assert label == "external-model:crt-win64/strcpy@v7"
     assert not item.proven[call].preserves_memory and item.proven[call].memory_runs_final
     assert dict(item.normalized.kept_call_memory)[call]
     first, second = _slice(results, "1:1000", 6), _slice(results, "1:1000", 7)
@@ -147,7 +147,7 @@ def _wide_model(directory):
            "entries": [{"name": "wide", "registers": [],
                         "memory": [{"write": {"base": [8, 8], "disp": 0, "size": 8}, "from": [[8, 8], [16, 8]],
                                     "loads": [{"base": [16, 8], "disp": 0, "size": 8}]}],
-                        "other_memory": "clobbered"}]}
+                        **NO_CALLBACKS, "other_memory": "clobbered"}]}
     path = Path(directory) / "wide.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     return load_external_models([path], "x86:LE:64:default", "win64")

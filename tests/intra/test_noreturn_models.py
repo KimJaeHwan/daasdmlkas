@@ -12,7 +12,7 @@ import pytest
 import test_graph_fidelity as fidelity
 from program_oracle import check_program
 from synthetic import (
-    CODE_BASE, RAX, RBX, RCX, REG, RSP, FunctionBuilder, add, const, copy, op, operation_node_at,
+    NO_CALLBACKS, CODE_BASE, RAX, RBX, RCX, REG, RSP, FunctionBuilder, add, const, copy, op, operation_node_at,
     program_units, ram, reg, slice_from, tmp,
 )
 from tdo_v2.image_info import ImageInfo, ImportedSymbol
@@ -98,7 +98,7 @@ def test_the_abort_model_loads_with_noreturn():
     ({"registers": [], "memory": [], "observes": [], "noreturn": 1}, "not a boolean"),
 ])
 def test_a_noreturn_entry_is_validated(tmp_path, entry, problem):
-    item = {"name": "f", "other_memory": "preserved", "noreturn": True, **entry}
+    item = {"name": "f", **NO_CALLBACKS, "other_memory": "preserved", "noreturn": True, **entry}
     raw = {"format_version": 1, "kind": "declared", "id": "t", "version": 1,
            "language_id": "x86:LE:64:default", "abi_tag": "win64", "stack_pointer": [32, 8],
            "stack_delta": 8, "preserved": [], "entries": [item]}
@@ -113,7 +113,7 @@ def test_a_conditional_jump_to_abort_is_no_tail_exit():
     helper = results["1:1000"]
     jump = "1:1008:0:CBRANCH"
     assert helper.summary.tail_exits == () and len(helper.summary.exits) == 1
-    assert helper.declared[jump] == "external-model:crt-win64/abort@v6"
+    assert helper.declared[jump] == "external-model:crt-win64/abort@v7"
     caller = results[f"1:{CALLER:x}"]
     (effect,) = caller.proven.values()  # the helper's summary now applies
     function = caller.normalized

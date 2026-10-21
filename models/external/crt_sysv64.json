@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-sysv64",
-  "version": 6,
+  "version": 7,
   "language_id": "x86:LE:64:default",
   "abi_tag": "sysv64",
   "notes": "C runtime functions under the System V x86-64 convention (args RDI, RSI, RDX, RCX; result RAX). Preserved: RBX, RBP, R12-R15. Every entry is a declared assumption.",
@@ -104,6 +104,9 @@
           ]
         }
       ],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (glibc manual: Copying Strings and Arrays); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved"
     },
     {
@@ -155,6 +158,9 @@
           "loads": []
         }
       ],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (glibc manual); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved"
     },
     {
@@ -206,6 +212,9 @@
           ]
         }
       ],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (glibc manual); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "clobbered"
     },
     {
@@ -230,6 +239,9 @@
         }
       ],
       "memory": [],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (glibc manual); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "clobbered"
     },
     {
@@ -238,6 +250,9 @@
       "registers": [],
       "memory": [],
       "observes": [[56, 8]],
+      "callbacks": {"registered": ["pthread cancellation cleanup handlers of the frames left (glibc _longjmp_unwind)"]},
+      "callbacks_evidence": "glibc setjmp/longjmp.c (_longjmp_unwind); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved",
       "noreturn": true
     },
@@ -247,6 +262,9 @@
       "registers": [],
       "memory": [],
       "observes": [],
+      "callbacks": {"registered": ["SIGABRT signal handler (signal / sigaction)"]},
+      "callbacks_evidence": "glibc debug/stack_chk_fail.c -> __fortify_fail -> abort (raises SIGABRT); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved",
       "noreturn": true
     },
@@ -256,6 +274,9 @@
       "registers": [],
       "memory": [],
       "observes": [],
+      "callbacks": {"registered": ["SIGABRT signal handler (signal / sigaction)"]},
+      "callbacks_evidence": "ISO C17 7.22.4.1; glibc stdlib/abort.c (raises SIGABRT); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved",
       "noreturn": true
     },
@@ -269,6 +290,9 @@
       "notes": "Reads memory of unknown extent: the result is left unknown; memory unchanged.",
       "registers": [],
       "memory": [],
+      "callbacks": "none",
+      "callbacks_evidence": "ISO C17 7.24 string / memory functions: no user code, no allocation (glibc manual); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved"
     },
     {
@@ -289,6 +313,9 @@
       ],
       "memory": [],
       "observes": [],
+      "callbacks": {"registered": ["glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"]},
+      "callbacks_evidence": "glibc manual: Hooks for Malloc (removed in 2.34); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
       "other_memory": "preserved"
     },
     {
@@ -297,6 +324,9 @@
       "registers": [],
       "memory": [],
       "observes": [],
+      "callbacks": {"registered": ["glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"]},
+      "callbacks_evidence": "glibc manual: Hooks for Malloc; free releases its argument's block; audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": [[56, 8]],
       "other_memory": "preserved"
     },
     {
@@ -323,6 +353,9 @@
       ],
       "memory": [],
       "observes": [[56, 8]],
+      "callbacks": {"registered": ["glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"]},
+      "callbacks_evidence": "glibc manual: Hooks for Malloc; realloc may free / move the old block; audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": [[56, 8]],
       "other_memory": "preserved"
     }
   ]

@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 10,
+ "version": 11,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 1,
    "template_version": 2,
-   "semantics_version": 11
+   "semantics_version": 12
   },
   "parameters": {
    "private_frame_above": 40
@@ -29,11 +29,11 @@
   "models": [
    {
     "file": "crt-win64",
-    "sha256": "efb7bd0c11f1f64e978b399d20411e36136c62b4d606d489683b500a03e91e7c"
+    "sha256": "0a20d1bc3ad6404058f58236b839f2696ef426da949b9137034f8dc41aabbbaf"
    },
    {
     "file": "ue-core-win64",
-    "sha256": "475d4395c9b3a19e1871051534f32c88997c5508322f581c4ed054d3c3cb79ee"
+    "sha256": "0c53e03eb5e8f86737a96d4e0814e88de3e38989ff9f5991e3fea65d3bcc9457"
    }
   ],
   "pcodeops": "749146c1d7ef52999c899a6665c763eeedd6bba9c6779c0b694b2bfe183ca076",
@@ -43,17 +43,18 @@
    "entry-values-do-not-address-the-new-frame",
    "win64-home-space-callee-private",
    "debug-break-traps-do-not-return",
-   "external-model:ue-core-win64/FDebug::CheckVerifyFailedImpl@v3",
-   "external-model:ue-core-win64/FMemory::Free@v3",
-   "external-model:ue-core-win64/FMemory::QuantizeSize@v3",
-   "external-model:ue-core-win64/FMemory::Realloc@v3",
-   "external-model:ue-core-win64/UE4Array_Private::OnInvalidArrayNum@v3",
+   "external-model:ue-core-win64/FDebug::CheckVerifyFailedImpl@v4",
+   "external-model:ue-core-win64/FMemory::Free@v4",
+   "external-model:ue-core-win64/FMemory::QuantizeSize@v4",
+   "external-model:ue-core-win64/FMemory::Realloc@v4",
+   "external-model:ue-core-win64/UE4Array_Private::OnInvalidArrayNum@v4",
    "library-internal-model-cuts",
+   "registered-handlers-are-not-observed",
    "ue-core-diagnostics-no-reentrant-callback"
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "660098303165c2f0fd3c8ee5532bd62a4ff813df+dirty",
+   "engine_revision": "fc907f3952ddd1a8b16a0e23c1fcd157d6f25fac+dirty",
    "bundle": "ea65ba0c9345504088f51de08e477313a79135fb99ae07e159816022ec7749aa",
    "index_addresses": true,
    "stack_evidence": [

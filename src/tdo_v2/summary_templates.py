@@ -63,8 +63,10 @@ TEMPLATE_VERSION = 2   # 2: stack_values_out
 # addresses at a LOAD read each candidate place; noreturn longjmp /
 # __stack_chk_fail models; import-slot-bound models carry their label. 11:
 # templates carry opaque-callees-leave-no-stack-addresses when they rest on it
-# (docs 25.29) -- older ones rest on it unlabelled
-ENGINE_SEMANTICS_VERSION = 11
+# (docs 25.29) -- older ones rest on it unlabelled. 12: model entries declare
+# callbacks / frees; templates carry registered-handlers-are-not-observed when
+# derived over entries running registered handlers (docs 25.33)
+ENGINE_SEMANTICS_VERSION = 12
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

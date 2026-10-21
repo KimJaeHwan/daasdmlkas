@@ -226,7 +226,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_same_result_functions=False,
                   assume_accessor_result_separate=False,
                   assume_accessor_private_state=False, model_bindings=(),
-                  record_provenance: dict | None = None) -> dict[str, AnalyzedFunction]:
+                  record_provenance: dict | None = None,
+                  assume_registered_handlers_not_observed=True) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -308,6 +309,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         ("same-result-functions", assume_same_result_functions),
         ("accessor-result-separate", assume_accessor_result_separate),
         ("accessor-private-state", assume_accessor_private_state),
+        ("registered-handlers-are-not-observed", assume_registered_handlers_not_observed),
     ) if not on}
     cuts = _model_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
                        image_info, external_models, own_library, disabled) \
@@ -335,6 +337,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         refused_sites.setdefault(key, {}).update(reasons)
 
     def usable(model_file, entry):
+        if entry.refusal is not None:   # (undeclared callbacks / frees, invoked callbacks, engine version)
+            return entry.refusal
         if entry.template is None:
             return None
         return template_refusal(model_file, entry, external_models=external_models, pcodeop_models=pcodeop_models,
@@ -912,6 +916,10 @@ def _bound_cuts(functions, bindings, disabled, external_models, refusals) -> dic
                 raise ModelError(f"binding {binding.binding_id}: rva {rva:#x} is bound twice")
             seen.add(key)
             model_file, entry = binding.entry(model_id)
+            if entry.refusal is not None:
+                refusals.setdefault(key, {})[f"bound-model@{rva:#x}"] = \
+                    f"{entry.label}: {entry.refusal}: the body is analyzed"
+                continue
             off = set(entry.inherited) & disabled
             if off:
                 refusals.setdefault(key, {})[f"bound-model@{rva:#x}"] = \
@@ -1528,7 +1536,7 @@ def _model_cuts(functions, image_info, external_models, own_library, disabled) -
         for name in names.get(key, ()):
             model = external_models.lookup(ImportedSymbol(library, name, name, (), ()))
             if model is None or not model[1].internal or library not in model[0].libraries \
-                    or set(model[1].inherited) & disabled:
+                    or set(model[1].inherited) & disabled or model[1].refusal is not None:
                 continue
             model_file, entry = model
             found[key] = (model_file, replace(entry, inherited=(*entry.inherited, "library-internal-model-cuts")))

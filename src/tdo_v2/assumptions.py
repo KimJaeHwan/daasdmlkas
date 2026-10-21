@@ -162,6 +162,24 @@ REGISTRY: tuple[Assumption, ...] = (
         "summary_store (model_paths, ExternalModels.lookup), interprocedural._external_sites",
         "external_models", "--no-external-models", "TDO_V2_EXTERNAL_MODELS"),
     Assumption(
+        "registered-handlers-are-not-observed", "switch", True,
+        "A handler a model entry declares under callbacks.registered (a new handler set with "
+        "_set_new_handler / _set_new_mode, a signal handler, an allocator object's virtual functions, error / "
+        "crash handlers, a resolver reached through a function pointer), when the entry runs it, adds nothing to "
+        "the entry's own contract: every effect of the handler and of whatever it calls in turn -- what it reads "
+        "or observes, pointers it keeps or lets escape, blocks it frees, results, writes, control flow -- is "
+        "within what the entry declares; in particular it writes nothing the analysed code reads afterwards, "
+        "reaches no sink with program data, and returns into the entry (no longjmp out of it: a noreturn entry "
+        "stays non-returning). Reported with every use of such an entry. Off: those entries are not applied "
+        "(an import call stays opaque; a bound or library-internal function's body is analysed instead).",
+        "A handler that writes program state (a new handler releasing a cache the program reads), logs or sends "
+        "program buffers, or longjmps out (a SIGABRT handler resuming the program); a custom allocator with "
+        "observable side effects. (A new handler freeing blocks the program still references breaks "
+        "no-use-after-free, not this.)",
+        "summary_store (callbacks.registered -> inherited label), interprocedural (disabled models)",
+        "assume_registered_handlers_not_observed", "--no-assume-registered-handlers-not-observed",
+        "TDO_V2_ASSUME_REGISTERED_HANDLERS_NOT_OBSERVED"),
+    Assumption(
         "opaque-callees-restore-stack-pointer", "reported", True,
         "A call with the observed call shape whose callee is not summarized returns with the stack "
         "pointer restored (summarized callees are checked instead).",
