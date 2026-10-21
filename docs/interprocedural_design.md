@@ -2186,10 +2186,10 @@ MAY_ALIAS_WRITE 간선은 그래프에 저장하지 않고 API가 지금과 같�
 - 남은 것: C9-3 조건이 있는 행(판정 메타데이터를 붙여 설명용으로), 메모리 출력의 잘림 줄이기(not an output run, memory: debt).
   기록: `.census6/stepC9_*`, `c9_stitch_census.py`.
 
-### 25.33 정방향 값 사실과 간접 호출 대상 — 설계 (2026-10-21, 설계 검토 Astra 3차·Fable 3차 승인) [정방향]
+### 25.33 정방향 값 사실과 간접 호출 대상 — 설계 (2026-10-21, 설계 검토 Astra 5차·Fable 5차 승인) [정방향]
 
 사용자 결정(2026-10-21): 정방향 트랙을 시작하고, 간접 호출도 넣음("간접 호출은 설계만" 규칙 해제). 설계 기록:
-`.census6/fwd_design_prompt{,2,3}.md`, 검토 `fwd_design_astra{,2,3}.md`.
+`.census6/fwd_design_prompt{,2,3,4,5}.md`, 검토 `fwd_design_astra{,2,3,4,5}.md`.
 
 **측정(정방향 효과, `.census6/fwd_census.py`·`fwd_detail.py`, 기본 설정·DLL 연결 끔)**: 싱크 루트 243개 중 확실 201, 아님 42.
 조건만 증명하면 풀리는 것 0(z3 단독 효과 없음). 모델 없는 import·외부 호출 18(연결 끔, win32 malloc/realloc·setjmp 모델
@@ -2238,17 +2238,26 @@ writer_conditions는 합집합(한 대상의 조건 실패는 그 조건이 지�
 accessor 주장은 모든 대상이 같을 때만, `extent_registers`는 버림, `memory_runs_final`은 처음엔 항상 거짓, `preserves_accessor_state`
 교집합, `omits_private_writes` OR, 바이트별 읽기·origins·조건 합집합, 값 모르는 대상의 바이트는 모름, noreturn 대상은 출력 후보에서
 빠짐, SP 변화량·tail 변화량이 다르면 스택 복원 안 함. 대상 하나는 지금의 직접 호출과 같음.
-MSVC CFG: `__guard_dispatch_icall_fptr`는 로더가 실행 때 ntdll 디스패처로 바꿔 쓰므로 읽기 전용 이미지 가정은 근거가 아님 — 칸은
-이름이 아니라 load config로 찾고, 이미지의 thunk 본문을 완전히 증명(rax로의 BRANCHIND 하나, 다른 효과 없음, 스택 같음)한 뒤
-실행 때의 교체는 이름 붙은 가정 `cfg-dispatch-calls-target-register`(레지스터·메모리·호출 스택이 직접 `call rax`와 같음, 또는 종료);
-검사 포인터는 `cfg-check-preserves-all-but-r10-r11-flags`(그 밖은 그대로, 또는 종료), thunk 요약 유지·바뀌는 집합은 모름.
-"주소가 노출된 함수 집합"을 상한으로 쓰는 것은 기본 아님 — 가정 `indirect-targets-are-address-taken`(opt-in; RIP 상대 lea·JIT·
-GetProcAddress·함수 중간 대상 같은 한계를 설명에).
+MSVC CFG(설계 4·5차, 사용자 요청으로 가정을 다시 줄임): 동작은 가정하지 않고 분석으로 증명. load config가 가리키는 guard 칸
+(GuardCFCheck/Dispatch, GuardXFGCheck/Dispatch/TableDispatch, CET·EH-continuation 포인터 — 이름이 아니라 load config 필드 목록으로,
+목록에 없는 포인터 필드는 테스트 실패)은 import 칸처럼 읽기 전용 상수 규칙에서 빠짐(이미지의 정적 값으로 읽지 않음). 실행 때 칸의 값은
+이미지 자신의 guard 함수(CFG를 강제하지 않을 때, `jmp rax`) 또는 ntdll의 디스패처(`LdrpDispatchUserCallTarget` 등) — 둘 다 엔진이
+분석(ntdll은 DLL 연결의 내부 함수 경로: PDB 심볼 → RVA, DLL 해시·PDB GUID/age 기록; 후보 하나라도 없거나 거부·분석 실패면 호출
+전체 opaque)하고 두 대상 호출로 합성. 새 가정은 하나: `cfg-dispatch-slot-holds-a-dispatcher`(칸에 그 두 함수 중 하나 — import 칸과
+같은 성격의 로더 동작); 쓰일 때 기존 `derived-model-runtime-matches`·`external-models`·`debug-break-traps-do-not-return`(int 0x29)도
+함께. 분석된 효과(비트맵 읽기, r10/r11/플래그 등 분석이 찾은 그대로)를 유지, 예상 동작으로 대신하지 않음. 필요한 기능: "입구 값으로
+옮겨 감" 출구 — 출구가 span S 그대로를 피연산자로 하는 간접 이동이고 그 지점에서 S가 입구 값 그대로(IDENTITY)임이 증명될 때만;
+요약은 일반 하나(문맥별 특수화 안 함 — 모든 간접 호출이 거치므로), 호출 지점마다 호출자의 S 사실로 대상을 대입(C4 주소 확인, 사실
+없으면 호출 전체 opaque), 옮기는 함수의 효과 뒤 상태에서 대상을 합성, 스택은 호출의 push 한 번(대상의 ret이 그것을 뺌), 본문 안의
+CALLIND는 이동이 아니라 호출. 요약 템플릿에 이 출구 필드(판 올림, 왕복·재배치 테스트, ntdll 디스패처 템플릿이 기존 거부 규칙을
+통과하는지 포함), 기록(C-9)에서는 그 호출의 대상 phi·잘림으로 진단 가능하게.
+"주소가 노출된 함수 집합" 상한 가정은 계획에서 뺌(증명이 아니라 추정 — 실제 대상에서 풀리지 않는 가상 호출이 많을 때 다시 검토).
 외부 모델의 콜백: 지금 모델은 "인자 k를 부름"을 말하지 못해, 함수 포인터를 받는 모델 호출에서 그 간선이 조용히 사라짐(기존
-건전성 빈틈). 모델 스키마에 `callbacks: none | invokes[...] | registers[...]`와 `frees`를 더하고, 동작(문서화된 의미, 미리 등록된
-콜백 포함)으로 점검해 근거(`callbacks_evidence`: 문서 출처·날짜·검토자)와 함께 적음(atexit·qsort·CreateThread·예외 필터·UE
-델리게이트는 none이 될 수 없음); 선언 없는 모델은 쓸 때마다 가정 `models-invoke-no-callbacks`("부를 수 있음")를 보고, 이 가정을
-끄면 선언 없는 모델 호출은 opaque; `invokes`의 합성은 F5.
+건전성 빈틈). 새 가정을 두지 않고 모델 계약으로: 모델 스키마에 `callbacks: none | invokes[...] | registers[...]`와 `frees`를 더하고,
+직접 쓴 모델은 모두 동작(문서화된 의미, 미리 등록된 콜백 포함)으로 점검해 근거(`callbacks_evidence`: 문서 출처·날짜·검토자)와 함께
+적음(atexit·qsort·CreateThread·예외 필터·UE 델리게이트는 none이 될 수 없음); 칸이 없거나 근거 없는 none이면 스키마 테스트 실패.
+분석으로 만든 모델은 본문의 간접 호출이 이미 opaque라 선언 불필요; 다른 곳에서 받은 모델에 칸이 없으면 그 호출은 opaque. 결과를
+바꾸는 점검 수정(콜백을 부르는 모델, 받은 모델의 opaque, `frees`)은 F0 전에 별도 커밋과 새 기준선으로. `invokes`의 합성은 F5.
 
 **사실·검증**: `Fact(id, subject, context, claim, evidence, requires, fingerprints)`(25.18의 6번), id는 실행마다 같은 순서로
 정해짐; 실행의 사실은 스냅샷의 새 단면(정방향 끔이면 없음, 나머지 단면 같음). 검증기: p-code 해석기(함수 단위·프로그램 모드)로
@@ -2256,9 +2265,10 @@ GetProcAddress·함수 중간 대상 같은 한계를 설명에).
 기댄 사실은 실패와 따로 셈. 예산: 정방향 작업은 함수 장부에, K/C/T·widening은 구조 한도(넘으면 TOP, 실패 아님), 정방향 실패는
 그 함수의 사실만 버림; 측정은 "정방향을 켜서만 실패한 함수"를 따로 셈.
 
-**순서**: F0 값 도메인·연산 규칙·함수 안 분석·사실 표·스냅샷 단면·검증기와 성질 테스트·모델 점검(`callbacks`/`frees` 칸, 없으면
-스키마 테스트 실패; 새 칸이 정방향 끔 스냅샷을 바꾸지 않음) — 결과 그대로. F1a 정방향이 증명한 대상 하나를 기존 간접 호출
-반복에 넣음, F1b 여러 대상 합성 + CFG 디스패치. F2 호출 문맥·특수화. F3 객체 분리 + 호출 지점 조건(F2/F3 전에는 "해제 없음"
+**순서**: 모델 점검 커밋(결과를 바꾸는 점검 수정 + 새 기준선)이 먼저. F0 값 도메인·연산 규칙·함수 안 분석·사실 표·스냅샷
+단면·검증기와 성질 테스트·스키마 테스트 — 그 기준선과 결과 그대로. F1a 정방향이 증명한 대상 하나를 기존 간접 호출 반복에 넣음,
+F1b 여러 대상 합성. F2 호출 문맥·특수화·"입구 값으로 옮겨 감" 출구. F2b CFG 디스패치·검사(위, 테스트 사례는 합성 예제 +
+`/guard:cf`로 직접 컴파일한 바이너리; 실제 ntdll은 PDB 다운로드를 허락받은 뒤). F3 객체 분리 + 호출 지점 조건(F2/F3 전에는 "해제 없음"
 증명 경로가 비어 있어 분리는 모두 `no-use-after-free`에 기댐 — 측정 때 가정 수를 그렇게 읽음). F4 주소 범위·범위 쓰기(배열
-3단계, R005, UE 피호출 함수의 불확실 쓰기). F5 모델 콜백 `invokes`, z3 조건 증명(D2), 주소 노출 상한 가정. Python 먼저(의미
+3단계, R005, UE 피호출 함수의 불확실 쓰기). F5 모델 콜백 `invokes`, z3 조건 증명(D2). Python 먼저(의미
 변경), Rust 포팅은 그동안 의미 없는 커널만. 나중 정밀도: 같은 기준의 ptr − ptr = offset 차.
