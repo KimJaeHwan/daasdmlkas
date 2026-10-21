@@ -13,14 +13,43 @@ Only blocks reachable from the entry produce rows, as in the dense code.
 from __future__ import annotations
 
 from bisect import bisect_right
+from heapq import heappop, heappush
 
-from ._sparse_dataflow import DominatorGraph
+from ._sparse_dataflow import DominatorGraph, batching, group_points, lanes_for, solve_lanes
 from .label_sets import LabelUniverse
 from .phases import count as phase_count, enabled as phases_enabled
 from .model import ResolvedStorage
 from .span_geometry import ByteSpan, StorageObjectKind
 
 _MEMORY_KINDS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
+
+
+
+class _Covering:
+    """The labels of the (start, end, label) spans covering an offset, for
+    offsets asked in ascending order: spans enter at their start and leave
+    at their end (a label may have several spans: counted)."""
+
+    def __init__(self, spans) -> None:
+        self.spans = sorted(spans, key=lambda span: span[0])
+        self.next = 0
+        self.ends: list = []    # heap of (end, entry number, label)
+        self.count: dict = {}
+
+    def at(self, offset: int) -> frozenset:
+        while self.next < len(self.spans) and self.spans[self.next][0] <= offset:
+            start, end, label = self.spans[self.next]
+            heappush(self.ends, (end, self.next, label))
+            self.count[label] = self.count.get(label, 0) + 1
+            self.next += 1
+        while self.ends and self.ends[0][0] <= offset:
+            _, _, label = heappop(self.ends)
+            left = self.count[label] - 1
+            if left:
+                self.count[label] = left
+            else:
+                del self.count[label]
+        return frozenset(self.count)
 
 
 def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ...]],
@@ -59,12 +88,15 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
         keeps = preserve_spans.get(object_id, [])
         points = sorted({p for s, e, _ in writes for p in (s, e)} | {p for s, e, _ in keeps for p in (s, e)})
         cache: dict[int, int] = {}
+        # (docs 25.31 K3-t6) the spans covering the current offset, kept by a
+        # sweep over the ascending offsets: the same sets as a scan of every span
+        sweeps = (_Covering(writes), _Covering(keeps))
         for offset in sorted(offsets):
             segment = bisect_right(points, offset)
             index = cache.get(segment)
             if index is None:
-                covering = frozenset(w for s, e, w in writes if s <= offset < e)
-                keeping = frozenset(c for s, e, c in keeps if s <= offset < e)
+                covering = sweeps[0].at(offset)
+                keeping = sweeps[1].at(offset)
                 if object_id.kind in _MEMORY_KINDS:
                     keeping |= memory_keeping  # summarized calls proven to keep memory
                 signature = (covering, keeping)
@@ -140,14 +172,23 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
     replays = [0]
     if counting:
         phase_count("cc_classes", len(reads_by_class))
+    # the classes of one keeping set share every call event: solved together,
+    # each in its own lane (docs 25.31 K3-t5; a class's transfers exist only
+    # while its batch is solved)
+    groups: dict = {}
     for index, needed in reads_by_class.items():
         calls_by_block, call_transfers, call_events = calls_for(class_preserving[index])
         events = kill_events_of(index, calls_by_block)
         class_events[index] = (calls_by_block, events)
         if counting:
             phase_count("cc_class_events", call_events + len(class_writes[index]))   # (calls + kills)
-        transfers = dict(call_transfers)
-        for block_key, rows in events.items():
+        groups.setdefault(class_preserving[index], []).append(index)
+
+    def class_transfers(index):
+        """A class's own rows (its kill blocks): the keeping set's call
+        transfers are the batch's shared rows (K3-t5b)."""
+        transfers = {}
+        for block_key, rows in class_events[index][1].items():
             kills = any(label is None for _, _, label in rows)
             last = max((i for i, (_, _, label) in enumerate(rows) if label is None), default=-1)
             after = 0
@@ -159,8 +200,21 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
                 if label is not None:
                     gens |= 1 << label
             transfers[block_key] = (kills, after, gens)
-        for block_key, value in graph.solve_gen_kill(transfers, needed, empty=0).items():
-            entry_values[(index, block_key)] = value
+        return transfers
+
+    width = len(universe.labels)
+    for keeping, members in groups.items():
+        union = set(calls_for(keeping)[1])
+        for index in members:
+            union.update(class_events[index][1])
+        lanes = lanes_for(width, len(union), group_points(graph, union)) if len(members) > 1 and batching() else 1
+        for first in range(0, len(members), lanes):
+            batch = members[first:first + lanes]
+            solved = solve_lanes(graph, [(class_transfers(index), reads_by_class[index]) for index in batch], width,
+                                 calls_for(keeping)[1])
+            for index, values in zip(batch, solved):
+                for block_key, value in values.items():
+                    entry_values[(index, block_key)] = value
 
     def value_at(index: int, block_key: str, position: int) -> int:
         value = entry_values[(index, block_key)]

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 
-from ._sparse_dataflow import DominatorGraph
+from ._sparse_dataflow import DominatorGraph, batching, group_points, lanes_for, solve_lanes
 from .label_sets import LabelUniverse
 from .phases import count as phase_count, enabled as phases_enabled
 from .model import ResolvedStorage
@@ -154,12 +154,46 @@ def derive_sparse(unit, objects, policy):
             found = shared[owner] = (by_block, transfers, sum(map(len, by_block.values())))
         return found
 
-    for index, blocks_needed in needed.items():
+    # the classes of one owner share every gen event: solved together, each
+    # in its own lane, the owner's shared transfers dropped after its last
+    # batch (docs 25.31 K3-t5; B2-a1b)
+    width = len(universe.labels)
+    batch: list = []   # (index, transfers) of the owner being collected
+    owner_order: dict = {}
+    for index in needed:
+        owner_order.setdefault(_ANY if index is _ANY else class_object[index], []).append(index)
+
+    lanes_of: dict = {}
+
+    def owner_lanes(owner, gen_transfers):
+        """The lane count of the owner's batches, from the union of its
+        classes' transfer blocks and its solver points (Astra: bound the
+        whole batch, not one class)."""
+        found = lanes_of.get(owner)
+        if found is None:
+            members = owner_order[owner]
+            found = 1
+            if len(members) > 1 and batching():
+                union = set(gen_transfers)
+                for item in members:
+                    union.update(block_key for block_key, _, _ in class_kills[item])
+                found = lanes_for(width, len(union), group_points(graph, union))
+            lanes_of[owner] = found
+        return found
+
+    def solve_batch(shared_rows):
+        solved = solve_lanes(graph, [(transfers, needed[index]) for index, transfers in batch], width, shared_rows)
+        for (index, _), values in zip(batch, solved):
+            for block_key, value in values.items():
+                entry_values[(index, block_key)] = value
+        batch.clear()
+
+    for index in (item for members in owner_order.values() for item in members):
+        blocks_needed = needed[index]
         owner = _ANY if index is _ANY else class_object[index]
         gens_by_block, gen_transfers, gen_events = gens_for(owner)
         remaining[owner] -= 1
-        if not remaining[owner]:
-            shared[owner] = (gens_by_block, None, gen_events)
+        last_of_owner = not remaining[owner]
         events: dict[str, list] = {}
         if index is not _ANY:
             for block_key, position, order in class_kills[index]:
@@ -171,7 +205,7 @@ def derive_sparse(unit, objects, policy):
         if counting:
             phase_count("ma_class_events",
                         gen_events + (len(class_kills[index]) if index is not _ANY else 0))   # (gens + kills)
-        transfers = dict(gen_transfers)
+        transfers = {}   # (its own kill rows; the owner's gen transfers are shared, K3-t5b)
         for block_key, rows in events.items():
             kills = any(label is None for _, _, label in rows)
             last = max((i for i, (_, _, label) in enumerate(rows) if label is None), default=-1)
@@ -184,8 +218,11 @@ def derive_sparse(unit, objects, policy):
                 if label is not None:
                     all_gens |= 1 << label
             transfers[block_key] = (kills, after, all_gens)
-        for block_key, value in graph.solve_gen_kill(transfers, blocks_needed, empty=0).items():
-            entry_values[(index, block_key)] = value
+        batch.append((index, transfers))
+        if last_of_owner or len(batch) >= owner_lanes(owner, gen_transfers):
+            solve_batch(gen_transfers)
+        if last_of_owner:
+            shared[owner] = (gens_by_block, None, gen_events)
 
     def value_at(index, block_key: str, position: int) -> int:
         value = entry_values[(index, block_key)]
