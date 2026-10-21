@@ -2107,6 +2107,18 @@ MAY_ALIAS_WRITE 간선은 그래프에 저장하지 않고 API가 지금과 같�
   60k normalize 최고점의 남은 큰 항목: 객체별 gen 사건 146 MB(`_may_alias_sparse`), 행의 writers 튜플 ~170 MB(`may_alias._row`) —
   다음은 B2-a2b(행을 비트로, 승인된 설계)와 gen 사건의 압축. [역방향]
 
+**K3 시간(2026-10-21, 결과 그대로)** — 같은 기계에서 커밋 전후를 각 2회 이상 잼(기계 잡음 단계별 ±25%; `scale_bench`는
+`TDO_V2_*` 환경 변수를 지우므로 비교는 코드를 바꿔서 함).
+- K3-t1(bfca9bb) 레인 슬라이스가 같은 쓰기를 여러 번 풀던 것을 덮인 비트로 한 번만(facade `physical_in_edges`, `virtual_writers`):
+  100k slices 26.1 → 1.2 s.
+- K3-t4(9efe3ae) 데이터만 따라가는 역방향 도달이 아직 방문하지 않은 가상 쓰기만 풀어 봄(쓰기별 방문 비트).
+- K3-t5 + K3-t6(1623ea3) gen/kill 풀이를 클래스마다 따로 하던 것을 레인으로 묶어 한 번에(`solve_lanes`; 레인 수는 64 MiB 예산과
+  CPython 정수 자릿수로 정함, 공유 행은 한 번만 포장), 클래스 서명은 한 번의 쓸기(`_Covering`)로. `TDO_V2_LANE_BATCH=0`이면 예전
+  클래스별 경로(오라클). 100k: lanes 28.4 → 5.3 s, call_clobber 53.9 → 25.8 s, 전체 278.8 → 약 190 s, 최고 1.77 GB.
+- **250k(1623ea3): 2176 s / 6.19 GB**(이전 2960 s). 단계: may_alias 555, call_clobber 460, normalize 433, memory_ssa 250,
+  summarize 179, analyze_units 80, binding 73 s. 목표 10분까지는 Python 안의 국소 수정보다 Rust 포팅(R0~R5, 단계별 Python 대체 경로
+  유지, OS별 wheel)이 맞다고 보고, C-9를 마친 뒤 이 세션에서 순서대로 진행하기로 함(병렬 세션 없음).
+
 ### 25.32 C-9 연산식 이어 붙이기: 호출 결과 자리에 피호출 함수의 연산 (2026-10-20~21, 설계 검토 Astra 5차 + 증분 1 설계 3차·구현 2차) [역방향]
 
 목표: 연산 기록(25.28)에서 요약된 호출의 출력이 "call 노드"로 끝나던 것을, 피호출 함수 안의 실제 연산으로 이어 보여 줌(검증·디버깅,
@@ -2139,5 +2151,32 @@ MAY_ALIAS_WRITE 간선은 그래프에 저장하지 않고 API가 지금과 같�
   그 해석 위치 s와 변위 d로 B = s - d(= o_sp + delta), 겹침 = 호출자 스택 객체 [B, B + push); 호출자 스택 객체로 해석된 읽기는 이 구간과
   비교, 전역은 globals-disjoint-from-stack 가정이 켜진 함수에서만(연결 노드에 가정 이름), 포인터 체인은 슬롯마다 같은 검사 + 주소에
   빚이 없을 것. entry-values-do-not-address-the-new-frame만으로는 부족(경계는 호출자의 입구 SP). [역방향]
-- 남은 것: C9-1 메모리·스택 변환, C9-3 조건이 있는 행(판정 메타데이터를 붙여 설명용으로), C9-4 "stitched" 평가 경로, C9-6 프로그램 전체
-  구체 실행 오라클(호출마다 반환 바이트를 기록, 돌연변이 거부). 기록: `.census6/stepC9_*`, `c9_stitch_census.py`.
+- 증분 3(8352862, 기록 전용): 위 계획대로 직접 스택 칸이 아닌 입구 메모리(레지스터 기준 [rcx], 포인터 단계, 전역)를 호출자의 `~ld<j>`에
+  연결 — 모든 단계(포인터 칸 먼저, 그다음 대상)가 빚 없는 행이고, 해석된 메모리 읽기가 하나이며, 리턴 주소 겹침 [B, B + push) 밖임을
+  증명할 때만. B는 빚 없는 증인에서: 그 호출의 `~sp` 행, SP를 읽는 `~in<k>`(`stack_offset_at(note=False)`), SP 직접 `~ld`(B = s - d),
+  또는 호출 직전 곧은 경로(간선 하나씩, 호출·분기·반환 없음, push는 건너뜀)에서 그 값을 정확히 읽는 마지막 연산. 전역은
+  globals-disjoint-from-stack 가정이 켜진 함수에서만(연결 노드에 가정 이름). 집계: 이어 붙은 호출 38 → 249(+중첩 5).
+- 후속(2c32e1b, Fable 사후 검토): 되돌릴 때 간선도 돌려줌, "not tried: reached while binding", 예상 못 한 예외는 그 호출만
+  "error: <형식>"으로 자름(집계가 ERRORS로 보고, 0이어야 관문 통과).
+- A-1 = 증분 4(88500e8, 기록 전용): 메모리 출력 행 — 호출 뒤 호출자가 읽는, 피호출 함수가 쓴 바이트를 출구별 실행(run)에 연결
+  (phi "callee exits"). 쓴 객체 X는 고정 기준과 겹침으로 하나여야 함("ambiguous object"), SP 직접 쓰기가 push 아래면 자름("below entry
+  stack pointer" / "return address"), COMPUTED 실행은 정의가 X 위일 때만, 출구가 바꾸지 않은 바이트는 `keeps_old`가 있어야 하고
+  피호출 함수 입구 메모리와 같은 경로(겹침 증인 포함)로 묶고 `unchanged` 표시. 출력 실행이 아니거나 접근자 되쓰기는 자름. 직접 스택
+  칸도 `_level`을 거침 — 호출 전 포인터 쓰기가 닿을 수 있는 입구 SP 위 칸은 빚 없는 행이어야 함("memory: debt"; 기본 가정
+  entry-values-not-frame이 흔한 경우를 살림). 집계: 이어 붙은 호출 249 → 294(+중첩 11), 잘림 not an output run 66, memory: debt 13,
+  model 9, conditions 7, run not exact 4, ERRORS 0.
+- A-2 = C9-4 "stitched" 평가 경로(`evaluate(..., route="stitched", trace=)`): 이어 붙은 call 노드는 가져온 피호출 연산으로 평가 —
+  레지스터 행은 부분의 `output`과 같은 항목, 메모리 행은 유일한 항목(`_stitched_item`), 참조하는 바이트를 생산자 바이트로 옮김
+  (`_compose`). `bound` / `assemble` / phi는 요청된 바이트 범위만 평가(`_range`, `_phi_range`, LOAD 경로의 phi 포함) — 쓰지 않는 바이트의
+  지원 안 되는 연산·구멍·호출이 막거나 추적에 잡히지 않음. 적격성과 선택 수도 선택된 항목·겹치는 부분만 따라감(`_reached`). 한 호출
+  인스턴스의 phi "callee exits"는 선택 하나를 공유(피호출 함수는 그 호출에서 한 출구로 나감; 출구 수가 다르면 "exit choice mismatch").
+  "injected" 경로는 그대로.
+- A-3 = C9-6 프로그램 전체 구체 실행 오라클(`tests/intra/record_oracle.check_stitched`): 프로젝트의 p-code 인터프리터를 프로그램
+  모드로(피호출 함수도 실행; angr/unicorn 아님) 돌려, 기록의 출구로 끝난 실행의 최종 레지스터 바이트가 "stitched" 평가 결과 집합에
+  있어야 함. 고정 예제 10개(뺄셈, 두 출구, 유지 바이트 [0:4]·[4:8], 스택 포인터, 스택 인자, 지역 포인터, 2단계, 메모리 출력, 유지
+  메모리, 포인터 체인; 예제마다 이어 붙은 호출을 실제로 지난 평가 > 0), 무작위 호출자/피호출자 30쌍, 돌연변이(묶음 바꿔치기, 변위 +8,
+  유지 바이트를 0으로, 공유 선택 깨기 = 정확한 집합 {11, 22} 검사)가 모두 거부됨. UNKNOWN / 빚 있는 실행은 정의가 실제 값을
+  나타내지 않으므로 비교에서 빼고, 그 요약 실행 기록이 두 경로 모두에서 거부됨을 따로 확인. 검토: 설계 Astra 2차, 구현 Astra 3차·
+  Fable 3차.
+- 남은 것: C9-3 조건이 있는 행(판정 메타데이터를 붙여 설명용으로), 메모리 출력의 잘림 줄이기(not an output run, memory: debt).
+  기록: `.census6/stepC9_*`, `c9_stitch_census.py`.

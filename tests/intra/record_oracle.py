@@ -102,4 +102,56 @@ def check_records(analyzed, *, seeds=range(6), register_pools=None, records=None
     return report
 
 
-__all__ = ("RecordReport", "check_records", "entry_reader", "final_register")
+@dataclass
+class StitchReport:
+    runs: int = 0
+    evaluated: int = 0
+    through_stitched: int = 0     # (evaluations that went through a stitched call)
+    no_stitched_call: int = 0
+    skipped: Counter = field(default_factory=Counter)
+    failures: list = field(default_factory=list)
+
+
+def check_stitched(caller, program, record, *, register, size=8, exit_key=None, seeds=range(6),
+                   register_pools=None) -> StitchReport:
+    """Whole-program oracle (docs 25.32 A-3): the caller run with its callees
+    executed (program mode); ``record`` -- the caller's root record of its
+    exit bytes [register, register + size) -- evaluated through its stitched
+    calls (route "stitched", no call injection) with the run's entry values
+    must allow the register's final bytes. ``exit_key``: the block key of the
+    caller exit the record is of -- only runs leaving by it are compared.
+    Evaluations that never went through a stitched call are counted apart."""
+    report = StitchReport()
+    for seed in seeds:
+        interpreter = Interpreter(caller.unit.observation, constant_space=CONST, seed=seed, program=program)
+        for offset, value in (register_pools(seed) if register_pools else {}).items():
+            interpreter.preset(REG, offset, 8, value)
+        try:
+            run = interpreter.run()
+        except Unsupported:
+            report.skipped["interpreter"] += 1
+            continue
+        if not run.completed or not run.executed:
+            continue
+        left = _exit_for(caller.summary, run.executed[-1])
+        if left is None or (exit_key is not None and left.block_key != exit_key):
+            continue   # (the record's own caller exit only)
+        report.runs += 1
+        trace: set = set()
+        try:
+            values = evaluate(record, entry_reader(interpreter), route="stitched", trace=trace)
+        except Ineligible as reason:
+            report.skipped[reason.args[0]] += 1
+            continue
+        report.evaluated += 1
+        if trace:
+            report.through_stitched += 1
+        else:
+            report.no_stitched_call += 1
+        concrete = final_register(interpreter, register, size)
+        if concrete not in values:
+            report.failures.append((seed, concrete, sorted(values)[:4]))
+    return report
+
+
+__all__ = ("RecordReport", "StitchReport", "check_records", "check_stitched", "entry_reader", "final_register")

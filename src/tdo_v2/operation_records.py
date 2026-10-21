@@ -1860,16 +1860,24 @@ _SUPPORTED = frozenset({
 })
 
 
-def eligibility(record) -> str | None:
+def eligibility(record, route: str = "injected") -> str | None:
     """None when ``record`` is checked for equality, else the first reason it
-    is not (loops are checked before any alternative)."""
+    is not (loops are checked before any alternative). ``route``: "injected"
+    -- a call node's value comes from the caller's ``call``, imported nodes
+    are not this record's value; "stitched" -- a stitched call's selected
+    output is evaluated through its import, and the nodes checked are those
+    the root reaches by the bytes it uses (docs 25.32 A-2)."""
     if record.get("run_kind") == "identity":
         return "identity"   # unchanged: nothing to evaluate
     if record.get("truncated"):
         return "truncated"
-    # (route "injected": a stitched call's imported subtree is not this
-    # record's value -- docs 25.31 C-9)
-    nodes = [node for node in record.get("nodes", ()) if "import" not in node]
+    if route == "stitched":
+        reached = _reached(record)
+        nodes = [node for node in record.get("nodes", ()) if node["id"] in reached]
+    else:
+        # (route "injected": a stitched call's imported subtree is not this
+        # record's value -- docs 25.31 C-9)
+        nodes = [node for node in record.get("nodes", ()) if "import" not in node]
     if any(node["kind"] == "cut" or node.get("interrupted") for node in nodes):
         return "cut"
     for node in nodes:
@@ -1915,36 +1923,62 @@ def eligibility(record) -> str | None:
     return None
 
 
-def evaluate(record, entry, *, call=None, max_choices=256):
+def evaluate(record, entry, *, call=None, max_choices=256, route: str = "injected", trace=None):
     """The set of values (little-endian ints over the root's bytes) the
     record allows: ``entry(node)`` -> the value of an entry node or None (not
     known), ``entry(("memory", space, address, size))`` -> entry memory at a
     concrete address or None; ``call(node, part)`` -> a call output's bytes or
-    None. Raises ``Ineligible`` with the reason when not evaluable."""
-    reason = eligibility(record)
+    None. Raises ``Ineligible`` with the reason when not evaluable.
+    ``route`` (``eligibility``): "stitched" evaluates a stitched call's
+    selected output through its import (``call`` only for the others); the
+    phis "callee exits" of one call instance take one choice together (the
+    callee left by one exit). ``trace``: a set the ids of the call nodes
+    evaluated through an import are added to."""
+    reason = eligibility(record, route)
     if reason is not None:
         raise Ineligible(reason)
     nodes = {node["id"]: node for node in record["nodes"]}
-    own = [node for node in record["nodes"] if "import" not in node]   # (route "injected")
+    if route == "stitched":
+        reached = _reached(record)
+        own = [node for node in record["nodes"] if node["id"] in reached]
+    else:
+        own = [node for node in record["nodes"] if "import" not in node]   # (route "injected")
     choices = [node["id"] for node in own if node["kind"] == "phi"] + \
               [node["id"] for node in own
                if node["kind"] == "op" and node["opcode"] == "LOAD" and len(node.get("memory", ())) > 1]
     sizes = {identifier: max(1, len(nodes[identifier].get("alternatives", nodes[identifier].get("memory", ()))))
              for identifier in choices}
-    total = 1
+    # one dimension per choice, the "callee exits" phis of one instance together
+    dimensions: list = []
+    instances: dict = {}
     for identifier in choices:
-        total *= sizes[identifier]
+        instance = nodes[identifier].get("instance") if route == "stitched" else None
+        if instance is None:
+            dimensions.append(([identifier], sizes[identifier]))
+            continue
+        if instance in instances:
+            members, size = dimensions[instances[instance]]
+            if size != sizes[identifier]:
+                raise Ineligible("exit choice mismatch")
+            members.append(identifier)
+        else:
+            instances[instance] = len(dimensions)
+            dimensions.append(([identifier], sizes[identifier]))
+    total = 1
+    for _, size in dimensions:
+        total *= size
     if total > max_choices:
         raise Ineligible("alternatives")
     results = set()
     unknown = False
     for number in range(total):
         assignment = {}
-        for identifier in choices:
-            assignment[identifier] = number % sizes[identifier]
-            number //= sizes[identifier]
+        for members, size in dimensions:
+            for identifier in members:
+                assignment[identifier] = number % size
+            number //= size
         try:
-            results.add(_evaluate_once(nodes, entry, call, assignment, record))
+            results.add(_evaluate_once(nodes, entry, call, assignment, record, route, trace))
         except _Unknown:
             unknown = True
     if unknown or not results:
@@ -1958,14 +1992,14 @@ class _Unknown(Exception):
     pass
 
 
-def _evaluate_once(nodes, entry, call, assignment, record):
+def _evaluate_once(nodes, entry, call, assignment, record, route="injected", trace=None):
     """One assignment's value, with room for the record's depth (one level
     takes a few Python frames); running out is ineligibility, not a crash."""
     depth = record.get("limits", {}).get("depth", Limits.depth)
     previous = sys.getrecursionlimit()
-    sys.setrecursionlimit(max(previous, 16 * depth + 2000))   # (the build cut deeper chains)
+    sys.setrecursionlimit(max(previous, 16 * depth * (1 + Limits.call_depth) + 2000))
     try:
-        return _Evaluator(nodes, entry, call, assignment).root(record["root"])
+        return _Evaluator(nodes, entry, call, assignment, route, trace).root(record["root"])
     except RecursionError:
         raise Ineligible("recursion") from None
     finally:
@@ -1973,9 +2007,11 @@ def _evaluate_once(nodes, entry, call, assignment, record):
 
 
 class _Evaluator:
-    def __init__(self, nodes, entry, call, assignment):
+    def __init__(self, nodes, entry, call, assignment, route="injected", trace=None):
         self.nodes, self.entry, self.call, self.assignment = nodes, entry, call, assignment
+        self.route, self.trace = route, trace
         self.memo: dict = {}
+        self.ranges: dict = {}   # (bound / assemble node, a, b) -> value
 
     def root(self, parts):
         value = 0
@@ -1989,14 +2025,63 @@ class _Evaluator:
         a, b = part["bytes"]
         node = self.nodes[part["node"]]
         if node["kind"] == "call":
+            if self.route == "stitched":
+                item = _stitched_item(node, part)
+                if item is not None:   # (the callee's own expression of these bytes)
+                    if self.trace is not None:
+                        self.trace.add(node["id"])
+                    return self.part(_compose(item["part"], a, b))
             if self.call is None:
                 raise _Unknown()
             found = self.call(node, part)
             if found is None:
                 raise _Unknown()
             return found
+        if node["kind"] in ("bound", "assemble") and node_value is None:
+            return self._range(part["node"], node, a, b)
+        if node["kind"] == "phi" and node_value is None and self.route == "stitched":
+            return self._phi_range(part["node"], node, a, b)
         value = self.value(part["node"]) if node_value is None else node_value
         return (value >> (8 * a)) & ((1 << (8 * (b - a))) - 1)
+
+    def _range(self, identifier, node, a, b):
+        """Bytes [a, b) of a ``bound`` / ``assemble`` value: only the parts
+        overlapping them (a byte in a gap or no part: unknown)."""
+        key = (identifier, a, b)
+        if key in self.ranges:
+            return self.ranges[key]
+        value = 0
+        covered = 0
+        for part in node.get("parts", ()):
+            start, end = part["at"]
+            low, high = max(a, start), min(b, end)
+            if low >= high:
+                continue
+            if part.get("pruned") or "node" not in part:
+                raise _Unknown()
+            piece = dict(part)
+            piece["bytes"] = [part["bytes"][0] + low - start, part["bytes"][0] + high - start]
+            value |= self.part(piece) << (8 * (low - a))
+            covered += high - low
+        if covered != b - a:
+            raise _Unknown()   # (a gap, or bytes no part holds)
+        self.ranges[key] = value
+        return value
+
+    def _phi_range(self, identifier, node, a, b):
+        """Bytes [a, b) of a phi (route "stitched"): only those bytes of the
+        chosen alternative, so bytes no reference asks for are never
+        evaluated; bytes it does not cover are not known."""
+        key = (identifier, a, b)
+        if key in self.ranges:
+            return self.ranges[key]
+        alternative = node["alternatives"][self.assignment[identifier]]
+        start, end = alternative["at"]
+        if not start <= a < b <= end:
+            raise _Unknown()
+        value = self.part(_compose(alternative, a - start, b - start))
+        self.ranges[key] = value
+        return value
 
     def _alternative(self, node, choice, read):
         """A phi's value: the chosen alternative's bytes at their place; a
@@ -2016,6 +2101,15 @@ class _Evaluator:
             if found is None:
                 raise _Unknown()
             return found
+        if node["kind"] == "phi" and self.route == "stitched":
+            # only bytes [a, b) of the chosen alternative (as ``_phi_range``):
+            # its producer's bytes start at address + at[0] - bytes[0]
+            alternative = node["alternatives"][self.assignment[part["node"]]]
+            start, end = alternative["at"]
+            if not start <= a < b <= end:
+                raise _Unknown()
+            return self._located_part(_compose(alternative, a - start, b - start), space,
+                                      address + start - alternative["bytes"][0])
         if node["kind"] == "phi":
             # the phi's bytes start at ``address``; its chosen alternative's
             # producer at address + at[0] - bytes[0]
@@ -2052,6 +2146,8 @@ class _Evaluator:
             found = self._alternative(node, self.assignment[identifier], self.part)
         elif kind == "op":
             found = self._op(identifier, node)
+        elif kind in ("bound", "assemble"):
+            found = self._range(identifier, node, 0, node["size"])
         else:
             raise _Unknown()
         self.memo[identifier] = found
@@ -2090,6 +2186,97 @@ class _Evaluator:
         widths = [operand["width"] for operand in operands]
         size = node.get("output", {}).get("size") or (widths[0] if widths else 1)
         return _compute(opcode, values, widths, size) & ((1 << (8 * size)) - 1)
+
+
+def _stitched_item(node, part):
+    """The stitched output a part on a call node reads: the item whose
+    ``output`` equals the part's selector; a memory row's single item; one
+    item and no selector -> it; otherwise None (never a default item)."""
+    items = node.get("stitched") or ()
+    if not items:
+        return None
+    selector = part.get("output")
+    if node.get("output", {}).get("kind") == "memory":
+        return items[0] if len(items) == 1 else None
+    if selector is not None:
+        return next((item for item in items if item["output"] == selector), None)
+    return items[0] if len(items) == 1 else None
+
+
+def _compose(part, a, b):
+    """Bytes [a, b) of the value ``part`` holds, as a part of its producer."""
+    found = {key: value for key, value in part.items() if key in ("node", "output", "loop")}
+    found["bytes"] = [part["bytes"][0] + a, part["bytes"][0] + b]
+    found["at"] = [0, b - a]
+    return found
+
+
+def _reached(record) -> set:
+    """The node ids route "stitched" reads: from the root's parts, every part
+    of a reached node, except that a ``bound`` / ``assemble`` is entered only
+    by the parts overlapping the bytes asked of it and a stitched call only
+    by its selected output (composed bytes) and a phi only by its
+    alternatives' bytes overlapping the bytes asked of it -- unused outputs,
+    parts and imports are not reached (Astra, A-2 reviews). A call node
+    without a selected stitched item ends the walk there: its value is
+    ``call()``'s or unknown, so its inputs are never evaluated (route
+    "injected" eligibility still inspects them)."""
+    nodes = {node["id"]: node for node in record.get("nodes", ())}
+    reached: set = set()
+    seen: set = set()
+    pending = [(part, part["bytes"][0], part["bytes"][1]) for part in record.get("root", ())
+               if "node" in part and "bytes" in part]
+
+    def push(part):
+        if "node" in part and "bytes" in part and not part.get("pruned"):
+            pending.append((part, part["bytes"][0], part["bytes"][1]))
+
+    while pending:
+        part, a, b = pending.pop()
+        identifier = part["node"]
+        node = nodes.get(identifier)
+        if node is None:
+            continue
+        key = (identifier, a, b, repr(part.get("output")))
+        if key in seen:
+            continue
+        seen.add(key)
+        reached.add(identifier)
+        kind = node["kind"]
+        if kind == "call":
+            item = _stitched_item(node, part)
+            if item is not None:
+                push(_compose(item["part"], a, b))
+            continue
+        if kind in ("bound", "assemble"):
+            for inner in node.get("parts", ()):
+                start, end = inner["at"]
+                low, high = max(a, start), min(b, end)
+                if low < high and "node" in inner:
+                    piece = dict(inner)
+                    piece["bytes"] = [inner["bytes"][0] + low - start, inner["bytes"][0] + high - start]
+                    push(piece)
+            continue
+        if kind == "phi":
+            for inner in node.get("alternatives", ()):
+                start, end = inner.get("at", (0, node.get("size", 0)))
+                low, high = max(a, start), min(b, end)
+                if low < high and "node" in inner:
+                    piece = dict(inner)
+                    piece["bytes"] = [inner["bytes"][0] + low - start, inner["bytes"][0] + high - start]
+                    push(piece)
+            continue
+        for name in ("operands", "memory", "reads"):
+            for item in node.get(name, ()):
+                for inner in item.get("parts", ()):
+                    push(inner)
+        if kind == "op" and node.get("override") is not None and node["override"] != "unproven":
+            pending.append(({"node": node["override"], "bytes": [0, 0]}, 0, 0))
+        for debt in node.get("debts", ()):
+            pending.append(({"node": debt, "bytes": [0, 0]}, 0, 0))
+        for item in node.get("from", ()):
+            pending.append(({"node": item["node"], "bytes": [0, 0]}, 0, 0))
+    return reached
 
 
 def _signed(value, size):

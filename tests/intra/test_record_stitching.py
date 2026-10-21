@@ -6,12 +6,14 @@ never changes the caller's own record or its evaluation."""
 
 import copy as copying
 
+import pytest
+
 from synthetic import (
     CODE_BASE, R9, RAX, RBX, RCX, RDX, RSP, FunctionBuilder, add, const, copy, load, op, program_units, reg, tmp,
 )
 from tdo_v2.interprocedural import analyze_units
 from tdo_v2.operation_records import (
-    StitchContext, _compute, eligibility, evaluate, render, root_record,
+    Ineligible, StitchContext, _compute, eligibility, evaluate, render, root_record, run_records,
 )
 
 F, G = CODE_BASE + 0x800, CODE_BASE + 0xA00
@@ -571,3 +573,285 @@ def test_an_entry_pointer_store_before_the_call():
     record = _record([caller, callee], assume_entry_values_not_frame=False)
     (call,) = _memory_call(record)
     assert "stitched" not in call and call["stitch_cut"] == "memory: debt", call
+
+
+# -- A-2: the engine's "stitched" evaluation route ---------------------------------
+
+def _entry(registers):
+    """``evaluate``'s entry: caller entry registers from ``registers``, byte by byte."""
+    def entry(node):
+        if type(node) is tuple or "register" not in node:
+            return None
+        offset, size = node["register"]["offset"], node["register"]["size"]
+        value = 0
+        for index in range(size):
+            byte = offset + index
+            value |= ((registers.get(byte - byte % 8, 0) >> (8 * (byte % 8))) & 0xFF) << (8 * index)
+        return value
+    return entry
+
+
+def test_the_stitched_route_matches_the_hand_evaluator():
+    flag = tmp(0x300, 1)
+    cases = [
+        ([_caller(copy(reg(RCX), const(0x10)), copy(reg(RDX), reg(RBX))),
+          FunctionBuilder(entry=F).ins(add(reg(RAX), reg(RCX), reg(RDX))).ret()], {RBX: 0x1234}),
+        ([_caller(copy(reg(RCX), const(7)), copy(reg(RDX), const(9))),
+          FunctionBuilder(entry=F).cbranch("other", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
+          .ins(copy(reg(RAX), reg(RCX))).ret().label("other").ins(copy(reg(RAX), reg(RDX))).ret()], {}),
+        ([_caller(), FunctionBuilder(entry=F).ins(add(reg(RAX), reg(RSP), const(0x10))).ret()], {RSP: ENTRY_SP}),
+    ]
+    for functions, registers in cases:
+        record = _record(functions)
+        trace: set = set()
+        found = evaluate(record, _entry(registers), route="stitched", trace=trace)
+        assert found == _values(record, record["root"][0], registers)
+        assert trace   # (through the stitched call)
+        assert eligibility(record) is None   # (the injected route still needs ``call``)
+
+
+def test_one_exit_choice_per_call_instance():
+    """Astra's exact-set case: exits (rax, rdx) = (1, 10) or (2, 20); the
+    caller returns rax + rdx: exactly {11, 22}, never 12 or 21."""
+    flag = tmp(0x300, 1)
+    callee = (FunctionBuilder(entry=F)
+              .cbranch("other", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
+              .ins(copy(reg(RAX), const(1)), copy(reg(RDX), const(10))).ret()
+              .label("other").ins(copy(reg(RAX), const(2)), copy(reg(RDX), const(20))).ret())
+    caller = (FunctionBuilder().sub_rsp(0x28).call(F).ins(add(reg(RAX), reg(RAX), reg(RDX)))
+              .add_rsp(0x28).ret())
+    record = _record([caller, callee])
+    assert evaluate(record, _entry({}), route="stitched") == {11, 22}
+
+
+def test_an_unselected_output_does_not_block():
+    """Astra's A-2 review: the root reads rax; another output of the same
+    call (rdx, from an unsupported operation) is not reached."""
+    callee = (FunctionBuilder(entry=F)
+              .ins(copy(reg(RAX), reg(RCX)), op("INT_MULT", [reg(RCX), reg(RCX)], reg(RDX)))
+              .ins(op("FLOAT_ADD", [reg(RCX), reg(RCX)], reg(RDX)))
+              .ret())
+    record = _record([_caller(copy(reg(RCX), const(3))), callee])
+    assert evaluate(record, _entry({}), route="stitched") == {3}
+
+
+# -- A-3: the whole-program concrete oracle ----------------------------------------
+
+def test_a_phi_keeps_the_requested_bytes():
+    """Bytes [0, 4) of a phi whose alternatives' upper bytes are unknown
+    (an unsupported op) evaluate; the whole phi does not (Astra, A-2/A-3
+    implementation review)."""
+    nodes = [
+        {"id": 0, "kind": "const", "value": 0x11, "size": 4},
+        {"id": 1, "kind": "op", "opcode": "UNSUPPORTED_X", "operands": [], "output": {"size": 4}},
+        {"id": 2, "kind": "assemble", "size": 8,
+         "parts": [{"node": 0, "bytes": [0, 4], "at": [0, 4]}, {"node": 1, "bytes": [0, 4], "at": [4, 8]}]},
+        {"id": 3, "kind": "phi", "reason": "test", "size": 8,
+         "alternatives": [{"node": 2, "bytes": [0, 8], "at": [0, 8], "loop": False}]},
+    ]
+    low = {"nodes": nodes, "root": [{"node": 3, "bytes": [0, 4], "at": [0, 4]}]}
+    whole = {"nodes": nodes, "root": [{"node": 3, "bytes": [0, 8], "at": [0, 8]}]}
+    assert evaluate(low, _entry({}), route="stitched") == {0x11}
+    with pytest.raises(Ineligible):
+        evaluate(whole, _entry({}), route="stitched")
+
+
+def test_a_loaded_phi_keeps_the_requested_bytes():
+    """A LOAD of 4 bytes over a phi of 8 (the phi in memory): only those
+    bytes are read -- an unsupported upper half, an upper-half phi or an
+    upper-half stitched call is never evaluated or traced (Astra, A-2/A-3
+    implementation review round 2)."""
+    upper = [   # (one at a time as node 5: the same id in each variant)
+        {"id": 5, "kind": "op", "opcode": "UNSUPPORTED_X", "operands": [], "output": {"size": 4}},
+        {"id": 5, "kind": "phi", "reason": "test", "size": 4,
+         "alternatives": [{"node": 9, "bytes": [0, 4], "at": [0, 4], "loop": False},
+                          {"node": 9, "bytes": [0, 4], "at": [0, 4], "loop": False}]},
+        {"id": 5, "kind": "call", "call": "c", "output": {"kind": "register_file", "start": 0, "size": 4},
+         "stitched": [{"output": {"kind": "register_file", "start": 0, "size": 4},
+                       "part": {"node": 9, "bytes": [0, 4], "at": [0, 4]}}]},
+    ]
+    for node in upper:
+        nodes = [
+            {"id": 0, "kind": "const", "value": 0x1000, "size": 8},
+            {"id": 1, "kind": "const", "value": 0x11, "size": 4},
+            {"id": 2, "kind": "assemble", "size": 8,
+             "parts": [{"node": 1, "bytes": [0, 4], "at": [0, 4]}, {"node": 5, "bytes": [0, 4], "at": [4, 8]}]},
+            {"id": 3, "kind": "phi", "reason": "test", "size": 8,
+             "alternatives": [{"node": 2, "bytes": [0, 8], "at": [0, 8], "loop": False}]},
+            {"id": 4, "kind": "op", "opcode": "LOAD", "space": 1, "output": {"size": 4},
+             "operands": [{"index": 1, "width": 8, "role": "address",
+                           "parts": [{"node": 0, "bytes": [0, 8], "at": [0, 8]}]}],
+             "memory": [{"parts": [{"node": 3, "bytes": [0, 4], "at": [0, 4]}]}]},
+            node,
+            {"id": 9, "kind": "const", "value": 0x22, "size": 4},
+        ]
+        record = {"nodes": nodes, "root": [{"node": 4, "bytes": [0, 4], "at": [0, 4]}]}
+        trace: set = set()
+        assert evaluate(record, _entry({}), route="stitched", trace=trace) == {0x11}, node["kind"]
+        assert trace == set(), node["kind"]
+
+
+def _oracle(functions, pools=None, seeds=range(8), at=RAX, **options):
+    """The caller's exit record (stitched) of the register run holding byte
+    ``at`` (not UNKNOWN, no debts: only those runs' definitions give the
+    value) checked against concrete runs of the whole program (callees
+    executed)."""
+    from record_oracle import check_stitched
+
+    units = program_units(*functions)
+    table: dict = {}
+    results = analyze_units(units, record_provenance=table, **options)
+    caller = results[ROOT]
+    exit_key, run = next((item.block_key, run) for item in caller.summary.exits for run in item.runs
+                     if run.span.object_id.kind.value == "register_file" and run.span.start <= at < run.span.end
+                     and run.kind.value != "unknown" and not run.debts)
+    (definition,) = run.definitions
+    node = caller.normalized.memory_graph.definition_nodes[definition]
+    record = root_record(caller.normalized, caller.unit, [(node, (run.span,))], declared=caller.declared,
+                         provenance=table[id(caller)][1], stitch=StitchContext(table))
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
+    return record, lambda changed: check_stitched(caller, program, changed, register=run.span.start, size=run.span.size,
+                                                  exit_key=exit_key, seeds=seeds, register_pools=pools)
+
+
+def _pools(seed):
+    import test_graph_fidelity as fidelity
+
+    # (RAX with nonzero upper bytes: a kept byte taken as 0 must show)
+    return {**fidelity._register_inputs(seed), RSP: ENTRY_SP, R9: seed % 2, RAX: 0x1122_3344_5566_7700 + seed}
+
+
+def _fixtures():
+    from synthetic import RSI, store, sub
+
+    flag = tmp(0x300, 1)
+    t = tmp(0x100)
+    u = tmp(0x200)
+    two_exits = (FunctionBuilder(entry=F)
+                 .cbranch("other", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
+                 .ins(copy(reg(RAX), reg(RCX))).ret().label("other").ins(copy(reg(RAX), reg(RDX))).ret())
+    keeps = (FunctionBuilder(entry=F)
+             .cbranch("other", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
+             .ins(copy(reg(RAX), reg(RDX))).ret().label("other").ins(copy(reg(RAX, 4), reg(RCX, 4))).ret())
+    return {
+        "subtract": [_caller(copy(reg(RCX), reg(RBX)), copy(reg(RDX), reg(RSI))),
+                     FunctionBuilder(entry=F).ins(sub(reg(RAX), reg(RCX), reg(RDX))).ret()],
+        "two exits": [_caller(copy(reg(RCX), reg(RBX)), copy(reg(RDX), reg(RSI))), two_exits],
+        "kept bytes": [_caller(copy(reg(RCX), reg(RBX)), copy(reg(RDX), reg(RSI))), keeps],
+        "stack pointer": [_caller(), FunctionBuilder(entry=F).ins(add(reg(RAX), reg(RSP), const(0x10))).ret()],
+        "stack argument": [_caller(store(reg(RSP), reg(RBX))),
+                           FunctionBuilder(entry=F).ins(add(u, reg(RSP), const(8)), load(reg(RAX), u)).ret()],
+        "pointer to a local": [_caller(add(t, reg(RSP), const(0x20)), store(t, reg(RBX)),
+                                       add(reg(RCX), reg(RSP), const(0x20))),
+                               FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()],
+        "two levels": [_caller(copy(reg(RCX), reg(RBX))),
+                       FunctionBuilder(entry=F).sub_rsp(0x28).call(G).add_rsp(0x28).ret(),
+                       FunctionBuilder(entry=G).ins(add(reg(RAX), reg(RCX), const(1))).ret()],
+        # memory outputs: the caller's local read back after the call
+        "memory output": [_memory_caller(copy(reg(RDX), reg(RBX))),
+                          FunctionBuilder(entry=F).ins(add(u, reg(RDX), const(1)), store(reg(RCX), u)).ret()],
+        "kept memory": [_memory_caller(store(t, reg(RBX)), copy(reg(RDX), reg(RSI))), _keeping_callee(reg(RCX))],
+        "pointer chain": [(FunctionBuilder().sub_rsp(0x28)
+                           .ins(add(t, reg(RSP), const(0x20)), store(reg(RSP), t))
+                           .call(F)
+                           .ins(add(t, reg(RSP), const(0x20)), load(reg(RAX), t))
+                           .add_rsp(0x28).ret()),
+                          FunctionBuilder(entry=F).ins(add(u, reg(RSP), const(8)), load(u, u),
+                                                       store(u, reg(RDX))).ret()],
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_fixtures()))
+def test_stitched_records_hold_on_whole_program_runs(name):
+    for at in (RAX, RAX + 4) if name == "kept bytes" else (RAX,):   # (the kept upper bytes: their own run)
+        record, check = _oracle(_fixtures()[name], _pools, at=at)
+        report = check(record)
+        assert report.failures == [], (at, report.failures)
+        assert report.through_stitched > 0, (at, report.skipped, report.no_stitched_call)
+
+
+def _mutated(record, change):
+    import copy as copying
+
+    changed = copying.deepcopy(record)
+    change(changed)
+    return changed
+
+
+def test_the_oracle_rejects_mutations():
+    """Each mutation must fail on some seed: swapped bindings, a call-shape
+    delta off by 8, an unchanged byte taken as computed (const 0), and the
+    shared exit choice broken (an exact-set check)."""
+    fixtures = _fixtures()
+
+    def swap_bound(record):
+        bound = next(node for node in record["nodes"] if node["kind"] == "bound" and len(node["parts"]) >= 2)
+        first, second = bound["parts"][0], bound["parts"][1]
+        first["node"], second["node"] = second["node"], first["node"]
+        first["bytes"], second["bytes"] = second["bytes"], first["bytes"]
+
+    def shift_delta(record):
+        shape = next(node for node in record["nodes"] if node.get("call_shape") is not None)
+        constant = shape["operands"][1]["parts"][0]["node"]
+        record["nodes"][constant]["value"] += 8
+
+    def unchanged_as_zero(record):
+        bound = next(node for node in record["nodes"] if node["kind"] == "bound" and node.get("unchanged"))
+        zero = {"kind": "const", "value": 0, "size": bound["size"], "id": len(record["nodes"]), "import": "m"}
+        record["nodes"].append(zero)
+        bound["parts"] = [{"node": zero["id"], "bytes": [0, bound["size"]], "at": [0, bound["size"]]}]
+
+    for name, change in (("subtract", swap_bound), ("stack pointer", shift_delta), ("kept bytes", unchanged_as_zero)):
+        record, check = _oracle(fixtures[name], _pools, at=RAX + 4 if name == "kept bytes" else RAX)
+        assert check(record).failures == []
+        assert check(_mutated(record, change)).failures, name
+
+    flag = tmp(0x300, 1)
+    callee = (FunctionBuilder(entry=F)
+              .cbranch("other", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
+              .ins(copy(reg(RAX), const(1)), copy(reg(RDX), const(10))).ret()
+              .label("other").ins(copy(reg(RAX), const(2)), copy(reg(RDX), const(20))).ret())
+    caller = (FunctionBuilder().sub_rsp(0x28).call(F).ins(add(reg(RAX), reg(RAX), reg(RDX)))
+              .add_rsp(0x28).ret())
+    record = _record([caller, callee])
+
+    def unshare(record):
+        for node in record["nodes"]:
+            node.pop("instance", None)
+
+    assert evaluate(record, _entry({}), route="stitched") == {11, 22}
+    assert evaluate(_mutated(record, unshare), _entry({}), route="stitched") == {11, 12, 21, 22}
+
+
+def _inexact_runs_are_refused(functions):
+    """The runs the oracle skips (UNKNOWN, debts): their summary-run records
+    are never evaluated, on either route."""
+    table: dict = {}
+    caller = analyze_units(program_units(*functions), record_provenance=table)[ROOT]
+    for record in run_records(caller.normalized, caller.unit, caller.summary):
+        if record.get("run_kind") == "unknown" or record.get("debts"):
+            assert eligibility(record, "stitched") is not None, record["span"]
+            assert eligibility(record) is not None, record["span"]
+
+
+def test_random_programs_hold():
+    """Random caller / callee pairs (test_interprocedural's bodies): every
+    stitched evaluation allows the concrete result; some go through a call."""
+    import random
+
+    from test_interprocedural import _random_body
+
+    through = 0
+    for seed in range(30):
+        rng = random.Random(83_000 + seed)
+        callee = _random_body(rng, FunctionBuilder(entry=F))
+        caller = _random_body(rng, FunctionBuilder(), calls=(F,))
+        _inexact_runs_are_refused([caller, callee])
+        try:
+            record, check = _oracle([caller, callee], _pools, seeds=range(4))
+        except (StopIteration, ValueError):
+            continue   # (no exact single-definition exit rax run)
+        report = check(record)
+        assert report.failures == [], (seed, report.failures)
+        through += report.through_stitched
+    assert through > 0
