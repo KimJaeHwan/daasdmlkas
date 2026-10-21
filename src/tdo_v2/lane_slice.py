@@ -188,6 +188,7 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False, budget=N
             continue
         add(node, frozenset(byte for span in spans for byte in range(span.start, span.end)) & whole)
     steps = 0
+    covered: dict = {}   # writer table -> bits of writers already added FULL here (``_other``)
     while pending:
         step()   # (budget: docs 25.30 K1c)
         if (budget is not None and steps >= budget) or (byte_budget is not None and materialized[0] > byte_budget) \
@@ -201,7 +202,7 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False, budget=N
         elif node in index.action_of:
             _operation(index, node, demand, add, clobbered)
         else:
-            _other(index, node, add)
+            _other(index, node, add, covered)
     phase_count("lane_slices", 1)   # (K2 sizes: slices x steps, docs 25.31)
     phase_count("lane_steps", steps)
     return LaneSlice(demands, frozenset(demands))
@@ -316,11 +317,30 @@ def _operation(index, node, demand, add, clobbered=None):
             add(source, FULL)
 
 
-def _other(index, node, add):
-    """A debt or other node: every data predecessor, FULL."""
-    for source, _, record in index.graph.in_edges(node):
+def _other(index, node, add, covered=None):
+    """A debt or other node: every data predecessor, FULL. ``covered``: per
+    virtual writer table, the writers this slice already added FULL -- adding
+    one again is a no-op, so only the others are decoded and added, in the
+    same order (docs 25.31 K3-t1)."""
+    graph = index.graph
+    finder = getattr(graph, "virtual_writers", None)
+    found = finder(node) if covered is not None and finder is not None else None
+    if found is None:
+        for source, _, record in graph.in_edges(node):
+            if record.kind != EdgeKind.CONTROL_DEPENDENCE.value:
+                add(source, FULL)
+        return
+    for source, _, record in graph.physical_in_edges(node):
         if record.kind != EdgeKind.CONTROL_DEPENDENCE.value:
             add(source, FULL)
+    writers, bits = found
+    key = id(writers)
+    new = bits & ~covered.get(key, 0)
+    if new:
+        covered[key] = covered.get(key, 0) | new
+        nodes = writers.nodes
+        for position in reversed(writers.universe.indices(new)):   # (MAY_ALIAS_WRITE: data edges)
+            add(nodes[position], FULL)
 
 
 _ARITY = {"COPY": 1, "INT_NEGATE": 1, "LOAD": 2, "STORE": 3, "SUBPIECE": 2, "PIECE": 2, "INT_ZEXT": 1,

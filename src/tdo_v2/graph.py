@@ -266,6 +266,16 @@ class RustworkxDependencyGraph:
         """The nodes with virtual writer edges into them."""
         return tuple(self._virtual)
 
+    def physical_in_edges(self, node: NodeId):
+        """``in_edges`` without the virtual writer edges (backend order)."""
+        return self._graph.in_edges(node)
+
+    def virtual_writers(self, node: NodeId):
+        """(VirtualWriters table, bits) of ``node``'s virtual writer edges, or
+        None: ``in_edges`` lists them after the physical edges, in
+        descending bit order (docs 25.31 K3-t1)."""
+        return self._virtual.get(node)
+
     def virtual_sources(self, node: NodeId) -> list:
         """The sources of ``node``'s virtual writer edges, ascending node id
         (decoded on each call -- nothing retained)."""
