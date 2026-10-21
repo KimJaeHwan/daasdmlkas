@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
-# A-5: snapshots of the working tree (label $2) compared with a baseline (label $1), every artifact.
+# A-5: snapshots of the working tree (label $2, written to a fresh directory) compared with a
+# baseline (label $1), every run of snapshot_expected.txt (snapshot_gate.py).
+# Exits with the gate's status: 0 identical, 1 a result differs, 2 the gate is incomplete.
 set -o pipefail
-cd /mnt/d/01_gitproject/14_TDO_v2/daasdmlkas
+cd /mnt/d/01_gitproject/14_TDO_v2/daasdmlkas || exit 2
 export PYTHONPATH=src
-bash tools/graph_fidelity/snapshot_baseline.sh $2 > /dev/null 2>&1
-bash tools/graph_fidelity/snapshot_fixtures.sh $2 > /dev/null 2>&1
+label='^[A-Za-z0-9][A-Za-z0-9._-]*$'   # (a plain directory name: never "." or "..")
+if [[ ! "${1:-}" =~ $label || ! "${2:-}" =~ $label || "$1" == "$2" ]]; then
+  echo "usage: snapshot_compare.sh <baseline label> <new label> (two different plain labels)"; exit 2
+fi
 A=/root/tdo_snapshots/$1; B=/root/tdo_snapshots/$2
-status=0
-for f in $A/*.json.gz; do
-  name=$(basename $f)
-  if [ ! -f $B/$name ]; then echo "MISSING $name"; status=2; continue; fi
-  ~/venvs/tdo/bin/python tools/graph_fidelity/semantic_snapshot.py compare $f $B/$name | tail -3 | sed "s/^/$name: /" || status=1
-done
-echo "== baseline failures (must be the same)"; grep -v "rc=0" $A/status.txt | cut -c1-120; echo "== now"; grep -v "rc=0" $B/status.txt | cut -c1-120
-echo "== timing (fixtures)"; paste <(cut -d' ' -f1-4 $A/fixtures.txt) <(cut -d' ' -f3-4 $B/fixtures.txt)
-echo "COMPAREDONE status=$status"
+[ -d "$A" ] || { echo "no baseline $A"; exit 2; }
+# fresh: no artifact or status of an earlier run under this label can pass for this one
+rm -rf "$B" || { echo "cannot remove $B"; exit 2; }
+[ -e "$B" ] && { echo "$B still exists"; exit 2; }
+mkdir -p "$B" || { echo "cannot create $B"; exit 2; }
+# (the generators' own output kept with the snapshot: a harness failure shows as NOT RUN in the gate)
+bash tools/graph_fidelity/snapshot_baseline.sh "$2" > "$B/generate.log" 2>&1
+bash tools/graph_fidelity/snapshot_fixtures.sh "$2" >> "$B/generate.log" 2>&1
+echo "== timing (fixtures)"; paste <(cut -d' ' -f1-4 "$A/fixtures.txt") <(cut -d' ' -f3-4 "$B/fixtures.txt")
+~/venvs/tdo/bin/python tools/graph_fidelity/snapshot_gate.py "$A" "$B"

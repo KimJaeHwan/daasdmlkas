@@ -2118,6 +2118,11 @@ MAY_ALIAS_WRITE 간선은 그래프에 저장하지 않고 API가 지금과 같�
 - **250k(1623ea3): 2176 s / 6.19 GB**(이전 2960 s). 단계: may_alias 555, call_clobber 460, normalize 433, memory_ssa 250,
   summarize 179, analyze_units 80, binding 73 s. 목표 10분까지는 Python 안의 국소 수정보다 Rust 포팅(R0~R5, 단계별 Python 대체 경로
   유지, OS별 wheel)이 맞다고 보고, C-9를 마친 뒤 이 세션에서 순서대로 진행하기로 함(병렬 세션 없음).
+- 포팅 전 관문 도구 정비(R0): `snapshot_compare.sh`가 판정을 종료 코드로 돌려줌(0 같음, 1 결과가 다름, 2 관문이 불완전).
+  새 라벨은 매번 새 폴더(지우기·만들기 실패는 2), 생성 출력은 `generate.log`, 상태 줄에 시간 제한. 판정은 `snapshot_gate.py`가
+  기대 목록 `snapshot_expected.txt`(실행 36개, 알려진 실패 v2-win-debug-full.legacy rc=1)와 대조: 빠진 실행·산출물, 끝나지 않은
+  실행(124/137/143), 깨진 상태 줄·산출물, 목록에 없는 실행·산출물은 2, 단면 차이·종료 코드 변화는 1; 기준에만 있는 파일
+  (zlib.phases)은 안내만. 마지막 줄 `COMPAREDONE status=N differences=D incomplete=I`. 검토 Astra 3차·Fable 2차.
 
 ### 25.32 C-9 연산식 이어 붙이기: 호출 결과 자리에 피호출 함수의 연산 (2026-10-20~21, 설계 검토 Astra 5차 + 증분 1 설계 3차·구현 2차) [역방향]
 

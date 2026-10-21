@@ -9,7 +9,7 @@ snap() {   # name generation config [binding]
   local extra=""; [ -n "${4:-}" ] && extra="--binding $4"
   timeout ${TIMEOUT:-3000} ~/venvs/tdo/bin/python tools/graph_fidelity/semantic_snapshot.py dump "$2" "$OUT/$1.$3.json.gz" --config $3 $extra > "$OUT/$1.$3.log" 2>&1
   local rc=$?
-  echo "$1.$3 rc=$rc $(tail -1 $OUT/$1.$3.log | cut -c1-160)" >> $OUT/status.txt
+  echo "$1.$3 rc=$rc timeout=${TIMEOUT:-3000} $(tail -1 $OUT/$1.$3.log | cut -c1-160)" >> $OUT/status.txt
 }
 for b in v2-win-debug-full v3-win-release-full v3-win32-release-full zlib ue-dll-debuggame ue-dll-development; do
   G=$(ls -d /root/tdo_bundles3/$b/*/ | head -1)

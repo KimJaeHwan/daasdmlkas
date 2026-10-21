@@ -1,0 +1,42 @@
+# Expected snapshot runs of snapshot_baseline.sh / snapshot_fixtures.sh (snapshot_gate.py).
+# One run per line: its name in status.txt (Bundles) or "fixture-<name>" (fixtures.txt), and
+# optionally "rc=<n>": a declared expected failure (default rc=0, an artifact <name>.json.gz).
+# A run, artifact or status line not listed here fails the gate; so does a listed one missing.
+v2-win-debug-full.default
+v2-win-debug-full.off
+v3-win-release-full.default
+v3-win-release-full.off
+v3-win32-release-full.default
+v3-win32-release-full.off
+zlib.default
+zlib.off
+ue-dll-debuggame.default
+ue-dll-debuggame.off
+ue-dll-development.default
+ue-dll-development.off
+ue-dll-debuggame.accessor
+ue-dll-development.accessor
+corpus-clang-x64-O0.default
+corpus-clang-x64-O2.default
+corpus-clang-x64-O3.default
+corpus-clang-x86-O0.default
+corpus-clang-x86-O2.default
+corpus-gcc-x64-O2-rep.default
+corpus-gcc-x64-O3.default
+# legacy (pre-sparse) configuration: its interprocedural write-event fixed point does not
+# stabilize on this Bundle (known since A-5)
+v2-win-debug-full.legacy rc=1
+v3-win-release-full.legacy
+corpus-clang-x64-O0.legacy
+corpus-clang-x64-O2.legacy
+corpus-gcc-x64-O3.legacy
+fixture-chain-1k
+fixture-chain-5k
+fixture-chain-in-loop-600
+fixture-loop-mixed-spans-40
+fixture-diamonds-12
+fixture-diamonds-30
+fixture-wide-6k
+fixture-pointer-accesses-300
+fixture-stack-spills-200
+fixture-chain-8k
