@@ -68,6 +68,7 @@ class RustworkxDependencyGraph:
         self._virtual: dict[NodeId, tuple] = {}   # debt -> (VirtualWriters, bits)
         self._virtual_edges = 0
         self._virtual_out = None   # writer -> [(debt, record)], built on demand
+        self._positions = None   # writer -> its (table, index) positions, on demand
         self._virtual_sources: set = set()   # nodes of the tables in use (a superset of the writers)
         self._virtual_tables: set = set()   # ids of the tables already in _virtual_sources
 
@@ -142,6 +143,7 @@ class RustworkxDependencyGraph:
             self._virtual_tables.add(id(writers))
             self._virtual_sources.update(writers.nodes)
         self._virtual_out = None
+        self._positions = None
 
     def _virtual_in(self, node: NodeId) -> list:
         """The virtual edges into ``node`` in insertion (ascending index) order."""
@@ -150,6 +152,20 @@ class RustworkxDependencyGraph:
             return []
         writers, bits = found
         return [(writers.nodes[index], node, writers.records[index]) for index in writers.universe.indices(bits)]
+
+    def _writer_positions(self) -> dict:
+        """Writer node -> ((id of its table, its index), ...) over the
+        virtual writer tables (built once; reset with the out-edge index)."""
+        if self._positions is None:
+            index: dict = {}
+            tables = {}
+            for writers, _ in self._virtual.values():
+                tables[id(writers)] = writers
+            for key, writers in tables.items():
+                for position, node in enumerate(writers.nodes):
+                    index.setdefault(node, []).append((key, position))
+            self._positions = index
+        return self._positions
 
     def _virtual_out_of(self, node: NodeId) -> list:
         if node not in self._virtual_sources:   # (no index for a node writing nothing virtually)
@@ -177,6 +193,7 @@ class RustworkxDependencyGraph:
         other._virtual_sources = set(self._virtual_sources)
         other._virtual_tables = set(self._virtual_tables)
         other._virtual_out = None
+        other._positions = None
         return other
 
     def in_edges(self, node: NodeId):
@@ -224,6 +241,11 @@ class RustworkxDependencyGraph:
         pending = sorted(set(seeds), reverse=True)
         visited: set[NodeId] = set()
         ordered: list[NodeId] = []
+        # (data-only walks, docs 25.31 K3-t4) per writer table the bits of
+        # the writers visited so far: a debt's virtual writers are decoded
+        # only where not visited -- the visited ones were never pushed again
+        seen_writers: dict = {}
+        positions = self._writer_positions() if self._virtual and not follow_control else {}
         while pending:
             step()   # (budget: docs 25.30 K1c)
             node = pending.pop()
@@ -233,12 +255,25 @@ class RustworkxDependencyGraph:
                 raise KeyError(f"unknown seed node: {node}")
             visited.add(node)
             ordered.append(node)
+            for table, position in positions.get(node, ()):
+                seen_writers[table] = seen_writers.get(table, 0) | (1 << position)
             if follow_control:
                 predecessors = self.predecessors(node)
+            elif node in self._virtual:
+                writers, bits = self._virtual[node]
+                found = {
+                    int(source)
+                    for source, _, record in self._graph.in_edges(node)
+                    if record.kind != CONTROL_DEPENDENCE_EDGE
+                }
+                unseen = bits & ~seen_writers.get(id(writers), 0)
+                if unseen:
+                    found.update(writers.nodes[index] for index in writers.universe.indices(unseen))
+                predecessors = sorted(found)
             else:
                 predecessors = sorted({
                     int(source)
-                    for source, _, record in self.in_edges(node)
+                    for source, _, record in self._graph.in_edges(node)
                     if record.kind != CONTROL_DEPENDENCE_EDGE
                 })
             for predecessor in reversed(predecessors):
