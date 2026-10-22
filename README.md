@@ -114,10 +114,13 @@ PYTHONPATH=src python -m pytest tests/intra -q
 - `run_dfbench --records`: 연산 기록 — root마다 값이 거친 p-code 연산의 식 그래프(입력 조각·바이트 범위, 합류의 대안, 요약된 호출과
   그 판단 사실, 부채)를 `--json`에 넣고 기대 케이스는 텍스트로 출력 (문서 25.28).
 - `tools/graph_fidelity/derivations.py <generation> --function <entry>`: 함수 하나의 출구별 출력을 입구 값의 식으로 출력 —
-  핸들러 함수(가상화 핸들러 등)의 의미를 볼 때.
+  실제 연산과 메모리 의존을 살펴보는 진단 기능입니다. VM 구조를 복원하는 기능은 아닙니다.
 - `run_dfbench --records`의 호출 본문 연결은 같은 실행에서 증명된 원래 함수의 연산을 사용합니다. 정방향
   (`TDO_V2_FORWARD=1`)으로 여러 후보가 증명된 간접 호출도 대상·출구 선택을 공유하며 연결합니다.
   동일한 물리 레지스터 기준의 고정 메모리 쓰기를 합치는 범위와 제한은 설계 문서 **25.34절**에 있습니다.
+- 지원되는 단순 if/else는 원래 조건식과 참/거짓 대안을 기록하며, 같은 분기의 여러 출력은 선택을 공유합니다.
+  조건이 알려지면 한쪽을, 미지 입력이면 상관을 유지한 두 대안을 평가합니다. 반복·분기 안 호출 등은 이유를 남기고
+  기존 무조건 대안으로 유지합니다. 실제 STORE→phi→LOAD 사례와 경계는 설계 문서 **25.37절**을 참고하세요.
 
 ## 검증
 
@@ -160,5 +163,7 @@ PYTHONPATH=src python -m pytest tests/intra -q
 - `feature/multi-target-memory-flow`는 엔진 의미 버전 13입니다. 동일 SHA-256의 UE 5.1.1 Win64 Core DLL을 확보해
   분석 자료·전체 스택 증거·FString 파생 모델을 다시 생성했고, 배포 모델 호환성 검사를 통과했습니다.
   재생성 근거와 검수 범위는 [`docs/interprocedural_design.md` §25.35](docs/interprocedural_design.md#2535-ue-core-원본-복구와-파생-모델-재생성-2026-10-23)를 참고하세요.
-- 연산식의 향후 용도는 가상화·인터프리터의 상태 변화 분석입니다. 현재는 그 기반이지 VM 전체의 복원기가 아닙니다.
-  다음 개발 단위와 완료 기준은 [`docs/interprocedural_design.md` §25.36](docs/interprocedural_design.md)에 기록했습니다.
+- 연산식은 향후 가상화·인터프리터 분석 도구가 소비할 표현 계층입니다. 현재 목표는 기존 SSA·데이터 그래프의 연산·메모리·
+  조건·불확실성을 손실 없이 조회·전달하는 것이며, VM 구조 복원이나 실제 VM 분석 개발이 아닙니다.
+  표현 기능과 구현 우선순위 검토는 [`docs/interprocedural_design.md` §25.36](docs/interprocedural_design.md)에,
+  1순위 조건·공유 선택의 구현 결과는 같은 문서 **§25.37**에 기록합니다.

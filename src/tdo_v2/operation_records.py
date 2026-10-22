@@ -19,7 +19,9 @@ normalized dependency graph:
 * ``entry`` -- an entry span (register, or memory place).
 * ``phi`` -- ALTERNATIVES: the value is one of these (a JOIN, an exit run's or
   a read fragment's several definitions, a definition with several writers);
-  the SSA keeps no predecessor selection.
+  a proven straight diamond additionally carries its original predicate and
+  one shared, scope/call-instance-qualified true/false selection. Unsupported
+  shapes remain unconditional alternatives with ``condition_fallback``.
 * ``call`` -- one output row of a summarized call (``~<i>`` / ``~sink<k>`` /
   ``~u<j>`` ...), its staging rows (``~in`` / ``~ld`` / ``~iu`` ...) folded
   into ``inputs`` with roles, and the call decision facts.
@@ -43,9 +45,12 @@ change the caller's own nodes, ``truncated`` flag or evaluation (route
 
 ``origins`` lists the source labels the engine attached to a node. Parts
 reaching a node that is being expanded (a loop-carried value) are marked
-``loop: true``. ``evaluate`` computes a record's value from concrete entry
-values when it is eligible (no cut, loop, debt, rep element, unproven
-override or unsupported operation): the set of values its alternatives allow.
+``loop: true``. ``evaluate`` computes the set of values its alternatives
+allow when the VALUE graph is eligible (no cut, loop, debt, rep element,
+unproven override or unsupported operation). A supported concrete predicate
+selects one arm; unknown entry predicates retain the correlated union.
+Optional predicate evaluation failures are explicit fallback metadata, not
+proof that either arm is feasible or that all path choices are exact.
 """
 
 from __future__ import annotations
@@ -62,7 +67,7 @@ from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 2   # (2: stitched calls, docs 25.31 C-9)
+RECORD_VERSION = 3   # (3: diagnostic CFG conditions; no engine semantics change)
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -495,19 +500,24 @@ class _Binding:
         return builder._new(node, record)["id"]
 
 
-def _node_parts(node):
+def _node_parts(node, *, include_condition=True):
     """Every part a record node holds (whatever its kind)."""
     for name in ("alternatives", "parts", "root"):
         yield from node.get(name, ())
     for name in ("operands", "inputs", "memory", "reads"):
         for item in node.get(name, ()):
             yield from item.get("parts", ())
+    if include_condition:
+        yield from node.get("condition", {}).get("operand", {}).get("parts", ())
 
 
 def _gap_used(records, start, outputs):
     """The reason of a ``bound`` gap byte an import (records from ``start``,
     and the stitched outputs) uses, or None."""
-    for part in (*(part for record in records[start:] for part in _node_parts(record)),
+    value_nodes = _value_reached({"nodes": records, "root": [item["part"] for item in outputs]})
+    for part in (*(part for record in records[start:]
+                   if not record.get("condition_only") or record["id"] in value_nodes
+                   for part in _node_parts(record, include_condition=False)),
                  *(item["part"] for item in outputs)):
         target = records[part["node"]] if "node" in part and part["node"] < len(records) else None
         if target is None or target["kind"] != "bound" or not target.get("gaps") or "bytes" not in part:
@@ -538,7 +548,7 @@ def _slice_parts(parts, low, high):
 class _Builder:
     def __init__(self, normalized, unit, *, origins=None, declared=None, limits=None, demands=None,
                  provenance=None, stitch=None, records=None, ledger=None, parent=None, binding=None, path=(),
-                 index=None):
+                 index=None, conditions=None):
         from .lane_slice import lane_index
 
         self.normalized = normalized
@@ -585,6 +595,8 @@ class _Builder:
         self.address_bits = {row.space_id: row.address_size_bits for row in evidence.address_spaces
                              if row.is_memory_space}
         self.x64 = evidence.translation_namespace.language_id.startswith("x86:LE:64")
+        self.conditions = conditions
+        self.building_condition = False
 
     # -- nodes ---------------------------------------------------------------
     _FIELDS = {"op": ("operands",), "override": ("operands",), "call": ("inputs",), "phi": ("alternatives",),
@@ -596,6 +608,8 @@ class _Builder:
             raise _Truncated()
         if self.parent is not None:
             record.setdefault('function', self.function_key)
+        if self.building_condition:
+            record["condition_only"] = True
         for name in self._FIELDS.get(record["kind"], ()):
             record.setdefault(name, [])
         if record["kind"] in self._FIELDS:
@@ -746,8 +760,58 @@ class _Builder:
                 self._edge()
         finally:
             self.expanding.discard(node)
+        self._condition(record, definition.span, self.index.joins.get(definition_id, ()),
+                        definition.block_key, depth, definition_id=definition_id)
         self._done(record)
         return record["id"]
+
+    def _condition_index(self):
+        if self.conditions is None:
+            from ._record_conditions import ConditionIndex
+
+            self.conditions = ConditionIndex(self.normalized, self.unit, self.index)
+        return self.conditions
+
+    def _definition_ref(self, identifier):
+        definition = self.ssa.definitions[identifier]
+        return {"scope": self.ssa.function_scope.digest.hex(), "unit": self.ssa.unit_digest.hex(),
+                "id": identifier, "kind": definition.kind.value, "operation": definition.operation_key,
+                "write_ordinal": definition.write_ordinal, "span": list(definition.span.canonical_key)}
+
+    def _condition(self, record, span, sources, block_key, depth, *, definition_id=None):
+        """Annotate only a complete CFG/SSA correspondence; retain all old
+        alternatives otherwise. Predicate construction uses the same limits
+        as value construction: an interruption makes the record truncated."""
+        if len(record["alternatives"]) != len(sources):
+            record["condition_fallback"] = "fragmented alternatives"
+            return
+        for part, identifier in zip(record["alternatives"], sources, strict=True):
+            part["definition_ref"] = self._definition_ref(identifier)
+        condition_index = self._condition_index()
+        match, reason = condition_index.for_join(definition_id) if definition_id is not None \
+            else condition_index.for_sources(span, tuple(sources), block_key)
+        if match is None:
+            record["condition_fallback"] = reason
+            return
+        prior = self.building_condition
+        self.building_condition = True
+        try:
+            operation, spans, _ = self.index.operation(match.branch_action_id)
+            operands = self._operands(match.branch_node, match.branch_action_id, operation, spans, depth + 1)
+            operand = next(item for item in operands if item["index"] == 1)
+            self._edge()  # the condition reference, in addition to its byte parts
+        finally:
+            self.building_condition = prior
+        by_source = dict(zip(sources, record["alternatives"], strict=True))
+        record["alternatives"] = [by_source[identifier] for identifier in match.sources]
+        record["choices"] = [True, False]
+        record["condition"] = {
+            "selection": "/".join(("cfg", self.ssa.function_scope.digest.hex(), self.ssa.unit_digest.hex(),
+                                    *(call for _, call in self.path), match.decision_key)),
+            "decision": match.decision_key, "merge": match.merge_key,
+            "true_successor": match.true_successor, "false_successor": match.false_successor,
+            "operand": {**operand, "role": "condition"},
+        }
 
     def _definition_guarded(self, node, depth):
         if depth > self.limits.depth:
@@ -1699,15 +1763,36 @@ def _span_dict(span):
 
 
 def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, limits=None, provenance=None,
-           stitch=None):
-    from .lane_slice import lane_slice
+           stitch=None, merge_run=None):
+    from .lane_slice import lane_slice, lane_index
+    from ._record_conditions import ConditionIndex
 
     limits = limits or Limits()
     demand_seeds = [(node, spans) for node, spans in seeds]
+    index = lane_index(normalized, unit)
+    conditions = ConditionIndex(normalized, unit, index)
     demands = lane_slice(normalized, unit, demand_seeds, budget=limits.demand_steps,
-                         byte_budget=limits.demand_bytes)
+                         byte_budget=limits.demand_bytes, index=index)
+    # Include predicates BEFORE constructing any value node. A predicate may
+    # need bytes a value's lane demand otherwise prunes; using the partially
+    # built node as the guard would silently change the branch decision.
+    added = set()
+    pending = [conditions.for_sources(*merge_run)[0]] if merge_run is not None else []
+    while not demands.exhausted:
+        for node in demands.nodes:
+            identifier = index.definition_of.get(node)
+            if identifier in index.joins:
+                pending.append(conditions.for_join(identifier)[0])
+        extra = {match.branch_node for match in pending if match is not None} - added
+        pending.clear()
+        if not extra:
+            break
+        added.update(extra)
+        demand_seeds.extend((node, ()) for node in sorted(extra))
+        demands = lane_slice(normalized, unit, demand_seeds, budget=limits.demand_steps,
+                             byte_budget=limits.demand_bytes, index=index)
     builder = _Builder(normalized, unit, origins=origins, declared=declared, limits=limits, demands=demands,
-                       provenance=provenance, stitch=stitch)
+                       provenance=provenance, stitch=stitch, index=index, conditions=conditions)
     root = []
     # one expansion level takes a few Python frames: room for ``limits.depth``
     previous = sys.getrecursionlimit()
@@ -1715,6 +1800,13 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
     try:
         for node, spans in seeds:
             root.extend(builder.seed(node, spans))
+        if merge_run is not None:
+            span, sources, block_key = merge_run
+            phi = builder._new(None, {"kind": "phi", "reason": "exit run definitions", "size": span.size,
+                                      "span": _span_text(span), "alternatives": root})
+            root = [{"node": phi["id"], "bytes": [0, span.size], "at": [0, span.size]}]
+            builder._condition(phi, span, sources, block_key, 0)
+            builder._done(phi)
     except _Truncated:
         pass
     except RecursionError:
@@ -1731,7 +1823,7 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
     entry = unit.scopes.function.entry
     evidence = unit.scopes.program.evidence
     language = evidence.translation_namespace.language_id
-    return {
+    record = {
         "version": RECORD_VERSION,
         "function": f"{entry.space_id:x}:{entry.byte_offset:x}",
         "program": evidence.executable_sha256.hex() if hasattr(evidence, "executable_sha256") else None,
@@ -1747,6 +1839,8 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
         "partial_provenance": ("assumptions that act by excluding writers or debts are not attributable to "
                                "one root; the run-level assumption list is the authority"),
     }
+    _finish_conditions(record)
+    return record
 
 
 @measured("records")
@@ -1799,14 +1893,9 @@ def run_records(normalized, unit, summary, *, origins=None, declared=None, limit
 
 def _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits):
     """A run with several definitions: a synthesized phi over them."""
-    record = _build(normalized, unit, [(node, (run.span,)) for node in nodes], metadata,
-                    origins=origins, declared=declared, limits=limits)
-    alternatives = list(record["root"])
-    phi = {"kind": "phi", "reason": "exit run definitions", "span": _span_text(run.span), "size": run.span.size,
-           "alternatives": alternatives, "id": len(record["nodes"])}
-    record["nodes"].append(phi)
-    record["root"] = [{"node": phi["id"], "bytes": [0, run.span.size], "at": [0, run.span.size]}]
-    return record
+    return _build(normalized, unit, [(node, (run.span,)) for node in nodes], metadata,
+                  origins=origins, declared=declared, limits=limits,
+                  merge_run=(run.span, tuple(run.definitions), metadata["exit"]))
 
 
 # -- rendering ------------------------------------------------------------------
@@ -1878,7 +1967,16 @@ def _render_node(node, nodes=None):
     if kind == "entry":
         return f"entry {node.get('name') or node['span']}{origins}"
     if kind == "phi":
-        return "phi(" + ", ".join(_render_parts(node["alternatives"], nodes)) + f") [{node['reason']}]{origins}"
+        text = "phi(" + ", ".join(_render_parts(node["alternatives"], nodes)) + f") [{node['reason']}]"
+        condition = node.get("condition")
+        if condition is not None:
+            predicate = "+".join(_render_parts(condition["operand"].get("parts", ()), nodes)) or "?"
+            text += (f" if {predicate} != 0 [T,F; decision={condition['decision']}; "
+                     f"merge={condition['merge']}; shared={condition['selection']}; "
+                     f"evaluation={node.get('condition_evaluation')}]")
+        elif node.get("condition_fallback"):
+            text += f" [unconditional: {node['condition_fallback']}]"
+        return text + origins
     if kind == "cut":
         return f"cut {node['target']} ({node['reason']})"
     if kind == "debt":
@@ -1939,9 +2037,133 @@ _SUPPORTED = frozenset({
 })
 
 
+def _guard_reason(condition, nodes):
+    """Static guard evaluation capability, NOT path feasibility. Unknown
+    entry bytes are a runtime case; debt/cut/unsupported are not that case."""
+    operand = condition.get("operand", {})
+    if operand.get("unresolved") or not operand.get("parts"):
+        return "unresolved operand"
+    pending = list(operand["parts"])
+    seen = set()
+    while pending:
+        part = pending.pop()
+        if part.get("pruned") or "node" not in part:
+            return "pruned predicate"
+        if part.get("loop"):
+            return "loop"
+        identifier = part["node"]
+        byte_range = tuple(part.get("bytes", ()))
+        key = identifier, byte_range
+        if key in seen:
+            continue
+        seen.add(key)
+        node = nodes.get(identifier)
+        if node is None:
+            return "missing reference"
+        if node.get("interrupted") or node["kind"] == "cut":
+            return "cut"
+        if node["kind"] == "debt" or node.get("debts"):
+            return "debt"
+        if node.get("override") is not None or node.get("rep_iteration") is not None:
+            return "override"
+        if node["kind"] == "op":
+            if node.get("opcode") not in _SUPPORTED:
+                return "unsupported " + str(node.get("opcode"))
+            if node.get("opcode") == "LOAD" and len(node.get("memory", ())) != 1:
+                return "ambiguous memory"
+            if any(item.get("unresolved") for item in node.get("operands", ())):
+                return "unresolved operand"
+        elif node["kind"] not in ("entry", "const", "bound", "assemble"):
+            return "unsupported " + node["kind"]
+        if node["kind"] in ("bound", "assemble"):
+            if len(byte_range) != 2:
+                return "unbound predicate"
+            a, b = byte_range
+            if any(a < gap["at"][1] and gap["at"][0] < b for gap in node.get("gaps", ())):
+                return "unbound predicate"
+            covered = 0
+            for inner in node.get("parts", ()):
+                start, end = inner["at"]
+                low, high = max(a, start), min(b, end)
+                if low < high:
+                    covered += high - low
+                    pending.append(_compose(inner, low - start, high - start))
+            if covered != b - a:
+                return "unbound predicate"
+            continue
+        pending.extend(_node_parts(node, include_condition=False))
+    return None
+
+
+def _value_reached(record):
+    """Transitive value references, without optional predicate references.
+    Recomputed on consumption: a serialized condition_only flag is no proof
+    that a node (or its debt/cut inputs) is unused by the requested value."""
+    nodes = {node["id"]: node for node in record["nodes"]}
+    pending = [part["node"] for part in record["root"] if "node" in part]
+    seen = set()
+    while pending:
+        identifier = pending.pop()
+        if identifier in seen or identifier not in nodes:
+            continue
+        seen.add(identifier)
+        node = nodes[identifier]
+        pending.extend(part["node"] for part in _node_parts(node, include_condition=False) if "node" in part)
+        pending.extend(node.get("debts", ()))
+        pending.extend(item["node"] for item in node.get("from", ()))
+        pending.extend(item["part"]["node"] for item in node.get("stitched", ()))
+        if type(node.get("override")) is int:
+            pending.append(node["override"])
+    return seen
+
+
+def _finish_conditions(record):
+    """Only predicate-exclusive nodes may bypass VALUE eligibility."""
+    nodes = {node["id"]: node for node in record["nodes"]}
+    for identifier in _value_reached(record):
+        nodes[identifier].pop("condition_only", None)
+    for node in record["nodes"]:
+        if "condition" in node:
+            reason = _guard_reason(node["condition"], nodes)
+            node["condition_evaluation"] = "supported" if reason is None else "fallback: " + reason
+
+
+def _condition_domain(node, nodes):
+    """Validate the shared choice contract when consuming a JSON record.
+    Never trust one phi's guard on behalf of other phis with the same id."""
+    condition = node["condition"]
+    fields = ("selection", "decision", "merge", "true_successor", "false_successor")
+    if (not isinstance(condition, dict) or any(type(condition.get(key)) is not str for key in fields)
+            or node.get("choices") != [True, False]
+            or any(type(choice) is not bool for choice in node.get("choices", ()))
+            or len(node.get("alternatives", ())) != 2):
+        raise Ineligible("condition choice mismatch")
+    operand = condition.get("operand", {})
+    if type(operand.get("width")) is not int or operand["width"] <= 0:
+        raise Ineligible("condition operand")
+    covered = set()
+    for part in operand.get("parts", ()):
+        if (part.get("node") not in nodes or part.get("loop") or "bytes" not in part or "at" not in part
+                or len(part["bytes"]) != 2 or len(part["at"]) != 2):
+            raise Ineligible("condition reference")
+        a, b = part["bytes"]
+        c, d = part["at"]
+        if not (0 <= a < b and 0 <= c < d <= operand["width"] and b - a == d - c):
+            raise Ineligible("condition reference")
+        byte_range = set(range(c, d))
+        if covered & byte_range:
+            raise Ineligible("condition reference")
+        covered |= byte_range
+    if covered != set(range(operand["width"])):
+        raise Ineligible("condition reference")
+    return condition
+
+
 def eligibility(record, route: str = "injected") -> str | None:
-    """None when ``record`` is checked for equality, else the first reason it
-    is not (loops are checked before any alternative). ``route``: "injected"
+    """None when the value graph is evaluable, else the first reason it is
+    not (loops are checked before any alternative). Alternatives can still
+    overapproximate feasible paths; optional guards have their own capability
+    metadata. ``route``: "injected"
     -- a call node's value comes from the caller's ``call``, imported nodes
     are not this record's value; "stitched" -- a stitched call's selected
     output is evaluated through its import, and the nodes checked are those
@@ -1950,13 +2172,16 @@ def eligibility(record, route: str = "injected") -> str | None:
         return "identity"   # unchanged: nothing to evaluate
     if record.get("truncated"):
         return "truncated"
+    value_nodes = _value_reached(record)
     if route == "stitched":
         reached = _reached(record)
-        nodes = [node for node in record.get("nodes", ()) if node["id"] in reached]
+        nodes = [node for node in record.get("nodes", ()) if node["id"] in reached
+                 and (not node.get("condition_only") or node["id"] in value_nodes)]
     else:
         # (route "injected": a stitched call's imported subtree is not this
         # record's value -- docs 25.31 C-9)
-        nodes = [node for node in record.get("nodes", ()) if "import" not in node]
+        nodes = [node for node in record.get("nodes", ()) if "import" not in node
+                 and (not node.get("condition_only") or node["id"] in value_nodes)]
     if any(node["kind"] == "cut" or node.get("interrupted") for node in nodes):
         return "cut"
     for node in nodes:
@@ -2011,17 +2236,24 @@ def evaluate(record, entry, *, call=None, max_choices=256, route: str = "injecte
     ``route`` (``eligibility``): "stitched" evaluates a stitched call's
     selected output through its import (``call`` only for the others); the
     phis "callee exits" of one call instance take one choice together (the
-    callee left by one exit). ``trace``: a set the ids of the call nodes
+    callee left by one exit). CFG-conditioned phis share their true/false
+    choice in BOTH routes. Known predicates reject the other assignment;
+    unknown inputs preserve the shared union. Unsupported predicates retain
+    unconditional alternatives, with an explicit capability reason.
+    ``trace``: a set the ids of the call nodes
     evaluated through an import are added to."""
     reason = eligibility(record, route)
     if reason is not None:
         raise Ineligible(reason)
     nodes = {node["id"]: node for node in record["nodes"]}
+    value_nodes = _value_reached(record)
     if route == "stitched":
         reached = _reached(record)
-        own = [node for node in record["nodes"] if node["id"] in reached]
+        own = [node for node in record["nodes"] if node["id"] in reached
+               and (not node.get("condition_only") or node["id"] in value_nodes)]
     else:
-        own = [node for node in record["nodes"] if "import" not in node]   # (route "injected")
+        own = [node for node in record["nodes"] if "import" not in node
+               and (not node.get("condition_only") or node["id"] in value_nodes)]
     choices = [node["id"] for node in own if node["kind"] == "phi"] + \
               [node["id"] for node in own
                if node["kind"] == "op" and node["opcode"] == "LOAD" and len(node.get("memory", ())) > 1]
@@ -2032,12 +2264,17 @@ def evaluate(record, entry, *, call=None, max_choices=256, route: str = "injecte
     instances: dict = {}
     domains: dict = {}
     for identifier in choices:
-        instance = nodes[identifier].get("instance") if route == "stitched" else None
+        node = nodes[identifier]
+        if "condition" in node:
+            domain = _condition_domain(node, nodes)
+            instance = ("cfg", domain["selection"])
+        else:
+            instance = ("call", node["instance"]) if route == "stitched" and "instance" in node else None
+            domain = node.get("choices")
         if instance is None:
             dimensions.append(([identifier], sizes[identifier]))
             continue
-        domain = nodes[identifier].get('choices')
-        if domain is not None and len(domain) != sizes[identifier]:
+        if "condition" not in node and domain is not None and len(domain) != sizes[identifier]:
             raise Ineligible('target choice mismatch')
         if instance in instances:
             members, size = dimensions[instances[instance]]
@@ -2063,6 +2300,8 @@ def evaluate(record, entry, *, call=None, max_choices=256, route: str = "injecte
             number //= size
         try:
             results.add(_evaluate_once(nodes, entry, call, assignment, record, route, trace))
+        except _Infeasible:
+            continue
         except _Unknown:
             unknown = True
     if unknown or not results:
@@ -2074,6 +2313,10 @@ def evaluate(record, entry, *, call=None, max_choices=256, route: str = "injecte
 
 class _Unknown(Exception):
     pass
+
+
+class _Infeasible(Exception):
+    """This shared assignment contradicts a concrete, supported guard."""
 
 
 def _evaluate_once(nodes, entry, call, assignment, record, route="injected", trace=None):
@@ -2096,6 +2339,19 @@ class _Evaluator:
         self.route, self.trace = route, trace
         self.memo: dict = {}
         self.ranges: dict = {}   # (bound / assemble node, a, b) -> value
+
+    def _choice(self, node):
+        choice = self.assignment[node["id"]]
+        condition = node.get("condition")
+        if condition is not None and _guard_reason(condition, self.nodes) is None:
+            try:
+                value = self.operand(condition["operand"])
+            except _Unknown:  # only an unknown input; unsupported/debt/cut is checked above
+                pass
+            else:
+                if bool(value) is not node["choices"][choice]:
+                    raise _Infeasible()
+        return choice
 
     def root(self, parts):
         value = 0
@@ -2159,7 +2415,7 @@ class _Evaluator:
         key = (identifier, a, b)
         if key in self.ranges:
             return self.ranges[key]
-        alternative = node["alternatives"][self.assignment[identifier]]
+        alternative = node["alternatives"][self._choice(node)]
         start, end = alternative["at"]
         if not start <= a < b <= end:
             raise _Unknown()
@@ -2188,7 +2444,7 @@ class _Evaluator:
         if node["kind"] == "phi" and self.route == "stitched":
             # only bytes [a, b) of the chosen alternative (as ``_phi_range``):
             # its producer's bytes start at address + at[0] - bytes[0]
-            alternative = node["alternatives"][self.assignment[part["node"]]]
+            alternative = node["alternatives"][self._choice(node)]
             start, end = alternative["at"]
             if not start <= a < b <= end:
                 raise _Unknown()
@@ -2198,7 +2454,7 @@ class _Evaluator:
             # the phi's bytes start at ``address``; its chosen alternative's
             # producer at address + at[0] - bytes[0]
             value = self._alternative(
-                node, self.assignment[part["node"]],
+                node, self._choice(node),
                 lambda alternative: self._located_part(alternative, space,
                                                        address + alternative["at"][0] - alternative["bytes"][0]))
             return (value >> (8 * a)) & ((1 << (8 * (b - a))) - 1)
@@ -2227,7 +2483,7 @@ class _Evaluator:
             if found is None:
                 raise _Unknown()
         elif kind == "phi":
-            found = self._alternative(node, self.assignment[identifier], self.part)
+            found = self._alternative(node, self._choice(node), self.part)
         elif kind == "op":
             found = self._op(identifier, node)
         elif kind in ("bound", "assemble"):
@@ -2342,6 +2598,8 @@ def _reached(record) -> set:
                     push(piece)
             continue
         if kind == "phi":
+            for inner in node.get("condition", {}).get("operand", {}).get("parts", ()):
+                push(inner)
             for inner in node.get("alternatives", ()):
                 start, end = inner.get("at", (0, node.get("size", 0)))
                 low, high = max(a, start), min(b, end)

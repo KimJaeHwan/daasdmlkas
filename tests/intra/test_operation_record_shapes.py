@@ -294,7 +294,8 @@ def test_an_alternative_that_cannot_be_evaluated_leaves_no_result():
     record = _record(_analyzed(builder), R8)
     with pytest.raises(Ineligible, match="unknown inputs"):
         evaluate(record, lambda node: None)
-    assert evaluate(record, lambda node: 5 << (8 * (RSI - node["register"]["offset"]))) == {17, 5}
+    # The input also fixes RDX=0: the now-recorded predicate selects RSI.
+    assert evaluate(record, lambda node: 5 << (8 * (RSI - node["register"]["offset"]))) == {5}
 
 
 def test_root_parts_of_one_selector_must_not_overlap():
@@ -398,5 +399,11 @@ def test_the_checker_rejects_a_phi_missing_the_taken_alternative():
     record = copying.deepcopy(_record(analyzed, R8))
     (phi,) = _nodes(record, "phi")
     phi["alternatives"] = phi["alternatives"][:1]
+    report = check_records(analyzed, seeds=range(4), register_pools=_branch_pools, records=[record])
+    assert report.evaluated == 0 and report.skipped == {"condition choice mismatch": 4}
+    # Old v2 unconditional alternatives still exercise the missing-value
+    # check; v3's malformed conditional choice is refused before evaluation.
+    phi.pop("condition")
+    phi.pop("choices")
     report = check_records(analyzed, seeds=range(4), register_pools=_branch_pools, records=[record])
     assert report.evaluated == 4 and len(report.failures) == 2
