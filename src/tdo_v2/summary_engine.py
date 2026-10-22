@@ -639,6 +639,9 @@ def _dependents_incomplete(roots, failed, results, by_key) -> list:
                     continue
                 seen.add(item)
                 pending.extend(results[item].calls.values())
+                # (a call reaching one of several functions reaches every member)
+                pending.extend(member for members in getattr(results[item], "multi_calls", {}).values()
+                               for member in members)
             reach[key] = frozenset(seen & set(failed))
         return reach[key]
 
@@ -651,8 +654,10 @@ def _dependents_incomplete(roots, failed, results, by_key) -> list:
         projected = results[key].projected_sinks
         checkpoint()
         if 0 <= index < len(projected):
-            callee = results[key].calls.get(projected[index][0])
-            failures = reached(callee) if callee is not None else frozenset()
+            call = projected[index][0]
+            callees = (results[key].calls[call],) if call in results[key].calls \
+                else getattr(results[key], "multi_calls", {}).get(call, ())
+            failures = frozenset().union(*(reached(callee) for callee in callees))
             if failures:
                 local = replace(root.local_completeness, complete=False)
                 effective = replace(root.effective_completeness, complete=False)

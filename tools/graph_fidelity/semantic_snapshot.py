@@ -61,7 +61,7 @@ CONTRACT = {
 # older snapshots stay comparable (a non-default value is encoded and differs)
 ADDED_FIELDS = {
     "EngineRun": {"failed_functions": ()},
-    "AnalyzedFunction": {"failure_detail": "", "superseded": None},
+    "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}},
     "RootSlice": {"inherited_incomplete": False},
 }
 

@@ -479,6 +479,139 @@ def derive_proven_call_effect(
     )
 
 
+def derive_composed_call_effect(
+    members: tuple,
+    callee: str,
+    register_object,
+    register_limit: int,
+    excluded: tuple[ByteSpan, ...] = (),
+    stack_deltas: dict | None = None,
+    failed_conditions: frozenset = frozenset(),
+) -> ProvenCallEffect | None:
+    """The effect of a call that reaches ONE of several functions (an indirect
+    call whose target set is proven, docs 25.33 F1b): ``members`` = ((summary,
+    anchors), ...). Each dynamic call runs one member, so the call's exits are
+    the members' exits together and the per-exit merge of
+    ``derive_proven_call_effect`` composes them (a byte one member leaves
+    untouched keeps its old value; preserved = every member preserves it; the
+    stack is restored only with one delta; noreturn only if every member
+    never returns) -- after three per-member steps the single-function merge
+    does not need:
+    * an opaque member (tail exits, or no exit and no dead exit: no effect of
+      its own) makes the whole call opaque -- but for the members' sink
+      demands, as for one such callee (a sink-only effect, or None);
+    * inner calls: a register byte no exit of the member mentions and some
+      inner call of the member does not keep is UNKNOWN on every exit of that
+      member (``derive_proven_call_effect``'s post-merge fill, per member --
+      another member's write of that byte must not hide it);
+    * memory: callee objects are scoped to their function, so two members'
+      writes may land on one caller place under different objects, and the
+      caller's rows would apply them one after the other (one value lost).
+      In an address space where more than one member writes memory other
+      than one shared global object, every such write of every member is
+      UNKNOWN (exact place, unknown value -- a debt there). Frame bytes below
+      the callee's entry stack pointer and the return-address slot are left
+      as they are (``derive_proven_call_effect`` handles them before any
+      memory key).
+    Writer conditions, sink demands, unknown writers, inner calls, dead exits
+    and anchors are united; register deltas are kept where every returning
+    member states the same delta."""
+    from dataclasses import replace as _replace
+
+    stack = {(span.start, span.size) for span in excluded}
+    merged_anchors: dict = {}
+    # a member opaque alone (tail exits, or no exit and no dead exit) is never
+    # dropped: the composition gets a tail exit, so ``derive_proven_call_effect``
+    # proves no state -- but every member's sink demands still bind at the call
+    opaque_members = []
+    for index, (summary, anchors) in enumerate(members):
+        if summary.tail_exits or (not summary.exits and not summary.dead_exits):
+            opaque_members.append(f"opaque-member:{index}")
+        merged_anchors.update(anchors or {})
+
+    def frame_or_slot(span, anchors) -> bool:
+        row = (anchors or {}).get(span.object_id)
+        if row is None or row[0].object_id.kind is not StorageObjectKind.REGISTER_FILE \
+                or (row[0].start, row[0].size) not in stack:
+            return False
+        bias = 1 << (8 * row[0].size)
+        push = -(stack_deltas or {}).get((row[0].start, row[0].size), 0)
+        return span.end <= bias or (push > 0 and bias <= span.start and span.end <= bias + push)
+
+    def space_of(span, anchors):
+        if span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
+            return span.object_id.space_key
+        row = (anchors or {}).get(span.object_id)
+        return None if row is None else row[1]
+
+    # (space -> {member index: written objects}): memory writes outside the frame
+    writers: dict = {}
+    for index, (summary, anchors) in enumerate(members):
+        for exit_summary in summary.exits:
+            for run in exit_summary.runs:
+                kind = run.span.object_id.kind
+                if kind in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE) \
+                        or run.kind is SummaryKind.IDENTITY or frame_or_slot(run.span, anchors):
+                    continue
+                writers.setdefault(space_of(run.span, anchors), {}).setdefault(index, set()).add(run.span.object_id)
+    contested = {
+        space for space, by_member in writers.items()
+        if len(by_member) > 1 and (len(set().union(*by_member.values())) > 1 or any(
+            object_id.kind is not StorageObjectKind.ADDRESS_SPACE for objects in by_member.values()
+            for object_id in objects))
+    }
+
+    exits, unknown_writers, writer_objects, inner_calls, sink_demands = [], [], [], [], []
+    writer_conditions, dead_exits = [], []
+    deltas = None
+    values_out = False
+    for index, (summary, anchors) in enumerate(members):
+        mentioned = {offset for exit_summary in summary.exits for run in exit_summary.runs
+                     if run.span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                     for offset in range(run.span.start, run.span.end)}
+        filled = set()
+        for _, kept, _, _ in summary.inner_calls:
+            kept_offsets = {offset for span in kept if span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                            for offset in range(span.start, span.end)}
+            filled |= {offset for offset in range(register_limit)
+                       if offset not in mentioned and offset not in kept_offsets}
+        fill = tuple(SummaryRun(span, SummaryKind.UNKNOWN, (), ("inner-call",), (), (), (), ("uncertain:inner-call",))
+                     for span in _spans(register_object, filled))
+        for exit_summary in summary.exits:
+            runs = []
+            for run in exit_summary.runs:
+                if run.span.object_id.kind not in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE) \
+                        and run.kind is not SummaryKind.IDENTITY and not frame_or_slot(run.span, anchors) \
+                        and space_of(run.span, anchors) in contested:
+                    run = _replace(run, kind=SummaryKind.UNKNOWN, debts=(*run.debts, "uncertain:several-targets"))
+                runs.append(run)
+            exits.append(ExitSummary(exit_summary.block_key, (*runs, *fill)))
+        unknown_writers += summary.unknown_writers
+        writer_objects += summary.writer_objects
+        inner_calls += summary.inner_calls
+        sink_demands += summary.sink_demands
+        writer_conditions += summary.writer_conditions
+        dead_exits += summary.dead_exits
+        values_out = values_out or summary.stack_values_out
+        if summary.exits:   # (a member that never returns states no delta)
+            own = dict(summary.register_deltas)
+            deltas = own if deltas is None else {slot: delta for slot, delta in deltas.items() if own.get(slot) == delta}
+    version = members[0][0].version
+    if any(summary.version != version for summary, _ in members):
+        return None
+    composed = FunctionSummary(
+        version, tuple(exits), tuple(unknown_writers), tuple(writer_objects),
+        tuple(tail for summary, _ in members for tail in summary.tail_exits) + tuple(opaque_members),
+        tuple(inner_calls),
+        tuple(sink_demands), tuple(sorted((deltas or {}).items())), tuple(dead_exits), tuple(writer_conditions),
+        values_out,
+    )
+    return derive_proven_call_effect(
+        composed, callee, register_object, register_limit, excluded=excluded, anchors=merged_anchors,
+        stack_deltas=stack_deltas, failed_conditions=failed_conditions,
+    )
+
+
 def _observed_registers(runs, memory_runs, unknown_memory, writer_pairs, sink_demands, skip) -> tuple:
     """The register bytes at the call an exported effect depends on: the
     reads of every register and memory run and sink root, and the root anchor
@@ -667,5 +800,5 @@ __all__ = (
     "anchored_span",
     "call_load_keys",
     "AnchoredSpan", "ProvenCallEffect", "ProvenMemoryRun", "ProvenRunEffect", "ProvenSinkDemand",
-    "derive_proven_call_effect",
+    "derive_composed_call_effect", "derive_proven_call_effect",
 )

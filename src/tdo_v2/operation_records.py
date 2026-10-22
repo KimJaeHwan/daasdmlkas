@@ -1507,6 +1507,8 @@ def _call_provenance(provenance, call, effect, tag) -> dict:
     if source is not None:
         if source[0] == "summary":
             found["function"] = source[1].key
+        elif source[0] == "summaries":   # (one of several functions, docs 25.33 F1b)
+            found["functions"] = list(source[1])
         else:
             found["label"] = source[1]
     failed = provenance.failed.get(call, frozenset())
@@ -1568,6 +1570,8 @@ def _anchored_text(place) -> str:
 
 def _effect_source(callee, label):
     if label is None:
+        if callee.startswith("targets:"):
+            return "summaries"
         return "summary" if ":" in callee and not callee.startswith("test-only") else "unknown"
     for prefix in ("external-model:", "derived-model:", "supplied-model:", "bound-model:", "test-only-boundary:"):
         if label.startswith(prefix):

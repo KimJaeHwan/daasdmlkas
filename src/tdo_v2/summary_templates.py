@@ -123,6 +123,9 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
         if item is not analyzed and getattr(item.normalized, "reason", None) is not None:
             raise TemplateRefused(f"{item.key}: {item.normalized.reason.value}")
     for item in closure:
+        if getattr(item, "multi_calls", None):
+            # (a call composed from several targets' summaries: not a template's shape yet)
+            raise TemplateRefused(f"{item.key}: a call reaching one of several functions")
         if item.recursion_unresolved:
             raise TemplateRefused(f"{item.key}: recursion without a verified fixpoint", "budget")
         if item.test_only_inputs or any(label.startswith("test-only-boundary:") for label in item.declared.values()):

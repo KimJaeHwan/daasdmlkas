@@ -2334,8 +2334,27 @@ push와 호출 사이에 있거나, push 말고 SP를 쓰는 연산이 같은 �
 그 밖은 TOP; 빚·빚 표시는 먼저 확인). 바이트 위치를 자릿값으로 읽는 곳(`_slice`, 이음)은 언어 id의 endianness가 `LE`일 때만
 (`relative_memory`와 같은 규칙; 그 밖은 TOP — 전에는 확인 없이 little-endian으로 가정했음). 결과: v3-win-release-full의 DFB072
 CALLIND → 두 대상 {0x1400013A0, 0x1400013B0}; 정방향 끔은 스냅샷(audit1)·작업량 같음, 켬은 Bundle 13개 설정 실패 0.
-F2b(입구 메모리 대입) 시제품은 실제 Bundle에서 CALLIND 사실 0개 — zlib의 함수 포인터 호출은 앞선 opaque 호출의 레지스터 clobber
-(rbp)에 막힘(호출 규약 가정이 필요해 원칙 8에 걸림, 사용자 결정 대기); 읽기 전용 표(F4a 확장)는 해당 자리 없음.
+F2b(입구 메모리 대입) 시제품은 실제 Bundle에서 CALLIND 사실 0개 — zlib의 함수 포인터 호출(`strm->zalloc` 등, 함수 1b1:10e230의
+17개)은 그 포인터가 Bundle 밖(라이브러리를 쓰는 프로그램)에서 옴: 그 함수는 Bundle 안에 호출자가 없는 export 진입점이고 Bundle
+안 어느 함수도 함수 주소를 메모리에 저장하지 않음 — 대입할 호출자가 없어, 호출 규약 가정으로도 대상은 나오지 않음(원칙 8과
+무관; 사용자 결정 2026-10-22: 규약 가정은 두지 않음). 길은 라이브러리를 쓰는 프로그램과 함께 분석하거나, API 경계를 "사용자
+콜백을 부름"으로 모델링하는 것(나중). 읽기 전용 표(F4a 확장)는 해당 자리 없음.
+
+**F1b 결과(여러 대상 간접 호출, 설계 Astra 3차·Fable 3차, 구현 Astra 2차·Fable 2차)**: 정방향을 켰을 때만, 간접 호출 반복의
+각 라운드가 그 라운드 정규화의 CALLIND 사실에서 대상 집합(모두 Bundle 함수의 정확한 입구, 8개 이하)을 받음 — 하나면 기존 단일
+대상 경로, 여럿이면 `multi` 지도(`AnalyzedFunction.multi_calls`; `calls`에는 넣지 않아 모르는 소비자에게는 지금처럼 opaque 간접
+호출). 효과는 `call_summary_effects.derive_composed_call_effect`: 한 번의 호출은 대상 하나로 가므로 대상들의 출구를 모은 요약 하나를
+기존 `derive_proven_call_effect`의 출구별 합치기에 넣음(한 대상만 쓴 바이트는 옛 값 유지, 보존은 모든 대상이 보존할 때만, SP 변화량이
+모두 같을 때만 복원, 모두 noreturn일 때만 noreturn) — 그 전에 대상마다: 혼자서도 opaque인 대상(꼬리 출구, 또는 출구도 죽은 출구도
+없음)은 꼬리 출구 표시를 남겨 호출 전체가 opaque(싱크 요구는 유지), 내부 호출이 지키지 않는 레지스터는 그 대상의 모든 출구에서
+UNKNOWN(다른 대상의 쓰기가 가리지 못하게), 같은 주소 공간에 둘 이상의 대상이 메모리를 쓰면(하나의 전역 객체가 아니면) 그 쓰기는
+모두 정확한 자리의 unknown memory(대상마다 객체가 달라 같은 호출자 자리를 서로 다른 쓰기로 차례로 적는 문제 — 같은 자리 합치기는
+정밀도 과제로 남김). 대상이 호출자의 SCC에 있거나 실패·요약 없음이면 opaque. 대상 집합을 준 사실의 requires는 라운드마다 모아
+호출자의 inherited_assumptions에(실행 단위 `run_assumptions`로 보고). 소비자: 실패 전파(`_dependents_incomplete`)는 대상 모두를 따라감,
+템플릿은 closure에 여러 대상 호출이 있으면 거부, 연결 기록은 stitching 안 함("summaries" 출처). 검증기 먼저(83fe479): `call [m]`도
+실제 대상 함수로 들어감. 결과: v2-win-debug-full·v3-win-release-full·v3-win32-release-full의 DFB072가 두 대상 합성으로 풀림
+(through-calls 증가), 정방향 켬 Bundle 13개 설정 실행 대조 missing 0·설명 안 된 수치 변화 없음; 정방향 끔은 스냅샷(audit1)·작업량
+같음(`multi_calls`는 비어 있으면 스냅샷에서 생략).
 
 **사실·검증**: `Fact(id, subject, context, claim, evidence, requires, fingerprints)`(25.18의 6번), id는 실행마다 같은 순서로
 정해짐; 실행의 사실은 스냅샷의 새 단면(정방향 끔이면 없음, 나머지 단면 같음). 검증기: p-code 해석기(함수 단위·프로그램 모드)로

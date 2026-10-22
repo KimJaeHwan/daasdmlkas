@@ -19,7 +19,9 @@ from dataclasses import dataclass, field
 
 from ._scope_contracts import VarnodeKindCode
 from .call_seeds import _operation_key
-from .call_summary_effects import AnchoredSpan, ProvenCallEffect, derive_proven_call_effect
+from .call_summary_effects import (
+    AnchoredSpan, ProvenCallEffect, derive_composed_call_effect, derive_proven_call_effect,
+)
 from .function_summary import FunctionSummary, summarize_function
 from dataclasses import replace
 
@@ -83,6 +85,11 @@ class AnalyzedFunction:
     # instruction does not prove it relocates (an absolute place that may not
     # move with the library)
     image_unproven: bool = False
+    # indirect calls proven to reach one of several functions (docs 25.33 F1b):
+    # call key -> member function keys; their effect composes the members'
+    # summaries (``derive_composed_call_effect``). Not in ``calls``: a consumer
+    # that does not know this map sees an opaque indirect call
+    multi_calls: dict = field(default_factory=dict)
 
 
 def _import_slots_switched_on() -> bool:
@@ -378,8 +385,13 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # failure of that function (sticky; run exhaustion is never recorded here)
     resource_failures: dict = {}
 
-    def analyze(calls):
-        order = _callee_first_components(calls)
+    def analyze(calls, multi=None):
+        multi = multi or {}
+        # (multi-target members ordered before their callers, as callees)
+        order = _callee_first_components({
+            key: {**calls[key], **{f"{call}~m{index}": member for call, members in multi.get(key, {}).items()
+                                   for index, member in enumerate(members)}}
+            for key in calls})
         component_of = {key: index for index, component in enumerate(order) for key in component}
         results: dict[str, AnalyzedFunction] = {}
 
@@ -438,6 +450,19 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 tail=tail,
                 failed_conditions=frozenset(failed),
                 rejections=rejections,
+            )
+
+        def composed_effect(key, call_key, members, failed=()):
+            """The effect of a call of ``key`` reaching one of ``members``
+            (their summaries composed, ``derive_composed_call_effect``)."""
+            register_object, register_limit, stack_pointers, shapes = site(key)
+            if register_object is None or _is_tail(call_key):
+                return None
+            return derive_composed_call_effect(
+                tuple((done.summary, done.anchors) for done in members),
+                "targets:" + "|".join(done.key for done in members), register_object, register_limit,
+                excluded=tuple(stack_pointers.get(call_key, ())), stack_deltas=shapes.get(call_key, {}),
+                failed_conditions=frozenset(failed),
             )
 
         def boundaries_of(key):
@@ -578,6 +603,17 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     if effect is not None:
                         proven[call_key] = effect
                         sources[call_key] = ("summary", done)
+                for call_key, members in multi.get(key, {}).items():
+                    if call_key in assumed or call_key in proven \
+                            or any(component_of[member] == component_of[key] for member in members):
+                        continue   # (a member in the caller's SCC: opaque)
+                    dones = [results.get(member) for member in members]
+                    if any(done is None or done.summary is None for done in dones):
+                        continue   # (a member failed or has no summary: opaque)
+                    effect = composed_effect(key, call_key, dones, failed.get(call_key, ()))
+                    if effect is not None:
+                        proven[call_key] = effect
+                        sources[call_key] = ("summaries", tuple(members))
                 register_space = _register_space_id(observation) or _program_register_space(unit)
                 for call_key, (model_file, entry) in externals[key].items():
                     if call_key in proven or call_key in assumed or memory_space is None:
@@ -712,6 +748,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                         for call in proven if call in externals[key] or call in boundaries_of(key)
                                     } | {call: effect.label for call, effect in markers.items()}
                                     | {jump: entry.label for jump, (_, entry) in jumps.items()},
+                                    # (this function's own models and resolutions only: a
+                                    # callee's labels are reported per run, run_assumptions)
                                     inherited_assumptions=frozenset(
                                         label for call in proven if call in externals[key]
                                         for label in externals[key][call][1].inherited)
@@ -723,7 +761,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     test_only_inputs=bool((assumed_call_effects or {}).get(key))
                                     or bool(boundaries_of(key)) or extra_origins is not None,
                                     image_tracked=image_tracked,
-                                    image_unproven=image_tracked and _unproven_image_operands(unit))
+                                    image_unproven=image_tracked and _unproven_image_operands(unit),
+                                    multi_calls={call: members for call, members in multi.get(key, {}).items()
+                                                 if call in proven})
+            if key in resolution_requires:   # (forward facts the resolutions of its calls rest on)
+                result.inherited_assumptions = result.inherited_assumptions | resolution_requires[key]
             if record_provenance is not None:   # (keyed by the instance; it keeps the objects alive)
                 record_provenance[id(result)] = (result, CallProvenance(
                     sources={call: source for call, source in sources.items() if call in proven},
@@ -818,7 +860,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
 
     resolved: dict = {}
     resolved_cuts: dict = {}
-    rounds = 1 + sum(1 for unit in functions.values() for _ in _callind_sites(unit))
+    resolved_multi: dict = {}
+    resolution_requires: dict = {}   # (key -> labels of the forward facts its resolutions rest on)
+    forward = _forward_switched_on()
+    rounds = 1 + (sum(1 for unit in functions.values() for instruction in unit.observation.instructions
+                      for operation in instruction.operations if operation.opcode == "CALLIND")
+                  if forward else sum(1 for unit in functions.values() for _ in _callind_sites(unit)))
     done = 0
     # round 1 resolves no indirect call: its results rest on no hypothesis --
     # what a run exhaustion in a later round publishes (docs 25.30 K1c-3)
@@ -839,10 +886,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         while done < rounds:
             done += 1
             use_externals(resolved_cuts)
-            results = analyze({key: {**calls[key], **resolved.get(key, {})} for key in calls})
+            results = analyze({key: {**calls[key], **resolved.get(key, {})} for key in calls}, resolved_multi)
             if first is None:
                 first = results
-            found, found_cuts = {}, {}
+            found, found_cuts, found_multi, requires = {}, {}, {}, {}
             newly_failed = False
             for key, item in results.items():
                 if key in resource_failures or type(item.normalized) is not NormalizedFunction:
@@ -850,6 +897,16 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 try:
                     with activation(_ledger_key(item.unit)):
                         targets = _indirect_targets(item, program)
+                        if forward:
+                            several, labels = _forward_targets(item, functions, readonly_image)
+                            for call, members in several.items():
+                                if call in targets:
+                                    continue
+                                if len(members) == 1:
+                                    targets[call] = members[0]
+                                else:
+                                    found_multi.setdefault(key, {})[call] = members
+                                requires.setdefault(key, set()).update(labels[call])
                         checkpoint()
                 except ANALYSIS_FAILURES as error:
                     if _is_run_exhaustion(error):
@@ -862,12 +919,21 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     found[key] = direct
                 if cut := {call: cuts[target] for call, target in targets.items() if target in cuts}:
                     found_cuts[key] = cut
-            if found == resolved and found_cuts == resolved_cuts and not newly_failed:
+            if found == resolved and found_cuts == resolved_cuts and found_multi == resolved_multi \
+                    and not newly_failed:
+                # (the resolutions recomputed on these results: their facts' labels too)
+                for key, labels in requires.items():
+                    results[key].inherited_assumptions = results[key].inherited_assumptions | frozenset(labels)
                 return results
             if newly_failed:
                 rounds += 1   # (one more round for the failure; each function fails once)
-            resolved, resolved_cuts = found, found_cuts
+            resolved, resolved_cuts, resolved_multi = found, found_cuts, found_multi
+            # (accumulated over the rounds: each round's results rest on every
+            # earlier round's resolutions, so on their facts' labels too)
+            for key, labels in requires.items():
+                resolution_requires[key] = resolution_requires.get(key, frozenset()) | frozenset(labels)
         use_externals({})
+        resolution_requires.clear()
         return analyze(calls)  # not stable: no indirect resolution at all
     except _Interrupted as stop:
         return stop.results if first is None else with_failures(first)
@@ -1706,6 +1772,43 @@ def _callind_sites(unit):
                         and copy.inputs[0].kind is VarnodeKindCode.REGISTER:
                     yield (_operation_key(instruction.address, ordinal, "CALLIND"),
                            _operation_key(instruction.address, index, "COPY"), copy.inputs[0])
+
+
+def _forward_switched_on() -> bool:
+    """Forward facts feed the indirect rounds (docs 25.33 F1b) only with
+    ``TDO_V2_FORWARD=1``: off, the analysis is exactly as without them."""
+    import os
+
+    return os.environ.get("TDO_V2_FORWARD") == "1"
+
+
+def _forward_targets(item, functions, readonly_image) -> tuple[dict, dict]:
+    """CALLIND key -> the sorted Bundle functions a forward fact proves it
+    reaches (every member an exact function entry, at most ``MAX_CANDIDATES``),
+    with the fact's ``requires`` per call. Facts of the round's normalization
+    (``forward.forward_facts``)."""
+    from .forward import MAX_CANDIDATES, forward_facts
+
+    normalized = item.normalized
+    if type(normalized) is not NormalizedFunction or normalized.forward_inputs is None:
+        return {}, {}
+    space = item.unit.scopes.function.entry.space_id
+    found, labels = {}, {}
+    for fact in forward_facts(normalized, item.unit, readonly_image=readonly_image):
+        if not fact.operation.endswith(":CALLIND") or fact.claim.is_top:
+            continue
+        members, ok = set(), True
+        for base, interval in fact.claim.items:
+            if base != ("abs",) or (interval.stride and (interval.hi - interval.lo) // interval.stride
+                                    + 1 > MAX_CANDIDATES):
+                ok = False
+                break
+            members.update(range(interval.lo, interval.hi + 1, interval.stride or 1))
+        keys = sorted(f"{space:x}:{value:x}" for value in members)
+        if ok and 0 < len(keys) <= MAX_CANDIDATES and all(key in functions for key in keys):
+            found[fact.operation] = tuple(keys)
+            labels[fact.operation] = frozenset(fact.requires)
+    return found, labels
 
 
 @measured("indirect_targets")
