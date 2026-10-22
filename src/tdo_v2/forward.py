@@ -646,10 +646,19 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
         step_ = offsets.stride or 1
         spans = tuple(ByteSpan(object_id, (1 << bits) + offset, size)
                       for offset in range(offsets.lo, offsets.hi + 1, step_))
-        key = (operation_key, spans)
-        if key not in probes:
-            probes[key] = probe(normalized, operation_key, spans)
-        found_ids, used = probes[key]
+        # (per candidate span: a loop's address interval grows pass by pass --
+        # only the spans not probed yet are probed. A probe read defines
+        # nothing and its debts are per span; probing spans together can at
+        # most widen an ENTRY definition so a span maps to no original one
+        # (None, conservative) -- every cached result is valid on its own.
+        # Labels over-report the union)
+        found_ids, labels = probes.setdefault(operation_key, ({}, set()))
+        missing = tuple(span for span in spans if span not in found_ids)
+        if missing:
+            found_new, used_new = probe(normalized, operation_key, missing)
+            found_ids.update(found_new)
+            labels.update(used_new)
+        used = tuple(sorted(labels))
         result = None
         for span in spans:
             index = found_ids[span]

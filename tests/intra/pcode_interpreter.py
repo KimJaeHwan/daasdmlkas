@@ -139,6 +139,21 @@ class Interpreter:
         for callee in self._program.values():
             for row in callee.instructions:
                 self._instructions.setdefault((row.address.space_id, row.address.byte_offset), row)
+        # calls whose push the engine removes (``observed_call_state``): their
+        # whole instruction belongs to the callee's activation; any other
+        # call's push is the caller's own operation, so its activation opens at
+        # the call operation itself
+        # (after an unprojected call the engine's stack pointer is the callee
+        # summary's write; ``_restore_call_stack_pointer`` re-attributes it to
+        # the pre-instruction writer -- checked through the call's SP input)
+        from tdo_v2._scope_contracts import ValidatedFunctionObservation
+        from tdo_v2.observed_call_state import observed_call_state_projections
+
+        sources = (observation, *self._program.values())
+        self._projected_calls = frozenset(
+            row.call_operation_key for source in sources for row in observed_call_state_projections(source)
+        ) if all(type(source) is ValidatedFunctionObservation for source in sources) else None
+        # (None: not validated observations -- every call as projected, as before)
         # ``call [slot]`` (COPY t <- slot; CALLIND t): a key in ``externals``
         # may also be an import slot address
         self._external_callind = {}
@@ -453,17 +468,15 @@ class Interpreter:
             # recursion through the same site the stack top may be an older one;
             # a rep site's element keys get ``~e<i>`` -- no x86 rep form calls)
             self._pushed_call = call
+            deferred = None
             if call is not None:
-                # the whole call instruction (stack-pointer adjustment and
-                # return-address push included) belongs to the activation, as the
-                # engine models the call shape
-                if not self._activations:
-                    self._activation_written = set()
-                    self._pre_activation = {}
-                    self._copy_source = {}
-                    self._call_stack_pointer = self._stack_pointer_snapshot()
-                    self._snapshot(call)   # retaken at the callee's entry (below)
-                self._activations.append((next_location, call))
+                if self._projected_calls is None or call in self._projected_calls:
+                    # the whole call instruction (stack-pointer adjustment and
+                    # return-address push included) belongs to the activation, as
+                    # the engine models the call shape
+                    self._enter_activation(call, next_location)
+                else:
+                    deferred = call   # (an unprojected push is the caller's own)
             index = 0
             while index < len(operations):
                 steps += 1
@@ -471,6 +484,9 @@ class Interpreter:
                     return run  # bounded: an incomplete run still yields valid dependencies
                 operation = operations[index]
                 key = _operation_key(instruction.address, index, operation.opcode)
+                if deferred is not None and key == deferred:
+                    self._enter_activation(deferred, next_location)
+                    deferred = None
                 # iteration i >= 1 of a rep site: the element operations are the
                 # engine's ``~e<i>`` rows; the other operations' register flow
                 # between iterations is summarized by the block (their last
@@ -529,6 +545,17 @@ class Interpreter:
                     return run
                 raise Unsupported("fell off a terminal instruction")
             location = next_location
+
+    def _enter_activation(self, call, next_location):
+        """Open the activation of a program call (outermost: the bookkeeping
+        of the call's writes and its entry snapshot)."""
+        if not self._activations:
+            self._activation_written = set()
+            self._pre_activation = {}
+            self._copy_source = {}
+            self._call_stack_pointer = self._stack_pointer_snapshot()
+            self._snapshot(call)   # retaken at the callee's entry (run loop)
+        self._activations.append((next_location, call))
 
     def _execute(self, key: str, operation, run: Run):
         opcode = operation.opcode

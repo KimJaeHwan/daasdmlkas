@@ -1491,7 +1491,10 @@ def _is_tail(call_key: str) -> bool:
 def _bottom_summary(stack_pointers, shapes, call_key, program_stack):
     """The optimistic start for a recursive call site: one normal exit that
     writes nothing, with the stack pointer restored (undoing the call shape's
-    push, or a pointer-sized ``ret`` for a tail jump)."""
+    push, or a pointer-sized ``ret`` for a tail jump). A call with no observed
+    shape (its push kept as an operation) gets no delta: the caller cannot
+    state the restore, the rounds find no fixpoint and the call stays opaque
+    (sound; ``test_call_projection_shape``)."""
     from .function_summary import FUNCTION_SUMMARY_VERSION, ExitSummary
 
     deltas = tuple(((offset, size), -delta) for (offset, size), delta in shapes.get(call_key, {}).items())

@@ -6,8 +6,8 @@ accesses may alias the removed store (found in the F2a review, docs 25.33;
 Ghidra's x86 calls compute their target before the push)."""
 
 from synthetic import (
-    CODE_BASE, RAX, RBX, RCX, RSP, FunctionBuilder, _Instruction, const, copy, load, op, program_units, ram, reg, store,
-    sub, tmp,
+    CODE_BASE, RAX, RBX, RCX, RSP, FunctionBuilder, _Instruction, add, const, copy, load, op, program_units, ram, reg,
+    store, sub, tmp,
 )
 from tdo_v2.interprocedural import analyze_units
 from tdo_v2.observed_call_state import observed_call_state_projections
@@ -86,3 +86,58 @@ def test_the_backward_read_reaches_the_pushed_slot():
     assert read.span.start == (1 << 64) - 0x30
     writers = {ssa.definitions[index].operation_key for fragment in read.fragments for index in fragment.definition_ids}
     assert writers == {"1:1008:1:STORE"}   # (the push's return-address store)
+
+
+def _oracle(units, key="1:1000", pools=None):
+    import test_graph_fidelity as fidelity
+    from program_oracle import check_program
+    from synthetic import REG
+
+    analyzed = analyze_units(units)[key]
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
+    pools = pools or (lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000})
+    report = check_program(analyzed.normalized, analyzed.unit.observation, program, seeds=range(6),
+                           register_pools=pools, havoc_calls=(REG, RSP, 8))
+    return analyzed, report
+
+
+def test_the_oracle_keeps_an_unprojected_push_in_the_caller():
+    """The interpreter opens the activation of a call whose push the engine
+    keeps (an unprojected shape) at the call operation: the push is the
+    caller's write, as in the engine, and the read of the pushed slot checks
+    (B2: it used to be attributed to the callee -- 'write outside its run')."""
+    caller = FunctionBuilder().sub_rsp(0x28).ins(store(reg(RSP), reg(RBX)))
+    caller = _shaped(caller, copy(reg(RCX), reg(RSP))).ins(load(reg(RAX), reg(RCX)))
+    caller = caller.add_rsp(0x28).ret()
+    _, report = _oracle(program_units(caller, FunctionBuilder(entry=CALLEE).ret()))
+    assert report.checked and report.silent == [] and report.covered_by_debt == []
+
+
+def test_a_recursive_call_with_an_unprojected_push_stays_sound():
+    """B1 (a limitation, not a hole): with the push kept as an operation the
+    caller has no way to state "the stack pointer is back to its pre-push
+    value" (no call shape: no excluded stack pointer, no delta), so the
+    recursion rounds do not reach a verified fixpoint and the intra-SCC call
+    stays opaque (``recursion_unresolved``) -- every dependency still checks.
+    Ghidra's x86 calls are always projected (``observed_call_state``)."""
+    import test_graph_fidelity as fidelity
+
+    flag = tmp(0x300, 1)
+
+    def recursive(*between):
+        builder = FunctionBuilder().sub_rsp(0x28).cbranch("done", flag, op("INT_EQUAL", [reg(RCX), const(0)], flag)) \
+            .ins(sub(reg(RCX), reg(RCX), const(1)))
+        after = builder._address(len(builder._rows) + 1)
+        builder._rows.append(_Instruction([sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), const(after)),
+                                           *between, op("CALL", [ram(CODE_BASE)])], "call", call_target=CODE_BASE))
+        return builder.label("done").add_rsp(0x28).ret()
+
+    # (a small depth: every activation returns, the opaque call's debts are exercised)
+    pools = lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000, RCX: seed}
+    unprojected = recursive(copy(reg(RAX), const(1)))
+    assert not observed_call_state_projections(program_units(unprojected)[0].observation)
+    analyzed, report = _oracle(program_units(unprojected), pools=pools)
+    assert analyzed.recursion_unresolved   # (opaque: sound, not precise)
+    assert report.checked and report.silent == []
+    projected, _ = _oracle(program_units(recursive()), pools=pools)
+    assert not projected.recursion_unresolved   # (the projected shape converges)
