@@ -8,7 +8,7 @@ from .resource_limits import limit
 
 from .resource_limits import step
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from .call_effect_contracts import (
@@ -27,7 +27,10 @@ from .control_dependence import (
 )
 from .pcode_blocks import build_pcode_block_graph
 from .rep_strings import MAX_REP_BYTES, rep_sites
-from .may_alias import EscapeMemo, MayAliasRead, derive_may_alias_reads, private_frame_writes
+from .may_alias import (
+    ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, EscapeMemo, MayAliasRead,
+    derive_may_alias_reads, private_frame_writes,
+)
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
     BoundLocalMemorySsa,
@@ -97,6 +100,19 @@ from .relative_memory import (
 from .observed_call_state import observed_call_state_projections, project_persistent_call_state
 from .opaque_values import OpaqueValueEvidenceProvider
 from .storage import _resolve_validated_storage
+
+
+def _forward_inputs(**inputs):
+    """``forward.ForwardInputs`` of the accepted normalization, only with the
+    forward switch on (TDO_V2_FORWARD=1); None otherwise -- one environment test,
+    nothing imported, built or charged."""
+    import os
+
+    if os.environ.get("TDO_V2_FORWARD") != "1":
+        return None
+    from .forward import ForwardInputs
+
+    return ForwardInputs(**inputs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +219,11 @@ class NormalizedFunction:
     # pairs in this function's objects). Conditional (summaries carry the
     # pairs to the callers; roots are unsure)
     open_nodes: tuple = ()
+    # forward on only (TDO_V2_FORWARD=1, docs 25.33 F4a): the final effect unit
+    # and the frozen inputs of this normalization's call-clobber and may-alias
+    # derivations (``forward.ForwardInputs``), for probe re-derivations; None
+    # otherwise, outside equality and snapshots
+    forward_inputs: object = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -2020,6 +2041,19 @@ class _ScopedNormalizer:
             open_nodes=open_nodes, opaque_nodes=opaque_nodes,
             kept_call_memory=tuple(sorted((key, spans) for key, (spans, _) in kept_memory.items())),
             accessor_separations=separations,
+            forward_inputs=_forward_inputs(
+                effect_unit=effect_unit, observation=observation, context=context, address_spaces=address_spaces,
+                assumed_calls=frozenset(assumed_call_effects), quiet_calls=quiet_calls,
+                observed_calls=dict(observed_calls), escaping_calls=escaping_calls, opaque_calls=opaque_calls,
+                private_frame_above=private_frame_above,
+                assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+                wild_objects=frozenset(wild_objects), fresh_objects=frozenset(fresh_objects),
+                nonstack_objects=frozenset(nonstack_objects), uncertain_writers=tuple(sorted(_uncertain.items(),
+                                                                                         key=lambda item: item[0])),
+                separations=separations, proven_call_effects=tuple(sorted(proven_call_effects.items())),
+                kept_memory=tuple(sorted((key, spans) for key, (spans, _) in kept_memory.items())),
+                below_bounds=below_bounds, entry_values_not_frame=ENTRY_VALUES_NOT_FRAME.get(),
+                opaque_no_stack_addresses=OPAQUE_NO_STACK_ADDRESSES.get()),
             same_result_uses=tuple(
                 (row, pointer_rows[row][1], tuple(sorted(accessor_states[row.rsplit("~", 1)[0]][1])),
                  next(iter(values)))

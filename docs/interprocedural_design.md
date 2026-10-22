@@ -2285,6 +2285,20 @@ LOAD/STORE 주소. requires = 실행의 가정 전부(`EngineRun.assumptions` / 
 실제로 잡힌 것: 요약 없는 호출 뒤 레지스터(빚 표시만 있고 SSA는 입구 정의 — 처음 6건 실패), 재귀 활성 섞임(검증기), 주소 빚,
 widening 부호, 늦게 퍼지는 빚 표시(Astra 재현), 여러 조각 읽기의 빚 표시(Fable), 가정 누락.
 
+**F4a 결과(범위 주소 읽기, 설계 Astra 2차·Fable 2차, 구현 Astra 2차·Fable 2차)**: 주소가 입구 레지스터 기준 하나에 후보
+offset 8개 이하인 LOAD(메모리 읽기가 풀리지 않음·주소 모름·인덱스(wild) 객체)를 후보 자리마다 확인. 경로(Astra 선택): 정방향을
+켰을 때만(`TDO_V2_FORWARD=1`, 레지스트리 스위치 아님) 받아들인 정규화가 `NormalizedFunction.forward_inputs`(마지막 effect unit +
+call-clobber·may-alias의 입력 + 설정된 정책 `ENTRY_VALUES_NOT_FRAME`·`OPAQUE_NO_STACK_ADDRESSES`, 변경 불가, 비교·스냅샷 제외,
+끄면 None)를 들고, `forward.probe()`가 LOAD에 후보 자리 읽기를 더한 복사본으로 엔진 자신의 call-clobber·may-alias 판정과 memory
+SSA를 다시 만듦 — 후보마다 빚이 겹치지 않고 그 자리를 덮는 정의가 하나이며 원래 SSA에 같은 정의(종류·연산·쓰기 순번·블록·
+span)가 있어야 그 값, 하나라도 아니면 TOP + 빚 표시; 성공하면 후보 값의 합(정의의 빚 표시는 이어받음). probe가 기댄 가정
+(새 프레임 정책·home space·opaque 호출·globals)은 그 함수의 모든 사실 requires에(함수 단위 과대 보고). 주소 모름 빚은 이제
+그 메모리 읽기에만 걸리고, probe가 풀지 못하면 빚 표시. 새 연산 규칙: 상수 마스크 `x & c` → [0, c]. 검토 중 잡힌 것: 설정한
+정책이 probe에서 기본값으로 돌아감(Astra 재현 — 정책 끔에서 틀린 대상), probe 가정 누락(Astra·Fable), 공간 선택자 확인.
+결과: 합성 DFB072 → {A, B}(검증기 통과), 사이의 opaque 호출·한 칸 부분 덮어쓰기·정책 끔 → 대상 없음; 실제 v2-win-debug-full
+1b1:140002869의 CALLIND → 정확히 두 대상 {0x14000144B, 0x14000145A}, v3-win32-release-full에서도 한 곳이 "여러 입구"로.
+정방향 끔: 스냅샷(audit1)·시드 고정 작업량 같음; 정방향 켬: Bundle 13개 설정 실행 대조 실패 0. 아직 쓰는 곳 없음(F1 소비자 전).
+
 **사실·검증**: `Fact(id, subject, context, claim, evidence, requires, fingerprints)`(25.18의 6번), id는 실행마다 같은 순서로
 정해짐; 실행의 사실은 스냅샷의 새 단면(정방향 끔이면 없음, 나머지 단면 같음). 검증기: p-code 해석기(함수 단위·프로그램 모드)로
 공개된 값·대상 사실을 구체 실행에서 확인(값이 집합 안, 도달한 대상이 집합 안), 돌연변이(줄인 집합) 거부, 실행이 어긴 가정에

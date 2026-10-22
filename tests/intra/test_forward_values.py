@@ -81,8 +81,11 @@ def test_based_values_keep_their_base_only_through_add_and_sub():
     moved = _transfer("INT_ADD", [pointer, Value.number(16, 64)], [8, 8], 8)
     assert moved.items == ((("entry", RCX, 8), Interval.offset(16, 64)),)
     assert _transfer("INT_SUB", [moved, Value.number(8, 64)], [8, 8], 8).items[0][1] == Interval.offset(8, 64)
-    for opcode in ("INT_AND", "INT_OR", "INT_LEFT", "INT_MULT"):
+    for opcode in ("INT_OR", "INT_LEFT", "INT_MULT"):
         assert _transfer(opcode, [pointer, Value.number(3, 64)], [8, 8], 8).is_top, opcode
+    # a mask keeps no base, only the mask's range
+    assert _transfer("INT_AND", [pointer, Value.number(3, 64)], [8, 8], 8).items == (
+        (("abs",), Interval(0, 3, 1, 64)),)
     assert _transfer("INT_ADD", [pointer, pointer], [8, 8], 8).is_top
 
 
@@ -257,3 +260,108 @@ def test_taint_that_arrives_late_still_reaches_the_loads():
     report = check_forward(item.unit, facts, seeds=range(2), register_pools=lambda seed: {RSP: 0x7000_0000},
                            havoc_calls=(REG, RSP, 8))
     assert report.failures == []
+
+
+# -- F4a: reads at ranged addresses (docs 25.33) ------------------------------------
+
+A_TARGET, B_TARGET = CODE_BASE + 0x800, CODE_BASE + 0x900
+
+
+def _table(*between, slot_b=0x28):
+    """table[0] = A at [rsp+0x20], table[1] = B at [rsp+slot_b]; i = rcx & 1;
+    call table[i] -- the 09 testbed's DFB072 shape."""
+    t, u, i = tmp(0x100), tmp(0x180), tmp(0x200)
+    return (FunctionBuilder().sub_rsp(0x48)
+            .ins(add(t, reg(RSP), const(0x20)), store(t, const(A_TARGET)),
+                 add(u, reg(RSP), const(slot_b)), store(u, const(B_TARGET)))
+            .ins(*between)
+            .ins(op("INT_AND", [reg(RCX), const(1)], i), op("INT_MULT", [i, const(8)], i),
+                 add(i, i, reg(RSP)), add(i, i, const(0x20)), load(reg(RAX), i))
+            .call_indirect(RAX).add_rsp(0x48).ret())
+
+
+def _forward_facts(monkeypatch, *functions):
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    results = analyze_units(program_units(*functions))
+    item = results[ROOT]
+    assert item.normalized.forward_inputs is not None
+    return item, forward_facts(item.normalized, item.unit)
+
+
+def _target(facts):
+    return next((fact.claim for fact in facts if fact.operation.endswith(":CALLIND")), None)
+
+
+def _targets(claim):
+    ((base, interval),) = claim.items
+    assert base == ("abs",)
+    return {value for value in range(interval.lo, interval.hi + 1, interval.stride or 1) if interval.contains(value)}
+
+
+def test_a_table_read_by_a_ranged_index_gives_both_targets(monkeypatch):
+    callees = (FunctionBuilder(entry=A_TARGET).ret(), FunctionBuilder(entry=B_TARGET).ret())
+    item, facts = _forward_facts(monkeypatch, _table(), *callees)
+    claim = _target(facts)
+    assert claim is not None and _targets(claim) == {A_TARGET, B_TARGET}
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation
+               for unit in program_units(_table(), *callees)}
+    report = check_forward(item.unit, facts, seeds=range(6), register_pools=_pools, program=program)
+    assert report.failures == [] and report.checked
+
+
+def test_an_opaque_call_between_the_stores_and_the_read_gives_no_target(monkeypatch):
+    builder = (FunctionBuilder().sub_rsp(0x48)
+               .ins(add(tmp(0x100), reg(RSP), const(0x20)), store(tmp(0x100), const(A_TARGET)),
+                    add(tmp(0x180), reg(RSP), const(0x28)), store(tmp(0x180), const(B_TARGET)))
+               .call(CODE_BASE + 0xA00)
+               .ins(op("INT_AND", [reg(RCX), const(1)], tmp(0x200)), op("INT_MULT", [tmp(0x200), const(8)], tmp(0x200)),
+                    add(tmp(0x200), tmp(0x200), reg(RSP)), add(tmp(0x200), tmp(0x200), const(0x20)),
+                    load(reg(RAX), tmp(0x200)))
+               .call_indirect(RAX).add_rsp(0x48).ret())
+    _, facts = _forward_facts(monkeypatch, builder)
+    assert _target(facts) is None
+
+
+def test_a_partial_overwrite_of_one_slot_gives_no_target(monkeypatch):
+    _, facts = _forward_facts(monkeypatch, _table(add(tmp(0x300), reg(RSP), const(0x2C)),
+                                                  store(tmp(0x300), const(0x77, 1))))
+    claim = _target(facts)
+    assert claim is None or B_TARGET not in _targets(claim)
+
+
+def test_forward_off_builds_no_inputs(monkeypatch):
+    monkeypatch.delenv("TDO_V2_FORWARD", raising=False)
+    results = analyze_units(program_units(_table()))
+    assert results[ROOT].normalized.forward_inputs is None
+
+
+def test_the_probe_keeps_the_configured_frame_policy(monkeypatch):
+    """With entry-values-do-not-address-the-new-frame OFF, an entry pointer
+    (rdx) may address the table: its store reaches a slot, so no {A, B}
+    (Astra F4a round 1, reproduced)."""
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    builder = _table(store(reg(RDX), const(0x1A00)))
+    results = analyze_units(program_units(builder), assume_entry_values_not_frame=False)
+    item = results[ROOT]
+    claim = _target(forward_facts(item.normalized, item.unit))
+    assert claim is None or 0x1A00 in _targets(claim) or not _targets(claim) <= {A_TARGET, B_TARGET}
+
+
+def test_a_probe_resting_on_an_assumption_reports_it(monkeypatch):
+    """Default policies; the stack address escapes after the read, so the
+    normalization itself rests on no private-frame assumption -- only the probe
+    does (it decides the rdx store cannot reach a table slot). Every fact then
+    lists entry-values-do-not-address-the-new-frame (Astra F4a round 2)."""
+    i = tmp(0x200)
+    builder = (FunctionBuilder().sub_rsp(0x48)
+               .ins(add(tmp(0x100), reg(RSP), const(0x20)), store(tmp(0x100), const(A_TARGET)),
+                    add(tmp(0x180), reg(RSP), const(0x28)), store(tmp(0x180), const(B_TARGET)))
+               .ins(store(reg(RDX), const(0x1A00)))
+               .ins(op("INT_AND", [reg(RCX), const(1)], i), op("INT_MULT", [i, const(8)], i),
+                    add(i, i, reg(RSP)), add(i, i, const(0x20)), load(reg(RAX), i))
+               .ins(store(const(0x5000), reg(RSP)))
+               .call_indirect(RAX).add_rsp(0x48).ret())
+    item, facts = _forward_facts(monkeypatch, builder)
+    assert not item.normalized.assumes_entry_values_not_frame
+    assert _targets(_target(facts)) == {A_TARGET, B_TARGET}
+    assert facts and all("entry-values-do-not-address-the-new-frame" in fact.requires for fact in facts)

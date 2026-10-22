@@ -46,7 +46,8 @@ SNAPSHOT_VERSION = 1
 # of these types must be in one of the two
 CONTRACT = {
     "NormalizedFunction": (None, {"document": "input (the function document)",
-                                  "scopes": "input (scope bundle)"}),
+                                  "scopes": "input (scope bundle)",
+                                  "forward_inputs": "forward-on derivation inputs (docs 25.33 F4a); None when off"}),
     "UnresolvedNormalizedFunction": (None, {"scopes": "input (scope bundle)"}),
     "AnalyzedFunction": (None, {"unit": "input (the scoped unit)"}),
     "FunctionSummary": (None, {}),

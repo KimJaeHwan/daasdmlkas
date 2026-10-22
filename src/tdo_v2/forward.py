@@ -46,6 +46,7 @@ from .span_geometry import StorageObjectKind
 MAX_BASES = 8          # items per value; more -> TOP
 WIDEN_AFTER = 3        # changes of a JOIN before it widens
 MAX_PASSES = 256       # fixpoint passes (a safety bound; widening converges first)
+MAX_CANDIDATES = 8     # candidate places of a ranged read (F4a)
 SUBJECTS = {"CALLIND": 0, "BRANCHIND": 0, "LOAD": 1, "STORE": 1}
 _ABS = ("abs",)
 
@@ -261,6 +262,10 @@ def _transfer(opcode: str, values: list[Value], widths: list[int], out_size: int
             return _shift(right, left.numeric(), False)
         return Value.top(bits)
     numbers = [value.numeric() for value in values]
+    if opcode == "INT_AND" and len(values) > 1 and singles[1] is not None and numbers[0] is None:
+        # x & c <= c whatever x is (a based value's bits included)
+        interval = _numeric(opcode, [Interval.full(8 * widths[0])], singles, bits)
+        return Value.top(bits) if interval is None else Value(bits, ((_ABS, interval),))
     if any(number is None for number in numbers):
         return Value.top(bits)   # (a based value through any other operation: no base kept)
     interval = _numeric(opcode, numbers, singles, bits)
@@ -283,6 +288,143 @@ def _slice(value: Value, definition_span, span) -> Value:
 
 
 # -- the analysis -------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ForwardInputs:
+    """The frozen inputs of one accepted normalization's call-clobber and
+    may-alias derivations (docs 25.33 F4a): ``NormalizedFunction.forward_inputs``
+    with the forward switch on. Policies are the CONFIGURED ones, not the
+    "used" flags; collections are copies the normalization no longer mutates."""
+    effect_unit: object
+    observation: object
+    context: object
+    address_spaces: tuple
+    assumed_calls: frozenset
+    quiet_calls: frozenset
+    observed_calls: dict
+    escaping_calls: frozenset
+    opaque_calls: frozenset
+    private_frame_above: int
+    assume_globals_disjoint_from_stack: bool
+    wild_objects: frozenset
+    fresh_objects: frozenset
+    nonstack_objects: frozenset
+    uncertain_writers: tuple       # ((writer key, conditions | None), ...)
+    separations: tuple
+    proven_call_effects: tuple     # ((call key, ProvenCallEffect), ...)
+    kept_memory: tuple             # ((call key, spans), ...)
+    below_bounds: tuple            # ((call key, stack object, first kept offset), ...)
+    entry_values_not_frame: bool = True      # (may_alias.ENTRY_VALUES_NOT_FRAME as configured)
+    opaque_no_stack_addresses: bool = True   # (may_alias.OPAQUE_NO_STACK_ADDRESSES as configured)
+
+
+def probe(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
+    """The backward engine's own debt judgement and reaching definition for
+    reads of ``spans`` at the operation ``load_key`` (docs 25.33 F4a): the
+    final effect unit with those reads added (``normalized.forward_inputs``)
+    goes through the same call-clobber and may-alias derivations, with the same
+    frozen inputs, and through the memory SSA build. Returns span -> the
+    ORIGINAL SSA definition id that alone covers it with no debt, or None
+    (a debt overlapping it, several or partial definitions, or a definition
+    with no identical one in the normalized function's SSA) -- with the named
+    assumptions the probe's derivations used (its private-frame and opaque-call
+    decisions). The derivations run under the normalization's CONFIGURED
+    policies (``ForwardInputs``), not the ambient defaults. Nothing of the
+    normalized function changes (fresh collectors and copies throughout)."""
+    from dataclasses import replace
+
+    from .call_clobber import derive_call_clobber_reads
+    from .call_observation_contracts import build_bound_local_memory_ssa
+    from .effect_decode import decode_effect_unit
+    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, EscapeMemo, derive_may_alias_reads
+    from .model import ResolvedStorage
+    from .normalize import _memory_spans_except_below
+
+    inputs = normalized.forward_inputs
+    spans = tuple(spans)
+    found = {span: None for span in spans}
+    if inputs is None or not spans:
+        return found, ()
+    unit = inputs.effect_unit
+    blocks, hit = [], False
+    for block in unit.blocks:
+        effects = []
+        for effect in block.effects:
+            if effect.operation_key == load_key:
+                hit = True
+                effect = replace(effect, reads=(*effect.reads, *(ResolvedStorage(span) for span in spans)))
+            effects.append(effect)
+        blocks.append(replace(block, effects=tuple(effects)))
+    if not hit:
+        return found, ()
+    probed = replace(unit, blocks=tuple(blocks))
+    rows = dict(inputs.proven_call_effects)
+    preserved = {key: tuple(row.preserved) for key, row in rows.items()}
+    for key, kept in inputs.kept_memory:
+        preserved[key] = preserved.get(key, ()) + tuple(kept)
+    for key, object_id, bound in inputs.below_bounds:
+        preserved[key] = preserved.get(key, ()) + _memory_spans_except_below(probed, object_id, bound)
+    clobbers = derive_call_clobber_reads(
+        probed, inputs.observation, inputs.context, assumed_calls=inputs.assumed_calls,
+        proven_preserved=preserved,
+        memory_keeping=frozenset(key for key, row in rows.items() if row.preserves_memory and not row.clobbers_below),
+        unrestored_stack_calls=frozenset(key for key, row in rows.items() if not row.restores_stack),
+    )
+    uncertain = dict(inputs.uncertain_writers)
+    frame_uses: list = []
+    opaque_uses: list = []
+    tokens = (ENTRY_VALUES_NOT_FRAME.set(inputs.entry_values_not_frame),
+              OPAQUE_NO_STACK_ADDRESSES.set(inputs.opaque_no_stack_addresses))
+    try:
+        aliases = derive_may_alias_reads(
+        probed, inputs.observation, inputs.context, inputs.address_spaces,
+        assumed_calls=inputs.quiet_calls,
+        assume_globals_disjoint_from_stack=inputs.assume_globals_disjoint_from_stack,
+        wild_objects=inputs.wild_objects, fresh_objects=inputs.fresh_objects,
+        nonstack_objects=inputs.nonstack_objects, observed_calls=dict(inputs.observed_calls),
+        escaping_calls=inputs.escaping_calls, opaque_calls=inputs.opaque_calls, opaque_uses=opaque_uses,
+        private_above=inputs.private_frame_above,
+        uncertain_writers=frozenset(uncertain),
+        no_kill_writers=frozenset(key for key, conditions in uncertain.items() if conditions is None),
+        uses=frame_uses, separations=inputs.separations,
+        escape_memo=EscapeMemo(probed, inputs.observation, inputs.context, inputs.address_spaces),
+        )
+    finally:
+        OPAQUE_NO_STACK_ADDRESSES.reset(tokens[1])
+        ENTRY_VALUES_NOT_FRAME.reset(tokens[0])
+    used = []
+    if any(frame_uses):
+        used.append("entry-values-do-not-address-the-new-frame")
+        if inputs.private_frame_above:
+            used.append("win64-home-space-callee-private")
+    if any(opaque_uses):
+        used.append("opaque-callees-leave-no-stack-addresses")
+    if inputs.assume_globals_disjoint_from_stack:
+        used.append("globals-disjoint-from-stack")
+    indebted = [span for row in (*clobbers, *aliases) if row.operation_key == load_key for span in row.spans]
+    ssa = build_bound_local_memory_ssa(decode_effect_unit(probed)).result
+    original = normalized.memory_ssa
+
+    def identity(definition):
+        return (definition.kind, definition.operation_key, definition.write_ordinal, definition.block_key,
+                definition.span)
+
+    by_identity = {identity(definition): index for index, definition in enumerate(original.definitions)}
+    action = next((index for index, row in enumerate(ssa.actions) if row.operation_key == load_key), None)
+    for span in spans:
+        if any(debt.overlaps(span) for debt in indebted):
+            continue
+        reads = [read for read in ssa.reads if read.action_id == action and read.span == span]
+        if len(reads) != 1 or len(reads[0].fragments) != 1:
+            continue
+        fragment = reads[0].fragments[0]
+        if fragment.span != span or len(fragment.definition_ids) != 1:
+            continue
+        definition = ssa.definitions[fragment.definition_ids[0]]
+        if definition.span.contains(span):
+            found[span] = by_identity.get(identity(definition))
+    return found, tuple(used)
+
 
 @dataclass(frozen=True, slots=True)
 class Fact:
@@ -339,8 +481,12 @@ def forward_facts(normalized, unit, *, readonly_image=None, assumptions=()) -> t
     debts: dict = {}
     for row in normalized.call_clobber_reads:
         debts.setdefault(row.operation_key, []).extend(row.spans)
+    unknown_address_reads = set()   # (operations whose memory read's address is unknown: that read only)
     for row in normalized.may_alias_reads:
-        debts.setdefault(row.operation_key, []).extend(row.spans if not row.unknown_address else (None,))
+        if row.unknown_address:
+            unknown_address_reads.add(row.operation_key)
+        else:
+            debts.setdefault(row.operation_key, []).extend(row.spans)
     function = f"{unit.scopes.function.entry.space_id:x}:{unit.scopes.function.entry.byte_offset:x}"
 
     def span_of(varnode):
@@ -369,7 +515,7 @@ def forward_facts(normalized, unit, *, readonly_image=None, assumptions=()) -> t
     def read_value(action_id, span):
         """The value an action's read of ``span`` takes, or TOP."""
         for debt in debts.get(ssa.actions[action_id].operation_key, ()):
-            if debt is None or debt.overlaps(span):
+            if debt.overlaps(span):
                 taint[0] = True
                 return Value.top(8 * span.size)
         rows = [read for read in reads_of.get(action_id, ()) if read.span == span]
@@ -394,18 +540,87 @@ def forward_facts(normalized, unit, *, readonly_image=None, assumptions=()) -> t
             return Value.top(8 * varnode.byte_size)
         return read_value(action_id, span)
 
+    probes: dict = {}
+    probe_labels: set = set()
+    anchors = None
+
+    def ranged_value(operation_key, operation):
+        """F4a: a LOAD at a ranged address of an entry-anchored object
+        (docs 25.33): every candidate span through ``probe`` -- the engine's
+        own debt rules and reaching definitions; all candidates clean -> the
+        join of their values (each candidate definition's taint carried), else
+        TOP. Needs ``normalized.forward_inputs``."""
+        nonlocal anchors
+        size = operation.output.byte_size
+        if normalized.forward_inputs is None or len(operation.inputs) < 2:
+            return Value.top(8 * size)
+        address = input_value(operation_key, operation.inputs[1])
+        if address is None or address.is_top or len(address.items) != 1:
+            return Value.top(8 * size)
+        base, offsets = address.items[0]
+        if base == _ABS or (offsets.stride and (offsets.hi - offsets.lo) // offsets.stride + 1 > MAX_CANDIDATES):
+            return Value.top(8 * size)
+        if anchors is None:
+            from .interprocedural import _relative_anchors
+
+            anchors = _relative_anchors(unit, normalized)
+        found = [(object_id, space) for object_id, (span, space) in anchors.items()
+                 if span.object_id.kind is StorageObjectKind.REGISTER_FILE and span.start == base[1]
+                 and span.size == base[2]]
+        if len(found) != 1:
+            return Value.top(8 * size)
+        object_id, space = found[0]
+        selector = operation.inputs[0]
+        if selector.kind is not VarnodeKindCode.CONSTANT or selector.coordinate.byte_offset != space:
+            return Value.top(8 * size)   # (the LOAD's space is not the anchored object's)
+        bits = next((row.address_size_bits for row in normalized.forward_inputs.address_spaces
+                     if row.space_id == space), None)
+        if bits is None:
+            return Value.top(8 * size)
+        from .span_geometry import ByteSpan
+
+        step_ = offsets.stride or 1
+        spans = tuple(ByteSpan(object_id, (1 << bits) + offset, size)
+                      for offset in range(offsets.lo, offsets.hi + 1, step_))
+        key = (operation_key, spans)
+        if key not in probes:
+            probes[key] = probe(normalized, operation_key, spans)
+        found_ids, used = probes[key]
+        result = None
+        for span in spans:
+            index = found_ids[span]
+            if index is None:
+                taint[0] = True   # (an indebted or unplaced candidate: the old taint contract)
+                return Value.top(8 * size)
+            if index in tainted:
+                taint[0] = True
+            part = definition_value(index, span)
+            if part is None:
+                return None   # (not evaluated yet: bottom)
+            result = part if result is None else join(result, part)
+        probe_labels.update(used)   # (a value resting on the probe rests on its assumptions)
+        return result
+
     def memory_value(operation_key, operation):
-        """A LOAD's loaded value: its single memory read (not an input's)."""
+        """A LOAD's loaded value: its single memory read (not an input's), or
+        a ranged read (``ranged_value``)."""
         action_id = action_ids.get(operation_key)
         size = operation.output.byte_size
-        if action_id is None or action_id in unresolved:
+        if action_id is None:
             return Value.top(8 * size)
+        if action_id in unresolved or operation_key in unknown_address_reads:
+            value = ranged_value(operation_key, operation)
+            if value is not None and value.is_top and operation_key in unknown_address_reads:
+                taint[0] = True   # (no probe settled it: the unknown-address debt stands, Fable F4a round 2)
+            return value
         inputs = {span_of(item) for item in operation.inputs if item.kind is not VarnodeKindCode.CONSTANT}
         rows = [read for read in reads_of.get(action_id, ()) if read.span not in inputs]
         if any(index in tainted for row in rows for fragment in row.fragments for index in fragment.definition_ids):
             taint[0] = True
         if len(rows) != 1 or rows[0].span.size != size:
-            return Value.top(8 * size)
+            return ranged_value(operation_key, operation)
+        if rows[0].span.object_id in getattr(normalized, "wild_objects", frozenset()):
+            return ranged_value(operation_key, operation)   # (an index object: its read is no single place)
         return read_value(action_id, rows[0].span)
 
     def address_tainted(key, varnode):
@@ -524,7 +739,8 @@ def forward_facts(normalized, unit, *, readonly_image=None, assumptions=()) -> t
 
     labels = tuple(sorted({*assumptions, *(label for attribute, label in _NORMALIZATION_ASSUMPTIONS
                                            if getattr(normalized, attribute, False)),
-                           *(("readonly-image-data-is-constant",) if used_readonly else ())}))
+                           *(("readonly-image-data-is-constant",) if used_readonly else ()),
+                           *probe_labels}))
     facts = []
     for instruction in unit.observation.instructions:
         for ordinal, operation in enumerate(instruction.operations):
