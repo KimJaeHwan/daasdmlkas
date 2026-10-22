@@ -527,11 +527,13 @@ def test_a_pass_through_is_a_context_fact(monkeypatch):
     assert context[0] == ROOT and targets.items[0][0] == ("entry", RCX, 8)
 
 
-def test_a_projection_sensitive_caller_gets_no_facts(monkeypatch):
+def test_a_stack_pointer_use_after_the_push_is_not_projected(monkeypatch):
     """``rsp -= 8; [rsp] = ret; rcx = rsp; CALL A`` then ``CALL B`` with B
-    loading [rcx]: the projected push makes the caller's own SSA value of rcx
-    wrong, so it leaks into later bindings (Astra F2a round 2, reproduced):
-    the caller gets no forward facts and binds nothing."""
+    loading [rcx]: had the push been projected away, the caller's own SSA value
+    of rcx would be the pre-push one and leak into B's binding (Astra F2a
+    round 2). The recognizer refuses that shape (observed_call_state), so the
+    push stays an ordinary operation: rcx = entry(rsp) - 0x30, and every
+    generic and context fact holds."""
     from synthetic import _Instruction, ram, sub
 
     other = CODE_BASE + 0xE00
@@ -544,5 +546,10 @@ def test_a_projection_sensitive_caller_gets_no_facts(monkeypatch):
     functions = (caller, FunctionBuilder(entry=A_TARGET).ret(),
                  FunctionBuilder(entry=other).ins(load(reg(RAX), reg(RCX))).ret())
     results = analyze_units(program_units(*functions))
-    assert forward_facts(results[ROOT].normalized, results[ROOT].unit) == ()
-    assert not [fact for fact in context_facts(results) if fact.context[0] == ROOT]
+    contexts = [fact for fact in context_facts(results) if fact.context[0] == ROOT]
+    loads = [fact.claim for fact in contexts if fact.operation == f"1:{other:x}:0:LOAD"]
+    assert loads and all(claim == Value(64, ((("entry", RSP, 8), Interval.offset(-0x30, 64)),)) for claim in loads)
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in program_units(*functions)}
+    facts = (*forward_facts(results[ROOT].normalized, results[ROOT].unit), *contexts)
+    report = check_forward(results[ROOT].unit, facts, seeds=range(4), register_pools=_pools, program=program)
+    assert report.failures == [] and report.checked

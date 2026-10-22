@@ -926,7 +926,9 @@ def _projection_sensitive(observation) -> bool:
     push, so such an operation's value in the memory SSA uses the pre-push
     stack pointer while the execution uses the pushed one (Astra F2a round 2;
     Ghidra's x86 calls compute their target before the push). Such a function
-    gets no forward facts and binds nothing."""
+    gets no forward facts and binds nothing. (The recognizer now refuses any
+    call instruction with an operation between the push and the call, so this
+    never fires; it stays as a guard.)"""
     from ._scope_contracts import VarnodeKindCode
     from .observed_call_state import observed_call_state_projections
 

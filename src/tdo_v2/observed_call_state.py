@@ -154,6 +154,18 @@ def project_persistent_call_state(
     )
 
 
+def _writes_register(operation: ValidatedOperation, register) -> bool:
+    """Whether an operation writes a register varnode sharing a byte with
+    ``register``."""
+    output = operation.output
+    return (
+        output is not None
+        and output.kind is VarnodeKindCode.REGISTER
+        and output.coordinate.byte_offset < register.coordinate.byte_offset + register.byte_size
+        and register.coordinate.byte_offset < output.coordinate.byte_offset + output.byte_size
+    )
+
+
 def _observed_call_state_projection(
     instruction: ValidatedInstruction,
     keyed_operations: tuple[tuple[str, int, ValidatedOperation], ...],
@@ -180,7 +192,7 @@ def _observed_call_state_projection(
         ):
             continue
         matching_stores = tuple(
-            store_key
+            (store_key, store_ordinal)
             for store_key, store_ordinal, store in keyed_operations
             if (
                 adjust_ordinal < store_ordinal < call_ordinal
@@ -197,6 +209,23 @@ def _observed_call_state_projection(
         )
         if len(matching_stores) != 1:
             continue
+        store_key, store_ordinal = matching_stores[0]
+        if any(
+            adjust_ordinal < ordinal < call_ordinal and ordinal != store_ordinal
+            for _, ordinal, _ in keyed_operations
+        ) or any(
+            ordinal != adjust_ordinal and _writes_register(operation, adjust.output)
+            for _, ordinal, operation in keyed_operations
+        ):
+            # only the return-address store may lie between the push and the
+            # call (removing the push changes the stack pointer any other
+            # operation there sees, and its memory accesses may alias the
+            # removed store), and the push must be the instruction's only
+            # stack-pointer write (a far call's second push: the callee's
+            # return pops both) -- else the whole instruction is refused, not
+            # just this candidate (Ghidra's near x86 calls compute their target
+            # before the push: nothing lies between)
+            return None
         register = PhysicalRegisterSlice(
             adjust.output.coordinate.byte_offset,
             adjust.output.byte_size,
@@ -204,7 +233,7 @@ def _observed_call_state_projection(
         candidates.append(
             ObservedCallStateProjection(
                 call_key,
-                (adjust_key, matching_stores[0]),
+                (adjust_key, store_key),
                 PhysicalMemoryTransition(
                     register,
                     register,
