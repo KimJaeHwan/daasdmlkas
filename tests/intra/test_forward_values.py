@@ -12,7 +12,7 @@ from forward_oracle import check_forward
 from synthetic import (
     CODE_BASE, RAX, RBX, RCX, RDX, RSP, FunctionBuilder, add, const, copy, load, op, program_units, reg, store, tmp,
 )
-from tdo_v2.forward import Interval, Value, _transfer, concretizes, forward_facts, join
+from tdo_v2.forward import Interval, Value, _transfer, concretizes, context_facts, forward_facts, join, substitute
 from tdo_v2.interprocedural import analyze_units
 from tdo_v2.operation_records import _compute
 
@@ -365,3 +365,184 @@ def test_a_probe_resting_on_an_assumption_reports_it(monkeypatch):
     assert not item.normalized.assumes_entry_values_not_frame
     assert _targets(_target(facts)) == {A_TARGET, B_TARGET}
     assert facts and all("entry-values-do-not-address-the-new-frame" in fact.requires for fact in facts)
+
+
+# -- F2a: call contexts by substitution (docs 25.33) --------------------------------
+
+CALLEE, OPAQUE = CODE_BASE + 0xA00, CODE_BASE + 0xC00
+
+
+def _calls_rcx():
+    """callee(rcx): call rcx."""
+    return FunctionBuilder(entry=CALLEE).sub_rsp(0x18).call_indirect(RCX).add_rsp(0x18).ret()
+
+
+def _context_run(monkeypatch, caller, *others):
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    functions = (caller, _calls_rcx(), FunctionBuilder(entry=A_TARGET).ret(), FunctionBuilder(entry=B_TARGET).ret(),
+                 *others)
+    results = analyze_units(program_units(*functions))
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in program_units(*functions)}
+    return results, context_facts(results), program
+
+
+def _context_targets(facts):
+    return {fact.context: _targets(fact.claim) for fact in facts if fact.operation.endswith(":CALLIND")}
+
+
+def test_substitution_moves_offsets_onto_the_binding():
+    claim = Value(64, ((("entry", RCX, 8), Interval.offset(8, 64)), (("abs",), Interval.const(3, 64))))
+    bound = substitute(claim, {("entry", RCX, 8): Value.number(0x1000, 64)})
+    assert bound.numeric() == Interval(3, 0x1008, 0x1005, 64)
+    assert substitute(claim, {}).is_top
+    assert substitute(claim, {("entry", RCX, 8): Value.top(64)}).is_top
+    stack = substitute(Value(64, ((("entry", RSP, 8), Interval(-16, -8, 8, 64, True)),)),
+                       {("entry", RSP, 8): Value(64, ((("entry", RSP, 8), Interval.offset(-0x30, 64)),))})
+    assert stack == Value(64, ((("entry", RSP, 8), Interval(-0x40, -0x38, 8, 64, True)),))
+
+
+def test_two_call_sites_bind_their_own_targets(monkeypatch):
+    caller = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RCX), const(A_TARGET))).call(CALLEE)
+              .ins(copy(reg(RCX), const(B_TARGET))).call(CALLEE).add_rsp(0x28).ret())
+    results, facts, program = _context_run(monkeypatch, caller)
+    targets = _context_targets(facts)
+    assert sorted(targets.values(), key=sorted) == [{A_TARGET}, {B_TARGET}]
+    assert len(targets) == 2 and all(context[0] == ROOT for context in targets)
+    callee_fact = next(fact for fact in forward_facts(results[f"1:{CALLEE:x}"].normalized, results[f"1:{CALLEE:x}"].unit)
+                       if fact.operation.endswith(":CALLIND"))
+    assert callee_fact.claim.items[0][0] == ("entry", RCX, 8)   # (the generic fact stays parametric)
+    item = results[ROOT]
+    report = check_forward(item.unit, facts, seeds=range(4), register_pools=_pools, program=program)
+    assert report.failures == [] and report.checked and report.unexercised == 0
+
+
+def test_the_stack_pointer_is_bound_once_through_the_call_shape(monkeypatch):
+    caller = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RCX), const(A_TARGET))).call(CALLEE).add_rsp(0x28).ret()
+    results, facts, program = _context_run(monkeypatch, caller)
+    # the callee's return reads [its entry rsp] = the caller's entry rsp - 0x28 - 8
+    (ret,) = [fact for fact in facts if fact.operation.endswith(":LOAD")
+              and fact.claim.items[0][0] == ("entry", RSP, 8)]
+    assert ret.claim.items[0][1] == Interval.offset(-0x30, 64)
+    report = check_forward(results[ROOT].unit, facts, seeds=range(4), register_pools=_pools, program=program)
+    assert report.failures == [] and report.checked
+
+
+def test_a_clobbered_binding_gives_no_context_target(monkeypatch):
+    caller = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RCX), const(A_TARGET))).call(OPAQUE).call(CALLEE)
+              .add_rsp(0x28).ret())
+    _, facts, _ = _context_run(monkeypatch, caller)
+    assert _context_targets(facts) == {}
+
+
+def test_repeated_activations_from_one_site_hold(monkeypatch):
+    flag = tmp(0x300, 1)
+    caller = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), const(0)))
+              .label("loop").ins(copy(reg(RCX), const(A_TARGET))).call(CALLEE)
+              .ins(add(reg(RBX), reg(RBX), const(1)))
+              .cbranch("loop", flag, op("INT_LESS", [reg(RBX), const(3)], flag))
+              .add_rsp(0x28).ret())
+    results, facts, program = _context_run(monkeypatch, caller)
+    report = check_forward(results[ROOT].unit, facts, seeds=range(3), register_pools=_pools, program=program)
+    assert report.failures == [] and report.checked
+    assert list(_context_targets(facts).values()) == [{A_TARGET}]
+
+
+def test_context_facts_carry_both_sides_requires(monkeypatch):
+    caller = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RCX), const(A_TARGET))).call(CALLEE).add_rsp(0x28).ret()
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    functions = (caller, _calls_rcx(), FunctionBuilder(entry=A_TARGET).ret())
+    results = analyze_units(program_units(*functions))
+    facts = context_facts(results, assumptions=lambda key, item: (f"side-{key}",))
+    assert facts and all({"side-1:1000", f"side-1:{CALLEE:x}"} <= set(fact.requires) for fact in facts)
+
+
+def test_the_oracle_rejects_a_wrong_context_target(monkeypatch):
+    caller = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RCX), const(A_TARGET))).call(CALLEE).add_rsp(0x28).ret()
+    results, facts, program = _context_run(monkeypatch, caller)
+    wrong = [replace(fact, claim=Value.number(B_TARGET, 64)) if fact.operation.endswith(":CALLIND") else fact
+             for fact in facts]
+    report = check_forward(results[ROOT].unit, wrong, seeds=range(2), register_pools=_pools, program=program)
+    assert report.failures
+
+
+def test_forward_off_gives_no_context_facts(monkeypatch):
+    monkeypatch.delenv("TDO_V2_FORWARD", raising=False)
+    caller = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RCX), const(A_TARGET))).call(CALLEE).add_rsp(0x28).ret()
+    results = analyze_units(program_units(caller, _calls_rcx(), FunctionBuilder(entry=A_TARGET).ret()))
+    assert context_facts(results) == ()
+
+
+def test_a_register_written_after_the_projected_push_binds_to_top(monkeypatch):
+    """call shape ``rsp -= 8; [rsp] = ret; rcx = rsp; CALL`` -- the projection
+    removes the push, so rcx is not the pre-call value the binding reads
+    (Astra F2a round 1, reproduced): no context fact rests on it."""
+    from synthetic import _Instruction, ram, sub
+
+    caller = FunctionBuilder().sub_rsp(0x28)
+    after = caller._address(len(caller._rows) + 1)   # (the return address: the shape is projected)
+    caller._rows.append(_Instruction([sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), const(after)),
+                                      copy(reg(RCX), reg(RSP)), op("CALL", [ram(CALLEE)])], "call", call_target=CALLEE))
+    caller = caller.add_rsp(0x28).ret()
+    callee = FunctionBuilder(entry=CALLEE).ins(load(reg(RAX), reg(RCX))).ret()
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    functions = (caller, callee)
+    results = analyze_units(program_units(*functions))
+    facts = context_facts(results)
+    assert not any(fact.operation.startswith(f"1:{CALLEE:x}:0:") for fact in facts)
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in program_units(*functions)}
+    report = check_forward(results[ROOT].unit, facts, seeds=range(3), register_pools=_pools, program=program)
+    assert report.failures == []
+
+
+def test_the_oracle_checks_a_recursive_callees_own_call_instruction():
+    """At depth 2 the call's own address is the callee's call instruction
+    (recursion): checked; at depth 1 it is the caller's (Astra F2a round 1)."""
+    import pcode_interpreter
+    from forward_oracle import _Recording
+
+    recording = _Recording.__new__(_Recording)
+    recording.contexts, recording.subjects, recording.seen = {("1:1008:2:CALL", "1:1008:0:LOAD"): 1}, {}, {}
+    recording._subject_value = lambda varnode: 7
+    operation = type("Op", (), {"inputs": (None, None)})()
+    original = pcode_interpreter.Interpreter._execute
+    pcode_interpreter.Interpreter._execute = lambda self, key, operation, run: None
+    try:
+        recording._activations = [(0, "1:1008:2:CALL"), (0, "1:1008:2:CALL")]
+        recording._execute("1:1008:0:LOAD", operation, None)
+        assert recording.seen == {("1:1008:2:CALL", "1:1008:0:LOAD"): [7]}
+        recording.seen = {}
+        recording._activations = [(0, "1:1008:2:CALL")]
+        recording._execute("1:1008:0:LOAD", operation, None)
+        assert recording.seen == {}
+    finally:
+        pcode_interpreter.Interpreter._execute = original
+
+
+def test_a_pass_through_is_a_context_fact(monkeypatch):
+    """caller passes its own entry rcx on: the context claim reads the same
+    but belongs to the caller's activation (Fable F2a round 1)."""
+    caller = FunctionBuilder().sub_rsp(0x28).call(CALLEE).add_rsp(0x28).ret()
+    _, facts, _ = _context_run(monkeypatch, caller)
+    ((context, targets),) = [(fact.context, fact.claim) for fact in facts if fact.operation.endswith(":CALLIND")]
+    assert context[0] == ROOT and targets.items[0][0] == ("entry", RCX, 8)
+
+
+def test_a_projection_sensitive_caller_gets_no_facts(monkeypatch):
+    """``rsp -= 8; [rsp] = ret; rcx = rsp; CALL A`` then ``CALL B`` with B
+    loading [rcx]: the projected push makes the caller's own SSA value of rcx
+    wrong, so it leaks into later bindings (Astra F2a round 2, reproduced):
+    the caller gets no forward facts and binds nothing."""
+    from synthetic import _Instruction, ram, sub
+
+    other = CODE_BASE + 0xE00
+    caller = FunctionBuilder().sub_rsp(0x28)
+    after = caller._address(len(caller._rows) + 1)
+    caller._rows.append(_Instruction([sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), const(after)),
+                                      copy(reg(RCX), reg(RSP)), op("CALL", [ram(A_TARGET)])], "call", call_target=A_TARGET))
+    caller = caller.call(other).add_rsp(0x28).ret()
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    functions = (caller, FunctionBuilder(entry=A_TARGET).ret(),
+                 FunctionBuilder(entry=other).ins(load(reg(RAX), reg(RCX))).ret())
+    results = analyze_units(program_units(*functions))
+    assert forward_facts(results[ROOT].normalized, results[ROOT].unit) == ()
+    assert not [fact for fact in context_facts(results) if fact.context[0] == ROOT]

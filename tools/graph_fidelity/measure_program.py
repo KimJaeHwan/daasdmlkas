@@ -108,6 +108,13 @@ def main() -> int:
         run_labels = run_assumptions(results, home_space=options.get("private_frame_above", 0),
                                      traps=options.get("assume_debug_break_traps_do_not_return", False),
                                      pcodeop_models=options.get("pcodeop_models"))
+        from tdo_v2.forward import context_facts
+
+        # F2a: callee facts with each call site's bindings, checked in the caller's runs
+        contexts_of: dict = {}
+        for fact in context_facts(results, assumptions=lambda key, item: (
+                *run_labels, *item.inherited_assumptions, *item.declared.values())):
+            contexts_of.setdefault(fact.context[0], []).append(fact)
     # every function of the program runs for real (a bound one included)
     program = {
         (unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset): unit.observation
@@ -163,14 +170,18 @@ def main() -> int:
             from forward_oracle import check_forward
             from tdo_v2.forward import forward_facts
 
-            facts = forward_facts(item.normalized, item.unit,
-                                  assumptions=(*run_labels, *item.inherited_assumptions, *item.declared.values()))
+            contexts = contexts_of.get(key, [])
+            facts = (*forward_facts(item.normalized, item.unit,
+                                    assumptions=(*run_labels, *item.inherited_assumptions, *item.declared.values())),
+                     *contexts)
             forward = check_forward(item.unit, facts, seeds=range(args.runs), register_pools=pool,
                                     const_space=const, reg_space=regs, havoc_calls=(regs, sp_offset, sp_size),
                                     image=image, program=program, externals=externals,
                                     no_effect_userops=userops, address_bits=address_bits,
                                     external_abi=external_abi)
-            totals["forward_facts"] += len(facts)
+            totals["forward_facts"] += len(facts) - len(contexts)
+            totals["forward_context_facts"] += len(contexts)
+            totals["forward_unexercised"] += forward.unexercised
             totals["forward_checked"] += forward.checked
             totals["forward_failures"] += len(forward.failures)
             for row in forward.failures[:2]:

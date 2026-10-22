@@ -244,7 +244,7 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
     if os.environ.get("TDO_V2_FORWARD") == "1":
         # forward value facts (docs 25.33 F0): nothing in the engine reads them;
         # recorded only when asked, so forward-off snapshots stay as they were
-        from tdo_v2.forward import forward_facts
+        from tdo_v2.forward import context_facts, forward_facts
         from tdo_v2.image_info import ReadOnlyImage, load_image_info
         from tdo_v2.normalize import NormalizedFunction
 
@@ -255,7 +255,11 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
                 labels = (*run.assumptions, *item.inherited_assumptions, *item.declared.values())
                 sections[f"forward:{key}"] = encode(forward_facts(
                     item.normalized, item.unit, readonly_image=readonly, assumptions=labels), f"{key}.forward")
-        meta["forward"] = "F0"
+        sections["forward-context"] = encode(context_facts(
+            results, readonly_image=readonly,
+            assumptions=lambda key, item: (*run.assumptions, *item.inherited_assumptions, *item.declared.values())),
+            "forward-context")
+        meta["forward"] = "F2a"
     return _write(out, meta, sections, f"{len(functions)} functions, {len(roots)} roots")
 
 
