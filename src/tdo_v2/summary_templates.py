@@ -66,7 +66,9 @@ TEMPLATE_VERSION = 2   # 2: stack_values_out
 # (docs 25.29) -- older ones rest on it unlabelled. 12: model entries declare
 # callbacks / frees; templates carry registered-handlers-are-not-observed when
 # derived over entries running registered handlers (docs 25.33)
-ENGINE_SEMANTICS_VERSION = 12
+# 13: composed calls join proved direct memory outputs on one physical anchor
+# rather than discarding their values under function-local object identities.
+ENGINE_SEMANTICS_VERSION = 13
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

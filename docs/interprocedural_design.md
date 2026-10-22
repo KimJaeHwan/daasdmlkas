@@ -2369,3 +2369,150 @@ F1b 여러 대상 합성. F2 호출 문맥·특수화·"입구 값으로 옮겨 
 증명 경로가 비어 있어 분리는 모두 `no-use-after-free`에 기댐 — 측정 때 가정 수를 그렇게 읽음). F4 주소 범위·범위 쓰기(배열
 3단계, R005, UE 피호출 함수의 불확실 쓰기). F5 모델 콜백 `invokes`, z3 조건 증명(D2). Python 먼저(의미
 변경), Rust 포팅은 그동안 의미 없는 커널만. 나중 정밀도: 같은 기준의 ptr − ptr = offset 차.
+
+### 25.34 동일 메모리의 다중 대상 합성과 실제 연산 연결 (2026-10-22~23, Astra 단계별 검수)
+
+작업 브랜치 `feature/multi-target-memory-flow`, 기준 main `9d1fdf1`. 목표는 두 후보가 같은 메모리에 쓰는 호출을
+단순히 그림에 추가하는 것이 아니라, 호출자의 후속 LOAD까지 근거 있는 효과와 원래 연산으로 연결하는 것이다.
+core의 arg/ret/calling convention 추론은 추가하지 않는다. 정방향 소비는 기존처럼 `TDO_V2_FORWARD=1`에서만 작동한다.
+
+**효과 합성**: `derive_composed_call_effect`의 기존 보수적 결과를 먼저 만들고, 각 대상의 원래 summary/anchors로
+`derive_proven_call_effect`를 따로 도출한다. 출력의 주소 공간과 물리 입구 레지스터 span이 동일하고 `pointer=None`인
+고정 범위만 공통 displacement 바이트 구간으로 합친다. 함수별 원래 객체·definition은 재작성하지 않는다.
+부분 쓰기는 원래 행의 경계에서 나누며, 쓰지 않은 대상은 메모리 보존이 증명된 경우에만 이전 값을 대안에 넣는다.
+입력 레지스터·메모리 읽기·origin을 합치고, 포인터 값 사실은 모든 관련 대안이 같은 전체 포인터를 보장할 때만 유지한다.
+관련 UNKNOWN·조건·다른 anchor·pointer chain 쓰기는 기존 보수적 결과를 유지한다. `clobbers_below`도 유지하여 호출자의
+아래쪽 스택 부채가 사라지지 않으며, 그 플래그가 있는 대상의 빠진 바이트를 보존으로 승격하지 않는다.
+
+**원래 연산 연결**: 기록 출처가 함수 이름 대신 효과 도출 당시의 정확한 분석 인스턴스를 보관한다.
+`CallProvenance.memory_sources`는 합성 출력에서 대상별 원래 출력 행 또는 보존 증명으로의 대응이다.
+이 대응만으로 exact를 주장하지 않고, 선택한 원래 출구의 정의·debt·crossed·조건을 다시 검사한다.
+같은 호출 인스턴스의 모든 출력은 동일한 합법 `(target, exit)` 목록 하나를 공유하는 phi
+`reason="call targets and exits"`가 된다. JSON의 `choices`에는 함수·출구가 순서대로 남으며, 평가기는 같은 인스턴스에서
+목록·순서·크기가 다르면 거부한다. 정상 복귀하지 않는 대상은 호출 뒤 출력 후보에서만 제외하고 sink·실패 정보는 유지한다.
+중첩 인스턴스 식별에는 부모의 선택 대상도 포함한다. 가져온 노드에는 원래 `function`을 표시한다.
+기록 자체는 진단이며, 켬/끔에 따른 효과·요약은 같다. 알려지지 않은 후보를 제거하거나 한도에서 일부 대상만 게시하지 않는다.
+
+**검수와 회귀**: Astra가 효과 합성, 연산 기록, 실제 자료 검증을 각각 검수했다. 기록 단계에서 발견한 메모리 입구 표지 소실
+(`label` 인자가 가정 이름으로 덮임)은 `entry_label` 분리와 단일/다중 대상 회귀로 고쳤다. 기존 테스트와 실행 오라클을 재사용한다.
+새 회귀는 같은 위치의 쓰기, 유지 대안, 4/8바이트 부분 쓰기, 조건·unknown·opaque, 아래쪽 스택 부채, mixed/all-noreturn,
+같은 호출의 레지스터/RAM 선택, 서로 다른 출구 수, 중첩 helper, 미지원 후보, 선택 목록 변조, 제한 시 전체 롤백을 포함한다.
+
+**실제 자료**: 테스트 소스 `tests/corpus/intra/multi_target_memory.c`를 x64 Mach-O로 컴파일하고 Ghidra 12.0.4로 추출했다.
+A는 `*p=x+1; return x+16`, B는 `*p=x+2; return x+32`, 호출자는 `*p + returned`를 계산한다(모두 unsigned 32bit).
+후속 LOAD 기록에 양쪽 STORE·산술이 있고, x=9에서 정확히 `{35,52}`이며 혼합한 `{36,51}`은 없다.
+기존 program oracle도 실제 피호출 본문을 실행하여 값·메모리 위치를 비교한다.
+6개 경계값 × 두 selector의 12회 실행에서 5,904개 검사·메모리 위치 144/144개가 정합하며,
+미설명 누락·부채로 덮인 비교·위치 미확인·위치 불일치는 0이다.
+DFB072는 별도로 기존 원본을 Linux x64 ELF·Windows x64 PE·Windows x86 PE에서 다시 추출했다.
+sink가 실제로 읽는 정규화된 `~in/~ld` 정의와 관찰된 call shape로 조회하며, source/sink 본문도 실행한다.
+처음 image의 고정 초기값으로만 실행했을 때는 세 variant 모두 B만 방문함을 Astra가 발견했다. 이를 source A/C가
+공통으로 읽는 writable 전역의 초기 입력 6개로 보강했다(반환값·대상 주입 아님). 각 variant에서 실제 CALLIND 입력의
+방문 집합이 `{A,B}`임을 검사하며, 실제 source 반환 x에 대해 기록 값 집합이 정확히 `{x+1,x+2}`인지 확인한다.
+DFB072의 주 흐름은 반환 연산이므로 출력 포인터 검증의 대체물이 아니다(Win64의 실제 home-slot spill은 별도 확인).
+기존 v2/v3의 같은 빌드라고 주장하지 않으며, 재귀·suite09 전체 통과나 모든 경로의 완전성 증명도 아니다.
+실행에는 기존 `globals-disjoint-from-stack` 가정을 켰다. 새로운 ABI 가정은 추가하지 않았다.
+
+로컬 봉인 자료는 Git 제외 경로 `output/multi-target-memory-20261022/`에 보관했다.
+
+| 환경 변수 | 해당 하위 경로 |
+|---|---|
+| `TDO_MULTI_TARGET_MEMORY_BUNDLE` | `local-bundles/9154d9906f36049c2b1c2bd72522a70ac9084b55adb16f4953ae31896c4790d0` |
+| `TDO_DFB072_BUNDLE` | `dfb072-bundles/851c56f6c74efb5e3d9d6aa38795eae0d2683bfdb699fd8e6997e53703f09db1` |
+| `TDO_DFB072_WINDOWS_X64_BUNDLE` | `dfb072-pe64-bundles/fcf92b6abe6a1201ccc9decc10c7ea30511db80f1a488cc6e5e6ef1286254187` |
+| `TDO_DFB072_WINDOWS_X86_BUNDLE` | `dfb072-pe32-bundles/75fc2bc5eb969c4b7a17bddac740f6a97d0afc982958550d699a28879982e743` |
+
+변수를 지정한 뒤 `PYTHONPATH=src:tests/intra python -m pytest tests/corpus/intra/test_multi_target_memory_binary.py -q`로
+재현한다. 자료가 없으면 해당 테스트는 skip이며, 성공으로 세지 않는다. 컴파일 예시는 C 소스 주석, 추출은 기존 exporter를 쓴다.
+
+**검증 제한**: DFB072의 기존 program oracle은 이전 source CALL의 SP 의존과 red-zone spill footprint를 오류로 보고한다.
+새 메모리 helper를 우회한 기준에서도 동일하게 재현했다. 해당 검사기를 바꿔 PASS로 세지 않고, DFB072는 원래 연산 기록의
+평가와 실제 source/sink 실행 값을 별도로 대조한다. 신규 메모리 사례의 program oracle에는 이 오류가 없다.
+
+**모델 호환성(최초 검증 당시)**: 효과 도출 의미가 바뀌어 `ENGINE_SEMANTICS_VERSION=13`이며, 당시 배포 UE FString 모델은
+의미 버전 12라 거부됐다. 원자료가 없다는 사용자 확인으로 첫 작업에서는 재생성을 제외하고 실패를 남겼다.
+당시 동결한 엔진의 전체 회귀는 **2,302개 통과·32개 skip·1개 실패**(363.16초)였으며 실패는 위 UE 호환성 검사다.
+이후 동일 원본 DLL을 확보해 정식 재생성과 호환성 검사를 진행했다(§25.35). 버전 숫자만 바꾸거나 검사를 비활성화하지 않았다.
+입력 범위를 보강한 뒤 실제 자료 5개·메모리/연결 관련 합성 회귀도 다시 실행했다. skip은 통과로 세지 않는다.
+일반 조건부 C9, 서로 다른 anchor의 별칭 통합, pointer-chain 출력 확대, 재귀, CFG dispatch, 외부 콜백, Rust는 이번 범위에서 제외한다.
+
+### 25.35 UE Core 원본 복구와 파생 모델 재생성 (2026-10-23)
+
+Epic의 Windows 배포 `5.1.1-23901901+++UE5+Release-5.1-2023.1-Windows`에서 Core DLL만 받아 기존 모델의
+원본 SHA-256 `fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942`와 일치함을 확인했다.
+원본은 저장소 바깥의 형제 경로 `../ue_binary_cache/ue-5.1-win64/Engine/Binaries/Win64/UnrealEditor-Core.dll`이며,
+다운로드 출처·해시는 해당 캐시의 `download_identity.json`에 있다. 인증 정보는 저장하지 않았다.
+
+Ghidra **12.0.4**, JDK **21.0.10**으로 별도 영속 프로젝트에 import·analysis·save를 완료했다(PDB 없음,
+추가 DLL import 없음). 같은 프로젝트를 `-process -noanalysis -readOnly`로 사용해 기존 도구로 추출·스캔했다.
+원본 PE export table에서 확인한 세 함수 입구는 RAM 433의 `0x180037a80`, `0x18003bc00`, `0x1800f4fd0`이다.
+내부 손 모델에서 호출 폐포를 자른 새 Bundle은 **11개 함수 모두 입장·정규화 성공**, 6개 분석 함수 + 5개 잘림이다.
+전체 스택 검사는 **52,211개 함수·2,881,565개 명령(함수 밖 15,196개), switch 0**, detector v3다.
+기존 `globals-disjoint-from-stack` 허용 근거를 새로 확인한 것이며, 미분석 바이트나 다른 DLL까지 증명한 것은 아니다.
+import 중 일부 `DemangledVariable` 데이터 생성 오류는 있었으나 analysis/save/import는 성공했고, 선택한 폐포의 누락·정규화 실패는 없다.
+
+로컬 근거는 Git 제외 경로 `output/ue-core-regeneration-20261023/`에 보존했다.
+
+- 프로젝트: `ghidra-project/core_rebuild.gpr`, 프로그램 `/UnrealEditor-Core.dll`.
+- 봉인 Bundle: `core-bundles/a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068`.
+- 스택 증거: `core.stack.json`(SHA-256 `6ebb8a1ea65ccf82e9f9c9945578f0ab38abf1ca21072c9b509d35e08f1988f7`).
+- 추출 명령·receipt: `core-bundles.logs/`, 분석·스캔·생성 로그: `core-import.ghidra.log`, `core-stack.console.log`, `core-derive.log`.
+
+기존 `tools/derive_models/derive_models.py`에 이 Bundle과 스택 증거, library `UNREALEDITOR-CORE.DLL`,
+id `ue-core-win64-derived`, file version **12**, `private_frame_above=0x28`을 전달했다. export 이름은
+`??0FString@@QEAA@XZ`, `??1FString@@QEAA@XZ`, `?AppendChar@FString@@QEAAAEAV1@_W@Z`를 모두 유지했다.
+현재 엔진이 semantics **13**으로 세 템플릿을 생성했고 refused/missing은 없다. 세 항목 본문과 가정 목록은 이전과 같다.
+새 모델의 SHA-256은 `8b0b9079dd54eea5570ffc1845cd38a1251db7da22eacc5b5f55b931a6472b85`이다.
+Astra는 추출과 스택 증거를 검수했고, 별도 독립 재도출 결과가 후보 전체 JSON·파일 SHA까지 일치함을 확인한 뒤 교체를 승인했다.
+현재 손 모델·p-code 모델·언어·파라미터에 대한 runtime `refusal()`도 세 항목 모두 `None`이다.
+
+손 모델 지문 차이는 CRLF/LF 차이였다. 현재 CRT·UE 손 모델의 LF 바이트를 CRLF로 바꾸면 기존 모델에 기록된 지문과
+정확히 일치한다. 지문 검사를 완화하지 않고 `.gitattributes`에서 `models/**/*.json text eol=lf`로 고정했다(Astra 검수 승인).
+이는 기존 Windows 작업 폴더의 CRLF 파일까지 자동 변경했다는 뜻이 아니다. 해당 환경에서는 새 checkout 또는 모델 파일의
+LF 갱신이 필요할 수 있다. 엔진 코드·검사기는 이번 재생성에서 수정하지 않았다.
+
+교체 후 `test_shipped_derived_models_match_this_engine` 단독 **1개 통과**, 모델 생성·round-trip·연결·스택 증거 등
+관련 기존 회귀 **95개 통과**(9.14초)를 확인했다. 전체 `pytest tests -q -ra`는 §25.34의 실제 Bundle 환경 변수 네 개를
+설정해 **2,303개 통과·32개 skip·실패/오류 0개**(373.30초)다. 기존 호환성 실패 한 건이 해결됐고, 실제 바이너리 검증
+5개와 배포 모델 호환성 검사가 모두 실제 실행·통과했음을 JUnit에서도 확인했다. 95개는 전체 결과와 중복이며 합산하지 않는다.
+skip은 Linux 전용 worker/supervisor 23개, 이 PC에 없는 별도 Bundle 검사 9개다(성공으로 세지 않음).
+실행 로그와 JUnit은 `model-regression.{log,junit.xml}`, `full-suite.{log,junit.xml}`에 있다.
+Astra는 최종 XML·설치 모델·검사 조건을 검수하고, 동일한 실제 Bundle 네 개로 호환성 1개 + 실제 바이너리 5개를
+독립 재실행해 **6개 통과**(1.04초)를 확인한 뒤 Stage 3와 이번 재생성 완료를 승인했다.
+이 승인은 현재 엔진의 모델 재생성·호환성 회복에 한정되며, UE 전체 코드의 분석 완전성을 뜻하지 않는다.
+
+### 25.36 가상화·인터프리터 분석을 위한 다음 개발 방향 (계획)
+
+사용자 의도(2026-10-23): 연산식은 사람이 읽는 부가 설명에 그치지 않고, 향후 가상화 보호 코드와 인터프리터 언어의
+계산·메모리 상태 변화를 분석하는 데 사용할 수 있어야 한다. 다음 내용은 Astra와 현재 코드를 검토해 정한 **미구현 계획**이다.
+이번 커밋의 완료 범위는 §25.34~35이며, 아래 기능이 이미 구현·검증됐다는 뜻이 아니다.
+
+**목표와 현재 차이**: 앞으로 필요한 단위는 `새 상태 = f(이전 레지스터/RAM 상태, 명령 바이트)`와 순서 있는 메모리 쓰기,
+분기 조건·다음 실행 위치다. 현재 그래프는 실제 p-code의 연산·바이트·메모리와 제한된 호출 연결을 담지만, 연산 기록은 여전히
+분석 결과를 바꾸지 않는 진단 표현이다. 일반 phi는 선행 경로의 선택을 보존하지 않으며, loop-carried 값은 기록할 수 있어도
+`operation_records.eligibility()`가 평가를 거부한다. `BRANCHIND` 대상 사실을 만든다는 것과 dispatch CFG 복원이 된다는 것도 다르다.
+guest PC·가상 스택의 역할 식별, opcode 해석, 반복 상태 전이, 언어 런타임의 객체·예외 의미는 아직 제공하지 않는다.
+예를 들어 [Lua의 실제 실행 루프](https://www.lua.org/source/5.4/lvm.c.html)는 pc·값 스택을 갱신하며, Lua 함수 호출을 같은 C 프레임에서
+처리하기도 한다. 따라서 네이티브 함수 호출 그래프를 연결했다는 이유만으로 guest 함수 호출까지 복원했다고 할 수 없다.
+
+**바로 다음 한 작업: 고정 입구 메모리의 한 단계 호출 문맥 연결과 실제 효과 소비.**
+`forward.context_facts()`의 현재 레지스터 대입만으로는 `state->handler`처럼 메모리에서 읽은 함수 주소가 이어지지 않는다.
+호출자의 기존 memory SSA/probe에서 증명한, 단일 직접 anchor·고정 크기 포인터 slot을 피호출 입구에 연결한다.
+결과는 `(caller, call site)`에만 유효하게 유지하고, 그 문맥에서 피호출 CALLIND의 실제 효과를 도출해 호출자의 후속 LOAD와
+기존 연산 기록 stitching까지 이어야 한다. 사실 표에 값만 추가하는 것으로는 완료가 아니다. 원래 definition과 분석 인스턴스를 유지한다.
+unknown·부분 덮어쓰기·may-alias·opaque 호출을 만나면 TOP/debt를 유지하고, 후보를 조용히 제거하거나 전역 함수 사실로 승격하지 않는다.
+기존 호출 모양·리턴 주소 overlay 규칙을 재사용하며 arg/ret/calling convention 추론은 추가하지 않는다.
+다단 pointer chain·재귀·CFG dispatch·외부 콜백은 이 첫 작업에서 제외한다.
+
+**최소 실제 사례와 완료 기준**: 별도 컴파일 단위·noinline의 작은 1-step interpreter 형태 C 바이너리를 사용한다.
+호출자가 상태의 handler slot에 A/B 주소를 쓰고, `step(state)`가 이를 LOAD→CALLIND하며, 두 handler는 같은 상태 셀에
+서로 다른 산술 결과를 STORE한다. 호출자는 그 셀을 다시 LOAD해 사용한다. 두 직접 호출 지점에서 서로 다른 handler를 전달해
+문맥 오염도 확인한다. 실제 두 handler의 실행, 원래 산술·STORE·LOAD의 연결, 기존 구체 실행기와의 값 일치가 모두 필요하다.
+slot 일부 덮어쓰기·중간 opaque 호출·미지 대상에서는 정확하다고 주장하지 않아야 한다. 새 채점기를 만들지 않고 기존 실행기와
+연산 기록 검사를 사용한다. 이 사례는 반복 없는 한 단계이며, 통과해도 VM 전체 해석 완료라고 부르지 않는다.
+
+**그 다음 순서**: (1) 실제 사례를 막는 제한된 조건부 메모리 출력과 분기 선택의 상관관계,
+(2) 작은 dispatch loop에서 반복별 guest PC·상태 메모리·가상 스택을 이어 주는 상태 전이 처리다.
+일반 루프와 재귀를 수식 평가기의 단순 횟수 제한 해제로 처리하지 않는다. 그 뒤 실제 Lua 등에서 제한된 opcode 구간을 확인하고,
+난독화된 handler의 복잡한 수식 단순화·더 넓은 런타임 모델로 확대할지 판단한다. 현재 코드 검토상 이 방향은 가능성이 있지만,
+상용 가상화 전체나 모든 인터프리터 기능에 충분하다고 검증한 상태는 아니다.

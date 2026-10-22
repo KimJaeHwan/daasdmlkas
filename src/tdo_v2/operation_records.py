@@ -351,10 +351,15 @@ class _Binding:
         from .call_summary_effects import anchored_span
 
         place = anchored_span(span, self.anchors)
+        return self.memory_place(builder, node, place, span.size, _span_text(span))
+
+    def memory_place(self, builder, node, place, size, entry_label):
+        """Bind a proved common memory place, without inventing a callee
+        object when this target preserves the caller's old bytes."""
         classes: list = []
         labels: set = set()   # (assumptions a binding rests on)
         if place is None:
-            classes = ["unbound memory"] * span.size
+            classes = ["unbound memory"] * size
         elif place.pointer is not None or place.anchor is None \
                 or (place.anchor.start, place.anchor.size) != self.stack:
             # (increment 3) every pointer slot, then the target: a debt-free
@@ -371,9 +376,9 @@ class _Binding:
                 if reason is not None:
                     break
             if reason is not None:
-                classes = [reason] * span.size
+                classes = [reason] * size
             else:
-                for index in range(span.size):
+                for index in range(size):
                     displacement = place.displacement + index
                     load = next((item for item in self.loads if item.pointer == place.pointer
                                  and item.anchor == place.anchor and item.space_id == place.space_id
@@ -387,7 +392,7 @@ class _Binding:
                     classes.append(load if reason is None else reason)
         else:
             push = -self.delta
-            for index in range(span.size):
+            for index in range(size):
                 displacement = place.displacement + index
                 if 0 <= displacement < push:
                     classes.append("return address")
@@ -425,7 +430,7 @@ class _Binding:
                 if self.loads[found] not in used:
                     used.append(self.loads[found])
             position = end
-        record = {"kind": "bound", "callee_entry": _span_text(span), "size": span.size, "parts": parts}
+        record = {"kind": "bound", "callee_entry": entry_label, "size": size, "parts": parts}
         if gaps:
             record["gaps"] = gaps
         if used:
@@ -589,6 +594,8 @@ class _Builder:
         if len(self.records) >= self.limits.nodes:
             self.truncated = True
             raise _Truncated()
+        if self.parent is not None:
+            record.setdefault('function', self.function_key)
         for name in self._FIELDS.get(record["kind"], ()):
             record.setdefault(name, [])
         if record["kind"] in self._FIELDS:
@@ -1194,10 +1201,10 @@ class _Builder:
         source = self.provenance.sources.get(base)
         if source is None:
             return "source: none"
-        if source[0] != "summary":
+        if source[0] not in ("summary", "summaries"):
             return f"source: {source[0]}"
-        done = source[1]
-        if done.summary is None or type(done.normalized).__name__ != "NormalizedFunction":
+        members = (source[1],) if source[0] == 'summary' else source[1]
+        if any(done.summary is None or type(done.normalized).__name__ != "NormalizedFunction" for done in members):
             return "no callee body"
         effect = self.proven[base]
         run = _output_run(effect, tag)
@@ -1207,13 +1214,13 @@ class _Builder:
             return "accessor write-back"
         if run.conditions or effect.writer_conditions:
             return "conditions"
-        if effect.tail_stack or done.summary.tail_exits:
+        if effect.tail_stack or any(done.summary.tail_exits for done in members):
             return "tail"
-        if not done.summary.exits:
+        if not any(done.summary.exits for done in members):
             return "no exit"
         if len(self.path) >= self.limits.call_depth:
             return "depth"
-        if done.key == self.function_key or any(done.key == key for key, _ in self.path):
+        if any(done.key == self.function_key or any(done.key == key for key, _ in self.path) for done in members):
             return "recursion"
         if self._stack_base(base) is None:
             return "no call shape"
@@ -1230,7 +1237,7 @@ class _Builder:
         from .call_summary_effects import call_load_keys
 
         base, tag = record["call"], record["row"]
-        done = self.provenance.sources[base][1]
+        source, body = self.provenance.sources[base]
         run = _output_run(self.proven[base], tag)
         start = len(self.records)
         chain = []
@@ -1244,7 +1251,11 @@ class _Builder:
         path = (*self.path, (self.function_key, base))
         instance = "/".join(call for _, call in path)
         try:
-            nested = _Builder(done.normalized, done.unit, origins=done.origins, declared=done.declared,
+            if source == 'summaries':
+                outputs = self._stitch_targets(record, body, run, path, instance)
+            else:
+                done = body
+                nested = _Builder(done.normalized, done.unit, origins=done.origins, declared=done.declared,
                               limits=self.limits, provenance=self.stitch.provenance(done), stitch=self.stitch,
                               records=self.records, ledger=self.ledger, parent=self,
                               binding=_Binding(self, self._staged_reads(f"{base}~in{tag}"), self._stack_base(base),
@@ -1252,20 +1263,21 @@ class _Builder:
                                                call_load_keys(base, self.proven[base]), call=base,
                                                effect=self.proven[base]),
                               path=path, index=self.stitch.index(done.normalized, done.unit))
-            if hasattr(run, "writes"):   # (a register run)
-                outputs = [{"output": _span_dict(span),
+                if hasattr(run, "writes"):   # (a register run)
+                    outputs = [{"output": _span_dict(span),
                             "part": nested._stitched_output(span, done.summary, instance)}
                            for span in run.writes]
-            else:   # (a memory run, docs 25.32 increment 4)
-                part, callee_span = nested._stitched_memory_output(run, done.summary, instance)
-                outputs = [{"output": {"place": _anchored_text(run.write), "callee": callee_span}, "part": part}]
-            if nested.truncated or any(item.truncated != flag for item, flag in saved):
+                else:   # (a memory run, docs 25.32 increment 4)
+                    part, callee_span = nested._stitched_memory_output(run, done.summary, instance)
+                    outputs = [{"output": {"place": _anchored_text(run.write), "callee": callee_span}, "part": part}]
+            if (source != 'summaries' and nested.truncated) or any(item.truncated != flag for item, flag in saved):
                 raise _StitchCut("limit")   # (a cut inside: never a partial import)
             gap = _gap_used(self.records, start, outputs)
             if gap is not None:
                 raise _StitchCut(gap)
-            nested.stitch_all()
-            if nested.truncated or any(item.truncated != flag for item, flag in saved):
+            if source != 'summaries':
+                nested.stitch_all()
+            if (source != 'summaries' and nested.truncated) or any(item.truncated != flag for item, flag in saved):
                 raise _StitchCut("limit")
         except (MemoryError, AnalysisBudgetExceeded, AnalysisReportingFailed):
             raise   # (process state and the run's own limits are never a record's cut)
@@ -1297,7 +1309,70 @@ class _Builder:
                 item.truncated = flag
             self.ledger.frozen = frozen
 
-    def _stitched_output(self, span, summary, instance):
+    def _stitch_targets(self, record, members, run, path, instance):
+        """All outputs of this call share one list of legal (target, exit)
+        choices. A target's objects/definitions keep their original scope."""
+        from dataclasses import replace
+        from .call_summary_effects import call_load_keys
+
+        base, tag = record['call'], record['row']
+        effect = self.proven[base]
+        pairs = [(index, done, exit_summary) for index, done in enumerate(members)
+                 for exit_summary in done.summary.exits]
+        choices = [{'function': done.key, 'exit': exit_summary.block_key} for _, done, exit_summary in pairs]
+        if not choices:
+            raise _StitchCut('no exit')
+        mapping = None
+        if not hasattr(run, 'writes'):
+            mapping = dict(self.provenance.memory_sources.get(base, {}).get(run.write, ()))
+            if set(mapping) != {index for index, _, _ in pairs}:
+                raise _StitchCut('multi memory mapping')
+        builders = {}
+        for index, done, _ in pairs:
+            if index in builders:
+                continue
+            builders[index] = _Builder(
+                done.normalized, done.unit, origins=done.origins, declared=done.declared,
+                limits=self.limits, provenance=self.stitch.provenance(done), stitch=self.stitch,
+                records=self.records, ledger=self.ledger, parent=self,
+                binding=_Binding(self, self._staged_reads(f'{base}~in{tag}'), self._stack_base(base),
+                                 self._stack_base(base, delta=True), done.anchors,
+                                 call_load_keys(base, effect), call=base, effect=effect),
+                path=(*path[:-1], (path[-1][0], f'{base}@{done.key}')),
+                index=self.stitch.index(done.normalized, done.unit))
+        outputs = []
+        spans = run.writes if hasattr(run, 'writes') else (None,)
+        for span in spans:
+            alternatives = []
+            for index, done, exit_summary in pairs:
+                nested = builders[index]
+                if span is not None:
+                    part = nested._stitched_output(span, done.summary, instance, exits=(exit_summary,))
+                elif mapping[index] is None:
+                    bound = nested.binding.memory_place(nested, None, run.write, run.write.size,
+                                                        'unchanged: ' + _anchored_text(run.write))
+                    nested.records[bound]['unchanged'] = True
+                    part = {'node': bound, 'bytes': [0, run.write.size], 'at': [0, run.write.size]}
+                else:
+                    original = replace(mapping[index], write=run.write)
+                    part, _ = nested._stitched_memory_output(original, done.summary, instance,
+                                                             exits=(exit_summary,))
+                alternatives.append(part)
+            size = span.size if span is not None else run.write.size
+            phi = self._new(None, {'kind': 'phi', 'reason': 'call targets and exits', 'instance': instance,
+                                   'size': size, 'choices': choices, 'alternatives': alternatives})
+            self._done(phi)
+            output = _span_dict(span) if span is not None else {'place': _anchored_text(run.write)}
+            outputs.append({'output': output, 'part': {'node': phi['id'], 'bytes': [0, size], 'at': [0, size]}})
+        for nested in builders.values():
+            if nested.truncated:
+                raise _StitchCut('limit')
+            nested.stitch_all()
+            if nested.truncated:
+                raise _StitchCut('limit')
+        return outputs
+
+    def _stitched_output(self, span, summary, instance, *, exits=None):
         """This callee's value of the caller's output bytes ``span``
         (register offsets) as one part: per exit the runs' bytes assembled
         (bytes the exit does not write: the caller's value at the call);
@@ -1306,7 +1381,7 @@ class _Builder:
 
         alternatives = []
         definition_nodes = self.normalized.memory_graph.definition_nodes
-        for exit_summary in summary.exits:
+        for exit_summary in summary.exits if exits is None else exits:
             parts, covered = [], set()
             for run in exit_summary.runs:
                 if run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE:
@@ -1353,7 +1428,7 @@ class _Builder:
         self._done(phi)
         return {"node": phi["id"], "bytes": [0, span.size], "at": [0, span.size]}
 
-    def _stitched_memory_output(self, run, summary, instance):
+    def _stitched_memory_output(self, run, summary, instance, *, exits=None):
         """This callee's value of a memory output row's write W (an
         AnchoredSpan) as one part, and the callee span W is: W's object X is
         the one callee memory object whose runs anchor to W's base with
@@ -1393,7 +1468,7 @@ class _Builder:
         end = start + size
         alternatives = []
         definition_nodes = self.normalized.memory_graph.definition_nodes
-        for exit_summary in summary.exits:
+        for exit_summary in summary.exits if exits is None else exits:
             parts, covered = [], set()
             for item in exit_summary.runs:
                 if item.span.object_id != target:
@@ -1508,7 +1583,7 @@ def _call_provenance(provenance, call, effect, tag) -> dict:
         if source[0] == "summary":
             found["function"] = source[1].key
         elif source[0] == "summaries":   # (one of several functions, docs 25.33 F1b)
-            found["functions"] = list(source[1])
+            found["functions"] = [done.key for done in source[1]]
         else:
             found["label"] = source[1]
     failed = provenance.failed.get(call, frozenset())
@@ -1955,18 +2030,23 @@ def evaluate(record, entry, *, call=None, max_choices=256, route: str = "injecte
     # one dimension per choice, the "callee exits" phis of one instance together
     dimensions: list = []
     instances: dict = {}
+    domains: dict = {}
     for identifier in choices:
         instance = nodes[identifier].get("instance") if route == "stitched" else None
         if instance is None:
             dimensions.append(([identifier], sizes[identifier]))
             continue
+        domain = nodes[identifier].get('choices')
+        if domain is not None and len(domain) != sizes[identifier]:
+            raise Ineligible('target choice mismatch')
         if instance in instances:
             members, size = dimensions[instances[instance]]
-            if size != sizes[identifier]:
+            if size != sizes[identifier] or domains[instance] != domain:
                 raise Ineligible("exit choice mismatch")
             members.append(identifier)
         else:
             instances[instance] = len(dimensions)
+            domains[instance] = domain
             dimensions.append(([identifier], sizes[identifier]))
     total = 1
     for _, size in dimensions:

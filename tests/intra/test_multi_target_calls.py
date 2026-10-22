@@ -2,7 +2,7 @@
 functions take the composed effect of their targets (docs 25.33 F1b,
 ``call_summary_effects.derive_composed_call_effect``): only with the forward
 switch on; every member's exits, per-member inner-call clobbers, contested
-memory as unknown places; an opaque member, a failed one or one in the
+memory through a shared physical anchor; an opaque member, a failed one or one in the
 caller's SCC leaves the call opaque."""
 
 import test_graph_fidelity as fidelity
@@ -100,9 +100,9 @@ def test_an_inner_call_of_one_member_clobbers_what_the_other_writes(monkeypatch)
     _holds(results, program)
 
 
-def test_two_members_writing_memory_leave_unknown_places(monkeypatch):
+def test_two_members_writing_the_same_anchored_memory_compose(monkeypatch):
     """A writes [rdx] = 1, B writes [rdx] = 2 -- different callee objects for
-    one caller place: no memory runs, unknown memory at the place."""
+    one caller place: one proven memory run at their common physical anchor."""
     from synthetic import RDX
 
     a = FunctionBuilder(entry=A).ins(store(reg(RDX), const(1))).ret()
@@ -110,7 +110,9 @@ def test_two_members_writing_memory_leave_unknown_places(monkeypatch):
     results, program = _analyze(monkeypatch, _table(), a, b)
     item = results[ROOT]
     effect = item.proven[_call(item)]
-    assert not effect.memory_runs and effect.unknown_memory
+    assert len(effect.memory_runs) == 1 and not effect.unknown_memory
+    assert effect.memory_runs[0].write.anchor.start == RDX
+    assert not effect.memory_runs[0].keeps_old
     _holds(results, program)
 
 

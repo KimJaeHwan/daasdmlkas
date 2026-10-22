@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 11,
+ "version": 12,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 1,
    "template_version": 2,
-   "semantics_version": 12
+   "semantics_version": 13
   },
   "parameters": {
    "private_frame_above": 40
@@ -29,11 +29,11 @@
   "models": [
    {
     "file": "crt-win64",
-    "sha256": "0a20d1bc3ad6404058f58236b839f2696ef426da949b9137034f8dc41aabbbaf"
+    "sha256": "d59cf14736b85587a16021aa88e67c28f92de8e2773b161ef3e5f6ce5d20309c"
    },
    {
     "file": "ue-core-win64",
-    "sha256": "0c53e03eb5e8f86737a96d4e0814e88de3e38989ff9f5991e3fea65d3bcc9457"
+    "sha256": "038bf7aea496929efff408e62146ecc013c917da5784051cab38a5a0501bbabb"
    }
   ],
   "pcodeops": "749146c1d7ef52999c899a6665c763eeedd6bba9c6779c0b694b2bfe183ca076",
@@ -54,13 +54,13 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "fc907f3952ddd1a8b16a0e23c1fcd157d6f25fac+dirty",
-   "bundle": "ea65ba0c9345504088f51de08e477313a79135fb99ae07e159816022ec7749aa",
+   "engine_revision": "9d1fdf1bdb0d1161748579e2b57ab32fe6d36a95+dirty",
+   "bundle": "a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068",
    "index_addresses": true,
    "stack_evidence": [
     {
-     "file": "b885e02c8343b69812760464928e6f6e8739093eaf91a92442d9e5c7db808649",
-     "summary": "/libs/UNREALEDITOR-CORE.DLL (sha256 fdea95976487): 52211 functions, 2881565 instructions scanned (15196 of them outside functions); no switch [stack-switch-coefficient-v3; calls preserve RBX,RBP,R12,R13,R14,R15; exceptions: stack-switch-check-exceptions]"
+     "file": "6ebb8a1ea65ccf82e9f9c9945578f0ab38abf1ca21072c9b509d35e08f1988f7",
+     "summary": "/UnrealEditor-Core.dll (sha256 fdea95976487): 52211 functions, 2881565 instructions scanned (15196 of them outside functions); no switch [stack-switch-coefficient-v3; calls preserve RBX,RBP,R12,R13,R14,R15; exceptions: stack-switch-check-exceptions]"
     }
    ]
   }
@@ -6062,5 +6062,5 @@
    }
   }
  ],
- "notes": "Derived by tools/derive_models from ea65ba0c9345504088f51de08e477313a79135fb99ae07e159816022ec7749aa."
+ "notes": "Derived by tools/derive_models from a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068."
 }

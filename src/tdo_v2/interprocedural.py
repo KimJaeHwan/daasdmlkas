@@ -129,6 +129,9 @@ class CallProvenance:
     opened: dict
     final: dict
     sink: dict
+    # Synthesized memory write -> original per-target run (or proven keeping).
+    # Held with these exact analysis instances, never reconstructed by name.
+    memory_sources: dict = field(default_factory=dict)
 
 
 @analysis_entry
@@ -452,7 +455,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 rejections=rejections,
             )
 
-        def composed_effect(key, call_key, members, failed=()):
+        def composed_effect(key, call_key, members, failed=(), memory_sources=None):
             """The effect of a call of ``key`` reaching one of ``members``
             (their summaries composed, ``derive_composed_call_effect``)."""
             register_object, register_limit, stack_pointers, shapes = site(key)
@@ -463,6 +466,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 "targets:" + "|".join(done.key for done in members), register_object, register_limit,
                 excluded=tuple(stack_pointers.get(call_key, ())), stack_deltas=shapes.get(call_key, {}),
                 failed_conditions=frozenset(failed),
+                memory_sources=memory_sources,
             )
 
         def boundaries_of(key):
@@ -540,11 +544,13 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             # (operation records only, docs 25.31 C9-5: where each effect came from)
             sources: dict = {}
             rejections: dict = {}
+            compositions: dict = {}
 
             def derive(failed):
                 proven = {}
                 sources.clear()
                 rejections.clear()
+                compositions.clear()
                 if register_object is None:
                     return proven
                 for call_key, declaration in boundaries_of(key).items():
@@ -610,10 +616,13 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     dones = [results.get(member) for member in members]
                     if any(done is None or done.summary is None for done in dones):
                         continue   # (a member failed or has no summary: opaque)
-                    effect = composed_effect(key, call_key, dones, failed.get(call_key, ()))
+                    memory_sources = {} if record_provenance is not None else None
+                    effect = composed_effect(key, call_key, dones, failed.get(call_key, ()), memory_sources)
                     if effect is not None:
                         proven[call_key] = effect
-                        sources[call_key] = ("summaries", tuple(members))
+                        sources[call_key] = ("summaries", tuple(dones))
+                        if memory_sources:
+                            compositions[call_key] = memory_sources
                 register_space = _register_space_id(observation) or _program_register_space(unit)
                 for call_key, (model_file, entry) in externals[key].items():
                     if call_key in proven or call_key in assumed or memory_space is None:
@@ -775,6 +784,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     final={(call, tag): tuple(rows) for (call, tag), rows in verdicts.items()},
                     sink={(call, tag): tuple(rows) for (call, tag), rows in decided.items()}
                     if type(normalized) is NormalizedFunction else {},
+                    memory_sources={call: dict(rows) for call, rows in compositions.items()},
                 ))
             return result
 
