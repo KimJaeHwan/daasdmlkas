@@ -20,8 +20,10 @@ Memory: a read the backward engine gave a debt (call-clobber, may-alias,
 unknown address) is TOP; any other read takes the value of its single
 reaching definition when that
 definition covers it (low bytes of a number keep their interval only when it
-fits; any constant is sliced exactly); a read with several fragments or
-definitions, an unresolved read, a call effect's definition, a KILL, or an
+fits; any constant is sliced exactly); a read of several fragments whose
+values are all exact numbers is their concatenation in byte order (little-
+endian languages only, as every byte slice here); a read with several
+definitions or other fragments, an unresolved read, a call effect's definition, a KILL, or an
 entry value of memory (other than a read-only image byte under
 readonly-image-data-is-constant) is TOP. JOIN definitions join their sources;
 after ``WIDEN_AFTER`` changes a join widens to the full range. The iteration
@@ -280,11 +282,14 @@ def _transfer(opcode: str, values: list[Value], widths: list[int], out_size: int
     return Value.top(bits) if interval is None else Value(bits, ((_ABS, interval),))
 
 
-def _slice(value: Value, definition_span, span) -> Value:
-    """The value of ``span`` (inside ``definition_span``) of a definition."""
+def _slice(value: Value, definition_span, span, little: bool) -> Value:
+    """The value of ``span`` (inside ``definition_span``) of a definition
+    (byte offsets read little-endian: TOP for a big-endian part)."""
     bits = 8 * span.size
     if definition_span == span:
         return value
+    if not little:
+        return Value.top(bits)
     single = value.single_number()
     shift = 8 * (span.start - definition_span.start)
     if single is not None:
@@ -519,6 +524,8 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
         else:
             debts.setdefault(row.operation_key, []).extend(row.spans)
     function = f"{unit.scopes.function.entry.space_id:x}:{unit.scopes.function.entry.byte_offset:x}"
+    # (byte offsets as significance: the language must be little-endian, as relative_memory's)
+    little = unit.scopes.program.evidence.translation_namespace.language_id.split(":")[1:2] == ["LE"]
 
     def span_of(varnode):
         resolved = _resolve_validated_storage(_storage_ref(varnode), context)
@@ -541,7 +548,31 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
                                   and definition.span.object_id.kind is StorageObjectKind.REGISTER_FILE):
             return Value(8 * span.size, ((("entry", span.start, span.size), Interval.offset(0, 8 * span.size)),))
         current = values.get(index)
-        return None if current is None else _slice(current, definition.span, span)
+        return None if current is None else _slice(current, definition.span, span, little)
+
+    def pieces(fragments, span):
+        """A read of several fragments (docs 25.33 "틀": the reaching values
+        per fragment joined in byte order): the
+        fragments' values joined in byte order -- only when every fragment is
+        one exact number and they tile the read (little-endian), else TOP;
+        None while a fragment is not evaluated yet."""
+        bits = 8 * span.size
+        if not little:
+            return Value.top(bits)
+        position, number = span.start, 0
+        for fragment in sorted(fragments, key=lambda row: row.span.start):
+            if fragment.span.start != position or len(fragment.definition_ids) != 1 \
+                    or not ssa.definitions[fragment.definition_ids[0]].span.contains(fragment.span):
+                return Value.top(bits)
+            part = definition_value(fragment.definition_ids[0], fragment.span)
+            if part is None:
+                return None
+            single = part.single_number()
+            if single is None:
+                return Value.top(bits)
+            number |= single << (8 * (position - span.start))
+            position += fragment.span.size
+        return Value.number(number, bits) if position == span.start + span.size else Value.top(bits)
 
     def read_value(action_id, span):
         """The value an action's read of ``span`` takes, or TOP."""
@@ -552,8 +583,10 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
         rows = [read for read in reads_of.get(action_id, ()) if read.span == span]
         if any(index in tainted for row in rows for fragment in row.fragments for index in fragment.definition_ids):
             taint[0] = True   # (before any TOP below: a TOP read of a tainted place is tainted too)
-        if len(rows) != 1 or len(rows[0].fragments) != 1:
+        if len(rows) != 1:
             return Value.top(8 * span.size)
+        if len(rows[0].fragments) > 1:
+            return pieces(rows[0].fragments, span)
         fragment = rows[0].fragments[0]
         if len(fragment.definition_ids) != 1 or fragment.span != span:
             return Value.top(8 * span.size)
@@ -728,7 +761,7 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
                 operation.opcode, found, [item.byte_size for item in inputs], operation.output.byte_size)
         if output_span is None or not output_span.contains(definition.span):
             return Value.top(bits)
-        return None if whole is None else _slice(whole, output_span, definition.span)
+        return None if whole is None else _slice(whole, output_span, definition.span, little)
 
     for _ in range(MAX_PASSES):
         changed = False

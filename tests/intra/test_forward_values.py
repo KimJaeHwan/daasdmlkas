@@ -553,3 +553,44 @@ def test_a_stack_pointer_use_after_the_push_is_not_projected(monkeypatch):
     facts = (*forward_facts(results[ROOT].normalized, results[ROOT].unit), *contexts)
     report = check_forward(results[ROOT].unit, facts, seeds=range(4), register_pools=_pools, program=program)
     assert report.failures == [] and report.checked
+
+
+# -- several fragments (release builds store pointer pairs through a vector register) --
+
+def _vector_table(high):
+    """rdx = A; xmm = zext(rdx) (16 bytes); xmm[8:16] = ``high``; [rsp+0x20] =
+    xmm; call [rsp+0x20 + (rcx & 1)*8] -- the release build of DFB072."""
+    xmm, t, i = reg(0x1200, 16), tmp(0x100), tmp(0x200)
+    return (FunctionBuilder().sub_rsp(0x48)
+            .ins(copy(reg(RDX), const(A_TARGET)), op("INT_ZEXT", [reg(RDX)], xmm), copy(reg(0x1208), high))
+            .ins(add(t, reg(RSP), const(0x20)), store(t, xmm))
+            .ins(op("INT_AND", [reg(RCX), const(1)], i), op("INT_MULT", [i, const(8)], i),
+                 add(i, i, reg(RSP)), add(i, i, const(0x20)), load(reg(RAX), i))
+            .call_indirect(RAX).add_rsp(0x48).ret())
+
+
+def test_a_register_built_from_two_numbers_is_their_concatenation(monkeypatch):
+    callees = (FunctionBuilder(entry=A_TARGET).ret(), FunctionBuilder(entry=B_TARGET).ret())
+    builder = _vector_table(const(B_TARGET))
+    item, facts = _forward_facts(monkeypatch, builder, *callees)
+    assert _targets(_target(facts)) == {A_TARGET, B_TARGET}
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation
+               for unit in program_units(builder, *callees)}
+    report = check_forward(item.unit, facts, seeds=range(6), register_pools=_pools, program=program)
+    assert report.failures == [] and report.checked
+
+
+def test_a_fragment_that_is_no_number_leaves_the_whole_read_unknown(monkeypatch):
+    _, facts = _forward_facts(monkeypatch, _vector_table(reg(RBX)))
+    claim = _target(facts)
+    assert claim is None or not _targets(claim) <= {A_TARGET, B_TARGET}
+
+
+def test_byte_slices_need_a_little_endian_language():
+    from tdo_v2.forward import _slice
+    from tdo_v2.span_geometry import ByteSpan, StorageObjectId, StorageObjectKind, StorageScopeId, StorageScopeKind
+
+    obj = StorageObjectId(StorageObjectKind.REGISTER_FILE, StorageScopeId(StorageScopeKind.PROGRAM, bytes(32)), 0)
+    whole, low = ByteSpan(obj, 0, 8), ByteSpan(obj, 0, 4)
+    assert _slice(Value.number(0x1122334455667788, 64), whole, low, little=True).single_number() == 0x55667788
+    assert _slice(Value.number(0x1122334455667788, 64), whole, low, little=False).is_top
