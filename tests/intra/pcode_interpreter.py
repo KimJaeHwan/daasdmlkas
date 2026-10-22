@@ -158,6 +158,7 @@ class Interpreter:
         self._rep_iteration = 0
         self._previous_location = None
         self._activations: list = []          # (return location, call key)
+        self._pushed_call = None              # (the call key the current instruction pushed for)
         self._activation_written: set = set()
         self._activation_serial = 0            # of the current / last outermost activation
         self._byte_activation: dict = {}       # byte -> serial of the activation that last wrote it
@@ -448,6 +449,10 @@ class Interpreter:
                     self.provenance.get((space_id, sp_offset + i)) for i in range(sp_size)
                 ]
             call = self._program_call(instruction)
+            # (the call this instruction's activation was pushed for: under
+            # recursion through the same site the stack top may be an older one;
+            # a rep site's element keys get ``~e<i>`` -- no x86 rep form calls)
+            self._pushed_call = call
             if call is not None:
                 # the whole call instruction (stack-pointer adjustment and
                 # return-address push included) belongs to the activation, as the
@@ -549,11 +554,12 @@ class Interpreter:
             if target in self._program:
                 return ("call", target)
         if opcode == "CALLIND" and self._program and inputs and self._activations \
-                and self._activations[-1][1] == key:
+                and self._pushed_call == key:
             # pushed by the run loop (``_program_call``): the target is a program function
             target = (self._order[0][0], self._value(key, inputs[0], run))
             if target in self._program:
                 return ("call", target)
+            raise Unsupported("CALLIND target differs from its pre-evaluation")
         if opcode in ("CALL", "BRANCH") and self._noreturn_external(inputs):
             return ("halt", None)  # abort: execution does not continue
         if opcode == "CALL" and self._externals and inputs \
@@ -862,19 +868,78 @@ class Interpreter:
         return None
 
     def _indirect_target(self, instruction, ordinal):
-        """``COPY t <- r; ...; CALLIND t`` (Ghidra's ``call r``): the program
-        location r holds now (read without recording a dependency)."""
-        operand = instruction.operations[ordinal].inputs[0]
-        for operation in instruction.operations[:ordinal]:
-            if operation.opcode == "COPY" and operation.output == operand \
-                    and operation.inputs[0].kind is VarnodeKindCode.REGISTER:
-                source = operation.inputs[0]
-                value = 0
-                for index in range(source.byte_size):
-                    byte, _ = self._byte(source.coordinate.space_id, source.coordinate.byte_offset + index)
-                    value |= byte << (8 * index)
-                return (self._order[0][0], value)
-        return None
+        """The program location the CALLIND operand will hold, evaluated on the
+        state at the instruction's start without recording dependencies or
+        writing anything: Ghidra computes a call's target before its push
+        (``call r``: COPY t <- r; ``call [m]``: t = LOAD m). Temporaries are
+        followed byte by byte through the operations before the CALLIND
+        (constants, registers and memory read with ``_peek``); None when the
+        operand rests on a register or memory the instruction itself wrote
+        before (the push), when anything before it may branch, call or change
+        registers unseen (a user op, an assumed boundary), for an import-slot
+        call (``_external_callind`` runs it), or on an operation the oracle
+        cannot compute. A disagreeing target at the CALLIND is an error there
+        (``_execute``), never a silent activation."""
+        key = _operation_key(instruction.address, ordinal, "CALLIND")
+        if key in self._external_callind or key in self._assumed:
+            return None   # (an import slot's model, an assumed boundary: ``_execute`` runs them)
+        temporaries, written, stored = {}, set(), False   # (unique byte -> its byte value)
+
+        def value(varnode):
+            kind, offset, size = varnode.kind, varnode.coordinate.byte_offset, varnode.byte_size
+            if kind is VarnodeKindCode.CONSTANT:
+                return offset & _MASKS[size]
+            if kind is VarnodeKindCode.UNIQUE:
+                found = 0
+                for index in range(size):
+                    if offset + index not in temporaries:
+                        return None
+                    found |= temporaries[offset + index] << (8 * index)
+                return found
+            if kind is VarnodeKindCode.REGISTER:
+                if any(offset + index in written for index in range(size)):
+                    return None
+                return self._peek(varnode.coordinate.space_id, offset, size)[0]
+            if kind is VarnodeKindCode.ADDRESS and not stored:
+                return self._peek(varnode.coordinate.space_id, offset, size)[0]
+            return None
+
+        def put(output, found):
+            for index in range(output.byte_size):
+                if found is None:
+                    temporaries.pop(output.coordinate.byte_offset + index, None)
+                else:
+                    temporaries[output.coordinate.byte_offset + index] = (found >> (8 * index)) & 0xFF
+
+        for index, operation in enumerate(instruction.operations[:ordinal]):
+            output = operation.output
+            if operation.opcode in ("BRANCH", "CBRANCH", "BRANCHIND", "CALL", "CALLIND", "CALLOTHER", "RETURN") \
+                    or _operation_key(instruction.address, index, operation.opcode) in self._assumed:
+                return None
+            if operation.opcode == "STORE":
+                stored = True
+                continue
+            if output is None:
+                continue
+            if output.kind is VarnodeKindCode.REGISTER:
+                written.update(range(output.coordinate.byte_offset, output.coordinate.byte_offset + output.byte_size))
+                continue
+            if output.kind is not VarnodeKindCode.UNIQUE:
+                return None
+            values = [value(item) for item in operation.inputs]
+            if operation.opcode == "LOAD":
+                put(output, None if stored or len(values) < 2 or values[1] is None else
+                    self._peek(operation.inputs[0].coordinate.byte_offset, values[1], output.byte_size)[0])
+                continue
+            if any(item is None for item in values):
+                put(output, None)
+                continue
+            try:
+                put(output, self._compute(operation.opcode, values, operation.inputs, output) & _MASKS[output.byte_size])
+            except Unsupported:
+                put(output, None)
+        found = value(instruction.operations[ordinal].inputs[0])
+        return None if found is None else (self._order[0][0], found)
 
     def _stack_pointer_snapshot(self):
         """The stack pointer at the start of the call instruction (before its
