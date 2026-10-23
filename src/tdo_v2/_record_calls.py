@@ -500,7 +500,11 @@ def physical_event(builder, event):
 
 
 def _unmodified_read(builder, base, read, span):
-    """The named call dominates this exact read, with no intervening overwrite."""
+    """Validate a known producer's dominance and absence of later writes.
+
+    ``span=None`` checks dominance/no intervening calls only, for validating
+    that an existing post-call SSA write really follows that call.
+    """
     conditions = builder._condition_index()
     if conditions._reason is not None:
         return False
@@ -535,7 +539,7 @@ def _unmodified_read(builder, base, read, span):
             if operation.opcode in ("CALL", "CALLIND", "CALLOTHER"):
                 return False
             output = operation.output
-            if output is not None and output.kind is VarnodeKindCode.REGISTER \
+            if span is not None and output is not None and output.kind is VarnodeKindCode.REGISTER \
                     and output.coordinate.space_id == builder.register_space \
                     and output.coordinate.byte_offset < span.end \
                     and span.start < output.coordinate.byte_offset + output.byte_size:
@@ -546,6 +550,27 @@ def _unmodified_read(builder, base, read, span):
         return found
 
     return ordinal is not None and trace(location, ordinal)
+
+
+def _post_call_definition(builder, base, read, piece, resolution):
+    """Validate the single definition already supplied by this SSA fragment."""
+    fragments = [fragment for fragment in resolution.fragments if fragment.span.contains(piece)]
+    if len(fragments) != 1 or len(fragments[0].definition_ids) != 1:
+        return None
+    identifier, = fragments[0].definition_ids
+    definition = builder.ssa.definitions[identifier]
+    if definition.kind is not MemoryDefinitionKind.DATA_WRITE or not definition.span.contains(piece):
+        return None
+    raw = _raw(builder, definition.operation_key)
+    output = raw[2].output if raw is not None else None
+    if output is None or output.kind is not VarnodeKindCode.REGISTER \
+            or output.coordinate.space_id != builder.register_space \
+            or not output.coordinate.byte_offset <= piece.start < piece.end <= output.coordinate.byte_offset + output.byte_size:
+        return None
+    if not _unmodified_read(builder, base, definition.operation_key, None) \
+            or not _unmodified_read(builder, definition.operation_key, read, piece):
+        return None
+    return definition.operation_key
 
 
 def bind_register_operand(builder, read, span):
@@ -567,6 +592,102 @@ def bind_register_operand(builder, read, span):
         return None
     return {"context": found["id"], "part": part, "offset": 0, "size": span.size,
             "register_offset": span.start, "read": read, "call": base}
+
+
+def bind_register_fragments(builder, read, span, resolution, parts=None, input_index=None):
+    """Overlay only the original call-clobber spans, keeping other SSA parts.
+
+    Bounds come from the existing read fragments and debt spans, not another
+    reaching-definition walk. Each replacement still needs an unchanged path
+    from exactly one observed call and an exact terminal export.
+    """
+    from .operation_records import _StitchCut, _Truncated, _register_overlay, _slice_parts
+
+    if resolution.span.object_id != span.object_id or not resolution.span.contains(span) \
+            or builder.ssa.actions[resolution.action_id].operation_key != read:
+        return None
+    rows = [row for row in builder.normalized.call_clobber_reads if row.operation_key == read
+            and any(piece.overlaps(span) for piece in row.spans)]
+    if not rows:
+        return None
+    calls = {call for row in rows for call in row.intervening_calls}
+    if len(calls) != 1:
+        return None
+    base, = calls
+    bands = [piece for row in rows for piece in row.spans if piece.overlaps(span)]
+    points = {span.start, span.end}
+    for piece in (*bands, *(fragment.span for fragment in resolution.fragments)):
+        if piece.overlaps(span):
+            points.update((max(span.start, piece.start), min(span.end, piece.end)))
+    points = sorted(points)
+    wanted, retained = [], []
+    for low, high in zip(points, points[1:]):
+        if not any(piece.start <= low and high <= piece.end for piece in bands):
+            continue
+        piece = ByteSpan(span.object_id, low, high - low)
+        if _unmodified_read(builder, base, read, piece):
+            wanted.append(piece)
+        else:
+            definition = _post_call_definition(builder, base, read, piece, resolution)
+            if definition is None:
+                return None
+            retained.append((piece, definition))
+    if not wanted:
+        return None
+    checkpoint = _checkpoint(builder)
+    try:
+        found = context(builder, base)
+        if found is None:
+            raise _StitchCut("partial register call unavailable")
+        replacements = []
+        for piece in wanted:
+            part = output_part(builder, found, piece)
+            if part is None:
+                raise _StitchCut("partial register export unavailable")
+            replacements.append({"context": found["id"], "part": part,
+                                 "offset": piece.start - span.start, "size": piece.size,
+                                 "register_offset": piece.start, "read": read, "call": base})
+        if parts is None:
+            parts = _slice_parts(builder._fragments(resolution, None, 0), span.start - resolution.span.start,
+                                 span.end - resolution.span.start)
+        merged = _register_overlay(parts, span.size, replacements)
+        retained_parts = []
+        for piece, operation in retained:
+            (part,) = _slice_parts(parts, piece.start - span.start, piece.end - span.start)
+            retained_parts.append({"offset": piece.start - span.start, "size": piece.size,
+                                   "register_offset": piece.start, "operation": operation,
+                                   "part": part, "call": base, "context": found["id"]})
+        return {"read": read, "input": input_index,
+                "register_offset": span.start, "size": span.size, "context": builder.physical_context,
+                "overrides": replacements, "retained": retained_parts, "parts": merged}
+    except (_StitchCut, _Truncated, RecursionError, ValueError):
+        _restore(builder, checkpoint)
+        return None
+
+
+def register_bindings(operands, *, retained=False):
+    for operand in operands:
+        if "physical_register" in operand:
+            yield operand["physical_register"]
+        if "physical_register_fragments" in operand:
+            yield from operand["physical_register_fragments"].get("overrides", ())
+            if retained:
+                yield from operand["physical_register_fragments"].get("retained", ())
+
+
+def covers_register(start, size, bindings, calls):
+    """Exact union coverage, not one successful fragment for a whole debt."""
+    position = start
+    bands = sorted((item["register_offset"], item["register_offset"] + item["size"])
+                   for item in bindings if item["call"] in calls)
+    for low, high in bands:
+        if low > position:
+            break
+        if low <= position < high:
+            position = high
+        if position >= start + size:
+            return True
+    return False
 
 
 def snapshot_parts(builder, snapshot, start, end):
@@ -611,8 +732,7 @@ def bind_call_debts(builder, record, debts):
         registers = [part for part in row.spans if part.object_id.kind is StorageObjectKind.REGISTER_FILE]
         memory = [part for part in row.spans if part.object_id.kind in
                   (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)]
-        bindings = [operand["physical_register"] for operand in record.get("operands", ())
-                    if "physical_register" in operand]
+        bindings = list(register_bindings(record.get("operands", ()), retained=True))
         if len(registers) + len(memory) != len(row.spans):
             continue
         if memory:
@@ -620,9 +740,7 @@ def bind_call_debts(builder, record, debts):
             direct_complete = identifier in record.get("physical_read_debt_ids", ())
             if not (load_complete or direct_complete):
                 continue
-        if any(not any(binding["call"] in row.intervening_calls and binding["register_offset"] <= span.start
-                       and span.end <= binding["register_offset"] + binding["size"] for binding in bindings)
-               for span in registers):
+        if any(not covers_register(span.start, span.size, bindings, row.intervening_calls) for span in registers):
             continue
         covered.append(identifier)
     if covered:

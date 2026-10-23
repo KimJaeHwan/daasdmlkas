@@ -376,7 +376,7 @@ def test_named_physical_register_read_rejects_malformed_offsets_and_sizes(field,
         evaluate_physical(changed, entry_reader(vm))
 
 
-def test_caller_partial_write_after_call_does_not_authorize_a_blanket_debt_override():
+def test_caller_partial_write_preserves_ssa_byte_and_only_binds_the_unwritten_call_bytes():
     case, key = _register_result_case(bound_alias=True, partial_after_call=True)
     vm = _execute(case, registers=((RDX, POINTER + 0x100),))
     _assert_normal_return(_return_witness(case, vm))
@@ -385,9 +385,19 @@ def test_caller_partial_write_after_call_does_not_authorize_a_blanket_debt_overr
     assert eligibility(record) == 'debt'
     (root,) = [node for node in record['nodes'] if node.get('key') == key]
     assert not any('physical_register' in operand for operand in root['operands'])
-    assert root.get('debts') and not root.get('physical_call_debt_ids')
+    (operand,) = [item for item in root['operands'] if 'physical_register_fragments' in item]
+    relation = operand['physical_register_fragments']
+    assert relation['parts'][0] == operand['parts'][0]
+    assert [(item['offset'], item['size']) for item in relation['overrides']] == [(1, 7)]
+    assert root.get('debts') == root.get('physical_call_debt_ids')
+    assert evaluate_physical(record, entry_reader(vm)).value == 175
+    # The new relation is not permission to replace the just-written AL.
+    changed = copying.deepcopy(record)
+    (projection,) = [item['physical_register_fragments'] for node in changed['nodes'] if node.get('key') == key
+                     for item in node['operands'] if 'physical_register_fragments' in item]
+    projection['parts'][0] = dict(projection['parts'][1], bytes=[1, 2], at=[0, 1])
     with pytest.raises(Ineligible):
-        evaluate_physical(record, entry_reader(vm))
+        evaluate_physical(changed, entry_reader(vm))
 
 
 @pytest.mark.parametrize('named_register', (False, True))

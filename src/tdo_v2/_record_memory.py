@@ -295,7 +295,9 @@ def evaluate_physical(record, entry, *, max_steps=200000):
     Unknown guards/calls, missing addresses, cuts or unexplained debts refuse.
     This does not change ``eligibility(record)`` or the record's debts.
     """
-    from .operation_records import Ineligible, Limits, _Evaluator, _Unknown, _choice_contract, _compose
+    from .operation_records import (
+        Ineligible, Limits, _Evaluator, _Unknown, _choice_contract, _compose, _register_overlay, _slice_parts,
+    )
 
     if record.get("truncated") is not False or record.get("demand_complete") is not True:
         raise Ineligible("incomplete physical record")
@@ -682,6 +684,88 @@ def evaluate_physical(record, entry, *, max_steps=200000):
             self.validate_context(override.get("context"), override["call"])
             return self.part(part)
 
+        def register_fragments(self, operand, owner=None, owner_context=None):
+            """Validate an exact byte overlay; untouched parts are still SSA."""
+            self.tick()
+            relation = operand.get("physical_register_fragments")
+            width = operand.get("width")
+            if not isinstance(relation, dict) or "physical_register" in operand or "physical_read" in operand \
+                    or operand.get("pruned") or operand.get("unresolved") \
+                    or type(width) is not int or width <= 0 or type(relation.get("size")) is not int \
+                    or relation["size"] != width \
+                    or type(relation.get("register_offset")) is not int or relation["register_offset"] < 0 \
+                    or type(relation.get("input")) is not int \
+                    or relation.get("input") != operand.get("index") \
+                    or type(relation.get("read")) is not str \
+                    or owner is not None and (relation["read"] != owner or relation.get("context") != owner_context):
+                raise Ineligible("invalid physical register fragment source")
+            overrides = relation.get("overrides")
+            if not isinstance(overrides, (tuple, list)) or not overrides:
+                raise Ineligible("missing physical register fragments")
+            owners = [node for node in self.nodes.values() if node.get("kind") == "op"
+                      and node.get("key") == relation["read"]
+                      and node.get("physical_context") == relation.get("context")]
+            if len(owners) != 1:
+                raise Ineligible("unknown physical register fragment owner")
+            original, = owners
+            bands = [(span, debt.get("calls", ())) for identifier in original.get("debts", ())
+                     for debt in (self.nodes.get(identifier, {}),) if debt.get("debt") == "call_clobber_read"
+                     for span in debt.get("physical_spans", ()) if span.get("kind") == "register_file"]
+            for item in overrides:
+                self.tick()
+                if not isinstance(item, dict):
+                    raise Ineligible("invalid physical register fragment")
+                start, size = item.get("offset"), item.get("size")
+                if type(start) is not int or type(size) is not int or not 0 <= start < start + size <= width \
+                        or item.get("register_offset") != relation["register_offset"] + start \
+                        or item.get("read") != relation["read"] or type(item.get("call")) is not str:
+                    raise Ineligible("invalid physical register fragment range")
+                self.context(item.get("context"), item["call"])
+                self.check_part(item["part"], size)
+                self.exported_part(item.get("context"), item["register_offset"], size, item["part"])
+                if not any(item["call"] in calls and span["start"] <= item["register_offset"]
+                           and item["register_offset"] + size <= span["start"] + span["size"] for span, calls in bands):
+                    raise Ineligible("register fragment is not an original call debt")
+            retained = relation.get("retained")
+            if not isinstance(retained, (tuple, list)):
+                raise Ineligible("missing original register fragment inventory")
+            covered = [(item["offset"], item["offset"] + item["size"]) for item in overrides]
+            for item in retained:
+                self.tick()
+                if not isinstance(item, dict):
+                    raise Ineligible("invalid original register fragment")
+                start, size = item.get("offset"), item.get("size")
+                if type(start) is not int or type(size) is not int or not 0 <= start < start + size <= width \
+                        or item.get("register_offset") != relation["register_offset"] + start \
+                        or type(item.get("operation")) is not str or type(item.get("call")) is not str \
+                        or any(low < start + size and start < high for low, high in covered):
+                    raise Ineligible("overlapping or invalid retained register fragment")
+                covered.append((start, start + size))
+                self.context(item.get("context"), item.get("call"))
+                pieces = _slice_parts(operand.get("parts", ()), start, start + size)
+                if pieces != [item.get("part")]:
+                    raise Ineligible("retained register fragment is not original SSA")
+                part = item["part"]
+                self.check_part(part, size)
+                producer = self.nodes[part["node"]]
+                output = producer.get("output", {})
+                if producer.get("kind") != "op" or producer.get("key") != item.get("operation") \
+                        or producer.get("physical_context") != relation.get("context") \
+                        or output.get("kind") != "register_file" \
+                        or type(output.get("start")) is not int or type(output.get("size")) is not int \
+                        or not output["start"] <= item["register_offset"] < item["register_offset"] + size \
+                            <= output["start"] + output["size"] \
+                        or part.get("bytes") != [item["register_offset"] - output["start"],
+                                                 item["register_offset"] - output["start"] + size]:
+                    raise Ineligible("retained register write correspondence")
+            try:
+                parts = _register_overlay(operand.get("parts", ()), width, overrides)
+            except (KeyError, TypeError, ValueError):
+                raise Ineligible("invalid physical register fragment assembly") from None
+            if relation.get("parts") != parts:
+                raise Ineligible("physical register fragments replaced original SSA bytes")
+            return parts
+
         def exported_part(self, identifier, offset, size, part):
             """Match an exact named projection of this body's terminal state."""
             self.tick()
@@ -737,6 +821,18 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 if operand.get("pruned") or operand.get("unresolved"):
                     raise Ineligible("unknown physical register operand")
                 return self.register_operand(operand)
+            if "physical_register_fragments" in operand:
+                parts = self.register_fragments(operand)
+                relation = operand["physical_register_fragments"]
+                for item in relation["overrides"]:
+                    self.validate_context(item["context"], item["call"])
+                value = super().operand({"parts": parts})
+                self.evidence.append({"kind": "register_fragments", "key": relation["read"],
+                                      "register_offset": relation["register_offset"], "width": operand["width"],
+                                      "overrides": [{key: item[key] for key in
+                                                     ("offset", "size", "register_offset", "context", "call")}
+                                                    for item in relation["overrides"]]})
+                return value
             return super().operand(operand, address)
 
         def read_geometry(self, operand, owner=None, owner_context=None, owner_guard=None):
@@ -813,6 +909,9 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     part(override["part"], width)
                     self.exported_part(override.get("context"), override["register_offset"], width,
                                        override["part"])
+                if "physical_register_fragments" in item:
+                    for piece in self.register_fragments(item, owner, owner_context):
+                        part(piece)
 
             def events(items, owner):
                 if not isinstance(items, (tuple, list)):
@@ -1022,7 +1121,7 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 if node.get("reason") == "physical call targets":
                     self.target_phi(node)
                 for item in node.get("operands", ()):
-                    if "physical_register" in item or "physical_read" in item:
+                    if any(field in item for field in ("physical_register", "physical_read", "physical_register_fragments")):
                         operation_guard = node.get("physical_guard", self.control.get("reach", {}).get(node.get("key")))
                         if "physical_read" in item and (node.get("kind") != "op" \
                                 or type(node.get("key")) is not str or operation_guard is None):
@@ -1041,6 +1140,15 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     if identifier not in node.get("debts", ()) \
                             or self.nodes.get(identifier, {}).get("debt") != "call_clobber_read":
                         raise Ineligible("invalid physical call debt coverage")
+                    if any("physical_register_fragments" in item for item in node.get("operands", ())):
+                        from ._record_calls import covers_register, register_bindings
+
+                        debt = self.nodes[identifier]
+                        bindings = list(register_bindings(node.get("operands", ()), retained=True))
+                        for span in debt.get("physical_spans", ()):
+                            if span["kind"] == "register_file" and not covers_register(
+                                    span["start"], span["size"], bindings, debt.get("calls", ())):
+                                raise Ineligible("incomplete physical register debt coverage")
                 direct_reads = [item["physical_read"] for item in node.get("operands", ()) if "physical_read" in item]
                 if direct_reads:
                     self.read_debts[node.get("physical_context"), node.get("key")] = node.get("debts", ())
@@ -1058,12 +1166,14 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     if memory.get("entry_context") is not None:
                         self.context(memory["entry_context"])
                 condition = node.get("condition")
-                if condition is not None and "physical_read" in condition.get("operand", {}):
+                if condition is not None and any(field in condition.get("operand", {}) for field in (
+                        "physical_read", "physical_register", "physical_register_fragments")):
                     operand(condition["operand"], condition.get("decision"), node.get("physical_context"),
                             self.control.get("reach", {}).get(condition.get("decision"))
                             if node.get("physical_context") is None else None)
             for decision in self.control.get("decisions", {}).values():
-                if "physical_read" in decision.get("operand", {}):
+                if any(field in decision.get("operand", {}) for field in (
+                        "physical_read", "physical_register", "physical_register_fragments")):
                     operand(decision["operand"], decision.get("decision"), decision.get("import"),
                             self.control.get("reach", {}).get(decision.get("decision"))
                             if decision.get("import") is None else None)
@@ -1101,10 +1211,9 @@ def evaluate_physical(record, entry, *, max_steps=200000):
             return self.operand(operand)
 
         def debts(self, node, memory=None):
-            context_ids = {
-                operand["physical_register"].get("context") for operand in node.get("operands", ())
-                if isinstance(operand.get("physical_register"), dict)
-            }
+            from ._record_calls import register_bindings
+
+            context_ids = {item.get("context") for item in register_bindings(node.get("operands", ()))}
             if memory is not None:
                 context_ids.update(event.get("context") for event in memory.get("events", ())
                                    if event.get("kind") == "call" and event.get("context") is not None)

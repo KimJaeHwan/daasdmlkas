@@ -74,7 +74,7 @@ from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 8   # (8: shared original-target selection for physical CALLIND)
+RECORD_VERSION = 9   # (9: exact call-byte overlays preserve post-call SSA register writes)
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -236,11 +236,14 @@ class _Binding:
                        for row in self.caller.normalized.call_clobber_reads)
         if not affected:
             return False, None
-        from ._record_calls import bind_register_operand
+        from ._record_calls import bind_register_operand, bind_register_fragments
         from .span_geometry import ByteSpan
 
         binding = bind_register_operand(self.caller, key, ByteSpan(span.object_id, start, end - start))
-        return True, [dict(binding["part"])] if binding is not None else None
+        if binding is not None:
+            return True, [dict(binding["part"])]
+        fragments = bind_register_fragments(self.caller, key, ByteSpan(span.object_id, start, end - start), read)
+        return True, fragments["parts"] if fragments is not None else None
 
     def pre_stack_parts(self):
         """Observed pre-push SP, with only this projection's transients skipped."""
@@ -627,14 +630,16 @@ class _Binding:
                                                PhysicalRegisterSlice(start, end - start)):
             return None
         if kind == "snapshot":
-            if not self.caller._snapshot_register_safe(self.snapshot, item):
+            from dataclasses import replace
+
+            piece = replace(item, span=type(item.span)(item.span.object_id, start, end - start))
+            if not self.caller._snapshot_register_safe(self.snapshot, piece):
                 if self.physical_context is not None:
                     from ._record_calls import snapshot_parts
 
                     return snapshot_parts(self.caller, self.snapshot, start, end)
                 return None
-            parts = self.caller._snapshot_parts(self.snapshot, item)
-            return _slice_parts(parts, start - item.span.start, end - item.span.start)
+            return self.caller._snapshot_parts(self.snapshot, piece)
         parts = self.caller._preserved_register_entry(self.snapshot, start, end)
         if parts is None and self.physical_context is not None:
             from ._record_calls import snapshot_parts
@@ -729,6 +734,39 @@ def _slice_parts(parts, low, high):
             piece["bytes"] = [part["bytes"][0] + start - a, part["bytes"][0] + end - a]
         piece["at"] = [start - low, end - low]
         found.append(piece)
+    return found
+
+
+def _register_overlay(parts, width, replacements):
+    """Keep original SSA bytes outside explicitly named call projections.
+
+    Pure byte geometry, shared by generation and consumption. It creates no
+    definitions and never rebases a callee export's internal byte range.
+    """
+    found, cursor = [], 0
+    for item in replacements:
+        start, size = item["offset"], item["size"]
+        if type(start) is not int or type(size) is not int or size <= 0 or not cursor <= start < start + size <= width:
+            raise ValueError("overlapping or invalid register overlay")
+        for piece in _slice_parts(parts, cursor, start):
+            piece["at"] = [position + cursor for position in piece["at"]]
+            found.append(piece)
+        piece = dict(item["part"])
+        if piece.get("at") != [0, size] or piece["bytes"][1] - piece["bytes"][0] != size:
+            raise ValueError("invalid register export placement")
+        piece["at"] = [start, start + size]
+        found.append(piece)
+        cursor = start + size
+    for piece in _slice_parts(parts, cursor, width):
+        piece["at"] = [position + cursor for position in piece["at"]]
+        found.append(piece)
+    cursor = 0
+    for piece in sorted(found, key=lambda row: row["at"]):
+        if piece.get("pruned") or piece.get("loop") or piece["at"][0] != cursor:
+            raise ValueError("incomplete register overlay")
+        cursor = piece["at"][1]
+    if cursor != width:
+        raise ValueError("incomplete register overlay")
     return found
 
 
@@ -1333,11 +1371,16 @@ class _Builder:
                                            position, varnode, depth)
             if self.physical_memory and self.stitch is not None and span is not None \
                     and span.object_id.kind is StorageObjectKind.REGISTER_FILE:
-                from ._record_calls import bind_register_operand
+                from ._record_calls import bind_register_operand, bind_register_fragments
 
                 binding = bind_register_operand(self, self.ssa.actions[action_id].operation_key, span)
                 if binding is not None:
                     operand["physical_register"] = binding
+                else:
+                    fragments = bind_register_fragments(self, self.ssa.actions[action_id].operation_key,
+                                                        span, matching[0], operand["parts"], position)
+                    if fragments is not None:
+                        operand["physical_register_fragments"] = fragments
             operands.append(operand)
         return operands
 
@@ -1687,6 +1730,8 @@ class _Builder:
         if row is not None:
             record["site"] = row.operation_key
             record["spans"] = [_span_text(span) for span in row.spans]
+            if self.physical_memory:
+                record["physical_spans"] = [_span_dict(span) for span in row.spans]
             if hasattr(row, "intervening_calls"):
                 record["calls"] = list(row.intervening_calls)
             if getattr(row, "uncertain", ()):
@@ -2691,6 +2736,10 @@ def _render_node(node, nodes=None):
                     physical = operand["physical_register"]
                     value += " => physical " + _render_parts([physical["part"]], nodes)[0] \
                         + f" [context={physical['context']}; original debt retained]"
+                if "physical_register_fragments" in operand:
+                    physical = operand["physical_register_fragments"]
+                    value += " => physical fragments " + "+".join(_render_parts(physical["parts"], nodes)) \
+                        + " [unreplaced SSA bytes retained]"
                 if "physical_read" in operand:
                     memory = operand["physical_read"]
                     value += f" => physical RAM[{memory['space']:x}:{memory['address']:x}+{memory['width']}] {{" \

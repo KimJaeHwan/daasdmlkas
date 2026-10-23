@@ -3057,7 +3057,7 @@ Astra가 요청한 실제 control 값의 직접 삼자 비교를 보강하면서
 Astra가 이 XML과 각 필수 검사 실행을 독립 확인하고, 문서화된 v7 비순환 직접 호출·구체 물리 해석 범위를 최종 승인했다.
 실제 바이너리 multi-RETURN 호출·native 실행·미해결 간접 호출 지원까지 승인한 것으로 확대하지 않는다.
 
-### 25.43 Astra 협의: 다음 개발 순서 (2026-10-23, 계획 — 미구현)
+### 25.43 Astra 협의: 개발 순서 (2026-10-23의 계획; 구현 결과는 25.44–25.45)
 
 v7 이후에도 목표는 **VM/인터프리터 분석을 위한 연산식 표현 계층**이다. 지금 VM을 복원하거나 새로운 정방향 실행기를
 만드는 작업으로 바꾸지 않는다. 기존 SSA·그래프·후보 증명·메모리 inventory를 재사용하고 no-arg/no-ret/no-calling-convention을 유지한다.
@@ -3186,3 +3186,63 @@ forward-off 거부 검사도 포함한다. 32개 skip은 이전과 같은 Linux 
 이 수치는 suite09의 케이스 통과 수가 아니다. Astra가 새 29개를 독립 실행하고 구현/바이트 검사를 승인했으며,
 권위 XML의 총 2660개·실패/오류 0·기존 실제 검사 실행까지 독립 확인해 v8 범위의 완료를 승인했다.
 앞선 2627 passed 실행은 검사 보강 전 결과로 구분하며, 최종 성적으로 사용하지 않는다.
+
+### 25.45 호출 뒤 부분 레지스터 쓰기의 기존 SSA 조각 연결 (2026-10-23, v9)
+
+25.43의 2순위를 구현했다. `CALL → AL/AH/AX 쓰기 → RAX 읽기`의 전체 폭 거부를 좁혔다.
+새 메모리 SSA·RD·정방향 실행기·ABI 인자/반환 역할은 추가하지 않는다. 기존 원 read fragment와 DATA_WRITE,
+원 CFG의 dominance/쓰기 유무 확인, 호출 본문의 terminal register export를 재사용한다.
+
+- 원 operand의 `parts`는 변경하지 않고 `physical_register_fragments`에 정확한 byte overlay를 별도로 보존한다.
+  새 SSA 쓰기를 덮어쓰지 않으며, 원 call-clobber 구간 중 호출 이후 변경되지 않은 구간만 같은 호출의 terminal export로 보충한다.
+- AH는 기존 call-clobber의 넓은 hull에 새 AH 쓰기까지 포함할 수 있다. 따라서 export만으로 hull 전체를 덮었다고 하지 않는다.
+  원 SSA가 지정한 단일 DATA_WRITE가 해당 call 이후/read 이전을 지배하고, 중간 호출·중복 쓰기가 없는 경우에만
+  그 retained 조각과 export 조각의 **합집합**으로 해당 register debt 범위를 설명한다. retained 값의 연산과 입력 debt는
+  일반 경로로 계속 평가한다. 한 operand의 성공으로 다른 operand나 메모리 debt를 면제하지 않는다.
+- register 조각의 operand 내 위치(`offset`)와 callee 원 register 주소(`register_offset`), producer 내 byte offset은 구별한다.
+  schema는 callback 전에 원 owner/input/context·기존 debt 구간·정확한 export·retained 원 SSA part 및 raw producer/output 대응·
+  전체 조립·debt 범위 충족을 확인한다. 검증할 수 없는 별도 definition/read ordinal 번호를 권위 필드로 직렬화하지 않는다.
+  이는 내부 대응 검사이며 임의 JSON의 진위 인증 기능은 아니다.
+- CALLIND의 모든 조각과 RAM은 v8의 같은 target selector를 사용하며, 다중 RETURN도 같은 원 출구 guard를 공유한다.
+  다음 호출의 staged read/snapshot에도 기존 SSA 경계와 clipped fragment를 사용해 전달한다. 한도 실패 시 새 context·lazy export·
+  control/노드 cache를 함께 복구한다.
+- AL/AH/AX, 서로 떨어진 쓰기, 같은 바이트의 반복 쓰기를 지원한다. raw 4-byte 쓰기에 x86 지식을 더해 상위 0을 발명하지 않는다.
+  원 `INT_ZEXT` 또는 Ghidra가 내보낸 8-byte `COPY`가 있으면 그 쓰기가 상위 바이트의 근거다.
+  전체 바이트가 덮이면 이전 호출 결과를 불필요하게 요구하지 않는다.
+
+예를 들어 callee terminal RAX가 `0x1122334455667789`일 때 `AH=0xbb` 뒤의 RAX는
+`0x112233445566bb89`다. 하위 `[0:1]`와 상위 `[2:8]`만 callee에 연결하고 `[1:2]`는 기존 caller COPY를 유지한다.
+뒤의 `+5`까지 표현한 값은 `0x112233445566bb8e`이며 callee 전체 RAX로 대체하지 않는다.
+
+#### 실제 바이너리 및 거부 경계
+
+실제 작업 Bundle의 제한적 inventory 탐색에서는 적합한 CALL→부분 쓰기→전체 폭 읽기 쌍을 선정하지 못해
+`tests/corpus/intra/partial_register_call.c`를 x64 Mach-O로 컴파일하고 Ghidra 12.0.4로 봉인 추출했다.
+이 탐색 결과를 UE/suite 전체에 해당 패턴이 없다는 증명으로 해석하지 않는다. inline assembly는 실제 AL/AH/AX/EAX 명령을
+바이너리에 남기기 위한 것이며 엔진에 call 결과나 요약을 주입하지 않는다.
+
+- 원 AL/AH/AX의 좁은 COPY와 EAX의 원 8-byte COPY(상위 0 포함)를 먼저 확인한다.
+- 4개 wrapper × 8개 입구 = **32회 원 p-code 실행**에서 고비트가 서로 다른 값·바이트 carry·64비트 wrap을 포함해
+  물리 계산식 값/직접 기대식/원 실행의 최종 RAX를 대조했다. AL/AH/AX에서는 원 callee RETURN/IP/SP 및 표현된 모든 LOAD의
+  각 byte writer/offset도 대조했다. native 실행이나 32개 suite09 케이스 통과를 의미하지 않는다.
+- 바이너리 SHA256: `2d9d753554aff4727bcafe3238705e59c9c21cf6f9a85e1480894c52395d9fcc`.
+  Bundle: `output/partial-register-20261023/bundles/f6d9db3d6ffedac40c4cfbcdab58f8a73bbc81e6a642c42d72a45aa73acd6d96`.
+  재실행은 `TDO_PARTIAL_REGISTER_BUNDLE=<generation> PYTHONPATH=src:tests/intra python -m pytest -q
+  tests/corpus/intra/test_partial_register_binary.py`로 한다.
+
+합성 raw p-code 회귀는 direct/staged 다음 호출(AL/AH/AX), retained 입력의 미확정 RAM/debt, 다른 operand의 잔여 debt,
+CALLIND 양후보의 다른 상·하위값과 RAM writer, 다중 RETURN 양경로, unknown call/userop, metadata 변조, pruned/unresolved 및
+limit rollback을 포함한다. Astra가 독립 실행한 관련 **97개 검사(실제 4개 포함)는 skip 없이 통과**했으며 범위 내 구현을 승인했다.
+
+새 쓰기/이전 호출 값이 분기별로 섞인 JOIN, KILL·미지원 효과·알 수 없는 호출을 건너뛴 연결은 계속 거부한다.
+루프·재귀 해결이나 정적 완전성 승격은 이번 범위가 아니다. 기본 summary·원 debt·named 가정·eligibility는 유지하며
+물리 구체 평가 성공을 일반 backward slice의 무조건적인 완전성으로 바꾸지 않는다.
+다음 순위는 25.43의 3순위인 **기존 초기값/되돌이 정의/CFG 간선을 이용한 반복식 구조 표현**이다.
+이는 반복 횟수 추정이나 재귀 실행 구현과 구별한다.
+
+동결본 전체 회귀는 **2669 passed / 32 skipped / 0 failed**, 420.54초였다.
+권위 결과는 `output/partial-register-20261023/final-suite.junit.xml`이며 총 2701개, failures/errors 모두 0이다.
+새 부분 레지스터 합성 37개와 실제 바이너리 4개는 모두 skip 없이 실행됐다. 기존 실제 CALLIND·UE Core·분기·중첩 호출 및
+배포 모델 호환성 검사도 포함한다. 이 테스트 개수를 suite09 케이스 점수나 함수 그래프 완전성 개수로 해석하지 않는다.
+Astra가 XML의 총수·실패/오류 0·새 검사와 기존 실제 검사 실행을 독립 확인해 v9 범위의 완료를 승인했다.
+32개 skip은 기존과 같은 Linux 환경 제약 23개와 미보유 Bundle 9개다.
