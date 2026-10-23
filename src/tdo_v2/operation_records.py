@@ -74,7 +74,7 @@ from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 7   # (7: nested calls, shared RETURN selection, direct RAM operands)
+RECORD_VERSION = 8   # (8: shared original-target selection for physical CALLIND)
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -177,11 +177,21 @@ class _ControlPool:
 class StitchContext:
     """The run's analysis instances (``interprocedural._analyze_units``'
     ``record_provenance``: id(AnalyzedFunction) -> (it, CallProvenance)) and
-    the callees' lane indexes, built once."""
+    the callees' lane indexes, built once. ``assumptions`` is the completed
+    run's exact premise list; omitted means unknown, not empty. Physical
+    CALLIND stitching requires this list (ordinary/direct records do not)."""
 
-    def __init__(self, table):
+    def __init__(self, table, *, assumptions=None):
         self.table = table
         self.indices: dict = {}
+        # A provenance table cannot recover run options (readonly image,
+        # home-space, traps ...). Unknown is not an empty premise set.
+        self.assumptions = None if assumptions is None else tuple(sorted(set(assumptions)))
+
+    def analyzed(self, normalized, unit, provenance):
+        matches = [item for item, source in self.table.values()
+                   if item.normalized is normalized and item.unit is unit and source is provenance]
+        return matches[0] if len(matches) == 1 else None
 
     def provenance(self, analyzed):
         found = self.table.get(id(analyzed))
@@ -783,6 +793,7 @@ class _Builder:
         self.controls = parent.controls if parent is not None else _ControlPool()
         self.physical_context = None
         self.physical_calls = parent.physical_calls if parent is not None else {}
+        self.target_selectors = parent.target_selectors if parent is not None else {}
         self.physical_call_building = parent.physical_call_building if parent is not None else set()
         self.physical_call_cuts = parent.physical_call_cuts if parent is not None else {}
         self.physical_call_builders = parent.physical_call_builders if parent is not None else {}
@@ -2330,6 +2341,16 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
                                     and raw[0].output.kind is VarnodeKindCode.ADDRESS
                                     and raw[0].output.coordinate.space_id in builder_spaces):
                 demand_seeds.append((node, ()))
+        from ._record_calls import target_producer
+
+        for instruction in unit.observation.instructions:
+            for ordinal, operation in enumerate(instruction.operations):
+                if operation.opcode == "CALLIND":
+                    key = f"{instruction.address.space_id:x}:{instruction.address.byte_offset:x}:{ordinal}:CALLIND"
+                    producer = target_producer(unit, key)
+                    node = normalized.dependencies.node_for_key(f"op:{producer[0]}") if producer else None
+                    if node is not None:
+                        demand_seeds.append((node, ()))
     demands = lane_slice(normalized, unit, demand_seeds, budget=limits.demand_steps,
                          byte_budget=limits.demand_bytes, index=index)
     # Include predicates BEFORE constructing any value node. A predicate may
@@ -2438,6 +2459,11 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
     }
     if physical_memory:
         record["physical_calls"] = builder.physical_calls
+        record["target_selectors"] = builder.target_selectors
+        record["physical_assumptions"] = list(stitch.assumptions) \
+            if stitch is not None and stitch.assumptions is not None else None
+        record["physical_scope"] = builder.ssa.function_scope.digest.hex()
+        record["physical_unit"] = builder.ssa.unit_digest.hex()
         if builder.physical_call_cuts:
             record["physical_call_cuts"] = dict(builder.physical_call_cuts)
     if control is not None:
@@ -2547,6 +2573,13 @@ def render(record) -> str:
         lines.append("  entry RAM = " + " -> ".join(event_text(event) for event in
                                                     (*context["prefix"], context["push"])))
         lines.append("  body writes = " + " -> ".join(event_text(event) for event in context["events"]))
+        if context.get("kind") == "target_selection":
+            selector = record["target_selectors"][context["target_selector"]]
+            target = "+".join(_render_parts(selector["operand"].get("parts", ()), nodes))
+            lines.append(f"  original target = {target}; selector {identity}")
+            for candidate in selector["candidates"]:
+                lines.append(f"  0x{candidate['value']:x} -> {candidate['context']}")
+            continue
         for returned in context.get("returns", (context.get("return"),)):
             target = "+".join(_render_parts(returned["operand"].get("parts", ()), nodes))
             stack = "+".join(_render_parts(returned["stack"]["parts"], nodes))

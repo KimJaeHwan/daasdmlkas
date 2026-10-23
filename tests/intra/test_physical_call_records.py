@@ -72,7 +72,7 @@ def _record(case, key='1:100c:1:INT_ADD', *, physical=True, limits=None, stitch=
                          (item.normalized.memory_ssa.definitions[index].span,))
                         for index in action.write_definition_ids],
                        declared=item.declared, provenance=case['provenance'][id(item)][1],
-                       stitch=StitchContext(case['provenance']) if stitch else None,
+                       stitch=StitchContext(case['provenance'], assumptions=case.get('assumptions')) if stitch else None,
                        physical_memory=physical, limits=limits)
 
 

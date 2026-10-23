@@ -43,11 +43,12 @@ def _checkpoint(builder):
             seen.add(child)
     return (len(builder.records), builder.ledger.edges, builder.controls.checkpoint(), chain,
             dict(builder.physical_calls), dict(builder.physical_call_builders),
-            {key: len(value["outputs"]) for key, value in builder.physical_calls.items()})
+            {key: len(value["outputs"]) for key, value in builder.physical_calls.items()},
+            dict(builder.target_selectors))
 
 
 def _restore(builder, checkpoint):
-    start, edges, controls, chain, calls, builders, output_lengths = checkpoint
+    start, edges, controls, chain, calls, builders, output_lengths, selectors = checkpoint
     builder.controls.restore(controls)
     for item, truncated, refs, decisions in chain:
         item.truncated, item.control_refs, item.control_decisions = truncated, refs, decisions
@@ -61,6 +62,8 @@ def _restore(builder, checkpoint):
         del calls[key]["outputs"][length:]
     builder.physical_call_builders.clear()
     builder.physical_call_builders.update(builders)
+    builder.target_selectors.clear()
+    builder.target_selectors.update(selectors)
 
 
 def context(builder, base):
@@ -76,10 +79,16 @@ def context(builder, base):
     prior_physical, builder.building_physical = builder.building_physical, True
     builder.physical_call_building.add(identity)
     try:
-        result, child, block, return_key = _context(builder, base, identity)
-        if child.truncated or any(item.truncated != flag for item, flag, _, _ in checkpoint[3]):
+        raw = _raw(builder, base)
+        if raw is not None and raw[2].opcode == "CALLIND":
+            result = _indirect_context(builder, base, identity)
+            child = None
+        else:
+            result, child, block, return_key = _context(builder, base, identity)
+        if child is not None and child.truncated or any(item.truncated != flag for item, flag, _, _ in checkpoint[3]):
             raise _StitchCut("limit")
-        child._control_record()
+        if child is not None:
+            child._control_record()
     except (MemoryError, AnalysisBudgetExceeded, AnalysisReportingFailed):
         raise
     except (_StitchCut, _Truncated, RecursionError) as error:
@@ -88,7 +97,8 @@ def context(builder, base):
         return None
     else:
         builder.physical_calls[identity] = result
-        builder.physical_call_builders[identity] = child, block, return_key
+        if child is not None:
+            builder.physical_call_builders[identity] = child, block, return_key
         for node in builder.records[checkpoint[0]:]:
             node.setdefault("physical_only", True)
             if node.get("physical_context") == identity:
@@ -100,7 +110,155 @@ def context(builder, base):
         builder.building_physical = prior_physical
 
 
-def _context(builder, base, identity):
+def target_producer(unit, base):
+    """Original straight instruction-local producer, not a new RD analysis."""
+    from .pcode_blocks import has_internal_flow
+
+    for row in unit.observation.instructions:
+        for ordinal, operation in enumerate(row.operations):
+            step()
+            if _operation_key(row.address, ordinal, operation.opcode) != base:
+                continue
+            if operation.opcode != "CALLIND" or len(operation.inputs) != 1 or has_internal_flow(row):
+                return None
+            target = operation.inputs[0]
+            for index in range(ordinal - 1, -1, -1):
+                earlier = row.operations[index]
+                output = earlier.output
+                if output is None or output.coordinate.space_id != target.coordinate.space_id:
+                    continue
+                if output.coordinate.byte_offset < target.coordinate.byte_offset + target.byte_size \
+                        and target.coordinate.byte_offset < output.coordinate.byte_offset + output.byte_size:
+                    return (_operation_key(row.address, index, earlier.opcode), target) if output == target else None
+            return None
+    return None
+
+
+def _target_operand(builder, base):
+    from .operation_records import _Binding, _StitchCut
+
+    instruction, ordinal, operation = _raw(builder, base)
+    target, = operation.inputs
+    producer = target_producer(builder.unit, base)
+    operand = {"index": 0, "role": "target", "width": target.byte_size}
+    source = {"operation": base, "index": 0, "kind": target.kind.name,
+              "space": target.coordinate.space_id, "offset": target.coordinate.byte_offset,
+              "width": target.byte_size, "context": builder.physical_context}
+    operand["target_read"] = {name: source[name] for name in ("kind", "space", "offset", "width")}
+    if producer is not None:
+        key, _ = producer
+        node = builder.graph.node_for_key(f"op:{key}")
+        if node is None or node not in builder.index.action_of:
+            raise _StitchCut("physical target has no existing producer")
+        operand["parts"] = [{"node": builder.operation(node, 0), "bytes": [0, target.byte_size],
+                             "at": [0, target.byte_size]}]
+        source["producer"] = key
+    elif target.kind is VarnodeKindCode.CONSTANT:
+        operand.update(builder._constant_operand(0, target, "target"))
+    elif target.kind is VarnodeKindCode.REGISTER:
+        # A snapshot is pre-staging, not a license to ignore a target write
+        # later in the same instruction. Partial writes and unmodeled local
+        # control therefore cut instead of reading an earlier register value.
+        from .pcode_blocks import has_internal_flow
+
+        if has_internal_flow(instruction):
+            raise _StitchCut("physical target has internal control")
+        for earlier in instruction.operations[:ordinal]:
+            output = earlier.output
+            if output is not None and output.coordinate.space_id == target.coordinate.space_id \
+                    and output.coordinate.byte_offset < target.coordinate.byte_offset + target.byte_size \
+                    and target.coordinate.byte_offset < output.coordinate.byte_offset + output.byte_size:
+                raise _StitchCut("physical target has no exact local producer")
+        binding = _Binding(builder, (), builder._stack_base(base), builder._stack_base(base, delta=True),
+                           call=base, effect=builder.proven[base])
+        binding.physical_context = _identity(builder, base)
+        operand["parts"] = binding.parts(target.coordinate.byte_offset,
+                                          target.coordinate.byte_offset + target.byte_size)
+    else:
+        raise _StitchCut("physical target read unavailable")
+    builder._edge()
+    return operand, source
+
+
+def _indirect_context(builder, base, identity):
+    from .operation_records import _StitchCut
+
+    if builder.stitch is None or builder.provenance is None:
+        raise _StitchCut("physical indirect call has no provenance")
+    if builder.stitch.assumptions is None:
+        raise _StitchCut("physical indirect call requires explicit run assumptions")
+    analyzed = builder.stitch.analyzed(builder.normalized, builder.unit, builder.provenance)
+    source = builder.provenance.sources.get(base)
+    if analyzed is None or source is None or source[0] not in ("summary", "summaries"):
+        raise _StitchCut("physical indirect call has no final analyzed targets")
+    members = (source[1],) if source[0] == "summary" else tuple(source[1])
+    proven = analyzed.multi_calls.get(base, ()) or ((analyzed.calls[base],) if base in analyzed.calls else ())
+    if not members or len(members) > 8 or tuple(done.key for done in members) != tuple(proven) \
+            or len(set(proven)) != len(proven):
+        raise _StitchCut("physical indirect target set mismatch")
+    operand, target_source = _target_operand(builder, base)
+    candidates, common = [], None
+    for done in members:
+        retained = builder.stitch.table.get(id(done))
+        if retained is None or retained[0] is not done \
+                or done.unit.scopes.program is not builder.unit.scopes.program:
+            raise _StitchCut("physical target body is not from the same admitted run/program")
+        child_id = f"{identity}@{done.key}"
+        found, child, terminals, _ = _context(builder, base, child_id, done=done, shared=common)
+        child._control_record()
+        if child.truncated:
+            raise _StitchCut("limit")
+        found["selected_by"] = identity
+        builder.physical_calls[child_id] = found
+        builder.physical_call_builders[child_id] = child, terminals, None
+        if common is None:
+            common = found
+            builder.records[found["push"]["node"]]["physical_call_push"] = identity
+        entry = done.unit.scopes.function.entry
+        candidates.append({"value": entry.byte_offset, "space": entry.space_id,
+                           "function": done.key, "context": child_id,
+                           "scope": found["scope"], "unit": found["unit"]})
+    selector = {"id": identity, "call": base, "parent_context": builder.physical_context,
+                "guard": common["guard"], "operand": operand, "source": target_source,
+                "space": builder.unit.scopes.function.entry.space_id, "width": operand["width"],
+                "program": getattr(builder.unit.scopes.program.evidence, "executable_sha256", b"").hex(),
+                "scope": builder.ssa.function_scope.digest.hex(), "unit": builder.ssa.unit_digest.hex(),
+                "function": builder.function_key, "requires": list(builder.stitch.assumptions),
+                "candidates": candidates}
+    builder.target_selectors[identity] = selector
+    return {"id": identity, "kind": "target_selection", "target_selector": identity,
+            "call": base, "function": "CALLIND", "parent_context": builder.physical_context,
+            "guard": common["guard"], "prefix": common["prefix"], "push": common["push"],
+            "projection": common["projection"], "events": [], "outputs": [],
+            "scope": selector["scope"], "unit": selector["unit"]}
+
+
+def _push(builder, identity, store, store_key, before, stack_size, delta, guard):
+    """One caller-owned push, shared by all targets of the same call."""
+    number = builder._new(None, {"kind": "const", "size": stack_size,
+                                "value": delta & ((1 << (8 * stack_size)) - 1)})["id"]
+    address = builder._new(None, {"kind": "op", "key": "stitch:call-shape", "opcode": "INT_ADD",
+                                  "output": {"size": stack_size}, "physical_guard": guard,
+                                  "operands": [{"index": 0, "width": stack_size, "parts": before},
+                                               {"index": 1, "width": stack_size, "parts": [
+                                                   {"node": number, "bytes": [0, stack_size],
+                                                    "at": [0, stack_size]}]}]})
+    builder._done(address)
+    width, space = store.inputs[2].byte_size, store.inputs[0].coordinate.byte_offset
+    value = builder._new(None, {"kind": "const", "size": width,
+                                "value": store.inputs[2].coordinate.byte_offset})["id"]
+    push = builder._new(None, {"kind": "op", "key": store_key, "opcode": "STORE", "space": space,
+                               "physical_guard": guard, "physical_call_push": identity, "operands": [
+                                   {"index": 0, "role": "space", "width": store.inputs[0].byte_size, "value": space},
+                                   {"index": 1, "role": "address", "width": store.inputs[1].byte_size,
+                                    "parts": [{"node": address["id"], "bytes": [0, stack_size], "at": [0, stack_size]}]},
+                                   {"index": 2, "role": "value", "width": width,
+                                    "parts": [{"node": value, "bytes": [0, width], "at": [0, width]}]}]})
+    builder._done(push)
+    return {"key": store_key, "kind": "store", "guard": guard, "node": push["id"], "space": space, "width": width}
+
+
+def _context(builder, base, identity, *, done=None, shared=None):
     from ._record_memory import MemoryIndex
     from .call_summary_effects import call_load_keys
     from .operation_records import _Binding, _Builder, _StitchCut
@@ -109,16 +267,17 @@ def _context(builder, base, identity):
         raise _StitchCut("physical call context unavailable")
     if len(builder.path) >= builder.limits.call_depth:
         raise _StitchCut("physical call depth")
-    source = builder.provenance.sources.get(base)
-    if source is None or source[0] != "summary":
-        raise _StitchCut("physical call requires one analyzed body")
-    done = source[1]
+    if done is None:
+        source = builder.provenance.sources.get(base)
+        if source is None or source[0] != "summary":
+            raise _StitchCut("physical call requires one analyzed body")
+        done = source[1]
     raw = _raw(builder, base)
-    if raw is None or raw[2].opcode != "CALL" or not raw[2].inputs:
-        raise _StitchCut("physical call requires a direct CALL")
+    if raw is None or raw[2].opcode not in ("CALL", "CALLIND") or not raw[2].inputs:
+        raise _StitchCut("physical call requires an observed CALL")
     instruction, _, operation = raw
     target = operation.inputs[0].coordinate
-    if done.key != f"{target.space_id:x}:{target.byte_offset:x}" \
+    if operation.opcode == "CALL" and done.key != f"{target.space_id:x}:{target.byte_offset:x}" \
             or done.key == builder.function_key or any(done.key == key for key, _ in builder.path):
         raise _StitchCut("physical call target mismatch or recursion")
     projection = builder._projection(base)
@@ -140,7 +299,8 @@ def _context(builder, base, identity):
     child = _Builder(done.normalized, done.unit, origins=done.origins, declared=done.declared,
                      limits=builder.limits, provenance=builder.stitch.provenance(done), stitch=builder.stitch,
                      records=builder.records, ledger=builder.ledger, parent=builder, binding=binding,
-                     path=(*builder.path, (builder.function_key, base)),
+                     path=(*builder.path, (builder.function_key,
+                           f"{base}@{done.key}" if operation.opcode == "CALLIND" else base)),
                      index=builder.stitch.index(done.normalized, done.unit), physical_memory=True)
     child.physical_context, child.building_physical = identity, True
     conditions = child._condition_index()
@@ -159,8 +319,7 @@ def _context(builder, base, identity):
     if prefix is None:
         raise _StitchCut(reason or "physical call prefix unavailable")
     before = binding.pre_stack_parts()
-    stack_node = binding._stack_value(child)
-    if before is None or stack_node is None:
+    if before is None:
         raise _StitchCut("physical call stack input unavailable")
     stack_size = binding.stack[1]
     stores = []
@@ -177,19 +336,8 @@ def _context(builder, base, identity):
     if guard is None:
         raise _StitchCut(reason or "physical call reach unavailable")
     guard = builder._guard_ref(guard)
-    value = builder._new(None, {"kind": "const", "size": store.inputs[2].byte_size,
-                                "value": store.inputs[2].coordinate.byte_offset})["id"]
-    push = builder._new(None, {"kind": "op", "key": store_key, "opcode": "STORE",
-                               "space": store.inputs[0].coordinate.byte_offset, "physical_guard": guard,
-                               "physical_call_push": identity, "operands": [
-                                   {"index": 0, "role": "space", "width": store.inputs[0].byte_size,
-                                    "value": store.inputs[0].coordinate.byte_offset},
-                                   {"index": 1, "role": "address", "width": store.inputs[1].byte_size,
-                                    "parts": [{"node": stack_node, "bytes": [0, stack_size], "at": [0, stack_size]}]},
-                                   {"index": 2, "role": "value", "width": store.inputs[2].byte_size,
-                                    "parts": [{"node": value, "bytes": [0, store.inputs[2].byte_size],
-                                               "at": [0, store.inputs[2].byte_size]}]}]})
-    builder._done(push)
+    push = shared["push"] if shared is not None else _push(
+        builder, identity, store, store_key, before, stack_size, binding.delta, guard)
     stack_span = next((span for span in child.ssa.atomic_spans
                        if span.object_id.kind is StorageObjectKind.REGISTER_FILE
                        and span.start <= binding.stack[0] < span.end), None)
@@ -223,9 +371,8 @@ def _context(builder, base, identity):
               "projection": {"transient": list(projection.transient_operation_keys),
                              "stack_offset": binding.stack[0], "stack_size": stack_size,
                              "delta": binding.delta},
-              "prefix": builder._physical_events(prefix),
-              "push": {"key": store_key, "kind": "store", "guard": guard, "node": push["id"],
-                       "space": store.inputs[0].coordinate.byte_offset, "width": store.inputs[2].byte_size},
+              "prefix": builder._physical_events(prefix) if shared is None else shared["prefix"],
+              "push": push,
               "events": child._physical_events(body), "outputs": [], "returns": returned_records}
     if len(returned_records) == 1:
         result["return"] = returned_records[0]  # singular v6 reader compatibility
@@ -278,6 +425,24 @@ def output_part(builder, found, span):
     for output in found["outputs"]:
         if output["offset"] == span.start and output["size"] == span.size:
             return output["part"]
+    if found.get("kind") == "target_selection":
+        checkpoint = _checkpoint(builder)
+        try:
+            choices = builder.target_selectors[found["id"]]["candidates"]
+            parts = [output_part(builder, builder.physical_calls[item["context"]], span) for item in choices]
+            if any(part is None for part in parts):
+                raise _StitchCut("physical target output unavailable")
+            node = builder._new(None, {"kind": "phi", "reason": "physical call targets", "size": span.size,
+                                       "register_offset": span.start,
+                                       "target_selector": found["id"], "alternatives": parts,
+                                       "physical_only": True})
+            builder._done(node)
+            part = {"node": node["id"], "bytes": [0, span.size], "at": [0, span.size]}
+            found["outputs"].append({"offset": span.start, "size": span.size, "part": part})
+            return part
+        except (_StitchCut, _Truncated, RecursionError):
+            _restore(builder, checkpoint)
+            return None
     child, terminals, _ = builder.physical_call_builders[found["id"]]
     checkpoint = _checkpoint(child)
     physical_flags = [(item, item.building_physical) for item, *_ in checkpoint[3]]

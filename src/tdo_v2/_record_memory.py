@@ -315,6 +315,8 @@ def evaluate_physical(record, entry, *, max_steps=200000):
             self.read_debts = {}
             self.context_reach_values, self.context_reach_active = {}, set()
             self.contexts = record.get("physical_calls", {})
+            self.selectors = record.get("target_selectors", {})
+            self.target_values, self.target_active = {}, set()
             self.evidence, self.remaining = [], max_steps
 
         def tick(self, cost=1):
@@ -387,8 +389,33 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     raise Ineligible("incomplete physical call context")
             if not isinstance(context.get("push"), dict):
                 raise Ineligible("incomplete physical call context")
-            self.return_rows(context)
+            if context.get("kind") != "target_selection":
+                self.return_rows(context)
             return context
+
+        def selected_context(self, identifier):
+            self.tick()
+            if identifier in self.target_values:
+                return self.target_values[identifier]
+            if identifier in self.target_active:
+                raise Ineligible("physical target selection cycle")
+            selector = self.selectors.get(identifier)
+            if not isinstance(selector, dict) or not self.context_reached(identifier):
+                raise Ineligible("physical indirect call unreached")
+            self.target_active.add(identifier)
+            try:
+                target = self.full_operand(selector["operand"])
+                matches = [item for item in selector["candidates"] if item["value"] == target]
+                if len(matches) != 1:
+                    raise Ineligible("physical target outside proven candidates")
+                chosen, = matches
+                self.target_values[identifier] = chosen["context"]
+                self.evidence.append({"kind": "target", "selector": identifier, "call": selector["call"],
+                                      "target": target, "function": chosen["function"],
+                                      "context": chosen["context"], "requires": selector["requires"]})
+                return chosen["context"]
+            finally:
+                self.target_active.remove(identifier)
 
         def return_rows(self, context):
             self.tick()
@@ -422,6 +449,8 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 parent = context.get("parent_context")
                 found = (parent is None or self.context_reached(parent)) \
                     and self.physical_guard(context.get("guard"))
+                if found and context.get("selected_by") is not None:
+                    found = self.selected_context(context["selected_by"]) == identifier
                 self.context_reach_values[identifier] = found
                 return found
             finally:
@@ -451,6 +480,12 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 raise Ineligible("physical call unreached")
             self.context_active.add(identifier)
             try:
+                if context.get("kind") == "target_selection":
+                    selected = self.selected_context(identifier)
+                    body = self.validate_context(selected, call)
+                    self.context_values[identifier] = body
+                    self.context_returns[identifier] = self.context_returns[selected]
+                    return body
                 # Earlier and nested calls publish only fully validated
                 # effects. An active unknown call or opaque event still fails.
                 tuple(self.stores(context["prefix"]))
@@ -676,6 +711,23 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     raise Ineligible("physical exit guard correspondence")
             return returned
 
+        def target_phi(self, node):
+            identifier = node.get("target_selector")
+            selector = self.selectors.get(identifier)
+            alternatives, size = node.get("alternatives", ()), node.get("size")
+            if not isinstance(selector, dict) or node.get("kind") != "phi" \
+                    or node.get("reason") != "physical call targets" \
+                    or type(size) is not int or size <= 0 \
+                    or len(alternatives) != len(selector["candidates"]) \
+                    or any(name in node for name in ("condition", "guarded_sources", "choices")):
+                raise Ineligible("physical target output selection mismatch")
+            for item, candidate in zip(alternatives, selector["candidates"], strict=True):
+                self.check_part(item, size)
+                exports = self.context_outputs.get(candidate["context"], {})
+                if item.get("at") != [0, size] or exports.get((node.get("register_offset"), size)) != item:
+                    raise Ineligible("physical target output is not a candidate export")
+            return selector
+
         def operand(self, operand, address=None):
             if "physical_read" in operand:
                 return self.read_operand(operand)
@@ -788,6 +840,12 @@ def evaluate_physical(record, entry, *, max_steps=200000):
 
             if not isinstance(self.contexts, dict):
                 raise Ineligible("invalid physical call registry")
+            if not isinstance(self.selectors, dict):
+                raise Ineligible("invalid physical target registry")
+            groups = {identifier for identifier, item in self.contexts.items()
+                      if isinstance(item, dict) and item.get("kind") == "target_selection"}
+            if set(self.selectors) != groups:
+                raise Ineligible("physical target registry mismatch")
             parents = {}
             for identifier in self.contexts:
                 if type(identifier) is not str:
@@ -796,6 +854,73 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 if parent is not None and (type(parent) is not str or parent not in self.contexts):
                     raise Ineligible("unknown physical context parent")
                 parents[identifier] = parent
+            for identifier, selector in self.selectors.items():
+                if not isinstance(selector, dict):
+                    raise Ineligible("invalid physical target contract")
+                group = self.context(identifier)
+                source = selector.get("source", {})
+                candidates = selector.get("candidates")
+                target_operand = selector.get("operand", {})
+                if not isinstance(source, dict) or not isinstance(target_operand, dict) \
+                        or not isinstance(candidates, (tuple, list)) \
+                        or any(not isinstance(item, dict) for item in candidates):
+                    raise Ineligible("invalid physical target contract")
+                width, space = selector.get("width"), selector.get("space")
+                parent = group.get("parent_context")
+                owner = self.context(parent) if parent is not None else {
+                    "function": record.get("function"), "scope": record.get("physical_scope"),
+                    "unit": record.get("physical_unit")}
+                if selector.get("id") != identifier or group.get("target_selector") != identifier \
+                        or selector.get("call") != group.get("call") \
+                        or selector.get("parent_context") != parent or selector.get("guard") != group.get("guard") \
+                        or any(selector.get(key) != owner.get(key) for key in ("function", "scope", "unit")) \
+                        or selector.get("program") != record.get("program") \
+                        or selector.get("requires") != record.get("physical_assumptions") \
+                        or type(width) is not int or not 1 <= width <= 8 \
+                        or width != target_operand.get("width") or width != source.get("width") \
+                        or type(space) is not int or space < 0 \
+                        or source.get("operation") != group.get("call") or source.get("index") != 0 \
+                        or source.get("context") != parent or target_operand.get("index") != 0 \
+                        or source.get("kind") not in ("CONSTANT", "REGISTER", "UNIQUE", "ADDRESS") \
+                        or type(source.get("space")) is not int or source["space"] < 0 \
+                        or type(source.get("offset")) is not int or source["offset"] < 0 \
+                        or target_operand.get("target_read") != {
+                            name: source.get(name) for name in ("kind", "space", "offset", "width")} \
+                        or not isinstance(candidates, (tuple, list)) or not 0 < len(candidates) <= 8 \
+                        or group.get("events") != []:
+                    raise Ineligible("invalid physical target contract")
+                operand(target_operand, group["call"], parent, group["guard"])
+                if source.get("producer") is not None:
+                    pieces = target_operand.get("parts", ())
+                    producer = self.nodes.get(pieces[0].get("node"), {}) if len(pieces) == 1 else {}
+                    if producer.get("key") != source["producer"] or producer.get("physical_context") != parent:
+                        raise Ineligible("physical target producer correspondence")
+                    output = producer.get("output", {})
+                    kind = {"REGISTER": "register_file", "UNIQUE": "function_unique", "ADDRESS": "address_space"}
+                    if output.get("start") != source["offset"] or output.get("size") != width \
+                            or output.get("kind") != kind.get(source["kind"]):
+                        raise Ineligible("physical target varnode correspondence")
+                values, children = set(), set()
+                for candidate in candidates:
+                    value, child_id = candidate.get("value"), candidate.get("context")
+                    child = self.context(child_id, group["call"])
+                    if type(value) is not int or not 0 <= value < 1 << (8 * width) or value in values \
+                            or child_id in children or candidate.get("space") != space \
+                            or candidate.get("function") != f"{space:x}:{value:x}" \
+                            or any(candidate.get(key) != child.get(key) for key in ("function", "scope", "unit")) \
+                            or child.get("selected_by") != identifier or child.get("parent_context") != parent \
+                            or child.get("guard") != group.get("guard") \
+                            or child.get("push") != group.get("push") or child.get("prefix") != group.get("prefix") \
+                            or child.get("projection") != group.get("projection"):
+                        raise Ineligible("physical target context correspondence")
+                    values.add(value)
+                    children.add(child_id)
+                actual_children = {key for key, item in self.contexts.items() if item.get("selected_by") == identifier}
+                if children != actual_children:
+                    raise Ineligible("physical target candidate inventory mismatch")
+            if any(item.get("selected_by") is not None and item["selected_by"] not in groups
+                   for item in self.contexts.values()):
+                raise Ineligible("unknown physical target owner")
             depths = {}
             limit = record.get("limits", {}).get("call_depth", Limits.call_depth)
             if type(limit) is not int or limit < 0:
@@ -825,6 +950,10 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 if not isinstance(outputs, (tuple, list)):
                     raise Ineligible("missing physical call exports")
                 exported = self.context_outputs[identifier] = {}
+            for identifier in sorted(self.contexts, key=lambda key: self.contexts[key].get("kind") == "target_selection"):
+                context = self.context(identifier)
+                outputs = context["outputs"]
+                exported = self.context_outputs[identifier]
                 for output in outputs:
                     self.tick()
                     if not isinstance(output, dict):
@@ -835,10 +964,15 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                         raise Ineligible("ambiguous physical call export")
                     piece = output["part"]
                     part(piece, size)
-                    if piece.get("at") != [0, size] \
+                    if context.get("kind") == "target_selection":
+                        producer = self.nodes[piece["node"]]
+                        if producer.get("target_selector") != identifier:
+                            raise Ineligible("physical export has no shared target selection")
+                        self.target_phi(producer)
+                    elif piece.get("at") != [0, size] \
                             or self.nodes[piece["node"]].get("physical_context") != identifier:
                         raise Ineligible("physical call export is not child-owned")
-                    if len(self.return_rows(context)) > 1:
+                    if context.get("kind") != "target_selection" and len(self.return_rows(context)) > 1:
                         producer = self.nodes[piece["node"]]
                         if producer.get("instance") != identifier:
                             raise Ineligible("physical export has no shared exit selection")
@@ -851,10 +985,12 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 guard(context.get("guard"))
                 events(context["prefix"], context.get("parent_context"))
                 events((context["push"],), context.get("parent_context"))
-                if self.nodes.get(context["push"].get("node"), {}).get("physical_call_push") != identifier \
+                if self.nodes.get(context["push"].get("node"), {}).get("physical_call_push") != context.get("selected_by", identifier) \
                         or context["push"].get("guard") != context.get("guard"):
                     raise Ineligible("physical push has a different owner")
                 events(context["events"], identifier)
+                if context.get("kind") == "target_selection":
+                    continue
                 returned_rows = self.return_rows(context)
                 keys = set()
                 for returned in returned_rows:
@@ -883,6 +1019,8 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 if node.get("reason") == "callee exits" and node.get("instance") in self.contexts \
                         and node.get("physical_context") == node.get("instance"):
                     self.exit_phi(node)
+                if node.get("reason") == "physical call targets":
+                    self.target_phi(node)
                 for item in node.get("operands", ()):
                     if "physical_register" in item or "physical_read" in item:
                         operation_guard = node.get("physical_guard", self.control.get("reach", {}).get(node.get("key")))
@@ -1006,7 +1144,13 @@ def evaluate_physical(record, entry, *, max_steps=200000):
         def _choice(self, node):
             self.tick()
             guarded = node.get("guarded_sources")
-            if guarded is not None:
+            if node.get("reason") == "physical call targets":
+                selector = self.target_phi(node)
+                self.validate_context(selector["id"])
+                selected = self.selected_context(selector["id"])
+                chosen = [index for index, candidate in enumerate(selector["candidates"])
+                          if candidate["context"] == selected]
+            elif guarded is not None:
                 if not self.physical_guard(guarded.get("reach")):
                     raise Ineligible("physical phi unreached")
                 guards = guarded.get("guards", ())

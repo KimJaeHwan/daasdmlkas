@@ -3099,3 +3099,90 @@ Root와 Astra는 실제로 남아 있는 기능 경계와 기존 코드의 재�
    정상 경로는 값뿐 아니라 실제 writer와 원 RETURN/SP까지 대조하고 기존 전체 회귀를 유지한다.
 
 이 협의는 다음 작업의 계획이다. v7에 CALLIND 지원이 이미 추가되었다거나 루프·부분 레지스터 제한이 해결되었다는 뜻이 아니다.
+
+### 25.44 원 target 식으로 공유 선택하는 CALLIND 물리 연결 (2026-10-23, v8)
+
+25.43의 1순위를 구현했다. 기존 memory SSA·원 연산 노드·스냅샷·최종 호출 요약을 재사용한다.
+새 SSA/RD, 정방향 실행기, ABI 인자/반환 역할을 추가하지 않는다. 기본 분석의 요약·부채·가정·정적 eligibility는 유지한다.
+
+- `target_selectors`는 원 CBRANCH의 Boolean control DAG와 별도인 공유 registry다. 원 CALLIND key/input 0,
+  target varnode의 kind/space/offset/width, 원 producer 또는 정확한 스냅샷 읽기, caller program/scope/unit,
+  최종 같은 실행의 후보 분석 instance와 대상별 scope/unit, 전체 실행 가정을 보존한다.
+- 원 target producer의 전체 폭을 기존 lane-demand에 포함한다. 같은 명령 안의 정확한 앞선 producer가 있으면 원 노드를
+  사용하고, REGISTER의 경우 기존 pre-staging 스냅샷/보존 확인을 사용한다. 부분 덮어쓰기·원 producer 부재·모양 민감
+  읽기를 임의로 이전 값에 연결하지 않는다. 일반 기록의 CALLIND 메타데이터 의미는 바꾸지 않는다.
+- 하나의 호출 group 아래에 대상별 physical context가 있다. 호출 도달 → 원 target 계산 → 정확히 일치하는 후보 하나 →
+  그 본문의 기존 RETURN guard 순서다. 레지스터 출력 phi와 RAM byte overlay, 중첩 문맥, RETURN/SP 검증이 같은 선택을
+  공유한다. 원 push 노드는 caller 소유로 하나만 만들고, 대상별로 복제하거나 CALL 전에 target에 호출 후 효과를 적용하지 않는다.
+- 미선택 함수의 입력이나 반환 조건을 평가하지 않는다. 선택된 본문은 모든 활성 쓰기와 원 RETURN target/SP 검증을
+  완료한 뒤에만 출력을 공개한다. detached child/export도 대상 선택과 부모 검증을 우회하지 못한다.
+- schema는 entry callback 전에 후보 누락/중복·순서/출력 불일치, 공간·폭·원 varnode/producer, 함수/문맥/부모/guard,
+  공유 push/prefix, 실행 전제의 귀속을 확인한다. 이는 JSON 내부 대응 검사이지 임의 JSON의 진위 인증은 아니다.
+  생성 한도 실패는 새 selector/context/출력 cache를 함께 복구한다.
+- 공식 API는 완성된 `run.assumptions`를 전달한다. 직접 `StitchContext(table, assumptions=...)`를 만들 때도 정확한 실행
+  전제를 명시해야 한다. provenance table만으로 readonly/home-space/trap 옵션을 복원하지 않으며, 생략하면 간접 물리 연결을
+  cut한다. 명시한 빈 tuple은 실제로 전제 없는 실행일 때만 사용한다.
+
+실제 사례는 native 실행이 아니라 봉인된 바이너리에서 추출한 원 p-code 실행과 대조했다.
+
+1. fresh DFB072 ELF64/PE64/PE32 공식 최종 `dfb_sink_int.arg0`: 각 6입구, 총 18실행에서 양 target 방문,
+   원 target·최종 sink 값·실제 RETURN/IP/SP와 모든 표현된 LOAD의 각 byte writer/offset 일치.
+   기존 forward-off 최종 sink 거부 검사는 그대로 유지했다.
+2. 기존 compiled `multi_target_memory.c`: 12입구에서 원 target과 최종 값·RETURN/SP·LOAD byte writer를 대조했다.
+   x=9의 결과는 선택에 따라 35 또는 52이며 RAM/register 선택을 섞은 36/51은 허용하지 않는다.
+3. 기존 실제 자료(suite09 122함수·suite10 294함수와 작업 Bundle들)에 원 caller→다중 RETURN 쌍이 없어,
+   `tests/corpus/intra/multi_return_target.c`를 x64 Mach-O로 컴파일하고 Ghidra로 새로 추출했다.
+   `multi_return_a`의 **원 p-code RETURN 2개**를 확인했고, 12입구에서 양 RETURN과 다른 호출 대상까지 방문했다.
+   최종 값뿐 아니라 실행된 원 RETURN/SP와 LOAD별 마지막 원 writer/byte offset을 대조했다.
+   새 Bundle은 `output/callind-expressions-20261023/multi-return-bundles/83ee577f27b0e265b2c9e9ba3f2779e0e25cf8aac02c28c33d1aedd78dde1580`,
+   바이너리 SHA256은 `8052334d56ac66cfeaacb26c915729e79d6775f6545ef9cb62665919b0182b83`다.
+
+원 실행의 `_write`와 LOAD를 관찰해 마지막 writer/offset을 별도로 수집하여 전체 바이트 목록을 비교한다.
+기대 writer로 필터링한 뒤 포함 여부만 검사하지 않는다. 새 합성 검사는 미선택 입력/SP, 중첩·반복 호출 문맥,
+단일 후보, schema 변조, 다른 실행의 body, 전제 누락, 한도 rollback을 포함한다. 새 frame에 입구 포인터가 alias하여
+가정과 달리 table이 덮어써지는 반례도 원 target을 실제 RAM에서 읽고 후보 밖으로 거부한다.
+이 한 반례의 거부를 모든 가정 위반의 자동 방어로 일반화하지 않는다.
+
+재현 자료는 기존 runner의 `TDO_V2_FORWARD=1 ... --physical-records --json`으로 만든
+`output/callind-expressions-20261023/dfb072-final-record.json`에 있다(기본 named 가정을 켠 CLI 실행, record v8).
+공식 positive 테스트의 별도 옵션/가정과 구별한다. 부분 레지스터 보충·반복식·재귀·tail/opaque 호출·미지 target은
+이번에 지원했다고 세지 않는다. 다음 우선순위는 25.43의 2순위인 호출 후 부분 레지스터 조각 연결이다.
+
+#### DFB072의 최종 sink 연결
+
+다음은 fresh ELF 관찰의 핵심 연결이다(스택 보존/플래그/바이트 조각 전체는 위 JSON에 보존).
+`table`은 caller 스택의 실제 RAM이고, selector는 후보를 자유롭게 고르는 enum이 아니라 **원 LOAD가 읽은 주소 값**이다.
+
+```mermaid
+flowchart TD
+    G["입구 RAM: g_seed"] --> C["source_C: g_seed + 3"]
+    G --> A["source_A: g_seed + 1 → a"]
+    C --> I["selector = source_C 결과 & 1"]
+    T0["스택 table[0] = A 주소 0x105295"] --> L["LOAD table[selector] · 0x1052e9"]
+    T1["스택 table[1] = B 주소 0x1052a4"] --> L
+    I -->|"index × 8 + table 주소"| L
+    L --> Q["원 target 식 → 공유 CALLIND 선택 · 0x1052f3"]
+    Q -->|"0x105295"| AS["A: x를 callee 스택에 STORE"]
+    Q -->|"0x1052a4"| BS["B: x를 callee 스택에 STORE"]
+    A -->|"실제 입구 EDI 바이트"| AS
+    A -->|"실제 입구 EDI 바이트"| BS
+    AS --> AL["A: 스택 LOAD x"] --> FA["A: x + 1"]
+    BS --> BL["B: 스택 LOAD x"] --> FB["B: x + 2"]
+    FA --> R["선택된 본문의 원 RETURN / IP / SP 검증"]
+    FB --> R
+    R --> S["선택된 EAX → r 스택 STORE · 0x1052f5"]
+    S --> D["r 스택 LOAD · 0x1052f8"]
+    D --> K["dfb_sink_int.arg0 · CALL 0x1052fd"]
+```
+
+원 바이너리의 32비트 연산 기준으로 `g_seed=0`은 selector 1 → B → sink 3,
+`g_seed=9`는 selector 0 → A → sink 11이다. 일반 기록의 후보/부채는 남고,
+이 입력을 넣은 물리 평가에서만 원 target과 일치한 한 본문으로 연결된다.
+
+최종 동결본 전체 회귀: **2628 passed / 32 skipped / 0 failed**, 410.82초.
+권위 결과는 `output/callind-expressions-20261023/final-suite.junit.xml`이다.
+새 합성 24개·실제 바이너리 5개(42개 입력 실행)는 모두 skip 없이 통과했다. 기존 UE Core·실제 분기/중첩 호출·
+forward-off 거부 검사도 포함한다. 32개 skip은 이전과 같은 Linux 전용 23개와 별도 자료 부재 9개이며,
+이 수치는 suite09의 케이스 통과 수가 아니다. Astra가 새 29개를 독립 실행하고 구현/바이트 검사를 승인했으며,
+권위 XML의 총 2660개·실패/오류 0·기존 실제 검사 실행까지 독립 확인해 v8 범위의 완료를 승인했다.
+앞선 2627 passed 실행은 검사 보강 전 결과로 구분하며, 최종 성적으로 사용하지 않는다.

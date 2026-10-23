@@ -133,9 +133,9 @@ def _entry(vm, register):
     return entry
 
 
-def _execute(case, item, pools, seed=0, *, memory_inputs=()):
+def _execute(case, item, pools, seed=0, *, memory_inputs=(), interpreter_type=Interpreter):
     constant, register, _ = case["ids"]
-    vm = Interpreter(item.unit.observation, constant_space=constant, seed=seed, program=case["program"],
+    vm = interpreter_type(item.unit.observation, constant_space=constant, seed=seed, program=case["program"],
                      image=case["image"], address_bits=case["address_bits"])
     for offset, value in pools.items():
         vm.preset(register, offset, case["stack"].byte_size, value)
@@ -143,6 +143,7 @@ def _execute(case, item, pools, seed=0, *, memory_inputs=()):
         vm.preset(space, address, size, value)
     run = vm.run()
     assert run.completed and run.executed and not vm.opaque_opcodes
+    vm.fixture_run = run
     return vm
 
 

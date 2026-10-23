@@ -603,7 +603,7 @@ def _with_records(run, record_inputs, provenance=None, *, physical_memory_record
 
     limit = os.environ.get("TDO_V2_RECORD_WORK")
     work = int(limit) if limit else None
-    stitch = StitchContext(provenance) if provenance is not None else None   # (docs 25.31 C-9)
+    stitch = StitchContext(provenance, assumptions=run.assumptions) if provenance is not None else None
     roots = []
     for root in run.roots:
         inputs = record_inputs.get(

@@ -113,7 +113,7 @@ PYTHONPATH=src python -m pytest tests/intra -q
 - `run_dfbench --witnesses`: 출처 증거 — 보고된 라벨이 어떤 부채(쓰기 → 읽기)를 거쳐 왔는지 (문서 25.19).
 - `run_dfbench --records`: 연산 기록 — root마다 값이 거친 p-code 연산의 식 그래프(입력 조각·바이트 범위, 합류의 대안, 요약된 호출과
   그 판단 사실, 부채)를 `--json`에 넣고 기대 케이스는 텍스트로 출력 (문서 25.28).
-- `run_dfbench --physical-records`: `--records`도 켜고 원래 메모리 읽기/쓰기 및 지원되는 직접 호출의 물리 바이트·반환 조건을
+- `run_dfbench --physical-records`: `--records`도 켜고 원래 메모리 읽기/쓰기 및 지원되는 호출의 물리 바이트·반환 조건을
   추가합니다. 기본 summary 경로에서만 지원하며 legacy 경로와 함께 쓰면 오류입니다. Python API에서는
   `physical_memory_records=True`로 켭니다. 요약·가정·정적 eligibility와 기존 부채는 바뀌지 않습니다.
 - `tools/graph_fidelity/derivations.py <generation> --function <entry>`: 함수 하나의 출구별 출력을 입구 값의 식으로 출력 —
@@ -124,7 +124,9 @@ PYTHONPATH=src python -m pytest tests/intra -q
 - 조건 표현은 기존 SSA·CFG를 재사용합니다. 비순환 중첩·연속 분기와 조건분기들로 컴파일된 switch의 원 CBRANCH 조건을
   공유하며, 조건이 알려지면 해당 대안을, 미지 입력이면 상관을 유지한 대안들을 남깁니다. 물리 기록은 중첩된 알려진 직접
   호출과 다중 RETURN을 같은 조건에 연결합니다. 간접 분기/호출의 미확정 목적지, 루프·재귀·미지원 효과를 임의의 경로로
-  확정하지 않습니다. 구현 범위와 실제 사례는 설계 문서 **25.39–25.42절**을 참고하세요.
+  확정하지 않습니다. 증명된 유한 CALLIND 후보는 원 target 계산식의 공유 선택으로 물리 연결하며, 레지스터·RAM·RETURN은
+  같은 대상을 따릅니다(미지/후보 밖 target은 거부). 정방향 후보 분석은 `TDO_V2_FORWARD=1`로 켭니다.
+  구현 범위와 실제 사례는 설계 문서 **25.39–25.44절**을 참고하세요.
 
 물리 기록의 구체 값은 `tdo_v2.operation_records.evaluate_physical(record, entry)`로 별도 평가합니다. 입구 레지스터와 RAM을
 실제 입력으로 제공해야 하며, 미지 값·지원하지 않는 효과·반환 불일치·예산 초과는 값으로 단정하지 않습니다. 이는 제한된
