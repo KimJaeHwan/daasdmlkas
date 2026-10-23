@@ -123,6 +123,9 @@ def main() -> int:
     parser.add_argument("--records", action="store_true",
                         help="operation records per root: the p-code operations each root's value went through "
                              "(diagnostics, docs 25.28; in --json, and printed for the expected cases)")
+    parser.add_argument("--physical-records", action="store_true",
+                        help="include opt-in physical memory/call evidence in operation records "
+                             "(implies --records; summary engine only; diagnostics, not analysis assumptions)")
     parser.add_argument("--witnesses", action="store_true",
                         help="origin witnesses per root: why each label is reported (diagnostics, docs 25.19)")
     parser.add_argument("--model-dir", type=Path, action="append", default=[],
@@ -165,6 +168,11 @@ def main() -> int:
                             help=f"{'drop' if item.default else 'take'} the named assumption {item.name}: "
                                  f"{item.statement} (fails when: {item.fails_when})")
     args = parser.parse_args()
+    legacy = args.legacy_engine or os.environ.get("TDO_V2_INTERPROCEDURAL") == "legacy"
+    if args.physical_records and legacy:
+        parser.error("--physical-records requires the summary engine (not --legacy-engine or TDO_V2_INTERPROCEDURAL=legacy)")
+    if args.physical_records:
+        args.records = True
     for item in switches():
         if item.env and os.environ.get(item.env) == "0":
             setattr(args, item.parameter, False)
@@ -212,7 +220,6 @@ def main() -> int:
 
     started = time.time()
     try:
-        legacy = args.legacy_engine or os.environ.get("TDO_V2_INTERPROCEDURAL") == "legacy"
         if not legacy:
             from tdo_v2.summary_engine import analyze_frozen_bundle_with_summaries
             print("[run] interprocedural: callee summaries")
@@ -228,6 +235,7 @@ def main() -> int:
                 linker=linker,
                 origin_witnesses=args.witnesses,
                 operation_records=args.records,
+                physical_memory_records=args.physical_records,
                 model_bindings=tuple(load_binding_file(path) for path in args.binding),
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},

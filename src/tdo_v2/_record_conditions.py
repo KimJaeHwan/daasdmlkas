@@ -1,9 +1,11 @@
 """Conservative branch selection for records, using the existing CFG and SSA.
 
-This module never computes reaching definitions. A simple diamond only
-orders the *already recorded* SSA alternatives after proving that each arm's
-last full write (or an unchanged value valid before the decision) is exactly
-one of those alternatives. Unsupported shapes retain an unordered phi.
+This module never solves reaching definitions. A simple diamond orders the
+already recorded alternatives. General acyclic control traces those same
+raw definitions through existing write boundaries, cross-checks captured SSA
+predecessor evidence, and proves a disjoint, complete Boolean correspondence.
+It changes no definition, origin, debt, summary or engine verdict. Unsupported
+shapes retain an unordered phi.
 """
 
 from __future__ import annotations
@@ -32,6 +34,23 @@ class ConditionMatch:
 
 
 @dataclass(frozen=True, slots=True)
+class GuardedSources:
+    """Existing raw SSA definitions paired with shared CFG Boolean guards.
+
+    Guards select a definition only when this read/exit is reached. They
+    are not a feasibility proof, and never introduce a new definition.
+    """
+
+    sources: tuple[int, ...]
+    guards: tuple[int, ...]
+    reach: int
+
+
+class _UnsupportedGuard(Exception):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class _Diamond:
     decision: str
     merge: str
@@ -47,9 +66,12 @@ class _Diamond:
 class ConditionIndex:
     """One function's reusable record-only CFG/SSA correspondence.
 
-    ``index`` is the existing ``lane_index``. Both public methods return
+    ``index`` is the existing ``lane_index``. The diamond methods return
     ``(ConditionMatch, None)`` or ``(None, fallback_reason)``. ``for_sources``
     also accepts summary-exit alternatives that have no materialized JOIN.
+    ``guarded_join``/``guarded_sources`` return a GuardedSources instead.
+    ``reach_guard`` separately identifies whether a raw operation or exit
+    executes. All guard references share this index's bounded Boolean DAG.
     Resource failures propagate to the record builder's existing limits.
     """
 
@@ -59,6 +81,10 @@ class ConditionIndex:
         self._cache, self._joins, self._join_reads, self._debts, self._prefixes = {}, {}, {}, {}, {}
         self._by_read, self._paths, self._writes, self._issues = {}, {}, {}, {}
         self._reason = None
+        self.guard_nodes = [False, True]
+        self.decisions = {}
+        self._guard_intern, self._guard_apply_cache = {}, {}
+        self._reach, self._guarded = {}, {}
         step(len(unit.observation.instructions) + sum(len(row.operations) for row in unit.observation.instructions))
         self.instructions = {row.address: row for row in unit.observation.instructions}
         cfg = build_pcode_block_graph(unit.observation, unit.scopes.function.entry)
@@ -76,9 +102,11 @@ class ConditionIndex:
         indegree = {key: len(value) for key, value in self.predecessors.items()}
         pending = deque(key for key, count in indegree.items() if count == 0)
         visited = 0
+        self.order = []
         while pending:
             step()
             key = pending.popleft()
+            self.order.append(key)
             visited += 1
             for target in self.blocks[key].successors:
                 step()
@@ -132,6 +160,11 @@ class ConditionIndex:
         # Resolve p-code ordinals once; successor tuple order conveys no polarity.
         self._segments = {(block.instruction, ordinal): block.key for block in cfg.blocks
                           for ordinal in range(block.start, block.stop)}
+        self._raw_blocks = {
+            _operation_key(row.address, ordinal, row.operations[ordinal].opcode): key
+            for (address, ordinal), key in self._segments.items()
+            for row in (self.instructions[address],)
+        }
         for block in cfg.blocks:
             step()
             row = self.instructions[block.instruction]
@@ -149,6 +182,210 @@ class ConditionIndex:
                 key = successors[0] if len(successors) == 1 and len(self.predecessors[successors[0]]) == 1 \
                     and self._straight(self.blocks[key]) else None
             self._paths[diamond.decision] = tuple(path)
+
+    # General acyclic control correspondence. The original diamond matcher
+    # remains the compact, backwards-compatible fast path above. Boolean
+    # nodes are hash-consed ordered decisions, not enumerated CFG paths.
+    def _guard_node(self, decision, yes, no):
+        if yes == no:
+            return yes
+        key = decision, yes, no
+        if key not in self._guard_intern:
+            step()
+            if len(self.guard_nodes) >= 4096:
+                raise _UnsupportedGuard("control DAG limit")
+            self._guard_intern[key] = len(self.guard_nodes)
+            self.guard_nodes.append(key)
+        return self._guard_intern[key]
+
+    def _boolean(self, opcode, left, right):
+        if left > right:
+            left, right = right, left
+        key = opcode, left, right
+        if key in self._guard_apply_cache:
+            return self._guard_apply_cache[key]
+        step()
+        if left == right:
+            return left
+        if opcode == "and":
+            if left == 0:
+                return 0
+            if left == 1:
+                return right
+        else:
+            if left == 0:
+                return right
+            if left == 1:
+                return 1
+        a, b = self.guard_nodes[left], self.guard_nodes[right]
+        decision = min((a[0], b[0]), key=self._decision_rank.__getitem__)
+        ay, an = a[1:] if a[0] == decision else (left, left)
+        by, bn = b[1:] if b[0] == decision else (right, right)
+        result = self._guard_node(decision, self._boolean(opcode, ay, by), self._boolean(opcode, an, bn))
+        self._guard_apply_cache[key] = result
+        return result
+
+    def _control(self):
+        if self._reach or self._reason is not None:
+            return
+        from .control_dependence import _immediate_postdominators, _EXIT
+
+        successors = {key: (*block.successors, _EXIT) if block.exits or not block.successors
+                      else block.successors for key, block in self.blocks.items()}
+        successors[_EXIT] = ()
+        post = _immediate_postdominators(successors)
+        self._decision_rank, self._edge_guards = {}, {}
+        try:
+            for rank, key in enumerate(self.order):
+                step()
+                block = self.blocks[key]
+                row = self.instructions[block.instruction]
+                operation = row.operations[block.stop - 1] if block.stop else None
+                if operation is not None and operation.opcode == "CBRANCH":
+                    if len(operation.inputs) != 2:
+                        raise _UnsupportedGuard("invalid cbranch")
+                    true, false = self._target(block, operation), self._fallthrough(block)
+                    if (true is None or false is None or true == false or block.exits
+                            or set(block.successors) != {true, false}):
+                        raise _UnsupportedGuard("cfg branch targets differ")
+                    decision = _operation_key(row.address, block.stop - 1, operation.opcode)
+                    node, action = self.graph.node_for_key(f"op:{decision}"), self.actions.get(decision)
+                    if node is None or action is None:
+                        raise _UnsupportedGuard("missing branch action")
+                    self.decisions[decision] = ConditionMatch(decision, post[key] or _EXIT, true, false,
+                                                               (), node, action)
+                    self._decision_rank[decision] = rank
+                    self._edge_guards[key, true] = self._guard_node(decision, 1, 0)
+                    self._edge_guards[key, false] = self._guard_node(decision, 0, 1)
+                elif block.successors:
+                    if not self._straight(block):
+                        raise _UnsupportedGuard("unsupported control transfer")
+                    self._edge_guards[key, block.successors[0]] = 1
+            for key in self.order:
+                value = int(key == self.entry)
+                for previous in sorted(self.predecessors[key]):
+                    value = self._boolean("or", value, self._boolean(
+                        "and", self._reach[previous], self._edge_guards[previous, key]))
+                self._reach[key] = value
+        except (RecursionError, _UnsupportedGuard) as error:
+            self._reason = str(error) if not isinstance(error, RecursionError) else "control DAG depth"
+            self._reach.clear()
+
+    def reach_guard(self, operation_or_block):
+        """Guard for executing an observed operation/block, not its value.
+
+        A caller must evaluate the original decision operands or explicitly
+        retain uncertainty. A guard reference alone is no feasibility proof.
+        """
+        self._control()
+        if self._reason is not None:
+            return None, self._reason
+        key = self._locations[operation_or_block][0] if operation_or_block in self._locations \
+            else self._raw_blocks.get(operation_or_block, operation_or_block)
+        return (self._reach[key], None) if key in self._reach else (None, "unknown control location")
+
+    def guard_decisions(self, references):
+        pending, found, seen = list(references), set(), set()
+        while pending:
+            reference = pending.pop()
+            if reference in seen or reference < 2:
+                continue
+            seen.add(reference)
+            decision, yes, no = self.guard_nodes[reference]
+            found.add(decision)
+            pending.extend((yes, no))
+        return tuple(self.decisions[key] for key in sorted(found))
+
+    def guarded_join(self, definition_id):
+        definition = self.ssa.definitions[definition_id]
+        return self.guarded_sources(definition.span, self.index.joins.get(definition_id, ()),
+                                    definition.block_key, self._join_reads.get(definition_id))
+
+    def guarded_sources(self, span, source_ids, read_block, read_operation=None):
+        """Attach edge guards to the raw alternatives already chosen by SSA.
+
+        We trace only these definitions, checking the SSA's predecessor
+        evidence at merges and its existing ordered write boundaries. This
+        does not solve a second reaching-definition problem or change SSA.
+        """
+        self._control()
+        if self._reason is not None:
+            return None, self._reason
+        sources = tuple(source_ids)
+        cache = span, sources, read_block, read_operation
+        if cache in self._guarded:
+            return self._guarded[cache]
+        try:
+            if not sources or any(not 0 <= source < len(self.ssa.definitions) for source in sources):
+                raise _UnsupportedGuard("unknown definition")
+            if any(self.ssa.definitions[source].kind not in (MemoryDefinitionKind.ENTRY, MemoryDefinitionKind.DATA_WRITE)
+                   or not self.ssa.definitions[source].span.contains(span) for source in sources):
+                raise _UnsupportedGuard("unsupported source")
+            before = self._locations.get(read_operation) if read_operation is not None else None
+            if read_operation is not None and (before is None or before[0] != read_block):
+                raise _UnsupportedGuard("read operation is not in block")
+            if read_block not in self.blocks:
+                raise _UnsupportedGuard("unknown control location")
+            evidence = getattr(self.ssa, "flow_edges", ())
+            memo = {}
+
+            def trace(source, key, stop=None):
+                identity = source, key, stop
+                if identity in memo:
+                    return memo[identity]
+                step()
+                # This is a correspondence over SSA's value definitions,
+                # not removal of a call/alias debt. A call on another path
+                # need not discard a known later register definition. Any
+                # actual KILL, partial write, debt or unresolved operand is
+                # still retained by the original SSA/value record.
+                last = None
+                for position, identifier in self._writes[key].get(span.object_id, ()):
+                    if stop is not None and position >= stop:
+                        break
+                    if self.ssa.definitions[identifier].span.overlaps(span):
+                        last = identifier
+                if last is not None:
+                    definition = self.ssa.definitions[last]
+                    if definition.kind is not MemoryDefinitionKind.DATA_WRITE:
+                        raise _UnsupportedGuard("killed source")
+                    if not definition.span.contains(span):
+                        raise _UnsupportedGuard("partial last write")
+                if last is not None:
+                    result = self._reach[key] if last == source else 0
+                elif key == self.entry:
+                    definition = self.ssa.definitions[source]
+                    result = int(definition.kind is MemoryDefinitionKind.ENTRY and definition.block_key == self.entry)
+                else:
+                    result = 0
+                    for predecessor in sorted(self.predecessors[key]):
+                        # Captured by the ORIGINAL SSA fixed point. No
+                        # replacement source may be invented at a merge.
+                        rows = [row for row in evidence if row.block_key == key
+                                and row.predecessor_key == predecessor and row.span.overlaps(span)]
+                        if rows and any(source not in row.definition_ids for row in rows):
+                            continue
+                        result = self._boolean("or", result, self._boolean(
+                            "and", self._edge_guards[predecessor, key], trace(source, predecessor)))
+                memo[identity] = result
+                return result
+
+            guards = tuple(trace(source, read_block, before[1] if before else None) for source in sources)
+            reach = self._reach[read_block]
+            union = 0
+            for guard in guards:
+                if guard == 0:
+                    raise _UnsupportedGuard("source mismatch")
+                if self._boolean("and", union, guard) != 0:
+                    raise _UnsupportedGuard("overlapping source guards")
+                union = self._boolean("or", union, guard)
+            if union != reach:
+                raise _UnsupportedGuard("incomplete source guards")
+            result = GuardedSources(sources, guards, reach), None
+        except (RecursionError, _UnsupportedGuard) as error:
+            result = None, str(error) if not isinstance(error, RecursionError) else "control DAG depth"
+        self._guarded[cache] = result
+        return result
 
     def for_join(self, definition_id):
         if definition_id not in self._joins:
@@ -362,4 +599,4 @@ class ConditionIndex:
         return _Diamond(block.key, merge, true, false, left[1], right[1], key, node, action)
 
 
-__all__ = ("ConditionIndex", "ConditionMatch")
+__all__ = ("ConditionIndex", "ConditionMatch", "GuardedSources")

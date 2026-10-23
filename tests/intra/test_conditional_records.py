@@ -65,6 +65,96 @@ def _phis(record):
     return [node for node in record['nodes'] if 'condition' in node]
 
 
+def _nested_choices(*, sequential=False):
+    a, b = tmp(0x300, 1), tmp(0x301, 1)
+    builder = FunctionBuilder()
+    if sequential:
+        builder.ins(copy(reg(RAX), const(1)), copy(reg(RBX), const(10)))
+        builder.cbranch('second', a, op('INT_EQUAL', [reg(RDX), const(0)], a))
+        builder.ins(copy(reg(RAX), const(2)), copy(reg(RBX), const(20)))
+        builder.label('second').cbranch('merge', b, op('INT_EQUAL', [reg(RCX), const(0)], b))
+        builder.ins(copy(reg(RAX), const(3)), copy(reg(RBX), const(30)))
+    else:
+        builder.cbranch('outer_true', a, op('INT_NOTEQUAL', [reg(RDX), const(0)], a))
+        builder.cbranch('inner_true', b, op('INT_NOTEQUAL', [reg(RCX), const(0)], b))
+        builder.ins(copy(reg(RAX), const(1)), copy(reg(RBX), const(10))).branch('merge')
+        builder.label('inner_true').ins(copy(reg(RAX), const(2)), copy(reg(RBX), const(20))).branch('merge')
+        builder.label('outer_true').ins(copy(reg(RAX), const(3)), copy(reg(RBX), const(30)))
+    return builder.label('merge').ins(add(reg(R8), reg(RAX), reg(RBX))).ret()
+
+
+@pytest.mark.parametrize('route', ['injected', 'stitched'])
+@pytest.mark.parametrize('sequential', [False, True])
+def test_general_control_preserves_three_raw_sources_and_shared_choices(route, sequential):
+    record = _record(_analyzed(_nested_choices(sequential=sequential)), R8)
+    guarded = [node for node in record['nodes'] if 'guarded_sources' in node]
+    assert len(guarded) == 2
+    assert all(len(node['alternatives']) == 3 for node in guarded)
+    assert all(len(node['guarded_sources']['guards']) == 3 for node in guarded)
+    assert evaluate(record, _entry({RDX: None, RCX: None}), route=route) == {11, 22, 33}
+    for a in (0, 1):
+        for b in (0, 1):
+            expected = (33 if b else 22 if a else 11) if sequential else (33 if a else 22 if b else 11)
+            assert evaluate(record, _entry({RDX: a, RCX: b}), route=route, max_choices=1) == {expected}
+
+
+def test_general_control_preserves_an_entry_across_an_unrelated_earlier_branch():
+    builder = FunctionBuilder().cbranch('first_join', reg(RCX, 1))
+    builder.ins(copy(reg(R9), reg(RBX))).label('first_join')
+    builder.ins(op('CBRANCH', [const(2, 1), reg(RDX, 1)]), copy(reg(RAX), const(7)))
+    builder.ins(copy(reg(R8), reg(RAX))).ret()
+    record = _record(_analyzed(builder), R8)
+    assert any('guarded_sources' in node for node in record['nodes'])
+    assert evaluate(record, _entry({RCX: None, RDX: 1, RAX: 99})) == {99}
+    assert evaluate(record, _entry({RCX: None, RDX: 0, RAX: 99})) == {7}
+
+
+@pytest.mark.parametrize('route', ['injected', 'stitched'])
+def test_multi_exit_records_reject_an_unreached_exit_without_an_execution_oracle(route):
+    from tdo_v2.operation_records import run_records
+
+    builder = FunctionBuilder().cbranch('true', reg(RDX, 1))
+    builder.ins(copy(reg(RAX), const(11))).ret()
+    builder.label('true').ins(copy(reg(RAX), const(22))).ret()
+    analyzed = _analyzed(builder)
+    records = [row for row in run_records(analyzed.normalized, analyzed.unit, analyzed.summary)
+               if row['place']['kind'] == 'register_file' and row['place']['start'] == RAX]
+    assert len(records) == 2 and all('execution_guard' in row for row in records)
+    for value, expected in ((0, 11), (1, 22)):
+        found, excluded = set(), 0
+        for record in records:
+            try:
+                found.update(evaluate(record, _entry({RDX: value}), route=route))
+            except Ineligible as error:
+                assert str(error) == 'no alternative'
+                excluded += 1
+        assert found == {expected} and excluded == 1
+
+
+def test_control_dag_json_reference_corruption_is_rejected():
+    record = json.loads(json.dumps(_record(_analyzed(_nested_choices()), R8)))
+    node = next(node for node in record['nodes'] if 'guarded_sources' in node)
+    node['guarded_sources']['guards'][0] = 999999
+    with pytest.raises(Ineligible, match='control reference'):
+        evaluate(record, _entry({RDX: 1, RCX: 0}))
+
+
+@pytest.mark.parametrize('route', ['injected', 'stitched'])
+def test_predicate_only_phis_must_obey_the_same_shared_selection_contract(route):
+    builder = FunctionBuilder().cbranch('first_true', reg(RDX, 1))
+    builder.ins(copy(reg(RAX), const(0))).branch('first_merge')
+    builder.label('first_true').ins(copy(reg(RAX), const(1)))
+    builder.label('first_merge').cbranch('second_true', reg(RAX, 1))
+    builder.ins(copy(reg(R8), const(11))).branch('second_merge')
+    builder.label('second_true').ins(copy(reg(R8), const(22))).label('second_merge').ret()
+    record = _record(_analyzed(builder), R8)
+    assert evaluate(record, _entry({RDX: 1}), route=route) == {22}
+    predicate = next(node for node in _phis(record) if node.get('condition_only'))
+    predicate['choices'] = [False, True]
+    with pytest.raises(Ineligible, match='condition choice mismatch'):
+        evaluate(record, _entry({RDX: 1}), route=route)
+
+
 @pytest.mark.parametrize('route', ['injected', 'stitched'])
 @pytest.mark.parametrize('memory', [False, True])
 def test_known_and_unknown_guards_keep_one_choice_for_every_output(route, memory):

@@ -27,11 +27,13 @@ from ._memory_ssa_state import (
 )
 from .memory_contracts import (
     LOCAL_MEMORY_CONTRACT_VERSION,
+    CallBoundaryRegisterState,
     LocalMemorySsaResult,
     LocalMemoryUnit,
     MemoryActionResult,
     MemoryDefinition,
     MemoryDefinitionKind,
+    MemoryFlowEdge,
     MemoryJoinInput,
     MemoryReadFragment,
     MemoryReadResolution,
@@ -39,8 +41,9 @@ from .memory_contracts import (
     MemoryUnresolvedOccurrence,
     MemoryWriteMode,
     ObservedTerminalMemoryState,
+    RegisterStateFragment,
 )
-from .model import ByteSpan, StorageObjectId
+from .model import ByteSpan, StorageObjectId, StorageObjectKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,39 +275,140 @@ def _build_dense(unit: LocalMemoryUnit, *, compress_chains: bool = True) -> Loca
     in_states, out_states = _dense_states(
         unit, partition, write_ids, entry_state, pool, compress_chains=compress_chains
     )
+    boundaries = _call_boundaries(unit)
+    registers = _register_ranges(partition) if boundaries else ()
+    snapshot_cost = sum(stop - start for _, start, stop in registers)
 
     def block_reads(block):
         state = in_states[block.key]
         for action in block.actions:
+            snapshot = None
+            if action.operation_key in boundaries:
+                step(snapshot_cost)
+                snapshot = tuple(fragment for _, start, stop in registers
+                                 for fragment in _read_fragments(state, start, stop, partition.atoms))
             yield [
                 _read_fragments(state, *partition.covered_range(span), partition.atoms)
                 for span in action.reads
-            ]
+            ], snapshot
             state = _apply_writes(state, action, partition, write_ids, pool)
 
     return _assemble(
         unit, partition, raw_definitions, writes_by_action, blocks, block_reads,
         {key: out_states[key] for key in unit.observed_terminal_block_keys},
+        _dense_flow_edges(unit, partition, write_ids, in_states, out_states),
+        boundaries,
     )
 
 
+def _call_boundaries(unit):
+    """First normalized action of each original CALL/CALLIND group."""
+    found, blocks = {}, {}
+    for block in unit.blocks:
+        for action in block.actions:
+            step()
+            base = action.operation_key.partition("~")[0]
+            if base.rsplit(":", 1)[-1] not in ("CALL", "CALLIND"):
+                continue
+            if base not in blocks:
+                blocks[base] = block.key
+                found[action.operation_key] = base
+            elif blocks[base] != block.key:
+                raise ValueError("one normalized call group must occupy one block")
+    return found
+
+
+def _register_ranges(partition):
+    """Only already-tracked, contiguous register spans; gaps stay absent."""
+    found = []
+    for span in partition.connected:
+        step()
+        if span.object_id.kind is StorageObjectKind.REGISTER_FILE:
+            found.append((span, *partition.covered_range(span)))
+    return tuple(found)
+
+
+def _flow_spans(atoms, class_atoms):
+    """Maximal contiguous spans of one (possibly disjoint) atom class."""
+    spans = []
+    for atom in class_atoms:
+        step()
+        span = atoms[atom]
+        if spans and spans[-1].object_id == span.object_id and spans[-1].end == span.start:
+            previous = spans[-1]
+            spans[-1] = ByteSpan(span.object_id, previous.start, span.end - previous.start)
+        else:
+            spans.append(span)
+    return tuple(spans)
+
+
+def _dense_flow_edges(unit, partition, write_ids, in_states, out_states):
+    """Observe the dense fixed point at the sparse engine's exact phi sites.
+
+    Atom-class equality follows from their existing write signatures. One
+    representative atom queries each class; no whole boundary-state copy or
+    second reaching-definition solve is needed.
+    """
+    from ._memory_ssa_classes import build_atom_classes
+    from ._sparse_dataflow import DominatorGraph
+
+    classes = build_atom_classes(unit, partition, write_ids)
+    graph = DominatorGraph(unit.entry_block_key, {b.key: b.predecessors for b in unit.blocks})
+    written_in = [set() for _ in classes.classes]
+    read_in = [set() for _ in classes.classes]
+    for block in unit.blocks:
+        for action in block.actions:
+            for spans, found in ((action.reads, read_in), (action.writes, written_in)):
+                for span in spans:
+                    start, stop = partition.covered_range(span)
+                    step(stop - start)
+                    for index in {classes.class_of_atom[atom] for atom in range(start, stop)}:
+                        found[index].add(block.key)
+    edges = []
+    for index, atom_class in enumerate(classes.classes):
+        step()
+        if not read_in[index] and not unit.observed_terminal_block_keys:
+            continue  # the sparse solver does not evaluate this class
+        atom = atom_class.atoms[0]
+        spans = None
+        for key in sorted(graph.phis_of(written_in[index])):
+            step()
+            (_, value), = _read_fragments(in_states[key], atom, atom + 1, partition.atoms)
+            if len(value) < 2:
+                continue
+            if spans is None:
+                spans = _flow_spans(partition.atoms, atom_class.atoms)
+            for predecessor in graph.predecessors[key]:
+                (_, incoming), = _read_fragments(out_states[predecessor], atom, atom + 1, partition.atoms)
+                step(len(incoming) + len(spans))
+                definitions = tuple(incoming)
+                edges.extend((span, predecessor, key, definitions) for span in spans)
+    return edges
+
+
 def _assemble(
-    unit, partition, raw_definitions, writes_by_action, blocks, block_reads, terminal_out_states
+    unit, partition, raw_definitions, writes_by_action, blocks, block_reads, terminal_out_states,
+    raw_flow_edges=(), call_boundaries=None,
 ) -> LocalMemorySsaResult:
     """Engine-independent result assembly. ``block_reads(block)`` yields, per
-    action in order, the read fragments ((span, definition IdSet), ...) of
-    each of its reads as seen just before the action; ``terminal_out_states``
-    maps every observed terminal block to its exit state."""
+    action in order, (read fragments, register snapshot or None). A snapshot
+    observes raw state before the action, without creating a read or JOIN.
+    ``terminal_out_states`` maps each observed terminal to its exit state."""
     action_keys = sorted(
         action.operation_key for block in unit.blocks for action in block.actions
     )
     action_ids = {key: ordinal for ordinal, key in enumerate(action_keys)}
     join_sources: dict[MemoryDefinition, _IdSet] = {}
     pending_reads = []
+    pending_snapshots = []
+    call_boundaries = call_boundaries or {}
 
     for block_key in sorted(blocks):
         block = blocks[block_key]
-        for action, action_fragments in zip(block.actions, block_reads(block), strict=True):
+        for action, (action_fragments, snapshot) in zip(block.actions, block_reads(block), strict=True):
+            if snapshot is not None:
+                pending_snapshots.append((call_boundaries[action.operation_key], block_key,
+                                          action.operation_key, snapshot))
             for read_ordinal, (read_span, fragments) in enumerate(
                 zip(action.reads, action_fragments, strict=True)
             ):
@@ -418,6 +522,19 @@ def _assemble(
         raw_to_final,
         definitions,
     )
+    flow_edges = []
+    for span, predecessor, block, sources in raw_flow_edges:
+        step(1 + len(sources))
+        flow_edges.append(MemoryFlowEdge(span, predecessor, block,
+                                         tuple(sorted(raw_to_final[source] for source in sources))))
+    snapshots = []
+    for boundary, block, first_action, fragments in pending_snapshots:
+        encoded = []
+        for span, sources in fragments:
+            step(1 + len(sources))
+            encoded.append(RegisterStateFragment(span, tuple(sorted(raw_to_final[source] for source in sources))))
+        snapshots.append(CallBoundaryRegisterState(
+            boundary, block, first_action, tuple(sorted(encoded, key=lambda item: item.span.canonical_key))))
 
     return LocalMemorySsaResult(
         LOCAL_MEMORY_CONTRACT_VERSION,
@@ -442,6 +559,8 @@ def _assemble(
         ),
         state_nodes,
         terminal_states,
+        tuple(sorted(flow_edges, key=lambda edge: edge.canonical_key)),
+        tuple(sorted(snapshots, key=lambda state: state.boundary_key)),
     )
 
 

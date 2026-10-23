@@ -318,3 +318,10 @@ def test_condition_results_are_cached_and_resource_failures_propagate(monkeypatc
     assert conditions.for_join(definition_id) is expected
     with pytest.raises(AnalysisBudgetExceeded):
         ConditionIndex(analyzed.normalized, analyzed.unit, lane)
+
+
+def test_general_guards_do_not_reinterpret_an_unknown_read_as_a_block_exit():
+    _, lane, conditions = _index(_branchy())
+    definition_id, definition = _join(lane)
+    assert conditions.guarded_sources(definition.span, lane.joins[definition_id], definition.block_key,
+                                      'not-an-observed-read') == (None, 'read operation is not in block')

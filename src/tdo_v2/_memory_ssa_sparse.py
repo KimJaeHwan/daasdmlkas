@@ -16,9 +16,10 @@ carrying the whole state through every block:
   P = writes U phis; its entry value is the phi value if it is a phi of c,
   else the exit value of its nearest strict dominator in P.
 
-Only the entry values a read or a terminal block needs are materialized;
-reads replay their block's writes in action order, and fragments, JOINs and
-terminal states are assembled by the shared ``memory_ssa._assemble``.
+Only the entry values a read, terminal block, or tracked register call
+boundary needs are materialized. Reads and boundary observations replay
+their block's writes in action order; only actual reads demand JOINs.
+The shared ``memory_ssa._assemble`` retains the same original definitions.
 """
 
 from __future__ import annotations
@@ -29,10 +30,13 @@ from .phases import count as phase_count
 from ._memory_ssa_state import DefinitionSetPool, Run, make_state
 from .memory_contracts import LocalMemorySsaResult, LocalMemoryUnit, MemoryDefinitionKind
 from .model import ByteSpan
+from .resource_limits import step
 
 
 def build_sparse_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
-    from .memory_ssa import _assemble, _build_partition, _raw_definitions
+    from .memory_ssa import (
+        _assemble, _build_partition, _call_boundaries, _flow_spans, _raw_definitions, _register_ranges,
+    )
 
     if type(unit) is not LocalMemoryUnit:
         raise TypeError("local memory SSA requires an exact LocalMemoryUnit")
@@ -60,6 +64,15 @@ def build_sparse_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult
     classes = build_atom_classes(unit, partition, write_ids)
     class_of_atom = classes.class_of_atom
     blocks = {block.key: block for block in unit.blocks}
+    boundaries = _call_boundaries(unit)
+    boundary_blocks = {block.key for block in unit.blocks
+                       if any(action.operation_key in boundaries for action in block.actions)}
+    registers = _register_ranges(partition) if boundaries else ()
+    register_classes = set()
+    for _, start, stop in registers:
+        step(stop - start)
+        register_classes.update(class_of_atom[atom] for atom in range(start, stop))
+    snapshot_cost = sum(stop - start for _, start, stop in registers)
     graph = DominatorGraph(
         unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks}
     )
@@ -92,15 +105,31 @@ def build_sparse_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult
 
     terminals = tuple(unit.observed_terminal_block_keys)
     entry_values: dict[str, dict[int, frozenset]] = {key: {} for key in blocks}
+    flow_edges = []
     for index, atom_class in enumerate(classes.classes):
         entry = frozenset((entry_of_connected[atom_class.connected],))
-        needed = read_in[index] | set(terminals)
+        original_needed = read_in[index] | set(terminals)
+        needed = original_needed | boundary_blocks if index in register_classes else original_needed
         if not needed:
             continue
+        class_spans = None
+
+        def capture_phi(key, incoming, atom_class=atom_class):
+            nonlocal class_spans
+            if class_spans is None:
+                class_spans = _flow_spans(partition.atoms, atom_class.atoms)
+            for predecessor, value in incoming:
+                step(len(value) + len(class_spans))
+                definitions = tuple(sorted(value))
+                flow_edges.extend((span, predecessor, key, definitions) for span in class_spans)
+
         values = graph.solve(
             written_in[index], needed,
             exit_of_write=lambda key, index=index: frozenset((last_write[(key, index)],)),
             entry_value=entry,
+            # Observing a previously undemanded register class must not add
+            # flow-edge evidence to the preexisting result fields.
+            capture_phi=capture_phi if original_needed else None,
         )
         for key, value in values.items():
             entry_values[key][index] = value
@@ -134,10 +163,15 @@ def build_sparse_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult
     def block_reads(block):
         current: dict[int, frozenset] = {}
         for action in block.actions:
+            snapshot = None
+            if action.operation_key in boundaries:
+                step(snapshot_cost)
+                snapshot = tuple(fragment for _, start, stop in registers
+                                 for fragment in fragments(start, stop, current, block.key))
             yield [
                 fragments(*partition.covered_range(span), current, block.key)
                 for span in action.reads
-            ]
+            ], snapshot
             for definition, covered in action_writes[action.operation_key]:
                 value = frozenset((definition,))
                 for index in covered:
@@ -158,6 +192,8 @@ def build_sparse_local_memory_ssa(unit: LocalMemoryUnit) -> LocalMemorySsaResult
     return _assemble(
         unit, partition, raw_definitions, writes_by_action, blocks, block_reads,
         terminal_out_states,
+        flow_edges,
+        boundaries,
     )
 
 
