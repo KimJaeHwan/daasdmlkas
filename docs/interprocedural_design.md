@@ -3484,3 +3484,81 @@ Python 원 정수를 `json.dumps`한 **문자열 그대로** 운반해 교정했
 Astra가 권위 XML·dense 검사·실제 방문 검증·교정된 원출력을 확인하고 **이번 한 회차 상태 전이식 목표 달성 및 마무리를
 최종 승인**했다. 원 그래프 보존과 이번 방문의 조건/메모리 읽기/순서 있는 갱신 연결에 남은 필수 보완은 없다는 판단이다.
 반복 전체의 닫힌 공식, 모든 중첩·다중 진입 영역의 전이 평가, 불명 호출 지원은 이번 범위 밖이며 명시적 partial로 남는다.
+
+### 25.49 단순 감소 반복의 terminal-state 요약 (2026-10-24, v13)
+
+25.48의 원 그래프와 한 회차식을 그대로 유지하고 **별도 top-level `loop_summaries`**를 추가한다. SSA/RD·명령 실행기·
+일반 루프 풀이기를 만들지 않는다. complete one-visit의 기존 바이트 식만 제한적으로 다시 쓰며, 원 `cycle_graph`·
+`transitions`·receipt·root·노드·eligibility를 변경하지 않는다. 원 그래프와 한 회차식은 요약의 성공 여부와 무관하게 남는다.
+
+#### 지원 조건과 공식
+
+- 실제 entry/cut/exit가 각 하나이고 원 조건 선택은 한 개여야 한다. full-width `counter != 0`에 대응하는 원 zero-test와
+  continue/exit polarity를 대조한다. `INT_EQUAL`/`INT_NOTEQUAL`, 정확한 COPY/BOOL_NEGATE와 TEST의 항등식도 해석한다.
+- counter가 매 continue마다 정확히 `counter - 1 mod 2^bits`이며 zero-exit은 모든 tracked state를 유지해야 한다.
+  따라서 몸체 횟수 `n`은 **이 영역 입구 counter의 unsigned 값**이다. 0이면 몸체는 실행되지 않고, 양수이면 0 이전에
+  counter wrap이 발생하지 않아 정확히 n회 후 종료한다. 함수 인자·이름·사용자가 임의로 준 반복 횟수에서 추측하지 않는다.
+- 각 tracked 출력은 `x_next = x + delta` 또는 `x_next = x`여야 한다. delta는 영역에서 변하지 않는 입력과 상수의
+  동일 폭 선형 결합만 참조한다. 정확한 full-byte COPY/CAST·LOAD/STORE 값 연결·동일 폭 ADD/SUB와 제한된 bitwise
+  항등식만 정상화한다. 원 식 node/자식 참조·규칙·정상형의 유한 근거 DAG를 남기고 기존 resource budget을 청구한다.
+- 각 출력 폭별로 `x_final = (x_initial + n*delta) mod 2^(8*width)`를 계산한다. **n은 accumulator 폭으로 자르지 않는다.**
+  원 counter 폭과 출력 폭이 달라도 자연수 횟수는 그대로이고 결과 바이트에만 modulo를 적용한다. 이 곱셈은 요약 규칙이지
+  바이너리에 새 곱셈 명령이 있었다는 표시가 아니다. 현재 정상화 폭은 1..16바이트다.
+- 모든 원 LOAD/STORE 주소도 정상화하여 mutable state에 의존하지 않음을 확인한다. 최종 값이 선형이어도 주소가
+  회차마다 달라지면 거부한다. 원 alias/clobber/unresolved/KILL/call/가정의 경계는 one-visit 계약 그대로다.
+  생략할 방문에 사용하지 않는 나눗셈 등 부분/미지원 연산이 있어도 임의로 정상 종료했다고 보지 않고 partial로 남긴다.
+
+분기별 갱신·여러 cut/exit·상태 간 의존·비단위 자기 계수·일반 XOR/곱셈·mutable 값의 폭 확장/축소·split-byte 값은
+현재 요약에서 partial이다. 단순해 보이는 C byte 누산도 정수 승격/절단으로 이 범위 밖일 수 있으며 원 그래프/한 회차식은
+그대로다. 기존 `recurrence_expression.c` 두 함수의 post-test exit는 one-visit 자체가 partial이므로 이 계층에서 우회하지 않는다.
+
+#### 수치 API와 메모리 효과
+
+`evaluate_loop_summary(record, summary_id, {state_id: unsigned_value}, accept_unattributed_assumptions=False)`는 다음을 수행한다.
+
+1. 기존 one-visit validator로 원 SSA/CFG/바이트·연산 의미/가정을 검사한다. 입력을 읽기 전에 원 one-visit에서 bounded
+   canonical recipe를 재도출해 저장한 요약과 정확히 일치하는지 확인한다. hash만으로 요약 의미를 인증하지 않는다.
+2. 필요한 입구 바이트를 한 번씩 lazy snapshot으로 읽는다. counter·필요 입력은 해당 폭의 unsigned 정수여야 한다.
+   `n=0`일 때 delta나 비활성 body 입력을 요구하지 않는다. 음수·폭 밖 counter를 조용히 잘라 횟수로 보고하지 않는다.
+3. n회 unroll 없이 terminal tracked state를 공식으로 계산하고, 그 상태에서 기존 `evaluate_transition`으로 **마지막
+   zero-visit만** 평가한다. 실제 종료 간선·다음 바이트와 일치해야 하며 조건 확인 LOAD도 보존한다.
+
+반환값에는 `iterations`, `exit_edge`, `updates`, `terminal_visit`, 원 `effect_template` 참조와 가정 context가 있다.
+원 효과를 **n개 body + n+1개 header 검사**의 템플릿으로 참조하며 전체 로그를 만들었다고 표시하지 않는다. 중간 STORE를
+제거하거나 반복 전체가 하나의 STORE와 동치라고 주장하지 않는다. 결과는 **영역 출구의 tracked byte 상태**이지 함수 전체의
+최종 반환값·모든 레지스터/RAM·native 실행 결과가 아니다. 미귀속 가정은 기본 거부하며 opt-in 시에도 조건부 결과로 표시한다.
+`render`는 원 그래프·한 회차식에 이어 n과 modulo 요약 및 원 식 node 참조를 출력한다.
+
+#### 실제 검증
+
+새 `tests/corpus/intra/loop_summary_expression.c`를 x64 Mach-O `-O0`로 컴파일하고 Ghidra 12.0.4로 봉인 추출했다.
+header-test가 원 CFG에 남는 register asm fixture, volatile RAM 누산 C, 정수 승격/절단의 negative C가 포함된다.
+
+- binary SHA256: `1b5c1c4c9e68e4e86c56f795fc6264293998ca6a117280b65b8ce91df5cda8ff`.
+- Bundle: `output/loop-summary-20261024.ga63B8/bundles/8f1dc11563f86f217926388c3a0a702d62ef1bfed4826ed6e2c46c18239cbafe`.
+- `TDO_LOOP_SUMMARY_BUNDLE=<generation>`과 25.47의 `TDO_GENERAL_CYCLE_BUNDLE`로
+  `tests/corpus/intra/test_loop_summary_binary.py`를 실행한다.
+
+신규 register/RAM 30회와 기존 sequential 첫 영역/nested 안쪽 72회를 합쳐 **102회 원 p-code 실행·462방문·120회 영역 호출**을
+검사한다. 기존 한 회차 검사의 모든 조건·LOAD/STORE 주소/너비/값/순서·byte writer epoch 대조를 그대로 수행하고,
+입구에서 계산한 전체 요약의 모든 terminal tracked byte·원 cut/exit 실제 횟수를 추가 대조한다. n=0/1/여러 회차,
+값 wraparound를 포함한다. sequential은 raw count=10이어도 입구 remaining=2를 사용하며, nested는 안쪽 counter를 사용한다.
+거대한 64-bit n의 공식 검사도 있지만 그 횟수만큼 원 바이너리를 실행했다고 주장하지 않는다. 합성 검사는 counter/accumulator
+폭 불일치·작은 폭 counter 최댓값·잘못된 감소량/조건/주소·변하는 delta·변조 recipe·가정·입력 미접근·원 graph/one-visit
+불변을 포함한다. 전체 회귀 및 Astra의 별도 최종 목표 달성 승인은 동결 검증 후 기록한다.
+
+동결본 전체 회귀: **2887 passed / 32 skipped / 0 failed**, 451.95초(권위 XML 451.850초).
+`output/loop-summary-20261024.ga63B8/final-suite.junit.xml`은 총 2919개, failures/errors 모두 0이다. 신규 합성 44개와
+실제 6개는 skip 없이 실행했고, dense SSA 기준 50개도 별도로 통과했다(`dense-summary.junit.xml`, 9.71초).
+기존 UE Core·DFB072 ELF/PE64/PE32·조건/부분 레지스터·호출/RAM·모델 및 원 순환/한 회차 회귀를 포함한다.
+32개 skip은 이전과 같은 Linux 제약 23개와 미보유 Bundle 9개다. 동결 전후 코드·테스트 SHA256은 동일하다.
+
+같은 폴더 `example-register/`와 `example-memory/`에는 원 엔진 `record.json`·`record.txt` 및 `examples.json`을 보존한다.
+각각 원 p-code를 추가 실행하며 `0 + 7*3 = 21`, `UINT64_MAX + 1*3 mod 2^64 = 2`, 0회 상태 유지(10)를 대조했다.
+JSON은 Python 정수를 직렬화한 문자열 그대로 운반했으며 재입력 receipt/recipe 검증, renderer exactmatch, 공개 API의
+세 결과 재평가 일치도 확인했다. 저장한 두 0회 사례는 step 입력 접근을 금지해도 같은 결과를 낸다. 이 출력은 원 그래프·
+한 회차식과 별도 요약을 함께 담으며, 수치 예제를 함수 전체의 일반 지원으로 확대하지 않는다.
+
+Astra가 권위 전체/dense XML, 실제 검사 구현과 집계, register/RAM 전달본의 원 증거·recipe·렌더링·공개 API 재평가,
+0회 delta 미접근과 미귀속 가정 기본 거부를 독립 확인하고 **이번 단순 반복 최종 요약식 목표 달성 및 마무리를 최종 승인**했다.
+필수 미달사항은 없으며 일반 closed form·폭 변경·함수 전체 반환값·전체 기계 상태/메모리 로그는 이번 완료 범위가 아니다.

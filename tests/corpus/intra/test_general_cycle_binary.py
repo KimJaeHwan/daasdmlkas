@@ -484,7 +484,9 @@ def test_actual_general_cycle_graph_retains_cfg_ssa_and_every_observed_writer(ge
     with monkeypatch.context() as patch:
         patch.setattr(module, 'publish_cycle_graph', lambda builder: None)
         original = _root(item)
-    assert {key: value for key, value in record.items() if key not in ('nodes', 'cycle_graph')} == {
+    # Optional derived views do not exist when their original graph is
+    # disabled. Compare the unchanged primary record, not these additions.
+    assert {key: value for key, value in record.items() if key not in ('nodes', 'cycle_graph', 'loop_summaries')} == {
         key: value for key, value in original.items() if key != 'nodes'}
     assert [node for node in record['nodes'] if not node.get('cycle_only')] == original['nodes']
     for route in ('injected', 'stitched'):

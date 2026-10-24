@@ -131,13 +131,17 @@ PYTHONPATH=src python -m pytest tests/intra -q
   공유 조건에 따라 새 쓰기 또는 호출 결과를 선택합니다. 순환은 `cycle_graph`에 원 함수 CFG의 모든 간선과 기존 SSA의
   정의·읽기·쓰기·JOIN·바이트 식 참조로 보존합니다. 중첩·다중 진입·여러 갱신/되돌이·연속 루프도 같은 일반 그래프를
   사용합니다. 조건은 매 방문의 원 식이며 한 번 정해지는 고정 boolean이 아닙니다. 기록되지 않은 간선별 상태는
-  `not_captured`로 남깁니다. CFG/식 구조 완전성과 수치 평가 가능성은 다르며, 반복 횟수나 최종값을 새로 계산하지 않습니다.
+  `not_captured`로 남깁니다. CFG/식 구조 완전성과 수치 평가 가능성은 다르며, 원 순환 그래프 자체는 반복 횟수나 최종값을 계산하지 않습니다.
   단순 `recurrence`는 호환용 유도 뷰입니다. 원 그래프를 유지한 `cycle_graph.transitions`는 지원되는 단일 진입 영역의
   **한 회차**에 대해 현재 상태→분기 조건→읽기/순서 있는 쓰기→다음 상태를 기존 식으로 연결합니다. 원 SSA source 후보와
   captured cut 상태를 바이트별로 대조하며, 이전 회차와 이번 회차의 같은 STORE를 혼동하지 않습니다. 수치 API는
   `evaluate_transition(record, view_id, {state_id: value})`입니다. 실행 가정이 미귀속이면 기본 거부하며 명시적 opt-in만
-  허용합니다. 이는 반복 전체의 최종 공식이나 완전한 기계 상태가 아닙니다. 구현 범위와 실제 사례는 설계 문서
-  **25.39–25.48절**을 참고하세요.
+  허용합니다. 한 회차 뷰는 반복 전체의 최종 공식이나 완전한 기계 상태가 아닙니다. 별도 `loop_summaries`는 검증된
+  `counter != 0; counter -= 1` 반복의 일정한 누산을 `x_final = x_initial + n*delta (mod 2^bits)`로 요약합니다.
+  `n`은 해당 영역 입구 counter의 unsigned 값이며 원 함수 인자로 추측하지 않습니다.
+  `evaluate_loop_summary(record, summary_id, inputs)`는 반복을 풀어 실행하지 않고 영역 종료 시 tracked state를 계산하며,
+  원 메모리 효과 템플릿과 마지막 zero-check를 보존합니다. 가정·부채·기존 eligibility는 유지됩니다. 분기·폭 변경·가변
+  주소 등 미지원 모양은 원 그래프/한 회차식을 남기고 사유를 표시합니다. 설계 문서 **25.39–25.49절**을 참고하세요.
 
 물리 기록의 구체 값은 `tdo_v2.operation_records.evaluate_physical(record, entry)`로 별도 평가합니다. 입구 레지스터와 RAM을
 실제 입력으로 제공해야 하며, 미지 값·지원하지 않는 효과·반환 불일치·예산 초과는 값으로 단정하지 않습니다. 이는 제한된

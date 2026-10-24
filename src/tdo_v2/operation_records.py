@@ -74,7 +74,7 @@ from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 12  # (12: optional one-visit state expressions, original cyclic graph retained)
+RECORD_VERSION = 13  # (13: optional countdown translation summaries, original graphs retained)
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -2544,6 +2544,9 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
         from ._record_transition_contract import seal
 
         seal(record)
+        from ._record_loop_summaries import publish_loop_summaries
+
+        record['loop_summaries'] = publish_loop_summaries(record)
     return record
 
 
@@ -2661,6 +2664,9 @@ def render(record) -> str:
         from ._record_cycles import render_cycle_graph
 
         lines.extend(render_cycle_graph(record["cycle_graph"], nodes, _render_parts))
+        from ._record_loop_summaries import render_loop_summaries
+
+        lines.extend(render_loop_summaries(record))
     for node in record.get("nodes", ()):
         if node["kind"] == "entry" and "register" in node and not node.get("origins"):
             continue   # shown by name where used
@@ -3251,6 +3257,13 @@ def evaluate_transition(record, identity, inputs, *, accept_unattributed_assumpt
     return interpret(record, identity, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
 
 
+def evaluate_loop_summary(record, identity, inputs, *, accept_unattributed_assumptions=False):
+    """Terminal tracked state for a supported countdown loop, without unrolling."""
+    from ._record_loop_summaries import evaluate_loop_summary as interpret
+
+    return interpret(record, identity, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
 class _Unknown(Exception):
     pass
 
@@ -3685,4 +3698,4 @@ def _compute(opcode, values, widths, out_size):
 
 
 __all__ = ("Ineligible", "Limits", "RECORD_VERSION", "StitchContext", "eligibility", "evaluate", "evaluate_physical", "render",
-           "root_record", "run_records")
+           "evaluate_transition", "evaluate_loop_summary", "root_record", "run_records")
