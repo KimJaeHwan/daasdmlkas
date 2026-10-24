@@ -146,7 +146,11 @@ PYTHONPATH=src python -m pytest tests/intra -q
   `M_final = apply_STORE(M_initial, p+offset+i*stride, value, i=0..n-1)`로 표현합니다. 원 RAM 미해결 표시를 갚지 않으며,
   수치 평가 시 겹침/주소 및 최종 pointer wrap을 거부합니다. 가정·부채·기존 eligibility는 유지됩니다. 변하는 조건·
   LOAD/STORE alias·일반 비선형 갱신 등은 원 그래프/한 회차식을 남기고 사유를 표시합니다.
-  설계 문서 **25.39–25.50절**을 참고하세요.
+  `select_expression`으로 이미 있는 임의 node/바이트 출력을 선택하고 `simplify_expression`으로 별도 간략화 DAG를
+  만들 수 있습니다. 기존 entry producer의 겹치는 바이트와 공유 분기를 보존하며, 원 domain SAT 후 값 불일치 UNSAT를
+  확인합니다. `attach_expression_view`는 원본의 복사본에 `expression_views`만 추가하고 원 그래프·반복 요약·부채를
+  변경하지 않습니다. 소비 시 원식 재구축과 동등성 재검사를 거치며, 이는 지역 값 동치이지 효과·종료·도달성 증명이
+  아닙니다. 설계 및 API 예시는 **25.39–25.51절**을 참고하세요.
 
 물리 기록의 구체 값은 `tdo_v2.operation_records.evaluate_physical(record, entry)`로 별도 평가합니다. 입구 레지스터와 RAM을
 실제 입력으로 제공해야 하며, 미지 값·지원하지 않는 효과·반환 불일치·예산 초과는 값으로 단정하지 않습니다. 이는 제한된

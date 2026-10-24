@@ -2682,6 +2682,9 @@ def render(record) -> str:
     lines.append("root = " + " | ".join(_render_parts(record.get("root", ()), nodes)))
     if "execution_guard" in record:
         lines.append(f"root executes only if g{record['execution_guard']} [g0=false, g1=true]")
+    if record.get('expression_views'):
+        from ._record_expression_views import render_expression_views
+        lines.extend(render_expression_views(record))
     return "\n".join(lines)
 
 
@@ -3705,5 +3708,30 @@ def _compute(opcode, values, widths, out_size):
     return table[opcode]()
 
 
+def select_expression(record, outputs=None, *, namespace='original', limits=None):
+    """Select existing expression PartRefs without changing the source network."""
+    from ._record_expression_views import select_expression as select
+    return select(record, outputs, namespace=namespace, limits=limits)
+
+
+def simplify_expression(record, selection=None, *, candidate=None, conditions=()):
+    """Derived local value view; source effects, cycles and summaries remain."""
+    from ._record_expression_views import simplify_expression as simplify
+    return simplify(record, selection, candidate=candidate, conditions=conditions)
+
+
+def attach_expression_view(record, view):
+    """Return an unchanged-source copy with a verified derived view attached."""
+    from ._record_expression_views import attach_expression_view as attach
+    return attach(record, view)
+
+
+def evaluate_expression_view(record, view, inputs, *, accept_unattributed_assumptions=False):
+    """Revalidate the derived view before reading concrete producer inputs."""
+    from ._record_expression_views import evaluate_expression_view as interpret
+    return interpret(record, view, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
 __all__ = ("Ineligible", "Limits", "RECORD_VERSION", "StitchContext", "eligibility", "evaluate", "evaluate_physical", "render",
-           "evaluate_transition", "evaluate_loop_summary", "root_record", "run_records")
+           "evaluate_transition", "evaluate_loop_summary", "root_record", "run_records", "select_expression",
+           "simplify_expression", "attach_expression_view", "evaluate_expression_view")

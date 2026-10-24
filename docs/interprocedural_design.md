@@ -3660,3 +3660,111 @@ Astra가 권위 full/dense XML과 기존 UE·DFB072 3플랫폼·forward/모델 �
 **이번 합의된 세 단계 구현 목표 달성 및 이대로 마무리를 명시적으로 승인**했다. 필수 미달사항은 없다는 판단이다.
 이 승인은 low-byte 승격/절단·불변 분기의 공유 선택별 최종식·단일 strided STORE 효과식에 관한 것이며, 위에 명시한
 일반 feedback/alias/비선형·여러 STORE·cut·exit까지 최종 공식으로 풀었다는 의미는 아니다.
+
+### 25.51 원 전체 그래프 위의 부분 식 선택·간략화·동등성·연결 (2026-10-24)
+
+전체 SSA/메모리·데이터 흐름/연산식 그래프를 먼저 유지하고, **이미 존재하는 node와 PartRef를 선택한 유도 뷰**를 붙인다.
+SSA 생성 전에 구간을 자르지 않으며 별도 SSA/RD·명령 실행기·alias 풀이기를 만들지 않는다. 기존 원 순환 그래프,
+한 회차 `transitions`, `write_effect_transitions`와 `loop_summaries`는 삭제·교체하지 않는다. 이번 P0는 지역 값의 동등성이다.
+모든 source 제거, 일반 루프의 닫힌 공식, 여러 회차 F_k 합성, 효과/exit/종료/entry 도달성 증명은 별도 후속 범위다.
+
+#### 선택과 원본 연결
+
+- `select_expression(record, outputs=None, namespace='original', limits=None)`는 원 root 또는 임의 내부 출력 묶음을 고른다.
+  출력은 `{name, width: 바이트수, parts: 원 PartRef 목록, guard?: 원 BDD 참조}`다. producer `bytes`와 출력 위치 `at`의
+  폭·범위·틈·겹침을 검사한다. **여러 출력 guard는 conjunction**이며 mutually-exclusive continue/exit를 한 묶음으로
+  선택하면 빈 domain이 된다. 두 결과를 함께 저장하려면 별도 뷰를 사용한다.
+- namespace는 `original` 또는 기존 complete one-visit의 정확한 ID다. 후자는 기존 원 SSA/CFG/captured-state/last-writer
+  계약을 먼저 재검증한다. 사용자가 임의 cut을 주입하여 debt·CALL·미확정 RAM·순환을 해결한 것처럼 만들 수 없다.
+- 선택은 원 node·조건/공유 control DAG·주소·debt 참조를 보존한다. 단순 구조 선택은 순환/미해결을 포함할 수 있으나 수치
+  간략화의 지원 여부와 다르다. CALL/stitched physical boundary는 이번 수치 지원에 포함하지 않는다.
+- `source`는 새 optional `expression_views`만 제외한 원 record의 SHA256이다. 기존 function/context·node·byte 참조는
+  `selection`/`source_links.outputs`에, 원 전체 entry producer는 `bindings`에 남는다. 간략화 후 각 중간 노드를 새로운
+  원 SSA 정의로 위장하지 않는다. 단일 뷰는 자체 typed DAG/출력 ID를 가지며 중첩·겹치는 여러 뷰를 동시에 붙일 수 있다.
+
+#### 간략화와 동등성 계약
+
+`_record_expression_bv`는 기존 식을 정확한 폭의 Z3 bit-vector로 옮기는 유한 adapter다. 같은 원 producer/context는
+**full-width symbol 하나**이고 겹치는 바이트는 그 symbol의 Extract를 공유한다. byte placement는 명시적인 조립이다.
+정수 ADD/SUB/MULT·bitwise·부호/무부호 비교·carry/overflow·shift·폭 확장/축소·PIECE/SUBPIECE·POPCOUNT와 원 공유
+조건의 ITE를 지원한다. BOOL은 원 evaluator처럼 전체 정수의 nonzero 여부이며 low bit만으로 추정하지 않는다.
+DIV/REM은 0의 부분 정의성을 total SMT 나눗셈으로 숨기지 않도록 현재 partial이다.
+
+raw source union/조건 없는 phi는 자유 selector로 만들지 않는다. 원 guard·활성 arm의 정의가능성·guarded source의 정확히
+한 선택을 원 domain으로 유지한다. 여러 출력은 같은 조건 symbol/BDD를 공유한다. 원 값 경로의 unknown CALL/debt/cut/
+순환은 partial이며, LOAD/STORE 값은 **검증된 기존 one-visit memory correspondence에서만** 따라간다. 일반 원 namespace의
+RAM은 이번 수치 adapter가 임의 입력으로 대체하지 않는다. 모든 원 효과는 source network에 남고 값 축약으로 삭제되지 않는다.
+
+candidate는 작은 항등식 및 Z3 simplifier로 생성한다. 예를 들어
+`(x XOR y) + 2*(x AND y) mod 2^w -> x+y mod 2^w`를 원 바이트 연결 위에서 적용한다. 일반 난독화 해제나 모든 MBA의
+최소식을 보장하지 않는다. 외부 생성기를 붙일 수 있도록 typed DAG candidate를 받을 수 있지만 그 자체는 권위가 아니다.
+
+1. 원 output의 guard/정의가능성과 명시적 `user_conditions=[{binding, equals}]`를 분리해 domain을 재구축한다.
+2. domain이 **SAT**여야 한다. UNSAT는 `inconsistent_domain`, unknown/timeout은 `unproven`이며 동치 성공이 아니다.
+3. 같은 domain에서 원 출력과 candidate 출력 중 하나라도 다른 식이 **UNSAT**여야 `equivalent`다. SAT는 `refuted`다.
+4. 이 SAT는 원 함수 entry에서 실행 가능함이나 종료를 증명하지 않는다. 결과는 항상 원 분석 가정에 조건부다.
+
+`ViewLimits`는 선택 producer+control node/간선·깊이·폭, 전처리 AST node/깊이, user hypothesis 개수, candidate DAG와
+SMT timeout/rlimit를 제한한다. 예산/미지원/오류는 성공으로 바꾸지 않으며 원 그래프 fallback 가능 여부도 따로 둔다.
+현재 `numeric_fallback=not_attempted`다. cached proof/hash는 인증이 아니며 소비자는 입력 `.get`에 접근하기 **전에**
+원 선택/바이트/namespace를 재구축하고 whitelist typed DAG를 decode하여 동등성을 재검증한다.
+
+#### 공개 API
+
+```python
+from tdo_v2.operation_records import (
+    select_expression, simplify_expression, attach_expression_view, evaluate_expression_view,
+)
+
+selection = select_expression(record)  # 또는 기존 내부 PartRef outputs, exact one-visit ID
+view = simplify_expression(record, selection)
+if view['proof']['status'] == 'equivalent':
+    with_view = attach_expression_view(record, view)  # 새 copy; record를 수정하지 않음
+    # inputs는 view.bindings의 id -> 그 원 producer 전체 폭의 unsigned 정수
+    result = evaluate_expression_view(with_view, view['id'], inputs)
+```
+
+미귀속 run 가정은 기존 API처럼 기본 거부하고 `accept_unattributed_assumptions=True`를 명시할 때만 허용한다.
+one-visit binding의 `transition_input`은 기존 s# snapshot에 직접 연결된다. renderer는 원 전체 출력 뒤에 별도 `e#.n#`
+typed DAG와 source output 연결을 보여준다. 원 source label/eligibility는 값이 상쇄되었다고 바꾸지 않는다.
+
+#### 실제 사례와 검수
+
+`tests/corpus/intra/local_expression_views.c`를 x64 Mach-O clang `-O1`로 컴파일했다. 순수 MBA 함수는 O1이고 shared RAM
+루프는 `optnone`을 명시해 O0 memory/branch 구조를 유지한다. Ghidra 12.0.4 원 p-code를 봉인 추출했다.
+
+- SHA256: `65d60c897de58fc5fa0e37bcc9a1d840e781a7afac09d32b66fe23e911f46569`.
+- Bundle: `output/expression-views-20261024.ekCMIQ/bundles/e9ff37f50c94e0d65650d8621bcc01a1b0c7a3d8734e5aa1aaf8996257ebac38`.
+- `TDO_EXPRESSION_VIEW_BUNDLE=<generation>`과 기존 loop/guarded-summary Bundle로
+  `tests/corpus/intra/test_expression_view_binary.py`를 실행한다.
+
+초기 all-O1 shared 루프는 기존 one-visit의 `exit poststate evidence is not captured`로 partial이었다. 새 간략화 계층으로
+이를 우회하지 않는다. 이 한계는 one-visit source correspondence의 확장 대상이며 이번 지역 값 간략화 지원 완료와 구별한다.
+아래는 동결본의 실제 검증·전체 회귀 및 별도 최종 승인 결과다.
+
+동결 targeted는 **96 passed / 0 skipped**(122.54초), dense SSA 기준도 같은 **96 passed / 0 skipped**(123.87초)다.
+합성 89개와 실제 7개이며, 실제 검사는 순수 MBA 32회와 5개 루프 각 36회, 총 **212회 원 p-code 실행·675회차**를
+포함한다. 추가 하나는 all-O1 루프의 기존 incomplete one-visit을 우회하지 못하는 negative다. 값뿐 아니라 모든 원
+조건·메모리 효과·LOAD byte writer epoch를 기존 raw oracle로 대조하고 기존 그래프·반복 요약·eligibility 불변을 검사한다.
+이 수치는 native 실행이나 suite09 전체 지원 점수가 아니다.
+
+같은 출력 폴더의 `example-mba/record.json`·`record.txt`에는 실제 MBA 원 기록과 별도 `x+y` 뷰를 함께 보존한다.
+`example-shared-memory/selected.json`은 **전체 원 record가 아닌** 기존 one-visit namespace와 유도 뷰 snapshot이며,
+`expressions.txt`와 두 분기의 8회차 입력/API 결과인 `examples.json`을 함께 둔다. 전체 원 record는 봉인 Bundle에서
+재구축해 사용한다. Python 정수를 JSON 문자열 그대로 전달했고, 재입력 후 원 fingerprint·namespace exactmatch,
+두 renderer exactmatch, 저장 8회차의 공개 API 재평가 일치를 확인했다. Astra도 이 산출물을 독립 재검증했다.
+
+선택 단계 검수의 producer/control 예산 누락과 guard 타입 검사 순서를 보완했다. 수치 단계에서는 출력폭이 입력보다
+넓은 ADD/SUB/MULT/부호 반전의 원 의미 및 n-ary simplifier 출력 decoding을 수정하고 회귀를 추가했다. Astra의 추가
+2,430개 연산/폭 대조도 통과했다. 원 분석 의미는 변경하지 않는다.
+
+동결본 전체 회귀는 **3068 passed / 32 skipped / 0 failed**, 595.12초다. 권위 결과는 같은 출력 폴더의
+`final-suite.junit.xml`(총 3100개, failures/errors 0)이다. 기존 UE Core·DFB072 ELF/PE64/PE32·호출/RAM·forward·모델·
+부분 레지스터·원 순환/한 회차/반복 요약 회귀를 포함한다. skip 32개는 이전과 같은 Linux 제약 23개와 미보유 Bundle 9개다.
+`targeted.junit.xml`/`dense-views.junit.xml`의 신규 96개는 전부 실제 실행했다. 동결 전후 코드·테스트 SHA256은
+`5767dec142975da8c7c6a2b80331ea1e4a30aab2a8a0b3fe134269ca35447f88`로 동일하다.
+
+Astra가 권위 full/targeted/dense XML과 UE Core 21개·DFB072 세 플랫폼·호출/RAM·forward-off·모델·기존 순환/한회차/
+요약 회귀 및 all-O1 거부 검사의 실제 실행을 독립 확인하고 **이번 합의된 P0 목표 달성과 이 상태에서의 마무리를 명시적으로
+최종 승인**했다. 필수 미달이나 남은 차단 결함을 발견하지 못했다는 판단이다. 지역 값 동치·원본 보존·기존 지원 경계로
+한정한 승인이고, 일반 루프 공식·미확정 RAM·효과/종료/도달성 증명·전역 source 제거를 완료한 것으로 확대하지 않는다.
