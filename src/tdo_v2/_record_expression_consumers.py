@@ -5,7 +5,7 @@ reference P0 views, never other consumers. Original loop summaries stay intact.
 """
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import time
 
 import z3
@@ -29,8 +29,10 @@ class ConsumerLimits:
 
 
 class _Budget:
-    def __init__(self):
-        self.limits, self.started, self.queries = ConsumerLimits(), time.monotonic(), 0
+    def __init__(self, *, solver_ms=None, solver_rlimit=2000000):
+        self.limits = replace(ConsumerLimits(),solver_ms=solver_ms or ConsumerLimits().solver_ms)
+        self.solver_rlimit = solver_rlimit
+        self.started, self.queries = time.monotonic(), 0
 
     def check(self, queries=0):
         step()
@@ -42,7 +44,7 @@ class _Budget:
 
     def query(self, *formulas):
         solver = z3.Solver()
-        solver.set(timeout=self.check(1), rlimit=2000000)
+        solver.set(timeout=self.check(1), rlimit=self.solver_rlimit)
         solver.add(*formulas)
         result = solver.check()
         self.check()
@@ -176,6 +178,9 @@ def _canonical(record, row):
     elif row.get('kind') == 'byte_influence':
         from ._record_expression_influence import validate_byte_influence
         return validate_byte_influence(record, row, accept_unattributed_assumptions=True)
+    elif row.get('kind') == 'conditional_expression_island':
+        from ._record_expression_islands import validate_expression_island
+        return validate_expression_island(record,row,accept_unattributed_assumptions=True)
     else:
         raise Ineligible('expression consumer: unsupported kind or consumer reference cycle')
     if row != expected:
@@ -185,8 +190,8 @@ def _canonical(record, row):
 
 def attach_expression_consumer(record, consumer):
     """Return a copy with an independently checked consumer overlay."""
-    if consumer.get('kind') == 'byte_influence':
-        raise Ineligible('expression consumer: use attach_byte_influence with explicit assumption policy')
+    if consumer.get('kind') in ('byte_influence','conditional_expression_island'):
+        raise Ineligible('expression consumer: use attach_byte_influence or attach_expression_island with explicit assumption policy')
     _canonical(record, consumer)
     result = deepcopy(record)
     rows = result.setdefault('expression_consumers', [])
@@ -205,6 +210,8 @@ def evaluate_expression_consumer(record, identity, inputs, *, accept_unattribute
         row = _canonical(record, rows[0])
         if row['kind'] == 'byte_influence':
             raise Ineligible('expression consumer: byte influence is proof-only, not a numeric expression')
+        if row['kind'] == 'conditional_expression_island':
+            raise Ineligible('expression consumer: conditional island requires dedicated evaluation and boundary acknowledgement')
         if not row['assumptions_complete'] and not accept_unattributed_assumptions:
             raise Ineligible('expression consumer: run assumptions unattributed; explicit opt-in required')
         if row['kind'] == 'invariant_delta_countdown':
@@ -246,6 +253,10 @@ def render_expression_consumers(record):
         if row['kind'] == 'byte_influence':
             from ._record_expression_influence import render_byte_influence
             lines.extend(render_byte_influence(row))
+            continue
+        if row['kind'] == 'conditional_expression_island':
+            from ._record_expression_islands import render_expression_island
+            lines.extend(render_expression_island(row))
             continue
         lines.append(f"expression consumer {row['id']} [{row['kind']}; original graph/summaries retained]")
         lines.append('  namespace = '+row['namespace']+'; P0 views = '+', '.join(row['views']))

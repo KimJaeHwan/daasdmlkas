@@ -103,6 +103,15 @@ def select_expression(record, outputs=None, *, namespace='original', limits=None
     existing ID, never a new cut or a guessed recursion/iteration bound.
     Structural selection may include debt/cycles: numeric support is separate.
     """
+    return _select(record, outputs, namespace=namespace, limits=limits)
+
+
+def _select(record, outputs=None, *, namespace='original', limits=None, boundaries=()):
+    """Shared reference traversal. Regional contracts alone may stop at ports.
+
+    A boundary selection is deliberately NOT accepted by ordinary _reselect.
+    Neither source records nor the ordinary SSA/value interpretation change.
+    """
     limits = limits or ViewLimits()
     local, visit = _namespace(record, namespace)
     nodes = {node['id']: node for node in local['nodes']}
@@ -174,6 +183,8 @@ def select_expression(record, outputs=None, *, namespace='original', limits=None
         if 'guarded_sources' in node:
             for ref in (*node['guarded_sources']['guards'], node['guarded_sources']['reach']):
                 guard(ref, depth)
+        if identifier in boundaries:
+            continue
         dependencies = [part['node'] for part in _node_parts(node) if 'node' in part]
         dependencies.extend(node.get('debts', ()))
         dependencies.extend(item['node'] for item in node.get('from', ()))
@@ -186,6 +197,10 @@ def select_expression(record, outputs=None, *, namespace='original', limits=None
     result = dict(version=1, source=_fingerprint(record), namespace=namespace, outputs=outputs,
                   nodes=sorted(selected), guards=sorted(guards), limits=asdict(limits),
                   scope='local_value_equivalence_not_effects_reachability_or_termination')
+    if boundaries:
+        if set(boundaries) - selected:
+            raise Ineligible('expression island: unused boundary producer')
+        result.update(boundaries=sorted(boundaries), scope='conditional_region_given_available_boundary_outputs')
     result['id'] = 'selection:' + _digest(result)
     return result
 

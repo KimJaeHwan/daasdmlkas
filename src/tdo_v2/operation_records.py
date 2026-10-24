@@ -3774,8 +3774,31 @@ def attach_byte_influence(record, proof, *, accept_unattributed_assumptions=Fals
     return attach(record, proof, accept_unattributed_assumptions=accept_unattributed_assumptions)
 
 
+def derive_expression_island(record, outputs=None, *, boundaries, namespace='original', conditions=(), candidate=None, limits=None):
+    from ._record_expression_islands import derive_expression_island as derive
+    return derive(record,outputs,boundaries=boundaries,namespace=namespace,conditions=conditions,candidate=candidate,limits=limits)
+
+
+def validate_expression_island(record, island, *, accept_unattributed_assumptions=False):
+    from ._record_expression_islands import validate_expression_island as validate
+    return validate(record,island,accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def attach_expression_island(record, island, *, accept_unattributed_assumptions=False):
+    from ._record_expression_islands import attach_expression_island as attach
+    return attach(record,island,accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def evaluate_expression_island(record, identity, inputs, validity, *, accept_conditional_boundaries=False,
+                               accept_unattributed_assumptions=False):
+    from ._record_expression_islands import evaluate_expression_island as evaluate
+    return evaluate(record,identity,inputs,validity,accept_conditional_boundaries=accept_conditional_boundaries,
+                    accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
 __all__ = ("Ineligible", "Limits", "RECORD_VERSION", "StitchContext", "eligibility", "evaluate", "evaluate_physical", "render",
            "evaluate_transition", "evaluate_loop_summary", "root_record", "run_records", "select_expression",
            "simplify_expression", "attach_expression_view", "evaluate_expression_view", "derive_expression_consumer",
            "derive_loop_consumer", "attach_expression_consumer", "evaluate_expression_consumer", "prove_byte_influence",
-           "validate_byte_influence", "attach_byte_influence")
+           "validate_byte_influence", "attach_byte_influence", "derive_expression_island", "validate_expression_island",
+           "attach_expression_island", "evaluate_expression_island")

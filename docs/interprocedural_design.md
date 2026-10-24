@@ -3989,10 +3989,11 @@ Astra는 단계별 코드/실제 검증을 승인했고, 마지막에 권위 전
 기존 경계의 조건부 값 영향 증명으로 한정한 승인이며, 임의 경계 cut·일반 alias·source 자동 제거를 완료한 것으로
 확대하지 않는다.
 
-### 25.54 다음 개발 우선순위 — Astra 합의 계획 (2026-10-24, 미구현)
+### 25.54 다음 개발 우선순위 — Astra 합의 계획 (2026-10-24)
 
 §25.53 완료 후 코드를 다시 점검해 아래 순서에 합의했다. 이번 기록은 **다음 작업 계획**이며 기능 구현이나 승인된
 지원 범위에 추가하지 않는다. 전체 원 SSA/데이터·연산 그래프를 유지한 채 필요한 부분만 다룬다는 방향은 그대로다.
+후속 상태: 1순위 구현·검증은 §25.55에 기록한다. 2·3순위는 아직 미구현이다.
 
 #### 1순위: 명시적 경계를 가진 지역 식 계약
 
@@ -4029,3 +4030,119 @@ Astra는 단계별 코드/실제 검증을 승인했고, 마지막에 권위 전
 현재 실제 최적화 사례의 `exit poststate evidence is not captured` 거부 원인을 원 SSA·CFG·flow 근거로 좁게 보완한다.
 누락된 출구 상태를 추정하지 않는다. 이는 2순위의 필수 선행조건은 아니다. 일반 alias 확장이나 간략화 패턴 증설보다
 명확한 실제 미지원 사례를 우선한다. 세 우선순위 모두 VM 복원이나 source 자동 제거를 목표로 바꾸지 않는다.
+
+### 25.55 명시적 입력 경계의 조건부 순수 부분식 — expression island (2026-10-24)
+
+복잡한 앞부분을 해석하지 못해도 **그 뒤의 필요한 계산 구간만 조건부로 간략화**할 수 있다. 기존 SSA·PartRef·전체
+데이터/연산 그래프를 원본으로 재사용하며 새 SSA/RD/명령 실행기/메모리 모델을 만들지 않는다. 원 그래프·source·debt·
+eligibility·반복/한 회차식·기존 요약을 교체하지 않는다. 원 출처가 미해결이라는 사실도 그대로 남긴다.
+
+#### 경계와 가정
+
+`derive_expression_island(record, outputs=None, boundaries=[original_node_id, ...])`는 원 producer 출력의 **전체 폭**을
+포트로 받는다. 출력은 기존 `select_expression`의 `{name,width,parts,guard?}` 형식이며 생략하면 원 root를 선택한다.
+같은 producer의 겹치는 바이트는 하나의 포트에서 Extract한다. 공유 분기도 원 조건·선택 ID를 그대로 사용한다.
+
+- 초기 범위는 **비순환 원 함수의 단일 순수 정수 구간**이다. 경계는 원 total integer op(COPY 등)의 레지스터/unique
+  출력만 허용한다. CALL·LOAD/STORE·phi·entry·부분 연산·중단/override 노드를 직접 새 입력으로 만들지 않는다.
+  기존 one-visit 내부의 새 cut과 반복/재귀 경계는 이번 범위가 아니다.
+- 포트 `p#`는 원 node ID·key·주소·ordinal·출력 저장소·원 PartRef·debt 링크를 가진다. source namespace와 별도로
+  `island:<selection hash>`를 기록한다. 포트는 새 원 SSA 정의나 ABI 인자/반환이 아니다.
+- 각 포트 값 외에 availability Boolean을 둔다. 이는 **그 발생 위치에서 해당 값이 주어졌다는 사용자 전제**이지
+  CALL 반환·원 정의가능성·도달성 증거가 아니다. `cut => defined=True`로 부채를 지우지 않는다. 모든 선언 포트의
+  availability를 지역 domain에 명시하고 평가 시 모든 포트의 값과 `validity[p#] is True`를 요구한다.
+- 원 내부 guard·정의가능성은 기존 BV adapter로 재구축한다. 미해결 guard를 자유 Boolean으로 바꾸지 않는다.
+  내부 debt/CALL/메모리/미지원 연산은 거부한다. 경계 밖으로 남긴 원 의무와 내부 결함을 구별한다.
+
+opcode만으로 순수성을 판정하지 않는다. raw `COPY`도 ADDRESS RAM 읽기/쓰기일 수 있어 원 output storage와 entry·
+physical read/write 정보를 검사한다. 원 PartRef의 **예산 제한 provenance 검사**가 upstream COPY·LOAD·RAM entry·
+실행 guard·guarded_sources의 BDD·decision operand도 따라간다. 메모리·불완전/순환 참조·한도 초과는 미확인으로 거부한다.
+register CALL 출력과 register `call_clobber_read`에서는 호출 경계에 멈춰 미해결 의무를 보존하며 callee 내부는 해석하지
+않는다. cycle graph 부재를 비순환 증거로 간주하지 않고 `execution_fallback='cyclic cfg'` 등도 거부한다.
+
+따라서 현재는 RAM에서 온 값을 COPY로 감싼 새 경계나 메모리 조건에 의해 만들어진 값을 새 포트로 받아 우회하지 않는다.
+일반 메모리/alias·효과·반복 경계의 지역 계약은 후속 범위다. 검사하는 provenance는 원 저장소/제어 참조이며 새 RD가 아니다.
+
+#### 지역 동치와 원본 연결의 분리
+
+원 selector의 참조 순회·BV 정수 연산·공유 선택·simplify·typed DAG encode/decode와 기존 proof budget을 재사용한다.
+포트에서만 순회를 멈추는 별도 selection은 기존 P0/P2의 원 선택 검증에 통과하지 않는다. 원 authority v1의 제외 필드는
+여전히 `expression_views`/`expression_consumers`뿐이다. 저장은 후자의 `conditional_expression_island` subtype(version 1)이다.
+
+1. 원 지역식을 포트로 표현하고 원 guard·정의가능성·availability·추가 사용자 조건으로 domain을 구성한다.
+   domain SAT와 **최종 저장 후보 DAG를 decode한 값의 불일치 UNSAT**를 증명해야 지역 결과를 발행한다.
+2. 별도로 원 식을 재구축한다. 포트 값을 정확한 원 producer 식으로, availability를 원 정의가능성으로 되돌려 대입한다.
+   원 domain의 SAT, 원 domain이 지역 전제를 함의하는지, 원 domain에서 최종 후보와 원 출력이 같은지를 다시 증명한다.
+3. 이 재접속 증명까지 성공하면 `linked_under_original_domain`이다. 원식 `_build` 성공만으로 연결 성공으로 처리하지 않는다.
+   원식 재구축 실패·추가 지역 전제의 비함의·연결 증명 unknown 등은 지역 성공과 별도로 `connection=unresolved`로 남긴다.
+
+연결 성공도 **원 expression domain 아래 값 연결**이지 프로그램 entry 도달·호출 반환·효과·종료나 native 실행의 증명이
+아니다. 지역 가정만으로 성공한 결과를 전역 complete나 source 제거로 올리지 않는다. 평가 결과에도 이 scope와 연결
+상태·`original_debt=retained`를 반환한다. 원 연결과 가정은 저장 결과를 소비할 때도 다시 검사한다.
+
+#### 공개 API와 안전한 소비
+
+```python
+island = derive_expression_island(record, boundaries=[existing_copy_a, existing_copy_b])
+with_island = attach_expression_island(record, island)
+validate_expression_island(with_island, island)
+result = evaluate_expression_island(
+    with_island, island['id'],
+    inputs={'p5': observed_a, 'p8': observed_b},  # 실제 ID/폭은 island['bindings'] 확인
+    validity={'p5': True, 'p8': True},
+    accept_conditional_boundaries=True,
+)
+```
+
+포트 외의 기존 entry binding이 있으면 `inputs`에 그것도 제공해야 한다. 입력 맵을 읽기 전에 source/identity/선택·폭·
+namespace·전제·후보 동치·연결 주장·canonical metadata를 원에서 다시 검증한다. availability는 값만 보고 추정하지 않는다.
+미귀속 run 가정은 attach/validate/evaluate에서 기본 거부하며, 실제 자료에서 필요하면 각각
+`accept_unattributed_assumptions=True`를 명시한다. `accept_conditional_boundaries`와는 별개 승인이다.
+
+기존 consumer attach/evaluate는 이 subtype을 전용 API로 보내며 자동 소비를 거부한다. 기존 P0나 P2의 새 entry로도
+등록하지 않는다. renderer는 지역 동치·원 연결 상태·조건부 포트와 원 출처 의무를 구분해 출력한다.
+상한은 기존 ViewLimits(node/edge/depth/width/AST), 포트 16개, solver 최대 2초·rlimit 200만, query 128개·전체 20초다.
+낮춘 solver 한도도 적용한다. 전체 시간은 원 재구축·재연결을 포함한 협력적 budget이며 즉시 강제 중단 보장은 아니다.
+지역 domain 모순·timeout/unknown·한도 초과는 지역 동치 성공이 아니다.
+
+#### 실제 사례와 검증
+
+`tests/corpus/intra/expression_islands.c`를 clang x64 Mach-O -O1/Ghidra12.0.4로 추출했다.
+
+- SHA256: `b4b827573fd073cd39d08b83488a4bcbd2ac823d35eae9a9565566edf4ba811e`.
+- Bundle: `output/expression-islands-20261024.umDvPS/bundles/bc589fd73708345f775f0c0a4ad1b281cb473d4642b1cbdfdde4bf14da61f80d`.
+- 재실행: `TDO_EXPRESSION_ISLAND_BUNDLE=<generation>` 및 기존 테스트 PYTHONPATH로
+  `pytest tests/corpus/intra/test_expression_island_binary.py`를 실행한다.
+
+| 실제 사례 | 결과 |
+|---|---|
+| pure: 원 COPY 두 개 → MBA → XOR 0x91 | 지역 MBA가 합으로 간략화되고 최종 DAG까지 동치. 원 producer 재대입 연결도 성공 |
+| opaque: 관측하지 않은 호출 → 원 COPY 두 개 → 같은 계산 | 지역 동치 성공 / 원 입력 연결 미해결 / call-clobber debt 유지 |
+| shared: 실제 diamond에서 두 값에 같은 7 또는 9를 더함 → 뺄셈 | 두 원 phi의 선택 상관 보존. 양 분기·selector=256에서 원 결과와 일치, 원 재연결 성공 |
+
+opaque 검사는 **engine 분석 입력에서 callee 한 개만 제외한 partial-program 설정**이다. 실행 오라클은 같은 봉인 Bundle의
+원 callee body를 실제 CALL/RETURN으로 실행한다. 가짜 반환·havoc·외부 모델·분기 강제가 없다. inline asm은 원 COPY와
+공유 diamond를 실제 명령으로 남기기 위한 fixture이며, 별도 IR/기대값을 엔진에 주입하지 않는다.
+
+원 COPY 실행 직후 포트 값을 채집하고, 일반 entry binding은 실행 전에 읽는다. 이 값으로 **원 지역식·간략 DAG·원 RAX**를
+대조했다. pure 32회·opaque 32회·shared 12회, 총 **원 p-code 76회 실행**이다. native 실행/entry 도달성의 일반 증명은 아니다.
+예를 들어 opaque에 x=3,y=7을 실행하면 실제 관측값은 `p5=0x8e71b3d49526a0dd`, `p8=7`, 최종값은
+`0x8e71b3d49526a075`다. 엔진 저장 DAG의 `i.n2=bvadd(p5,p8)` 뒤에는 XOR 0x91에 해당하는 Extract/NOT/Concat이 이어진다.
+이때도 원 연결은 `unresolved`이고 두 입력의 원 호출 의무는 남는다.
+
+합성 **77개**는 폭·overflow·상쇄·공유 phi·중첩 원 제어 의존·port/metadata/후보 변조·availability/가정·원 재대입·
+기존 API 우회 차단·RAW ADDRESS/다단계 메모리 기원·순환 fallback·검사 한도/solver unknown을 포함한다.
+신규 합성+실제 **80 passed / 0 skipped**(4.98초), dense SSA에서도 **80 passed / 0 skipped**(5.48초)다.
+Astra는 설계·구현(범위 우회 보강 포함)·실제 검증 단계를 각각 검수하고 승인했다.
+
+동결본 전체 회귀는 **3253 passed / 32 skipped / 0 failed**(662.13초)다. 권위 XML은 같은 출력 폴더의
+`final-suite.junit.xml`(총 3285개, failures/errors 0)이다. 신규 80개는 모두 실행됐고, 기존 UE Core·DFB072 세 플랫폼·
+모델·forward-off·호출/RAM·부분 레지스터·순환/한 회차/반복 요약·P0/consumer/P2 회귀도 포함한다.
+32 skip은 기존 Linux 제약 23개와 미보유 Bundle 9개다. 전체 회귀 전후 코드·테스트 SHA256은
+`a32cbc41cee05574aef50005485135d6e0bac3cb9cab415e7a69f165c97075d2`로 동일하다.
+
+Astra는 권위 전체 XML·new/dense/actual XML·기존 실제 회귀와 최종 문서를 독립 확인하고 **§25.54의 1순위 목표 달성 및
+이 상태에서의 마무리를 명시적으로 최종 승인**했다. 문서의 x=3,y=7 사례도 동일 sealed callee를 원 실행해 포트 값·
+최종값·`i.n2=bvadd`·원 연결 unresolved/debt retained를 독립 재현했다. 원 p-code 76회 집계도 확인했다.
+합의한 초기 범위에서 필수 미달이나 차단 결함이 없다는 판단이다. 비순환 순수 정수 지역 계약으로 한정한 승인이고,
+일반 RAM/alias·반복 경계·F_k 합성·O1 출구 보완이나 source 자동 제거를 완료한 것으로 확대하지 않는다.
