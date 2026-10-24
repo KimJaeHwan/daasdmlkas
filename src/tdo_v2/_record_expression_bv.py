@@ -185,13 +185,24 @@ class Adapter:
         values = [value for value, _ in operands]
         return arithmetic(opcode, values, width * 8), z3.And(*(defined for _, defined in operands))
 
-    def outputs(self, selection):
-        values, domain = {}, []
+    def observe(self, selection):
+        """Original guard evaluability Q, guard truth R, value validity A.
+
+        A retains existing definition/execution gates inside the value graph;
+        R describes the explicit selected output guard, not entry reachability.
+        """
+        observations = {}
         for row in selection['outputs']:
             value, defined = self.assemble(row['parts'], row['width'])
             guard, gd = self.guard(row['guard'])
-            values[row['name']] = value
-            domain.extend((defined, guard, gd))
+            observations[row['name']] = dict(value=value, Q=gd, R=guard, A=defined)
+        return observations
+
+    def outputs(self, selection):
+        values, domain = {}, []
+        for name, row in self.observe(selection).items():
+            values[name] = row['value']
+            domain.extend((row['A'], row['R'], row['Q']))
         return values, z3.And(*domain)
 
 

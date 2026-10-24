@@ -173,6 +173,9 @@ def _canonical(record, row):
     elif row.get('kind') == 'invariant_delta_countdown':
         from ._record_expression_loops import derive_loop_consumer
         expected = derive_loop_consumer(record, row['namespace'], row['views'])
+    elif row.get('kind') == 'byte_influence':
+        from ._record_expression_influence import validate_byte_influence
+        return validate_byte_influence(record, row, accept_unattributed_assumptions=True)
     else:
         raise Ineligible('expression consumer: unsupported kind or consumer reference cycle')
     if row != expected:
@@ -182,6 +185,8 @@ def _canonical(record, row):
 
 def attach_expression_consumer(record, consumer):
     """Return a copy with an independently checked consumer overlay."""
+    if consumer.get('kind') == 'byte_influence':
+        raise Ineligible('expression consumer: use attach_byte_influence with explicit assumption policy')
     _canonical(record, consumer)
     result = deepcopy(record)
     rows = result.setdefault('expression_consumers', [])
@@ -198,6 +203,8 @@ def evaluate_expression_consumer(record, identity, inputs, *, accept_unattribute
         if len(rows) != 1:
             raise Ineligible('expression consumer: unknown identity')
         row = _canonical(record, rows[0])
+        if row['kind'] == 'byte_influence':
+            raise Ineligible('expression consumer: byte influence is proof-only, not a numeric expression')
         if not row['assumptions_complete'] and not accept_unattributed_assumptions:
             raise Ineligible('expression consumer: run assumptions unattributed; explicit opt-in required')
         if row['kind'] == 'invariant_delta_countdown':
@@ -236,6 +243,10 @@ def render_expression_consumers(record):
         for key,ref in graph['outputs'].items():
             lines.append(f"  {key} = {prefix}n{ref}")
     for index,row in enumerate(record.get('expression_consumers', ())):
+        if row['kind'] == 'byte_influence':
+            from ._record_expression_influence import render_byte_influence
+            lines.extend(render_byte_influence(row))
+            continue
         lines.append(f"expression consumer {row['id']} [{row['kind']}; original graph/summaries retained]")
         lines.append('  namespace = '+row['namespace']+'; P0 views = '+', '.join(row['views']))
         if row['kind'] == 'invariant_delta_countdown':

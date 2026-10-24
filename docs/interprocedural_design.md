@@ -3882,3 +3882,150 @@ Astra가 full/new-unit/actual/dense XML과 기존 P0·UE Core·DFB072 세 플랫
 독립 확인하고 **합의한 1A·1B 목표 달성 및 이 상태에서의 마무리를 명시적으로 최종 승인**했다. 남은 필수 미달이나
 차단 결함을 발견하지 못했다는 판단이다. 명시적 consumer 경로·영역 종료 tracked 상태로 한정한 승인이며, 범용 반환
 공식·mutable feedback·새 경계 계약·일반 alias·여러 회차 F_k까지 완료한 것으로 확대하지 않는다.
+
+### 25.53 기존 경계 입력의 바이트별 의미 영향 증명 (2026-10-24)
+
+§25.51의 부분식과 §25.52의 후속 소비·반복 요약을 유지하고, **구조적으로 연결됐지만 출력 값에는 실제 영향을
+주지 않는 입력 바이트**를 별도로 증명한다. 기존 SSA·PartRef·공유 선택·한 회차 메모리 대응과 BV adapter를 재사용한다.
+새 SSA/RD/명령 실행기/alias 분석기/VM 복원기를 만들지 않는다. 원 record·source 라벨·간선·부채·eligibility·cycle graph·
+한 회차식·기존 반복 요약은 모두 보존하며, 증명을 source 제거 정책으로 자동 적용하지 않는다.
+
+#### 질의와 판정
+
+`prove_byte_influence(record, selection, pairs, conditions=(), limits=None)`의 pair는 다음과 같다.
+
+```python
+pairs = [{"input": {"node": existing_entry_node, "byte": input_byte},
+          "output": {"name": "root", "byte": output_byte}}]
+proof = prove_byte_influence(record, select_expression(record), pairs)
+with_proof = attach_byte_influence(record, proof)
+validate_byte_influence(with_proof, proof)
+```
+
+입력은 **선택한 원 식에서 실제로 사용되는 기존 entry/one-visit binding**이어야 한다. 합쳐진 register producer도
+그대로 유지한다. 임의 중간 노드를 잘라 새 자유 입력으로 만들지 않는다. 후자는 새 경계 계약을 다루는 후속 범위다.
+미귀속 run 가정은 기본 거부하며, 필요한 경우 세 API 각각 `accept_unattributed_assumptions=True`를 명시한다.
+
+하나의 입력 producer 중 질의한 바이트만 fresh 8-bit 값으로 바꾸고, 다른 바이트·다른 입력·공유 분기 상관은 유지한다.
+출력의 Q는 **선택한 출력 guard가 평가 가능한가**, R은 **그 guard가 참인가**, A는 **선택한 값 바이트가 정의되는가**다.
+A에는 원 값 그래프의 정의/실행 gate가 포함된다. Q/R/A는 기계 전체의 fault-free 실행이나 프로그램 진입 도달성 증명이 아니다.
+
+검사는 아래 순서로 수행한다.
+
+1. 추가 사용자 가정 H 자체가 SAT인지 확인한다. 모순이면 `inconsistent_hypotheses`이며 무영향으로 표시하지 않는다.
+2. 양쪽 H를 만족하면서 질의 바이트만 달라질 수 있는지 확인한다. 불가능하면 `fixed_by_hypothesis`다.
+3. 바이트가 다른 두 상태에서 양쪽 Q/R/A가 모두 참인 비교쌍의 SAT를 확인한다. 없으면
+   `no_comparable_defined_pair`이지 무영향이 아니다.
+4. 유효 비교쌍에서 출력 바이트가 다른 반례가 SAT이면 `may_influence`, UNSAT이면
+   `independent_when_both_defined`다. 독립은 해당 출력 바이트·원 namespace·가정·추상 경계 모델에만 적용된다.
+5. Q 변화는 H+바이트 변화 아래, R 변화는 양쪽 Q가 참인 경우, A 변화는 양쪽 Q/R이 참인 경우 따로 검사한다.
+   각 비교 context의 SAT도 필요하다. `stable_in_comparison_context`, `may_change`, `not_comparable`, `unknown`을 구분한다.
+
+따라서 값이 같아도 한쪽에서 body가 실행되지 않으면 R 변화가 남는다. 값 독립이 도달·정의가능성·효과·종료 독립을
+뜻하지 않는다. `may_influence`의 SAT 반례 역시 **원 추상 경계 입력 모델의 반례**이지 일반적인 함수 entry에서 실제
+도달 가능한 상태라는 보장은 아니다. 일부 실제 정수 사례의 반례는 원 p-code로 직접 재실행해 확인했다.
+
+#### 메모리·원본 연결·저장 계약
+
+선택된 원 LOAD/STORE 주소의 producer closure도 별도 기록한다. 입력 producer가 있으면 `may_depend`, 없으면
+`not_in_syntactic_address_closure`, 불완전하면 `unassessed`다. 바이트별 alias 증명이 아닌 보수적인 **전체 producer**
+검사다. closure 밖이라는 사실도 효과 무영향의 증거는 아니다. 모든 결과에 `effects=not_proven`,
+`termination=not_proven`, `concrete_memory_correspondence=not_claimed`를 유지한다.
+
+특히 RBP를 바꾸면서 captured RAM cell 값은 고정한 모델에서 값 독립이 나올 수 있다. 이는 그 추상 cell을 재배치한
+실제 RAM 실행의 정당성을 증명하지 않는다. 주소 `may_depend` 경고와 기존 분석의 스택/전역 가정은 그대로 남는다.
+일반 RAM·CALL·부채·원 순환·지원하지 않는 연산은 기존 adapter가 fail-closed 거부하며 독립으로 승격하지 않는다.
+
+저장은 기존 `expression_consumers`의 `kind=byte_influence`, version 1인 **proof-only subtype**을 사용한다.
+source authority v1의 제외 필드는 기존 두 collection뿐이며 해시 규칙을 넓히지 않는다. ID는 source/namespace/질의/
+가정/판정/반례를 묶는다. 전용 validator는 원 식을 재구축하고 판정을 다시 증명한다. solver가 고른 반례 숫자는 달라질
+수 있으므로 숫자 일치를 강요하지 않으며, 저장 반례 각각에 대해 원 가정·바이트 하나만 변경·비교 context·보이는 Q/R/A와
+값을 ground 대입으로 독립 검증한다. 바인딩 ID나 주소 경고 등 canonical metadata 변조도 거부한다.
+
+기존 값/반복 consumer의 exact canonical 재검증은 완화하지 않는다. `attach_expression_consumer`는 이 subtype을 거부하여
+전용 API의 가정 승인을 우회하지 못하게 한다. `evaluate_expression_consumer`도 입력 접근 전에 proof-only로 거부한다.
+기존 renderer는 질의별 value/Q/R/A를 별도 표시한다.
+
+기본 상한은 입력/출력 pair 16개·SMT query 192개·개별 solver 2초·전체 20초다. 호출자는 상한을 낮출 수만 있다.
+전체 budget은 원 재구축부터 저장 반례 검증까지 공유하는 협력적 한도이며 강제 즉시 중단 타이머는 아니다.
+한도/solver unknown이면 `incomplete`와 각 미완료 질의를 남기며, 검사하지 않은 pair도 누락하지 않는다.
+이런 diagnostic 결과가 항상 재검증/attach 가능하다는 보장은 없다. 자원 부족을 무영향 증거로 사용하지 않는다.
+
+#### 실제 검증
+
+새 `tests/corpus/intra/expression_byte_influence.c`의 add와 MBA cancellation을 clang x64 Mach-O -O1/Ghidra12.0.4로
+추출했다. empty asm은 compiler folding 방지용이고 실제 상태 변경 명령을 추가하지 않는다.
+
+- SHA256: `04ae572c6764719635514571378092d97bd67016fd88c93294063671e076b1e9`.
+- Bundle: `output/expression-influence-20261024.y4sFuF/bundles/e1a9585c942a604dfae1f354a36b83c72c81249fb4bb750922e96ce48e6eeb2e`.
+- 환경 변수 `TDO_EXPRESSION_INFLUENCE_BUNDLE=<generation>`을 설정한다. narrow/shared 검사는 기존
+  `TDO_LOOP_SUMMARY_BUNDLE`/`TDO_EXPRESSION_VIEW_BUNDLE`의 봉인 Bundle을 변경 없이 사용한다.
+
+| 실제 원 식 | 확인 결과 |
+|---|---|
+| `x+y` | y의 하위 byte는 상위 결과 byte 1·7에 carry 영향이 있음. y의 byte 1은 결과 byte 0에 무영향 |
+| `((x^y)+2*(x&y))-y` | y의 8개 byte 모두 결과 byte 0에 무영향. x의 하위 byte는 영향 있음. 원 MBA 간선은 유지 |
+| `cell8=(cell8+(unsigned char)step)` | 원 8-byte step binding의 상위 7개는 결과 cell byte에 무영향, 하위 byte는 영향 있음 |
+| 기존 두 RAM cell 공유 선택 반복 | counter byte는 cell 값에 무영향이지만 body R은 변함. RBP byte는 추상 cell 값 무영향이어도 주소 `may_depend` 유지 |
+
+실제 4개 검사에서 명시적 byte pair 24개를 질의했다(값 독립 20·영향 반례 4). add/cancel 반례 6회 재실행을 포함해
+**원 p-code 70회 실행·한 회차 관찰 92회(종료 검사 포함)**를 대조했다. 기존 `_Visits`가 원 선택과 모든 LOAD/STORE의 주소·폭·값·순서·
+byte writer epoch·회차 갱신을 확인한다. native 실행이나 추상 RAM 반례의 일반 entry 실현 가능성을 검증한 것은 아니다.
+기존 shared의 partial 반복 요약은 그대로다.
+
+신규 합성 54개는 carry/폭/상쇄·공유 phi 상관·Q/R/A 분리·모순/고정 가정·저장 반례/metadata 변조·unsupported·
+가정 opt-in·자원/unknown·원 BV domain AST 보존을 포함한다. 합성+실제 **58 passed / 0 skipped**(4.91초)이며,
+전체 회귀·dense SSA 및 Astra의 별도 최종 목표 승인은 아래와 같다.
+
+동결본 전체 회귀는 **3173 passed / 32 skipped / 0 failed**(648.71초), XML 총 3205개·failures/errors 0이다.
+권위 결과는 같은 출력 폴더의 `final-suite.junit.xml`/`final-suite.log`에 있다. 신규 58개는 모두 실행됐고,
+dense SSA에서도 **58 passed / 0 skipped**(5.35초)다. 기존 UE Core·DFB072 세 플랫폼·모델·forward-off·호출/RAM·
+부분 레지스터·순환/한 회차/반복 요약·P0/consumer 회귀를 포함한다. 32 skip은 기존 Linux 제약 23개·미보유 Bundle 9개다.
+동결 전후 코드·테스트 SHA256은 `1366eb8238030551aca912d249f423fed13cfc25b4e4218879012bd474822086`로 동일하다.
+
+Astra는 단계별 코드/실제 검증을 승인했고, 마지막에 권위 전체 XML·new/dense XML·기존 실제 회귀와 최종 문서를
+독립 확인하여 **이번 합의 범위의 목표 달성 및 마무리를 명시적으로 최종 승인**했다. 24 byte pair와 원 p-code 70회/
+한 회차 92회 집계도 테스트 구조와 대조했다. 필수 잔여사항이나 차단 결함을 발견하지 못했다는 판단이다.
+기존 경계의 조건부 값 영향 증명으로 한정한 승인이며, 임의 경계 cut·일반 alias·source 자동 제거를 완료한 것으로
+확대하지 않는다.
+
+### 25.54 다음 개발 우선순위 — Astra 합의 계획 (2026-10-24, 미구현)
+
+§25.53 완료 후 코드를 다시 점검해 아래 순서에 합의했다. 이번 기록은 **다음 작업 계획**이며 기능 구현이나 승인된
+지원 범위에 추가하지 않는다. 전체 원 SSA/데이터·연산 그래프를 유지한 채 필요한 부분만 다룬다는 방향은 그대로다.
+
+#### 1순위: 명시적 경계를 가진 지역 식 계약
+
+현재 선택은 원 producer·guard·debt를 끝까지 따라가고, 기존 BV adapter/consumer는 원 식을 먼저 재구축해야 한다.
+그래서 복잡한 호출 앞부분을 못 풀면 그 뒤의 작은 순수 계산도 함께 막힌다. 다음 목표는 **필요한 구간의 입력을 명시해
+그 안의 계산만 조건부로 줄이고, 그 입력의 원 함수 내 출처는 미해결로 남길 수 있게 하는 것**이다.
+
+- 첫 범위는 기존 노드·PartRef를 참조하는 단일 비순환 순수 정수 구간이다. 별도 island namespace는 계약 구분이며
+  새 SSA가 아니다. 명시적으로 선택한 원 value producer의 전체 폭을 입력 port로 받고 필요한 byte를 Extract한다.
+  같은 producer의 겹치는 byte와 원 분기 조건은 공유한다. 함수명/ABI 인자·반환 추측으로 새 값을 만들지 않는다.
+- 내부 조건·정의가능성을 원 근거에서 재구축하지 못하면 partial/거부한다. unknown guard를 자유 Boolean으로 바꾸거나
+  `cut => defined=True`로 debt를 지우지 않는다. 원 그래프·라벨·부채·eligibility는 유지한다.
+- `지역 값 동치`와 `원 entry까지의 입력 연결`을 별도 상태로 기록한다. 지역 증명을 기존 consumer가 전역 증명처럼
+  자동 소비하지 못하게 한다. 반복 경계·신규 RAM 상태/side-effect cut·CALL/alias 해석·새 SSA/RD/실행기는 제외한다.
+- 첫 실제 사례는 `opaque CALL → 원 COPY/정수 producer → MBA 계산`이다. 호출 뒤 실제 연산 출력의 정확한 폭·발생
+  위치를 경계로 잡는다. 해당 위치에 도달해 경계값이 주어진 경우만 증명하며 CALL 반환·효과·도달성은 미증명이다.
+
+완료 기준은 다음과 같다.
+
+1. 실제 원 p-code 실행에서 해당 경계값을 채집해 원 지역식·간략식과 대조한다. 정상 순수식에서는 경계를 원 producer로
+   다시 연결했을 때 기존 값과 일치해야 한다.
+2. opaque 사례는 **지역 동치 성공 / 원 입력 연결 미해결 / 기존 debt 유지**가 정답이다. 전역 complete로 올리지 않는다.
+3. producer/namespace/byte 변조·공유 조건 분리·숨겨진 주소/효과 의존·임의 loop cut·정의가능성의 부당한 승격을 거부한다.
+4. 기존 기능 회귀와 실제 사례 검증 후 Astra의 단계 검수 및 별도 최종 목표 달성 승인을 받는다.
+
+#### 2순위: 이미 complete한 한 회차식의 제한된 여러 회차 F_k 합성
+
+기존 cut-state·공유 조건·메모리 버전을 회차별로 연결한다. 우선 complete한 register/고정-memory 사례에서 정해진
+작은 k회 결과를 다룬다. **k회 계산할 수 있다는 것과 실제 반복횟수가 k라는 증명은 구분**한다. 일반 RAM 해결이나
+새 반복 풀이기를 선행시키지 않는다.
+
+#### 3순위: 실제 O1 출구 상태 대응 보완
+
+현재 실제 최적화 사례의 `exit poststate evidence is not captured` 거부 원인을 원 SSA·CFG·flow 근거로 좁게 보완한다.
+누락된 출구 상태를 추정하지 않는다. 이는 2순위의 필수 선행조건은 아니다. 일반 alias 확장이나 간략화 패턴 증설보다
+명확한 실제 미지원 사례를 우선한다. 세 우선순위 모두 VM 복원이나 source 자동 제거를 목표로 바꾸지 않는다.

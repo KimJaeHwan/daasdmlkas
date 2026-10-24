@@ -3757,7 +3757,25 @@ def evaluate_expression_consumer(record, identity, inputs, *, accept_unattribute
     return evaluate(record, identity, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
 
 
+def prove_byte_influence(record, selection, pairs, *, conditions=(), limits=None, accept_unattributed_assumptions=False):
+    """Prove byte value influence separately from guard/reach/definedness."""
+    from ._record_expression_influence import prove_byte_influence as prove
+    return prove(record, selection, pairs, conditions=conditions, limits=limits,
+                 accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def validate_byte_influence(record, proof, *, accept_unattributed_assumptions=False):
+    from ._record_expression_influence import validate_byte_influence as validate
+    return validate(record, proof, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def attach_byte_influence(record, proof, *, accept_unattributed_assumptions=False):
+    from ._record_expression_influence import attach_byte_influence as attach
+    return attach(record, proof, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
 __all__ = ("Ineligible", "Limits", "RECORD_VERSION", "StitchContext", "eligibility", "evaluate", "evaluate_physical", "render",
            "evaluate_transition", "evaluate_loop_summary", "root_record", "run_records", "select_expression",
            "simplify_expression", "attach_expression_view", "evaluate_expression_view", "derive_expression_consumer",
-           "derive_loop_consumer", "attach_expression_consumer", "evaluate_expression_consumer")
+           "derive_loop_consumer", "attach_expression_consumer", "evaluate_expression_consumer", "prove_byte_influence",
+           "validate_byte_influence", "attach_byte_influence")
