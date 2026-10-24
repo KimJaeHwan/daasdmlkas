@@ -140,8 +140,13 @@ PYTHONPATH=src python -m pytest tests/intra -q
   `counter != 0; counter -= 1` 반복의 일정한 누산을 `x_final = x_initial + n*delta (mod 2^bits)`로 요약합니다.
   `n`은 해당 영역 입구 counter의 unsigned 값이며 원 함수 인자로 추측하지 않습니다.
   `evaluate_loop_summary(record, summary_id, inputs)`는 반복을 풀어 실행하지 않고 영역 종료 시 tracked state를 계산하며,
-  원 메모리 효과 템플릿과 마지막 zero-check를 보존합니다. 가정·부채·기존 eligibility는 유지됩니다. 분기·폭 변경·가변
-  주소 등 미지원 모양은 원 그래프/한 회차식을 남기고 사유를 표시합니다. 설계 문서 **25.39–25.49절**을 참고하세요.
+  원 메모리 효과 템플릿과 마지막 zero-check를 보존합니다. low-byte 승격/절단은 해당 바이트의 modulo 항등식일 때만,
+  분기는 원 전체 조건이 반복 중 불변임이 증명될 때만 공유 선택별 최종식을 만듭니다. 카운터와 주소에는 low-byte 축약을
+  적용하지 않습니다. 한 STORE뿐이고 LOAD/호출이 없는 일정 간격 쓰기는 별도 `write_effect_transitions`를 통해
+  `M_final = apply_STORE(M_initial, p+offset+i*stride, value, i=0..n-1)`로 표현합니다. 원 RAM 미해결 표시를 갚지 않으며,
+  수치 평가 시 겹침/주소 및 최종 pointer wrap을 거부합니다. 가정·부채·기존 eligibility는 유지됩니다. 변하는 조건·
+  LOAD/STORE alias·일반 비선형 갱신 등은 원 그래프/한 회차식을 남기고 사유를 표시합니다.
+  설계 문서 **25.39–25.50절**을 참고하세요.
 
 물리 기록의 구체 값은 `tdo_v2.operation_records.evaluate_physical(record, entry)`로 별도 평가합니다. 입구 레지스터와 RAM을
 실제 입력으로 제공해야 하며, 미지 값·지원하지 않는 효과·반환 불일치·예산 초과는 값으로 단정하지 않습니다. 이는 제한된

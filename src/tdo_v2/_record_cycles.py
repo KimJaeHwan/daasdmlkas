@@ -369,6 +369,9 @@ def publish_cycle_graph(builder):
     from ._record_transitions import publish_transitions
 
     graph['transitions'] = publish_transitions(view, graph, index)
+    from ._record_write_effects import publish
+
+    builder.write_effect_transitions = publish(view, graph, index)
     return graph
 
 

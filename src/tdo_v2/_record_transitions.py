@@ -106,7 +106,7 @@ class _StepConditions(ConditionIndex):
 class _Correspondence:
     """Only query SSA-supplied candidates; never make another RD table."""
 
-    def __init__(self, index, graph, region, conditions, limits):
+    def __init__(self, index, graph, region, conditions, limits, write_projection=None):
         self.index, self.graph, self.region, self.conditions = index, graph, region, conditions
         self.ssa = index.ssa
         self.defs, self.joins = self.ssa.definitions, index.index.joins
@@ -129,6 +129,7 @@ class _Correspondence:
                 writes.extend((position, identifier) for identifier in self.ssa.actions[action_id].write_definition_ids)
                 conditions._locations[action.operation_key] = (block.key, position)
         self.boundaries = [*region['entry_edges'], *conditions.cut_edges]
+        self.projection_id = graph['id'] + ('/write-visit/' if write_projection else '/visit/') + str(region['id'])
         if not index.index.little:
             raise _Partial('one-visit evaluator requires original little-endian semantics')
         if not region['entry_edges']:
@@ -136,7 +137,17 @@ class _Correspondence:
         # Unknown alias/effect evidence is never discharged by this view.
         for occurrence in (*self.ssa.unresolved_reads, *self.ssa.unresolved_writes):
             if self.ssa.actions[occurrence.action_id].operation_key in self.locations:
-                raise _Partial('unresolved memory access in one visit')
+                from ._record_cycles import _storage
+
+                item = dict(kind='write' if occurrence in self.ssa.unresolved_writes else 'read',
+                            action_id=occurrence.action_id,
+                            operation=self.ssa.actions[occurrence.action_id].operation_key,
+                            occurrence_ordinal=occurrence.occurrence_ordinal, width=occurrence.access.width,
+                            address=_storage(occurrence.access.address), raw_address=_storage(occurrence.access.raw_address))
+                expected = [{key: value for key, value in row.items() if key != 'node'}
+                            for row in write_projection['occurrences']] if write_projection else []
+                if item not in expected:
+                    raise _Partial('unresolved memory access in one visit')
         for rows in (index.normalized.may_alias_reads, index.normalized.call_clobber_reads):
             if any(row.operation_key in self.locations for row in rows):
                 raise _Partial('original alias or clobber debt in one visit')
@@ -318,7 +329,7 @@ class _StepBuilder(_Builder):
         self.read_bindings = {}
 
     def _selection(self, decision):
-        return self.proof.graph['id'] + '/visit/' + str(self.proof.region['id']) + '/' + decision
+        return self.proof.projection_id + '/' + decision
 
     def _new(self, key, record):
         if record.get('kind') == 'op' and record.get('key') in self.original_nodes:
@@ -379,11 +390,16 @@ class _StepBuilder(_Builder):
         return parts
 
 
-def _build(original, graph, index, region):
+def _build(original, graph, index, region, *, write_projection=None):
+    if write_projection is not None:
+        from ._record_write_effects import policy
+
+        if write_projection != policy(graph, region):
+            raise _Partial('STORE projection policy mismatch')
     if len(region['entry_points']) != 1:
         raise _Partial('one-visit view requires one actual entry')
     conditions = _StepConditions(index, region, graph['cfg']['edges'])
-    proof = _Correspondence(index, graph, region, conditions, original.limits)
+    proof = _Correspondence(index, graph, region, conditions, original.limits, write_projection)
     builder = _StepBuilder(original, proof, conditions)
     operations = []
     effects = []
@@ -410,7 +426,7 @@ def _build(original, graph, index, region):
     for rows in proof.writes.values():
         for _, identifier in rows:
             definition = proof.defs[identifier]
-            if definition.span.object_id.kind in (Storage.ADDRESS_SPACE, Storage.FUNCTION_RELATIVE):
+            if write_projection is None and definition.span.object_id.kind in (Storage.ADDRESS_SPACE, Storage.FUNCTION_RELATIVE):
                 for atom in proof.atoms_of(definition.span):
                     output_atoms[atom.canonical_key] = atom
     for row in list(proof.inputs.values()):
@@ -458,7 +474,7 @@ def _build(original, graph, index, region):
             raise _Partial('incomplete one-visit expression or original debt')
     if builder.truncated:
         raise _Partial('one-visit expression budget')
-    return dict(complete=True, evaluation='one_visit_expression', entry=conditions.entry,
+    result = dict(complete=True, evaluation='one_visit_expression', entry=conditions.entry,
                 cut_edges=conditions.cut_edges, entry_edges=region['entry_edges'],
                 blocks=conditions.order, inputs=list(proof.inputs.values()),
                 operations=operations, reads=list(builder.read_bindings.values()), effects=effects, outcomes=outcomes,
@@ -470,6 +486,9 @@ def _build(original, graph, index, region):
                 endianness='little', analysis_context=graph['analysis_context'],
                 record=dict(record='one-visit expressions', nodes=builder.records, control=control,
                             root=[], truncated=False, limits={'depth': builder.limits.depth}))
+    if write_projection is not None:
+        result.update(write_projection=write_projection, output_scope=write_projection['output_scope'])
+    return result
 
 
 def publish_transitions(original, graph, index):
@@ -502,7 +521,7 @@ def render_transitions(graph, render_parts, render_node):
         if not view['complete']:
             lines.append('  partial: ' + view['reason'])
             continue
-        prefix = f"t{view['region']}."
+        prefix = ('w' if 'write_projection' in view else 't') + str(view['region']) + '.'
 
         def local(text):
             return re.sub(r'\b([ng]\d+)\b', lambda match: prefix + match[1], text)
@@ -554,12 +573,14 @@ def evaluate_transition(record, identity, inputs, *, accept_unattributed_assumpt
 def _evaluate_transition(record, identity, inputs, accept_unattributed_assumptions):
     from .operation_records import _choice_contract, _NeedChoice, _Unknown, _Infeasible
 
-    rows = record.get('cycle_graph', {}).get('transitions', ())
+    rows = [*record.get('cycle_graph', {}).get('transitions', ()), *record.get('write_effect_transitions', ())]
     view = next((row for row in rows if row['id'] == identity), None)
     if view is None or not view['complete']:
         raise Ineligible('incomplete one-visit view')
     from ._record_transition_contract import validate
 
+    if 'write_projection' in view:
+        from ._record_write_effects import validate
     validate(record, view)
     context = view['analysis_context']
     attributed = context['run_assumptions'] is not None

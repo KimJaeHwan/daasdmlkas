@@ -25,9 +25,10 @@ def _read_varnode(vm, varnode):
 
 
 class _Visits(_ObservedMemory):
-    def __init__(self, case, item, record, *, region=0):
+    def __init__(self, case, item, record, *, region=0, collection='transitions'):
         self.case, self.item, self.record = case, item, record
-        self.view, = [row for row in record['cycle_graph']['transitions'] if row['region'] == region]
+        rows = record['cycle_graph']['transitions'] if collection == 'transitions' else record[collection]
+        self.view, = [row for row in rows if row['region'] == region]
         assert self.view['complete'], self.view
         self.members = set(self.view['blocks'])
         self.locations = _raw_block_edges(item, ())[1]

@@ -74,7 +74,7 @@ from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 13  # (13: optional countdown translation summaries, original graphs retained)
+RECORD_VERSION = 14  # (14: guarded/low-byte summaries and isolated STORE-only effect projections)
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -2544,6 +2544,11 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
         from ._record_transition_contract import seal
 
         seal(record)
+        if getattr(builder, 'write_effect_transitions', ()):
+            record['write_effect_transitions'] = builder.write_effect_transitions
+            from ._record_write_effects import seal as seal_write_effects
+
+            seal_write_effects(record)
         from ._record_loop_summaries import publish_loop_summaries
 
         record['loop_summaries'] = publish_loop_summaries(record)
@@ -2664,6 +2669,9 @@ def render(record) -> str:
         from ._record_cycles import render_cycle_graph
 
         lines.extend(render_cycle_graph(record["cycle_graph"], nodes, _render_parts))
+        from ._record_transitions import render_transitions
+
+        lines.extend(render_transitions({'transitions': record.get('write_effect_transitions', ())}, _render_parts, _render_node))
         from ._record_loop_summaries import render_loop_summaries
 
         lines.extend(render_loop_summaries(record))

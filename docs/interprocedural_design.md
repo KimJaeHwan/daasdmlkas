@@ -3562,3 +3562,101 @@ JSON은 Python 정수를 직렬화한 문자열 그대로 운반했으며 재입
 Astra가 권위 전체/dense XML, 실제 검사 구현과 집계, register/RAM 전달본의 원 증거·recipe·렌더링·공개 API 재평가,
 0회 delta 미접근과 미귀속 가정 기본 거부를 독립 확인하고 **이번 단순 반복 최종 요약식 목표 달성 및 마무리를 최종 승인**했다.
 필수 미달사항은 없으며 일반 closed form·폭 변경·함수 전체 반환값·전체 기계 상태/메모리 로그는 이번 완료 범위가 아니다.
+
+### 25.50 최종 요약 확장: low-byte·불변 분기·단일 strided STORE (2026-10-24, v14)
+
+25.49는 당시의 v13 지원 기록이다. 이번 확장은 그 위에 세 종류의 제한적 요약을 추가한다. 원 SSA/CFG/데이터 그래프,
+`cycle_graph.transitions`·receipt·root·eligibility·가정과 부채는 바뀌지 않는다. 별도 SSA/RD·명령 실행기·일반 루프 풀이기는
+추가하지 않는다. 단순 감소 counter의 unsigned 입구 값 n과 마지막 zero-visit 대조는 그대로 사용한다.
+
+#### 1. 폭 변환과 low-byte 투영
+
+값 정상화 캐시를 `(원 node, 요청 low-byte 폭, strict 모드)`로 분리한다. 확대된 정수의 하위 바이트를 다시 저장하는
+ZEXT/SEXT→ADD/SUB→low-byte 절단은 동일 modulo ring의 항등식일 때만 지운다. split parts는 같은 원 producer의
+연속 low-byte 조각인 경우만 합친다. nonzero source offset, 관찰되는 넓은 승격값, 다른 producer의 조각은 partial이다.
+입력 정수는 실제 원 바이트 폭으로 검사하며 결과에만 좁은 modulo를 적용한다. counter zero-test와 모든 주소 증명은
+원래 전체 폭의 **strict** 경로이고, low-byte 정상형 캐시를 이 경로에서 재사용하지 않는다.
+
+예: unsigned byte cell의 C 정수 승격이 있더라도 최종 byte는 `(cell_initial+n*step) mod 256`이다. 그러나 넓은 승격
+결과를 다른 loop-carried 출력에 누적하는 경우 그 넓은 값까지 좁은 항등식으로 바꾸지 않는다. 모든 tracked 출력을
+동시에 증명하지 못하면 전체 요약을 partial로 남긴다.
+
+#### 2. 원 조건이 반복 중 불변인 공유 분기
+
+counter 이외 원 결정의 **전체 의미 의존성**을 원 node/LOAD 주소/메모리 parts까지 따라가 모든 boundary input이
+영역에서 쓰이지 않는지 확인한다. low-byte 값의 정상형으로 조건 불변성을 추측하지 않는다. mutable condition이나
+selected phi 의존성은 거부한다. 현재 counter 외 최대 4개 불변 결정의 유한 case를 만들고, 각 case에서 같은 원 BDD 선택으로 phi·
+모든 tracked 갱신·주소/효과 schedule을 함께 증명한다. 별개 출력마다 독립적인 선택을 만들지 않는다.
+
+예: `if(selector!=0) cell+=yes; else cell+=no; --counter`는
+`cell_final = cell_initial + n*(원 selector 조건 ? yes : no)`의 공유 선택을 유지한다. 중첩 조건도 활성 선택만 기록한다.
+소비자는 원 계약과 canonical recipe를 재검사한 뒤 기존 `_StepEvaluator`로 활성 원 조건을 한 번 선택한다. 비활성
+delta/중첩 selector는 요구하지 않는다. n=0에는 **비활성 body** selector/delta를 요구하지 않지만, 실제 zero-visit에서
+실행되는 header 조건/LOAD는 기존 evaluator대로 요구한다. 매번 달라지는 `remaining & 1`은 불변 case가 아니다.
+
+#### 3. 주소가 움직이는 단일 STORE의 효과식
+
+일반 RAM one-visit 계약을 완화하지 않는다. 원 `cycle_graph.transitions`의 unresolved RAM은 그대로 partial이며,
+top-level `write_effect_transitions`와 `write_effect_contracts`에 좁은 별도 projection을 보관한다. 공통 `_Builder`,
+원 `_Correspondence` 바이트 증명, `_StepConditions`, `_validate`, evaluator를 재사용한다.
+
+- 영역에 STORE가 정확히 하나이고 LOAD/CALL/CALLIND/CALLOTHER/direct-address memory action이 없어야 한다.
+  해당 STORE의 원 unresolved **write 발생** 하나만 원 operation/action/ordinal/폭/raw address와 주소 read에 대조한다.
+  임의의 RAM 미해결을 무시하는 사용자 flag는 없다. 다른 unresolved occurrence나 scalar KILL/alias/clobber/debt는 거부한다.
+- scalar read·captured cut·last-write·guard certificate는 기존과 동일하게 검증한다. 출력은 원 register/unique의 mutable
+  cut state와 원 STORE 효과뿐이다. RAM entry·구체 RAM 정의·가짜 `fixedByteSpan`을 만들어내지 않는다.
+- full-width `p_next=p+positive_constant_stride`, 원 STORE read 시점의 `address=p_initial+offset`, 불변 저장값을 증명한다.
+  증분 전 STORE와 증분 후 STORE를 구별하며 stride는 STORE 폭 이상이어야 한다. body당 원 STORE 하나의 순서를 보존한다.
+- 요약은 `M_final = apply_STORE(M_initial, p_initial+offset+i*stride, value, i=0..n-1)`이다. 범위 밖 바이트는 보존된다.
+  이는 주소별 메모리 효과식이지 한 번의 STORE나 RAM 전체 구체 snapshot이 아니다. 원 debt를 해소했다고 표시하지 않는다.
+- 수치 API는 무제한 정수로 first address·last byte·**final pointer**의 no-wrap을 확인한다. 0회에는 가짜 last address나
+  STORE value를 요구하지 않는다. 주소가 mapped/writable인지, fault 없는 native 실행인지, 함수 전체 RETURN과 이후 RAM
+  read까지 연결됐는지는 주장하지 않는다. 결과는 해당 region exit의 scalar+memory effect projection이다.
+
+`evaluate_transition`/`evaluate_loop_summary`는 실제 view collection에 맞는 validator를 선택한다. 입력 접근 전 원 inventory,
+정책과 scope, byte certificate와 receipt, canonical 요약 recipe를 검사한다. 원 일반 one-visit validator로 STORE projection을
+위장할 수 없다. renderer는 새 projection을 `w<region>.n#`로 구별하고 원 `t<region>.n#`와 양쪽 원 node 참조를 유지한다.
+receipt는 엔진 산출물 변경 검출이지 서명 없는 임의 JSON의 진위 인증은 아니다.
+
+#### 실제 검증과 남기는 경계
+
+기존 `case_summary_narrow`의 64개 입력에서 승격/절단·0/127/128/255·overflow·0회/여러 회차를 원 p-code로 대조했다.
+새 `tests/corpus/intra/guarded_loop_summary.c`를 x64 Mach-O `-O0`로 컴파일하고 Ghidra 12.0.4로 봉인 추출했다.
+
+- binary SHA256: `ba1fa527387a9bdf63cd7bbc69d98ccc11a49e4f0dcfb265d97cbeceff141897`.
+- Bundle: `output/guarded-summary-20261024.LfTjJ2/bundles/7147740a35c3a0be1c1f76a54745b4bc8eb52d5b04d14241fc54161e5a4cbd3b`.
+- 환경 변수 `TDO_GUARDED_SUMMARY_BUNDLE=<generation>`와 기존 loop/general-cycle Bundle을 지정해 신규 테스트를 실행한다.
+
+불변 분기 36회/153방문에서 양쪽 선택과 원 LOAD/STORE 주소·폭·값·순서·byte writer epoch·모든 terminal tracked byte를
+대조했다. strided STORE는 증분 전/후 각 30회/210방문/180회 STORE, 총 60회/420방문/360 STORE를 대조했다. 정렬/비정렬
+주소와 저장값 0/UINT64_MAX/바이트 패턴, n=0/1/3/7/19를 포함한다. 주변 RAM을 바이트마다 다른 sentinel로 채워 실제 쓴
+바이트와 쓰지 않은 바이트를 전부 비교했고, 원 cut/exit 횟수와 매 STORE의 주소·폭·값·순서도 확인한다. 분기 결과나 종료를
+주입하지 않는다. LOAD 추가·변하는 저장값·겹치는 stride는 실제 negative로, wrap·잘못된 occurrence/범위/효과·proof·scope·
+receipt 재계산만으로는 숨길 수 없는 변조는 합성 negative로 검사한다.
+
+기존 102회/462방문/120영역 호출과 narrow64회/272방문, 신규96회/573방문을 합치면 이번 targeted 검증은
+**262회 원 p-code 실행·1307방문·280영역 호출**이다. 이는 native 실행이나 suite09 전체 점수라는 뜻이 아니다.
+반복마다 변하는 조건/누산값의 일반 비선형 갱신, 일반 LOAD/STORE alias, 여러 STORE/여러 cut/exit, 중첩 바깥·다중 진입의
+최종 닫힌 공식은 보장하지 않는다. 그런 경우에도 원 일반 순환 그래프 및 만들 수 있는 한 회차식과 partial 사유는 남는다.
+전체 회귀와 Astra의 별도 최종 목표 달성 승인은 동결 검증 후 기록한다.
+
+v14 동결본 전체 회귀: **2972 passed / 32 skipped / 0 failed**, 470.59초(권위 XML 470.489초).
+`output/guarded-summary-20261024.LfTjJ2/final-suite.junit.xml`은 총 3004개, failures/errors 모두 0이다. 기존 UE Core·
+DFB072 ELF/PE64/PE32·호출/RAM·모델·부분 레지스터·원 순환/한 회차 회귀를 포함한다. 32개 skip은 기존과 같은 Linux
+제약 23개와 미보유 Bundle 9개다. targeted 135개도 dense SSA에서 skip 없이 통과했다(`dense-summary.junit.xml`, 24.083초).
+코드·테스트 동결 전후 SHA256은 `eb54d89ec311a7991ffe57ab98e78a457ab4b5a71979ded84e285ed6422d38c5`로 동일하다.
+
+첫 회귀에서 새 projection이 없는 기존 결과에도 빈 optional 필드 두 개를 추가한 차이를 기존 보존 검사가 발견했다.
+해당 필드는 실제 projection이 있을 때만 발행하도록 수정하고 기존 실제 순환 보존 6개를 재통과한 다음 전체를 처음부터
+다시 실행했다. 위 수치는 수정본의 완주 결과이며 중단된 첫 실행을 성공 근거로 합치지 않는다.
+
+같은 출력 폴더의 `case_summary_narrow/`, `case_summary_branch/`, `case_strided_store/`, `case_strided_after/`는 각각
+원 `record.json`·엔진 `record.txt`·실제 boundary 입력과 API 결과의 `examples.json`을 담는다. 총 9개 예제는 원 p-code
+방문과 함께 생성했다. Python 정수를 JSON 문자열 그대로 운반했으며 재입력 receipt/recipe 검사, renderer exactmatch,
+공개 API 결과 일치·미귀속 가정 기본 거부를 확인했다. Astra도 손실 없는 64-bit 상수, 원 unknown 보존, 0회 비활성 입력
+미접근과 전달 파일을 독립 검수했다.
+
+Astra가 권위 full/dense XML과 기존 UE·DFB072 3플랫폼·forward/모델 회귀, 전달 9개 API/4개 renderer를 최종 확인하고
+**이번 합의된 세 단계 구현 목표 달성 및 이대로 마무리를 명시적으로 승인**했다. 필수 미달사항은 없다는 판단이다.
+이 승인은 low-byte 승격/절단·불변 분기의 공유 선택별 최종식·단일 strided STORE 효과식에 관한 것이며, 위에 명시한
+일반 feedback/alias/비선형·여러 STORE·cut·exit까지 최종 공식으로 풀었다는 의미는 아니다.

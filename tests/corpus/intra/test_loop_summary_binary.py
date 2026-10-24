@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from synthetic import RAX, RCX, RDI, RDX, RSI, RSP
+from synthetic import RAX, RCX, RDI, RDX, RSI, RSP, R8
 from test_general_cycle_binary import MASK, _expected, _physical_place, _root, general_cycle_binary
 from test_multi_target_memory_binary import _load, _value
 from test_recurrence_register_binary import _raw_block_edges
@@ -34,8 +34,8 @@ def loop_summary_binary():
 class _SummaryVisits(_Visits):
     """Keep v12's all-effects/writer-epoch oracle and add loop boundaries."""
 
-    def __init__(self, case, item, record, *, region=0):
-        super().__init__(case, item, record, region=region)
+    def __init__(self, case, item, record, *, region=0, collection='transitions'):
+        super().__init__(case, item, record, region=region, collection=collection)
         self.summary, = [row for row in record['loop_summaries'] if row['transition'] == self.view['id']]
         assert self.summary['complete'], self.summary
         self.pending, self.invocations = None, []
@@ -65,9 +65,9 @@ class _SummaryVisits(_Visits):
         self.pending = None
 
 
-def _run(case, item, record, initial, delta, count, selector=0, *, region=0):
+def _run(case, item, record, initial, delta, count, selector=0, *, region=0, no=0):
     vm = _SummaryVisits(case, item, record, region=region)
-    for offset, value in ((RSP, 0x70000000), (RDI, initial), (RSI, delta), (RDX, count), (RCX, selector)):
+    for offset, value in ((RSP, 0x70000000), (RDI, initial), (RSI, delta), (RDX, count), (RCX, selector), (R8, no)):
         vm.preset(case['ids'][1], offset, 8, value)
     vm.preset(item.unit.scopes.function.entry.space_id, 0x70000000, 8, 0x2000)
     observed = vm.run()
@@ -123,14 +123,18 @@ def test_existing_actual_regions_use_their_own_boundary_counter(general_cycle_bi
     assert visits == (90 if suffix == 'sequential' else 162)
 
 
-def test_actual_narrow_promotions_are_explicit_partial_not_a_wide_translation(loop_summary_binary):
+def test_actual_narrow_promotion_and_truncation_preserve_byte_modulo(loop_summary_binary):
     case = loop_summary_binary
     record = _root(case['results'][case['names']['case_summary_narrow']])
     summary, = record['loop_summaries']
-    assert not summary['complete'] and summary['reason']
-    assert record['cycle_graph']['coverage']['expression_complete']
-    with pytest.raises(Ineligible, match='incomplete'):
-        evaluate_loop_summary(record, summary['id'], {})
+    assert summary['complete'], summary
+    assert any(row['rule'] == 'extension_discarded_by_low_bits' for row in summary['derivation'])
+    for initial in (0, 127, 128, 255):
+        for delta in (1, 0x101, 0x80, 0x100):
+            for count in (0, 1, 3, 9):
+                vm = _run(case, case['results'][case['names']['case_summary_narrow']], record, initial, delta, count)
+                assert _value(vm, case['ids'][1], RAX, 8) == (initial + count * delta) & 255
+                assert vm.invocations[0]['iterations'] == count
 
 
 def test_existing_nontranslation_regions_keep_graph_and_one_visit(general_cycle_binary):

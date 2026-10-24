@@ -60,12 +60,15 @@ def _union(spans):
     return result
 
 
-def _validate(record, view):
+def _validate(record, view, *, write_projection=None):
     graph = record['cycle_graph']
-    receipt = graph['transition_contracts'].get(view['id'])
+    receipts = record.get('write_effect_contracts', {}) if write_projection is not None else graph['transition_contracts']
+    receipt = receipts.get(view['id'])
     _require(receipt is not None and receipt['source'] == _digest(_authority(record))
              and receipt['derived'] == _digest(view), 'derivation receipt mismatch')
     _require(view['endianness'] == record['endianness'] == 'little', 'unsupported endianness')
+    scope = write_projection['output_scope'] if write_projection is not None else 'loop_carried_inputs_and_observed_RAM_writes_not_full_machine'
+    _require(view['output_scope'] == scope and ('write_projection' in view) == (write_projection is not None), 'output projection scope')
     _require(view['analysis_context'] == graph['analysis_context'], 'analysis context mismatch')
     _require(view['normalization_assumptions'] == graph['analysis_context']['normalization_assumptions'],
              'normalization policy mismatch')
@@ -389,7 +392,7 @@ def _validate(record, view):
     _require([row['edge'] for row in view['outcomes']] == outcomes, 'outcome inventory')
     required = [_span(definitions[identifier]['span']) for row in dag_order if row['key'] in actions
                 for identifier in actions[row['key']]['definitions']
-                if definitions[identifier]['span'][1] in ('address_space', 'function_relative')]
+                if write_projection is None and definitions[identifier]['span'][1] in ('address_space', 'function_relative')]
     required.extend(_span(row['span']) for row in input_ids.values() if row['mutable'])
     for outcome in view['outcomes']:
         updates = [_span(row['span']) for row in outcome['updates']]
