@@ -35,7 +35,7 @@ from tdo_v2.scope_identity import open_configured_extraction
 from tdo_v2.span_geometry import ByteSpan
 
 
-def _load(environment, monkeypatch):
+def _load(environment, monkeypatch, *, require_calls=True):
     path = os.environ.get(environment)
     if not path:
         pytest.skip(f"set {environment} to a sealed actual-binary generation")
@@ -72,8 +72,8 @@ def _load(environment, monkeypatch):
         return None
 
     projections = observed_call_state_projections(units[0].observation)
-    assert projections, "the selected actual case must contain an observed call shape"
-    stack = projections[0].memory_transition.caller_base
+    assert projections or not require_calls, "the selected actual case must contain an observed call shape"
+    stack = projections[0].memory_transition.caller_base if projections else None
     assert all(row.memory_transition.caller_base == stack for row in projections)
     return dict(results=results, names=names, provenance=provenance, ids=ids, image=image, stack=stack,
                 image_format=image_info.executable_format, image_info=image_info,

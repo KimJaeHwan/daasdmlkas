@@ -74,7 +74,7 @@ from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 9   # (9: exact call-byte overlays preserve post-call SSA register writes)
+RECORD_VERSION = 12  # (12: optional one-visit state expressions, original cyclic graph retained)
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -708,7 +708,8 @@ def _gap_used(records, start, outputs):
     and the stitched outputs) uses, or None."""
     value_nodes = _value_reached({"nodes": records, "root": [item["part"] for item in outputs]})
     for part in (*(part for record in records[start:]
-                   if not (record.get("condition_only") or record.get("physical_only")) or record["id"] in value_nodes
+                   if not (record.get("condition_only") or record.get("physical_only") or record.get("cycle_only"))
+                   or record["id"] in value_nodes
                    for part in _node_parts(record, include_condition=False)),
                  *(item["part"] for item in outputs)):
         target = records[part["node"]] if "node" in part and part["node"] < len(records) else None
@@ -821,6 +822,7 @@ class _Builder:
                              if row.is_memory_space}
         self.x64 = evidence.translation_namespace.language_id.startswith("x86:LE:64")
         self.conditions = conditions
+        self.recurrences = None
         self.building_condition = False
         self.building_physical = False
         self.physical_memory = physical_memory
@@ -1004,6 +1006,10 @@ class _Builder:
             self.expanding.discard(node)
         self._condition(record, definition.span, self.index.joins.get(definition_id, ()),
                         definition.block_key, depth, definition_id=definition_id)
+        from ._record_recurrence import annotate_recurrence
+
+        if not getattr(self, "cycle_projection", False):
+            annotate_recurrence(self, record, definition_id, depth)
         self._done(record)
         return record["id"]
 
@@ -2352,11 +2358,14 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
            stitch=None, merge_run=None, physical_memory=False):
     from .lane_slice import lane_slice, lane_index
     from ._record_conditions import ConditionIndex
+    from ._record_recurrence import RecurrenceIndex
 
     limits = limits or Limits()
     demand_seeds = [(node, spans) for node, spans in seeds]
     index = lane_index(normalized, unit)
     conditions = ConditionIndex(normalized, unit, index)
+    recurrences = RecurrenceIndex(normalized, unit, index)
+    demand_seeds.extend(recurrences.condition_seeds())
     root_location = metadata.get("exit")
     if root_location is None:
         locations = set()
@@ -2430,6 +2439,7 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
     builder = _Builder(normalized, unit, origins=origins, declared=declared, limits=limits, demands=demands,
                        provenance=provenance, stitch=stitch, index=index, conditions=conditions,
                        physical_memory=physical_memory)
+    builder.recurrences = recurrences
     if root_guard is not None:
         builder.control_refs.add(root_guard)
     physical_metadata = {"physical_effect_inventory": False, "physical_root_events": []} if physical_memory else {}
@@ -2519,7 +2529,21 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
                 record["physical_root_guard"] = builder._guard_ref(root_guard)
     elif control_reason is not None:
         record["execution_fallback"] = control_reason
+    from ._record_cycles import publish_cycle_graph
+
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous, 16 * limits.depth + 2000))
+    try:
+        cycle_graph = publish_cycle_graph(builder)
+    finally:
+        sys.setrecursionlimit(previous)
+    if cycle_graph is not None:
+        record["cycle_graph"] = cycle_graph
     _finish_conditions(record)
+    if cycle_graph is not None:
+        from ._record_transition_contract import seal
+
+        seal(record)
     return record
 
 
@@ -2633,6 +2657,10 @@ def render(record) -> str:
                          f"SP {stack} == {expected}")
     for call, reason in record.get("physical_call_cuts", {}).items():
         lines.append(f"physical call {call} not connected: {reason}")
+    if "cycle_graph" in record:
+        from ._record_cycles import render_cycle_graph
+
+        lines.extend(render_cycle_graph(record["cycle_graph"], nodes, _render_parts))
     for node in record.get("nodes", ()):
         if node["kind"] == "entry" and "register" in node and not node.get("origins"):
             continue   # shown by name where used
@@ -2695,6 +2723,14 @@ def _render_node(node, nodes=None):
                 + f"; reaches=g{guarded['reach']}]"
         elif node.get("condition_fallback"):
             text += f" [unconditional: {node['condition_fallback']}]"
+        recurrence = node.get("recurrence")
+        if recurrence is not None:
+            initial = _render_parts([recurrence['init']['part']], nodes)[0]
+            transition = _render_parts([recurrence['transition']['part']], nodes)[0]
+            text += (f" [recurrence: init={initial}; next={transition}; header={recurrence['header']}; "
+                     f"backedge={recurrence['latch']}->{recurrence['header']}; structural only]")
+        elif node.get("recurrence_fallback"):
+            text += f" [recurrence unavailable: {node['recurrence_fallback']}]"
         return text + origins
     if kind == "cut":
         return f"cut {node['target']} ({node['reason']})"
@@ -2885,6 +2921,7 @@ def _finish_conditions(record):
     for identifier in _value_reached(record):
         nodes[identifier].pop("condition_only", None)
         nodes[identifier].pop("physical_only", None)
+        nodes[identifier].pop("cycle_only", None)
     for node in record["nodes"]:
         if "condition" in node:
             reason = _guard_reason(node["condition"], nodes)
@@ -2946,7 +2983,7 @@ def _condition_signature(condition, nodes):
         if isinstance(value, dict):
             return tuple((key, node(value[key]) if key == "node" else freeze(value[key]))
                          for key in sorted(value) if key not in (
-                             "id", "origins", "condition_only", "physical_only", "import",
+                             "id", "origins", "condition_only", "physical_only", "cycle_only", "import",
                              "condition_evaluation", "evaluation"))
         if isinstance(value, (tuple, list)):
             return tuple(freeze(item) for item in value)
@@ -2989,12 +3026,14 @@ def eligibility(record, route: str = "injected") -> str | None:
     if route == "stitched":
         reached = _reached(record)
         nodes = [node for node in record.get("nodes", ()) if node["id"] in reached
-                 and (not (node.get("condition_only") or node.get("physical_only")) or node["id"] in value_nodes)]
+                 and (not (node.get("condition_only") or node.get("physical_only") or node.get("cycle_only"))
+                      or node["id"] in value_nodes)]
     else:
         # (route "injected": a stitched call's imported subtree is not this
         # record's value -- docs 25.31 C-9)
         nodes = [node for node in record.get("nodes", ()) if "import" not in node
-                 and (not (node.get("condition_only") or node.get("physical_only")) or node["id"] in value_nodes)]
+                 and (not (node.get("condition_only") or node.get("physical_only") or node.get("cycle_only"))
+                      or node["id"] in value_nodes)]
     if any(node["kind"] == "cut" or node.get("interrupted") for node in nodes):
         return "cut"
     for node in nodes:
@@ -3161,10 +3200,12 @@ def evaluate(record, entry, *, call=None, max_choices=256, route: str = "injecte
     if route == "stitched":
         reached = _reached(record)
         own = [node for node in record["nodes"] if node["id"] in reached
-               and (not (node.get("condition_only") or node.get("physical_only")) or node["id"] in value_nodes)]
+               and (not (node.get("condition_only") or node.get("physical_only") or node.get("cycle_only"))
+                    or node["id"] in value_nodes)]
     else:
         own = [node for node in record["nodes"] if "import" not in node
-               and (not (node.get("condition_only") or node.get("physical_only")) or node["id"] in value_nodes)]
+               and (not (node.get("condition_only") or node.get("physical_only") or node.get("cycle_only"))
+                    or node["id"] in value_nodes)]
     choice_keys, control = _choice_contract(record, nodes, own, route)
     results = set()
     unknown = False
@@ -3201,6 +3242,13 @@ def evaluate_physical(record, entry, *, max_steps=200000):
     from ._record_memory import evaluate_physical as interpret
 
     return interpret(record, entry, max_steps=max_steps)
+
+
+def evaluate_transition(record, identity, inputs, *, accept_unattributed_assumptions=False):
+    """One derived cut-DAG visit; does not change original loop eligibility."""
+    from ._record_transitions import evaluate_transition as interpret
+
+    return interpret(record, identity, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
 
 
 class _Unknown(Exception):

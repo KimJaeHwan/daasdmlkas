@@ -44,11 +44,13 @@ def _checkpoint(builder):
     return (len(builder.records), builder.ledger.edges, builder.controls.checkpoint(), chain,
             dict(builder.physical_calls), dict(builder.physical_call_builders),
             {key: len(value["outputs"]) for key, value in builder.physical_calls.items()},
-            dict(builder.target_selectors))
+            dict(builder.target_selectors),
+            {key: ("caller_register_writes" in value, len(value.get("caller_register_writes", ())))
+             for key, value in builder.physical_calls.items()})
 
 
 def _restore(builder, checkpoint):
-    start, edges, controls, chain, calls, builders, output_lengths, selectors = checkpoint
+    start, edges, controls, chain, calls, builders, output_lengths, selectors, write_lengths = checkpoint
     builder.controls.restore(controls)
     for item, truncated, refs, decisions in chain:
         item.truncated, item.control_refs, item.control_decisions = truncated, refs, decisions
@@ -60,6 +62,11 @@ def _restore(builder, checkpoint):
     builder.physical_calls.update(calls)
     for key, length in output_lengths.items():
         del calls[key]["outputs"][length:]
+        present, writes = write_lengths[key]
+        if present:
+            del calls[key]["caller_register_writes"][writes:]
+        else:
+            calls[key].pop("caller_register_writes", None)
     builder.physical_call_builders.clear()
     builder.physical_call_builders.update(builders)
     builder.target_selectors.clear()
@@ -573,6 +580,109 @@ def _post_call_definition(builder, base, read, piece, resolution):
     return definition.operation_key
 
 
+def _guarded_register_plan(builder, base, read, piece, resolution, parts, origin):
+    """Reuse a supplied SSA phi's exact guards, never invent a new source."""
+    from .operation_records import _slice_parts
+
+    if not _unmodified_read(builder, base, read, None):
+        return None
+    originals = _slice_parts(parts, piece.start - origin, piece.end - origin)
+    if len(originals) != 1 or originals[0].get("loop") or originals[0].get("pruned"):
+        return None
+    source = originals[0]
+    phi = builder.records[source["node"]]
+    if phi.get("kind") != "phi" or not any(field in phi for field in ("condition", "guarded_sources")):
+        return None
+    fragments = [fragment for fragment in resolution.fragments if fragment.span.contains(piece)]
+    if len(fragments) != 1:
+        return None
+    identifiers = []
+    for identifier in fragments[0].definition_ids:
+        identifiers.extend(builder.index.joins.get(identifier, (identifier,)))
+    alternatives = phi.get("alternatives", ())
+    sources = [part.get("definition_ref", {}).get("id") for part in alternatives]
+    if len(sources) != len(set(sources)) or set(sources) != set(identifiers):
+        return None
+    conditions = builder._condition_index()
+    location = conditions._locations.get(read)
+    if location is None:
+        return None
+    guarded, _ = conditions.guarded_sources(piece, tuple(sources), location[0], read)
+    if guarded is None:
+        return None
+    if "guarded_sources" in phi and phi["guarded_sources"] != {
+            "guards": [builder._guard_ref(guard) for guard in guarded.guards],
+            "reach": builder._guard_ref(guarded.reach)}:
+        return None
+    low, high = source["bytes"]
+    selected = []
+    for identifier, alternative in zip(sources, alternatives, strict=True):
+        definition = builder.ssa.definitions[identifier]
+        if not definition.span.contains(piece):
+            return None
+        sliced = _slice_parts([alternative], low, high)
+        if len(sliced) != 1 or sliced[0].get("loop") or sliced[0].get("pruned"):
+            return None
+        part, = sliced
+        producer = builder.records[part["node"]]
+        if definition.kind is MemoryDefinitionKind.ENTRY:
+            if producer.get("kind") not in ("entry", "bound"):
+                return None
+            kind = "call"
+        elif definition.kind is MemoryDefinitionKind.DATA_WRITE:
+            raw = _raw(builder, definition.operation_key)
+            output = raw[2].output if raw is not None else None
+            if producer.get("kind") != "op" or producer.get("key") != definition.operation_key \
+                    or producer.get("interrupted") or output is None or output.kind is not VarnodeKindCode.REGISTER \
+                    or output.coordinate.space_id != builder.register_space \
+                    or not output.coordinate.byte_offset <= piece.start < piece.end \
+                        <= output.coordinate.byte_offset + output.byte_size:
+                return None
+            if _unmodified_read(builder, base, definition.operation_key, None):
+                kind = "retained"
+            elif _unmodified_read(builder, definition.operation_key, base, piece):
+                kind = "call"
+            else:
+                return None
+        else:
+            return None
+        selected.append({"kind": kind, "original": part, "operation": definition.operation_key})
+    return {"source": source, "sources": selected}
+
+
+def _guarded_register_part(builder, found, base, read, piece, plan):
+    """A physical-only overlay; the original SSA phi is left unchanged."""
+    from copy import deepcopy
+    from .operation_records import _StitchCut
+
+    phi = builder.records[plan["source"]["node"]]
+    alternatives = []
+    for item in plan["sources"]:
+        if item["operation"] is not None:
+            producer = builder.records[item["original"]["node"]]
+            boundary = {"operation": item["operation"], "node": producer["id"],
+                        "context": builder.physical_context, "output": producer["output"],
+                        "phase": "after" if item["kind"] == "retained" else "before"}
+            inventory = found.setdefault("caller_register_writes", [])
+            if boundary not in inventory:
+                inventory.append(boundary)
+        part = output_part(builder, found, piece) if item["kind"] == "call" else item["original"]
+        if part is None:
+            raise _StitchCut("guarded register export unavailable")
+        alternatives.append(dict(part))
+        builder._edge()
+    record = builder._new(None, {"kind": "phi", "reason": "physical register choices", "size": piece.size,
+                                 "alternatives": alternatives, "physical_only": True,
+                                 "physical_register_choice": {**plan, "register_offset": piece.start,
+                                                              "size": piece.size, "call": base, "read": read,
+                                                              "context": found["id"]}})
+    for name in ("condition", "choices", "guarded_sources"):
+        if name in phi:
+            record[name] = deepcopy(phi[name])
+    builder._done(record)
+    return {"node": record["id"], "bytes": [0, piece.size], "at": [0, piece.size]}
+
+
 def bind_register_operand(builder, read, span):
     rows = [row for row in builder.normalized.call_clobber_reads if row.operation_key == read
             and any(piece.object_id == span.object_id and piece.overlaps(span) for piece in row.spans)]
@@ -620,22 +730,29 @@ def bind_register_fragments(builder, read, span, resolution, parts=None, input_i
         if piece.overlaps(span):
             points.update((max(span.start, piece.start), min(span.end, piece.end)))
     points = sorted(points)
-    wanted, retained = [], []
-    for low, high in zip(points, points[1:]):
-        if not any(piece.start <= low and high <= piece.end for piece in bands):
-            continue
-        piece = ByteSpan(span.object_id, low, high - low)
-        if _unmodified_read(builder, base, read, piece):
-            wanted.append(piece)
-        else:
-            definition = _post_call_definition(builder, base, read, piece, resolution)
-            if definition is None:
-                return None
-            retained.append((piece, definition))
-    if not wanted:
-        return None
     checkpoint = _checkpoint(builder)
     try:
+        if parts is None:
+            parts = _slice_parts(builder._fragments(resolution, None, 0), span.start - resolution.span.start,
+                                 span.end - resolution.span.start)
+        wanted, retained, guarded = [], [], []
+        for low, high in zip(points, points[1:]):
+            if not any(piece.start <= low and high <= piece.end for piece in bands):
+                continue
+            piece = ByteSpan(span.object_id, low, high - low)
+            if _unmodified_read(builder, base, read, piece):
+                wanted.append(piece)
+            else:
+                definition = _post_call_definition(builder, base, read, piece, resolution)
+                if definition is not None:
+                    retained.append((piece, definition))
+                    continue
+                plan = _guarded_register_plan(builder, base, read, piece, resolution, parts, span.start)
+                if plan is None:
+                    raise _StitchCut("guarded register source unavailable")
+                guarded.append((piece, plan))
+        if not wanted and not guarded:
+            raise _StitchCut("no call register fragments")
         found = context(builder, base)
         if found is None:
             raise _StitchCut("partial register call unavailable")
@@ -647,9 +764,12 @@ def bind_register_fragments(builder, read, span, resolution, parts=None, input_i
             replacements.append({"context": found["id"], "part": part,
                                  "offset": piece.start - span.start, "size": piece.size,
                                  "register_offset": piece.start, "read": read, "call": base})
-        if parts is None:
-            parts = _slice_parts(builder._fragments(resolution, None, 0), span.start - resolution.span.start,
-                                 span.end - resolution.span.start)
+        for piece, plan in guarded:
+            part = _guarded_register_part(builder, found, base, read, piece, plan)
+            replacements.append({"context": found["id"], "part": part,
+                                 "offset": piece.start - span.start, "size": piece.size,
+                                 "register_offset": piece.start, "read": read, "call": base})
+        replacements.sort(key=lambda item: item["offset"])
         merged = _register_overlay(parts, span.size, replacements)
         retained_parts = []
         for piece, operation in retained:

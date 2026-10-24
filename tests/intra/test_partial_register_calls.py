@@ -15,13 +15,13 @@ MASK = (1 << 64) - 1
 
 
 def _partial_case(writes=((0, 1, 0xaa),), *, staged=False, conditional=False, unknown=False, wide=8,
-                  byte_input=False, other_operand=False):
+                  byte_input=False, other_operand=False, fresh=R9):
     caller = (FunctionBuilder().sub_rsp(0x28).ins(store(reg(RCX), const(7)), copy(reg(RDX), reg(RCX)))
               .call(0x1800))
     if conditional:
         caller.cbranch('skip', reg(R9, 1))
     for offset, size, value in writes:
-        caller.ins(copy(reg(RAX + offset, size), reg(R9, size) if unknown else const(value, size)))
+        caller.ins(copy(reg(RAX + offset, size), reg(fresh, size) if unknown else const(value, size)))
     if conditional:
         caller.label('skip')
     if wide == 4:
@@ -274,12 +274,14 @@ def test_ah_fragments_from_multiple_returns_share_one_original_exit():
 
 
 @pytest.mark.parametrize('choice', (0, 1))
-def test_a_mixed_phi_of_new_write_and_old_call_byte_stays_unresolved(choice):
+def test_a_mixed_phi_of_new_write_and_old_call_byte_uses_the_original_condition(choice):
     case, key = _partial_case(conditional=True)
     record = _record(case, key)
     vm = _execute(case, registers=((R9, choice),))
-    with pytest.raises(Ineligible):
-        evaluate_physical(record, entry_reader(vm))
+    interpreted = evaluate_physical(record, entry_reader(vm))
+    assert interpreted.value == final_register(vm, RAX, 8)
+    assert any('physical_register_choice' in node for node in record['nodes'])
+    assert eligibility(record) == 'debt'
 
 
 @pytest.mark.parametrize('mutation', ('offset', 'size', 'register', 'input', 'read', 'context', 'part',

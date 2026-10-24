@@ -722,7 +722,15 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     raise Ineligible("invalid physical register fragment range")
                 self.context(item.get("context"), item["call"])
                 self.check_part(item["part"], size)
-                self.exported_part(item.get("context"), item["register_offset"], size, item["part"])
+                chosen = self.nodes[item["part"]["node"]]
+                if "physical_register_choice" in chosen:
+                    relation_choice = self.register_choice(chosen)
+                    if item["part"].get("bytes") != [0, size] or item["part"].get("at") != [0, size] \
+                            or any(relation_choice.get(name) != item.get(name) for name in (
+                                "context", "call", "read", "register_offset", "size")):
+                        raise Ineligible("physical guarded register projection mismatch")
+                else:
+                    self.exported_part(item.get("context"), item["register_offset"], size, item["part"])
                 if not any(item["call"] in calls and span["start"] <= item["register_offset"]
                            and item["register_offset"] + size <= span["start"] + span["size"] for span, calls in bands):
                     raise Ineligible("register fragment is not an original call debt")
@@ -765,6 +773,80 @@ def evaluate_physical(record, entry, *, max_steps=200000):
             if relation.get("parts") != parts:
                 raise Ineligible("physical register fragments replaced original SSA bytes")
             return parts
+
+        def register_choice(self, node):
+            """A separate physical phi must keep the original SSA choice."""
+            self.tick()
+            choice, width = node.get("physical_register_choice"), node.get("size")
+            if not isinstance(choice, dict) or node.get("kind") != "phi" \
+                    or node.get("reason") != "physical register choices" \
+                    or type(width) is not int or width <= 0 or choice.get("size") != width \
+                    or type(choice.get("register_offset")) is not int or choice["register_offset"] < 0 \
+                    or type(choice.get("read")) is not str or type(choice.get("call")) is not str:
+                raise Ineligible("invalid physical register choice")
+            self.check_part(choice.get("source"), width)
+            source = choice["source"]
+            original = self.nodes[source["node"]]
+            if original is node or original.get("kind") != "phi" or "physical_register_choice" in original \
+                    or original.get("physical_context") != node.get("physical_context") \
+                    or source.get("at") != [0, width] \
+                    or not any(field in original for field in ("condition", "guarded_sources")) \
+                    or any(node.get(field) != original.get(field) for field in (
+                        "condition", "choices", "guarded_sources")):
+                raise Ineligible("physical register choice changed original control")
+            context = self.context(choice.get("context"), choice["call"])
+            if context.get("parent_context") != node.get("physical_context"):
+                raise Ineligible("physical register choice has a different caller")
+            sources, alternatives = choice.get("sources"), node.get("alternatives", ())
+            if not isinstance(sources, (tuple, list)) or len(sources) != len(original.get("alternatives", ())) \
+                    or len(sources) != len(alternatives):
+                raise Ineligible("incomplete physical register choice")
+            low, high = source["bytes"]
+            for item, old, current in zip(sources, original["alternatives"], alternatives, strict=True):
+                if not isinstance(item, dict) or item.get("kind") not in ("call", "retained") \
+                        or item.get("operation") != old.get("definition_ref", {}).get("operation"):
+                    raise Ineligible("physical register choice source mismatch")
+                sliced = _slice_parts([old], low, high)
+                if sliced != [item.get("original")]:
+                    raise Ineligible("physical register choice is not original SSA")
+                reference = old.get("definition_ref", {})
+                if reference.get("kind") == "entry":
+                    producer = self.nodes[item["original"]["node"]]
+                    if item["kind"] != "call" or item["operation"] is not None \
+                            or producer.get("kind") not in ("entry", "bound") \
+                            or producer.get("physical_context") != node.get("physical_context"):
+                        raise Ineligible("physical entry register choice classification")
+                elif reference.get("kind") == "data_write":
+                    producer = self.nodes[item["original"]["node"]]
+                    boundary = {"operation": item["operation"], "node": producer["id"],
+                                "context": node.get("physical_context"), "output": producer.get("output"),
+                                "phase": "after" if item["kind"] == "retained" else "before"}
+                    rows = [row for row in context.get("caller_register_writes", ())
+                            if row.get("operation") == item["operation"]]
+                    if rows != [boundary] or producer.get("kind") != "op" \
+                            or producer.get("key") != item["operation"] \
+                            or producer.get("physical_context") != node.get("physical_context"):
+                        raise Ineligible("physical register choice crossed original call boundary")
+                else:
+                    raise Ineligible("unsupported original register choice definition")
+                self.check_part(current, width)
+                if current.get("at") != [0, width]:
+                    raise Ineligible("physical register choice placement")
+                if item["kind"] == "call":
+                    self.exported_part(choice["context"], choice["register_offset"], width, current)
+                else:
+                    producer = self.nodes[current["node"]]
+                    output = producer.get("output", {})
+                    offset = choice["register_offset"]
+                    if current != item["original"] or producer.get("kind") != "op" \
+                            or producer.get("key") != item["operation"] \
+                            or producer.get("physical_context") != node.get("physical_context") \
+                            or output.get("kind") != "register_file" \
+                            or type(output.get("start")) is not int or type(output.get("size")) is not int \
+                            or not output["start"] <= offset < offset + width <= output["start"] + output["size"] \
+                            or current["bytes"] != [offset - output["start"], offset - output["start"] + width]:
+                        raise Ineligible("physical register choice changed retained SSA write")
+            return choice
 
         def exported_part(self, identifier, offset, size, part):
             """Match an exact named projection of this body's terminal state."""
@@ -1120,6 +1202,8 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     self.exit_phi(node)
                 if node.get("reason") == "physical call targets":
                     self.target_phi(node)
+                if "physical_register_choice" in node:
+                    self.register_choice(node)
                 for item in node.get("operands", ()):
                     if any(field in item for field in ("physical_register", "physical_read", "physical_register_fragments")):
                         operation_guard = node.get("physical_guard", self.control.get("reach", {}).get(node.get("key")))
@@ -1322,6 +1406,9 @@ def evaluate_physical(record, entry, *, max_steps=200000):
             if node.get("kind") in ("cut", "debt", "call", "override") or node.get("interrupted"):
                 raise Ineligible(f"selected physical {node.get('kind')}")
             self.require_context(node)
+            if "physical_register_choice" in node:
+                choice = node["physical_register_choice"]
+                self.validate_context(choice["context"], choice["call"])
             self.value_active.add(identifier)
             try:
                 if "execution_guard" in node and not self.physical_guard(node["execution_guard"]):
