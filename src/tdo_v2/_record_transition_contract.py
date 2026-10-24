@@ -408,10 +408,26 @@ def _validate(record, view, *, write_projection=None):
                      and proof['span'] == row['span'], 'output certificate root')
             span = _span(row['span'])
             candidates = set()
-            for number in ([outcome['edge']] if outcome['kind'] == 'continue' else [*region['entry_edges'], *cut]):
-                candidates.update(captured_sources(number, span))
+            exit_state = graph['edge_states'][outcome['edge']]
+            captured_exit = outcome['kind'] == 'exit' and exit_state['evidence'] == 'captured'
+            if captured_exit:
+                facts = [fact for fact in exit_state['facts'] if _span(fact['span']).overlaps(span)]
+                _require(exit_state['edge'] == outcome['edge'] and len(facts) == 1
+                         and _span(facts[0]['span']).contains(span), 'missing original exit state')
+                fact, = facts
+                _require(row.get('captured_exit_evidence') == dict(
+                    edge=outcome['edge'], span=fact['span'], definition_ids=fact['definition_ids']),
+                    'original exit fact correspondence')
+                candidates.update(raw_sources(fact['definition_ids'], span))
+            else:
+                _require('captured_exit_evidence' not in row, 'fabricated exit fact')
+                if outcome['kind'] == 'exit':
+                    _require(exit_state['edge'] == outcome['edge'] and exit_state['evidence'] == 'not_captured'
+                             and not exit_state['facts'], 'uncaptured exit state')
+                for number in ([outcome['edge']] if outcome['kind'] == 'continue' else [*region['entry_edges'], *cut]):
+                    candidates.update(captured_sources(number, span))
             _require(set(proof['candidate_definitions']) == candidates, 'output original cut sources')
-            if outcome['kind'] == 'exit':
+            if outcome['kind'] == 'exit' and not captured_exit:
                 _require(all(source['kind'] == 'input' for source in row['sources']), 'uncaptured exit update')
             check_value(row['part'], row['sources'], row['proof'], _span(row['span']))
 

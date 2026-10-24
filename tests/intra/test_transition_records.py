@@ -3,6 +3,7 @@
 import copy as copying
 import json
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -33,6 +34,169 @@ def _view(record):
 
 def _values(view, **registers):
     return {row['id']: registers.get(str(int(row['span'][-2], 16))) for row in view['inputs']}
+
+
+def _captured_exit_loop():
+    # The shared exit has two ORIGINAL predecessors, so SSA captures both
+    # exit edge facts, including the post-increment nonidentity state.
+    return (FunctionBuilder().ins(copy(reg(RAX), reg(RCX))).label('top')
+            .cbranch('end', reg(CF, 1)).ins(add(reg(RAX), reg(RAX), const(1)))
+            .cbranch('end', reg(R9, 1)).branch('top')
+            .label('end').ins(copy(reg(RBX), reg(RAX))).ret())
+
+
+@pytest.mark.parametrize('early,late,expected,kind', ((1, 0, 10, 'exit'), (0, 1, 11, 'exit'),
+                                                   (0, 0, 11, 'continue')))
+def test_captured_exit_poststate_reuses_its_original_edge_fact(early, late, expected, kind):
+    record = _record(_captured_exit_loop(), known=True)
+    view = _view(record)
+    result = evaluate_transition(record, view['id'], _values(
+        view, **{str(RAX): 10, str(CF): early, str(R9): late}))
+    assert result['kind'] == kind and result['updates'][0]['value'] == expected
+    for outcome in view['outcomes']:
+        update, = outcome['updates']
+        if outcome['kind'] == 'continue':
+            assert 'captured_exit_evidence' not in update
+            continue
+        evidence = update['captured_exit_evidence']
+        state = record['cycle_graph']['edge_states'][outcome['edge']]
+        fact, = state['facts']
+        assert evidence == dict(edge=outcome['edge'], span=fact['span'], definition_ids=fact['definition_ids'])
+        proof = view['proofs'][update['proof']]
+        assert proof['block'] == record['cycle_graph']['cfg']['edges'][outcome['edge']]['source']
+        assert proof['before_position'] is None and proof['span'] == update['span']
+    assert eligibility(record) == 'loop'
+
+
+def test_uncaptured_exit_keeps_the_existing_identity_fallback():
+    record = _record(known=True)
+    view = _view(record)
+    outcome, = [row for row in view['outcomes'] if row['kind'] == 'exit']
+    assert record['cycle_graph']['edge_states'][outcome['edge']]['evidence'] == 'not_captured'
+    assert all('captured_exit_evidence' not in update
+               and all(source['kind'] == 'input' for source in update['sources']) for update in outcome['updates'])
+    result = evaluate_transition(record, view['id'], _values(view, **{str(RAX): 10, str(RDX): 5}))
+    assert result['kind'] == 'exit' and result['updates'][0]['value'] == 10
+
+
+@pytest.mark.parametrize('change', ('missing', 'partial', 'duplicate'))
+def test_missing_or_partial_exit_facts_do_not_invent_a_nonidentity_poststate(monkeypatch, change):
+    original = _record_transitions._Correspondence.__init__
+
+    def altered(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.index = copying.copy(self.index)
+        self.index.flow_by_edge = dict(self.index.flow_by_edge)
+        edge = self.graph['cfg']['edges'][self.region['exit_edges'][-1]]
+        key = edge['source'], edge['target']
+        flow, = self.index.flow_by_edge[key]
+        if change == 'missing':
+            self.index.flow_by_edge[key] = []
+        elif change == 'partial':
+            self.index.flow_by_edge[key] = [replace(flow, span=ByteSpan(flow.span.object_id, flow.span.start, 4))]
+        else:
+            self.index.flow_by_edge[key] = [flow, flow]
+
+    monkeypatch.setattr(_record_transitions._Correspondence, '__init__', altered)
+    record = _record(_captured_exit_loop(), known=True)
+    view, = record['cycle_graph']['transitions']
+    assert not view['complete'] and 'exit' in view['reason']
+
+
+@pytest.mark.parametrize('change', ('missing_receipt', 'swapped_edge', 'receipt_span', 'receipt_definitions',
+                                  'proof_candidates', 'proof_geometry', 'missing_fact', 'partial_fact',
+                                  'swapped_state', 'fake_fact', 'uncaptured_with_fact'))
+def test_captured_exit_correspondence_is_checked_with_recomputed_receipts(change):
+    record = _record(_captured_exit_loop(), known=True)
+    view = _view(record)
+    exits = [row for row in view['outcomes'] if row['kind'] == 'exit']
+    outcome = exits[-1]
+    update, = outcome['updates']
+    evidence = update['captured_exit_evidence']
+    state = record['cycle_graph']['edge_states'][outcome['edge']]
+    if change == 'missing_receipt':
+        del update['captured_exit_evidence']
+    elif change == 'swapped_edge':
+        evidence['edge'] = exits[0]['edge']
+    elif change == 'receipt_span':
+        evidence['span'][-1] = '4'
+    elif change == 'receipt_definitions':
+        evidence['definition_ids'] = record['cycle_graph']['edge_states'][exits[0]['edge']]['facts'][0]['definition_ids']
+    elif change == 'proof_candidates':
+        candidates = record['cycle_graph']['edge_states'][exits[0]['edge']]['facts'][0]['definition_ids']
+        pending = [update['proof']]
+        while pending:
+            proof = view['proofs'][pending.pop()]
+            proof['candidate_definitions'] = list(candidates)
+            pending.extend(child['proof'] for child in proof['predecessors'])
+    elif change == 'proof_geometry':
+        update['proof'] = exits[0]['updates'][0]['proof']
+    elif change == 'missing_fact':
+        state['facts'] = []
+    elif change == 'partial_fact':
+        state['facts'][0]['span'][-1] = '4'
+    elif change == 'swapped_state':
+        state['edge'] = exits[0]['edge']
+    elif change == 'fake_fact':
+        state['facts'] = copying.deepcopy(record['cycle_graph']['edge_states'][view['entry_edges'][0]]['facts'])
+        evidence['definition_ids'] = list(state['facts'][0]['definition_ids'])
+    else:
+        state['evidence'] = 'not_captured'
+        del update['captured_exit_evidence']
+    seal(record)
+    with pytest.raises(Ineligible, match='contract'):
+        evaluate_transition(record, view['id'], _Unreadable())
+
+
+def test_captured_exit_receipt_tamper_fails_before_input_access():
+    record = _record(_captured_exit_loop(), known=True)
+    view = _view(record)
+    outcome = next(row for row in view['outcomes'] if row['kind'] == 'exit')
+    outcome['updates'][0]['captured_exit_evidence']['edge'] = -1
+    with pytest.raises(Ineligible, match='receipt mismatch'):
+        evaluate_transition(record, view['id'], _Unreadable())
+
+
+def _repeated_operand_loop():
+    return (FunctionBuilder().ins(copy(reg(RAX), reg(RCX))).label('top')
+            .cbranch('end', reg(R9, 1)).ins(op('INT_AND', [reg(RAX), reg(RAX)], reg(RDX)))
+            .ins(add(reg(RAX), reg(RAX), const(1))).branch('top')
+            .label('end').ins(copy(reg(RBX), reg(RAX))).ret())
+
+
+def test_repeated_storage_operands_keep_both_original_read_certificates():
+    record = _record(_repeated_operand_loop(), known=True)
+    view = _view(record)
+    operation = next(row for row in view['operations']
+                     if view['record']['nodes'][row['node']].get('opcode') == 'INT_AND')
+    reads = [row for row in view['reads'] if row['operation'] == operation['operation']]
+    assert {row['read_ordinal'] for row in reads} == {0, 1} and len(reads) == 2
+    assert reads[0]['span'] == reads[1]['span'] and reads[0]['parts'] == reads[1]['parts']
+    assert reads[0]['original_read'] != reads[1]['original_read']
+    validate(record, view)
+    result = evaluate_transition(record, view['id'], _values(view, **{str(RAX): 10, str(R9): 0}))
+    assert result['kind'] == 'continue' and result['updates'][0]['value'] == 11
+
+
+@pytest.mark.parametrize('change', ('ordinal', 'span', 'source', 'operand'))
+def test_repeated_operand_read_certificates_are_independently_checked(change):
+    record = _record(_repeated_operand_loop(), known=True)
+    view = _view(record)
+    node = next(row for row in view['record']['nodes'] if row.get('opcode') == 'INT_AND')
+    reads = sorted((row for row in view['reads'] if row['operation'] == node['key']),
+                   key=lambda row: row['read_ordinal'])
+    if change == 'ordinal':
+        reads[1]['read_ordinal'] = reads[0]['read_ordinal']
+    elif change == 'span':
+        reads[1]['span'][-1] = '4'
+    elif change == 'source':
+        reads[1]['atoms'][0]['sources'] = []
+    else:
+        constant = next(row for row in view['record']['nodes'] if row['kind'] == 'const')
+        node['operands'][1]['parts'] = [dict(node=constant['id'], bytes=[0, 8], at=[0, 8])]
+    seal(record)
+    with pytest.raises(Ineligible, match='contract'):
+        evaluate_transition(record, view['id'], _Unreadable())
 
 
 @pytest.mark.parametrize('initial,limit,expected,kind', ((0, 0, 0, 'exit'), (3, 5, 4, 'continue'),
@@ -209,10 +373,11 @@ def test_captured_predecessor_fact_constrains_submitted_origin_sources():
         evaluate_transition(record, view['id'], _Unreadable())
 
 
-def test_derived_projection_does_not_edit_any_original_node_or_relation(monkeypatch):
-    record = _record(known=True)
+@pytest.mark.parametrize('builder', (_loop, _captured_exit_loop, _repeated_operand_loop))
+def test_derived_projection_does_not_edit_any_original_node_or_relation(monkeypatch, builder):
+    record = _record(builder(), known=True)
     monkeypatch.setattr(_record_transitions, 'publish_transitions', lambda *args: [])
-    baseline = _record(known=True)
+    baseline = _record(builder(), known=True)
     assert record['nodes'] == baseline['nodes'] and record['root'] == baseline['root']
     assert {key: value for key, value in record['cycle_graph'].items()
             if key not in ('transitions', 'transition_contracts')} == {

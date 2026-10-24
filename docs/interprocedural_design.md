@@ -3741,6 +3741,7 @@ typed DAG와 source output 연결을 보여준다. 원 source label/eligibility�
 
 초기 all-O1 shared 루프는 기존 one-visit의 `exit poststate evidence is not captured`로 partial이었다. 새 간략화 계층으로
 이를 우회하지 않는다. 이 한계는 one-visit source correspondence의 확장 대상이며 이번 지역 값 간략화 지원 완료와 구별한다.
+후속 §25.57에서 같은 원 Bundle의 captured exit 사실을 연결해 보완했다. 아래 수치는 당시 동결본의 역사적 결과다.
 아래는 동결본의 실제 검증·전체 회귀 및 별도 최종 승인 결과다.
 
 동결 targeted는 **96 passed / 0 skipped**(122.54초), dense SSA 기준도 같은 **96 passed / 0 skipped**(123.87초)다.
@@ -3993,7 +3994,7 @@ Astra는 단계별 코드/실제 검증을 승인했고, 마지막에 권위 전
 
 §25.53 완료 후 코드를 다시 점검해 아래 순서에 합의했다. 이번 기록은 **다음 작업 계획**이며 기능 구현이나 승인된
 지원 범위에 추가하지 않는다. 전체 원 SSA/데이터·연산 그래프를 유지한 채 필요한 부분만 다룬다는 방향은 그대로다.
-후속 상태: 1순위 구현·검증은 §25.55에 기록한다. 2·3순위는 아직 미구현이다.
+후속 상태: 1순위 구현·검증은 §25.55, 2순위는 §25.56, 3순위는 §25.57에 기록한다.
 
 #### 1순위: 명시적 경계를 가진 지역 식 계약
 
@@ -4146,3 +4147,131 @@ Astra는 권위 전체 XML·new/dense/actual XML·기존 실제 회귀와 최종
 최종값·`i.n2=bvadd`·원 연결 unresolved/debt retained를 독립 재현했다. 원 p-code 76회 집계도 확인했다.
 합의한 초기 범위에서 필수 미달이나 차단 결함이 없다는 판단이다. 비순환 순수 정수 지역 계약으로 한정한 승인이고,
 일반 RAM/alias·반복 경계·F_k 합성·O1 출구 보완이나 source 자동 제거를 완료한 것으로 확대하지 않는다.
+
+### 25.56 complete 한 회차식의 제한된 여러 회차 합성 F_k (2026-10-24)
+
+§25.54의 2순위다. 기존 원 SSA/데이터·연산 그래프와 complete 일반 one-visit을 재사용해 **최대 몇 번의 방문을
+이어 계산할지** 질의한다. 새로운 SSA/RD·명령 실행기·전체 반복 풀이기·alias 모델은 만들지 않는다. 원 전체 그래프,
+기존 한 회차식·반복 요약·source/debt/eligibility를 교체하지 않고 `expression_consumers`에 파생 DAG만 추가한다.
+authority 예외는 기존 `original_record_except_expression_views_and_consumers_v1` 그대로다.
+
+#### 상태·분기·메모리 계약
+
+- `derive_transition_chain(record, transition_id, max_visits)`에서 `max_visits`는 정수 0–8이다. 실제 body 반복횟수를
+  알고 있다는 뜻이 아니다. header에서 종료 조건을 검사하는 회차도 한 방문이며, O1 body-first 영역은 실제 원 CFG를
+  따라 같은 방문에서 body와 exit 검사를 수행한다. `trip_count`와 `termination`은 항상 `not_proven`이다.
+- 원 `s#` mutable 입력과 각 outcome의 출력이 **정확히 동일한 byte span**으로 일대일 대응해야 한다. 다음 회차는
+  이전 회차의 갱신을 동시에 대입하고, invariant 입력은 최초 값을 공유한다. 새 자유 상태/새 phi 선택을 만들지 않는다.
+  불완전한 일반 one-visit, STORE-only write projection, 초기 상태와 맞지 않는 RAM 출력은 거부한다.
+- 각 회차의 원 continue/exit guard와 decision을 공유한다. 여러 continue edge·변하는 분기·비선형 갱신을 표현할 수
+  있지만, 단일 방문으로 자를 수 없는 중첩/다중 진입 영역을 새로 해결하지는 않는다. 기존 complete 영역만 합성한다.
+- 첫 범위는 register와 **반복 중 주소가 불변인 기존 RAM cell**이다. mutable 입력이 주소에 관여하면 거부한다.
+  기존 span 대응·메모리/스택 가정은 그대로이며 일반 alias를 갚지 않는다. 빠진 초기 RAM byte를 만들어 넣지 않는다.
+- 모든 원 LOAD/STORE에 회차별 active guard·주소·폭·값·순서를 보존한다. `rounds`의 원 `source_reads`와
+  `input_versions`, `state_version`/`definition_version`이 이전 회차 입력 writer와 현재 회차 정의를 구분한다.
+  같은 STORE operation이 반복돼도 발생 회차가 다르면 동일 writer 발생으로 합치지 않는다.
+- exit를 실행한 뒤에는 상태를 유지하고 후속 회차의 decision/effect를 관측하지 않는다. `max_visits=0`은 mutable 상태의
+  identity이며 guard/body/효과는 실행하지 않는다. 이때도 반환할 초기 mutable 상태 byte는 있어야 한다.
+
+예를 들어 `while (counter != 0) { value += 7; counter--; }`의 header-first one-visit에서 초기 value=10,
+counter=3이면 `max_visits=3`은 value=31/counter=0이지만 **bound_exhausted**다. 다음 종료 검사를 실행하지 않았기
+때문이다. `max_visits=4`는 같은 최종값과 **exit**를 반환한다. 이 예는 `test_transition_chains.py`의 원 식 기반 회귀와
+같은 방문 수 계약이다. 실제 종료횟수의 일반적인 추정이나 무한 상한의 최종 공식으로 확대하지 않는다.
+
+#### 원 식 연결과 저장 DAG 재검증
+
+1. `_namespace`로 원 one-visit의 독립 byte/guard/효과 계약을 검증하고, 기존 `Adapter`로 모든 원 operation·outcome·
+   effect·decision 및 정의가능성 D를 구성한다. partial 연산은 초기 범위 밖이다.
+2. 작은 `visit_graph`에 원 guard/상태 갱신/효과/decision 식을 저장한다. 소비할 때마다 이 저장 DAG를 decode해
+   **동일한 원 D 아래 원 식과의 불일치 UNSAT**를 재확인한다. 성공 flag나 hash만 믿지 않는다.
+3. 추가 가정 없는 새 solver에서 `Not(D)`가 UNSAT일 때만 D의 보편항진 lemma를 사용한다. 임의 폭 정확 상태 대입
+   후에도 D가 참이므로 반복된 정의가능성 질의를 줄일 수 있다. SAT/unknown이면 True로 승격하지 않고 각 active
+   방문의 원 D 의무를 그대로 합성한다. empty D도 성공이 아니다.
+4. **검증한 동일 visit_graph**를 정확한 상태 대입으로 연결한다. 전역 간략화로 다시 생성한 다른 방문식을 비교하느라
+   긴 feedback 식의 교환법칙 순서 차이를 반복 증명하지 않는다. 원 DAG 공유를 유지하며 최종 저장 F_k를 별도 decode해
+   해당 합성과의 불일치 UNSAT를 확인한다. 전이 합성의 합동성과 위 지역 증명으로 원 one-visit에 연결된다.
+5. 수치 평가는 기존 `evaluate_transition`으로 상한 또는 실제 exit까지만 replay하며 필요한 최초 입력을 한 번씩
+   캐시한다. 이후 F_k 검사는 이 캐시만 사용하고 외부 입력을 새로 읽지 않는다. 관측된 상태·edge·decision·모든 효과·
+   방문 수를 원 전이와 대조한다. 비활성 selector/후속 회차 입력은 요구하지 않는다. 필요한 식이 확정되지 않으면 거부한다.
+
+상한은 방문 8개, 각 typed DAG 기존 ViewLimits(node 2000/edge 12000/depth 120/width 256byte), solver 2초·
+rlimit 200만, query 128개·협력적 전체 budget 20초다. 원 모델/지역 DAG/최종 DAG/회차 연결 변조 및 unknown/한도 초과는
+성공이 아니다. renderer는 원 그래프 뒤에 실제 `c#.n#` typed F_k 노드와 출력 연결을 보여준다.
+
+```python
+chain = derive_transition_chain(record, complete_transition_id, max_visits=4)
+with_chain = attach_expression_consumer(record, chain)
+result = evaluate_expression_consumer(
+    with_chain, chain['id'], initial_state,  # 원 view.inputs의 s#와 정확한 byte 폭
+    accept_unattributed_assumptions=True,  # 원 run 가정이 미귀속인 실제 자료에서만 명시
+)
+# result: status=exit|bound_exhausted, state, steps, evaluated_visits
+# 각 steps에는 원 edge/decisions/updates/ordered effects/read_sources가 남는다.
+```
+
+#### 실제 사례
+
+기존 `general_cycle_expression.c` x64 -O0 봉인 Bundle을 재사용한다.
+
+- 원 이미지 SHA256: `7545efc08975f6c38b99ab97016049e3af102d36be32118d2df2fbc2b5ddee55`.
+- Bundle: `output/general-cycle-20261024.IWqPVH/bundles/9a1823d0a2f3531bfbef88ebb2032d2c36db0a2a2ac0d929ef46cfe1ee8f34ad`.
+- 테스트: `TDO_GENERAL_CYCLE_BUNDLE=<generation>`과 `tests/corpus/intra/test_transition_chain_binary.py`.
+
+| 실제 영역 | 연결 확인 |
+|---|---|
+| `case_cycle_memory` | 두 RAM cell의 피드백, 변하는 공유 분기, STORE 전후 LOAD·원 writer 발생 회차 |
+| `case_cycle_multi_backedge` | 서로 다른 두 continue edge와 ADD/XOR 갱신, counter·RAM 상태를 다음 방문에 전달 |
+| 기존 all-O1 `case_view_shared` (§25.57) | body-first 방문의 비항등 exit 갱신을 적용하고 이후 방문은 비활성으로 보존 |
+
+첫 두 실제 함수는 16회 원 실행·70개 원 방문·LOAD 4,016byte의 writer epoch를 기존 raw oracle로 대조한다.
+8개 입력 조합×두 함수×상한 0/1/2/4/8로 **80개 F_k 수치 평가·166개 방문 prefix**를 확인한다.
+즉시 exit·상한 직전/직후 exit·두 분기·unsigned wrap·최초 입력 중복 접근 금지를 포함한다.
+추가 O1 연결은 원 실행 6회·상한 1/2/4/8의 **24개 평가**로 원 효과와 exit 상태를 대조한다.
+합성 62개는 분기·비선형 피드백·폭·k=0·부분 자료·가정/원 근거·두 DAG 변조·domain lemma/unknown을 검사한다.
+
+### 25.57 실제 O1 captured exit poststate와 원 읽기 발생 대응 (2026-10-24)
+
+§25.54의 3순위다. 기존 all-O1 `case_view_shared`가 partial이었던 주 원인은 **자료 부재가 아니라 이미 캡처된
+출구 간선 자료를 builder가 사용하지 않고 입력 identity만 허용한 것**이었다. 새 RD나 poststate 추정 없이 그 자료를 연결한다.
+
+- captured exit에서는 해당 원 edge의 단일 완전 fact만 사용한다. `captured_exit_evidence`가 edge·span·definition ID를
+  기록하고, validator는 원 `edge_states`와 source 후보 집합·기존 ordered last-write/byte/guard certificate·출력 PartRef를
+  독립 대조한다. 부분/중복/누락 fact를 absence로 처리해 우회하지 않는다.
+- captured exit의 필수 출력 중 하나라도 covering fact가 없으면 partial이다. **not_captured** exit는 기존과 같이
+  모든 경로에 앞선 쓰기가 없어 입력 identity임이 확인될 때만 허용한다. cut 의미나 원 SSA는 바꾸지 않는다.
+- 이후 드러난 중복 storage operand 문제도 보완했다. 공통 builder가 같은 span의 첫 read를 재사용하더라도 각 원
+  `(operation, read_ordinal)`이 자기 `_fragments`와 기존 proof를 갖도록 한다. 실제 `INT_AND`의 ordinal 1 누락을 복구하며,
+  원 read 수를 줄이거나 검사를 생략하지 않는다. 공통 Builder의 연산 의미는 수정하지 않는다.
+
+원 이미지 SHA256은 `b27e76ddfc39f0bcee27d8c73f1e06ee305b57aa487b98b450adcdb365684707`, Bundle은
+`output/expression-views-20261024.ekCMIQ/bundles/fd1091b23bbbd428ca7a249294afad3c5470c26e8496fda67ef5159ada8f05b1`이다.
+`TDO_EXPRESSION_O1_BUNDLE=<generation>`으로 `tests/corpus/intra/test_transition_o1_binary.py`를 실행한다.
+기존 optimized P0 검사는 같은 자료의 captured exit 성공/원 cyclic root partial 유지로 갱신했고,
+명시적인 증거 누락·부분 fact의 거부 검사는 별도로 유지한다.
+
+원 continue20 `1b1:380→1b1:382`와 exit21 `1b1:380→1b1:3a6`의 캡처를 재사용한다.
+exit 출력은 RAM `-0x18` 원 정의 `[69,146]`, RAM `-0x10` `[99]`, register `0x10` `[101]`에 연결된다.
+exit 방문도 실제 두 STORE를 실행하므로 input identity로 치환하지 않는다.
+
+실제 O1 36회 원 실행에서 **99회차(continue72/exit27)·LOAD 2,376byte**를 대조했다. 각 continue와 exit 모두의 두
+분기·공유 선택·갱신·주소/폭/값/효과 순서·writer epoch를 기존 `_Visits`로 확인한다. count=0은 영역을 방문하지 않는다.
+원 근거를 reseal한 변조도 거부하며 원 그래프/eligibility는 그대로다. O1 관련 합성 추가 26개와 실제 7개(§25.56 연계 포함)를
+회귀에 포함한다. 이 지원은 native 실행·모든 O1 프로그램·일반 alias 또는 전체 루프 최종 공식의 보장이 아니다.
+
+#### 단계 검수 및 전체 회귀
+
+Astra가 두 설계·수정 코드를 검수하고 O1 독립 86개, F_k/O1 연계 독립 71개를 각각 모두 실행해 단계 승인했다.
+신규 97개(합성 88개·실제 9개)와 기존 인접 검사를 합한 **151개**는 일반 SSA에서 **151 passed / 0 skipped**
+(29.87초), dense SSA에서도 **151 passed / 0 skipped**(30.88초)다.
+
+동결본 전체 회귀는 **3350 passed / 32 skipped / 0 failed**(698.23초)다. 권위 결과는
+`output/transition-chains-20261024.xP3UPv/final-suite.junit.xml`/`final-suite.log`이며 XML 총 3382개·failures/errors 0이다.
+같은 폴더의 `new-and-nearby.junit.xml`/`dense.junit.xml`이 위 151개 결과다. 신규 항목은 전부 실행됐고 기존 UE Core 21개도
+모두 통과했다. DFB072 세 플랫폼·모델·forward-off·호출/RAM·부분 레지스터·순환/반복 요약·P0/consumer/P2/island 회귀를
+포함한다. 32 skip은 기존 Linux 제약 23개와 미보유 Bundle 9개다.
+전체 실행 전후 코드·테스트 SHA256은 `43d362095510120fc419d5afb77fd4b69fbd02b61806f91bc66e5bd81d38ae18`로 동일하다.
+
+Astra가 권위 전체/일반/dense XML과 신규 97개·UE/DFB072·모델/forward-off 등 기존 회귀 및 최종 문서를 독립 확인해
+**§25.54의 남은 2·3순위 목표 달성과 이 상태에서의 마무리를 별도로 최종 승인**했다. 필수 잔여 차단사항을 발견하지
+못했다는 판단이다. 위 hash의 실행 전후 대조는 주 작업자가 수행했다. 일반 alias·신규 RAM/반복 island 경계·임의 반복의
+무상한 최종 공식·trip count/종료 증명·source 자동 제거·VM 복원은 합의 범위 밖이며 완료로 확대하지 않는다.

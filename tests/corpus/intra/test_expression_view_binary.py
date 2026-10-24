@@ -143,7 +143,7 @@ def test_existing_actual_branch_memory_views_share_original_choice(guarded_summa
     _run_views(guarded_summary_binary, 'case_summary_branch')
 
 
-def test_actual_all_optimized_loop_cannot_bypass_incomplete_onevisit(monkeypatch):
+def test_actual_optimized_exit_is_captured_without_promoting_original_cyclic_root(monkeypatch):
     case = _load('TDO_EXPRESSION_VIEW_OPTIMIZED_BUNDLE', monkeypatch, require_calls=False)
     generation = Path(os.environ['TDO_EXPRESSION_VIEW_OPTIMIZED_BUNDLE'])
     manifest = json.loads((generation / 'manifest.json').read_text())
@@ -153,8 +153,12 @@ def test_actual_all_optimized_loop_cannot_bypass_incomplete_onevisit(monkeypatch
     record = _root(case['results'][case['names']['case_view_shared']])
     before = copy.deepcopy(record)
     visit, = record['cycle_graph']['transitions']
-    assert not visit['complete'] and visit['reason'] == 'exit poststate evidence is not captured'
-    with pytest.raises(Ineligible, match='incomplete'):
-        select_expression(record, namespace=visit['id'])
+    assert visit['complete']
+    exit, = [row for row in visit['outcomes'] if row['kind'] == 'exit']
+    assert all('captured_exit_evidence' in update for update in exit['updates'])
+    update = exit['updates'][0]
+    assert select_expression(record, [dict(name='exit_cell', width=int(update['span'][-1], 16),
+        parts=[update['part']], guard=exit['guard'])], namespace=visit['id'])['namespace'] == visit['id']
+    # Captured exit support is not a global cyclic-root simplification claim.
     assert simplify_expression(record)['proof']['status'] == 'partial'
     assert record == before

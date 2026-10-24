@@ -157,7 +157,10 @@ PYTHONPATH=src python -m pytest tests/intra -q
   조건 평가·진입·정의가능성은 따로 판정하며, 무영향 결과로 원 간선/source를 삭제하지 않습니다.
   `derive_expression_island`는 명시한 원 producer 출력을 구간 입력으로 받아 비순환 순수 정수 부분식만 조건부로
   간략화합니다. 지역 동치와 원 식으로의 연결 증명을 분리하며, 미해결 호출 입력·원 부채는 그대로 남깁니다.
-  설계 및 API 예시는 **25.39–25.55절**을 참고하세요.
+  `derive_transition_chain(record, transition_id, max_visits)`는 complete 한 회차식을 최대 8회 연결합니다. 원 공유 조건·
+  정확한 byte 상태·고정 메모리·효과 순서를 보존하고 exit 후 상태를 유지합니다. 반복횟수 예측이나 전체 반복의 닫힌
+  공식은 아니며, 상한 도달과 실제 종료를 구분합니다. 원 자료가 캡처한 O1 출구의 비항등 갱신도 연결합니다.
+  설계 및 API 예시는 **25.39–25.57절**을 참고하세요.
 
 물리 기록의 구체 값은 `tdo_v2.operation_records.evaluate_physical(record, entry)`로 별도 평가합니다. 입구 레지스터와 RAM을
 실제 입력으로 제공해야 하며, 미지 값·지원하지 않는 효과·반환 불일치·예산 초과는 값으로 단정하지 않습니다. 이는 제한된

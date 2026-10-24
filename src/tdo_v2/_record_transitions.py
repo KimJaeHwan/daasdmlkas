@@ -414,6 +414,12 @@ def _build(original, graph, index, region, *, write_projection=None):
             if source is None:
                 raise _Partial('missing original action node')
             node = builder.operation(source, 0)
+            # The shared operand builder reuses the first matching span for
+            # repeated storage operands. Preserve every ORIGINAL occurrence,
+            # with its own ordinal and checked read certificate, as well.
+            for read in builder.index.reads.get(proof.actions.get(key), ()):
+                if (key, read.read_ordinal) not in builder.read_bindings:
+                    builder._fragments(read, None, 0)
             operations.append(dict(operation=key, node=node, original_node=builder.original_nodes[key],
                                     block=block, guard=builder._guard_ref(conditions._reach[block])))
             if raw[ordinal].opcode in ('LOAD', 'STORE'):
@@ -440,8 +446,20 @@ def _build(original, graph, index, region, *, write_projection=None):
                                          conditions._edge_guards[source, edge['target']])
         updates = []
         for atom in output_atoms.values():
+            exit_evidence = None
             if number in conditions.cut_edges:
                 identifiers = proof.flow(number, atom).definition_ids
+            elif proof.index.flow_by_edge.get((source, edge['target'])):
+                # Reuse only this ORIGINAL exit's captured poststate. A
+                # partial/ambiguous overlapping fact cannot become absence.
+                flows = [row for row in proof.index.flow_by_edge[source, edge['target']]
+                         if row.span.overlaps(atom)]
+                if len(flows) != 1 or not flows[0].span.contains(atom):
+                    raise _Partial('missing or partial captured exit state')
+                flow, = flows
+                identifiers = flow.definition_ids
+                exit_evidence = dict(edge=number, span=list(flow.span.canonical_key),
+                                     definition_ids=list(identifiers))
             else:
                 # An unrecorded exit can preserve only an already captured
                 # input, and only when every path has no preceding write.
@@ -455,6 +473,8 @@ def _build(original, graph, index, region, *, write_projection=None):
             part, sources = builder.source_parts(atom, origins, 0, conditions._reach[source])
             updates.append(dict(span=list(atom.canonical_key), part=part, sources=sources,
                                 proof=proof.certificate(atom, identifiers, source)))
+            if exit_evidence is not None:
+                updates[-1]['captured_exit_evidence'] = exit_evidence
             proof.charge(1 + len(sources))
         outcomes.append(dict(kind='continue' if number in conditions.cut_edges else 'exit', edge=number,
                              guard=builder._guard_ref(local_guard), updates=updates))

@@ -3779,6 +3779,11 @@ def derive_expression_island(record, outputs=None, *, boundaries, namespace='ori
     return derive(record,outputs,boundaries=boundaries,namespace=namespace,conditions=conditions,candidate=candidate,limits=limits)
 
 
+def derive_transition_chain(record, transition, max_visits):
+    from ._record_transition_chains import derive_transition_chain as derive
+    return derive(record,transition,max_visits)
+
+
 def validate_expression_island(record, island, *, accept_unattributed_assumptions=False):
     from ._record_expression_islands import validate_expression_island as validate
     return validate(record,island,accept_unattributed_assumptions=accept_unattributed_assumptions)
@@ -3801,4 +3806,4 @@ __all__ = ("Ineligible", "Limits", "RECORD_VERSION", "StitchContext", "eligibili
            "simplify_expression", "attach_expression_view", "evaluate_expression_view", "derive_expression_consumer",
            "derive_loop_consumer", "attach_expression_consumer", "evaluate_expression_consumer", "prove_byte_influence",
            "validate_byte_influence", "attach_byte_influence", "derive_expression_island", "validate_expression_island",
-           "attach_expression_island", "evaluate_expression_island")
+           "attach_expression_island", "evaluate_expression_island", "derive_transition_chain")

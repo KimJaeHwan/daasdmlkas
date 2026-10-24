@@ -181,6 +181,9 @@ def _canonical(record, row):
     elif row.get('kind') == 'conditional_expression_island':
         from ._record_expression_islands import validate_expression_island
         return validate_expression_island(record,row,accept_unattributed_assumptions=True)
+    elif row.get('kind') == 'bounded_transition_chain':
+        from ._record_transition_chains import _canonical as canonical_chain
+        return canonical_chain(record,row)
     else:
         raise Ineligible('expression consumer: unsupported kind or consumer reference cycle')
     if row != expected:
@@ -217,6 +220,9 @@ def evaluate_expression_consumer(record, identity, inputs, *, accept_unattribute
         if row['kind'] == 'invariant_delta_countdown':
             from ._record_expression_loops import evaluate_loop_consumer
             return evaluate_loop_consumer(record, row, inputs, accept_unattributed_assumptions)
+        if row['kind'] == 'bounded_transition_chain':
+            from ._record_transition_chains import evaluate_transition_chain
+            return evaluate_transition_chain(record,row,inputs,accept_unattributed_assumptions)
         adapter, old, domain, visit, limits = _build(record, row['selection'])
         values = decode(row['graph'], adapter.symbols, limits)
         substitutions = []
@@ -257,6 +263,11 @@ def render_expression_consumers(record):
         if row['kind'] == 'conditional_expression_island':
             from ._record_expression_islands import render_expression_island
             lines.extend(render_expression_island(row))
+            continue
+        if row['kind'] == 'bounded_transition_chain':
+            from ._record_transition_chains import render_transition_chain
+            lines.extend(render_transition_chain(row))
+            graph_text(row['graph'],f'c{index}.')
             continue
         lines.append(f"expression consumer {row['id']} [{row['kind']}; original graph/summaries retained]")
         lines.append('  namespace = '+row['namespace']+'; P0 views = '+', '.join(row['views']))
