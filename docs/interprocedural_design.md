@@ -3678,7 +3678,8 @@ SSA 생성 전에 구간을 자르지 않으며 별도 SSA/RD·명령 실행기�
   계약을 먼저 재검증한다. 사용자가 임의 cut을 주입하여 debt·CALL·미확정 RAM·순환을 해결한 것처럼 만들 수 없다.
 - 선택은 원 node·조건/공유 control DAG·주소·debt 참조를 보존한다. 단순 구조 선택은 순환/미해결을 포함할 수 있으나 수치
   간략화의 지원 여부와 다르다. CALL/stitched physical boundary는 이번 수치 지원에 포함하지 않는다.
-- `source`는 새 optional `expression_views`만 제외한 원 record의 SHA256이다. 기존 function/context·node·byte 참조는
+- `source`는 원 record의 SHA256이며 유도 collection만 제외한다(최초 `expression_views`, §25.52부터 추가로
+  `expression_consumers`). 기존 field나 `loop_summaries`는 제외하지 않는다. 기존 function/context·node·byte 참조는
   `selection`/`source_links.outputs`에, 원 전체 entry producer는 `bindings`에 남는다. 간략화 후 각 중간 노드를 새로운
   원 SSA 정의로 위장하지 않는다. 단일 뷰는 자체 typed DAG/출력 ID를 가지며 중첩·겹치는 여러 뷰를 동시에 붙일 수 있다.
 
@@ -3768,3 +3769,116 @@ Astra가 권위 full/targeted/dense XML과 UE Core 21개·DFB072 세 플랫폼·
 요약 회귀 및 all-O1 거부 검사의 실제 실행을 독립 확인하고 **이번 합의된 P0 목표 달성과 이 상태에서의 마무리를 명시적으로
 최종 승인**했다. 필수 미달이나 남은 차단 결함을 발견하지 못했다는 판단이다. 지역 값 동치·원본 보존·기존 지원 경계로
 한정한 승인이고, 일반 루프 공식·미확정 RAM·효과/종료/도달성 증명·전역 source 제거를 완료한 것으로 확대하지 않는다.
+
+### 25.52 검증된 부분식의 후속 소비와 불변 증가량 반복 요약 (2026-10-24)
+
+§25.51은 뷰의 생성·검증·원본 연결까지다. 이번 확장은 그 뷰를 **후속 계산에 실제 재사용**한다. 기존 SSA/RD·원 record·
+한 회차 graph/receipt·`loop_summaries`는 수정하지 않고 opt-in `expression_consumers`에 별도 유도 결과를 둔다.
+기존 partial 요약도 유지한다. 범용 합성/새 명령 실행기/VM 복원/일반 비선형 반복 풀이기를 추가하지 않는다.
+
+#### 1A. 같은 namespace의 후속 식에 치환
+
+`derive_expression_consumer(record, target_selection, [P0_view_id, ...])`는 다음을 수행한다.
+
+1. 원 target 선택에서 출력 값과 실행/정의가능성 조건 **G를 먼저 재구축**한다. 참조한 뷰의 추가 가정으로 G를 좁히지 않는다.
+2. 참조는 같은 source/namespace의 기존 P0 뷰만 허용한다. 다른 consumer를 참조하지 않아 순환 proof chain을 만들지 않는다.
+   각 뷰는 원본에서 다시 검사한다. 원 producer/byte range/placement/width가 정확한 단일 PartRef 출력 port를 사용한다.
+3. G의 SAT와 `G AND NOT(view_domain)`의 UNSAT를 확인한다. counter=1이나 cell=특정값 등 첫 방문에만 맞는 가정을
+   반복/후속 계산 전체로 올릴 수 없다. 현재 별도 consumer 전제를 추가하는 API는 없으며 원 G가 함의하지 못하면 거부한다.
+4. byte port를 실제 하류 읽기에 치환한다. 부분 겹침은 해당 바이트만 대체하고 나머지 원 바이트를 조립한다. 서로 겹치는
+   port는 거부하며, 참조했지만 실제 사용한 byte가 없는 뷰도 거부한다. 입력은 같은 원 producer symbol/Extract를 공유한다.
+5. 치환 후 정의가능성과 출력 동치를 검사하고, 간략화·encode·decode한 **최종 저장 DAG도 원 출력과 다시 증명**한다.
+   후보 생성기나 cached proof가 틀려도 성공으로 발행하지 않는다. 결과는 원 효과를 제거하는 증명이 아닌 지역 값 동치다.
+
+`attach_expression_consumer`는 별도 collection만 붙인 복사본을 반환한다. `evaluate_expression_consumer`는 입력 접근 전에
+source/identity/뷰·byte·domain과 canonical recipe를 전부 다시 검증한다. 미귀속 가정은 기본 거부하며 explicit opt-in만
+허용한다. timeout/unknown/빈 G/개별·합산 자원 한도 초과는 성공이 아니다. P0의 node/edge/depth/width 제한 외에도
+소비자당 뷰 8개·SMT query 128개·개별 solver 2초와 총시간 budget 20초를 둔다. 총시간은 검사 지점에서 확인하여 초과
+결과를 거부하는 협력적 budget이며, 진행 중인 내부 검사·해시·AST 처리를 20초에 즉시 강제 중단하는 보장은 아니다.
+긴 입력 분석의 성능 우월을 주장하지 않는다.
+
+source authority 이름은 `original_record_except_expression_views_and_consumers_v1`이다. 두 파생 collection만 제외하고
+기존 모든 원 필드를 해시한다. consumer가 없던 P0 record의 hash는 그대로이며, consumer 추가/순서 변경은 원 hash를
+바꾸지 않는다. 원 `loop_summaries`를 교체하여 뷰를 무효화하지 않는다. consumer ID에는 원 source·namespace·P0 ID·recipe를
+포함하고 자기 자신/다른 consumer 참조는 허용하지 않는다.
+
+#### 1B. 기존 감소 반복 판정에 불변 δ 식 연결
+
+`derive_loop_consumer(record, transition_id, [P0_view_id, ...])`는 기존 complete 일반 one-visit과 counter/조건/주소/효과
+판정기를 재사용한다. write-only projection이나 incomplete view를 우회하지 않는다. 각 원 불변 branch case에서 1A의
+검증된 출력을 소비하고 `state_next = state + δ(불변 입력)`를 해당 폭의 bit-vector로 증명한다.
+
+- δ는 단순 affine 입력 합을 넘어 XOR/shift 등 **순수 불변 계산 DAG**일 수 있다. mutable state가 자유변수로 남으면 안 된다.
+  mutable 값을 0, counter만 1로 놓아 후보를 만든다(guarded body가 counter=0에서 비활성화되는 것을 피함). 이는 예시 상태
+  대입만으로 증명하는 것이 아니다. **모든 원 G 상태**에서 원 update와 `initial+δ`의 불일치가 UNSAT여야 한다.
+  직렬화한 δ DAG도 decode 후 재증명한다. `delta:s#`는 유도 식의 parameter 이름이지 새 SSA 정의/entry/captured byte가 아니다.
+- 원 `_derive_case`의 full-width zero test, 단위 감소 counter, 하나의 cut/exit, 원 zero-exit의 상태 유지, 모든 mutable 출력
+  coverage, TOTAL 원 연산 검사, strict 주소 불변 및 원 메모리 schedule 검사는 그대로다. 값을 줄였다고 주소·효과·종료의
+  조건을 완화하지 않는다. 원 branch의 전체 의미 의존성이 불변인 경우만 선택별로 요약한다.
+- n은 해당 영역 입구 counter의 unsigned 값이다. δ는 양수 n에서 필요한 활성 식만 평가하며 회차마다 실행하지 않는다.
+  `state_final=(state_initial+n*δ) mod 2^bits`로 계산하고 기존 one-visit으로 **마지막 zero-check 한 번**을 대조한다.
+  0회에는 body δ나 selector를 요구하지 않는다. 원 효과는 n body+n+1 header 검사 템플릿으로 남는다.
+
+새 loop consumer의 scope는 영역 종료의 tracked byte 상태이지 함수의 최종 RETURN·전체 RAM·native 실행 결과가 아니다.
+함수 반환 후속식까지 별도 연결하지 않았다면 최종 반환 공식이라고 부르지 않는다. 일반 feedback/nonlinear recurrence,
+mutable selector·일반 alias·여러 cut/exit·O1 출구 증거 공백 및 임의 N회 F_k는 여전히 후속 범위다.
+
+#### 실제 검증
+
+1A의 `tests/corpus/intra/expression_consumer_chain.c`를 x64 Mach-O clang -O1/Ghidra12.0.4로 추출했다.
+원 MBA 중간 producer를 선택해 증명하고, 뒤의 XOR 0x91·ADD 9에 실제 치환한다.
+
+- SHA256: `9461f72b5475a9203303b3f00e1504f54bb5f4c6933cd50872e4fbc19b8c6d0a`.
+- Bundle: `output/expression-consumers-20261024.OYpVU6/bundles/b0e0cf5fec37fd00d675a706e369092e09e13de216ca8d52a343504a8090b132`.
+- `TDO_EXPRESSION_CONSUMER_BUNDLE=<generation>`으로 실제 chain 검사를 실행한다.
+
+1B는 **기존 §25.51 SHA 65d60c...f46569 Bundle의 `case_view_shared`를 그대로** 사용한다. 쉬운 fixture로 교체하지 않는다.
+원 `loop_summaries`는 nonlinear bitwise로 partial인 채 유지하며 새 consumer만 검증된 식을 활용해 complete 요약을 생성한다.
+두 원 RAM cell의 증가량은 `selector ? y : y XOR 0x55`이고 counter와 함께 세 tracked 출력을 요약한다.
+
+실제 targeted **2 passed / 0 skipped**(47.29초)이며, chain 32회+shared45회, 총 **77회 원 p-code 실행·루프315회차**다.
+0/1/3/7/19회·양쪽 branch·selector=256·overflow를 포함한다. 원 p-code 결과 주입이나 branch 강제 없이 실행하고 기존
+`_Visits`로 매 회차 원 선택·모든 LOAD/STORE 주소/폭/값/순서·LOAD byte writer epoch를 대조한다. 종료의 두 RAM cell과
+counter, 실제 원 backedge 횟수와 exit 1회도 확인한다. 관찰한 함수 반환값은 raw 실행 sanity check이며 새 consumer가
+함수 최종 반환식을 생성했다고 주장하지 않는다.
+
+합성 검사는 byte port의 보존/실제 사용, domain 불일치·첫 회차 한정 가정·미귀속 가정, source/namespace/순환 참조·recipe
+변조, 최종 후보/δ 직렬화 오류, mutable δ/조건·변동 주소·잘못된 zero-exit·dead DIV·자원/unknown 거부를 포함한다.
+전체 회귀와 Astra의 별도 최종 목표 승인은 동결 실행 후 기록한다.
+
+신규 consumer 합성 검사는 **45 passed / 0 skipped**(11.14초), dense SSA에서 합성+실제 **47 passed / 0 skipped**
+(59.34초)다. 기존 요약 검사를 포함한 targeted 166개도 통과했다. 동결 SHA256은
+`425b3a87b264c36f6b4acf372a9b733270c3c34f9e52b90a186488f48ddb306f`이며 전체 회귀 전후 동일성을 확인한다.
+
+전달 예제는 같은 출력 폴더 `example-chain/record.json`·`record.txt`·`examples.json` 및
+`example-loop/consumer.json`·`consumer.txt`·`examples.json`이다. chain은 전체 원 record와 두 파생 collection을 담고,
+loop JSON은 **파생 overlay만** 담아 원 record를 기존 봉인 Bundle에서 재구축하도록 note를 명시한다. Python의 원 64-bit
+정수를 JSON 문자열 그대로 전달했다. 원 source hash, 기존 partial 요약 보존, 두 renderer exactmatch 및 chain3개/loop3개
+공개 API 재평가 일치를 확인했다. loop 예제는 양 분기와 0회를 포함한다.
+
+사용 예시는 다음과 같다. `body_view`는 원 body 출력들에 대해 P0에서 이미 동등성이 확인된 뷰다.
+
+```python
+with_view = attach_expression_view(record, body_view)
+consumer = derive_loop_consumer(with_view, transition_id, [body_view['id']])
+with_consumer = attach_expression_consumer(with_view, consumer)
+result = evaluate_expression_consumer(with_consumer, consumer['id'], original_state_inputs)
+```
+
+상태 입력은 기존 transition의 s# ID를 그대로 사용한다. 개별 후속식은 `derive_expression_consumer`에 원 target selection을
+전달한다. 자동 전역 치환이 아니라 명시적인 consumer 경로이며, 미귀속 가정 opt-in은 기존 API와 같다.
+
+동결본 전체 회귀는 **3115 passed / 32 skipped / 0 failed**, 632.19초다. 권위 XML은 같은 출력 폴더의
+`final-suite.junit.xml`(총 3147개, failures/errors 0)이다. 기존 UE Core·DFB072 ELF/PE64/PE32·호출/RAM·모델·forward·
+부분 레지스터·원 순환/한 회차/반복 요약/P0 회귀를 포함한다. 32개 skip은 기존 Linux 제약 23개와 미보유 Bundle 9개다.
+신규 consumer 합성45개·실제2개는 전부 실행됐고 dense에서도 47개 모두 통과했다. 동결 전후 코드·테스트 SHA256은
+`425b3a87b264c36f6b4acf372a9b733270c3c34f9e52b90a186488f48ddb306f`로 동일하다.
+
+Astra는 전달 chain3개·loop3개를 독립 재입력했고, loop의 실제 저장값 `[246,249,0]`·`[2,5,0]`·0회 `[17,20,0]`,
+원 fingerprint/partial 요약 보존·두 renderer exactmatch·미귀속 가정 기본 거부를 확인했다. 최종 목표 달성 승인은
+권위 전체 XML을 포함한 별도 검토로 받았다.
+
+Astra가 full/new-unit/actual/dense XML과 기존 P0·UE Core·DFB072 세 플랫폼·forward-off·순환/한회차/요약 회귀를
+독립 확인하고 **합의한 1A·1B 목표 달성 및 이 상태에서의 마무리를 명시적으로 최종 승인**했다. 남은 필수 미달이나
+차단 결함을 발견하지 못했다는 판단이다. 명시적 consumer 경로·영역 종료 tracked 상태로 한정한 승인이며, 범용 반환
+공식·mutable feedback·새 경계 계약·일반 alias·여러 회차 F_k까지 완료한 것으로 확대하지 않는다.

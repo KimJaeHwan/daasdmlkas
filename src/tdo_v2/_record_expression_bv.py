@@ -19,21 +19,47 @@ def resize(value, bits, *, signed=False):
 
 
 class Adapter:
-    def __init__(self, local, selection, limits, *, memory=False):
+    def __init__(self, local, selection, limits, *, memory=False, substitutions=None):
         self.local, self.limits, self.memory = local, limits, memory
         self.control = local.get('control') or dict(nodes=[False, True], decisions={})
         self.nodes = {node['id']: node for node in local['nodes']}
         self.selected = set(selection['nodes'])
         self.cache, self.active, self.guards, self.decisions = {}, set(), {}, {}
         self.bindings, self.symbols = {}, {}
+        self.substitutions = substitutions or {}
+        self.used_substitutions = set()
         self.edges = 0
         _choice_contract(local, self.nodes, [self.nodes[i] for i in selection['nodes']], 'stitched')
 
     def part(self, part):
         if part.get('loop') or part.get('pruned') or part.get('whole'):
             raise Ineligible('expression view: cycle or incomplete bytes')
-        value, defined = self.node(part['node'])
         low, high = part['bytes']
+        replacements = [row for row in self.substitutions.get(part['node'], ())
+                        if low < row[1] and row[0] < high]
+        if replacements:
+            # Ports refer to exact ORIGINAL byte ranges. Partial overlap is
+            # assembled with unchanged source bytes, never widened to a node.
+            chunks, definitions, cursor = [], [], low
+            for source_low, source_high, value in replacements:
+                self.used_substitutions.add((part['node'], source_low, source_high))
+                start, stop = max(source_low, low), min(source_high, high)
+                if cursor < start:
+                    original, defined = self.node(part['node'])
+                    chunks.append((cursor, start, z3.Extract(start * 8 - 1, cursor * 8, original)))
+                    definitions.append(defined)
+                offset = start - source_low
+                chunks.append((start, stop, z3.Extract((offset + stop - start) * 8 - 1, offset * 8, value)))
+                cursor = stop
+            if cursor < high:
+                original, defined = self.node(part['node'])
+                chunks.append((cursor, high, z3.Extract(high * 8 - 1, cursor * 8, original)))
+                definitions.append(defined)
+            result = z3.BitVecVal(0, (high - low) * 8)
+            for start, stop, value in chunks:
+                result |= resize(value, (high - low) * 8) << (8 * (start - low))
+            return result, z3.And(*definitions)
+        value, defined = self.node(part['node'])
         if not 0 <= low < high <= value.size() // 8:
             raise Ineligible('expression view: source byte range')
         return z3.Extract(high * 8 - 1, low * 8, value), defined

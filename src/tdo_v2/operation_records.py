@@ -2685,6 +2685,9 @@ def render(record) -> str:
     if record.get('expression_views'):
         from ._record_expression_views import render_expression_views
         lines.extend(render_expression_views(record))
+    if record.get('expression_consumers'):
+        from ._record_expression_consumers import render_expression_consumers
+        lines.extend(render_expression_consumers(record))
     return "\n".join(lines)
 
 
@@ -3732,6 +3735,29 @@ def evaluate_expression_view(record, view, inputs, *, accept_unattributed_assump
     return interpret(record, view, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
 
 
+def derive_expression_consumer(record, selection, view_ids):
+    """Reuse verified P0 views in same-namespace downstream expressions."""
+    from ._record_expression_consumers import derive_expression_consumer as derive
+    return derive(record, selection, view_ids)
+
+
+def derive_loop_consumer(record, transition, view_ids):
+    """Separate countdown summary consuming proven invariant-delta DAGs."""
+    from ._record_expression_loops import derive_loop_consumer as derive
+    return derive(record, transition, view_ids)
+
+
+def attach_expression_consumer(record, consumer):
+    from ._record_expression_consumers import attach_expression_consumer as attach
+    return attach(record, consumer)
+
+
+def evaluate_expression_consumer(record, identity, inputs, *, accept_unattributed_assumptions=False):
+    from ._record_expression_consumers import evaluate_expression_consumer as evaluate
+    return evaluate(record, identity, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
 __all__ = ("Ineligible", "Limits", "RECORD_VERSION", "StitchContext", "eligibility", "evaluate", "evaluate_physical", "render",
            "evaluate_transition", "evaluate_loop_summary", "root_record", "run_records", "select_expression",
-           "simplify_expression", "attach_expression_view", "evaluate_expression_view")
+           "simplify_expression", "attach_expression_view", "evaluate_expression_view", "derive_expression_consumer",
+           "derive_loop_consumer", "attach_expression_consumer", "evaluate_expression_consumer")

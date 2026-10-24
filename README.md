@@ -150,7 +150,10 @@ PYTHONPATH=src python -m pytest tests/intra -q
   만들 수 있습니다. 기존 entry producer의 겹치는 바이트와 공유 분기를 보존하며, 원 domain SAT 후 값 불일치 UNSAT를
   확인합니다. `attach_expression_view`는 원본의 복사본에 `expression_views`만 추가하고 원 그래프·반복 요약·부채를
   변경하지 않습니다. 소비 시 원식 재구축과 동등성 재검사를 거치며, 이는 지역 값 동치이지 효과·종료·도달성 증명이
-  아닙니다. 설계 및 API 예시는 **25.39–25.51절**을 참고하세요.
+  아닙니다. 검증된 뷰를 후속식에 실제 치환하는 `derive_expression_consumer`와, 기존 감소 반복 판정에 불변 증가량
+  DAG를 연결하는 `derive_loop_consumer`도 제공합니다. 새 `expression_consumers`에만 저장하며 원본과 기존 반복 요약은
+  바꾸지 않습니다. 원 조건이 뷰의 가정을 함의하고 최종 저장식까지 동치일 때만 소비합니다. 설계 및 API 예시는
+  **25.39–25.52절**을 참고하세요.
 
 물리 기록의 구체 값은 `tdo_v2.operation_records.evaluate_physical(record, entry)`로 별도 평가합니다. 입구 레지스터와 RAM을
 실제 입력으로 제공해야 하며, 미지 값·지원하지 않는 효과·반환 불일치·예산 초과는 값으로 단정하지 않습니다. 이는 제한된

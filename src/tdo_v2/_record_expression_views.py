@@ -34,8 +34,10 @@ def _digest(value):
 
 def _fingerprint(record):
     # Adding another derived view must not invalidate either the authority or
-    # existing transition/loop-summary contracts. Nothing else is excluded.
-    return _digest({key: value for key, value in record.items() if key != 'expression_views'})
+    # existing transition/loop-summary contracts. Only the two explicitly
+    # derived collections are excluded; all original fields stay authoritative.
+    return _digest({key: value for key, value in record.items()
+                    if key not in ('expression_views', 'expression_consumers')})
 
 
 def _namespace(record, namespace):
@@ -200,11 +202,11 @@ def _reselect(record, selection):
     return limits
 
 
-def _build(record, selection):
+def _build(record, selection, *, substitutions=None):
     from ._record_expression_bv import Adapter
     limits = _reselect(record, selection)
     local, visit = _namespace(record, selection['namespace'])
-    adapter = Adapter(local, selection, limits, memory=visit is not None)
+    adapter = Adapter(local, selection, limits, memory=visit is not None, substitutions=substitutions)
     values, domain = adapter.outputs(selection)
     return adapter, values, domain, visit, limits
 

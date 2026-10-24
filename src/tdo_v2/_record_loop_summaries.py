@@ -228,7 +228,7 @@ class _Normalizer:
                     zero_when_decision=bool((node['opcode'] == 'INT_EQUAL') ^ negate))
 
 
-def _derive_case(view, limits, assignments=None, counter_decision=None, *, write_effect=False):
+def _derive_case(view, limits, assignments=None, counter_decision=None, *, write_effect=False, update_forms=None):
     _require(view['complete'], 'original one-visit view is incomplete')
     _require(len(view['entry_edges']) == len(view['cut_edges']) == 1, 'requires one entry edge and one recurrence cut')
     outcomes = view['outcomes']
@@ -273,7 +273,8 @@ def _derive_case(view, limits, assignments=None, counter_decision=None, *, write
         width, key = int(span[-1], 16), state['id']
         initial = _Form.make(width, terms=((key, 1),))
         _require(normalizer.part(exits[span]['part']) == initial, 'zero-exit changes tracked state')
-        delta = normalizer.part(row['part']).add(initial, -1)
+        value = normalizer.part(row['part']) if update_forms is None else update_forms[span]
+        delta = value.add(initial, -1)
         _require(not (set(dict(delta.terms)) & mutable), 'delta depends on mutable state')
         if key == counter['input']:
             _require(width == counter['width'] and delta == _Form.make(width, -1), 'counter must decrement by exactly one')
@@ -346,11 +347,12 @@ def _predicate_inputs(view, decision, limits):
     return sorted(inputs)
 
 
-def _derive(view, limits):
+def _derive(view, limits, *, update_forms=None):
     if 'write_projection' in view:
         return _derive_write(view, limits)
     if not view['complete'] or len(view['record']['control']['decisions']) <= 1:
-        return _derive_case(view, limits)
+        forms = None if update_forms is None else update_forms(None, None)
+        return _derive_case(view, limits, update_forms=forms)
     control = view['record']['control']
     exits = [row for row in view['outcomes'] if row['kind'] == 'exit']
     _require(len(exits) == 1, 'requires one exit')
@@ -375,7 +377,8 @@ def _derive(view, limits):
         if identity in seen:
             continue
         seen.add(identity)
-        derived = _derive_case(view, limits, assignment, counter_decision)
+        forms = None if update_forms is None else update_forms(assignment, counter_decision)
+        derived = _derive_case(view, limits, assignment, counter_decision, update_forms=forms)
         if baseline is None:
             baseline = derived
         cases.append(dict(choices=choices, updates=derived['updates'], derivation=derived['derivation'],
