@@ -1,0 +1,74 @@
+{
+  "format_version": 2,
+  "contracts": [
+    {
+      "contract_id": "glibc-sysv64-malloc",
+      "version": 1,
+      "model_id": "crt-sysv64/malloc",
+      "model_digest": "df8349043fbeb418f7c60be3eee276efc231ac3845e3b25b249b8d78ddc54c4f",
+      "kind": "allocate",
+      "result": [0, 8],
+      "pointer": null,
+      "size": [56, 8],
+      "count": null,
+      "nullable": true,
+      "failure": "unknown",
+      "zero_size": "unknown",
+      "inplace": "unknown",
+      "moved": "unknown",
+      "contents": "unknown",
+      "owned_footprint": true,
+      "references": [
+        "https://sourceware.org/glibc/manual/latest/html_node/Basic-Allocation.html",
+        "https://sourceware.org/glibc/manual/latest/html_node/Replacing-malloc.html"
+      ],
+      "symbol_names": ["malloc"]
+    },
+    {
+      "contract_id": "glibc-sysv64-free",
+      "version": 1,
+      "model_id": "crt-sysv64/free",
+      "model_digest": "df8349043fbeb418f7c60be3eee276efc231ac3845e3b25b249b8d78ddc54c4f",
+      "kind": "release",
+      "result": null,
+      "pointer": [56, 8],
+      "size": null,
+      "count": null,
+      "nullable": true,
+      "failure": "unknown",
+      "zero_size": "unknown",
+      "inplace": "unknown",
+      "moved": "unknown",
+      "contents": "unknown",
+      "owned_footprint": false,
+      "references": [
+        "https://sourceware.org/glibc/manual/latest/html_node/Freeing-after-Malloc.html",
+        "https://sourceware.org/glibc/manual/latest/html_node/Replacing-malloc.html"
+      ],
+      "symbol_names": ["free"]
+    },
+    {
+      "contract_id": "glibc-sysv64-realloc",
+      "version": 2,
+      "model_id": "crt-sysv64/realloc",
+      "model_digest": "df8349043fbeb418f7c60be3eee276efc231ac3845e3b25b249b8d78ddc54c4f",
+      "kind": "resize",
+      "result": [0, 8],
+      "pointer": [56, 8],
+      "size": [48, 8],
+      "count": null,
+      "nullable": true,
+      "failure": "retain",
+      "zero_size": "unknown",
+      "inplace": "retain",
+      "moved": "replace",
+      "contents": "preserve-prefix",
+      "owned_footprint": true,
+      "references": [
+        "https://sourceware.org/glibc/manual/latest/html_node/Changing-Block-Size.html",
+        "https://sourceware.org/glibc/manual/latest/html_node/Replacing-malloc.html"
+      ],
+      "symbol_names": ["realloc"]
+    }
+  ]
+}

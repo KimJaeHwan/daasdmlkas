@@ -461,6 +461,7 @@ class NormalizedFunction:
                 *self.memory_graph.action_nodes,
                 *self.memory_graph.unresolved_read_nodes,
                 *self.memory_graph.unresolved_write_nodes,
+                *self.memory_graph.transfer_nodes,
             )
             if len(set(all_memory_nodes)) != len(all_memory_nodes):
                 raise ValueError("memory graph binding node IDs must be unique")
@@ -534,6 +535,11 @@ class NormalizedFunction:
                 self.memory_ssa,
                 self.memory_graph,
             )
+            if self.memory_graph.transfers:
+                from ._realloc_contents import transfers_for
+                plan = None if self.forward_inputs is None else self.forward_inputs.read_separations
+                if self.memory_graph.transfers != transfers_for(plan, self.memory_ssa):
+                    raise ValueError("memory transfers require the same sealed reader-byte proof")
 
 
 # call-local temporaries of proven call effects, far above any Ghidra unique offset
@@ -1899,8 +1905,10 @@ class _ScopedNormalizer:
             action.operation_key: operation_nodes[action.operation_key]
             for action in memory_ssa.actions
         }
+        from ._realloc_contents import transfers_for, subtract_copy_clobbers
         memory_graph = _materialize_local_memory_ssa(
-            dependencies, memory_ssa, memory_operation_nodes
+            dependencies, memory_ssa, memory_operation_nodes,
+            transfers=transfers_for(_forward_memory_plan, memory_ssa),
         )
         observed_inputs = tuple(storage for _, storage in memory_graph.entry_bindings)
         expected_entry_nodes = tuple(node for node, _ in memory_graph.entry_bindings)
@@ -1933,6 +1941,7 @@ class _ScopedNormalizer:
                 key for key, row in proven_call_effects.items() if not row.restores_stack
             ),
         )
+        call_clobber_reads = subtract_copy_clobbers(_forward_memory_plan, call_clobber_reads)
         call_clobber_nodes = _materialize_call_clobber_debt(
             dependencies,
             memory_ssa,

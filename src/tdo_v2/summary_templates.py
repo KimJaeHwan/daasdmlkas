@@ -143,6 +143,8 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
     for item in closure:
         if getattr(item.normalized, "activation_entry", None) is not None or getattr(item, "activations", None):
             raise TemplateRefused(f"{item.key}: caller-owned activation evidence is not a generic template")
+        if getattr(item, "allocation_contracts", ()):
+            raise TemplateRefused(f"{item.key}: opt-in lifecycle evidence is not a portable template")
         if getattr(item, "multi_calls", None):
             # (a call composed from several targets' summaries: not a template's shape yet)
             raise TemplateRefused(f"{item.key}: a call reaching one of several functions")

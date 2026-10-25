@@ -8,12 +8,32 @@ at a resolved LOAD byte, never an uncertain/unknown effect or an object policy.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from .resource_limits import step
 from .span_geometry import ByteSpan, StorageObjectKind
 
 MAX_PROOFS = 64
 MAX_ACCESS_BYTES = 16
+_VERIFIED = ContextVar("tdo_memory_refinement_verification", default=None)
+
+
+@contextmanager
+def verification_session():
+    """Deduplicate derivations only inside one synchronous analysis/replay.
+
+    No cache survives its owner operation. Every hit still rechecks source
+    and peer pins; mutable caller state is never trusted by object ID alone.
+    """
+    if _VERIFIED.get() is not None:
+        yield
+        return
+    token = _VERIFIED.set({})
+    try:
+        yield
+    finally:
+        _VERIFIED.reset(token)
 
 
 class RefinementRefused(Exception):
@@ -43,6 +63,25 @@ def _signature(options):
             id(ACTIVE_ENTRY.get()))
 
 
+def _verification_source_pin(item):
+    """Snapshot all mutable analysis fields read by these derivations.
+
+    Units/normalized SSA and model records are frozen accepted inputs. Maps,
+    inherited dependencies and superseded run inputs are copied by value.
+    The mutable import-slot policy is checked by _policy before every hit.
+    """
+    from ._call_activation import _source_signature
+    runtime = ()
+    if len(item.normalization_context) == 7:
+        _, _, imports, _, image, _, _ = item.normalization_context
+        runtime = (None if imports is None else (imports.active, _freeze(imports.slots)),
+                   None if image is None else (image.ranges, _freeze(image.lengths), id(image.relocates)))
+    return (_source_signature(item), item.key, _freeze(item.calls), _freeze(item.multi_calls),
+            _freeze(item.declared), _freeze(item.proven), frozenset(item.inherited_assumptions),
+            _freeze(item.summary_inputs), item.summary, item.recursion_unresolved, runtime,
+            None if item.superseded is None else _verification_source_pin(item.superseded))
+
+
 @dataclass(frozen=True, slots=True)
 class ReadSeparation:
     read: str
@@ -62,6 +101,13 @@ class MemoryRefinement:
     options: tuple
     source: object
     assumptions: tuple[str, ...]
+    evidence_kind: str = "address"
+    peers: tuple = ()
+    contracts: tuple = ()
+    peer_signatures: tuple = ()
+    call_effects: tuple = ()
+    call_decisions: tuple = ()
+    copy_proofs: tuple = ()
 
     def bind(self, unit, options):
         if unit is not self.unit or unit.observation is not self.baseline.forward_inputs.observation \
@@ -71,12 +117,58 @@ class MemoryRefinement:
         return self.proofs
 
     def verify(self):
+        with verification_session():
+            self._verify()
+
+    def _verify(self):
         if self.source.unit is not self.unit or self.source.normalized is not self.baseline:
             raise RefinementRefused("original analysis changed")
-        expected = prepare_memory_refinement(self.source, dict(self.options), assumptions=self.assumptions)
+        from ._call_activation import _source_signature, _policy
+        import os
+        from .relative_memory import index_addresses, DEFINITION_ATOMS
+        cache, pin = None, None
+        if self.evidence_kind in ("allocation", "allocation-call", "realloc-copy"):
+            with _policy(self.source):
+                pass
+            for _, peer in self.peers:
+                if getattr(peer.normalized, "forward_inputs", None) is not None:
+                    with _policy(peer):
+                        pass
+            pin = (_verification_source_pin(self.source),
+                   tuple((key, _verification_source_pin(item)) for key, item in self.peers),
+                   _signature(dict(self.options)), os.environ.get("TDO_V2_FORWARD"), index_addresses(), DEFINITION_ATOMS)
+            prior = self.baseline.forward_inputs.read_separations
+            if prior is not None:
+                prior.verify()  # A parent hit cannot hide a changed earlier batch.
+            cache = _VERIFIED.get()
+            cached = cache.get(id(self))
+            if cached is not None and cached[0] is self and cached[1] == pin:
+                return
+        if self.evidence_kind in ("allocation", "allocation-call", "realloc-copy"):
+            from ._allocation_memory import prepare_allocation_refinement, prepare_allocation_call_refinement
+            from ._call_activation import _source_signature
+            if self.contracts != self.source.allocation_contracts:
+                raise RefinementRefused("lifecycle contract input changed")
+            if self.peer_signatures != tuple((key, _source_signature(item)) for key, item in self.peers):
+                raise RefinementRefused("lifecycle peer snapshot changed")
+            if self.evidence_kind == "realloc-copy":
+                from ._realloc_contents import prepare_realloc_contents
+                expected = prepare_realloc_contents(self.source, results=dict(self.peers))
+            else:
+                expected = (prepare_allocation_refinement(self.source, dict(self.options),
+                        results=dict(self.peers), assumptions=self.assumptions) if self.evidence_kind == "allocation"
+                        else prepare_allocation_call_refinement(self.source, results=dict(self.peers)))
+        elif self.evidence_kind == "address":
+            expected = prepare_memory_refinement(self.source, dict(self.options), assumptions=self.assumptions)
+        else:
+            raise RefinementRefused("unsupported sealed memory proof kind")
         if expected is None or expected.signature != self.signature or expected.proofs != self.proofs \
-                or expected.requires != self.requires:
+                or expected.options != self.options \
+                or expected.requires != self.requires or expected.call_effects != self.call_effects \
+                or expected.call_decisions != self.call_decisions or expected.copy_proofs != self.copy_proofs:
             raise RefinementRefused("baseline address evidence changed")
+        if cache is not None:
+            cache[id(self)] = self, pin
 
 
 def _offsets(fact, width):
@@ -201,8 +293,12 @@ def exclusions_for(plan, effect_unit):
     for proof in plan.proofs:
         step()
         read, writer = effects.get(proof.read), effects.get(proof.writer)
+        exact_read = read is not None and ResolvedStorage(proof.span) in read.reads
+        contained_read = plan.evidence_kind == "realloc-copy" and read is not None and any(
+            type(row) is ResolvedStorage and row.span.object_id == proof.span.object_id
+            and row.span.start <= proof.span.start < proof.span.end <= row.span.end for row in read.reads)
         if type(proof) is not ReadSeparation or read is None or writer is None \
-                or ResolvedStorage(proof.span) not in read.reads:
+                or not (exact_read or contained_read):
             raise RefinementRefused("original read occurrence changed")
         for offset in range(proof.span.start, proof.span.end):
             step()

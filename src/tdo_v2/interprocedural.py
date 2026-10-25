@@ -106,6 +106,10 @@ class AnalyzedFunction:
     call_memory_decisions: tuple = ()
     # Valid entry context refused by the current summary lowering boundary.
     activation_rejections: dict = field(default_factory=dict)
+    allocation_models: tuple = field(default=(), repr=False)
+    allocation_contracts: tuple = field(default=(), repr=False)
+    allocation_lifetimes: tuple = ()
+    replay_feedback: tuple = field(default=(), repr=False)
 
 
 def _import_slots_switched_on() -> bool:
@@ -250,7 +254,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_accessor_result_separate=False,
                   assume_accessor_private_state=False, model_bindings=(),
                   record_provenance: dict | None = None,
-                  assume_registered_handlers_not_observed=True) -> dict[str, AnalyzedFunction]:
+                  assume_registered_handlers_not_observed=True, lifecycle_contracts=()) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -294,7 +298,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     accessor-private-state -- entries with ``omits_private_writes`` apply.
     ``model_bindings``: ``summary_store.ModelBinding`` files; the bound
     functions of this binary are cut (``_bound_cuts``) unless an assumption
-    their entry rests on is off -- then their bodies are analyzed."""
+    their entry rests on is off -- then their bodies are analyzed.
+    ``lifecycle_contracts``: independently audited, exact-symbol/digest-bound
+    opt-in lifecycle records. Empty by default, never auto-loaded with models.
+    New range evidence retains their labels and all original run dependencies;
+    it is not raw allocator/UAF certification or a portable summary input."""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -514,6 +522,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         # hypothesis in use: {"failed": pairs, "rejections": rows}
         hypothesis_notes: dict = {}
 
+        from ._forward_memory import verification_session
+
+        @verification_session()
         def refined_one(key, hypotheses, activation_overrides=None):
             published = {} if record_provenance is not None else None
             result, options = analyze_one(key, hypotheses, provenance=published,
@@ -531,8 +542,69 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None:
                             candidate.inherited_assumptions |= frozenset(plan.requires)
                             result, published = candidate, pending
+                            options = dict(result.normalization_options)
                     except RefinementRefused:
                         pass
+                if lifecycle_contracts:
+                    from ._allocation_memory import prepare_allocation_refinement
+                    for _ in range(8):
+                        try:
+                            plan = prepare_allocation_refinement(result, options, results=results)
+                        except RefinementRefused:
+                            break  # Unsupported/stale optional inputs keep the original graph.
+                        if plan is None:
+                            break
+                        pending = {} if record_provenance is not None else None
+                        try:
+                            candidate, _ = analyze_one(key, hypotheses, refinement=plan, provenance=pending,
+                                                      activation_overrides=activation_overrides)
+                            if type(candidate.normalized) is not NormalizedFunction or candidate.summary is None:
+                                break
+                            candidate.inherited_assumptions |= frozenset(plan.requires)
+                            candidate.allocation_lifetimes = tuple(proof.write_fact for proof in plan.proofs
+                                                                  if isinstance(proof.read_fact, tuple))
+                            result, published = candidate, pending
+                            options = dict(result.normalization_options)
+                        except RefinementRefused:
+                            break
+                    from ._allocation_memory import prepare_allocation_call_refinement, accepts_allocation_calls
+                    try:
+                        plan = prepare_allocation_call_refinement(result, results=results)
+                    except RefinementRefused:
+                        plan = None
+                    if plan is not None:
+                        pending = {} if record_provenance is not None else None
+                        try:
+                            candidate, _ = analyze_one(key, hypotheses, refinement=plan, provenance=pending,
+                                                      activation_overrides=activation_overrides)
+                            if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None \
+                                    and accepts_allocation_calls(plan, candidate, results):
+                                candidate.inherited_assumptions |= frozenset(plan.requires)
+                                candidate.allocation_lifetimes = result.allocation_lifetimes
+                                candidate.call_memory_decisions = plan.call_decisions
+                                result, published = candidate, pending
+                                options = dict(result.normalization_options)
+                        except RefinementRefused:
+                            pass
+                if lifecycle_contracts:
+                    from ._realloc_contents import prepare_realloc_contents
+                    try:
+                        copy_plan = prepare_realloc_contents(result, results=results)
+                    except RefinementRefused:
+                        copy_plan = None
+                    if copy_plan is not None:
+                        pending = {} if record_provenance is not None else None
+                        try:
+                            candidate, _ = analyze_one(key, hypotheses, refinement=copy_plan, provenance=pending,
+                                                      activation_overrides=activation_overrides)
+                            if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None:
+                                candidate.inherited_assumptions |= frozenset(copy_plan.requires)
+                                candidate.allocation_lifetimes = result.allocation_lifetimes
+                                candidate.call_memory_decisions = result.call_memory_decisions
+                                result, published = candidate, pending
+                                options = dict(result.normalization_options)
+                        except RefinementRefused:
+                            pass
                 from ._load_identity import prepare_load_identities
                 plan = prepare_load_identities(result, options)
                 if plan is not None:
@@ -543,6 +615,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             load_identity=plan, provenance=pending, activation_overrides=activation_overrides)
                         if candidate.summary is not None and plan.accepts(candidate):
                             candidate.inherited_assumptions |= frozenset(plan.requires)
+                            candidate.allocation_lifetimes = result.allocation_lifetimes
+                            candidate.call_memory_decisions = result.call_memory_decisions
                             result, published = candidate, pending
                     except RefinementRefused:
                         pass
@@ -756,6 +830,20 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     sources[call_key] = ("model", entry.label)
                 for call_key in _unplaced_noreturn(unit, proven):
                     del proven[call_key]  # opaque: the cut would drop an observed edge
+                # Retain independently approved CALL-byte decisions when a
+                # later reader-local content proof replays their normalization.
+                chain, cursor = [], refinement
+                while cursor is not None:
+                    chain.append(cursor)
+                    cursor = cursor.baseline.forward_inputs.read_separations
+                for sealed in reversed(chain):
+                    if sealed.evidence_kind == "allocation-call":
+                        sealed.verify()
+                        for call_key, effect in sealed.call_effects:
+                            if proven.get(call_key) != sealed.source.proven.get(call_key):
+                                from ._forward_memory import RefinementRefused
+                                raise RefinementRefused("lifecycle call effect baseline changed")
+                            proven[call_key] = effect
                 return proven
 
             # summarized values that hold only if alias conditions hold: the
@@ -770,6 +858,14 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             # sticky -- a pair later found failing, or located elsewhere, fails
             opened: dict = {}
             verdicts: dict = {}
+            replay_source = refinement.source if refinement is not None else \
+                load_identity.source if load_identity is not None else None
+            if replay_source is not None and replay_source.replay_feedback:
+                old_failed, old_constants, old_rejected, old_opened = replay_source.replay_feedback
+                failed = {call: set(rows) for call, rows in old_failed}
+                constants = {call: dict(rows) for call, rows in old_constants}
+                rejected = set(old_rejected)
+                opened = {call: dict(rows) for call, rows in old_opened}
             while True:
                 proven = derive(failed)
                 normalization_options = dict(
@@ -876,6 +972,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                                  if call in proven})
             result.normalization_options = tuple(normalization_options.items())
             result.summary_inputs = (dead_ops, dead_jumps, summary_requires)
+            result.replay_feedback = (
+                tuple((call, frozenset(rows)) for call, rows in sorted(failed.items())),
+                tuple((call, tuple(rows.items())) for call, rows in sorted(constants.items())),
+                frozenset(rejected),
+                tuple((call, tuple(rows.items())) for call, rows in sorted(opened.items())),
+            )
             from .relative_memory import IMPORT_SLOTS, IMAGE_BASE_TRACKING, index_addresses, DEFINITION_ATOMS
             imports = IMPORT_SLOTS.get()
             result.normalization_context = (ENTRY_VALUES_NOT_FRAME.get(), OPAQUE_NO_STACK_ADDRESSES.get(),
@@ -884,6 +986,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             result.lifetime_models = tuple((call, model_file, entry)
                                            for call, (model_file, entry) in externals[key].items()
                                            if call in proven and entry.frees and entry.same_object)
+            result.allocation_contracts = tuple(lifecycle_contracts)
+            symbols = import_call_sites(unit, image_info) if lifecycle_contracts and image_info is not None else {}
+            result.allocation_models = tuple((call, file, entry, symbols[call])
+                                             for call, (file, entry) in externals[key].items()
+                                             if call in proven and call in symbols) if lifecycle_contracts else ()
             if key in resolution_requires:   # (forward facts the resolutions of its calls rest on)
                 result.inherited_assumptions = result.inherited_assumptions | resolution_requires[key]
             for context in (activation_overrides or {}).values():

@@ -89,6 +89,11 @@ class _Index:
         self.definition_of = {node: index for index, node in enumerate(bindings.definition_nodes)}
         self.action_of = {node: index for index, node in enumerate(bindings.action_nodes)}
         self.definition_node = bindings.definition_nodes
+        self.transfer_of = dict(zip(bindings.transfer_nodes, bindings.transfers, strict=True))
+        self.transfer_node = {
+            (row.definition_id, row.action_id, row.span): node
+            for node, row in self.transfer_of.items()
+        }
         self.reads = {}
         for read in ssa.reads:
             self.reads.setdefault(read.action_id, []).append(read)
@@ -201,6 +206,8 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False, budget=N
             _definition(index, node, demand, add)
         elif node in index.action_of:
             _operation(index, node, demand, add, clobbered)
+        elif node in index.transfer_of:
+            _transfer(index, node, demand, add)
         else:
             _other(index, node, add, covered)
     phase_count("lane_slices", 1)   # (K2 sizes: slices x steps, docs 25.31)
@@ -221,6 +228,8 @@ def _cost(index, node) -> int:
             index.ssa.definitions[source].span.size for source in index.joins.get(definition_id, ()))
     if node in index.action_of:
         return sum(read.span.size for read in index.reads.get(index.action_of[node], ()))
+    if node in index.transfer_of:
+        return index.transfer_of[node].span.size
     return 0
 
 
@@ -308,12 +317,32 @@ def _operation(index, node, demand, add, clobbered=None):
             if not bytes_:
                 continue
             for definition_id in fragment.definition_ids:
-                add(index.definition_node[definition_id], bytes_)
+                transfer = index.transfer_node.get((definition_id, action_id, fragment.span))
+                add(index.definition_node[definition_id] if transfer is None else transfer, bytes_)
     # debts and every other predecessor that is not one of its reads or a
     # constant input (CONTROL_DEPENDENCE: data-only)
     for source, _, record in index.graph.in_edges(node):
         if record.kind not in (EdgeKind.MEMORY_READ.value, EdgeKind.VALUE_INPUT.value,
                                EdgeKind.CONTROL_DEPENDENCE.value):
+            add(source, FULL)
+
+
+def _transfer(index, node, demand, add):
+    """Keep the SSA fragment's byte demand through its graph-owned transfer.
+
+    The CALL is a data prerequisite. The guard's CONTROL_DEPENDENCE edge
+    remains on the graph for control-aware traversal; lane slices are
+    data-only, just as for every other control-dependence edge.
+    """
+    transfer = index.transfer_of[node]
+    wanted = _whole(transfer.span) if demand is FULL else demand & _whole(transfer.span)
+    for source, _, record in index.graph.in_edges(node):
+        if record.kind == EdgeKind.CONTROL_DEPENDENCE.value:
+            continue
+        if source == index.definition_node[transfer.definition_id] \
+                and record.kind == EdgeKind.MEMORY_TRANSFER.value:
+            add(source, wanted)
+        else:
             add(source, FULL)
 
 

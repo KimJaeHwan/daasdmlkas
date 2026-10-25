@@ -28,6 +28,7 @@ class CallMemoryDecision:
     requires: tuple[str, ...] = ()
     model_digest: str | None = None
     model_label: str = ""
+    evidence: tuple = ()
 
 
 def memory_demands(normalized):

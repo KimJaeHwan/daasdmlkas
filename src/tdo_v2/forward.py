@@ -337,7 +337,8 @@ def probe(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
     """Probe under the normalization's captured activation, never ambient state."""
     from ._activation_entry import using_entry
 
-    with using_entry(getattr(normalized, "activation_entry", None)):
+    from ._forward_memory import verification_session
+    with verification_session(), using_entry(getattr(normalized, "activation_entry", None)):
         return _probe_active(normalized, load_key, spans)
 
 
@@ -394,6 +395,8 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
         memory_keeping=frozenset(key for key, row in rows.items() if row.preserves_memory and not row.clobbers_below),
         unrestored_stack_calls=frozenset(key for key, row in rows.items() if not row.restores_stack),
     )
+    from ._realloc_contents import subtract_copy_clobbers
+    clobbers = subtract_copy_clobbers(inputs.read_separations, clobbers)
     uncertain = dict(inputs.uncertain_writers)
     frame_uses: list = []
     opaque_uses: list = []
@@ -815,6 +818,14 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
                 whole = memory_value(key, operation)
         elif operation.opcode in ("CALL", "CALLIND", "CALLOTHER"):
             whole = Value.top(8 * operation.output.byte_size)
+        elif operation.opcode in ("INT_XOR", "INT_SUB", "BOOL_XOR") and len(operation.inputs) == 2 \
+                and operation.inputs[0] == operation.inputs[1] \
+                and operation.inputs[0].kind in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
+            # The normalizer already removes these operand reads. Preserve
+            # that exact identity here as well, even when the old value is
+            # unknown or has CALL debt. This computes only the output bytes;
+            # it does not zero unwritten upper register bytes.
+            whole = Value.number(0, 8 * operation.output.byte_size)
         else:
             inputs = list(operation.inputs)
             found = [input_value(key, item) for item in inputs]

@@ -3193,3 +3193,332 @@ Astra는 설계·분리 구조·보수적 거부·제어 컷 재요약을 단계
 판정을 분리하고 기존 SSA/그래프를 재사용하는 이번 목표 달성 및 현재 상태에서의 마무리를 명시적으로 최종 승인**했으며 필수 잔여
 차단은 없다. 직전 커밋 전체 revert 대신 결합 경로를 삭제·대체하는 판단도 유지한다. 일반 할당 수명·비NULL Realloc·전체 R002/UAF
 증명 또는 향후 확장 전체를 완료로 승인한 것이 아니다. 이 작업에서는 Git revert·새 커밋·push는 수행하지 않았다.
+
+### 25.69 필요한 구간의 할당 정체성·별칭·수명 — 설계와 한정 구현 (2026-10-25)
+
+25.68의 분리 구현은 **`1cca97b`**로 커밋했다. 아래 설계에서 출발해 단계 0–4의 한정 구현을 진행했다.
+기본값은 유지하며 사용자가 승인한 별도 opt-in 계약만 추가한다. 첫 Grow의 NULL 사례는 기존 회귀 기준이지
+새로운 비NULL 수명 추적의 성공 사례가 아니다. 현재 구현·검증 상태는 이 절 마지막에 구분한다.
+
+#### 목적과 불변식
+
+질의는 필요한 `(호출 문맥, reader/원 질의 지점, CALL, 읽을 ByteSpan)`에서 시작한다. 해당 의무에 관련된 포인터·할당과 수명 사건만 정밀 추적하되,
+그 사건이 실행될 수 있는 **원 CFG의 모든 관련 경로**를 닫는다. 전체 프로그램 UAF 부재 증명이나 전체 RAM 복사가 목표가 아니다.
+반대로 데이터 slice에 없는 free를 생략하거나, 잘라낸 구간의 진입 상태를 살아 있다고 가정해서도 안 된다.
+
+아래 네 관계는 서로의 대용이 아니다.
+
+| 관계 | 필요한 근거 | 단독으로 결론 낼 수 없는 것 |
+|---|---|---|
+| 값/주소 관계 | 기존 SSA 정의·COPY·주소 연산·정확한 메모리 읽기 | 같은 수치 주소가 같은 할당이라는 결론 |
+| 할당 정체성 | 원 할당 사건·호출 문맥·실행 occurrence/세대 | 범위 내 접근·아직 생존·CALL 비변경 |
+| 수명 | 해당 정체성의 생성/해제/재할당과 경로별 사건 폐쇄 | 살아 있으므로 임의 byte가 보존된다는 결론 |
+| CALL의 범위 비변경 | 모든 가능한 쓰기·무효화·콜백 효과와 전체 요구 범위의 비간섭 | 읽기 전체 해결·후행 STORE/CALL 부채 제거 |
+
+#### 현재 재사용 기반과 실제 결핍
+
+`LocalMemorySsaResult`의 정의·read fragment·JOIN, `definition_identity`, 원 dependency graph의 정의/읽기 간선,
+`PcodeBlockGraph`의 predecessor/successor·operation 순서·종료 근거, `single_execution_keys`의 단일 실행 판정,
+`forward.Value/Interval`의 값·offset 범위와 `probe`의 원 reaching definition/부채 판정을 재사용한다.
+정확한 CALL 전이·물리 register/memory port·`ActivationEntry` 문맥과 원 정책/입력 재검증도 유지한다. ABI 인자/반환 추측은 추가하지 않는다.
+
+그러나 `StorageObjectId`는 byte 저장소 좌표계이고 `forward.Value`는 숫자/entry-base 관계이지 할당 ID가 아니다.
+`relative_memory`의 definition/fresh atom은 단일 실행 값의 출처이고, `same_object`는 기존 전제하의 주소 표현 재사용이다.
+이들을 물리적 allocation epoch로 바꾸어 해석하지 않는다. 반복 callsite를 한 번의 할당처럼 취급해서도 안 된다.
+
+기존 `ActivationEntry`는 entrySP-relative 전체 레지스터 관계와 정확한 ENTRY 상수만 전달해 왔다. 설계 착수 시에는 일반 pointer
+provenance·수명의 호출 간 전달이 없었다. 이번 구현은 비상수 heap provenance를 상수 seed에 억지로 넣지 않고, 원 caller 정의와
+callee ENTRY를 물리 port로 연결하는 별도 근거로 확장한다. generic summary/`inner_calls`만으로 내부 수명 사건이 닫혔다고 보지 않는다.
+
+현재 `ModelEntry.frees`는 해제 또는 이동 가능성이 있는 입력을 표시한다. 원 `fresh/same_object/frees`만으로는 할당 성공/실패,
+정확한 extent·zero-size 동작·확정 해제·재할당 복사 범위를 구별할 수 없다. CRT의 malloc/calloc도 같은 모델 행을 공유한다.
+따라서 현 `frees`만 있으면 `may-invalidated`까지이며, `same_object`로 old-live나 같은 세대를 증명하지 않는다.
+
+#### 최소 의미 구조 — 기존 그래프에 붙는 사실 계층
+
+아래는 설계상 역할이다. 실제 구현은 원 SSA에 붙는 private 사실 계층이며 portable summary schema는 확장하지 않는다.
+
+| 역할 | 보관할 내용 |
+|---|---|
+| AllocationRef | program/function·원 allocation event/result port·activation·단일 occurrence 또는 반복 family. 숫자 주소·SSA 배열 index와 분리 |
+| PointerFact | 원 SSA 정의 참조 → 가능한 AllocationRef와 offset/폭/공간·NULL/unknown 가능성·경로 근거. 전체폭 COPY/주소 산술은 기존 분석으로 처리 |
+| LifetimeState | 정체성별 가능한 `not-created/live/ended` 상태 집합. 미확인 전이는 보수적으로 확대하며, escape·extent·NULL·outcome 정보는 별도 |
+| LifecycleEvent | 기존 operation/CFG 위치·입출력 물리 port·모델 digest/원 body 근거·경로 조건·허용된 상태 전이 |
+| LifetimeEvidence | 질의 지점·원 snapshot/context·관련 정의/사건·구간 경계와 경로 폐쇄·정책/모델/의존 가정·미해결 이유 |
+
+이 계층은 **두 번째 메모리 SSA나 복사한 데이터 흐름 그래프를 만들지 않는다.** 기존 정의/operation/node의 stable key와 원 snapshot에
+붙은 분석 사실을 관리하고, 간선·byte writer·JOIN은 기존 그래프가 계속 소유한다. 재정규화로 index가 바뀌면 stable identity로 재검증한다.
+별칭은 must/may/unknown을 구별한다. JOIN은 가능한 정체성과 수명의 합집합이며 한 경로의 live가 다른 경로의 free를 지우지 않는다.
+부분 overwrite·미해결 LOAD/주소·포인터 폭 손실은 전체 포인터 정체성을 전파하지 않는다. offset을 알아도 전체 접근 범위의 포함은 별도다.
+
+#### 사건 전이는 함수명이 아닌 실제 계약에서 도출
+
+명시적으로 감사한 lifecycle 계약 또는 원 body 증거가 있는 경우에만 allocate/free/resize의 정밀 전이를 사용한다.
+계약은 실제 입출력 port, 성공 조건, NULL/size0/실패/제자리·이동 결과, old 객체 수명, extent/복사 범위, callback/숨은 쓰기를
+구별할 수 있어야 한다. 없는 항목은 unknown이다. malloc과 calloc, CRT와 GMalloc을 이름이 비슷하다고 같은 전이로 취급하지 않는다.
+
+- 할당: 성공이 확인된 결과만 새로운 occurrence로 연결한다. NULL/실패 가능성을 `fresh`라는 이름만 보고 지우지 않는다.
+- free: must-alias·허용된 base pointer·정확한 해제 계약이 모두 있으면 해당 경로의 수명 종료를 기록한다. may-alias는 가능한 대상 상태를
+  확대한다. NULL 처리도 해당 계약에 상대적이다. 내부/임의 pointer 전달은 UB라며 경로를 삭제하지 않는다.
+- realloc: 성공/실패·제자리/이동·size0를 계약이 구별하는 만큼만 분리한다. 결과와 old의 content lineage를 기록하되 같은 수치 주소나
+  `same_object`만으로 동일 epoch로 합치지 않는다. 명시 계약이 기존 수명을 유지하는 제자리 resize를 보장하면 AllocationRef/epoch를
+  유지할 수 있다. 종료 후 재할당이면 새 epoch로 구분하고 계약이 불충분하면 unknown 또는 가능한 대안을 유지한다. 모든 resize는 별도
+  LifecycleEvent지만 반드시 새 할당은 아니다. old alias의 유효성과 old bytes의 복사 범위도 각각 해당 계약의 근거가 필요하다.
+- 주소 재사용: 같은 주소를 돌려줘도 다른 occurrence일 수 있다. 이전 pointer의 provenance를 새 할당으로 자동 갱신하지 않는다.
+- unknown call/callback/escape: 해당 객체에 영향이 없음을 독립 효과 계약으로 닫지 못하면 invalidation 가능성을 남긴다.
+  인자에 안 보인다는 이유만으로 전역·숨은 alias 접근을 제외하지 않는다. 예외/재진입 등 미관찰 흐름도 조용히 생략하지 않는다.
+
+#### 필요한 구간의 선택과 정방향 전달
+
+1. 기존 `CallMemoryDemand`에서 시작해 CALL 직전 포인터 값과 요구 ByteSpan의 원 정의·별칭 후보를 찾는다.
+2. 후보 할당 사건 또는 진입 의무부터 질의 지점까지 원 CFG의 모든 관련 predecessor 경로를 닫는다. allocation이 지배하지 않는 경로,
+   구간 앞 free, CALL/재할당·escape·콜백·예외 경로를 포함한다. 자료 의존 조상이 아닌 사건도 이벤트 검사 대상이다.
+3. 추적할 정체성과 값은 제한하되 구간 내 사건을 정방향 전달하고 분기/JOIN에서 가능 상태를 합친다. 경로를 버릴 때는 기존 조건 분석의
+   독립적인 불가능성 근거가 있어야 한다. 원 summary의 trap/noreturn 컷과 그 가정도 함께 pin한다.
+4. 루프/SCC·중첩 호출·불완전한 간접 흐름이나 진입 상태를 현재 지원 범위로 닫지 못하면 이유가 있는 unknown을 반환한다.
+   단순 횟수 제한이나 생략된 경로를 증명으로 세지 않는다. 정체성/경로 폭 제한은 보수적 합류·unknown이며 실제 자원 예외는 기존 typed failure다.
+5. 닫힌 근거만 범위 비변경 provider에 넘긴다. 생존 사실 외에 대상 CALL의 complete footprint·쓰기/무효화 범위·stack overlay/frame·
+   callback과 전체 요구 byte의 비간섭을 별도로 확인한다. 실패하면 원 `frees` fence·후보 source·부채를 유지한다.
+
+모든 판정은 같은 원 snapshot에서 시작한다. 판정으로 개선된 SSA를 그 판정의 선행 수명 근거로 다시 쓰는 순환 증명을 금지한다.
+후속 분석이 선행 결과를 사용하려면 근거 의존을 추적하고 원 입력·context·model/policy를 다시 검증해야 한다.
+`CallMemoryDecision`의 현재 단일 target model digest만으로 다중 allocation/free 근거가 충분하다고 보지 않는다.
+추가 증거 참조가 필요하며, 소비는 기존 `effect.preserved` → normalizer/SSA → caller 원자 채택 경로 하나로 유지한다.
+
+#### 가정 기반 결과와 엄격 검증의 구별
+
+기본값은 그대로 둔다. 기존 가정 기반 결과는 모든 전제를 계속 표시하며 새 수명 사실이 그 전제를 자동 해제하지 않는다.
+수명 자체를 증명할 때는 `no-use-after-free/no-use-of-old-pointer-after-realloc`로 만든 관계를 그 결론의 근거로 쓰지 않는다.
+가정을 꺼도 이미 그 전제로 정규화된 SSA/요약이 독립 근거가 되지는 않는다. 필요한 입력을 기존 normalizer로 더 약한 정책에서 재도출하거나
+unknown으로 남긴다. `requires`에서 라벨만 삭제하는 방식은 금지한다. run-wide 의존의 과대보고를 임의로 줄이지 않는다.
+
+‘수명 엄격 검증’은 허용한 **명시 계약에 상대적인 증명**과 strict raw(외부 효과의 원 기계어까지 닫음)를 따로 표시해야 한다.
+모델 상대 결과를 무가정/raw 증명으로 부르지 않는다. stack/global 분리·allocator freshness·callback/private-state 전제도 따로 표시하고
+이번 설계 때문에 강화하거나 해제하지 않는다. 정책/모델 digest·snapshot/context가 다른 사실은 캐시에서 공유하지 않는다.
+새 lifecycle 모델 필드·수출 의미가 필요하면 schema/의미 판/파생 모델의 재검증을 별도 변경으로 다룬다. 이번에는 변경하지 않는다.
+
+#### 구현 순서·완료 기준
+
+| 단계 | 산출물과 완료 조건 | 이 단계에서 완료로 세지 않는 것 |
+|---|---|---|
+| 0. 실제 근거 확인 | 비NULL 실제 양성 후보 하나의 allocation→질의 경로와 필수 lifecycle 계약을 감사. 근거가 없으면 필요한 계약을 명시하고 보강을 별도 합의 | NULL Grow 재통과·자료구조만 추가 |
+| 1. 단일 activation 공통 분석 | 비순환 구간에서 전체폭 pointer·COPY·상수 offset·정확한 spill/reload·분기/JOIN·free/unknown 사건을 처리하고 원 SSA 근거를 반환 | 미해결 반복/중첩 CALL을 건너뛰고 live로 처리 |
+| 2. 실제 범위 의무 소비 | 근거가 닫힌 비NULL 실제 양성과 동형 합성 양성에서 개별 CALL/ByteSpan의 부채를 줄이고 실제 writer/간선·역쿼리까지 확인. 반례는 부채 유지 | source 이름만 맞음·항상 unknown인 골격을 기능 완료로 계산 |
+| 3. 호출 경계 확장 | 원 물리 call port와 caller 정의→callee ENTRY 근거를 이용해 비상수 pointer/lifecycle 전달. 문맥별 사건 요약과 입력 재검증을 구현 | 전체 RAM 복사·generic callee에 특정 caller 수명 저장 |
+| 4. 반복/확장 전이 | event family/recency 등 검증된 유한 추상화로 반복 occurrence를 분리하고, 감사한 realloc outcome 계약을 필요한 만큼 확장 | 임의 unroll 수·동일 callsite/주소를 하나의 live 객체로 합치기 |
+
+첫 구현의 완료선은 단계 0–2의 **단일 activation·비순환 구간의 유용한 비NULL 범위 증명**이다. COPY만 처리하는 일회성 경로가 아니라
+정체성/별칭/경로 합류/사건 폐쇄/unknown/증거 소비를 함께 검증한다. 호출 간 수명 전달과 반복 정밀화는 별도 마일스톤이다.
+Trace 두 번째 Grow는 후속 수직 검증 후보이며, 현재 pointer 입력 전달과 lifecycle 계약으로 곧 해결된다고 약속하지 않는다.
+
+필수 시험은 기존 synthetic p-code builder·실행 oracle·실제 sealed Bundle을 재사용한다. 새 검사기나 보고서 생성기를 선행 개발하지 않는다.
+
+| 검증군 | 필수 반례/경계 |
+|---|---|
+| 포인터/별칭 | COPY·정확한 spill·부분 덮어쓰기·동일/상이/미확인 alias·interior pointer·폭 손실 |
+| 경로/경계 | 한 분기에서만 free·할당 안 된 분기·구간 앞 free·불명 CALL·callback·escape·관찰하지 못한 흐름 |
+| 세대/반복 | 같은 수치 주소 재사용·old alias 유지·동일 callsite 반복·중첩 호출의 동일 함수 |
+| realloc 계약 | 실패/size0/NULL/제자리·이동 계약 유무·성공 조건 미확인·복사 범위 미제공 |
+| byte 비간섭 | live지만 요구 byte를 쓰는 CALL·extent 밖·부분 겹침·wrap·후행 writer/CALL/JOIN |
+| 근거/소비 | 가정/모델/context 변경·자기 증명 금지·예산/자원 실패·generic/template 경계·원자 복귀 |
+
+각 구현 단계는 Astra 설계/단계 검수, 실제 사례·반례와 전체 OFF/ON 회귀 후 최종 승인을 받는다.
+기존 모델만으로 새 비NULL 수명 증명을 할 수 있다고 간주하지 않는다. 부족한 계약을 별도 명시 입력으로 받는 아래 경계를 적용한다.
+
+Astra는 원 코드/모델과 이 절 전체를 대조하고, realloc epoch를 일률적으로 생성/유지하지 않는 수정 및 reader 지점 명시를 조건으로
+설계와 단계 0–2 완료선 제안을 승인했다. 이후 사용자가 구현 및 별도 opt-in 계약·의존 표시를 승인했다.
+
+#### 구현된 공통 경로와 의도적인 경계
+
+단계 0–4 시점의 `lifecycle_contracts.py`는 엄격한 version-1 프로필을 읽는다(§25.70에서 내용 보존을 명시하는 version-2 입력을 추가).
+원 model digest·행·실제 import symbol·물리 port·callback 경계가
+모두 맞아야 적용하며, malloc/calloc 공용 모델을 malloc 계약만으로 calloc에 적용하지 않는다. `models/lifecycle/glibc_sysv64.json`은
+직접 선택해야 하는 문서 상대 프로필이지 자동 로드되는 효과 모델이 아니다. DLL/실제 libc·interposition을 원 기계어로 인증하지 않는다.
+계약 ID·버전·전체 canonical SHA256이 `lifecycle-contract:...` 의존으로 남는다. 원 external-model·run/summary 전제도 유지한다.
+release(NULL) 무효과와 resize(NULL, 양수) 할당 의미도 이 C-style 계약 버전의 명시 의미다. 임의 custom allocator에 이 의미를 추측하지 않는다.
+
+| 단계 | 현재 지원 | 안전하게 남기는 범위 |
+|---|---|---|
+| 정체성/별칭 | 원 allocation event·activation·occurrence, 전체폭 COPY·동일 피연산자 AND/OR·상수 offset·정확 spill/reload, 분기/JOIN | 포인터 폭 손실·혼합 read·부채 있는 read·unknown provenance |
+| 수명/사건 | 원 CFG 모든 관련 경로와 반복 방문, base·생존 전제가 검증된 release/resize, 조건부 free 합류 | invalid/interior/ended free는 **다른 allocation에도** unknown 장벽; UB라며 경로 삭제 안 함 |
+| byte 소비 | 원 plain STORE→특정 LOAD의 기존 ReadSeparation과 CALL→개별 ByteSpan 보존 경로 재사용 | arbitrary offset·extent 밖·overlay 겹침·후행 writer/CALL/JOIN 부채 유지 |
+| 호출 전달 | known direct/nonrecursive 호출의 원 full8 ENTRY register port로 caller Ref·호출 직전 상태 전달, 모든 normal RETURN 상태 합류 | 미전달 ENTRY RAM·부분 port·불명 exit/호출·재귀, callee에서 새 할당한 pointer 반환 |
+| 반복 | loop 밖 할당 live 불변식 및 free 뒤 재방문 검사; loop 안 직접 파생된 **현재 회차** pointer와 닫힌 birth→use cone | static family 전체를 live로 만들지 않음; 이전 회차 JOIN/spill/alias·구간 내 순환·여러 birth 선택은 unknown |
+| realloc outcome | 양수 크기·호출 전 live base·명시 `failure=retain`·원 결과 NULL 실패 분기가 query를 지배할 때 old 수명/기존 extent 유지 | 성공 시 old/new epoch 선택과 copied-content lineage, size0·불명 결과는 미해결 |
+
+호출 전달은 `_allocation_calls.py`의 호출별 `LifetimeCall`에 원 full8 ENTRY port들(실제 예제는 두 alias)·동일 원 Ref·입구/정상 출구 상태·자식 근거를 남긴다.
+generic callee SSA·요약을 특정 caller 수명으로 덮지 않고 전체 RAM을 복사하지 않는다. `_allocation_outcomes.py`의 `ResizeFailure`는
+원 result/transport 정의·CBRANCH·실패/성공 간선·양수 크기·계약을 `LifetimeEvidence.outcomes`로 연결한다.
+실패 분기의 조건부 수명을 CALL 전체의 `effect.preserved`로 올리지 않는다. 별도 all-outcomes owned-range 증거가 닫힌 경우의
+스택 byte 보존은 독립 판정이며, 대상 CALL의 `preserves_memory` 전체 플래그는 여전히 False다.
+
+XOR/subtract 자기상쇄는 normalizer가 이미 입력 read를 없애는 원 REGISTER/UNIQUE 항등식을 기존 forward 평가에서도 0으로 반영한다.
+upper register byte를 임의로 0으로 만들지 않는다. preCALL probe가 닫히고 기존 forward가 요구 전체폭의 정확 0을 증명한 경우에만
+NULL port로 소비한다. 비0 숫자를 allocation identity로 바꾸지 않는다.
+
+재생은 기존 normalizer의 원 failed/constant/rejected/opened feedback을 보존한다. 옵션·reader·정책·계약·원 source/peer snapshot을
+봉인하고 근거를 재도출한다. 순차 refinement는 앞 배치 근거를 다시 검증하며 같은 배치의 출력으로 입력을 증명하지 않는다.
+자원 청구는 기존 ledger를 사용한다. 한도·순환·범위 cap은 생략 성공이 아니라 원 부채/typed failure로 남긴다.
+새 계약을 가진 결과의 portable template export는 의미 schema를 감사하기 전까지 거부한다(기존 의미 판 19 유지).
+
+#### 실제 근거와 재현
+
+- Suite09 DFB031(`1b1:1049f6`, ELF `759c7760…238e29`): malloc8→두 heap STORE→realloc16.
+  명시 glibc 프로필 ON에서 두 STORE의 일곱 read-range 별칭 후보와 realloc→saved-RBX/saved-RBP 두 CALL 의무만 해소한다.
+  원 `1049f6:2:STORE`→8byte 메모리 정의→`104a6d:1:LOAD` 간선·역쿼리는 유지하며, 이후 sink/free CALL 부채 때문에 그 read의
+  `probe`는 여전히 None이다. **DFB031 전체 완전성 또는 realloc 내용 복사 증명이 아니다.** 프로필 OFF/FWD OFF/owned extent 제거 시 부채 유지.
+- `tests/corpus/fixtures/allocation_lifetime.c`를 NDK Clang 21, x86-64 Android ELF로 빌드하고 기존 Ghidra 12.0.4 exporter로 봉인했다.
+  두 alias helper(조건부 free/명시 NULL release), loop 안/밖 할당, 양수 realloc 실패 및 size0의 원 코드를 검사한다.
+  test-only POSIX 계약은 별도 ID를 사용하며 Android를 glibc라고 표시하지 않는다.
+  기존 p-code oracle에서 분기별 정상 동작과 2회 반복·해제 주소 재사용을 확인한다. 이는 **원 p-code+명시 allocator oracle**의 유한 관찰이며
+  native Android allocator 실행·모든 경로·실제 libc 인증이 아니다. 실패 realloc 관찰도 선택한 계약의 실패 oracle에 상대적이다.
+  빌드 명령과 도구 버전은 `output/allocation-lifetime-20261025/reproduction-final.txt`, 최종 Bundle은
+  `output/allocation-lifetime-20261025/bundles/042fd0cffa820470038b6970c71f3a5590ff5f5cef3802c24245e661e8e576bc`에 있다.
+
+공식 계약 감사: [glibc allocation](https://sourceware.org/glibc/manual/latest/html_node/Basic-Allocation.html),
+[free](https://sourceware.org/glibc/manual/latest/html_node/Freeing-after-Malloc.html),
+[resize](https://sourceware.org/glibc/manual/latest/html_node/Changing-Block-Size.html),
+[allocator replacement](https://sourceware.org/glibc/manual/latest/html_node/Replacing-malloc.html),
+[POSIX malloc](https://pubs.opengroup.org/onlinepubs/9799919799/functions/malloc.html),
+[free](https://pubs.opengroup.org/onlinepubs/9799919799/functions/free.html),
+[선택한 양수 실패 계약의 realloc 문서](https://pubs.opengroup.org/onlinepubs/009696899/functions/realloc.html).
+이 문서들은 callback/private-state·실제 symbol binding·스택 overlay 무변경을 단독 보장하지 않는다. 해당 기존 모델 전제는 별도로 유지한다.
+
+API는 `load_lifecycle_contracts(path)` 결과를 `analyze_units`, `analyze_observed_with_summaries` 또는
+`analyze_frozen_bundle_with_summaries`의 `lifecycle_contracts=`에 명시 전달한다. 기본값은 모두 `()`다.
+계약 없이 새 lifetime 전제를 켜거나, 기존 no-UAF/no-old-pointer 전제를 해제했다고 주장하지 않는다.
+전체 프로그램 UAF 부재, UE R002 전체 해결, 일반 heap ENTRY-memory 전달·재귀·성공 realloc의 모든 outcome은 이번 완료선이 아니다.
+
+#### 동결 전체 회귀 (2026-10-25)
+
+| 실행 | 수집/통과/skip | 실패/오류 | 시간 |
+|---|---|---|---|
+| 기본 (`TDO_V2_FORWARD=0`) | 3440 / **3408** / 32 | 0 / 0 | 966.12초 |
+| 정방향 ON (`TDO_V2_FORWARD=1`) | 3440 / **3408** / 32 | 0 / 0 | 990.89초 |
+
+신규 8모듈 **278개**는 두 실행에서 모두 통과하고 신규 skip은 없다. 그 안의 실제 Suite09 5개·새 ELF 18개도 전부 실행했다.
+기존 실제 UE 3모듈 **86개**(20/10/56)도 전부 통과했다. 이는 자동 회귀 테스트 건수이며 Suite09 전체 케이스 완전성 수치가 아니다.
+기존 skip32개는 Linux worker9·Linux supervision14·미보유 Bundle9다. 두 XML의 신규/UE 실패·오류·skip은 모두 없다.
+로그와 XML은 `/private/tmp/tdo-allocation-lifetime.pVhg8p/forward-{0,1}.{log,xml}`에 있다.
+
+src/tests/models/tools/ghidra의 Python·JSON·Java·C 파일 목록과 내용 합성 SHA256은 동결 시작·중간·두 실행 종료 후 모두
+`c5b7f17746a419829f88a781974b0c90f686ad91ef9040a9b56d87a86530d7b5`로 같다. 검사 중 엔진·테스트를 수정하지 않았다.
+설치 Core 모델 SHA256도 `84c74fd4817226a505a04a50af6f78ea1fdc32332602683bff05a6b56cf714bb`로 유지했다.
+의미 판 19·가정 registry·기본값·기존 외부/파생 모델을 변경하지 않았다.
+
+Astra는 두 XML의 통과/실패/오류/skip 사유·신규278개·실제 UE86개, 현재 동결 해시와 설치 Core 모델,
+이 절·README의 지원/제한 경계를 독립 대조했다. **단계 0–4의 합의된 한정 목표 달성 및 현재 상태에서의 마무리를 최종 승인**했고
+필수 잔여 차단은 발견하지 못했다. 승인은 명시 opt-in 계약 아래의 원 SSA/CFG 정체성·별칭·경로별 수명·개별 byte 소비와
+제한된 직접 호출·현재 반복 회차·realloc 실패 경로에 한정한다. 성공 realloc의 old/new epoch·복사 계보, 일반 재귀·heap ENTRY 전달,
+전체 UAF 부재를 완료로 승인한 것이 아니다.
+
+### 25.70 성공 realloc의 바이트 계보 — 연산식 통합 직전 범위 (2026-10-26)
+
+목적은 **원 데이터 그래프의 연결 근거 강화**다. 새 backward-slice 엔진·전체 UAF 검증기·범용 복사 SSA를 만들지 않는다.
+§25.69의 한정 수명 분석을 재사용하여, 성공한 resize의 `min(old,new)` 안에서 원 STORE byte가 이후 결과-pointer LOAD로
+전달되는 관계를 원 그래프에 명시한다. 연산식 브랜치는 merge/rebase하지 않는다. main 분기 이후의 전체 작업 이력은
+[`forward_branch_history.md`](forward_branch_history.md)에 정리한다.
+
+#### 명시 계약과 독립 근거
+
+`LifecycleContract.contents`는 기본 `unknown`이다. version-2 입력의 `preserve-prefix`는 양수 resize 성공 시
+`min(old_size,new_size)` byte의 내용 보존만 보장하며, 물리 주소·할당 epoch·old alias의 유효성을 보장하지 않는다.
+기존 format-1의 canonical payload/digest와 의미를 유지하고, 새 schema/필드는 새 전체 digest에 포함한다.
+glibc 선택 프로필의 realloc 계약은 @v2이며 malloc/free는 `contents=unknown`이다. 자동 로드는 없다.
+원 external-model/가정 registry/파생 Core 모델/기본값/portable template 의미 판 19는 바꾸지 않는다.
+
+원 결과를 추적한 non-NULL 성공 guard, 호출 전 live base와 old extent, new extent, 원 memory64 LOAD/STORE geometry,
+CALL 직전의 깨끗한 writer snapshot을 각각 요구한다. `same_object`는 기존 후보 좌표일 뿐 이 근거들을 대신하지 않는다.
+원 STORE→read fragment가 정확히 대응할 때만 승인하며, 새 결과가 아닌 old alias·JOIN·부분 pointer·부채 있는 snapshot은 거부한다.
+CALL 전체를 `preserves_memory=True`로 만들지 않는다.
+
+스택 STORE와의 비겹침을 사용할 때는 그 **전체 STORE span**이 old birth와 resize 시점 모두 활성 frame 안에 있어야 한다.
+old birth 당시에만 활성이고 resize 전에 해제된 스택 영역을 moved allocation에 재사용할 가능성을 무시하지 않는다.
+해소할 read alias 범위도 승인된 copy fragment로 제한한다. shrink4/LOAD8 반례에서는 앞4B만 정밀화하고 뒤4B 후보를 남긴다.
+
+#### 원 SSA와 그래프의 단일 소유
+
+`_realloc_contents.ResizeCopy`는 원 CALL·reader·fragment·stable writer identity·결과/guard 정의·preCALL snapshot·수명·extent·
+계약/전체 requires를 봉인한다. `_forward_memory.MemoryRefinement`가 같은 입력에서 재도출하고, normalizer와 `forward.probe`가
+동일 근거의 reader/byte에서만 해당 resize CALL debt를 차감한다. 다른 CALL과 나머지 byte는 보존한다.
+
+`memory_graph.MemoryTransfer`가 승인된 **원 read fragment의 직접 간선만** 다음 형태로 대체한다.
+
+```text
+원 STORE → 원 DATA_WRITE 정의 ──memory_transfer──▶ EFFECT 전이 ──memory_read──▶ 원 LOAD
+원 resize CALL ─────────────────memory_transfer──────▲
+원 성공 CBRANCH ───────────────control_dependence──────┘
+```
+
+SSA 정의·read·JOIN을 추가/복사하지 않는다. bindings가 transfer record/node를 소유하고, 중복·누락·원 fragment 대응·CALL/guard
+간선·소유 incident topology를 검증한다. `NormalizedFunction`도 같은 봉인 근거와 bindings의 일치를 확인한다.
+기존 byte query는 해당 fragment에서 전이를 경유한다. 기존 data-only query는 다른 CONTROL_DEPENDENCE와 마찬가지로 guard를
+자동 포함하지 않으며, control-aware query와 원 graph에는 guard 연결이 남는다.
+
+기존 정적 `memory_runs`나 CALL 전체 `effect.preserved`를 조건부 내용 복사 증거로 오용하지 않는다.
+이전 allocation-call byte 보존 근거는 후속 replay에서도 검증하여 유지한다. load-identity 단계보다 먼저 적용하므로 이전 정밀도를
+지우고 다시 성공한 것처럼 보이지 않는다. portable lifecycle template export는 계속 거부한다.
+
+검증 중복 제거는 동기 `verification_session` 수명 안에서만 수행한다. source/peer의 실제 의미 입력과 의존, runtime policy,
+ImportSlots의 active/slots, ImageBase 입력을 pin하고 매 hit에 선행 plan DAG와 정책을 확인한다. 세션 종료 시 폐기하며 실패는
+기억하지 않는다. 원 입력·가정이 바뀌었는데 cache hit로 승인하는 우회를 음성 회귀로 고정했다.
+
+#### 실제 사례와 보수적 잔여
+
+| 실제 원 자료 | 확인한 연결 | 남는 것 |
+|---|---|---|
+| Suite09 DFB031 malloc8→realloc16 | preCALL `104a1d:1:STORE`의 원4B snapshot→전이→`104a4e:0:LOAD`; CALL/성공 guard·probe 일치 | source-A의 독립 부채 및 이후 sink/free 부채. 함수 전체 완료 아님 |
+| 새 ELF grow16→32 / shrink16→8 | 두 원 STORE4 fragment→전이2개→원 LOAD8 | 실제 allocator 기계어/모든 실행을 인증한 것은 아님 |
+| 새 ELF STORE2 부분 덮어쓰기 | copied6B만 전이, 새 STORE2의 직접 writer 간선 유지 | 새 STORE2 범위2B에 기존 CALL-clobber/probe=None이 보수적으로 남음 |
+| 새 ELF 성공 뒤 opaque call | 내용 전이를 새로 승인하지 않고 두 CALL 부채 유지 | 알 수 없는 후행 변경을 가정으로 덮지 않음 |
+
+새 fixture는 `tests/corpus/fixtures/realloc_contents.c`, SHA256
+`0cd135a43cd88c56c9fe6ffad01b7a1500dedbd686543b2e09d2144dc066e5fb`다.
+NDK x86_64-linux-android21-clang의 `-O1 -g -fPIC -fno-inline -fno-builtin -fno-stack-protector -fno-omit-frame-pointer -shared
+-Wl,--build-id=sha1`로 빌드했으며 ELF SHA256은 `0d9b7940e00656ae71a5a69989c11cebdba519c50623c02ecbdee4cb79f42a42`다.
+기존 Ghidra 12.0.4 exporter로 만든 Bundle은
+`output/realloc-contents-20261026/bundles/0bcfb315a3130467bedcdbef74cb54a83aff2307e11b031f12e73076c4eb577a`다.
+`TDO_REALLOC_CONTENTS_BUNDLE`로 선택한다. 기존 8함수 allocation fixture는 수정하지 않았다.
+
+원 p-code interpreter의 moved/in-place/failure outcome 관찰은 **선택한 외부 allocator 계약/oracle에 상대적인 유한 실행**이다.
+Android를 glibc로 인증하거나, native realloc 실행·whole-program UAF 부재를 증명했다고 표시하지 않는다.
+성공 copy-prefix의 문서 근거는 [glibc resize](https://sourceware.org/glibc/manual/latest/html_node/Changing-Block-Size.html)이며,
+[allocator replacement](https://sourceware.org/glibc/manual/latest/html_node/Replacing-malloc.html) 가능성과 기존 callback/private-state
+의존도 유지한다.
+
+실제 DFB031의 원 CMP는 full-width `x-0`을 거치고 실패 arm에 zero-op NOP block이 있다. 기존 identity 연산에 `x+0`, `x-0`을
+공통 추가하고 operation-view CFG는 빈 block의 원 successor를 따라간다. 양 arm이 동일 지점으로 합류하면 성공/실패를 구별하지
+못한 것으로 남기며, 빈 함수 입구도 직접 `[0]` 접근하지 않는다. 주소·케이스 번호별 특례는 없다.
+
+#### 단계 검수와 동결 회귀
+
+Astra의 단계 검수에서 발견한 copy4B→read8B 별칭 과해소, 원 access geometry 검증 누락, cache 의존 변경 우회,
+빈 CFG arm 합류 예외를 수정하고 반례를 고정했다. Astra는 최종 두 unit 모듈의 **94 passed**를 독립 확인하고
+전체 OFF/ON 동결 회귀 착수를 승인했다. 최종 목표 달성 승인은 아래 회귀가 끝난 뒤 별도로 기록한다.
+
+첫 전체 실행에서 기존 address 증명 입력에 새 lifecycle cache의 metadata를 요구하는 호환성 오류 24건을 발견하여 실행을 중단했다.
+주소 증명의 기존 최소 입력/재도출 경로는 그대로 두고 캐시를 lifecycle 세 종류에만 한정했다. 기존 address+신규 copy **119개**를
+Astra도 독립 재실행해 통과를 확인하고 새 동결본의 전체 회귀 재착수를 승인했다. 첫 중단 실행의 통과/실패 수치를 완료 근거로
+합산하지 않는다. 중단 로그/XML은 `/private/tmp/tdo-realloc-contents.f8P45g/`에 보존한다.
+
+| 최종 동결 실행 | 수집 / 통과 / skip | 실패 / 오류 | 시간 |
+|---|---|---|---|
+| `TDO_V2_FORWARD=0` | 3572 / **3540** / 32 | 0 / 0 | 793.90초 |
+| `TDO_V2_FORWARD=1` | 3572 / **3540** / 32 | 0 / 0 | 817.05초 |
+
+새 copy unit 1개·실제 2개 모듈의 테스트 **98개**(72/24/2)를 두 실행에서 모두 수행했다. 실제 ELF/Suite09의 **26개**는 그 부분집합이며
+별도 추가 합산하지 않는다. 기존 실제 UE 세 모듈 **86개**(20/10/56)도 모두 실행·통과했다. 이전 동결보다 테스트는 132개 늘고
+skip은 동일한 32개다: Linux worker9·Linux supervision14·미보유 Bundle9. 새 기능의 실제 Bundle 검증은 skip하지 않았다.
+이 수치는 회귀 테스트 건수이며 Suite09 전체 케이스의 완전성 수치가 아니다.
+
+최종 XML/로그는 `/private/tmp/tdo-realloc-final.c1p5da/forward-{0,1}.{xml,log}`에 있다.
+src/tests/models/tools/ghidra의 Python·JSON·Java·C 목록/내용 합성 SHA256은 시작·중간·종료 모두
+`bf8dc2601ebcf5a77125909f32aa3a8b6d9391761ecff7a7efa06d11ad0859d5`로 같다. 테스트 도중 이 소스들을 수정하지 않았다.
+설치 Core 모델 SHA256은 `84c74fd4817226a505a04a50af6f78ea1fdc32332602683bff05a6b56cf714bb`를 유지한다.
+의미 판 19·기본값·가정 registry·기존 외부/파생 모델을 변경하지 않았으며 `git diff --check`도 통과했다.
+
+Astra는 최종 두 XML의 수집/통과/실패/오류/skip, 신규98개·실제26개·기존 UE86개, 현재 코드/Core 모델 해시,
+8커밋 이력과 README/이 절의 지원 경계를 독립 대조했다. **명시 계약 아래 성공 realloc의 원 writer→byte 전이→결과 LOAD 연결이라는
+한정 목표 달성 및 현재 상태의 마무리를 최종 승인**했으며 필수 잔여 차단은 없다. 연산식 통합 직전 마일스톤으로 종료한다.
+부분 덮어쓰기·범위 밖 byte·독립 부채를 남기는 승인이지 전체 UAF·일반 epoch 선택·연산식 통합 완료의 승인이 아니다.
+이 작업에서는 연산식 브랜치 merge/rebase·커밋·push를 수행하지 않았다.

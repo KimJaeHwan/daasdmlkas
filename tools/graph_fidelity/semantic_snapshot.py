@@ -54,6 +54,9 @@ CONTRACT = {
         "normalization_options": "frozen replay inputs; effects/graph outputs are encoded separately",
         "normalization_context": "runtime policy/reader inputs, not a portable analysis output",
         "summary_inputs": "original control-cut derivation inputs; summary outputs remain encoded",
+        "allocation_models": "exact original model/symbol bindings; lifecycle verdicts remain encoded",
+        "allocation_contracts": "opt-in labelled lifecycle input contracts, not analysis outputs",
+        "replay_feedback": "captured alias/extent feedback inputs; final effects/conditions are encoded",
         "activation_witness": "original caller/callee input pins; context graph and preserved spans remain encoded",
         "activation_inputs": "identity-based invalidation pins of the original inputs",
     }),
@@ -69,9 +72,11 @@ CONTRACT = {
 ADDED_FIELDS = {
     "EngineRun": {"failed_functions": ()},
     "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {},
-                         "call_memory_decisions": (), "activation_rejections": {}},
+                         "call_memory_decisions": (), "activation_rejections": {}, "allocation_lifetimes": ()},
     "NormalizedFunction": {"activation_entry": None},
     "RootSlice": {"inherited_incomplete": False},
+    "CallMemoryDecision": {"evidence": ()},
+    "MemoryGraphBindings": {"transfers": (), "transfer_nodes": ()},
 }
 
 # identity / authority tokens with no content (each is a unique object; only

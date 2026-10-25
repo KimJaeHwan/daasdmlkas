@@ -17,7 +17,8 @@ def _source_signature(item):
     options = dict(item.normalization_options)
     reader = options.pop("readonly_image", None)
     return (id(item.unit), id(item.normalized), _freeze(options), id(reader),
-            item.normalization_context, item.summary_inputs, item.lifetime_models)
+            item.normalization_context, item.summary_inputs, item.lifetime_models,
+            item.allocation_models, item.allocation_contracts, item.replay_feedback)
 
 
 @contextmanager

@@ -18,6 +18,64 @@ from tdo_v2.lane_slice import FULL, lane_slice, reached_bytes
 from tdo_v2.span_geometry import ByteSpan
 
 
+def _transfer_index():
+    from test_memory_graph import _case
+    from tdo_v2.memory_graph import _materialize_local_memory_ssa
+
+    graph, ssa, operations, transfer, _ = _case()
+    bindings = _materialize_local_memory_ssa(graph, ssa, operations, (transfer,))
+    reads = {}
+    for read in ssa.reads:
+        reads.setdefault(read.action_id, []).append(read)
+    load = SimpleNamespace(
+        opcode="LOAD",
+        inputs=(SimpleNamespace(byte_size=8), SimpleNamespace(byte_size=8)),
+        output=SimpleNamespace(byte_size=8),
+    )
+    index = SimpleNamespace(
+        graph=graph, ssa=ssa, definition_node=bindings.definition_nodes,
+        definition_of={node: number for number, node in enumerate(bindings.definition_nodes)},
+        action_of={node: number for number, node in enumerate(bindings.action_nodes)},
+        reads=reads, joins={}, little=True,
+        transfer_of={bindings.transfer_nodes[0]: transfer},
+        transfer_node={(transfer.definition_id, transfer.action_id, transfer.span): bindings.transfer_nodes[0]},
+        operation=lambda action_id: (load, (None, None), None) if action_id == transfer.action_id else None,
+    )
+    return graph, ssa, operations, transfer, bindings, index
+
+
+def test_a_transfer_preserves_the_demanded_bytes_and_its_call():
+    from tdo_v2.graph_contracts import EdgeKind
+    from tdo_v2.lane_slice import _operation, _transfer
+
+    graph, _, operations, transfer, bindings, index = _transfer_index()
+    added = []
+    _operation(index, operations["e:load"], frozenset({0, 1}),
+               lambda node, demand: added.append((node, demand)))
+    assert added == [(bindings.transfer_nodes[0], frozenset({0, 1}))]
+    added.clear()
+    _transfer(index, bindings.transfer_nodes[0], frozenset({0, 1}),
+              lambda node, demand: added.append((node, demand)))
+    assert set(added) == {
+        (bindings.definition_nodes[transfer.definition_id], frozenset({0, 1})),
+        (operations[transfer.call], FULL),
+    }
+    assert any(source == operations[transfer.guard] and edge.kind == EdgeKind.CONTROL_DEPENDENCE.value
+               for source, _, edge in graph.in_edges(bindings.transfer_nodes[0]))
+
+
+def test_a_full_lane_slice_reaches_transfer_and_untransferred_fragment():
+    _, _, operations, transfer, bindings, index = _transfer_index()
+    normalized = SimpleNamespace(call_clobber_reads=())
+    lanes = lane_slice(normalized, None, [(operations["e:load"], ())], index=index)
+    assert bindings.transfer_nodes[0] in lanes.nodes
+    assert bindings.definition_nodes[transfer.definition_id] in lanes.nodes
+    assert bindings.definition_nodes[2] in lanes.nodes
+    assert operations[transfer.call] in lanes.nodes
+    # Data-only lane traversal retains the guard edge without entering it.
+    assert operations[transfer.guard] not in lanes.nodes
+
+
 def _analyzed(builder):
     (unit,) = program_units(builder)
     results = analyze_units([unit])

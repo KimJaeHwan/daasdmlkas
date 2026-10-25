@@ -45,6 +45,7 @@ class EdgeKind(StrEnum):
     VALUE_INPUT = "value_input"                  # constant -> operation input
     MEMORY_DEFINES = "memory_defines"            # operation -> memory definition
     MEMORY_READ = "memory_read"                  # definition -> reading operation
+    MEMORY_TRANSFER = "memory_transfer"          # preserved byte source/CALL -> transfer
     MEMORY_JOIN_INPUT = "memory_join_input"      # definition -> JOIN
     UNRESOLVED_READ = "unresolved_read"          # debt -> reading operation
     UNRESOLVED_WRITE = "unresolved_write"        # writing operation -> debt
