@@ -16,7 +16,7 @@ from forward_oracle import _Recording
 from program_oracle import _place, check_program
 from record_oracle import entry_reader
 from test_callee_preserved_low_binary import (
-    APPEND, REPO, _core_run, _projector, core, image_ranges,
+    APPEND, REPO, _core_results, _projector, core, image_ranges,
 )
 from tdo_v2.configured_naming_contracts import CALL_NAMING_GHIDRA_VERSION, NamingBindingExpectation
 from tdo_v2.image_info import ReadOnlyImage, load_image_info
@@ -255,8 +255,8 @@ def test_original_thunk_memory_output_stitches_to_the_original_child_store(index
 
 
 def test_original_core_post_resize_store_is_not_relabelled_as_an_entry_base(core, monkeypatch):
-    result = _core_run(core, monkeypatch, True, tracking=True)
-    summary = result["results"][APPEND].summary
+    results = _core_results(core, monkeypatch, tracking=True)
+    summary = results[APPEND].summary
     assert {"1b1:1800f5078:3:STORE", "1b1:1800f50d6:3:STORE"} <= set(summary.unknown_writers)
     objects = dict(summary.writer_objects)
     relations = dict(summary.address_relations)

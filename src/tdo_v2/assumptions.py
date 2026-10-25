@@ -49,17 +49,19 @@ REGISTRY: tuple[Assumption, ...] = (
         "TDO_V2_ASSUME_GLOBALS_NOT_STACK"),
     Assumption(
         "stack-switch-check-exceptions", "reported", True,
-        "The stack-switch check that withdraws globals-disjoint-from-stack (may_alias.stack_switches, "
-        "GhidraV2StackSwitchScan) takes: a value loaded from memory or left in a register by a call, used to "
-         "adjust the stack pointer, as holding no stack pointer (alloca / __chkstk sizes); a user op (CALLOTHER) "
-         "as changing only its output; a call as preserving the "
-        "nonvolatile registers common to the language's conventions (x86-64: rbx, rbp, r12-r15; x86-32: ebx, "
-        "ebp, esi, edi). Reported with globals-disjoint-from-stack.",
+        "The stack-switch check treats memory-loaded adjustment values as holding no stack pointer and "
+        "CALLOTHER as changing only its output. The Python check and explicit legacy-v3 scanner also "
+        "take unresolved-call result adjustments as holding no stack pointer and assume common "
+        "nonvolatile preservation (x86-64: rbx, rbp, r12-r15; x86-32: ebx, ebp, esi, edi). Independent "
+        "raw-leaf SSA byte identity replaces that exception at particular Python call spans; an examined "
+        "unconditional nonidentity is unknown, not proven clobber. Conservative scanner v4 instead keeps "
+        "all post-call registers except call-shape SP unknown, including first and partial reads, with "
+        "no nonvolatile list. Remaining exceptions are still reported with globals-disjoint-from-stack.",
         "A stack moved to static data by arithmetic on a saved stack pointer read back from memory or "
         "returned by a call (rsp -= saved; rsp += buffer), by a user op with hidden effects, or through a callee "
-        "that returns with a nonvolatile register set to a static address. A direct load into the stack pointer "
+        "that changes an assumed-preserved register where legacy fallback remains. A direct load into the stack pointer "
         "(rsp = [x], pop rsp) is always flagged; a register copy into it is accepted only with coefficient 1.",
-        "may_alias._coefficient_switches, ghidra/GhidraV2StackSwitchScan.java, stack_evidence"),
+        "may_alias._coefficient_switches, _stack_preservation, ghidra/GhidraV2StackSwitchScan.java, stack_evidence"),
     Assumption(
         "readonly-image-data-is-constant", "switch", True,
         "Bytes of a loaded, initialized, non-writable block keep their image value while the program "

@@ -173,7 +173,9 @@ def test_original_r002_has_no_new_frame_on_off_precision_gain(ue_entry_frames):
         state = ue_entry_frames[enabled]
         root, item = state["roots"][R002], state["trace"][R002]
         assert root.reached_origin_labels == ("dfb_source_A.ret", "dfb_source_B.ret")
-        assert root.effective_completeness.reachable_unresolved_reads == 10 and not root.is_effectively_complete
+        # frees-bearing Realloc now retains lifetime call debt in both
+        # policies; switching frame privacy still supplies no new proof.
+        assert root.effective_completeness.reachable_unresolved_reads == 33 and not root.is_effectively_complete
         assert not item.refused_models
         items.append(item)
     assert items[0].declared == items[1].declared
@@ -264,19 +266,16 @@ def _assert_original_ctor_zero_bytes_and_return_conditions(state):
         assert all(reached[span] == identifier for identifier, span in headers)
         assert FRAME not in requires and HOME not in requires
     else:
-        # Forward OFF intentionally retains no probe inputs. Check the actual
-        # existing modeled four-byte Num LOAD's original SSA fragment instead;
-        # this is not a fabricated probe or a new native LOAD instruction.
-        (read,) = [read for read in normalized.memory_ssa.reads
-                   if normalized.memory_ssa.actions[read.action_id].operation_key == "1b1:18000acdc:3:CALLIND~ld0"
-                   and read.span.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE]
-        assert read.span.size == 4 and read.span.start - (1 << 64) == -64
-        (fragment,) = read.fragments
-        (identifier,) = fragment.definition_ids
-        assert any(identifier == writer and span.contains(fragment.span) for writer, span in headers)
-        literal = definition_constants(normalized, item.unit.observation, {(identifier, fragment.span)})[
-            identifier, fragment.span]
-        assert literal.byte_size == 4 and literal.unsigned == 0
+        # Forward OFF retains no stage probe. The new lifetime-limited
+        # Append summary no longer exports the old exact Num4 LOAD at all;
+        # do not invent it to retain the former stage-read assertion. The
+        # four original ctor definitions and exact subwidth bits were all
+        # independently checked above. ON tests also check the stage probe.
+        assert not any(normalized.memory_ssa.actions[read.action_id].operation_key ==
+                       "1b1:18000acdc:3:CALLIND~ld0"
+                       and read.span.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE
+                       for read in normalized.memory_ssa.reads)
+        assert not item.proven["1b1:18000acdc:3:CALLIND"].preserves_memory
     for read in ("1b1:18000adc3:1:LOAD", "1b1:18000adf4:0:LOAD"):
         (clobbered,) = [row for row in normalized.call_clobber_reads if row.operation_key == read]
         assert set(clobbered.intervening_calls) == {"1b1:18000acdc:3:CALLIND", "1b1:18000acef:3:CALLIND"}
@@ -295,7 +294,7 @@ def test_frame_off_current_models_do_not_require_runtime_forward_refinement(trac
         assert call in item.proven and f"derived-model:ue-core-win64-derived/{name}@" in item.declared[call]
     assert state["roots"][R005].effective_completeness.reachable_unresolved_reads == 15
     assert state["roots"][R005].reached_origin_labels == ()
-    assert state["roots"][R002].effective_completeness.reachable_unresolved_reads == 10
+    assert state["roots"][R002].effective_completeness.reachable_unresolved_reads == 33
     assert state["roots"][R002].reached_origin_labels == ("dfb_source_A.ret", "dfb_source_B.ret")
     assert FRAME not in state["engine_run"].assumptions and HOME not in state["engine_run"].assumptions
     _assert_original_ctor_zero_bytes_and_return_conditions(state)

@@ -26,17 +26,21 @@ def allocation_trace(trace):
         return _trace_run(trace, patch, True)
 
 
-def test_original_r002_null_resize_origin_does_not_imply_an_eight_byte_extent(allocation_trace):
+def test_original_r002_resize_lifetime_debt_cannot_supply_an_eight_byte_extent(allocation_trace):
     _, roots, results = allocation_trace
     item = results[R002]
     _, operations = _projector(item)
     assert operations[FIRST_STORE].inputs[2].byte_size == 8
     assert operations[SECOND_STORE].inputs[2].byte_size == 8
-    # This is the original same-object/null-allocation pointer provenance,
-    # not a newly supplied allocation-size contract.
-    row = dict(item.normalized.pointer_rows)[RESIZE_RESULT]
-    assert row[0] == "mem" and row[1] == "1b1:180006053:2:CALL~ld0"
-    assert row[2:] == (8, True, False)
+    # Lifetime uncertainty now blocks the old ResizeGrow pointer export;
+    # neither a missing relation nor fresh provenance is extent evidence.
+    normalized = item.normalized
+    assert RESIZE_RESULT not in dict(normalized.pointer_rows)
+    graph = normalized.dependencies
+    upstream = set(graph.backward_reachable((graph.node_for_key("op:" + FIRST_STORE),)))
+    assert any("1b1:180006053:2:CALL" in row.intervening_calls and node in upstream
+               for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes))
+    assert dict(normalized.uncertain_writers)[FIRST_STORE] is None
     assert roots[R002].effective_completeness.reachable_unresolved_reads > 0
     assert not roots[R002].is_effectively_complete
 

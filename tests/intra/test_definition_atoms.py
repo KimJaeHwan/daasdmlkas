@@ -223,13 +223,20 @@ def _grown_buffer():
             .add_rsp(0x28).ret())
 
 
-def test_realloc_keeps_the_object():
+def test_realloc_keeps_declared_object_relation_but_not_unproved_old_bytes():
     """realloc's result addresses the old block's object (the model's
     same_object_as, assuming the old pointer is not used afterwards): the
-    oracle moves the block for real and every byte keeps its writer."""
+    oracle moves the block for real and every byte keeps its writer. The
+    relation alone is not independent lifetime/whole-memory preservation."""
     results = _analyze(_grown_buffer())
     reload = _reload(results["1:1000"].normalized)
-    assert reload.is_complete
+    assert not reload.is_complete
+    normalized = results["1:1000"].normalized
+    assert any(normalized.dependencies.node(node).label == "call_clobber_read"
+               for node in reload.result.reachable_nodes)
+    realloc = [effect for key, effect in results["1:1000"].proven.items()
+               if effect.same_object_registers]
+    assert len(realloc) == 1 and not realloc[0].preserves_memory
     assert set(range(RSI, RSI + 8)) <= reload.register_bytes
     assert not reload.register_bytes & set(range(RDI, RDI + 8))
     report = _check(results)
@@ -473,17 +480,17 @@ def _debug_caller(displacement=0x10):
             .add_rsp(0x48).ret())
 
 
-def test_an_unproven_value_behind_a_conditional_alias_keeps_the_address():
-    """The reload of this may see the Max write only if they overlap (an
-    alias condition); the unknown eax it would then hold does not make the
-    Data write's address unconditional."""
+def test_realloc_lifetime_debt_prevents_conditional_only_address_claim():
+    """In addition to the old Max/this conditional alias, realloc may end
+    the old memory's lifetime. Without an extent proof even a frame spill
+    cannot silently survive that call: the later address stays uncertain."""
     results, report = _program_check(_debug_caller(), _debug_grow_helper())
     summary = results[f"1:{HELPER:x}"].summary
-    assert not summary.unknown_writers and summary.writer_conditions
+    assert summary.unknown_writers == ("1:1810:1:STORE", "1:1818:1:STORE", "1:1820:1:STORE")
     (effect,) = [e for k, e in results["1:1000"].proven.items() if k.endswith(":CALL")]
-    assert effect.preserves_memory
+    assert not effect.preserves_memory
     kept = _load_slice(results["1:1000"].normalized, 1)
-    assert kept.is_complete and set(range(RBX, RBX + 8)) <= kept.register_bytes
+    assert not kept.is_complete and set(range(RBX, RBX + 8)) <= kept.register_bytes
     assert report.runs and report.silent == []
 
 
@@ -515,5 +522,9 @@ def test_xor_of_a_register_with_itself_reads_nothing():
                .add_rsp(0x28).ret())
     results = _analyze(builder)
     function = results["1:1000"].normalized
-    assert not function.call_clobber_reads
+    # The register computation is exact even though the old return-address
+    # memory can no longer be assumed to survive a frees-bearing call.
+    exact = slice_from(function, operation_node_at(function, 3))
+    assert exact.is_complete and not exact.register_bytes
+    assert {row.operation_key for row in function.call_clobber_reads} == {"1:1014:0:LOAD"}
     assert _check(results).silent == []

@@ -175,7 +175,7 @@ def test_template_roundtrip_keeps_scalar_bits_separate_and_versioned(memory):
     assert result.literal == ExactConstant(8, (1 << 64) - 1) and result.value is None
     effect = derive_proven_call_effect(summary, "test", REGISTERS, 128, anchors=anchors)
     assert (effect.memory_runs if memory else effect.runs)[0].literal == result.literal
-    assert TEMPLATE_VERSION == 3 and ENGINE_SEMANTICS_VERSION == 18
+    assert TEMPLATE_VERSION == 3 and ENGINE_SEMANTICS_VERSION == 19
 
 
 @pytest.mark.parametrize("pointer", [("nonstack",), ("same", ByteSpan(REGISTERS, RCX, 8), False)])

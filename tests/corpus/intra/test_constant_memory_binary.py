@@ -11,7 +11,7 @@ import json
 import pytest
 
 from test_callee_preserved_low_binary import (
-    CONSTRUCTOR, CORE_SHA, R005, REPO, _core_run, _projector, _trace_run, core, trace,
+    CONSTRUCTOR, CORE_SHA, R005, REPO, _core_results, _projector, _trace_run, core, trace,
 )
 from tdo_v2.constant_value import ExactConstant
 from tdo_v2.forward import probe
@@ -36,8 +36,8 @@ def original_constructor(core):
     assert core["units"][CONSTRUCTOR].scopes.function.observation_digest.hex() == DIGESTS[CONSTRUCTOR]
     # Match the independently rederived shipped model's OFF policy; keep
     # equality with its real summary, including the return-slot conditions.
-    result = _core_run(core, pytest.MonkeyPatch(), True, tracking=True, frame=False)
-    return result["results"][CONSTRUCTOR], result["results"]
+    results = _core_results(core, pytest.MonkeyPatch(), tracking=True, frame=False)
+    return results[CONSTRUCTOR], results
 
 
 def _header_runs(summary):

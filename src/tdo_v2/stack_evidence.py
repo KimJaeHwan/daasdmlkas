@@ -32,9 +32,9 @@ from pathlib import Path
 
 FORMAT = "tdo-v2-stack-switch-evidence"
 # the detector rule versions this engine accepts (the newest last; equal to
-# GhidraV2StackSwitchScan.DETECTOR). Earlier rules are not accepted: their clean
-# result does not imply the current rule's
-DETECTORS = ("stack-switch-coefficient-v3",)
+# GhidraV2StackSwitchScan.DETECTOR). v3 remains explicitly legacy evidence:
+# it assumes language-wide nonvolatile preservation, unlike conservative v4.
+DETECTORS = ("stack-switch-coefficient-v3", "stack-switch-coefficient-v4")
 _FIELDS = {"format", "version", "detector", "executable_sha256", "program", "language", "stack_pointer",
            "functions_scanned", "instructions_scanned", "instructions_outside_functions", "switches",
            "call_preserved", "exceptions"}
@@ -42,6 +42,7 @@ _FIELDS = {"format", "version", "detector", "executable_sha256", "program", "lan
 # stack-switch-check-exceptions): exactly these, in this order
 EXCEPTIONS = ("loaded-and-call-result-values-hold-no-stack-pointer", "user-ops-change-only-their-output",
               "calls-preserve-the-common-nonvolatile-registers")
+CONSERVATIVE_EXCEPTIONS = EXCEPTIONS[:2]
 
 
 class EvidenceError(ValueError):
@@ -67,9 +68,11 @@ class StackEvidence:
 
     def describe(self) -> str:
         found = f"{len(self.switches)} switch(es)" if self.switches else "no switch"
+        calls = (f"legacy declared preservation {','.join(self.call_preserved)}"
+                 if self.detector == DETECTORS[0] else "conservative unknown post-call registers")
         return (f"{self.program} (sha256 {self.executable_sha256[:12]}): {self.functions_scanned} functions, "
                 f"{self.instructions_scanned} instructions scanned ({self.instructions_outside_functions} of them "
-                f"outside functions); {found} [{self.detector}; calls preserve {','.join(self.call_preserved)}; "
+                f"outside functions); {found} [{self.detector}; {calls}; "
                 f"exceptions: stack-switch-check-exceptions]")
 
 
@@ -83,12 +86,15 @@ def load_stack_evidence(path) -> StackEvidence:
         raise EvidenceError(f"{path}: not a {FORMAT} file (version 1)")
     if any(type(raw[key]) is not str or not raw[key] for key in ("program", "language", "stack_pointer")):
         raise EvidenceError(f"{path}: program / language / stack_pointer")
-    if raw["exceptions"] != list(EXCEPTIONS):
-        raise EvidenceError(f"{path}: exceptions must be exactly {list(EXCEPTIONS)}")
     if type(raw["call_preserved"]) is not list or any(type(item) is not str for item in raw["call_preserved"]):
         raise EvidenceError(f"{path}: call_preserved")
     if raw["detector"] not in DETECTORS:
         raise EvidenceError(f"{path}: detector {raw['detector']!r} is not one this engine knows {DETECTORS}")
+    exceptions = EXCEPTIONS if raw["detector"] == DETECTORS[0] else CONSERVATIVE_EXCEPTIONS
+    if raw["exceptions"] != list(exceptions):
+        raise EvidenceError(f"{path}: exceptions must be exactly {list(exceptions)}")
+    if raw["detector"] == DETECTORS[-1] and raw["call_preserved"]:
+        raise EvidenceError(f"{path}: conservative v4 call_preserved must be empty")
     sha = raw["executable_sha256"]
     if type(sha) is not str or len(sha) != 64 or any(item not in "0123456789abcdef" for item in sha):
         raise EvidenceError(f"{path}: executable_sha256")

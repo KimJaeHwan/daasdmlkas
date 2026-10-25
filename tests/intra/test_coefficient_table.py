@@ -128,9 +128,13 @@ def compared(monkeypatch):
     new = may_alias._coefficient_pass
     calls = []
 
-    def both(graph, instructions, stack, preserved):
-        found = new(graph, instructions, stack, preserved)
-        assert found == _old_coefficient_pass(graph, instructions, stack, preserved)
+    def both(graph, instructions, stack, preserved, call_decision=None):
+        found = new(graph, instructions, stack, preserved, call_decision)
+        # This performance oracle concerns the unchanged legacy overlap
+        # table, not the new independent raw-callee policy. Compare that
+        # mode separately; its old ABI/call-result assumptions are explicit.
+        assert new(graph, instructions, stack, preserved) == _old_coefficient_pass(
+            graph, instructions, stack, preserved)
         calls.append(len(found))
         return found
 

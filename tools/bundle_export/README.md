@@ -92,15 +92,20 @@ python3 tools/bundle_export/scan_stack_switches.py "<path to>/UnrealEditor-Core.
 ```
 (`ghidra/GhidraV2StackSwitchScan.java`: every function and the instructions outside functions, the
 engine's MUST rule -- a write of the stack pointer with anything but "the stack pointer + a number",
-under the reported assumption stack-switch-check-exceptions (loaded or call-result values used to adjust
-the stack pointer hold none; user ops change only their output; calls keep the common nonvolatile
-registers) -- refuses an unanalyzed program or another binary.) Then:
+under the reported assumption stack-switch-check-exceptions -- refuses an unanalyzed program or another
+binary.) The default `--mode conservative` produces detector **v4**: after a call, registers other than
+the call-shape SP are unknown, including first and partial reads; no ABI preservation list is used.
+Memory-loaded adjustment values and user-op output-only behavior remain explicit exceptions.
+`--mode legacy-v3` instead declares the old common-nonvolatile preservation and call-result exceptions.
+The loader keeps those legacy dependencies explicit; a v3 file is not a v4 proof. The Python Bundle
+check can separately consume independent raw-leaf SSA byte identity at particular calls. Neither check
+proves unobserved code safe. Then:
 * `run_dfbench.py --stack-evidence plugin.stack.json --stack-evidence core.stack.json`: a switch in any
   of them withdraws the assumption for the run (one process); the scope is printed.
 * `tools/derive_models ... --stack-evidence core.stack.json`: the library's templates are derived with
   the assumption only with a clean scan of that very library (otherwise without it).
 A clean scan is no proof: bytes Ghidra never disassembled and binaries not scanned are outside it.
-Measured: UnrealEditor-Core 52,211 functions / 2.88 M instructions in ~100 s, no switch; the plugin
+Historical legacy-v3 measurement (not a v4 rescan): UnrealEditor-Core 52,211 functions / 2.88 M instructions in ~100 s, no switch; the plugin
 981 functions, no switch; ntdll.dll (positive control) finds `MOV RSP,[RCX+0x10]`, as does the engine's
 own check on that function's Bundle.
 

@@ -2920,3 +2920,112 @@ Astra는 대상 선정·selector 구현·whole-pack OFF 재도출과 실제 반�
 최종 문서를 Astra가 독립 대조했다. **합의한 이번 목표 달성과 이 상태에서의 마무리를 명시적으로 최종 승인**했으며
 필수 잔여 차단 사항은 발견하지 못했다. 승인은 동일 공간 selector 적용 보정과 Core 모델의 frame/home 의존 축소·조건 보존
 범위다. R005 전체 해결·전역 entry/frame 가정 해제·할당 수명 해결은 포함하지 않으며, 위 한계를 완료로 세지 않는다.
+
+### 25.66 호출 보존의 원 SSA 증거와 free/realloc 수명 경계 (2026-10-25)
+
+§25.65의 1순위는 `e7cbbcb`로 커밋했다. 이어서 §25.64의 2순위와 allocator 의무의 실제 소비를 진행한다.
+전체 SSA·메모리 그래프·copy tracer·호출 clobber를 재사용하며 새 ABI, 별도 포인터 분석기, 가정 라벨 삭제는 없다.
+이 절의 현재 범위는 **특정 raw leaf의 호출 보존 증거와 수명 경계의 보수적 처리**다. 3순위의 no-UAF/no-old-pointer
+독립 증명이나 allocator 가정 전체 해제는 완료하지 않았다. 그런 실제 독립 근거가 현재 자료에는 없다.
+
+#### 2순위: 언어별 목록 대신 특정 호출·register byte의 원 근거
+
+`program_switches_stack`는 같은 admitted program의 원 callee만 선택한다. 내부 `_stack_preservation`은 기존
+`FunctionNormalizer`와 `summarize_function`으로 raw leaf를 분석한다. globals/frame/home/import/readonly/opaque/trap
+가정과 외부 모델을 쓰지 않는다. 관찰한 모든 정상 출구에서 같은 entry byte의 무조건 `IDENTITY`인 span만 보존한다.
+CALL/CALLIND/CALLOTHER/BRANCHIND·미관찰/불지원·tail exit·조건/부채·예산 실패는 독립 증거가 아니다.
+단순 `COMPUTED`도 반드시 값이 바뀌었다는 증명이 아니므로 **unknown**으로 처리한다.
+
+계수 검사에는 CALL 이후 처음 읽는 레지스터와 부분 span도 등록한다. 독립적으로 검사한 비identity는
+언어별 비휘발 목록보다 우선하여 unknown이 된다. 미해결 callee는 기존 명시적 legacy 예외를 유지할 수 있다.
+따라서 `stack-switch-check-exceptions` 전체를 제거하지 않는다. LOAD/result·CALLOTHER 예외도 그대로 별도 한계다.
+독립 lookup/원 명령/출구/byte coverage 비용은 기존 caller/callee work ledger에 청구하며, scope가 다른 같은 주소는 거부한다.
+
+원 Suite09 115함수/1833명령 Bundle에서 source A/B/C는 실제 RBP push STORE→8byte pop LOAD→RBP COPY로
+모든 byte의 entry 값을 복원한다. 선택한 caller `1b1:1056f4`의 `1056ff:2:CALL`→`105704:0:COPY RBP→RSP`는
+언어별 보존 목록을 비워도 원 증거로 유지된다. 증거를 거부하고 목록도 비우면 그 COPY를 flag한다.
+원 p-code 8개 입력에서 해당 writer byte도 대조한다. 반대로 sink `1b1:104595`는 globals OFF에서 saved RBP와
+전역 쓰기의 비겹침 조건이 남는다. 실제 겹침 입력에서는 low4byte가 바뀌므로 globals ON 요약을 독립 증거로 재사용하지 않는다.
+이는 Suite09 전체 80개의 완전성이나 UE 전체의 보존 증명이 아니다.
+실제 회귀의 `TDO_STACK_CALL_PRESERVATION_BUNDLE`은 전체 115함수 봉인 generation
+`e360c22577b1da09a13565ddde889418e361497a7bda097f1545c4c8189d7b4b`를 가리킨다. 기존 044의 작은 closure로 대체하지 않는다.
+
+#### 전체 이미지 scanner v4와 기존 v3의 분리
+
+Ghidra scanner의 기본은 보수적 `stack-switch-coefficient-v4`다. CALL/CALLIND 뒤 기존 call-shape로 다루는 SP를 제외한
+레지스터는 미등장/부분 read까지 unknown이며 언어별 보존 목록이 없다. 명시적 후속 zero write만 정확히 복원하고 JOIN에서도 unknown을 유지한다.
+함수 밖/단절 구간도 unknown으로 시작한다. `--mode legacy-v3`는 예전 보존 목록과 세 예외를 그대로 선언한다.
+Python CLI도 두 모드를 전달한다. loader는 v4에 빈 `call_preserved`와 남은 두 예외만 허용하며 v3를 v4 증거로 바꾸지 않는다.
+scanner는 callee SSA 증명 생산자를 복제하지 않는다. 실제 Java 계수 상태 helper를 javac로 실행했으나,
+이번 PC에서 Docker daemon이 없으므로 **v4로 UE 전체 이미지를 새로 스캔했다고 주장하지 않는다**.
+Core 재도출은 기존 봉인 v3 자료를 쓰며 그 legacy 가정도 계속 보고한다.
+
+#### 3순위의 제한적 보완: frees 선언을 실제 clobber에 소비
+
+`ModelEntry.frees`가 비어 있지 않은 free/realloc 모델은 `other_memory=preserved`여도 더 이상 whole-memory preservation을
+부여하지 못한다. 대상 객체의 extent/lifetime을 증명할 근거가 없으므로 일부 주소만 안전하다고 발명하지 않는다.
+기존 call-clobber/CFG JOIN/메모리 SSA가 이전 STORE를 **가능한 후보 + 정확한 호출 부채**로 유지한다.
+후속 정확한 STORE는 그 byte의 부채만 없앨 수 있으며 부분 STORE는 나머지 byte를 해결하지 못한다.
+명시적 final memory run의 해당 byte 효과, register 효과, fresh/same-object 모델 계약과 가정 라벨은 그대로다.
+`same_object_as`는 모든 옛 byte 보존이나 extent 증명이 아니다. realloc만 예외 처리하지 않는다.
+
+실제 Core Free `18003bc0c:2:CALL`→반환주소 LOAD `18003bc16:0:LOAD`, Trace Free
+`18000598a:3:CALLIND`→`180005995:0:LOAD`에 원 call-clobber 그래프 부채가 붙고 summary의 inner call도
+nonpreserving이다. 이 몸체에는 post-Free pointee LOAD가 없으므로 실제 UAF를 실행해 증명했다는 의미가 아니다.
+Core/Trace Realloc도 원 call→첫 frame LOAD→COPY→Data STORE의 주소 불확실성이 유지된다.
+
+Core 모델 세 export는 whole-pack frame OFF로 다시 도출했다. 엔진 의미 **19**, template **3**, model file **18**이며
+forward 0/1 재도출과 설치 모델 SHA256은 모두 `84c74fd4817226a505a04a50af6f78ea1fdc32332602683bff05a6b56cf714bb`다.
+constructor의 기존 두 반환조건과 32byte zero 값은 유지되며 dtor/Append payload는 새 수명 부채를 운반한다.
+source 가정은 11개 그대로이고 frame/home 두 의존은 다시 생기지 않았다. 나머지 모델 계약을 해제한 것이 아니다.
+
+#### 실제 정밀도 변화 — 해결로 세지 않는다
+
+frame ON/OFF × runtime forward 0/1 네 조합에서 R002는 A+B/proven 9/부채 **33**, R005는 proven 10/부채 **15**다.
+R005의 세 export에 대한 여섯 호출은 현재 모델로 모두 적용된다. R002의 이전 부채 10→33은 개선 수치가 아니다.
+현재 33은 call-clobber 16 + may-alias 11 + opaque-write 6이다. 옛 10은 may-alias 7 + conditional 3이므로
+단순히 같은 종류의 읽기 23개가 추가된 것이 아니다. Realloc 뒤 frame LOAD가 불확실해져 두 caller STORE
+`180006099:1:STORE`/`180006230:1:STORE`의 주소 의무가 무조건 unknown으로 남고, 각 ResizeGrow가
+unknown memory run 세 개씩을 전달한다. 이 의무를 지우고 성공으로 세지 않는다.
+
+같은 이유로 Append의 옛 RDI8 보존 CALL 행과 그 low4 index 주소 증거도 현재 독립 증명으로 쓸 수 없다.
+옛 `CALL~2`가 단순히 다른 번호로 옮긴 것이 아니므로 번호만 바꾸거나 원 입력을 주입해 양성으로 유지하지 않는다.
+일반적인 정확한 low-register 표현 기능은 유지하지만 이 실제 사례는 수명 근거 보강 전까지 미해결이다.
+독립적인 allocator 성공/extent/이동/옛 포인터 사용 구간 증명은 **미완료 확장 과제**로 남긴다.
+
+#### 최종 회귀와 승인 범위
+
+Astra는 원 대상 선택·Python/Java 설계·scope/예산 반례·실제 연결과 정밀도 손실·회귀 기대 변경을 단계별로 검수했다.
+전체 실행 전 원인별 기존 회귀 139개도 모두 통과했다. 아래가 수정 후 고정한 권위 실행이다.
+
+| 실행 | 결과 | 시간 |
+|---|---|---|
+| `release-default` (`TDO_V2_FORWARD=0`) 전체 | **2926 passed / 32 skipped / failure 0 / error 0** | 522.19초 |
+| `release-forward-on` (`TDO_V2_FORWARD=1`) 전체 | **2926 passed / 32 skipped / failure 0 / error 0** | 545.01초 |
+| `release-dense` 인접 전체 | **826 passed / 0 skipped / failure 0 / error 0** | 112.50초 |
+| 설명 전용 수정 뒤 관련 회귀 | **126 passed / 0 skipped / failure 0 / error 0** | 9.77초 |
+
+전체는 각 2958항목이며 32 skip은 Linux worker 9·Linux supervision 14·미보유 Bundle 9다. 신규 **103개**
+(독립 호출 합성 17·원 Suite09 17·수명 합성 41·원 UE 20·scanner/evidence 8)는 위 세 권위 실행 모두 실제 pass다.
+신규 skip/failure/error는 0이다. 이는 물리적 실행을 모든 입력에 대해 증명하거나 Suite09 전체 완전성으로 환산한 수치가 아니다.
+수정 도중의 개발 실행(11 failure/3 error)은 이전 기대값·옛 파생 행 번호·소실된 보존 근거를 확인한 중간 기록이며,
+현재 권위 통과로 재해석하지 않는다. 현재 검사는 해당 소실을 원 그래프의 정확한 부채로 명시적으로 검사한다.
+
+로그/XML·집계는 `output/call-preservation-lifetime-20261025.KONALw/release-{default,forward-on,dense}.{log,junit.xml}`와
+`release-xml-audit.log`다. src/tests `.py`·models `.json`·도출 CLI `.py`에 새 scanner Java/CLI를 포함한 273파일을
+경로+NUL+각 파일 SHA256으로 동결했다. `freeze-release-{start,middle,end}.log`는 모두
+`7023f18d12d75487c42a1231f609657683269b24e3e4a0ec3f0910e34e84a74e`로 같다.
+
+전체 종료 후 가정 registry의 **설명 문자열 세 필드(statement/fails_when/applied_in)와 생성 문서만** 최신 동작에 맞췄다.
+Astra가 승인한 설명 전용 후처리 예외로, 25개 항목의 이름/종류/기본값/parameter/flag/env와 순서는 전후 동일하다.
+생성 문서 일치·가정·stack evidence·템플릿·모델 연결·실제 사례 126개를 다시 검사했다.
+현재 해시는 `e908af169493962d59dfc7997963b1931c0902b9e2090a54c906812774cce345`이며,
+`assumptions.py`의 설명만 이전 내용으로 대체해 재해시하면 원 동결 해시가 정확히 복원된다
+(`freeze-description-{only,reconstruction}.log`). 이 후처리 뒤 전체를 다시 실행했다고 주장하지 않는다.
+`model-release-{0,1}.json` 재도출도 설치본과 같은 위 SHA256이다.
+
+Astra는 세 XML·신규 103개·skip 사유·273파일 두 해시와 설명 수정 전 복원·25개 registry 정책 불변·후속 126개·
+설치/재도출 모델의 SHA/세 export/의미 판/11가정을 독립 확인했다. **P2 호출별 raw-leaf 보존과 P3 frees 안전성 소비라는
+한정 마일스톤의 목표 달성 및 이 상태에서의 마무리를 명시적으로 최종 승인**했으며 해당 범위의 필수 차단 사항은 없었다.
+원래 3순위 전체의 독립 allocator 수명 증명·no-UAF/no-old-pointer 가정 해제는 여전히 미완료다.
+UE 전체 해결이나 v4 전체 이미지 재스캔까지 승인된 것이 아니다.

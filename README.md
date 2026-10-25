@@ -21,6 +21,10 @@ UE 전체 완전성이나 추가 source 제거를 보장하지 않습니다. 지
 확장을 끄고 원 코드에서 다시 도출했으며, 필요한 반환주소 비겹침 조건은 보존합니다. 같은 메모리 공간 selector의 4/8byte
 표현 차이도 기존 정방향 증명에 연결합니다. 지원 범위·독립 근거·UE의 남은 부채는
 [설계 §25.65](docs/interprocedural_design.md#2565-entryframe-가정-off의-실제-검증과-core-모델-독립-재도출-2026-10-25)을 따릅니다.
+호출 보존 검사는 원 raw leaf의 byte-identity 증거를 소비하며, free/realloc 선언은 무조건 메모리 보존을 허용하지 않습니다.
+이로 인해 UE R002 부채는 10→33으로 늘고 기존 Append RDI 보존 증거도 미해결로 남습니다. 가정을 해제하거나 전체 분석을
+완료했다는 뜻은 아닙니다. 현재 범위·의도적인 정밀도 제한은
+[설계 §25.66](docs/interprocedural_design.md#2566-호출-보존의-원-ssa-증거와-freerealloc-수명-경계-2026-10-25)에 있습니다.
 
 ## 구성
 
@@ -138,7 +142,7 @@ PYTHONPATH=src python -m pytest tests/intra -q
   `unexplained`로 따로 셉니다.
 - **golden 비교**: `tools/graph_fidelity/golden_all.sh compare <golden> <new>`.
 
-현재(2026-10-16) 지표 (정확 / 정확+확실):
+이전 기준(2026-10-16) 지표 (정확 / 정확+확실; 아래 최신 브랜치 회귀와 별개):
 
 | Bundle | 케이스 | 결과 |
 |---|---|---|
@@ -148,8 +152,8 @@ PYTHONPATH=src python -m pytest tests/intra -q
 | UE DLL DebugGame | 22 | 15 / 15 (접근 함수 가정 + 바인딩: 17) |
 | UE DLL Development | 22 | 16 / 16 (접근 함수 가정 + 바인딩: 18) |
 
-어느 Bundle에서도 "누락 + 확실"은 0이고, 프로그램 오라클의 누락은 zlib를 포함해 0입니다(zlib의 256건은 오라클 해석기의 호출 규약 결함이었음 — 문서 25.29).
-현재 main 기반 브랜치의 최신 전체 회귀 수치와 skip 범위는 설계 §25.65에 기록합니다.
+위 이전 측정에서는 어느 Bundle에서도 "누락 + 확실"이 0이었고, 프로그램 오라클의 누락도 zlib를 포함해 0이었습니다(zlib의 256건은 오라클 해석기의 호출 규약 결함이었음 — 문서 25.29).
+현재 main 기반 브랜치의 최신 전체 회귀 수치와 skip 범위는 설계 §25.66에 기록합니다.
 
 ## 문서
 

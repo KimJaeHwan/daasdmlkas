@@ -10,7 +10,7 @@
 // program's executable SHA-256, how much was scanned, and every switch (or
 // operation the scan could not follow: "UNCHECKED") found.
 //
-// Arguments: --output PATH --expected-sha256 HEX
+// Arguments: --output PATH --expected-sha256 HEX [--mode conservative|legacy-v3]
 // Refuses a program that is not analyzed, or whose recorded executable
 // SHA-256 differs from the expected one. Run with -process -noanalysis -readOnly.
 //@category TDO
@@ -34,11 +34,15 @@ import ghidra.program.model.pcode.Varnode;
 
 public class GhidraV2StackSwitchScan extends GhidraScript {
     // keep equal to tdo_v2.stack_evidence.DETECTORS[-1]
-    public static final String DETECTOR = "stack-switch-coefficient-v3";
+    public static final String DETECTOR = "stack-switch-coefficient-v4";
+    private static final String LEGACY_DETECTOR = "stack-switch-coefficient-v3";
     // what a clean scan rests on besides finding no switch (the reported
     // assumption stack-switch-check-exceptions; as tdo_v2.stack_evidence.EXCEPTIONS)
     private static final List<String> EXCEPTIONS = List.of("loaded-and-call-result-values-hold-no-stack-pointer",
-        "user-ops-change-only-their-output", "calls-preserve-the-common-nonvolatile-registers");
+        "user-ops-change-only-their-output");
+    private static final List<String> LEGACY_EXCEPTIONS = List.of(
+        "loaded-and-call-result-values-hold-no-stack-pointer", "user-ops-change-only-their-output",
+        "calls-preserve-the-common-nonvolatile-registers");
     private static final long MAX_STACK_ALIGNMENT = 1L << 12;
     private static final Integer UNKNOWN = null;
     private static final Set<Integer> BOOLEAN = Set.of(
@@ -58,11 +62,24 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
         }
     }
 
+    // A coefficient-state default, not a storage location. After a call an
+    // unmentioned register is UNKNOWN too (including its first or partial read).
+    private static final Loc UNKNOWN_REGISTERS = new Loc(Integer.MIN_VALUE, 0, 0);
+
     /** One p-code operation of a scanned region: (instruction, ordinal). */
     private record Node(Address instruction, int ordinal) {}
 
     private Loc stack;
     private final List<Loc> preserved = new ArrayList<>();
+    private boolean conservative = true;
+
+    private static boolean conservativeMode(String mode) {
+        return switch (mode) {
+            case "conservative" -> true;
+            case "legacy-v3" -> false;
+            default -> throw new IllegalArgumentException("unknown stack scan mode " + mode);
+        };
+    }
 
     private static Loc loc(Varnode varnode) {
         return new Loc(varnode.getSpace(), varnode.getOffset(), varnode.getSize());
@@ -77,11 +94,13 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
             switch (args[index]) {
                 case "--output" -> output = Path.of(args[index + 1]).toAbsolutePath().normalize();
                 case "--expected-sha256" -> expected = args[index + 1].toLowerCase(Locale.ROOT);
+                case "--mode" -> conservative = conservativeMode(args[index + 1]);
                 default -> throw new IllegalArgumentException("unknown argument " + args[index]);
             }
         }
         if (output == null || expected == null || args.length % 2 != 0) {
-            throw new IllegalArgumentException("--output PATH --expected-sha256 HEX");
+            throw new IllegalArgumentException(
+                "--output PATH --expected-sha256 HEX [--mode conservative|legacy-v3]");
         }
         if (!currentProgram.getOptions(Program.PROGRAM_INFO).getBoolean(Program.ANALYZED_OPTION_NAME, false)) {
             throw new IllegalStateException("the program is not analyzed: analyze it in the Ghidra project first");
@@ -93,7 +112,7 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
         Register sp = currentProgram.getCompilerSpec().getStackPointer();
         stack = loc(new Varnode(sp.getAddress(), sp.getMinimumByteSize()));
         String language = currentProgram.getLanguageID().getIdAsString();
-        List<String> preservedNames = language.startsWith("x86:LE:64") ? X86_64_PRESERVED
+        List<String> preservedNames = conservative ? List.of() : language.startsWith("x86:LE:64") ? X86_64_PRESERVED
             : language.startsWith("x86:LE:32") ? X86_32_PRESERVED : List.of();
         for (String name : preservedNames) {
             Register register = currentProgram.getRegister(name);
@@ -114,8 +133,8 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
             instructions += scan(function.getEntryPoint(), function.getBody(), function.getName(true), listing,
                 switches);
         }
-        // instructions outside every function: scanned as one region (each from
-        // the stack pointer being the stack pointer)
+        // Instructions outside every function use the SAME selected rule,
+        // including unknown post-call registers in conservative mode.
         AddressSet outside = new AddressSet();
         InstructionIterator all = listing.getInstructions(true);
         while (all.hasNext()) {
@@ -128,7 +147,7 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
         Map<String, Object> evidence = new LinkedHashMap<>();
         evidence.put("format", "tdo-v2-stack-switch-evidence");
         evidence.put("version", 1);
-        evidence.put("detector", DETECTOR);
+        evidence.put("detector", conservative ? DETECTOR : LEGACY_DETECTOR);
         evidence.put("executable_sha256", expected);
         evidence.put("program", currentProgram.getDomainFile().getPathname());
         evidence.put("language", language);
@@ -138,7 +157,7 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
         evidence.put("instructions_outside_functions", outsideCount);
         evidence.put("switches", switches);
         evidence.put("call_preserved", preservedNames);
-        evidence.put("exceptions", EXCEPTIONS);
+        evidence.put("exceptions", conservative ? EXCEPTIONS : LEGACY_EXCEPTIONS);
         Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(evidence) + "\n",
             StandardCharsets.UTF_8);
         println("stack-switch scan: " + functions + " functions, " + (instructions + outsideCount) +
@@ -158,8 +177,8 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
         Map<Node, Map<Loc, Integer>> in = new HashMap<>();
         Set<Node> unchecked = new LinkedHashSet<>();
         Deque<Node> pending = new ArrayDeque<>();
-        // from the entry, then from every instruction no path reaches; the stack
-        // pointer is the stack pointer everywhere
+        // From the entry, then from every instruction no path reaches. A
+        // disconnected/outside seed has no entry-register baseline in v4.
         List<Address> starts = new ArrayList<>();
         if (entry != null) {
             starts.add(entry);
@@ -173,8 +192,7 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
             addInstruction(seeds, start, pcode, rows);
             for (Node seed : seeds) {
                 if (!in.containsKey(seed)) {
-                    Map<Loc, Integer> state = new HashMap<>();
-                    state.put(stack, 1);
+                    Map<Loc, Integer> state = initialState(entry != null && start.equals(entry));
                     in.put(seed, state);
                     pending.add(seed);
                 }
@@ -198,6 +216,15 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
             report(switches, reported, node, "UNCHECKED", name, rows);
         }
         return pcode.size();
+    }
+
+    private Map<Loc, Integer> initialState(boolean functionEntry) {
+        Map<Loc, Integer> state = new HashMap<>();
+        state.put(stack, 1);
+        if (conservative && !functionEntry) {
+            state.put(UNKNOWN_REGISTERS, UNKNOWN);
+        }
+        return state;
     }
 
     private static void report(List<Map<String, Object>> switches, Set<Node> reported, Node node, String opcode,
@@ -224,23 +251,36 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
         return false;
     }
 
-    private static Integer read(Map<Loc, Integer> state, Varnode varnode) {
+    private Integer read(Map<Loc, Integer> state, Varnode varnode) {
         if (varnode.isConstant()) {
             return 0;
         }
-        Loc key = loc(varnode);
+        return readLocation(state, loc(varnode));
+    }
+
+    private Integer readLocation(Map<Loc, Integer> state, Loc key) {
         if (state.containsKey(key)) {
             return state.get(key);
         }
+        boolean zeroCovered = false;
         for (Map.Entry<Loc, Integer> row : state.entrySet()) {
             if (row.getKey().overlaps(key) && !Integer.valueOf(0).equals(row.getValue())) {
                 return UNKNOWN;
             }
+            if (Integer.valueOf(0).equals(row.getValue()) && row.getKey().space() == key.space() &&
+                    row.getKey().offset() <= key.offset() &&
+                    key.offset() + key.size() <= row.getKey().offset() + row.getKey().size()) {
+                zeroCovered = true;
+            }
+        }
+        if (conservative && key.space() == stack.space() && state.containsKey(UNKNOWN_REGISTERS) &&
+                !zeroCovered) {
+            return UNKNOWN;
         }
         return 0;
     }
 
-    private static void write(Map<Loc, Integer> state, Loc key, Integer value) {
+    private void write(Map<Loc, Integer> state, Loc key, Integer value) {
         for (Loc other : new ArrayList<>(state.keySet())) {
             if (!other.overlaps(key)) {
                 continue;
@@ -256,7 +296,7 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
                 state.put(other, UNKNOWN);
             }
         }
-        if (!Integer.valueOf(0).equals(value)) {
+        if (conservative || !Integer.valueOf(0).equals(value)) {
             state.put(key, value);
         }
         else {
@@ -265,8 +305,11 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
     }
 
     /** The output's stack coefficient: 1, 0, or null (unknown). */
-    private static Integer coefficient(PcodeOp op, Map<Loc, Integer> state) {
+    private Integer coefficient(PcodeOp op, Map<Loc, Integer> state) {
         int opcode = op.getOpcode();
+        if (conservative && (opcode == PcodeOp.CALL || opcode == PcodeOp.CALLIND)) {
+            return UNKNOWN;
+        }
         Varnode[] inputs = op.getInputs();
         List<Integer> values = new ArrayList<>();
         for (Varnode input : inputs) {
@@ -308,6 +351,36 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
         return 0;
     }
 
+    private void afterCall(Map<Loc, Integer> state) {
+        // Legacy v3 explicitly assumes the language's common nonvolatiles.
+        // V4 keeps no such values, including registers not seen before this call.
+        state.keySet().removeIf(key -> key.space() == stack.space() && !key.equals(stack) &&
+            (conservative || preserved.stream().noneMatch(kept -> key.offset() >= kept.offset() &&
+                key.offset() + key.size() <= kept.offset() + kept.size())));
+        if (conservative) {
+            state.put(UNKNOWN_REGISTERS, UNKNOWN);
+        }
+    }
+
+    private Map<Loc, Integer> merge(Map<Loc, Integer> known, Map<Loc, Integer> state) {
+        Map<Loc, Integer> merged = new HashMap<>();
+        if (conservative && (known.containsKey(UNKNOWN_REGISTERS) || state.containsKey(UNKNOWN_REGISTERS))) {
+            merged.put(UNKNOWN_REGISTERS, UNKNOWN);
+        }
+        Set<Loc> keys = new HashSet<>(known.keySet());
+        keys.addAll(state.keySet());
+        keys.remove(UNKNOWN_REGISTERS);
+        for (Loc key : keys) {
+            Integer left = conservative ? readLocation(known, key) : known.getOrDefault(key, 0);
+            Integer right = conservative ? readLocation(state, key) : state.getOrDefault(key, 0);
+            Integer value = Objects.equals(left, right) ? left : UNKNOWN;
+            if (conservative || !Integer.valueOf(0).equals(value)) {
+                merged.put(key, value);
+            }
+        }
+        return merged;
+    }
+
     private void propagate(Map<Node, Map<Loc, Integer>> in, Deque<Node> pending, Map<Address, PcodeOp[]> pcode,
             Map<Address, Instruction> rows, Set<Node> unchecked) throws Exception {
         while (!pending.isEmpty()) {
@@ -317,12 +390,9 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
             Map<Loc, Integer> state = new HashMap<>(in.get(node));
             int opcode = op.getOpcode();
             if (opcode == PcodeOp.CALL || opcode == PcodeOp.CALLIND) {
-                // the callee leaves what it likes, except the stack pointer (the
-                // call shape) and the call-preserved registers; a user op
-                // (CALLOTHER) defines just its output, if any
-                state.keySet().removeIf(key -> key.space() == stack.space() && !key.equals(stack) &&
-                    preserved.stream().noneMatch(kept -> key.offset() >= kept.offset() &&
-                        key.offset() + key.size() <= kept.offset() + kept.size()));
+                // The call shape restores SP. No other preservation is assumed
+                // in v4; CALLOTHER still defines only its output (reported exception).
+                afterCall(state);
             }
             Varnode out = op.getOutput();
             if (out != null && (out.isRegister() || out.isUnique())) {
@@ -341,17 +411,7 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
                     merged = new HashMap<>(state);
                 }
                 else {   // MUST: the same coefficient on every path, else unknown
-                    merged = new HashMap<>();
-                    Set<Loc> keys = new HashSet<>(known.keySet());
-                    keys.addAll(state.keySet());
-                    for (Loc key : keys) {
-                        Integer left = known.getOrDefault(key, 0);
-                        Integer right = state.getOrDefault(key, 0);
-                        Integer value = Objects.equals(left, right) ? left : UNKNOWN;
-                        if (!Integer.valueOf(0).equals(value)) {
-                            merged.put(key, value);
-                        }
-                    }
+                    merged = merge(known, state);
                 }
                 if (known == null || !merged.equals(known)) {
                     in.put(next, merged);

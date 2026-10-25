@@ -34,6 +34,8 @@ def main() -> int:
     parser.add_argument("-o", "--output", type=Path, required=True)
     parser.add_argument("--ghidra", type=Path, default=eb.DEFAULT_GHIDRA)
     parser.add_argument("--max-mem", default="8G")
+    parser.add_argument("--mode", choices=("conservative", "legacy-v3"), default="conservative",
+                        help="v4 unknown post-call registers (default), or explicit ABI-dependent v3")
     args = parser.parse_args()
 
     project = args.ghidra_project.resolve()
@@ -43,7 +45,8 @@ def main() -> int:
     command = ["bash", str(args.ghidra / "support" / "analyzeHeadless"), str(project.parent), project.stem + folder,
                "-process", program, "-noanalysis", "-readOnly", "-scriptPath", str(eb.GHIDRA_DIR),
                "-log", str(log), "-postScript", "GhidraV2StackSwitchScan.java",
-               "--output", str(output), "--expected-sha256", eb.sha256_file(args.binary.resolve())]
+               "--output", str(output), "--expected-sha256", eb.sha256_file(args.binary.resolve()),
+               "--mode", args.mode]
     if output.exists():
         output.unlink()
     started = time.time()

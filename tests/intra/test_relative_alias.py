@@ -316,7 +316,9 @@ def test_coefficient_counterexamples_are_switches(case):
         body.ins(op("CALLOTHER", [const(5, 4), reg(RSP)], reg(RSP)))
     else:                                        # rax = [rcx] - rsp; rsp += rax  (rsp := [rcx])
         body.ins(load(reg(R8), reg(RCX))).ins(sub(reg(R8), reg(R8), reg(RSP))).ins(add(reg(RSP), reg(RSP), reg(R8)))
-    leaf = FunctionBuilder(entry=callee).ret()
+    # A genuinely changed raw result, not an untouched leaf (which the
+    # independent per-call SSA check now correctly proves preserved).
+    leaf = FunctionBuilder(entry=callee).ins(copy(reg(RAX), const(DATA_BASE))).ret()
     assert f"1:{SWITCHER:x}" in _switches(body.ret(), leaf)
 
 
@@ -396,4 +398,8 @@ def test_a_call_result_adjustment_is_the_named_exception():
     callee = CODE_BASE + 0x800
     body = (FunctionBuilder(entry=SWITCHER).ins(copy(reg(RAX), reg(RSP))).call(callee)
             .ins(sub(reg(RSP), reg(RSP), reg(RAX))).ret())
-    assert _switches(body, FunctionBuilder(entry=callee).ret()) == {}
+    # No body: this remains the explicitly named legacy result exception.
+    assert _switches(body) == {}
+    # With the original untouched body, rax is independently the old rsp;
+    # subtracting it is a real coefficient cancellation, not a size adjust.
+    assert f"1:{SWITCHER:x}" in _switches(body, FunctionBuilder(entry=callee).ret())

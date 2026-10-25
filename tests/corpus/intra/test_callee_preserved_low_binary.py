@@ -1,4 +1,4 @@
-"""Original UE calls preserve a full register and its exact low-byte input.
+"""Original UE register restoration retains allocator lifetime uncertainty.
 
 Set TDO_UE_CORE_BUNDLE, TDO_UE_TRACE_BUNDLE and TDO_UE_STACK_EVIDENCE.
 These checks analyze the admitted bodies with the current models; they do not
@@ -19,12 +19,14 @@ from tdo_v2.image_info import ReadOnlyImage, load_image_info
 from tdo_v2.integration.configured_bundle import admit_frozen_bundle
 from tdo_v2.integration.observed_function_session import open_observed_function_session
 from tdo_v2.interprocedural import analyze_units, function_key
+from tdo_v2.function_summary import SummaryKind
+from tdo_v2.graph_contracts import NodeKind
 from tdo_v2.normalize import NormalizedFunction
 from tdo_v2.pcode_blocks import build_pcode_block_graph
 from tdo_v2.relative_memory import (
     ImageBaseTracking, _Projector, _configured_projector, single_execution_blocks, single_execution_keys,
 )
-from tdo_v2.span_geometry import ByteSpan
+from tdo_v2.query import BackwardSliceQuery
 from tdo_v2.stack_evidence import assumption_allowed, load_stack_evidence
 from tdo_v2.summary_templates import image_provenance
 
@@ -37,7 +39,7 @@ from derive_models import image_ranges
 
 
 APPEND, CONSTRUCTOR, DESTRUCTOR = "1b1:1800f4fd0", "1b1:180037a80", "1b1:18003bc00"
-PRESERVED = "1b1:1800f5019:2:CALL~2"
+GROW_CALL, GROW, REALLOC = "1b1:1800f5019:2:CALL", "1b1:18010b8d0", "1b1:18010b946:2:CALL"
 INDEX = "1b1:1800f5073:0:INT_SEXT"
 R005, R002 = "1b1:18000acb0", "1b1:180005ed0"
 CORE_SHA = "fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942"
@@ -100,7 +102,7 @@ def _projector(item):
     return projector, operations
 
 
-def _core_run(core, monkeypatch, enabled, *, tracking=False, frame=True):
+def _core_results(core, monkeypatch, enabled=True, *, tracking=False, frame=True):
     space = core["scope"].evidence.image_base.space_id
     relocates = image_provenance(lambda address, size: core["image"].value(space, address, size),
                                 [(offset, size) for sid, offset, size in core["info"].relocations if sid == space])
@@ -116,55 +118,85 @@ def _core_run(core, monkeypatch, enabled, *, tracking=False, frame=True):
                 assume_entry_values_not_frame=frame,
                 assume_globals_disjoint_from_stack=True, assume_debug_break_traps_do_not_return=True,
                 own_library="UNREALEDITOR-CORE.DLL", keep_uncut=frozenset((APPEND, CONSTRUCTOR, DESTRUCTOR)))
-            item = results[APPEND]
-            projector, operations = _projector(item)
-            ssa = item.normalized.memory_ssa
-            (row,) = [(identifier, definition) for identifier, definition in enumerate(ssa.definitions)
-                      if definition.operation_key == PRESERVED]
-            identifier, definition = row
-            low_span = ByteSpan(definition.span.object_id, definition.span.start, 4)
-            full = projector._expression_for_definition(identifier, definition.span)
-            low = projector._expression_for_definition(identifier, low_span)
-            index = projector._expression_for_input(INDEX, operations[INDEX].inputs[0])
-            pointer = dict(item.normalized.pointer_rows)[PRESERVED]
-            argument = projector._resolved_span(pointer[2])
-            source_low = ByteSpan(argument.object_id, argument.start, 4)
-            (source_fragment,) = [fragment for read in ssa.reads
-                                  if ssa.actions[read.action_id].operation_key == pointer[1]
-                                  and read.span.contains(source_low) for fragment in read.fragments
-                                  if fragment.span.contains(source_low)]
-            (source_definition,) = source_fragment.definition_ids
-            low_input = projector._expression_for_definition(source_definition, source_low)
-            full_input = projector._expression_for_input(pointer[1], pointer[2])
-            return dict(results=results, item=item, definition=definition, low_span=low_span, full=full, low=low,
-                        index=index, boundaries=dict(projector._boundary),
-                        pointer=pointer, low_input=low_input, full_input=full_input)
+            return results
 
 
-def test_original_core_call_low_four_bytes_recover_the_original_index_expression(core, monkeypatch):
-    before = _core_run(core, monkeypatch, False)
-    after = _core_run(core, monkeypatch, True)
-    assert before["full"] is not None and after["full"] == before["full"]
-    assert before["low"] is None and before["index"] is None
-    assert before["full_input"] is None and before["low_input"] is not None
-    assert after["low"] is not None and after["low"].byte_size == 4
-    assert after["index"] is not None and after["index"].byte_size == 4
-    assert after["definition"].span.size == 8 and after["low_span"].size == 4
-    assert after["pointer"][0] == "reg" and not after["pointer"][3]
-    assert after["low"].atoms
-    assert after["low_input"] is not None and after["low"] == after["low_input"]
-    print("UE Core AppendChar: full8 preserved; CALL~2 low4 None -> original low-byte input; index None -> expression")
+def _assert_current_rdi_lifetime_debt(results):
+    """The old CALL~2 was RDI[0x38:8], not a stable staging ordinal.
+
+    Realloc now fences memory, including the callee's saved-register slots.
+    This withdraws the old whole-register copy premise; narrowing must not
+    recreate it. An opaque input expression alone is not a debt-free value.
+    """
+    item = results[APPEND]
+    normalized = item.normalized
+    effect = dict(normalized.proven_call_effects)[GROW_CALL]
+    assert not effect.preserves_memory
+    assert not any(span.start <= 56 and span.end >= 64 for span in effect.preserved)
+    assert not any(span.start < 64 and 56 < span.end for run in effect.runs for span in run.writes)
+    assert not any(row[0] == "reg" and row[2].coordinate.byte_offset == 56
+                   for key, row in normalized.pointer_rows if key.startswith(GROW_CALL + "~"))
+    assert not any(definition.operation_key is not None
+                   and definition.operation_key.startswith(GROW_CALL + "~")
+                   and definition.span.object_id.kind.value == "register_file"
+                   and definition.span.start < 64 and 56 < definition.span.end
+                   for definition in normalized.memory_ssa.definitions)
+
+    projector, operations = _projector(item)
+    operation = operations[INDEX]
+    assert operation.inputs[0].coordinate.byte_offset == 56 and operation.inputs[0].byte_size == 4
+    assert operation.output.byte_size == 8
+    graph = normalized.dependencies
+    index_node = graph.node_for_key("op:" + INDEX)
+    (row, node), = [(row, node) for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
+                    if row.operation_key == INDEX and GROW_CALL in row.intervening_calls]
+    assert any(span.start == 56 and span.size == 4 for span in row.spans)
+    assert graph.node(node).kind is NodeKind.MEMORY_DEBT
+    assert graph.node(node).label == "call_clobber_read" and node in graph.predecessors(index_node)
+    assert not BackwardSliceQuery().run(normalized, index_node).is_complete
+
+    grow = results[GROW]
+    assert "FMemory::Realloc@" in grow.declared[REALLOC]
+    assert not grow.proven[REALLOC].preserves_memory
+    for register, reader, writer in ((24, "1b1:18010b94e:1:LOAD", "1b1:18010b94e:2:COPY"),
+                                     (56, "1b1:18010b957:1:LOAD", "1b1:18010b957:3:COPY")):
+        (run,) = [run for exit_ in grow.summary.exits for run in exit_.runs
+                  if run.span.object_id.kind.value == "register_file"
+                  and run.span.start == register and run.span.size == 8]
+        assert run.kind is SummaryKind.COMPUTED and "call_clobber_read" in run.debts
+        assert writer in run.writers
+        local = grow.normalized
+        (read,) = [read for read in local.memory_ssa.reads
+                   if local.memory_ssa.actions[read.action_id].operation_key == reader
+                   and read.span.object_id.kind.value == "function_relative"]
+        assert read.span.size == 8
+        (debt, debt_node), = [(row, node) for row, node in zip(local.call_clobber_reads, local.call_clobber_nodes)
+                             if row.operation_key == reader and REALLOC in row.intervening_calls]
+        assert read.span in debt.spans
+        assert local.dependencies.node(debt_node).kind is NodeKind.MEMORY_DEBT
+        assert debt_node in local.dependencies.predecessors(local.dependencies.node_for_key("op:" + reader))
+    # Opaque numeric atoms remain representable, but may not become new
+    # entry-address relations while the original register read has call debt.
+    writers = {"1b1:1800f5078:3:STORE", "1b1:1800f50d6:3:STORE"}
+    assert writers <= set(item.summary.unknown_writers)
+    objects, relations = dict(item.summary.writer_objects), dict(item.summary.address_relations)
+    assert all(objects.get(writer) not in relations for writer in writers)
+    return projector._expression_for_input(INDEX, operation.inputs[0])
 
 
-def test_original_core_model_derivation_keeps_the_prior_conservative_projection(core, monkeypatch):
-    before = _core_run(core, monkeypatch, False, tracking=True)
-    after = _core_run(core, monkeypatch, True, tracking=True)
-    assert before["full"] is not None and after["full"] == before["full"]
-    assert before["low"] is None and after["low"] is None
-    assert before["index"] is None and after["index"] is None
+def test_original_core_low_byte_feature_does_not_recreate_withdrawn_rdi_preservation(core, monkeypatch):
+    before = _core_results(core, monkeypatch, False)
+    after = _core_results(core, monkeypatch, True)
+    assert _assert_current_rdi_lifetime_debt(before) == _assert_current_rdi_lifetime_debt(after)
+    assert before[APPEND].normalized.memory_ssa == after[APPEND].normalized.memory_ssa
+
+
+def test_original_core_model_derivation_keeps_the_same_named_lifetime_debt(core, monkeypatch):
+    before = _core_results(core, monkeypatch, False, tracking=True)
+    after = _core_results(core, monkeypatch, True, tracking=True)
+    assert _assert_current_rdi_lifetime_debt(before) == _assert_current_rdi_lifetime_debt(after)
     for key in (APPEND, CONSTRUCTOR, DESTRUCTOR):
-        assert before["results"][key].summary == after["results"][key].summary
-    print("UE Core image-base tracking: original full8/low4/index results and all three export summaries preserved")
+        assert before[key].summary == after[key].summary
 
 
 def _trace_run(trace, monkeypatch, enabled):

@@ -1036,15 +1036,17 @@ def _unit_stub(scopes):
 
 @measured("stack_switch_check")
 def stack_switches(unit, observation, context, address_spaces, program_stack=None,
-                   call_preserved=()) -> tuple[str, ...]:
+                   call_preserved=(), call_decision=None) -> tuple[str, ...]:
     """Operations that may set the stack pointer to something other than
     "the stack pointer + a number" (a stack switch: ``mov rsp, [x]``). The
     stack pointer is the function's own (call / return shapes) or, without
     those (a lone jump), ``program_stack``: (register offset, size) of the
     program's; with neither, a function touching registers is "unchecked".
     The check withdraws an assumption: it must not miss a switch (MUST
-    analysis, ``_coefficient_switches``; ``call_preserved``: register
-    (offset, size) a callee keeps, ``CALL_PRESERVED``)."""
+    analysis, ``_coefficient_switches``; ``call_preserved``: the explicitly
+    assumed legacy register list. ``call_decision`` is the program check's
+    independent raw-leaf consumer: per call/span, identity keeps the value,
+    unknown overrides the legacy exception, None retains that exception)."""
     from .pcode_blocks import instruction_key
 
     if not any(instruction_key(row.address) == unit.entry_block_key for row in observation.instructions):
@@ -1062,7 +1064,7 @@ def stack_switches(unit, observation, context, address_spaces, program_stack=Non
     else:
         return ("unchecked",) if touched else ()
     return _coefficient_switches(observation, register_space, offset, size, unit.entry_block_key,
-                                 call_preserved)
+                                 call_preserved, call_decision)
 
 
 # registers both x86-64 ABIs (Windows, System V) have a callee preserve; a
@@ -1076,7 +1078,7 @@ MAX_STACK_ALIGNMENT = 1 << 12
 
 
 def _coefficient_switches(observation, register_space: int, offset: int, size: int, entry_key,
-                          call_preserved=()) -> tuple[str, ...]:
+                          call_preserved=(), call_decision=None) -> tuple[str, ...]:
     """Forward MUST analysis over the p-code block graph of each register or
     temporary's STACK COEFFICIENT: 1 -- "the stack pointer + a number" on
     every path, 0 -- no stack pointer in it, None -- anything else (a join of
@@ -1116,7 +1118,7 @@ def _coefficient_switches(observation, register_space: int, offset: int, size: i
         if graph.unsupported is not None:
             return ("unchecked",)
         covered.update(block.instruction for block in graph.blocks)
-        switches |= _coefficient_pass(graph, instructions, stack, preserved)
+        switches |= _coefficient_pass(graph, instructions, stack, preserved, call_decision)
     return tuple(sorted(switches))
 
 
@@ -1124,7 +1126,7 @@ def _coefficient_switches(observation, register_space: int, offset: int, size: i
 _LIVE_STATES = 256
 
 
-def _coefficient_pass(graph, instructions, stack, preserved) -> set:
+def _coefficient_pass(graph, instructions, stack, preserved, call_decision=None) -> set:
     blocks = {block.key: block for block in graph.blocks}
 
     def location(varnode):
@@ -1135,7 +1137,8 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
 
     # the overlap table, once per pass (docs 25.31 B0-3; was a scan of the
     # whole state per read and write): the keys a state can hold -- the stack
-    # pointer and the REGISTER / UNIQUE outputs -- and, per location read or
+    # pointer and the REGISTER / UNIQUE outputs (also REGISTER inputs when
+    # independent per-call decisions are enabled) -- and, per location read or
     # written, those of them it overlaps
     held = {stack}
     used = {stack}
@@ -1148,6 +1151,10 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
                 held.add(location(output))
                 used.add(location(output))
             used.update(location(item) for item in operation.inputs if item.kind is not VarnodeKindCode.CONSTANT)
+            if call_decision is not None:
+                # A callee may change a register first READ after the call.
+                # Absent in this sparse state means zero, not unknown.
+                held.update(location(item) for item in operation.inputs if item.kind is VarnodeKindCode.REGISTER)
     spaces: dict = {}
     for key in held:
         spaces.setdefault(key[0], []).append(key)
@@ -1219,6 +1226,7 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
         return 0 if all(value == 0 for value in values) else None
 
     kept_keys: dict = {}
+    call_actions: dict = {}
 
     def wholly_kept(key) -> bool:
         """Whether ``key`` lies wholly inside a call-preserved register."""
@@ -1235,9 +1243,25 @@ def _coefficient_pass(graph, instructions, stack, preserved) -> set:
             operation = row.operations[ordinal]
             if operation.opcode in ("CALL", "CALLIND"):
                 # a user op (CALLOTHER) defines just its output, if any
-                for index in [index for index in state if keys[index][0] == stack[0] and index != stack_index
-                              and not wholly_kept(keys[index])]:
-                    del state[index]
+                call_key = _operation_key(row.address, ordinal, operation.opcode)
+                actions = call_actions.get(call_key)
+                if actions is None:
+                    actions = []
+                    for index, place in enumerate(keys):
+                        step()   # charge independent lookup/coverage, once per occurrence
+                        if place[0] != stack[0] or overlaps(place, stack):
+                            continue
+                        decision = None if call_decision is None else call_decision(call_key, place)
+                        if decision == "unknown":
+                            actions.append((index, True))
+                        elif decision != "identity" and not wholly_kept(place):
+                            actions.append((index, False))
+                    call_actions[call_key] = actions
+                for index, unknown in actions:
+                    if unknown:
+                        state[index] = None
+                    else:
+                        state.pop(index, None)  # explicit legacy result-value exception
             output = operation.output
             if output is None or output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
                 continue

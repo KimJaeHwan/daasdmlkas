@@ -1583,7 +1583,7 @@ def _recursive_hypothesis(derive, stack, notes=None):
 
 
 @measured("program_checks")
-def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
+def program_switches_stack(units, *, call_evidence=None) -> dict[str, tuple[str, ...]]:
     """Entry key -> operations that may set the stack pointer to something
     other than "the stack pointer + a number" (a stack switch: fibers,
     coroutines;
@@ -1598,6 +1598,10 @@ def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
     from .may_alias import CALL_PRESERVED, _return_shape, _unit_stub, stack_switches
 
     units = list(units)
+    from ._stack_preservation import LeafPreservation
+
+    functions = {function_key(unit.scopes.function.entry): unit for unit in units}
+    leaves = LeafPreservation(functions)
     # the program's stack pointer: the call shapes' base register, or the
     # register return shapes pop from
     pointers = {(span.start, span.size) for unit in units
@@ -1610,11 +1614,23 @@ def program_switches_stack(units) -> dict[str, tuple[str, ...]]:
     for unit in units:
         program = unit.scopes.program
         language = ":".join(program.evidence.translation_namespace.language_id.split(":")[:3])
+        calls = _direct_calls(unit, functions)
+        caller = function_key(unit.scopes.function.entry)
+
+        def decision(call, place):
+            callee = calls.get(call)
+            same_program = callee is not None and functions[callee].scopes.program.scope == unit.scopes.program.scope
+            result = leaves.decision(callee, *place) if same_program else None
+            if call_evidence is not None:
+                call_evidence[(caller, call, *place)] = (callee, result or "legacy")
+            return result
+
         try:
             with activation(_ledger_key(unit)):
                 rows = stack_switches(
                     _unit_stub(unit.scopes), unit.observation, unit.scopes.resolution_context,
                     program.evidence.address_spaces, program_stack, CALL_PRESERVED.get(language, ()),
+                    decision,
                 )
                 checkpoint()
         except ANALYSIS_FAILURES as error:

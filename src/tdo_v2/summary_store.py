@@ -811,7 +811,13 @@ def model_effect(derive, model_file, entry, *args):
         return None
     return replace(
         effect,
-        preserves_memory=effect.preserves_memory and complete and entry.keeps_other_memory,
+        # A free/realloc declaration is a lifetime boundary, not evidence
+        # that every old byte remains readable. Without an extent/lifetime
+        # proof it cannot license whole-memory preservation, even when a
+        # same-object result relation is declared. The existing call-clobber
+        # graph retains the old writers as candidates WITH debt. Explicit
+        # final memory runs, register effects and model labels stay intact.
+        preserves_memory=effect.preserves_memory and complete and entry.keeps_other_memory and not entry.frees,
         memory_runs_final=True,    # the listed writes; other_memory is about the rest
         noreturn=entry.noreturn,   # the path behind the call is cut (``function_summary._dead_region``)
         clobbers_below=True,       # a library function has its own frame
