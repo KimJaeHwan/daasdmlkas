@@ -2369,3 +2369,110 @@ F1b 여러 대상 합성. F2 호출 문맥·특수화·"입구 값으로 옮겨 
 증명 경로가 비어 있어 분리는 모두 `no-use-after-free`에 기댐 — 측정 때 가정 수를 그렇게 읽음). F4 주소 범위·범위 쓰기(배열
 3단계, R005, UE 피호출 함수의 불확실 쓰기). F5 모델 콜백 `invokes`, z3 조건 증명(D2). Python 먼저(의미
 변경), Rust 포팅은 그동안 의미 없는 커널만. 나중 정밀도: 같은 기준의 ptr − ptr = offset 차.
+
+### 25.60 정방향 메모리 범위 소비 — 첫 증분 (2026-10-25)
+
+**작업 상태: 구현·실제 사례·전체 회귀 완료, Astra 최종 승인 완료. 합의 범위의 필수 잔여 없음.**
+최신 원격 main `9d1fdf1bdb0d1161748579e2b57ab32fe6d36a95`에서 `feature/forward-memory-footprints`를 만들었다.
+기존 연산식 브랜치의 14개 커밋과 미커밋 문서는 별도 checkout에 보존했다. 이 브랜치에는 가져오지 않는다.
+정방향은 데이터/메모리 분석 기반의 개선이고 연산식 계층의 새 기능이 아니다. 추후 통합 브랜치에서 연산식 소비를 확인한다.
+
+#### 실제 문제와 종료 범위
+
+대표 재현은 `tdo_testbed/src/cases_array.c`의 DFB044다. 공통 consumer를 구현하며 케이스 이름/라벨/명령 주소는
+production 조건으로 쓰지 않는다.
+
+```c
+int arr[4] = {0, 0, 0, 0};
+int idx = dfb_source_C() & 3;
+int a = dfb_source_A();
+arr[idx] = a;
+dfb_sink_int(arr[idx]);
+```
+
+원 ELF SHA256은 `759c776096d7454feadfbe92b4645b4a825450cce099b732363b1d9cc7238e29`다.
+현재 exporter로 재추출한 Bundle `c751a41173c363150182d9667e6a84461051cb0679e806fc205df69a18b3e099`의
+DFB043·044·122 및 실제 source/sink 호출 닫힘 7함수를 사용한다. 과거 naming schema를 admission 우회로 받아들이지 않는다.
+대표 함수는 `1b1:104bf6`, 언어는 `x86:LE:64:default`다. `S`는 이 함수 activation의 진입 RSP 값이다.
+
+| 원 접근 | 기존 정방향 근거 | 기존 보수적 분석 → 개선 |
+|---|---|---|
+| 배열 STORE `1b1:104c35:4:STORE` | `S+{-40,-36,-32,-28}`, 폭 4 | footprint `S+[-40,-24)`를 소비 |
+| idx LOAD `1b1:104c39:1:LOAD` | `S-12`, 폭 4 | 위 STORE의 거짓 alias 제거, 원 idx STORE `1b1:104c22:2:STORE` 연결 보존 |
+| 배열 LOAD `1b1:104c3e:3:LOAD` | 기존에는 주소 fact 없음 | idx 읽기가 회복되어 네 칸의 주소 fact 생성 |
+
+최신 main baseline에서 forward 0/1 모두 044의 reachable unresolved read는 2개였다. 개선 후 1개이며 원 A+C 후보는 같다.
+DFB043은 B·부채 0, DFB122는 기존 `crt-sysv64/strcpy@v7` 모델 아래 A·부채 0으로 전후 결과가 동일하다.
+**완료선은 idx의 거짓 alias 제거·정확한 원 정의 연결·배열 LOAD 주소 fact 회복·나머지 부채/가정 보존과 회귀/Astra 승인이다.**
+부채 수만 줄이거나 source A를 포함했다는 이유로 완료하지 않는다. 044 전체 complete·PASS 수 증가·C 제거는 이번 목표가 아니다.
+동일 index의 STORE→LOAD 상관관계/last-writer와 초기화 STORE 제거는 별도 후속 범위다.
+
+#### 기존 분석 재사용과 증거 경계
+
+- 기존 `analyze_one`의 완성된 보수적 결과 **N0**(요약·origins·anchors·provenance 포함)를 먼저 만든다.
+  `_forward_memory.prepare_memory_refinement`는 그 N0의 `forward_facts`와 원 raw 접근만 사용한다. 새 실행기·SSA·RD는 없다.
+- 동일 activation·주소 공간·동일 full-width entry register base의 64bit 주소만 첫 지원이다. 실제 selector의 memory space
+  evidence도 `address_size_bits == 64`여야 한다. 최대 8개 주소·접근 폭 16byte이며 모든 byte를 modulo 2^64로 비교한다.
+  서로 다른 base/문맥·TOP·초과 범위·폭 불일치·겹침/일부 겹침은 비겹침의 근거가 아니다. 새 non-wrap/호출 규약 가정은 없다.
+- 예외는 **원 STORE–원 LOAD–입증된 읽기 byte**에만 적용한다. dense/sparse may-alias의 read-time plain writer 수집에서만
+  제외하며 gen/kill·weak update·객체 alias 정책은 유지한다. 같은 writer의 `?writer` 불확실 효과와 unknown-read 경로는 유지한다.
+- frozen plan이 자기 주장만 확인하지 않도록 소비 시 N0의 원 가정과 `run_assumptions`를 독립 복원하고, N0의 full fact claim·
+  원 operation·selector·폭·byte 범위로 계획을 재생성해 대조한다. `Fact.id`만으로 재사용하지 않는다. normalization 입력/효과/
+  정책/모델·원 unit/observation이 바뀌면 재사용을 거부한다. 추가 probe는 입증된 원 byte 이외에 예외를 넓히지 않는다.
+- 동일 입력으로 기존 normalization/SSA/그래프 파이프라인과 전체 함수 분석을 한 번 재실행한 **N1**만 후보로 만든다.
+  N1 개선을 자기 근거로 다시 쓰지 않는다. 재귀 SCC는 이 증분에서 제외하며, 호출효과가 바뀐 외부 라운드는 새 N0에서 시작한다.
+  N0 증명의 가정/모델 의존성은 N1 결과뿐 아니라 새 `forward_facts`와 `probe` 반환에도 남긴다.
+- N1 provenance는 로컬에 보관하고 최종 checkpoint를 통과한 선택 결과만 게시한다. 근거 거부·정규화 실패·국소 proof 상한
+  64개 초과는 N0 전체를 유지하며 N0/N1 summary·facts·provenance를 섞지 않는다. 실제 run/function hard budget 소진·취소는
+  기존 typed failure/중단 계약을 유지한다. sticky 장부를 지우거나 `diagnostic`으로 production 한도를 우회하지 않는다.
+  이는 설계 검수에서 확인한 기존 자원 계약의 명확화이며 hard exhaustion 후 성공 결과 게시를 새로 구현한 것이 아니다.
+
+원 run이 사용한 스택/전역 분리 등 기존 가정은 계속 보고한다. 동일 base의 상대 byte 비겹침 자체에 추가 분리 가정은 없지만,
+이 개선으로 기존 run의 전제가 없어졌다고 주장하지 않는다. 일반 alias·호출 문맥 RAM 전달·재귀·반복횟수·경로 제거·VM 복원은
+범위 밖이다. 완료 후 새 기능 목록을 자동으로 필수 잔여에 추가하지 않는다.
+
+#### 검증과 모델 호환성
+
+실제 회귀는 `TDO_FORWARD_MEMORY_BUNDLE=<generation>`와
+`tests/corpus/intra/test_forward_memory_footprints_binary.py`를 사용한다. sparse/dense에서 root·SSA·요약·예외 근거를 대조한다.
+원 source/sink 몸체까지 기존 `_Recording`/raw interpreter로 실행하며 source 반환값을 주입하지 않는다. 입력 global seed
+`0,1,2,3,0x7fffffff,0x80000000,0xfffffffe,0xffffffff`의 8개가 네 index와 부호 경계를 포함한다. 실제 주소·폭·값·4byte별
+원 writer를 대조하고 새 주소 fact에 실제 접근이 포함됨을 확인한다. 유한 실행은 회귀 근거이지 전 경로 증명이 아니다.
+합성/반례는 `tests/intra/test_forward_memory_refinement.py`에 두고 기존 graph oracle·SSA와 함께 검증한다.
+
+alias reasoning 변경에 따라 `ENGINE_SEMANTICS_VERSION`은 **14**다. 13은 연산식 브랜치가 이미 사용했으므로 재사용하지 않는다.
+배포 UE FString 파생 모델은 같은 DLL SHA256 `fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942`,
+봉인 Bundle `a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068`와 원 스택 자료에서 기존 도구로 재도출한다.
+과거 모델의 숫자만 고치거나 다른 브랜치의 의미 버전 13 모델을 복사하지 않는다. RECORD_VERSION/기존 그래프 형식은 바꾸지 않는다.
+실제 재도출한 파일은 모델 version 13/engine semantics 14이며, forward off/on의 최초·재검증 산출물 4개와 반영 파일이
+SHA256 `bb968365aff2268e1fa7ba5048f7e0cfd00407ed8c64e118f6a0b51b379cb5ee`로 같다. 기존 3개 export의 entries와
+13개 가정은 변하지 않았다. 실제 Bundle/현재 손 모델·p-code op·home-space 설정에서 3개 모두 runtime refusal이 없다.
+기존 모델 검사 off 25개, on/roundtrip 33개도 모두 통과했다. 재현 명령·산출물·JUnit은
+`output/ue-core-engine14-20261025/`에 있으며 단순 버전 숫자 수정이 아니다.
+
+#### 동결본 결과와 단계 검수
+
+신규 **52개**(합성/반례 47·실제 5)는 모두 실행됐다. 기존 forward 55개를 합친 인접 **107개**가 일반 모드
+107 passed / 0 skipped(8.30초), dense 모드에서도 107 passed / 0 skipped(8.83초)다. Astra도 독립 107개 실행과
+원 전제 삭제 반례, 실제 주소/byte 근거, 모델 재도출 당시/현재 source inventory 일치를 확인해 단계 승인했다.
+
+| 현재 main 기반 전체 회귀 | 결과 | 시간 |
+|---|---|---|
+| 기본 설정 | **2313 passed / 32 skipped / failures 0 / errors 0** | 394.78초 |
+| 전역 `TDO_V2_FORWARD=1` | **2313 passed / 32 skipped / failures 0 / errors 0** | 400.22초 |
+
+각 실행은 총 2345개이며 테스트가 명시적으로 선택하는 forward-off 반례는 그대로 존중한다. 32 skip은 Linux worker 제약 9개·
+Linux supervision 제약 14개·미보유 Bundle 9개다. skip을 성공으로 세지 않으며 신규 52개는 skip이 없다.
+이 브랜치에는 연산식 개발분이 없으므로 과거 연산식 브랜치의 3350 passed와 테스트 범위가 다르다. 연산식과의 합류 회귀를
+이번 main 단독 검증으로 대신하지 않는다.
+
+권위 로그/JUnit은 `output/forward-memory-20261025.MNU9yR/{full-suite,forward-on-suite,nearby,dense}.{log,junit.xml}`이다.
+같은 폴더의 `cli-forward-{0,1}.{json,log}`는 최신 main의 기존 `--records` CLI에서도 043/122 불변·044 2→1을 확인한다.
+엔진·테스트·모델 243개(`src`/`tests`의 `.py`, `models`의 `.json`)를 정렬한 경로+NUL+파일 SHA256으로 동결했고,
+두 전체 회귀 전후 집계 SHA256은 `d3ccc1aa753ac7bf99b9c941c4a64e3c1d1870305c8e2268a691b5b516e88908`로 같다.
+문서 변경은 이 동결 hash 범위 밖이다.
+
+Astra가 두 권위 XML·신규 52개 실행·일반/dense 107개·현재 동결 hash·CLI 원 JSON·최종 문서를 독립 대조하고,
+이전 단계의 실제 idx writer/주소 사실·전제 귀속·원자 복귀·모델 검수와 합쳐 **이번 공통 non-overlap consumer의 목표 달성과
+이 상태에서의 마무리를 별도로 최종 승인**했다. 이 범위의 필수 잔여 차단은 발견하지 못했다. 044 전체 해결·C 제거·일반 alias·
+연산식 브랜치와의 통합 승인은 아니며, 후속 기능을 이번 완료의 추가 필수 작업으로 만들지 않는다.

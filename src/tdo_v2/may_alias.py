@@ -193,6 +193,7 @@ class _Policy:
         self.wild_objects: frozenset = frozenset()
         self.fresh_objects: frozenset = frozenset()
         self.nonstack_objects: frozenset = frozenset()
+        self.read_exclusions: dict = {}
         # the private-frame rule decided some byte private (the assumption
         # entry-values-do-not-address-the-new-frame was used)
         self.private_used = False
@@ -283,6 +284,7 @@ def derive_may_alias_reads(
     opaque_calls: frozenset = frozenset(),
     opaque_uses: list | None = None,
     escape_memo: "EscapeMemo | None" = None,
+    read_separations: tuple = (),
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -354,6 +356,10 @@ def derive_may_alias_reads(
         if type(evidence) is ResolvedStorage and evidence.span.object_id in wild
     ) | frozenset(_UNCERTAIN + key for key in uncertain)
     policy.separations = tuple(separations)
+    if read_separations:
+        from ._forward_memory import exclusions_for
+
+        policy.read_exclusions = exclusions_for(read_separations, unit)
     if policy.separations:
         policy.ran = _ran_before(unit)
         rows = _dense_rows(unit, objects, policy)   # the sparse engine gens whole objects
@@ -493,6 +499,9 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows, intern=None) -
                     found = state[span.object_id].at(offset)
                     if policy.is_private(span.object_id, offset, effect.operation_key):
                         found = found & policy.unknown_writers
+                    if policy.read_exclusions:
+                        found = found - policy.read_exclusions.get((effect.operation_key, span.object_id, offset),
+                                                                  frozenset())
                     if found:
                         dirty.append(offset)
                         writers |= found

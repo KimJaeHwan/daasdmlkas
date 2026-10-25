@@ -329,6 +329,7 @@ class ForwardInputs:
     below_bounds: tuple            # ((call key, stack object, first kept offset), ...)
     entry_values_not_frame: bool = True      # (may_alias.ENTRY_VALUES_NOT_FRAME as configured)
     opaque_no_stack_addresses: bool = True   # (may_alias.OPAQUE_NO_STACK_ADDRESSES as configured)
+    read_separations: object = None
 
 
 def probe(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
@@ -402,11 +403,13 @@ def probe(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
         no_kill_writers=frozenset(key for key, conditions in uncertain.items() if conditions is None),
         uses=frame_uses, separations=inputs.separations,
         escape_memo=EscapeMemo(probed, inputs.observation, inputs.context, inputs.address_spaces),
+        read_separations=inputs.read_separations,
         )
     finally:
         OPAQUE_NO_STACK_ADDRESSES.reset(tokens[1])
         ENTRY_VALUES_NOT_FRAME.reset(tokens[0])
     used = []
+    used.extend(normalized.forward_memory_requires)
     if any(frame_uses):
         used.append("entry-values-do-not-address-the-new-frame")
         if inputs.private_frame_above:
@@ -810,7 +813,8 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
             return None
         return None
 
-    labels = tuple(sorted({*assumptions, *(label for attribute, label in _NORMALIZATION_ASSUMPTIONS
+    labels = tuple(sorted({*assumptions, *normalized.forward_memory_requires,
+                           *(label for attribute, label in _NORMALIZATION_ASSUMPTIONS
                                            if getattr(normalized, attribute, False)),
                            *(("readonly-image-data-is-constant",) if used_readonly else ()),
                            *probe_labels}))

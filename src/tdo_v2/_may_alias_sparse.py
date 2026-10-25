@@ -117,6 +117,7 @@ def derive_sparse(unit, objects, policy):
     universe = LabelUniverse(writer for *_, writer in any_gens)
     index_of = universe.index_of   # events carry indices (label_sets)
     unknown_mask = universe.mask(policy.unknown_writers)
+    read_exclusions = {key: universe.mask(writers) for key, writers in policy.read_exclusions.items()}
 
     class_events: dict[object, dict[str, list]] = {}
     entry_values: dict[tuple, int] = {}
@@ -251,6 +252,8 @@ def derive_sparse(unit, objects, policy):
                     found = value_at(class_of[(span.object_id, offset)], block.key, position)
                     if policy.is_private(span.object_id, offset, effect.operation_key):
                         found = found & unknown_mask
+                    if read_exclusions:
+                        found &= ~read_exclusions.get((effect.operation_key, span.object_id, offset), 0)
                     if found:
                         dirty.append(offset)
                         writers |= found

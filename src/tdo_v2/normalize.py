@@ -224,6 +224,9 @@ class NormalizedFunction:
     # derivations (``forward.ForwardInputs``), for probe re-derivations; None
     # otherwise, outside equality and snapshots
     forward_inputs: object = field(default=None, compare=False, repr=False)
+    # Exact baseline STORE/LOAD byte nonoverlap evidence; no global object separation.
+    forward_memory_proofs: tuple = field(default=(), compare=False, repr=False)
+    forward_memory_requires: tuple = field(default=(), compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -1303,6 +1306,7 @@ class FunctionNormalizer:
         assume_direction_flag_clear: bool = False,
         private_frame_above: int = 0,
         open_conditions: dict | None = None,
+        _forward_memory_plan=None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
         declared effect; see ``tdo_v2.assumed_call_effects``.
@@ -1332,8 +1336,7 @@ class FunctionNormalizer:
         ) or _intra_instruction_flow_failure(value.observation, function.entry)
         if admission_failure is not None:
             return UnresolvedNormalizedFunction(value.scopes, admission_failure)
-        return _ScopedNormalizer().normalize(
-            value,
+        options = dict(
             opaque_value_provider=opaque_value_provider,
             assumed_call_effects=assumed_call_effects or {},
             proven_call_effects=proven_call_effects or {},
@@ -1343,6 +1346,9 @@ class FunctionNormalizer:
             private_frame_above=private_frame_above,
             open_conditions=open_conditions or {},
         )
+        if _forward_memory_plan is not None:
+            _forward_memory_plan.bind(value, options)
+        return _ScopedNormalizer().normalize(value, **options, _forward_memory_plan=_forward_memory_plan)
 
     def normalize_configured(
         self,
@@ -1451,6 +1457,7 @@ class _ScopedNormalizer:
         _blocked_bounds: frozenset = frozenset(),
         _uncertain: dict | None = None,
         open_conditions: dict | None = None,
+        _forward_memory_plan=None,
     ) -> NormalizedFunction | _Retry:
         """``_blocked_reads``: values read from memory that a projection may not
         use (``relative_memory.stale_reads``; set by the validation below).
@@ -1865,6 +1872,7 @@ class _ScopedNormalizer:
                 uncertain_writers=frozenset(_uncertain),
                 no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
                 uses=frame_uses, separations=separations, escape_memo=escape_memo,
+                read_separations=_forward_memory_plan,
             )
             dependencies = base.copy()
             phase_count("fixpoint_rounds", 1)   # (K2 sizes: a graph copy per round, docs 25.31)
@@ -2041,6 +2049,8 @@ class _ScopedNormalizer:
             open_nodes=open_nodes, opaque_nodes=opaque_nodes,
             kept_call_memory=tuple(sorted((key, spans) for key, (spans, _) in kept_memory.items())),
             accessor_separations=separations,
+            forward_memory_proofs=_forward_memory_plan.proofs if _forward_memory_plan else (),
+            forward_memory_requires=_forward_memory_plan.requires if _forward_memory_plan else (),
             forward_inputs=_forward_inputs(
                 effect_unit=effect_unit, observation=observation, context=context, address_spaces=address_spaces,
                 assumed_calls=frozenset(assumed_call_effects), quiet_calls=quiet_calls,
@@ -2053,7 +2063,8 @@ class _ScopedNormalizer:
                 separations=separations, proven_call_effects=tuple(sorted(proven_call_effects.items())),
                 kept_memory=tuple(sorted((key, spans) for key, (spans, _) in kept_memory.items())),
                 below_bounds=below_bounds, entry_values_not_frame=ENTRY_VALUES_NOT_FRAME.get(),
-                opaque_no_stack_addresses=OPAQUE_NO_STACK_ADDRESSES.get()),
+                opaque_no_stack_addresses=OPAQUE_NO_STACK_ADDRESSES.get(),
+                read_separations=_forward_memory_plan),
             same_result_uses=tuple(
                 (row, pointer_rows[row][1], tuple(sorted(accessor_states[row.rsplit("~", 1)[0]][1])),
                  next(iter(values)))

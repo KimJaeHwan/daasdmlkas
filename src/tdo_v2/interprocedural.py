@@ -393,6 +393,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                    for index, member in enumerate(members)}}
             for key in calls})
         component_of = {key: index for index, component in enumerate(order) for key in component}
+        recursive_keys = frozenset(key for component in order for key in component
+                                   if len(component) > 1 or key in calls[key].values()
+                                   or any(key in members for members in multi.get(key, {}).values()))
         results: dict[str, AnalyzedFunction] = {}
 
         sites_of: dict = {}
@@ -503,8 +506,26 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             if key not in resource_failures:
                 try:
                     with activation(_ledger_key(functions[key])):
-                        result = analyze_one(key, hypotheses)
+                        published = {} if record_provenance is not None else None
+                        result, normalization_options = analyze_one(key, hypotheses, provenance=published)
+                        if _forward_switched_on() and key not in recursive_keys:
+                            from ._forward_memory import RefinementRefused, prepare_memory_refinement
+                            from .summary_engine import run_assumptions
+
+                            plan = prepare_memory_refinement(result, normalization_options, assumptions=run_assumptions(
+                                {key: result}, readonly_image=readonly_image, home_space=private_frame_above))
+                            if plan is not None:
+                                pending = {} if record_provenance is not None else None
+                                try:
+                                    candidate, _ = analyze_one(key, hypotheses, refinement=plan, provenance=pending)
+                                    if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None:
+                                        candidate.inherited_assumptions |= frozenset(plan.requires)
+                                        result, published = candidate, pending
+                                except RefinementRefused:
+                                    pass  # keep N0 in its entirety, never combine replay artifacts
                         checkpoint()   # (limits checked before the result is published)
+                        if record_provenance is not None:
+                            record_provenance.update(published)
                         return result
                 except ANALYSIS_FAILURES as error:
                     from .relative_memory import IMPORT_SLOTS
@@ -518,7 +539,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             return AnalyzedFunction(key, functions[key], UnresolvedNormalizedFunction(
                 functions[key].scopes, reason), None, calls[key], failure_detail=detail)
 
-        def analyze_one(key, hypotheses):
+        def analyze_one(key, hypotheses, *, refinement=None, provenance=None):
             unit = functions[key]
             observation = unit.observation
             context = unit.scopes.resolution_context
@@ -670,14 +691,16 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             verdicts: dict = {}
             while True:
                 proven = derive(failed)
-                normalized = FunctionNormalizer().normalize(
-                    unit, assumed_call_effects=assumed, proven_call_effects=proven,
+                normalization_options = dict(
+                    assumed_call_effects=assumed, proven_call_effects=proven,
                     assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
                     readonly_image=readonly_image,
                     assume_direction_flag_clear=assume_direction_flag_clear,
                     private_frame_above=private_frame_above,
                     open_conditions=opened,
                 )
+                normalized = FunctionNormalizer().normalize(
+                    unit, **normalization_options, _forward_memory_plan=refinement)
                 if type(normalized) is not NormalizedFunction:
                     break
                 verdicts = _decide_conditions(unit, normalized, shapes, [
@@ -766,8 +789,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                                  if call in proven})
             if key in resolution_requires:   # (forward facts the resolutions of its calls rest on)
                 result.inherited_assumptions = result.inherited_assumptions | resolution_requires[key]
-            if record_provenance is not None:   # (keyed by the instance; it keeps the objects alive)
-                record_provenance[id(result)] = (result, CallProvenance(
+            if provenance is not None:   # publish only after the whole selected analysis succeeds
+                provenance[id(result)] = (result, CallProvenance(
                     sources={call: source for call, source in sources.items() if call in proven},
                     rejections={call: tuple(rows) for call, rows in rejections.items() if rows},
                     failed={call: frozenset(pairs) for call, pairs in failed.items()},
@@ -776,7 +799,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     sink={(call, tag): tuple(rows) for (call, tag), rows in decided.items()}
                     if type(normalized) is NormalizedFunction else {},
                 ))
-            return result
+            return result, normalization_options
 
         def solve(component):
             """Recursion (design S5): every intra-SCC call starts from the

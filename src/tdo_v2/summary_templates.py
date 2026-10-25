@@ -66,7 +66,9 @@ TEMPLATE_VERSION = 2   # 2: stack_values_out
 # (docs 25.29) -- older ones rest on it unlabelled. 12: model entries declare
 # callbacks / frees; templates carry registered-handlers-are-not-observed when
 # derived over entries running registered handlers (docs 25.33)
-ENGINE_SEMANTICS_VERSION = 12
+# 14: consume verified baseline forward memory footprints at exact read bytes.
+# 13 belongs to the expression-development branch; do not alias its models.
+ENGINE_SEMANTICS_VERSION = 14
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
