@@ -1,0 +1,400 @@
+"""Caller-owned entry-state replay over the existing normalizer and SSA.
+
+This is deliberately not a universal allocator/lifetime theorem.  It can
+keep one immediate stack LOAD across a matched null-is-fresh model, only in
+the calling activation whose original pre-call SSA supplies the inputs.
+"""
+from dataclasses import replace
+from contextlib import contextmanager
+
+from .constant_value import ExactConstant
+from .memory_contracts import MemoryDefinitionKind
+from .resource_limits import step
+from .span_geometry import ByteSpan, StorageObjectKind
+
+
+def _source_signature(item):
+    from ._forward_memory import _freeze
+    return (id(item.unit), id(item.normalized), _freeze(dict(item.normalization_options)),
+            item.normalization_context, item.lifetime_models)
+
+
+@contextmanager
+def _policy(callee):
+    import os
+    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES
+    from .relative_memory import IMPORT_SLOTS, IMAGE_BASE_TRACKING, index_addresses, DEFINITION_ATOMS
+    from ._forward_memory import RefinementRefused
+
+    if os.environ.get("TDO_V2_FORWARD") != "1" or len(callee.normalization_context) != 7:
+        raise RefinementRefused("activation lacks the original normalization policies")
+    frame, opaque, imports, active, image, indexed, atoms = callee.normalization_context
+    inputs = callee.normalized.forward_inputs
+    if inputs is None or (inputs.entry_values_not_frame, inputs.opaque_no_stack_addresses) != (frame, opaque) \
+            or index_addresses() != indexed or DEFINITION_ATOMS != atoms \
+            or imports is not None and imports.active != active:
+        raise RefinementRefused("activation normalization policies changed")
+    tokens = [(ENTRY_VALUES_NOT_FRAME, ENTRY_VALUES_NOT_FRAME.set(frame)),
+              (OPAQUE_NO_STACK_ADDRESSES, OPAQUE_NO_STACK_ADDRESSES.set(opaque)),
+              (IMPORT_SLOTS, IMPORT_SLOTS.set(imports)), (IMAGE_BASE_TRACKING, IMAGE_BASE_TRACKING.set(image))]
+    try:
+        yield
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
+
+
+def _first(normalized, call):
+    if getattr(normalized, "forward_inputs", None) is None:
+        return None
+    return next((effect.operation_key for block in normalized.forward_inputs.effect_unit.blocks
+                 for effect in block.effects
+                 if effect.operation_key == call or effect.operation_key.startswith(call + "~")), None)
+
+
+def _single(value):
+    if value is None or value.is_top or value.bits != 64 or len(value.items) != 1:
+        return None
+    base, offset = value.items[0]
+    return (base, offset.lo) if offset.single and offset.signed else None
+
+
+def _stack(item):
+    from .may_alias import _stack_pointer, _unit_stub
+    return _stack_pointer(_unit_stub(item.unit.scopes), item.unit.observation,
+                          item.unit.scopes.resolution_context, item.unit.scopes.program.evidence.address_spaces)
+
+
+def _inputs(caller, callee, call, assumptions, readonly_image):
+    from .forward import _analyze, _call_local_writes, _moved
+    from .interprocedural import _register_file
+    from .observed_call_state import observed_call_state_projections
+
+    if caller.normalized.forward_inputs is None or callee.normalized.forward_inputs is None:
+        return None
+    shape = next((row for row in observed_call_state_projections(caller.unit.observation)
+                  if row.call_operation_key == call), None)
+    if shape is None or caller.calls.get(call) != callee.key or caller.unit.scopes.program != callee.unit.scopes.program:
+        return None
+    keys = {effect.operation_key for block in caller.normalized.forward_inputs.effect_unit.blocks
+            for effect in block.effects}
+    if any(key in keys for key in shape.transient_operation_keys):
+        return None
+    transition = shape.memory_transition
+    register, _ = _register_file(callee.unit.observation, callee.unit.scopes.resolution_context)
+    if register is None or transition.callee_base.byte_size != 8 or transition.displacement_delta != -8:
+        return None
+    sp = ByteSpan(register, transition.callee_base.byte_offset, 8)
+    bases = {anchor for anchor, _ in callee.anchors.values()
+             if anchor.object_id.kind is StorageObjectKind.REGISTER_FILE and anchor.size == 8}
+    bases.add(sp)
+    analysis = _analyze(caller.normalized, caller.unit, readonly_image=readonly_image, assumptions=assumptions)
+    if analysis.bind is None:
+        return None
+    values, used = analysis.bind(call, tuple(sorted(bases, key=lambda span: span.canonical_key)))
+    before = values.get(sp)
+    if before is None or before.is_top:
+        return None
+    after = _moved(before, transition.displacement_delta, transition.displacement_delta, 0)
+    stack = _single(after)
+    writes = _call_local_writes(caller.unit.observation, call, (sp.start, sp.size))
+    if stack is None or writes is None or stack[0][0] != "entry":
+        return None
+    relations = []
+    for span, value in values.items():
+        step()
+        current = _single(value)
+        if span == sp or current is None or current[0] != stack[0] \
+                or any(span.start < start + size and start < span.end for start, size in writes):
+            continue
+        relations.append((span, sp, current[1] - stack[1]))
+    geometry = _stack(caller)
+    if not relations or geometry is None:
+        return None
+    caller_object, bias, _, offset, size = geometry
+    caller_anchor = caller.anchors.get(caller_object)
+    space = None if caller_anchor is None else next((row for row in caller.unit.scopes.program.evidence.address_spaces
+                                                     if row.space_id == caller_anchor[1]), None)
+    if (offset, size) != stack[0][1:] or space is None or not space.is_memory_space \
+            or space.address_size_bits != 64:
+        return None
+    return sp, stack[1], caller_object, bias, tuple(relations), tuple(sorted(set(analysis.labels) | set(used)))
+
+
+def _normalize(callee, state, effects=None):
+    from ._activation_entry import using_entry
+    from .normalize import FunctionNormalizer
+
+    options = dict(callee.normalization_options)
+    if effects is not None:
+        options["proven_call_effects"] = effects
+    with _policy(callee), using_entry(state):
+        return FunctionNormalizer().normalize(callee.unit, **options)
+
+
+def _frame_compatible(callee, normalized, sp, relations):
+    """Do not specialize a binding that contradicts a retained frame premise.
+
+    Compare the original resolved accesses with the mapped accesses, including
+    their displacement and full byte range. Unlocated accesses are not a proof
+    that a known entry pointer stays outside the private frame.
+    """
+    from .interprocedural import _relative_anchors
+    from .model import ResolvedStorage
+
+    original = callee.normalized.forward_inputs
+    if not original.entry_values_not_frame:
+        return True
+    above = original.private_frame_above
+    if any(delta < above for _, _, delta in relations):
+        return False
+    anchors = _relative_anchors(callee.unit, normalized)
+    old_anchors = callee.anchors
+    old = {effect.operation_key: effect for effect in callee.normalized.effects}
+    for effect in normalized.effects:
+        step()
+        if effect.memory_read is not None or effect.memory_write is not None \
+                or effect.unresolved_reads or effect.unresolved_writes:
+            return False
+        for role in ("reads", "writes"):
+            for storage in getattr(effect, role):
+                if type(storage) is not ResolvedStorage:
+                    continue
+                span = storage.span
+                if span.object_id.kind is not StorageObjectKind.FUNCTION_RELATIVE:
+                    continue
+                anchor = anchors.get(span.object_id)
+                if anchor is None:
+                    return False
+                if anchor[0] != sp or span.start >= (1 << 64) + above:
+                    continue
+                previous = old.get(effect.operation_key)
+                if previous is None or not any(
+                        type(item) is ResolvedStorage and old_anchors.get(item.span.object_id) == anchor
+                        and item.span.start == span.start and item.span.size == span.size
+                        for item in getattr(previous, role)):
+                    return False
+    return True
+
+
+def _memory_inputs(caller, callee, normalized, sp, delta, caller_object, bias, readonly_image, assumptions):
+    from .forward import _analyze, probe
+    from .interprocedural import _relative_anchors
+    from ._load_identity import definition_identity
+
+    anchors = _relative_anchors(callee.unit, normalized)
+    caller_anchor = caller.anchors.get(caller_object)
+    if caller_anchor is None:
+        return (), (), ()
+    memory_space = caller_anchor[1]
+    analysis = _analyze(caller.normalized, caller.unit, readonly_image=readonly_image, assumptions=assumptions)
+    first = _first(caller.normalized, normalized.activation_entry.context[1])
+    if first is None or analysis.bind is None:
+        return (), (), ()
+    seeds, witnesses, labels = [], [], set(analysis.labels)
+    ssa = normalized.memory_ssa
+    # ENTRY definitions coalesce adjacent fields. Demand only the original
+    # read fragments, not a whole coalesced TArray header whose other fields
+    # may be unknown. A later DATA_WRITE is never an entry input.
+    requested = {fragment.span for read in ssa.reads for fragment in read.fragments
+                 if len(fragment.definition_ids) == 1 and
+                 ssa.definitions[fragment.definition_ids[0]].kind is MemoryDefinitionKind.ENTRY}
+    for span in sorted(requested, key=lambda span: (-span.size, span.canonical_key)):
+        step()
+        if not 0 < span.size <= 16 \
+                or anchors.get(span.object_id) != (sp, memory_space):
+            continue
+        displacement = span.start - (1 << 64)
+        # The observed CALL pushes its return address here. Caller pre-push
+        # RAM is not the callee's ENTRY value, including partial overlaps.
+        if displacement < 8 and displacement + span.size > 0 \
+                or any(span.overlaps(previous) for previous, _ in seeds):
+            continue
+        source = ByteSpan(caller_object, bias + delta + displacement, span.size)
+        ids, used = probe(caller.normalized, first, (source,))
+        identifier = ids.get(source)
+        if type(identifier) is not int:
+            continue
+        values, used_value = analysis.bind(normalized.activation_entry.context[1], (source,))
+        number = values[source].single_number()
+        if number is None:
+            continue
+        literal = ExactConstant(span.size, number)
+        seeds.append((span, literal))
+        witnesses.append((source, definition_identity(caller.normalized.memory_ssa.definitions[identifier]), literal))
+        labels.update((*used, *used_value))
+        if len(seeds) >= 16:
+            break
+    return tuple(seeds), tuple(witnesses), tuple(sorted(labels))
+
+
+def _preserved_loads(callee, normalized, models, assumptions, readonly_image):
+    from .forward import _analyze
+    from .normalize import _call_below_bounds
+    from .observed_call_state import observed_call_state_projections
+
+    analysis = _analyze(normalized, callee.unit, readonly_image=readonly_image, assumptions=assumptions)
+    if analysis.bind is None:
+        return {}, ()
+    effects = dict(normalized.proven_call_effects)
+    transitions = {row.call_operation_key: row.memory_transition
+                   for row in observed_call_state_projections(callee.unit.observation)}
+    inputs = normalized.forward_inputs
+    bounds = {key: (obj, bound) for key, obj, bound in _call_below_bounds(
+        effects, transitions, inputs.effect_unit, normalized.memory_ssa, callee.unit.observation,
+        callee.unit.scopes, callee.unit.scopes.resolution_context, include_unpreserved=True)}
+    instructions = callee.unit.observation.instructions
+    source = {f"{ins.address.space_id:x}:{ins.address.byte_offset:x}:{i}:{op.opcode}": (ins, op)
+              for ins in instructions for i, op in enumerate(ins.operations)}
+    claims = []
+    for call, model_file, entry in models:
+        step()
+        effect = effects.get(call)
+        # The existing matched model must explicitly have null-is-fresh
+        # semantics and a complete footprint outside its freed/moved block.
+        # No name-based Realloc special case and no new null-free contract.
+        matched = any(replace(entry, inherited=original.inherited) == original
+                      and set(original.inherited) <= set(entry.inherited)
+                      and set(entry.inherited) - set(original.inherited)
+                      <= {"import-slots-hold-their-exports", "library-internal-model-cuts"}
+                      for original in model_file.entries)
+        if effect is None or effect.callee != entry.label or not matched \
+                or entry.refusal or entry.callbacks_invokes or entry.template is not None \
+                or not entry.keeps_other_memory or not entry.frees \
+                or any(old not in {pair[1] for pair in entry.same_object} for old in entry.frees) \
+                or not effect.same_object_registers or not effect.restores_stack or not effect.clobbers_below \
+                or effect.noreturn or effect.memory_runs or effect.unknown_memory or effect.writer_conditions \
+                or effect.extent_registers or effect.preserves_memory or call not in bounds or call not in source:
+            continue
+        transition = transitions.get(call)
+        if transition is None or transition.displacement_delta != -8:
+            continue
+        register = effect.same_object_registers[0][1].object_id
+        freed = tuple(ByteSpan(register, start, size) for start, size in entry.frees)
+        values, used = analysis.bind(call, freed)
+        if any(values[span].single_number() != 0 for span in freed):
+            continue
+        ins, _ = source[call]
+        following = next((row for row in instructions if row.address == ins.fallthrough), None)
+        if following is None:
+            continue
+        loads = [(i, op) for i, op in enumerate(following.operations) if op.opcode == "LOAD"]
+        if len(loads) != 1 or loads[0][1].output is None or loads[0][1].output.byte_size != 8:
+            continue
+        ordinal, _ = loads[0]
+        if any(op.opcode in ("STORE", "CALL", "CALLIND", "CALLOTHER", "BRANCH", "CBRANCH", "BRANCHIND")
+               for op in following.operations[:ordinal]):
+            continue
+        reader = f"{following.address.space_id:x}:{following.address.byte_offset:x}:{ordinal}:LOAD"
+        obj, bound = bounds[call]
+        spans = {span for row in normalized.call_clobber_reads
+                 if row.operation_key == reader and call in row.intervening_calls for span in row.spans
+                 # The CALL's own return-address STORE is not preservation
+                 # by the callee. Exclude that overlay as well as its frame.
+                 if span.object_id == obj and span.size == 8 and span.start >= bound + 8}
+        if len(spans) != 1:
+            continue
+        span = next(iter(spans))
+        effects[call] = replace(effect, preserved=(*effect.preserved, span))
+        claims.append((call, reader, span, model_file.digest, entry.label, tuple(sorted(set(used) | set(analysis.labels)))))
+    return effects if claims else {}, tuple(claims)
+
+
+def replay_activation(caller, callee, call, *, readonly_image=None, assumptions=()):
+    """Optional context result, or None. The generic callee is never changed."""
+    from ._forward_memory import RefinementRefused
+    if readonly_image is not dict(callee.normalization_options).get("readonly_image") \
+            or readonly_image is not dict(caller.normalization_options).get("readonly_image"):
+        return None
+    try:
+        with _policy(callee):
+            return _replay_activation(caller, callee, call, readonly_image=readonly_image, assumptions=assumptions)
+    except RefinementRefused:
+        return None
+
+
+def _replay_activation(caller, callee, call, *, readonly_image=None, assumptions=()):
+    from ._activation_entry import ActivationEntry, using_entry
+    from .interprocedural import _relative_anchors
+    from .normalize import NormalizedFunction
+    from .function_summary import summarize_function
+    from .forward import probe
+
+    if callee.unit.scopes.program.evidence.translation_namespace.language_id.split(":")[1:3] != ["LE", "64"] \
+            or getattr(caller.normalized, "activation_entry", None) is not None \
+            or getattr(callee.normalized, "activation_entry", None) is not None \
+            or callee.activations or callee.origins or callee.projected_sinks or callee.recursion_unresolved or not callee.lifetime_models \
+            or not callee.normalization_options or type(callee.normalized) is not NormalizedFunction:
+        return None
+    bound = _inputs(caller, callee, call, assumptions, readonly_image)
+    if bound is None:
+        return None
+    sp, delta, caller_object, bias, relations, labels = bound
+    state = ActivationEntry(callee.unit.scopes.function.scope, (caller.key, call), relations, (), labels)
+    first = _normalize(callee, state)
+    if type(first) is not NormalizedFunction:
+        return None
+    if not _frame_compatible(callee, first, sp, relations):
+        return None
+    seeds, witnesses, used = _memory_inputs(caller, callee, first, sp, delta, caller_object, bias,
+                                          readonly_image, assumptions)
+    if not seeds:
+        return None
+    state = replace(state, memory=seeds, requires=tuple(sorted(set(labels) | set(used) | set(assumptions))))
+    second = _normalize(callee, state)
+    if type(second) is not NormalizedFunction:
+        return None
+    effects, claims = _preserved_loads(callee, second, callee.lifetime_models, state.requires, readonly_image)
+    if not claims:
+        return None
+    final = _normalize(callee, state, effects)
+    if type(final) is not NormalizedFunction:
+        return None
+    for _, reader, span, *_ in claims:
+        ids, _ = probe(final, reader, (span,))
+        if type(ids.get(span)) is not int or any(row.operation_key == reader and any(
+                debt.overlaps(span) for debt in row.spans) for row in (*final.call_clobber_reads, *final.may_alias_reads)):
+            return None
+    # Entry substitution is consumed by the normalizer, probe and crossing
+    # calculation alike. No surrogate source/sink graph is built here.
+    with using_entry(state):
+        summary = summarize_function(final, callee.unit.observation, {}, ())
+        anchors = _relative_anchors(callee.unit, final)
+    result = replace(callee, normalized=final, summary=summary, proven=effects,
+                     anchors=anchors, inherited_assumptions=callee.inherited_assumptions
+                     | frozenset(state.requires), activation_witness=(caller, callee, call, witnesses, claims),
+                     activation_inputs=(_source_signature(caller), _source_signature(callee)))
+    return result
+
+
+def revalidate_activation(original, candidate, replay, *, readonly_image=None, assumptions=()):
+    """The caller's adopted result must still supply the ORIGINAL inputs."""
+    from .forward import _analyze, probe
+    from ._load_identity import definition_identity
+    from .normalize import NormalizedFunction
+
+    if len(replay.activation_witness) != 5 or type(candidate.normalized) is not NormalizedFunction \
+            or candidate.normalized.forward_inputs is None:
+        return False
+    source, callee, call, witnesses, _ = replay.activation_witness
+    if source is not original or candidate.unit is not original.unit:
+        return False
+    if replay.activation_inputs != (_source_signature(original), _source_signature(callee)):
+        return False
+    first = _first(candidate.normalized, call)
+    analysis = _analyze(candidate.normalized, candidate.unit, readonly_image=readonly_image, assumptions=assumptions)
+    if first is None or analysis.bind is None:
+        return False
+    # Rebuild the independent register/call-shape bindings as well.
+    before = _inputs(original, callee, call, assumptions, readonly_image)
+    after = _inputs(candidate, callee, call, assumptions, readonly_image)
+    if before is None or after is None or before[:5] != after[:5]:
+        return False
+    for span, identity, literal in witnesses:
+        found, _ = probe(candidate.normalized, first, (span,))
+        identifier = found.get(span)
+        values, _ = analysis.bind(call, (span,))
+        if type(identifier) is not int or definition_identity(candidate.normalized.memory_ssa.definitions[identifier]) \
+                != identity or values[span].single_number() != literal.unsigned:
+            return False
+    return True

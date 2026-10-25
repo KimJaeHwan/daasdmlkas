@@ -49,7 +49,13 @@ CONTRACT = {
                                   "scopes": "input (scope bundle)",
                                   "forward_inputs": "forward-on derivation inputs (docs 25.33 F4a); None when off"}),
     "UnresolvedNormalizedFunction": (None, {"scopes": "input (scope bundle)"}),
-    "AnalyzedFunction": (None, {"unit": "input (the scoped unit)"}),
+    "AnalyzedFunction": (None, {
+        "unit": "input (the scoped unit)",
+        "normalization_options": "frozen replay inputs; effects/graph outputs are encoded separately",
+        "normalization_context": "runtime policy/reader inputs, not a portable analysis output",
+        "activation_witness": "original caller/callee input pins; context graph and preserved spans remain encoded",
+        "activation_inputs": "identity-based invalidation pins of the original inputs",
+    }),
     "FunctionSummary": (None, {}),
     "ProvenCallEffect": (None, {}),
     "RootSlice": (None, {}),
@@ -61,7 +67,8 @@ CONTRACT = {
 # older snapshots stay comparable (a non-default value is encoded and differs)
 ADDED_FIELDS = {
     "EngineRun": {"failed_functions": ()},
-    "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}},
+    "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {}},
+    "NormalizedFunction": {"activation_entry": None},
     "RootSlice": {"inherited_incomplete": False},
 }
 

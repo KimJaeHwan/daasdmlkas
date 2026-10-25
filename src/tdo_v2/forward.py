@@ -334,6 +334,14 @@ class ForwardInputs:
 
 
 def probe(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
+    """Probe under the normalization's captured activation, never ambient state."""
+    from ._activation_entry import using_entry
+
+    with using_entry(getattr(normalized, "activation_entry", None)):
+        return _probe_active(normalized, load_key, spans)
+
+
+def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
     """The backward engine's own debt judgement and reaching definition for
     reads of ``spans`` at the operation ``load_key`` (docs 25.33 F4a): the
     final effect unit with those reads added (``normalized.forward_inputs``)
@@ -411,6 +419,11 @@ def probe(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
         OPAQUE_NO_STACK_ADDRESSES.reset(tokens[1])
         ENTRY_VALUES_NOT_FRAME.reset(tokens[0])
     used = []
+    from ._activation_entry import entry_for
+
+    activation = entry_for(normalized.memory_ssa.function_scope)
+    if activation is not None:
+        used.extend(activation.requires)
     used.extend(normalized.forward_memory_requires)
     if any(frame_uses):
         used.append("entry-values-do-not-address-the-new-frame")
@@ -488,6 +501,14 @@ class _Analysis:
 
 
 def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analysis:
+    """Analyze only the entry state captured by this normalization."""
+    from ._activation_entry import using_entry
+
+    with using_entry(getattr(normalized, "activation_entry", None)):
+        return _analyze_active(normalized, unit, readonly_image=readonly_image, assumptions=assumptions)
+
+
+def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analysis:
     """The F0 facts of one normalized function (docs 25.33), in a stable
     order; () when the function has no memory SSA. Every fact's ``requires``
     lists ``assumptions`` -- callers pass every assumption the analysis run
@@ -499,10 +520,12 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
     from .relative_memory import _operation_key, _resolve_validated_storage, _storage_ref
     from ._scope_contracts import VarnodeKindCode
     from .model import ResolvedStorage
+    from ._activation_entry import entry_for, entry_seed, using_entry
 
     ssa = normalized.memory_ssa
     if ssa is None or unit.observation is None or _projection_sensitive(unit.observation):
         return _Analysis((), (), None)
+    activation = entry_for(ssa.function_scope)
     context = normalized.scopes.resolution_context
     operations = {
         _operation_key(instruction.address, ordinal, operation): operation
@@ -546,10 +569,25 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
     tainted: set = set()
     taint = [False]
 
+    def activation_value(span):
+        seeded = entry_seed(ssa.function_scope, span) if activation is not None else None
+        if seeded is None:
+            return None
+        if seeded[0] == "constant":
+            return Value.number(seeded[1].unsigned, 8 * span.size) if little else None
+        _, base, delta = seeded
+        return Value(8 * span.size, ((("entry", base.start, base.size), Interval.offset(delta, 8 * span.size)),))
+
     def definition_value(index, span):
         """None: not evaluated yet (bottom). Part of a register entry
         definition (entry spans are coalesced) is that part's own entry value."""
         definition = None if index == ENTRY_VALUE else ssa.definitions[index]
+        if definition is None or definition.kind is MemoryDefinitionKind.ENTRY:
+            if definition is not None and not definition.span.contains(span):
+                return Value.top(8 * span.size)
+            seeded = activation_value(span)
+            if seeded is not None:
+                return seeded
         if definition is None or (definition.kind is MemoryDefinitionKind.ENTRY
                                   and definition.span.object_id.kind is StorageObjectKind.REGISTER_FILE):
             return Value(8 * span.size, ((("entry", span.start, span.size), Interval.offset(0, 8 * span.size)),))
@@ -723,6 +761,9 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
         kind = definition.kind
         if kind is MemoryDefinitionKind.ENTRY:
             span = definition.span
+            seeded = activation_value(span)
+            if seeded is not None:
+                return seeded
             if span.object_id.kind is StorageObjectKind.REGISTER_FILE:
                 return Value(bits, ((("entry", span.start, span.size), Interval.offset(0, bits)),))
             if readonly_image is not None and span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
@@ -822,6 +863,7 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
         return None
 
     labels = tuple(sorted({*assumptions, *normalized.forward_memory_requires,
+                           *(activation.requires if activation is not None else ()),
                            *(label for attribute, label in _NORMALIZATION_ASSUMPTIONS
                                            if getattr(normalized, attribute, False)),
                            *(("readonly-image-data-is-constant",) if used_readonly else ()),
@@ -843,10 +885,19 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
             if claim is None or claim.is_top:
                 continue
             requires = labels
-            digest = hashlib.sha256(f"forward-v0|{function}|{key}|{position}".encode()).hexdigest()[:16]
-            facts.append(Fact(digest, function, key, position, claim, requires))
+            fact_context = activation.context if activation is not None else ()
+            identity = f"forward-v0|{function}|{key}|{position}"
+            if fact_context:
+                identity += f"|activation:{fact_context!r}"
+            digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
+            facts.append(Fact(digest, function, key, position, claim, requires, fact_context))
 
     def bind(call_key, spans):
+        # The returned closure outlives _analyze's ContextVar binding.
+        with using_entry(activation):
+            return bind_active(call_key, spans)
+
+    def bind_active(call_key, spans):
         """The caller's values of register ``spans`` just before the call
         ``call_key`` (F2a): probe reads on the call's FIRST effect (its
         ``~in`` / ``~ld`` staging, or the bare call -- before any of the call's
@@ -920,14 +971,15 @@ def context_facts(results, *, readonly_image=None, assumptions=lambda key, item:
 
     facts = []
     for key, item in sorted(results.items()):
-        if type(item.normalized) is not NormalizedFunction or item.normalized.forward_inputs is None:
+        if type(item.normalized) is not NormalizedFunction or item.normalized.forward_inputs is None \
+                or getattr(item.normalized, "activation_entry", None) is not None:
             continue
         transitions = None
         # (``item.calls`` also holds tail jumps: no observed call shape, so they bind nothing)
         for call_key, callee_key in sorted(item.calls.items()):
             callee = analysis(callee_key)
             parametric = [fact for fact in (callee.facts if callee is not None else ())
-                          if any(base != _ABS for base, _ in fact.claim.items)]
+                          if not fact.context and any(base != _ABS for base, _ in fact.claim.items)]
             if not parametric:
                 continue
             register = next((definition.span.object_id for definition in results[callee_key].normalized.memory_ssa

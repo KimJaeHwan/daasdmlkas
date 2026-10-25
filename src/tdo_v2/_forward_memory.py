@@ -32,11 +32,13 @@ def _freeze(value):
 
 def _signature(options):
     from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES
+    from ._activation_entry import ACTIVE_ENTRY
 
     # Image readers belong to this exact run; never compare by an image name.
     options = {"opaque_value_provider": None, **options}
     return (_freeze({key: value for key, value in options.items() if key != "readonly_image"}),
-            id(options.get("readonly_image")), ENTRY_VALUES_NOT_FRAME.get(), OPAQUE_NO_STACK_ADDRESSES.get())
+            id(options.get("readonly_image")), ENTRY_VALUES_NOT_FRAME.get(), OPAQUE_NO_STACK_ADDRESSES.get(),
+            id(ACTIVE_ENTRY.get()))
 
 
 @dataclass(frozen=True, slots=True)

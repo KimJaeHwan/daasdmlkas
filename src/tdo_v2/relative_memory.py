@@ -5,6 +5,7 @@ from __future__ import annotations
 from .phases import measured
 
 from .resource_limits import step
+from ._activation_entry import entry_seed
 
 from dataclasses import dataclass, replace
 import hashlib
@@ -1745,6 +1746,21 @@ class _Projector:
         self._active.add(cache_key)
         result: _AddressExpression | None
         constant = None
+        seed = entry_seed(self._ssa.function_scope, requested_span) \
+            if definition.kind is MemoryDefinitionKind.ENTRY \
+            and self._translation_namespace.split(":")[1:3] == ["LE", "64"] else None
+        if seed is not None:
+            if seed[0] == "affine":
+                _, base, delta = seed
+                atom = _stable_storage_key(base)
+                self._note_entry_atom(base, atom)
+                result = _AddressExpression(((atom, 1),), delta, requested_span.size)
+            else:
+                literal = seed[1]
+                result = _AddressExpression((), literal.unsigned, requested_span.size)
+            self._active.discard(cache_key)
+            self._cache[cache_key] = result
+            return result
         imports = IMPORT_SLOTS.get()
         space = self._spaces.get(requested_span.object_id.space_key)
         import_atom = None

@@ -3029,3 +3029,64 @@ Astra는 세 XML·신규 103개·skip 사유·273파일 두 해시와 설명 수
 한정 마일스톤의 목표 달성 및 이 상태에서의 마무리를 명시적으로 최종 승인**했으며 해당 범위의 필수 차단 사항은 없었다.
 원래 3순위 전체의 독립 allocator 수명 증명·no-UAF/no-old-pointer 가정 해제는 여전히 미완료다.
 UE 전체 해결이나 v4 전체 이미지 재스캔까지 승인된 것이 아니다.
+
+### 25.67 호출 문맥 한정 NULL-Realloc → 스택 8바이트 보존 (2026-10-25)
+
+기본값과 기존 모델 계약은 유지한다. 기존 정방향 스위치가 켜진 실행에서만, caller의 완성된 원 SSA가 제공하는
+진입 레지스터 관계와 정확한 ENTRY 메모리 상수를 한 callee activation에 전달한다. 새 SSA solver·ABI 추측·전체 UAF
+부재 가정은 추가하지 않는다. 값은 ENTRY 정의에만 적용한다. 중간 STORE/JOIN/CALL과 alias/clobber/taint는 기존
+normalizer·SSA·정방향 값 분석이 처리하며, 부채가 남으면 NULL 판정을 거부한다.
+
+실제 Trace R002의 첫 Grow `180006053:2:CALL`에서 Data 8바이트는 원 `180005eee:1:STORE`의 정확한 0이다.
+원 call shape로 `this = Grow.entrySP + 80`이 도출된다. 이 관계로 `b42`의 `this+12` 쓰기와 `b51`의 saved-this
+읽기, 두 helper의 명시적 스택 쓰기를 기존 메모리 그래프에서 분리한다. `180005b84:0:LOAD`→RCX COPY를 통해
+`180005b87:3:CALLIND`의 old pointer가 NULL임을 확인한 뒤, 바로 다음 `180005b8d:1:LOAD`의
+`[Grow.entrySP-24:8]`에만 보존을 부여한다. 해당 읽기는 원 SSA 정의 **213 / `180005b56:2:STORE`**에 연결된다.
+
+이는 **현재 매칭된 외부모델의 완전 효과·콜백·NULL→fresh 계약에 상대적인 증명**이다. `preserves_memory=False`는
+그대로다. NULL이라는 이유만으로 일반 Free나 임의 allocator에 보존을 주지 않으며, 모델의 명시적 쓰기·미확인 효과가
+있는 경우는 이번 지원 범위 밖이다. 원 모델 라벨과 전체 의존 가정도 계승한다. GMalloc 및 LLM helper의 원 기계어
+쓰기 범위를 모두 닫은 strict raw 증명이나 no-UAF/no-old-pointer 가정 해제가 아니다.
+
+callee 진입의 return-address overlay에는 caller의 pre-push RAM 상수를 넣지 않는다. 보존 대상도 내부 CALL의
+return-address overlay와 callee frame 밖이어야 한다. 첫 범위는 LE64·관찰된 8바이트 CALL push이며, 메모리 공간도
+정확히 일치해야 한다. frame/opaque/import/image/index 정책은 원 실행에 고정하고 변경되면 보수적으로 거부한다.
+frame ON에서는 새 entry 관계가 기존 private-frame 전제를 직접 위반하거나, 원 entry-anchor 접근을 변위·폭까지
+매핑했을 때 private 영역과 겹치면 거부한다. 원 SP 접근과의 대응은 read/write 역할별로 확인하며, 위치가 미해결인
+모양도 거부한다. Frame OFF에서는 이 전제를 쓰지 않고 기존 SSA의 실제 별칭·부채 판정을 그대로 소비한다.
+
+문맥 결과는 caller의 정확한 호출에만 보관한다. caller 재분석 후 원 입력의 정의 정체성·값·레지스터 관계·모델 및
+정규화 입력을 다시 확인해 결과와 provenance를 함께 채택하거나 원 N0 전체로 복귀한다. generic Grow와 두 번째
+`1800061ea:2:CALL`은 바꾸지 않는다. context 및 이를 사용한 caller의 transitive template 수출도 거부한다.
+자원 상한 초과는 보수적 거부와 구분해 기존 function/run typed failure로 보고하며, 미완성 candidate를 게시하지 않는다.
+기존 내부 provenance는 원 generic 근거를 보수적으로 계승한 것이며, 문맥에서 조건 verdict를 새로 계산했다는 뜻이 아니다.
+
+이 한 연결을 해결해도 Grow의 `b99` 반환주소 읽기 등 나머지 부채는 남는다. 현재 R002는 A+B/부채 33/incomplete를
+유지하며, 전체 R002 또는 모든 Realloc의 보존을 완료로 세지 않는다.
+
+generic template의 의미는 바꾸지 않으므로 엔진 의미 판 19와 설치 Core 모델은 유지한다. 현재 코드의 Core 세 export
+재도출은 forward 0/1이 모두 SHA256 `8cc13fc3a695debfb61c5edefa19c3d6f0f49f1e68e7e0ad1d9981c9840854e4`로 같다.
+설치본 `84c74fd4…714bb`와는 `producer.engine_revision`의 기존 Git commit 표기 한 필드만 다르며, 나머지 모델 payload는
+완전히 동일하다. 이 provenance 차이를 감추거나 설치본을 덮어쓰지 않았다. 기존 generic 캐시는 계속 보수적으로 유효하다.
+
+#### 동결 후 전체 회귀
+
+| 실행 | 결과 | 시간 |
+|---|---|---|
+| 기본 (`TDO_V2_FORWARD=0`) 전체 | **3056 passed / 32 skipped / failure 0 / error 0** | 650.66초 |
+| 정방향 ON (`TDO_V2_FORWARD=1`) 전체 | **3056 passed / 32 skipped / failure 0 / error 0** | 666.88초 |
+| dense 인접 회귀 | **956 passed / 0 skipped / failure 0 / error 0** | 327.53초 |
+
+신규 **130개**는 세 실행에서 모두 실제 통과했다. 기존 32 skip은 Linux worker 9·Linux supervision 14·미보유 Bundle 9이며
+신규 skip은 없다. 실제 사례 56개, ENTRY·CALL overlay·메모리 공간·frame 충돌·중간 쓰기·모델 계약 철회·원자 복귀·
+실제 work 상한·provenance·template 경계 74개를 포함한다. 이 수치는 전체 UAF 부재나 R002 전체 완료 수가 아니다.
+
+로그/XML은 `output/realloc-slot-evidence-20261025.08O2pr/release-{0,1,dense}.{log,junit.xml}`, 집계는
+`release-audit.log`다. src/tests/models/tools/ghidra의 Python·JSON·Java 파일 목록과 내용을 동결한 SHA256은
+`4f1b4725ac7019f26df1ab9844a7f9ff13de4d9fac1e041c0372f95c645e25ec`이며, 시작·중간·dense 종료·전체 종료에 동일하다.
+회귀 중 변경한 것은 이 절의 설명·결과 기록뿐이다.
+
+Astra는 설계·ENTRY/정책 경계·caller 통합·frame 충돌을 단계별 검수하고, 최종 XML의 신규 130개·기존 skip 사유·
+현재 파일 재해시·모델 JSON의 단일 provenance 차이·이 절의 제한을 독립 대조했다. **첫 `6053` activation에서 기존
+명시 모델 계약에 상대적인 `b87→b8d` S8 보존이라는 한정 목표 달성과 현재 상태의 마무리를 최종 승인**했으며,
+추가 필수 차단 사항은 없다. generic Realloc·전체 R002·strict raw allocator footprint·no-UAF 완료의 승인이 아니다.

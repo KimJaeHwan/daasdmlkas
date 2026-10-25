@@ -230,6 +230,8 @@ class NormalizedFunction:
     forward_memory_proofs: tuple = field(default=(), compare=False, repr=False)
     forward_memory_requires: tuple = field(default=(), compare=False, repr=False)
     load_value_proofs: tuple = field(default=(), compare=False, repr=False)
+    # A caller-owned replay, never an unconditional summary/template input.
+    activation_entry: object = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -811,7 +813,7 @@ def _kept_call_memory(proven_call_effects, memory_ssa, wild_objects, uncertain) 
 
 
 def _call_below_bounds(proven_call_effects, transitions, effect_unit, memory_ssa, observation, scopes,
-                       context) -> tuple:
+                       context, *, include_unpreserved=False) -> tuple:
     """(call key, stack object, bound) for calls that clobber below the
     call-time stack pointer: bytes of this function's stack object at offsets
     below ``bound`` (the callee's entry stack pointer) may change."""
@@ -819,7 +821,8 @@ def _call_below_bounds(proven_call_effects, transitions, effect_unit, memory_ssa
     from .relative_memory import stack_offset_at
 
     # only calls that keep all other memory: a call that keeps none clobbers it all anyway
-    keys = [key for key, row in proven_call_effects.items() if row.clobbers_below and row.preserves_memory]
+    keys = [key for key, row in proven_call_effects.items()
+            if row.clobbers_below and (row.preserves_memory or include_unpreserved)]
     if not keys:
         return ()
     found = _stack_pointer(_unit_stub(scopes), observation, context, scopes.program.evidence.address_spaces)
@@ -1469,8 +1472,13 @@ class FunctionNormalizer:
             _forward_memory_plan.bind(value, options)
         if _load_identity_plan is not None:
             _load_identity_plan.bind(value, options, _forward_memory_plan)
-        return _ScopedNormalizer().normalize(value, **options, _forward_memory_plan=_forward_memory_plan,
-                                             _load_identity_plan=_load_identity_plan)
+        result = _ScopedNormalizer().normalize(value, **options, _forward_memory_plan=_forward_memory_plan,
+                                              _load_identity_plan=_load_identity_plan)
+        from ._activation_entry import entry_for
+        from dataclasses import replace
+
+        entry = entry_for(function.scope)
+        return replace(result, activation_entry=entry) if type(result) is NormalizedFunction and entry else result
 
     def normalize_configured(
         self,

@@ -90,6 +90,14 @@ class AnalyzedFunction:
     # summaries (``derive_composed_call_effect``). Not in ``calls``: a consumer
     # that does not know this map sees an opaque indirect call
     multi_calls: dict = field(default_factory=dict)
+    # Private replay inputs and caller-owned specializations; never replace
+    # the program's generic callee entry with an activation.
+    normalization_options: tuple = field(default=(), repr=False)
+    lifetime_models: tuple = field(default=(), repr=False)
+    activations: dict = field(default_factory=dict, repr=False)
+    activation_witness: tuple = field(default=(), repr=False)
+    normalization_context: tuple = field(default=(), repr=False)
+    activation_inputs: tuple = field(default=(), repr=False)
 
 
 def _import_slots_switched_on() -> bool:
@@ -498,6 +506,40 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         # hypothesis in use: {"failed": pairs, "rejections": rows}
         hypothesis_notes: dict = {}
 
+        def refined_one(key, hypotheses, activation_overrides=None):
+            published = {} if record_provenance is not None else None
+            result, options = analyze_one(key, hypotheses, provenance=published,
+                                          activation_overrides=activation_overrides)
+            if _forward_switched_on() and key not in recursive_keys:
+                from ._forward_memory import RefinementRefused, prepare_memory_refinement
+                from .summary_engine import run_assumptions
+                plan = prepare_memory_refinement(result, options, assumptions=run_assumptions(
+                    {key: result}, readonly_image=readonly_image, home_space=private_frame_above))
+                if plan is not None:
+                    pending = {} if record_provenance is not None else None
+                    try:
+                        candidate, _ = analyze_one(key, hypotheses, refinement=plan, provenance=pending,
+                                                  activation_overrides=activation_overrides)
+                        if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None:
+                            candidate.inherited_assumptions |= frozenset(plan.requires)
+                            result, published = candidate, pending
+                    except RefinementRefused:
+                        pass
+                from ._load_identity import prepare_load_identities
+                plan = prepare_load_identities(result, options)
+                if plan is not None:
+                    pending = {} if record_provenance is not None else None
+                    try:
+                        candidate, _ = analyze_one(
+                            key, hypotheses, refinement=result.normalized.forward_inputs.read_separations,
+                            load_identity=plan, provenance=pending, activation_overrides=activation_overrides)
+                        if candidate.summary is not None and plan.accepts(candidate):
+                            candidate.inherited_assumptions |= frozenset(plan.requires)
+                            result, published = candidate, pending
+                    except RefinementRefused:
+                        pass
+            return result, published
+
         def one(key, hypotheses):
             """``analyze_one``; a function whose dependent-value chains exceed
             the recursion bound (or whose budget runs out) is a typed failure
@@ -506,37 +548,37 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             if key not in resource_failures:
                 try:
                     with activation(_ledger_key(functions[key])):
-                        published = {} if record_provenance is not None else None
-                        result, normalization_options = analyze_one(key, hypotheses, provenance=published)
+                        result, published = refined_one(key, hypotheses)
                         if _forward_switched_on() and key not in recursive_keys:
-                            from ._forward_memory import RefinementRefused, prepare_memory_refinement
+                            from ._call_activation import replay_activation, revalidate_activation
                             from .summary_engine import run_assumptions
-
-                            plan = prepare_memory_refinement(result, normalization_options, assumptions=run_assumptions(
-                                {key: result}, readonly_image=readonly_image, home_space=private_frame_above))
-                            if plan is not None:
-                                pending = {} if record_provenance is not None else None
-                                try:
-                                    candidate, _ = analyze_one(key, hypotheses, refinement=plan, provenance=pending)
-                                    if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None:
-                                        candidate.inherited_assumptions |= frozenset(plan.requires)
-                                        result, published = candidate, pending
-                                except RefinementRefused:
-                                    pass  # keep N0 in its entirety, never combine replay artifacts
-                            from ._load_identity import prepare_load_identities
-
-                            identity_plan = prepare_load_identities(result, normalization_options)
-                            if identity_plan is not None:
-                                pending = {} if record_provenance is not None else None
-                                base_plan = result.normalized.forward_inputs.read_separations
-                                try:
-                                    candidate, _ = analyze_one(key, hypotheses, refinement=base_plan,
-                                                              load_identity=identity_plan, provenance=pending)
-                                    if candidate.summary is not None and identity_plan.accepts(candidate):
-                                        candidate.inherited_assumptions |= frozenset(identity_plan.requires)
-                                        result, published = candidate, pending
-                                except RefinementRefused:
-                                    pass  # preserve the last complete result, including its provenance
+                            contexts = {}
+                            possible = [(call, results[target]) for call, target in result.calls.items()
+                                        if target in results and results[target].lifetime_models
+                                        and target not in recursive_keys]
+                            labels = run_assumptions({**results, key: result}, readonly_image=readonly_image,
+                                                     home_space=private_frame_above) if possible else ()
+                            if type(result.normalized) is NormalizedFunction:
+                                for call, done in possible:
+                                    context = replay_activation(result, done, call, readonly_image=readonly_image,
+                                                                assumptions=labels)
+                                    if context is not None:
+                                        contexts[call] = context
+                                    if len(contexts) == 8:
+                                        break
+                            if contexts:
+                                candidate, pending = refined_one(key, hypotheses, contexts)
+                                if type(candidate.normalized) is NormalizedFunction and all(revalidate_activation(
+                                        result, candidate, context, readonly_image=readonly_image, assumptions=labels)
+                                        for context in contexts.values()):
+                                    candidate.activations = contexts
+                                    if record_provenance is not None:
+                                        for context in contexts.values():
+                                            generic = results[context.key]
+                                            original = record_provenance.get(id(generic))
+                                            if original is not None:
+                                                pending[id(context)] = (context, original[1])
+                                    result, published = candidate, pending
                         checkpoint()   # (limits checked before the result is published)
                         if record_provenance is not None:
                             record_provenance.update(published)
@@ -553,7 +595,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             return AnalyzedFunction(key, functions[key], UnresolvedNormalizedFunction(
                 functions[key].scopes, reason), None, calls[key], failure_detail=detail)
 
-        def analyze_one(key, hypotheses, *, refinement=None, load_identity=None, provenance=None):
+        def analyze_one(key, hypotheses, *, refinement=None, load_identity=None, provenance=None,
+                        activation_overrides=None):
             unit = functions[key]
             observation = unit.observation
             context = unit.scopes.resolution_context
@@ -589,7 +632,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             proven[call_key] = effect
                             sources[call_key] = ("test-only-boundary", declaration.label)
                 for call_key, callee in calls[key].items():
-                    done = results.get(callee)
+                    done = (activation_overrides or {}).get(call_key, results.get(callee))
                     if call_key in assumed or call_key in proven:
                         continue
                     if component_of[callee] == component_of[key]:
@@ -802,8 +845,19 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     image_unproven=image_tracked and _unproven_image_operands(unit),
                                     multi_calls={call: members for call, members in multi.get(key, {}).items()
                                                  if call in proven})
+            result.normalization_options = tuple(normalization_options.items())
+            from .relative_memory import IMPORT_SLOTS, IMAGE_BASE_TRACKING, index_addresses, DEFINITION_ATOMS
+            imports = IMPORT_SLOTS.get()
+            result.normalization_context = (ENTRY_VALUES_NOT_FRAME.get(), OPAQUE_NO_STACK_ADDRESSES.get(),
+                                            imports, None if imports is None else imports.active,
+                                            IMAGE_BASE_TRACKING.get(), index_addresses(), DEFINITION_ATOMS)
+            result.lifetime_models = tuple((call, model_file, entry)
+                                           for call, (model_file, entry) in externals[key].items()
+                                           if call in proven and entry.frees and entry.same_object)
             if key in resolution_requires:   # (forward facts the resolutions of its calls rest on)
                 result.inherited_assumptions = result.inherited_assumptions | resolution_requires[key]
+            for context in (activation_overrides or {}).values():
+                result.inherited_assumptions |= context.inherited_assumptions
             if provenance is not None:   # publish only after the whole selected analysis succeeds
                 provenance[id(result)] = (result, CallProvenance(
                     sources={call: source for call, source in sources.items() if call in proven},
