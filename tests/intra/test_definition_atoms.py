@@ -1,10 +1,13 @@
 """Definition atoms (``relative_memory``): a pointer a call returns or a LOAD
 reads, defined once per activation, is a base of its own.
 
-The program oracle runs the real code (``malloc`` with C semantics) and checks
-the caller's graph: nothing is silently missed. The mutations prove the guards
-matter: without the wild-object rule of ``may_alias`` a pointer a callee
-returns into the caller's private frame is missed.
+The program oracle runs the real code (including allocator behavior) and checks
+the caller's graph: nothing is silently missed. A fresh/nonstack origin does
+not prove the extent of an eight-byte access: spills, globals and reallocated
+members therefore retain alias debt and their possible writers. Exact
+same-address SSA definitions remain useful without object-wide disjointness.
+The mutations distinguish a missing wild-object guard from a mere declared
+origin label, which cannot grant separation authority.
 """
 
 import pytest
@@ -167,15 +170,27 @@ def _spilled_heap_pointer():
             .add_rsp(0x48).ret())
 
 
-def test_a_fresh_block_spilled_to_the_frame_is_exact():
-    """malloc's model declares its result fresh (never a stack address): its
-    object is not wild, so the private frame slot holding the pointer is not
-    disturbed by the heap store."""
+def _assert_unbounded_access_debt(function, view, registers, writers):
+    """Keep both alias uncertainty and original writer candidates, not just
+    an incomplete flag after removing the old object-wide nonstack rule."""
+    assert not view.is_complete
+    assert any(function.dependencies.node(node).kind == "memory_debt"
+               for node in view.result.reachable_nodes)
+    for register in registers:
+        assert set(range(register, register + 8)) <= view.register_bytes
+    for writer in writers:
+        assert function.dependencies.node_for_key("op:" + writer) in view.result.reachable_nodes
+
+
+def test_a_fresh_block_spilled_to_the_frame_keeps_extent_debt():
+    """Fresh describes the returned base, not the range of its eight-byte
+    store. Its possible alias with the pointer's home slot stays explicit."""
     results = _analyze(_spilled_heap_pointer())
-    reload = _reload(results["1:1000"].normalized)
-    assert reload.is_complete
-    assert set(range(RSI, RSI + 8)) <= reload.register_bytes
-    assert _check(results).silent == []
+    function = results["1:1000"].normalized
+    _assert_unbounded_access_debt(function, _reload(function), (RSI,),
+                                 ("1:100c:1:STORE", "1:1014:0:STORE"))
+    report = _check(results)
+    assert report.runs == 6 and report.checked and not report.unsupported and report.silent == []
 
 
 def test_without_fresh_the_spilled_pointer_stays_unsure(monkeypatch):
@@ -250,12 +265,15 @@ def _global_pools(seed):
     return {**fidelity._register_inputs(seed), RSP: 0x7000_0000, RBX: DATA_BASE + 0x40}
 
 
-def test_a_fresh_block_is_disjoint_from_globals():
+def test_a_fresh_block_without_extent_keeps_the_global_writer():
+    """An origin label alone cannot exclude the global write from an
+    unbounded eight-byte heap demand, even when this execution is disjoint."""
     results = _analyze(_fresh_and_global(False))
-    reload = _reload(results["1:1000"].normalized)
-    assert reload.is_complete and set(range(RSI, RSI + 8)) <= reload.register_bytes
-    assert not reload.register_bytes & set(range(RDI, RDI + 8))
-    assert _check(results).silent == []
+    function = results["1:1000"].normalized
+    _assert_unbounded_access_debt(function, _reload(function), (RSI, RDI),
+                                 ("1:100c:0:STORE", "1:1010:0:STORE"))
+    report = _check(results)
+    assert report.runs == 6 and report.checked and not report.unsupported and report.silent == []
 
 
 def test_a_loaded_pointer_may_reach_a_fresh_block():
@@ -344,25 +362,30 @@ def _load_slice(function, nth_from_end):
     return slice_from(function, operation_node_at(function, (address - CODE_BASE) // 4, 1))
 
 
-def test_a_reallocated_member_is_not_a_stack_address():
+def test_a_reallocated_member_origin_does_not_bound_its_access():
+    """The same-object/null-is-fresh descriptor remains, but supplies no
+    extent certificate excluding the Data write from the frame's Num slot."""
     results, report = _program_check(_array_caller(), _grow_helper())
     from tdo_v2.span_geometry import StorageObjectKind
     (run,) = [run for exit_summary in results[f"1:{HELPER:x}"].summary.exits for run in exit_summary.runs
               if run.value is not None and run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE
               and run.value[0] == "same" and run.value[2]]   # realloc of this->Data, null is fresh
-    num = _load_slice(results["1:1000"].normalized, 2)
-    assert num.is_complete and set(range(RBX, RBX + 8)) <= num.register_bytes
-    assert not num.register_bytes & set(range(RSI, RSI + 8))
-    assert report.runs and report.silent == []
+    function = results["1:1000"].normalized
+    _assert_unbounded_access_debt(function, _load_slice(function, 2), (RBX, RSI),
+                                 ("1:1008:1:STORE", "1:1018:0:STORE"))
+    assert report.runs == 6 and report.checked and not report.unsupported and report.silent == []
 
 
-def test_a_reallocated_member_keeps_its_contents():
+def test_a_reallocated_member_keeps_content_candidates_and_extent_debt():
+    """Do not demand an exact pointer after uncertain frame aliases. Retain
+    the original heap contents and frame writers alongside the alias debt."""
     results, report = _program_check(_array_caller(preallocated=True), _grow_helper())
-    element = _load_slice(results["1:1000"].normalized, 1)
-    assert element.is_complete and set(range(RBP, RBP + 8)) <= element.register_bytes
-    num = _load_slice(results["1:1000"].normalized, 2)
-    assert num.is_complete and set(range(RBX, RBX + 8)) <= num.register_bytes
-    assert report.runs and report.silent == []
+    function = results["1:1000"].normalized
+    _assert_unbounded_access_debt(function, _load_slice(function, 1), (RBP, RBX),
+                                 ("1:100c:1:STORE", "1:1014:1:STORE"))
+    _assert_unbounded_access_debt(function, _load_slice(function, 2), (RBX, RSI),
+                                 ("1:1014:1:STORE", "1:1024:0:STORE"))
+    assert report.runs == 6 and report.checked and not report.unsupported and report.silent == []
 
 
 def test_a_member_pointing_into_the_frame_gets_no_value():
@@ -376,7 +399,9 @@ def test_a_member_pointing_into_the_frame_gets_no_value():
     assert report.silent == []
 
 
-def test_mutation_frame_pointer_tagged_nonstack_misses(monkeypatch):
+def test_mutation_frame_pointer_tagged_nonstack_cannot_hide_frame_writers(monkeypatch):
+    """A forged declared-origin label is not a byte-range certificate: the
+    real frame writer and alias debt survive even without an exact pointer."""
     import tdo_v2.function_summary as summary_module
     from dataclasses import replace
     from tdo_v2.function_summary import ExitSummary, SummaryKind
@@ -390,8 +415,13 @@ def test_mutation_frame_pointer_tagged_nonstack_misses(monkeypatch):
             for run in item.runs)) for item in exits]
 
     monkeypatch.setattr(summary_module, "_pointer_values", everything_nonstack)
-    _, report = _program_check(_array_caller(), _grow_helper(points_into_frame=True))
-    assert report.silent
+    results, report = _program_check(_array_caller(), _grow_helper(points_into_frame=True))
+    assert any(run.value == ("nonstack",) for exit_summary in results[f"1:{HELPER:x}"].summary.exits
+               for run in exit_summary.runs)
+    function = results["1:1000"].normalized
+    _assert_unbounded_access_debt(function, _load_slice(function, 2), (RBX, RSI),
+                                 ("1:1008:1:STORE", "1:1018:0:STORE"))
+    assert report.runs == 6 and report.checked and not report.unsupported and report.silent == []
 
 
 def test_a_reused_block_after_free_is_not_missed():

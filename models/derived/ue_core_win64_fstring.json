@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 15,
+ "version": 16,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 1,
    "template_version": 3,
-   "semantics_version": 16
+   "semantics_version": 17
   },
   "parameters": {
    "private_frame_above": 40
@@ -54,7 +54,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "b89d6a7ae6cced9c161c910f5514eaca058f257e+dirty",
+   "engine_revision": "b23469e234cc8f44458df963735b5a5d62317f45+dirty",
    "bundle": "a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068",
    "index_addresses": true,
    "stack_evidence": [

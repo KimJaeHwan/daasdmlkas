@@ -243,6 +243,7 @@ def project_function_relative_memory(
     fresh_objects: set | None = None,
     pointer_rows: dict | None = None,
     nonstack_objects: set | None = None,
+    nonstack_spans: set | None = None,
     address_metadata: dict | None = None,
     once_blocks: frozenset | None = None,
     settle_pending: bool = True,
@@ -281,13 +282,13 @@ def project_function_relative_memory(
     result's address expression is the argument's (a constant argument, e.g.
     realloc(NULL, n), makes it a fresh block instead).
 
-    ``fresh_objects`` collects, for ``may_alias``, the objects based on
-    exactly one fresh atom.
+    ``fresh_objects`` records objects based on exactly one fresh atom. This
+    is pointer-origin metadata, not a proof about all offset accesses.
 
     ``pointer_rows``: call effect row key -> the pointer value a callee
     summary states for it (``normalize._proven_call_rows``): ("nonstack",) --
-    a nonstack definition atom (once per activation, as definition atoms;
-    ``nonstack_objects``: disjoint from the stack only); ("reg", input row,
+    a nonstack-origin definition atom (once per activation, as definition
+    atoms; no bound on offset accesses); ("reg", input row,
     register varnode, null_is_fresh) / ("mem", load row, width,
     null_is_fresh) -- the caller's value there at the call, substituted (a
     null value with null_is_fresh is a nonstack atom).
@@ -341,6 +342,8 @@ def project_function_relative_memory(
         projector.fresh_objects = fresh_objects
     if nonstack_objects is not None:
         projector.nonstack_objects = nonstack_objects
+    if nonstack_spans is not None:
+        projector.nonstack_spans = nonstack_spans
     if address_metadata is not None:
         projector.address_metadata = address_metadata
     # Writes of one summarized call that bind to overlapping caller bytes: the
@@ -1015,6 +1018,10 @@ class _Projector:
         # opaque atoms computed from a stack-derived value (transitively)
         self._stack_derived: set[int] = set()
         self.nonstack_objects: set = set()
+        # Only proven byte windows authorize nonstack alias exclusions.
+        # Currently the existing import-static rule proves exactly one byte;
+        # allocator models carry no allocation extent and yield no window.
+        self.nonstack_spans: set[ByteSpan] = set()
         self.wild_objects: set = set()
         # diagnostics (``origin_witnesses``): relative object -> (atom tuple,
         # space id) -- the object id is a function of exactly these, so entries
@@ -1187,7 +1194,8 @@ class _Projector:
         pointer moved into this function's frame (docs 25.8)."""
         if any(self._is_stack_derived(key) for item in inputs for key, _ in item.atoms):
             self._stack_derived.add(atom)
-        if any(key in self._definition_atoms or key in self._boundary or coefficient != 1
+        if any(key in self._definition_atoms or key in self._boundary or key in self._fresh_atoms
+               or key in self._nonstack_atoms or coefficient != 1
                for item in inputs for key, coefficient in item.atoms):
             self._definition_atoms.add(atom)
 
@@ -1273,6 +1281,9 @@ class _Projector:
             # (import-slots-hold-their-exports) -- its own object, never the stack
             object_id = import_object_ids(self._ssa.function_scope, address.atoms[0][0], space_id)[0]
             self.nonstack_objects.add(object_id)
+            space = self._spaces.get(space_id)
+            if space is not None and space.addressable_unit_bytes == 1:
+                self.nonstack_spans.add(ByteSpan(object_id, 1 << space.address_size_bits, 1))
             return object_id
         # (an import atom with another displacement or width gets the ordinary
         # object below: it may alias the stack -- but, not being wild, no
@@ -1290,6 +1301,11 @@ class _Projector:
         if metadata is not None:
             metadata["objects"][object_id] = (address.atoms, space_id)
         if any(atom in self._definition_atoms for atom, _ in address.atoms):
+            self.wild_objects.add(object_id)
+        if any(atom in self._fresh_atoms or atom in self._nonstack_atoms for atom, _ in address.atoms):
+            # A fresh/nonstack BASE says nothing about arbitrary offsets,
+            # widths or arithmetic on it. No extent contract is available.
+            # Wildness also prevents the private-frame rule dropping aliases.
             self.wild_objects.add(object_id)
         if any(atom in self._boundary or coefficient != 1 for atom, coefficient in address.atoms):
             # an index object (a boundary atom, a scaled atom; rdi - rsi too):
@@ -1585,7 +1601,8 @@ class _Projector:
         return not expression.atoms and _unsigned_wrap(expression.displacement, expression.byte_size) == 0
 
     def _is_nonstack(self, expression) -> bool:
-        return len(expression.atoms) == 1 and expression.atoms[0][1] == 1 and (
+        return expression.image == 0 and _unsigned_wrap(expression.displacement, expression.byte_size) == 0 \
+            and len(expression.atoms) == 1 and expression.atoms[0][1] == 1 and (
             expression.atoms[0][0] in self._nonstack_atoms or expression.atoms[0][0] in self._fresh_atoms)
 
     def _candidate_expressions_for_input(

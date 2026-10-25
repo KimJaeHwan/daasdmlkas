@@ -6,6 +6,9 @@ PointerPath(무한 루프), 재귀 미지원. 새 설계는 **완성된 intra �
 
 원칙(유지): 놓치지 않는다(모르면 부채/불완전), 호출 규약 비가정, 선언(가정)과 증명을 결과에서 구분.
 
+현재 안전 경계: §25.63은 과거 절의 fresh/nonstack **포인터 출처만으로 객체 전체를 분리하던 설명과 완전성 기대를
+대체**한다. 과거 회귀 통과 기록은 당시 동결본의 기록이지 이후 발견된 범위 밖 접근 결함이 없었다는 증명이 아니다.
+
 ## 1. 함수 요약 (`FunctionSummary`)
 
 끝 상태(`observed_terminal_states`)의 **모든 바이트 run**을 넷 중 하나로 분류한다(exit별, 그 뒤 합침).
@@ -2704,3 +2707,123 @@ src/tests `.py`와 models `.json` 257개를 경로+NUL+각 파일 SHA256으로 �
 대조했다. **합의한 이번 목표 달성과 이 상태에서의 마무리를 명시적으로 최종 승인**했으며, 현재 범위의 필수 잔여나
 차단 결함은 발견하지 못했다. 이번 승인을 R005 재할당 이후 처리·일반 alias 해결·전체 UE 해결·연산식 브랜치 병합으로
 확대하지 않는다. 해당 미해결 상태와 모델 조건/부채는 그대로 유지한다.
+
+### 25.63 할당 범위 근거 없는 접근의 잘못된 분리 수정 (2026-10-25)
+
+§25.62는 `b23469e`로 커밋/푸시했다. 이번 목표는 **할당 범위 밖 접근을 포인터 출처만으로 스택·전역·다른 할당과
+잘못 분리하여 실제 writer를 누락하던 공통 결함 수정**이다. 특정 case/함수 이름/주소용 production 분기를 만들지 않는다.
+기존 주소 projector·메모리 SSA·may-alias·부채 그래프·정방향 probe를 재사용한다. 새 가정/스위치를 추가하지 않는다.
+
+#### 재현과 원인
+
+기존 p-code 인터프리터의 malloc 반환값을 `p=0x60000000`으로 두고, 할당 전 기존 스택 칸에 RBX를 저장한다.
+`malloc(16)` 뒤 `STORE8[p+0x0fffffd0] = RSI`, `LOAD8[SP+0x10]` 순서로 실행하면 같은 실제 주소
+`0x6fffffd0..0x6fffffd7`를 읽고 쓴다. free/realloc/UAF나 C 언어 UB 가정은 필요하지 않은 flat-RAM 반례다.
+기존 엔진은 fresh 객체 전체가 스택과 다르다고 판단해 `STORE → LOAD`를 제외하고 **완전**으로 보고했다.
+기존 실행 오라클이 실제 writer 누락을 재현했고, 수정 후에는 그 writer가 부채 그래프에 남는다.
+
+```text
+기존: fresh 출처 → 모든 offset/폭이 nonalias라는 잘못된 승격 → RSI writer 누락
+수정: 같은 주소의 정의 → 기존 byte SSA 그대로 연결
+      범위 근거 없는 다른 객체 접근 → 원 STORE → MEMORY_DEBT → 실제 LOAD
+```
+
+원인은 `_relative_object`의 origin 분류를 `_Policy.may_alias`의 객체 전체 배제에 쓰고, private-frame 규칙에서도
+해당 출처를 wild로 보지 않은 것이다. opaque 산술과 JOIN은 원래 출처를 새 offset-0 atom으로 바꿀 수도 있었다.
+크기·성공·수명 계약이 없는 기존 allocator 모델의 `fresh`/`nonstack`은 접근 폭 전체의 안전 근거가 아니다.
+`extent_registers`도 memcpy 등의 접근 길이이지 malloc 결과의 할당 범위 계약이 아니므로 전용하지 않는다.
+
+#### 공통 수정과 보존하는 정보
+
+- fresh/nonstack은 포인터 **출처 메타데이터**로 남기되 객체 전체의 별칭 배제 권한은 제거한다. 범위 근거 없는
+  모든 해당 접근을 wild로 취급하여 기존 private-frame 규칙이 writer를 다시 숨기지 못하게 한다.
+- COPY/정확한 spill뿐 아니라 OR/XOR/entry 혼합 등 opaque 변형에도 wildness가 전달된다. JOIN의 nonstack 재분류는
+  원 주소폭 modulo-zero displacement·image 독립·단일 계수 1 atom일 때만 허용한다. 이것도 extent 근거는 아니다.
+- 같은 상대 객체의 정확한 주소·byte별 last-writer SSA는 유지한다. 서로 다른 객체가 겹칠 가능성을 유지하는 것과
+  같은 주소의 정의를 잃는 것은 다르다. 실제 누락을 추가 source 허용 정책으로 덮지 않는다.
+- 기존 import-static 근거는 별도 `nonstack_spans: frozenset[ByteSpan]`으로 보존한다. 기존 가정이 정당화하던
+  **원 export 주소의 정확히 1byte**뿐이며 wider/다른 offset/export extent를 추정하지 않는다.
+- 공통 alias 진입점은 해당 객체의 **현재 정규화된 전체 read/write**가 이 byte 근거에 포함되는지 재검사한다.
+  call effect·implicit effect·probe-added read 중 하나라도 벗어나면 그 객체의 배제 권한을 철회한다.
+  pointer label만 주면 배제하지 않는다. unresolved writer는 기존 unknown-write 부채 경로에 계속 남는다.
+- 정방향 `ForwardInputs`가 같은 근거를 고정 보관하며, probe는 추가한 span까지 포함한 unit으로 다시 검사한다.
+  검사 한도 소진은 기존 function/run typed failure이며 summary/provenance를 성공처럼 게시하지 않는다.
+
+가정 registry의 예전 fresh/nonstack 배제 설명은 현재 구현에 맞게 바로잡았으며 가정 이름·기본값·계약을 늘리지 않았다.
+할당 성공·크기·epoch/lifetime을 근거 없이 추가하는 것은 후속 범위가 아니라 금지된 대체 해결이다.
+
+#### 실제 원본 확인과 범위
+
+| 실제 사례 | 현재 확인 | 해결했다고 하지 않는 것 |
+|---|---|---|
+| 원 UE Trace R002 | 기존 null-realloc/same-object pointer row 유지. 원 `180006099:1:STORE`(base+0, 8byte)와 `180006230:1:STORE`(base+8, 8byte)가 각각 `1800060c2:1:LOAD` / `180006257:1:LOAD`의 alias·부채에 다시 참여. A+B 유지, root unresolved read 1→10, incomplete | 유효한 native 할당이 실제 stack과 충돌했다는 주장·할당 범위/수명 복원·R002 전체 해결 |
+| 원 Core FString 3 exports / Trace R005 | ctor zero literal·Num/Max 부분폭 및 기존 메모리 전달 회귀 유지. R005 root debt 15 유지 | post-ResizeGrow Pout을 entry P로 치환·R005 최종 sink 해결 |
+| 원 DFB044 / Suite10 indexed lane | 이전 동일 STORE identity 및 indexed raw STORE→caller byte 연결 유지 | 재귀·모든 케이스/아키텍처 완전성 |
+
+R002 원 함수 observation SHA256은 `7330f59944e14a30c0bc8b23cb0a8cea9742678fbbfc9a571e6bac8b56997d21`이다.
+원 DLL/Bundle은 §25.61–25.62와 같다. 새 C/대체 바이너리나 allocation-size 모델을 넣지 않았다.
+원 wide STORE의 **가능한** 별칭을 보존하는 static 회귀이며 실제 native 전 경로 증명으로 세지 않는다.
+부채가 증가한 것은 정밀도 향상 수치가 아니라 이전 잘못된 완전성 주장을 철회한 안전성 수정이다.
+
+합성 반례는 76개(sparse/dense × forward off/on), byte-window/probe 및 직접 metadata 회귀 38개, 원 UE 회귀 3개다.
+옛 definition-atom 테스트 5개의 complete 기대는 근거 없는 객체 분리에 의존했으므로 고쳤다. 단순 incomplete로 낮춘 것이
+아니라 **원 입력 바이트·원 writer 노드·도달 memory debt와 기존 실행 oracle**을 함께 검사한다. 같은 주소 byte SSA 양성은 유지한다.
+
+엔진 의미 버전 **17**, template version **3**, 배포 FString model file version **16**이다. 원 Core Bundle/스택 자료에서
+3개 export 전부 다시 도출했다. forward off/on과 설치파일 SHA256은 모두
+`43d41f031200ec08ec3fb63629a8c4a9db4f7932168342bc2f7a5bf5a3af0d2c`다. 이전 entry를 혼합하거나 버전만 바꾼 것이 아니다.
+`output/allocation-bounds-20261025.kgUNYz/model-final-{0,1}.{json,log}`에 산출물과 명령 로그를 보존한다.
+
+#### 동결 전체 회귀와 최종 승인
+
+| 권위 실행 | 결과 | 시간 |
+|---|---|---|
+| `release-default` (`TDO_V2_FORWARD=0`) 전체 | **2720 passed / 32 skipped / failures 0 / errors 0** | 470.67초 |
+| `release-forward-on` (`TDO_V2_FORWARD=1`) 전체 | **2720 passed / 32 skipped / failures 0 / errors 0** | 486.27초 |
+| `release-dense` (메모리·호출·정방향·실제 사례 인접 회귀) | **605 passed / 0 skipped / failures 0 / errors 0** | 55.87초 |
+
+전체는 각 2752항목이다. skip 32개는 Linux worker 9·Linux supervision 14·미보유 Bundle 9개로 성공 수에 넣지 않는다.
+신규 117항목(합성 76 + window/metadata 38 + 원 UE 3)은 세 실행 모두 skip/failure/error 0이다. source/sink 수나
+Suite09 80개/모든 아키텍처 완전성으로 환산하지 않는다. 초기 309항목 표적 실행에는 이후 추가한 직접 회귀 18개가 없으므로
+최종 결과는 위 동결 실행만 권위로 쓴다.
+
+로그와 XML은 `output/allocation-bounds-20261025.kgUNYz/release-{default,forward-on,dense}.{log,junit.xml}`,
+XML별 수/skip 사유는 `release-xml-audit.log`에 있다. src/tests `.py`와 models `.json` 260개를 경로+NUL+각 파일
+SHA256으로 동결했다. `freeze-release-{start,middle,end}.log` 세 집계가 모두
+`a9507e5d0f3376f7876f48c8ab52c74023fee1d204725fbb6eebbc4e17a16c49`로 같다. 문서는 hash 범위 밖이다.
+모델은 이 코드로 3개 export를 다시 도출했고 설치 모델과 일치한다. Astra는 단계1 및 추가 metadata 회귀를 독립 승인했다.
+이어 최종 XML 세 개·신규 117항목 non-skip·현재 260파일 직접 재해시·설치/off/on 모델 SHA 및 기존 13개 가정·최종 문서를
+독립 대조하여 **합의한 이번 목표 달성과 이 상태에서의 마무리를 명시적으로 최종 승인**했다. 필수 잔여 차단 사항은 없다.
+이는 false nonalias 제거의 안전성 완료이며 allocation extent/lifetime 복원·R005 전체 해결·일반 정방향 완성으로 확대하지 않는다.
+
+### 25.64 다음 가정 축소의 우선순위 (2026-10-25, Astra 합의; 미구현 계획)
+
+가정 이름을 지우거나 전역 OFF 결과를 곧 해결로 세지 않는다. **대상 가정을 끈 비교 기준에서도 유효한 원 SSA/주소/호출
+증거로 특정 판단을 대체**하는 것이 목표다. 기존 forward/probe·그래프·요약을 재사용하며 별도 분석기나 케이스 특례를 만들지 않는다.
+
+| 순위 | 줄일 대상 | 착수 조건과 제한된 완료선 |
+|---|---|---|
+| 1 | `entry-values-do-not-address-the-new-frame`의 특정 read/write 판단 | 원 044 또는 보유 UE에서 ON/OFF 차이를 만드는 원 STORE–LOAD–byte pair와 OFF에서도 유효한 독립 주소 근거를 먼저 찾는다. 기존 caller 주소 배치/forward 유한 범위로 전체 접근 byte의 동일-base 비겹침을 증명해 해당 writer 부채나 조건 한 건을 해결한다. |
+| 2 | `stack-switch-check-exceptions` 중 호출 후 비휘발 레지스터 보존 간주 | 언어별 보존 목록 대신 원 callee의 정확한 보존 byte 증거로 특정 호출의 판단을 대체한다. 실제 보존 양성과 비휘발 레지스터 변경·부분쓰기 음성에서 검사 결과를 대조한다. |
+| 3 | allocator 모델의 fresh/no-UAF/realloc 관계 의존 | 한 호출 구간의 allocation identity·중간 free/realloc/unknown-call 의무를 분리해 실제 관계부터 증명한다. 성공·범위·이동·옛 포인터 수명을 추정하지 않고 필요한 근거가 있는 범위에서만 모델 의존을 줄인다. |
+
+1순위의 첫 작업은 **실제 대상 선정**이다. `_decide_conditions`는 이미 caller에 배치한 같은 객체 byte 비겹침을 판정하고,
+`_forward_memory.prepare_memory_refinement`도 가정 OFF를 금지하지 않는다. 기존 기능으로 이미 풀리면 중복 기능을 만들지 않고
+적용 범위·근거 전달만 점검한다. 아직 044/UE의 해당 OFF-baseline 개선량은 측정하지 않았으므로 해결 케이스 수를 약속하지 않는다.
+독립 증거가 남는 실제 pair가 없으면 그 이유를 보고하고 다음 대상을 재선정한다. 대상 가정 ON으로 만든 사실의 `requires`에서
+이름만 빼는 것은 순환 증명이다. 다른 가정에 의존하면 그 이름은 계속 보존하며, 부분 증거를 함수 전체·모든 입력의 frame 안전으로
+확대하지 않는다. 가정 축소를 케이스 하나용 특례로 구현하지 않는다.
+
+2순위의 현재 근거: `program_switches_stack`는 함수 분석 시작 시 `CALL_PRESERVED`의 언어별 목록을 쓰고, per-call proven 효과를
+소비하지 않는다. globals 분리 가정에 기대어 만든 summary로 그 가정을 다시 허가해서는 안 된다. 독립적 또는 대상 가정 OFF의
+보존 증거만 허용한다. 미상 callee·부분 clobber·다중 target 불일치는 unknown 또는 명시적 기존 가정으로 남긴다.
+현재 coefficient state의 **삭제는 unknown이 아니라 0**이므로 단순 목록 제거로 해결했다고 할 수 없다. Python/Ghidra 검사 규칙과
+stack evidence 호환 판도 함께 검토해야 한다. 이 단계로 CALLOTHER·메모리 기반 SP 조정 예외나 전역 stack/global 분리까지
+해제했다고 주장하지 않는다.
+
+3순위는 크고 후속이다. 현재 `frees`는 lifetime 분석에 소비되지 않으며 §25.63에서 origin 기반 객체 전체 배제는 이미 제거했다.
+따라서 allocator 가정 이름만 삭제하거나 identity만 추가해 nonalias를 복구하는 것은 안전성 개선이 아니다.
+`opaque-callees-leave-no-stack-addresses`는 원 callee를 확보한 실제 호출에서 기존 escape/observed-register/SP 요약으로 대체할 수
+있는지 별도 후보로 유지한다. 알려진 callee의 검사는 이미 있고, body 없는 호출은 caller가 frame 포인터를 전달하지 않았다는
+이유만으로 안전하다고 판정할 수 없다. `globals-disjoint-from-stack`의 전역 해제와 모델·실행 환경 계약 전체 제거도 이번 계획의
+완료선이 아니다. accessor 가정 셋은 기본 OFF를 유지한다. 이 절은 다음 작업의 우선순위 합의이지 구현/검증 완료 기록이 아니다.

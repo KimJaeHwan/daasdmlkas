@@ -78,7 +78,9 @@ TEMPLATE_VERSION = 3   # 2: stack_values_out; 3: exact scalar literals and entry
 # register-copy call effects (no fresh/nonstack inference after truncation).
 # 16: finished-SSA exact scalar values and bounded entry indexed addresses
 # through summaries, call effects and strict portable templates.
-ENGINE_SEMANTICS_VERSION = 16
+# 17: fresh/nonstack pointer origin no longer grants object-wide nonalias;
+# only explicit byte windows covering every normalized access can exclude.
+ENGINE_SEMANTICS_VERSION = 17
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

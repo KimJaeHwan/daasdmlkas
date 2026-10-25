@@ -330,6 +330,7 @@ class ForwardInputs:
     entry_values_not_frame: bool = True      # (may_alias.ENTRY_VALUES_NOT_FRAME as configured)
     opaque_no_stack_addresses: bool = True   # (may_alias.OPAQUE_NO_STACK_ADDRESSES as configured)
     read_separations: object = None
+    nonstack_spans: frozenset = frozenset()
 
 
 def probe(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
@@ -397,6 +398,7 @@ def probe(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
         assume_globals_disjoint_from_stack=inputs.assume_globals_disjoint_from_stack,
         wild_objects=inputs.wild_objects, fresh_objects=inputs.fresh_objects,
         nonstack_objects=inputs.nonstack_objects, observed_calls=dict(inputs.observed_calls),
+        nonstack_spans=inputs.nonstack_spans,
         escaping_calls=inputs.escaping_calls, opaque_calls=inputs.opaque_calls, opaque_uses=opaque_uses,
         private_above=inputs.private_frame_above,
         uncertain_writers=frozenset(uncertain),

@@ -79,7 +79,7 @@ REGISTRY: tuple[Assumption, ...] = (
         "the export's extent, fresh blocks, or two imports being different storage.",
         "IAT hooking / Detours / patching, delay-load slots read before resolution, a module unloaded "
         "while its address is in use, run-time re-resolution.",
-        "relative_memory.IMPORT_SLOTS (import atoms, import-static objects -> may_alias nonstack objects); "
+        "relative_memory.IMPORT_SLOTS (import-static one-byte windows -> may_alias checked exclusions); "
         "interprocedural._external_sites (a model bound at call [slot] / jmp [slot] / mov r, [slot]; call r -- "
         "the slot holds the export's address; reported per use, the call stays opaque when off)",
         "assume_import_slots_hold_exports", "--no-assume-import-slots",
@@ -101,8 +101,8 @@ REGISTRY: tuple[Assumption, ...] = (
         "(any arithmetic, displacement or width change), while no stack-derived value has escaped (reads: on "
         "no path to the access; writes: on no path after it). Of the bases kept out of the frame, this "
         "covers entry-value arithmetic (rdi - 16, rdi + rsi); constants and imports rest on "
-        "globals-disjoint-from-stack / import-slots-hold-their-exports, fresh blocks on their allocator "
-        "model, nonstack bases on a callee's summary. Wild bases (loaded pointers, call results, index and "
+        "globals-disjoint-from-stack / import-slots-hold-their-exports. Fresh/nonstack pointer origins "
+        "alone do not bound accesses and stay wild. Wild bases (loaded pointers, call results, index and "
         "stack-mixed addresses) are never kept out. Reported when the rule decided a byte private.",
         "A caller-supplied pointer offset or indexed below the caller's frame bottom (buffer underflow, "
         "alloca-adjacent arithmetic: an entry rdi = entry sp + 8 makes rdi - 16 a byte of the new frame); "

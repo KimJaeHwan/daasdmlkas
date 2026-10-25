@@ -38,12 +38,13 @@ object (private frame bytes included, since a non-affine address may still
 be derived from the stack pointer), and an unknown-address read may observe
 any memory write executed before it. Both stay unresolved debt as well.
 
-``fresh_objects`` (based on one block a modeled allocator returned, the
-model's assumption): disjoint from constant addresses, the stack and other
-fresh blocks (no use after free). Any other base may point into it -- even
-an entry register value, which an opaque call may have replaced.
-``nonstack_objects`` (a callee's summary states the base never addresses the
-stack, ``relative_memory`` pointer rows): disjoint from the stack only.
+``fresh_objects`` / ``nonstack_objects`` record pointer origins, not the
+bounds of arbitrary offset accesses. Without extent evidence their accesses
+are wild. Only explicit ``nonstack_spans`` covering EVERY normalized access
+to an object authorize its nonstack exclusion. Currently only the existing
+import-static rule produces an exact one-byte window; allocator models
+provide no allocation extent. A probe adding an uncovered span revokes the
+exclusion. Same-object memory SSA remains byte-exact.
 
 ``wild_objects`` (``relative_memory`` definition atoms: a call's result, a
 loaded pointer) are exact objects whose base may still point anywhere, the
@@ -243,15 +244,9 @@ class _Policy:
     def may_alias(self, left: StorageObjectId, right: StorageObjectId) -> bool:
         if left == right:
             return False  # one object: the SSA is byte-exact
-        for fresh, other in ((left, right), (right, left)):
-            if fresh in self.fresh_objects and (
-                other.kind is StorageObjectKind.ADDRESS_SPACE or other == self.stack_object
-                or other in self.fresh_objects
-            ):
-                return False  # ASSUMPTION (the allocator model): a new block
         for nonstack, other in ((left, right), (right, left)):
             if nonstack in self.nonstack_objects and other == self.stack_object:
-                return False  # the callee summary: never a stack address
+                return False  # every access to this object is inside proven byte windows
         if left.kind is StorageObjectKind.ADDRESS_SPACE and right.kind is StorageObjectKind.ADDRESS_SPACE:
             return False  # different spaces
         if self.globals_disjoint and (
@@ -285,6 +280,7 @@ def derive_may_alias_reads(
     opaque_uses: list | None = None,
     escape_memo: "EscapeMemo | None" = None,
     read_separations: tuple = (),
+    nonstack_spans: frozenset = frozenset(),
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -342,10 +338,17 @@ def derive_may_alias_reads(
     policy = _stack_policy(unit, observation, context, address_spaces, assumed_calls,
                            assume_globals_disjoint_from_stack, observed_calls, private_above, escaping_calls,
                            opaque_calls, escape_memo)
-    wild = frozenset(item for item in objects if item in wild_objects)
+    # Pointer-origin classes do not prove that their offset accesses stay
+    # inside a block. Certify the WHOLE current access set, including call
+    # effect rows and probe-added reads; any uncovered span revokes the
+    # object's exclusion. Existing import-static one-byte evidence is the
+    # only producer of windows, not allocator request sizes or fresh labels.
+    origin = (frozenset(fresh_objects) | frozenset(nonstack_objects)) & frozenset(objects)
+    checked = _bounded_nonstack_objects(unit, origin, nonstack_spans)
+    wild = (frozenset(item for item in objects if item in wild_objects) | origin) - checked
     policy.wild_objects = wild
     policy.fresh_objects = frozenset(item for item in objects if item in fresh_objects)
-    policy.nonstack_objects = frozenset(item for item in objects if item in nonstack_objects)
+    policy.nonstack_objects = checked
     policy.uncertain_writers = uncertain
     policy.no_kill_writers = frozenset(no_kill_writers) & uncertain
     policy.unknown_writers = unknown_writers | frozenset(
@@ -377,6 +380,38 @@ def derive_may_alias_reads(
     if opaque_uses is not None:
         opaque_uses.append(policy.opaque_used)
     return rows
+
+
+def _bounded_nonstack_objects(unit, candidates, windows) -> frozenset:
+    """Only an explicit byte proof covering every current access grants exclusion."""
+    if not candidates or not windows:
+        return frozenset()
+    by_object: dict = {}
+    for window in windows:
+        step()
+        if type(window) is ByteSpan and window.object_id in candidates:
+            by_object.setdefault(window.object_id, []).append(window)
+    checked = set(by_object)
+    if not checked:
+        return frozenset()
+    touched = set()
+    for block in unit.blocks:
+        for effect in block.effects:
+            for evidence in (*effect.reads, *effect.writes):
+                step()
+                if type(evidence) is not ResolvedStorage or evidence.span.object_id not in checked:
+                    continue
+                span = evidence.span
+                touched.add(span.object_id)
+                covered = False
+                for window in by_object[span.object_id]:
+                    step()
+                    if window.contains(span):
+                        covered = True
+                        break
+                if not covered:
+                    checked.discard(span.object_id)
+    return frozenset(checked & touched)
 
 
 def _ran_before(unit):
