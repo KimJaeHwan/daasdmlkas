@@ -227,6 +227,7 @@ class NormalizedFunction:
     # Exact baseline STORE/LOAD byte nonoverlap evidence; no global object separation.
     forward_memory_proofs: tuple = field(default=(), compare=False, repr=False)
     forward_memory_requires: tuple = field(default=(), compare=False, repr=False)
+    load_value_proofs: tuple = field(default=(), compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -1307,6 +1308,7 @@ class FunctionNormalizer:
         private_frame_above: int = 0,
         open_conditions: dict | None = None,
         _forward_memory_plan=None,
+        _load_identity_plan=None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
         declared effect; see ``tdo_v2.assumed_call_effects``.
@@ -1348,7 +1350,10 @@ class FunctionNormalizer:
         )
         if _forward_memory_plan is not None:
             _forward_memory_plan.bind(value, options)
-        return _ScopedNormalizer().normalize(value, **options, _forward_memory_plan=_forward_memory_plan)
+        if _load_identity_plan is not None:
+            _load_identity_plan.bind(value, options, _forward_memory_plan)
+        return _ScopedNormalizer().normalize(value, **options, _forward_memory_plan=_forward_memory_plan,
+                                             _load_identity_plan=_load_identity_plan)
 
     def normalize_configured(
         self,
@@ -1458,6 +1463,7 @@ class _ScopedNormalizer:
         _uncertain: dict | None = None,
         open_conditions: dict | None = None,
         _forward_memory_plan=None,
+        _load_identity_plan=None,
     ) -> NormalizedFunction | _Retry:
         """``_blocked_reads``: values read from memory that a projection may not
         use (``relative_memory.stale_reads``; set by the validation below).
@@ -1706,6 +1712,7 @@ class _ScopedNormalizer:
                     address_metadata=address_metadata,
                     blocked_reads=_blocked_reads,
                     used_reads=used_reads,
+                    load_identity_plan=_load_identity_plan,
                 )
                 if projected_effect_unit is effect_unit:
                     # (accessor keys need atoms on even with nothing run once)
@@ -1847,6 +1854,7 @@ class _ScopedNormalizer:
             opaque_value_provider=opaque_value_provider, readonly_image=readonly_image,
             once_keys=once_keys, fresh_keys=fresh_rows, same_object=same_object_rows,
             pointer_rows=pointer_rows, once_blocks=once_blocks,
+            load_identity_plan=_load_identity_plan,
         ) if any(type(key[0]) is tuple for key in used_reads) else ()
         open_nodes = _materialize_open_conditions(
             dependencies, memory_ssa, proven_call_effects, open_conditions or {}, operation_nodes)
@@ -1917,6 +1925,7 @@ class _ScopedNormalizer:
             opaque_value_provider=opaque_value_provider, readonly_image=readonly_image,
             once_keys=once_keys, fresh_keys=fresh_rows, same_object=same_object_rows,
             pointer_rows=pointer_rows, once_blocks=once_blocks,
+            load_identity_plan=_load_identity_plan,
         )
         failed |= stale_reads(
             effect_unit, observation, context, address_spaces, memory_ssa, rep_used, bare=True,
@@ -2050,7 +2059,10 @@ class _ScopedNormalizer:
             kept_call_memory=tuple(sorted((key, spans) for key, (spans, _) in kept_memory.items())),
             accessor_separations=separations,
             forward_memory_proofs=_forward_memory_plan.proofs if _forward_memory_plan else (),
-            forward_memory_requires=_forward_memory_plan.requires if _forward_memory_plan else (),
+            forward_memory_requires=tuple(sorted(
+                set(_forward_memory_plan.requires if _forward_memory_plan else ())
+                | set(_load_identity_plan.requires if _load_identity_plan else ()))),
+            load_value_proofs=_load_identity_plan.proofs if _load_identity_plan else (),
             forward_inputs=_forward_inputs(
                 effect_unit=effect_unit, observation=observation, context=context, address_spaces=address_spaces,
                 assumed_calls=frozenset(assumed_call_effects), quiet_calls=quiet_calls,

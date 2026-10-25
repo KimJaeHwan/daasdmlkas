@@ -2476,3 +2476,116 @@ Astra가 두 권위 XML·신규 52개 실행·일반/dense 107개·현재 동결
 이전 단계의 실제 idx writer/주소 사실·전제 귀속·원자 복귀·모델 검수와 합쳐 **이번 공통 non-overlap consumer의 목표 달성과
 이 상태에서의 마무리를 별도로 최종 승인**했다. 이 범위의 필수 잔여 차단은 발견하지 못했다. 044 전체 해결·C 제거·일반 alias·
 연산식 브랜치와의 통합 승인은 아니며, 후속 기능을 이번 완료의 추가 필수 작업으로 만들지 않는다.
+
+### 25.61 동일 저장값 공유와 보존 레지스터 부분폭 (2026-10-25)
+
+§25.60은 첫 커밋 `915d5a6`의 기록이다. 이 후속 증분은 같은 브랜치에서 기존 SSA·주소 projector·메모리 그래프를
+재사용한다. source/sink 라벨이나 케이스 주소를 production 특례로 사용하지 않는다. 새 정방향 실행기나 검사기는 없다.
+연산식 브랜치의 구현은 여전히 별도 checkout에 보존하며 아직 병합하지 않았다.
+
+#### 동일 원 STORE 값 → 공유 주소 입력 → 실제 last writer
+
+DFB044의 두 index LOAD는 동일한 4byte idx STORE를 읽지만, `C & 3`을 affine 주소식으로 만들지 못해 기존 projector가
+각 LOAD에 서로 다른 atom을 붙였다. 두 주소가 모두 네 칸 범위에 든다는 사실만으로 같은 index라고 볼 수는 없다.
+`_load_identity`는 완성된 보수 결과의 **동일 원 STORE·동일 전체 byte·단일 DATA_WRITE 정의**를 확인하고 기존
+`_slot_class`/`_definition_class`의 안정된 값 identity를 공유한다. 일반 별칭 정책이나 SSA gen/kill은 바꾸지 않는다.
+
+```text
+idx STORE ──4byte 동일 값──┬─ index LOAD #1 ── S + 4*sext(idx) - 40 ── 배열 STORE
+                         └─ index LOAD #2 ── S + 4*sext(idx) - 40 ── 배열 LOAD
+                                                        배열 STORE ──메모리 정의──▶ 배열 LOAD
+```
+
+- N0→§25.60의 N1을 먼저 완성한다. N1이 원 근거이며 고정 계획으로 기존 파이프라인을 한 번 더 실행한 N2만 후보로 삼는다.
+  N2의 두 index LOAD를 원 STORE identity로 다시 probe하고, 이전에 부채가 있던 원 LOAD가 실제 STORE의 전체 byte 정의를
+  읽으며 부채 없이 probe되는 경우만 채택한다. 같은 interval, ENTRY/JOIN, 반복 STORE, 부분 byte, 불명 효과는 동등성 근거가 아니다.
+- 원 observation·activation·storage context·SSA scope/digest·정책/모델·full fact claim을 소비 시 대조한다. 정상적으로 다시 만든
+  동일 내용 context는 허용하되 다른 activation은 거부한다. 공유 atom은 wild/stack-derived로 보수 분류하며 fresh/nonstack을
+  새로 주장하지 않는다. 기존 blocked/pending/used/stale read 검증을 유지한다.
+- 64bit memory selector/주소, 접근 폭 최대 16byte, 단일 주소 byte footprint, at-most-once 원 LOAD/STORE, 최대 64개 공유 근거가
+  첫 범위다. 순회 비용은 기존 작업 장부에 청구한다. 재귀 SCC·REP·모델 도출용 IMAGE_BASE_TRACKING에서는 사용하지 않는다.
+- 근거 거부·국소 cap·실제 SSA 진전 없음은 **마지막 완성 N1 전체와 그 provenance**를 보존한다. function/run hard exhaustion은
+  N1 성공으로 숨기지 않고 기존 typed failure·빈 provenance를 반환한다. 원 모델/가정은 결과·주소 fact·probe에 이어진다.
+
+원 DFB044 Bundle/ELF는 §25.60과 같다. `TDO_V2_FORWARD=1`에서 배열 STORE `104c35:4`의 4byte 정의가 배열 LOAD
+`104c3e:3`의 실제 단일 정의가 되며 `STORE → memory_defines → definition → memory_read → LOAD` 간선을 확인했다.
+sink의 reachable unresolved read는 **N0 2 → N1 1 → N2 0**, effective complete이며 A+C 후보는 그대로다. C 제거는 목표가 아니다.
+forward off는 N0를 유지한다. DFB043/122의 root·SSA·요약은 유지된다. 실제 source/sink 몸체를 실행한 8개 seed의 주소·폭·값·
+byte writer 및 sparse/dense 일치를 대조했다. 유한 실행을 전 경로 증명으로 주장하지 않는다.
+
+#### 호출의 보존 레지스터 → 저위 byte
+
+UE Core AppendChar의 ResizeGrow 호출은 64bit 레지스터 복사를 증명했지만 다음 명령이 읽는 하위 32bit를 전달하지 못했다.
+`_preserved_register_low`는 기존 `reg` 복사 행의 원 전체폭이 같고, REGISTER_FILE·LE·low offset 0·`null_is_fresh=False`인
+부분 요청만 다룬다. 원 전체 입력이 표현되면 정확한 기존 `SUBPIECE(0)`를 사용한다. 입력의 상위 byte가 따로 정의되어 전체식이
+없어도, 동일 원 input read의 단일 SSA fragment가 요청 저위 byte 전부를 덮으면 그 정의의 정확한 저위 값만 재사용한다.
+저위 범위 자체가 여러 fragment/정의이면 조합하지 않는다. 새 호출 규약이나 high=0 가정은 없다.
+
+64bit nonzero/low32 zero를 NULL 또는 fresh allocation으로 취급하지 않는다. 잘라낸 pointer에 fresh/nonstack 분류를 이전하지
+않으며 mem/same_result/nonstack 행·다른 offset·BE에는 확대하지 않는다. 기존 입력 부채·clobber·cycle 처리를 따른다.
+일반 분석의 공통 수정이며 `TDO_V2_FORWARD` 토글과 별개다.
+
+실제 Core DLL SHA `fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942`/원 Bundle에서
+`1800f5019:2:CALL~2`의 보존 출력 low4 및 `1800f5073`의 index 입력이 None에서 원 SSA 값 식으로 연결되는 것을 대조한다.
+**일반 분석의 연결 회복과 모델 수출 범위는 다르다.** 새 indexed 객체의 writer 조건을 현 anchor-only 템플릿이 운반하지 못해
+모델 도출용 IMAGE_BASE_TRACKING에서는 helper를 처음부터 사용하지 않고 기존 보수 경로를 유지한다. 생성한 조건을 사후
+삭제하지 않는다. 새 indexed writer 조건의 템플릿 수출은 후속 기능이지 이 증분이 해결한 기능이 아니다.
+
+#### 실제 후보 재현과 남은 경계
+
+원 Suite09 ELF의 비재귀 71개 선택 함수와 호출 닫힘을 현재 exporter로 추출한 Bundle
+`e360c22577b1da09a13565ddde889418e361497a7bda097f1545c4c8189d7b4b`에서도 기존 CLI로 재실행했다.
+root를 가진 76함수/79root 중 **044만 effective false→true**, A+C 불변이고 다른 78root의 origin/완전성 메타는 같다.
+이 수치는 전체 80case·모든 간선·모든 아키텍처 완전성 수치가 아니다. 092처럼 결과 root가 없는 함수는 성공으로 세지 않는다.
+
+UE DebugGame DLL SHA `440c863ed5ce6bdbca892b51dadec20fa601a64cfb150b60740fc51df6608c6a`와 원 PDB를 현재 exporter로
+추출한 13함수 Bundle `580bc1a6456e153b3364b47a22cc2f24734d63fe6ef63488fa1a63bc2b963201`로 R005/R002를 재현했다.
+현재 모델 admission/호환 문제는 없다. 아래 경계는 구현 완료로 세지 않는다.
+
+| 후보 | 실제 확인 결과 | 다음에 필요한 공통 정보/계약 |
+|---|---|---|
+| UE R005 FString buffer | A 미도달·reachable debt 15 유지. Core의 저위 index 값 연결은 별도 회복 | 생성자 header의 숫자 0 요약, 호출 입구 값 전달, `buffer + 2*index` 같은 조건부 indexed 쓰기와 조건의 수출 |
+| UE R002 TArray index | B의 debt-free 경로 존재, A+B 후보·debt 1 유지. 추가 A 자체는 실패 조건 아님 | 현재 Realloc/header 복사 정보는 있으나 nonstack까지만 확정. 여러 출력이 같은 할당을 가리키는 identity 그룹과 epoch/범위 근거 |
+| DFB074 간접 대상 | 대상 미해결 | 호출 대상 값·관련 라이브러리 몸체/모델. range 공유만으로 해결할 수 없음 |
+| DFB075, 130/131 외부 경계 | 부채 유지 | 효과 요약 기능은 이미 존재. 075는 의도적 무요약 경계, 130/131은 실제 importlib 모델/몸체를 실행 경로에 연결하는 작업 |
+| DFB090/092, 110 | thread callback·비지역 제어 경계 | callback/create/join, setjmp/longjmp 상태 계약. 092는 root 미생성을 포함해 따로 점검 |
+
+추가 DLL/PDB가 없어 UE 진단을 못 한 상황은 아니다. 다만 할당 성공·lifetime·extent를 임의 가정으로 채우지 않는다.
+추가 source는 현재 정책상 허용한다. 원 expected의 `forbidden` 표기는 다음 분석 목표나 추가 source 제거 요구로 사용하지 않는다.
+
+#### 의미 버전·배포 모델·검증
+
+엔진 의미 버전은 **15**, 배포 FString 모델은 file version **14**다. 동일 원 Core Bundle/스택 자료에서 현재 엔진의 명시된
+보수 도출 경로로 ctor/dtor/AppendChar **3개 모두 다시 도출**했다. forward off/on 산출물과 반영 파일은
+SHA256 `91f8d9a6a2d447abb56cc937eaac2a6673881c8596429aa2467b7e4adf5ef154`로 같고, 3개 entry 및 13개 가정은 이전과 같다.
+숫자만 고치거나 새 파일과 이전 파일의 일부를 섞은 것이 아니다. 새 indexed 도출을 시험한 거부 로그도 보존한다.
+재현 산출물은 `output/ue-core-engine15-20261025/`, 실제 후보 CLI는 `output/forward-candidates-20261025.6EcxaA/`와
+`output/ue-forward-candidates-20261025/`에 있다. 최종 동결 전체 회귀와 Astra 승인은 아래에 기록한다.
+
+| 동결본 회귀 | 결과 | 시간 |
+|---|---|---|
+| 기본 설정 전체 | **2392 passed / 32 skipped / failures 0 / errors 0** | 450.65초 |
+| 전역 `TDO_V2_FORWARD=1` 전체 | **2392 passed / 32 skipped / failures 0 / errors 0** | 467.74초 |
+| dense 인접 회귀 | **186 passed / 0 skipped / failures 0 / errors 0** | 64.63초 |
+
+각 전체 실행은 2424개다. 32 skip은 Linux worker 9개·Linux supervision 14개·미보유 Bundle 9개로 성공 수에 포함하지 않는다.
+이번 신규 **79개**(동일값 합성 24·부분폭 합성 23·원 DFB044 29·원 UE 3)는 모두 실행됐다. N2 normalize/accepts의
+function/run hard budget 네 조합, cap/refusal/no-progress의 전체 N1 복귀, full metadata 변조, activation/SSA/정책 교체,
+blocked/pending/stale, 같은 range의 다른 index·부분 덮어쓰기·분기 우회·반복·불명 호출·다른 폭변환·나중 STORE를 포함한다.
+전체 실행에서도 테스트가 명시한 forward off 반례는 유지한다.
+
+Astra는 별도로 상수/원입력 두 분기의 저위 JOIN과 별도 상위 정의를 만들고 원 callee를 실행해 확인했다. 16개 입력에서
+program oracle 16회 + raw 실행 16회이며 두 분기를 각각 4회씩 지났다. silent/unsupported 0, 원 low32 및 SEXT 주소 일치다.
+실험 원 명령과 결과는 `astra-join-evidence.log`에 있으며 유한 실행을 일반 증명으로 세지 않는다.
+
+권위 로그/JUnit은 `output/forward-shared-values-20261025.McVuHc/{full-default,full-forward-on,dense-final}.{log,junit.xml}`,
+원 044의 operation record CLI는 같은 폴더 `cli-original044.{json,log}`다. 초기 dense 명령의 잘못된 테스트 파일명으로
+수집 0/exit4였던 `dense-nearby.log`는 결과에 사용하지 않았다. 수정한 `dense-final`만 권위 실행이다.
+src/tests `.py`와 models `.json` 248개를 정렬한 경로+NUL+파일 SHA256으로 동결했다. 전체 회귀 전/중/후 집계는 모두
+`f743caf0d0b9e173ca92a17c429f4a68d2fe9323d975f751f1f38cfc21a3ed90`로 같다. 문서는 이 hash 범위 밖이다.
+연산식 브랜치 통합·UE 전체 해결·모든 추가 source 제거·재귀 확장은 이 동결 검증으로 승인하지 않는다.
+
+이번 완료선은 **동일 원 저장값 공유를 통한 044의 실제 last-writer 간선 완성, 보존 register의 정확한 저위 전달,
+기존 가정/미해결/모델 수출 경계 보존 및 회귀 통과**다. Astra가 두 권위 XML·신규 79개 non-skip·dense 186개·현재 동결 hash·
+원 044 CLI·Core/Trace 실제 검사·배포 모델과 최종 문서를 독립 대조한 뒤, **합의 범위의 목표 달성과 이 상태에서의 마무리를
+별도로 최종 승인**했다. 이번 범위의 필수 잔여/차단 결함은 발견되지 않았다. 위 표의 후속 한계를 완료로 세지는 않는다.

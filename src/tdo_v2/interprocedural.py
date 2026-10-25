@@ -523,6 +523,20 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                         result, published = candidate, pending
                                 except RefinementRefused:
                                     pass  # keep N0 in its entirety, never combine replay artifacts
+                            from ._load_identity import prepare_load_identities
+
+                            identity_plan = prepare_load_identities(result, normalization_options)
+                            if identity_plan is not None:
+                                pending = {} if record_provenance is not None else None
+                                base_plan = result.normalized.forward_inputs.read_separations
+                                try:
+                                    candidate, _ = analyze_one(key, hypotheses, refinement=base_plan,
+                                                              load_identity=identity_plan, provenance=pending)
+                                    if candidate.summary is not None and identity_plan.accepts(candidate):
+                                        candidate.inherited_assumptions |= frozenset(identity_plan.requires)
+                                        result, published = candidate, pending
+                                except RefinementRefused:
+                                    pass  # preserve the last complete result, including its provenance
                         checkpoint()   # (limits checked before the result is published)
                         if record_provenance is not None:
                             record_provenance.update(published)
@@ -539,7 +553,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             return AnalyzedFunction(key, functions[key], UnresolvedNormalizedFunction(
                 functions[key].scopes, reason), None, calls[key], failure_detail=detail)
 
-        def analyze_one(key, hypotheses, *, refinement=None, provenance=None):
+        def analyze_one(key, hypotheses, *, refinement=None, load_identity=None, provenance=None):
             unit = functions[key]
             observation = unit.observation
             context = unit.scopes.resolution_context
@@ -700,7 +714,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     open_conditions=opened,
                 )
                 normalized = FunctionNormalizer().normalize(
-                    unit, **normalization_options, _forward_memory_plan=refinement)
+                    unit, **normalization_options, _forward_memory_plan=refinement,
+                    _load_identity_plan=load_identity)
                 if type(normalized) is not NormalizedFunction:
                     break
                 verdicts = _decide_conditions(unit, normalized, shapes, [

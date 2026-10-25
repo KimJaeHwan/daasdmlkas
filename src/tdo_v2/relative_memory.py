@@ -248,6 +248,7 @@ def project_function_relative_memory(
     settle_pending: bool = True,
     blocked_reads: frozenset = frozenset(),
     used_reads: dict | None = None,
+    load_identity_plan=None,
 ) -> ObservedEffectUnit:
     """Resolve provably equal indirect addresses, preserving all other debt.
 
@@ -328,6 +329,7 @@ def project_function_relative_memory(
         unit, observation, context, address_spaces, first_pass, operations, translation_namespace,
         opaque_value_provider=opaque_value_provider, readonly_image=readonly_image, once_keys=once_keys,
         fresh_keys=fresh_keys, same_object=same_object, pointer_rows=pointer_rows, once_blocks=once_blocks,
+        load_identity_plan=load_identity_plan,
     )
     if settle_pending:
         projector._unsettled = _unsettled_reads(unit)
@@ -651,7 +653,8 @@ def expressions_at(memory_ssa, observation, scopes, requests, overrides=None, bl
 
 def _configured_projector(unit, observation, context, address_spaces, ssa, operations, translation_namespace,
                           *, opaque_value_provider=None, readonly_image=None, once_keys=None,
-                          fresh_keys=frozenset(), same_object=None, pointer_rows=None, once_blocks=None):
+                          fresh_keys=frozenset(), same_object=None, pointer_rows=None, once_blocks=None,
+                          load_identity_plan=None):
     projector = _Projector(
         context,
         address_spaces,
@@ -671,6 +674,8 @@ def _configured_projector(unit, observation, context, address_spaces, ssa, opera
     )
     projector._once_blocks = (once_blocks or frozenset()) if DEFINITION_ATOMS and once_keys else frozenset()
     projector._stack_atoms = _stack_atoms(unit, observation, context, address_spaces)
+    if load_identity_plan is not None:
+        projector._load_identities = load_identity_plan.bindings(unit, observation, context, address_spaces, ssa)
     return projector
 
 
@@ -876,6 +881,7 @@ class _Projector:
         # boundary atoms (C1): key -> (kind, from bytes, to bytes, (low, high))
         # -- the range is for C2 (relations), unused here
         self._boundary: dict[int, tuple] = {}
+        self._load_identities: dict = {}
         # entry atoms of a span overlapping the stack pointer (any width) and
         # opaque atoms computed from a stack-derived value (transitively)
         self._stack_derived: set[int] = set()
@@ -1227,6 +1233,52 @@ class _Projector:
             self.address_metadata["atoms"][atom] = (
                 f"same_result:{row[1]} of {definition.operation_key} #{atom & 0xffffffff:08x}")
         return _AddressExpression(((atom, 1),), 0, requested_span.size)
+
+    def _preserved_register_low(self, definition, requested_span):
+        """Exact low bytes of an already-proven whole register copy.
+
+        This is a SUBPIECE, not a narrowed pointer: no fresh/nonstack claim or
+        null-reallocation rule survives truncation. Other pointer row kinds
+        and memory outputs deliberately retain their existing contracts.
+        Template derivation keeps its old conservative projection: its
+        anchor-only format cannot export the resulting indexed conditions.
+        """
+        if IMAGE_BASE_TRACKING.get() is not None:
+            return None
+        row = self._pointer_rows.get(definition.operation_key)
+        language = self._translation_namespace.split(":")
+        if row is None or row[0] != "reg" or row[3] \
+                or definition.span.object_id.kind is not StorageObjectKind.REGISTER_FILE \
+                or row[2].kind is not VarnodeKindCode.REGISTER \
+                or len(language) < 2 or language[1] != "LE" \
+                or definition.span.object_id != requested_span.object_id \
+                or definition.span.start != requested_span.start \
+                or not 0 < requested_span.size < definition.span.size \
+                or row[2].byte_size != definition.span.size:
+            return None
+        value = self._expression_for_input(row[1], row[2])
+        if value is None:
+            # A whole input may have separate low/high definitions. The
+            # requested low bytes need not depend on the unknown high part.
+            argument_span = self._resolved_span(row[2])
+            if argument_span is None:
+                return None
+            low = ByteSpan(argument_span.object_id, argument_span.start, requested_span.size)
+            action = self._action_ids.get(row[1])
+            reads = [read for read in self._reads_of_action.get(action, ()) if read.span == argument_span]
+            if len(reads) != 1:
+                return None
+            for fragment in reads[0].fragments:
+                step()
+                if fragment.span.contains(low) and len(fragment.definition_ids) == 1:
+                    return self._expression_for_definition(fragment.definition_ids[0], low)
+            return None
+        if value.byte_size != definition.span.size:
+            return None
+        if not value.atoms:
+            return _AddressExpression((), _unsigned_wrap(value.displacement, requested_span.size),
+                                      requested_span.size, _opaque_image(value))
+        return self._boundary_expression("subpiece", value, requested_span.size)
 
     def _same_result_key(self, row, size) -> int | None:
         """The key of an accessor call's result (``row``: a ("same_result",
@@ -1585,6 +1637,9 @@ class _Projector:
             result = self._pointer_row(definition, requested_span)
             if result is _WAIT:
                 result, waiting = None, True
+        if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE \
+                and definition.span != requested_span:
+            result = self._preserved_register_low(definition, requested_span)
         if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE and not waiting:
             result = self._definition_atom(definition, requested_span)
         self._active.remove(cache_key)
@@ -1841,7 +1896,16 @@ class _Projector:
             return None  # a pending write may still redefine these bytes (``settle_pending``)
         if operation_key in self._blocked:
             return None
-        value = self._memory_read_value(operation_key, byte_size, action_id)
+        identity = self._load_identities.get((operation_key, byte_size)) if self._atoms_on else None
+        if identity is not None:
+            atom = _digest_ints(b"shared-load-value-v1", (*identity[1:], byte_size))
+            self._definition_atoms.add(atom)  # equality is not non-aliasing or a fresh allocation
+            self._stack_derived.add(atom)     # contents might be a stack-derived pointer
+            if getattr(self, "address_metadata", None) is not None:
+                self.address_metadata["atoms"][atom] = f"shared STORE value for {operation_key} #{atom & 0xffffffff:08x}"
+            value = _AddressExpression(((atom, 1),), 0, byte_size)
+        else:
+            value = self._memory_read_value(operation_key, byte_size, action_id)
         if value is not None and self.used_reads is not None:
             self.used_reads.setdefault((operation_key, byte_size), set()).add(value)
         return value

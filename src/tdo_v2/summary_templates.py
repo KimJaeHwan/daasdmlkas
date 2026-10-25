@@ -68,7 +68,9 @@ TEMPLATE_VERSION = 2   # 2: stack_values_out
 # derived over entries running registered handlers (docs 25.33)
 # 14: consume verified baseline forward memory footprints at exact read bytes.
 # 13 belongs to the expression-development branch; do not alias its models.
-ENGINE_SEMANTICS_VERSION = 14
+# 15: verified shared original LOAD values and exact low parts of proven
+# register-copy call effects (no fresh/nonstack inference after truncation).
+ENGINE_SEMANTICS_VERSION = 15
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

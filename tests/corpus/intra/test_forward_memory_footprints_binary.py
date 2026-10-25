@@ -95,19 +95,25 @@ def actual():
                               if row.is_memory_space})
 
 
-def _analyze(actual, monkeypatch, enabled, engine):
+def _analyze(actual, monkeypatch, enabled, engine, *, identities=False, provenance=None):
     captured = {}
     analyze = summary_engine.analyze_units
 
     def capture(*args, **options):
         result = analyze(*args, **options)
         captured.update(result)
+        if provenance is not None:
+            provenance.update(options.get("record_provenance") or {})
         return result
 
     with monkeypatch.context() as patch:
         patch.setenv("TDO_V2_FORWARD", "1" if enabled else "0")
         patch.setenv("TDO_V2_DATAFLOW_ENGINE", engine)
         patch.setenv("TDO_V2_MEMORY_SSA_ENGINE", engine)
+        if not identities:
+            from tdo_v2 import _load_identity
+
+            patch.setattr(_load_identity, "prepare_load_identities", lambda *args, **options: None)
         patch.setattr(summary_engine, "analyze_units", capture)
         run = summary_engine.analyze_observed_with_summaries(
             actual["scope"], actual["evidences"], image_info=actual["image_info"],
@@ -179,8 +185,8 @@ def test_actual_sparse_and_dense_results_agree(actual, monkeypatch):
 
 
 @pytest.mark.parametrize("engine", ("sparse", "dense"))
-def test_original_pcode_bytes_values_addresses_and_widths(actual, monkeypatch, engine):
-    _, analyzed = _analyze(actual, monkeypatch, True, engine)
+def test_original_pcode_bytes_values_addresses_and_widths(actual, monkeypatch, engine, identities=False):
+    _, analyzed = _analyze(actual, monkeypatch, True, engine, identities=identities)
     item = analyzed[VARIABLE]
     facts = {row.operation: row for row in forward_facts(
         item.normalized, item.unit, readonly_image=actual["readonly"])}
