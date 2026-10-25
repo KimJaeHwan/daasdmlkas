@@ -831,6 +831,133 @@ def register_value_deltas(normalized, observation, requests) -> dict:
     return found
 
 
+def definition_constants(normalized, observation, requests) -> dict:
+    """Exact bounded scalar literals of finished SSA byte definitions.
+
+    The caller retains its run's debts, conditions and assumptions. No
+    readonly-image folding or pointer identity is invented here; relocation-
+    dependent expressions are not portable numeric constants.
+    """
+    from .constant_value import ExactConstant
+
+    if normalized.scopes.program.evidence.translation_namespace.language_id.split(":")[1:2] != ["LE"]:
+        return {}
+    projector = _final_projector(normalized, observation)
+    projector._pointer_rows = {key: row for key, row in normalized.pointer_rows if row[0] == "const"}
+    found = {}
+    for identifier, span in requests:
+        step()
+        if not 0 < span.size <= 16:
+            continue
+        value = projector._expression_for_definition(identifier, span)
+        if value is not None and not value.atoms and value.image == 0 and value.byte_size == span.size:
+            found[(identifier, span)] = ExactConstant(span.size, _unsigned_wrap(value.displacement, span.size))
+    return found
+
+
+def indexed_relations(normalized, observation, conditions_of=None) -> tuple:
+    """Recover only entry-base + scaled entry-index relations from the SSA.
+
+    This reuses the address projector's expressions and recorded boundary
+    operations. Opaque atoms, joins, allocation results and unrecognised
+    transforms stay unlocatable; numeric atom hashes are never exported.
+    """
+    from .indexed_address import IndexedAnchor
+    from .function_summary import _address_slice, _alias_conditions
+    from .normalize import _debt_nodes, call_clobber_spans
+    from .graph_contracts import NodeKind
+
+    if not index_addresses():
+        return ()
+    projector = _final_projector(normalized, observation)
+    projector._relation_entries, projector._relation_boundaries = {}, {}
+    projector._pointer_rows = {key: row for key, row in normalized.pointer_rows if row[0] == "const"}
+    conditional = {**(_alias_conditions(normalized) if conditions_of is None else conditions_of),
+                   **dict(normalized.uncertain_nodes)}
+    graph, clobbers = normalized.dependencies, call_clobber_spans(normalized)
+
+    def trusted(key, reference):
+        if type(reference) is not tuple:
+            debts = _debt_nodes(graph, graph.node_for_key(f"op:{key}"), reference,
+                                normalized.scopes.resolution_context, clobbers, conditional)
+            return debts is not None and all(node in conditional for node in debts)
+        if reference[0] == "indexed":
+            return trusted(key, reference[1]) and trusted(key, reference[2])
+        if reference[0] == "mem":
+            node = graph.node_for_key(f"op:{reference[1]}")
+            return node is not None and all(graph.node(item).kind is not NodeKind.MEMORY_DEBT or item in conditional
+                                           for item in _address_slice(graph, (node,), conditional))
+        return False
+    objects = dict(normalized.address_objects)
+    spaces_of = {}
+    for atoms, space_id in objects.values():
+        step()
+        spaces_of.setdefault(atoms, set()).add(space_id)
+    found = {}
+
+    def candidates():
+        for key, operation in projector._operations.items():
+            step()
+            if operation is None or operation.opcode not in ("LOAD", "STORE") or len(operation.inputs) < 2:
+                continue
+            selector = operation.inputs[0]
+            if selector.kind is not VarnodeKindCode.CONSTANT or not trusted(key, operation.inputs[1]):
+                continue
+            yield projector._expression_for_input(key, operation.inputs[1]), projector._spaces.get(
+                selector.coordinate.byte_offset)
+        for _, key, reference in normalized.call_anchors:
+            step()
+            if not trusted(key, reference):
+                continue
+            value = projector._anchored_expression(key, reference, 8)
+            if value is not None:
+                for space_id in spaces_of.get(value.atoms, ()):
+                    yield value, projector._spaces.get(space_id)
+
+    for value, space in candidates():
+        if space is None or not space.is_memory_space or space.address_size_bits != 64 \
+                or space.addressable_unit_bytes != 1:
+            continue
+        if value is None or value.byte_size != 8 or value.image != 0 or len(value.atoms) != 2:
+            continue
+        object_id = projector._relative_object(value, space.space_id, 0, 1)
+        if object_id not in objects or objects[object_id] != (value.atoms, space.space_id):
+            continue
+        for base_atom, coefficient in value.atoms:
+            if coefficient != 1:
+                continue
+            base = projector._relation_entries.get(base_atom)
+            if base is None or base.size != 8 or base.object_id.kind not in (
+                    StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_RELATIVE):
+                continue
+            (index_atom, scale), = [item for item in value.atoms if item[0] != base_atom]
+            entry = projector._relation_entries.get(index_atom)
+            extend, preoffset = "identity", 0
+            if entry is None:
+                boundary = projector._relation_boundaries.get(index_atom)
+                if boundary is None:
+                    continue
+                extend, inner, target, offset = boundary
+                if extend not in ("sext", "zext") or inner.byte_size != 4 or target != 8 \
+                        or offset != 0 or inner.image != 0 or len(inner.atoms) != 1 \
+                        or inner.atoms[0][1] != 1:
+                    continue
+                entry = projector._relation_entries.get(inner.atoms[0][0])
+                preoffset = _unsigned_wrap(inner.displacement, 4)
+            if entry is None or entry.object_id.kind not in (
+                    StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_RELATIVE):
+                continue
+            try:
+                relation = IndexedAnchor(base, entry, space.space_id, extend, preoffset, scale)
+            except (TypeError, ValueError):
+                continue
+            found.setdefault(object_id, relation)
+            break
+        if len(found) > 64:
+            return ()
+    return tuple(sorted(found.items(), key=lambda item: repr(item[0])))
+
+
 class _Projector:
     def __init__(
         self,
@@ -882,6 +1009,8 @@ class _Projector:
         # -- the range is for C2 (relations), unused here
         self._boundary: dict[int, tuple] = {}
         self._load_identities: dict = {}
+        self._relation_entries = None
+        self._relation_boundaries = None
         # entry atoms of a span overlapping the stack pointer (any width) and
         # opaque atoms computed from a stack-derived value (transitively)
         self._stack_derived: set[int] = set()
@@ -977,6 +1106,7 @@ class _Projector:
         displacement: int,
         width: int,
         space_id: int,
+        pre_call_overlay=None,
     ) -> tuple[ByteSpan, ...] | None:
         """The bytes at (value of ``anchor`` read by ``evaluation_key``) +
         ``displacement``, in this function's objects (one exact address only)."""
@@ -988,12 +1118,23 @@ class _Projector:
             or classify_address_space_v2(space) is not AddressSpaceClassV2.ADDRESS
         ):
             return None
-        if type(anchor) is tuple:  # ("mem", key of the row reading the pointer slot)
-            address = self._expression_from_memory_read(anchor[1], space.address_size_bits // 8)
-        else:
-            address = self._expression_for_input(evaluation_key, anchor)
+        address = self._anchored_expression(evaluation_key, anchor, space.address_size_bits // 8)
         if address is None or address.byte_size * 8 != space.address_size_bits:
             return None
+        if pre_call_overlay is not None:
+            # The persistent SSA omits CALL's transient return-address push.
+            # New indexed base/index entry loads may reuse pre-call RAM only
+            # when their entire span provably avoids that overlay. Resolve
+            # the actual caller address, not merely the callee anchor name.
+            sp, delta = pre_call_overlay
+            stack = self._expression_for_input(evaluation_key, sp)
+            if stack is None or stack.byte_size != address.byte_size \
+                    or stack.atoms != address.atoms or stack.image != address.image or delta >= 0:
+                return None
+            modulus = 1 << space.address_size_bits
+            distance = (address.displacement + displacement - stack.displacement - delta) % modulus
+            if width >= modulus or -delta >= modulus or distance < -delta or distance + width > modulus:
+                return None
         if not address.atoms:
             _note_fact(self._ssa.function_scope, address, address=True)
             object_id = StorageObjectId(
@@ -1008,6 +1149,36 @@ class _Projector:
                 return None
             object_id = self._relative_object(address, space.space_id, displacement, width)
         return (ByteSpan(object_id, start, width),)
+
+    def _anchored_expression(self, evaluation_key, reference, byte_size):
+        if type(reference) is not tuple:
+            return self._expression_for_input(evaluation_key, reference)
+        if reference[0] == "mem":
+            return self._expression_from_memory_read(reference[1], byte_size)
+        if reference[0] != "indexed" or len(reference) != 7 or byte_size != 8:
+            return None
+        _, base, source, size, extend, preoffset, scale = reference
+        from .indexed_address import _validate_offset
+
+        try:
+            _validate_offset(size, extend, preoffset, scale)
+        except (TypeError, ValueError):
+            return None
+        base_value = self._anchored_expression(evaluation_key, base, 8)
+        index = self._anchored_expression(evaluation_key, source, size)
+        if base_value is None or index is None or base_value.byte_size != 8 or index.byte_size != size:
+            return None
+        index = _add_address_expressions(index, _AddressExpression((), preoffset, size), size)
+        if extend != "identity":
+            if index.atoms:
+                index = self._boundary_expression(extend, index, 8)
+            else:
+                number = _signed_wrap(index.displacement, size) if extend == "sext" else \
+                    _unsigned_wrap(index.displacement, size)
+                index = _AddressExpression((), number, 8, _opaque_image(index))
+        if index is None:
+            return None
+        return _add_address_expressions(base_value, _scaled(index, scale, 8), 8)
 
     def _note_opaque_atom(self, atom: int, inputs) -> None:
         """An opaque atom inherits its inputs' classes: stack-derived; wild for
@@ -1053,6 +1224,8 @@ class _Projector:
                 _address_atom_key(value.atoms), displacement))
             low, high = (0, (1 << bits) - 1) if kind == "zext" else (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
         self._boundary[atom] = (kind, value.byte_size, byte_size, (low, high))
+        if self._relation_boundaries is not None:
+            self._relation_boundaries[atom] = (kind, value, byte_size, offset)
         if any(self._is_stack_derived(key) for key, _ in value.atoms):
             self._stack_derived.add(atom)
         if any(key in self._definition_atoms for key, _ in value.atoms):
@@ -1186,6 +1359,8 @@ class _Projector:
         """The address a call effect row holds by its callee's summary
         (``pointer_rows``), or None."""
         row = self._pointer_rows[definition.operation_key]
+        if row[0] == "const":
+            return self._literal_row(definition, requested_span)
         if row[0] == "same_result":
             return self._same_result_atom(definition, requested_span, row)
         if row[0] == "write_back":
@@ -1207,6 +1382,18 @@ class _Projector:
             # call's only pointer value (two values could name one block)
             return self._definition_atom(definition, requested_span, nonstack=not unique, fresh=unique)
         return value
+
+    def _literal_row(self, definition, requested_span):
+        row = self._pointer_rows.get(definition.operation_key)
+        if row is None or row[0] != "const" or len(row) != 3 \
+                or type(row[1]) is not int or type(row[2]) is not int \
+                or not 0 < row[1] <= 16 or row[1] != definition.span.size \
+                or not 0 <= row[2] < 1 << (8 * row[1]) \
+                or not definition.span.contains(requested_span) \
+                or self._translation_namespace.split(":")[1:2] != ["LE"]:
+            return None
+        shift = 8 * (requested_span.start - definition.span.start)
+        return _AddressExpression((), _unsigned_wrap(row[2] >> shift, requested_span.size), requested_span.size)
 
     def _same_result_atom(self, definition, requested_span, row) -> _AddressExpression | None:
         """An accessor call's result (same-result-functions, docs 25.20): the
@@ -1240,8 +1427,8 @@ class _Projector:
         This is a SUBPIECE, not a narrowed pointer: no fresh/nonstack claim or
         null-reallocation rule survives truncation. Other pointer row kinds
         and memory outputs deliberately retain their existing contracts.
-        Template derivation keeps its old conservative projection: its
-        anchor-only format cannot export the resulting indexed conditions.
+        Template derivation keeps its old conservative projection: general
+        joins/post-call index bases are outside the bounded entry contract.
         """
         if IMAGE_BASE_TRACKING.get() is not None:
             return None
@@ -1566,6 +1753,8 @@ class _Projector:
                                         None if IMAGE_BASE_TRACKING.get() is not None else 0)
         elif definition.kind is MemoryDefinitionKind.ENTRY:
             atom = _stable_storage_key(requested_span)
+            if self._relation_entries is not None:
+                self._relation_entries[atom] = requested_span
             if getattr(self, "address_metadata", None) is not None:
                 self.address_metadata["atoms"][atom] = (
                     f"entry {requested_span.object_id.kind.value}+{requested_span.start:#x}:{requested_span.size}"
@@ -1587,6 +1776,8 @@ class _Projector:
                     definition_id,
                     definition.span.size,
                 )
+            if result is None:
+                result = self._literal_row(definition, requested_span)
         elif definition.kind is MemoryDefinitionKind.JOIN:
             candidates = tuple([   # (a list comprehension: no generator frame per level)
                 self._expression_for_definition(source_id, requested_span)

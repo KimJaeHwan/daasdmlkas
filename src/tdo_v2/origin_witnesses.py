@@ -258,7 +258,7 @@ class _Context:
 
     def address_on_debt(self, key) -> bool:
         """The address of access ``key`` rests on a debt (or is not known)."""
-        from .function_summary import _address_slice
+        from .function_summary import _address_slice, _anchor_inputs
 
         operation = self.operations.get(key)
         if operation is not None and operation.opcode in ("LOAD", "STORE") and len(operation.inputs) >= 2:
@@ -267,11 +267,7 @@ class _Context:
             inputs = self._operand_inputs(key, operation.inputs[1])
         elif key in self.anchors:
             evaluation, anchor = self.anchors[key]
-            if type(anchor) is tuple:
-                node = self.node(anchor[1])
-                inputs = [node] if node is not None else None
-            else:
-                inputs = self._operand_inputs(evaluation, anchor)
+            inputs = _anchor_inputs(evaluation, anchor, self._operand_inputs, self.node)
         else:
             return True
         if inputs is None:

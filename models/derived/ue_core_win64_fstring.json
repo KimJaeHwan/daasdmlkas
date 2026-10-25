@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 14,
+ "version": 15,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -20,8 +20,8 @@
   },
   "engine": {
    "summary_version": 1,
-   "template_version": 2,
-   "semantics_version": 15
+   "template_version": 3,
+   "semantics_version": 16
   },
   "parameters": {
    "private_frame_above": 40
@@ -54,7 +54,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "915d5a68f58e94aaa37a631e57446e6d47c42c1a+dirty",
+   "engine_revision": "b89d6a7ae6cced9c161c910f5514eaca058f257e+dirty",
    "bundle": "a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068",
    "index_addresses": true,
    "stack_evidence": [
@@ -97,7 +97,11 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": {
+         "byte_size": 8,
+         "unsigned": 0
+        }
        },
        {
         "span": {
@@ -120,7 +124,11 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": {
+         "byte_size": 8,
+         "unsigned": 0
+        }
        },
        {
         "span": {
@@ -152,7 +160,8 @@
           "size": 8
          },
          false
-        ]
+        ],
+        "literal": null
        },
        {
         "span": {
@@ -183,7 +192,8 @@
           "size": 8
          },
          false
-        ]
+        ],
+        "literal": null
        },
        {
         "span": {
@@ -204,7 +214,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -227,7 +238,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -244,7 +256,11 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": {
+         "byte_size": 1,
+         "unsigned": 0
+        }
        },
        {
         "span": {
@@ -261,7 +277,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -278,7 +295,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -295,7 +313,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -312,7 +331,11 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": {
+         "byte_size": 1,
+         "unsigned": 0
+        }
        },
        {
         "span": {
@@ -350,7 +373,8 @@
           "size": 8
          },
          false
-        ]
+        ],
+        "literal": null
        }
       ]
      }
@@ -500,7 +524,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -521,7 +546,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -553,7 +579,8 @@
          "call:dll:1b1:18003bc0c:2:CALL"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -576,7 +603,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -599,7 +627,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -622,7 +651,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -645,7 +675,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -668,7 +699,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -691,7 +723,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -729,7 +762,8 @@
           "size": 8
          },
          false
-        ]
+        ],
+        "literal": null
        }
       ]
      }
@@ -962,7 +996,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1133,7 +1168,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1200,7 +1236,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1298,7 +1335,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1325,7 +1363,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1362,7 +1401,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1627,7 +1667,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1722,7 +1763,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1761,7 +1803,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1800,7 +1843,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1834,7 +1878,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1868,7 +1913,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1895,7 +1941,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1929,7 +1976,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -1963,7 +2011,8 @@
          "unknown:dll:1b1:1800f50d6:3:STORE"
         ],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -2070,7 +2119,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -2165,7 +2215,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -2226,7 +2277,8 @@
           "size": 8
          },
          false
-        ]
+        ],
+        "literal": null
        },
        {
         "span": {
@@ -2310,7 +2362,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -2376,7 +2429,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -2651,7 +2705,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -2674,7 +2729,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -2949,7 +3005,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -3224,7 +3281,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -3483,7 +3541,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -3745,7 +3804,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -3852,7 +3912,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -3875,7 +3936,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -3898,7 +3960,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -3921,7 +3984,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -3944,7 +4008,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -3967,7 +4032,8 @@
         "debts": [],
         "crossed": [],
         "conditions": [],
-        "value": null
+        "value": null,
+        "literal": null
        },
        {
         "span": {
@@ -4248,7 +4314,8 @@
           }
          ]
         ],
-        "value": null
+        "value": null,
+        "literal": null
        }
       ]
      }

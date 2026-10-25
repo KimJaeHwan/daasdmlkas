@@ -124,6 +124,7 @@ def test_published_verdicts_never_assume_proven():
     class Place:
         pointer = None
         anchor = None
+        index = None
         displacement = 0x10
         size = 8
         space_id = 1

@@ -10,8 +10,10 @@
 
 정방향 메모리 범위 강화는 `TDO_V2_FORWARD=1`에서 기존 주소 사실을 정확한 LOAD/STORE byte의 별칭 판단에 연결합니다.
 실제 DFB044는 동일 STORE 값을 읽는 index LOAD를 공유해 배열 STORE→4byte 메모리 정의→배열 LOAD까지 연결합니다.
-보존된 호출 레지스터의 저위 부분도 정확한 SUBPIECE로 이어집니다. UE 전체 완전성이나 추가 source 제거를 보장하지 않습니다.
-지원 조건·실제 결과·한계는 [설계 §25.61](docs/interprocedural_design.md#2561-동일-저장값-공유와-보존-레지스터-부분폭-2026-10-25)에 있습니다.
+보존된 호출 레지스터의 저위 부분도 정확한 SUBPIECE로 이어집니다. 완성된 SSA의 정확한 상수 값과 호출 입구의
+`base + scale * extend(index + offset)` 쓰기·별칭 조건도 요약/템플릿/호출자 메모리로 전달합니다.
+UE 전체 완전성이나 추가 source 제거를 보장하지 않습니다. 지원 조건·실제 결과·한계는
+[설계 §25.62](docs/interprocedural_design.md#2562-상수-메모리값과-입구-indexed-쓰기조건-전달-2026-10-25)에 있습니다.
 
 ## 구성
 
@@ -140,7 +142,7 @@ PYTHONPATH=src python -m pytest tests/intra -q
 | UE DLL Development | 22 | 16 / 16 (접근 함수 가정 + 바인딩: 18) |
 
 어느 Bundle에서도 "누락 + 확실"은 0이고, 프로그램 오라클의 누락은 zlib를 포함해 0입니다(zlib의 256건은 오라클 해석기의 호출 규약 결함이었음 — 문서 25.29).
-현재 main 기반 브랜치의 최신 전체 회귀 수치와 skip 범위는 설계 §25.61에 기록합니다.
+현재 main 기반 브랜치의 최신 전체 회귀 수치와 skip 범위는 설계 §25.62에 기록합니다.
 
 ## 문서
 

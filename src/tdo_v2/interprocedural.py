@@ -1738,10 +1738,11 @@ def _decide_conditions(unit, normalized, shapes, pending) -> dict:
     two address spaces, or a constant address and this function's stack under
     the named globals-vs-stack assumption; otherwise open. A side that cannot
     be located fails."""
-    from ._scope_contracts import AddressCoordinate, ValidatedVarnode
     from .call_clobber import _register_space_id
     from .may_alias import stack_object_of
-    from .normalize import _program_register_space
+    from .normalize import (_call_access_request, _program_register_space, _row_reaches_debt,
+                            _reaches_debt, call_clobber_spans)
+    from .call_summary_effects import call_load_keys
     from .relative_memory import project_anchored_after
     from .span_geometry import StorageObjectKind
 
@@ -1749,40 +1750,46 @@ def _decide_conditions(unit, normalized, shapes, pending) -> dict:
         return {}
     observation = unit.observation
     register_space = _register_space_id(observation) or _program_register_space(unit)
+    effects = dict(normalized.proven_call_effects)
+    loads = {call: call_load_keys(call, effects[call]) for call, _, _ in pending}
 
     def request(call, tag, side):
-        displacement = side.displacement
-        for (offset, size), delta in shapes.get(call, {}).items():
-            if (side.anchor.start, side.anchor.size) == (offset, size):
-                displacement += delta  # the callee's entry SP is after the push
-        varnode = ValidatedVarnode(
-            VarnodeKindCode.REGISTER, AddressCoordinate(register_space, side.anchor.start), side.anchor.size,
-        )
-        return (f"{call}~{tag}", varnode, displacement, side.size, side.space_id)
+        return _call_access_request(call, f"{call}~{tag}", side, register_space, loads[call], shapes.get(call, {}))
 
     requests = {
         request(call, tag, side)
         for call, tag, conditions in pending for pair in conditions for side in pair
-        if side.anchor is not None
+        if side.anchor is not None or side.pointer is not None or side.index is not None
     }
     located = project_anchored_after(normalized, observation, sorted(requests, key=repr)) \
         if register_space is not None else {}
     # a side located through a value with debt is not located: its address
     # could be another (the anchor read may have been changed)
-    from .normalize import _reaches_debt, call_clobber_spans
     graph = normalized.dependencies
     clobbers = call_clobber_spans(normalized)
+
+    def indebted(reference, key):
+        if type(reference) is not tuple:
+            return _reaches_debt(graph, graph.node_for_key(f"op:{key}"), reference,
+                                 unit.scopes.resolution_context, clobbers)
+        if reference[0] == "mem":
+            node = graph.node_for_key(f"op:{reference[1]}")
+            return node is None or _row_reaches_debt(graph, node)
+        if reference[0] == "indexed":
+            return indebted(reference[1], key) or indebted(reference[2], key)
+        return True
+
     located = {
         item: span for item, span in located.items()
-        if span is not None and not _reaches_debt(
-            graph, graph.node_for_key(f"op:{item[0]}"), item[1], unit.scopes.resolution_context, clobbers)
+        if span is not None and not indebted(item[1], item[0])
     }
     stack = stack_object_of(unit.scopes, observation) if normalized.assumes_globals_disjoint_from_stack else None
     result = {}
     for call, tag, conditions in pending:
         rows = []
         for pair in conditions:
-            left, right = [side.span if side.anchor is None else located.get(request(call, tag, side))
+            left, right = [side.span if side.anchor is None and side.pointer is None and side.index is None
+                           else located.get(request(call, tag, side))
                            for side in pair]
             if left is None or right is None:
                 rows.append("fail")

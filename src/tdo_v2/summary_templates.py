@@ -15,6 +15,10 @@ Objects (the only caller-dependent part) are a table:
 * a FUNCTION_RELATIVE object addressed from one entry register value, or
   from a pointer held in entry memory of such an object (``anchors``):
   ``{"anchor": span}`` -- the importer binds it at the call;
+* a bounded entry base/index relation: ``{"indexed": {"base": span,
+  "index": span, "extend": ..., "preoffset": ..., "scale": ...}}``;
+  both children must be registers or locatable basic entry memory. Its
+  memory space is rebased to the importer's, as for ordinary anchors;
 * everything else -- the library's globals (ADDRESS_SPACE: the importer
   cannot locate them), objects with no anchor, call-local temporaries
   appearing as sources: ``{"local": true}``, an object no caller can locate
@@ -37,12 +41,14 @@ from __future__ import annotations
 import hashlib
 import json
 
+from .constant_value import ExactConstant
 from .function_summary import (
     FUNCTION_SUMMARY_VERSION, ExitSummary, FunctionSummary, SinkDemand, SummaryKind, SummaryRun,
 )
+from .indexed_address import IndexedAnchor
 from .span_geometry import ByteSpan, StorageObjectId, StorageObjectKind, StorageScopeId, StorageScopeKind
 
-TEMPLATE_VERSION = 2   # 2: stack_values_out
+TEMPLATE_VERSION = 3   # 2: stack_values_out; 3: exact scalar literals and entry indexed addresses
 # bumped on any change of what a summary means: normalization, alias
 # reasoning, constant evaluation, effect derivation (not only its fields)
 # 2: stack-mixed objects wild (docs 25.7); index addresses, index objects
@@ -70,7 +76,9 @@ TEMPLATE_VERSION = 2   # 2: stack_values_out
 # 13 belongs to the expression-development branch; do not alias its models.
 # 15: verified shared original LOAD values and exact low parts of proven
 # register-copy call effects (no fresh/nonstack inference after truncation).
-ENGINE_SEMANTICS_VERSION = 15
+# 16: finished-SSA exact scalar values and bounded entry indexed addresses
+# through summaries, call effects and strict portable templates.
+ENGINE_SEMANTICS_VERSION = 16
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
@@ -149,9 +157,10 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
         raise TemplateRefused("sink demands")
     if any(run.origins for item in summary.exits for run in item.runs):
         raise TemplateRefused("source labels")
-    if len({space for _, space in analyzed.anchors.values()}) > 1:
+    relations = dict(getattr(summary, "address_relations", ()))
+    if len({space for _, space in analyzed.anchors.values()} | {row.space_id for row in relations.values()}) > 1:
         raise TemplateRefused("objects addressed in several memory spaces")
-    table = _ObjectTable(analyzed.anchors)
+    table = _ObjectTable(analyzed.anchors, relations)
     out = {
         # runs ending in call-local temporaries say nothing to a caller (derive
         # skips them); temporaries as sources stay, as objects no caller locates
@@ -196,8 +205,9 @@ def _crossing(label: str) -> str:
 
 
 class _ObjectTable:
-    def __init__(self, anchors) -> None:
+    def __init__(self, anchors, relations=None) -> None:
         self.anchors = anchors
+        self.relations = relations or {}
         self.rows: list = []
         self.index: dict = {}
 
@@ -209,6 +219,14 @@ class _ObjectTable:
         self.index[object_id] = len(self.rows)
         self.rows.append(None)   # reserved: anchors may refer to objects (no cycles)
         row = {"local": True}
+        relation = self.relations.get(object_id) if object_id.kind is StorageObjectKind.FUNCTION_RELATIVE else None
+        if relation is not None:
+            if type(relation) is not IndexedAnchor:
+                raise TemplateRefused("invalid indexed address relation")
+            row = {"indexed": {"base": self._entry_span(relation.base), "index": self._entry_span(relation.index),
+                               "extend": relation.extend, "preoffset": relation.preoffset, "scale": relation.scale}}
+            self.rows[self.index[object_id]] = row
+            return self.index[object_id]
         anchor = self.anchors.get(object_id) if object_id.kind is StorageObjectKind.FUNCTION_RELATIVE else None
         if anchor is not None:
             span = anchor[0]
@@ -222,6 +240,16 @@ class _ObjectTable:
                     row = {"anchor": {"object": reference, "start": span.start, "size": span.size}}
         self.rows[self.index[object_id]] = row
         return self.index[object_id]
+
+    def _entry_span(self, span):
+        """The first indexed contract admits only registers and basic anchors."""
+        if span.object_id.kind is StorageObjectKind.REGISTER_FILE:
+            return self.span(span)
+        if span.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE and span.object_id not in self.relations:
+            reference = self.object(span.object_id)
+            if self.rows[reference] is not None and "anchor" in self.rows[reference]:
+                return {"object": reference, "start": span.start, "size": span.size}
+        raise TemplateRefused("indexed address has an unlocatable or non-basic entry child")
 
     def local(self, span) -> bool:
         reference = self.object(span.object_id)
@@ -239,13 +267,21 @@ class _ObjectTable:
             value = [value[0], self.span(value[1]), value[2]]
         elif value is not None:
             value = ["nonstack"]
+        literal = run.literal
+        if literal is not None:
+            if value is not None:
+                raise TemplateRefused("run cannot declare both scalar literal and pointer value")
+            if type(literal) is not ExactConstant or literal.byte_size != run.span.size \
+                    or run.kind is not SummaryKind.COMPUTED or run.debts or run.crossed:
+                raise TemplateRefused("run literal is not an exact debt-free full-width computed value")
+            literal = {"byte_size": literal.byte_size, "unsigned": literal.unsigned}
         return {
             "span": self.span(run.span), "kind": run.kind.value,
             "writers": [_key(key) for key in run.writers],
             "sources": [self.span(span) for span in run.sources],
             "entry_readers": [_key(key) for key in run.entry_readers],
             "debts": list(run.debts), "crossed": [_crossing(label) for label in run.crossed],
-            "conditions": [self.pair(pair) for pair in run.conditions], "value": value,
+            "conditions": [self.pair(pair) for pair in run.conditions], "value": value, "literal": literal,
         }
 
 
@@ -281,17 +317,35 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
             raise TemplateError("span start/size")
         return ByteSpan(object_of(raw["object"]), raw["start"], raw["size"])
 
-    anchors = {}
+    anchors, relations = {}, {}
     for index, row in enumerate(rows):
         if row == {"local": True}:
             continue
-        if type(row) is not dict or set(row) != {"anchor"}:
-            raise TemplateError(f"object {index}: local or anchor")
-        anchor = span(row["anchor"])
-        if anchor.object_id == objects[index]:
-            raise TemplateError(f"object {index} anchored on itself")
-        anchors[objects[index]] = (anchor, memory_space_id)
-    _acyclic(anchors)
+        if type(row) is dict and set(row) == {"indexed"}:
+            descriptor = row["indexed"]
+            _exact(descriptor, ("base", "index", "extend", "preoffset", "scale"), "indexed")
+            try:
+                relation = IndexedAnchor(span(descriptor["base"]), span(descriptor["index"]), memory_space_id,
+                                         descriptor["extend"], descriptor["preoffset"], descriptor["scale"])
+            except (TypeError, ValueError) as error:
+                raise TemplateError(f"object {index}: invalid indexed address") from error
+            relations[objects[index]] = relation
+        else:
+            if type(row) is not dict or set(row) != {"anchor"}:
+                raise TemplateError(f"object {index}: local, anchor or indexed")
+            anchor = span(row["anchor"])
+            if anchor.object_id == objects[index]:
+                raise TemplateError(f"object {index} anchored on itself")
+            anchors[objects[index]] = (anchor, memory_space_id)
+    _acyclic(anchors, relations)
+
+    def basic_entry(value):
+        while value.object_id in anchors:
+            value = anchors[value.object_id][0]
+        return value.object_id.kind is StorageObjectKind.REGISTER_FILE
+
+    if any(not basic_entry(child) for relation in relations.values() for child in (relation.base, relation.index)):
+        raise TemplateError("indexed address has an unlocatable or non-basic entry child")
 
     def pair(raw):
         if type(raw) is not list or len(raw) != 2:
@@ -300,7 +354,7 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
 
     def run(raw):
         _exact(raw, ("span", "kind", "writers", "sources", "entry_readers", "debts", "crossed", "conditions",
-                     "value"), "run")
+                     "value", "literal"), "run")
         value = raw["value"]
         if value == ["nonstack"]:
             value = ("nonstack",)
@@ -308,10 +362,24 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
             if type(value) is not list or len(value) != 3 or value[0] != "same" or type(value[2]) is not bool:
                 raise TemplateError("run value")
             value = ("same", span(value[1]), value[2])
-        return SummaryRun(span(raw["span"]), SummaryKind(raw["kind"]), (0,), _strings(raw["writers"]),
+        run_span = span(raw["span"])
+        kind = SummaryKind(raw["kind"])
+        literal = raw["literal"]
+        if literal is not None:
+            if value is not None:
+                raise TemplateError("run cannot declare both scalar literal and pointer value")
+            _exact(literal, ("byte_size", "unsigned"), "literal")
+            try:
+                literal = ExactConstant(literal["byte_size"], literal["unsigned"])
+            except (TypeError, ValueError) as error:
+                raise TemplateError("run literal width/value") from error
+            if literal.byte_size != run_span.size or kind is not SummaryKind.COMPUTED \
+                    or raw["debts"] or raw["crossed"]:
+                raise TemplateError("run literal is not an exact debt-free full-width computed value")
+        return SummaryRun(run_span, kind, (0,), _strings(raw["writers"]),
                           tuple(span(item) for item in raw["sources"]), _strings(raw["entry_readers"]),
                           _strings(raw["debts"]), _strings(raw["crossed"]), (),
-                          tuple(pair(item) for item in raw["conditions"]), value)
+                          tuple(pair(item) for item in raw["conditions"]), value, literal)
 
     exits = []
     for item in template["exits"]:
@@ -338,18 +406,32 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
         (), tuple(inner), (), tuple(deltas), _strings(template["dead_exits"]),
         tuple(pair(item) for item in template["writer_conditions"]),
         template["stack_values_out"],
+        tuple(relations.items()),
     )
     return summary, anchors
 
 
-def _acyclic(anchors) -> None:
-    for start in anchors:
-        seen, current = set(), start
-        while current in anchors:
-            if current in seen:
+def _acyclic(anchors, relations=None) -> None:
+    children = {key: (value[0].object_id,) for key, value in anchors.items()}
+    children.update({key: (value.base.object_id, value.index.object_id)
+                     for key, value in (relations or {}).items()})
+    finished, active = set(), set()
+
+    for start in children:
+        pending = [(start, False)]
+        while pending:
+            current, exiting = pending.pop()
+            if exiting:
+                active.remove(current)
+                finished.add(current)
+                continue
+            if current in active:
                 raise TemplateError("anchor cycle")
-            seen.add(current)
-            current = anchors[current][0].object_id
+            if current in finished:
+                continue
+            active.add(current)
+            pending.append((current, True))
+            pending.extend((child, False) for child in children.get(current, ()))
 
 
 def _exact(raw, keys, what) -> None:

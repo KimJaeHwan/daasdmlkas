@@ -535,6 +535,7 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
         return resolved.span if type(resolved) is ResolvedStorage else None
 
     values: dict = {}
+    literal_rows = {key: row for key, row in normalized.pointer_rows if row[0] == "const"}
     used_readonly: set = set()
     changes: dict = {}
     # definitions resting on a read with a debt (transitively): their value
@@ -749,6 +750,11 @@ def _analyze(normalized, unit, *, readonly_image=None, assumptions=()) -> _Analy
             return Value.top(bits)
         operation = operations.get(definition.operation_key)
         if operation is None:   # (a call effect's row: ``~k``, ``~in`` ...)
+            row = literal_rows.get(definition.operation_key)
+            if little and row is not None and len(row) == 3 and type(row[1]) is int and type(row[2]) is int \
+                    and row[1] == definition.span.size and 0 < row[1] <= 16 \
+                    and 0 <= row[2] < 1 << bits:
+                return Value.number(row[2], bits)
             return Value.top(bits)
         key = definition.operation_key
         if operation.opcode == "STORE" and len(operation.inputs) == 3:

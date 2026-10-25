@@ -32,7 +32,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .constant_value import ExactConstant
 from .function_summary import ExitSummary, FunctionSummary, SummaryKind, SummaryRun
+from .indexed_address import IndexedAnchor, _validate_offset
 from .span_geometry import ByteSpan, StorageObjectKind
 
 
@@ -43,7 +45,9 @@ class AnchoredSpan:
     (the pointer stored at ``pointer`` at callee entry) + ``displacement``
     (``anchor`` and ``span`` None; a pointer passed in memory, e.g. ``**pp``
     or a 32-bit stack argument). The caller evaluates every base once, at the
-    call (``MAX_POINTER_DEPTH`` levels)."""
+    call (``MAX_POINTER_DEPTH`` levels). With ``index``, add its scaled,
+    extended entry value to that base before the ordinary displacement.
+    The index's preoffset addition wraps at its source width."""
 
     anchor: ByteSpan | None
     displacement: int
@@ -51,18 +55,66 @@ class AnchoredSpan:
     space_id: int
     span: ByteSpan | None = None
     pointer: "AnchoredSpan | None" = None
+    index: "IndexedOffset | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class IndexedOffset:
+    """An entry index, evaluated once from one register or anchored memory."""
+
+    register: ByteSpan | None
+    memory: AnchoredSpan | None
+    extend: str
+    preoffset: int
+    scale: int
+
+    def __post_init__(self) -> None:
+        if (self.register is None) == (self.memory is None):
+            raise ValueError("indexed offset requires exactly one source")
+        if self.register is not None:
+            if type(self.register) is not ByteSpan or self.register.object_id.kind is not StorageObjectKind.REGISTER_FILE:
+                raise TypeError("indexed register must be an exact register ByteSpan")
+            width = self.register.size
+        else:
+            if type(self.memory) is not AnchoredSpan:
+                raise TypeError("indexed memory must be an exact AnchoredSpan")
+            width = self.memory.size
+        _validate_offset(width, self.extend, self.preoffset, self.scale)
 
 
 MAX_POINTER_DEPTH = 2
 
 
-def anchored_span(span: ByteSpan, anchors: dict, depth: int = 0) -> "AnchoredSpan | None":
+def anchored_span(span: ByteSpan, anchors: dict, depth: int = 0, relations=None) -> "AnchoredSpan | None":
     """Where a caller finds callee bytes ``span`` at the call (``anchors``:
     the callee's FUNCTION_RELATIVE object -> (entry register span, space)):
     a global, (an entry register's value) + displacement, or (the pointer
     at another anchored place) + displacement (``MAX_POINTER_DEPTH``
     levels); None when the caller cannot locate it."""
     kind = span.object_id.kind
+    relation = (relations or {}).get(span.object_id)
+    if kind is StorageObjectKind.FUNCTION_RELATIVE and relation is not None:
+        if type(relation) is not IndexedAnchor or depth >= MAX_POINTER_DEPTH:
+            return None
+        allowed = (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_RELATIVE)
+        if relation.base.object_id.kind not in allowed or relation.index.object_id.kind not in allowed:
+            return None
+        anchor, pointer, register, memory = None, None, None, None
+        if relation.base.object_id.kind is StorageObjectKind.REGISTER_FILE:
+            anchor = relation.base
+        else:
+            pointer = anchored_span(relation.base, anchors, depth + 1)
+            if pointer is None:
+                return None
+        if relation.index.object_id.kind is StorageObjectKind.REGISTER_FILE:
+            register = relation.index
+        else:
+            memory = anchored_span(relation.index, anchors, depth + 1)
+            if memory is None:
+                return None
+        index = IndexedOffset(register, memory, relation.extend, relation.preoffset, relation.scale)
+        return AnchoredSpan(anchor, span.start - (1 << 64), span.size, relation.space_id,
+                            pointer=pointer, index=index)
     if kind is StorageObjectKind.ADDRESS_SPACE:
         return AnchoredSpan(None, span.start, span.size, span.object_id.space_key, span)
     if kind is StorageObjectKind.FUNCTION_RELATIVE and span.object_id in anchors:
@@ -86,7 +138,8 @@ def call_load_keys(call_key: str, proven) -> dict:
     """AnchoredSpan -> the key of the ``~ld<j>`` row that loads it at the
     call, in the order ``normalize._proven_call_rows`` creates them (runs'
     loads, memory runs' kept old values and pointer bases, unknown memory's
-    pointer bases, sink demands' loads; a pointer slot before its target).
+    pointer/index bases, sink demands' loads, then condition bases; pointer
+    and index slots precede their target and are evaluated before outputs).
     An accessor's slot, loaded last, is not listed."""
     keys: dict = {}
 
@@ -95,7 +148,15 @@ def call_load_keys(call_key: str, proven) -> dict:
             return
         if access.pointer is not None:
             load(access.pointer)
+        if access.index is not None and access.index.memory is not None:
+            load(access.index.memory)
         keys[access] = f"{call_key}~ld{len(keys)}"
+
+    def bases(access):
+        if access.pointer is not None:
+            load(access.pointer)
+        if access.index is not None and access.index.memory is not None:
+            load(access.index.memory)
 
     for run in (*proven.runs, *proven.memory_runs):
         for item in run.loads:
@@ -103,14 +164,19 @@ def call_load_keys(call_key: str, proven) -> dict:
         if isinstance(run, ProvenMemoryRun):
             if run.keeps_old:
                 load(run.write)
-            if run.write.pointer is not None:
-                load(run.write.pointer)
+            bases(run.write)
     for access in proven.unknown_memory:
-        if access.pointer is not None:
-            load(access.pointer)
+        bases(access)
     for demand in proven.sink_demands:
         for item in demand.loads:
             load(item)
+    for row in (*proven.runs, *proven.memory_runs, *proven.sink_demands):
+        for pair in row.conditions:
+            for side in pair:
+                bases(side)
+    for pair in proven.writer_conditions:
+        for side in pair:
+            bases(side)
     return keys
 
 
@@ -129,6 +195,7 @@ class ProvenRunEffect:
     # register at the call -- or ("same_mem", AnchoredSpan, null_is_fresh) --
     # the caller's memory there at the call; None: unknown
     value: tuple | None = None
+    literal: ExactConstant | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +207,7 @@ class ProvenMemoryRun:
     origins: tuple[str, ...] = ()
     conditions: tuple[tuple[AnchoredSpan, AnchoredSpan], ...] = ()
     value: tuple | None = None   # as ``ProvenRunEffect.value``
+    literal: ExactConstant | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,10 +330,11 @@ def derive_proven_call_effect(
     "unlocatable" (a side the caller cannot locate) or "failed" (the caller
     already found it failing)."""
     anchors = anchors or {}
+    relations = dict(getattr(summary, "address_relations", ()))
     skip = {offset for span in excluded for offset in range(span.start, span.end)}
 
     def anchored(span: ByteSpan) -> AnchoredSpan | None:
-        return anchored_span(span, anchors)
+        return anchored_span(span, anchors, relations=relations)
 
     stack = {(span.start, span.size) for span in excluded}
 
@@ -424,7 +493,7 @@ def derive_proven_call_effect(
         if keeps_old:
             registers = tuple(sorted(set(registers) | set(writes), key=lambda span: span.canonical_key))
         runs.append(ProvenRunEffect(writes, registers, loads, _origins(sources), _sorted_pairs(conditions),
-                                    value))
+                                    value, _literal_value(sources, keeps_old, writes)))
     memory_runs = []
     for (sources, keeps_old, conditions), items in sorted(memory_groups.items(), key=lambda item: repr(min(item[1], key=repr))):
         registers, loads = split_sources(sources)
@@ -440,7 +509,8 @@ def derive_proven_call_effect(
                 if value is not None and value[0] == "same_mem" and value[1] not in loads:
                     value = None
                 memory_runs.append(ProvenMemoryRun(anchored(span), registers, loads, keeps_old, _origins(sources),
-                                                   _sorted_pairs(conditions), value))
+                                                   _sorted_pairs(conditions), value,
+                                                   _literal_value(sources, keeps_old, (span,))))
     preserved = [offset for offset in range(register_limit) if offset not in unknown and offset not in skip]
     unknown_memory = tuple(
         anchored(span) for object_id, offsets in sorted(unknown_bytes.items(), key=repr)
@@ -520,6 +590,8 @@ def derive_composed_call_effect(
 
     stack = {(span.start, span.size) for span in excluded}
     merged_anchors: dict = {}
+    merged_relations: dict = {}
+    conflicted_relations = set()
     # a member opaque alone (tail exits, or no exit and no dead exit) is never
     # dropped: the composition gets a tail exit, so ``derive_proven_call_effect``
     # proves no state -- but every member's sink demands still bind at the call
@@ -528,6 +600,10 @@ def derive_composed_call_effect(
         if summary.tail_exits or (not summary.exits and not summary.dead_exits):
             opaque_members.append(f"opaque-member:{index}")
         merged_anchors.update(anchors or {})
+        for object_id, relation in dict(getattr(summary, "address_relations", ())).items():
+            if object_id in merged_relations and merged_relations[object_id] != relation:
+                conflicted_relations.add(object_id)
+            merged_relations[object_id] = relation
 
     def frame_or_slot(span, anchors) -> bool:
         row = (anchors or {}).get(span.object_id)
@@ -542,7 +618,10 @@ def derive_composed_call_effect(
         if span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
             return span.object_id.space_key
         row = (anchors or {}).get(span.object_id)
-        return None if row is None else row[1]
+        if row is not None:
+            return row[1]
+        relation = merged_relations.get(span.object_id)
+        return None if relation is None else relation.space_id
 
     # (space -> {member index: written objects}): memory writes outside the frame
     writers: dict = {}
@@ -583,7 +662,8 @@ def derive_composed_call_effect(
                 if run.span.object_id.kind not in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE) \
                         and run.kind is not SummaryKind.IDENTITY and not frame_or_slot(run.span, anchors) \
                         and space_of(run.span, anchors) in contested:
-                    run = _replace(run, kind=SummaryKind.UNKNOWN, debts=(*run.debts, "uncertain:several-targets"))
+                    run = _replace(run, kind=SummaryKind.UNKNOWN, debts=(*run.debts, "uncertain:several-targets"),
+                                   literal=None)
                 runs.append(run)
             exits.append(ExitSummary(exit_summary.block_key, (*runs, *fill)))
         unknown_writers += summary.unknown_writers
@@ -605,6 +685,8 @@ def derive_composed_call_effect(
         tuple(inner_calls),
         tuple(sink_demands), tuple(sorted((deltas or {}).items())), tuple(dead_exits), tuple(writer_conditions),
         values_out,
+        tuple(sorted(((key, value) for key, value in merged_relations.items() if key not in conflicted_relations),
+                     key=lambda pair: repr(pair[0]))),
     )
     return derive_proven_call_effect(
         composed, callee, register_object, register_limit, excluded=excluded, anchors=merged_anchors,
@@ -621,10 +703,15 @@ def _observed_registers(runs, memory_runs, unknown_memory, writer_pairs, sink_de
     found = set()
 
     def anchor_of(access):
-        while access is not None and access.anchor is None and access.pointer is not None:
-            access = access.pointer
-        if access is not None and access.anchor is not None:
+        if access is None:
+            return
+        if access.anchor is not None:
             found.add(access.anchor)
+        anchor_of(access.pointer)
+        if access.index is not None:
+            if access.index.register is not None:
+                found.add(access.index.register)
+            anchor_of(access.index.memory)
 
     def pairs(conditions):
         for left, right in conditions:
@@ -682,7 +769,24 @@ def _with_origins(sources, run) -> frozenset:
     and two pointers with equal values (rax and rcx both a copy of rdi) stay
     two groups, each its own pointer-size run)."""
     marker = ("pointer", run.value) if run.value is None else ("pointer", run.value, run.span)
-    return frozenset(sources) | {("origin", label) for label in run.origins} | {marker}
+    # Keep the original full span: equal adjacent scalar stores must not turn
+    # into a wider scalar, and a partial output must not reuse the old bits.
+    literal = run.literal if type(run.literal) is ExactConstant and run.literal.byte_size == run.span.size \
+        and run.kind is SummaryKind.COMPUTED and not run.debts and not run.crossed else None
+    literal_marker = ("literal", literal, run.span) if literal is not None else ("literal", None)
+    return frozenset(sources) | {("origin", label) for label in run.origins} | {marker, literal_marker}
+
+
+def _literal_value(sources, keeps_old, spans):
+    """An unchanged, full-width scalar agreed by every contributing exit."""
+    markers = [item for item in sources if type(item) is tuple and item[0] == "literal"]
+    if keeps_old or len(spans) != 1 or len(markers) != 1:
+        return None
+    marker = markers[0]
+    if len(marker) != 3 or type(marker[1]) is not ExactConstant:
+        return None
+    literal, original = marker[1:]
+    return literal if original == spans[0] and literal.byte_size == spans[0].size else None
 
 
 def _pointer_value(sources, keeps_old, spans, size, anchored):
@@ -799,6 +903,6 @@ def _spans(object_id, offsets):
 __all__ = (
     "anchored_span",
     "call_load_keys",
-    "AnchoredSpan", "ProvenCallEffect", "ProvenMemoryRun", "ProvenRunEffect", "ProvenSinkDemand",
+    "AnchoredSpan", "IndexedOffset", "ProvenCallEffect", "ProvenMemoryRun", "ProvenRunEffect", "ProvenSinkDemand",
     "derive_composed_call_effect", "derive_proven_call_effect",
 )

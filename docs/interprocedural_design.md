@@ -2589,3 +2589,118 @@ src/tests `.py`와 models `.json` 248개를 정렬한 경로+NUL+파일 SHA256�
 기존 가정/미해결/모델 수출 경계 보존 및 회귀 통과**다. Astra가 두 권위 XML·신규 79개 non-skip·dense 186개·현재 동결 hash·
 원 044 CLI·Core/Trace 실제 검사·배포 모델과 최종 문서를 독립 대조한 뒤, **합의 범위의 목표 달성과 이 상태에서의 마무리를
 별도로 최종 승인**했다. 이번 범위의 필수 잔여/차단 결함은 발견되지 않았다. 위 표의 후속 한계를 완료로 세지는 않는다.
+
+### 25.62 상수 메모리값과 입구 indexed 쓰기조건 전달 (2026-10-25)
+
+§25.61은 `b89d6a7`로 `origin/feature/forward-memory-footprints`에 커밋/푸시했다. 이번 후속 범위는
+**완성된 SSA의 정확한 상수 비트와 입구 base/index 관계를 기존 요약→템플릿→호출자 그래프로 전달하는 것**이다.
+기존 SSA·주소 projector·call effect·메모리 그래프를 재사용한다. 새 정방향 실행기/검사기나 일반식 IR은 만들지 않는다.
+원 그래프를 대체하거나 연산식 브랜치를 병합하지 않는다. 케이스 주소/source/sink 라벨은 production 특례가 아니다.
+
+#### 상수는 pointer 계약과 분리한다
+
+- 별도 불변 `ExactConstant(byte_size, unsigned)`로 폭 1–16byte의 정확한 비트를 기록한다. bool/coercion/범위 초과를 거부한다.
+  완성된 SSA의 원 정의를 기존 projector로 계산하고 atoms·image 의존이 없는 LE 값만 붙인다. 읽기 전용 이미지를 새로
+  상수 접기하거나 반복/JOIN/불명 효과를 값 하나로 추측하지 않는다.
+- `SummaryRun.literal`→`ProvenRunEffect`/`ProvenMemoryRun.literal`→strict template로 전달한다. 모든 정상 exit/대상이
+  같은 전체 출력 범위·값을 확정해야 한다. 일부 폭·다른 값·IDENTITY/UNKNOWN·hard debt·keeps_old는 상수 강화 근거가 아니다.
+  조건이 붙은 출력은 조건이 남아 있는 동안 const row로 소비하지 않는다.
+- 상수 0을 NULL allocation, fresh, nonstack, same-pointer로 바꾸지 않는다. 같은 run의 scalar literal/pointer value
+  동시 선언은 template export/import에서 모두 거부한다. 기존 pointer 계약과 출처/부채 간선은 보존한다.
+- 호출자의 정확한 전체 정의와 그 안의 LE 부분 byte를 읽을 수 있다. 생성자 8byte 저장 중 Num/Max 각각 4byte도 정확히 0이다.
+
+```text
+원 Core ctor STORE(8byte, 0) → SummaryRun.literal → portable template
+    → caller CALL output → 8byte SSA definition → Num/Max 4byte LOAD = 0
+```
+
+#### bounded 입구 주소와 조건을 함께 전달한다
+
+새 `IndexedAnchor`/`IndexedOffset`는 다음 관계만 운반한다. 원 graph/SSA가 관계의 근거다.
+
+```text
+address = base8 + scale * extend(index + preoffset) + displacement  (mod 2^64)
+```
+
+- base는 원 입구 register8 또는 기본 anchor로 찾을 수 있는 원 입구 memory8이다. index는 입구 register/memory의
+  4byte sext/zext 또는 8byte identity다. preoffset은 **원 index 폭에서 먼저 wrap**, 이후 확장·scale·주소폭 wrap을 한다.
+  scale은 0 아닌 signed64다. 원 공간 selector를 검증하고 template에서는 importer memory 공간으로 재바인딩한다.
+- 양쪽 주소의 register와 모든 pointer/index memory 의존을 기존 `call_load_keys`로 계획해 같은 호출 직전 snapshot에서
+  출력보다 먼저 한 번만 읽는다. 출력이 index/base slot을 바꾸어도 갱신 후 값으로 재바인딩하지 않고 호출 직전 원 입구 값을 유지한다.
+- 기존 `writer_conditions`/run 조건의 양쪽 주소도 같은 관계·preload로 전달한다. 조건은 **byte 비겹침 전제**이며,
+  임의 if/else 실행 guard를 새로 추출하는 기능은 아니다. 거짓/불명 조건은 기존 unknown/debt 정책으로 남는다.
+- CALL의 관찰된 push가 persistent SSA에서 제거되므로 새 indexed 입력의 memory preload에는 반환주소 overlay 검사를
+  붙인다. 실제 caller 주소식과 같은 시점 SP가 동일 atoms/image/폭일 때만 modulo 전체 byte 비겹침을 확정한다.
+  직접 SP 및 `RCX=RSP-8` alias의 겹침을 거부하고, 비교불능도 거부한다. SP delta는 한 번만 적용한다. 일반 전역/비stack
+  안전성을 새로 가정하지 않는다. used/stale memory 근거 재검증과 최종 부채 검사도 유지한다.
+- wrapper 재요약·composed effect·strict template 및 operation-record stitching도 같은 관계를 쓴다. writer 부채 검사와
+  origin witness가 `indexed` 튜플을 기존 `mem` 튜플로 오해하지 않도록 base/index 의존 추적을 공유한다.
+- call-derived/new-allocation base, 일반 JOIN/여러 변환, global entry child, indexed-on-indexed child는 첫 범위 밖이다.
+  등록되지 않은 hard debt가 있는 주소는 relation으로 수출하지 않는다. 최대 64개 관계를 넘으면 선택 정보만 생략한다.
+  function/run hard exhaustion은 기존 typed failure·summary/provenance 미게시로 반환하며 성공으로 숨기지 않는다.
+
+#### 실제 원본 사례와 남은 경계
+
+| 실제 사례 | 확인한 결과 | 완료로 세지 않는 것 |
+|---|---|---|
+| 원 UE Core FString ctor / Trace R005 | 원 두 8byte zero STORE→요약→현재 template→두 호출자의 총 32byte header=0. Num/Max 부분폭도 확인 | AppendChar/재할당 이후 buffer 주소와 최종 sink의 전체 해결 |
+| 원 Suite10 `TV2C687_write_lane` + thunk | `base + 2*zext(lane32)`의 원 2byte STORE→caller 쓰기→메모리 정의. wrapper 재요약·template 왕복·원 child STORE까지 operation-record stitch | 전체 memory 보존·모든 Suite10 case/아키텍처 완전성 |
+| 원 Suite09 DFB044 | 이전 동일 원 STORE identity와 last-writer 연결 회귀 유지 | 추가 C source 제거·재귀 확장 |
+
+Suite10 원 ELF SHA256 `68e1f59b6e4980df254407d430f065072d9ac64805588993e508de3e0b5da4a4`를 현재 exporter로
+두 함수만 다시 추출했다. 새 C/교체 바이너리를 만들지 않았다. 원 함수 observation digest도 기존과 같다.
+Bundle은 `output/constant-indexed-20261025/suite10-indexed-bundles/dd71f851d2b7fbdbc07980d7d0d1ee2d4d59576450e5964b10a2294260424140`이다.
+원 STORE `1b1:10b597:1:STORE`, thunk CALL `1b1:10b5bc:2:CALL`이다. 기존 program oracle의 8개 입력에서
+3104byte 관계/호출 경유 16개를 대조했고, demanded indexed STORE byte 16/16을 실제로 위치시켰다.
+silent·place failed·unlocated·covered_by_debt는 0이다. callee가 whole-memory 보존을 주장하지 않으므로 비활성 footprint
+의무를 성공으로 세지 않는다. 부호경계/상위 register 잡음/주소 wrap을 포함한 유한 실행을 전 경로 증명으로 세지 않는다.
+원 C는 `tdo_testbed_UE/cpp_like/src/cases_fusion.cpp:2810`이며 graph 평가값도 원 두 writer byte와 대조한다.
+
+UE Core/Trace 원 DLL과 Bundle은 §25.61과 같다. **post-ResizeGrow Pout을 entry P로 치환하지 않는다.** 실제
+`1800f5078:3:STORE`/`1800f50d6:3:STORE`의 재할당 이후 base와 branch-derived index는 여전히 보수 경계다.
+모델 도출의 일반 low-register 강화 제한도 유지한다. §25.61의 anchor-only 수출 한계 중 이번에 해결한 것은 입구에
+묶인 bounded index뿐이며, 일반 실행조건·할당 identity/epoch/lifetime이 해결된 것은 아니다. R002 A+B/부채도 그대로다.
+
+#### 의미 버전과 배포 모델
+
+엔진 의미 버전 **16**, template version **3**, 배포 FString model file version **15**다. 원 Core Bundle/스택 자료에서
+ctor/dtor/AppendChar 3개 모두 현재 엔진으로 다시 도출했다. forward off/on과 설치파일 SHA256은
+`1be888f52e8cd2a792cdafc0c4bcce0862a4e50aadcdfd9f39735ba00ab6f122`로 같다. 예전/새 entry를 섞거나 메타데이터만
+고친 모델이 아니다. 실행은 `output/constant-indexed-20261025/model-final-{0,1}.log`, 산출 모델은 같은 폴더
+`model-constant-indexed-final-{0,1}.json`에 있다. 구 semantic/template 모델은 호환되는 것처럼 받지 않는다.
+
+상수 단계와 indexed 구현/실제 사례 단계는 Astra가 각각 독립 검수 후 승인했다. 전체 동결 회귀와 최종 목표 종료 승인은
+아래 최종 기록으로 구분한다. 이번 완료선은 정확 상수/입구 indexed 효과·비겹침 조건의 공통 전달이며 UE R005 전체 해결이 아니다.
+
+기존 회귀의 주소 fixture에는 새 `index=None` 필드를 명시했다. 옛 stack-escape 음성은 입구 indexed LOAD를
+표현 불가로 전제했으므로, 실제 미지원 XOR 주소로 음성 의무를 유지하고 지원 indexed LOAD의 no-frame 양성과
+base/index frame 전달·현재 frame 주소를 메모리에 공개→callee 반환 pointer로 caller 쓰기의 음성을 sparse/dense로
+추가했다. 마지막 흐름은 원 p-code 실행 oracle 8seed씩으로 대조했다. 기대만 낮추어 미해결을 통과시킨 것이 아니다.
+
+전체 회귀에서 unproven REP의 의도적 `operation_overrides=None`을 신규 relation 후보 순회가 읽는 예외도 발견해
+수정했다. None은 후보에서 생략하며 원 raw operation으로 되돌리지 않는다. sparse/dense 명시 회귀는 relation 미생성과
+기존 `unproven rep` 상태 유지를 확인한다. `SP + index` 쓰기는 이제 명시 memory run으로 수출하므로
+`preserves_memory=True`일 수 있다. 이는 **수출한 쓰기 외 추가 미지 쓰기가 없음**이지 쓰기 없음/nonalias가 아니다.
+실제 caller frame과 겹치는 입력의 wild 객체·부채·원 byte writer를 대조하며, XOR 미지원 쓰기의 음성 의무도 유지한다.
+
+#### 최종 동결 검증
+
+| 권위 실행 | 결과 | 시간 |
+|---|---|---|
+| `release-default` (`TDO_V2_FORWARD=0`) | **2603 passed / 32 skipped / failures 0 / errors 0** | 466.14초 |
+| `release-forward-on` (`TDO_V2_FORWARD=1`) | **2603 passed / 32 skipped / failures 0 / errors 0** | 485.15초 |
+| `release-dense` (REP·mixed stack·호출 출처·기존 044/UE 포함) | **442 passed / 0 skipped / failures 0 / errors 0** | 53.60초 |
+
+전체는 각 2635항목이다. skip 32개는 Linux worker 9·Linux supervision 14·미보유 Bundle 9개로 성공에 포함하지 않는다.
+새 7개 테스트 파일의 200항목은 모두 실제 실행됐으며 skip 0이다. 기존 stack-escape/mixed-stack 파일의 행렬 추가까지
+포함하면 §25.61 대비 211항목 증가다. 이것은 80개 Suite09 case나 모든 아키텍처의 완전성 수치가 아니다.
+
+로그/JUnit은 `output/constant-indexed-20261025/release-{default,forward-on,dense}.{log,junit.xml}`이다.
+초기 `full-*`/`dense-*`/`*-authority` 실행은 예외·구 기대 수정 전/중단본이므로 이 표의 완료 근거로 사용하지 않는다.
+src/tests `.py`와 models `.json` 257개를 경로+NUL+각 파일 SHA256으로 동결했다. `freeze-release-{start,middle,end}.log`
+모두 집계 SHA256 `5b632cf918f870a243ffc62fe30e1f884548128da6efe8e16a34bd104bd03ee5`로 같으며 문서는 hash 범위 밖이다.
+모델은 이 동결 코드로 다시 도출한 동일 3개 export다. Astra는 권위 XML 세 개·신규 200개 non-skip·현재 257파일의
+직접 재해시·설치/재도출 모델 SHA·기존 13개 가정·실제 ctor/indexed 및 기존 044/UE/stack 회귀·최종 문서를 독립
+대조했다. **합의한 이번 목표 달성과 이 상태에서의 마무리를 명시적으로 최종 승인**했으며, 현재 범위의 필수 잔여나
+차단 결함은 발견하지 못했다. 이번 승인을 R005 재할당 이후 처리·일반 alias 해결·전체 UE 해결·연산식 브랜치 병합으로
+확대하지 않는다. 해당 미해결 상태와 모델 조건/부채는 그대로 유지한다.

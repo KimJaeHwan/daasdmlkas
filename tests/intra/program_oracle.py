@@ -89,7 +89,9 @@ def _proven_runs(function):
 def _place(anchored, snapshot, entry_values, reg_space, depth=0, moduli=None):
     """(space, start, size) of an ``AnchoredSpan`` evaluated with the byte
     values just before the call (``snapshot``, else the entry values), or
-    None; addresses modulo each space's width (``moduli``)."""
+    None; addresses modulo each space's width (``moduli``). An indexed
+    offset reads its scalar from that same pre-call snapshot, adds at the
+    scalar width, extends, then scales before the address-width addition."""
     moduli = moduli or {}
 
     def value(space, start, size):
@@ -102,7 +104,10 @@ def _place(anchored, snapshot, entry_values, reg_space, depth=0, moduli=None):
             found |= byte << (8 * index)
         return found
 
+    indexed = getattr(anchored, "index", None)
     if anchored.span is not None:
+        if indexed is not None:
+            return None
         return anchored.space_id, anchored.displacement % moduli.get(anchored.space_id, 1 << 64), anchored.size
     if anchored.anchor is not None:
         base = value(reg_space, anchored.anchor.start, anchored.anchor.size)
@@ -117,7 +122,29 @@ def _place(anchored, snapshot, entry_values, reg_space, depth=0, moduli=None):
         return None
     if base is None:
         return None
-    return anchored.space_id, (base + anchored.displacement) % (1 << (8 * width)), anchored.size
+    offset = 0
+    if indexed is not None:
+        if width != 8:
+            return None
+        if indexed.register is not None:
+            source_width = indexed.register.size
+            number = value(reg_space, indexed.register.start, source_width)
+        elif indexed.memory is not None and depth < 4:
+            slot = _place(indexed.memory, snapshot, entry_values, reg_space, depth + 1, moduli)
+            if slot is None:
+                return None
+            source_width, number = slot[2], value(*slot)
+        else:
+            return None
+        if number is None or (source_width, indexed.extend) not in (
+                (8, "identity"), (4, "zext"), (4, "sext")):
+            return None
+        source_bits = 8 * source_width
+        number = (number + indexed.preoffset) % (1 << source_bits)
+        if indexed.extend == "sext" and number >= 1 << (source_bits - 1):
+            number -= 1 << source_bits
+        offset = number * indexed.scale
+    return anchored.space_id, (base + offset + anchored.displacement) % (1 << (8 * width)), anchored.size
 
 
 def _contains(place, space, offset, modulus=1 << 64) -> bool:

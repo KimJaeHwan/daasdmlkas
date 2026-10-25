@@ -622,7 +622,7 @@ def _row_reaches_debt(graph, node) -> bool:
     return any(graph.node(item).kind is NodeKind.MEMORY_DEBT for item in _address_slice(graph, inputs, {}))
 
 
-def _debt_nodes(graph, node, varnode, context, clobbers=None):
+def _debt_nodes(graph, node, varnode, context, clobbers=None, conditions_of=None):
     """The debt nodes the value ``varnode`` has at operation ``node`` depends
     on (None: cannot tell); see ``_debt_labels``."""
     from .function_summary import _address_slice
@@ -639,7 +639,7 @@ def _debt_nodes(graph, node, varnode, context, clobbers=None):
             clobbers is None or source not in clobbers
             or any(span.overlaps(resolved.span) for span in clobbers[source])))
     ]
-    return frozenset(item for item in _address_slice(graph, inputs, {})
+    return frozenset(item for item in _address_slice(graph, inputs, conditions_of or {})
                      if graph.node(item).kind is NodeKind.MEMORY_DEBT)
 
 
@@ -1026,7 +1026,36 @@ def _pending_write_keys(effect_unit) -> frozenset:
                      if effect.memory_write is not None)
 
 
-def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries,
+def _call_access_request(call_key, evaluation_key, access, register_space, load_keys, shapes):
+    """Shared construction of pre-call references, including the raw SP push."""
+    def varnode(span):
+        return ValidatedVarnode(VarnodeKindCode.REGISTER,
+                                AddressCoordinate(register_space, span.start), span.size)
+
+    offset = access.displacement
+    if access.pointer is not None:
+        reference = ("mem", load_keys[access.pointer])
+    else:
+        reference = varnode(access.anchor)
+        offset += shapes.get((access.anchor.start, access.anchor.size), 0)
+    if access.index is not None:
+        index = access.index
+        preoffset = index.preoffset
+        if index.register is None:
+            source, size = ("mem", load_keys[index.memory]), index.memory.size
+        else:
+            source, size = varnode(index.register), index.register.size
+            for (start, width), delta in shapes.items():
+                if start < index.register.end and index.register.start < start + width:
+                    if index.register.start != start or size > width:
+                        source = ("unbound",)  # a high SP part needs a carry relation, not a guessed delta
+                    else:
+                        preoffset = (preoffset + delta) % (1 << (8 * size))
+        reference = ("indexed", reference, source, size, index.extend, preoffset, index.scale)
+    return evaluation_key, reference, offset, access.size, access.space_id
+
+
+def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries, context,
                       stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
@@ -1050,6 +1079,48 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     from .call_summary_effects import call_load_keys
 
     planned = call_load_keys(call_key, proven)
+    protected_loads = set()
+
+    def protect(access):
+        step()
+        if access in protected_loads:
+            return
+        protected_loads.add(access)
+        if access.pointer is not None:
+            protect(access.pointer)
+        if access.index is not None and access.index.memory is not None:
+            protect(access.index.memory)
+
+    for access in planned:
+        step()
+        if access.index is not None:
+            if access.pointer is not None:
+                protect(access.pointer)
+            if access.index.memory is not None:
+                protect(access.index.memory)
+    for run in proven.memory_runs:
+        step()
+        if run.write.index is not None:
+            if run.write.pointer is not None:
+                protect(run.write.pointer)
+            if run.write.index.memory is not None:
+                protect(run.write.index.memory)
+    for row in (*proven.runs, *proven.memory_runs, *proven.sink_demands):
+        for pair in row.conditions:
+            step()
+            for side in pair:
+                if side.index is not None:
+                    if side.pointer is not None:
+                        protect(side.pointer)
+                    if side.index.memory is not None:
+                        protect(side.index.memory)
+    for side in (*proven.unknown_memory, *(side for pair in proven.writer_conditions for side in pair)):
+        step()
+        if side.index is not None:
+            if side.pointer is not None:
+                protect(side.pointer)
+            if side.index.memory is not None:
+                protect(side.index.memory)
 
     def temporary():
         span = ResolvedStorage(ByteSpan(
@@ -1080,15 +1151,46 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     def base(access):
         """(anchor reads, anchored-access base) of an anchored access: a
         register, or ("mem", key of the ~ld row reading the pointer slot)."""
-        if access.pointer is not None:
-            slot = load(access.pointer)
-            return (slot,), ("mem", load_keys[access.pointer]), access.displacement
-        return (ResolvedStorage(access.anchor),), anchor_varnode(access.anchor), displacement(access)
+        reads = [load(access.pointer)] if access.pointer is not None else [ResolvedStorage(access.anchor)]
+        if access.index is not None:
+            index = access.index
+            if index.register is not None:
+                reads.append(ResolvedStorage(index.register))
+            else:
+                reads.append(load(index.memory))
+        transition = transitions.get(call_key)
+        shape = {} if transition is None else {
+            (transition.caller_base.byte_offset, transition.caller_base.byte_size): transition.displacement_delta}
+        _, pointer, offset, _, _ = _call_access_request(
+            call_key, call_key, access, register_space, load_keys, shape)
+        return tuple(dict.fromkeys(reads)), pointer, offset
 
     def load(access):
+        step()
         if access in loaded:
             return loaded[access]
-        if access.pointer is not None:
+        transition = transitions.get(call_key)
+        if access in protected_loads and transition is not None and transition.displacement_delta < 0:
+            # CALL's transient push is removed from persistent SSA. Reading
+            # entry memory for an index/base must not silently read the old
+            # bytes underneath it, including via an indirect RCX=RSP-8 alias.
+            reads, pointer, offset = base(access)
+            sp = ValidatedVarnode(VarnodeKindCode.REGISTER,
+                                 AddressCoordinate(register_space, transition.caller_base.byte_offset),
+                                 transition.caller_base.byte_size)
+            sp_storage = _resolve_validated_storage(_storage_ref(sp), context)
+            assert type(sp_storage) is ResolvedStorage
+            key, target = f"{call_key}~ld{len(loaded)}", temporary()
+            assert planned.get(access, key) == key
+            rows.append(ObservedEffect(key, EffectKind.COPY,
+                                       reads=tuple(dict.fromkeys((*reads, sp_storage))),
+                                       writes=(target,), memory_read=UnresolvedMemoryAccess(None, access.size),
+                                       block_key=block_key))
+            anchored[key] = (key, pointer, offset, access.size, access.space_id,
+                             (sp, transition.displacement_delta))
+            loaded[access], load_keys[access] = target, key
+            return target
+        if access.pointer is not None or access.index is not None:
             reads, pointer, offset = base(access)
             key = f"{call_key}~ld{len(loaded)}"
             assert planned.get(access, key) == key, (key, planned.get(access))
@@ -1119,6 +1221,20 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
         loaded[access] = target
         return target
 
+    # Every entry load, including index/condition inputs, is evaluated once
+    # before any output. The shared planner fixes keys and recursive order.
+    for access in planned:
+        step()
+        load(access)
+
+    def condition_inputs(conditions):
+        reads = []
+        for pair in conditions:
+            for side in pair:
+                if side.anchor is not None or side.pointer is not None or side.index is not None:
+                    reads.extend(base(side)[0])
+        return tuple(dict.fromkeys(reads))
+
     if proven.extent_registers:
         # reads the registers whose constant value would make a model's
         # variable-size effect exact (``interprocedural``)
@@ -1146,13 +1262,11 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
                 value_inputs[f"{call_key}~in{index}"] = len(inputs)
             if run.write.anchor is not None or run.write.pointer is not None:
                 inputs.extend(base(run.write)[0])
-        anchors = sorted({
-            side.anchor for pair in run.conditions for side in pair if side.anchor is not None
-        }, key=lambda span: span.canonical_key)
-        if anchors:  # locates both sides of each alias condition at the call (``interprocedural``)
+        anchors = condition_inputs(run.conditions)
+        if anchors:  # locates all inputs of both sides in the same pre-call state
             rows.append(ObservedEffect(
                 f"{call_key}~cr{index}", EffectKind.COPY,
-                reads=tuple(ResolvedStorage(span) for span in anchors), writes=(temporary(),),
+                reads=anchors, writes=(temporary(),),
                 block_key=block_key,
             ))
         stage_key = f"{call_key}~in{index}"
@@ -1173,13 +1287,11 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             stage_key, EffectKind.COPY, reads=tuple(base(access)[0]), writes=(target,), block_key=block_key,
         ))
         unknown_staged.append((access, stage_key, target))
-    anchors = sorted({
-        side.anchor for pair in proven.writer_conditions for side in pair if side.anchor is not None
-    }, key=lambda span: span.canonical_key)
+    anchors = condition_inputs(proven.writer_conditions)
     if anchors:  # locates both sides of each writer condition at the call (``interprocedural``)
         rows.append(ObservedEffect(
             f"{call_key}~cw", EffectKind.COPY,
-            reads=tuple(ResolvedStorage(span) for span in anchors), writes=(temporary(),),
+            reads=anchors, writes=(temporary(),),
             block_key=block_key,
         ))
     for index, demand in enumerate(proven.sink_demands):
@@ -1188,15 +1300,13 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             f"{call_key}~sink{index}", EffectKind.COPY, reads=tuple(inputs), writes=(temporary(),),
             block_key=block_key,
         ))
-        anchors = sorted({
-            side.anchor for pair in demand.conditions for side in pair if side.anchor is not None
-        }, key=lambda span: span.canonical_key)
+        anchors = condition_inputs(demand.conditions)
         if anchors:
             # reads the anchor registers at the call, so the caller can locate
             # both sides of each alias condition (``interprocedural``)
             rows.append(ObservedEffect(
                 f"{call_key}~ck{index}", EffectKind.COPY,
-                reads=tuple(ResolvedStorage(span) for span in anchors), writes=(temporary(),),
+                reads=anchors, writes=(temporary(),),
                 block_key=block_key,
             ))
     accessor = None
@@ -1222,6 +1332,11 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     for index, (kind, run, stage_key, target) in enumerate(staged):
         key = f"{call_key}~{index}"
         value = getattr(run, "value", None)
+        literal = getattr(run, "literal", None)
+        if pointer_rows is not None and literal is not None and not run.conditions and not proven.writer_conditions:
+            widths = tuple(span.size for span in run.writes) if kind == "register" else (run.write.size,)
+            if len(widths) == 1 and widths[0] == literal.byte_size:
+                pointer_rows[key] = ("const", literal.byte_size, literal.unsigned)
         if pointer_rows is not None and value is not None:
             # the pointer value the callee's summary states (``relative_memory``)
             if value[0] == "nonstack":
@@ -1591,7 +1706,7 @@ class _ScopedNormalizer:
                         rows, anchored = _proven_call_rows(
                             operation_key, proven_call_effects[operation_key], block_key,
                             function.scope, _register_space_id(observation) or _program_register_space(unit),
-                            call_transitions, staged_temporaries,
+                            call_transitions, staged_temporaries, context,
                             _call_stack_span(operation_key, proven_call_effects[operation_key],
                                              call_transitions, observation, context),
                             pointer_rows, value_inputs, accessor_states.get(operation_key, (None,))[0],

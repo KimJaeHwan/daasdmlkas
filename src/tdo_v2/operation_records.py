@@ -138,10 +138,11 @@ class _Binding:
     + displacement, outside the return-address overlay [0, push)) from the
     caller's ``~ld<j>`` row loading it (docs 25.32, increment 2)."""
 
-    def __init__(self, caller, reads, stack, delta=0, anchors=None, loads=None, call=None, effect=None):
+    def __init__(self, caller, reads, stack, delta=0, anchors=None, loads=None, call=None, effect=None, relations=None):
         self.caller, self.reads, self.stack = caller, reads, stack
         self.delta, self.anchors, self.loads = delta, anchors or {}, loads or {}
         self.call, self.effect = call, effect
+        self.relations = relations or {}
         self._pointer = self._witness = None   # (computed once; False: none)
         self._levels: dict = {}
 
@@ -205,7 +206,8 @@ class _Binding:
                 if found is not None:
                     return found
         for load, key in self.loads.items():   # a direct stack-pointer load: B = s - d
-            if load.pointer is None and load.anchor is not None and (load.anchor.start, load.anchor.size) == self.stack:
+            if load.index is None and load.pointer is None and load.anchor is not None \
+                    and (load.anchor.start, load.anchor.size) == self.stack:
                 node = caller.graph.node_for_key(f"op:{key}")
                 if node is None or _row_reaches_debt(caller.graph, node):
                     continue
@@ -293,7 +295,8 @@ class _Binding:
         from .normalize import _row_reaches_debt
 
         push = -self.delta
-        if load.pointer is None and load.anchor is not None and (load.anchor.start, load.anchor.size) == self.stack:
+        if load.index is None and load.pointer is None and load.anchor is not None \
+                and (load.anchor.start, load.anchor.size) == self.stack:
             # a direct slot: the overlay is [0, push) in callee entry-SP coordinates
             if load.displacement < push and 0 < load.displacement + load.size:
                 return "return address", None
@@ -350,12 +353,12 @@ class _Binding:
         "memory: overlay unproven") -- cut only if an import uses it."""
         from .call_summary_effects import anchored_span
 
-        place = anchored_span(span, self.anchors)
+        place = anchored_span(span, self.anchors, relations=self.relations)
         classes: list = []
         labels: set = set()   # (assumptions a binding rests on)
         if place is None:
             classes = ["unbound memory"] * span.size
-        elif place.pointer is not None or place.anchor is None \
+        elif place.index is not None or place.pointer is not None or place.anchor is None \
                 or (place.anchor.start, place.anchor.size) != self.stack:
             # (increment 3) every pointer slot, then the target: a debt-free
             # caller load outside the overlay
@@ -375,7 +378,7 @@ class _Binding:
             else:
                 for index in range(span.size):
                     displacement = place.displacement + index
-                    load = next((item for item in self.loads if item.pointer == place.pointer
+                    load = next((item for item in self.loads if item.pointer == place.pointer and item.index == place.index
                                  and item.anchor == place.anchor and item.space_id == place.space_id
                                  and item.displacement <= displacement < item.displacement + item.size), None)
                     if load is None:
@@ -1250,7 +1253,7 @@ class _Builder:
                               binding=_Binding(self, self._staged_reads(f"{base}~in{tag}"), self._stack_base(base),
                                                self._stack_base(base, delta=True), done.anchors,
                                                call_load_keys(base, self.proven[base]), call=base,
-                                               effect=self.proven[base]),
+                                               effect=self.proven[base], relations=dict(done.summary.address_relations)),
                               path=path, index=self.stitch.index(done.normalized, done.unit))
             if hasattr(run, "writes"):   # (a register run)
                 outputs = [{"output": _span_dict(span),
@@ -1371,21 +1374,21 @@ class _Builder:
 
         def same_base(place):
             return place is not None and place.anchor == write.anchor and place.pointer == write.pointer \
-                and place.space_id == write.space_id
+                and place.space_id == write.space_id and place.index == write.index
 
         objects: dict = {}   # X -> offset of W's first byte in X
         for exit_summary in summary.exits:
             for item in exit_summary.runs:
                 if item.span.object_id.kind not in _MEMORY_OBJECTS:
                     continue
-                place = anchored_span(item.span, anchors)
+                place = anchored_span(item.span, anchors, relations=dict(summary.address_relations))
                 if same_base(place) and place.displacement < write.displacement + size \
                         and write.displacement < place.displacement + place.size:
                     objects[item.span.object_id] = item.span.start - place.displacement + write.displacement
         if len(objects) != 1:
             raise _StitchCut("ambiguous object" if objects else "run not exact")
         (target, start), = objects.items()
-        if write.pointer is None and write.anchor is not None \
+        if write.index is None and write.pointer is None and write.anchor is not None \
                 and (write.anchor.start, write.anchor.size) == self.binding.stack \
                 and write.displacement < -self.binding.delta:
             # (below the callee's entry SP, or crossing into the pushed slot)
@@ -1561,6 +1564,11 @@ def _output_run(effect, tag):
 
 def _anchored_text(place) -> str:
     """An ``AnchoredSpan`` (a caller-located callee address) as text."""
+    if place.index is not None:
+        index = place.index
+        source = _span_text(index.register) if index.register is not None else f"[{_anchored_text(index.memory)}]"
+        base = f"[{_anchored_text(place.pointer)}]" if place.pointer is not None else _span_text(place.anchor)
+        return f"{base}+{index.scale}*{index.extend}({source}+{index.preoffset:#x}){place.displacement:+#x}+{place.size}"
     if place.pointer is not None:
         return f"[{_anchored_text(place.pointer)}]{place.displacement:+#x}+{place.size}"
     if place.anchor is not None:

@@ -3,14 +3,30 @@ complete callee effect reads are what it observes; an output read from the
 stack pointer, or an effect not exported whole, makes the call a stack
 escape (``ProvenCallEffect.escapes_stack``)."""
 
+import pytest
+
+from program_oracle import check_program
 from synthetic import (
-    CODE_BASE, DATA_BASE, R8, R9, RAX, RBX, RCX, RDI, RDX, RSI, RSP, FunctionBuilder, add, const, copy, load, op,
+    CODE_BASE, DATA_BASE, R8, R9, RAX, RBX, RCX, RDI, RDX, REG, RSI, RSP, FunctionBuilder, add, const, copy, load, op,
     program_units, ram, reg, slice_from, store, tmp,
 )
 from test_index_addresses import _load_node
 from tdo_v2.interprocedural import analyze_units
 
 LEAF = CODE_BASE + 0x800
+
+
+@pytest.fixture(params=("sparse", "dense"))
+def engines(request, monkeypatch):
+    monkeypatch.setenv("TDO_V2_DATAFLOW_ENGINE", request.param)
+    monkeypatch.setenv("TDO_V2_MEMORY_SSA_ENGINE", request.param)
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+
+
+def _indexed_leaf(output=RAX):
+    t = tmp(0x300)
+    return (FunctionBuilder(entry=LEAF)
+            .ins(op("INT_MULT", [reg(RDX), const(8)], t), add(t, t, reg(RCX)), load(reg(output), t)).ret())
 
 
 def _caller(setup=()):
@@ -88,16 +104,60 @@ def test_a_partial_stack_pointer_read_is_an_escape():
     assert effect.escapes_stack and not _private(found)
 
 
-def test_an_effect_not_exported_whole_is_an_escape_with_every_register_observed():
-    """rax = [rcx + rdx*8]: an index address (wild), so rax is unknown -- its
-    value may be anything, a frame address included."""
+def test_an_effect_not_exported_whole_is_an_escape_with_every_register_observed(engines):
+    """A nonlinear XOR address remains unexportable, unlike typed indexing:
+    the unknown result can contain a frame address."""
     t = tmp(0x300)
     leaf = (FunctionBuilder(entry=LEAF)
-            .ins(op("INT_MULT", [reg(RDX), const(8)], t), add(t, t, reg(RCX)), load(reg(RAX), t)).ret())
+            .ins(op("INT_XOR", [reg(RCX), reg(RDX)], t), load(reg(RAX), t)).ret())
     effect, found = _run(leaf)
     assert effect.preserves_memory and effect.observed_registers is None and effect.observes_registers
     assert effect.escapes_stack
     assert not _private(found)
+
+
+def test_a_complete_indexed_load_without_frame_inputs_observes_only_base_and_index(engines):
+    effect, found = _run(_indexed_leaf())
+    assert effect.preserves_memory and effect.observes_registers and not effect.escapes_stack
+    assert {(span.start, span.size) for span in effect.observed_registers} == {(RCX, 8), (RDX, 8)}
+    assert _private(found)
+
+
+@pytest.mark.parametrize("frame_input", (RCX, RDX))
+def test_a_frame_address_in_either_indexed_load_input_stops_private_frame_separation(engines, frame_input):
+    effect, found = _run(_indexed_leaf(), ((add(reg(frame_input), reg(RSP), const(0x10)),),))
+    assert not effect.escapes_stack
+    assert {(span.start, span.size) for span in effect.observed_registers} == {(RCX, 8), (RDX, 8)}
+    assert not _private(found)
+
+
+def test_an_indexed_loaded_pointer_returned_in_rdi_cannot_hide_a_published_current_frame_address(engines):
+    """Publish this frame explicitly; entry memory alone cannot contain it
+    under entry-values-do-not-address-the-new-frame. The callee returns it
+    in RDI and the caller writes through it, after clearing its temporary."""
+    address, pointer = tmp(0x100), tmp(0x200)
+    caller = (FunctionBuilder().sub_rsp(0x80)
+              .ins(add(pointer, reg(RSP), const(0x10)), store(pointer, reg(RBX)))
+              .ins(op("INT_MULT", [reg(RDX), const(8)], address), add(address, address, reg(RCX)),
+                   store(address, pointer), copy(pointer, const(0)))
+              .call(LEAF).ins(store(reg(RDI), reg(RSI))))
+    reload = len(caller._rows)
+    caller.ins(add(pointer, reg(RSP), const(0x10)), load(reg(R9), pointer)).add_rsp(0x80).ret()
+    units = program_units(caller, _indexed_leaf(RDI))
+    analyzed = analyze_units(units)["1:1000"]
+    (effect,) = analyzed.proven.values()
+    assert not effect.escapes_stack
+    assert {(span.start, span.size) for span in effect.observed_registers} == {(RCX, 8), (RDX, 8)}
+    found = slice_from(analyzed.normalized, _load_node(analyzed.normalized, reload))
+    assert not found.is_complete or set(range(RSI, RSI + 8)) <= found.register_bytes
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
+    report = check_program(analyzed.normalized, analyzed.unit.observation, program, seeds=range(8),
+                           register_pools=lambda seed: {RSP: 0x70000000, RCX: 0x72000000,
+                                                         RDX: seed & 3, RBX: 0x12340000 + seed,
+                                                         RSI: 0x56780000 + seed},
+                           havoc_calls=(REG, RSP, 8))
+    assert report.runs == 8 and report.checked and report.through_calls
+    assert not report.silent and not report.unsupported and not report.place_failed
 
 
 def test_a_callee_with_an_inner_call_is_an_escape():

@@ -48,6 +48,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from ._sparse_dataflow import DominatorGraph
+from .constant_value import ExactConstant
 from .graph_contracts import NodeKind
 from .label_sets import LabelUniverse
 from .memory_contracts import MemoryDefinitionKind
@@ -91,6 +92,8 @@ class SummaryRun:
     # value the entry bytes held (a copy, or, with null_is_fresh, a realloc
     # of it: a null entry value then means a new block); None: unknown
     value: tuple | None = None
+    # Exact scalar bits at this run's full width, not pointer provenance.
+    literal: ExactConstant | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +155,8 @@ class FunctionSummary:
     # than in the stack pointer: in another register at a RETURN, or by an
     # escape inside (``may_alias.stack_values_out``); True when not known
     stack_values_out: bool = True
+    # Bounded original-entry base/index address relations for relative objects.
+    address_relations: tuple = ()
 
 
 @measured("summarize")
@@ -172,6 +177,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     that edge is no tail exit; the fall-through path stays."""
     from .call_clobber import _preserved_stack_pointers
     from .may_alias import stack_values_out
+    from .relative_memory import indexed_relations
 
     context = normalized.scopes.resolution_context
 
@@ -232,6 +238,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         key=lambda row: (row[0], row[1].kind.value, row[1].space_key),
     )
     exits = _pointer_values(normalized, observation, exits, tracer)
+    exits = _constant_values(normalized, observation, exits)
     # unknown-address writers (conditional ones are ordinary writes, above)
     # leave every root incomplete
     unconditional_writers = bool(crossed.get("unknown_writers", ()))
@@ -278,6 +285,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         tuple(sorted(dead_exits)),
         tuple(sorted(writer_conditions, key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))),
         stack_values_out(normalized, observation),
+        indexed_relations(normalized, observation, conditions_of),
     )
 
 
@@ -742,17 +750,31 @@ def _uncertain_address_writers(normalized, observation, context, operation_of, c
         check(key, inputs)
     for key in sorted(memory_writers & set(anchors)):
         evaluation, anchor = anchors[key]
-        if type(anchor) is tuple:
-            node = node_of.get(anchor[1])
-            inputs = [node] if node is not None else None
-        else:
+        def operand_at(evaluation, varnode):
             node = node_of.get(evaluation)
-            inputs = None if node is None else operand_inputs(node, anchor)
+            return None if node is None else operand_inputs(node, varnode)
+
+        inputs = _anchor_inputs(evaluation, anchor, operand_at, node_of.get)
         if inputs is None:
             add(key, None)
             continue
         check(key, inputs)
     return found
+
+
+def _anchor_inputs(evaluation, reference, operand_inputs, node_of):
+    """Address dependencies at one snapshot; a tuple is not always a load."""
+    step()
+    if type(reference) is not tuple:
+        return operand_inputs(evaluation, reference)
+    if len(reference) == 2 and reference[0] == "mem":
+        node = node_of(reference[1])
+        return None if node is None else [node]
+    if len(reference) == 7 and reference[0] == "indexed":
+        base = _anchor_inputs(evaluation, reference[1], operand_inputs, node_of)
+        index = _anchor_inputs(evaluation, reference[2], operand_inputs, node_of)
+        return None if base is None or index is None else list(dict.fromkeys((*base, *index)))
+    return None
 
 
 class _CopyTracer:
@@ -978,6 +1000,45 @@ def _pointer_size(normalized) -> int | None:
         and classify_address_space_v2(row) is AddressSpaceClassV2.ADDRESS
     }
     return sizes.pop() if len(sizes) == 1 else None
+
+
+def _constant_values(normalized, observation, exits) -> list:
+    """Attach only finished-SSA, full-run, unanimously proven scalar values.
+
+    Conditional alias claims keep their conditions; hard debt and crossings
+    never become a literal. The projector admits only image-independent bits.
+    """
+    from . import relative_memory
+
+    project = getattr(relative_memory, "definition_constants", None)
+    if project is None:
+        return exits
+    requests = {
+        (definition, run.span)
+        for item in exits for run in item.runs
+        if run.kind is SummaryKind.COMPUTED and not run.debts and not run.crossed
+        and 1 <= run.span.size <= 16
+        for definition in run.definitions
+    }
+    if not requests:
+        return exits
+    values = project(normalized, observation, requests)
+    if values is None:
+        return exits
+    result = []
+    for item in exits:
+        runs = []
+        for run in item.runs:
+            literal = None
+            if run.kind is SummaryKind.COMPUTED and not run.debts and not run.crossed and run.definitions:
+                found = tuple(values.get((definition, run.span)) for definition in run.definitions)
+                first = found[0]
+                if type(first) is ExactConstant and first.byte_size == run.span.size \
+                        and all(type(value) is ExactConstant and value == first for value in found):
+                    literal = first
+            runs.append(replace(run, literal=literal) if literal is not None else run)
+        result.append(ExitSummary(item.block_key, tuple(runs)))
+    return result
 
 
 def _pointer_values(normalized, observation, exits, tracer) -> list:
