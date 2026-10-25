@@ -229,6 +229,8 @@ def main(argv=None) -> int:
                         help="whole-program stack-switch evidence of the library (and others it runs with)")
     parser.add_argument("--private-frame-above", type=lambda text: int(text, 0), default=0x28,
                         help="as the program run that applies the templates (Win64 home space: 0x28; none: 0)")
+    parser.add_argument("--no-assume-entry-values-not-frame", dest="entry_values_not_frame", action="store_false",
+                        help="derive without the entry-value/frame assumption (also disables its home-space extension)")
     parser.add_argument("--no-traps", dest="traps", action="store_false",
                         help="derive without debug-break-traps-do-not-return")
     parser.add_argument("--assume-same-result-functions", dest="same_result", action="store_true",
@@ -240,7 +242,7 @@ def main(argv=None) -> int:
         args.generation, args.library, args.export, file_id=args.id, version=args.version,
         model_dirs=args.model_dir, stack_evidence=args.stack_evidence,
         private_frame_above=args.private_frame_above, traps=args.traps, same_result=args.same_result,
-        accessor_separate=args.accessor_separate)
+        accessor_separate=args.accessor_separate, entry_values_not_frame=args.entry_values_not_frame)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(raw, indent=1) + chr(10), encoding="utf-8")
     print(f"wrote {len(raw['entries'])} templates to {args.output}")

@@ -100,7 +100,7 @@ def _projector(item):
     return projector, operations
 
 
-def _core_run(core, monkeypatch, enabled, *, tracking=False):
+def _core_run(core, monkeypatch, enabled, *, tracking=False, frame=True):
     space = core["scope"].evidence.image_base.space_id
     relocates = image_provenance(lambda address, size: core["image"].value(space, address, size),
                                 [(offset, size) for sid, offset, size in core["info"].relocations if sid == space])
@@ -112,7 +112,8 @@ def _core_run(core, monkeypatch, enabled, *, tracking=False):
         with context:
             results = analyze_units(
                 list(core["units"].values()), image_info=core["info"], external_models=core["models"],
-                pcodeop_models=run_dfbench.pcodeop_models(), private_frame_above=40,
+                pcodeop_models=run_dfbench.pcodeop_models(), private_frame_above=40 if frame else 0,
+                assume_entry_values_not_frame=frame,
                 assume_globals_disjoint_from_stack=True, assume_debug_break_traps_do_not_return=True,
                 own_library="UNREALEDITOR-CORE.DLL", keep_uncut=frozenset((APPEND, CONSTRUCTOR, DESTRUCTOR)))
             item = results[APPEND]

@@ -34,7 +34,9 @@ DIGESTS = {
 @pytest.fixture(scope="module")
 def original_constructor(core):
     assert core["units"][CONSTRUCTOR].scopes.function.observation_digest.hex() == DIGESTS[CONSTRUCTOR]
-    result = _core_run(core, pytest.MonkeyPatch(), True, tracking=True)
+    # Match the independently rederived shipped model's OFF policy; keep
+    # equality with its real summary, including the return-slot conditions.
+    result = _core_run(core, pytest.MonkeyPatch(), True, tracking=True, frame=False)
     return result["results"][CONSTRUCTOR], result["results"]
 
 

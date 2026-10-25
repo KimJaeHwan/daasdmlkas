@@ -2827,3 +2827,96 @@ stack evidence 호환 판도 함께 검토해야 한다. 이 단계로 CALLOTHER
 있는지 별도 후보로 유지한다. 알려진 callee의 검사는 이미 있고, body 없는 호출은 caller가 frame 포인터를 전달하지 않았다는
 이유만으로 안전하다고 판정할 수 없다. `globals-disjoint-from-stack`의 전역 해제와 모델·실행 환경 계약 전체 제거도 이번 계획의
 완료선이 아니다. accessor 가정 셋은 기본 OFF를 유지한다. 이 절은 다음 작업의 우선순위 합의이지 구현/검증 완료 기록이 아니다.
+
+### 25.65 entry/frame 가정 OFF의 실제 검증과 Core 모델 독립 재도출 (2026-10-25)
+
+§25.63–25.64는 `1ec1782`로 커밋/푸시했다. 1순위의 착수 관문에 따라 같은 원 044/UE Bundle·closure·모델·정방향 설정에서
+`entry-values-do-not-address-the-new-frame` ON/OFF를 비교했다. SSA 번호가 아니라 원 STORE–LOAD–byte pair와 전체
+`Fact.requires`/모델 상속 가정/`run_assumptions`를 대조했다. 별도 분석기·추가 OFF 재분석 선택 pass·새 가정·케이스 특례는 없다.
+
+#### 비교 결과와 선택한 범위
+
+| 원본/대상 | 가정 ON/OFF 비교 및 이번 범위 |
+|---|---|
+| DFB044 최종 sink | 양쪽 모두 A+C, unresolved read 0, effective complete. 기존 N0→N1 비겹침과 N1→N2 동일 저장값 SSA가 이미 OFF에서 독립적으로 성립한다. 새 가정 해제 기능으로 세지 않는다. |
+| 044 epilogue 두 LOAD | 양쪽 모두 무관한 배열 STORE가 plain alias로 남았으나 OFF에서도 같은 entry-SP와 유한 범위의 전체 byte 비겹침이 증명된다. selector 저장 폭의 구문 차이 때문에 기존 증명이 적용되지 않던 공통 결함을 수정한다. |
+| UE R002 | 같은 A+B/부채 10. 새 ON/OFF 차이 pair나 전체 해결을 주장하지 않는다. |
+| Core ctor 2쌍/helper 1쌍 | OFF에서 RCX-entry 대 SP-entry, SP-entry 대 R8-entry는 서로 독립 base라 원 alias를 유지한다. 이 차이는 비겹침 근거가 아니다. |
+| UE R005의 기존 ON 모델 | OFF에서 기존 6개 Core 호출이 frame/home 의존 때문에 거부된다. 부채 15→7은 모델 소실의 결과이지 개선이 아니다. 실제 OFF 재도출 모델로 대체해 정상 효과를 보존하는 것이 진짜 축소 대상이다. |
+
+#### 같은 공간 selector의 표현 폭만 바로잡는다
+
+원 `1b1:104c35:4:STORE`는 selector 상수가 4byte, `104c4a:1:LOAD`/`104c4b:0:LOAD`는 8byte지만 모두 메모리 공간
+ID `0x1b1`/주소폭 64bit다. `_forward_memory`가 selector varnode 전체를 비교하던 것을 **양쪽 원 CONSTANT이며 같은
+admitted memory-space ID**인지 비교하도록 바꾼다. 주소 operand(input1)의 full64bit·실제 access 폭·원 resolved read/plain
+write·동일 entry base·모든 modulo byte 비겹침·override/effect/정책/원근거 재검증은 유지한다.
+
+배열 쓰기는 `S+{-40,-36,-32,-28}`의 각 4byte, 두 읽기는 `S-8`/`S+0`의 각 8byte다. 원 saved-RBP STORE
+`104bf6:2:STORE`→정의→`104c4a:1:LOAD`와 entry-return bytes→`104c4b:0:LOAD`가 그대로 남으며 무관한 writer만 제외한다.
+proof 1→3, alias row 4→2, index LOAD identity 2개와 최종 sink 결과는 그대로다. 이는 ON/OFF 공통 적용 누락 보정이며
+가정을 새로 해제했다고 과장하지 않는다. 실제 배열/return-slot 겹침·부분 byte 겹침·다른 공간/비상수 selector·좁은 주소 operand는
+별도 음성으로 유지한다. raw 8개 입력의 두 epilogue 16byte writer도 기존 인터프리터로 대조한다.
+
+#### Core 모델은 원 코드의 OFF 분석으로 통째로 다시 만든다
+
+기존 `derive_library(entry_values_not_frame=False)`를 재사용한다. CLI에는 기존 API 인자를 전달하는
+`--no-assume-entry-values-not-frame`만 노출했다(기본 ON 유지). 이때 home 확장도 0이다. 원 Core DLL SHA256
+`fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942`와 기존 봉인 Bundle/스택 자료를 사용해
+**6개 함수 + 5개 model cut의 전체 OFF run에서 세 export를 한 파일로 직접 도출**한다. per-export 파일을 섞거나 ON 결과의
+가정 라벨을 수동 삭제하지 않는다. ImageBaseTracking은 유지하고 readonly folding은 OFF로 두며, 기존 모델/콜백/스택 검사 계약도 유지한다.
+
+엔진 의미 **18**, template **3**, 배포 model file **17**이다. forward off/on의 재도출 및 설치 모델 SHA256은 모두
+`685950d5ba9ac38d94d5c2e94fc9b64242d5ec8d50e5d5fdcbb63159fdf41184`다. 세 export 수출 성공, refusal/missing 0이다.
+source 가정은 **13→11**로, frame/home 두 의존만 없어졌으며 나머지는 유지한다. 다른 모델 계약이나 전역 스택 주소를 증명한 것이 아니다.
+
+생성자 payload에는 원 반환주소 LOAD가 쓴 RIP run에 조건 두 개가 추가된다. callee entry-SP `[0,8)`과 RCX `[0,8)`/
+`[8,16)`의 비겹침이다. 나머지 ctor 필드와 dtor/Append payload는 이전 ON 도출과 같다. 원 alias를 제거한 것이 아니라 기존
+strict template→call effect→caller 조건 판정에 운반한다. 실제 R005 두 ctor 호출의 `cr4`는 모두 `('ok','ok')`이며,
+반환주소와 겹치거나 비교 불가능한 caller는 확정 통과시키지 않는 음성도 확인한다.
+
+기존 `summary == export_summary` 검사는 약화하지 않았다. 원 constructor fixture를 배포 모델과 같은 실제 OFF 정책으로
+분석하도록 맞춰 추가 반환주소 조건까지 동일하게 검사한다. 원 ON/독립 base 음성도 별도 유지한다.
+
+#### 실제 caller의 값과 남는 한계
+
+원 ctor의 두 zero STORE→현재 모델 literal→R005의 두 ctor 호출→원 SSA 네 정의 **총 32byte**를 확인한다.
+4byte 부분값도 정확히 0이며 기존 probe가 첫 Append 직전 원 네 정의 ID를 재검증한다. 부분값은 실제 정의의 subspan 추출이지
+그 시점에 별도 원 Num/Max LOAD가 있다는 주장이 아니다. 원 최종 header/character LOAD는 이후 두 Append의 clobber/debt를 유지한다.
+
+현재 모델로 실제 Trace ON/OFF 모두 6개 Core 호출을 승인하고 R005 proven 10/부채 15/incomplete, R002 A+B/부채 10을 유지한다.
+OFF에서는 모델/forward fact/전체 run에 frame/home 의존이 없고, ON에서 Trace 자체가 쓴 의존은 그대로 보고한다.
+따라서 **Core 파생 모델의 두 가정 의존 축소**는 성과지만 R005 전체 해결·할당 extent/lifetime·전역 stack/global 분리 해제가 아니다.
+
+runtime `TDO_V2_FORWARD=0` + frame OFF에서도 같은 6개 호출·부채·32byte 값·두 반환조건의 실제 `ok` 판정을 유지한다.
+이 모드의 `forward_inputs=None`/probe 비활성은 원 계약이다. 입력을 위조하지 않고 기존 `definition_constants`와 원 첫 Append의
+`~ld0` Num4 SSA fragment가 생성자 8byte 정의에서 0을 읽는지 확인한다. runtime forward ON에서는 기존 probe를 사용한다.
+
+중간 ctor-only 대체 실험은 R005 proven 4→6/부채 7→2였으나 나머지 네 모델 호출이 여전히 거부된 결과이므로 최종 수치로 쓰지 않는다.
+최종 권위는 whole-pack OFF 설치본이다. 산출물은 `output/frame-independent-20261025.WJ992p/model-frame-off-{0,1}.{json,log}`이다.
+
+#### 최종 회귀와 승인
+
+Astra는 대상 선정·selector 구현·whole-pack OFF 재도출과 실제 반환조건 음성까지 단계별 독립 검수·승인했다.
+
+| 권위 동결 실행 | 결과 | 시간 |
+|---|---|---|
+| `release-default` (`TDO_V2_FORWARD=0`) 전체 | **2823 passed / 32 skipped / failures 0 / errors 0** | 503.30초 |
+| `release-forward-on` (`TDO_V2_FORWARD=1`) 전체 | **2823 passed / 32 skipped / failures 0 / errors 0** | 516.26초 |
+| `release-dense` 인접 회귀 | **708 passed / 0 skipped / failures 0 / errors 0** | 89.52초 |
+
+전체는 각 2855항목이다. 32 skip은 Linux worker 9·Linux supervision 14·미보유 Bundle 9개로 성공 수에 넣지 않는다.
+신규 **103개**(selector 60·CLI 3·shipped ctor 조건 10·원 044 20·원 UE 10)는 세 권위 실행 모두 skip/failure/error 0이다.
+전체 기본/forward-on은 정방향 스위치 설정이며, frame ON/OFF의 실제 비교는 해당 새 회귀에서 명시적으로 검사한다.
+이를 Suite09 전체 80개나 모든 아키텍처·모든 가정 조합의 완전성으로 환산하지 않는다.
+
+권위 로그/XML은 `output/frame-independent-20261025.WJ992p/release-{default,forward-on,dense}.{log,junit.xml}`,
+집계/skip 사유는 `release-xml-audit.log`다. 이번에는 변경한 도출 CLI도 포함하여 src/tests `.py`·models `.json`·
+`tools/derive_models/*.py` 266파일을 경로+NUL+각 파일 SHA256으로 동결했다. `freeze-release-{start,middle,end}.log` 모두
+`4dba5b26f95b9f23b12b26e52dea37890838c83b0b0b8a3042205136066d77a6`로 같으며 문서는 범위 밖이다.
+동결 직전 현재 CLI로 다시 만든 `model-final-{0,1}.json`도 설치 모델과 같은 SHA256 `685950d5ba9ac38d94d5c2e94fc9b64242d5ec8d50e5d5fdcbb63159fdf41184`다.
+초기 ON 모델/ctor-only 실험·중간 표적 통과를 이 최종 동결본의 대체 근거로 세지 않는다.
+
+최종 XML 세 개·신규 103개 실제 통과·현재 266파일 직접 재해시·설치/재도출 모델 SHA·3개 export와 source 11가정·실제 사례·
+최종 문서를 Astra가 독립 대조했다. **합의한 이번 목표 달성과 이 상태에서의 마무리를 명시적으로 최종 승인**했으며
+필수 잔여 차단 사항은 발견하지 못했다. 승인은 동일 공간 selector 적용 보정과 Core 모델의 frame/home 의존 축소·조건 보존
+범위다. R005 전체 해결·전역 entry/frame 가정 해제·할당 수명 해결은 포함하지 않으며, 위 한계를 완료로 세지 않는다.

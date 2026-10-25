@@ -153,8 +153,12 @@ def prepare_memory_refinement(result, options, *, assumptions=()):
         for writer in row.plain:
             step()
             store, write_fact = original.get(writer), facts.get(writer)
+            # A selector is the memory-space ID, not an address operand.
+            # Ghidra can encode the same ID with different constant widths.
             if store is None or store.opcode != "STORE" or writer in overrides or write_fact is None \
-                    or store.inputs[0] != load.inputs[0] or write_fact.function != read_fact.function \
+                    or store.inputs[0].kind is not VarnodeKindCode.CONSTANT \
+                    or store.inputs[0].coordinate.byte_offset != space.space_id \
+                    or write_fact.function != read_fact.function \
                     or write_fact.function != result.key or store.inputs[1].byte_size * 8 != write_fact.claim.bits:
                 continue
             effect = effects.get(writer)

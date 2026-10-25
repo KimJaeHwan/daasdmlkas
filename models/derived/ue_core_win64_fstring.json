@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 16,
+ "version": 17,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -21,10 +21,10 @@
   "engine": {
    "summary_version": 1,
    "template_version": 3,
-   "semantics_version": 17
+   "semantics_version": 18
   },
   "parameters": {
-   "private_frame_above": 40
+   "private_frame_above": 0
   },
   "models": [
    {
@@ -40,8 +40,6 @@
   "assumptions": [
    "globals-disjoint-from-stack",
    "stack-switch-check-exceptions",
-   "entry-values-do-not-address-the-new-frame",
-   "win64-home-space-callee-private",
    "debug-break-traps-do-not-return",
    "external-model:ue-core-win64/FDebug::CheckVerifyFailedImpl@v4",
    "external-model:ue-core-win64/FMemory::Free@v4",
@@ -54,7 +52,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "b23469e234cc8f44458df963735b5a5d62317f45+dirty",
+   "engine_revision": "1ec1782b25a804ce73f6f87300725fefb7b38c60+dirty",
    "bundle": "a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068",
    "index_addresses": true,
    "stack_evidence": [
@@ -364,7 +362,32 @@
         ],
         "debts": [],
         "crossed": [],
-        "conditions": [],
+        "conditions": [
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 0,
+           "start": 18446744073709551616,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 1,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 0,
+           "start": 18446744073709551624,
+           "size": 8
+          }
+         ]
+        ],
         "value": [
          "same",
          {

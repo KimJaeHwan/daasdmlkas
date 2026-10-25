@@ -80,7 +80,9 @@ TEMPLATE_VERSION = 3   # 2: stack_values_out; 3: exact scalar literals and entry
 # through summaries, call effects and strict portable templates.
 # 17: fresh/nonstack pointer origin no longer grants object-wide nonalias;
 # only explicit byte windows covering every normalized access can exclude.
-ENGINE_SEMANTICS_VERSION = 17
+# 18: compare raw memory selectors by admitted space ID, independently of
+# their constant encoding width, while keeping full address-byte proofs.
+ENGINE_SEMANTICS_VERSION = 18
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
