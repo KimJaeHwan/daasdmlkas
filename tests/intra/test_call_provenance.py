@@ -4,7 +4,7 @@ asked for, and never changing a result."""
 
 from test_open_conditions import HELPER, WRAPPER, _program
 
-from synthetic import program_units
+from synthetic import RBX, program_units
 from tdo_v2.call_summary_effects import _anchored_conditions
 from tdo_v2.interprocedural import CallProvenance, analyze_units
 from tdo_v2.operation_records import _call_provenance
@@ -64,7 +64,11 @@ def test_the_root_decides_it():
         caller = results["1:1000"]
         table = provenance["1:1000"]
         call = _call_of(caller, f"1:{WRAPPER:x}")
-        assert table.sources[call] == ("summary", results[f"1:{WRAPPER:x}"])
+        source = caller.activations.get(call, results[f"1:{WRAPPER:x}"])
+        assert table.sources[call] == ("summary", source)
+        if call in caller.activations:
+            assert source.normalized.activation_entry.context == (caller.key, call)
+            assert source.activation_witness[1] is results[f"1:{WRAPPER:x}"]
         if same:
             assert table.failed.get(call)
         else:
@@ -84,7 +88,16 @@ def test_the_root_decides_it():
             assert all(published.get(pair, "failed") == "failed" for pair in failing)
             assert any(reason == "failed" for _, _, reason in table.rejections.get(call, ()))
         else:
-            assert published and set(published.values()) == {expected}
+            if published:
+                assert set(published.values()) == {expected}
+            else:
+                # A caller-specific raw SSA can discharge the generic alias
+                # pair before lowering; absence of a conditional run is not
+                # publication of an unchecked generic condition as proven.
+                assert call in caller.activations
+                assert not effect.writer_conditions
+                assert any(any(span.start <= RBX < span.end for span in run.reads)
+                           for run in effect.runs)
 
 
 def test_no_table_unless_asked():

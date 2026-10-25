@@ -3032,6 +3032,9 @@ UE 전체 해결이나 v4 전체 이미지 재스캔까지 승인된 것이 아�
 
 ### 25.67 호출 문맥 한정 NULL-Realloc → 스택 8바이트 보존 (2026-10-25)
 
+이 절은 **40aef76의 한정 구현·검증 이력**이다. 현재 구조와 지원 범위는 아래 **25.68**을 따른다.
+특히 즉시 다음 8바이트 LOAD 제한 및 보존 성공과 문맥 생성의 결합은 현재 계약이 아니다.
+
 기본값과 기존 모델 계약은 유지한다. 기존 정방향 스위치가 켜진 실행에서만, caller의 완성된 원 SSA가 제공하는
 진입 레지스터 관계와 정확한 ENTRY 메모리 상수를 한 callee activation에 전달한다. 새 SSA solver·ABI 추측·전체 UAF
 부재 가정은 추가하지 않는다. 값은 ENTRY 정의에만 적용한다. 중간 STORE/JOIN/CALL과 alias/clobber/taint는 기존
@@ -3090,3 +3093,103 @@ Astra는 설계·ENTRY/정책 경계·caller 통합·frame 충돌을 단계별 �
 현재 파일 재해시·모델 JSON의 단일 provenance 차이·이 절의 제한을 독립 대조했다. **첫 `6053` activation에서 기존
 명시 모델 계약에 상대적인 `b87→b8d` S8 보존이라는 한정 목표 달성과 현재 상태의 마무리를 최종 승인**했으며,
 추가 필수 차단 사항은 없다. generic Realloc·전체 R002·strict raw allocator footprint·no-UAF 완료의 승인이 아니다.
+
+### 25.68 호출 문맥과 CALL 메모리 비변경 판정 분리 (2026-10-25)
+
+#### 큰 그림 및 직전 커밋 처리
+
+Astra와 재검토한 결과 40aef76의 입력 근거·관찰된 CALL 전이·원 SSA/그래프 소비 및 한정 비변경 증명은 유효하다.
+다만 상태 전달과 NULL 판정의 결합, 즉시 다음 단일 8바이트 LOAD라는 후보 선택은 범용 분석 구조가 아니다.
+전체 revert로 유효한 기반을 버리지 않고 **기존 결합 경로를 삭제·대체하는 전진 수정**을 선택한다. 별도 구버전 경로나
+Grow 주소/함수명 특례는 유지하지 않는다. 당시 승인·회귀 수치는 25.67의 범위에 한정된 이력이지 현재 구조 승인의 대용이 아니다.
+
+#### 계층별 책임
+
+| 계층 | 입력과 출력 | 하지 않는 일 |
+|---|---|---|
+| `_call_activation.replay_activation` | 원 caller SSA의 레지스터 관계·확인된 ENTRY 상수 → 해당 호출만의 기존 normalizer/SSA 결과·입력 witness | allocator 모델이나 보존 성공을 진입 상태 전달 조건으로 삼지 않음 |
+| `_call_memory.memory_demands` / `decide_call_memory` | 원 call-clobber 그래프의 `(reader, CALL, ByteSpan)` → `preserved` 또는 `unknown` 및 이유·모델 digest·의존 근거 | 읽기 전체 해결·객체 생존·전체 메모리 보존으로 승격하지 않음 |
+| `_call_memory.refine_call_memory` | 승인된 CALL별 byte 범위 → 기존 `effect.preserved`, normalizer·메모리 SSA·그래프 재계산 | 별도 그래프·직접 간선 패치·후행 writer 제거를 하지 않음 |
+| `interprocedural.one` | 기존 미해결 수요 선별 → 요약/anchor 변화가 있는 정확한 callsite에만 재검증 후 원자 채택 | generic callee/template/cache에 문맥 결과를 저장하지 않음 |
+
+메모리 상수 seed나 보존 결정이 없어도 유효한 레지스터 관계가 있으면 독립 문맥 API가 결과를 반환한다.
+현재 입력 전달은 LE64의 전체 레지스터가 `callee.entrySP + delta`인 관계와, 해당 스택 anchor에서 원 SSA로 확인한 ENTRY 상수에
+한정된다. 임의 heap 주소 관계·비상수 메모리 값·일반 할당 수명을 모두 전달한다는 뜻은 아니다.
+메모리 seed가 없으면 첫 normalization을 재사용한다. 판정이 전부 unknown이면 보존용 재실행을 생략하고 entry 결과를 유지한다.
+자동 scheduler는 allocator 존재 대신 기존 callee의 call-clobber/may-alias 수요로 선별하며 **최대 8회 시도**한다.
+독립 API의 결과 반환과 자동 채택은 다르다. 요약과 anchor가 generic 결과와 동일하면 채택하지 않아 불필요한 문맥화·template 거부를 막는다.
+
+추가로 **원 문맥 SSA와 현 summary lowering의 표현 능력도 구분**한다. 기존 lowering은 관찰된 CALL의 return overlay를
+생략한다. 문맥화로 실제 body STORE가 그 자리로 해석되는 경우 이를 그대로 lowering하면 writer를 잃는다. 원 SSA의 DATA_WRITE와
+원 관찰 push 범위를 대조해 전체/부분 겹침이면 `activation_rejections[call] = return-overlay-writer-not-lowerable`로 자동 override만
+거부하고 generic caller를 유지한다. 독립 entry API는 원 문맥 SSA를 반환한다. 이는 frame ON/OFF와 무관한 표현 경계이며, 스택 전제를
+추가하거나 해당 실행을 불가능하다고 가정하는 처리가 아니다. 기존 return-overlay lowering 일반화는 별도 확장 과제다.
+
+#### 비변경 판정과 읽기 해결의 차이
+
+기존 NULL 규칙은 모델 이름이 아니라 원 모델의 complete footprint·callback·free 입력과 실제 정방향 값에 의존한다.
+모든 free 입력이 NULL이고 기존 null-is-fresh 계약이 매칭되어야 free 대상 집합을 비었다고 판단한다. CALL의 실제 8바이트
+return overlay와 하위 frame을 제외한 **전체 요구 ByteSpan**만 보존한다. 다른 폭·지연된 읽기·복수 읽기도 동일한 요구를 사용한다.
+경계에 걸친 범위는 전체 거부하며 임의의 부분범위 근거나 할당 범위 전제를 만들지 않는다.
+
+판정은 **C가 S를 바꾸지 않는다**는 뜻이다. 재계산 후 C의 해당 byte 부채만 제거돼야 하며, 뒤의 부분 STORE·다른 CALL·
+unknown writer·JOIN은 그대로 처리한다. 따라서 전체 read가 single definition이거나 모든 부채가 없을 것을 채택 조건으로 삼지 않는다.
+비NULL/미확인 free 입력은 `allocation-lifetime-unproved`, 닫히지 않은 효과는 `call-footprint-unproved`로 남긴다.
+unknown 결정을 보존 성공으로 세거나, 상태 전달 성공을 메모리 연결 완료로 세지 않는다.
+
+새 소비 경계 전체는 원 captured policy·readonly reader에 묶인다. 승인된 결정의 `requires` 및 최종 정방향/normalization
+의존은 `activation_entry`·`inherited_assumptions`·probe로 계승한다. 선택적 비자원 거부는 기존 문맥과 그래프·효과를 유지하고
+해당 보존 결정을 unknown으로 돌린다. 실제 자원 예외는 기존 typed function/run failure로 전파해 미완성 candidate를 게시하지 않는다.
+
+원 summary의 입력도 별도로 캡처한다. `summary_inputs`의 dead operation·noreturn jump와 실제 적용한 trap/model 의존은
+entry replay와 메모리 보존 후 재요약이 공유한다. 원 종료 근거만 재사용하고, 새 SSA/그래프의 도달성·요약은 다시 계산한다.
+미캡처 입력을 빈 집합으로 간주하지 않으며, 기존 트랩 가정이나 모델 의존을 빼고 정밀해진 결과로 게시하지 않는다.
+
+#### 할당 수명으로의 확장 경계와 이번 비목표
+
+현재 `lifetime_models`는 매칭된 외부모델 선언이지 살아 있는 할당 목록이 아니다. 이번에 allocation ID나 `alive` placeholder를
+추가하지 않는다. 다음 확장은 **필요한 구간**의 기존 SSA 정의·호출 문맥에 할당 정체성·별칭·free/realloc 전이·경로별 상태를
+연결해 위 CALL/ByteSpan 의무의 근거로 소비하는 방향이다. 주소가 같아도 재할당 세대가 다를 수 있고, 분기에서 alive/해제/unknown을
+합쳐야 하며, Realloc의 성공·실패·제자리/이동 관계는 해당 모델 계약 없이 추정할 수 없다. `alive`만으로 쓰기 범위 비중첩이 증명되지는 않는다.
+기존 값/주소 solver나 메모리 SSA를 복제하지 않고, 아직 증명하지 못한 수명은 후보·부채로 유지한다.
+
+기본값·모델·가정 registry 및 엔진 의미 판 19는 바꾸지 않는다. LE64 관찰 push, 정확한 메모리 공간, frame 충돌, 입력/정책 재검증,
+generic/provenance/template 경계는 유지한다. origins/projected sinks뿐 아니라 직접 선언한 `summary.sink_demands`, 중첩 문맥·재귀도
+거부한다(현재 문맥 요약은 해당 source/sink를 재구성하지 않으므로 무작정 거부를 풀 수 없다). 일반 비NULL Realloc, 전체 UAF 부재,
+strict raw allocator footprint, R002 전체 완료는 비목표다.
+
+#### 검증
+
+넓은 문맥화의 기존 검사 기대 변경은 실제 근거와 구분한다. 같은 두 포인터의 순차 STORE를 원 SSA에서 합친 경우 원 입력 값으로의
+정확한 연결이 가능해지고, 재읽은 포인터가 앞 STORE에 의해 RDX/RCX로 바뀌면 해당 새 anchor의 실제 memory run이 수출된다.
+기존 프로그램 실행 oracle의 `silent == []` 및 원 데이터 의존 검사는 유지한다. provenance는 generic 대신 정확한 문맥 owner를 가리키며,
+strcpy wrapper의 같은 물리 byte가 RCX-relative 대신 바인딩된 SP-relative로 표현되는 것도 원 위치로 검사한다.
+반면 return-overlay 실제 writer 누락 반례는 기대를 낮추지 않고 위 lowering 경계를 닫아서 수정했다.
+
+문맥 재요약에서 원 trap/noreturn 컷을 빠뜨린 결함도 수정했다. 실제 TRAP·조건부/무조건 noreturn jump의 종료 근거와 의존이
+entry replay 및 보존 후 재요약 양쪽에 유지되는지 확인한다. portable template 비교는 generic 결과와의 동등성을 유지하고,
+정방향 ON에서도 importer의 실패한 writer guard는 보존 성공으로 바뀌지 않는 음성을 유지한다. 더 정밀한 raw context는 별도로 검사한다.
+
+| 실행 | 결과 | 시간 |
+|---|---|---|
+| 기본 (`TDO_V2_FORWARD=0`) 전체 | **3130 passed / 32 skipped / failure 0 / error 0** | 717.12초 |
+| 정방향 ON (`TDO_V2_FORWARD=1`) 전체 | **3130 passed / 32 skipped / failure 0 / error 0** | 740.22초 |
+
+두 실행 모두 3162개를 수집했다. 범위 판정 신규 파일의 **70개**, 호출 통합 **16개**, 실제 UE **56개**가 모두 실행·통과했다.
+신규 범위 검사는 sparse/dense, 모델 없는 상태 전달, NULL/비NULL, 지연된 1/2/4/8/16바이트·복수 읽기, 후행 STORE/CALL/unknown/JOIN,
+의존/reader/정책 고정, 입력 변경, 직접 sink 거부, 원 제어 컷 계승, return-overlay 전체/부분 겹침과 최종 소비 경계를 포함한다.
+UE 검사는 frame OFF/ON 및 sparse/dense에서 원 **213 / `180005b56:2:STORE` → saved-slot LOAD**의 실제 메모리 간선·역쿼리를 확인한다.
+두 번째 Grow는 상태 문맥을 얻더라도 Realloc 보존 부채를 임의로 지우지 않는다. 전체 R002 완료나 일반 수명 증명의 수치가 아니다.
+
+기존 32 skip은 Linux worker 9·Linux supervision 14·미보유 Bundle 9이며 신규 skip은 없다. 단계 검수에서는 Astra 독립 FWD1 118개·
+FWD0 32개, 별도 인접 회귀 215개도 통과했다. 최종 근거는 위 동결 후 전체 두 실행이다.
+로그/XML은 이 PC의 `/private/tmp/tdo-activation-refactor.Rj7jYj/verified-{0,1}.{log,xml}`에 있다.
+src/tests/models/tools/ghidra의 Python·JSON·Java 파일 목록/내용 SHA256은 시작·종료·최종 독립 재계산에서 모두
+`13bc8f8903ea57a0aa6dbb7521b285123a7751cb2f97753a04930f45fc7a7773`으로 같다. 회귀 중 변경한 코드는 없다.
+설치 Core 모델 SHA256도 `84c74fd4817226a505a04a50af6f78ea1fdc32332602683bff05a6b56cf714bb`로 유지했다.
+
+Astra는 설계·분리 구조·보수적 거부·제어 컷 재요약을 단계 검수하고, 최종 두 XML의 전체/신규/실제 UE 통과 및 skip 사유,
+현재 재해시·동결 시작/종료 일치·설치 모델·가정 registry·의미 판 19 불변을 독립 확인했다. **호출별 상태 전달과 CALL별 byte 범위
+판정을 분리하고 기존 SSA/그래프를 재사용하는 이번 목표 달성 및 현재 상태에서의 마무리를 명시적으로 최종 승인**했으며 필수 잔여
+차단은 없다. 직전 커밋 전체 revert 대신 결합 경로를 삭제·대체하는 판단도 유지한다. 일반 할당 수명·비NULL Realloc·전체 R002/UAF
+증명 또는 향후 확장 전체를 완료로 승인한 것이 아니다. 이 작업에서는 Git revert·새 커밋·push는 수행하지 않았다.

@@ -184,7 +184,7 @@ def test_a_library_global_read_keeps_memory(tmp_path):
 
 
 @pytest.mark.parametrize("alias", [True, False])
-def test_writer_conditions_are_decided_at_the_importer(tmp_path, alias):
+def test_writer_conditions_are_decided_at_the_importer(tmp_path, alias, monkeypatch):
     """F writes through a pointer it loads from [rsi], then through rdi, then
     reloads the pointer and writes again: the summary holds only if [rsi]
     and [rdi] differ. The caller passes rsi == rdi (Astra, design review):
@@ -208,11 +208,25 @@ def test_writer_conditions_are_decided_at_the_importer(tmp_path, alias):
                 .add_rsp(0x48).ret())
     inside = _client(tmp_path, caller, body, template=False)
     derived = _client(tmp_path, caller, body)
-    a, b = _effect(inside), _effect(derived)
+    # A generic portable summary is compared with the generic in-Bundle
+    # baseline. Raw caller-specific SSA may legitimately be more precise;
+    # the importer must still refuse the template's failing writer guard.
+    with monkeypatch.context() as patch:
+        patch.setenv("TDO_V2_FORWARD", "0")
+        generic = _client(tmp_path, caller, body, template=False)
+    a, b = _effect(generic), _effect(derived)
     assert (a.preserves_memory, a.restores_stack, a.preserved) == (b.preserves_memory, b.restores_stack, b.preserved)
     if alias:
         assert not b.preserves_memory and not b.restores_stack and not b.preserved
-    assert _views(inside, ((6, 1),)) == _views(derived, ((6, 1),))
+    assert _views(generic, ((6, 1),)) == _views(derived, ((6, 1),))
+    if inside.activations and alias:
+        actual = _effect(inside)
+        assert any(run.write.anchor is not None and run.write.anchor.start == RDX
+                   and run.write.displacement == 8 for run in actual.memory_runs)
+        assert actual.preserves_memory and actual.restores_stack
+        assert set(range(RDX, RDX + 8)) <= _views(inside, ((6, 1),))[0][1]
+    else:
+        assert _views(inside, ((6, 1),)) == _views(derived, ((6, 1),))
 
 
 def test_a_temporary_source_stays_unknown(tmp_path):

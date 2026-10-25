@@ -225,7 +225,13 @@ def test_one_object_passed_twice_is_not_trusted():
     results, program = _analyze(caller, leaf)
     report = _check(results, program, pools=lambda seed: {RSP: 0x7000_0000})
     assert report.silent == []
-    assert not slice_op(results["1:1000"].normalized, "LOAD", 5).result.is_complete
+    loaded = slice_op(results["1:1000"].normalized, "LOAD", 5)
+    if results["1:1000"].activations:
+        # Context SSA merges the identical pointers and executes both stores
+        # in order: the original local value is written back, not RCX.
+        assert loaded.result.is_complete and set(range(RDX, RDX + 8)) <= loaded.register_bytes
+    else:
+        assert not loaded.result.is_complete
 
 
 # -- sink demand projection ---------------------------------------------------
@@ -670,7 +676,14 @@ def test_failing_writer_condition_proves_nothing():
     call): the reloaded pointer is RDX, so the second write lands elsewhere."""
     results, program = _analyze(_initializer_caller(0, 8), _home_space_initializer(0, 8))
     effect = results["1:1000"].proven.get(next(iter(results["1:1000"].calls)))
-    assert effect is None or not effect.preserves_memory
+    if results["1:1000"].activations:
+        # The failed generic condition is not reused: context SSA resolves
+        # the reload to RDX and exports the actual second store at RDX+8.
+        assert effect.preserves_memory
+        assert any(run.write.anchor is not None and run.write.anchor.start == RDX
+                   and run.write.displacement == 8 and run.write.size == 8 for run in effect.memory_runs)
+    else:
+        assert effect is None or not effect.preserves_memory
     assert _check(results, program).silent == []
 
 
@@ -710,7 +723,16 @@ def test_writer_condition_decided_per_call(same_slot):
     results, program = _analyze(_reloading_caller(same_slot), _reloading_writer())
     assert results[f"1:{LEAF:x}"].summary.writer_conditions
     (effect,) = results["1:1000"].proven.values()
-    assert effect.preserves_memory is not same_slot
+    contextual = bool(results["1:1000"].activations)
+    if contextual and same_slot:
+        # The first store overwrites the saved pointer with RCX. The second
+        # store is therefore explicitly exported at RCX, without assuming
+        # the generic nonalias writer condition.
+        assert effect.preserves_memory
+        assert any(run.write.anchor is not None and run.write.anchor.start == RCX
+                   and run.write.displacement == 0 for run in effect.memory_runs)
+    else:
+        assert effect.preserves_memory is not same_slot
     report = _check(results, program)
     # a failing condition proves nothing through the call (the mutation that
     # trusts conditional writers misses r9's real writer here)

@@ -97,7 +97,15 @@ class AnalyzedFunction:
     activations: dict = field(default_factory=dict, repr=False)
     activation_witness: tuple = field(default=(), repr=False)
     normalization_context: tuple = field(default=(), repr=False)
+    # Original dead-op / noreturn-jump inputs and their declared dependencies
+    # must survive any context re-summarization, not only normalization.
+    summary_inputs: tuple = field(default=(), repr=False)
     activation_inputs: tuple = field(default=(), repr=False)
+    # Per-CALL, per-byte no-write/unknown verdicts. Not allocation liveness
+    # and not a claim that the demanding read has no other debt/writers.
+    call_memory_decisions: tuple = ()
+    # Valid entry context refused by the current summary lowering boundary.
+    activation_rejections: dict = field(default_factory=dict)
 
 
 def _import_slots_switched_on() -> bool:
@@ -550,28 +558,44 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     with activation(_ledger_key(functions[key])):
                         result, published = refined_one(key, hypotheses)
                         if _forward_switched_on() and key not in recursive_keys:
-                            from ._call_activation import replay_activation, revalidate_activation
+                            from ._call_activation import replay_activation, revalidate_activation, lowering_refusal
+                            from ._call_memory import refine_call_memory
+                            from ._forward_memory import RefinementRefused
                             from .summary_engine import run_assumptions
                             contexts = {}
                             possible = [(call, results[target]) for call, target in result.calls.items()
-                                        if target in results and results[target].lifetime_models
+                                        if target in results and type(results[target].normalized) is NormalizedFunction
+                                        and (results[target].normalized.call_clobber_reads
+                                             or results[target].normalized.may_alias_reads)
                                         and target not in recursive_keys]
                             labels = run_assumptions({**results, key: result}, readonly_image=readonly_image,
                                                      home_space=private_frame_above) if possible else ()
                             if type(result.normalized) is NormalizedFunction:
-                                for call, done in possible:
+                                # Bound attempts, not successful claims. Entry
+                                # replay is scheduled by existing debt demands,
+                                # independently of allocator/model availability.
+                                for call, done in possible[:8]:
                                     context = replay_activation(result, done, call, readonly_image=readonly_image,
                                                                 assumptions=labels)
                                     if context is not None:
-                                        contexts[call] = context
-                                    if len(contexts) == 8:
-                                        break
+                                        try:
+                                            context = refine_call_memory(context, readonly_image=readonly_image,
+                                                                         assumptions=labels)
+                                        except RefinementRefused:
+                                            pass  # The independently evidenced entry context remains usable.
+                                        reason = lowering_refusal(context)
+                                        if reason is not None:
+                                            result.activation_rejections[call] = reason
+                                            continue
+                                        if context.summary != done.summary or context.anchors != done.anchors:
+                                            contexts[call] = context
                             if contexts:
                                 candidate, pending = refined_one(key, hypotheses, contexts)
                                 if type(candidate.normalized) is NormalizedFunction and all(revalidate_activation(
                                         result, candidate, context, readonly_image=readonly_image, assumptions=labels)
                                         for context in contexts.values()):
                                     candidate.activations = contexts
+                                    candidate.activation_rejections = dict(result.activation_rejections)
                                     if record_provenance is not None:
                                         for context in contexts.values():
                                             generic = results[context.key]
@@ -813,12 +837,17 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         projected.append((call, index, demand.label, nodes, complete and not remaining))
                         roots.append((demand.label, nodes, complete, remaining))
             jumps = noreturn_jumps[key]
+            traps = (trap_operations(unit, pcodeop_models)
+                     if assume_debug_break_traps_do_not_return and pcodeop_models else frozenset())
+            dead_ops = frozenset(traps) | {jump for jump in jumps if jump.endswith(":BRANCH")}
+            dead_jumps = frozenset(jump for jump in jumps if jump.endswith(":CBRANCH"))
+            summary_requires = tuple(sorted(
+                ({"debug-break-traps-do-not-return"} if traps else set())
+                | {entry.label for _, entry in jumps.values()}
+                | {label for _, entry in jumps.values() for label in entry.inherited}))
             summary = (
                 summarize_function(normalized, observation, origins, roots,
-                                   (trap_operations(unit, pcodeop_models)
-                                    if assume_debug_break_traps_do_not_return and pcodeop_models else frozenset())
-                                   | {jump for jump in jumps if jump.endswith(":BRANCH")},
-                                   noreturn_jumps=frozenset(jump for jump in jumps if jump.endswith(":CBRANCH")))
+                                   dead_ops, noreturn_jumps=dead_jumps)
                 if type(normalized) is NormalizedFunction else None
             )
             anchors = _relative_anchors(unit, normalized) if summary is not None else {}
@@ -846,6 +875,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     multi_calls={call: members for call, members in multi.get(key, {}).items()
                                                  if call in proven})
             result.normalization_options = tuple(normalization_options.items())
+            result.summary_inputs = (dead_ops, dead_jumps, summary_requires)
             from .relative_memory import IMPORT_SLOTS, IMAGE_BASE_TRACKING, index_addresses, DEFINITION_ATOMS
             imports = IMPORT_SLOTS.get()
             result.normalization_context = (ENTRY_VALUES_NOT_FRAME.get(), OPAQUE_NO_STACK_ADDRESSES.get(),

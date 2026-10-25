@@ -1,4 +1,4 @@
-"""Original TraceGrow activation keeps one evidenced S8, not all memory.
+"""Original TraceGrow activation keeps evidenced ranges, not all memory.
 
 Uses the pinned Trace fixture and existing model assumptions. This is not a
 strict raw allocator theorem, an extent proof, or proof that UAF is absent.
@@ -13,6 +13,7 @@ import pytest
 from test_callee_preserved_low_binary import R002, _projector, trace
 from test_entry_frame_ue_limits_binary import FRAME, HOME, _trace_analysis
 from tdo_v2 import _call_activation
+from tdo_v2._call_memory import refine_call_memory
 from tdo_v2.constant_value import ExactConstant
 from tdo_v2.forward import _analyze, probe
 from tdo_v2.may_alias import ENTRY_VALUES_NOT_FRAME
@@ -54,6 +55,8 @@ def activation_case(trace, request):
             assert call == FIRST
         options = dict(readonly_image=trace["image"], assumptions=result["engine_run"].assumptions)
         replay = _call_activation.replay_activation(caller, callee, FIRST, **options)
+        assert replay is not None
+        replay = refine_call_memory(replay, **options)
     assert replay is not None
     provenance = result["provenance"]
     generic_owner, generic_note = provenance[id(callee)]
@@ -74,7 +77,7 @@ def _read(item, key):
 def test_public_replay_uses_original_caller_zero_and_full_width_null_input(activation_case):
     case = activation_case
     caller, callee, replay = (case[key] for key in ("caller", "callee", "replay"))
-    owner, original, call, witnesses, claims = replay.activation_witness
+    owner, original, call, witnesses = replay.activation_witness
     assert owner is caller and original is callee and call == FIRST
     state = replay.normalized.activation_entry
     assert state.context == (R002, FIRST)
@@ -108,20 +111,22 @@ def test_public_replay_uses_original_caller_zero_and_full_width_null_input(activ
     values, used = analysis.bind(REALLOC, (argument,))
     assert values[argument].single_number() == 0
     assert set(used) <= set(state.requires)
-    assert len(claims) == 1
-    assert claims[0][0:2] == (REALLOC, LOAD)
-    assert claims[0][2].start == BIAS - 24 and claims[0][2].size == 8
-    assert "external-model:ue-core-win64/FMemory::Realloc@" in claims[0][4]
+    (claim,) = [row for row in replay.call_memory_decisions
+                if row.preserved and (row.demand.call, row.demand.reader) == (REALLOC, LOAD)]
+    assert claim.demand.span.start == BIAS - 24 and claim.demand.span.size == 8
+    assert "external-model:ue-core-win64/FMemory::Realloc@" in claim.model_label
 
 
-def test_only_s8_call_debt_is_removed_with_original_ssa_and_graph_writers(activation_case):
+def test_demanded_s8_call_debt_is_removed_with_original_ssa_and_graph_writers(activation_case):
     case = activation_case
     generic, replay = case["callee"], case["replay"]
     before, after = generic.proven[REALLOC], replay.proven[REALLOC]
     read = _read(replay, LOAD)
     assert read.span.start == BIAS - 24 and read.span.size == 8
     assert not before.preserves_memory and not after.preserves_memory
-    assert set(after.preserved) - set(before.preserved) == {read.span}
+    assert read.span in set(after.preserved) - set(before.preserved)
+    assert set(after.preserved) - set(before.preserved) == {
+        row.demand.span for row in replay.call_memory_decisions if row.preserved and row.demand.call == REALLOC}
     assert set(before.preserved) <= set(after.preserved)
     assert replace(after, preserved=before.preserved) == before
     assert all(replay.proven[key] == effect for key, effect in generic.proven.items() if key != REALLOC)
@@ -153,7 +158,13 @@ def test_generic_and_second_call_remain_unknown_and_no_assumptions_are_invented(
     case = activation_case
     caller, callee = case["caller"], case["callee"]
     before = (callee.normalized, callee.summary, dict(callee.proven))
-    assert _call_activation.replay_activation(caller, callee, SECOND, **case["options"]) is None
+    second = _call_activation.replay_activation(caller, callee, SECOND, **case["options"])
+    assert second is not None and second.normalized.activation_entry.context == (R002, SECOND)
+    second = refine_call_memory(second, **case["options"])
+    assert not any(row.preserved and row.demand.call == REALLOC for row in second.call_memory_decisions)
+    assert second.proven[REALLOC] == callee.proven[REALLOC]
+    assert any(row.operation_key == LOAD and REALLOC in row.intervening_calls
+               for row in second.normalized.call_clobber_reads)
     assert before == (callee.normalized, callee.summary, callee.proven)
     requires = set(case["replay"].normalized.activation_entry.requires)
     assert requires == set(case["options"]["assumptions"])
@@ -167,6 +178,7 @@ def test_public_replay_restores_captured_off_policy_despite_ambient_on(activatio
     token = ENTRY_VALUES_NOT_FRAME.set(True)
     try:
         replay = _call_activation.replay_activation(case["caller"], case["callee"], FIRST, **case["options"])
+        replay = refine_call_memory(replay, **case["options"])
         assert ENTRY_VALUES_NOT_FRAME.get() is True
     finally:
         ENTRY_VALUES_NOT_FRAME.reset(token)
@@ -199,7 +211,13 @@ def test_withdrawn_input_seed_control_cannot_authorize_the_actual_s8(activation_
 
     monkeypatch.setattr(_call_activation, "_memory_inputs", withdrawn)
     case = activation_case
-    assert _call_activation.replay_activation(case["caller"], case["callee"], FIRST, **case["options"]) is None
+    replay = _call_activation.replay_activation(case["caller"], case["callee"], FIRST, **case["options"])
+    assert replay is not None
+    replay = refine_call_memory(replay, **case["options"])
+    assert not any(row.preserved and row.demand.call == REALLOC for row in replay.call_memory_decisions)
+    assert replay.proven[REALLOC] == case["callee"].proven[REALLOC]
+    assert any(row.operation_key == LOAD and REALLOC in row.intervening_calls
+               for row in replay.normalized.call_clobber_reads)
     assert intercepted and all(literal == ExactConstant(8, 0) for _, literal in intercepted)
 
 
@@ -210,7 +228,7 @@ def test_caller_without_captured_forward_evidence_is_not_a_seed(activation_case)
 
 
 @pytest.mark.parametrize("control", ("other-memory-not-kept", "callback-refused", "callback-invokes"))
-def test_withdrawn_matched_model_contract_control_refuses_replay(activation_case, control):
+def test_withdrawn_matched_model_contract_keeps_context_but_refuses_preservation(activation_case, control):
     # Deliberate metadata boundary controls. No shipped model file or raw
     # callee is changed, and the original model's labels are not stripped.
     case = activation_case
@@ -224,7 +242,11 @@ def test_withdrawn_matched_model_contract_control_refuses_replay(activation_case
         changed.append((call, model, altered))
     assert changed
     refused = replace(case["callee"], lifetime_models=tuple(changed))
-    assert _call_activation.replay_activation(case["caller"], refused, FIRST, **case["options"]) is None
+    replay = _call_activation.replay_activation(case["caller"], refused, FIRST, **case["options"])
+    assert replay is not None
+    replay = refine_call_memory(replay, **case["options"])
+    assert not any(row.preserved for row in replay.call_memory_decisions)
+    assert replay.proven[REALLOC] == case["callee"].proven[REALLOC]
 
 
 def test_public_replay_is_refused_with_runtime_forward_off(activation_case, monkeypatch):
@@ -238,7 +260,6 @@ def test_adopted_call_provenance_points_to_exact_context_and_keeps_generic_notes
     current, generic, context = case["current"], case["callee"], case["adopted"]
     assert context is not None and context is current.activations[FIRST]
     assert context is not generic and context.key == generic.key == GROW
-    assert SECOND not in current.activations
     provenance = case["provenance"]
     caller_owner, caller_note = provenance[id(current)]
     generic_owner, generic_note = provenance[id(generic)]
@@ -247,7 +268,12 @@ def test_adopted_call_provenance_points_to_exact_context_and_keeps_generic_notes
     first_kind, first_source = caller_note.sources[FIRST]
     second_kind, second_source = caller_note.sources[SECOND]
     assert first_kind == second_kind == "summary"
-    assert first_source is context and second_source is generic
+    assert first_source is context
+    assert second_source is current.activations.get(SECOND, generic)
+    if SECOND in current.activations:
+        second = current.activations[SECOND]
+        assert second.normalized.activation_entry.context == (R002, SECOND)
+        assert not any(row.preserved and row.demand.call == REALLOC for row in second.call_memory_decisions)
     # Context-local preservation is witnessed separately. Reusing the old
     # conservative source/alias notes must not relabel a generic verdict as a
     # new context proof or mutate the generic model/callback dependencies.
@@ -261,12 +287,12 @@ def test_adopted_call_provenance_points_to_exact_context_and_keeps_generic_notes
     assert context.summary.writer_conditions == generic.summary.writer_conditions
     assert context.activation_witness[0] is case["caller"]
     assert context.activation_witness[1] is generic and context.activation_witness[2] == FIRST
-    (claim,) = context.activation_witness[4]
-    assert claim[0:2] == (REALLOC, LOAD)
-    span = claim[2]
+    (claim,) = [row for row in context.call_memory_decisions
+                if row.preserved and (row.demand.call, row.demand.reader) == (REALLOC, LOAD)]
+    span = claim.demand.span
     assert span.start == BIAS - 24 and span.size == 8
     old, new = generic.proven[REALLOC], context.proven[REALLOC]
-    assert set(new.preserved) - set(old.preserved) == {span}
+    assert span in set(new.preserved) - set(old.preserved)
     assert replace(new, preserved=old.preserved) == old
     assert not old.preserves_memory and not new.preserves_memory
     assert all(context.proven[key] == effect for key, effect in generic.proven.items() if key != REALLOC)

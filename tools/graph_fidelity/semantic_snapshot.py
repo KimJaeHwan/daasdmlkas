@@ -53,6 +53,7 @@ CONTRACT = {
         "unit": "input (the scoped unit)",
         "normalization_options": "frozen replay inputs; effects/graph outputs are encoded separately",
         "normalization_context": "runtime policy/reader inputs, not a portable analysis output",
+        "summary_inputs": "original control-cut derivation inputs; summary outputs remain encoded",
         "activation_witness": "original caller/callee input pins; context graph and preserved spans remain encoded",
         "activation_inputs": "identity-based invalidation pins of the original inputs",
     }),
@@ -67,7 +68,8 @@ CONTRACT = {
 # older snapshots stay comparable (a non-default value is encoded and differs)
 ADDED_FIELDS = {
     "EngineRun": {"failed_functions": ()},
-    "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {}},
+    "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {},
+                         "call_memory_decisions": (), "activation_rejections": {}},
     "NormalizedFunction": {"activation_entry": None},
     "RootSlice": {"inherited_incomplete": False},
 }

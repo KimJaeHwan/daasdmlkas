@@ -22,7 +22,9 @@ class RefinementRefused(Exception):
 
 def _freeze(value):
     if isinstance(value, dict):
-        return tuple(sorted((key, _freeze(item)) for key, item in value.items()))
+        # Condition maps can use immutable AnchoredSpan pairs as keys. Their
+        # equality matters; imposing an ordering on those keys is invalid.
+        return frozenset((key, _freeze(item)) for key, item in value.items())
     if isinstance(value, (tuple, list)):
         return tuple(_freeze(item) for item in value)
     if isinstance(value, set):

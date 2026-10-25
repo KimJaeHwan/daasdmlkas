@@ -1,8 +1,7 @@
 """Caller-owned entry-state replay over the existing normalizer and SSA.
 
-This is deliberately not a universal allocator/lifetime theorem.  It can
-keep one immediate stack LOAD across a matched null-is-fresh model, only in
-the calling activation whose original pre-call SSA supplies the inputs.
+This layer transports evidenced inputs, not allocation lifetime or memory
+preservation claims. A separate call-memory consumer may refine its result.
 """
 from dataclasses import replace
 from contextlib import contextmanager
@@ -15,8 +14,10 @@ from .span_geometry import ByteSpan, StorageObjectKind
 
 def _source_signature(item):
     from ._forward_memory import _freeze
-    return (id(item.unit), id(item.normalized), _freeze(dict(item.normalization_options)),
-            item.normalization_context, item.lifetime_models)
+    options = dict(item.normalization_options)
+    reader = options.pop("readonly_image", None)
+    return (id(item.unit), id(item.normalized), _freeze(options), id(reader),
+            item.normalization_context, item.summary_inputs, item.lifetime_models)
 
 
 @contextmanager
@@ -132,6 +133,20 @@ def _normalize(callee, state, effects=None):
         return FunctionNormalizer().normalize(callee.unit, **options)
 
 
+def _summarize(callee, normalized):
+    """Replay the original summary's control cuts, not just its SSA options."""
+    from ._activation_entry import using_entry
+    from .function_summary import summarize_function
+    from .interprocedural import _relative_anchors
+
+    dead_ops, dead_jumps, _ = callee.summary_inputs
+    with _policy(callee), using_entry(normalized.activation_entry):
+        summary = summarize_function(normalized, callee.unit.observation, {}, (), dead_ops,
+                                     noreturn_jumps=dead_jumps)
+        anchors = _relative_anchors(callee.unit, normalized)
+    return summary, anchors
+
+
 def _frame_compatible(callee, normalized, sp, relations):
     """Do not specialize a binding that contradicts a retained frame premise.
 
@@ -228,78 +243,6 @@ def _memory_inputs(caller, callee, normalized, sp, delta, caller_object, bias, r
     return tuple(seeds), tuple(witnesses), tuple(sorted(labels))
 
 
-def _preserved_loads(callee, normalized, models, assumptions, readonly_image):
-    from .forward import _analyze
-    from .normalize import _call_below_bounds
-    from .observed_call_state import observed_call_state_projections
-
-    analysis = _analyze(normalized, callee.unit, readonly_image=readonly_image, assumptions=assumptions)
-    if analysis.bind is None:
-        return {}, ()
-    effects = dict(normalized.proven_call_effects)
-    transitions = {row.call_operation_key: row.memory_transition
-                   for row in observed_call_state_projections(callee.unit.observation)}
-    inputs = normalized.forward_inputs
-    bounds = {key: (obj, bound) for key, obj, bound in _call_below_bounds(
-        effects, transitions, inputs.effect_unit, normalized.memory_ssa, callee.unit.observation,
-        callee.unit.scopes, callee.unit.scopes.resolution_context, include_unpreserved=True)}
-    instructions = callee.unit.observation.instructions
-    source = {f"{ins.address.space_id:x}:{ins.address.byte_offset:x}:{i}:{op.opcode}": (ins, op)
-              for ins in instructions for i, op in enumerate(ins.operations)}
-    claims = []
-    for call, model_file, entry in models:
-        step()
-        effect = effects.get(call)
-        # The existing matched model must explicitly have null-is-fresh
-        # semantics and a complete footprint outside its freed/moved block.
-        # No name-based Realloc special case and no new null-free contract.
-        matched = any(replace(entry, inherited=original.inherited) == original
-                      and set(original.inherited) <= set(entry.inherited)
-                      and set(entry.inherited) - set(original.inherited)
-                      <= {"import-slots-hold-their-exports", "library-internal-model-cuts"}
-                      for original in model_file.entries)
-        if effect is None or effect.callee != entry.label or not matched \
-                or entry.refusal or entry.callbacks_invokes or entry.template is not None \
-                or not entry.keeps_other_memory or not entry.frees \
-                or any(old not in {pair[1] for pair in entry.same_object} for old in entry.frees) \
-                or not effect.same_object_registers or not effect.restores_stack or not effect.clobbers_below \
-                or effect.noreturn or effect.memory_runs or effect.unknown_memory or effect.writer_conditions \
-                or effect.extent_registers or effect.preserves_memory or call not in bounds or call not in source:
-            continue
-        transition = transitions.get(call)
-        if transition is None or transition.displacement_delta != -8:
-            continue
-        register = effect.same_object_registers[0][1].object_id
-        freed = tuple(ByteSpan(register, start, size) for start, size in entry.frees)
-        values, used = analysis.bind(call, freed)
-        if any(values[span].single_number() != 0 for span in freed):
-            continue
-        ins, _ = source[call]
-        following = next((row for row in instructions if row.address == ins.fallthrough), None)
-        if following is None:
-            continue
-        loads = [(i, op) for i, op in enumerate(following.operations) if op.opcode == "LOAD"]
-        if len(loads) != 1 or loads[0][1].output is None or loads[0][1].output.byte_size != 8:
-            continue
-        ordinal, _ = loads[0]
-        if any(op.opcode in ("STORE", "CALL", "CALLIND", "CALLOTHER", "BRANCH", "CBRANCH", "BRANCHIND")
-               for op in following.operations[:ordinal]):
-            continue
-        reader = f"{following.address.space_id:x}:{following.address.byte_offset:x}:{ordinal}:LOAD"
-        obj, bound = bounds[call]
-        spans = {span for row in normalized.call_clobber_reads
-                 if row.operation_key == reader and call in row.intervening_calls for span in row.spans
-                 # The CALL's own return-address STORE is not preservation
-                 # by the callee. Exclude that overlay as well as its frame.
-                 if span.object_id == obj and span.size == 8 and span.start >= bound + 8}
-        if len(spans) != 1:
-            continue
-        span = next(iter(spans))
-        effects[call] = replace(effect, preserved=(*effect.preserved, span))
-        claims.append((call, reader, span, model_file.digest, entry.label, tuple(sorted(set(used) | set(analysis.labels)))))
-    return effects if claims else {}, tuple(claims)
-
-
 def replay_activation(caller, callee, call, *, readonly_image=None, assumptions=()):
     """Optional context result, or None. The generic callee is never changed."""
     from ._forward_memory import RefinementRefused
@@ -313,18 +256,44 @@ def replay_activation(caller, callee, call, *, readonly_image=None, assumptions=
         return None
 
 
+def lowering_refusal(context):
+    """Keep valid entry SSA separate from the existing summary port limits.
+
+    The generic call-effect lowering omits the observed return overlay. It
+    cannot consume a context that resolves a real body write into that area:
+    doing so would drop the writer while claiming the rest is preserved.
+    This is a lowering refusal, not a frame assumption or invalid entry fact.
+    """
+    from .interprocedural import _register_file
+    from .observed_call_state import observed_call_state_projections
+
+    caller, original, call, _ = context.activation_witness
+    shape = next(row for row in observed_call_state_projections(caller.unit.observation)
+                 if row.call_operation_key == call)
+    transition = shape.memory_transition
+    register, _ = _register_file(original.unit.observation, original.unit.scopes.resolution_context)
+    sp = ByteSpan(register, transition.callee_base.byte_offset, transition.callee_base.byte_size)
+    bias, push = 1 << (8 * sp.size), -transition.displacement_delta
+    for definition in context.normalized.memory_ssa.definitions:
+        step()
+        anchor = context.anchors.get(definition.span.object_id)
+        if definition.kind is MemoryDefinitionKind.DATA_WRITE and anchor is not None and anchor[0] == sp \
+                and definition.span.start < bias + push and bias < definition.span.end:
+            return "return-overlay-writer-not-lowerable"
+    return None
+
+
 def _replay_activation(caller, callee, call, *, readonly_image=None, assumptions=()):
-    from ._activation_entry import ActivationEntry, using_entry
-    from .interprocedural import _relative_anchors
+    from ._activation_entry import ActivationEntry
     from .normalize import NormalizedFunction
-    from .function_summary import summarize_function
-    from .forward import probe
 
     if callee.unit.scopes.program.evidence.translation_namespace.language_id.split(":")[1:3] != ["LE", "64"] \
             or getattr(caller.normalized, "activation_entry", None) is not None \
             or getattr(callee.normalized, "activation_entry", None) is not None \
-            or callee.activations or callee.origins or callee.projected_sinks or callee.recursion_unresolved or not callee.lifetime_models \
-            or not callee.normalization_options or type(callee.normalized) is not NormalizedFunction:
+            or callee.activations or callee.origins or callee.projected_sinks or callee.recursion_unresolved \
+            or callee.summary is None or callee.summary.sink_demands \
+            or not callee.normalization_options or len(callee.summary_inputs) != 3 \
+            or type(callee.normalized) is not NormalizedFunction:
         return None
     bound = _inputs(caller, callee, call, assumptions, readonly_image)
     if bound is None:
@@ -338,31 +307,21 @@ def _replay_activation(caller, callee, call, *, readonly_image=None, assumptions
         return None
     seeds, witnesses, used = _memory_inputs(caller, callee, first, sp, delta, caller_object, bias,
                                           readonly_image, assumptions)
-    if not seeds:
-        return None
-    state = replace(state, memory=seeds, requires=tuple(sorted(set(labels) | set(used) | set(assumptions))))
-    second = _normalize(callee, state)
-    if type(second) is not NormalizedFunction:
-        return None
-    effects, claims = _preserved_loads(callee, second, callee.lifetime_models, state.requires, readonly_image)
-    if not claims:
-        return None
-    final = _normalize(callee, state, effects)
+    state = replace(state, memory=seeds, requires=tuple(sorted(
+        set(labels) | set(used) | set(assumptions) | set(callee.summary_inputs[2])
+        | set(callee.inherited_assumptions) | set(callee.declared.values()))))
+    final = _normalize(callee, state) if seeds else first
     if type(final) is not NormalizedFunction:
         return None
-    for _, reader, span, *_ in claims:
-        ids, _ = probe(final, reader, (span,))
-        if type(ids.get(span)) is not int or any(row.operation_key == reader and any(
-                debt.overlaps(span) for debt in row.spans) for row in (*final.call_clobber_reads, *final.may_alias_reads)):
-            return None
+    # Keep the requirements captured even when the first normalization can
+    # be reused: the input context is independent of optional memory seeds.
+    final = replace(final, activation_entry=state)
     # Entry substitution is consumed by the normalizer, probe and crossing
     # calculation alike. No surrogate source/sink graph is built here.
-    with using_entry(state):
-        summary = summarize_function(final, callee.unit.observation, {}, ())
-        anchors = _relative_anchors(callee.unit, final)
-    result = replace(callee, normalized=final, summary=summary, proven=effects,
+    summary, anchors = _summarize(callee, final)
+    result = replace(callee, normalized=final, summary=summary,
                      anchors=anchors, inherited_assumptions=callee.inherited_assumptions
-                     | frozenset(state.requires), activation_witness=(caller, callee, call, witnesses, claims),
+                     | frozenset(state.requires), activation_witness=(caller, callee, call, witnesses),
                      activation_inputs=(_source_signature(caller), _source_signature(callee)))
     return result
 
@@ -373,10 +332,10 @@ def revalidate_activation(original, candidate, replay, *, readonly_image=None, a
     from ._load_identity import definition_identity
     from .normalize import NormalizedFunction
 
-    if len(replay.activation_witness) != 5 or type(candidate.normalized) is not NormalizedFunction \
+    if len(replay.activation_witness) != 4 or type(candidate.normalized) is not NormalizedFunction \
             or candidate.normalized.forward_inputs is None:
         return False
-    source, callee, call, witnesses, _ = replay.activation_witness
+    source, callee, call, witnesses = replay.activation_witness
     if source is not original or candidate.unit is not original.unit:
         return False
     if replay.activation_inputs != (_source_signature(original), _source_signature(callee)):

@@ -123,7 +123,13 @@ def test_original_null_data_specializes_only_the_call_and_keeps_the_saved_writer
 def test_original_intermediate_write_or_call_cannot_reuse_the_null_proof(models, kind):
     result, points = _run(models, kind)
     caller, generic = result["1:1000"], result["1:1600"]
-    assert not caller.activations and generic.normalized.activation_entry is None
+    assert generic.normalized.activation_entry is None
+    context = caller.activations[points["outer"]]
+    assert context.normalized.activation_entry is not None
+    assert _clobbered(context, points)
+    assert not any(row.preserved and row.demand.call == points["realloc"]
+                   for row in context.call_memory_decisions)
+    assert context.proven[points["realloc"]] == generic.proven[points["realloc"]]
     assert _clobbered(generic, points)
     target = _read(generic, points["reader"])
     assert target.span not in generic.proven[points["realloc"]].preserved
@@ -149,11 +155,15 @@ def test_original_intermediate_write_or_call_cannot_reuse_the_null_proof(models,
 def test_registered_callback_assumption_off_cannot_create_a_scope_proof(models):
     result, points = _run(models, assume_registered_handlers_not_observed=False)
     caller, callee = result["1:1000"], result["1:1600"]
-    assert not caller.activations and not callee.lifetime_models
+    assert not callee.lifetime_models
     assert points["realloc"] not in callee.proven
     assert points["realloc"] in callee.refused_models
     assert "registered-handlers-are-not-observed" in callee.refused_models[points["realloc"]]
     assert _clobbered(callee, points)
+    context = caller.activations.get(points["outer"])
+    if context is not None:
+        assert _clobbered(context, points)
+        assert not any(row.preserved for row in context.call_memory_decisions)
 
 
 def test_forward_off_keeps_the_original_generic_call_debt(models, monkeypatch):
@@ -169,7 +179,11 @@ def test_forward_off_keeps_the_original_generic_call_debt(models, monkeypatch):
 def test_slot_in_callee_frame_or_call_return_overlay_is_not_preserved(models, saved_displacement):
     result, points = _run(models, saved_displacement=saved_displacement)
     caller, callee = result["1:1000"], result["1:1600"]
-    assert not caller.activations
+    context = caller.activations.get(points["outer"])
+    if context is not None:
+        assert _clobbered(context, points)
+        target = _read(context, points["reader"])
+        assert target.span not in context.proven[points["realloc"]].preserved
     assert not callee.proven[points["realloc"]].preserves_memory
     assert _clobbered(callee, points)
 
@@ -188,7 +202,12 @@ def test_explicit_other_memory_contract_withdrawal_keeps_the_raw_call_debt(model
     assert changed.lookup("realloc")[0].digest != models.lookup("realloc")[0].digest
     result, points = _run(changed)
     caller, callee = result["1:1000"], result["1:1600"]
-    assert callee.lifetime_models and not caller.activations
+    assert callee.lifetime_models
+    context = caller.activations.get(points["outer"])
+    if context is not None:
+        assert _clobbered(context, points)
+        assert not any(row.preserved for row in context.call_memory_decisions)
+        assert context.proven[points["realloc"]] == callee.proven[points["realloc"]]
     assert not callee.lifetime_models[0][2].keeps_other_memory
     assert _clobbered(callee, points)
     target = _read(callee, points["reader"])

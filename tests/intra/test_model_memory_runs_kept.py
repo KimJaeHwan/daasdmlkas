@@ -123,8 +123,15 @@ def test_a_wrapper_summary_exports_the_kept_byte():
     key = f"1:{CALLER:x}"
     (effect,) = results[key].proven.values()
     assert not effect.preserves_memory and not effect.memory_runs_final
-    runs = [run for run in effect.memory_runs if run.write.size == 1 and run.write.displacement == 0]
-    assert len(runs) == 1 and runs[0].write.anchor.start == RCX and runs[0].loads
+    if results[key].activations:
+        # The same original byte is now anchored on wrapper entry SP, not
+        # the already-bound RCX. The observed outer CALL pushes 8 bytes.
+        runs = [run for run in effect.memory_runs if run.write.size == 1 and run.write.anchor is not None
+                and run.write.anchor.start == RSP and run.write.displacement == 0x38]
+    else:
+        runs = [run for run in effect.memory_runs if run.write.size == 1 and run.write.displacement == 0
+                and run.write.anchor.start == RCX]
+    assert len(runs) == 1 and runs[0].loads
     first = _slice(results, key, 6)
     assert RBX in first.register_bytes and not first.is_complete
     assert _check(results, key).silent == []

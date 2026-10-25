@@ -23,7 +23,7 @@ def forward_on(monkeypatch):
 
 
 @pytest.mark.parametrize("side", ("caller", "callee"))
-@pytest.mark.parametrize("field", ("normalization_options", "normalization_context", "lifetime_models"))
+@pytest.mark.parametrize("field", ("normalization_options", "normalization_context", "summary_inputs", "lifetime_models"))
 def test_original_policy_or_model_mutation_invalidates_the_candidate(models, monkeypatch, side, field):
     result, points = _run(models)
     candidate = result["1:1000"]
@@ -37,6 +37,8 @@ def test_original_policy_or_model_mutation_invalidates_the_candidate(models, mon
         changed = tuple(changed.items())
     elif field == "normalization_context":
         changed = (not target.normalization_context[0], *target.normalization_context[1:])
+    elif field == "summary_inputs":
+        changed = (frozenset({"changed-control-cut"}), *target.summary_inputs[1:])
     else:
         changed = () if target.lifetime_models else callee.lifetime_models
     assert changed != getattr(target, field)
@@ -95,6 +97,8 @@ def _watch_stages(patch):
     def watched_entry(callee, state, effects=None):
         if state.memory and effects is None:
             note("replay")
+        elif effects is not None:
+            note("memory")
         return normalize_entry(callee, state, effects)
 
     def watched_normalize(self, unit, **options):
@@ -108,7 +112,7 @@ def _watch_stages(patch):
     return events, replayed
 
 
-@pytest.mark.parametrize("stage", ("replay", "candidate"))
+@pytest.mark.parametrize("stage", ("replay", "memory", "candidate"))
 @pytest.mark.parametrize("scope", ("function", "run"))
 def test_real_work_limit_during_replay_or_caller_reanalysis_never_publishes_candidate(
         models, monkeypatch, stage, scope):
