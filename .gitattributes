@@ -1,2 +1,4 @@
 # shell scripts run in WSL / Linux: always LF, whatever core.autocrlf says
 *.sh text eol=lf
+# Derived model provenance hashes raw model bytes: use the same bytes on every OS.
+models/**/*.json text eol=lf

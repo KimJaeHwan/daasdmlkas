@@ -255,7 +255,7 @@ def test_public_replay_is_refused_with_runtime_forward_off(activation_case, monk
     assert _call_activation.replay_activation(case["caller"], case["callee"], FIRST, **case["options"]) is None
 
 
-def test_adopted_call_provenance_points_to_exact_context_and_keeps_generic_notes(activation_case):
+def test_adopted_call_provenance_keeps_only_exact_context_effect_notes(activation_case):
     case = activation_case
     current, generic, context = case["current"], case["callee"], case["adopted"]
     assert context is not None and context is current.activations[FIRST]
@@ -274,13 +274,34 @@ def test_adopted_call_provenance_points_to_exact_context_and_keeps_generic_notes
         second = current.activations[SECOND]
         assert second.normalized.activation_entry.context == (R002, SECOND)
         assert not any(row.preserved and row.demand.call == REALLOC for row in second.call_memory_decisions)
-    # Context-local preservation is witnessed separately. Reusing the old
-    # conservative source/alias notes must not relabel a generic verdict as a
-    # new context proof or mutate the generic model/callback dependencies.
-    assert context_note is generic_note
+    # A specialized CALL has a new effect/condition domain. Its former cr/ck
+    # ordinals and model source are not an activation-local verdict. Only
+    # exactly unchanged effects may carry a copied generic note.
+    assert context_note is not generic_note
+    unchanged = {call for call, effect in generic.proven.items()
+                 if call in context.proven and context.proven[call] == effect}
+    assert REALLOC not in unchanged
     for name, snapshot in case["generic_note_snapshot"].items():
         assert getattr(generic_note, name) == snapshot
-        assert getattr(context_note, name) == snapshot
+        copied = getattr(context_note, name)
+        assert copied is not getattr(generic_note, name)
+        assert copied == {key: value for key, value in snapshot.items()
+                          if (key[0] if name in ("final", "sink") else key) in unchanged}
+    assert context_note.memory_sources is not generic_note.memory_sources
+    assert context_note.memory_sources == {call: rows for call, rows in generic_note.memory_sources.items()
+                                           if call in unchanged}
+    for call in unchanged:
+        if call in context_note.opened:
+            assert context_note.opened[call] is not generic_note.opened[call]
+        if call in context_note.memory_sources:
+            assert context_note.memory_sources[call] is not generic_note.memory_sources[call]
+    assert REALLOC not in context_note.sources
+    assert REALLOC not in context_note.failed and REALLOC not in context_note.opened
+    assert not any(call == REALLOC for call, _ in context_note.final)
+    assert not any(call == REALLOC for call, _ in context_note.sink)
+    from tdo_v2.operation_records import _call_provenance
+
+    assert _call_provenance(context_note, REALLOC, context.proven[REALLOC], "0")["source"] is None
     assert generic_note.sources[REALLOC] == ("model", generic.proven[REALLOC].callee)
     assert context.declared == generic.declared
     assert context.lifetime_models == generic.lifetime_models

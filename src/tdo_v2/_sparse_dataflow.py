@@ -164,8 +164,15 @@ class DominatorGraph:
     def _dominates(self, upper: str, lower: str) -> bool:
         return self.pre[upper] <= self.pre[lower] and self.post[lower] <= self.post[upper]
 
-    def solve(self, writes: set[str], needed: set[str], *, exit_of_write, entry_value):
-        """Entry value of one class at every block in ``needed``."""
+    def solve(self, writes: set[str], needed: set[str], *, exit_of_write, entry_value, capture_phi=None):
+        """Entry value of one class at every block in ``needed``.
+
+        Optional ``capture_phi(block, predecessor_values)`` sees the final
+        out-values of real predecessors at phi points whose union has at
+        least two definitions. It observes this solve's fixed point only;
+        no extra states or reaching-definition computation are introduced.
+        The external ENTRY value has no synthetic predecessor edge.
+        """
         phis = {self.entry}
         pending = list(writes)
         while pending:  # iterated dominance frontier of the writing blocks
@@ -212,6 +219,17 @@ class DominatorGraph:
                     if dependent not in queued:
                         queued.add(dependent)
                         pending.append(dependent)
+
+        if capture_phi is not None:
+            for node in sorted(phis):
+                step()
+                if len(phi_value[node]) < 2:
+                    continue
+                incoming = []
+                for predecessor in self.predecessors[node]:
+                    step()
+                    incoming.append((predecessor, exit_value(predecessor)))
+                capture_phi(node, tuple(incoming))
 
         result = {}
         for node in needed:

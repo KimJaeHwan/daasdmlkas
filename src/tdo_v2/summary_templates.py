@@ -72,8 +72,10 @@ TEMPLATE_VERSION = 3   # 2: stack_values_out; 3: exact scalar literals and entry
 # (docs 25.29) -- older ones rest on it unlabelled. 12: model entries declare
 # callbacks / frees; templates carry registered-handlers-are-not-observed when
 # derived over entries running registered handlers (docs 25.33)
+# 13: composed calls join proved direct memory outputs on one physical anchor
+# rather than discarding values under function-local object identities.
 # 14: consume verified baseline forward memory footprints at exact read bytes.
-# 13 belongs to the expression-development branch; do not alias its models.
+# 13 was developed independently; pre-integration 19 did not include it.
 # 15: verified shared original LOAD values and exact low parts of proven
 # register-copy call effects (no fresh/nonstack inference after truncation).
 # 16: finished-SSA exact scalar values and bounded entry indexed addresses
@@ -84,7 +86,9 @@ TEMPLATE_VERSION = 3   # 2: stack_values_out; 3: exact scalar literals and entry
 # their constant encoding width, while keeping full address-byte proofs.
 # 19: independent raw-leaf stack-check preservation; model frees no longer
 # license whole-memory preservation (old-content/lifetime debt is retained).
-ENGINE_SEMANTICS_VERSION = 19
+# 20: integrate physical-anchor composed memory outputs with 14..19's literal,
+# indexed-address and lifetime fences; independently derived models are stale.
+ENGINE_SEMANTICS_VERSION = 20
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

@@ -232,6 +232,50 @@ def test_an_import_out_of_limits_is_rolled_back():
                                                for n in plain["nodes"]]
 
 
+@pytest.mark.parametrize("physical", [False, True])
+def test_empty_stitch_context_does_not_recharge_guards_or_leak_limit_exceptions(physical):
+    from tdo_v2.operation_records import Limits
+
+    builder = (FunctionBuilder().cbranch("other", reg(R9, 1))
+               .ins(copy(reg(RAX), const(7))).ret()
+               .label("other").ins(copy(reg(RAX), const(9))).ret())
+    caller = analyze_units(program_units(builder))[ROOT]
+    node = caller.normalized.dependencies.node_for_key("op:1:1004:0:COPY")
+    assert node is not None
+    for edges in range(1, 16):
+        options = dict(limits=Limits(edges=edges), physical_memory=physical)
+        plain = root_record(caller.normalized, caller.unit, [(node, ())], **options)
+        stitched = root_record(caller.normalized, caller.unit, [(node, ())],
+                               stitch=StitchContext({}), **options)
+        assert stitched == plain
+
+
+def test_failed_control_publication_restores_the_whole_import(monkeypatch):
+    from tdo_v2.operation_records import _ControlPool, _StitchCut
+
+    callee = (FunctionBuilder(entry=F).cbranch("other", reg(R9, 1))
+              .ins(copy(reg(RAX), const(7))).ret()
+              .label("other").ins(copy(reg(RAX), const(9))).ret())
+    functions = [_caller(copy(reg(R9), reg(RCX))), callee]
+    plain = _record(functions, stitch=False)
+    original = _ControlPool.publish
+    published = []
+
+    def fail_after_publish(pool, builder, decisions):
+        original(pool, builder, decisions)
+        if builder.parent is not None:
+            published.append(copying.deepcopy(pool.data))
+            raise _StitchCut("test: after control publication")
+
+    monkeypatch.setattr(_ControlPool, "publish", fail_after_publish)
+    found = _record(functions)
+    assert published and published[0]["decisions"]
+    assert not found["truncated"] and not any(node.get("import") for node in found["nodes"])
+    assert found.get("control") == plain.get("control")
+    assert found["nodes"] == [dict(node, stitch_cut="test: after control publication")
+                              if node["kind"] == "call" else node for node in plain["nodes"]]
+
+
 
 # -- increment 2: the stack pointer and direct stack slots ----------------------
 
@@ -586,7 +630,10 @@ def _entry(registers):
         value = 0
         for index in range(size):
             byte = offset + index
-            value |= ((registers.get(byte - byte % 8, 0) >> (8 * (byte % 8))) & 0xFF) << (8 * index)
+            source = registers.get(byte - byte % 8, 0)
+            if source is None:
+                return None
+            value |= ((source >> (8 * (byte % 8))) & 0xFF) << (8 * index)
         return value
     return entry
 
@@ -598,7 +645,7 @@ def test_the_stitched_route_matches_the_hand_evaluator():
           FunctionBuilder(entry=F).ins(add(reg(RAX), reg(RCX), reg(RDX))).ret()], {RBX: 0x1234}),
         ([_caller(copy(reg(RCX), const(7)), copy(reg(RDX), const(9))),
           FunctionBuilder(entry=F).cbranch("other", flag, op("INT_NOTEQUAL", [reg(R9), const(0)], flag))
-          .ins(copy(reg(RAX), reg(RCX))).ret().label("other").ins(copy(reg(RAX), reg(RDX))).ret()], {}),
+          .ins(copy(reg(RAX), reg(RCX))).ret().label("other").ins(copy(reg(RAX), reg(RDX))).ret()], {R9: None}),
         ([_caller(), FunctionBuilder(entry=F).ins(add(reg(RAX), reg(RSP), const(0x10))).ret()], {RSP: ENTRY_SP}),
     ]
     for functions, registers in cases:
@@ -621,7 +668,9 @@ def test_one_exit_choice_per_call_instance():
     caller = (FunctionBuilder().sub_rsp(0x28).call(F).ins(add(reg(RAX), reg(RAX), reg(RDX)))
               .add_rsp(0x28).ret())
     record = _record([caller, callee])
-    assert evaluate(record, _entry({}), route="stitched") == {11, 22}
+    assert evaluate(record, _entry({R9: None}), route="stitched") == {11, 22}
+    assert evaluate(record, _entry({R9: 0}), route="stitched") == {11}
+    assert evaluate(record, _entry({R9: 1}), route="stitched") == {22}
 
 
 def test_an_unselected_output_does_not_block():
@@ -819,8 +868,18 @@ def test_the_oracle_rejects_mutations():
         for node in record["nodes"]:
             node.pop("instance", None)
 
-    assert evaluate(record, _entry({}), route="stitched") == {11, 22}
-    assert evaluate(_mutated(record, unshare), _entry({}), route="stitched") == {11, 12, 21, 22}
+    assert evaluate(record, _entry({R9: None}), route="stitched") == {11, 22}
+    # Imported exit guards now independently preserve the same logical
+    # decision, even if the old exit-instance grouping is removed.
+    assert evaluate(_mutated(record, unshare), _entry({R9: None}), route="stitched") == {11, 22}
+
+    def unshare_and_drop_exit_guards(record):
+        unshare(record)
+        for node in record["nodes"]:
+            node.pop("execution_guard", None)
+
+    assert evaluate(_mutated(record, unshare_and_drop_exit_guards), _entry({R9: None}), route="stitched") \
+        == {11, 12, 21, 22}
 
 
 def _inexact_runs_are_refused(functions):

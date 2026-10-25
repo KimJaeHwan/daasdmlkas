@@ -294,7 +294,8 @@ def test_an_alternative_that_cannot_be_evaluated_leaves_no_result():
     record = _record(_analyzed(builder), R8)
     with pytest.raises(Ineligible, match="unknown inputs"):
         evaluate(record, lambda node: None)
-    assert evaluate(record, lambda node: 5 << (8 * (RSI - node["register"]["offset"]))) == {17, 5}
+    # The input also fixes RDX=0: the now-recorded predicate selects RSI.
+    assert evaluate(record, lambda node: 5 << (8 * (RSI - node["register"]["offset"]))) == {5}
 
 
 def test_root_parts_of_one_selector_must_not_overlap():
@@ -399,4 +400,290 @@ def test_the_checker_rejects_a_phi_missing_the_taken_alternative():
     (phi,) = _nodes(record, "phi")
     phi["alternatives"] = phi["alternatives"][:1]
     report = check_records(analyzed, seeds=range(4), register_pools=_branch_pools, records=[record])
+    assert report.evaluated == 0 and report.skipped == {"condition choice mismatch": 4}
+    # Old v2 unconditional alternatives still exercise the missing-value
+    # check; v3's malformed conditional choice is refused before evaluation.
+    phi.pop("condition")
+    phi.pop("choices")
+    report = check_records(analyzed, seeds=range(4), register_pools=_branch_pools, records=[record])
     assert report.evaluated == 4 and len(report.failures) == 2
+
+
+# The opt-in physical view interprets actual byte addresses. Ordinary record
+# eligibility and the engine's original alias/call debts remain unchanged.
+def _physical_analyzed(builder):
+    return analyze_units(program_units(builder), assume_entry_values_not_frame=False,
+                         assume_opaque_callees_leave_no_stack_addresses=False,
+                         assume_globals_disjoint_from_stack=False)["1:1000"]
+
+
+def _physical_record(analyzed, key, *, physical_memory=True):
+    action = next(action for action in analyzed.normalized.memory_ssa.actions if action.operation_key == key)
+    return root_record(analyzed.normalized, analyzed.unit,
+                       [(analyzed.normalized.memory_graph.definition_nodes[identifier],
+                         (analyzed.normalized.memory_ssa.definitions[identifier].span,))
+                        for identifier in action.write_definition_ids], physical_memory=physical_memory)
+
+
+@pytest.mark.parametrize("delta", (-24, -20, -16, 0x100))
+def test_physical_load_interprets_prologue_overlap_without_a_no_alias_assumption(delta):
+    from pcode_interpreter import Interpreter
+    from record_oracle import entry_reader, final_register
+    from synthetic import REG
+    from tdo_v2._record_memory import evaluate_physical
+
+    builder = (FunctionBuilder().push(RBX).push(RSI)
+               .ins(add(tmp(0x100), reg(RCX), const(8)), load(reg(RAX), tmp(0x100)))
+               .pop(RSI).pop(RBX).ret())
+    analyzed = _physical_analyzed(builder)
+    record = _physical_record(analyzed, "1:1008:1:LOAD")
+    assert eligibility(record) == "debt"
+    debt_ids = [node["id"] for node in record["nodes"] if node["kind"] == "debt"]
+    vm = Interpreter(analyzed.unit.observation, constant_space=0, seed=3)
+    for offset, value in ((RSP, 0x70000000), (RCX, 0x70000000 + delta),
+                          (RBX, 0x1122334455667788), (RSI, 0xaabbccddeeff0011)):
+        vm.preset(REG, offset, 8, value)
+    run = vm.run()
+    assert run.completed
+    result = evaluate_physical(record, entry_reader(vm))
+    assert result.value == final_register(vm, RAX, 8)
+    assert any(item["kind"] == "load" and item["preserved_debts"] for item in result.evidence)
+    assert [node["id"] for node in record["nodes"] if node["kind"] == "debt"] == debt_ids
+    assert eligibility(record) == "debt"
+    with pytest.raises(Ineligible, match="debt"):
+        evaluate(record, entry_reader(vm))
+
+
+def test_physical_overlay_orders_definite_partial_writes_with_aliasing_stores():
+    from pcode_interpreter import Interpreter
+    from record_oracle import entry_reader, final_register
+    from synthetic import REG
+    from tdo_v2._record_memory import evaluate_physical
+
+    builder = (FunctionBuilder().ins(store(reg(RSI), reg(RBX)))
+               .ins(store(reg(RDI), reg(RCX, 1))).ins(load(reg(RAX), reg(RDI))).ret())
+    analyzed = _physical_analyzed(builder)
+    record = _physical_record(analyzed, "1:1008:0:LOAD")
+    assert eligibility(record) == "debt"
+    vm = Interpreter(analyzed.unit.observation, constant_space=0, seed=5)
+    for offset, value in ((RSP, 0x70000000), (RSI, 0x4000), (RDI, 0x4000),
+                          (RBX, 0x1122334455667788), (RCX, 0xaa)):
+        vm.preset(REG, offset, 8, value)
+    assert vm.run().completed
+    result = evaluate_physical(record, entry_reader(vm))
+    assert result.value == final_register(vm, RAX, 8) == 0x11223344556677aa
+    (load_evidence,) = [item for item in result.evidence if item["kind"] == "load"]
+    assert load_evidence["sources"][0]["writer"] == "1:1004:0:STORE"
+    assert all(source["writer"] == "1:1000:0:STORE" for source in load_evidence["sources"][1:])
+
+
+def test_physical_symbolic_pointer_write_preserves_the_unknown_writer_diagnostic():
+    from pcode_interpreter import Interpreter
+    from record_oracle import entry_reader, final_register
+    from synthetic import REG
+    from tdo_v2._record_memory import evaluate_physical
+
+    builder = (FunctionBuilder().ins(op("INT_MULT", [reg(RSI), reg(RBX)], tmp(0x200)),
+                                    store(tmp(0x200), reg(R8)))
+               .ins(load(tmp(0x100), reg(RDI))).ins(store(tmp(0x100), reg(RCX, 2)))
+               .ins(load(reg(RAX, 2), reg(RDX))).ret())
+    analyzed = _physical_analyzed(builder)
+    assert "1:1008:0:STORE" in analyzed.summary.unknown_writers
+    record = _physical_record(analyzed, "1:100c:0:LOAD")
+    assert eligibility(record) == "debt"
+    vm = Interpreter(analyzed.unit.observation, constant_space=0, seed=7)
+    for offset, value in ((RSP, 0x70000000), (RSI, 1), (RDI, 0x4000),
+                          (RBX, 0x4000), (R8, 0x4100), (RCX, 0x1234), (RDX, 0x4100)):
+        vm.preset(REG, offset, 8, value)
+    assert vm.run().completed
+    result = evaluate_physical(record, entry_reader(vm))
+    assert result.value == final_register(vm, RAX, 2) == 0x1234
+    assert "1:1008:0:STORE" in analyzed.summary.unknown_writers
+    assert eligibility(record) == "debt"
+
+
+def test_physical_inactive_call_is_skipped_and_an_active_call_or_unknown_guard_is_refused():
+    from pcode_interpreter import Interpreter
+    from record_oracle import entry_reader, final_register
+    from synthetic import CF, DATA_BASE, RAM, REG
+    from tdo_v2._record_memory import evaluate_physical
+
+    builder = (FunctionBuilder().cbranch("read", reg(CF, 1)).call(0x1f00)
+               .label("read").ins(load(reg(RAX), const(DATA_BASE))).ret())
+    analyzed = _physical_analyzed(builder)
+    record = _physical_record(analyzed, "1:1008:0:LOAD")
+    assert eligibility(record) == "debt"
+    vm = Interpreter(analyzed.unit.observation, constant_space=0, seed=9)
+    vm.preset(REG, RSP, 8, 0x70000000)
+    vm.preset(REG, CF, 1, 1)
+    vm.preset(RAM, DATA_BASE, 8, 0xabcdef)
+    run = vm.run()
+    assert run.completed and not any(key.endswith(":CALL") for key in run.executed)
+    assert evaluate_physical(record, entry_reader(vm)).value == final_register(vm, RAX, 8)
+    vm.preset(REG, CF, 1, 0)
+    with pytest.raises(Ineligible, match="call|memory event"):
+        evaluate_physical(record, entry_reader(vm))
+    with pytest.raises(Ineligible):
+        evaluate_physical(record, lambda node: None)
+
+
+def test_physical_overlay_wraps_each_byte_in_the_original_address_space():
+    from pcode_interpreter import Interpreter
+    from record_oracle import entry_reader, final_register
+    from synthetic import RAM, REG
+    from tdo_v2._record_memory import evaluate_physical
+
+    builder = (FunctionBuilder().ins(store(reg(RSI), reg(RBX)))
+               .ins(load(reg(RAX), reg(RDI))).ret())
+    analyzed = _physical_analyzed(builder)
+    record = _physical_record(analyzed, "1:1004:0:LOAD")
+    vm = Interpreter(analyzed.unit.observation, constant_space=0, seed=11, address_bits={RAM: 64})
+    for offset, value in ((RSP, 0x70000000), (RSI, (1 << 64) - 4),
+                          (RDI, (1 << 64) - 2), (RBX, 0x1122334455667788)):
+        vm.preset(REG, offset, 8, value)
+    vm.preset(RAM, 4, 2, 0xbbaa)
+    assert vm.run().completed
+    result = evaluate_physical(record, entry_reader(vm))
+    assert result.value == final_register(vm, RAX, 8) == 0xbbaa112233445566
+    assert [source.get("offset") for source in result.evidence[-1]["sources"]] == [2, 3, 4, 5, 6, 7, None, None]
+
+
+@pytest.mark.parametrize("taken", (0, 1))
+def test_physical_overlay_uses_the_actual_store_arm_and_only_demands_its_address(taken):
+    from pcode_interpreter import Interpreter
+    from record_oracle import entry_reader, final_register
+    from synthetic import CF, REG
+    from tdo_v2._record_memory import evaluate_physical
+
+    builder = FunctionBuilder().cbranch("right", reg(CF, 1))
+    builder.ins(store(reg(RSI), reg(RBX))).branch("read")
+    builder.label("right").ins(store(reg(RDI), reg(RCX, 1)))
+    builder.label("read").ins(load(reg(RAX), reg(RDX))).ret()
+    analyzed = _physical_analyzed(builder)
+    record = _physical_record(analyzed, "1:1010:0:LOAD")
+    vm = Interpreter(analyzed.unit.observation, constant_space=0, seed=13)
+    for offset, value in ((RSP, 0x70000000), (RSI, 0x4000), (RDI, 0x4000), (RDX, 0x4000),
+                          (RBX, 0x1122334455667788), (RCX, 0xaa)):
+        vm.preset(REG, offset, 8, value)
+    vm.preset(REG, CF, 1, taken)
+    assert vm.run().completed
+    reader = entry_reader(vm)
+    assert evaluate_physical(record, reader).value == final_register(vm, RAX, 8)
+    missing_right = lambda node: None if isinstance(node, dict) and node.get("register", {}).get("offset") == RDI else reader(node)
+    if taken:
+        with pytest.raises(Ineligible, match="unknown physical inputs"):
+            evaluate_physical(record, missing_right)
+    else:
+        assert evaluate_physical(record, missing_right).value == final_register(vm, RAX, 8)
+    with pytest.raises(Ineligible, match="physical work limit"):
+        evaluate_physical(record, reader, max_steps=1)
+
+
+def test_physical_store_without_a_load_still_refuses_an_executed_call_prefix():
+    from pcode_interpreter import Interpreter
+    from record_oracle import entry_reader
+    from synthetic import CF, DATA_BASE, REG
+    from tdo_v2._record_memory import evaluate_physical
+
+    builder = (FunctionBuilder().cbranch("write", reg(CF, 1)).call(0x1f00)
+               .label("write").ins(store(const(DATA_BASE), const(0x1234, 2))).ret())
+    analyzed = _physical_analyzed(builder)
+    record = _physical_record(analyzed, "1:1008:0:STORE")
+    assert not _nodes(record, "op", "LOAD")
+    vm = Interpreter(analyzed.unit.observation, constant_space=0, seed=17)
+    vm.preset(REG, RSP, 8, 0x70000000)
+    vm.preset(REG, CF, 1, 1)
+    assert vm.run().completed
+    reader = entry_reader(vm)
+    assert evaluate_physical(record, reader).value == 0x1234
+    incomplete = copying.deepcopy(record)
+    incomplete.pop("physical_effect_inventory")
+    with pytest.raises(Ineligible, match="root inventory"):
+        evaluate_physical(incomplete, reader)
+    vm.preset(REG, CF, 1, 0)
+    with pytest.raises(Ineligible, match="root memory event"):
+        evaluate_physical(record, reader)
+
+
+@pytest.mark.parametrize("mutation", ("truncated", "demand", "reversed choices", "duplicate choices"))
+def test_physical_evaluation_refuses_an_incomplete_or_malformed_selection_contract_before_entry(mutation):
+    from synthetic import CF
+    from tdo_v2._record_memory import evaluate_physical
+
+    builder = FunctionBuilder().cbranch("right", reg(CF, 1))
+    builder.ins(copy(reg(RAX), const(7))).branch("read")
+    builder.label("right").ins(copy(reg(RAX), const(99)))
+    builder.label("read").ins(copy(reg(R8), reg(RAX))).ret()
+    record = _physical_record(_physical_analyzed(builder), "1:1010:0:COPY")
+    assert evaluate_physical(record, lambda node: 0).value == 7
+    corrupted = copying.deepcopy(record)
+    if mutation == "truncated":
+        corrupted["truncated"] = True
+    elif mutation == "demand":
+        corrupted["demand_complete"] = False
+    else:
+        (phi,) = _nodes(corrupted, "phi")
+        phi["choices"] = [False, True] if mutation == "reversed choices" else [True, True]
+    requested = []
+    with pytest.raises(Ineligible):
+        evaluate_physical(corrupted, lambda node: requested.append(node) or 0)
+    assert not requested
+
+
+@pytest.mark.parametrize("source_kind", ("unsupported", "debt"))
+def test_physical_only_nonoverlapping_writer_does_not_change_static_value_eligibility(source_kind):
+    from synthetic import DATA_BASE, RAM
+    from tdo_v2._record_memory import evaluate_physical
+
+    read_address, value = DATA_BASE + 0x80, 0x1122334455667788
+    if source_kind == "unsupported":
+        builder = FunctionBuilder().ins(op("FLOAT_ADD", [reg(RBX), reg(RSI)], tmp(0x100)))
+        auxiliary_key, root_key = "1:1000:0:FLOAT_ADD", "1:1008:0:LOAD"
+    else:
+        builder = (FunctionBuilder().ins(store(const(DATA_BASE + 0x20), reg(RBX)))
+                   .ins(load(tmp(0x100), reg(RDI))))
+        auxiliary_key, root_key = "1:1004:0:LOAD", "1:100c:0:LOAD"
+    builder.ins(store(const(DATA_BASE), tmp(0x100))).ins(load(reg(RAX), const(read_address))).ret()
+    analyzed = _physical_analyzed(builder)
+    ordinary = _physical_record(analyzed, root_key, physical_memory=False)
+    physical = _physical_record(analyzed, root_key)
+    assert not any(node.get("key") == auxiliary_key for node in ordinary["nodes"])
+    (auxiliary,) = [node for node in physical["nodes"] if node.get("key") == auxiliary_key]
+    assert auxiliary.get("physical_only") is True
+    if source_kind == "debt":
+        assert auxiliary["debts"]
+        assert all(physical["nodes"][identifier].get("physical_only") for identifier in auxiliary["debts"])
+    assert eligibility(ordinary) is eligibility(physical) is None
+
+    def read_entry(node):
+        # The actual entry RAM bytes are known. Neither the disjoint STORE's
+        # value expression nor its register inputs are needed for this LOAD.
+        assert isinstance(node, tuple) and node[:2] == ("memory", RAM)
+        _, _, address, size = node
+        assert read_address <= address < address + size <= read_address + 8
+        return (value >> (8 * (address - read_address))) & ((1 << (8 * size)) - 1)
+
+    assert evaluate(ordinary, read_entry) == evaluate(physical, read_entry) == {value}
+    result = evaluate_physical(physical, read_entry)
+    assert result.value == value
+    assert not any(item["kind"] == "store" for item in result.evidence)
+    assert result.evidence[-1]["sources"] == [{"at": byte, "entry": read_address + byte} for byte in range(8)]
+
+
+@pytest.mark.parametrize("reason", ("unsupported", "debt"))
+def test_a_forged_physical_only_flag_cannot_hide_actual_value_nodes_from_eligibility(reason):
+    if reason == "unsupported":
+        builder = FunctionBuilder().ins(op("FLOAT_ADD", [reg(RBX), reg(RSI)], reg(RAX))).ret()
+        key, expected = "1:1000:0:FLOAT_ADD", "unsupported FLOAT_ADD"
+    else:
+        builder = (FunctionBuilder().ins(store(reg(RSI), reg(RBX)))
+                   .ins(load(reg(RAX), reg(RDI))).ret())
+        key, expected = "1:1004:0:LOAD", "debt"
+    record = _physical_record(_physical_analyzed(builder), key)
+    assert eligibility(record) == expected
+    forged = copying.deepcopy(record)
+    for node in forged["nodes"]:
+        node["physical_only"] = True
+    assert eligibility(forged) == expected
+    with pytest.raises(Ineligible, match=expected):
+        evaluate(forged, lambda node: 0)

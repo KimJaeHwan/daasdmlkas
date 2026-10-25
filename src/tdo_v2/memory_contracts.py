@@ -254,6 +254,79 @@ class MemoryJoinInput:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryFlowEdge:
+    """Raw definitions on one real CFG edge at an ambiguous sparse phi.
+
+    Additive analysis evidence, not another definition or a public Bundle
+    field. A span is one contiguous range of atoms in the same atom class;
+    definition IDs refer to the result's existing raw definitions.
+    """
+
+    span: ByteSpan
+    predecessor_key: str
+    block_key: str
+    definition_ids: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.span) is not ByteSpan:
+            raise TypeError("flow-edge span must be an exact ByteSpan")
+        _require_nonempty_string(self.predecessor_key, "flow-edge predecessor key")
+        _require_nonempty_string(self.block_key, "flow-edge block key")
+        _require_id_tuple(self.definition_ids, "flow-edge definition IDs")
+        if not self.definition_ids:
+            raise ValueError("flow edges require at least one raw definition")
+
+    @property
+    def canonical_key(self) -> tuple[object, ...]:
+        return self.block_key, self.predecessor_key, self.span.canonical_key
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterStateFragment:
+    """Existing raw definitions of tracked register bytes at a boundary."""
+
+    span: ByteSpan
+    definition_ids: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.span) is not ByteSpan or self.span.object_id.kind is not StorageObjectKind.REGISTER_FILE:
+            raise TypeError("register-state span must be an exact register ByteSpan")
+        _require_id_tuple(self.definition_ids, "register-state definition IDs")
+        if not self.definition_ids:
+            raise ValueError("register-state fragments require raw definitions")
+
+
+@dataclass(frozen=True, slots=True)
+class CallBoundaryRegisterState:
+    """Register state before a normalized CALL/CALLIND group's first action.
+
+    This observes the existing fixed point, not a read or a new definition.
+    Untracked register bytes are absent, never implied to be preserved.
+    """
+
+    boundary_key: str
+    block_key: str
+    first_action_key: str
+    fragments: tuple[RegisterStateFragment, ...]
+
+    def __post_init__(self) -> None:
+        for value, label in ((self.boundary_key, "call boundary key"),
+                             (self.block_key, "call boundary block key"),
+                             (self.first_action_key, "call boundary first action key")):
+            _require_nonempty_string(value, label)
+        if self.boundary_key.rsplit(":", 1)[-1] not in ("CALL", "CALLIND") \
+                or self.first_action_key.partition("~")[0] != self.boundary_key:
+            raise ValueError("call boundary must name its raw CALL/CALLIND group")
+        _require_exact_tuple(self.fragments, RegisterStateFragment, "call boundary register fragments")
+        _require_sorted_unique(self.fragments, key=lambda item: item.span.canonical_key,
+                               label="call boundary register fragments")
+        ordered = sorted(self.fragments, key=lambda item: (item.span.canonical_key[:-2], item.span.start))
+        for left, right in zip(ordered, ordered[1:]):
+            if left.span.overlaps(right.span):
+                raise ValueError("call boundary register fragments must not overlap")
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryReadFragment:
     span: ByteSpan
     definition_ids: tuple[int, ...]
@@ -363,6 +436,8 @@ class LocalMemorySsaResult:
     unresolved_writes: tuple[MemoryUnresolvedOccurrence, ...]
     state_nodes: tuple[MemoryStateNode, ...] = ()
     observed_terminal_states: tuple[ObservedTerminalMemoryState, ...] = ()
+    flow_edges: tuple[MemoryFlowEdge, ...] = ()
+    call_register_snapshots: tuple[CallBoundaryRegisterState, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.contract_version) is not int:
@@ -394,6 +469,9 @@ class LocalMemorySsaResult:
             ObservedTerminalMemoryState,
             "observed terminal memory states",
         )
+        _require_exact_tuple(self.flow_edges, MemoryFlowEdge, "memory flow edges")
+        _require_exact_tuple(self.call_register_snapshots, CallBoundaryRegisterState,
+                             "call boundary register states")
         self._validate_canonical_order()
         self._validate_relations()
 
@@ -444,6 +522,13 @@ class LocalMemorySsaResult:
             key=lambda item: item.block_key,
             label="observed terminal memory states",
         )
+        _require_sorted_unique(
+            self.flow_edges,
+            key=lambda item: item.canonical_key,
+            label="memory flow edges",
+        )
+        _require_sorted_unique(self.call_register_snapshots, key=lambda item: item.boundary_key,
+                               label="call boundary register states")
 
     def _validate_relations(self) -> None:
         definition_count = len(self.definitions)
@@ -488,7 +573,62 @@ class LocalMemorySsaResult:
             raise ValueError("JOIN definitions may exist only when demanded by a read")
         for occurrence in (*self.unresolved_reads, *self.unresolved_writes):
             _require_id_in_range(occurrence.action_id, action_count, "unresolved action")
+        self._validate_flow_edges()
+        self._validate_call_register_snapshots()
         self._validate_state_arena()
+
+    def _validate_call_register_snapshots(self) -> None:
+        if not self.call_register_snapshots:
+            return
+        from .resource_limits import step
+
+        actions = {action.operation_key for action in self.actions}
+        starts = {(span.object_id, span.start): index for index, span in enumerate(self.atomic_spans)}
+        ends = {(span.object_id, span.end): index for index, span in enumerate(self.atomic_spans)}
+        run_ends = _contiguous_run_ends(self.atomic_spans)
+        step(len(self.atomic_spans) + len(self.actions))
+        for state in self.call_register_snapshots:
+            step()
+            if state.first_action_key not in actions:
+                raise ValueError("call boundary first action must exist")
+            for fragment in state.fragments:
+                step()
+                start = starts.get((fragment.span.object_id, fragment.span.start))
+                stop = ends.get((fragment.span.object_id, fragment.span.end))
+                if start is None or stop is None or not start <= stop < run_ends[start]:
+                    raise ValueError("register-state span must cover contiguous atomic spans")
+                for definition_id in fragment.definition_ids:
+                    step()
+                    _require_id_in_range(definition_id, len(self.definitions), "register-state definition")
+                    definition = self.definitions[definition_id]
+                    if definition.kind is MemoryDefinitionKind.JOIN:
+                        raise ValueError("register states retain raw definitions only")
+                    if not definition.span.contains(fragment.span):
+                        raise ValueError("register-state definitions must cover its span")
+
+    def _validate_flow_edges(self) -> None:
+        if not self.flow_edges:
+            return
+        from .resource_limits import step
+
+        starts = {(span.object_id, span.start): index for index, span in enumerate(self.atomic_spans)}
+        ends = {(span.object_id, span.end): index for index, span in enumerate(self.atomic_spans)}
+        run_ends = _contiguous_run_ends(self.atomic_spans)
+        step(len(self.atomic_spans))
+        for edge in self.flow_edges:
+            step()
+            start = starts.get((edge.span.object_id, edge.span.start))
+            stop = ends.get((edge.span.object_id, edge.span.end))
+            if start is None or stop is None or not start <= stop < run_ends[start]:
+                raise ValueError("flow-edge span must exactly cover contiguous atomic spans")
+            for definition_id in edge.definition_ids:
+                step()
+                _require_id_in_range(definition_id, len(self.definitions), "flow-edge definition")
+                definition = self.definitions[definition_id]
+                if definition.kind is MemoryDefinitionKind.JOIN:
+                    raise ValueError("flow edges retain raw definitions only")
+                if not definition.span.contains(edge.span):
+                    raise ValueError("flow-edge definitions must cover its span")
 
     def _validate_state_arena(self) -> None:
         atom_count = len(self.atomic_spans)

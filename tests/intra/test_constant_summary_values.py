@@ -163,6 +163,14 @@ def test_several_targets_require_unanimous_literals_and_preserve_contested_memor
     memory = _run(ByteSpan(MEMORY, BIAS, 8))
     members = tuple((_summary((memory,)), {MEMORY: (ByteSpan(REGISTERS, RCX, 8), 1)}) for _ in range(2))
     effect = derive_composed_call_effect(members, "targets", REGISTERS, 128)
+    # Integrated fixed-anchor composition now retains their physical output.
+    # It does not claim a whole-literal value from matching dependencies.
+    (output,) = effect.memory_runs
+    assert output.write.anchor == ByteSpan(REGISTERS, RCX, 8)
+    assert output.literal is None and not effect.unknown_memory
+    # Actually conflicting bases remain contested, not silently unified.
+    members = (members[0], (members[1][0], {MEMORY: (ByteSpan(REGISTERS, RCX + 8, 8), 1)}))
+    effect = derive_composed_call_effect(members, "targets", REGISTERS, 128)
     assert not effect.memory_runs and effect.unknown_memory
 
 
@@ -175,7 +183,7 @@ def test_template_roundtrip_keeps_scalar_bits_separate_and_versioned(memory):
     assert result.literal == ExactConstant(8, (1 << 64) - 1) and result.value is None
     effect = derive_proven_call_effect(summary, "test", REGISTERS, 128, anchors=anchors)
     assert (effect.memory_runs if memory else effect.runs)[0].literal == result.literal
-    assert TEMPLATE_VERSION == 3 and ENGINE_SEMANTICS_VERSION == 19
+    assert TEMPLATE_VERSION == 3 and ENGINE_SEMANTICS_VERSION == 20
 
 
 @pytest.mark.parametrize("pointer", [("nonstack",), ("same", ByteSpan(REGISTERS, RCX, 8), False)])

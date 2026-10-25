@@ -128,6 +128,7 @@ def analyze_frozen_bundle_with_summaries(
     assume_opaque_callees_leave_no_stack_addresses: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
+    physical_memory_records: bool = False,
     assume_same_result_functions: bool = False,
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
@@ -147,6 +148,9 @@ def analyze_frozen_bundle_with_summaries(
     ``origin_witnesses``) in ``RootSlice.explanation``.
     ``operation_records``: put each root's operation record (diagnostics,
     ``operation_records``, docs 25.28) in ``RootSlice.explanation["record"]``.
+    ``physical_memory_records``: include opt-in concrete physical memory and
+    call evidence in those diagnostic records; implies ``operation_records``
+    without changing summaries, assumptions or static eligibility.
     ``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
     facts (``image_info``); each model used is listed in ``EngineRun.assumptions``.
@@ -197,6 +201,7 @@ def analyze_frozen_bundle_with_summaries(
             assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
             origin_witnesses=origin_witnesses,
             operation_records=operation_records,
+            physical_memory_records=physical_memory_records,
             assume_same_result_functions=assume_same_result_functions,
             assume_accessor_result_separate=assume_accessor_result_separate,
             assume_accessor_private_state=assume_accessor_private_state,
@@ -223,6 +228,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
     assume_opaque_callees_leave_no_stack_addresses: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
+    physical_memory_records: bool = False,
     assume_same_result_functions: bool = False,
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
@@ -252,6 +258,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
         assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
         origin_witnesses=origin_witnesses,
         operation_records=operation_records,
+        physical_memory_records=physical_memory_records,
         assume_same_result_functions=assume_same_result_functions,
         assume_accessor_result_separate=assume_accessor_result_separate,
         assume_accessor_private_state=assume_accessor_private_state,
@@ -277,6 +284,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     assume_opaque_callees_leave_no_stack_addresses: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
+    physical_memory_records: bool = False,
     assume_same_result_functions: bool = False,
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
@@ -284,6 +292,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     assume_registered_handlers_not_observed: bool = True,
 ) -> EngineRun:
     """The post-admission body of the summary engine (unchanged)."""
+    operation_records = operation_records or physical_memory_records
     from .integration.configured_boundary_demands import (
         _analyses_from_boundary_nodes, _direct_sink_boundary_nodes,
     )
@@ -583,11 +592,12 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     with reporting(), phase("reporting"):   # (bounded: TDO_V2_REPORTING_SECONDS; no analysis)
         run = report()
     if operation_records:
-        run = _with_records(run, record_inputs, record_provenance)
+        run = _with_records(run, record_inputs, record_provenance,
+                            physical_memory_records=physical_memory_records)
     return run
 
 
-def _with_records(run, record_inputs, provenance=None) -> "EngineRun":
+def _with_records(run, record_inputs, provenance=None, *, physical_memory_records=False) -> "EngineRun":
     """Each root's operation record (diagnostics, docs 25.28), built after
     every root's completeness is final (late failures included) and under
     its own diagnostic budget (docs 25.31 C9-0): records charge no analysis
@@ -599,7 +609,7 @@ def _with_records(run, record_inputs, provenance=None) -> "EngineRun":
 
     limit = os.environ.get("TDO_V2_RECORD_WORK")
     work = int(limit) if limit else None
-    stitch = StitchContext(provenance) if provenance is not None else None   # (docs 25.31 C-9)
+    stitch = StitchContext(provenance, assumptions=run.assumptions) if provenance is not None else None
     roots = []
     for root in run.roots:
         inputs = record_inputs.get(
@@ -614,7 +624,8 @@ def _with_records(run, record_inputs, provenance=None) -> "EngineRun":
         try:
             with diagnostic(work):
                 record = _root_record(analysis, unit, rows, root.label, root.occurrence_ordinal, analyzed,
-                                      root.effective_completeness, calls, stitch)
+                                      root.effective_completeness, calls, stitch,
+                                      physical_memory_records=physical_memory_records)
         except DiagnosticExhausted:
             record = {"record": "root", "truncated": True, "cut": "diagnostic budget", "root": [], "nodes": []}
         # (the record before ``rests_on_failed``, the key order it had)
@@ -738,7 +749,7 @@ def _witnesses(analysis, unit, rows, label, occurrence, labels, node_labels, ind
 
 
 def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness, provenance=None,
-                 stitch=None) -> dict:
+                 stitch=None, *, physical_memory_records=False) -> dict:
     """The operation record of one root (diagnostics, ``operation_records``):
     seeded as ``_lane_origin_labels`` seeds its slice; SOURCE rows' labels as
     node origins."""
@@ -751,7 +762,8 @@ def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness
         if row.kind is BoundaryKind.SOURCE:
             origins.setdefault(row.node, set()).add(row.label)
     return root_record(analysis.normalized, unit, seeds, origins=origins, declared=analyzed.declared,
-                       completeness=completeness, provenance=provenance, stitch=stitch)
+                       completeness=completeness, provenance=provenance, stitch=stitch,
+                       physical_memory=physical_memory_records)
 
 
 def _raw_root_groups(analysis, rows):

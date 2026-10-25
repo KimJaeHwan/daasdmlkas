@@ -22,6 +22,9 @@ class MemoryTransfer:
     guard: str
     contract: str
     requires: tuple[str, ...]
+    success_edge: tuple[str, ...] = ()
+    failure_edge: tuple[str, ...] = ()
+    result_definitions: tuple = ()
 
     def __post_init__(self) -> None:
         if type(self.definition_id) is not int or self.definition_id < 0:
@@ -40,6 +43,14 @@ class MemoryTransfer:
             raise TypeError("transfer requirements must be exact non-empty strings")
         if len(set(self.requires)) != len(self.requires) or self.contract not in self.requires:
             raise ValueError("transfer requirements must be unique and include its contract")
+        for edge in (self.success_edge, self.failure_edge):
+            if type(edge) is not tuple or edge and (len(edge) != 2 or any(type(key) is not str or not key for key in edge)
+                                                    or edge[0] != self.guard):
+                raise ValueError("transfer outcome edges require the original guard and successor")
+        if bool(self.success_edge) != bool(self.failure_edge) or self.success_edge and self.success_edge == self.failure_edge:
+            raise ValueError("transfer outcome edges must distinguish success and failure")
+        if type(self.result_definitions) is not tuple:
+            raise TypeError("transfer result witnesses must be an exact tuple")
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,6 +432,7 @@ def _transfer_node_record(
     identity = (
         transfer.definition_id, transfer.action_id, transfer.span.canonical_key,
         transfer.call, transfer.guard, transfer.contract, transfer.requires,
+        transfer.success_edge, transfer.failure_edge, transfer.result_definitions,
     )
     return NodeRecord(
         f"memory:{namespace}:transfer:{index}", NodeKind.EFFECT,

@@ -1,5 +1,11 @@
 # 함수 간 설계: 요약 기반 (2026-10-07, Fable 검토 반영)
 
+**현재 상태 (2026-10-25): 연산식 계층의 1차 개발은 완료다.** 지원 계약·제한·완료 근거와 선택적 확장은
+[§25.58](#2558-연산식-1차-개발-완료와-지원-계약-2026-10-25)에 모았다. 확인된 1차 필수 잔여 항목은 없으며,
+범위 밖 기능을 자동으로 다음 필수 작업에 추가하지 않는다. 이 선언은 프로젝트 전체의 모든 분석 문제를 해결했다는 뜻이 아니다.
+이 문서는 누적 설계 기록이다. 각 절의 "현재/다음/미구현"은 해당 절 작성 당시를 뜻하며, 특히 §25.36·§25.54의
+연산식 개발 계획은 역사적 기록이다. 현재 연산식 범위 판정에는 §25.58과 그 절이 연결하는 구현 결과를 우선한다.
+
 배경: `docs/interprocedural_investigation.md` — 기존 계층은 루트마다 재전개(요약·memo 없음), 평가 시점 없는
 PointerPath(무한 루프), 재귀 미지원. 새 설계는 **완성된 intra 그래프에서 함수 요약을 bottom-up으로 만들고
 호출 지점에서 물리 바이트로 인스턴스화**한다(Sharir–Pnueli functional approach: 데이터 의존에 대해 완전 문맥 민감).
@@ -1812,8 +1818,9 @@ esp 일부 겹침, 메모리 출력 COPY, index 주소로 불완전, 안쪽 호�
 
 ### 25.28 연산 기록(operation records): 값이 어떤 연산을 거쳐 왔는지 (2026-10-16, 설계 검토 3차·구현 검토 Antigravity 4차·Astra 4차) [역방향]
 
-**목적**(사용자): 결과 확인·디버깅, 그리고 나중에 가상화(VM) 코드·인터프리터 분석 — 핸들러의 의미("vreg[a] = vreg[b] + vreg[c]")는
-그 핸들러 함수 각 출력의 연산 식. 지금 요약은 출력이 기대는 바이트(종류 + sources)만 갖고 연산은 버림. 진단 전용: 켜도 라벨·완전성·
+**목적**(사용자): 결과 확인·디버깅, 그리고 향후 가상화(VM)·인터프리터 분석 도구가 소비할 연산식 표현. 예를 들어 나중의 소비자가
+핸들러의 출력 식을 읽을 수 있도록 실제 연산을 남기는 것이며, 현재 VM 구조 복원이나 분석을 구현하는 뜻이 아니다(최신 범위·우선순위는 §25.36).
+도입 당시 요약은 출력이 기대는 바이트(종류 + sources)만 갖고 연산은 버렸음. 진단 전용: 켜도 라벨·완전성·
 요약·템플릿·가정은 그대로(09 debug·release·win32·UE Development에서 켜기/끄기 JSON이 기록 말고 같음을 확인).
 
 **형식**(`src/tdo_v2/operation_records.py`, 기록 하나 = 식 그래프, 노드 표 + id):
@@ -1855,9 +1862,10 @@ writer 수(`Limits`); 넘으면 `cut`과 `truncated`(분석의 완전성과 별�
 **도구**: `run_dfbench --records`(root마다 `--json`의 `record`, 기대 케이스는 텍스트로 출력), `tools/graph_fidelity/derivations.py
 <generation> --function <entry>`(함수 하나의 출구별 출력 식 — 핸들러 분석용).
 
-**남은 한계**: callee 안까지 식 이어 붙이기(2단계, 호출 노드가 callee와 쓴 바이트를 이름으로 가짐) [역방향]; 식 정리·같음 판정(z3,
-3단계) [역방향]; phi의 어느 쪽 경로였는지 [정방향](분기 조건 사실); 반복의 최종 값 [정방향]; 가상화 디스패치·operand로 고르는 가상
-레지스터 [정방향]; root별 가정 귀속(제외 방식 가정) [가정 — 귀속 불가, 실행 단위 목록만].
+**도입 당시 한계와 이후 상태**: callee 내부 식 연결은 이후 §25.32~25.34에서 제한된 범위로 구현했다. 일반 phi의 분기 선택·선택 상관관계,
+반복의 의미 표현, 외부 소비 계약의 현재 부족은 §25.36을 기준으로 한다. 식 정리·동치 판정, 반복의 최종 값 계산, 실제 가상화 코드의
+dispatch·가상 레지스터 해석은 이번 표현 계층 점검에서 자동으로 정해지는 개발 단계가 아니다. root별 가정 귀속은 기존 제한을 유지한다
+(제외 방식 가정은 실행 단위 목록이 권위).
 **테스트**: `test_operation_records.py`(오라클 8), `test_operation_record_shapes.py` 29개(조각난 입력, x op x, LOAD/STORE 역할, phi, 반복,
 요약 호출 접기와 판단 사실, 준비 행 부채, 한 행의 두 출력, may-alias writer, 합류를 거친 입구 메모리, 한도·수요 한도·바이트 누적,
 깊은 사슬 만들기·계산, origins, rep·override·증명 안 된 rep의 횟수 레지스터, 잘린 바이트 0, 계산 못 하는 대안, 여러·겹친 선택 범위,
@@ -2372,6 +2380,1994 @@ F1b 여러 대상 합성. F2 호출 문맥·특수화·"입구 값으로 옮겨 
 증명 경로가 비어 있어 분리는 모두 `no-use-after-free`에 기댐 — 측정 때 가정 수를 그렇게 읽음). F4 주소 범위·범위 쓰기(배열
 3단계, R005, UE 피호출 함수의 불확실 쓰기). F5 모델 콜백 `invokes`, z3 조건 증명(D2). Python 먼저(의미
 변경), Rust 포팅은 그동안 의미 없는 커널만. 나중 정밀도: 같은 기준의 ptr − ptr = offset 차.
+
+### 25.34 동일 메모리의 다중 대상 합성과 실제 연산 연결 (2026-10-22~23, Astra 단계별 검수)
+
+작업 브랜치 `feature/multi-target-memory-flow`, 기준 main `9d1fdf1`. 목표는 두 후보가 같은 메모리에 쓰는 호출을
+단순히 그림에 추가하는 것이 아니라, 호출자의 후속 LOAD까지 근거 있는 효과와 원래 연산으로 연결하는 것이다.
+core의 arg/ret/calling convention 추론은 추가하지 않는다. 정방향 소비는 기존처럼 `TDO_V2_FORWARD=1`에서만 작동한다.
+
+**효과 합성**: `derive_composed_call_effect`의 기존 보수적 결과를 먼저 만들고, 각 대상의 원래 summary/anchors로
+`derive_proven_call_effect`를 따로 도출한다. 출력의 주소 공간과 물리 입구 레지스터 span이 동일하고 `pointer=None`인
+고정 범위만 공통 displacement 바이트 구간으로 합친다. 함수별 원래 객체·definition은 재작성하지 않는다.
+부분 쓰기는 원래 행의 경계에서 나누며, 쓰지 않은 대상은 메모리 보존이 증명된 경우에만 이전 값을 대안에 넣는다.
+입력 레지스터·메모리 읽기·origin을 합치고, 포인터 값 사실은 모든 관련 대안이 같은 전체 포인터를 보장할 때만 유지한다.
+관련 UNKNOWN·조건·다른 anchor·pointer chain 쓰기는 기존 보수적 결과를 유지한다. `clobbers_below`도 유지하여 호출자의
+아래쪽 스택 부채가 사라지지 않으며, 그 플래그가 있는 대상의 빠진 바이트를 보존으로 승격하지 않는다.
+
+**원래 연산 연결**: 기록 출처가 함수 이름 대신 효과 도출 당시의 정확한 분석 인스턴스를 보관한다.
+`CallProvenance.memory_sources`는 합성 출력에서 대상별 원래 출력 행 또는 보존 증명으로의 대응이다.
+이 대응만으로 exact를 주장하지 않고, 선택한 원래 출구의 정의·debt·crossed·조건을 다시 검사한다.
+같은 호출 인스턴스의 모든 출력은 동일한 합법 `(target, exit)` 목록 하나를 공유하는 phi
+`reason="call targets and exits"`가 된다. JSON의 `choices`에는 함수·출구가 순서대로 남으며, 평가기는 같은 인스턴스에서
+목록·순서·크기가 다르면 거부한다. 정상 복귀하지 않는 대상은 호출 뒤 출력 후보에서만 제외하고 sink·실패 정보는 유지한다.
+중첩 인스턴스 식별에는 부모의 선택 대상도 포함한다. 가져온 노드에는 원래 `function`을 표시한다.
+기록 자체는 진단이며, 켬/끔에 따른 효과·요약은 같다. 알려지지 않은 후보를 제거하거나 한도에서 일부 대상만 게시하지 않는다.
+
+**검수와 회귀**: Astra가 효과 합성, 연산 기록, 실제 자료 검증을 각각 검수했다. 기록 단계에서 발견한 메모리 입구 표지 소실
+(`label` 인자가 가정 이름으로 덮임)은 `entry_label` 분리와 단일/다중 대상 회귀로 고쳤다. 기존 테스트와 실행 오라클을 재사용한다.
+새 회귀는 같은 위치의 쓰기, 유지 대안, 4/8바이트 부분 쓰기, 조건·unknown·opaque, 아래쪽 스택 부채, mixed/all-noreturn,
+같은 호출의 레지스터/RAM 선택, 서로 다른 출구 수, 중첩 helper, 미지원 후보, 선택 목록 변조, 제한 시 전체 롤백을 포함한다.
+
+**실제 자료**: 테스트 소스 `tests/corpus/intra/multi_target_memory.c`를 x64 Mach-O로 컴파일하고 Ghidra 12.0.4로 추출했다.
+A는 `*p=x+1; return x+16`, B는 `*p=x+2; return x+32`, 호출자는 `*p + returned`를 계산한다(모두 unsigned 32bit).
+후속 LOAD 기록에 양쪽 STORE·산술이 있고, x=9에서 정확히 `{35,52}`이며 혼합한 `{36,51}`은 없다.
+기존 program oracle도 실제 피호출 본문을 실행하여 값·메모리 위치를 비교한다.
+6개 경계값 × 두 selector의 12회 실행에서 5,904개 검사·메모리 위치 144/144개가 정합하며,
+미설명 누락·부채로 덮인 비교·위치 미확인·위치 불일치는 0이다.
+DFB072는 별도로 기존 원본을 Linux x64 ELF·Windows x64 PE·Windows x86 PE에서 다시 추출했다.
+sink가 실제로 읽는 정규화된 `~in/~ld` 정의와 관찰된 call shape로 조회하며, source/sink 본문도 실행한다.
+처음 image의 고정 초기값으로만 실행했을 때는 세 variant 모두 B만 방문함을 Astra가 발견했다. 이를 source A/C가
+공통으로 읽는 writable 전역의 초기 입력 6개로 보강했다(반환값·대상 주입 아님). 각 variant에서 실제 CALLIND 입력의
+방문 집합이 `{A,B}`임을 검사하며, 실제 source 반환 x에 대해 기록 값 집합이 정확히 `{x+1,x+2}`인지 확인한다.
+DFB072의 주 흐름은 반환 연산이므로 출력 포인터 검증의 대체물이 아니다(Win64의 실제 home-slot spill은 별도 확인).
+기존 v2/v3의 같은 빌드라고 주장하지 않으며, 재귀·suite09 전체 통과나 모든 경로의 완전성 증명도 아니다.
+실행에는 기존 `globals-disjoint-from-stack` 가정을 켰다. 새로운 ABI 가정은 추가하지 않았다.
+
+로컬 봉인 자료는 Git 제외 경로 `output/multi-target-memory-20261022/`에 보관했다.
+
+| 환경 변수 | 해당 하위 경로 |
+|---|---|
+| `TDO_MULTI_TARGET_MEMORY_BUNDLE` | `local-bundles/9154d9906f36049c2b1c2bd72522a70ac9084b55adb16f4953ae31896c4790d0` |
+| `TDO_DFB072_BUNDLE` | `dfb072-bundles/851c56f6c74efb5e3d9d6aa38795eae0d2683bfdb699fd8e6997e53703f09db1` |
+| `TDO_DFB072_WINDOWS_X64_BUNDLE` | `dfb072-pe64-bundles/fcf92b6abe6a1201ccc9decc10c7ea30511db80f1a488cc6e5e6ef1286254187` |
+| `TDO_DFB072_WINDOWS_X86_BUNDLE` | `dfb072-pe32-bundles/75fc2bc5eb969c4b7a17bddac740f6a97d0afc982958550d699a28879982e743` |
+
+변수를 지정한 뒤 `PYTHONPATH=src:tests/intra python -m pytest tests/corpus/intra/test_multi_target_memory_binary.py -q`로
+재현한다. 자료가 없으면 해당 테스트는 skip이며, 성공으로 세지 않는다. 컴파일 예시는 C 소스 주석, 추출은 기존 exporter를 쓴다.
+
+**검증 제한**: DFB072의 기존 program oracle은 이전 source CALL의 SP 의존과 red-zone spill footprint를 오류로 보고한다.
+새 메모리 helper를 우회한 기준에서도 동일하게 재현했다. 해당 검사기를 바꿔 PASS로 세지 않고, DFB072는 원래 연산 기록의
+평가와 실제 source/sink 실행 값을 별도로 대조한다. 신규 메모리 사례의 program oracle에는 이 오류가 없다.
+
+**모델 호환성(최초 검증 당시)**: 효과 도출 의미가 바뀌어 `ENGINE_SEMANTICS_VERSION=13`이며, 당시 배포 UE FString 모델은
+의미 버전 12라 거부됐다. 원자료가 없다는 사용자 확인으로 첫 작업에서는 재생성을 제외하고 실패를 남겼다.
+당시 동결한 엔진의 전체 회귀는 **2,302개 통과·32개 skip·1개 실패**(363.16초)였으며 실패는 위 UE 호환성 검사다.
+이후 동일 원본 DLL을 확보해 정식 재생성과 호환성 검사를 진행했다(§25.35). 버전 숫자만 바꾸거나 검사를 비활성화하지 않았다.
+입력 범위를 보강한 뒤 실제 자료 5개·메모리/연결 관련 합성 회귀도 다시 실행했다. skip은 통과로 세지 않는다.
+일반 조건부 C9, 서로 다른 anchor의 별칭 통합, pointer-chain 출력 확대, 재귀, CFG dispatch, 외부 콜백, Rust는 이번 범위에서 제외한다.
+
+### 25.35 UE Core 원본 복구와 파생 모델 재생성 (2026-10-23)
+
+Epic의 Windows 배포 `5.1.1-23901901+++UE5+Release-5.1-2023.1-Windows`에서 Core DLL만 받아 기존 모델의
+원본 SHA-256 `fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942`와 일치함을 확인했다.
+원본은 저장소 바깥의 형제 경로 `../ue_binary_cache/ue-5.1-win64/Engine/Binaries/Win64/UnrealEditor-Core.dll`이며,
+다운로드 출처·해시는 해당 캐시의 `download_identity.json`에 있다. 인증 정보는 저장하지 않았다.
+
+Ghidra **12.0.4**, JDK **21.0.10**으로 별도 영속 프로젝트에 import·analysis·save를 완료했다(PDB 없음,
+추가 DLL import 없음). 같은 프로젝트를 `-process -noanalysis -readOnly`로 사용해 기존 도구로 추출·스캔했다.
+원본 PE export table에서 확인한 세 함수 입구는 RAM 433의 `0x180037a80`, `0x18003bc00`, `0x1800f4fd0`이다.
+내부 손 모델에서 호출 폐포를 자른 새 Bundle은 **11개 함수 모두 입장·정규화 성공**, 6개 분석 함수 + 5개 잘림이다.
+전체 스택 검사는 **52,211개 함수·2,881,565개 명령(함수 밖 15,196개), switch 0**, detector v3다.
+기존 `globals-disjoint-from-stack` 허용 근거를 새로 확인한 것이며, 미분석 바이트나 다른 DLL까지 증명한 것은 아니다.
+import 중 일부 `DemangledVariable` 데이터 생성 오류는 있었으나 analysis/save/import는 성공했고, 선택한 폐포의 누락·정규화 실패는 없다.
+
+로컬 근거는 Git 제외 경로 `output/ue-core-regeneration-20261023/`에 보존했다.
+
+- 프로젝트: `ghidra-project/core_rebuild.gpr`, 프로그램 `/UnrealEditor-Core.dll`.
+- 봉인 Bundle: `core-bundles/a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068`.
+- 스택 증거: `core.stack.json`(SHA-256 `6ebb8a1ea65ccf82e9f9c9945578f0ab38abf1ca21072c9b509d35e08f1988f7`).
+- 추출 명령·receipt: `core-bundles.logs/`, 분석·스캔·생성 로그: `core-import.ghidra.log`, `core-stack.console.log`, `core-derive.log`.
+
+기존 `tools/derive_models/derive_models.py`에 이 Bundle과 스택 증거, library `UNREALEDITOR-CORE.DLL`,
+id `ue-core-win64-derived`, file version **12**, `private_frame_above=0x28`을 전달했다. export 이름은
+`??0FString@@QEAA@XZ`, `??1FString@@QEAA@XZ`, `?AppendChar@FString@@QEAAAEAV1@_W@Z`를 모두 유지했다.
+현재 엔진이 semantics **13**으로 세 템플릿을 생성했고 refused/missing은 없다. 세 항목 본문과 가정 목록은 이전과 같다.
+새 모델의 SHA-256은 `8b0b9079dd54eea5570ffc1845cd38a1251db7da22eacc5b5f55b931a6472b85`이다.
+Astra는 추출과 스택 증거를 검수했고, 별도 독립 재도출 결과가 후보 전체 JSON·파일 SHA까지 일치함을 확인한 뒤 교체를 승인했다.
+현재 손 모델·p-code 모델·언어·파라미터에 대한 runtime `refusal()`도 세 항목 모두 `None`이다.
+
+손 모델 지문 차이는 CRLF/LF 차이였다. 현재 CRT·UE 손 모델의 LF 바이트를 CRLF로 바꾸면 기존 모델에 기록된 지문과
+정확히 일치한다. 지문 검사를 완화하지 않고 `.gitattributes`에서 `models/**/*.json text eol=lf`로 고정했다(Astra 검수 승인).
+이는 기존 Windows 작업 폴더의 CRLF 파일까지 자동 변경했다는 뜻이 아니다. 해당 환경에서는 새 checkout 또는 모델 파일의
+LF 갱신이 필요할 수 있다. 엔진 코드·검사기는 이번 재생성에서 수정하지 않았다.
+
+교체 후 `test_shipped_derived_models_match_this_engine` 단독 **1개 통과**, 모델 생성·round-trip·연결·스택 증거 등
+관련 기존 회귀 **95개 통과**(9.14초)를 확인했다. 전체 `pytest tests -q -ra`는 §25.34의 실제 Bundle 환경 변수 네 개를
+설정해 **2,303개 통과·32개 skip·실패/오류 0개**(373.30초)다. 기존 호환성 실패 한 건이 해결됐고, 실제 바이너리 검증
+5개와 배포 모델 호환성 검사가 모두 실제 실행·통과했음을 JUnit에서도 확인했다. 95개는 전체 결과와 중복이며 합산하지 않는다.
+skip은 Linux 전용 worker/supervisor 23개, 이 PC에 없는 별도 Bundle 검사 9개다(성공으로 세지 않음).
+실행 로그와 JUnit은 `model-regression.{log,junit.xml}`, `full-suite.{log,junit.xml}`에 있다.
+Astra는 최종 XML·설치 모델·검사 조건을 검수하고, 동일한 실제 Bundle 네 개로 호환성 1개 + 실제 바이너리 5개를
+독립 재실행해 **6개 통과**(1.04초)를 확인한 뒤 Stage 3와 이번 재생성 완료를 승인했다.
+이 승인은 현재 엔진의 모델 재생성·호환성 회복에 한정되며, UE 전체 코드의 분석 완전성을 뜻하지 않는다.
+
+### 25.36 SSA·그래프 기반 연산식 표현 계층 (범위 정정·기능 점검)
+
+상태 안내 (2026-10-25): 이 절은 **구현 전 점검과 당시 계획**이다. 후속 구현·검증은 §25.37–§25.57에 기록했으며,
+현재의 1차 완료 계약은 §25.58이다. 아래의 "다음 구현/아직 미구현"을 현재 필수 잔여 작업으로 해석하지 않는다.
+
+사용자 정정(2026-10-23): 개발 대상은 **향후 VM·인터프리터 분석 도구가 사용할 연산식 표현 계층**이다.
+현재 VM을 분석하거나 복원하는 작업이 아니다. 이전에 이 절에 적었던 handler 해석·guest PC 복원·dispatch loop 분석의
+로드맵은 질문의 범위를 잘못 넓힌 것이므로 철회한다. 입구 메모리의 정방향 문맥 특수화(F2b) 역시 이 질문에서
+자동으로 정해지는 다음 작업이 아니다. 별도 정방향 엔진 과제와 표현 계층의 부족을 구분한다.
+
+**원칙**: 기존 memory SSA·데이터 그래프·CFG/제어 정보를 사실의 원천으로 재사용한다. 별도 SSA나 VM 전용 그래프를
+새로 만들거나, 아직 없는 분석 근거를 표현 단계에서 발명하지 않는다. 표현·렌더링·평가·외부 소비의 지원 범위는
+서로 구분한다. 현재 연산 기록은 진단 표현이며, 그 평가 결과를 엔진의 증명 사실로 승격하는 작업은 이번 범위가 아니다.
+arg/ret/calling convention 추론을 추가하지 않으며, unknown·debt·가정·잘림을 숨기지 않는다.
+
+이번 작업은 문서 정정과 Astra의 코드 기반 기능 점검이다. 엔진 구현·VM 복원·새 채점기 개발은 진행하지 않는다.
+현재 지원 범위, 부족한 표현 기능과 구현 우선순위는 아래 점검 결과로 정리한다.
+
+#### 코드 기반 점검 결과 (Astra 협의)
+
+아래는 **구현 전 기록 v2의 점검 결과**다. 합의한 1순위의 구현 후 지원 범위와 검증 결과는 §25.37을 기준으로 한다.
+
+결론: **기존 SSA·데이터 그래프는 적절한 기반이다. 현재 연산 기록은 바이트 단위 의존식과 대안의 과대근사이며,
+조건·반복까지 보존한 실행 의미 표현이 완성된 것은 아니다.** 전체 함수를 다시 분석하는 계층이 아니라, 기존 사실을
+요청한 root·출구 출력에 맞춰 투영하는 계층으로 확장한다. 현재 기록은 수요에 따라 `pruned`/`cut`될 수 있으며,
+함수의 모든 명령·제어·메모리 변경을 무조건 담은 완전한 IR 덤프라고 해석하지 않는다.
+
+| 기능 | 현재 기록·표시 | 평가·소비 시의 실제 제한 |
+| --- | --- | --- |
+| 연산·입출력·부분 바이트 | 원래 opcode·연산 위치·피연산자 순서/폭·출력 span, 생산 바이트→입력 바이트 조립이 있음 | 지원 정수 연산은 폭과 signed opcode로 계산. 원본 C 타입 추론은 전제가 아님. 바이트 의존 정밀도와 비트 연산 지원은 별개 |
+| LOAD/STORE·메모리 버전 | 읽기→도달 정의→작성 연산, 주소/값 역할, 부분 쓰기·입구 메모리를 연결 | SSA에 정의 ID·write ordinal이 이미 있지만 기록은 정의를 생산 연산으로 접음. STORE 쓰기 목록·상대 주소 기저의 일부는 표시 문자열이므로 독립 소비에 필요한 원형 참조를 전부 보존하지 않음 |
+| 일반 분기 phi | 여러 정의를 대안으로 기록·표시 | 선행 간선별 선택·참/거짓 조건·서로 다른 JOIN의 공유 선택이 없음. 조건 연산이 root의 데이터 수요 밖이면 식에 없을 수 있음 |
+| 함수 호출 | 지원 범위에서 실제 callee 식·입구 바인딩·메모리 출력을 연결. 호출 인스턴스별 `(target, exit)` 목록을 공유 | 기존 호출 선택 상관은 있음. 이것이 일반 CFG 분기의 상관관계나 경로 실현 가능성 증명은 아님. 연결 못 한 경우 `stitch_cut` 유지 |
+| 반복 | 순환 역참조와 `loop: true` 표시가 있음 | 초기 입력/되돌이 입력·CFG 간선의 명시적 recurrence 계약은 없음. 반복값 계산은 거부하며 반복 횟수를 알아냈다고 주장하지 않음 |
+| 부동소수점·특수 연산 | 원래 opcode·입력/출력 폭을 기록할 수 있음 | `FLOAT_*`는 현재 평가 지원 목록에 없음. 기록 가능과 의미 평가 가능을 구분. BE 평가 정확성도 이번 점검에서 확인하지 않음 |
+| 불확실성·출처·전달 | debt·cut·잘림·호출 provenance·완전성, `RECORD_VERSION=2` dict/JSON 및 텍스트 렌더러가 있음 | 가정의 권위는 run 전체 목록. `eligibility=None`은 정확한 경로 값 집합의 보증이 아님. 텍스트는 무손실 교환 형식이 아니며 범용 record 로더·스키마 검증 공개 API는 검토한 인터페이스에서 확인하지 못함 |
+
+직접 확인한 한계: 같은 분기에서 `(a,b)=(1,10)` 또는 `(2,20)`을 만든 뒤 `a+b`를 기록하면 실제 가능한 합은
+`{11,22}`지만 현재 `evaluate`는 `{11,12,21,22}`를 허용한다(`eligibility=None`). 두 JOIN이 선택을 따로 하기 때문이다.
+이는 현재 **과대근사 계약 안의 결과**이며 엔진의 source 누락이나 건전성 실패를 입증한 것이 아니다. 하지만 이를
+“실제 가능한 값만 정확히 표현했다”로 읽으면 잘못이다. 호출 출력의 공유 선택은 이미 구현됐으므로 그 기능을 없는 것으로
+다시 개발하지 않는다.
+
+근거가 되는 기존 자료와 재사용 경로:
+
+- `memory_contracts.MemoryDefinition`: ENTRY/DATA_WRITE/KILL/JOIN, span, block/operation key, write ordinal.
+  `ByteSpan.canonical_key`는 전체 scope digest를 포함한다. record의 노드 ID와 원래 SSA 정의 ID는 별개다.
+- `lane_slice.lane_index`: graph node↔definition/action, 읽기 조각·JOIN·원래 p-code의 기존 연결 인덱스.
+  연산식의 정의·사용·바이트 조회는 이를 재사용한다.
+- `pcode_blocks`와 `integration/configured_function_control`: 명령 내부 분기를 포함한 block·successor 및 제어 조회.
+  `control_dependence`의 decision→dependent 간선도 재사용하되, 그 간선 자체를 참/거짓 조건으로 간주하지 않는다.
+- `MemoryJoinInput`은 현재 **raw definition ID 집합**뿐이고 선행 간선→입력 매핑이 아니다. `memory_ssa._assemble`에서도
+  정의 집합으로 조립한다. 따라서 원래 CFG가 있다는 이유만으로 조건 phi를 붙일 수 있는 것은 아니다. 제한된 경우 원래 작성 위치와
+  CFG에서 대응을 확인하고, 더 넓은 지원에 필요한 출처가 조립 단계에서 사라진다면 기존 SSA의 부가 근거 보존을 확장한다.
+  기존 도달 정의 계산을 대체하거나 새 SSA를 구축하지 않는다.
+
+주요 코드: `operation_records.py`의 `_phi_join`, `_op`, `_build`, `run_records`, `eligibility`, `evaluate`와
+`memory_contracts.py`, `memory_ssa.py`, `lane_slice.py`, `pcode_blocks.py`, `control_dependence.py`.
+
+#### 합의한 구현 우선순위 — 표현 계층의 세 단위
+
+| 순서 | 개발할 기능 | 재사용·경계 |
+| --- | --- | --- |
+| 1 | **제한된 조건 phi와 출력 간 공유 선택**: 어떤 분기에서 나온 대안인지, 같은 분기의 여러 출력이 같이 선택됨을 보존 | 기존 CFG·조건 p-code·작성 정의를 연결. 조건 표시와 조건에 따른 평가를 별도 계약으로 둠. 우선 아래의 작은 diamond만 지원하고 일반 경로 탐색/SMT는 넣지 않음 |
+| 2 | **메모리·반복의 구조화된 근거 참조**: 정의·읽기·쓰기 및 확인 가능한 초기/되돌이 간선을 원형 ID로 전달 | scope/unit digest·definition/action ID·write ordinal·바이트 범위를 재사용. 표현 ID·표시 이름으로 대체하지 않음. 기존 `loop:true`를 유지하며 확인 못 한 초기/되돌이 대응을 발명하지 않음. 반복 평가·횟수 추론은 별개 |
+| 3 | **기존 JSON의 소비 계약 정리**: 버전·참조·수요 범위·가정 출처·잘림과 의미 지원 수준을 일관되게 전달 | 새 IR/내보내기 도구가 아니라 기존 dict/JSON 보강. identity run에도 공통 envelope를 적용할지 명시하고, run 가정 목록 또는 유효한 참조가 없으면 “가정 없음”이 아니라 “출처 불충분”으로 취급. `과대근사/조건 선택 지원/평가 불가`를 구분 |
+
+세 단위는 완전히 분리된 대형 과제가 아니다. 1번에도 원래 정의 참조와 의미 지원 표시는 최소한 포함하고,
+2·3번에서 메모리·반복과 독립 소비까지 일관성을 넓힌다. 정수 연산을 전부 새로 만들거나 원본 언어 자료형을 복원하는 일보다
+선택·근거를 보존하는 일이 우선이다. FP 평가 확대, 식 정리/동치 검사, 외부 솔버 연계는 이 세 단위 뒤에 별도 필요로 판단한다.
+
+#### 다음 구현의 최소 범위와 완료 기준 (이번에는 구현하지 않음)
+
+다음 단위는 **한 함수 안의 비순환·두 갈래·각 arm이 직선·합류 하나인 diamond의 조건부 공유 phi**다.
+원래 작성 정의와 CFG 양쪽의 대응이 확인된 경우에만 조건 식·참/거짓 successor와 공통 선택 식별자를 붙인다.
+분기의 여러 출력은 그 선택을 공유하되 서로 다른 분기·호출 인스턴스의 선택을 합치지 않는다. 기존 대안·바이트 조각·근거는 유지한다.
+반복·별칭 부채·대안 누락·부분 대응 등 확인 못 하는 경우는 원래 무조건 대안과 이유를 남긴다.
+조건을 표시했다는 이유만으로 `eligibility`나 엔진의 증명 상태를 올리지 않는다.
+
+완료 기준은 기존 `test_operation_record_shapes.py`, `test_control_dependence.py`, `test_record_stitching.py`,
+`test_multi_target_stitching.py`, `test_record_isolation.py` 및 기존 synthetic/p-code 실행기를 확장해 확인한다.
+새 채점기는 만들지 않는다.
+
+- 위 두 레지스터 예제에서 조건별 결과와 가능한 합 `{11,22}`를 보존하고 교차 조합 `12/21`을 배제한다.
+- 기존 if/else·명령 내부 분기(cmov)·고정 메모리 쓰기/읽기에서 지원되는 모양은 조건↔원래 정의 대응을 확인한다.
+  지원 모양 밖의 사례를 성공으로 세지 않고 이유를 보존한다.
+- 미지 조건·반복·누락 대안은 정확한 값으로 승격하지 않는다. 기존 호출 대상/출구의 공유 선택도 깨지지 않는다.
+- 기존 JSON 왕복에서 선택·원형 참조·잘림을 유지하고, 기록 on/off에 따라 분석 라벨·완전성·요약·가정은 달라지지 않는다.
+
+이번 점검에서 Astra는 기존 shape/control/multi-target/isolation 관련 4개 테스트 파일을 독립 실행해 **58개 통과**를 확인했고,
+위 일반 JOIN 상관 한계는 파일을 추가하지 않은 메모리 내 synthetic으로 재현했다. 이는 현재 기반 회귀의 결과이지,
+아직 구현하지 않은 조건 phi 기능의 통과 결과가 아니다. 이번 변경은 문서뿐이며 전체 테스트를 다시 실행한 것은 아니다.
+Astra는 최종 문서도 코드와 대조해 검수했고, 현재/미구현 범위·세 우선순위·최소 구현 단위에 필수 정정 없이 승인했다.
+
+### 25.37 단순 if/else의 조건식·공유 선택 보존 (2026-10-23)
+
+여기서 if/else는 원래 C/C++ 문법을 감지한다는 뜻이 아니라, **조건 분기 → 두 직선 arm → 단일 합류**라는 p-code CFG 모양의 약칭이다.
+같은 명령이어도 주변 CFG 모양에 따라 지원 여부가 달라지며, 삼항 연산자·cmov 등에서 나온 해당 모양에도 적용한다.
+
+§25.36의 1순위를 **기록 계층만** 확장해 구현했다. VM 복원·새 SSA·새 채점기·정방향 엔진은 만들지 않았다.
+엔진의 도달 정의·요약·라벨·완전성·가정과 `ENGINE_SEMANTICS_VERSION=13`은 그대로다.
+새 기록은 `RECORD_VERSION=3`이며, 기존 무조건 대안 기록의 평가도 유지한다.
+
+#### 기존 사실을 연결하는 구조와 지원 범위
+
+- `_record_conditions.ConditionIndex`는 기존 `pcode_blocks` CFG, memory SSA 정의·읽기·쓰기 및 `lane_index`를 사용한다.
+  함수 CFG가 비순환이고 두 arm이 직선·단일 진입·단일 합류인 diamond만 지원한다. 참/거짓은 정렬된 successor 순서가 아니라
+  원래 CBRANCH의 목적지·fallthrough와 조건 입력의 0/비0 의미로 정한다. 명령 내부 상대 분기도 signed delta + 현재 ordinal로 해석한다.
+- 원래 JOIN의 block은 실제 merge가 아니라 **읽기 block**일 수 있다. 실제 merge부터 읽기까지 유일한 직선 경로이며,
+  관련 바이트의 추가 쓰기가 없어야 한다. 동일 연산의 입력 읽기는 그 연산의 출력 쓰기보다 앞이므로 SSA read의 연산 위치까지 검사한다.
+  출구 run의 여러 정의를 합치는 phi는 block 끝을 기준으로 같은 대응 검사를 사용한다.
+- 각 arm의 마지막 관련 쓰기가 phi 바이트 전체를 덮거나, 직선 entry prefix에서 유효했던 ENTRY/이전 정의가 유지되어야 한다.
+  양쪽 정의의 합집합은 기존 raw source 집합과 정확히 같아야 한다. 대안을 버리거나 새 도달 정의를 계산하지 않는다.
+- 기록의 `condition`은 원래 decision/merge/true·false successor와 조건 피연산자의 byte parts를 갖는다.
+  `selection`은 전체 function scope/unit digest + 호출 import 경로 + decision으로 한정한다. `choices=[true,false]` 순서로
+  대안을 대응시키며, 각 대안의 `definition_ref`에 원래 SSA 정의 ID·scope/unit·작성 연산·write ordinal·canonical span을 보존한다.
+  일반 분기 선택과 기존 호출 `(target,exit)` 선택은 별도 namespace다.
+- 같은 분기의 레지스터·RAM 출력은 선택을 공유한다. 알려진 조건은 그쪽 대안만, 단순 미지 입구값은 상관을 유지한 union을 반환한다.
+  §25.36의 `(1,10)/(2,20)` 사례는 알려진 조건에서 `{11}` 또는 `{22}`, 미지 조건에서 `{11,22}`이며 `12/21`이 섞이지 않는다.
+  서로 다른 분기·호출 인스턴스는 선택을 공유하지 않는다. `injected`와 `stitched` 양쪽에 적용한다.
+
+#### 보수적 경계와 기존 결과의 보존
+
+반복·중첩 분기·arm 안 호출·해석 안 된 접근·alias debt·불완전한 source 대응은 `condition_fallback` 이유와 원래 대안을 남긴다.
+이번 지원은 모든 CFG나 모든 함수 호출을 조건식으로 바꾼다는 뜻이 아니다. 이전 단계의 스택/전역 등 실행 가정도 자동 제거하지 않는다.
+
+조건을 **표현**할 수 있는 것과 조건을 **계산**할 수 있는 것도 구분한다. `condition_evaluation`은 지원 또는 명시적 fallback 이유다.
+예를 들어 FP·미지원 guard, 여러 메모리 후보를 가진 guard LOAD, 바인딩 안 된 조건은 한쪽으로 추정하지 않는다.
+단순 미지 조건은 양쪽을 열지만, 선택 가능한 출력 자체가 unknown이면 기존처럼 전체 값 평가를 거부한다.
+따라서 조건이 붙었다는 사실이나 `eligibility=None`만으로 전체 경로 실현 가능성이 증명된 것은 아니다.
+
+조건 입력은 값 식을 만들기 **전에** lane 수요에 포함해 부분 바이트 pruning으로 조건이 달라지지 않도록 한다.
+조건 전용 subtree는 값의 적격성과 분리하되, 값에도 사용되는 노드·그 입력·debt/cut는 전이적 도달성으로 다시 확인해 제외하지 않는다.
+조건 추가의 한도 초과는 전체 `truncated`로 명시한다. 조건에만 필요한 미바인딩 바이트는 기존 호출 본문 연결을 취소하지 않고,
+그 조건의 평가 fallback으로 남긴다. 실제 값에 쓰이는 바인딩 구멍은 여전히 연결을 거부한다.
+공유 selection의 모든 phi는 choices뿐 아니라 조건·decision·merge·successor 계약도 같아야 하며,
+공유 선택 계약이 손상된 JSON은 평가를 거부한다. 범용 JSON parser의 모든 손상 검증을 제공한다는 뜻은 아니다.
+
+#### 실제 바이너리에서 확인한 표현
+
+기존 봉인 Bundle을 재사용했다. source 이름은 실제 관찰 선택에만 사용하고, 조건 분류·정의 연결은 원래 p-code/CFG/SSA로 한다.
+새 바이너리·추출기·검사기를 만들지 않았다. 실제 검증은 기존 `assume_globals_disjoint_from_stack=True`를 명시해 실행했으며,
+이번 조건식 표현 지원으로 그 가정을 제거했다고 주장하지 않는다.
+`tdo_testbed_UE/cpp_like`의 helper는 별도 C++ 테스트 바이너리이며 실제 Unreal Engine DLL의 함수가 아니다.
+이번 단계에서 UE FString 파생 모델의 엔진 호환성은 확인했지만, 새 조건식 기능을 실제 UE DLL 분기에 적용해 검증하지는 않았다.
+
+| 실제 함수 | 확인 결과 |
+| --- | --- |
+| `tv2c622_pick_writer` (`1b1:1081c0`) | 두 arm의 실제 stack STORE → 조건부 phi → 합류 LOAD. selector 0/1에서 각 평가 route가 실제 실행과 같은 주소 하나만 반환 |
+| `tv2c650_store_selected_lane` (`1b1:1096a0`) | 두 RAM 출구 기록(입구 RDI+4/+8)이 같은 selection을 공유. 쓰지 않은 field의 입구 정의를 보존하고 조건별 실제 field 값과 일치 |
+| DFB010 / DFB016 | 양 arm 안 source 함수 CALL이 있으므로 이번 범위에서는 `call on path` fallback. 두 STORE·합류 LOAD·두 대안이 유지되고 실제 실행값이 포함됨. 조건부 지원 성공으로 세지 않음 |
+
+helper622 원본(`tdo_testbed_UE/cpp_like/src/cases_fusion.cpp:803`):
+
+```cpp
+static TV2C622_WriteFn tv2c622_pick_writer(int selector) {
+  return selector ? tv2c622_write_live : tv2c622_write_decoy;
+}
+```
+
+실제 바이너리 기록의 관련 부분(긴 selection digest만 생략; 원래 JSON에는 전체가 있음):
+
+```text
+n15 = INT_EQUAL(..., 0) @1081c4:7
+n5  = STORE(address, live_address)  @1081d2:2
+n10 = STORE(address, decoy_address) @1081e0:2
+n4  = phi(T:n10, F:n5) if n15 != 0
+      decision=1b1:1081c9:0:CBRANCH, merge=1b1:1081e7, shared=cfg/<scope>/<unit>/<decision>
+n0  = LOAD(address) mem{n4} @1081e7:1
+```
+
+true/false의 원래 SSA 정의는 각각 42/38이며 동일한 entry RSP-16의 8바이트다.
+selector 0은 true → `0x10b6f0`, selector 1은 false → `0x10b6d0`로 실제 실행과 양 평가 route가 일치했다.
+helper650은 초기 `(payload,decoy)=(11,29)`, value=7에서 selector 0 → `(11,7)`, selector 1 → `(7,29)`이며,
+두 field 기록의 공통 selection과 조건별 singleton을 확인했다.
+
+검증 구현·원본 digest·Bundle 환경 변수는 `test_conditional_records_real.py`에 있다.
+DFB는 `c6edcb2c812de6b6b226bcd7a83c9d418e1858a21e56cbadffb7ef92d63109d1`, C++ helper는
+`cddea32fb84d188522eca9f9584d784d5c9eca86cc72d711a67808c445d903f1` 세대를 사용했다.
+
+#### 검수와 회귀 결과
+
+Astra 설계 검수 → 구현·의미 검수 → 원본 코드/실제 사례 검수를 순서대로 받았다. 검수에서 발견한 guard-only LOAD의
+다중 메모리 후보 첫 항목 선택 문제는 `ambiguous memory` fallback과 양 route 회귀로 수정했다.
+Astra는 관련 6개 파일 **133개**, 기존 구체 실행 대조 **8개**, 실제 바이너리 검사 **4개**를 각각 독립 실행·통과했다.
+
+최종 `pytest tests -q -ra`는 기존 실제 Bundle 환경 변수 네 개와 위 조건식 검증 Bundle 환경 변수 두 개를 설정해
+**2,351개 통과·32개 skip·실패/오류 0개**(377.27초)였다. 실제 조건식 검사 4개는 지원 positive 2개와 fallback negative 2개이며
+모두 실행됐다. skip은 Linux 전용 worker/supervisor 23개와 이 PC에 없는 별도 Bundle 검사 9개다(통과로 세지 않음).
+선별·독립 실행은 전체 회귀와 중복되므로 합산하지 않는다. 모델 호환성 검사도 실제 실행·통과했다.
+JUnit 근거는 `output/conditional-records-20261023/full-suite.junit.xml`이다.
+Astra도 최종 XML에서 새 실제 검사 4개·기존 다중 대상 실제 검사 5개·배포 모델 호환성 1개가 skip 없이 통과했음을
+확인하고 이번 범위의 완료를 승인했다.
+
+### 25.38 실제 UnrealEditor-Core.dll 검증: 되는 표현과 남은 공통 원인 (2026-10-23)
+
+이 절은 **확장 구현 전 검증 스냅샷**이다. 이후 수정된 범위와 현재 지원 한계는 §25.39를 기준으로 읽는다.
+
+이번은 검증·원인 분석이며 **엔진·SSA·모델 코드를 수정하지 않았다.** 앞 절의 cpp_like 시험 바이너리와 달리 실제 Epic 배포
+UE 5.1.1 `UnrealEditor-Core.dll`을 사용했다. SHA-256은 `fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942`다.
+저장된 Ghidra 프로젝트에서 `-process -noanalysis -readOnly`로 추가 표본을 추출했고, 원본 SHA·봉인 Bundle admission을 확인했다.
+
+결론: 실제 UE에서도 단순 조건·출력 간 선택 정합·일부 메모리 읽기/쓰기를 표현한다. 그러나 **AppendChar처럼 호출·포인터 쓰기가
+섞인 함수의 조건식과 RAM 연결까지 완성됐다고 할 수 없다.** 이 한계는 추출 실패나 시간 초과가 아니라 아래의 식별된 원인이다.
+
+#### 범위와 분모
+
+- 기존 FString 파생용 closure의 **11개 관찰 모두**를 조사했다. 손모델 없이 본문을 분석하면 11개 모두 정규화된다.
+  기존 파생 설정에서는 **6개 body + 정책 cut 5개**이며, cut 5개는 실패가 아니다. 두 모드 모두 지원 조건 기록은 없었다.
+- 별도로 실제 PE export·기계어를 보고 메모리 읽기, 두 갈래 분기, 복합 분기, 메모리 쓰기 모양의 **10개 leaf 함수**를 선별했다.
+  이후 실제 FString cmov를 확인하기 위해 **Len 1개**를 별도 추가했다. 원래 11개를 성공 표본으로 교체하지 않았다.
+- 서로 다른 실제 함수 **22개 모두 관찰 확보·정규화 성공**이다. 이 중 **11개 함수의 선택한 입구 상태 29회**를 기존 p-code 실행기로
+  끝까지 실행해 값·실제 STORE·조건 선택 등을 대조했다. 나머지 함수는 정적 CFG/SSA/기록 조사이며 구체 실행 완료로 세지 않는다.
+- **Windows에서 DLL을 직접 구동하는 native 실행은 하지 않았다.** p-code 실행도 함수 전체의 모든 입력·경로를 증명한 것은 아니다.
+  평가 가능 run 수, phi 수, pytest 수를 함수 성공 수로 바꾸어 세지 않는다.
+
+기존 closure의 관찰 분모(LOAD/STORE에는 스택 저장·반환도 포함):
+
+| 실제 함수 / 입구 | 명령 수 | 원본 LOAD/STORE | 조건화에서 확인한 경계 |
+| --- | ---: | ---: | --- |
+| FString ctor `180037a80` | 5 | 1/2 | 분기 없음. 두 실제 초기화 STORE 대조 |
+| FString dtor `18003bc00` | 8 | 2/1 | NULL guard의 다른 arm에 CALL. NULL 경로만 구체 대조 |
+| FString::AppendChar `1800f4fd0` | 83 | 11/16 | cmov 3개가 있으나 alias/call 관련 debt. 실제 버퍼 쓰기 두 곳의 대상도 미해결 |
+| FMemory::Free `1801f1c40` | 30 | 4/7 | 복합 경로·간접 호출. configured에서는 정책 cut |
+| FUN_18010b8d0 | 42 | 6/7 | cmov 합류에 3개 predecessor 또는 condition debt |
+| FUN_180bca600 | 13 | 4/4 | CBRANCH 없음; 호출 환경 필요 |
+| FUN_1800570d0 | 3 | 0/0 | CBRANCH 없음 |
+| FMemory::QuantizeSize `18020a670` | 10 | 3/0 | return/tail BRANCHIND로 갈라져 단순 합류가 없음; 정책 cut |
+| FMemory::Realloc `18020afe0` | 64 | 6/16 | 복합 경로·호출·대안 수; 정책 cut |
+| FDebug::CheckVerifyFailedImpl `18035a2e0` | 50 | 7/18 | 복합 경로·condition debt; 정책 cut |
+| UE4Array_Private::OnInvalidArrayNum `180100420` | 12 | 1/4 | CBRANCH 없음; 정책 cut |
+
+#### 실제로 표현·값 대조가 된 부분
+
+| 실제 함수 / 입구 | 확인한 내용 | 검증 범위 |
+| --- | --- | --- |
+| FString::Len `1800567d0` | `[RCX+8]` LOAD → 조건·cmov → `Num==0 ? 0 : Num-1` | Num 0/1/2/15, 두 p-code arm, 양 평가 route의 singleton 일치 |
+| FName::CompareIndexes `180048910` | 객체 필드 LOAD·차이 → 조건 → RAX와 CF/PF/ZF/SF/OF의 6개 출력 기록이 같은 selection 사용 | 4입력·두 arm, 한 실행의 6개 실제 출력과 각각 singleton 일치 |
+| FName::IsEqual `180050e70` | 첫 diamond가 선택한 필드 비교 → 중간 ZF JOIN → `180050e82`의 AL COPY | 선택값 0/1. 최종 AL은 나중에 덮이므로 원래 중간 `_write` 값을 관찰해 직접 대조. 최종 출구 전체의 조건화 성공은 아님 |
+| FString::IsEmpty `180050e00`, FTextRange::IsEmpty `180050e50` | 객체 필드 LOAD → 정수/비교 → 결과 | 각각 4입력의 실제 결과 일치. 분기가 없으므로 조건 phi는 불필요 |
+| FTextKey::IsEmpty `180050e30` | 객체 포인터 LOAD → 가리키는 문자 LOAD → 결과 | 문자 0/65의 실제 AL·예상값·기록값 일치 |
+| FBitWriterMark::Init `1804b87d0` | `RAM64[RCX+8] ← RAM64[RDX+0x98]` | 첫 STORE 값·실제 RAM 일치. 두 번째 STORE는 아래 alias debt를 유지 |
+| FBitWriterMark::Reset `1804c4be0` | `[RCX]` 1바이트·`[RCX+8]` 8바이트의 실제 0 쓰기 | 두 STORE 식과 실제 초기값 변경 일치 |
+| FString ctor / dtor | ctor의 두 0 쓰기, dtor NULL 경로의 실제 LOAD | 각각 확인한 경로만. dtor의 non-NULL free 경로는 완료로 세지 않음 |
+| FString::AppendChar | 용량이 충분한 Num 0/1/3에서 실제 Num 갱신·문자·종료문자 STORE | 실제 버퍼 결과는 확인했지만 기록은 debt를 유지하므로 완전한 slice/조건화 성공으로 세지 않음 |
+
+FName의 공유 선택 검증은 **출력 간 동일 선택 정보와 알려진 조건별 값 정합**이다. 이번 UE 표본에는 하나의 기록 안에서 여러 phi를
+미지 조건으로 함께 소비하는 수치 사례가 없으므로, 그것까지 실제 UE에서 검증했다고 주장하지 않는다(기존 synthetic 회귀와 별개).
+선택한 추가 10개에서 최종 출력 조건 기록이 있는 함수는 CompareIndexes 한 개이며, Len은 별도 표본이다.
+IsEqual/IsLeapYear의 일부 중간 JOIN 지원과 함수의 모든 최종 출구 조건 표현을 혼동하지 않는다.
+
+#### 안 되는 부분의 공통 원인
+
+| 공통 원인 | 실제 근거 | 남는 한계 / 필요한 정보 |
+| --- | --- | --- |
+| 단순 CFG 범위 밖 | FTextId의 다중 출구, IsLeapYear의 복합 분기, IsValidIndex cmov의 `no straight entry prefix` | 기존 정의 대안은 보존하지만 전체 분기 조건 관계를 표현하지 못함. 선행 간선별 정의 근거·복합 선택 표현이 필요 |
+| guard까지 도달하는 alias debt | AppendChar `1800f5001:5`의 guard LOAD `1800f4fe6:1`에 prologue push STORE `1800f4fd0:2`/`1800f4fd2:2`가 may-alias writer로 도달 | 현재 분석은 입구 RCX의 대상이 스택 저장과 겹치지 않음을 증명하지 못함. 구체 입력에서 다르다는 사실을 일반 정적 증명으로 사용하지 않음 |
+| 호출·탈출·대안 수 | AppendChar의 후속 cmov, dtor arm CALL. configured에서도 관련 호출의 `escapes_stack=True`, 일부 소비에 대안 3개 | 명시된 호출 효과·별칭 근거 또는 확장된 조건 모델이 필요. 두 대안으로 강제로 축소하지 않음 |
+| 포인터 경유 STORE 대상 미해결 | AppendChar `1800f5078:3:STORE`, `1800f50d6:3:STORE`가 `summary.unknown_writers`; configured의 `unresolved_memory_write` 2개 | 원래 STORE·값·주소 식이 있는 것과 특정 RAM 대상으로 신뢰할 수 있게 연결됐다는 것은 다름 |
+| STORE→후속 LOAD 별칭 가능성 | Init의 첫 STORE `1804b87d7:2`와 다음 LOAD `1804b87db:1` | 두 번째 STORE 식은 있으나 `may_alias_read` debt로 평가 거부. RCX/RDX의 구체 비겹침을 분석 사실로 임의 승격하지 않음 |
+| 실행 환경·범위 부족 | allocator·진단 등 호출/간접 호출 경로, 아직 구체 실행하지 않은 함수·arm | 모델 호환성이나 선택한 no-call 경로의 성공을 실제 런타임 호출 전체 검증으로 확대할 수 없음 |
+
+원래 closure의 두 분석 설정 비교:
+
+| 항목 | 손모델 없이 본문 검사 | 기존 정식 모델 파생 설정 |
+| --- | ---: | ---: |
+| body / 정책 cut | 11 / 0 | 6 / 5 |
+| summary-run 기록 / 지원 condition | 319 / 0 | 96 / 0 |
+| cmov 관련 직접 JOIN 루트 / 지원 condition | 24 / 0 | 26 / 0 |
+| AppendChar call-clobber / opaque-write graph debt | 35 / 12 | 0 / 0 |
+| AppendChar may-alias graph debt | 15 | 17 |
+
+이는 서로 다른 설정의 중복 분석이며 함수·검사 성공 수로 합산하지 않는다. 앞 모드는 모델/P-code 모델 없이,
+`image_info`·`ReadOnlyImage`·globals-disjoint=True·entry-frame=True·opaque-no-stack=True·home-space 확장 0으로 조사했다.
+뒤 모드는 기존 `crt-win64@7`, `ue-core-win64@4`, x86 P-code 모델, home 0x28, clean stack evidence,
+own-library와 FString 3 root keep-uncut, ImageBaseTracking을 재현했다. **파생 FString 모델로 대상 본문을 대체하지 않았다.**
+호출 debt는 줄었지만 alias와 미해결 RAM 쓰기는 남았다. 모델을 켜면 모두 해결된다는 결론이 아니다.
+
+#### 재현 근거와 승인 범위
+
+`tests/intra/test_ue_core_conditional_records.py`는 물리 입구 레지스터/RAM만 preset하고 원래 p-code를 실행한다.
+분기 flip·기대 phi 선택·가짜 반환·havoc·손모델/파생모델을 쓰지 않는다. 구체 실행 대조용 분석은 globals-disjoint,
+entry-frame, opaque-no-stack을 모두 False, private-frame-above=0으로 명시하고 이미지 folding도 하지 않는다.
+중간 값은 기존 `_write`를 그대로 실행한 뒤 관찰하며, 실행 완료·RETURN 도달·opaque 없음·검사 root 도달을 확인한다.
+
+로컬 Bundle(모두 Git 제외):
+
+- 기존 11개: §25.35의 `a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068`.
+- 추가 10개: `output/ue-core-conditions-20261023/bundles/a37981561a216e30545b5cd90bbf82e01ccd08ede2b93ba55933697001b89db8`.
+- Len: `output/ue-core-conditions-20261023/len-bundles/dfeaa7992e73c38fadbed95037cd96d99a444075891653d83133254278dad8c9`.
+- 실행 로그/receipt는 해당 `*.logs/`; 테스트 JUnit은 `output/ue-core-conditions-20261023/ue-core.junit.xml`.
+
+환경 변수 `TDO_UE_CORE_MODEL_BUNDLE`, `TDO_UE_CORE_CONDITIONAL_BUNDLE`, `TDO_UE_CORE_LEN_BUNDLE`을 각각 위 경로로 설정한다.
+UE 검사 **11개 통과·skip 0**이며 Astra도 같은 Bundle로 독립 실행·통과했다. 이 숫자에는 미지원 경계를 확인하는 negative 검사가
+포함되므로 11개 함수의 완전한 조건화 성공률이 아니다. 엔진 수정이나 전체 UE 분석 완료의 승인이 아니다.
+
+관련 조건·연산 기록·연결·격리·모델 호환성 회귀는 UE 검사 11개를 포함해 **153개 통과·skip 0·실패/오류 0**(19.25초)이다.
+JUnit은 `output/ue-core-conditions-20261023/regression.junit.xml`에 있다. 전체 테스트 스위트를 이번에 재실행한 수치는 아니다.
+Astra는 UE 검사를 독립 실행하고 두 JUnit 및 문서의 범위·한계 표기를 검수해 필수 차단 사항 없이 승인했다.
+기존 closure 두 모드 통계는 담당 전수결과와 문서의 정합을 검수했으며, Astra가 이번에 독립 재계산한 것은 아니다.
+
+### 25.39 복합 분기와 조건부 물리 메모리 연결 구현 (2026-10-23)
+
+앞 절의 한계를 단순한 성공률 변경이 아니라 표현 계층에서 보완했다. **기존 SSA·정의 ID·데이터 그래프·요약·가정은 재사용**하며,
+새 reaching-definition 분석기를 만들지 않았다. 이 단계의 기록 형식은 `RECORD_VERSION=4`이며 후속 호출 연결은 §25.40의 v5다.
+엔진의 정적 completeness와 debt 판정은 올리지 않는다.
+
+#### 여러 분기를 지난 값과 출구의 조건
+
+- 기존 단순 diamond 표현은 유지한다. 일반 비순환 CFG에는 공유 Boolean 결정 DAG인 `control`을 붙인다.
+  `guarded_sources`는 **기존 raw SSA 정의 각각에 어떤 조건으로 도달하는지** 대응시킨다. 중첩·연속 분기와 세 개 이상 정의도 지원한다.
+- SSA 고정점에서 sparse phi의 predecessor out-state를 `flow_edges`로 추가 보존한다. dense/sparse는 동일한 근거를 내며,
+  기존 정의·읽기·JOIN·terminal state는 동일하다. 기록층은 기존 쓰기 경계를 따라 원래 source만 추적하고,
+  합류 근거가 있는 곳에서 교차 확인한 뒤 guard의 배타성·전체 도달 범위와의 일치를 검사한다.
+  `flow_edges`는 보조 근거이며, 행이 없으면 언제나 거부하는 별도 admission 정책은 아니다.
+- 값 선택과 별도로 `execution_guard`가 root/출구 도달 조건을 나타낸다. 실제 실행 결과를 보고 출구를 먼저 고를 필요 없이
+  도달하지 않는 출구는 `no alternative`로 제외된다. 미지 입력은 공유 선택을 보존한 후보 집합이고, 경로 실현 가능성 증명은 아니다.
+- 구체 조건은 필요한 결정만 평가한다. 미지 조건만 제한 내에서 분기하므로, 알려진 여러 조건을 불필요하게 Cartesian 전개하지 않는다.
+
+실제 UE의 **FName::IsEqual, FString::IsValidIndex, FDateTime::IsLeapYear, FTextId::IsEmpty**는 모든 최종 AL 출구를
+먼저 평가해 실제 결과 하나만 남는 것을 확인했다. cmov 뒤의 분기, 음수 보정·나머지 계산, short-circuit LOAD를 포함한다.
+선택한 입력 집합에서 각 CBRANCH의 true/false를 모두 실행했지만, 모든 입력의 증명으로 확대하지 않는다.
+
+#### 겹칠 수 있는 메모리는 가정을 지우지 않고 관계를 연결
+
+`root_record(..., physical_memory=True)` / `run_records(..., physical_memory=True)`는 기존 LOAD에
+`physical_memory`를 추가한다. 원래 STORE 노드의 주소식·값식, 실행 guard, CFG 순서, 공간·폭과 기존 debt를 함께 보존한다.
+may-alias 후보만 나열하지 않고 확정 STORE도 같은 순서에 놓아, 나중의 확정 쓰기가 앞선 가능한 쓰기를 덮는 효과를 보존한다.
+보조 표현만을 위해 추가한 노드는 `physical_only`로 구분하되 실제 VALUE가 도달하면 제외 표지를 신뢰하지 않는다.
+
+명시적 `evaluate_physical(record, entry)`는 **동일한 함수 입구의 레지스터/RAM 값**으로 이 관계를 해석하고
+`PhysicalEvaluation(value, evidence)`를 반환한다. 서로 다른 symbolic base라는 이유로 비겹침을 가정하지 않는다.
+같은 물리 주소 공간의 바이트 주소를 비교해 부분 겹침·비정렬·주소 폭 wrap과 마지막 실행 STORE를 처리한다.
+기존 `evaluate`/`eligibility`의 정적 debt는 그대로 남는다. 즉 구체 입력별 해석의 성공은 일반 nonalias 증명이 아니다.
+
+실제 확인한 핵심 경로:
+
+```text
+AppendChar: 입구 register/RAM → prologue PUSH → 객체 Num LOAD → cmov/조건
+           → Num 갱신 STORE → Data 포인터·문자 위치 계산 → 문자 STORE → 종료문자 STORE
+
+객체 = 입구 SP-16인 반례:
+입구 Num=1 → PUSH RBX가 같은 물리 바이트에 Num=3을 씀 → LOAD가 3을 읽음 → Num=4를 씀
+```
+
+AppendChar의 충분한 용량에서 Num 0/1/3의 세 STORE 주소·폭·값과 실제 실행을 대조했다. 문자 0이면 STORE root 미실행을 거부한다.
+위 스택 별칭 입력도 실제 덮어쓴 값과 바이트별 writer 근거가 일치했다. `FBitWriterMark::Init`은 서로 다른 포인터,
+실제 동일 주소와 STORE 내부 offset 4를 읽는 입력까지 확인했다. 스택/전역/입구 포인터 비겹침 가정을 추가하지 않았다.
+AppendChar는 표시용 writer 상한으로 잘린 자료를 평가하지 않도록 `Limits(writers=64, depth=512)`를 명시했다.
+
+안전 경계: 선택된 미지 주소/값, 활성 call·opaque memory 효과, 잘린 기록·미완료 demand, 잘못된 공유 선택·guard 참조는 거부한다.
+LOAD가 없는 상수 STORE root도 앞선 활성 불명 호출을 통과시키지 않는다. 두 평가 API는 동일한 선택 계약 검증을 사용한다.
+기록 일관성 검사는 진위 인증이 아니며, 누락된 프로그램 전체를 증명하는 인증서도 아니다.
+
+#### 남는 범위와 재현
+
+함수 내부 **비순환 흐름**이 이번 확장 범위다. 루프·미확정 간접 제어 이동, 활성 allocator 등 불명 호출의 실행은 해결했다고 하지 않는다.
+이 단계에서 새 일반 guard DAG의 함수간 import는 명시 fallback으로 유지했고, 후속 보완은 §25.40에 기술한다. 따라서 AppendChar의 **재할당 없는
+선택 경로 완료**이지 함수 전체·재귀·모든 UE 메모리 쓰기의 정적 완전성 완료가 아니다. Windows native DLL 실행도 아니다.
+
+실제 자료는 §25.38의 같은 SHA와 Bundle 세 개를 재사용했다. UE 검사 21개는 기존 11개 + 복합 분기 4개 + 물리 메모리 6개이며,
+각 숫자는 완성 함수 수가 아니다. 서로 다른 22개 관찰 중 구체 실행한 함수는 14개, 테스트 내 입구 실행은 중복을 포함해 66회다.
+DFB010/016은 호출 뒤 STORE의 guard 구조를 보존하지만 predicate의 `unsupported call` 상태와 기존 `{x+1,x+2}` 후보를 유지한다.
+실제 source/sink body 실행·양쪽 arm·원 STORE 정의 대응 검사를 계속하며, 이 둘을 정확한 조건값 지원으로 세지 않는다.
+
+최종 전체 회귀 `pytest tests -q -ra`는 §25.34의 실제 Bundle 네 개, §25.37의 조건식 Bundle 두 개,
+§25.38의 실제 UE Bundle 세 개를 모두 지정해 **2,419개 통과·32개 skip·실패/오류 0개**(382.03초)다.
+UE 검사 21개·DFB/helper 조건 검사 4개·기존 다중 대상 실제 검사 5개·배포 모델 호환성 검사는 모두 실제 실행됐다.
+skip 32개는 기존 Linux 전용 worker/supervisor 23개와 별도 Bundle 미확보 9개이며, 통과로 세지 않는다.
+최종 JUnit은 `output/guarded-memory-20261023/final-suite.junit.xml`이다. 선별·독립 검사는 전체와 중복되므로 합산하지 않는다.
+Astra는 설계 → SSA/control → 물리 메모리 → 실제 사례·기존 판정 불변 순으로 검수했다.
+지적된 조건 전용 phi 선택 계약, 잘못된 read 경계, 물리 평가의 잘림·demand·선택 계약 거부를 수정하고 음성 회귀를 유지했다.
+Astra는 최종 JUnit도 독립 확인해 위 실제 검사들의 skip/실패 없음과 32개 skip 분류를 확인하고 이번 범위 완료를 승인했다.
+
+### 25.40 호출 경계의 공유 조건과 제어 전용 입력 (2026-10-23, v5)
+
+같은 함수를 다른 입력으로 두 번 호출하면 서로 다른 선택이어야 한다. 반대로 한 번의 호출에서 나온 레지스터·RAM 출력은
+같은 선택을 공유해야 한다. v5는 기존 callee SSA/CFG에서 만든 일반 guard DAG를 root 기록의 공통 control pool로 원자적으로 import한다.
+선택의 논리 식별자는 scope·unit·전체 호출 경로·원 decision이며, 정수 guard ref는 직렬화 위치일 뿐이다.
+같은 논리 선택의 입력 식이 일치하지 않으면 별개 선택으로 둔갑시키지 않고 해당 import를 cut한다.
+
+각 callee 출구는 상수·변경 없는 값·단일 출구도 `assemble.execution_guard`로 감싼다. 공유 DAG에서 필요한 조건을 지연 평가하고,
+선택하지 않은 대안의 값 본문은 평가하지 않는다.
+3-exit와 single-exit 3-definition, register/RAM 동시 출력, 같은 callee 반복 호출의 입력/조건 분리를 확인한다.
+import 실패 시 노드·edge 비용·control DAG·선택 registry·ref map·조상 builder의 조건 cache를 함께 되돌린다.
+조건 materialization은 builder별 한 번이며, 호출 없는 기록에 빈 stitch context만 추가해도 budget을 다시 소모하지 않는다.
+
+#### 값을 계산하지 않고 분기만 결정하는 레지스터
+
+기존 data-only summary의 `~in`에는 결과값 계산에 쓰이지 않는 조건 입력이 없을 수 있다.
+이를 arg/ret 또는 calling convention으로 추측하지 않고, 기존 SSA의 register-only 호출 직전 관찰을 사용한다.
+
+```text
+caller: R9 ← RCX → CALL F             F: R9 != 0 ? 상수 9 : 상수 7
+                      ↑
+             첫 staging action 직전
+             기존 raw reaching definitions
+```
+
+`LocalMemorySsaResult.call_register_snapshots`는 원 CALL/CALLIND·block·첫 staging action과 이미 추적 중인 register atomic span의
+raw ENTRY/DATA_WRITE/KILL ID만 보존한다. 새 SSA 정의·JOIN·읽기·별도 reaching-definition solve나 RAM 복사는 없다.
+dense/sparse는 같은 조각을 만들며 원래 정의·JOIN·read·terminal 결과는 바꾸지 않는다.
+staged read가 있는 바이트를 우선하고, 빠진 바이트만 snapshot으로 보충한다. SP와 관찰된 call-shape delta 처리도 유지한다.
+다중 raw 정의의 조건 대응은 block-exit가 아닌 정확한 첫 staging action 이전 위치를 사용한다.
+
+snapshot은 일반 read의 call-clobber 근거를 대신하지 않는다. 따라서 각 보충 조각은 원 CFG의 모든 경로에서
+마지막 원 register 쓰기와 captured definition의 대응을 검사한다. 그 사이의 불명 CALL/CALLIND/CALLOTHER를 넘는 옛 값은
+확정값으로 승격하지 않는다. 앞선 불명 호출 뒤 해당 조각을 명시적으로 다시 쓴 경우에만 그 새 정의를 쓸 수 있다.
+현재 snapshot 보충의 보존 검사는 모든 선행 raw 호출을 경계로 처리한다. 알려진 callee의 보존 요약을 새로 추론해 통과시키지는 않는다.
+미추적 바이트를 입구값으로 연결할 때도 완전한 비순환 CFG·정확한 boundary·모든 경로의 겹침 쓰기/KILL/불명 효과/선행 호출 부재가 필요하다.
+이때 추가하는 `boundary_entry`는 근거를 표시한 기록층 leaf이며 엔진 SSA 정의가 아니다. 증거가 빠지면 gap/fallback이다.
+
+이 v5 확장은 **조건식과 이미 지원하던 summary 기반 register/RAM 연결**에 적용했다.
+당시 활성 호출을 넘는 물리 해석은 미구현이었으며, 후속 v6 범위는 §25.41에 기술한다.
+루프·미확정 간접 분기·불명 호출 효과도 해결한 것으로 세지 않는다. 정적 debt/completeness와 구체 물리 해석은 계속 분리한다.
+동결한 v5 전체 회귀는 §25.39와 같은 실제 Bundle 9개를 지정해 **2,449개 통과·32개 skip·실패/오류 0개**(395.84초)다.
+최종 JUnit은 `output/call-control-20261023/final-suite.junit.xml`이며 §25.39의 2,419개는 v4 시점 결과다.
+새 제어 입력 16개·SSA snapshot 8개와 기존 실제 UE 21개 검사는 모두 실행됐다. skip 분류는 앞 절과 같다.
+이는 회귀 테스트 개수이지 완성 함수·suite09 사례·모든 입력 경로의 증명 개수가 아니다.
+Astra가 call-clobber 불확실성 누락을 지적해 수정했고, 지연 guard와 공유 exit 선택의 후속 수정도 독립 재현 후 승인했다.
+Astra는 최종 XML의 통과·skip 분류와 실제 검사 실행 여부 및 이 절의 지원 경계까지 독립 확인해 v5 단계를 승인했다.
+
+다음 물리 호출 단계의 Astra 합의 범위는 **단일 직접 CALL·분석된 leaf 본문·비순환·단일 정상 RETURN**이다.
+최소 완료 흐름은 caller STORE → callee LOAD/연산/STORE → 실제 RETURN 검증 → caller LOAD/연산이다.
+callee 입구 RAM은 caller의 첫 transient 이전 prefix와 원 call push를 정확히 한 번 적용한 상태여야 한다.
+원 RETURN operand가 관찰된 fallthrough와 일치하고 SP 전이가 관찰된 관계를 만족해야 caller continuation을 공개한다.
+push/prologue와 데이터의 실제 겹침·반환 주소 훼손·같은 callee 연속 호출의 RAM 공유·미지 입력·한도 초과를 확인하고,
+실패 시 register/RAM/control 일부가 남지 않게 원자적으로 거부한다. 모델·간접/다중 대상·재귀·중첩 호출은 이 첫 단계에서 제외한다.
+이는 v5에서 합의했던 후속 계약이며, 구현 결과는 §25.41과 구분해서 읽는다.
+특히 불확실한 callee register 출력은 기존 caller `~output` 행 자체가 없고, 이후 실제 read의 `call_clobber_read`로만
+나타날 수 있다. 따라서 그 read의 별도 물리 연결도 필요하다. 입력은 기존 callee terminal state의 raw 정의를 사용한다.
+clobber span은 깨끗한 byte hole까지 포함할 수 있으므로 전체 span을 무조건 대체해서는 안 된다. 첫 보충은 정확한 기존 출력 행,
+또는 단일 named-call debt와 call→read 사이 겹침 쓰기/KILL/다른 호출 부재가 확인된 register operand로 한정하고 나머지는 거부한다.
+후속 실행 대조에서는 기존 테스트 Interpreter의 `completed=True`만으로 정상 반환을 인정하지 않는다.
+그 도구는 callee RETURN operand가 변조돼도 저장된 호출 위치로 복귀할 수 있으므로, 원 RETURN의 IP/SP 바이트와
+관찰된 fallthrough/SP 관계를 별도로 비교해야 한다. 이는 다음 물리 호출 검증의 필수 조건이다.
+
+### 25.41 실제 RETURN을 확인하는 물리 호출 RAM 연결 (2026-10-23, v6)
+
+`root_record(..., physical_memory=True, stitch=StitchContext(provenance))`는 기존 그래프에 `physical_calls`를 보존한다.
+각 문맥은 호출 instance·원 scope/unit·관찰된 projection·호출 전 prefix·원 push·callee 전체 raw STORE·RETURN/SP 식을 담는다.
+새 SSA 정의/출력 행·reaching-definition 분석·RAM 복사·arg/ret 역할 또는 calling convention을 추가하지 않는다.
+
+```text
+caller STORE → call 이전 RAM prefix → 관찰된 return-address push (1회)
+            → callee ENTRY LOAD → 내부 연산·STORE → 원 RETURN target/SP 검증
+            → caller LOAD/레지스터 읽기 → 다음 연산
+```
+
+callee ENTRY RAM은 프로그램 입구가 아니라 해당 호출의 prefix + push에서 읽는다. 모든 활성 callee STORE의 주소/값과
+원 RETURN operand = 관찰된 fallthrough, terminal SP = 관찰된 pre-push SP를 확인한 뒤에만 호출 효과를 공개한다.
+서로 다른 호출의 문맥·입구 RAM은 분리하고, 뒤 호출은 앞 호출의 검증된 쓰기/필요한 레지스터 값을 사용한다.
+기존 테스트 Interpreter의 강제 continuation을 정상 반환 증거로 쓰지 않고 실제 activation IP/SP를 별도로 대조한다.
+
+정적 요약에서 조건이 성립하지 않으면 caller의 register 출력 행 자체가 없을 수 있다.
+v6는 기존 terminal raw state에서 필요한 register 바이트만 꺼내 실제 named-call read operand의 `physical_register`에 연결한다.
+기존 행이 있으면 정확한 selector의 `physical_stitched`를 쓴다. 원 SSA parts·summary·debt·정적 eligibility는 그대로 남긴다.
+넓은 clobber span을 통째로 대체하지 않으며, call이 read를 지배하고 중간 겹침 쓰기/KILL/다른 호출이 없는 구간만 보충한다.
+callee 입력의 staged read에도 선행 호출 clobber가 있으면 옛 ENTRY 대신 앞 호출의 검증된 terminal 바이트를 연결한다.
+
+기록은 조건부 해석 관계이지 미리 성공한 실행 인증서가 아니다. `render()`도 entry RAM·push·body STORE·RETURN/SP 조건과
+register 물리 연결을 노드 참조로 보여준다. 범위를 벗어난 byte part뿐 아니라 범위 안의 무관한 값으로 projection을 바꿔도
+named context의 정확한 `(offset,size,part)` export/소유 관계가 맞지 않으면 입력 callback 전에 거부한다.
+생성 실패/한도 초과는 노드·edge·control과 이전 문맥의 lazy export·child cache까지 복구한다. 구체 평가 실패도 부분 결과를 반환하지 않는다.
+
+이 절의 v6 동결 범위는 **실제 분석된 단일 직접 target, 비순환 leaf 본문, 단일 RETURN**이다.
+root 안의 연속 호출과 callee 내부 조건부 STORE는 지원한다. 활성 중첩 호출·다중 RETURN/target·재귀·루프·미확정 주소·opaque 효과는
+미지원 경계로 거부한다. 기존 ordinary 조건/요약 연결의 더 넓은 범위와 물리 호출 범위를 혼동하지 않는다.
+v6는 명시적 Python API opt-in이었다. 정식 실행 옵션과 중첩/다중 RETURN의 v7 확장은 아래 25.42절을 따른다.
+
+#### 실제 컴파일 바이너리 확인
+
+suite10의 같은 sealed Bundle에서 외부 source/allocator body 없이 독립 실행 가능한 다음 함수들을 사용했다.
+모든 가정 옵션은 False, private-frame-above=0이며 원 DLL/Windows native 실행이 아니라 추출한 실제 p-code 실행 대조다.
+
+- `1b1:109430` lambda operator → `1b1:10b890 tv2c646_store_live`:
+  callee의 두 4-byte STORE가 caller의 saved RBP와 실제 겹치면, 원 POP LOAD가 `0x5566778811223344`를 읽는다.
+  8개 바이트 모두 원 callee STORE key·offset과 일치한다. 비겹침 입력에서는 기존 `0x74000000`을 유지한다.
+- `1b1:10b5a0 TV2C687_write_lane_thunk` → `1b1:10b560 TV2C687_write_lane`:
+  lane 0/1의 2-byte STORE만 saved RBP를 덮으며 나머지 6바이트는 원 caller push에서 온다.
+  겹침 결과 `0x74001234`/`0x12340000`과 비겹침 결과, 실제 RETURN target/SP를 대조했다.
+
+이는 outer case646/687 전체의 완료가 아니라 위 실제 호출자/피호출자 4개 함수의 선택한 6개 입구 실행이다.
+기존 실제 조건 검사 4개를 유지하고 `test_conditional_records_real.py`의 새 2개로 고정했다.
+Bundle image SHA·4개 observation digest도 fixture에 고정한다. 원 소스는 `tdo_testbed_UE/cpp_like/src/cases_fusion.cpp`의
+1590/1603, 2810/2816행이다. 합성 물리 CALL 회귀 32개와 atomicity/연속 register 전달 회귀 2개도 유지한다.
+이 v6 동결본의 전체 회귀는 **2485 passed / 32 skipped / 0 failed, 396.80초**였다.
+`output/physical-calls-20261023/final-suite.junit.xml`에 결과를 남겼다. 32개 제외는 기존과 같은
+Linux worker/supervisor 전용 23개와 별도 Bundle 부재 9개다. Astra는 실제 2테스트·6입구와 합성 호출/atomicity
+34개를 독립 실행해 **36 passed / 0 skipped**를 확인하고 이 코드·실제 사례 범위를 승인했다.
+이 수치는 suite case 통과 수나 전체 함수의 완전성 수가 아니다. 정식 실행 옵션/중첩 호출 확장은 이 동결본 이후 작업이다.
+
+### 25.42 중첩 호출·다중 반환·직접 RAM 피연산자의 공통 연결 (2026-10-23, v7)
+
+목적은 VM 복원이 아니라 **기존 SSA/데이터 그래프를 재사용하는 연산식 표현**의 확장이다.
+원 SSA 정의·read·JOIN·요약·정적 eligibility를 바꾸지 않고, 원래 p-code 연산의 조건부 물리 관계를 추가한다.
+`if/else`라는 소스 문법만 찾지 않는다. 비순환 CFG의 중첩/연속 CBRANCH와 이들로 컴파일된 switch가 같은 Boolean DAG와
+원 definition ID를 공유한다. 미지 조건의 ordinary 평가는 상관 있는 대안을 유지하고, concrete physical 평가는 필요한
+입구 값/주소/조건이 알려져야 하나의 실행 결과를 낸다. 새로운 ABI·arg/ret 분류·RAM 복사는 없다.
+
+#### 호출 문맥과 반환 선택
+
+- `physical_calls[id].parent_context`는 호출 instance의 물리 입구 RAM 부모다. child의 LOAD는 자신의 prefix+push를 먼저
+  조회하고, 없으면 **parent ENTRY RAM**으로 올라간다. parent의 최종 RAM 또는 프로그램 입구로 바로 건너뛰지 않는다.
+  상위 호출이 도달하지 않으면 하위 조건 입력도 요구하지 않는다. 동일 함수의 반복 호출은 full call path로 구별한다.
+- 알려진 직접 호출은 기존 `Limits.call_depth`와 함수 ancestry 안에서 연결한다. child 결과를 직접 요구해도 검증 중이거나
+  이미 검증된 parent가 없으면 먼저 parent transaction을 확인한다. 미확인 parent 효과를 child 결과로 우회하지 못한다.
+- `returns[]`는 각 원 RETURN의 guard·operand·terminal SP와 동일한 관찰 fallthrough/pre-push SP를 보존한다.
+  정확히 한 RETURN의 도달이 확정되어야 하며, 0개·복수·필요 조건 미상·반환 주소/SP 불일치는 거부한다.
+  register export도 출구별 기존 terminal state → execution-guard assemble → 기존 `callee exits` phi로 연결한다.
+  export의 instance·대안 순서·guard는 `returns[]`와 일치해야 하며, 반환과 출력에 독립 선택을 추가하지 않는다.
+  단일 출구에는 이전 `return` 필드 alias도 유지한다.
+- 전체 비순환 body inventory의 **모든 활성** STORE/직접 메모리 쓰기와 중첩 호출을 확인한 뒤 결과를 공개한다.
+  원 push는 한 번만 반영하며 반환 뒤에도 그 RAM 쓰기는 남는다. 비활성 경로의 미지원 값은 실행값으로 요구하지 않는다.
+  prefix·schema·byte 범위·재귀·노드/edge/평가 한도를 지키며 생성 실패 시 자손과 기존 lazy export cache까지 복구한다.
+
+원 register snapshot이 이전 CALL 이전의 정의를 계속 이름 붙여도 그 CALL이 보존했다는 증거로 쓰지 않는다.
+physical-only fallback은 원 pre-staging 경계에 대해 유일한 지배적 이전 호출과 사이의 덮어쓰기 부재를 확인한 뒤,
+그 호출의 실제 terminal raw register 바이트를 쓴다. 바인딩의 배치 offset을 바꿀 때 공유 export part를 복사해 오염을 막는다.
+정확한 기존 synthetic 출력 행 `~<숫자>`는 original CALL + proven effect + 실제 SSA action/output-run의 대응이 있을 때만
+after-CALL 위치로 기록한다. staging/sink/알 수 없는 tag에 이 위치를 추정하지 않는다.
+
+#### LOAD/STORE 외의 메모리 입력·출력
+
+실제 x86 p-code에는 `COPY register, ADDRESS` 또는 `COPY ADDRESS, register`도 있다.
+메모리 읽기/쓰기를 LOAD/STORE opcode만으로 판별하면 실제 전역 변수를 놓친다.
+
+- 메모리 space의 원 ADDRESS output은 `physical_write`와 inventory `write`로 보존한다. 원 node/key/opcode/value를
+  그대로 사용하고, literal space/address/width와 실제 output span을 대조한다. 미지원 연산/입력의 활성 쓰기는 거부한다.
+- 원 ADDRESS data input은 **기존 SSA의 정확한 메모리 read에 대응할 때만** operand의 `physical_read`로 연결한다.
+  `physical_read_source`는 원 operation/index/context/space/address/width를 보존한다. 직접 CALL/BRANCH 목적지를 RAM 읽기로
+  오인하지 않는다. 같은 연산의 input/output이 겹쳐도 읽기는 그 연산 직전 prefix만 사용한다.
+- 두 형태 모두 기존 LOAD와 동일한 guard·writer 순서·바이트별 마지막 쓰기·부분 겹침·주소 폭·parent entry overlay를 쓴다.
+  `read` evidence에는 원 operand index와 각 바이트 writer/offset을 남긴다. 원 parts/debt를 지우지 않는다.
+  `physical_read_debt_ids`는 원 read owner의 **모든 span**이 지원되는 literal read에 포함될 때만 붙는다.
+  남은 register/다른 메모리 span이나 미지원 CALL 효과를 이 표시로 덮지 않는다.
+
+이는 스택과 전역이 항상 다르다는 증명이 아니다. 제공된 실제 입구 주소가 같거나 일부 겹칠 때 그 실행에서 어떤 바이트가
+어느 쓰기에서 왔는지 해석하는 관계다. 미확정 주소·opaque 효과·순환 CFG·재귀·미해결 간접 target·tail call은 이 물리 해석의
+미지원 경계다. 그런 경우 일반 그래프의 후보/부채를 유지하고 concrete 값을 단정하지 않는다.
+
+#### 정식 실행 경로와 실제 사례
+
+두 summary-engine public API의 `physical_memory_records=True` 또는 runner `--physical-records`가 기록 생성을 함께 켠다.
+기본 실행/ordinary 기록은 그대로이며 분석 결과 확정 후 독립 diagnostic 예산에서 생성한다. 자동 concrete 평가를 하지 않는다.
+legacy 조합은 오류이고, Bundle admission의 naming-v2 검증도 우회하지 않는다. JSON과 `render()`에 문맥·조건·메모리 관계가 남는다.
+
+- 실제 suite09 **DFB051 helper** 104d83→104d6c→104d56: 5입구에서 `(x*7+1) mod 2^32`, saved-RBP LOAD와 각 depth의 실제 RETURN/SP를 대조.
+- 실제 **DFB055 helper** 104f77→104f46→104f2a→104595: 비겹침과 `struct=entrySP-12` 두 입구.
+  후자는 원 callee의 4/6 쓰기로 caller POP LOAD가 `0x600000004`를 읽으며 8개 바이트 writer/offset을 실제 실행과 대조.
+- 실제 **DFB010/016 및 DFB012 switch**: 각 8입구(24실행). 실제 source_C RAM 읽기→CALL 결과→원 조건→선택된 A/B/C CALL→
+  stack STORE→LOAD를 연결한다. physical 값·예상식·VM 실제 LOAD 바이트값의 삼자 비교와 원 writer 대조를 함께 한다.
+  두 갈래뿐 아니라 compiled switch의 3갈래 모두 도달한다.
+- fresh naming-v2 **DFB072의 CALLIND 직전 EDI4 root**: 6입구에서 두 직접 source 호출의 문맥·반환과 공식 API/direct 기록의 값·증거·debt 일치를 확인.
+  원래 최종 sink는 미지원 활성 CALLIND 때문에 계속 거부한다. DFB072 전체를 physical pass로 세지 않는다.
+
+위 실제 사례는 원 sealed image/observation digest와 실제 p-code를 사용하며 native 실행이 아니다.
+old suite09의 naming-v1 자료는 기존 read-only admitted p-code 경로로 확인하고 원 sidecar를 재작성하지 않는다.
+새 실제/helper 검사는 가정 옵션 False/private-frame-above=0이고, DFB072 공식 경로의 기존
+`opaque-callees-restore-stack-pointer` 표시도 진단 옵션 전후 동일하게 유지한다.
+다중 RETURN 호출의 17개 검사는 **합성 raw p-code**이며, 실제 바이너리 multi-RETURN 호출 완료로 확대해서 말하지 않는다.
+기존 실제 UE Core 21개 검사와 suite10 호출 검사도 별도로 유지한다.
+
+fresh DFB072 Bundle에 정식 runner `--physical-records --json`도 실행해 종료 0, version 7, 직접 호출 문맥 2개와
+미연결 CALLIND를 확인했다(`output/nested-control-20261023/dfb072-records.json`). 이는 **기본 named 가정이 켜진 별도 CLI
+사용 검사**이며 위 가정 비활성화 양성 검증으로 세지 않는다. 진단 옵션이 기존 가정을 추가하거나 제거하지 않는다.
+
+최종 v7 코드/테스트 동결본의 전체 회귀는 **2599 passed / 32 skipped / 0 failed, 396.59초**였다.
+권위 결과는 `output/nested-control-20261023/final-suite.junit.xml`이며 XML은 총 2631개, 396.573초, failures/errors 모두 0이다.
+다중 RETURN 17·nested/메모리 공통 56·직접 RAM 입력 21·공식 진입 14·실제 nested 3·실제 control 3·기존 실제 conditional 6·
+실제 UE Core 21개가 모두 skip 없이 실행됐다. 기존 배포 모델 호환성도 유지한다. 32개 skip은 Linux worker/supervisor 23개와
+별도 Bundle 부재 9개이며, 이 수치는 suite09의 80개 케이스 점수나 전체 함수 완전성 수가 아니다.
+Astra가 요청한 실제 control 값의 직접 삼자 비교를 보강하면서 첫 실행을 634 passed에서 중단했으며, 그 실행은 완료 성적으로
+세지 않는다. 위 권위본은 그 보완을 포함해 처음부터 끝까지 다시 실행한 결과다.
+Astra가 이 XML과 각 필수 검사 실행을 독립 확인하고, 문서화된 v7 비순환 직접 호출·구체 물리 해석 범위를 최종 승인했다.
+실제 바이너리 multi-RETURN 호출·native 실행·미해결 간접 호출 지원까지 승인한 것으로 확대하지 않는다.
+
+### 25.43 Astra 협의: 개발 순서 (2026-10-23의 계획; 구현 결과는 25.44–25.46)
+
+v7 이후에도 목표는 **VM/인터프리터 분석을 위한 연산식 표현 계층**이다. 지금 VM을 복원하거나 새로운 정방향 실행기를
+만드는 작업으로 바꾸지 않는다. 기존 SSA·그래프·후보 증명·메모리 inventory를 재사용하고 no-arg/no-ret/no-calling-convention을 유지한다.
+Root와 Astra는 실제로 남아 있는 기능 경계와 기존 코드의 재사용 가능성을 비교하여 다음 순서에 합의했다.
+
+| 순서 | 작업 | 우선하는 이유 / 범위 |
+|---|---|---|
+| 1 | 이미 증명된 유한 CALLIND 후보와 원 target 식 연결 | 실제 DFB072 최종 sink의 남은 물리 경계이며 ordinary 기록에는 이미 다중 대상/출구 연결이 있다. 새 target 탐색이 아니라 그 증거와 v7 물리 문맥의 연결이다. |
+| 2 | 호출 뒤 부분 레지스터 덮어쓰기의 조각 연결 | `CALL → AL 쓰기 → RAX 읽기`에서 새 SSA 쓰기를 유지하고, 덮이지 않은 바이트만 callee terminal export로 보충한다. 현재의 전체 폭 거부를 좁히되 넓은 clobber debt 전체를 허용하지 않는다. |
+| 3 | 반복식의 구조 표현 | 기존 초기값·되돌이 정의·CFG 간선·definition ID로 recurrence를 표현한다. 반복 횟수 추정·구체 루프 실행·재귀 해결을 함께 구현하지 않는다. |
+
+#### 1순위의 합의된 최소 설계
+
+- 기존 분석이 증명한 완전한 유한 후보와 원 observed call projection이 있는 CALLIND부터 지원한다.
+  첫 단계는 실제 분석된 비순환 본문으로 제한한다. 입력 주소가 그럴듯하다는 이유로 후보를 새로 추가하지 않는다.
+- `CALLIND`의 target을 literal 좌표 메타데이터로 취급하지 않고, **실제로 읽는 operand의 원 연산식**에 연결한다.
+  REGISTER는 기존 snapshot/SSA 정의, UNIQUE/ADDRESS는 원 producer/실제 read 대응을 이용하되,
+  pre-staging snapshot 이후 같은 명령어 안의 변경까지 대조한다. 실제 CALLIND 읽기 경계와 대응이 없으면 cut하며 새 RD를 추정하지 않는다.
+- 원 CBRANCH용 `ControlPool`에 가짜 CBRANCH를 넣지 않는다. 별도 공유 `target_selector`에 호출 instance·원 CALLIND key/input index·
+  operand 폭/주소 공간·동일 program/scope의 완전한 후보 값과 문맥 대응을 보존한다. 최종 직렬화 형태는 구현 검수 때 확정한다.
+- 물리 평가는 호출 도달을 먼저 확인하고, 실제 target 값과 정확히 일치하는 후보 하나만 선택한다.
+  RAM·register·RETURN·중첩 문맥이 같은 selector를 사용하며, 그 아래 기존 RETURN guard를 적용한다.
+  target별 문맥에는 대상 정체성도 포함하되 prefix/push는 selector 바깥에서 실제 호출당 한 번만 적용한다.
+- 미선택 본문의 입력값은 요구하지 않는다. 후보 중복/누락·문맥/공간 불일치·미지/후보 밖 target·선택 본문 부재·
+  재귀/tail/opaque·한도 초과는 거부한다. 독립적인 자유 target enum으로 fallback하지 않으며 기존 가정·debt·정적 결과는 유지한다.
+
+#### 실제 완료 기준
+
+1. fresh ELF **DFB072**의 기존 6개 `g_seed` 입구에서 source_C → 원 테이블 주소 계산/LOAD → CALLIND → 최종 sink까지
+   공식 physical-record 경로로 연결한다. 현재 forward-off 거부 검사를 성공으로 바꾸지 않고 유지하며, 별도 forward-on 성공 검사를 둔다.
+   후보 증명에 쓰인 실제 가정도 명시한다.
+2. 이미 봉인된 **`tests/corpus/intra/multi_target_memory.c`**의 compiled fixture에서 A/B 양쪽을 실행한다.
+   원 target·RETURN/IP/SP·최종값·각 메모리 바이트 writer가 일치해야 한다. x=9의 결과는 해당 실행에서 35 또는 52 하나이며,
+   서로 다른 대상의 register/RAM을 섞은 36/51은 허용하지 않는다.
+3. 실제 compiled **caller → 다중 RETURN callee** 한 쌍을 포함해 모든 원 RETURN을 방문한다.
+   기존 봉인 관찰의 CALL/RETURN inventory에서 먼저 선정하고, 없을 때만 작은 compiled fixture를 추가한다.
+   현재 그 실제 쌍을 이미 확보·검증했다고 주장하지 않는다. C 소스의 return 개수가 아니라 원 p-code RETURN을 확인한다.
+4. target/출구/문맥 변조, 후보 밖·미지 target, 미선택 입력의 불필요한 요구, push 중복, 실패 시 부분 결과 유출을 거부한다.
+   정상 경로는 값뿐 아니라 실제 writer와 원 RETURN/SP까지 대조하고 기존 전체 회귀를 유지한다.
+
+이 협의는 다음 작업의 계획이다. v7에 CALLIND 지원이 이미 추가되었다거나 루프·부분 레지스터 제한이 해결되었다는 뜻이 아니다.
+
+### 25.44 원 target 식으로 공유 선택하는 CALLIND 물리 연결 (2026-10-23, v8)
+
+25.43의 1순위를 구현했다. 기존 memory SSA·원 연산 노드·스냅샷·최종 호출 요약을 재사용한다.
+새 SSA/RD, 정방향 실행기, ABI 인자/반환 역할을 추가하지 않는다. 기본 분석의 요약·부채·가정·정적 eligibility는 유지한다.
+
+- `target_selectors`는 원 CBRANCH의 Boolean control DAG와 별도인 공유 registry다. 원 CALLIND key/input 0,
+  target varnode의 kind/space/offset/width, 원 producer 또는 정확한 스냅샷 읽기, caller program/scope/unit,
+  최종 같은 실행의 후보 분석 instance와 대상별 scope/unit, 전체 실행 가정을 보존한다.
+- 원 target producer의 전체 폭을 기존 lane-demand에 포함한다. 같은 명령 안의 정확한 앞선 producer가 있으면 원 노드를
+  사용하고, REGISTER의 경우 기존 pre-staging 스냅샷/보존 확인을 사용한다. 부분 덮어쓰기·원 producer 부재·모양 민감
+  읽기를 임의로 이전 값에 연결하지 않는다. 일반 기록의 CALLIND 메타데이터 의미는 바꾸지 않는다.
+- 하나의 호출 group 아래에 대상별 physical context가 있다. 호출 도달 → 원 target 계산 → 정확히 일치하는 후보 하나 →
+  그 본문의 기존 RETURN guard 순서다. 레지스터 출력 phi와 RAM byte overlay, 중첩 문맥, RETURN/SP 검증이 같은 선택을
+  공유한다. 원 push 노드는 caller 소유로 하나만 만들고, 대상별로 복제하거나 CALL 전에 target에 호출 후 효과를 적용하지 않는다.
+- 미선택 함수의 입력이나 반환 조건을 평가하지 않는다. 선택된 본문은 모든 활성 쓰기와 원 RETURN target/SP 검증을
+  완료한 뒤에만 출력을 공개한다. detached child/export도 대상 선택과 부모 검증을 우회하지 못한다.
+- schema는 entry callback 전에 후보 누락/중복·순서/출력 불일치, 공간·폭·원 varnode/producer, 함수/문맥/부모/guard,
+  공유 push/prefix, 실행 전제의 귀속을 확인한다. 이는 JSON 내부 대응 검사이지 임의 JSON의 진위 인증은 아니다.
+  생성 한도 실패는 새 selector/context/출력 cache를 함께 복구한다.
+- 공식 API는 완성된 `run.assumptions`를 전달한다. 직접 `StitchContext(table, assumptions=...)`를 만들 때도 정확한 실행
+  전제를 명시해야 한다. provenance table만으로 readonly/home-space/trap 옵션을 복원하지 않으며, 생략하면 간접 물리 연결을
+  cut한다. 명시한 빈 tuple은 실제로 전제 없는 실행일 때만 사용한다.
+
+실제 사례는 native 실행이 아니라 봉인된 바이너리에서 추출한 원 p-code 실행과 대조했다.
+
+1. fresh DFB072 ELF64/PE64/PE32 공식 최종 `dfb_sink_int.arg0`: 각 6입구, 총 18실행에서 양 target 방문,
+   원 target·최종 sink 값·실제 RETURN/IP/SP와 모든 표현된 LOAD의 각 byte writer/offset 일치.
+   기존 forward-off 최종 sink 거부 검사는 그대로 유지했다.
+2. 기존 compiled `multi_target_memory.c`: 12입구에서 원 target과 최종 값·RETURN/SP·LOAD byte writer를 대조했다.
+   x=9의 결과는 선택에 따라 35 또는 52이며 RAM/register 선택을 섞은 36/51은 허용하지 않는다.
+3. 기존 실제 자료(suite09 122함수·suite10 294함수와 작업 Bundle들)에 원 caller→다중 RETURN 쌍이 없어,
+   `tests/corpus/intra/multi_return_target.c`를 x64 Mach-O로 컴파일하고 Ghidra로 새로 추출했다.
+   `multi_return_a`의 **원 p-code RETURN 2개**를 확인했고, 12입구에서 양 RETURN과 다른 호출 대상까지 방문했다.
+   최종 값뿐 아니라 실행된 원 RETURN/SP와 LOAD별 마지막 원 writer/byte offset을 대조했다.
+   새 Bundle은 `output/callind-expressions-20261023/multi-return-bundles/83ee577f27b0e265b2c9e9ba3f2779e0e25cf8aac02c28c33d1aedd78dde1580`,
+   바이너리 SHA256은 `8052334d56ac66cfeaacb26c915729e79d6775f6545ef9cb62665919b0182b83`다.
+
+원 실행의 `_write`와 LOAD를 관찰해 마지막 writer/offset을 별도로 수집하여 전체 바이트 목록을 비교한다.
+기대 writer로 필터링한 뒤 포함 여부만 검사하지 않는다. 새 합성 검사는 미선택 입력/SP, 중첩·반복 호출 문맥,
+단일 후보, schema 변조, 다른 실행의 body, 전제 누락, 한도 rollback을 포함한다. 새 frame에 입구 포인터가 alias하여
+가정과 달리 table이 덮어써지는 반례도 원 target을 실제 RAM에서 읽고 후보 밖으로 거부한다.
+이 한 반례의 거부를 모든 가정 위반의 자동 방어로 일반화하지 않는다.
+
+재현 자료는 기존 runner의 `TDO_V2_FORWARD=1 ... --physical-records --json`으로 만든
+`output/callind-expressions-20261023/dfb072-final-record.json`에 있다(기본 named 가정을 켠 CLI 실행, record v8).
+공식 positive 테스트의 별도 옵션/가정과 구별한다. 부분 레지스터 보충·반복식·재귀·tail/opaque 호출·미지 target은
+이번에 지원했다고 세지 않는다. 다음 우선순위는 25.43의 2순위인 호출 후 부분 레지스터 조각 연결이다.
+
+#### DFB072의 최종 sink 연결
+
+다음은 fresh ELF 관찰의 핵심 연결이다(스택 보존/플래그/바이트 조각 전체는 위 JSON에 보존).
+`table`은 caller 스택의 실제 RAM이고, selector는 후보를 자유롭게 고르는 enum이 아니라 **원 LOAD가 읽은 주소 값**이다.
+
+```mermaid
+flowchart TD
+    G["입구 RAM: g_seed"] --> C["source_C: g_seed + 3"]
+    G --> A["source_A: g_seed + 1 → a"]
+    C --> I["selector = source_C 결과 & 1"]
+    T0["스택 table[0] = A 주소 0x105295"] --> L["LOAD table[selector] · 0x1052e9"]
+    T1["스택 table[1] = B 주소 0x1052a4"] --> L
+    I -->|"index × 8 + table 주소"| L
+    L --> Q["원 target 식 → 공유 CALLIND 선택 · 0x1052f3"]
+    Q -->|"0x105295"| AS["A: x를 callee 스택에 STORE"]
+    Q -->|"0x1052a4"| BS["B: x를 callee 스택에 STORE"]
+    A -->|"실제 입구 EDI 바이트"| AS
+    A -->|"실제 입구 EDI 바이트"| BS
+    AS --> AL["A: 스택 LOAD x"] --> FA["A: x + 1"]
+    BS --> BL["B: 스택 LOAD x"] --> FB["B: x + 2"]
+    FA --> R["선택된 본문의 원 RETURN / IP / SP 검증"]
+    FB --> R
+    R --> S["선택된 EAX → r 스택 STORE · 0x1052f5"]
+    S --> D["r 스택 LOAD · 0x1052f8"]
+    D --> K["dfb_sink_int.arg0 · CALL 0x1052fd"]
+```
+
+원 바이너리의 32비트 연산 기준으로 `g_seed=0`은 selector 1 → B → sink 3,
+`g_seed=9`는 selector 0 → A → sink 11이다. 일반 기록의 후보/부채는 남고,
+이 입력을 넣은 물리 평가에서만 원 target과 일치한 한 본문으로 연결된다.
+
+최종 동결본 전체 회귀: **2628 passed / 32 skipped / 0 failed**, 410.82초.
+권위 결과는 `output/callind-expressions-20261023/final-suite.junit.xml`이다.
+새 합성 24개·실제 바이너리 5개(42개 입력 실행)는 모두 skip 없이 통과했다. 기존 UE Core·실제 분기/중첩 호출·
+forward-off 거부 검사도 포함한다. 32개 skip은 이전과 같은 Linux 전용 23개와 별도 자료 부재 9개이며,
+이 수치는 suite09의 케이스 통과 수가 아니다. Astra가 새 29개를 독립 실행하고 구현/바이트 검사를 승인했으며,
+권위 XML의 총 2660개·실패/오류 0·기존 실제 검사 실행까지 독립 확인해 v8 범위의 완료를 승인했다.
+앞선 2627 passed 실행은 검사 보강 전 결과로 구분하며, 최종 성적으로 사용하지 않는다.
+
+### 25.45 호출 뒤 부분 레지스터 쓰기의 기존 SSA 조각 연결 (2026-10-23, v9)
+
+25.43의 2순위를 구현했다. `CALL → AL/AH/AX 쓰기 → RAX 읽기`의 전체 폭 거부를 좁혔다.
+새 메모리 SSA·RD·정방향 실행기·ABI 인자/반환 역할은 추가하지 않는다. 기존 원 read fragment와 DATA_WRITE,
+원 CFG의 dominance/쓰기 유무 확인, 호출 본문의 terminal register export를 재사용한다.
+
+- 원 operand의 `parts`는 변경하지 않고 `physical_register_fragments`에 정확한 byte overlay를 별도로 보존한다.
+  새 SSA 쓰기를 덮어쓰지 않으며, 원 call-clobber 구간 중 호출 이후 변경되지 않은 구간만 같은 호출의 terminal export로 보충한다.
+- AH는 기존 call-clobber의 넓은 hull에 새 AH 쓰기까지 포함할 수 있다. 따라서 export만으로 hull 전체를 덮었다고 하지 않는다.
+  원 SSA가 지정한 단일 DATA_WRITE가 해당 call 이후/read 이전을 지배하고, 중간 호출·중복 쓰기가 없는 경우에만
+  그 retained 조각과 export 조각의 **합집합**으로 해당 register debt 범위를 설명한다. retained 값의 연산과 입력 debt는
+  일반 경로로 계속 평가한다. 한 operand의 성공으로 다른 operand나 메모리 debt를 면제하지 않는다.
+- register 조각의 operand 내 위치(`offset`)와 callee 원 register 주소(`register_offset`), producer 내 byte offset은 구별한다.
+  schema는 callback 전에 원 owner/input/context·기존 debt 구간·정확한 export·retained 원 SSA part 및 raw producer/output 대응·
+  전체 조립·debt 범위 충족을 확인한다. 검증할 수 없는 별도 definition/read ordinal 번호를 권위 필드로 직렬화하지 않는다.
+  이는 내부 대응 검사이며 임의 JSON의 진위 인증 기능은 아니다.
+- CALLIND의 모든 조각과 RAM은 v8의 같은 target selector를 사용하며, 다중 RETURN도 같은 원 출구 guard를 공유한다.
+  다음 호출의 staged read/snapshot에도 기존 SSA 경계와 clipped fragment를 사용해 전달한다. 한도 실패 시 새 context·lazy export·
+  control/노드 cache를 함께 복구한다.
+- AL/AH/AX, 서로 떨어진 쓰기, 같은 바이트의 반복 쓰기를 지원한다. raw 4-byte 쓰기에 x86 지식을 더해 상위 0을 발명하지 않는다.
+  원 `INT_ZEXT` 또는 Ghidra가 내보낸 8-byte `COPY`가 있으면 그 쓰기가 상위 바이트의 근거다.
+  전체 바이트가 덮이면 이전 호출 결과를 불필요하게 요구하지 않는다.
+
+예를 들어 callee terminal RAX가 `0x1122334455667789`일 때 `AH=0xbb` 뒤의 RAX는
+`0x112233445566bb89`다. 하위 `[0:1]`와 상위 `[2:8]`만 callee에 연결하고 `[1:2]`는 기존 caller COPY를 유지한다.
+뒤의 `+5`까지 표현한 값은 `0x112233445566bb8e`이며 callee 전체 RAX로 대체하지 않는다.
+
+#### 실제 바이너리 및 거부 경계
+
+실제 작업 Bundle의 제한적 inventory 탐색에서는 적합한 CALL→부분 쓰기→전체 폭 읽기 쌍을 선정하지 못해
+`tests/corpus/intra/partial_register_call.c`를 x64 Mach-O로 컴파일하고 Ghidra 12.0.4로 봉인 추출했다.
+이 탐색 결과를 UE/suite 전체에 해당 패턴이 없다는 증명으로 해석하지 않는다. inline assembly는 실제 AL/AH/AX/EAX 명령을
+바이너리에 남기기 위한 것이며 엔진에 call 결과나 요약을 주입하지 않는다.
+
+- 원 AL/AH/AX의 좁은 COPY와 EAX의 원 8-byte COPY(상위 0 포함)를 먼저 확인한다.
+- 4개 wrapper × 8개 입구 = **32회 원 p-code 실행**에서 고비트가 서로 다른 값·바이트 carry·64비트 wrap을 포함해
+  물리 계산식 값/직접 기대식/원 실행의 최종 RAX를 대조했다. AL/AH/AX에서는 원 callee RETURN/IP/SP 및 표현된 모든 LOAD의
+  각 byte writer/offset도 대조했다. native 실행이나 32개 suite09 케이스 통과를 의미하지 않는다.
+- 바이너리 SHA256: `2d9d753554aff4727bcafe3238705e59c9c21cf6f9a85e1480894c52395d9fcc`.
+  Bundle: `output/partial-register-20261023/bundles/f6d9db3d6ffedac40c4cfbcdab58f8a73bbc81e6a642c42d72a45aa73acd6d96`.
+  재실행은 `TDO_PARTIAL_REGISTER_BUNDLE=<generation> PYTHONPATH=src:tests/intra python -m pytest -q
+  tests/corpus/intra/test_partial_register_binary.py`로 한다.
+
+합성 raw p-code 회귀는 direct/staged 다음 호출(AL/AH/AX), retained 입력의 미확정 RAM/debt, 다른 operand의 잔여 debt,
+CALLIND 양후보의 다른 상·하위값과 RAM writer, 다중 RETURN 양경로, unknown call/userop, metadata 변조, pruned/unresolved 및
+limit rollback을 포함한다. Astra가 독립 실행한 관련 **97개 검사(실제 4개 포함)는 skip 없이 통과**했으며 범위 내 구현을 승인했다.
+
+새 쓰기/이전 호출 값이 분기별로 섞인 JOIN, KILL·미지원 효과·알 수 없는 호출을 건너뛴 연결은 계속 거부한다.
+루프·재귀 해결이나 정적 완전성 승격은 이번 범위가 아니다. 기본 summary·원 debt·named 가정·eligibility는 유지하며
+물리 구체 평가 성공을 일반 backward slice의 무조건적인 완전성으로 바꾸지 않는다.
+다음 순위는 25.43의 3순위인 **기존 초기값/되돌이 정의/CFG 간선을 이용한 반복식 구조 표현**이다.
+이는 반복 횟수 추정이나 재귀 실행 구현과 구별한다.
+
+동결본 전체 회귀는 **2669 passed / 32 skipped / 0 failed**, 420.54초였다.
+권위 결과는 `output/partial-register-20261023/final-suite.junit.xml`이며 총 2701개, failures/errors 모두 0이다.
+새 부분 레지스터 합성 37개와 실제 바이너리 4개는 모두 skip 없이 실행됐다. 기존 실제 CALLIND·UE Core·분기·중첩 호출 및
+배포 모델 호환성 검사도 포함한다. 이 테스트 개수를 suite09 케이스 점수나 함수 그래프 완전성 개수로 해석하지 않는다.
+Astra가 XML의 총수·실패/오류 0·새 검사와 기존 실제 검사 실행을 독립 확인해 v9 범위의 완료를 승인했다.
+32개 skip은 기존과 같은 Linux 환경 제약 23개와 미보유 Bundle 9개다.
+
+### 25.46 반복식 구조와 분기 후 부분 레지스터 합류 (2026-10-23, v10)
+
+이 절의 단순 `recurrence` 범위와 복잡한 순환 fallback은 v10의 이력이다. 현재 일반 순환 표현 계약은 **25.47절**이 우선한다.
+
+VM/인터프리터 분석에 사용할 **연산식 표현 계층**의 두 경계를 보강했다. VM 복원·반복 횟수 산정·새 정방향 실행기·
+재귀 해결로 범위를 확장하지 않는다. 기존 SSA/정의 ID/데이터 그래프/CFG/조건 DAG를 재사용하며 기본 분석 결과와 가정은 바꾸지 않는다.
+
+#### 조건부 부분 쓰기
+
+`CALL → 분기 → 한쪽에서 AH 쓰기 → 합류 후 RAX 읽기`를 지원한다. v9의 무조건 부분 쓰기와 달리, 기존 SSA JOIN의
+원 조건과 `guarded_sources`를 참조한 별도 **physical-only phi**가 이전 값 가지에만 같은 호출의 terminal export를 붙인다.
+새 DATA_WRITE 가지는 원 SSA part를 유지한다. 원 phi/operand parts/debt는 수정하지 않는다.
+
+- 원 call이 read를 지배하고 모든 경로에서 중간 CALL/CALLIND/CALLOTHER가 없어야 한다. 원 source ID와 SSA flow evidence,
+  원 write 경계에 대한 기존 `ConditionIndex.guarded_sources` 검증을 사용한다. 새 RD를 풀지 않는다.
+- source guard는 배타적이며 read reach 전체를 덮어야 한다. 여러 바이트·중첩 분기·CALLIND 대상·RETURN/RAM은 기존의
+  같은 선택을 공유하고, 선택되지 않은 새 바이트 입력은 평가하지 않는다. 조건식이 호출 결과를 읽는 경우도 원 식을 사용한다.
+- ENTRY/호출 이전 source는 export로, 호출 이후 source는 retained part로 분류한다. 공유 call context의
+  `caller_register_writes`는 이미 검증한 원 producer ID/operation/output span/caller context/before-or-after 경계를 보존한다.
+  소비자는 source 분류를 이 별도 inventory와 대조한다. retained를 call로 바꾸어 새 쓰기를 지우는 변조·반대 방향·다른 호출
+  inventory 재사용·상충 분류는 callback 전에 거부한다. 이는 내부 대응 검사이며 임의 JSON의 진위 인증은 아니다.
+- lazy inventory·export·새 phi는 기존 transaction에 포함한다. node/edge/depth 제한의 cut을 원 SSA producer로 취급하지 않는다.
+  정적 eligibility나 원 debt를 없애는 기능이 아니다. 미확정 source/효과·불완전 guard·중간 호출은 계속 미해결로 남긴다.
+
+예를 들어 callee RAX가 `0x1122334455667789`이면 조건이 참일 때만 `AH=0xbb`를 적용하여
+`select(condition, 0x112233445566bb89, 0x1122334455667789)`로 연결한다. 서로 다른 경로의 AL/AH를 자유롭게 섞지 않는다.
+
+#### 반복식 구조
+
+기존 phi/loop 참조를 그대로 두고, 확인 가능한 JOIN에 `recurrence`를 추가한다. 예를 들어
+`x=initial; while (n!=0) { x=x+step; n--; }`는 초기 정의, 다음 회차를 만드는 원 ADD, 실제 header/latch,
+진입·되돌이 간선과 그 간선의 원 definition ID, 원 CBRANCH 조건 operand 및 탈출 간선을 보존한다.
+연산 노드를 새로 합성하거나 임의 횟수만큼 그래프를 복제하지 않는다.
+
+- **JOIN.block_key는 읽는 위치이지 loop header가 아니다.** 원 p-code CFG와 normalized SSA block/진입점/predecessor가
+  일치하는지 확인하고, 실제 SCC·기존 budgeted dominator로 header를 확인한다. cyclic CFG에서 조기 종료하는
+  `ConditionIndex`의 불완전 내부 상태를 recurrence에 재사용하지 않는다.
+- 단일 진입·단일 latch이며 되돌이 간선을 제거하면 DAG가 되는 단순 cyclic region부터 지원한다. 원
+  `ssa.flow_edges`의 header 진입/되돌이 span이 모든 요청 바이트를 덮고, 각 간선이 단일 raw definition을 가리키며
+  두 source의 합집합이 원 JOIN과 같아야 한다. ENTRY 초기값도 실제 외부 진입 간선이 있어야 허용한다.
+- `recurrence`는 call path를 포함한 공유 ID, scope/unit, 원 init/transition definition ref와 기존 expression part,
+  실제 header/latch와 별도의 read_block, 원 조건식/true·false successor/탈출 간선을 보존한다. 조건식의 원 노드는
+  첫 lane-demand 전에 포함한다. 중첩 predicate 생성의 in-flight holder는 종료/실패 시 제거해 rollback 뒤의 node ID를 남기지 않는다.
+- 복수 latch·중첩/irreducible 순환·복수 source region·없는/부분적인 flow evidence·원 초기 진입점 부재·KILL 등은
+  `recurrence_fallback`으로 남긴다. 여러 경로가 합쳐진 raw source union을 임의로 init/transition으로 나누지 않는다.
+- `evaluation='structural_only'`이며 새 반복 평가나 횟수 추정은 없다. 값이 되먹임되는 누산 루프의 기존 `eligibility='loop'`
+  거부는 유지한다. 반면 `while (...) x=5`처럼 기존 값 그래프에 되먹임 cycle이 없어 원 phi의 포락값 평가가 가능했던 경우는
+  그대로 유지한다. **recurrence 존재 자체가 무조건적인 평가 거부나 정적 완전성 승격을 뜻하지 않는다.**
+
+#### 실제 검증 자료
+
+두 fixture는 x64 Mach-O로 컴파일한 뒤 Ghidra 12.0.4로 새로 추출했다. 원 binary/p-code를 실행하는 기존 interpreter를
+대조 오라클로 사용하며 native 실행이나 VM 분석 완료로 표현하지 않는다. call 결과·요약·기대 writer를 엔진에 주입하지 않는다.
+컴파일은 두 C 파일 각각에 `clang -target x86_64-apple-macos11 -O1 -fno-stack-protector
+-fno-optimize-sibling-calls -fno-unroll-loops -fno-vectorize -nostdlib -dynamiclib -lSystem -o <dylib> <source>`를 사용했다.
+기존 `tools/bundle_export/export_bundle.py`에서 각 파일의 `case_...` wrapper를 leading underscore가 있는 이름으로 선택한다.
+
+1. `tests/corpus/intra/conditional_register_call.c`: AL/AH/AX 3종 × 8개 seed × 양 조건 = 48입구와
+   호출 결과가 조건인 8입구, **총 56입구**. 원 CBRANCH 존재·원 값·최종 계산식·RETURN/IP/SP 및 표현된 모든 LOAD의
+   각 byte writer/offset을 대조했다. 미선택 새 입력·양쪽 쓰기·pre-call 정의·중첩 바이트 선택·간접 호출과의 선택 공유는
+   별도 합성 raw p-code 회귀로 확인한다.
+   SHA256 `84eaa8d3a663c3bdcfaa046954054b34ed5e213f08cbabcbd5b4df057e97134d`.
+   Bundle `output/recurrence-register-20261023/conditional-bundles/7d3ed2287a7baf9d1bf8154ccd3825957d6a8bbf1ce98c903aff17fb79e9458a`.
+2. `tests/corpus/intra/recurrence_expression.c`: register/memory 누산 2종 × 초기값·step 3종 × 0/1/3/7회,
+   **총 24입구**. 원 실행의 최종값과 fixture 산술을 비교하고, 실제 trace의 최초 진입/되돌이 횟수·원 정의 실행을
+   기록된 header 간선에 대조했다. 메모리 누산은 플래그 계산의 중복 LOAD까지 각 byte writer가 초기 STORE 또는
+   해당 회차/이전 회차 transition STORE인지 대조했다. NOP-only block은 원 trace에서 생략되므로 유일한 원 empty-block
+   chain만 복구한다. 이는 검사 오라클이며 엔진이 입력 count로 횟수를 추정하는 기능은 아니다.
+   SHA256 `7c9bae72c57695e496d8576a3fe4f58fd8e0a6ecd34f25448432b1fc3011aaa9`.
+   Bundle `output/recurrence-register-20261023/recurrence-bundles/410abf1253f7d1af1aa49bf9050747fe23baaa2c36c18bb02ff61e80b84bb671`.
+
+실제 검사는 위 두 generation을 각각 `TDO_CONDITIONAL_REGISTER_BUNDLE`, `TDO_RECURRENCE_BUNDLE`로 지정하고
+`tests/corpus/intra/test_recurrence_register_binary.py`를 실행한다. 기존 UE·DFB072·분기/중첩 호출 회귀는 별도로 유지한다.
+현재 범위 이후의 복잡한 순환·루프를 가로지르는 호출 효과·미확정 간접 목적지·메모리 alias 정밀화는 별도 작업이며,
+이 두 기능을 모든 VM/인터프리터의 계산식 표현 완료로 일반화하지 않는다.
+
+동결본 전체 회귀는 **2748 passed / 32 skipped / 0 failed**, 429.40초였다.
+권위 결과는 `output/recurrence-register-20261023/final-suite.junit.xml`이며 총 2780개, failures/errors 모두 0이다.
+새 조건부 레지스터 49개·recurrence 24개·실제 바이너리 6개, 총 **79개**는 모두 skip 없이 실행됐다.
+새 합성 73개는 sparse SSA에서도 별도로 통과했다. 실제 6개는 위 56+24=80입구 대조이며 이 숫자는 suite09 케이스 점수가 아니다.
+기존 UE Core 21개·DFB072 ELF/PE64/PE32 최종 sink·분기/중첩 호출·모델 호환성·forward-off 거부도 유지했다.
+32개 skip은 기존과 같은 Linux 환경 제약 23개와 미보유 Bundle 9개다.
+Astra가 최신 코드/문서·신규 79개를 독립 검수·실행하고 권위 XML의 전체 수치와 기존 회귀 실행까지 확인해 v10 범위 완료를 승인했다.
+
+### 25.47 일반 순환 식 그래프 (2026-10-24, v11)
+
+단일 초기값·갱신값·header/latch로 인식되는 루프만을 표현하던 제약을 제거한다. 기존 SSA와 데이터 그래프를 재사용해
+**임의의 관찰된 함수 내 순환**을 유한한 참조 그래프로 기록한다. 별도 SSA/RD/정방향 실행기나 반복 횟수 추정기는 만들지 않는다.
+중첩·다중 진입(irreducible)·여러 갱신·여러 되돌이·연속 루프는 예외 fallback 대상이 아니라 같은 기본 표현의 입력이다.
+
+#### 계약과 기존 값 그래프의 격리
+
+- record의 `cycle_graph.cfg`는 기존 raw p-code CFG의 전체 reachable block/edge를 담는다. 순환 사이의 bridge와 0회 우회도
+  포함한다. `cfg_complete`는 이 **관찰된 함수 CFG**의 지원 여부이며, 바이너리의 모든 미확정 간접 목적지를 찾았다는 뜻이 아니다.
+- `components`는 SCC 축약 구조다. `cycle_hierarchy`는 실제 진입점을 제거하며 SCC를 다시 구하는 포함 계층이다.
+  `entry-stripping-scc` 분해일 뿐 소스 언어의 자연 루프, 고유 header 또는 실행 스케줄을 증명하지 않는다. 다중 진입점과
+  모든 원 entry/internal/exit 간선의 인덱스를 보존한다.
+- 모든 기존 SSA 정의와 raw action, read ordinal/fragment, write definition ID, JOIN의 **원 source union**을 기록하고
+  실제 기존 expression node/byte part를 참조한다. JOIN의 `read_block`을 loop header로 바꾸지 않는다.
+- 간선 상태는 원 `MemoryFlowEdge`에 기록된 predecessor·span·definition set만 붙인다. sparse phi site 외에 기록되지 않은
+  상태는 `not_captured`이며, 빈 상태·단일 초기값·출처 없음으로 해석하지 않는다. 각 defset의 원 바이트 part를 함께 보존한다.
+- CBRANCH의 true/false successor와 원 조건 operand를 매 방문의 식(`per_visit_expression`)으로 연결한다. 반복 중 바뀌는
+  조건을 입력마다 한 번 고정되는 ControlPool 선택으로 취급하지 않는다.
+- `expression_complete`는 원 연산/SSA 바이트 구조를 잘림 없이 기록했는지다. ENTRY·KILL·부채 등 미지 입력은 계속 명시한다.
+  `unresolved_accesses`에 원 read/write occurrence의 action/ordinal/width/address/raw address와 식 node를 보존하고,
+  `coverage.unknown_inputs`에서 미지 입구·KILL·미해결 접근·projection 부채의 수를 구조 완전성과 별도로 표시한다.
+  값의 확정, 경로별 source association, 전체 memory state의 확보 또는 최종값 계산 성공을 뜻하지 않는다.
+  `evaluation='structural_only'`이며 기존의 실제 되먹임 `eligibility='loop'`는 유지한다.
+
+기존 root의 좁은 lane demand를 넓혀 다른 입력을 강제로 요구하지 않는다. **동일한 기존 `_Builder`와 SSA**의 full-demand
+projection을 별도 cache로 만들고 같은 `nodes`에 `cycle_only` 노드로 더한다. canonical definition ref로 원 정의와 대응한다.
+기존 root/연산/정적 eligibility/평가값은 바꾸지 않는다. 제한으로 실패하면 새 projection만 rollback하고, 원 CFG outline과
+명시적 partial 사유를 남긴다. outline의 SCC/중첩 region별 전체 간선 스캔도 기존 work budget에 청구하며 전역 budget 실패를
+삼키지 않는다. 성공한 구조를 반복식 수치 평가의 성공으로 승격하지 않는다.
+기존 텍스트 `render`도 모든 CFG 간선·captured 상태·정의/읽기 식·매 방문 조건을 출력한다. 단순 `recurrence`는 호환 뷰로 남고,
+그 뷰의 fallback은 일반 `cycle_graph`의 미지원 표시가 아니다.
+
+#### 실제 사례와 완료 기준
+
+`tests/corpus/intra/general_cycle_expression.c`를 x64 Mach-O `-O0`로 컴파일하여 Ghidra 12.0.4로 봉인 추출했다.
+중첩, 여러 갱신, 여러 되돌이, 실제 두 진입의 irreducible, 연속 루프, 메모리 갱신의 6함수를 사용한다. 컴파일된 원 CFG에서
+각 모양이 실제로 남았는지를 먼저 독립 확인하며 C 소스의 이름만으로 모양을 인정하지 않는다.
+
+- binary SHA256: `7545efc08975f6c38b99ab97016049e3af102d36be32118d2df2fbc2b5ddee55`.
+- Bundle: `output/general-cycle-20261024.IWqPVH/bundles/9a1823d0a2f3531bfbef88ebb2032d2c36db0a2a2ac0d929ef46cfe1ee8f34ad`.
+- `TDO_GENERAL_CYCLE_BUNDLE=<generation>`과 기존 `PYTHONPATH=src:tests/intra`로
+  `tests/corpus/intra/test_general_cycle_binary.py`를 실행한다.
+
+원 CFG의 모든 block/edge 보존, 원 SSA def/read/join/byte 대응, 기존 root 불변, 실제 raw 실행의 모든 LOAD byte writer 및
+captured 간선 상태의 직전 writer 포함관계를 확인한다. 기대 writer만 선별하지 않는다. 없는 sparse 증거를 검증된 상태로
+세지 않는다. 원 p-code 실행 오라클을 사용하는 검사이며 native 실행·임의 VM 복원·루프를 가로지르는 모든 호출의 지원을
+주장하지 않는다. 최종 실행 수치와 Astra 승인 결과는 아래에 기록한다.
+
+새 실제 검사 6개는 **216회 원 p-code 실행**에서 원 CFG **245개 간선 전부**를 방문했다. 모든 LOAD의 **53,064 byte writer**와
+captured predecessor 상태의 **98,631 byte writer**가 원 SSA defset에 포함되는지 대조했다. RETURN target/SP와 기존 root/
+non-cycle node/eligibility 불변도 확인했다. 신규 일반 순환 합성 20개와 실제 6개는 모두 skip 없이 통과했으며, v10의 합성 73개를
+포함한 93개는 sparse SSA에서도 별도 통과했다. 이는 suite09 케이스 점수가 아니라 새 표현 계층의 검사 수다.
+
+앞으로도 개발·테스트 후 **Astra의 별도 목표 달성/마무리 승인**을 완료 관문으로 삼는다. 코드 검수나 테스트 통과만으로
+요청 범위를 만족했다고 보고하지 않는다. 미구현·미검증이 있다면 요청 범위와 비교하여 마무리 가능 여부를 명시한다.
+
+동결본 전체 회귀: **2774 passed / 32 skipped / 0 failed**, 432.31초.
+권위 결과는 `output/general-cycle-20261024.IWqPVH/final-suite.junit.xml`이며 총 2806개, failures/errors 모두 0이다.
+신규 일반 순환 26개는 모두 skip 없이 실행했다. 기존 UE Core·DFB072 ELF/PE64/PE32·조건부/부분 레지스터·호출/메모리·모델
+호환성 회귀를 포함한다. 32개 skip은 이전과 같은 Linux 환경 제약 23개와 미보유 Bundle 9개다. 이 수치는 suite09 케이스 점수가 아니다.
+Astra가 신규 26개 및 실제 6개/집계 수치를 독립 재실행·확인하고, 권위 XML의 전체 회귀와 문서 범위를 확인해
+**이번 일반 순환 식 구조 표현 목표의 달성 및 마무리를 최종 승인**했다. 반복 횟수/최종값 계산·미확정 간접 목적지 해소·
+루프 횡단 모든 호출의 물리 연결은 별도 목표이며, 이번 요청의 구조 표현 완료를 막는 잔여 필수 항목은 없다고 판단했다.
+
+### 25.48 원 그래프를 보존하는 한 회차 상태 전이식 (2026-10-24, v12)
+
+원 SSA/데이터 그래프/일반 순환 그래프를 권위 자료로 유지하고 `cycle_graph.transitions`에 유도 뷰를 추가한다.
+입력은 해당 영역 **이번 방문의 입구 바이트 값**, 출력은 continue/exit 조건, loop-carried 입력과 관찰된 RAM 쓰기의
+다음 값, 실행된 LOAD/STORE의 주소·너비·값·순서다. 레지스터/unique의 모든 일시적 쓰기는 원 연산으로 보존하되
+출력 상태를 전체 기계 상태라고 부르지 않는다. 반복 횟수 추정·최종 닫힌 공식·VM 복원은 이번 범위가 아니다.
+
+#### 기존 증거의 사용과 회차 구분
+
+- 기존 `cycle_hierarchy`의 실제 진입점이 하나인 영역에서 그 입구로 돌아오는 **모든 원 간선**을 cut한다.
+  cut 후 DAG인 경우만 한 방문으로 표현하며 여러 backedge도 같은 방식이다. 중첩 바깥 영역의 잔여 순환이나 다중 진입은
+  명시적 partial이고, 원 v11 일반 순환 그래프의 지원 여부를 낮추지 않는다. 중첩의 안쪽·연속 루프는 각각 만들 수 있다.
+- 별도 SSA/RD 고정점·명령 실행기를 만들지 않는다. 기존 `_Builder`, `ConditionIndex` Boolean DAG, bit-vector evaluator를
+  재사용한다. 읽기 **발생 위치/ordinal/원 atomic span**마다 기존 SSA 후보만 대상으로 제한된 역대응을 수행한다.
+  해당 action 이전의 마지막 원 쓰기에서 멈추고, 없으면 원 predecessor/edge guard를 따라간다. 원 captured fact가 있다면
+  그 제약도 대조한다. 새 정의나 누락된 간선 상태를 만들어내지 않는다.
+- header에서만 현재 상태 입력으로 끊는다. mutable 입력은 모든 원 entry/cut 간선의 full byte fact가 있어야 하고 그
+  원 source union이 읽기의 원 후보에 포함되어야 한다. 영역 내 쓰기가 없는 값은 영역 밖 원 source에 대응하는 입력이며
+  상수가 아니다. 모든 입력/출력은 원 atomic byte span을 따른다. 부분 레지스터도 같은 바이트 규칙이다.
+- 같은 raw STORE가 직전 회차에도 실행되었다는 이유로 현재 쓰기를 header 값으로 바꾸지 않는다. 이번 방문에서 읽기
+  전에 실행된 STORE는 현재 producer로 연결한다. JOIN을 전역 치환하거나 모든 JOIN을 header phi로 취급하지 않는다.
+- 각 원 연산은 원 projection node ID를 참조하며 새 로컬 식은 별도 node 목록에 놓는다. 공유 선택은 **이번 방문 안**에서만
+  공유한다. `evaluate_transition` 재호출은 캐시를 재사용하지 않는다. 원 root/노드/정적 eligibility/부채는 바뀌지 않는다.
+- LOAD/STORE 전부를 cut-DAG의 위상 순서로 기록하고 guard로 실행된 것만 선택한다. 중간 STORE도 남긴다. 출력은 원
+  backedge captured state의 후보에서 구성한다. captured poststate가 없는 exit은 원 cut 입력을 그대로 보존한다고 확인된
+  바이트만 허용하며, 없는 출구 갱신을 추측하지 않는다.
+
+opaque CALL/CALLIND/CALLOTHER, 원 alias/clobber debt, 미해결 접근, KILL/부분 덮기의 불완전 대응, direct-address memory
+action, staged/override action, 비 little-endian 또는 자원 한도 초과는 새 뷰만 partial이다. 원 구조를 성공으로 위장하거나
+전역 work-budget 실패를 삼키지 않는다. `render`에는 `t<region>.n#`/`t<region>.g#`로 구별된 로컬 식·공유 조건·순서 있는
+효과·다음 상태가 함께 출력되며, 기존 원 `n#`/간선/SSA 출력도 유지된다.
+
+#### 전제 귀속과 소비자 검증
+
+원 `NormalizedFunction.assumes_*` 값을 실제 객체에서 기록한다. `StitchContext.assumptions`가 있으면 그 실행의 정확한
+목록을 보존한다. `[]`는 알려진 빈 목록이며 `None`은 미귀속이다. 기본값으로 전제를 재구성하거나 미귀속을 빈 목록으로
+바꾸지 않는다. 구조 뷰는 남기되 미귀속의 수치 평가는 기본 거부한다. 사용자가
+`accept_unattributed_assumptions=True`를 명시하면 평가할 수 있지만 `assumptions_complete=False`와 원 context가
+반환된다. 모든 수치 결과는 `conditional_on_original_analysis=True`다. opt-in은 가정의 참이나 원 부채 해소를 증명하지 않는다.
+
+평가 전에 원 CFG/SSA/parts/nodes/context와 유도 뷰의 별도 receipt를 대조한다. 그 외에도 원 inventory/byte coverage,
+원 연산/상수/operand 의미, last-write stop, predecessor/guard, cut 후보, 불변 입력과 guarded origin의 국소 certificate-DAG를
+검사한다. receipt 재계산만으로 이 검사를 대체할 수 없다. 입력 callback은 검증 후에만 접근한다. 원 엔진 산출물을 신뢰
+기준으로 삼는 변경 검출/국소 대응 검사이지, **서명 없는 임의 JSON의 진위 인증이나 독립적인 새 RD 증명은 아니다**.
+
+#### 실제 메모리 사례
+
+25.47의 봉인 Bundle과 `case_cycle_memory` 원 p-code를 그대로 사용한다. entry `1b1:624`, entry edge 13,
+backedge 37, body의 실제 STORE는 `633`(cell 중간값), `654`(shadow XOR) 또는 `662`(cell 대체값), `66e`(remaining)다.
+`649`의 LOAD는 header cell이 아니라 이번 회차의 `633:2:STORE`(원 def 100)에 연결된다.
+
+표현되는 관계를 읽기 쉽게 쓴 결과는 다음과 같다. 정수 연산은 원 64-bit bit-vector 의미이며 원 그래프를 이 요약으로 대체하지 않는다.
+
+```text
+remaining == 0  → exit, 상태 유지 (조건 확인 LOAD는 남음)
+remaining != 0 → temp = cell + step; STORE cell = temp
+                 if ((selector XOR remaining) AND 1) != 0:
+                     LOAD 방금 쓴 cell; STORE shadow = temp XOR shadow
+                 else:
+                     STORE cell = shadow + step
+                 STORE remaining = remaining - 1; continue
+```
+
+예: 현재 cell=10, shadow=11, step=7, remaining=3이면 selector=0에서 다음 (cell,shadow,remaining)은 (17,26,2),
+selector=1에서 (18,11,2)다. 후자에서도 `cell=17`이라는 첫 STORE를 버리지 않고 뒤의 `cell=18` STORE와 순서대로 보존한다.
+
+신규 실제 검사는 원 p-code를 강제 분기·결과 주입 없이 실행하고 방문 경계마다 상태를 채집한다. 매 방문의 모든 조건,
+모든 LOAD/STORE 주소·너비·값·순서, 다음 상태를 대조한다. LOAD byte의 writer는 raw STORE 주소뿐 아니라 실행 epoch도
+구별하여 이전/현재 회차의 같은 STORE를 구분한다. 원 root/노드/간선이 유도 뷰 없이 생성한 결과와 동일한지도 검사한다.
+메모리 사례 36회 실행/117방문(continue 81+exit 36)과 중첩 안쪽·여러 갱신·여러 되돌이·연속 두 영역을 합쳐
+**216회 원 실행/783방문, 5함수의 6영역**을 대조한다. irreducible과 중첩 바깥 영역은 원 그래프만 보존하고 새 뷰의 partial을 확인한다.
+이는 native 실행이나 suite09 점수가 아니다. 전체 회귀와 Astra의 최종 목표 달성 승인은 동결 검증 후 아래에 기록한다.
+
+동결 코드·테스트 전체 회귀: **2837 passed / 32 skipped / 0 failed**, 440.35초(권위 XML 440.251초).
+`output/one-visit-20261024.2oxohB/final-suite.junit.xml`은 총 2869개, failures/errors 모두 0이다. 신규 전이식
+합성 54개+실제 9개는 전부 실행했다. 기존 UE Core·DFB072 ELF/PE64/PE32·호출/메모리·부분 레지스터·모델 회귀를 포함하며,
+32개 skip은 기존 Linux 제약 23개와 미보유 Bundle 9개다. 기본 sparse SSA 외 dense 기준으로 신규 63개도 별도로 모두 통과했다
+(`dense-transition.junit.xml`, 15.52초). 위 폴더의 `record.json`/`record.txt`는 실제 memory 사례의 엔진 전체 출력이고,
+`visits.json`은 두 body 분기 및 zero-exit의 실제 API 결과다. 코드·테스트는 동결 직후와 전체 실행 후 해시가 동일하다.
+
+최종 전달 검수에서 JSON을 JavaScript Number로 중간 파싱하며 일부 64-bit 상수가 반올림된 산출물 문제를 발견했다.
+Python 원 정수를 `json.dumps`한 **문자열 그대로** 운반해 교정했다. 현재 `record.json`을 다시 읽은 receipt 검증,
+`render(record)`와 저장 텍스트의 정확 일치, 저장한 세 방문의 공개 API 재평가 일치를 확인했고 Astra도 독립 재검증했다.
+엔진 코드나 동결 테스트의 실패가 아니며, 향후에도 전달 계층에서 원 64-bit 정수를 Number로 바꾸면 안 된다.
+
+Astra가 권위 XML·dense 검사·실제 방문 검증·교정된 원출력을 확인하고 **이번 한 회차 상태 전이식 목표 달성 및 마무리를
+최종 승인**했다. 원 그래프 보존과 이번 방문의 조건/메모리 읽기/순서 있는 갱신 연결에 남은 필수 보완은 없다는 판단이다.
+반복 전체의 닫힌 공식, 모든 중첩·다중 진입 영역의 전이 평가, 불명 호출 지원은 이번 범위 밖이며 명시적 partial로 남는다.
+
+### 25.49 단순 감소 반복의 terminal-state 요약 (2026-10-24, v13)
+
+25.48의 원 그래프와 한 회차식을 그대로 유지하고 **별도 top-level `loop_summaries`**를 추가한다. SSA/RD·명령 실행기·
+일반 루프 풀이기를 만들지 않는다. complete one-visit의 기존 바이트 식만 제한적으로 다시 쓰며, 원 `cycle_graph`·
+`transitions`·receipt·root·노드·eligibility를 변경하지 않는다. 원 그래프와 한 회차식은 요약의 성공 여부와 무관하게 남는다.
+
+#### 지원 조건과 공식
+
+- 실제 entry/cut/exit가 각 하나이고 원 조건 선택은 한 개여야 한다. full-width `counter != 0`에 대응하는 원 zero-test와
+  continue/exit polarity를 대조한다. `INT_EQUAL`/`INT_NOTEQUAL`, 정확한 COPY/BOOL_NEGATE와 TEST의 항등식도 해석한다.
+- counter가 매 continue마다 정확히 `counter - 1 mod 2^bits`이며 zero-exit은 모든 tracked state를 유지해야 한다.
+  따라서 몸체 횟수 `n`은 **이 영역 입구 counter의 unsigned 값**이다. 0이면 몸체는 실행되지 않고, 양수이면 0 이전에
+  counter wrap이 발생하지 않아 정확히 n회 후 종료한다. 함수 인자·이름·사용자가 임의로 준 반복 횟수에서 추측하지 않는다.
+- 각 tracked 출력은 `x_next = x + delta` 또는 `x_next = x`여야 한다. delta는 영역에서 변하지 않는 입력과 상수의
+  동일 폭 선형 결합만 참조한다. 정확한 full-byte COPY/CAST·LOAD/STORE 값 연결·동일 폭 ADD/SUB와 제한된 bitwise
+  항등식만 정상화한다. 원 식 node/자식 참조·규칙·정상형의 유한 근거 DAG를 남기고 기존 resource budget을 청구한다.
+- 각 출력 폭별로 `x_final = (x_initial + n*delta) mod 2^(8*width)`를 계산한다. **n은 accumulator 폭으로 자르지 않는다.**
+  원 counter 폭과 출력 폭이 달라도 자연수 횟수는 그대로이고 결과 바이트에만 modulo를 적용한다. 이 곱셈은 요약 규칙이지
+  바이너리에 새 곱셈 명령이 있었다는 표시가 아니다. 현재 정상화 폭은 1..16바이트다.
+- 모든 원 LOAD/STORE 주소도 정상화하여 mutable state에 의존하지 않음을 확인한다. 최종 값이 선형이어도 주소가
+  회차마다 달라지면 거부한다. 원 alias/clobber/unresolved/KILL/call/가정의 경계는 one-visit 계약 그대로다.
+  생략할 방문에 사용하지 않는 나눗셈 등 부분/미지원 연산이 있어도 임의로 정상 종료했다고 보지 않고 partial로 남긴다.
+
+분기별 갱신·여러 cut/exit·상태 간 의존·비단위 자기 계수·일반 XOR/곱셈·mutable 값의 폭 확장/축소·split-byte 값은
+현재 요약에서 partial이다. 단순해 보이는 C byte 누산도 정수 승격/절단으로 이 범위 밖일 수 있으며 원 그래프/한 회차식은
+그대로다. 기존 `recurrence_expression.c` 두 함수의 post-test exit는 one-visit 자체가 partial이므로 이 계층에서 우회하지 않는다.
+
+#### 수치 API와 메모리 효과
+
+`evaluate_loop_summary(record, summary_id, {state_id: unsigned_value}, accept_unattributed_assumptions=False)`는 다음을 수행한다.
+
+1. 기존 one-visit validator로 원 SSA/CFG/바이트·연산 의미/가정을 검사한다. 입력을 읽기 전에 원 one-visit에서 bounded
+   canonical recipe를 재도출해 저장한 요약과 정확히 일치하는지 확인한다. hash만으로 요약 의미를 인증하지 않는다.
+2. 필요한 입구 바이트를 한 번씩 lazy snapshot으로 읽는다. counter·필요 입력은 해당 폭의 unsigned 정수여야 한다.
+   `n=0`일 때 delta나 비활성 body 입력을 요구하지 않는다. 음수·폭 밖 counter를 조용히 잘라 횟수로 보고하지 않는다.
+3. n회 unroll 없이 terminal tracked state를 공식으로 계산하고, 그 상태에서 기존 `evaluate_transition`으로 **마지막
+   zero-visit만** 평가한다. 실제 종료 간선·다음 바이트와 일치해야 하며 조건 확인 LOAD도 보존한다.
+
+반환값에는 `iterations`, `exit_edge`, `updates`, `terminal_visit`, 원 `effect_template` 참조와 가정 context가 있다.
+원 효과를 **n개 body + n+1개 header 검사**의 템플릿으로 참조하며 전체 로그를 만들었다고 표시하지 않는다. 중간 STORE를
+제거하거나 반복 전체가 하나의 STORE와 동치라고 주장하지 않는다. 결과는 **영역 출구의 tracked byte 상태**이지 함수 전체의
+최종 반환값·모든 레지스터/RAM·native 실행 결과가 아니다. 미귀속 가정은 기본 거부하며 opt-in 시에도 조건부 결과로 표시한다.
+`render`는 원 그래프·한 회차식에 이어 n과 modulo 요약 및 원 식 node 참조를 출력한다.
+
+#### 실제 검증
+
+새 `tests/corpus/intra/loop_summary_expression.c`를 x64 Mach-O `-O0`로 컴파일하고 Ghidra 12.0.4로 봉인 추출했다.
+header-test가 원 CFG에 남는 register asm fixture, volatile RAM 누산 C, 정수 승격/절단의 negative C가 포함된다.
+
+- binary SHA256: `1b5c1c4c9e68e4e86c56f795fc6264293998ca6a117280b65b8ce91df5cda8ff`.
+- Bundle: `output/loop-summary-20261024.ga63B8/bundles/8f1dc11563f86f217926388c3a0a702d62ef1bfed4826ed6e2c46c18239cbafe`.
+- `TDO_LOOP_SUMMARY_BUNDLE=<generation>`과 25.47의 `TDO_GENERAL_CYCLE_BUNDLE`로
+  `tests/corpus/intra/test_loop_summary_binary.py`를 실행한다.
+
+신규 register/RAM 30회와 기존 sequential 첫 영역/nested 안쪽 72회를 합쳐 **102회 원 p-code 실행·462방문·120회 영역 호출**을
+검사한다. 기존 한 회차 검사의 모든 조건·LOAD/STORE 주소/너비/값/순서·byte writer epoch 대조를 그대로 수행하고,
+입구에서 계산한 전체 요약의 모든 terminal tracked byte·원 cut/exit 실제 횟수를 추가 대조한다. n=0/1/여러 회차,
+값 wraparound를 포함한다. sequential은 raw count=10이어도 입구 remaining=2를 사용하며, nested는 안쪽 counter를 사용한다.
+거대한 64-bit n의 공식 검사도 있지만 그 횟수만큼 원 바이너리를 실행했다고 주장하지 않는다. 합성 검사는 counter/accumulator
+폭 불일치·작은 폭 counter 최댓값·잘못된 감소량/조건/주소·변하는 delta·변조 recipe·가정·입력 미접근·원 graph/one-visit
+불변을 포함한다. 전체 회귀 및 Astra의 별도 최종 목표 달성 승인은 동결 검증 후 기록한다.
+
+동결본 전체 회귀: **2887 passed / 32 skipped / 0 failed**, 451.95초(권위 XML 451.850초).
+`output/loop-summary-20261024.ga63B8/final-suite.junit.xml`은 총 2919개, failures/errors 모두 0이다. 신규 합성 44개와
+실제 6개는 skip 없이 실행했고, dense SSA 기준 50개도 별도로 통과했다(`dense-summary.junit.xml`, 9.71초).
+기존 UE Core·DFB072 ELF/PE64/PE32·조건/부분 레지스터·호출/RAM·모델 및 원 순환/한 회차 회귀를 포함한다.
+32개 skip은 이전과 같은 Linux 제약 23개와 미보유 Bundle 9개다. 동결 전후 코드·테스트 SHA256은 동일하다.
+
+같은 폴더 `example-register/`와 `example-memory/`에는 원 엔진 `record.json`·`record.txt` 및 `examples.json`을 보존한다.
+각각 원 p-code를 추가 실행하며 `0 + 7*3 = 21`, `UINT64_MAX + 1*3 mod 2^64 = 2`, 0회 상태 유지(10)를 대조했다.
+JSON은 Python 정수를 직렬화한 문자열 그대로 운반했으며 재입력 receipt/recipe 검증, renderer exactmatch, 공개 API의
+세 결과 재평가 일치도 확인했다. 저장한 두 0회 사례는 step 입력 접근을 금지해도 같은 결과를 낸다. 이 출력은 원 그래프·
+한 회차식과 별도 요약을 함께 담으며, 수치 예제를 함수 전체의 일반 지원으로 확대하지 않는다.
+
+Astra가 권위 전체/dense XML, 실제 검사 구현과 집계, register/RAM 전달본의 원 증거·recipe·렌더링·공개 API 재평가,
+0회 delta 미접근과 미귀속 가정 기본 거부를 독립 확인하고 **이번 단순 반복 최종 요약식 목표 달성 및 마무리를 최종 승인**했다.
+필수 미달사항은 없으며 일반 closed form·폭 변경·함수 전체 반환값·전체 기계 상태/메모리 로그는 이번 완료 범위가 아니다.
+
+### 25.50 최종 요약 확장: low-byte·불변 분기·단일 strided STORE (2026-10-24, v14)
+
+25.49는 당시의 v13 지원 기록이다. 이번 확장은 그 위에 세 종류의 제한적 요약을 추가한다. 원 SSA/CFG/데이터 그래프,
+`cycle_graph.transitions`·receipt·root·eligibility·가정과 부채는 바뀌지 않는다. 별도 SSA/RD·명령 실행기·일반 루프 풀이기는
+추가하지 않는다. 단순 감소 counter의 unsigned 입구 값 n과 마지막 zero-visit 대조는 그대로 사용한다.
+
+#### 1. 폭 변환과 low-byte 투영
+
+값 정상화 캐시를 `(원 node, 요청 low-byte 폭, strict 모드)`로 분리한다. 확대된 정수의 하위 바이트를 다시 저장하는
+ZEXT/SEXT→ADD/SUB→low-byte 절단은 동일 modulo ring의 항등식일 때만 지운다. split parts는 같은 원 producer의
+연속 low-byte 조각인 경우만 합친다. nonzero source offset, 관찰되는 넓은 승격값, 다른 producer의 조각은 partial이다.
+입력 정수는 실제 원 바이트 폭으로 검사하며 결과에만 좁은 modulo를 적용한다. counter zero-test와 모든 주소 증명은
+원래 전체 폭의 **strict** 경로이고, low-byte 정상형 캐시를 이 경로에서 재사용하지 않는다.
+
+예: unsigned byte cell의 C 정수 승격이 있더라도 최종 byte는 `(cell_initial+n*step) mod 256`이다. 그러나 넓은 승격
+결과를 다른 loop-carried 출력에 누적하는 경우 그 넓은 값까지 좁은 항등식으로 바꾸지 않는다. 모든 tracked 출력을
+동시에 증명하지 못하면 전체 요약을 partial로 남긴다.
+
+#### 2. 원 조건이 반복 중 불변인 공유 분기
+
+counter 이외 원 결정의 **전체 의미 의존성**을 원 node/LOAD 주소/메모리 parts까지 따라가 모든 boundary input이
+영역에서 쓰이지 않는지 확인한다. low-byte 값의 정상형으로 조건 불변성을 추측하지 않는다. mutable condition이나
+selected phi 의존성은 거부한다. 현재 counter 외 최대 4개 불변 결정의 유한 case를 만들고, 각 case에서 같은 원 BDD 선택으로 phi·
+모든 tracked 갱신·주소/효과 schedule을 함께 증명한다. 별개 출력마다 독립적인 선택을 만들지 않는다.
+
+예: `if(selector!=0) cell+=yes; else cell+=no; --counter`는
+`cell_final = cell_initial + n*(원 selector 조건 ? yes : no)`의 공유 선택을 유지한다. 중첩 조건도 활성 선택만 기록한다.
+소비자는 원 계약과 canonical recipe를 재검사한 뒤 기존 `_StepEvaluator`로 활성 원 조건을 한 번 선택한다. 비활성
+delta/중첩 selector는 요구하지 않는다. n=0에는 **비활성 body** selector/delta를 요구하지 않지만, 실제 zero-visit에서
+실행되는 header 조건/LOAD는 기존 evaluator대로 요구한다. 매번 달라지는 `remaining & 1`은 불변 case가 아니다.
+
+#### 3. 주소가 움직이는 단일 STORE의 효과식
+
+일반 RAM one-visit 계약을 완화하지 않는다. 원 `cycle_graph.transitions`의 unresolved RAM은 그대로 partial이며,
+top-level `write_effect_transitions`와 `write_effect_contracts`에 좁은 별도 projection을 보관한다. 공통 `_Builder`,
+원 `_Correspondence` 바이트 증명, `_StepConditions`, `_validate`, evaluator를 재사용한다.
+
+- 영역에 STORE가 정확히 하나이고 LOAD/CALL/CALLIND/CALLOTHER/direct-address memory action이 없어야 한다.
+  해당 STORE의 원 unresolved **write 발생** 하나만 원 operation/action/ordinal/폭/raw address와 주소 read에 대조한다.
+  임의의 RAM 미해결을 무시하는 사용자 flag는 없다. 다른 unresolved occurrence나 scalar KILL/alias/clobber/debt는 거부한다.
+- scalar read·captured cut·last-write·guard certificate는 기존과 동일하게 검증한다. 출력은 원 register/unique의 mutable
+  cut state와 원 STORE 효과뿐이다. RAM entry·구체 RAM 정의·가짜 `fixedByteSpan`을 만들어내지 않는다.
+- full-width `p_next=p+positive_constant_stride`, 원 STORE read 시점의 `address=p_initial+offset`, 불변 저장값을 증명한다.
+  증분 전 STORE와 증분 후 STORE를 구별하며 stride는 STORE 폭 이상이어야 한다. body당 원 STORE 하나의 순서를 보존한다.
+- 요약은 `M_final = apply_STORE(M_initial, p_initial+offset+i*stride, value, i=0..n-1)`이다. 범위 밖 바이트는 보존된다.
+  이는 주소별 메모리 효과식이지 한 번의 STORE나 RAM 전체 구체 snapshot이 아니다. 원 debt를 해소했다고 표시하지 않는다.
+- 수치 API는 무제한 정수로 first address·last byte·**final pointer**의 no-wrap을 확인한다. 0회에는 가짜 last address나
+  STORE value를 요구하지 않는다. 주소가 mapped/writable인지, fault 없는 native 실행인지, 함수 전체 RETURN과 이후 RAM
+  read까지 연결됐는지는 주장하지 않는다. 결과는 해당 region exit의 scalar+memory effect projection이다.
+
+`evaluate_transition`/`evaluate_loop_summary`는 실제 view collection에 맞는 validator를 선택한다. 입력 접근 전 원 inventory,
+정책과 scope, byte certificate와 receipt, canonical 요약 recipe를 검사한다. 원 일반 one-visit validator로 STORE projection을
+위장할 수 없다. renderer는 새 projection을 `w<region>.n#`로 구별하고 원 `t<region>.n#`와 양쪽 원 node 참조를 유지한다.
+receipt는 엔진 산출물 변경 검출이지 서명 없는 임의 JSON의 진위 인증은 아니다.
+
+#### 실제 검증과 남기는 경계
+
+기존 `case_summary_narrow`의 64개 입력에서 승격/절단·0/127/128/255·overflow·0회/여러 회차를 원 p-code로 대조했다.
+새 `tests/corpus/intra/guarded_loop_summary.c`를 x64 Mach-O `-O0`로 컴파일하고 Ghidra 12.0.4로 봉인 추출했다.
+
+- binary SHA256: `ba1fa527387a9bdf63cd7bbc69d98ccc11a49e4f0dcfb265d97cbeceff141897`.
+- Bundle: `output/guarded-summary-20261024.LfTjJ2/bundles/7147740a35c3a0be1c1f76a54745b4bc8eb52d5b04d14241fc54161e5a4cbd3b`.
+- 환경 변수 `TDO_GUARDED_SUMMARY_BUNDLE=<generation>`와 기존 loop/general-cycle Bundle을 지정해 신규 테스트를 실행한다.
+
+불변 분기 36회/153방문에서 양쪽 선택과 원 LOAD/STORE 주소·폭·값·순서·byte writer epoch·모든 terminal tracked byte를
+대조했다. strided STORE는 증분 전/후 각 30회/210방문/180회 STORE, 총 60회/420방문/360 STORE를 대조했다. 정렬/비정렬
+주소와 저장값 0/UINT64_MAX/바이트 패턴, n=0/1/3/7/19를 포함한다. 주변 RAM을 바이트마다 다른 sentinel로 채워 실제 쓴
+바이트와 쓰지 않은 바이트를 전부 비교했고, 원 cut/exit 횟수와 매 STORE의 주소·폭·값·순서도 확인한다. 분기 결과나 종료를
+주입하지 않는다. LOAD 추가·변하는 저장값·겹치는 stride는 실제 negative로, wrap·잘못된 occurrence/범위/효과·proof·scope·
+receipt 재계산만으로는 숨길 수 없는 변조는 합성 negative로 검사한다.
+
+기존 102회/462방문/120영역 호출과 narrow64회/272방문, 신규96회/573방문을 합치면 이번 targeted 검증은
+**262회 원 p-code 실행·1307방문·280영역 호출**이다. 이는 native 실행이나 suite09 전체 점수라는 뜻이 아니다.
+반복마다 변하는 조건/누산값의 일반 비선형 갱신, 일반 LOAD/STORE alias, 여러 STORE/여러 cut/exit, 중첩 바깥·다중 진입의
+최종 닫힌 공식은 보장하지 않는다. 그런 경우에도 원 일반 순환 그래프 및 만들 수 있는 한 회차식과 partial 사유는 남는다.
+전체 회귀와 Astra의 별도 최종 목표 달성 승인은 동결 검증 후 기록한다.
+
+v14 동결본 전체 회귀: **2972 passed / 32 skipped / 0 failed**, 470.59초(권위 XML 470.489초).
+`output/guarded-summary-20261024.LfTjJ2/final-suite.junit.xml`은 총 3004개, failures/errors 모두 0이다. 기존 UE Core·
+DFB072 ELF/PE64/PE32·호출/RAM·모델·부분 레지스터·원 순환/한 회차 회귀를 포함한다. 32개 skip은 기존과 같은 Linux
+제약 23개와 미보유 Bundle 9개다. targeted 135개도 dense SSA에서 skip 없이 통과했다(`dense-summary.junit.xml`, 24.083초).
+코드·테스트 동결 전후 SHA256은 `eb54d89ec311a7991ffe57ab98e78a457ab4b5a71979ded84e285ed6422d38c5`로 동일하다.
+
+첫 회귀에서 새 projection이 없는 기존 결과에도 빈 optional 필드 두 개를 추가한 차이를 기존 보존 검사가 발견했다.
+해당 필드는 실제 projection이 있을 때만 발행하도록 수정하고 기존 실제 순환 보존 6개를 재통과한 다음 전체를 처음부터
+다시 실행했다. 위 수치는 수정본의 완주 결과이며 중단된 첫 실행을 성공 근거로 합치지 않는다.
+
+같은 출력 폴더의 `case_summary_narrow/`, `case_summary_branch/`, `case_strided_store/`, `case_strided_after/`는 각각
+원 `record.json`·엔진 `record.txt`·실제 boundary 입력과 API 결과의 `examples.json`을 담는다. 총 9개 예제는 원 p-code
+방문과 함께 생성했다. Python 정수를 JSON 문자열 그대로 운반했으며 재입력 receipt/recipe 검사, renderer exactmatch,
+공개 API 결과 일치·미귀속 가정 기본 거부를 확인했다. Astra도 손실 없는 64-bit 상수, 원 unknown 보존, 0회 비활성 입력
+미접근과 전달 파일을 독립 검수했다.
+
+Astra가 권위 full/dense XML과 기존 UE·DFB072 3플랫폼·forward/모델 회귀, 전달 9개 API/4개 renderer를 최종 확인하고
+**이번 합의된 세 단계 구현 목표 달성 및 이대로 마무리를 명시적으로 승인**했다. 필수 미달사항은 없다는 판단이다.
+이 승인은 low-byte 승격/절단·불변 분기의 공유 선택별 최종식·단일 strided STORE 효과식에 관한 것이며, 위에 명시한
+일반 feedback/alias/비선형·여러 STORE·cut·exit까지 최종 공식으로 풀었다는 의미는 아니다.
+
+### 25.51 원 전체 그래프 위의 부분 식 선택·간략화·동등성·연결 (2026-10-24)
+
+전체 SSA/메모리·데이터 흐름/연산식 그래프를 먼저 유지하고, **이미 존재하는 node와 PartRef를 선택한 유도 뷰**를 붙인다.
+SSA 생성 전에 구간을 자르지 않으며 별도 SSA/RD·명령 실행기·alias 풀이기를 만들지 않는다. 기존 원 순환 그래프,
+한 회차 `transitions`, `write_effect_transitions`와 `loop_summaries`는 삭제·교체하지 않는다. 이번 P0는 지역 값의 동등성이다.
+모든 source 제거, 일반 루프의 닫힌 공식, 여러 회차 F_k 합성, 효과/exit/종료/entry 도달성 증명은 별도 후속 범위다.
+
+#### 선택과 원본 연결
+
+- `select_expression(record, outputs=None, namespace='original', limits=None)`는 원 root 또는 임의 내부 출력 묶음을 고른다.
+  출력은 `{name, width: 바이트수, parts: 원 PartRef 목록, guard?: 원 BDD 참조}`다. producer `bytes`와 출력 위치 `at`의
+  폭·범위·틈·겹침을 검사한다. **여러 출력 guard는 conjunction**이며 mutually-exclusive continue/exit를 한 묶음으로
+  선택하면 빈 domain이 된다. 두 결과를 함께 저장하려면 별도 뷰를 사용한다.
+- namespace는 `original` 또는 기존 complete one-visit의 정확한 ID다. 후자는 기존 원 SSA/CFG/captured-state/last-writer
+  계약을 먼저 재검증한다. 사용자가 임의 cut을 주입하여 debt·CALL·미확정 RAM·순환을 해결한 것처럼 만들 수 없다.
+- 선택은 원 node·조건/공유 control DAG·주소·debt 참조를 보존한다. 단순 구조 선택은 순환/미해결을 포함할 수 있으나 수치
+  간략화의 지원 여부와 다르다. CALL/stitched physical boundary는 이번 수치 지원에 포함하지 않는다.
+- `source`는 원 record의 SHA256이며 유도 collection만 제외한다(최초 `expression_views`, §25.52부터 추가로
+  `expression_consumers`). 기존 field나 `loop_summaries`는 제외하지 않는다. 기존 function/context·node·byte 참조는
+  `selection`/`source_links.outputs`에, 원 전체 entry producer는 `bindings`에 남는다. 간략화 후 각 중간 노드를 새로운
+  원 SSA 정의로 위장하지 않는다. 단일 뷰는 자체 typed DAG/출력 ID를 가지며 중첩·겹치는 여러 뷰를 동시에 붙일 수 있다.
+
+#### 간략화와 동등성 계약
+
+`_record_expression_bv`는 기존 식을 정확한 폭의 Z3 bit-vector로 옮기는 유한 adapter다. 같은 원 producer/context는
+**full-width symbol 하나**이고 겹치는 바이트는 그 symbol의 Extract를 공유한다. byte placement는 명시적인 조립이다.
+정수 ADD/SUB/MULT·bitwise·부호/무부호 비교·carry/overflow·shift·폭 확장/축소·PIECE/SUBPIECE·POPCOUNT와 원 공유
+조건의 ITE를 지원한다. BOOL은 원 evaluator처럼 전체 정수의 nonzero 여부이며 low bit만으로 추정하지 않는다.
+DIV/REM은 0의 부분 정의성을 total SMT 나눗셈으로 숨기지 않도록 현재 partial이다.
+
+raw source union/조건 없는 phi는 자유 selector로 만들지 않는다. 원 guard·활성 arm의 정의가능성·guarded source의 정확히
+한 선택을 원 domain으로 유지한다. 여러 출력은 같은 조건 symbol/BDD를 공유한다. 원 값 경로의 unknown CALL/debt/cut/
+순환은 partial이며, LOAD/STORE 값은 **검증된 기존 one-visit memory correspondence에서만** 따라간다. 일반 원 namespace의
+RAM은 이번 수치 adapter가 임의 입력으로 대체하지 않는다. 모든 원 효과는 source network에 남고 값 축약으로 삭제되지 않는다.
+
+candidate는 작은 항등식 및 Z3 simplifier로 생성한다. 예를 들어
+`(x XOR y) + 2*(x AND y) mod 2^w -> x+y mod 2^w`를 원 바이트 연결 위에서 적용한다. 일반 난독화 해제나 모든 MBA의
+최소식을 보장하지 않는다. 외부 생성기를 붙일 수 있도록 typed DAG candidate를 받을 수 있지만 그 자체는 권위가 아니다.
+
+1. 원 output의 guard/정의가능성과 명시적 `user_conditions=[{binding, equals}]`를 분리해 domain을 재구축한다.
+2. domain이 **SAT**여야 한다. UNSAT는 `inconsistent_domain`, unknown/timeout은 `unproven`이며 동치 성공이 아니다.
+3. 같은 domain에서 원 출력과 candidate 출력 중 하나라도 다른 식이 **UNSAT**여야 `equivalent`다. SAT는 `refuted`다.
+4. 이 SAT는 원 함수 entry에서 실행 가능함이나 종료를 증명하지 않는다. 결과는 항상 원 분석 가정에 조건부다.
+
+`ViewLimits`는 선택 producer+control node/간선·깊이·폭, 전처리 AST node/깊이, user hypothesis 개수, candidate DAG와
+SMT timeout/rlimit를 제한한다. 예산/미지원/오류는 성공으로 바꾸지 않으며 원 그래프 fallback 가능 여부도 따로 둔다.
+현재 `numeric_fallback=not_attempted`다. cached proof/hash는 인증이 아니며 소비자는 입력 `.get`에 접근하기 **전에**
+원 선택/바이트/namespace를 재구축하고 whitelist typed DAG를 decode하여 동등성을 재검증한다.
+
+#### 공개 API
+
+```python
+from tdo_v2.operation_records import (
+    select_expression, simplify_expression, attach_expression_view, evaluate_expression_view,
+)
+
+selection = select_expression(record)  # 또는 기존 내부 PartRef outputs, exact one-visit ID
+view = simplify_expression(record, selection)
+if view['proof']['status'] == 'equivalent':
+    with_view = attach_expression_view(record, view)  # 새 copy; record를 수정하지 않음
+    # inputs는 view.bindings의 id -> 그 원 producer 전체 폭의 unsigned 정수
+    result = evaluate_expression_view(with_view, view['id'], inputs)
+```
+
+미귀속 run 가정은 기존 API처럼 기본 거부하고 `accept_unattributed_assumptions=True`를 명시할 때만 허용한다.
+one-visit binding의 `transition_input`은 기존 s# snapshot에 직접 연결된다. renderer는 원 전체 출력 뒤에 별도 `e#.n#`
+typed DAG와 source output 연결을 보여준다. 원 source label/eligibility는 값이 상쇄되었다고 바꾸지 않는다.
+
+#### 실제 사례와 검수
+
+`tests/corpus/intra/local_expression_views.c`를 x64 Mach-O clang `-O1`로 컴파일했다. 순수 MBA 함수는 O1이고 shared RAM
+루프는 `optnone`을 명시해 O0 memory/branch 구조를 유지한다. Ghidra 12.0.4 원 p-code를 봉인 추출했다.
+
+- SHA256: `65d60c897de58fc5fa0e37bcc9a1d840e781a7afac09d32b66fe23e911f46569`.
+- Bundle: `output/expression-views-20261024.ekCMIQ/bundles/e9ff37f50c94e0d65650d8621bcc01a1b0c7a3d8734e5aa1aaf8996257ebac38`.
+- `TDO_EXPRESSION_VIEW_BUNDLE=<generation>`과 기존 loop/guarded-summary Bundle로
+  `tests/corpus/intra/test_expression_view_binary.py`를 실행한다.
+
+초기 all-O1 shared 루프는 기존 one-visit의 `exit poststate evidence is not captured`로 partial이었다. 새 간략화 계층으로
+이를 우회하지 않는다. 이 한계는 one-visit source correspondence의 확장 대상이며 이번 지역 값 간략화 지원 완료와 구별한다.
+후속 §25.57에서 같은 원 Bundle의 captured exit 사실을 연결해 보완했다. 아래 수치는 당시 동결본의 역사적 결과다.
+아래는 동결본의 실제 검증·전체 회귀 및 별도 최종 승인 결과다.
+
+동결 targeted는 **96 passed / 0 skipped**(122.54초), dense SSA 기준도 같은 **96 passed / 0 skipped**(123.87초)다.
+합성 89개와 실제 7개이며, 실제 검사는 순수 MBA 32회와 5개 루프 각 36회, 총 **212회 원 p-code 실행·675회차**를
+포함한다. 추가 하나는 all-O1 루프의 기존 incomplete one-visit을 우회하지 못하는 negative다. 값뿐 아니라 모든 원
+조건·메모리 효과·LOAD byte writer epoch를 기존 raw oracle로 대조하고 기존 그래프·반복 요약·eligibility 불변을 검사한다.
+이 수치는 native 실행이나 suite09 전체 지원 점수가 아니다.
+
+같은 출력 폴더의 `example-mba/record.json`·`record.txt`에는 실제 MBA 원 기록과 별도 `x+y` 뷰를 함께 보존한다.
+`example-shared-memory/selected.json`은 **전체 원 record가 아닌** 기존 one-visit namespace와 유도 뷰 snapshot이며,
+`expressions.txt`와 두 분기의 8회차 입력/API 결과인 `examples.json`을 함께 둔다. 전체 원 record는 봉인 Bundle에서
+재구축해 사용한다. Python 정수를 JSON 문자열 그대로 전달했고, 재입력 후 원 fingerprint·namespace exactmatch,
+두 renderer exactmatch, 저장 8회차의 공개 API 재평가 일치를 확인했다. Astra도 이 산출물을 독립 재검증했다.
+
+선택 단계 검수의 producer/control 예산 누락과 guard 타입 검사 순서를 보완했다. 수치 단계에서는 출력폭이 입력보다
+넓은 ADD/SUB/MULT/부호 반전의 원 의미 및 n-ary simplifier 출력 decoding을 수정하고 회귀를 추가했다. Astra의 추가
+2,430개 연산/폭 대조도 통과했다. 원 분석 의미는 변경하지 않는다.
+
+동결본 전체 회귀는 **3068 passed / 32 skipped / 0 failed**, 595.12초다. 권위 결과는 같은 출력 폴더의
+`final-suite.junit.xml`(총 3100개, failures/errors 0)이다. 기존 UE Core·DFB072 ELF/PE64/PE32·호출/RAM·forward·모델·
+부분 레지스터·원 순환/한 회차/반복 요약 회귀를 포함한다. skip 32개는 이전과 같은 Linux 제약 23개와 미보유 Bundle 9개다.
+`targeted.junit.xml`/`dense-views.junit.xml`의 신규 96개는 전부 실제 실행했다. 동결 전후 코드·테스트 SHA256은
+`5767dec142975da8c7c6a2b80331ea1e4a30aab2a8a0b3fe134269ca35447f88`로 동일하다.
+
+Astra가 권위 full/targeted/dense XML과 UE Core 21개·DFB072 세 플랫폼·호출/RAM·forward-off·모델·기존 순환/한회차/
+요약 회귀 및 all-O1 거부 검사의 실제 실행을 독립 확인하고 **이번 합의된 P0 목표 달성과 이 상태에서의 마무리를 명시적으로
+최종 승인**했다. 필수 미달이나 남은 차단 결함을 발견하지 못했다는 판단이다. 지역 값 동치·원본 보존·기존 지원 경계로
+한정한 승인이고, 일반 루프 공식·미확정 RAM·효과/종료/도달성 증명·전역 source 제거를 완료한 것으로 확대하지 않는다.
+
+### 25.52 검증된 부분식의 후속 소비와 불변 증가량 반복 요약 (2026-10-24)
+
+§25.51은 뷰의 생성·검증·원본 연결까지다. 이번 확장은 그 뷰를 **후속 계산에 실제 재사용**한다. 기존 SSA/RD·원 record·
+한 회차 graph/receipt·`loop_summaries`는 수정하지 않고 opt-in `expression_consumers`에 별도 유도 결과를 둔다.
+기존 partial 요약도 유지한다. 범용 합성/새 명령 실행기/VM 복원/일반 비선형 반복 풀이기를 추가하지 않는다.
+
+#### 1A. 같은 namespace의 후속 식에 치환
+
+`derive_expression_consumer(record, target_selection, [P0_view_id, ...])`는 다음을 수행한다.
+
+1. 원 target 선택에서 출력 값과 실행/정의가능성 조건 **G를 먼저 재구축**한다. 참조한 뷰의 추가 가정으로 G를 좁히지 않는다.
+2. 참조는 같은 source/namespace의 기존 P0 뷰만 허용한다. 다른 consumer를 참조하지 않아 순환 proof chain을 만들지 않는다.
+   각 뷰는 원본에서 다시 검사한다. 원 producer/byte range/placement/width가 정확한 단일 PartRef 출력 port를 사용한다.
+3. G의 SAT와 `G AND NOT(view_domain)`의 UNSAT를 확인한다. counter=1이나 cell=특정값 등 첫 방문에만 맞는 가정을
+   반복/후속 계산 전체로 올릴 수 없다. 현재 별도 consumer 전제를 추가하는 API는 없으며 원 G가 함의하지 못하면 거부한다.
+4. byte port를 실제 하류 읽기에 치환한다. 부분 겹침은 해당 바이트만 대체하고 나머지 원 바이트를 조립한다. 서로 겹치는
+   port는 거부하며, 참조했지만 실제 사용한 byte가 없는 뷰도 거부한다. 입력은 같은 원 producer symbol/Extract를 공유한다.
+5. 치환 후 정의가능성과 출력 동치를 검사하고, 간략화·encode·decode한 **최종 저장 DAG도 원 출력과 다시 증명**한다.
+   후보 생성기나 cached proof가 틀려도 성공으로 발행하지 않는다. 결과는 원 효과를 제거하는 증명이 아닌 지역 값 동치다.
+
+`attach_expression_consumer`는 별도 collection만 붙인 복사본을 반환한다. `evaluate_expression_consumer`는 입력 접근 전에
+source/identity/뷰·byte·domain과 canonical recipe를 전부 다시 검증한다. 미귀속 가정은 기본 거부하며 explicit opt-in만
+허용한다. timeout/unknown/빈 G/개별·합산 자원 한도 초과는 성공이 아니다. P0의 node/edge/depth/width 제한 외에도
+소비자당 뷰 8개·SMT query 128개·개별 solver 2초와 총시간 budget 20초를 둔다. 총시간은 검사 지점에서 확인하여 초과
+결과를 거부하는 협력적 budget이며, 진행 중인 내부 검사·해시·AST 처리를 20초에 즉시 강제 중단하는 보장은 아니다.
+긴 입력 분석의 성능 우월을 주장하지 않는다.
+
+source authority 이름은 `original_record_except_expression_views_and_consumers_v1`이다. 두 파생 collection만 제외하고
+기존 모든 원 필드를 해시한다. consumer가 없던 P0 record의 hash는 그대로이며, consumer 추가/순서 변경은 원 hash를
+바꾸지 않는다. 원 `loop_summaries`를 교체하여 뷰를 무효화하지 않는다. consumer ID에는 원 source·namespace·P0 ID·recipe를
+포함하고 자기 자신/다른 consumer 참조는 허용하지 않는다.
+
+#### 1B. 기존 감소 반복 판정에 불변 δ 식 연결
+
+`derive_loop_consumer(record, transition_id, [P0_view_id, ...])`는 기존 complete 일반 one-visit과 counter/조건/주소/효과
+판정기를 재사용한다. write-only projection이나 incomplete view를 우회하지 않는다. 각 원 불변 branch case에서 1A의
+검증된 출력을 소비하고 `state_next = state + δ(불변 입력)`를 해당 폭의 bit-vector로 증명한다.
+
+- δ는 단순 affine 입력 합을 넘어 XOR/shift 등 **순수 불변 계산 DAG**일 수 있다. mutable state가 자유변수로 남으면 안 된다.
+  mutable 값을 0, counter만 1로 놓아 후보를 만든다(guarded body가 counter=0에서 비활성화되는 것을 피함). 이는 예시 상태
+  대입만으로 증명하는 것이 아니다. **모든 원 G 상태**에서 원 update와 `initial+δ`의 불일치가 UNSAT여야 한다.
+  직렬화한 δ DAG도 decode 후 재증명한다. `delta:s#`는 유도 식의 parameter 이름이지 새 SSA 정의/entry/captured byte가 아니다.
+- 원 `_derive_case`의 full-width zero test, 단위 감소 counter, 하나의 cut/exit, 원 zero-exit의 상태 유지, 모든 mutable 출력
+  coverage, TOTAL 원 연산 검사, strict 주소 불변 및 원 메모리 schedule 검사는 그대로다. 값을 줄였다고 주소·효과·종료의
+  조건을 완화하지 않는다. 원 branch의 전체 의미 의존성이 불변인 경우만 선택별로 요약한다.
+- n은 해당 영역 입구 counter의 unsigned 값이다. δ는 양수 n에서 필요한 활성 식만 평가하며 회차마다 실행하지 않는다.
+  `state_final=(state_initial+n*δ) mod 2^bits`로 계산하고 기존 one-visit으로 **마지막 zero-check 한 번**을 대조한다.
+  0회에는 body δ나 selector를 요구하지 않는다. 원 효과는 n body+n+1 header 검사 템플릿으로 남는다.
+
+새 loop consumer의 scope는 영역 종료의 tracked byte 상태이지 함수의 최종 RETURN·전체 RAM·native 실행 결과가 아니다.
+함수 반환 후속식까지 별도 연결하지 않았다면 최종 반환 공식이라고 부르지 않는다. 일반 feedback/nonlinear recurrence,
+mutable selector·일반 alias·여러 cut/exit·O1 출구 증거 공백 및 임의 N회 F_k는 여전히 후속 범위다.
+
+#### 실제 검증
+
+1A의 `tests/corpus/intra/expression_consumer_chain.c`를 x64 Mach-O clang -O1/Ghidra12.0.4로 추출했다.
+원 MBA 중간 producer를 선택해 증명하고, 뒤의 XOR 0x91·ADD 9에 실제 치환한다.
+
+- SHA256: `9461f72b5475a9203303b3f00e1504f54bb5f4c6933cd50872e4fbc19b8c6d0a`.
+- Bundle: `output/expression-consumers-20261024.OYpVU6/bundles/b0e0cf5fec37fd00d675a706e369092e09e13de216ca8d52a343504a8090b132`.
+- `TDO_EXPRESSION_CONSUMER_BUNDLE=<generation>`으로 실제 chain 검사를 실행한다.
+
+1B는 **기존 §25.51 SHA 65d60c...f46569 Bundle의 `case_view_shared`를 그대로** 사용한다. 쉬운 fixture로 교체하지 않는다.
+원 `loop_summaries`는 nonlinear bitwise로 partial인 채 유지하며 새 consumer만 검증된 식을 활용해 complete 요약을 생성한다.
+두 원 RAM cell의 증가량은 `selector ? y : y XOR 0x55`이고 counter와 함께 세 tracked 출력을 요약한다.
+
+실제 targeted **2 passed / 0 skipped**(47.29초)이며, chain 32회+shared45회, 총 **77회 원 p-code 실행·루프315회차**다.
+0/1/3/7/19회·양쪽 branch·selector=256·overflow를 포함한다. 원 p-code 결과 주입이나 branch 강제 없이 실행하고 기존
+`_Visits`로 매 회차 원 선택·모든 LOAD/STORE 주소/폭/값/순서·LOAD byte writer epoch를 대조한다. 종료의 두 RAM cell과
+counter, 실제 원 backedge 횟수와 exit 1회도 확인한다. 관찰한 함수 반환값은 raw 실행 sanity check이며 새 consumer가
+함수 최종 반환식을 생성했다고 주장하지 않는다.
+
+합성 검사는 byte port의 보존/실제 사용, domain 불일치·첫 회차 한정 가정·미귀속 가정, source/namespace/순환 참조·recipe
+변조, 최종 후보/δ 직렬화 오류, mutable δ/조건·변동 주소·잘못된 zero-exit·dead DIV·자원/unknown 거부를 포함한다.
+전체 회귀와 Astra의 별도 최종 목표 승인은 동결 실행 후 기록한다.
+
+신규 consumer 합성 검사는 **45 passed / 0 skipped**(11.14초), dense SSA에서 합성+실제 **47 passed / 0 skipped**
+(59.34초)다. 기존 요약 검사를 포함한 targeted 166개도 통과했다. 동결 SHA256은
+`425b3a87b264c36f6b4acf372a9b733270c3c34f9e52b90a186488f48ddb306f`이며 전체 회귀 전후 동일성을 확인한다.
+
+전달 예제는 같은 출력 폴더 `example-chain/record.json`·`record.txt`·`examples.json` 및
+`example-loop/consumer.json`·`consumer.txt`·`examples.json`이다. chain은 전체 원 record와 두 파생 collection을 담고,
+loop JSON은 **파생 overlay만** 담아 원 record를 기존 봉인 Bundle에서 재구축하도록 note를 명시한다. Python의 원 64-bit
+정수를 JSON 문자열 그대로 전달했다. 원 source hash, 기존 partial 요약 보존, 두 renderer exactmatch 및 chain3개/loop3개
+공개 API 재평가 일치를 확인했다. loop 예제는 양 분기와 0회를 포함한다.
+
+사용 예시는 다음과 같다. `body_view`는 원 body 출력들에 대해 P0에서 이미 동등성이 확인된 뷰다.
+
+```python
+with_view = attach_expression_view(record, body_view)
+consumer = derive_loop_consumer(with_view, transition_id, [body_view['id']])
+with_consumer = attach_expression_consumer(with_view, consumer)
+result = evaluate_expression_consumer(with_consumer, consumer['id'], original_state_inputs)
+```
+
+상태 입력은 기존 transition의 s# ID를 그대로 사용한다. 개별 후속식은 `derive_expression_consumer`에 원 target selection을
+전달한다. 자동 전역 치환이 아니라 명시적인 consumer 경로이며, 미귀속 가정 opt-in은 기존 API와 같다.
+
+동결본 전체 회귀는 **3115 passed / 32 skipped / 0 failed**, 632.19초다. 권위 XML은 같은 출력 폴더의
+`final-suite.junit.xml`(총 3147개, failures/errors 0)이다. 기존 UE Core·DFB072 ELF/PE64/PE32·호출/RAM·모델·forward·
+부분 레지스터·원 순환/한 회차/반복 요약/P0 회귀를 포함한다. 32개 skip은 기존 Linux 제약 23개와 미보유 Bundle 9개다.
+신규 consumer 합성45개·실제2개는 전부 실행됐고 dense에서도 47개 모두 통과했다. 동결 전후 코드·테스트 SHA256은
+`425b3a87b264c36f6b4acf372a9b733270c3c34f9e52b90a186488f48ddb306f`로 동일하다.
+
+Astra는 전달 chain3개·loop3개를 독립 재입력했고, loop의 실제 저장값 `[246,249,0]`·`[2,5,0]`·0회 `[17,20,0]`,
+원 fingerprint/partial 요약 보존·두 renderer exactmatch·미귀속 가정 기본 거부를 확인했다. 최종 목표 달성 승인은
+권위 전체 XML을 포함한 별도 검토로 받았다.
+
+Astra가 full/new-unit/actual/dense XML과 기존 P0·UE Core·DFB072 세 플랫폼·forward-off·순환/한회차/요약 회귀를
+독립 확인하고 **합의한 1A·1B 목표 달성 및 이 상태에서의 마무리를 명시적으로 최종 승인**했다. 남은 필수 미달이나
+차단 결함을 발견하지 못했다는 판단이다. 명시적 consumer 경로·영역 종료 tracked 상태로 한정한 승인이며, 범용 반환
+공식·mutable feedback·새 경계 계약·일반 alias·여러 회차 F_k까지 완료한 것으로 확대하지 않는다.
+
+### 25.53 기존 경계 입력의 바이트별 의미 영향 증명 (2026-10-24)
+
+§25.51의 부분식과 §25.52의 후속 소비·반복 요약을 유지하고, **구조적으로 연결됐지만 출력 값에는 실제 영향을
+주지 않는 입력 바이트**를 별도로 증명한다. 기존 SSA·PartRef·공유 선택·한 회차 메모리 대응과 BV adapter를 재사용한다.
+새 SSA/RD/명령 실행기/alias 분석기/VM 복원기를 만들지 않는다. 원 record·source 라벨·간선·부채·eligibility·cycle graph·
+한 회차식·기존 반복 요약은 모두 보존하며, 증명을 source 제거 정책으로 자동 적용하지 않는다.
+
+#### 질의와 판정
+
+`prove_byte_influence(record, selection, pairs, conditions=(), limits=None)`의 pair는 다음과 같다.
+
+```python
+pairs = [{"input": {"node": existing_entry_node, "byte": input_byte},
+          "output": {"name": "root", "byte": output_byte}}]
+proof = prove_byte_influence(record, select_expression(record), pairs)
+with_proof = attach_byte_influence(record, proof)
+validate_byte_influence(with_proof, proof)
+```
+
+입력은 **선택한 원 식에서 실제로 사용되는 기존 entry/one-visit binding**이어야 한다. 합쳐진 register producer도
+그대로 유지한다. 임의 중간 노드를 잘라 새 자유 입력으로 만들지 않는다. 후자는 새 경계 계약을 다루는 후속 범위다.
+미귀속 run 가정은 기본 거부하며, 필요한 경우 세 API 각각 `accept_unattributed_assumptions=True`를 명시한다.
+
+하나의 입력 producer 중 질의한 바이트만 fresh 8-bit 값으로 바꾸고, 다른 바이트·다른 입력·공유 분기 상관은 유지한다.
+출력의 Q는 **선택한 출력 guard가 평가 가능한가**, R은 **그 guard가 참인가**, A는 **선택한 값 바이트가 정의되는가**다.
+A에는 원 값 그래프의 정의/실행 gate가 포함된다. Q/R/A는 기계 전체의 fault-free 실행이나 프로그램 진입 도달성 증명이 아니다.
+
+검사는 아래 순서로 수행한다.
+
+1. 추가 사용자 가정 H 자체가 SAT인지 확인한다. 모순이면 `inconsistent_hypotheses`이며 무영향으로 표시하지 않는다.
+2. 양쪽 H를 만족하면서 질의 바이트만 달라질 수 있는지 확인한다. 불가능하면 `fixed_by_hypothesis`다.
+3. 바이트가 다른 두 상태에서 양쪽 Q/R/A가 모두 참인 비교쌍의 SAT를 확인한다. 없으면
+   `no_comparable_defined_pair`이지 무영향이 아니다.
+4. 유효 비교쌍에서 출력 바이트가 다른 반례가 SAT이면 `may_influence`, UNSAT이면
+   `independent_when_both_defined`다. 독립은 해당 출력 바이트·원 namespace·가정·추상 경계 모델에만 적용된다.
+5. Q 변화는 H+바이트 변화 아래, R 변화는 양쪽 Q가 참인 경우, A 변화는 양쪽 Q/R이 참인 경우 따로 검사한다.
+   각 비교 context의 SAT도 필요하다. `stable_in_comparison_context`, `may_change`, `not_comparable`, `unknown`을 구분한다.
+
+따라서 값이 같아도 한쪽에서 body가 실행되지 않으면 R 변화가 남는다. 값 독립이 도달·정의가능성·효과·종료 독립을
+뜻하지 않는다. `may_influence`의 SAT 반례 역시 **원 추상 경계 입력 모델의 반례**이지 일반적인 함수 entry에서 실제
+도달 가능한 상태라는 보장은 아니다. 일부 실제 정수 사례의 반례는 원 p-code로 직접 재실행해 확인했다.
+
+#### 메모리·원본 연결·저장 계약
+
+선택된 원 LOAD/STORE 주소의 producer closure도 별도 기록한다. 입력 producer가 있으면 `may_depend`, 없으면
+`not_in_syntactic_address_closure`, 불완전하면 `unassessed`다. 바이트별 alias 증명이 아닌 보수적인 **전체 producer**
+검사다. closure 밖이라는 사실도 효과 무영향의 증거는 아니다. 모든 결과에 `effects=not_proven`,
+`termination=not_proven`, `concrete_memory_correspondence=not_claimed`를 유지한다.
+
+특히 RBP를 바꾸면서 captured RAM cell 값은 고정한 모델에서 값 독립이 나올 수 있다. 이는 그 추상 cell을 재배치한
+실제 RAM 실행의 정당성을 증명하지 않는다. 주소 `may_depend` 경고와 기존 분석의 스택/전역 가정은 그대로 남는다.
+일반 RAM·CALL·부채·원 순환·지원하지 않는 연산은 기존 adapter가 fail-closed 거부하며 독립으로 승격하지 않는다.
+
+저장은 기존 `expression_consumers`의 `kind=byte_influence`, version 1인 **proof-only subtype**을 사용한다.
+source authority v1의 제외 필드는 기존 두 collection뿐이며 해시 규칙을 넓히지 않는다. ID는 source/namespace/질의/
+가정/판정/반례를 묶는다. 전용 validator는 원 식을 재구축하고 판정을 다시 증명한다. solver가 고른 반례 숫자는 달라질
+수 있으므로 숫자 일치를 강요하지 않으며, 저장 반례 각각에 대해 원 가정·바이트 하나만 변경·비교 context·보이는 Q/R/A와
+값을 ground 대입으로 독립 검증한다. 바인딩 ID나 주소 경고 등 canonical metadata 변조도 거부한다.
+
+기존 값/반복 consumer의 exact canonical 재검증은 완화하지 않는다. `attach_expression_consumer`는 이 subtype을 거부하여
+전용 API의 가정 승인을 우회하지 못하게 한다. `evaluate_expression_consumer`도 입력 접근 전에 proof-only로 거부한다.
+기존 renderer는 질의별 value/Q/R/A를 별도 표시한다.
+
+기본 상한은 입력/출력 pair 16개·SMT query 192개·개별 solver 2초·전체 20초다. 호출자는 상한을 낮출 수만 있다.
+전체 budget은 원 재구축부터 저장 반례 검증까지 공유하는 협력적 한도이며 강제 즉시 중단 타이머는 아니다.
+한도/solver unknown이면 `incomplete`와 각 미완료 질의를 남기며, 검사하지 않은 pair도 누락하지 않는다.
+이런 diagnostic 결과가 항상 재검증/attach 가능하다는 보장은 없다. 자원 부족을 무영향 증거로 사용하지 않는다.
+
+#### 실제 검증
+
+새 `tests/corpus/intra/expression_byte_influence.c`의 add와 MBA cancellation을 clang x64 Mach-O -O1/Ghidra12.0.4로
+추출했다. empty asm은 compiler folding 방지용이고 실제 상태 변경 명령을 추가하지 않는다.
+
+- SHA256: `04ae572c6764719635514571378092d97bd67016fd88c93294063671e076b1e9`.
+- Bundle: `output/expression-influence-20261024.y4sFuF/bundles/e1a9585c942a604dfae1f354a36b83c72c81249fb4bb750922e96ce48e6eeb2e`.
+- 환경 변수 `TDO_EXPRESSION_INFLUENCE_BUNDLE=<generation>`을 설정한다. narrow/shared 검사는 기존
+  `TDO_LOOP_SUMMARY_BUNDLE`/`TDO_EXPRESSION_VIEW_BUNDLE`의 봉인 Bundle을 변경 없이 사용한다.
+
+| 실제 원 식 | 확인 결과 |
+|---|---|
+| `x+y` | y의 하위 byte는 상위 결과 byte 1·7에 carry 영향이 있음. y의 byte 1은 결과 byte 0에 무영향 |
+| `((x^y)+2*(x&y))-y` | y의 8개 byte 모두 결과 byte 0에 무영향. x의 하위 byte는 영향 있음. 원 MBA 간선은 유지 |
+| `cell8=(cell8+(unsigned char)step)` | 원 8-byte step binding의 상위 7개는 결과 cell byte에 무영향, 하위 byte는 영향 있음 |
+| 기존 두 RAM cell 공유 선택 반복 | counter byte는 cell 값에 무영향이지만 body R은 변함. RBP byte는 추상 cell 값 무영향이어도 주소 `may_depend` 유지 |
+
+실제 4개 검사에서 명시적 byte pair 24개를 질의했다(값 독립 20·영향 반례 4). add/cancel 반례 6회 재실행을 포함해
+**원 p-code 70회 실행·한 회차 관찰 92회(종료 검사 포함)**를 대조했다. 기존 `_Visits`가 원 선택과 모든 LOAD/STORE의 주소·폭·값·순서·
+byte writer epoch·회차 갱신을 확인한다. native 실행이나 추상 RAM 반례의 일반 entry 실현 가능성을 검증한 것은 아니다.
+기존 shared의 partial 반복 요약은 그대로다.
+
+신규 합성 54개는 carry/폭/상쇄·공유 phi 상관·Q/R/A 분리·모순/고정 가정·저장 반례/metadata 변조·unsupported·
+가정 opt-in·자원/unknown·원 BV domain AST 보존을 포함한다. 합성+실제 **58 passed / 0 skipped**(4.91초)이며,
+전체 회귀·dense SSA 및 Astra의 별도 최종 목표 승인은 아래와 같다.
+
+동결본 전체 회귀는 **3173 passed / 32 skipped / 0 failed**(648.71초), XML 총 3205개·failures/errors 0이다.
+권위 결과는 같은 출력 폴더의 `final-suite.junit.xml`/`final-suite.log`에 있다. 신규 58개는 모두 실행됐고,
+dense SSA에서도 **58 passed / 0 skipped**(5.35초)다. 기존 UE Core·DFB072 세 플랫폼·모델·forward-off·호출/RAM·
+부분 레지스터·순환/한 회차/반복 요약·P0/consumer 회귀를 포함한다. 32 skip은 기존 Linux 제약 23개·미보유 Bundle 9개다.
+동결 전후 코드·테스트 SHA256은 `1366eb8238030551aca912d249f423fed13cfc25b4e4218879012bd474822086`로 동일하다.
+
+Astra는 단계별 코드/실제 검증을 승인했고, 마지막에 권위 전체 XML·new/dense XML·기존 실제 회귀와 최종 문서를
+독립 확인하여 **이번 합의 범위의 목표 달성 및 마무리를 명시적으로 최종 승인**했다. 24 byte pair와 원 p-code 70회/
+한 회차 92회 집계도 테스트 구조와 대조했다. 필수 잔여사항이나 차단 결함을 발견하지 못했다는 판단이다.
+기존 경계의 조건부 값 영향 증명으로 한정한 승인이며, 임의 경계 cut·일반 alias·source 자동 제거를 완료한 것으로
+확대하지 않는다.
+
+### 25.54 당시 개발 우선순위 — Astra 합의 계획 (2026-10-24, 이행 완료)
+
+§25.53 완료 당시 코드를 점검해 아래 순서에 합의했다. 아래는 **당시의 계획**이며 그 자체가 구현 완료의 근거는 아니다.
+세 항목은 이후 모두 구현·검증·최종 승인을 받았다. 1순위 결과는 §25.55, 2순위는 §25.56, 3순위는 §25.57이다.
+전체 원 SSA/데이터·연산 그래프를 유지한 채 필요한 부분만 다룬다는 방향은 그대로다. 현재 완료 범위와 선택적 확장은
+§25.58을 따른다. 아래 목록을 새 필수 개발 작업으로 재개하지 않는다.
+
+#### 1순위: 명시적 경계를 가진 지역 식 계약
+
+현재 선택은 원 producer·guard·debt를 끝까지 따라가고, 기존 BV adapter/consumer는 원 식을 먼저 재구축해야 한다.
+그래서 복잡한 호출 앞부분을 못 풀면 그 뒤의 작은 순수 계산도 함께 막힌다. 다음 목표는 **필요한 구간의 입력을 명시해
+그 안의 계산만 조건부로 줄이고, 그 입력의 원 함수 내 출처는 미해결로 남길 수 있게 하는 것**이다.
+
+- 첫 범위는 기존 노드·PartRef를 참조하는 단일 비순환 순수 정수 구간이다. 별도 island namespace는 계약 구분이며
+  새 SSA가 아니다. 명시적으로 선택한 원 value producer의 전체 폭을 입력 port로 받고 필요한 byte를 Extract한다.
+  같은 producer의 겹치는 byte와 원 분기 조건은 공유한다. 함수명/ABI 인자·반환 추측으로 새 값을 만들지 않는다.
+- 내부 조건·정의가능성을 원 근거에서 재구축하지 못하면 partial/거부한다. unknown guard를 자유 Boolean으로 바꾸거나
+  `cut => defined=True`로 debt를 지우지 않는다. 원 그래프·라벨·부채·eligibility는 유지한다.
+- `지역 값 동치`와 `원 entry까지의 입력 연결`을 별도 상태로 기록한다. 지역 증명을 기존 consumer가 전역 증명처럼
+  자동 소비하지 못하게 한다. 반복 경계·신규 RAM 상태/side-effect cut·CALL/alias 해석·새 SSA/RD/실행기는 제외한다.
+- 첫 실제 사례는 `opaque CALL → 원 COPY/정수 producer → MBA 계산`이다. 호출 뒤 실제 연산 출력의 정확한 폭·발생
+  위치를 경계로 잡는다. 해당 위치에 도달해 경계값이 주어진 경우만 증명하며 CALL 반환·효과·도달성은 미증명이다.
+
+완료 기준은 다음과 같다.
+
+1. 실제 원 p-code 실행에서 해당 경계값을 채집해 원 지역식·간략식과 대조한다. 정상 순수식에서는 경계를 원 producer로
+   다시 연결했을 때 기존 값과 일치해야 한다.
+2. opaque 사례는 **지역 동치 성공 / 원 입력 연결 미해결 / 기존 debt 유지**가 정답이다. 전역 complete로 올리지 않는다.
+3. producer/namespace/byte 변조·공유 조건 분리·숨겨진 주소/효과 의존·임의 loop cut·정의가능성의 부당한 승격을 거부한다.
+4. 기존 기능 회귀와 실제 사례 검증 후 Astra의 단계 검수 및 별도 최종 목표 달성 승인을 받는다.
+
+#### 2순위: 이미 complete한 한 회차식의 제한된 여러 회차 F_k 합성
+
+기존 cut-state·공유 조건·메모리 버전을 회차별로 연결한다. 우선 complete한 register/고정-memory 사례에서 정해진
+작은 k회 결과를 다룬다. **k회 계산할 수 있다는 것과 실제 반복횟수가 k라는 증명은 구분**한다. 일반 RAM 해결이나
+새 반복 풀이기를 선행시키지 않는다.
+
+#### 3순위: 실제 O1 출구 상태 대응 보완
+
+현재 실제 최적화 사례의 `exit poststate evidence is not captured` 거부 원인을 원 SSA·CFG·flow 근거로 좁게 보완한다.
+누락된 출구 상태를 추정하지 않는다. 이는 2순위의 필수 선행조건은 아니다. 일반 alias 확장이나 간략화 패턴 증설보다
+명확한 실제 미지원 사례를 우선한다. 세 우선순위 모두 VM 복원이나 source 자동 제거를 목표로 바꾸지 않는다.
+
+### 25.55 명시적 입력 경계의 조건부 순수 부분식 — expression island (2026-10-24)
+
+복잡한 앞부분을 해석하지 못해도 **그 뒤의 필요한 계산 구간만 조건부로 간략화**할 수 있다. 기존 SSA·PartRef·전체
+데이터/연산 그래프를 원본으로 재사용하며 새 SSA/RD/명령 실행기/메모리 모델을 만들지 않는다. 원 그래프·source·debt·
+eligibility·반복/한 회차식·기존 요약을 교체하지 않는다. 원 출처가 미해결이라는 사실도 그대로 남긴다.
+
+#### 경계와 가정
+
+`derive_expression_island(record, outputs=None, boundaries=[original_node_id, ...])`는 원 producer 출력의 **전체 폭**을
+포트로 받는다. 출력은 기존 `select_expression`의 `{name,width,parts,guard?}` 형식이며 생략하면 원 root를 선택한다.
+같은 producer의 겹치는 바이트는 하나의 포트에서 Extract한다. 공유 분기도 원 조건·선택 ID를 그대로 사용한다.
+
+- 초기 범위는 **비순환 원 함수의 단일 순수 정수 구간**이다. 경계는 원 total integer op(COPY 등)의 레지스터/unique
+  출력만 허용한다. CALL·LOAD/STORE·phi·entry·부분 연산·중단/override 노드를 직접 새 입력으로 만들지 않는다.
+  기존 one-visit 내부의 새 cut과 반복/재귀 경계는 이번 범위가 아니다.
+- 포트 `p#`는 원 node ID·key·주소·ordinal·출력 저장소·원 PartRef·debt 링크를 가진다. source namespace와 별도로
+  `island:<selection hash>`를 기록한다. 포트는 새 원 SSA 정의나 ABI 인자/반환이 아니다.
+- 각 포트 값 외에 availability Boolean을 둔다. 이는 **그 발생 위치에서 해당 값이 주어졌다는 사용자 전제**이지
+  CALL 반환·원 정의가능성·도달성 증거가 아니다. `cut => defined=True`로 부채를 지우지 않는다. 모든 선언 포트의
+  availability를 지역 domain에 명시하고 평가 시 모든 포트의 값과 `validity[p#] is True`를 요구한다.
+- 원 내부 guard·정의가능성은 기존 BV adapter로 재구축한다. 미해결 guard를 자유 Boolean으로 바꾸지 않는다.
+  내부 debt/CALL/메모리/미지원 연산은 거부한다. 경계 밖으로 남긴 원 의무와 내부 결함을 구별한다.
+
+opcode만으로 순수성을 판정하지 않는다. raw `COPY`도 ADDRESS RAM 읽기/쓰기일 수 있어 원 output storage와 entry·
+physical read/write 정보를 검사한다. 원 PartRef의 **예산 제한 provenance 검사**가 upstream COPY·LOAD·RAM entry·
+실행 guard·guarded_sources의 BDD·decision operand도 따라간다. 메모리·불완전/순환 참조·한도 초과는 미확인으로 거부한다.
+register CALL 출력과 register `call_clobber_read`에서는 호출 경계에 멈춰 미해결 의무를 보존하며 callee 내부는 해석하지
+않는다. cycle graph 부재를 비순환 증거로 간주하지 않고 `execution_fallback='cyclic cfg'` 등도 거부한다.
+
+따라서 현재는 RAM에서 온 값을 COPY로 감싼 새 경계나 메모리 조건에 의해 만들어진 값을 새 포트로 받아 우회하지 않는다.
+일반 메모리/alias·효과·반복 경계의 지역 계약은 후속 범위다. 검사하는 provenance는 원 저장소/제어 참조이며 새 RD가 아니다.
+
+#### 지역 동치와 원본 연결의 분리
+
+원 selector의 참조 순회·BV 정수 연산·공유 선택·simplify·typed DAG encode/decode와 기존 proof budget을 재사용한다.
+포트에서만 순회를 멈추는 별도 selection은 기존 P0/P2의 원 선택 검증에 통과하지 않는다. 원 authority v1의 제외 필드는
+여전히 `expression_views`/`expression_consumers`뿐이다. 저장은 후자의 `conditional_expression_island` subtype(version 1)이다.
+
+1. 원 지역식을 포트로 표현하고 원 guard·정의가능성·availability·추가 사용자 조건으로 domain을 구성한다.
+   domain SAT와 **최종 저장 후보 DAG를 decode한 값의 불일치 UNSAT**를 증명해야 지역 결과를 발행한다.
+2. 별도로 원 식을 재구축한다. 포트 값을 정확한 원 producer 식으로, availability를 원 정의가능성으로 되돌려 대입한다.
+   원 domain의 SAT, 원 domain이 지역 전제를 함의하는지, 원 domain에서 최종 후보와 원 출력이 같은지를 다시 증명한다.
+3. 이 재접속 증명까지 성공하면 `linked_under_original_domain`이다. 원식 `_build` 성공만으로 연결 성공으로 처리하지 않는다.
+   원식 재구축 실패·추가 지역 전제의 비함의·연결 증명 unknown 등은 지역 성공과 별도로 `connection=unresolved`로 남긴다.
+
+연결 성공도 **원 expression domain 아래 값 연결**이지 프로그램 entry 도달·호출 반환·효과·종료나 native 실행의 증명이
+아니다. 지역 가정만으로 성공한 결과를 전역 complete나 source 제거로 올리지 않는다. 평가 결과에도 이 scope와 연결
+상태·`original_debt=retained`를 반환한다. 원 연결과 가정은 저장 결과를 소비할 때도 다시 검사한다.
+
+#### 공개 API와 안전한 소비
+
+```python
+island = derive_expression_island(record, boundaries=[existing_copy_a, existing_copy_b])
+with_island = attach_expression_island(record, island)
+validate_expression_island(with_island, island)
+result = evaluate_expression_island(
+    with_island, island['id'],
+    inputs={'p5': observed_a, 'p8': observed_b},  # 실제 ID/폭은 island['bindings'] 확인
+    validity={'p5': True, 'p8': True},
+    accept_conditional_boundaries=True,
+)
+```
+
+포트 외의 기존 entry binding이 있으면 `inputs`에 그것도 제공해야 한다. 입력 맵을 읽기 전에 source/identity/선택·폭·
+namespace·전제·후보 동치·연결 주장·canonical metadata를 원에서 다시 검증한다. availability는 값만 보고 추정하지 않는다.
+미귀속 run 가정은 attach/validate/evaluate에서 기본 거부하며, 실제 자료에서 필요하면 각각
+`accept_unattributed_assumptions=True`를 명시한다. `accept_conditional_boundaries`와는 별개 승인이다.
+
+기존 consumer attach/evaluate는 이 subtype을 전용 API로 보내며 자동 소비를 거부한다. 기존 P0나 P2의 새 entry로도
+등록하지 않는다. renderer는 지역 동치·원 연결 상태·조건부 포트와 원 출처 의무를 구분해 출력한다.
+상한은 기존 ViewLimits(node/edge/depth/width/AST), 포트 16개, solver 최대 2초·rlimit 200만, query 128개·전체 20초다.
+낮춘 solver 한도도 적용한다. 전체 시간은 원 재구축·재연결을 포함한 협력적 budget이며 즉시 강제 중단 보장은 아니다.
+지역 domain 모순·timeout/unknown·한도 초과는 지역 동치 성공이 아니다.
+
+#### 실제 사례와 검증
+
+`tests/corpus/intra/expression_islands.c`를 clang x64 Mach-O -O1/Ghidra12.0.4로 추출했다.
+
+- SHA256: `b4b827573fd073cd39d08b83488a4bcbd2ac823d35eae9a9565566edf4ba811e`.
+- Bundle: `output/expression-islands-20261024.umDvPS/bundles/bc589fd73708345f775f0c0a4ad1b281cb473d4642b1cbdfdde4bf14da61f80d`.
+- 재실행: `TDO_EXPRESSION_ISLAND_BUNDLE=<generation>` 및 기존 테스트 PYTHONPATH로
+  `pytest tests/corpus/intra/test_expression_island_binary.py`를 실행한다.
+
+| 실제 사례 | 결과 |
+|---|---|
+| pure: 원 COPY 두 개 → MBA → XOR 0x91 | 지역 MBA가 합으로 간략화되고 최종 DAG까지 동치. 원 producer 재대입 연결도 성공 |
+| opaque: 관측하지 않은 호출 → 원 COPY 두 개 → 같은 계산 | 지역 동치 성공 / 원 입력 연결 미해결 / call-clobber debt 유지 |
+| shared: 실제 diamond에서 두 값에 같은 7 또는 9를 더함 → 뺄셈 | 두 원 phi의 선택 상관 보존. 양 분기·selector=256에서 원 결과와 일치, 원 재연결 성공 |
+
+opaque 검사는 **engine 분석 입력에서 callee 한 개만 제외한 partial-program 설정**이다. 실행 오라클은 같은 봉인 Bundle의
+원 callee body를 실제 CALL/RETURN으로 실행한다. 가짜 반환·havoc·외부 모델·분기 강제가 없다. inline asm은 원 COPY와
+공유 diamond를 실제 명령으로 남기기 위한 fixture이며, 별도 IR/기대값을 엔진에 주입하지 않는다.
+
+원 COPY 실행 직후 포트 값을 채집하고, 일반 entry binding은 실행 전에 읽는다. 이 값으로 **원 지역식·간략 DAG·원 RAX**를
+대조했다. pure 32회·opaque 32회·shared 12회, 총 **원 p-code 76회 실행**이다. native 실행/entry 도달성의 일반 증명은 아니다.
+예를 들어 opaque에 x=3,y=7을 실행하면 실제 관측값은 `p5=0x8e71b3d49526a0dd`, `p8=7`, 최종값은
+`0x8e71b3d49526a075`다. 엔진 저장 DAG의 `i.n2=bvadd(p5,p8)` 뒤에는 XOR 0x91에 해당하는 Extract/NOT/Concat이 이어진다.
+이때도 원 연결은 `unresolved`이고 두 입력의 원 호출 의무는 남는다.
+
+합성 **77개**는 폭·overflow·상쇄·공유 phi·중첩 원 제어 의존·port/metadata/후보 변조·availability/가정·원 재대입·
+기존 API 우회 차단·RAW ADDRESS/다단계 메모리 기원·순환 fallback·검사 한도/solver unknown을 포함한다.
+신규 합성+실제 **80 passed / 0 skipped**(4.98초), dense SSA에서도 **80 passed / 0 skipped**(5.48초)다.
+Astra는 설계·구현(범위 우회 보강 포함)·실제 검증 단계를 각각 검수하고 승인했다.
+
+동결본 전체 회귀는 **3253 passed / 32 skipped / 0 failed**(662.13초)다. 권위 XML은 같은 출력 폴더의
+`final-suite.junit.xml`(총 3285개, failures/errors 0)이다. 신규 80개는 모두 실행됐고, 기존 UE Core·DFB072 세 플랫폼·
+모델·forward-off·호출/RAM·부분 레지스터·순환/한 회차/반복 요약·P0/consumer/P2 회귀도 포함한다.
+32 skip은 기존 Linux 제약 23개와 미보유 Bundle 9개다. 전체 회귀 전후 코드·테스트 SHA256은
+`a32cbc41cee05574aef50005485135d6e0bac3cb9cab415e7a69f165c97075d2`로 동일하다.
+
+Astra는 권위 전체 XML·new/dense/actual XML·기존 실제 회귀와 최종 문서를 독립 확인하고 **§25.54의 1순위 목표 달성 및
+이 상태에서의 마무리를 명시적으로 최종 승인**했다. 문서의 x=3,y=7 사례도 동일 sealed callee를 원 실행해 포트 값·
+최종값·`i.n2=bvadd`·원 연결 unresolved/debt retained를 독립 재현했다. 원 p-code 76회 집계도 확인했다.
+합의한 초기 범위에서 필수 미달이나 차단 결함이 없다는 판단이다. 비순환 순수 정수 지역 계약으로 한정한 승인이고,
+일반 RAM/alias·반복 경계·F_k 합성·O1 출구 보완이나 source 자동 제거를 완료한 것으로 확대하지 않는다.
+
+### 25.56 complete 한 회차식의 제한된 여러 회차 합성 F_k (2026-10-24)
+
+§25.54의 2순위다. 기존 원 SSA/데이터·연산 그래프와 complete 일반 one-visit을 재사용해 **최대 몇 번의 방문을
+이어 계산할지** 질의한다. 새로운 SSA/RD·명령 실행기·전체 반복 풀이기·alias 모델은 만들지 않는다. 원 전체 그래프,
+기존 한 회차식·반복 요약·source/debt/eligibility를 교체하지 않고 `expression_consumers`에 파생 DAG만 추가한다.
+authority 예외는 기존 `original_record_except_expression_views_and_consumers_v1` 그대로다.
+
+#### 상태·분기·메모리 계약
+
+- `derive_transition_chain(record, transition_id, max_visits)`에서 `max_visits`는 정수 0–8이다. 실제 body 반복횟수를
+  알고 있다는 뜻이 아니다. header에서 종료 조건을 검사하는 회차도 한 방문이며, O1 body-first 영역은 실제 원 CFG를
+  따라 같은 방문에서 body와 exit 검사를 수행한다. `trip_count`와 `termination`은 항상 `not_proven`이다.
+- 원 `s#` mutable 입력과 각 outcome의 출력이 **정확히 동일한 byte span**으로 일대일 대응해야 한다. 다음 회차는
+  이전 회차의 갱신을 동시에 대입하고, invariant 입력은 최초 값을 공유한다. 새 자유 상태/새 phi 선택을 만들지 않는다.
+  불완전한 일반 one-visit, STORE-only write projection, 초기 상태와 맞지 않는 RAM 출력은 거부한다.
+- 각 회차의 원 continue/exit guard와 decision을 공유한다. 여러 continue edge·변하는 분기·비선형 갱신을 표현할 수
+  있지만, 단일 방문으로 자를 수 없는 중첩/다중 진입 영역을 새로 해결하지는 않는다. 기존 complete 영역만 합성한다.
+- 첫 범위는 register와 **반복 중 주소가 불변인 기존 RAM cell**이다. mutable 입력이 주소에 관여하면 거부한다.
+  기존 span 대응·메모리/스택 가정은 그대로이며 일반 alias를 갚지 않는다. 빠진 초기 RAM byte를 만들어 넣지 않는다.
+- 모든 원 LOAD/STORE에 회차별 active guard·주소·폭·값·순서를 보존한다. `rounds`의 원 `source_reads`와
+  `input_versions`, `state_version`/`definition_version`이 이전 회차 입력 writer와 현재 회차 정의를 구분한다.
+  같은 STORE operation이 반복돼도 발생 회차가 다르면 동일 writer 발생으로 합치지 않는다.
+- exit를 실행한 뒤에는 상태를 유지하고 후속 회차의 decision/effect를 관측하지 않는다. `max_visits=0`은 mutable 상태의
+  identity이며 guard/body/효과는 실행하지 않는다. 이때도 반환할 초기 mutable 상태 byte는 있어야 한다.
+
+예를 들어 `while (counter != 0) { value += 7; counter--; }`의 header-first one-visit에서 초기 value=10,
+counter=3이면 `max_visits=3`은 value=31/counter=0이지만 **bound_exhausted**다. 다음 종료 검사를 실행하지 않았기
+때문이다. `max_visits=4`는 같은 최종값과 **exit**를 반환한다. 이 예는 `test_transition_chains.py`의 원 식 기반 회귀와
+같은 방문 수 계약이다. 실제 종료횟수의 일반적인 추정이나 무한 상한의 최종 공식으로 확대하지 않는다.
+
+#### 원 식 연결과 저장 DAG 재검증
+
+1. `_namespace`로 원 one-visit의 독립 byte/guard/효과 계약을 검증하고, 기존 `Adapter`로 모든 원 operation·outcome·
+   effect·decision 및 정의가능성 D를 구성한다. partial 연산은 초기 범위 밖이다.
+2. 작은 `visit_graph`에 원 guard/상태 갱신/효과/decision 식을 저장한다. 소비할 때마다 이 저장 DAG를 decode해
+   **동일한 원 D 아래 원 식과의 불일치 UNSAT**를 재확인한다. 성공 flag나 hash만 믿지 않는다.
+3. 추가 가정 없는 새 solver에서 `Not(D)`가 UNSAT일 때만 D의 보편항진 lemma를 사용한다. 임의 폭 정확 상태 대입
+   후에도 D가 참이므로 반복된 정의가능성 질의를 줄일 수 있다. SAT/unknown이면 True로 승격하지 않고 각 active
+   방문의 원 D 의무를 그대로 합성한다. empty D도 성공이 아니다.
+4. **검증한 동일 visit_graph**를 정확한 상태 대입으로 연결한다. 전역 간략화로 다시 생성한 다른 방문식을 비교하느라
+   긴 feedback 식의 교환법칙 순서 차이를 반복 증명하지 않는다. 원 DAG 공유를 유지하며 최종 저장 F_k를 별도 decode해
+   해당 합성과의 불일치 UNSAT를 확인한다. 전이 합성의 합동성과 위 지역 증명으로 원 one-visit에 연결된다.
+5. 수치 평가는 기존 `evaluate_transition`으로 상한 또는 실제 exit까지만 replay하며 필요한 최초 입력을 한 번씩
+   캐시한다. 이후 F_k 검사는 이 캐시만 사용하고 외부 입력을 새로 읽지 않는다. 관측된 상태·edge·decision·모든 효과·
+   방문 수를 원 전이와 대조한다. 비활성 selector/후속 회차 입력은 요구하지 않는다. 필요한 식이 확정되지 않으면 거부한다.
+
+상한은 방문 8개, 각 typed DAG 기존 ViewLimits(node 2000/edge 12000/depth 120/width 256byte), solver 2초·
+rlimit 200만, query 128개·협력적 전체 budget 20초다. 원 모델/지역 DAG/최종 DAG/회차 연결 변조 및 unknown/한도 초과는
+성공이 아니다. renderer는 원 그래프 뒤에 실제 `c#.n#` typed F_k 노드와 출력 연결을 보여준다.
+
+```python
+chain = derive_transition_chain(record, complete_transition_id, max_visits=4)
+with_chain = attach_expression_consumer(record, chain)
+result = evaluate_expression_consumer(
+    with_chain, chain['id'], initial_state,  # 원 view.inputs의 s#와 정확한 byte 폭
+    accept_unattributed_assumptions=True,  # 원 run 가정이 미귀속인 실제 자료에서만 명시
+)
+# result: status=exit|bound_exhausted, state, steps, evaluated_visits
+# 각 steps에는 원 edge/decisions/updates/ordered effects/read_sources가 남는다.
+```
+
+#### 실제 사례
+
+기존 `general_cycle_expression.c` x64 -O0 봉인 Bundle을 재사용한다.
+
+- 원 이미지 SHA256: `7545efc08975f6c38b99ab97016049e3af102d36be32118d2df2fbc2b5ddee55`.
+- Bundle: `output/general-cycle-20261024.IWqPVH/bundles/9a1823d0a2f3531bfbef88ebb2032d2c36db0a2a2ac0d929ef46cfe1ee8f34ad`.
+- 테스트: `TDO_GENERAL_CYCLE_BUNDLE=<generation>`과 `tests/corpus/intra/test_transition_chain_binary.py`.
+
+| 실제 영역 | 연결 확인 |
+|---|---|
+| `case_cycle_memory` | 두 RAM cell의 피드백, 변하는 공유 분기, STORE 전후 LOAD·원 writer 발생 회차 |
+| `case_cycle_multi_backedge` | 서로 다른 두 continue edge와 ADD/XOR 갱신, counter·RAM 상태를 다음 방문에 전달 |
+| 기존 all-O1 `case_view_shared` (§25.57) | body-first 방문의 비항등 exit 갱신을 적용하고 이후 방문은 비활성으로 보존 |
+
+첫 두 실제 함수는 16회 원 실행·70개 원 방문·LOAD 4,016byte의 writer epoch를 기존 raw oracle로 대조한다.
+8개 입력 조합×두 함수×상한 0/1/2/4/8로 **80개 F_k 수치 평가·166개 방문 prefix**를 확인한다.
+즉시 exit·상한 직전/직후 exit·두 분기·unsigned wrap·최초 입력 중복 접근 금지를 포함한다.
+추가 O1 연결은 원 실행 6회·상한 1/2/4/8의 **24개 평가**로 원 효과와 exit 상태를 대조한다.
+합성 62개는 분기·비선형 피드백·폭·k=0·부분 자료·가정/원 근거·두 DAG 변조·domain lemma/unknown을 검사한다.
+
+### 25.57 실제 O1 captured exit poststate와 원 읽기 발생 대응 (2026-10-24)
+
+§25.54의 3순위다. 기존 all-O1 `case_view_shared`가 partial이었던 주 원인은 **자료 부재가 아니라 이미 캡처된
+출구 간선 자료를 builder가 사용하지 않고 입력 identity만 허용한 것**이었다. 새 RD나 poststate 추정 없이 그 자료를 연결한다.
+
+- captured exit에서는 해당 원 edge의 단일 완전 fact만 사용한다. `captured_exit_evidence`가 edge·span·definition ID를
+  기록하고, validator는 원 `edge_states`와 source 후보 집합·기존 ordered last-write/byte/guard certificate·출력 PartRef를
+  독립 대조한다. 부분/중복/누락 fact를 absence로 처리해 우회하지 않는다.
+- captured exit의 필수 출력 중 하나라도 covering fact가 없으면 partial이다. **not_captured** exit는 기존과 같이
+  모든 경로에 앞선 쓰기가 없어 입력 identity임이 확인될 때만 허용한다. cut 의미나 원 SSA는 바꾸지 않는다.
+- 이후 드러난 중복 storage operand 문제도 보완했다. 공통 builder가 같은 span의 첫 read를 재사용하더라도 각 원
+  `(operation, read_ordinal)`이 자기 `_fragments`와 기존 proof를 갖도록 한다. 실제 `INT_AND`의 ordinal 1 누락을 복구하며,
+  원 read 수를 줄이거나 검사를 생략하지 않는다. 공통 Builder의 연산 의미는 수정하지 않는다.
+
+원 이미지 SHA256은 `b27e76ddfc39f0bcee27d8c73f1e06ee305b57aa487b98b450adcdb365684707`, Bundle은
+`output/expression-views-20261024.ekCMIQ/bundles/fd1091b23bbbd428ca7a249294afad3c5470c26e8496fda67ef5159ada8f05b1`이다.
+`TDO_EXPRESSION_O1_BUNDLE=<generation>`으로 `tests/corpus/intra/test_transition_o1_binary.py`를 실행한다.
+기존 optimized P0 검사는 같은 자료의 captured exit 성공/원 cyclic root partial 유지로 갱신했고,
+명시적인 증거 누락·부분 fact의 거부 검사는 별도로 유지한다.
+
+원 continue20 `1b1:380→1b1:382`와 exit21 `1b1:380→1b1:3a6`의 캡처를 재사용한다.
+exit 출력은 RAM `-0x18` 원 정의 `[69,146]`, RAM `-0x10` `[99]`, register `0x10` `[101]`에 연결된다.
+exit 방문도 실제 두 STORE를 실행하므로 input identity로 치환하지 않는다.
+
+실제 O1 36회 원 실행에서 **99회차(continue72/exit27)·LOAD 2,376byte**를 대조했다. 각 continue와 exit 모두의 두
+분기·공유 선택·갱신·주소/폭/값/효과 순서·writer epoch를 기존 `_Visits`로 확인한다. count=0은 영역을 방문하지 않는다.
+원 근거를 reseal한 변조도 거부하며 원 그래프/eligibility는 그대로다. O1 관련 합성 추가 26개와 실제 7개(§25.56 연계 포함)를
+회귀에 포함한다. 이 지원은 native 실행·모든 O1 프로그램·일반 alias 또는 전체 루프 최종 공식의 보장이 아니다.
+
+#### 단계 검수 및 전체 회귀
+
+Astra가 두 설계·수정 코드를 검수하고 O1 독립 86개, F_k/O1 연계 독립 71개를 각각 모두 실행해 단계 승인했다.
+신규 97개(합성 88개·실제 9개)와 기존 인접 검사를 합한 **151개**는 일반 SSA에서 **151 passed / 0 skipped**
+(29.87초), dense SSA에서도 **151 passed / 0 skipped**(30.88초)다.
+
+동결본 전체 회귀는 **3350 passed / 32 skipped / 0 failed**(698.23초)다. 권위 결과는
+`output/transition-chains-20261024.xP3UPv/final-suite.junit.xml`/`final-suite.log`이며 XML 총 3382개·failures/errors 0이다.
+같은 폴더의 `new-and-nearby.junit.xml`/`dense.junit.xml`이 위 151개 결과다. 신규 항목은 전부 실행됐고 기존 UE Core 21개도
+모두 통과했다. DFB072 세 플랫폼·모델·forward-off·호출/RAM·부분 레지스터·순환/반복 요약·P0/consumer/P2/island 회귀를
+포함한다. 32 skip은 기존 Linux 제약 23개와 미보유 Bundle 9개다.
+전체 실행 전후 코드·테스트 SHA256은 `43d362095510120fc419d5afb77fd4b69fbd02b61806f91bc66e5bd81d38ae18`로 동일하다.
+
+Astra가 권위 전체/일반/dense XML과 신규 97개·UE/DFB072·모델/forward-off 등 기존 회귀 및 최종 문서를 독립 확인해
+**§25.54의 남은 2·3순위 목표 달성과 이 상태에서의 마무리를 별도로 최종 승인**했다. 필수 잔여 차단사항을 발견하지
+못했다는 판단이다. 위 hash의 실행 전후 대조는 주 작업자가 수행했다. 일반 alias·신규 RAM/반복 island 경계·임의 반복의
+무상한 최종 공식·trip count/종료 증명·source 자동 제거·VM 복원은 합의 범위 밖이며 완료로 확대하지 않는다.
+
+### 25.58 연산식 1차 개발 완료와 지원 계약 (2026-10-25)
+
+**상태: 완료. 확인된 필수 잔여 항목: 없음.** 사용자가 1차 개발의 범위를 닫고 지원 범위·제한을 명시하기로 결정했다.
+이 완료 선언은 기존 구현·검증 결과를 바탕으로 한 개발 마일스톤 정리다. 엔진 코드·RECORD_VERSION·
+ENGINE_SEMANTICS_VERSION을 변경하거나 모든 바이너리의 분석 완전성을 보장하는 새 버전을 선언한 것이 아니다.
+
+#### 1차 목적과 완료선
+
+목적은 향후 VM·인터프리터 분석 도구가 소비할 **데이터 흐름과 연산식의 연결된 표현·부분 처리 기반**이다.
+현재 VM을 복원하거나 모든 식을 가장 짧은 단일 공식으로 만드는 작업이 아니다. 완료선은 다음 네 항목이다.
+
+1. 기존 SSA·바이트 정의/읽기/쓰기·조건·원 데이터/연산 그래프를 사실의 원천으로 유지한다.
+2. 필요한 원 노드/바이트의 부분 그래프를 선택하고, 지원 범위에서 간략화·제한된 요약을 별도 DAG로 만든다.
+3. 해당 domain·가정 아래의 동등성을 확인하고 원 식·근거에 연결한다. 간략식이 원 그래프를 대체하지 않는다.
+4. 지원하지 않거나 증명하지 못한 경우 원 그래프와 debt/cut/partial·미해결 사유를 숨기거나 성공으로 승격하지 않는다.
+   API가 `Ineligible`로 거부하는 경우도 있다. 모든 실패가 자동으로 숫자나 요약식으로 반환된다는 계약은 아니다.
+
+§25.37–§25.57에 구현·실제 사례·회귀와 단계별/최종 검수 근거가 있다. §25.36과 §25.54는 이행 이력을 이해하기 위한
+과거 계획이며, 미지원 항목을 무한히 채워야 하는 현재 작업 목록이 아니다.
+
+#### 현재 지원 범위
+
+| 영역 | 1차에서 제공하는 계약 | 근거 |
+|---|---|---|
+| 원 연산식·상태 연결 | 지원되는 정수 연산의 opcode·폭·입출력 byte 조각, 원 LOAD/STORE·정의/읽기 참조·부분 레지스터·조건과 불확실성을 보존. 증명된 직접/유한 간접 호출은 기존 지원 범위에서 대상·출구 선택을 공유 | §25.37–§25.45 |
+| 순환의 구조 표현 | 기존 CFG·SSA로 중첩·다중 진입·여러 갱신/되돌이를 표현. 구조 표현 가능과 수치 평가 가능은 구분 | §25.47 |
+| 부분 선택·간략화·재사용 | 기존 노드/PartRef를 선택하고 별도 간략 DAG의 동등성을 원 domain 아래 확인. 검증된 뷰의 후속식 치환·지원 반복 요약 소비도 원 근거에 연결 | §25.51–§25.52 |
+| 지역 독립 간략화 | 비순환 순수 정수 구간에서 명시적 원 producer 경계의 값·availability를 전제로 지역 동치를 검증. 원 entry까지의 연결 미해결과 호출 부채를 별도로 유지 | §25.55 |
+| 바이트 값 영향 증명 | 기존 입력 byte의 출력 값 영향 여부를 조건·정의가능성과 구분해 증명. 무영향이어도 원 간선/source를 자동 삭제하지 않음 | §25.53 |
+| 한 회차 상태 전이 | 원 cut-state와 byte/last-writer 증거가 complete한 단일 진입 cut-DAG에서 조건·메모리 읽기·순서 있는 쓰기·다음 상태를 연결 | §25.48·§25.57 |
+| 반복 최종 요약 | 검증된 단위 감소 counter와 불변 증가량, 지원되는 불변 공유 선택·폭 변환/절단, 제한된 STORE-only 일정 간격 쓰기를 요약. 기존 함수의 모든 반복에 적용하는 공식은 아님 | §25.49–§25.50·§25.52 |
+| 여러 방문 합성 | complete 일반 one-visit의 닫힌 byte 상태와 불변 주소의 RAM을 최대 0–8방문 연결. exit 후 상태 유지, 상한 도달/실제 exit 구분, 회차별 writer 보존 | §25.56 |
+
+원 "전체 그래프 보존"은 기존 권위 그래프를 파괴하지 않는다는 뜻이다. 개별 root/부분식 record는 수요에 맞춘 투영이며
+`pruned`/`cut`/잘림이 있을 수 있다. 모든 record가 모든 명령·완전한 기계 상태를 담는 IR 덤프라는 뜻은 아니다.
+
+#### 제한과 결과 해석
+
+- **간략화 능력과 동등성 검증은 다르다.** 현재 후보 생성은 구현된 규칙 범위다. 모든 난독화 식의 축약·가장 짧은 식·
+  암호 알고리즘의 복원을 보장하지 않는다. 후보를 못 찾거나 solver가 unknown/timeout이면 동치 성공으로 세지 않는다.
+- 지역 동치는 전역 source/도달성/효과/종료의 증명이 아니다. 원 run의 가정과 미해결 연결을 유지하며, 가정 출처가
+  미귀속이면 각 API의 명시적 opt-in 계약을 따른다. source 추가 후보를 자동 제거하는 정책으로 바꾸지 않는다.
+- 순환 그래프에 구조가 있어도 모든 영역의 한 회차 평가가 가능한 것은 아니다. 내부 순환이 남거나 다중 진입인 영역의
+  새 cut·재귀 전체의 물리 평가·미확정 호출 목적지는 이번 계약에서 해결했다고 주장하지 않는다.
+- F_k의 `max_visits`는 실제 반복횟수 예측이 아니다. header exit 검사도 방문 수에 포함되며 O1 body-first 영역은 원 CFG를
+  따른다. 고정 RAM 상태 합성 외의 가변 주소/일반 alias는 지원하지 않는다. 기존 제한적 STORE-only 요약과 구별한다.
+- 지원 원 정수 연산·byte 폭·메모리 대응·공유 조건에 한정된다. `FLOAT_*` 등 미지원 연산의 일반 평가, big-endian의
+  동일한 의미 검증을 완료로 확대하지 않는다. 세부 자원 상한·API별 선행조건은 각 구현 절의 계약을 따른다.
+
+#### 필수 잔여와 선택적 확장의 분리
+
+**1차 완료를 위한 확인된 필수 잔여 작업은 없다.** 다음은 자동 착수·우선순위·완료 의무가 없는 선택적 확장 후보다.
+
+| 선택적 확장 | 별도 범위로 분리하는 이유 |
+|---|---|
+| 일반 동적 RAM·alias·가변 주소 전이 | 기존 고정 cell/명명 가정만으로 해결할 수 없는 새 메모리 계약이 필요 |
+| RAM 효과·반복 경계를 포함하는 지역 island | 현재 비순환 순수 정수 경계 계약을 넘어서는 독립 상태·효과 의무가 필요 |
+| 복잡한 비선형/조건 의존 반복의 최종식·횟수/종료 증명 | 원 관계 그래프 표현·유한 방문 계산과 별개인 요약/증명 문제이며, 임의 반복의 단일 공식을 약속하지 않음 |
+| 간략화 규칙·식 탐색·FP 등 의미 지원 확대 | 현재 기능의 필수 빈칸이 아니라 구체적인 사용 사례로 효과와 비용을 판단할 범위 확대 |
+
+확장에는 **실제 사용을 막는 입력/구간과 기대 결과 → 기존 범위의 결함인지 확장인지 분류 → 지원 계약·완료 기준·
+비목표에 대한 사용자와의 별도 합의**가 선행한다. 확인된 불편이 없다는 이유로 새로운 기능 목록을 만들어 개발을
+계속하지 않는다. VM 복원·새 실행기·새 평가기/보고서 체계를 확장의 기본 해법으로 추가하지 않는다.
+
+범위를 닫는 것은 결함을 덮는다는 뜻이 아니다. 문서화한 지원 범위에서 원 관계/동등성/가정 보존이 깨지는 재현 사례는
+기존 기능의 결함으로 다룬다. 반대로 범위 밖 사례를 명시적으로 거부하거나 partial로 남기는 것은 그 자체로 1차 미완료가 아니다.
+프로젝트의 다른 하위 계층에 대한 별도 작업·지원 한계도 이 완료 선언으로 해결됐다고 바꾸지 않는다.
+
+#### 완료 근거와 이번 문서 정리의 검증
+
+엔진 구현 기준 커밋은 `69e3cc745fb781848e4240cd573e0d5639e00e3d`다. §25.57의 동결본은 **3350 passed / 32 skipped /
+0 failed**이며 신규 97개와 UE Core 21개가 실제 실행됐다. 인접 검사 151개는 일반·dense SSA 모두 통과했고 Astra의
+별도 최종 목표 달성 승인을 받았다. Linux 제약 23개·미보유 Bundle 9개의 skip은 성공으로 포함하지 않는다.
+권위 로그/XML과 코드·테스트 동결 hash는 §25.57에 남아 있다. 이는 해당 검증 범위의 근거이지 임의 입력의 완전성 증명은 아니다.
+
+이번 변경은 README·설계 문서의 상태/지원 계약 정리뿐이다. 엔진·테스트는 변경하지 않았고, 문서의 참조·차이 검사와
+기존 동결 hash 일치를 확인했다. 위 수치를 이번 문서 변경에서 전체 테스트를 다시 실행한 결과로 표기하지 않는다.
+Astra는 이번 문서의 지원 계약·제한·결함과 확장의 구분을 교차검토하고 필수 수정 없이 마무리를 승인했다. 문서 검토이며
+새 테스트 실행이나 지원 범위 확대에 대한 승인은 아니다.
 
 ### 25.60 정방향 메모리 범위 소비 — 첫 증분 (2026-10-25)
 
@@ -3522,3 +5518,107 @@ Astra는 최종 두 XML의 수집/통과/실패/오류/skip, 신규98개·실제
 한정 목표 달성 및 현재 상태의 마무리를 최종 승인**했으며 필수 잔여 차단은 없다. 연산식 통합 직전 마일스톤으로 종료한다.
 부분 덮어쓰기·범위 밖 byte·독립 부채를 남기는 승인이지 전체 UAF·일반 epoch 선택·연산식 통합 완료의 승인이 아니다.
 이 작업에서는 연산식 브랜치 merge/rebase·커밋·push를 수행하지 않았다.
+
+### 25.71 정방향·연산식 브랜치 통합 (2026-10-26)
+
+사용자 승인으로 정방향의 검증된 수명/성공 내용 전이를 `fbc1a62`로 먼저 보존한 뒤,
+`feature/multi-target-memory-flow`의 `c8379e8`까지 14개 커밋을 현재 `feature/forward-memory-footprints`에 통합한다.
+두 부모의 공통 기반은 `9d1fdf1`이다. main이나 별도 연산식 worktree의 미커밋 문서는 변경하지 않는다.
+§25.58과 §25.70의 회귀/승인은 각각 통합 전 마일스톤이며 통합본의 최종 회귀를 대체하지 않는다.
+
+#### 원 그래프와 조건부 전이의 연산식 연결
+
+원 SSA 정의·read fragment·JOIN과 전체 데이터 그래프를 그대로 재사용한다. 기존 분기 선택·순환 식 그래프·한 회차식·
+제한된 반복 요약·부분식 간략화/동등성·바이트 영향·독립 구간·유한 방문 합성을 보존한다.
+새 memory record는 bindings가 소유한 정확한 `(definition_id, read_action_id, byte_span)`의 전이만 소비한다.
+
+```text
+원 STORE의 PartRef/연산식 → memory_transfer → 원 LOAD의 메모리 입력
+                              │
+                              ├─ 원 graph source/transfer/reader/CALL/guard의 ID와 key
+                              ├─ 원 성공·실패 CFG 간선 및 결과 pointer 정의
+                              └─ byte span·계약 digest·전체 requires
+```
+
+record 형식은 **15**다. 전이 출력은 무조건 COPY나 새로운 일반 메모리 값이 아니다. 현재 numeric evaluator는 선택 값이 전이에
+의존하면 거부하고, physical evaluator는 record에 전이가 있으면 명시적으로 거부한다.
+BV 간략화/동등성은 partial, 한 회차 재구성도 partial로 남긴다.
+따라서 계약·성공 조건을 평가하지 않고 old 값을 새 값으로 인정하는 우회는 없다. 기존 그래프와 식은 지우지 않는다.
+이 제한은 새 realloc 전이를 소비하는 범위에만 해당하며 기존의 지원 가능한 식 계산/요약을 폐기하지 않는다.
+
+#### 병합에서 확인한 공통 경계 수정
+
+- indexed 접근이 있는 메모리 공간은 fixed-address 격자로 합성하지 않는다. 동일 index까지 별도 관계 없이 상수 주소로 취급하지 않는다.
+  다른 공간의 안전한 fixed 합성은 유지하며 indexed 원 출력도 그대로 남긴다.
+- 한 출력이 부분 byte run으로 잘릴 때 원 전체 pointer 값뿐 아니라 scalar literal도 제거한다.
+- direct physical callee-entry와 multi-target stitch가 기존 summary의 `address_relations`를 동일하게 소비한다.
+  memory-place stitch는 pointer/span뿐 아니라 index도 비교한다.
+- 호출 문맥 provenance는 새 객체다. generic/context의 **전체 CALL 효과가 같은 호출만** 판정·출처·메모리 근거를 복사한다.
+  조건·출력이 달라진 호출은 source=None/undecided로 남으며 generic 판정을 변경하지 않는다.
+
+사전 회귀의 두 기대 충돌도 의미를 확인했다. 같은 물리 anchor의 multi-target 출력을 조합하는 기존 연산식 기능과 충돌한
+구 기대는 실제 같은 anchor 양성/충돌 anchor 음성으로 분리했다. 반환 IP의 원 entry-memory LOAD가 추가된 snapshot fixture는
+`ld0 → in0 → output → CALL` 순서와 원 RAX/RSP 정의를 명시한다. Astra가 첫 동작 이전 관찰을 독립 재현했다.
+
+#### Core 모델의 실제 재도출
+
+summary 의미 판 **20**은 연산식의 물리 anchor 합성(독립 판 13)과 정방향 판 14–19의 scalar/indexed/수명 경계를 함께 포함한다.
+template 형식은 3이다. 예전 13/19 템플릿을 단순 버전 치환해 받아들이지 않는다.
+기존 원 UnrealEditor-Core.dll Bundle `a1f091c5…12068`과 기존 stack evidence에서 `tools/derive_models`를 실제 실행했다.
+entry/frame 가정 OFF·home-space 확장 0을 유지했다.
+
+- forward OFF: FString ctor/dtor/AppendChar **3개**를 도출해 설치 pack v19로 사용한다.
+- forward ON: ctor/dtor **2개**는 OFF의 전체 entry payload와 동일하다. AppendChar는 caller 소유 activation 근거를 portable
+  template로 내보낼 수 없어 기존 거부 규칙대로 제외한다. 이를 성공 도출로 세거나 generic 근거로 대체하지 않는다.
+- 공통 두 entry의 의존과 가정 집합도 동일하지만 ON 실행의 중복 가정 목록 때문에 파일 전체가 동일하다고 주장하지 않는다.
+- 설치 pack SHA256은 `1daec00630b6df37ea1c4fff6c7b4ecfaa8cbfeb703ac84445ed20f6349a516d`이며 실제 OFF 생성물과 같다.
+
+#### 실제 연결·검수와 최종 회귀
+
+새 실제 `test_realloc_expression_integration.py`는 Suite09 DFB031의 원 STORE4→전이→LOAD4와 실제 ELF의 grow/shrink·부분
+덮어쓰기·opaque 후행 호출을 sparse/dense로 **10개 모두 실행·통과**했다. source-A 독립 부채·직접 STORE2·미복사 byte의 CALL 부채도
+유지한다. 실제 Core 조건식/entry-frame 검증 **31개**도 통과했다. 해당 테스트는 예정된 전체 회귀에서도 실행하며 중복 합산하지 않는다.
+부분 전이의 numeric 거부와 간략화 partial, graph/record 원본 불변도 반례로 고정했다.
+
+Astra는 indexed/literal 경계·호출 문맥 격리·전이 조건 보존과 consumer의 fail-closed 처리를 단계 검수했다.
+아래 회귀 종료 후 XML·해시·지원 범위를 기준으로 별도의 최종 완료 승인도 받았다.
+
+첫 통합 전체 실행은 실제 부분 레지스터 fixture에서 OFF/ON 모두 142 passed 뒤 중단했다. 기존 검사는 CALL 부채를 덧씌우는
+`physical_register_fragments` 표현의 존재를 요구했지만, 정방향이 해당 부채를 해소한 통합본은 원 SSA에서 부분 COPY와 CALL 출력을
+직접 조합했다. AL/AH/AX의 정확 byte 분할·원 callee 연결과 4 suffix×8 seeds의 값·LOAD writer·RETURN/SP를 독립 확인했다.
+테스트는 debt 경로의 overlay 검사와 debt-free 경로의 직접 SSA 검사를 모두 명시하도록 고쳤다. 이 중단 실행을 최종 통과 수에 합산하지 않는다.
+별도 나머지 actual 사전 검사에서도 158개 통과 뒤 조건부 부분 쓰기 4개의 `physical_register_choice` 존재 기대가 같은 이유로
+충돌했다. 원 decision 하나와 상보 guards의 일반 JOIN이 CALL/COPY byte를 선택함을 확인했으며, AH 양쪽 보존 byte와 from-call
+predicate도 동일 CALL 결과에 연결된다. 56회 원 실행·writer·RETURN/SP 및 구 overlay 경로를 대조하는 검사를 유지한다.
+from-call의 정적 condition annotation에 남는 `unsupported call` fallback은 제거하거나 일반 수치 eligibility 성공으로 승격하지 않는다.
+미선택 입력은 기존 선택 평가 규칙에 따라 읽지 않는 것이지 그래프에서 삭제하거나 알려진 값으로 치환한 것이 아니다.
+전체 OFF/ON 표시는 전역 기본 switch를 뜻하며, 개별 테스트가 명시하는 ON/OFF fixture/파라미터는 그대로 유지한다.
+
+첫 중단 동결 소스 합성 SHA256은 `ae876ae72d3582a38ede7467f6031516e916be6fe7267dd4c597e2a8954959fb`였다.
+위 실제 테스트 보완 뒤 재실행 동결 소스 목록/내용의 합성 SHA256(src/tests/models/tools/ghidra의 Python·JSON·Java·C):
+`8d47231b782dcdc5d5896e81725f1991bf068f2b0dbabbab06d89d15d5c01361`.
+통합 로그·XML·Core 재도출물은 `output/expression-integration-20261026.joh0cU/`에 둔다.
+각 OFF/ON 실행은 확보된 실제 Bundle 환경을 지정하고 `python -m pytest -q -x --junitxml=<각 XML>`로
+별도 실행한다. 문서만 갱신할 수 있으며 엔진·테스트·모델은 실행 중 바꾸지 않는다.
+
+| 최종 통합 동결 실행 | 수집 / 통과 / skip | 실패 / 오류 | 시간 |
+|---|---|---|---|
+| `TDO_V2_FORWARD=0` | 4690 / **4658** / 32 | 0 / 0 | 1162.24초 |
+| `TDO_V2_FORWARD=1` | 4690 / **4658** / 32 | 0 / 0 | 1195.02초 |
+
+최종 근거는 같은 디렉터리의 **`final-forward-{0,1}.{xml,log}`**다. 앞선 `forward-{0,1}`과 사전 검사 로그는 별도 실패/준비 기록이며
+최종 통과 수에 합산하지 않는다. 두 XML 모두 실제 바이너리 `tests/corpus/intra` **308개를 전부 실행·통과**했다.
+새 realloc 연산식 10개와 transfer record 7개, 실제 UE 관련 네 모듈 107개(20/10/56/21)는 전체 4658개의 부분집합이다.
+이 수치는 회귀 테스트 건수이며 Suite09 80개 케이스 전체의 완전성 판정이나 모든 그래프 간선의 보편 증명이 아니다.
+
+skip32는 기존과 같은 Linux worker9·Linux supervision14·미보유 Bundle9다. 이번 실제 바이너리 모듈의 skip은 0이다.
+시작·중간·종료 소스 합성 해시와 설치 Core pack 해시도 위 값으로 동일하다. 실행 중 엔진·테스트·모델을 바꾸지 않았다.
+충돌 잔여는 없고 `git diff --check`도 통과했다. 기본값·가정 registry·기존 external 모델은 그대로 유지했다.
+
+Astra는 최종 두 XML의 전체/실제/skip 집계, 현재 소스·설치/재도출 Core 해시, 병합 부모·충돌 없음·다른 worktree의 사용자 문서 보존을
+독립 대조했다. **원 writer→조건부 transfer record→LOAD와 기존 연산식 기능의 통합이라는 한정 목표 달성 및 이 검증본의
+커밋·푸시를 최종 승인**했으며 필수 잔여 차단은 없다. 전체 UAF나 임의 최종 공식 완성의 승인이 아니다.
+
+병합 부모는 정방향 체크포인트 `fbc1a62`와 연산식 `c8379e8`이며, 원격 반영 대상은
+`origin/feature/forward-memory-footprints`다. main으로 병합하거나 강제 push하지 않는다.
+병합 커밋의 실제 ID와 원격 SHA 일치는 Git 이력 및 작업 완료 응답에서 확인한다.

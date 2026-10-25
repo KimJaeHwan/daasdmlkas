@@ -1,8 +1,10 @@
 """Consume baseline forward address facts at exact memory read occurrences.
 
 No new value analysis or reaching-definition solve: a plan holds the original
-normalization and its full claims. It can authorize only a plain STORE label
-at a resolved LOAD byte, never an uncertain/unknown effect or an object policy.
+normalization and its full claims. Address claims authorize plain STORE labels
+at exact LOAD bytes; separate sealed lifecycle claims can discharge one CALL
+at exact reader bytes or connect a conditional resize-copy fragment. None of
+these claims grants an object-wide policy or clears unrelated unknown effects.
 """
 
 from __future__ import annotations

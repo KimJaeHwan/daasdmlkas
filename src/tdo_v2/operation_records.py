@@ -19,10 +19,18 @@ normalized dependency graph:
 * ``entry`` -- an entry span (register, or memory place).
 * ``phi`` -- ALTERNATIVES: the value is one of these (a JOIN, an exit run's or
   a read fragment's several definitions, a definition with several writers);
-  the SSA keeps no predecessor selection.
+  a proven straight diamond additionally carries its original predicate and
+  one shared, scope/call-instance-qualified true/false selection. General
+  acyclic selections carry ``guarded_sources`` referencing the record's
+  shared Boolean ``control`` DAG and the original raw definition IDs.
+  Unsupported shapes retain alternatives with ``condition_fallback``.
 * ``call`` -- one output row of a summarized call (``~<i>`` / ``~sink<k>`` /
   ``~u<j>`` ...), its staging rows (``~in`` / ``~ld`` / ``~iu`` ...) folded
   into ``inputs`` with roles, and the call decision facts.
+* ``memory_transfer`` -- one graph-owned, exact-fragment conditional byte
+  transfer. Its ``parts`` retain the original writer expression; CALL,
+  branch, success-edge and contract requirements remain explicit provenance,
+  not an unconditional COPY or a numeric-evaluation license.
 * ``debt`` -- a MEMORY_DEBT node: kind, site, predecessors (may-alias
   writers: their STORE nodes, address and value operands both).
 * ``cut`` -- a node not expanded (limits or the demand budget), with the
@@ -33,9 +41,10 @@ the record is built, each ``call`` node of a register output whose effect is
 a callee summary of this run gets ``stitched`` -- per output register span
 the callee's own expression of those bytes: per callee exit an ``assemble``
 of its runs' bytes (bytes an exit leaves unchanged: the caller's value at the
-call), several exits a phi "callee exits" (alternatives: an overapproximation,
-no path feasibility). The callee's entry registers are ``bound`` nodes: the
-caller's values of those registers at the call (the call's ``~in`` read).
+call), several exits a phi "callee exits" (alternatives share original exit
+guards; this is not a general path-feasibility proof). The callee's entry
+registers are ``bound`` nodes: the caller's values at the call, using staged
+reads first, then existing SSA boundary state with preservation evidence.
 Imported nodes carry ``import`` (the call instance: call keys from the
 root); a call not stitched carries ``stitch_cut`` (the reason). Imports never
 change the caller's own nodes, ``truncated`` flag or evaluation (route
@@ -43,9 +52,16 @@ change the caller's own nodes, ``truncated`` flag or evaluation (route
 
 ``origins`` lists the source labels the engine attached to a node. Parts
 reaching a node that is being expanded (a loop-carried value) are marked
-``loop: true``. ``evaluate`` computes a record's value from concrete entry
-values when it is eligible (no cut, loop, debt, rep element, unproven
-override or unsupported operation): the set of values its alternatives allow.
+``loop: true``. ``evaluate`` computes the set of values its alternatives
+allow when the VALUE graph is eligible (no cut, loop, debt, rep element,
+unproven override or unsupported operation). A supported concrete predicate
+selects one arm; unknown entry predicates retain the correlated union.
+Optional predicate evaluation failures are explicit fallback metadata, not
+proof that either arm is feasible or that all path choices are exact.
+``execution_guard`` separately records whether the requested root/exit is
+reached. ``physical_memory=True`` additionally retains guarded, ordered raw
+memory events for explicit ``evaluate_physical``; original debts and static
+eligibility are never removed by that concrete interpretation.
 """
 
 from __future__ import annotations
@@ -62,7 +78,7 @@ from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 2   # (2: stitched calls, docs 25.31 C-9)
+RECORD_VERSION = 15  # (15: graph-owned conditional memory-transfer provenance)
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -107,14 +123,79 @@ class _Ledger:
         self.exhausted = False
 
 
+class _ControlPool:
+    """One record's shared control DAG; local CFG indices never escape.
+
+    Decision identity is logical (scope/unit/call path), whereas integers
+    are storage references. Import rollback covers both registries.
+    """
+
+    def __init__(self):
+        self.data = {"nodes": [False, True], "decisions": {}, "reach": {}}
+        self.interned, self.references = {}, {}
+
+    def checkpoint(self):
+        return (len(self.data["nodes"]), dict(self.data["decisions"]),
+                dict(self.interned), dict(self.references), dict(self.data["reach"]))
+
+    def restore(self, checkpoint):
+        count, decisions, interned, references, reach = checkpoint
+        del self.data["nodes"][count:]
+        for name, value in (("decisions", decisions), ("reach", reach)):
+            self.data[name].clear()
+            self.data[name].update(value)
+        self.interned, self.references = interned, references
+
+    def reference(self, builder, local):
+        if local < 2:
+            return local
+        identity = builder, local
+        if identity in self.references:
+            return self.references[identity]
+        decision, yes, no = builder._condition_index().guard_nodes[local]
+        match = builder.conditions.decisions[decision]
+        key = decision if builder.parent is None else builder._selection(match.decision_key)
+        self.data["decisions"].setdefault(key, None)
+        yes, no = self.reference(builder, yes), self.reference(builder, no)
+        item = key, yes, no
+        if item not in self.interned:
+            builder._edge()
+            builder._edge()
+            self.interned[item] = len(self.data["nodes"])
+            self.data["nodes"].append({"decision": key, "true": yes, "false": no})
+        self.references[identity] = self.interned[item]
+        return self.references[identity]
+
+    def publish(self, builder, decisions):
+        nodes = {node["id"]: node for node in builder.records}
+        for decision, domain in decisions.items():
+            key = decision if builder.parent is None else domain["selection"]
+            old = self.data["decisions"].get(key)
+            if old is not None and old is not domain \
+                    and _condition_signature(old, nodes) != _condition_signature(domain, nodes):
+                raise _StitchCut("control binding mismatch")
+            if old is None:
+                self.data["decisions"][key] = domain
+
+
 class StitchContext:
     """The run's analysis instances (``interprocedural._analyze_units``'
     ``record_provenance``: id(AnalyzedFunction) -> (it, CallProvenance)) and
-    the callees' lane indexes, built once."""
+    the callees' lane indexes, built once. ``assumptions`` is the completed
+    run's exact premise list; omitted means unknown, not empty. Physical
+    CALLIND stitching requires this list (ordinary/direct records do not)."""
 
-    def __init__(self, table):
+    def __init__(self, table, *, assumptions=None):
         self.table = table
         self.indices: dict = {}
+        # A provenance table cannot recover run options (readonly image,
+        # home-space, traps ...). Unknown is not an empty premise set.
+        self.assumptions = None if assumptions is None else tuple(sorted(set(assumptions)))
+
+    def analyzed(self, normalized, unit, provenance):
+        matches = [item for item, source in self.table.values()
+                   if item.normalized is normalized and item.unit is unit and source is provenance]
+        return matches[0] if len(matches) == 1 else None
 
     def provenance(self, analyzed):
         found = self.table.get(id(analyzed))
@@ -145,6 +226,62 @@ class _Binding:
         self.relations = relations or {}
         self._pointer = self._witness = None   # (computed once; False: none)
         self._levels: dict = {}
+        self.snapshot = next((row for row in getattr(caller.ssa, "call_register_snapshots", ())
+                              if row.boundary_key == call), None)
+        self._physical_stack = None
+        self.physical_context = None
+
+    def _physical_staged_parts(self, read, start, end):
+        if self.physical_context is None:
+            return False, None
+        key = self.caller.ssa.actions[read.action_id].operation_key
+        span = read.span
+        affected = any(row.operation_key == key and any(piece.object_id == span.object_id
+                       and piece.start < end and start < piece.end for piece in row.spans)
+                       for row in self.caller.normalized.call_clobber_reads)
+        if not affected:
+            return False, None
+        from ._record_calls import bind_register_operand, bind_register_fragments
+        from .span_geometry import ByteSpan
+
+        binding = bind_register_operand(self.caller, key, ByteSpan(span.object_id, start, end - start))
+        if binding is not None:
+            return True, [dict(binding["part"])]
+        fragments = bind_register_fragments(self.caller, key, ByteSpan(span.object_id, start, end - start), read)
+        return True, fragments["parts"] if fragments is not None else None
+
+    def pre_stack_parts(self):
+        """Observed pre-push SP, with only this projection's transients skipped."""
+        from dataclasses import replace
+        from .span_geometry import ByteSpan
+
+        offset, size = self.stack
+        read = next((read for read in self.reads if read.span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                     and read.span.start <= offset and offset + size <= read.span.end), None)
+        if read is not None:
+            affected, parts = self._physical_staged_parts(read, offset, offset + size)
+            if affected:
+                return parts
+            return _slice_parts(self.caller._fragments(read, None, 0), offset - read.span.start,
+                                offset + size - read.span.start)
+        projection = self.caller._projection(self.call)
+        if self.snapshot is None or projection is None:
+            return None
+        parts, cursor = [], offset
+        for fragment in sorted(self.snapshot.fragments, key=lambda row: row.span.start):
+            low, high = max(offset, fragment.span.start), min(offset + size, fragment.span.end)
+            if low >= high:
+                continue
+            if low != cursor:
+                return None
+            piece = replace(fragment, span=ByteSpan(fragment.span.object_id, low, high - low))
+            if not self.caller._snapshot_register_safe(self.snapshot, piece,
+                                                      skip=frozenset(projection.transient_operation_keys)):
+                return None
+            for item in self.caller._snapshot_parts(self.snapshot, piece):
+                parts.append({**item, "at": [item["at"][0] + low - offset, item["at"][1] + low - offset]})
+            cursor = high
+        return parts if cursor == offset + size else None
 
     # -- the return-address overlay in the caller's coordinates (increment 3) --
     def _stack_pointer(self):
@@ -332,10 +469,17 @@ class _Binding:
         offset, size = self.stack
         read = next((read for read in self.reads if read.span.object_id.kind is StorageObjectKind.REGISTER_FILE
                      and read.span.start <= offset and offset + size <= read.span.end), None)
-        if read is None:
-            return None
-        parts = _slice_parts(self.caller._fragments(read, None, 0), offset - read.span.start,
-                             offset + size - read.span.start)
+        if builder.physical_context is not None:
+            if self._physical_stack is not None:
+                return self._physical_stack
+            parts = self.pre_stack_parts()
+            if parts is None:
+                return None
+        else:
+            if read is None:
+                return None
+            parts = _slice_parts(self.caller._fragments(read, None, 0), offset - read.span.start,
+                                 offset + size - read.span.start)
         constant = builder._new(None, {"kind": "const", "value": self.delta & ((1 << (8 * size)) - 1),
                                        "size": size})["id"]
         record = builder._new(None, {"kind": "op", "key": "stitch:call-shape", "opcode": "INT_ADD",
@@ -343,6 +487,13 @@ class _Binding:
                                          {"index": 0, "width": size, "role": "value", "parts": parts},
                                          {"index": 1, "width": size, "role": "value", "parts": [
                                              {"node": constant, "bytes": [0, size], "at": [0, size]}]}]})
+        if builder.physical_context is not None:
+            guard, why = self.caller._condition_index().reach_guard(self.call)
+            if guard is None:
+                return None
+            record["physical_guard"] = self.caller._guard_ref(guard)
+            record["physical_call_shape"] = builder.physical_context
+            self._physical_stack = record["id"]
         builder._done(record)
         return record["id"]
 
@@ -354,10 +505,15 @@ class _Binding:
         from .call_summary_effects import anchored_span
 
         place = anchored_span(span, self.anchors, relations=self.relations)
+        return self.memory_place(builder, node, place, span.size, _span_text(span))
+
+    def memory_place(self, builder, node, place, size, entry_label):
+        """Bind a proved common memory place, without inventing a callee
+        object when this target preserves the caller's old bytes."""
         classes: list = []
         labels: set = set()   # (assumptions a binding rests on)
         if place is None:
-            classes = ["unbound memory"] * span.size
+            classes = ["unbound memory"] * size
         elif place.index is not None or place.pointer is not None or place.anchor is None \
                 or (place.anchor.start, place.anchor.size) != self.stack:
             # (increment 3) every pointer slot, then the target: a debt-free
@@ -374,9 +530,9 @@ class _Binding:
                 if reason is not None:
                     break
             if reason is not None:
-                classes = [reason] * span.size
+                classes = [reason] * size
             else:
-                for index in range(span.size):
+                for index in range(size):
                     displacement = place.displacement + index
                     load = next((item for item in self.loads if item.pointer == place.pointer and item.index == place.index
                                  and item.anchor == place.anchor and item.space_id == place.space_id
@@ -390,12 +546,13 @@ class _Binding:
                     classes.append(load if reason is None else reason)
         else:
             push = -self.delta
-            for index in range(span.size):
+            for index in range(size):
                 displacement = place.displacement + index
                 if 0 <= displacement < push:
                     classes.append("return address")
                     continue
-                load = next((item for item in self.loads if item.pointer is None and item.anchor is not None
+                load = next((item for item in self.loads if item.index is None and item.pointer is None
+                             and item.anchor is not None
                              and item.anchor == place.anchor and item.space_id == place.space_id
                              and item.displacement <= displacement < item.displacement + item.size), None)
                 if load is None:
@@ -428,7 +585,7 @@ class _Binding:
                 if self.loads[found] not in used:
                     used.append(self.loads[found])
             position = end
-        record = {"kind": "bound", "callee_entry": _span_text(span), "size": span.size, "parts": parts}
+        record = {"kind": "bound", "callee_entry": entry_label, "size": size, "parts": parts}
         if gaps:
             record["gaps"] = gaps
         if used:
@@ -441,11 +598,62 @@ class _Binding:
     def parts(self, start, end):
         if start < self.stack[0] + self.stack[1] and self.stack[0] < end:
             raise _StitchCut("stack pointer")
-        for read in self.reads:
-            span = read.span
-            if span.object_id.kind is StorageObjectKind.REGISTER_FILE and span.start <= start and end <= span.end:
-                return _slice_parts(self.caller._fragments(read, None, 0), start - span.start, end - span.start)
-        raise _StitchCut("unbound register")
+        parts = []
+        position = start
+        while position < end:
+            source = self._register_source(position)
+            stop = position + 1
+            while stop < end and self._register_source(stop) == source:
+                stop += 1
+            pieces = self._register_parts(source, position, stop)
+            if pieces is None:
+                raise _StitchCut("unbound register")
+            parts.extend({**piece, "at": [piece["at"][0] + position - start,
+                                           piece["at"][1] + position - start]} for piece in pieces)
+            position = stop
+        return parts
+
+    def _register_source(self, offset):
+        read = next((read for read in self.reads if read.span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                     and read.span.start <= offset < read.span.end), None)
+        if read is not None:
+            return "staged", read
+        fragment = next((row for row in self.snapshot.fragments if row.span.start <= offset < row.span.end), None) \
+            if self.snapshot is not None else None
+        return ("snapshot", fragment) if fragment is not None else ("entry", None)
+
+    def _register_parts(self, source, start, end):
+        kind, item = source
+        if kind == "staged":
+            affected, parts = self._physical_staged_parts(item, start, end)
+            if affected:
+                return parts
+            return _slice_parts(self.caller._fragments(item, None, 0), start - item.span.start, end - item.span.start)
+        if self.snapshot is None:
+            return None
+        from .observed_call_state import observed_call_preserves_register
+        from .physical_state import PhysicalRegisterSlice
+
+        if not observed_call_preserves_register(self.caller.unit.observation, self.call,
+                                               PhysicalRegisterSlice(start, end - start)):
+            return None
+        if kind == "snapshot":
+            from dataclasses import replace
+
+            piece = replace(item, span=type(item.span)(item.span.object_id, start, end - start))
+            if not self.caller._snapshot_register_safe(self.snapshot, piece):
+                if self.physical_context is not None:
+                    from ._record_calls import snapshot_parts
+
+                    return snapshot_parts(self.caller, self.snapshot, start, end)
+                return None
+            return self.caller._snapshot_parts(self.snapshot, piece)
+        parts = self.caller._preserved_register_entry(self.snapshot, start, end)
+        if parts is None and self.physical_context is not None:
+            from ._record_calls import snapshot_parts
+
+            parts = snapshot_parts(self.caller, self.snapshot, start, end)
+        return parts
 
     def bind(self, builder, node, span):
         """A ``bound`` node for a callee entry definition (the SSA may
@@ -465,15 +673,12 @@ class _Binding:
                         stack_value = "unbound register"
                 classes.append(stack_value if whole_stack else "stack pointer")
                 continue
-            read = next((read for read in self.reads if read.span.object_id.kind is StorageObjectKind.REGISTER_FILE
-                         and read.span.start <= offset < read.span.end), None)
-            classes.append("unbound register" if read is None else read)
+            classes.append(self._register_source(offset))
         parts, gaps = [], []
         position = 0
         while position < len(classes):
             end = position
-            while end < len(classes) and (classes[end] == classes[position] if isinstance(classes[position], str)
-                                          else classes[end] is classes[position]):
+            while end < len(classes) and classes[end] == classes[position]:
                 end += 1
             low, high = span.start + position, span.start + end
             found = classes[position]
@@ -482,8 +687,10 @@ class _Binding:
             elif isinstance(found, int):   # the stack pointer: the call-shape op node
                 parts.append({"node": found, "bytes": [0, end - position], "at": [position, end]})
             else:
-                for piece in _slice_parts(self.caller._fragments(found, None, 0), low - found.span.start,
-                                          high - found.span.start):
+                pieces = self._register_parts(found, low, high)
+                if pieces is None:
+                    gaps.append({"at": [position, end], "reason": "unbound register"})
+                for piece in pieces or ():
                     piece["at"] = [piece["at"][0] + position, piece["at"][1] + position]
                     parts.append(piece)
             position = end
@@ -493,19 +700,25 @@ class _Binding:
         return builder._new(node, record)["id"]
 
 
-def _node_parts(node):
+def _node_parts(node, *, include_condition=True):
     """Every part a record node holds (whatever its kind)."""
     for name in ("alternatives", "parts", "root"):
         yield from node.get(name, ())
     for name in ("operands", "inputs", "memory", "reads"):
         for item in node.get(name, ()):
             yield from item.get("parts", ())
+    if include_condition:
+        yield from node.get("condition", {}).get("operand", {}).get("parts", ())
 
 
 def _gap_used(records, start, outputs):
     """The reason of a ``bound`` gap byte an import (records from ``start``,
     and the stitched outputs) uses, or None."""
-    for part in (*(part for record in records[start:] for part in _node_parts(record)),
+    value_nodes = _value_reached({"nodes": records, "root": [item["part"] for item in outputs]})
+    for part in (*(part for record in records[start:]
+                   if not (record.get("condition_only") or record.get("physical_only") or record.get("cycle_only"))
+                   or record["id"] in value_nodes
+                   for part in _node_parts(record, include_condition=False)),
                  *(item["part"] for item in outputs)):
         target = records[part["node"]] if "node" in part and part["node"] < len(records) else None
         if target is None or target["kind"] != "bound" or not target.get("gaps") or "bytes" not in part:
@@ -533,10 +746,43 @@ def _slice_parts(parts, low, high):
     return found
 
 
+def _register_overlay(parts, width, replacements):
+    """Keep original SSA bytes outside explicitly named call projections.
+
+    Pure byte geometry, shared by generation and consumption. It creates no
+    definitions and never rebases a callee export's internal byte range.
+    """
+    found, cursor = [], 0
+    for item in replacements:
+        start, size = item["offset"], item["size"]
+        if type(start) is not int or type(size) is not int or size <= 0 or not cursor <= start < start + size <= width:
+            raise ValueError("overlapping or invalid register overlay")
+        for piece in _slice_parts(parts, cursor, start):
+            piece["at"] = [position + cursor for position in piece["at"]]
+            found.append(piece)
+        piece = dict(item["part"])
+        if piece.get("at") != [0, size] or piece["bytes"][1] - piece["bytes"][0] != size:
+            raise ValueError("invalid register export placement")
+        piece["at"] = [start, start + size]
+        found.append(piece)
+        cursor = start + size
+    for piece in _slice_parts(parts, cursor, width):
+        piece["at"] = [position + cursor for position in piece["at"]]
+        found.append(piece)
+    cursor = 0
+    for piece in sorted(found, key=lambda row: row["at"]):
+        if piece.get("pruned") or piece.get("loop") or piece["at"][0] != cursor:
+            raise ValueError("incomplete register overlay")
+        cursor = piece["at"][1]
+    if cursor != width:
+        raise ValueError("incomplete register overlay")
+    return found
+
+
 class _Builder:
     def __init__(self, normalized, unit, *, origins=None, declared=None, limits=None, demands=None,
                  provenance=None, stitch=None, records=None, ledger=None, parent=None, binding=None, path=(),
-                 index=None):
+                 index=None, conditions=None, physical_memory=False):
         from .lane_slice import lane_index
 
         self.normalized = normalized
@@ -583,6 +829,22 @@ class _Builder:
         self.address_bits = {row.space_id: row.address_size_bits for row in evidence.address_spaces
                              if row.is_memory_space}
         self.x64 = evidence.translation_namespace.language_id.startswith("x86:LE:64")
+        self.conditions = conditions
+        self.recurrences = None
+        self.building_condition = False
+        self.building_physical = False
+        self.physical_memory = physical_memory
+        self.control_refs = set()
+        self.control_reach = {}
+        self.control_decisions = {}
+        self.memory_index = None
+        self.controls = parent.controls if parent is not None else _ControlPool()
+        self.physical_context = None
+        self.physical_calls = parent.physical_calls if parent is not None else {}
+        self.target_selectors = parent.target_selectors if parent is not None else {}
+        self.physical_call_building = parent.physical_call_building if parent is not None else set()
+        self.physical_call_cuts = parent.physical_call_cuts if parent is not None else {}
+        self.physical_call_builders = parent.physical_call_builders if parent is not None else {}
 
     # -- nodes ---------------------------------------------------------------
     _FIELDS = {"op": ("operands",), "override": ("operands",), "call": ("inputs",), "phi": ("alternatives",),
@@ -592,6 +854,14 @@ class _Builder:
         if len(self.records) >= self.limits.nodes:
             self.truncated = True
             raise _Truncated()
+        if self.parent is not None:
+            record.setdefault('function', self.function_key)
+        if self.building_condition:
+            record["condition_only"] = True
+        if self.building_physical:
+            record["physical_only"] = True
+        if self.physical_context is not None:
+            record["physical_context"] = self.physical_context
         for name in self._FIELDS.get(record["kind"], ()):
             record.setdefault(name, [])
         if record["kind"] in self._FIELDS:
@@ -742,8 +1012,112 @@ class _Builder:
                 self._edge()
         finally:
             self.expanding.discard(node)
+        self._condition(record, definition.span, self.index.joins.get(definition_id, ()),
+                        definition.block_key, depth, definition_id=definition_id)
+        from ._record_recurrence import annotate_recurrence
+
+        if not getattr(self, "cycle_projection", False):
+            annotate_recurrence(self, record, definition_id, depth)
         self._done(record)
         return record["id"]
+
+    def _condition_index(self):
+        if self.conditions is None:
+            from ._record_conditions import ConditionIndex
+
+            self.conditions = ConditionIndex(self.normalized, self.unit, self.index)
+        return self.conditions
+
+    def _definition_ref(self, identifier):
+        definition = self.ssa.definitions[identifier]
+        return {"scope": self.ssa.function_scope.digest.hex(), "unit": self.ssa.unit_digest.hex(),
+                "id": identifier, "kind": definition.kind.value, "operation": definition.operation_key,
+                "write_ordinal": definition.write_ordinal, "span": list(definition.span.canonical_key)}
+
+    def _condition(self, record, span, sources, block_key, depth, *, definition_id=None, read_operation=None):
+        """Annotate only a complete CFG/SSA correspondence; retain all old
+        alternatives otherwise. Predicate construction uses the same limits
+        as value construction: an interruption makes the record truncated."""
+        if len(record["alternatives"]) != len(sources):
+            record["condition_fallback"] = "fragmented alternatives"
+            return
+        for part, identifier in zip(record["alternatives"], sources, strict=True):
+            part["definition_ref"] = self._definition_ref(identifier)
+        condition_index = self._condition_index()
+        match, reason = condition_index.for_join(definition_id) if definition_id is not None \
+            else condition_index.for_sources(span, tuple(sources), block_key, read_operation)
+        if match is None:
+            guarded, why = condition_index.guarded_join(definition_id) if definition_id is not None \
+                else condition_index.guarded_sources(span, tuple(sources), block_key, read_operation)
+            if guarded is None:
+                record["condition_fallback"] = why or reason
+                return
+            record["guarded_sources"] = {"guards": [self._guard_ref(ref) for ref in guarded.guards],
+                                         "reach": self._guard_ref(guarded.reach)}
+            self.control_refs.update((*guarded.guards, guarded.reach))
+            return
+        prior = self.building_condition
+        self.building_condition = True
+        try:
+            operation, spans, _ = self.index.operation(match.branch_action_id)
+            operands = self._operands(match.branch_node, match.branch_action_id, operation, spans, depth + 1)
+            operand = next(item for item in operands if item["index"] == 1)
+            self._edge()  # the condition reference, in addition to its byte parts
+        finally:
+            self.building_condition = prior
+        by_source = dict(zip(sources, record["alternatives"], strict=True))
+        record["alternatives"] = [by_source[identifier] for identifier in match.sources]
+        record["choices"] = [True, False]
+        record["condition"] = {
+            "selection": self._selection(match.decision_key),
+            "decision": match.decision_key, "merge": match.merge_key,
+            "true_successor": match.true_successor, "false_successor": match.false_successor,
+            "operand": {**operand, "role": "condition"},
+        }
+
+    def _selection(self, decision):
+        return "/".join(("cfg", self.ssa.function_scope.digest.hex(), self.ssa.unit_digest.hex(),
+                         *(call for _, call in self.path), decision))
+
+    def _guard_ref(self, local):
+        self.control_refs.add(local)
+        return self.controls.reference(self, local)
+
+    def _control_record(self):
+        """Materialize each needed original predicate once, using SSA reads.
+
+        Predicate construction can itself discover guarded JOINs; close that
+        demand before serializing the shared Boolean DAG.
+        """
+        decisions = self.control_decisions
+        prior = self.building_condition
+        self.building_condition = True
+        try:
+            while True:
+                pending = [match for match in self._condition_index().guard_decisions(self.control_refs)
+                           if match.decision_key not in decisions]
+                if not pending:
+                    break
+                for match in pending:
+                    operation, spans, _ = self.index.operation(match.branch_action_id)
+                    operands = self._operands(match.branch_node, match.branch_action_id, operation, spans, 1)
+                    operand = next(item for item in operands if item["index"] == 1)
+                    decisions[match.decision_key] = {
+                        "selection": self._selection(match.decision_key),
+                        "decision": match.decision_key, "merge": match.merge_key,
+                        "true_successor": match.true_successor, "false_successor": match.false_successor,
+                        "operand": {**operand, "role": "condition"},
+                    }
+                    if self.parent is not None:
+                        decisions[match.decision_key]["import"] = "/".join(call for _, call in self.path)
+        finally:
+            self.building_condition = prior
+        for reference in tuple(self.control_refs):
+            self._guard_ref(reference)
+        self.controls.publish(self, decisions)
+        if self.parent is None:
+            self.controls.data["reach"].update(self.control_reach)
+        return self.controls.data
 
     def _definition_guarded(self, node, depth):
         if depth > self.limits.depth:
@@ -804,14 +1178,25 @@ class _Builder:
             else:
                 operation, spans, output = found
                 record["opcode"] = operation.opcode
+                if self.physical_memory:
+                    guard, why = self._condition_index().reach_guard(key)
+                    if guard is not None:
+                        record["physical_guard"] = self._guard_ref(guard)
                 if output is not None:
                     record["output"] = _span_dict(output)
                 elif operation.output is not None:
                     record["output"] = {"size": operation.output.byte_size}
+                if self.physical_memory and operation.output is not None \
+                        and operation.output.kind is VarnodeKindCode.ADDRESS:
+                    address = operation.output.coordinate
+                    record["physical_write"] = {"space": address.space_id, "address": address.byte_offset,
+                                                "width": operation.output.byte_size}
                 record["operands"] = self._operands(node, action_id, operation, spans, depth)
                 if operation.opcode == "LOAD":
                     record["memory"] = self._loaded(node, action_id, spans, depth)
                     record["space"] = operation.inputs[0].coordinate.byte_offset
+                    if self.physical_memory:
+                        self._physical_load(record, key, depth)
                 if operation.opcode == "STORE":
                     record["space"] = operation.inputs[0].coordinate.byte_offset
                     record["writes"] = [_span_text(self.ssa.definitions[item].span)
@@ -831,10 +1216,95 @@ class _Builder:
             debts = self._debts(node, depth)
             if debts:
                 record["debts"] = debts
+            if "physical_memory" in record:
+                record["physical_memory"]["debt_ids"] = list(debts)
+            if self.physical_memory:
+                direct_reads = [operand["physical_read"] for operand in record.get("operands", ())
+                                if operand.get("physical_read", {}).get("complete") is True]
+                covered = []
+                for raw_node, row in self.debt_rows.items():
+                    identifier = self.id_of.get(raw_node)
+                    if identifier not in debts or row.operation_key != key or not row.spans:
+                        continue
+                    if all(span.object_id.kind is StorageObjectKind.ADDRESS_SPACE
+                           and any(read["space"] == span.object_id.space_key
+                                   and read["address"] <= span.start
+                                   and span.end <= read["address"] + read["width"] for read in direct_reads)
+                           for span in row.spans):
+                        covered.append(identifier)
+                if covered:
+                    record["physical_read_debt_ids"] = covered
+            if self.physical_memory and self.stitch is not None:
+                from ._record_calls import bind_call_debts
+
+                bind_call_debts(self, record, debts)
         finally:
             self.expanding.discard(node)
         self._done(record)
         return record["id"]
+
+    def _physical_load(self, record, key, depth):
+        from ._record_memory import MemoryIndex
+
+        if self.memory_index is None:
+            self.memory_index = MemoryIndex(self.normalized, self.unit, self.index, self._condition_index())
+        plan, reason = self.memory_index.plan(key)
+        if plan is None:
+            record["physical_memory_fallback"] = reason
+            return
+        events = self._physical_events(plan.events, depth)
+        record["physical_memory"] = {"space": plan.space, "width": plan.width,
+                                     "address_bits": plan.address_bits, "little_endian": plan.little_endian,
+                                     "guard": self._guard_ref(plan.guard), "events": events, "complete": plan.complete}
+        if self.physical_context is not None:
+            record["physical_memory"]["entry_context"] = self.physical_context
+        self.control_refs.add(plan.guard)
+
+    def _physical_direct_read(self, operand, key, position, varnode, depth):
+        from ._record_memory import MemoryIndex
+
+        address = varnode.coordinate
+        operand["physical_read_source"] = {"space": address.space_id, "address": address.byte_offset,
+                                           "width": varnode.byte_size, "operation": key,
+                                           "index": position, "context": self.physical_context}
+        if self.memory_index is None:
+            self.memory_index = MemoryIndex(self.normalized, self.unit, self.index, self._condition_index())
+        plan, reason = self.memory_index.plan_direct(key, position)
+        if plan is None:
+            operand["physical_read_fallback"] = reason
+            return
+        operand["physical_read"] = {"space": plan.space, "address": address.byte_offset,
+                                    "width": plan.width, "address_bits": plan.address_bits,
+                                    "little_endian": plan.little_endian,
+                                    "guard": self._guard_ref(plan.guard),
+                                    "events": self._physical_events(plan.events, depth), "complete": plan.complete}
+        if self.physical_context is not None:
+            operand["physical_read"]["entry_context"] = self.physical_context
+
+    def _physical_events(self, rows, depth=0):
+        events = []
+        prior, self.building_physical = self.building_physical, True
+        try:
+            for event in rows:
+                item = {"key": event.key, "kind": event.kind, "guard": self._guard_ref(event.guard),
+                        "width": event.width, "space": event.space, "reason": event.reason}
+                if getattr(event, "address", None) is not None:
+                    item["address"] = event.address
+                if self.stitch is not None:
+                    from ._record_calls import physical_event
+
+                    replacement = physical_event(self, event)
+                    if replacement is not None:
+                        events.append(replacement)
+                        continue
+                if event.kind in ("store", "write") and event.node is not None and event.action_id is not None:
+                    item["node"] = self.operation(event.node, depth + 1)
+                    self._edge()
+                events.append(item)
+                self.control_refs.add(event.guard)
+        finally:
+            self.building_physical = prior
+        return events
 
     def _override(self, node, action_id, operation, found, depth):
         record = self._new(None, {"kind": "override", "opcode": operation.opcode,
@@ -907,12 +1377,31 @@ class _Builder:
                 operands.append({"index": position, "width": varnode.byte_size, "role": role, "parts": [],
                                  "unresolved": True})
                 continue
-            operands.append({"index": position, "width": varnode.byte_size, "role": role,
-                             "parts": self._fragments(matching[0], wanted, depth)})
+            operand = {"index": position, "width": varnode.byte_size, "role": role,
+                       "parts": self._fragments(matching[0], wanted, depth)}
+            if self.physical_memory and varnode.kind is VarnodeKindCode.ADDRESS \
+                    and varnode.coordinate.space_id in self.address_bits:
+                self._physical_direct_read(operand, self.ssa.actions[action_id].operation_key,
+                                           position, varnode, depth)
+            if self.physical_memory and self.stitch is not None and span is not None \
+                    and span.object_id.kind is StorageObjectKind.REGISTER_FILE:
+                from ._record_calls import bind_register_operand, bind_register_fragments
+
+                binding = bind_register_operand(self, self.ssa.actions[action_id].operation_key, span)
+                if binding is not None:
+                    operand["physical_register"] = binding
+                else:
+                    fragments = bind_register_fragments(self, self.ssa.actions[action_id].operation_key,
+                                                        span, matching[0], operand["parts"], position)
+                    if fragments is not None:
+                        operand["physical_register_fragments"] = fragments
+            operands.append(operand)
         return operands
 
     def _fragments(self, read, wanted, depth):
         """Parts of one read: each fragment's bytes from its definition(s)."""
+        from ._record_memory_transfer import transfer_part
+
         parts = []
         for fragment in read.fragments:
             offsets = range(fragment.span.start - read.span.start, fragment.span.end - read.span.start)
@@ -920,14 +1409,19 @@ class _Builder:
                 parts.append({"pruned": True, "at": [offsets.start, offsets.stop]})
                 continue
             if len(fragment.definition_ids) == 1:
-                source = self.index.definition_node[fragment.definition_ids[0]]
-                produced, base, loop = self._definition_guarded(source, depth + 1)
-                definition = self.ssa.definitions[fragment.definition_ids[0]]
-                start = fragment.span.start - definition.span.start + base
-                part = self._named({"node": produced, "bytes": [start, start + fragment.span.size],
-                                    "at": [offsets.start, offsets.stop]}, definition)
-                if loop:
-                    part["loop"] = True
+                transfer = transfer_part(self, read, fragment, depth + 1)
+                if transfer is not None:
+                    part = {"node": transfer, "bytes": [0, fragment.span.size],
+                            "at": [offsets.start, offsets.stop]}
+                else:
+                    source = self.index.definition_node[fragment.definition_ids[0]]
+                    produced, base, loop = self._definition_guarded(source, depth + 1)
+                    definition = self.ssa.definitions[fragment.definition_ids[0]]
+                    start = fragment.span.start - definition.span.start + base
+                    part = self._named({"node": produced, "bytes": [start, start + fragment.span.size],
+                                        "at": [offsets.start, offsets.stop]}, definition)
+                    if loop:
+                        part["loop"] = True
             else:
                 part = {"node": self._fragment_phi(fragment, depth), "bytes": [0, fragment.span.size],
                         "at": [offsets.start, offsets.stop]}
@@ -935,8 +1429,8 @@ class _Builder:
             parts.append(part)
         return parts
 
-    def _fragment_phi(self, fragment, depth):
-        key = ("fragment", fragment.span, tuple(fragment.definition_ids))
+    def _fragment_phi(self, fragment, depth, *, boundary=None):
+        key = ("fragment", fragment.span, tuple(fragment.definition_ids), boundary)
         if key in self.id_of:
             return self.id_of[key]
         record = self._new(key, {"kind": "phi", "reason": "several definitions", "span": _span_text(fragment.span),
@@ -950,8 +1444,157 @@ class _Builder:
                                                        "bytes": [start, start + fragment.span.size],
                                                        "at": [0, fragment.span.size]}, definition))
             self._edge()
+        if boundary is not None:
+            self._condition(record, fragment.span, fragment.definition_ids, boundary[0], depth,
+                            read_operation=boundary[1])
         self._done(record)
         return record["id"]
+
+    def _snapshot_parts(self, snapshot, fragment):
+        """Use original raw SSA definitions at one exact pre-staging boundary."""
+        if len(fragment.definition_ids) == 1:
+            identifier = fragment.definition_ids[0]
+            definition = self.ssa.definitions[identifier]
+            producer, base, loop = self._definition_guarded(self.index.definition_node[identifier], 1)
+            start = fragment.span.start - definition.span.start + base
+            part = self._named({"node": producer, "bytes": [start, start + fragment.span.size],
+                                "at": [0, fragment.span.size]}, definition)
+            if loop:
+                part["loop"] = True
+        else:
+            producer = self._fragment_phi(fragment, 0, boundary=(snapshot.block_key, snapshot.first_action_key))
+            part = {"node": producer, "bytes": [0, fragment.span.size], "at": [0, fragment.span.size]}
+        self._edge()
+        return [part]
+
+    def _snapshot_register_safe(self, snapshot, fragment, *, skip=frozenset()):
+        """A captured raw def is not a read's call-clobber proof.
+
+        Check its correspondence to the last observed write on every CFG
+        path. Never carry a pre-call value through an opaque call merely
+        because the register-only fixed point still names that definition.
+        This verifies supplied IDs; it creates no definitions or RD state.
+        """
+        from .call_seeds import _operation_key
+        from .resource_limits import step
+
+        conditions = self._condition_index()
+        if conditions._reason is not None:
+            return False
+        location = conditions._locations.get(snapshot.first_action_key)
+        if location is None or location[0] != snapshot.block_key \
+                or conditions._raw_blocks.get(snapshot.boundary_key) != snapshot.block_key:
+            return False
+        identifiers = frozenset(fragment.definition_ids)
+        span = fragment.span
+        memo = {}
+
+        def trace(key, before=None):
+            step()
+            identity = key, before
+            if identity in memo:
+                return memo[identity]
+            block = conditions.blocks[key]
+            instruction = conditions.instructions[block.instruction]
+            stop = block.stop if before is None else before
+            for ordinal in range(stop - 1, block.start - 1, -1):
+                step()
+                operation = instruction.operations[ordinal]
+                if _operation_key(instruction.address, ordinal, operation.opcode) in skip:
+                    continue
+                if operation.opcode in ("CALL", "CALLIND", "CALLOTHER"):
+                    memo[identity] = False
+                    return False
+                output = operation.output
+                if output is not None and output.kind is VarnodeKindCode.REGISTER \
+                        and output.coordinate.space_id == self.register_space \
+                        and output.coordinate.byte_offset < span.end \
+                        and span.start < output.coordinate.byte_offset + output.byte_size:
+                    raw_key = _operation_key(instruction.address, ordinal, operation.opcode)
+                    found = any(self.ssa.definitions[identifier].kind is MemoryDefinitionKind.DATA_WRITE
+                                and self.ssa.definitions[identifier].operation_key == raw_key
+                                and self.ssa.definitions[identifier].span.contains(span) for identifier in identifiers)
+                    memo[identity] = found
+                    return found
+            if key == conditions.entry:
+                found = any(self.ssa.definitions[identifier].kind is MemoryDefinitionKind.ENTRY
+                            and self.ssa.definitions[identifier].span.contains(span) for identifier in identifiers)
+            else:
+                incoming = conditions.predecessors[key]
+                found = bool(incoming) and all(trace(predecessor) for predecessor in incoming)
+            memo[identity] = found
+            return found
+
+        _, _, ordinal = _key_parts(snapshot.boundary_key)
+        return ordinal is not None and trace(snapshot.block_key, ordinal)
+
+    def _preserved_register_entry(self, snapshot, start, end):
+        """A diagnostic entry leaf only after proving every prior path preserves it.
+
+        An absent tracked atom is not evidence. Require an exact acyclic CFG,
+        the recorded staging boundary, no earlier call/opaque effect, and no
+        overlapping observed or normalized write. No ABI preservation rule.
+        """
+        from .call_seeds import _operation_key
+        from .resource_limits import step
+        from .span_geometry import ByteSpan, StorageObjectId
+
+        key = ("preserved register entry", snapshot.boundary_key, start, end)
+        if key in self.id_of:
+            return [{"node": self.id_of[key], "bytes": [0, end - start], "at": [0, end - start]}]
+        conditions = self._condition_index()
+        if conditions._reason is not None or conditions._locations.get(snapshot.first_action_key) is None:
+            return None
+        block_key, position = conditions._locations[snapshot.first_action_key]
+        if block_key != snapshot.block_key or conditions._raw_blocks.get(snapshot.boundary_key) != block_key:
+            return None
+        ancestors, pending = set(), [block_key]
+        while pending:
+            step()
+            current = pending.pop()
+            if current not in ancestors:
+                ancestors.add(current)
+                pending.extend(conditions.predecessors[current])
+        for current in ancestors:
+            step()
+            for at, reason in conditions._issues.get(current, ()):
+                if current != block_key or at < position:
+                    return None
+            for writes in conditions._writes[current].values():
+                for at, identifier in writes:
+                    step()
+                    span = self.ssa.definitions[identifier].span
+                    if (current != block_key or at < position) \
+                            and span.object_id.kind is StorageObjectKind.REGISTER_FILE \
+                            and span.start < end and start < span.end:
+                        return None
+            block = conditions.blocks[current]
+            instruction = conditions.instructions[block.instruction]
+            for ordinal in range(block.start, block.stop):
+                step()
+                raw = instruction.operations[ordinal]
+                if _operation_key(instruction.address, ordinal, raw.opcode) == snapshot.boundary_key:
+                    break
+                if raw.opcode in ("CALL", "CALLIND", "CALLOTHER"):
+                    return None
+                output = raw.output
+                if output is not None and output.kind is VarnodeKindCode.REGISTER \
+                        and output.coordinate.space_id == self.register_space \
+                        and output.coordinate.byte_offset < end and start < output.coordinate.byte_offset + output.byte_size:
+                    return None
+        span = ByteSpan(StorageObjectId(StorageObjectKind.REGISTER_FILE,
+                                       self.unit.scopes.resolution_context.program_scope, 0), start, end - start)
+        proof = {"call": snapshot.boundary_key, "before": snapshot.first_action_key,
+                 "scope": self.ssa.function_scope.digest.hex(), "unit": self.ssa.unit_digest.hex(),
+                 "reason": "all observed entry-to-boundary paths preserve these bytes"}
+        if self.binding is not None:
+            identifier = self.binding.bind(self, key, span)
+            self.records[identifier]["boundary_entry"] = proof
+        else:
+            identifier = self._new(key, {"kind": "entry", "span": _span_text(span),
+                                        "register": {"space": self.register_space, "offset": start, "size": end - start},
+                                        "boundary_entry": proof, **({"x64": True} if self.x64 else {})})["id"]
+        return [{"node": identifier, "bytes": [0, end - start], "at": [0, end - start]}]
 
     def _loaded(self, node, action_id, spans, depth):
         """A LOAD's dereferenced bytes, one entry per candidate place."""
@@ -1049,6 +1692,10 @@ class _Builder:
         finally:
             self.expanding.discard(node)
         self._done(record)
+        if self.physical_memory and self.stitch is not None:
+            from ._record_calls import bind_call_row
+
+            bind_call_row(self, record)
         return record["id"]
 
     def _call_inputs(self, node, base, depth, role=None, via=None, seen=None):
@@ -1104,6 +1751,8 @@ class _Builder:
         if row is not None:
             record["site"] = row.operation_key
             record["spans"] = [_span_text(span) for span in row.spans]
+            if self.physical_memory:
+                record["physical_spans"] = [_span_dict(span) for span in row.spans]
             if hasattr(row, "intervening_calls"):
                 record["calls"] = list(row.intervening_calls)
             if getattr(row, "uncertain", ()):
@@ -1136,8 +1785,13 @@ class _Builder:
     # -- stitching (docs 25.31 C-9, increment 1) -------------------------------
     def stitch_all(self):
         """Phase 2: try every call node this builder made (in id order)."""
-        for identifier in list(self.call_ids):
-            if identifier < len(self.records):
+        while True:
+            self._control_record()
+            pending = [identifier for identifier in self.call_ids if identifier < len(self.records)
+                       and "stitched" not in self.records[identifier] and "stitch_cut" not in self.records[identifier]]
+            if not pending:
+                break
+            for identifier in pending:
                 self._stitch(self.records[identifier])
 
     def _staged_reads(self, row_key):
@@ -1197,10 +1851,10 @@ class _Builder:
         source = self.provenance.sources.get(base)
         if source is None:
             return "source: none"
-        if source[0] != "summary":
+        if source[0] not in ("summary", "summaries"):
             return f"source: {source[0]}"
-        done = source[1]
-        if done.summary is None or type(done.normalized).__name__ != "NormalizedFunction":
+        members = (source[1],) if source[0] == 'summary' else source[1]
+        if any(done.summary is None or type(done.normalized).__name__ != "NormalizedFunction" for done in members):
             return "no callee body"
         effect = self.proven[base]
         run = _output_run(effect, tag)
@@ -1210,13 +1864,13 @@ class _Builder:
             return "accessor write-back"
         if run.conditions or effect.writer_conditions:
             return "conditions"
-        if effect.tail_stack or done.summary.tail_exits:
+        if effect.tail_stack or any(done.summary.tail_exits for done in members):
             return "tail"
-        if not done.summary.exits:
+        if not any(done.summary.exits for done in members):
             return "no exit"
         if len(self.path) >= self.limits.call_depth:
             return "depth"
-        if done.key == self.function_key or any(done.key == key for key, _ in self.path):
+        if any(done.key == self.function_key or any(done.key == key for key, _ in self.path) for done in members):
             return "recursion"
         if self._stack_base(base) is None:
             return "no call shape"
@@ -1233,7 +1887,7 @@ class _Builder:
         from .call_summary_effects import call_load_keys
 
         base, tag = record["call"], record["row"]
-        done = self.provenance.sources[base][1]
+        source, body = self.provenance.sources[base]
         run = _output_run(self.proven[base], tag)
         start = len(self.records)
         chain = []
@@ -1242,12 +1896,18 @@ class _Builder:
             chain.append(builder)
             builder = builder.parent
         saved = [(item, item.truncated) for item in chain]
+        saved_control_refs = [(item, set(item.control_refs), dict(item.control_decisions)) for item in chain]
+        control_checkpoint = self.controls.checkpoint()
         edges = self.ledger.edges   # (refunded on rollback: a cut attempt costs no budget)
         frozen, self.ledger.frozen = self.ledger.frozen, start
         path = (*self.path, (self.function_key, base))
         instance = "/".join(call for _, call in path)
         try:
-            nested = _Builder(done.normalized, done.unit, origins=done.origins, declared=done.declared,
+            if source == 'summaries':
+                outputs = self._stitch_targets(record, body, run, path, instance)
+            else:
+                done = body
+                nested = _Builder(done.normalized, done.unit, origins=done.origins, declared=done.declared,
                               limits=self.limits, provenance=self.stitch.provenance(done), stitch=self.stitch,
                               records=self.records, ledger=self.ledger, parent=self,
                               binding=_Binding(self, self._staged_reads(f"{base}~in{tag}"), self._stack_base(base),
@@ -1255,24 +1915,29 @@ class _Builder:
                                                call_load_keys(base, self.proven[base]), call=base,
                                                effect=self.proven[base], relations=dict(done.summary.address_relations)),
                               path=path, index=self.stitch.index(done.normalized, done.unit))
-            if hasattr(run, "writes"):   # (a register run)
-                outputs = [{"output": _span_dict(span),
+                if hasattr(run, "writes"):   # (a register run)
+                    outputs = [{"output": _span_dict(span),
                             "part": nested._stitched_output(span, done.summary, instance)}
                            for span in run.writes]
-            else:   # (a memory run, docs 25.32 increment 4)
-                part, callee_span = nested._stitched_memory_output(run, done.summary, instance)
-                outputs = [{"output": {"place": _anchored_text(run.write), "callee": callee_span}, "part": part}]
-            if nested.truncated or any(item.truncated != flag for item, flag in saved):
+                else:   # (a memory run, docs 25.32 increment 4)
+                    part, callee_span = nested._stitched_memory_output(run, done.summary, instance)
+                    outputs = [{"output": {"place": _anchored_text(run.write), "callee": callee_span}, "part": part}]
+            if (source != 'summaries' and nested.truncated) or any(item.truncated != flag for item, flag in saved):
                 raise _StitchCut("limit")   # (a cut inside: never a partial import)
             gap = _gap_used(self.records, start, outputs)
             if gap is not None:
                 raise _StitchCut(gap)
-            nested.stitch_all()
-            if nested.truncated or any(item.truncated != flag for item, flag in saved):
+            if source != 'summaries':
+                nested.stitch_all()
+            if (source != 'summaries' and nested.truncated) or any(item.truncated != flag for item, flag in saved):
                 raise _StitchCut("limit")
         except (MemoryError, AnalysisBudgetExceeded, AnalysisReportingFailed):
             raise   # (process state and the run's own limits are never a record's cut)
         except Exception as error:   # (_StitchCut, _Truncated, RecursionError, DiagnosticExhausted, a bug)
+            self.controls.restore(control_checkpoint)
+            for item, references, decisions in saved_control_refs:
+                item.control_refs = references
+                item.control_decisions = decisions
             for item in chain:
                 for key in [key for key, value in item.id_of.items() if value >= start]:
                     del item.id_of[key]
@@ -1300,7 +1965,72 @@ class _Builder:
                 item.truncated = flag
             self.ledger.frozen = frozen
 
-    def _stitched_output(self, span, summary, instance):
+    def _stitch_targets(self, record, members, run, path, instance):
+        """All outputs of this call share one list of legal (target, exit)
+        choices. A target's objects/definitions keep their original scope."""
+        from dataclasses import replace
+        from .call_summary_effects import call_load_keys
+
+        base, tag = record['call'], record['row']
+        effect = self.proven[base]
+        pairs = [(index, done, exit_summary) for index, done in enumerate(members)
+                 for exit_summary in done.summary.exits]
+        choices = [{'function': done.key, 'exit': exit_summary.block_key} for _, done, exit_summary in pairs]
+        if not choices:
+            raise _StitchCut('no exit')
+        mapping = None
+        if not hasattr(run, 'writes'):
+            mapping = dict(self.provenance.memory_sources.get(base, {}).get(run.write, ()))
+            if set(mapping) != {index for index, _, _ in pairs}:
+                raise _StitchCut('multi memory mapping')
+        builders = {}
+        for index, done, _ in pairs:
+            if index in builders:
+                continue
+            builders[index] = _Builder(
+                done.normalized, done.unit, origins=done.origins, declared=done.declared,
+                limits=self.limits, provenance=self.stitch.provenance(done), stitch=self.stitch,
+                records=self.records, ledger=self.ledger, parent=self,
+                binding=_Binding(self, self._staged_reads(f'{base}~in{tag}'), self._stack_base(base),
+                                 self._stack_base(base, delta=True), done.anchors,
+                                 call_load_keys(base, effect), call=base, effect=effect,
+                                 relations=dict(done.summary.address_relations)),
+                path=(*path[:-1], (path[-1][0], f'{base}@{done.key}')),
+                index=self.stitch.index(done.normalized, done.unit))
+        outputs = []
+        spans = run.writes if hasattr(run, 'writes') else (None,)
+        for span in spans:
+            alternatives = []
+            for index, done, exit_summary in pairs:
+                nested = builders[index]
+                if span is not None:
+                    part = nested._stitched_output(span, done.summary, instance, exits=(exit_summary,))
+                elif mapping[index] is None:
+                    bound = nested.binding.memory_place(nested, None, run.write, run.write.size,
+                                                        'unchanged: ' + _anchored_text(run.write))
+                    nested.records[bound]['unchanged'] = True
+                    part = {'node': bound, 'bytes': [0, run.write.size], 'at': [0, run.write.size]}
+                    part = nested._exit_part(part, exit_summary.block_key, run.write.size)
+                else:
+                    original = replace(mapping[index], write=run.write)
+                    part, _ = nested._stitched_memory_output(original, done.summary, instance,
+                                                             exits=(exit_summary,))
+                alternatives.append(part)
+            size = span.size if span is not None else run.write.size
+            phi = self._new(None, {'kind': 'phi', 'reason': 'call targets and exits', 'instance': instance,
+                                   'size': size, 'choices': choices, 'alternatives': alternatives})
+            self._done(phi)
+            output = _span_dict(span) if span is not None else {'place': _anchored_text(run.write)}
+            outputs.append({'output': output, 'part': {'node': phi['id'], 'bytes': [0, size], 'at': [0, size]}})
+        for nested in builders.values():
+            if nested.truncated:
+                raise _StitchCut('limit')
+            nested.stitch_all()
+            if nested.truncated:
+                raise _StitchCut('limit')
+        return outputs
+
+    def _stitched_output(self, span, summary, instance, *, exits=None):
         """This callee's value of the caller's output bytes ``span``
         (register offsets) as one part: per exit the runs' bytes assembled
         (bytes the exit does not write: the caller's value at the call);
@@ -1309,7 +2039,7 @@ class _Builder:
 
         alternatives = []
         definition_nodes = self.normalized.memory_graph.definition_nodes
-        for exit_summary in summary.exits:
+        for exit_summary in summary.exits if exits is None else exits:
             parts, covered = [], set()
             for run in exit_summary.runs:
                 if run.span.object_id.kind is not StorageObjectKind.REGISTER_FILE:
@@ -1329,6 +2059,7 @@ class _Builder:
                 else:
                     phi = self._new(None, {"kind": "phi", "reason": "exit run definitions",
                                            "span": _span_text(piece), "size": high - low, "alternatives": values})
+                    self._condition(phi, piece, tuple(run.definitions), exit_summary.block_key, 0)
                     self._done(phi)
                     part = {"node": phi["id"], "bytes": [0, high - low]}
                 parts.append({**part, "at": [low - span.start, high - span.start]})
@@ -1348,7 +2079,7 @@ class _Builder:
                               "at": [offset - span.start, end - span.start]})
                 offset = end
             parts.sort(key=lambda part: part["at"][0])
-            alternatives.append(self._whole(parts, span.size))
+            alternatives.append(self._exit_part(self._whole(parts, span.size), exit_summary.block_key, span.size))
         if len(alternatives) == 1:
             return alternatives[0]
         phi = self._new(None, {"kind": "phi", "reason": "callee exits", "instance": instance, "size": span.size,
@@ -1356,7 +2087,7 @@ class _Builder:
         self._done(phi)
         return {"node": phi["id"], "bytes": [0, span.size], "at": [0, span.size]}
 
-    def _stitched_memory_output(self, run, summary, instance):
+    def _stitched_memory_output(self, run, summary, instance, *, exits=None):
         """This callee's value of a memory output row's write W (an
         AnchoredSpan) as one part, and the callee span W is: W's object X is
         the one callee memory object whose runs anchor to W's base with
@@ -1396,7 +2127,7 @@ class _Builder:
         end = start + size
         alternatives = []
         definition_nodes = self.normalized.memory_graph.definition_nodes
-        for exit_summary in summary.exits:
+        for exit_summary in summary.exits if exits is None else exits:
             parts, covered = [], set()
             for item in exit_summary.runs:
                 if item.span.object_id != target:
@@ -1423,6 +2154,7 @@ class _Builder:
                 else:
                     phi = self._new(None, {"kind": "phi", "reason": "exit run definitions",
                                            "span": _span_text(piece), "size": high - low, "alternatives": values})
+                    self._condition(phi, piece, tuple(item.definitions), exit_summary.block_key, 0)
                     self._done(phi)
                     part = {"node": phi["id"], "bytes": [0, high - low]}
                 parts.append({**part, "at": [low - start, high - start]})
@@ -1442,7 +2174,7 @@ class _Builder:
                 parts.append({"node": bound, "bytes": [0, stop - offset], "at": [offset - start, stop - start]})
                 offset = stop
             parts.sort(key=lambda part: part["at"][0])
-            alternatives.append(self._whole(parts, size))
+            alternatives.append(self._exit_part(self._whole(parts, size), exit_summary.block_key, size))
         callee_span = _span_text(ByteSpan(target, start, size))
         if len(alternatives) == 1:
             return alternatives[0], callee_span
@@ -1450,6 +2182,18 @@ class _Builder:
                                "alternatives": alternatives})
         self._done(phi)
         return {"node": phi["id"], "bytes": [0, size], "at": [0, size]}, callee_span
+
+    def _exit_part(self, part, block, size):
+        """Reachability is a property of the selected alternative, including
+        constants and identity bytes, not an extra independent exit choice."""
+        guard, reason = self._condition_index().reach_guard(block)
+        record = {"kind": "assemble", "size": size, "parts": [{**part, "at": [0, size]}]}
+        if guard is None:
+            record["execution_fallback"] = reason
+        else:
+            record["execution_guard"] = self._guard_ref(guard)
+        wrapper = self._new(None, record)
+        return {"node": wrapper["id"], "bytes": [0, size], "at": [0, size]}
 
     def _whole(self, parts, size):
         """One part holding a ``size``-byte value given as ``parts``: the
@@ -1511,7 +2255,7 @@ def _call_provenance(provenance, call, effect, tag) -> dict:
         if source[0] == "summary":
             found["function"] = source[1].key
         elif source[0] == "summaries":   # (one of several functions, docs 25.33 F1b)
-            found["functions"] = list(source[1])
+            found["functions"] = [done.key for done in source[1]]
         else:
             found["label"] = source[1]
     failed = provenance.failed.get(call, frozenset())
@@ -1632,39 +2376,147 @@ def _span_dict(span):
 
 
 def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, limits=None, provenance=None,
-           stitch=None):
-    from .lane_slice import lane_slice
+           stitch=None, merge_run=None, physical_memory=False):
+    from .lane_slice import lane_slice, lane_index
+    from ._record_conditions import ConditionIndex
+    from ._record_recurrence import RecurrenceIndex
 
     limits = limits or Limits()
     demand_seeds = [(node, spans) for node, spans in seeds]
+    index = lane_index(normalized, unit)
+    conditions = ConditionIndex(normalized, unit, index)
+    recurrences = RecurrenceIndex(normalized, unit, index)
+    demand_seeds.extend(recurrences.condition_seeds())
+    root_location = metadata.get("exit")
+    if root_location is None:
+        locations = set()
+        for node, _ in seeds:
+            definition_id = index.definition_of.get(node)
+            if definition_id is not None:
+                locations.add(index.ssa.definitions[definition_id].operation_key)
+            elif node in index.action_of:
+                locations.add(index.ssa.actions[index.action_of[node]].operation_key)
+        if len(locations) == 1:
+            root_location = next(iter(locations))
+    root_guard, control_reason = conditions.reach_guard(root_location) if root_location is not None \
+        else (None, "no single execution location")
+    # The same SSA and lane walk supplies value and control operands. Do not
+    # build a predicate from bytes pruned for the requested value alone.
+    if control_reason is None:
+        demand_seeds.extend((match.branch_node, ()) for match in conditions.decisions.values())
+    if physical_memory:
+        # The physical relation can inspect any earlier raw STORE, including
+        # a definite write that kills bytes of a possible-alias writer. Keep
+        # full address/value operands before constructing any record nodes.
+        builder_spaces = {row.space_id for row in unit.scopes.program.evidence.address_spaces
+                          if row.is_memory_space}
+        for node, action_id in index.action_of.items():
+            raw = index.operation(action_id)
+            if raw is not None and (raw[0].opcode == "STORE" or raw[0].output is not None
+                                    and raw[0].output.kind is VarnodeKindCode.ADDRESS
+                                    and raw[0].output.coordinate.space_id in builder_spaces):
+                demand_seeds.append((node, ()))
+        from ._record_calls import target_producer
+
+        for instruction in unit.observation.instructions:
+            for ordinal, operation in enumerate(instruction.operations):
+                if operation.opcode == "CALLIND":
+                    key = f"{instruction.address.space_id:x}:{instruction.address.byte_offset:x}:{ordinal}:CALLIND"
+                    producer = target_producer(unit, key)
+                    node = normalized.dependencies.node_for_key(f"op:{producer[0]}") if producer else None
+                    if node is not None:
+                        demand_seeds.append((node, ()))
     demands = lane_slice(normalized, unit, demand_seeds, budget=limits.demand_steps,
-                         byte_budget=limits.demand_bytes)
+                         byte_budget=limits.demand_bytes, index=index)
+    # Include predicates BEFORE constructing any value node. A predicate may
+    # need bytes a value's lane demand otherwise prunes; using the partially
+    # built node as the guard would silently change the branch decision.
+    added, added_snapshots = set(), set()
+    pending = [conditions.for_sources(*merge_run)[0]] if merge_run is not None else []
+    while not demands.exhausted:
+        for node in demands.nodes:
+            identifier = index.definition_of.get(node)
+            if identifier in index.joins:
+                pending.append(conditions.for_join(identifier)[0])
+        extra = {match.branch_node for match in pending if match is not None} - added
+        pending.clear()
+        snapshot_seeds = set()
+        if stitch is not None:
+            reached_calls = {normalized.dependencies.node(node).key.removeprefix("op:").split("~", 1)[0]
+                             for node in demands.nodes
+                             if normalized.dependencies.node(node).kind is NodeKind.OPERATION}
+            for snapshot in getattr(index.ssa, "call_register_snapshots", ()):
+                if snapshot.boundary_key in reached_calls or physical_memory:
+                    snapshot_seeds.update(index.definition_node[identifier]
+                                          for fragment in snapshot.fragments for identifier in fragment.definition_ids)
+            snapshot_seeds.difference_update(added_snapshots)
+        if not extra and not snapshot_seeds:
+            break
+        added.update(extra)
+        added_snapshots.update(snapshot_seeds)
+        demand_seeds.extend((node, ()) for node in sorted(extra | snapshot_seeds))
+        demands = lane_slice(normalized, unit, demand_seeds, budget=limits.demand_steps,
+                             byte_budget=limits.demand_bytes, index=index)
     builder = _Builder(normalized, unit, origins=origins, declared=declared, limits=limits, demands=demands,
-                       provenance=provenance, stitch=stitch)
+                       provenance=provenance, stitch=stitch, index=index, conditions=conditions,
+                       physical_memory=physical_memory)
+    builder.recurrences = recurrences
+    if root_guard is not None:
+        builder.control_refs.add(root_guard)
+    physical_metadata = {"physical_effect_inventory": False, "physical_root_events": []} if physical_memory else {}
     root = []
     # one expansion level takes a few Python frames: room for ``limits.depth``
     previous = sys.getrecursionlimit()
     sys.setrecursionlimit(max(previous, 16 * limits.depth + 2000))
     try:
+        if physical_memory:
+            from ._record_memory import MemoryIndex
+
+            if control_reason is None:
+                for key in conditions._locations.keys() | conditions._raw_blocks.keys():
+                    reference, why = conditions.reach_guard(key)
+                    if reference is not None:
+                        builder.control_reach[key] = builder._guard_ref(reference)
+            builder.memory_index = MemoryIndex(normalized, unit, index, conditions)
+            events, why = builder.memory_index.prefix(root_location)
+            physical_metadata["physical_effect_inventory"] = events is not None
+            if events is None:
+                physical_metadata["physical_effect_fallback"] = why
+            else:
+                physical_metadata["physical_root_events"] = [event for event in builder._physical_events(events)
+                                                             if event["kind"] not in ("store", "write")]
         for node, spans in seeds:
             root.extend(builder.seed(node, spans))
+        if merge_run is not None:
+            span, sources, block_key = merge_run
+            phi = builder._new(None, {"kind": "phi", "reason": "exit run definitions", "size": span.size,
+                                      "span": _span_text(span), "alternatives": root})
+            root = [{"node": phi["id"], "bytes": [0, span.size], "at": [0, span.size]}]
+            builder._condition(phi, span, sources, block_key, 0)
+            builder._done(phi)
+        control = builder._control_record() if builder.control_refs else None
     except _Truncated:
-        pass
+        control = None
     except RecursionError:
         builder.truncated = True
         builder.records.append({"kind": "cut", "target": None, "reason": "recursion", "id": len(builder.records)})
+        control = None
     except BaseException:
         sys.setrecursionlimit(previous)
         raise
     try:
-        if stitch is not None:
+        if stitch is not None and not builder.truncated and not demands.exhausted:
             builder.stitch_all()   # (after the record is whole; an attempt never changes it)
+            control = builder._control_record()
+    except (_Truncated, RecursionError):
+        builder.truncated = True
+        control = None
     finally:
         sys.setrecursionlimit(previous)
     entry = unit.scopes.function.entry
     evidence = unit.scopes.program.evidence
     language = evidence.translation_namespace.language_id
-    return {
+    record = {
         "version": RECORD_VERSION,
         "function": f"{entry.space_id:x}:{entry.byte_offset:x}",
         "program": evidence.executable_sha256.hex() if hasattr(evidence, "executable_sha256") else None,
@@ -1675,16 +2527,58 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
         "limits": vars(limits) if not hasattr(limits, "__dataclass_fields__") else {
             name: getattr(limits, name) for name in limits.__dataclass_fields__},
         **metadata,
+        **physical_metadata,
         "root": root,
         "nodes": builder.records,
         "partial_provenance": ("assumptions that act by excluding writers or debts are not attributable to "
                                "one root; the run-level assumption list is the authority"),
     }
+    if physical_memory:
+        record["physical_calls"] = builder.physical_calls
+        record["target_selectors"] = builder.target_selectors
+        record["physical_assumptions"] = list(stitch.assumptions) \
+            if stitch is not None and stitch.assumptions is not None else None
+        record["physical_scope"] = builder.ssa.function_scope.digest.hex()
+        record["physical_unit"] = builder.ssa.unit_digest.hex()
+        if builder.physical_call_cuts:
+            record["physical_call_cuts"] = dict(builder.physical_call_cuts)
+    if control is not None:
+        record["control"] = control
+        if root_guard is not None:
+            record["execution_guard"] = builder._guard_ref(root_guard)
+            if physical_memory:
+                record["physical_root_guard"] = builder._guard_ref(root_guard)
+    elif control_reason is not None:
+        record["execution_fallback"] = control_reason
+    from ._record_cycles import publish_cycle_graph
+
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous, 16 * limits.depth + 2000))
+    try:
+        cycle_graph = publish_cycle_graph(builder)
+    finally:
+        sys.setrecursionlimit(previous)
+    if cycle_graph is not None:
+        record["cycle_graph"] = cycle_graph
+    _finish_conditions(record)
+    if cycle_graph is not None:
+        from ._record_transition_contract import seal
+
+        seal(record)
+        if getattr(builder, 'write_effect_transitions', ()):
+            record['write_effect_transitions'] = builder.write_effect_transitions
+            from ._record_write_effects import seal as seal_write_effects
+
+            seal_write_effects(record)
+        from ._record_loop_summaries import publish_loop_summaries
+
+        record['loop_summaries'] = publish_loop_summaries(record)
+    return record
 
 
 @measured("records")
 def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=None, completeness=None,
-                provenance=None, stitch=None):
+                provenance=None, stitch=None, physical_memory=False):
     """The record of a sink root: ``seeds`` as ``lane_slice`` takes them
     ((node, spans) of the root's raw sink rows); ``provenance``: the
     instance's ``CallProvenance`` (call nodes then carry it, docs 25.31 C9-5)."""
@@ -1697,10 +2591,10 @@ def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=
     metadata["function_unresolved_writes"] = len(normalized.memory_graph.unresolved_write_nodes) \
         if normalized.memory_graph is not None else None
     return _build(normalized, unit, seeds, metadata, origins=origins, declared=declared, limits=limits,
-                  provenance=provenance, stitch=stitch)
+                  provenance=provenance, stitch=stitch, physical_memory=physical_memory)
 
 
-def run_records(normalized, unit, summary, *, origins=None, declared=None, limits=None):
+def run_records(normalized, unit, summary, *, origins=None, declared=None, limits=None, physical_memory=False):
     """One record per output run of every normal exit of ``summary`` (the
     function's ``FunctionSummary``), with the run's own facts."""
     found = []
@@ -1722,24 +2616,19 @@ def run_records(normalized, unit, summary, *, origins=None, declared=None, limit
                 found.append({**metadata, "truncated": False, "demand_complete": True, "root": [], "nodes": []})
                 continue
             if len(nodes) > 1:
-                record = _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits)
+                record = _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits, physical_memory)
             else:
                 record = _build(normalized, unit, [(node, (run.span,)) for node in nodes], metadata,
-                                origins=origins, declared=declared, limits=limits)
+                                origins=origins, declared=declared, limits=limits, physical_memory=physical_memory)
             found.append(record)
     return found
 
 
-def _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits):
+def _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits, physical_memory=False):
     """A run with several definitions: a synthesized phi over them."""
-    record = _build(normalized, unit, [(node, (run.span,)) for node in nodes], metadata,
-                    origins=origins, declared=declared, limits=limits)
-    alternatives = list(record["root"])
-    phi = {"kind": "phi", "reason": "exit run definitions", "span": _span_text(run.span), "size": run.span.size,
-           "alternatives": alternatives, "id": len(record["nodes"])}
-    record["nodes"].append(phi)
-    record["root"] = [{"node": phi["id"], "bytes": [0, run.span.size], "at": [0, run.span.size]}]
-    return record
+    return _build(normalized, unit, [(node, (run.span,)) for node in nodes], metadata,
+                  origins=origins, declared=declared, limits=limits,
+                  merge_run=(run.span, tuple(run.definitions), metadata["exit"]), physical_memory=physical_memory)
 
 
 # -- rendering ------------------------------------------------------------------
@@ -1764,11 +2653,62 @@ def render(record) -> str:
     lines = [f"# {record.get('record')} {record.get('function')} {record.get('span', '')}"
              + (f" [{' '.join(facts)}]" if facts else "")]
     nodes = {node["id"]: node for node in record.get("nodes", ())}
+    control = record.get("control", {})
+    for key, decision in control.get("decisions", {}).items():
+        predicate = "+".join(_render_parts(decision["operand"].get("parts", ()), nodes)) or "?"
+        lines.append(f"decision {key} = {predicate} != 0 [{decision.get('evaluation', '?')}]")
+    for reference, item in enumerate(control.get("nodes", ())):
+        if type(item) is dict:
+            lines.append(f"g{reference} = {item['decision']} ? g{item['true']} : g{item['false']}")
+    for identity, context in record.get("physical_calls", {}).items():
+        def event_text(event):
+            target = f"n{event['node']}" if "node" in event else event.get("context", event["key"])
+            return f"{event['kind']} {target} if g{event['guard']}"
+
+        lines.append(f"physical call {identity} -> {context['function']} [requires RETURN/SP validation]")
+        if context.get("parent_context") is not None:
+            lines.append(f"  entry fallback = {context['parent_context']} ENTRY RAM (not its terminal RAM)")
+        lines.append("  entry RAM = " + " -> ".join(event_text(event) for event in
+                                                    (*context["prefix"], context["push"])))
+        lines.append("  body writes = " + " -> ".join(event_text(event) for event in context["events"]))
+        if context.get("kind") == "target_selection":
+            selector = record["target_selectors"][context["target_selector"]]
+            target = "+".join(_render_parts(selector["operand"].get("parts", ()), nodes))
+            lines.append(f"  original target = {target}; selector {identity}")
+            for candidate in selector["candidates"]:
+                lines.append(f"  0x{candidate['value']:x} -> {candidate['context']}")
+            continue
+        for returned in context.get("returns", (context.get("return"),)):
+            target = "+".join(_render_parts(returned["operand"].get("parts", ()), nodes))
+            stack = "+".join(_render_parts(returned["stack"]["parts"], nodes))
+            expected = "+".join(_render_parts(returned["expected_stack"]["parts"], nodes))
+            lines.append(f"  {returned['key']} if g{returned['guard']}: {target} == 0x{returned['expected_target']:x}; "
+                         f"SP {stack} == {expected}")
+    for call, reason in record.get("physical_call_cuts", {}).items():
+        lines.append(f"physical call {call} not connected: {reason}")
+    if "cycle_graph" in record:
+        from ._record_cycles import render_cycle_graph
+
+        lines.extend(render_cycle_graph(record["cycle_graph"], nodes, _render_parts))
+        from ._record_transitions import render_transitions
+
+        lines.extend(render_transitions({'transitions': record.get('write_effect_transitions', ())}, _render_parts, _render_node))
+        from ._record_loop_summaries import render_loop_summaries
+
+        lines.extend(render_loop_summaries(record))
     for node in record.get("nodes", ()):
         if node["kind"] == "entry" and "register" in node and not node.get("origins"):
             continue   # shown by name where used
         lines.append(f"n{node['id']} = {_render_node(node, nodes)}")
     lines.append("root = " + " | ".join(_render_parts(record.get("root", ()), nodes)))
+    if "execution_guard" in record:
+        lines.append(f"root executes only if g{record['execution_guard']} [g0=false, g1=true]")
+    if record.get('expression_views'):
+        from ._record_expression_views import render_expression_views
+        lines.extend(render_expression_views(record))
+    if record.get('expression_consumers'):
+        from ._record_expression_consumers import render_expression_consumers
+        lines.extend(render_expression_consumers(record))
     return "\n".join(lines)
 
 
@@ -1810,8 +2750,36 @@ def _render_node(node, nodes=None):
         return f"0x{node['value']:x}:{node['size']}"
     if kind == "entry":
         return f"entry {node.get('name') or node['span']}{origins}"
+    if kind == "memory_transfer":
+        source = "+".join(_render_parts(node["parts"], nodes))
+        success = node.get("success_edge") or "unrecorded"
+        return (f"memory transfer {node['span']} = {source} "
+                f"[reader={node['reader']}; call={node['call']}; guard={node['guard']}; "
+                f"success={success}; contract={node['contract']}; "
+                f"requires={','.join(node['requires'])}; conditional, numeric unsupported]{origins}")
     if kind == "phi":
-        return "phi(" + ", ".join(_render_parts(node["alternatives"], nodes)) + f") [{node['reason']}]{origins}"
+        text = "phi(" + ", ".join(_render_parts(node["alternatives"], nodes)) + f") [{node['reason']}]"
+        condition = node.get("condition")
+        if condition is not None:
+            predicate = "+".join(_render_parts(condition["operand"].get("parts", ()), nodes)) or "?"
+            text += (f" if {predicate} != 0 [T,F; decision={condition['decision']}; "
+                     f"merge={condition['merge']}; shared={condition['selection']}; "
+                     f"evaluation={node.get('condition_evaluation')}]")
+        elif node.get("guarded_sources"):
+            guarded = node["guarded_sources"]
+            text += " [guards=" + ",".join(f"g{ref}" for ref in guarded["guards"]) \
+                + f"; reaches=g{guarded['reach']}]"
+        elif node.get("condition_fallback"):
+            text += f" [unconditional: {node['condition_fallback']}]"
+        recurrence = node.get("recurrence")
+        if recurrence is not None:
+            initial = _render_parts([recurrence['init']['part']], nodes)[0]
+            transition = _render_parts([recurrence['transition']['part']], nodes)[0]
+            text += (f" [recurrence: init={initial}; next={transition}; header={recurrence['header']}; "
+                     f"backedge={recurrence['latch']}->{recurrence['header']}; structural only]")
+        elif node.get("recurrence_fallback"):
+            text += f" [recurrence unavailable: {node['recurrence_fallback']}]"
+        return text + origins
     if kind == "cut":
         return f"cut {node['target']} ({node['reason']})"
     if kind == "debt":
@@ -1822,13 +2790,23 @@ def _render_node(node, nodes=None):
         text = f"call {node['callee']} ~{node['row']} [{node.get('source')}] ({inputs}){origins}"
         for item in node.get("stitched", ()):
             text += f" => {_render_parts([item['part']], nodes)[0]}"
+        for item in node.get("physical_stitched", ()):
+            text += f" => physical {_render_parts([item['part']], nodes)[0]} [context={item['context']}]"
         if node.get("stitch_cut"):
             text += f" [not stitched: {node['stitch_cut']}]"
         return text
     if kind == "bound":
-        return f"bound {node['callee_entry']} = " + "+".join(_render_parts(node["parts"], nodes))
+        text = f"bound {node['callee_entry']} = " + "+".join(_render_parts(node["parts"], nodes))
+        if node.get("gaps"):
+            text += " gaps{" + ", ".join(f"{gap['at']}: {gap['reason']}" for gap in node["gaps"]) + "}"
+        return text
     if kind == "assemble":
-        return "assemble(" + ", ".join(_render_parts(node["parts"], nodes)) + ")"
+        text = "assemble(" + ", ".join(_render_parts(node["parts"], nodes)) + ")"
+        if "execution_guard" in node:
+            text += f" [exec g{node['execution_guard']}]"
+        elif "execution_fallback" in node:
+            text += f" [execution unknown: {node['execution_fallback']}]"
+        return text
     if kind in ("op", "override"):
         operands = []
         for operand in node.get("operands", ()):
@@ -1837,10 +2815,35 @@ def _render_node(node, nodes=None):
             if operand.get("pruned"):
                 operands.append("_")
             else:
-                operands.append("+".join(_render_parts(operand.get("parts", ()), nodes)) or "?")
+                value = "+".join(_render_parts(operand.get("parts", ()), nodes)) or "?"
+                if "physical_register" in operand:
+                    physical = operand["physical_register"]
+                    value += " => physical " + _render_parts([physical["part"]], nodes)[0] \
+                        + f" [context={physical['context']}; original debt retained]"
+                if "physical_register_fragments" in operand:
+                    physical = operand["physical_register_fragments"]
+                    value += " => physical fragments " + "+".join(_render_parts(physical["parts"], nodes)) \
+                        + " [unreplaced SSA bytes retained]"
+                if "physical_read" in operand:
+                    memory = operand["physical_read"]
+                    value += f" => physical RAM[{memory['space']:x}:{memory['address']:x}+{memory['width']}] {{" \
+                        + ", ".join(f"{event['kind']}@{event['key']} if g{event['guard']}"
+                                    for event in memory["events"]) + "}"
+                    if memory.get("entry_context") is not None:
+                        value += f" [entry RAM={memory['entry_context']}]"
+                operands.append(value)
         text = f"{node['opcode']}({', '.join(operands)})"
+        if "physical_write" in node:
+            write = node["physical_write"]
+            text += f" => RAM[{write['space']:x}:{write['address']:x}+{write['width']}]"
         if node.get("memory"):
             text += " mem{" + " | ".join("+".join(_render_parts(item["parts"], nodes)) for item in node["memory"]) + "}"
+        if node.get("physical_memory"):
+            memory = node["physical_memory"]
+            text += " physical{" + ", ".join(f"{event['kind']}@{event['key']} if g{event['guard']}"
+                                               for event in memory["events"]) + "}"
+            if "entry_context" in memory:
+                text += f" [entry RAM={memory['entry_context']}]"
         if node.get("reads"):
             text += " reads{" + " | ".join("+".join(_render_parts(item["parts"], nodes)) for item in node["reads"]) + "}"
         if "value" in node:
@@ -1872,9 +2875,193 @@ _SUPPORTED = frozenset({
 })
 
 
+def _guard_reason(condition, nodes):
+    """Static guard evaluation capability, NOT path feasibility. Unknown
+    entry bytes are a runtime case; debt/cut/unsupported are not that case."""
+    operand = condition.get("operand", {})
+    if operand.get("unresolved") or not operand.get("parts"):
+        return "unresolved operand"
+    pending = list(operand["parts"])
+    seen = set()
+    while pending:
+        part = pending.pop()
+        if part.get("pruned") or "node" not in part:
+            return "pruned predicate"
+        if part.get("loop"):
+            return "loop"
+        identifier = part["node"]
+        byte_range = tuple(part.get("bytes", ()))
+        key = identifier, byte_range
+        if key in seen:
+            continue
+        seen.add(key)
+        node = nodes.get(identifier)
+        if node is None:
+            return "missing reference"
+        if node.get("interrupted") or node["kind"] == "cut":
+            return "cut"
+        if node["kind"] == "debt" or node.get("debts"):
+            return "debt"
+        if node.get("override") is not None or node.get("rep_iteration") is not None:
+            return "override"
+        if node["kind"] == "op":
+            if node.get("opcode") not in _SUPPORTED:
+                return "unsupported " + str(node.get("opcode"))
+            if "value" in node:
+                # The existing engine proved a self-cancelling operation
+                # (xor/sub of the same storage) reads no inputs. Its folded
+                # value must not require the intentionally absent operands.
+                continue
+            if node.get("opcode") == "LOAD" and len(node.get("memory", ())) != 1:
+                return "ambiguous memory"
+            if any(item.get("unresolved") for item in node.get("operands", ())):
+                return "unresolved operand"
+        elif node["kind"] == "phi":
+            if "condition" not in node and "guarded_sources" not in node:
+                return "unordered phi"
+        elif node["kind"] not in ("entry", "const", "bound", "assemble"):
+            return "unsupported " + node["kind"]
+        if node["kind"] in ("bound", "assemble"):
+            if len(byte_range) != 2:
+                return "unbound predicate"
+            a, b = byte_range
+            if any(a < gap["at"][1] and gap["at"][0] < b for gap in node.get("gaps", ())):
+                return "unbound predicate"
+            covered = 0
+            for inner in node.get("parts", ()):
+                start, end = inner["at"]
+                low, high = max(a, start), min(b, end)
+                if low < high:
+                    covered += high - low
+                    pending.append(_compose(inner, low - start, high - start))
+            if covered != b - a:
+                return "unbound predicate"
+            continue
+        pending.extend(_node_parts(node, include_condition=False))
+    return None
+
+
+def _value_reached(record):
+    """Transitive value references, without optional predicate references.
+    Recomputed on consumption: a serialized condition_only flag is no proof
+    that a node (or its debt/cut inputs) is unused by the requested value."""
+    nodes = {node["id"]: node for node in record["nodes"]}
+    pending = [part["node"] for part in record["root"] if "node" in part]
+    seen = set()
+    while pending:
+        identifier = pending.pop()
+        if identifier in seen or identifier not in nodes:
+            continue
+        seen.add(identifier)
+        node = nodes[identifier]
+        pending.extend(part["node"] for part in _node_parts(node, include_condition=False) if "node" in part)
+        pending.extend(node.get("debts", ()))
+        pending.extend(item["node"] for item in node.get("from", ()))
+        pending.extend(item["part"]["node"] for item in node.get("stitched", ()))
+        if type(node.get("override")) is int:
+            pending.append(node["override"])
+    return seen
+
+
+def _finish_conditions(record):
+    """Only predicate-exclusive nodes may bypass VALUE eligibility."""
+    nodes = {node["id"]: node for node in record["nodes"]}
+    for identifier in _value_reached(record):
+        nodes[identifier].pop("condition_only", None)
+        nodes[identifier].pop("physical_only", None)
+        nodes[identifier].pop("cycle_only", None)
+    for node in record["nodes"]:
+        if "condition" in node:
+            reason = _guard_reason(node["condition"], nodes)
+            node["condition_evaluation"] = "supported" if reason is None else "fallback: " + reason
+    for decision in record.get("control", {}).get("decisions", {}).values():
+        reason = _guard_reason(decision, nodes)
+        decision["evaluation"] = "supported" if reason is None else "fallback: " + reason
+
+
+def _condition_domain(node, nodes):
+    """Validate the shared choice contract when consuming a JSON record.
+    Never trust one phi's guard on behalf of other phis with the same id."""
+    condition = node["condition"]
+    fields = ("selection", "decision", "merge", "true_successor", "false_successor")
+    if (not isinstance(condition, dict) or any(type(condition.get(key)) is not str for key in fields)
+            or node.get("choices") != [True, False]
+            or any(type(choice) is not bool for choice in node.get("choices", ()))
+            or len(node.get("alternatives", ())) != 2):
+        raise Ineligible("condition choice mismatch")
+    operand = condition.get("operand", {})
+    if type(operand.get("width")) is not int or operand["width"] <= 0:
+        raise Ineligible("condition operand")
+    covered = set()
+    for part in operand.get("parts", ()):
+        if (part.get("node") not in nodes or part.get("loop") or "bytes" not in part or "at" not in part
+                or len(part["bytes"]) != 2 or len(part["at"]) != 2):
+            raise Ineligible("condition reference")
+        a, b = part["bytes"]
+        c, d = part["at"]
+        if not (0 <= a < b and 0 <= c < d <= operand["width"] and b - a == d - c):
+            raise Ineligible("condition reference")
+        byte_range = set(range(c, d))
+        if covered & byte_range:
+            raise Ineligible("condition reference")
+        covered |= byte_range
+    if covered != set(range(operand["width"])):
+        raise Ineligible("condition reference")
+    return condition
+
+
+def _condition_signature(condition, nodes):
+    """Compare duplicated call-output predicates without equating raw IDs.
+
+    Bound nodes must resolve to the same byte expressions. Diagnostic flags
+    and origins do not establish that equality; calls remain opaque by ID.
+    Cycles cannot justify a shared decision and fail the import closed.
+    """
+    from .resource_limits import step
+
+    memo, active = {}, set()
+    remaining = 20000
+
+    def freeze(value):
+        nonlocal remaining
+        remaining -= 1
+        step()
+        if remaining < 0:
+            raise Ineligible("condition signature limit")
+        if isinstance(value, dict):
+            return tuple((key, node(value[key]) if key == "node" else freeze(value[key]))
+                         for key in sorted(value) if key not in (
+                             "id", "origins", "condition_only", "physical_only", "cycle_only", "import",
+                             "condition_evaluation", "evaluation"))
+        if isinstance(value, (tuple, list)):
+            return tuple(freeze(item) for item in value)
+        return value
+
+    def node(identifier):
+        if identifier in memo:
+            return memo[identifier]
+        if identifier in active or identifier not in nodes:
+            raise Ineligible("condition signature cycle or reference")
+        record = nodes[identifier]
+        if record["kind"] == "call":
+            return "opaque call", identifier
+        active.add(identifier)
+        try:
+            result = freeze(record)
+        finally:
+            active.remove(identifier)
+        memo[identifier] = result
+        return result
+
+    return tuple((field, freeze(condition[field])) for field in (
+        "selection", "decision", "merge", "true_successor", "false_successor", "operand"))
+
+
 def eligibility(record, route: str = "injected") -> str | None:
-    """None when ``record`` is checked for equality, else the first reason it
-    is not (loops are checked before any alternative). ``route``: "injected"
+    """None when the value graph is evaluable, else the first reason it is
+    not (loops are checked before any alternative). Alternatives can still
+    overapproximate feasible paths; optional guards have their own capability
+    metadata. ``route``: "injected"
     -- a call node's value comes from the caller's ``call``, imported nodes
     are not this record's value; "stitched" -- a stitched call's selected
     output is evaluated through its import, and the nodes checked are those
@@ -1883,15 +3070,22 @@ def eligibility(record, route: str = "injected") -> str | None:
         return "identity"   # unchanged: nothing to evaluate
     if record.get("truncated"):
         return "truncated"
+    value_nodes = _value_reached(record)
     if route == "stitched":
         reached = _reached(record)
-        nodes = [node for node in record.get("nodes", ()) if node["id"] in reached]
+        nodes = [node for node in record.get("nodes", ()) if node["id"] in reached
+                 and (not (node.get("condition_only") or node.get("physical_only") or node.get("cycle_only"))
+                      or node["id"] in value_nodes)]
     else:
         # (route "injected": a stitched call's imported subtree is not this
         # record's value -- docs 25.31 C-9)
-        nodes = [node for node in record.get("nodes", ()) if "import" not in node]
+        nodes = [node for node in record.get("nodes", ()) if "import" not in node
+                 and (not (node.get("condition_only") or node.get("physical_only") or node.get("cycle_only"))
+                      or node["id"] in value_nodes)]
     if any(node["kind"] == "cut" or node.get("interrupted") for node in nodes):
         return "cut"
+    if any(node["kind"] == "memory_transfer" for node in nodes):
+        return "memory transfer"
     for node in nodes:
         parts = [*node.get("alternatives", ()),
                  *(part for operand in node.get("operands", ()) for part in operand.get("parts", ())),
@@ -1935,64 +3129,152 @@ def eligibility(record, route: str = "injected") -> str | None:
     return None
 
 
+def _choice_contract(record, nodes, own, route="injected"):
+    """Structural selection validation, independent of static VALUE debt.
+
+    Both evaluation APIs consume the same contracts, including predicates
+    that are not value-eligible. This is consistency checking, not record
+    authentication or proof of path feasibility.
+    """
+    # Predicate-only values do not participate in VALUE eligibility, but
+    # their selection contracts must still be validated when guards consume
+    # them. Serialized condition_only flags are not trust boundaries.
+    predicate_pending = [part["node"] for node in own
+                         for part in node.get("condition", {}).get("operand", {}).get("parts", ())
+                         if "node" in part]
+    predicate_pending.extend(part["node"] for decision in record.get("control", {}).get("decisions", {}).values()
+                             if route == "stitched" or "import" not in decision
+                             for part in decision.get("operand", {}).get("parts", ()) if "node" in part)
+    predicate_seen = set()
+    while predicate_pending:
+        identifier = predicate_pending.pop()
+        if identifier in predicate_seen or identifier not in nodes:
+            continue
+        predicate_seen.add(identifier)
+        predicate_pending.extend(part["node"] for part in _node_parts(nodes[identifier]) if "node" in part)
+    checked = {node["id"]: node for node in own}
+    checked.update((identifier, nodes[identifier]) for identifier in predicate_seen)
+    choices = [node["id"] for node in checked.values() if node["kind"] == "phi" and "guarded_sources" not in node] + \
+              [node["id"] for node in checked.values()
+               if node["kind"] == "op" and node["opcode"] == "LOAD" and len(node.get("memory", ())) > 1]
+    sizes = {identifier: max(1, len(nodes[identifier].get("alternatives", nodes[identifier].get("memory", ()))))
+             for identifier in choices}
+    # Choices are requested lazily. Concrete predicates do not consume a
+    # Cartesian dimension, and branches of an unexecuted arm are not read.
+    choice_keys, domains, sizes_by_key = {}, {}, {}
+    for identifier in choices:
+        node = nodes[identifier]
+        if "condition" in node:
+            domain = _condition_domain(node, nodes)
+            instance = ("cfg", domain["selection"])
+            domain = _condition_signature(domain, nodes)
+        else:
+            instance = ("call", node["instance"]) if route == "stitched" and "instance" in node else None
+            domain = node.get("choices")
+        if instance is None:
+            instance = ("node", identifier)
+        if "condition" not in node and domain is not None and len(domain) != sizes[identifier]:
+            raise Ineligible('target choice mismatch')
+        if instance[0] == "call" and node.get("reason") == "callee exits":
+            # Separate output rows must agree on the same exit predicates,
+            # not merely the number/names of exits. These predicates may
+            # determine the exit without spending a second choice dimension.
+            guards = tuple(nodes[part["node"]].get("execution_guard") for part in node["alternatives"])
+            domain = domain, guards
+        if instance in domains:
+            if sizes_by_key[instance] != sizes[identifier] or domains[instance] != domain:
+                raise Ineligible("exit choice mismatch")
+        else:
+            domains[instance] = domain
+            sizes_by_key[instance] = sizes[identifier]
+        choice_keys[identifier] = instance
+    control = record.get("control") or {}
+    if control:
+        dag = control.get("nodes", ())
+        if len(dag) < 2 or dag[0] is not False or dag[1] is not True:
+            raise Ineligible("control DAG")
+        decisions = control.get("decisions", {})
+        for reference, item in enumerate(dag[2:], 2):
+            if item is None:
+                continue
+            if (not isinstance(item, dict) or item.get("decision") not in decisions
+                    or any(type(item.get(side)) is not int or not 0 <= item[side] < reference
+                           or dag[item[side]] is None for side in ("true", "false"))):
+                raise Ineligible("control DAG")
+        for key, decision in decisions.items():
+            if route == "injected" and "import" in decision:
+                continue
+            domain = _condition_domain({"condition": decision, "choices": [True, False],
+                                        "alternatives": [None, None]}, nodes)
+            if key not in (domain["decision"], domain["selection"]):
+                raise Ineligible("control decision")
+            # Evaluation annotations are diagnostic, never an authority.
+            domain = {name: value for name, value in domain.items() if name != "evaluation"}
+            instance = ("cfg", domain["selection"])
+            signature = _condition_signature(domain, nodes)
+            if instance in domains and domains[instance] != signature:
+                raise Ineligible("exit choice mismatch")
+            domains[instance], sizes_by_key[instance] = signature, 2
+        references = [record["execution_guard"]] if "execution_guard" in record else []
+        for node in checked.values():
+            if "execution_guard" in node:
+                references.append(node["execution_guard"])
+            if "guarded_sources" in node:
+                guarded = node["guarded_sources"]
+                guards = guarded.get("guards", ())
+                if len(guards) != len(node.get("alternatives", ())):
+                    raise Ineligible("guarded source correspondence")
+                references.extend((*guards, guarded.get("reach")))
+        if any(type(ref) is not int or not 0 <= ref < len(dag) or dag[ref] is None for ref in references):
+            raise Ineligible("control reference")
+    elif any("guarded_sources" in node for node in own) or "execution_guard" in record:
+        raise Ineligible("missing control DAG")
+    return choice_keys, control
+
+
 def evaluate(record, entry, *, call=None, max_choices=256, route: str = "injected", trace=None):
-    """The set of values (little-endian ints over the root's bytes) the
-    record allows: ``entry(node)`` -> the value of an entry node or None (not
-    known), ``entry(("memory", space, address, size))`` -> entry memory at a
-    concrete address or None; ``call(node, part)`` -> a call output's bytes or
-    None. Raises ``Ineligible`` with the reason when not evaluable.
-    ``route`` (``eligibility``): "stitched" evaluates a stitched call's
-    selected output through its import (``call`` only for the others); the
-    phis "callee exits" of one call instance take one choice together (the
-    callee left by one exit). ``trace``: a set the ids of the call nodes
-    evaluated through an import are added to."""
+    """Values allowed by a static expression record at the given entry.
+
+    ``entry(node)`` reads entry registers; ``entry(('memory', space,
+    address, size))`` reads function-entry RAM. ``call(node, part)`` optionally
+    supplies boundary bytes. The stitched route follows imported bodies.
+    Shared CFG decisions and callee exits select together; unknown guards
+    preserve their correlated union, not proof of feasible paths. Static
+    debt/cuts remain ineligible. ``trace`` collects evaluated stitched calls.
+    """
     reason = eligibility(record, route)
     if reason is not None:
         raise Ineligible(reason)
     nodes = {node["id"]: node for node in record["nodes"]}
+    value_nodes = _value_reached(record)
     if route == "stitched":
         reached = _reached(record)
-        own = [node for node in record["nodes"] if node["id"] in reached]
+        own = [node for node in record["nodes"] if node["id"] in reached
+               and (not (node.get("condition_only") or node.get("physical_only") or node.get("cycle_only"))
+                    or node["id"] in value_nodes)]
     else:
-        own = [node for node in record["nodes"] if "import" not in node]   # (route "injected")
-    choices = [node["id"] for node in own if node["kind"] == "phi"] + \
-              [node["id"] for node in own
-               if node["kind"] == "op" and node["opcode"] == "LOAD" and len(node.get("memory", ())) > 1]
-    sizes = {identifier: max(1, len(nodes[identifier].get("alternatives", nodes[identifier].get("memory", ()))))
-             for identifier in choices}
-    # one dimension per choice, the "callee exits" phis of one instance together
-    dimensions: list = []
-    instances: dict = {}
-    for identifier in choices:
-        instance = nodes[identifier].get("instance") if route == "stitched" else None
-        if instance is None:
-            dimensions.append(([identifier], sizes[identifier]))
-            continue
-        if instance in instances:
-            members, size = dimensions[instances[instance]]
-            if size != sizes[identifier]:
-                raise Ineligible("exit choice mismatch")
-            members.append(identifier)
-        else:
-            instances[instance] = len(dimensions)
-            dimensions.append(([identifier], sizes[identifier]))
-    total = 1
-    for _, size in dimensions:
-        total *= size
-    if total > max_choices:
-        raise Ineligible("alternatives")
+        own = [node for node in record["nodes"] if "import" not in node
+               and (not (node.get("condition_only") or node.get("physical_only") or node.get("cycle_only"))
+                    or node["id"] in value_nodes)]
+    choice_keys, control = _choice_contract(record, nodes, own, route)
     results = set()
     unknown = False
-    for number in range(total):
-        assignment = {}
-        for members, size in dimensions:
-            for identifier in members:
-                assignment[identifier] = number % size
-            number //= size
+    pending, leaves = [{}], 0
+    while pending:
+        assignment = pending.pop()
         try:
-            results.add(_evaluate_once(nodes, entry, call, assignment, record, route, trace))
+            results.add(_evaluate_once(nodes, entry, call, assignment, record, route, trace,
+                                       choice_keys=choice_keys, control=control))
+        except _NeedChoice as request:
+            if leaves + len(pending) + request.size > max_choices:
+                raise Ineligible("alternatives")
+            pending.extend({**assignment, request.key: choice} for choice in range(request.size))
+            continue
+        except _Infeasible:
+            continue
         except _Unknown:
             unknown = True
+        leaves += 1
     if unknown or not results:
         # an alternative that cannot be evaluated may be the one taken: the
         # known ones are no result (approved R2)
@@ -2000,18 +3282,64 @@ def evaluate(record, entry, *, call=None, max_choices=256, route: str = "injecte
     return results
 
 
+def evaluate_physical(record, entry, *, max_steps=200000):
+    """Explicit concrete interpretation, preserving the static record debt.
+
+    Requires ``root_record``/``run_records(..., physical_memory=True)``.
+    The result includes the value and per-byte/decision evidence. Unknown
+    addresses, relevant unresolved effects and unsupported active calls fail closed.
+    """
+    # The physical interpreter consumes ordered event subgraphs outside the
+    # ordinary root-value walk; an unrelated-looking transfer may still be
+    # needed by an event address/value. Do not bypass the conditional contract
+    # through that alternate evaluator.
+    if any(node.get("kind") == "memory_transfer" for node in record.get("nodes", ())):
+        raise Ineligible("memory transfer requires conditional contract evaluation")
+    from ._record_memory import evaluate_physical as interpret
+
+    return interpret(record, entry, max_steps=max_steps)
+
+
+def evaluate_transition(record, identity, inputs, *, accept_unattributed_assumptions=False):
+    """One derived cut-DAG visit; does not change original loop eligibility."""
+    from ._record_transitions import evaluate_transition as interpret
+
+    return interpret(record, identity, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def evaluate_loop_summary(record, identity, inputs, *, accept_unattributed_assumptions=False):
+    """Terminal tracked state for a supported countdown loop, without unrolling."""
+    from ._record_loop_summaries import evaluate_loop_summary as interpret
+
+    return interpret(record, identity, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
 class _Unknown(Exception):
     pass
 
 
-def _evaluate_once(nodes, entry, call, assignment, record, route="injected", trace=None):
+class _Infeasible(Exception):
+    """This shared assignment contradicts a concrete, supported guard."""
+
+
+class _NeedChoice(Exception):
+    def __init__(self, key, size):
+        self.key, self.size = key, size
+
+
+def _evaluate_once(nodes, entry, call, assignment, record, route="injected", trace=None,
+                   *, choice_keys=None, control=None):
     """One assignment's value, with room for the record's depth (one level
     takes a few Python frames); running out is ineligibility, not a crash."""
     depth = record.get("limits", {}).get("depth", Limits.depth)
     previous = sys.getrecursionlimit()
     sys.setrecursionlimit(max(previous, 16 * depth * (1 + Limits.call_depth) + 2000))
     try:
-        return _Evaluator(nodes, entry, call, assignment, route, trace).root(record["root"])
+        evaluator = _Evaluator(nodes, entry, call, assignment, route, trace,
+                               choice_keys=choice_keys, control=control)
+        if "execution_guard" in record and not evaluator.guard(record["execution_guard"]):
+            raise _Infeasible()
+        return evaluator.root(record["root"])
     except RecursionError:
         raise Ineligible("recursion") from None
     finally:
@@ -2019,11 +3347,77 @@ def _evaluate_once(nodes, entry, call, assignment, record, route="injected", tra
 
 
 class _Evaluator:
-    def __init__(self, nodes, entry, call, assignment, route="injected", trace=None):
+    def __init__(self, nodes, entry, call, assignment, route="injected", trace=None,
+                 *, choice_keys=None, control=None):
         self.nodes, self.entry, self.call, self.assignment = nodes, entry, call, assignment
         self.route, self.trace = route, trace
         self.memo: dict = {}
         self.ranges: dict = {}   # (bound / assemble node, a, b) -> value
+        self.choice_keys, self.control = choice_keys or {}, control or {}
+        self.guard_memo, self.guard_active = {}, set()
+
+    def _decision(self, condition):
+        key = ("cfg", condition["selection"])
+        if key in self.guard_active:
+            raise Ineligible("cyclic predicate")
+        if _guard_reason(condition, self.nodes) is None:
+            self.guard_active.add(key)
+            try:
+                value = self.operand(condition["operand"])
+            except _Unknown:
+                pass
+            else:
+                choice = 0 if value else 1
+                if key in self.assignment and self.assignment[key] != choice:
+                    raise _Infeasible()
+                return choice
+            finally:
+                self.guard_active.discard(key)
+        if key not in self.assignment:
+            raise _NeedChoice(key, 2)
+        return self.assignment[key]
+
+    def guard(self, reference):
+        if reference in self.guard_memo:
+            return self.guard_memo[reference]
+        dag = self.control.get("nodes", ())
+        if type(reference) is not int or not 0 <= reference < len(dag) or dag[reference] is None:
+            raise Ineligible("control reference")
+        if reference < 2:
+            return bool(reference)
+        item = dag[reference]
+        decision = self.control.get("decisions", {}).get(item["decision"])
+        if decision is None:
+            raise Ineligible("control decision")
+        result = self.guard(item["true"] if self._decision(decision) == 0 else item["false"])
+        self.guard_memo[reference] = result
+        return result
+
+    def _choice(self, node):
+        if "guarded_sources" in node:
+            guarded = node["guarded_sources"]
+            if not self.guard(guarded["reach"]):
+                raise _Infeasible()
+            choices = [index for index, ref in enumerate(guarded["guards"]) if self.guard(ref)]
+            if len(choices) != 1:
+                raise Ineligible("guarded source correspondence")
+            return choices[0]
+        condition = node.get("condition")
+        if condition is not None:
+            return self._decision(condition)
+        if node.get("reason") == "callee exits" and node.get("alternatives"):
+            exits = [self.nodes[part["node"]] for part in node["alternatives"]]
+            if all(item.get("kind") == "assemble" and "execution_guard" in item for item in exits):
+                chosen = [index for index, item in enumerate(exits) if self.guard(item["execution_guard"])]
+                if not chosen:
+                    raise _Infeasible()
+                if len(chosen) != 1:
+                    raise Ineligible("callee exit correspondence")
+                return chosen[0]
+        key = self.choice_keys.get(node["id"], ("node", node["id"]))
+        if key not in self.assignment:
+            raise _NeedChoice(key, max(1, len(node.get("alternatives", node.get("memory", ())))))
+        return self.assignment[key]
 
     def root(self, parts):
         value = 0
@@ -2036,6 +3430,15 @@ class _Evaluator:
     def part(self, part, node_value=None):
         a, b = part["bytes"]
         node = self.nodes[part["node"]]
+        if "execution_guard" in node and not self.guard(node["execution_guard"]):
+            raise _Infeasible()
+        if node["kind"] == "entry" and "register" in node and node_value is None:
+            register = node["register"]
+            found = self.entry({**node, "register": {**register, "offset": register["offset"] + a,
+                                                     "size": b - a}})
+            if found is None:
+                raise _Unknown()
+            return found & ((1 << (8 * (b - a))) - 1)
         if node["kind"] == "call":
             if self.route == "stitched":
                 item = _stitched_item(node, part)
@@ -2087,7 +3490,7 @@ class _Evaluator:
         key = (identifier, a, b)
         if key in self.ranges:
             return self.ranges[key]
-        alternative = node["alternatives"][self.assignment[identifier]]
+        alternative = node["alternatives"][self._choice(node)]
         start, end = alternative["at"]
         if not start <= a < b <= end:
             raise _Unknown()
@@ -2116,7 +3519,7 @@ class _Evaluator:
         if node["kind"] == "phi" and self.route == "stitched":
             # only bytes [a, b) of the chosen alternative (as ``_phi_range``):
             # its producer's bytes start at address + at[0] - bytes[0]
-            alternative = node["alternatives"][self.assignment[part["node"]]]
+            alternative = node["alternatives"][self._choice(node)]
             start, end = alternative["at"]
             if not start <= a < b <= end:
                 raise _Unknown()
@@ -2126,7 +3529,7 @@ class _Evaluator:
             # the phi's bytes start at ``address``; its chosen alternative's
             # producer at address + at[0] - bytes[0]
             value = self._alternative(
-                node, self.assignment[part["node"]],
+                node, self._choice(node),
                 lambda alternative: self._located_part(alternative, space,
                                                        address + alternative["at"][0] - alternative["bytes"][0]))
             return (value >> (8 * a)) & ((1 << (8 * (b - a))) - 1)
@@ -2147,6 +3550,8 @@ class _Evaluator:
         if identifier in self.memo:
             return self.memo[identifier]
         node = self.nodes[identifier]
+        if "execution_guard" in node and not self.guard(node["execution_guard"]):
+            raise _Infeasible()
         kind = node["kind"]
         if kind == "const":
             found = node["value"]
@@ -2155,7 +3560,7 @@ class _Evaluator:
             if found is None:
                 raise _Unknown()
         elif kind == "phi":
-            found = self._alternative(node, self.assignment[identifier], self.part)
+            found = self._alternative(node, self._choice(node), self.part)
         elif kind == "op":
             found = self._op(identifier, node)
         elif kind in ("bound", "assemble"):
@@ -2178,7 +3583,7 @@ class _Evaluator:
             places = node["memory"]
             if not places:
                 raise _Unknown()
-            place = places[self.assignment.get(identifier, 0)]
+            place = places[self._choice(node) if len(places) > 1 else 0]
             size = node["output"]["size"]
             value = 0
             covered = set()
@@ -2270,6 +3675,8 @@ def _reached(record) -> set:
                     push(piece)
             continue
         if kind == "phi":
+            for inner in node.get("condition", {}).get("operand", {}).get("parts", ()):
+                push(inner)
             for inner in node.get("alternatives", ()):
                 start, end = inner.get("at", (0, node.get("size", 0)))
                 low, high = max(a, start), min(b, end)
@@ -2340,5 +3747,99 @@ def _compute(opcode, values, widths, out_size):
     return table[opcode]()
 
 
-__all__ = ("Ineligible", "Limits", "RECORD_VERSION", "StitchContext", "eligibility", "evaluate", "render",
-           "root_record", "run_records")
+def select_expression(record, outputs=None, *, namespace='original', limits=None):
+    """Select existing expression PartRefs without changing the source network."""
+    from ._record_expression_views import select_expression as select
+    return select(record, outputs, namespace=namespace, limits=limits)
+
+
+def simplify_expression(record, selection=None, *, candidate=None, conditions=()):
+    """Derived local value view; source effects, cycles and summaries remain."""
+    from ._record_expression_views import simplify_expression as simplify
+    return simplify(record, selection, candidate=candidate, conditions=conditions)
+
+
+def attach_expression_view(record, view):
+    """Return an unchanged-source copy with a verified derived view attached."""
+    from ._record_expression_views import attach_expression_view as attach
+    return attach(record, view)
+
+
+def evaluate_expression_view(record, view, inputs, *, accept_unattributed_assumptions=False):
+    """Revalidate the derived view before reading concrete producer inputs."""
+    from ._record_expression_views import evaluate_expression_view as interpret
+    return interpret(record, view, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def derive_expression_consumer(record, selection, view_ids):
+    """Reuse verified P0 views in same-namespace downstream expressions."""
+    from ._record_expression_consumers import derive_expression_consumer as derive
+    return derive(record, selection, view_ids)
+
+
+def derive_loop_consumer(record, transition, view_ids):
+    """Separate countdown summary consuming proven invariant-delta DAGs."""
+    from ._record_expression_loops import derive_loop_consumer as derive
+    return derive(record, transition, view_ids)
+
+
+def attach_expression_consumer(record, consumer):
+    from ._record_expression_consumers import attach_expression_consumer as attach
+    return attach(record, consumer)
+
+
+def evaluate_expression_consumer(record, identity, inputs, *, accept_unattributed_assumptions=False):
+    from ._record_expression_consumers import evaluate_expression_consumer as evaluate
+    return evaluate(record, identity, inputs, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def prove_byte_influence(record, selection, pairs, *, conditions=(), limits=None, accept_unattributed_assumptions=False):
+    """Prove byte value influence separately from guard/reach/definedness."""
+    from ._record_expression_influence import prove_byte_influence as prove
+    return prove(record, selection, pairs, conditions=conditions, limits=limits,
+                 accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def validate_byte_influence(record, proof, *, accept_unattributed_assumptions=False):
+    from ._record_expression_influence import validate_byte_influence as validate
+    return validate(record, proof, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def attach_byte_influence(record, proof, *, accept_unattributed_assumptions=False):
+    from ._record_expression_influence import attach_byte_influence as attach
+    return attach(record, proof, accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def derive_expression_island(record, outputs=None, *, boundaries, namespace='original', conditions=(), candidate=None, limits=None):
+    from ._record_expression_islands import derive_expression_island as derive
+    return derive(record,outputs,boundaries=boundaries,namespace=namespace,conditions=conditions,candidate=candidate,limits=limits)
+
+
+def derive_transition_chain(record, transition, max_visits):
+    from ._record_transition_chains import derive_transition_chain as derive
+    return derive(record,transition,max_visits)
+
+
+def validate_expression_island(record, island, *, accept_unattributed_assumptions=False):
+    from ._record_expression_islands import validate_expression_island as validate
+    return validate(record,island,accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def attach_expression_island(record, island, *, accept_unattributed_assumptions=False):
+    from ._record_expression_islands import attach_expression_island as attach
+    return attach(record,island,accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+def evaluate_expression_island(record, identity, inputs, validity, *, accept_conditional_boundaries=False,
+                               accept_unattributed_assumptions=False):
+    from ._record_expression_islands import evaluate_expression_island as evaluate
+    return evaluate(record,identity,inputs,validity,accept_conditional_boundaries=accept_conditional_boundaries,
+                    accept_unattributed_assumptions=accept_unattributed_assumptions)
+
+
+__all__ = ("Ineligible", "Limits", "RECORD_VERSION", "StitchContext", "eligibility", "evaluate", "evaluate_physical", "render",
+           "evaluate_transition", "evaluate_loop_summary", "root_record", "run_records", "select_expression",
+           "simplify_expression", "attach_expression_view", "evaluate_expression_view", "derive_expression_consumer",
+           "derive_loop_consumer", "attach_expression_consumer", "evaluate_expression_consumer", "prove_byte_influence",
+           "validate_byte_influence", "attach_byte_influence", "derive_expression_island", "validate_expression_island",
+           "attach_expression_island", "evaluate_expression_island", "derive_transition_chain")

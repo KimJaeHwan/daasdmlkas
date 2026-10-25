@@ -281,7 +281,8 @@ def transfers_for(plan, ssa):
         if identifier is None or action is None or not matches:
             raise RefinementRefused("resize snapshot/read fragment changed during replay")
         result.append(MemoryTransfer(identifier, action, proof.span, proof.call, proof.outcome.guard,
-                                     proof.contract, proof.requires))
+                                     proof.contract, proof.requires, proof.outcome.success_edge,
+                                     proof.outcome.failure_edge, proof.result_definitions))
     return tuple(result)
 
 

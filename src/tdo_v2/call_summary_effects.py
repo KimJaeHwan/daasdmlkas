@@ -557,6 +557,7 @@ def derive_composed_call_effect(
     excluded: tuple[ByteSpan, ...] = (),
     stack_deltas: dict | None = None,
     failed_conditions: frozenset = frozenset(),
+    memory_sources: dict | None = None,
 ) -> ProvenCallEffect | None:
     """The effect of a call that reaches ONE of several functions (an indirect
     call whose target set is proven, docs 25.33 F1b): ``members`` = ((summary,
@@ -578,14 +579,19 @@ def derive_composed_call_effect(
       writes may land on one caller place under different objects, and the
       caller's rows would apply them one after the other (one value lost).
       In an address space where more than one member writes memory other
-      than one shared global object, every such write of every member is
-      UNKNOWN (exact place, unknown value -- a debt there). Frame bytes below
+      than one shared global object, these writes start UNKNOWN. Only direct
+      memory runs proven separately for every member can replace that debt:
+      one shared physical entry-register anchor, one address space, no
+      unexplained writes or alias conditions. They merge on anchored bytes,
+      without renaming any member's objects. Frame bytes below
       the callee's entry stack pointer and the return-address slot are left
       as they are (``derive_proven_call_effect`` handles them before any
       memory key).
     Writer conditions, sink demands, unknown writers, inner calls, dead exits
     and anchors are united; register deltas are kept where every returning
-    member states the same delta."""
+    member states the same delta. ``memory_sources``, when supplied, records
+    each synthesized write's original (member index, ProvenMemoryRun or None
+    for proven preservation) alternatives, for operation-record provenance."""
     from dataclasses import replace as _replace
 
     stack = {(span.start, span.size) for span in excluded}
@@ -688,10 +694,120 @@ def derive_composed_call_effect(
         tuple(sorted(((key, value) for key, value in merged_relations.items() if key not in conflicted_relations),
                      key=lambda pair: repr(pair[0]))),
     )
-    return derive_proven_call_effect(
+    effect = derive_proven_call_effect(
         composed, callee, register_object, register_limit, excluded=excluded, anchors=merged_anchors,
         stack_deltas=stack_deltas, failed_conditions=failed_conditions,
     )
+    if effect is None or opaque_members or effect.noreturn:
+        return effect
+    member_effects = tuple(
+        (index, derive_proven_call_effect(
+            summary, callee, register_object, register_limit, excluded=excluded, anchors=anchors,
+            stack_deltas=stack_deltas, failed_conditions=failed_conditions,
+        ))
+        for index, (summary, anchors) in enumerate(members) if summary.exits
+    )
+    return _compose_fixed_memory(effect, member_effects, memory_sources)
+
+
+def _compose_fixed_memory(effect, member_effects, memory_sources=None):
+    """Refine only fixed anchored bytes, after each member proved its own
+    effect. Missing bytes are old memory only when that member accounts for
+    all memory writes, and has no other write that could alias this anchor.
+    Global, pointer-chain and conflicting-anchor spaces keep the old result.
+    No summary object is rewritten into another function's namespace."""
+    from dataclasses import replace
+
+    if not member_effects or any(own is None or not own.preserves_memory or own.writer_conditions
+                                 for _, own in member_effects):
+        return effect
+
+    spaces: dict = {}
+    blocked = set()
+    for _, own in member_effects:
+        for access in own.unknown_memory:
+            blocked.add(access.space_id)
+        for run in own.memory_runs:
+            access = run.write
+            if access.anchor is None or access.anchor.object_id.kind is not StorageObjectKind.REGISTER_FILE \
+                    or access.pointer is not None or access.span is not None or access.index is not None or run.conditions:
+                blocked.add(access.space_id)
+                continue
+            spaces.setdefault(access.space_id, set()).add(access.anchor)
+
+    synthesized = []
+    replaced: dict = {}
+    for space, anchors in sorted(spaces.items()):
+        if space in blocked or len(anchors) != 1:
+            continue
+        (anchor,) = anchors
+        grids = []
+        conflict = False
+        for index, own in member_effects:
+            grid = {}
+            for run in own.memory_runs:
+                if run.write.space_id != space:
+                    continue
+                for offset in range(run.write.displacement, run.write.displacement + run.write.size):
+                    if offset in grid:
+                        conflict = True  # more than one final value for a member's byte
+                    grid[offset] = run
+            grids.append((index, own, grid))
+        if conflict:
+            continue
+        offsets = set().union(*(grid.keys() for _, _, grid in grids))
+        # Below-frame writes stay represented by clobbers_below: the caller
+        # applies that region's debt after the run outputs. They cannot prove
+        # that a byte missing from one member kept its old memory value.
+        if any(own.clobbers_below and offsets - grid.keys() for _, own, grid in grids):
+            continue
+        # Keep original run boundaries, even when the merged dependencies are
+        # equal: every output interval has one unambiguous source per member.
+        groups = []
+        for offset in sorted(offsets):
+            alternatives = tuple((index, grid.get(offset)) for index, _, grid in grids)
+            if groups and groups[-1][1] == offset and groups[-1][2] == alternatives:
+                start, _, sources = groups[-1]
+                groups[-1] = (start, offset + 1, sources)
+            else:
+                groups.append((offset, offset + 1, alternatives))
+        for start, end, alternatives in groups:
+            write = AnchoredSpan(anchor, start, end - start, space)
+            runs = tuple(run for _, run in alternatives if run is not None)
+            keeps_old = any(run is None or run.keeps_old for _, run in alternatives)
+            reads = tuple(sorted({span for run in runs for span in run.reads}, key=lambda span: span.canonical_key))
+            loads = tuple(sorted({access for run in runs for access in run.loads}, key=repr))
+            origins = tuple(sorted({origin for run in runs for origin in run.origins}))
+            # Pointer facts describe a whole pointer, never a split portion or
+            # an old-memory alternative. Equal dependency sets are not proof
+            # that two alternatives carry the same pointer value.
+            value = runs[0].value if not keeps_old and all(
+                run.write == write and run.value == runs[0].value for run in runs
+            ) else None
+            synthesized.append(ProvenMemoryRun(write, reads, loads, keeps_old, origins, value=value))
+            if memory_sources is not None:
+                memory_sources[write] = alternatives
+        replaced[(space, anchor)] = offsets
+    if not synthesized:
+        return effect
+
+    def remaining(access):
+        offsets = replaced.get((access.space_id, access.anchor)) if access.pointer is None \
+            and access.span is None and access.index is None else None
+        if offsets is None:
+            return (access,)
+        # Replace exactly the proven byte grid, not an overlapping unknown
+        # span's other bytes (nor a place under another physical anchor).
+        left = set(range(access.displacement, access.displacement + access.size)) - offsets
+        base = min(left, default=0)  # ByteSpan offsets are unsigned; displacements need not be.
+        return tuple(AnchoredSpan(access.anchor, base + span.start, span.size, access.space_id)
+                     for span in _spans(access.anchor.object_id, (offset - base for offset in left)))
+
+    memory_runs = [replace(run, write=access, value=run.value if access == run.write else None,
+                           literal=run.literal if access == run.write else None)
+                   for run in effect.memory_runs for access in remaining(run.write)]
+    unknown_memory = tuple(access for item in effect.unknown_memory for access in remaining(item))
+    return replace(effect, memory_runs=tuple(memory_runs + synthesized), unknown_memory=unknown_memory)
 
 
 def _observed_registers(runs, memory_runs, unknown_memory, writer_pairs, sink_demands, skip) -> tuple:
