@@ -104,12 +104,18 @@ def decide_call_memory(item, *, readonly_image=None, assumptions=()):
         if reason == "null-free-set-empty":
             transition = transitions.get(call)
             geometry = bounds.get(call)
-            # Require the entire demanded range outside the CALL's observed
-            # return-address overlay AND the callee's lower frame. No partial
-            # overlap, pointer-origin, allocation extent or lifetime shortcut.
+            # Require the entire demanded range outside the callee's lower
+            # frame. No partial overlap, pointer-origin, allocation extent or
+            # lifetime shortcut. (The CALL's return-address slot needs no
+            # exclusion: the push is its definition, ``normalize._push_row``,
+            # and the read reaches it whether or not the call preserves memory.
+            # ``_allocation_memory`` keeps the slot on purpose -- there it is
+            # memory LIVE during the allocating call, a different question.
+            # The home space above the slot is the model's: "other memory
+            # preserved" includes no spill there.)
             if transition is None or transition.displacement_delta != -8 or geometry is None:
                 reason = "call-geometry-unproved"
-            elif demand.span.object_id != geometry[0] or demand.span.start < geometry[1] + 8:
+            elif demand.span.object_id != geometry[0] or demand.span.start < geometry[1]:
                 reason = "range-outside-proven-stack-region"
         decisions.append(CallMemoryDecision(demand, reason == "null-free-set-empty", reason, requires,
                                             None if model_file is None else model_file.digest,

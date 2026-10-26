@@ -5739,4 +5739,9 @@ count 검사 제어 간선 중복(의미 동일, 간선 수만). (4) SP를 표�
 (6) 정리 1차(같은 날): `_call_activation.lowering_refusal` 제거(위 문단), "호출의 첫 행" 탐색을 `forward.first_effect` 하나로,
 rep `~e` 행의 count 검사 제어 간선 별도 루프 제거(행이 기준 연산의 제어 의존을 물려받음 — 간선 수 동일, 중복 없음). 순 -39줄.
 남김: `_call_memory`의 "demand가 geometry+8 밖" 검사(+8은 push 칸 — 지금은 push 정의가 답하므로 -8/-4 기대를 바꾸는 별도 변경으로).
+(7) 정리 2차: `_call_memory`의 null-free 보존 판정이 요구하던 "demand가 반환주소 칸 `[bound, bound+8)` 밖" 조건 제거 — 그 칸은
+push 정의가 답한다(callee 쓰기는 run이라 이 판정 자체가 거부됨). 측정: realloc 칸 -8/-4 읽기가 push(+이전 바이트)로 정확, 오라클
+조용한 오류 0. `_allocation_memory`는 "할당 호출 동안 살아 있는 메모리"라는 다른 질문이라 칸을 그대로 센다.
+기록만: 다중 대상 `frame_or_slot`의 칸 제외는 모든 대상 요약의 "writer 없는 UNKNOWN" 칸 run(RET 뒤 SP 아래)을 경쟁 쓰기에서 빼는
+역할 — 그래프식 해법은 "writer 없는 run은 쓰기가 아니다"(별도 설계).
 

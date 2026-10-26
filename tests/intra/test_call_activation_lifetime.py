@@ -175,8 +175,8 @@ def test_forward_off_keeps_the_original_generic_call_debt(models, monkeypatch):
     assert _read(callee, points["reader"]).span not in callee.proven[points["realloc"]].preserved
 
 
-@pytest.mark.parametrize("saved_displacement", (-16, -12, -8, -4))
-def test_slot_in_callee_frame_or_call_return_overlay_is_not_preserved(models, saved_displacement):
+@pytest.mark.parametrize("saved_displacement", (-16, -12))
+def test_slot_in_callee_frame_is_not_preserved(models, saved_displacement):
     result, points = _run(models, saved_displacement=saved_displacement)
     caller, callee = result["1:1000"], result["1:1600"]
     context = caller.activations.get(points["outer"])
@@ -186,6 +186,29 @@ def test_slot_in_callee_frame_or_call_return_overlay_is_not_preserved(models, sa
         assert target.span not in context.proven[points["realloc"]].preserved
     assert not callee.proven[points["realloc"]].preserves_memory
     assert _clobbered(callee, points)
+
+
+@pytest.mark.parametrize("saved_displacement", (-8, -4))
+def test_slot_on_the_calls_return_address_reads_the_push(models, saved_displacement):
+    """The saved slot is (partly) the inner CALL's own return-address slot:
+    no exclusion is needed there -- the push is its definition
+    (``normalize._push_row``), so with the call preserving memory the read
+    gets the pushed bytes (and the old store's for the rest), exactly. (The
+    program oracle checks the caller's graph, which embeds the context.)"""
+    from test_interprocedural import _check
+
+    result, points = _run(models, saved_displacement=saved_displacement)
+    caller, callee = result["1:1000"], result["1:1600"]
+    context = caller.activations[points["outer"]]
+    assert not _clobbered(context, points)
+    ssa = context.normalized.memory_ssa
+    writers = {ssa.definitions[fragment.definition_ids[0]].operation_key
+               for read in ssa.reads if ssa.actions[read.action_id].operation_key == points["reader"]
+               and read.span.object_id.kind.value == "function_relative" for fragment in read.fragments}
+    assert f"{points['realloc']}~push" in writers
+    assert _clobbered(callee, points)   # (the generic callee: no activation facts, the call keeps its debt)
+    program = {(1, item.unit.scopes.function.entry.byte_offset): item.unit.observation for item in result.values()}
+    assert _check(result, program).silent == []
 
 
 def test_explicit_other_memory_contract_withdrawal_keeps_the_raw_call_debt(models, tmp_path):
