@@ -1105,10 +1105,10 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     for access in planned:
         step()
         if access.index is not None:
-            if access.pointer is not None:
-                protect(access.pointer)
-            if access.index.memory is not None:
-                protect(access.index.memory)
+            # the indexed read itself too, not only its inputs: ``[SP + RDX]``
+            # in the callee may be the return address the push just wrote
+            # (Astra, forward-memory merge review)
+            protect(access)
     for run in proven.memory_runs:
         step()
         if run.write.index is not None:

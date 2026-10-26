@@ -28,7 +28,10 @@ def _leaf_summary(unit):
                 (IMPORT_SLOTS, None), (IMAGE_BASE_TRACKING, None))
     tokens = [(variable, variable.set(value)) for variable, value in settings]
     try:
-        with activation(("function", unit.scopes.function.scope)):
+        # (a ledger of its own: the leaf's pre-analysis must not spend the
+        # leaf's own function budget -- a leaf near its limit would then fail
+        # its real analysis, Fable merge review; out of budget here -> no decision)
+        with activation(("stack-check", unit.scopes.function.scope)):
             for row in observation.instructions:
                 for op in row.operations:
                     step()
@@ -79,7 +82,7 @@ class LeafPreservation:
                 unit.scopes.resolution_context,
             )
             if type(place) is ResolvedStorage:
-                with activation(("function", unit.scopes.function.scope)):
+                with activation(("stack-check", unit.scopes.function.scope)):
                     result = self._span(unit, summary, place.span)
                     checkpoint()
         self.decisions[key] = result

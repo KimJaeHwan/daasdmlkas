@@ -139,7 +139,11 @@ def test_same_address_from_another_admitted_program_is_not_evidence(monkeypatch)
     assert "1:1000" in found and _statuses(notes) == {"legacy"}
 
 
-def test_coverage_work_uses_the_same_callee_function_budget(monkeypatch):
+def test_coverage_work_is_bounded_by_its_own_function_budget(monkeypatch):
+    """The stack check's pre-analysis of a leaf is charged to a ledger of
+    its own (("stack-check", scope)), bounded by the same function limit --
+    never to the leaf's own ledger, which its real analysis must keep whole
+    (Fable, forward-memory merge review)."""
     from tdo_v2.resource_limits import AnalysisBudgetExceeded, last_run, run_analysis
 
     (leaf,) = program_units(FunctionBuilder(entry=LEAF).ins(copy(reg(RBP), reg(RBP))).ret())
@@ -151,8 +155,9 @@ def test_coverage_work_uses_the_same_callee_function_budget(monkeypatch):
         return proof.LeafPreservation({"1:1800": leaf}).decision("1:1800", REG, RBP, 8)
 
     assert run_analysis(decide) == "identity"
-    ledger = last_run().ledgers[("function", leaf.scopes.function.scope)]
-    assert ledger.work > 8
+    ledgers = last_run().ledgers
+    assert ledgers[("stack-check", leaf.scopes.function.scope)].work > 8
+    assert ("function", leaf.scopes.function.scope) not in ledgers
     monkeypatch.setenv("TDO_V2_FUNCTION_WORK", "4")
     with pytest.raises(AnalysisBudgetExceeded) as failure:
         run_analysis(decide)

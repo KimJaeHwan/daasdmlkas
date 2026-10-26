@@ -72,11 +72,21 @@ CONTRACT = {
 ADDED_FIELDS = {
     "EngineRun": {"failed_functions": ()},
     "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {},
-                         "call_memory_decisions": (), "activation_rejections": {}, "allocation_lifetimes": ()},
-    "NormalizedFunction": {"activation_entry": None},
+                         "call_memory_decisions": (), "activation_rejections": {}, "allocation_lifetimes": (),
+                         "lifetime_models": ()},
+    "NormalizedFunction": {"activation_entry": None, "forward_memory_proofs": (), "forward_memory_requires": (),
+                           "load_value_proofs": (), "nonstack_spans": frozenset()},
     "RootSlice": {"inherited_incomplete": False},
     "CallMemoryDecision": {"evidence": ()},
     "MemoryGraphBindings": {"transfers": (), "transfer_nodes": ()},
+    # (fields of the forward-memory / expression branch, 2026-10-23..26)
+    "FunctionSummary": {"address_relations": ()},
+    "LocalMemorySsaResult": {"call_register_snapshots": (), "flow_edges": ()},
+    "SummaryRun": {"literal": None},
+    "ProvenRunEffect": {"literal": None},
+    "ProvenMemoryRun": {"literal": None},
+    "AnchoredSpan": {"index": None},
+    "CallProvenance": {"memory_sources": {}},
 }
 
 # identity / authority tokens with no content (each is a unique object; only

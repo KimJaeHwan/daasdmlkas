@@ -128,3 +128,31 @@ main이나 다른 worktree의 미커밋 파일은 변경하지 않는다. 기존
 **이번 한정 통합 목표 달성과 현재 검증본의 커밋·푸시를 최종 승인했다.** 필수 잔여 차단은 없다.
 원격 대상은 `origin/feature/forward-memory-footprints`이며 main이나 다른 worktree를 변경하지 않는다.
 상세는 설계 §25.71, 실제 병합 커밋 ID·원격 반영은 Git 이력과 완료 응답을 따른다.
+
+## main 병합 검토 (2026-10-26, 회사 PC)
+
+집 PC Bundle이 필요한 343개를 뺀 전체 회귀는 OFF/ON 각각 **4354 passed / 343 skipped / 0 failures**다.
+실행 대조(`measure_program`, Bundle 13개 설정, OFF/ON)는 빠진 의존 0이고 수치는 main과 같다.
+Astra·Fable 검토(각 2차)에서 나온 기본 경로 수정 두 가지를 병합 전에 반영했다.
+
+- **호출의 push 칸과 겹치는 인덱스 읽기** (Astra P1, 건전성): 피호출 함수의 `[SP+RDX]`처럼 인덱스 주소로
+  읽는 접근도 push overlay 검사(`relative_memory.project_anchored`의 `pre_call_overlay`)를 받는다.
+  `normalize._proven_call_rows`가 인덱스 접근의 입력만이 아니라 접근 자체를 보호한다.
+  증명 안 되면 빚으로 남고(정밀도 손실, 건전), 재현 예제가 회귀 테스트(`test_indexed_call_overlay.py`)다.
+  수정 전에는 완전하다고 한 조각이 실제 의존 48개를 놓쳤다.
+- **스택 검사의 leaf 사전 분석 예산** (Fable P1): `_stack_preservation`의 사전 분석을 `("stack-check", scope)` 장부에 청구한다.
+  같은 함수 한도가 걸리지만 leaf 자신의 분석 예산은 쓰지 않는다.
+- 스냅샷 도구: 이 브랜치의 새 필드를 `semantic_snapshot.ADDED_FIELDS`에 등록했다. 기본값이면 생략되어 이전 기준선과 비교할 수 있다.
+
+스냅샷 의미 차이(audit1 대비)는 다음과 같다.
+- 정확한 상수(`literal`), 주소 관계, SSA flow edge가 새로 기록된다. 정의·노드 번호가 밀린다.
+- 모델 설정에서는 free/realloc 보존 철회와 Core 모델 재도출로 일부 root가 불완전해지고, 출처 라벨에 `source_B`가 더해진다.
+- 테스트베드 채점에서 v2-win-debug-full DFB030·DFB031이 PASS→FAIL이다. 금지된 `source_B`를 보고한 것으로, 근거 없던 보존을 철회한 보수적 변화다.
+- v3 두 Bundle의 채점은 같다.
+
+새 기준선은 `audit2`다.
+
+남은 일:
+- main에도 있던 같은 종류의 구멍을 고친다. 피호출 함수가 `[RSP]`를 인덱스 없이 직접 읽어도 push 이전 값에 묶인다(Fable 재현, 별도 수정).
+- 스택 기준 인덱스 읽기의 정밀도를 회복한다.
+- P2 후속: leaf identity 스위치, `definition_constants` 회귀 테스트, `_call_boundaries` 오류 처리.
