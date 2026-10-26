@@ -26,12 +26,8 @@ def _run(program, **options):
         boundary_provider=program.provider, pcodeop_models=program.pcodeop_models(inputs.evidences), **options)
 
 
-_ESCAPING = pytest.mark.xfail(strict=True, reason="push-slot overlay (docs 25.72): the call itself receives a stack address (a stack escape in may_alias's frame rule), so a callee-entry load through an entry value is not bound; to be recovered by the push-as-definition design (escapes strictly before the call)")
-
-
-@pytest.mark.parametrize("config", ["target", pytest.param("escapes", marks=_ESCAPING),
-                                    pytest.param("recursion", marks=_ESCAPING), "fanin", "rep", "traps",
-                                    "resolvable", "two_pointer", "unknown_stores", "growing_fields"])
+@pytest.mark.parametrize("config", ["target", "escapes", "recursion", "fanin", "rep", "traps", "resolvable",
+                                    "two_pointer", "unknown_stores", "growing_fields"])
 def test_every_probe_holds_on_each_stress_axis(config):
     from scale_bench import CONFIGS
     from scale_point import _check_probes

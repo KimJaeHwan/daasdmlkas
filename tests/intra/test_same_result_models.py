@@ -85,6 +85,20 @@ def _read(analyzed, builder):
     return slice_from(function, operation_node_at(function, len(builder._rows) - 3, 1))
 
 
+def _complete_but_for_pushes(analyzed, read):
+    """Complete except for may-alias debt of CALL pushes only: the accessor
+    result is a wild object (it may point anywhere, the frame included), so
+    a push before the read -- a frame write like any other
+    (``normalize._push_row``, docs 25.73) -- reaches it."""
+    if read.is_complete:
+        return True
+    graph = analyzed.normalized.dependencies
+    keys = {graph.node(node).key for node in read.result.reachable_unresolved_read_nodes}
+    rows = [row for row in analyzed.normalized.may_alias_reads if any(row.operation_key in key for key in keys)]
+    return bool(rows) and len(rows) == len(keys) and all(
+        writer.endswith("~push") for row in rows for writer in row.writers)
+
+
 def _verdict(tmp_path, *between, on=True, second=None):
     builder = _caller(*between, second=second)
     analyzed = _analyze(tmp_path, builder, on)
@@ -568,7 +582,7 @@ def test_r007_with_separation_reads_a_only(tmp_path):
     atoms = [atom for *_, atom in analyzed.normalized.same_result_uses]
     assert len(atoms) == 3 and len(set(atoms)) == 1
     read = _read(analyzed, builder)
-    assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and read.is_complete
+    assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and _complete_but_for_pushes(analyzed, read)
     assert {"same-result-functions", "accessor-result-separate"} <= analyzed.inherited_assumptions
     assert analyzed.normalized.accessor_separations
 
@@ -719,7 +733,7 @@ def test_a_bound_function_is_cut_and_its_callers_take_the_model(tmp_path):
     atoms = [atom for *_, atom in analyzed.normalized.same_result_uses]
     assert len(atoms) == 3 and len(set(atoms)) == 1
     read = _read(analyzed, caller)
-    assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and read.is_complete
+    assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and _complete_but_for_pushes(analyzed, read)
     rva = INTERNAL - analyzed.unit.scopes.program.evidence.image_base.byte_offset
     digest = load_binding_file(tmp_path / "binding.json").digest
     assert {f"bound-model:test-binding@{rva:#x}#{digest[:12]}", "accessor-private-state", "same-result-functions",
@@ -944,7 +958,7 @@ def test_a_pure_callee_keeps_the_accessor_state(tmp_path):
     assert len(uses) == 3 and len({atom for *_, atom in uses}) == 1
     assert any(claim.startswith("proof:") for _, _, claims, _ in uses for claim in claims)
     read = _read(analyzed, caller)
-    assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and read.is_complete
+    assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and _complete_but_for_pushes(analyzed, read)
     assert "accessor-hidden-state-in-memory" in analyzed.inherited_assumptions
     assert not any(label.startswith("accessor-state-preserved-by:proof") for label in analyzed.inherited_assumptions)
 

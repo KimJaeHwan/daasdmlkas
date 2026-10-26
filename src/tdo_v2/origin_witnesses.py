@@ -235,6 +235,8 @@ class _Context:
                 return None, set()
             return self._seeds(writer, (value.span,)), set()
         base, _, tag = writer.rpartition("~")
+        if tag == "push":
+            return [], set()   # the CALL's push: the return address, a constant (``normalize._push_row``)
         if tag.startswith("e") and tag[1:].isdigit():
             effect = self.effects.get(writer)
             if effect is None or len(effect.reads) < 2 or not hasattr(effect.reads[1], "span"):

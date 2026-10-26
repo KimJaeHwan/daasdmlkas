@@ -23,7 +23,13 @@ def stack_range(analysis, allocation, span):
     Freshness/owned-range contracts cannot license an arbitrary pointer+N
     exclusion. The whole requested byte range must predate the allocation
     inside the observed active frame, independently of that range's contents.
+    The allocating CALL's own return-address slot (its observed push, just
+    below the stack pointer at the call: ``normalize._push_row``) counts too
+    -- not the caller's frame but the callee's: the owned-footprint contract
+    is read as "the block is disjoint from memory live during the allocating
+    call", and that slot holds the return address until the callee returns.
     """
+    from .observed_call_state import observed_call_state_projections
     geometry = _stack(analysis.item)
     if geometry is None or span.object_id != geometry[0] or analysis.numeric.bind is None:
         return None
@@ -35,7 +41,12 @@ def stack_range(analysis, allocation, span):
     before = _single(values[register])
     if before is None or before[0] != ("entry", offset, width):
         return None
-    lower, upper = bias + before[1], bias
+    push = max((-row.memory_transition.displacement_delta
+                for row in observed_call_state_projections(analysis.item.unit.observation)
+                if row.call_operation_key == allocation.event
+                and (row.memory_transition.caller_base.byte_offset, row.memory_transition.caller_base.byte_size)
+                == (offset, width)), default=0)
+    lower, upper = bias + before[1] - max(push, 0), bias
     if not 0 <= lower <= span.start or span.end > upper:
         return None
     requires = tuple(sorted(set(used) | set(analysis.numeric.labels)))

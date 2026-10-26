@@ -73,7 +73,6 @@ def _memcpy_caller(count_register_constant=True):
             .add_rsp(0x40).ret())
 
 
-@pytest.mark.xfail(strict=True, reason="push-slot overlay (docs 25.72): the call itself receives a stack address (a stack escape in may_alias's frame rule), so a callee-entry load through an entry value is not bound; to be recovered by the push-as-definition design (escapes strictly before the call)")
 def test_memcpy_with_a_constant_count_is_exact():
     results = _analyze(_memcpy_caller())
     item = results["1:1000"]

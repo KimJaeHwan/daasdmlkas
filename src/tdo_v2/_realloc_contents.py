@@ -134,13 +134,21 @@ def _stack_exclusions(analysis, call, reader, read_span, old, requires):
     for writer in sorted({writer for row in rows for writer in row.plain}):
         step()
         store = analysis.ops.get(writer)
-        span = None if store is None or store.opcode != "STORE" else _raw_access(
-            analysis, writer, store, effects.get(writer), "write")
-        if store is None or store.opcode != "STORE" or span is None \
-                or span.size != store.inputs[2].byte_size or writer in dict(analysis.normalized.operation_overrides) \
-                or store.inputs[0].kind != original.inputs[0].kind \
-                or store.inputs[0].coordinate.byte_offset != original.inputs[0].coordinate.byte_offset:
-            return None
+        if writer.endswith("~push"):
+            # a CALL's push (``normalize._push_row``): a stack write like a
+            # STORE, at its projected bytes
+            writes = [item.span for item in getattr(effects.get(writer), "writes", ()) if hasattr(item, "span")]
+            span = writes[0] if len(writes) == 1 else None
+            if span is None:
+                return None
+        else:
+            span = None if store is None or store.opcode != "STORE" else _raw_access(
+                analysis, writer, store, effects.get(writer), "write")
+            if store is None or store.opcode != "STORE" or span is None \
+                    or span.size != store.inputs[2].byte_size or writer in dict(analysis.normalized.operation_overrides) \
+                    or store.inputs[0].kind != original.inputs[0].kind \
+                    or store.inputs[0].coordinate.byte_offset != original.inputs[0].coordinate.byte_offset:
+                return None
         before = stack_range(analysis, old, span)
         current = stack_range(analysis, ref, span)
         if before is None or current is None:

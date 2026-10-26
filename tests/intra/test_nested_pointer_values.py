@@ -95,7 +95,13 @@ def test_a_caller_of_the_caller_places_memory_through_the_result():
     function = results[f"1:{H:x}"].normalized
     found = slice_from(function, _load_node(function, 3))
     assert set(range(RSI, RSI + 8)) <= found.register_bytes
-    assert found.is_complete
+    # F escapes the stack (its summary), so the CALL's push -- a frame write
+    # before it (``normalize._push_row``) -- may be read back through another
+    # base afterwards: the read through the result carries that debt only
+    # (may_alias's ordinary rule for any frame write; docs 25.73)
+    (row,) = [row for row in function.may_alias_reads if row.operation_key.endswith(":LOAD")
+              and any(writer.endswith("~push") for writer in row.writers)]
+    assert all(writer.endswith("~push") for writer in row.writers)
 
 
 def test_the_caller_of_the_caller_matches_the_concrete_runs():

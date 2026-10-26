@@ -5673,3 +5673,64 @@ PASS→FAIL(got=[], 불완전 — 틀린 출처 없음; 같은 부류로 보이�
 image 매핑 범위 상수는 stack이 아니라는 이름 붙은 가정(Astra: 정적 버퍼 stack이 있어 가정 없이는 불가),
 indexed-access-stays-in-object 같은 스위치(기본값은 사용자 결정). 남은 P2: SP 값을 모르는 호출은 진입 load 전부 debt,
 overlay 행마다 SP 읽기(SP debt 전파), `private_frame_calls`의 escape 분석 1회 추가(EscapeMemo는 effect unit 정체성으로만 공유).
+
+### 25.73 CALL push를 메모리 정의로 되살림 — §25.72의 칸별 검사 대체 (2026-10-26~27)
+
+사용자 지시 "그래프를 먼저 바로잡으면 나머지는 단순해진다"에 따른 근본 수정이다. §25.72의 구멍은 그래프에 **정의가 빠진 것**이
+원인이었다: `observed_call_state.project_persistent_call_state`가 CALL의 일시 연산(`RSP -= size`, `STORE [RSP], 다음 주소`)을
+지우므로 push 칸 `[SP+delta, SP)`에는 정의가 없고, 그래서 읽는 형태마다 따로 막아야 했다.
+
+**A — push를 정의로.** `normalize._push_row`: 관찰된 call shape(`displacement_delta < 0`)의 push가 제거되는 **모든 CALL**에
+(요약 유무와 무관, Astra) CALL 직전 첫 행으로 `{call}~push`를 둔다: COPY, reads=(SP), memory_write 폭 -delta, 앵커
+`(SP, delta)`, 공간 = CALL 명령의 공간. 값은 반환주소(상수)이고 SP는 주소 계산용으로만 읽는다(STORE가 포인터를 읽듯).
+`relative_memory`의 기존 앵커 쓰기 투영으로 caller stack 객체의 정확한 바이트에 놓인다. 그러면
+
+- `~ld` 행은 다시 보통의 앵커 읽기다(§25.72의 overlay 튜플·`project_anchored` overlay 분기·`_may_address_frame`·
+  `private_frame_calls`/`frame_uses`·절대 주소 우회·정확한 칸 무입력 정의는 모두 제거). 같은 객체의 읽기(`[RSP]`,
+  `RCX=RSP-8` 별칭, SP-8을 담은 포인터 슬롯, 일부 겹침, SP 원자의 indexed)는 일반 reaching definition으로 push 정의를
+  바이트 단위로 받는다(겹친 읽기는 push 바이트 + 이전 바이트).
+- 다른 기반의 읽기(진입 포인터·상수·wild 객체)는 `may_alias`가 push를 stack 객체 쓰기로 보고 기존 정책(private-frame
+  규칙, globals-disjoint, wild 객체, unknown writer)을 그대로 적용한다 — 특별 경우 없음.
+- push는 CALL 이후에도 남는다: caller가 반환 뒤 `[SP-8]`을 읽으면 push 정의를 받는다(callee가 덮었으면 그 요약의 쓰기).
+- 한 호출의 겹치는 쓰기 규칙(`blocked`)에서 `~push`는 제외한다: 순서가 정해져 있다(push → 진입 읽기 → callee 쓰기).
+- 기록 계층: `~push`는 그 CALL의 일시 STORE가 쓴 상수(다음 주소)의 `const` 노드다(잘라내지 않음 — 잘라내면 기록 전체의
+  stitch가 꺼진다). 진입 load의 stitch 판정("return address" cut)은 그대로 둔다.
+
+**B — 호출 직전까지의 escape만.** may_alias의 private-frame 규칙은 CALL 자체(스택 주소를 받는 호출, 디버그 빌드의 RBP=RSP)를
+escape로 세어, §25.72 정밀도 손실 전부(v2 252, v3 96, ue 1217→977; DFB055; xfail 6개)를 만들었다. push 쓰기는 진입 load(같은
+호출의 `~ld`)에 대해, 쓴 바이트가 모두 새 프레임(entry SP 아래)이고 **호출 직전까지** escape가 없으면(`_Escape.escaped_before`,
+`_flagged(strict=True)`) 다른 객체로의 gen을 CALL 시점으로 미룬다(`_Policy.push_deferred`): push에서는 wild 객체에만, CALL에서
+나머지(일반 규칙 `private_write(call)`이 아닐 때). 두 엔진 모두(dense: CALL의 읽기 뒤·쓰기 앞, sparse: CALL 위치 order 0
+이벤트 — 같은 순서). 근거: 진입 시점에는 push 이후 아무것도 실행되지 않았으므로 다른 기반이 칸에 닿는 길은
+entry-values-do-not-address-the-new-frame의 실패뿐이다(사용 시 `private_used`로 보고). 이전 escape가 있으면 미루지 않는다.
+요약용 `private_frame_writes`는 `~push`에 일반 규칙을 그대로 쓴다.
+
+**함께 고친 것(구현 1차 검토).** (Astra P1) 행에 대한 제어 의존: `~push`·호출 효과 행·rep `~e` 행이 기준 연산(CALL/STORE)의
+제어 의존을 그대로 받는다(조건부 호출의 push가 조건을 잃지 않음 — 기존 호출 효과 행에도 해당). (Astra P2) 레지스터 공간 탐색을
+함수당 한 번으로. (조사 #1, 건전성) `call_summary_effects`가 callee의 반환주소 칸 쓰기를 버리던 `return_slot` 제거 — push가
+영속 정의이므로 그 쓰기는 보통 run으로 caller의 push 정의 위에 놓인다(다중 대상 합성의 `frame_or_slot`은 그대로 두고 후속).
+`origin_witnesses`는 `~push`를 상수로. realloc 복사 증명: `_stack_exclusions`가 `~push` 쓰기도 STORE처럼 투영된 바이트로
+다루고, `stack_range`는 할당 CALL 자신의 반환주소 칸(할당 동안 반환주소를 담고 있어 돌려받는 블록일 수 없음)을 활성 범위에 넣는다.
+"호출의 첫 행"(probe 지점)은 `~push`를 포함한다 — 호출의 쓰기 전.
+
+**결과(게이트, 병합 전).** 프로그램 오라클 26회 누락 0. debt로만 설명되는 의존성(forward 0/1 동일): v2 252→**0**, v3 96→**0**,
+v3-win32 288→**0**, ue-dll-debuggame 1217→**977**, ue-dll-development 192→**0** — §25.72 이전(91c9beb)과 같다.
+테스트베드: v2 DFB055 다시 PASS(64/10/1), v3·v3-win32 동일. §25.72의 xfail 6개는 모두 통과해 표시를 뗐다.
+스냅샷 root(audit2 대비): 기본 구성에서 완전→불완전은 ue-dll-development accessor 구성의 2개뿐 — accessor 결과 포인터는 wild
+객체(어디든 가리킬 수 있음)라 사이의 CALL push(프레임 쓰기)가 닿는다; push가 없던 이전의 "완전"은 그 칸을 놓친 것이었다.
+같은 이유로 `test_same_result_models` 3개는 "push debt만 남은 완전"으로 기대를 바꿨다. 가정 off 구성의 완전→불완전(v3 32,
+v3-win32 22, ue-dev 4)은 §25.72와 같다(가정 없이는 push 칸 별칭을 배제할 수 없음).
+그 밖의 기대 변경: record stitching 3개는 §25.72 이전 기대("return address")로 복귀, `test_call_register_snapshots`의 첫 행은
+`~push`, `test_opaque_stack_addresses`·`test_forward_values`는 push 결정이 가정에 기대므로 보고됨으로,
+`test_nested_pointer_values` 1개는 escape 호출 앞의 push가 결과 포인터 읽기에 debt를 줌(일반 규칙).
+회귀: `tests/intra/test_indexed_call_overlay.py` 18개(sparse/dense × forward 0/1) — push 정의 도달, 다른 기반의 push debt,
+호출 자체의 stack 인자 + 진입 포인터 읽기는 정확(B), 반환 뒤 `[SP-8]`은 push, 루프·이전 escape는 미루지 않음. 변이: push 행 제거
+→ 11개 실패, B 끄기 → 1개, `escaped_before` 무시 → 1개.
+
+**검토.** 설계 1차(Astra·Fable: 방향 승인, P1 반영), 구현 1·2차(2차 Astra·Fable 승인, 차단 없음).
+
+**후속.** (1) accessor 회귀의 회복: stack escape가 아닌 호출이 만든 정의 atom은 이 함수의 새 프레임을 가리킬 수 없다는
+경로(Fable) — Astra는 바이트 범위 비겹침(주소 기하 또는 명시 소유/분리 계약) 없이는 불가하다는 입장, 설계 검토 필요.
+(2) 다중 대상 합성 `frame_or_slot`이 반환주소 칸 run을 아직 버림(반환주소를 고쳐 쓰는 대상에서만 문제). (3) rep `~e` 행의
+count 검사 제어 간선 중복(의미 동일, 간선 수만). (4) SP를 표현 못 하는 호출의 push는 주소 미해결 쓰기가 됨(측정상 영향 없음).
+(5) 특수 경우 → 그래프 사실 조사 목록(`.census6/special_case_survey.md`, 15개 — #1 반영).

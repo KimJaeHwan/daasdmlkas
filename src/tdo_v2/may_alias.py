@@ -145,12 +145,15 @@ _EMPTY_OBJECT = _ObjectState(frozenset(), {})
 class _Escape:
     """Per operation key: ``escaped`` -- some path from the entry to the
     operation passes an escape (the operation itself included); ``reaches`` --
-    some path from the operation reaches an escape (itself included). Keys the
-    observation does not know count as both."""
+    some path from the operation reaches an escape (itself included);
+    ``escaped_before`` -- as ``escaped`` but the operation itself excluded
+    (an escape strictly before it). Keys the observation does not know count
+    as all three."""
 
     known: frozenset[str]
     escaped: frozenset[str]
     reaches: frozenset[str]
+    escaped_before: frozenset[str] | None = None
 
     @staticmethod
     def _base(key: str) -> str:
@@ -163,6 +166,12 @@ class _Escape:
     def private_write(self, key: str) -> bool:
         base = self._base(key)
         return base in self.known and base not in self.reaches
+
+    def private_before(self, key: str) -> bool:
+        """No escape on any path from the entry strictly before ``key``'s
+        operation (a call's rows: before the CALL itself)."""
+        base = self._base(key)
+        return self.escaped_before is not None and base in self.known and base not in self.escaped_before
 
 
 # Named assumption entry-values-do-not-address-the-new-frame (``assumptions``):
@@ -240,6 +249,30 @@ class _Policy:
             if other is not None and not (other.private_write(key) if write else other.private_read(key)):
                 self.opaque_used = True
         return private
+
+    def push_deferred(self, writer: str, span: ByteSpan) -> str | None:
+        """The CALL whose push ``writer`` is (``normalize._push_row``), when
+        the write reaches other objects only at the CALL itself, not before:
+        the callee's entry loads (the call's rows between) see the pushed
+        bytes only through the stack object, exactly. Holds when every
+        written byte is in this function's new frame (the private-frame
+        bytes) and no escape precedes the call: at callee entry nothing has
+        run since, so a base other than the stack pointer reaches the slot
+        only by entry-values-do-not-address-the-new-frame failing -- the
+        private-frame rule's own assumption (``private_used``). The gen into
+        other objects then happens at the CALL unless the push is private by
+        the ordinary rule (``private_write``: no escape from the CALL on)."""
+        if not writer.endswith("~push") or self.escape is None or span.object_id != self.stack_object:
+            return None
+        if any(offset >= self.bias + self.private_above for offset in range(span.start, span.end)):
+            return None
+        if not self.escape.private_before(writer):
+            return None
+        self.private_used = True
+        other = self.escape_without_opaque
+        if other is not None and not other.private_before(writer):
+            self.opaque_used = True
+        return writer[: -len("~push")]
 
     def may_alias(self, left: StorageObjectId, right: StorageObjectId) -> bool:
         if left == right:
@@ -467,29 +500,6 @@ def private_frame_writes(
     return frozenset(found)
 
 
-def private_frame_calls(
-    unit, observation, context, address_spaces, calls, *, assumed_calls=frozenset(),
-    observed_calls=None, escaping_calls=frozenset(), opaque_calls=frozenset(),
-) -> dict:
-    """call key -> whether this function's new frame is private at the call
-    (``_Policy.is_private``'s rule for a read there): the stack pointer this
-    module finds is ``calls[key]`` (register offset, size), entry-values-do-
-    not-address-the-new-frame is on and no path from the entry to the call
-    passes an escape. The value: None (not private), else whether that needed
-    opaque-callees-leave-no-stack-addresses -- for ``relative_memory``'s
-    callee-entry loads that may not see the removed return-address push."""
-    found, escape, without, _ = _stack_escapes(unit, observation, context, address_spaces, assumed_calls,
-                                               observed_calls, escaping_calls, opaque_calls)
-    if found is None or escape is None:
-        return {key: None for key in calls}
-    _, _, _, offset, size = found
-    return {
-        key: (without is not None and not without.private_read(key))
-        if (offset, size) == register and escape.private_read(key) else None
-        for key, register in calls.items()
-    }
-
-
 DEFAULT_ENGINE = "sparse"  # verified identical to "dense" (docs section 14)
 
 
@@ -545,6 +555,7 @@ def _meet(left: dict, right: dict) -> dict:
 
 
 def _transfer(block, state: dict, objects, policy: _Policy, rows, intern=None) -> dict:
+    deferred: dict = {}   # CALL key -> its push's (span, writer): reaches other objects at the CALL
     for effect in block.effects:
         if rows is not None:
             spans, writers = [], set()
@@ -569,15 +580,26 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows, intern=None) -
                 rows.append(_row(effect.operation_key, tuple(spans), writers, intern))
             elif _unknown_read(effect) and state[_ANY_WRITE]:
                 rows.append(_row(effect.operation_key, (), state[_ANY_WRITE], intern))
+        for span, writer in deferred.pop(effect.operation_key, ()):
+            # (after the CALL's reads, before its writes: the sparse engine's
+            # event order -- position of the CALL, order 0)
+            state = _written(state, span, writer, objects, policy, "call")
         for evidence in effect.writes:
             if type(evidence) is not ResolvedStorage or evidence.span.object_id not in state:
                 continue
-            state = _written(state, evidence.span, effect.operation_key, objects, policy)
+            call = policy.push_deferred(effect.operation_key, evidence.span)
+            if call is not None:
+                deferred.setdefault(call, []).append((evidence.span, effect.operation_key))
+            state = _written(state, evidence.span, effect.operation_key, objects, policy,
+                             "" if call is None else "entry")
             state[_ANY_WRITE] = state[_ANY_WRITE] | {effect.operation_key}
         if _unknown_write(effect):
             state = _written_anywhere(state, effect.operation_key, objects)
         if effect.operation_key in policy.uncertain_writers:
             state = _written_anywhere(state, _UNCERTAIN + effect.operation_key, objects)
+    for pushes in deferred.values():   # (a CALL not in this block: at its end, conservatively)
+        for span, writer in pushes:
+            state = _written(state, span, writer, objects, policy, "call")
     return state
 
 
@@ -641,9 +663,12 @@ def _written_anywhere(state: dict, writer: str, objects) -> dict:
     return updated
 
 
-def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy) -> dict:
+def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy, phase: str = "") -> dict:
+    """``phase`` for a deferred push (``_Policy.push_deferred``): "entry" --
+    the write itself, reaching only wild objects; "call" -- at the CALL, the
+    rest of the ordinary gen (no kill, wild objects already reached)."""
     updated = dict(state)
-    if writer not in policy.no_kill_writers:
+    if writer not in policy.no_kill_writers and phase != "call":
         own = state[span.object_id]
         cleared = dict(own.bytes)
         for offset in range(span.start, span.end):
@@ -652,12 +677,14 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy)
             else:
                 cleared.pop(offset, None)
         updated[span.object_id] = _ObjectState(own.default, cleared)
-    private = all(policy.is_private(span.object_id, offset, writer, write=True)
-                  for offset in range(span.start, span.end))
+    private = phase == "entry" or all(policy.is_private(span.object_id, offset, writer, write=True)
+                                      for offset in range(span.start, span.end))
     for other in objects:
         # a private frame write reaches no other object but a wild one
         if not policy.may_alias(other, span.object_id) or (private and other not in policy.wild_objects):
             continue
+        if phase == "call" and other in policy.wild_objects:
+            continue   # (reached at the push)
         current = updated[other]
         excluded = policy.excluded(span, other, writer) if policy.separations else frozenset()
         values = {offset: calls | {writer} for offset, calls in current.bytes.items() if offset not in excluded}
@@ -972,9 +999,10 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
     return keys, successors, escapes, switches
 
 
-def _flagged(keys, edges, escapes, reverse: bool) -> set[str]:
+def _flagged(keys, edges, escapes, reverse: bool, strict: bool = False) -> set[str]:
     """Operation keys an escape precedes (``reverse``: follows) on some path,
-    the escape itself included: forward (backward) may-reachability."""
+    the escape itself included (``strict``: excluded -- an escape strictly
+    before): forward (backward) may-reachability."""
     entering: set[str] = set()   # blocks reached along ``edges`` from an escaping block
     work = [block for block, sequence in keys.items() if any(key in escapes for key in sequence)]
     leaving = set(work)
@@ -990,8 +1018,10 @@ def _flagged(keys, edges, escapes, reverse: bool) -> set[str]:
     for block, sequence in keys.items():
         seen = block in entering
         for key in (reversed(sequence) if reverse else sequence):
+            if strict and seen:
+                flagged.add(key)
             seen = seen or key in escapes
-            if seen:
+            if seen and not strict:
                 flagged.add(key)
     return flagged
 
@@ -1014,6 +1044,7 @@ def _stack_escape(observation, register_space: int, offset: int, size: int,
         known,
         frozenset(_flagged(keys, successors, escapes, reverse=False)),
         frozenset(_flagged(keys, predecessors, escapes, reverse=True)),
+        frozenset(_flagged(keys, successors, escapes, reverse=False, strict=True)),
     )
 
 

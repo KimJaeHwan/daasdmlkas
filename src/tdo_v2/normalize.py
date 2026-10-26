@@ -29,7 +29,7 @@ from .pcode_blocks import build_pcode_block_graph
 from .rep_strings import MAX_REP_BYTES, rep_sites
 from .may_alias import (
     ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, EscapeMemo, MayAliasRead,
-    derive_may_alias_reads, private_frame_calls, private_frame_writes,
+    derive_may_alias_reads, private_frame_writes,
 )
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
@@ -936,6 +936,7 @@ _CALL_EFFECT_LABELS = {
     "": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD", "sink": "CALL_EFFECT_SINK",
     "ck": "CALL_EFFECT_CHECK", "cr": "CALL_EFFECT_CHECK", "cw": "CALL_EFFECT_CHECK", "sp": "CALL_EFFECT_CHECK",
     "ext": "CALL_EFFECT_CHECK", "u": "CALL_EFFECT", "iu": "CALL_EFFECT_INPUT", "sr": "CALL_EFFECT_CHECK",
+    "push": "CALL_EFFECT",
 }
 
 
@@ -1066,9 +1067,32 @@ def _call_access_request(call_key, evaluation_key, access, register_space, load_
     return evaluation_key, reference, offset, access.size, access.space_id
 
 
+def _push_row(call_key, transition, block_key, register_space, context):
+    """The CALL's own write: its observed push of the return address at
+    [SP + delta, SP) (``observed_call_state``), which the persistent SSA
+    omits with the CALL's transient operations -- put back as a definition
+    so every later read of those bytes (the callee's entry loads, an alias of
+    the slot, the caller's reads below SP) reaches it by the ordinary rules.
+    The value is the return address, a constant: the row reads only the
+    stack pointer, for its address (as a STORE reads its pointer). The space
+    is the CALL's own -- the push stores there. (effect, anchored access) or
+    None (no push in the shape, or no stack pointer storage)."""
+    if transition is None or transition.displacement_delta >= 0 or register_space is None:
+        return None
+    base = transition.caller_base
+    sp = ValidatedVarnode(VarnodeKindCode.REGISTER, AddressCoordinate(register_space, base.byte_offset),
+                          base.byte_size)
+    storage = _resolve_validated_storage(_storage_ref(sp), context)
+    if type(storage) is not ResolvedStorage:
+        return None
+    key, size = f"{call_key}~push", -transition.displacement_delta
+    effect = ObservedEffect(key, EffectKind.COPY, reads=(storage,),
+                            memory_write=UnresolvedMemoryAccess(None, size), block_key=block_key)
+    return effect, (key, sp, transition.displacement_delta, size, int(call_key.split(":", 1)[0], 16))
+
+
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries, context,
-                      stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None,
-                      globals_disjoint=False, constant_space=None):
+                      stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
@@ -1139,63 +1163,8 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
         step()
         if access in loaded:
             return loaded[access]
-        transition = transitions.get(call_key)
-        if transition is not None and transition.displacement_delta < 0 and access.pointer is None \
-                and access.index is None and access.anchor is not None and access.displacement == 0 \
-                and (access.anchor.start, access.anchor.size) == (
-                    transition.caller_base.byte_offset, transition.caller_base.byte_size) \
-                and access.size == -transition.displacement_delta \
-                and access.space_id == int(call_key.split(":", 1)[0], 16):
-            # exactly the pushed slot (the callee's ``[SP]``, the push's
-            # width, in the space the push stores to -- the CALL's own,
-            # ``observed_call_state``; Astra round 7): at callee entry it
-            # holds the return address the CALL wrote -- a constant, so a
-            # definition with no input (the push's own definition, which the
-            # persistent SSA omits). Partly overlapping reads stay under the
-            # overlay check below.
-            key, target = f"{call_key}~ld{len(loaded)}", temporary()
-            assert planned.get(access, key) == key
-            rows.append(ObservedEffect(key, EffectKind.COPY, reads=(), writes=(target,), block_key=block_key))
-            loaded[access], load_keys[access] = target, key
-            return target
-        absolute = access.pointer is None and access.anchor is None and access.index is None
-        if transition is not None and transition.displacement_delta < 0 and (not absolute or not globals_disjoint):
-            # CALL's transient push is removed from persistent SSA. No read of
-            # callee-entry memory -- plain, through a pointer slot, indexed,
-            # an index/base input or an accessor slot -- may silently read the
-            # old bytes underneath it: the row carries the push overlay and
-            # ``relative_memory.project_anchored`` binds it only when its span
-            # provably avoids the pushed bytes (Astra / Fable, merge review;
-            # also via an RCX = RSP-8 alias) -- nor an absolute address, which
-            # the pushed slot may be unless globals-disjoint-from-stack is
-            # taken (Astra, round 4)
-            if absolute:
-                # (no constant space or no address-space span: no base to
-                # check -- the read stays unresolved, debt; Fable round 5)
-                reads, offset, pointer = (), 0, None
-                if constant_space is not None and access.span is not None \
-                        and access.span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
-                    pointer = ValidatedVarnode(VarnodeKindCode.CONSTANT,
-                                               AddressCoordinate(constant_space, access.span.start),
-                                               transition.caller_base.byte_size)
-            else:
-                reads, pointer, offset = base(access)
-            sp = ValidatedVarnode(VarnodeKindCode.REGISTER,
-                                 AddressCoordinate(register_space, transition.caller_base.byte_offset),
-                                 transition.caller_base.byte_size)
-            sp_storage = _resolve_validated_storage(_storage_ref(sp), context)
-            key, target = f"{call_key}~ld{len(loaded)}", temporary()
-            assert planned.get(access, key) == key
-            if type(sp_storage) is ResolvedStorage and pointer is not None:
-                reads = (*reads, sp_storage)
-                anchored[key] = (key, pointer, offset, access.size, access.space_id,
-                                 (sp, transition.displacement_delta))
-            # (else no overlay to check: the read stays unresolved -- debt)
-            rows.append(ObservedEffect(key, EffectKind.COPY, reads=tuple(dict.fromkeys(reads)),
-                                       writes=(target,), memory_read=UnresolvedMemoryAccess(None, access.size),
-                                       block_key=block_key))
-            loaded[access], load_keys[access] = target, key
-            return target
+        # (callee-entry memory includes the CALL's push: the ``~push`` row
+        # before these, ``_push_row``, defines the slot -- no special case here)
         if access.pointer is not None or access.index is not None:
             reads, pointer, offset = base(access)
             key = f"{call_key}~ld{len(loaded)}"
@@ -1644,7 +1613,7 @@ class _ScopedNormalizer:
             call_transitions = {
                 row.call_operation_key: row.memory_transition
                 for row in observed_call_state_projections(observation)
-            } if proven_call_effects else {}
+            }
             operation_nodes: dict[str, NodeId] = {}
             constant_inputs: dict[str, list[tuple[int, NodeId]]] = {}
 
@@ -1674,6 +1643,8 @@ class _ScopedNormalizer:
                 if run.writes and all(span in effect.fresh_registers for span in run.writes)
             )
             same_object_rows = _same_object_rows(proven_call_effects, observation)
+            push_register_space = (_register_space_id(observation) or _program_register_space(unit)
+                                   if call_transitions else None)
             for instruction in sorted(observation.instructions, key=lambda item: item.address):
                 for ordinal, operation in enumerate(instruction.operations):
                     operation_key = _operation_key(instruction, ordinal, operation)
@@ -1711,6 +1682,16 @@ class _ScopedNormalizer:
                             constant_inputs.setdefault(operation_key, []).append(
                                 (input_ordinal, constant_node)
                             )
+                    pushed = None if block_key is None or operation_key not in call_transitions else _push_row(
+                        operation_key, call_transitions[operation_key], block_key, push_register_space, context)
+                    if pushed is not None:
+                        # every observed push the persistent SSA drops comes
+                        # back as a definition, first: push, callee entry, CALL
+                        push, anchored = pushed
+                        operation_nodes[push.operation_key] = dependencies.add_node(NodeRecord(
+                            f"op:{push.operation_key}", NodeKind.OPERATION, _CALL_EFFECT_LABELS["push"]))
+                        effects.append(push)
+                        anchored_call_accesses[push.operation_key] = anchored
                     if block_key is not None and operation_key in proven_call_effects:
                         # the callee's proven effects, placed just before the CALL so
                         # their writes survive it (the call preserves them, see
@@ -1722,9 +1703,6 @@ class _ScopedNormalizer:
                             _call_stack_span(operation_key, proven_call_effects[operation_key],
                                              call_transitions, observation, context),
                             pointer_rows, value_inputs, accessor_states.get(operation_key, (None,))[0],
-                            globals_disjoint=assume_globals_disjoint_from_stack,
-                            constant_space=next((row.space_id for row in unit.scopes.program.evidence.address_spaces
-                                                 if row.is_constant_space), None),
                         )
                         for row in rows:
                             operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
@@ -1824,23 +1802,7 @@ class _ScopedNormalizer:
             escaping_calls = frozenset(key for key, row in proven_call_effects.items() if row.escapes_stack)
             # calls with no proven effect (opaque-callees-leave-no-stack-addresses)
             opaque_calls = _opaque_calls(observation, proven_call_effects, assumed_call_effects)
-            # callee-entry loads through another base than the stack pointer
-            # (``relative_memory.project_anchored``): bound only at calls where
-            # the new frame is private, as ``may_alias`` decides it
-            # (entry-values-do-not-address-the-new-frame, escapes)
-            overlay_calls = {
-                key: (call_transitions[key].caller_base.byte_offset, call_transitions[key].caller_base.byte_size)
-                for key in dict.fromkeys(row[0].split("~", 1)[0] for row in anchored_call_accesses.values()
-                                         if len(row) == 6)
-            }
-            frame_private = private_frame_calls(
-                effect_unit, observation, context, address_spaces, overlay_calls, assumed_calls=quiet_calls,
-                observed_calls=observed_calls, escaping_calls=escaping_calls, opaque_calls=opaque_calls,
-            ) if overlay_calls else {}
             used_reads: dict = {}  # memory values the projections used (validated at the end)
-            # callee-entry loads bound under entry-values-do-not-address-the-new-frame
-            projection_frame_uses: list = []
-            # (each: (load key, whether opaque-callees-leave-no-stack-addresses was needed))
             # last stage: values behind writes still without an address are used
             # (``settle_pending``); undone if it gives one of those writes an address
             settle, settled_at = True, None
@@ -1876,8 +1838,6 @@ class _ScopedNormalizer:
                     blocked_reads=_blocked_reads,
                     used_reads=used_reads,
                     load_identity_plan=_load_identity_plan,
-                    frame_uses=projection_frame_uses,
-                    frame_private=frame_private,
                 )
                 if projected_effect_unit is effect_unit:
                     # (accessor keys need atoms on even with nothing run once)
@@ -2133,12 +2093,22 @@ class _ScopedNormalizer:
         if failed or failed_sites or failed_bounds:
             return _Retry(frozenset(failed), failed_sites, failed_bounds)
         control_dependences = derive_control_dependences(observation, function.entry)
+        # a row staged for an operation (a call's ``~push`` / effect rows, a
+        # rep store's ``~e`` elements) runs when the operation does: it has
+        # the operation's control dependences too (Astra: a conditional
+        # call's push)
+        rows_of: dict[str, list[str]] = {}
+        for key in operation_nodes:
+            base, separator, _ = key.partition("~")
+            if separator:
+                rows_of.setdefault(base, []).append(key)
         for row in control_dependences:
-            dependencies.add_edge(
-                operation_nodes[row.decision],
-                operation_nodes[row.dependent],
-                EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=row.decision),
-            )
+            for dependent in (row.dependent, *rows_of.get(row.dependent, ())):
+                dependencies.add_edge(
+                    operation_nodes[row.decision],
+                    operation_nodes[dependent],
+                    EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=row.decision),
+                )
         for address, (count, _) in rep_plan.items():
             # element rows run once per iteration: like the loop body, they
             # depend on the count test
@@ -2185,9 +2155,8 @@ class _ScopedNormalizer:
             assumed_call_effects=tuple(sorted(assumed_call_effects.items())),
             proven_call_effects=tuple(sorted(proven_call_effects.items())),
             assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
-            assumes_entry_values_not_frame=any(frame_uses) or bool(projection_frame_uses),
-            assumes_opaque_callees_leave_no_stack_addresses=any(opaque_uses) or any(
-                opaque for _, opaque in projection_frame_uses),
+            assumes_entry_values_not_frame=any(frame_uses),
+            assumes_opaque_callees_leave_no_stack_addresses=any(opaque_uses),
             call_below_bounds=below_bounds,
             assumes_readonly_image_constant=readonly_image is not None,
             assumes_import_slots_hold_exports=_import_slots_used(memory_ssa),

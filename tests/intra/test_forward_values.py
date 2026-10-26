@@ -362,7 +362,9 @@ def test_a_probe_resting_on_an_assumption_reports_it(monkeypatch):
                .ins(store(const(0x5000), reg(RSP)))
                .call_indirect(RAX).add_rsp(0x48).ret())
     item, facts = _forward_facts(monkeypatch, builder)
-    assert not item.normalized.assumes_entry_values_not_frame
+    # (the normalization rests on it too now: the CALL's push is a frame
+    # write after the escape, private by the rule -- ``normalize._push_row``)
+    assert item.normalized.assumes_entry_values_not_frame
     assert _targets(_target(facts)) == {A_TARGET, B_TARGET}
     assert facts and all("entry-values-do-not-address-the-new-frame" in fact.requires for fact in facts)
 

@@ -181,7 +181,10 @@ def test_a_frame_read_before_the_only_opaque_call_does_not_rest_on_it():
     t = tmp(0x100)
     read_first = _entry_write(FunctionBuilder().sub_rsp(0x40))
     read_first.ins(add(t, reg(RSP), const(0x10)), load(reg(RAX), t)).call(OPAQUE)
-    assert not _reported(read_first.add_rsp(0x40).ret())
+    # (the CALL's push is a frame write at the opaque call itself
+    # (``normalize._push_row``): keeping it from other objects is a decision
+    # that rests on the assumption -- reported, as for any frame write there)
+    assert _reported(read_first.add_rsp(0x40).ret())
 
 
 def test_a_frame_write_before_an_opaque_call_rests_on_it():

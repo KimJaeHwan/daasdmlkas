@@ -415,13 +415,16 @@ def test_independent_entry_anchor_cannot_be_assumed_disjoint_from_the_call_push(
     reader = f"1:{caller._address(len(caller._rows)):x}:0:LOAD"
     caller.ins(load(reg(RAX, 2), reg(RSI))).add_rsp(0x48).ret()
     units = program_units(caller, leaf)
-    # Not without a named assumption: entry RCX may be the pushed slot. With
-    # entry-values-do-not-address-the-new-frame (on by default) the index
-    # load binds, and the use is reported (push-slot overlay, docs 25.72).
+    # Not without a named assumption: entry RCX may be the pushed slot -- the
+    # CALL's push is a definition (``normalize._push_row``), so with
+    # entry-values-do-not-address-the-new-frame off the index load through
+    # RCX carries may-alias debt for it, and the indexed write through it is
+    # not exact (docs 25.73). With the assumption (on by default) the index
+    # load is exact and the use is reported.
     item = analyze_units(units, assume_entry_values_not_frame=False)["1:1000"]
-    projector = _final_projector(item.normalized, item.unit.observation)
-    assert all(projector._anchored_expression(key, reference, 8) is None
-               for key, reference in _indexed_references(item))
+    call = next(key for key in item.proven if key.endswith(":CALL"))
+    assert any(row.operation_key.startswith(call + "~ld") and call + "~push" in row.writers
+               for row in item.normalized.may_alias_reads)
     assert not slice_from(item.normalized, item.normalized.dependencies.node_for_key("op:" + reader)).is_complete
     assert not item.normalized.assumes_entry_values_not_frame
     program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
@@ -448,9 +451,9 @@ def test_constant_near_zero_stack_and_wrapping_preload_have_no_exact_reuse(monke
     caller.ins(load(reg(RAX, 2), reg(RSI))).ret()
     units = program_units(caller, leaf)
     item = analyze_units(units)["1:1000"]
-    projector = _final_projector(item.normalized, item.unit.observation)
-    assert all(projector._anchored_expression(key, reference, 8) is None
-               for key, reference in _indexed_references(item))
+    # (the stack pointer is the constant 4: the push lands at a constant
+    # address below zero -- wrapping -- and the index load through RCX = 4 - 8
+    # reads it; no exact reuse of the preload through the wrapped index)
     assert not slice_from(item.normalized, item.normalized.dependencies.node_for_key("op:" + reader)).is_complete
     program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
     # Keep the demanded buffer outside the raw push bytes: this test concerns

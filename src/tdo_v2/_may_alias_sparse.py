@@ -40,8 +40,21 @@ def derive_sparse(unit, objects, policy):
     write_spans: dict[object, list[tuple[int, int, tuple]]] = {}
     read_bytes: dict[object, set[int]] = {}
     unknown_read_blocks: set[str] = set()
+    def push_at_call(block_key, position, span, writer):
+        # a deferred push (``_Policy.push_deferred``) reaching the other
+        # objects at its CALL: what the ordinary gen adds beyond the wild ones
+        private = all(policy.is_private(span.object_id, offset, writer, write=True)
+                      for offset in range(span.start, span.end))
+        event = (block_key, position, 0, writer)
+        for other in tracked:
+            if policy.may_alias(other, span.object_id) and not private and other not in policy.wild_objects:
+                object_gens[other].append(event)
+
     for block in blocks:
+        deferred: dict = {}   # CALL key -> its push's (span, writer)
         for position, effect in enumerate(block.effects):
+            for span, writer in deferred.pop(effect.operation_key, ()):
+                push_at_call(block.key, position, span, writer)
             for evidence in effect.reads:
                 if type(evidence) is ResolvedStorage and evidence.span.object_id in tracked:
                     span = evidence.span
@@ -57,8 +70,11 @@ def derive_sparse(unit, objects, policy):
                 if writer not in policy.no_kill_writers:  # an uncertain destination kills nothing
                     write_spans.setdefault(span.object_id, []).append(
                         (span.start, span.end, (block.key, position, order)))
-                private = all(policy.is_private(span.object_id, offset, writer, write=True)
-                              for offset in range(span.start, span.end))
+                call = policy.push_deferred(writer, span)
+                if call is not None:
+                    deferred.setdefault(call, []).append((span, writer))
+                private = call is not None or all(policy.is_private(span.object_id, offset, writer, write=True)
+                                                  for offset in range(span.start, span.end))
                 # (one event tuple, shared by every list it goes to -- docs 25.31 B2-a2a)
                 event = (block.key, position, order, writer)
                 for other in tracked:  # a private frame write reaches only wild objects
@@ -75,6 +91,9 @@ def derive_sparse(unit, objects, policy):
                 for other in tracked:
                     object_gens[other].append(event)
                 any_gens.append(event)
+        for pushes in deferred.values():   # (a CALL not in this block: at its end, as the dense code)
+            for span, writer in pushes:
+                push_at_call(block.key, len(block.effects), span, writer)
 
     # byte classes: (object, covering writes)
     class_of: dict[tuple, int] = {}

@@ -355,19 +355,6 @@ def derive_proven_call_effect(
         return row is not None and row[0].object_id.kind is StorageObjectKind.REGISTER_FILE \
             and (row[0].start, row[0].size) in stack and span.end <= 1 << (8 * row[0].size)
 
-    def return_slot(span: ByteSpan) -> bool:
-        """Bytes of the return address the observed call shape pushed (from
-        the callee's entry stack pointer up by the push): the caller's model
-        removes that transient push -- after the return they lie below its
-        stack pointer and are not read (``observed_call_state``)."""
-        row = anchors.get(span.object_id)
-        if row is None or row[0].object_id.kind is not StorageObjectKind.REGISTER_FILE \
-                or (row[0].start, row[0].size) not in stack or tail:
-            return False
-        push = -(stack_deltas or {}).get((row[0].start, row[0].size), 0)
-        bias = 1 << (8 * row[0].size)
-        return push > 0 and bias <= span.start and span.end <= bias + push
-
     clobbers_below = False
     sink_demands = tuple(_sink_demand(demand, anchored, rejections, f"sink{index}")
                          for index, demand in enumerate(summary.sink_demands))
@@ -407,8 +394,8 @@ def derive_proven_call_effect(
             if kind is not StorageObjectKind.REGISTER_FILE and below(run.span):
                 clobbers_below = clobbers_below or verdict != "self"
                 continue
-            if kind is not StorageObjectKind.REGISTER_FILE and return_slot(run.span):
-                continue
+            # (a write to the return-address slot is an ordinary run: in the
+            # caller it lands on the CALL's push definition, ``normalize._push_row``)
             if verdict == "unknown" and kind is not StorageObjectKind.REGISTER_FILE \
                     and _only_exported_aliasing(run, exported):
                 # unknown only because an exported memory write may alias these

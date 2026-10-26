@@ -173,9 +173,10 @@ def test_normalized_call_captures_before_staging_not_the_raw_call_marker(monkeyp
     analyzed = analyze_units(program_units(caller, callee))["1:1000"]
     (state,) = analyzed.normalized.memory_ssa.call_register_snapshots
     assert state.boundary_key == "1:1004:2:CALL"
-    # The return-IP summary also reads entry memory. That load must precede
-    # the run-input temporaries, and the snapshot must precede both stages.
-    assert state.first_action_key == "1:1004:2:CALL~ld0"
+    # The CALL's push comes first (``normalize._push_row``), then the
+    # return-IP summary's entry load, then the run-input temporaries; the
+    # snapshot precedes them all.
+    assert state.first_action_key == "1:1004:2:CALL~push"
     assert state.block_key == "1:1004"
     block = next(block for block in analyzed.normalized.memory_unit.blocks
                  if block.key == state.block_key)
