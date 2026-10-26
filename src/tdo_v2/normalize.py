@@ -2096,7 +2096,7 @@ class _ScopedNormalizer:
         # a row staged for an operation (a call's ``~push`` / effect rows, a
         # rep store's ``~e`` elements) runs when the operation does: it has
         # the operation's control dependences too (Astra: a conditional
-        # call's push)
+        # call's push; a rep element row: the loop body's count test)
         rows_of: dict[str, list[str]] = {}
         for key in operation_nodes:
             base, separator, _ = key.partition("~")
@@ -2109,16 +2109,6 @@ class _ScopedNormalizer:
                     operation_nodes[dependent],
                     EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=row.decision),
                 )
-        for address, (count, _) in rep_plan.items():
-            # element rows run once per iteration: like the loop body, they
-            # depend on the count test
-            site = sites[address]
-            for index in range(1, count):
-                for key in site.element_keys:
-                    dependencies.add_edge(
-                        operation_nodes[site.branch_key], operation_nodes[f"{key}~e{index}"],
-                        EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=site.branch_key),
-                    )
         limit("graph_nodes", dependencies.node_count)
         limit("graph_edges", dependencies.edge_count)
         limit("memory_definitions", len(memory_ssa.definitions) if memory_ssa is not None else 0)

@@ -412,7 +412,12 @@ def test_source_capture_accepts_unhashable_reader_but_rejects_equal_foreign_read
 
 @pytest.mark.parametrize("frame", (False, True))
 @pytest.mark.parametrize("displacement,width", ((0, 8), (0, 1), (4, 8), (7, 2)))
-def test_real_body_return_overlay_writes_keep_entry_ssa_but_refuse_lowering(frame, displacement, width):
+def test_real_body_return_overlay_writes_lower_onto_the_push(frame, displacement, width):
+    """The callee writes into its own return-address slot: the context keeps
+    that write in its entry SSA, and lowering it is an ordinary memory run
+    onto the caller's push definition (``normalize._push_row``; before the
+    push was a definition the lowering dropped it and the context was
+    refused, "return-overlay-writer-not-lowerable")."""
     from test_interprocedural import _check
 
     caller = (FunctionBuilder().sub_rsp(0x40)
@@ -426,11 +431,9 @@ def test_real_body_return_overlay_writes_keep_entry_ssa_but_refuse_lowering(fram
                            assume_entry_values_not_frame=frame,
                            assume_opaque_callees_leave_no_stack_addresses=False)
     owner, generic = result["1:1000"], result["1:1600"]
-    assert outer not in owner.activations
-    assert owner.activation_rejections[outer] == "return-overlay-writer-not-lowerable"
+    assert outer not in owner.activation_rejections and outer in owner.activations   # (the lowered context is used)
     context = _call_activation.replay_activation(owner, generic, outer)
     assert context is not None  # Entry transport itself is valid under both policies.
-    assert _call_activation.lowering_refusal(context) == "return-overlay-writer-not-lowerable"
     assert any(definition.kind is MemoryDefinitionKind.DATA_WRITE
                and definition.span.start == (1 << 64) + displacement and definition.span.size == width
                for definition in context.normalized.memory_ssa.definitions)
@@ -438,27 +441,22 @@ def test_real_body_return_overlay_writes_keep_entry_ssa_but_refuse_lowering(fram
     assert _check(result, program).silent == []
 
 
-def test_final_lowering_guard_checks_the_memory_consumer_output(models, monkeypatch):
+def test_the_memory_consumer_output_keeps_the_slot_writer(models, monkeypatch):
     # The original projector keeps the candidate address even with CALL
-    # debt. This is not a claimed final-only address-resolution countermodel.
-    # Observe the production boundary: the checked object must nevertheless
-    # be the actual consumer output, not an earlier entry-only result.
+    # debt. The refined context (the memory consumer's output) keeps the
+    # callee's write into its return-address slot as a definition; it lowers
+    # onto the caller's push (it was refused while the push was no definition).
     from tdo_v2 import _call_memory
 
     processed = []
-    refine, guard = _call_memory.refine_call_memory, _call_activation.lowering_refusal
+    refine = _call_memory.refine_call_memory
 
     def consumed(context, **options):
         final = refine(context, **options)
         processed.append(final)
         return final
 
-    def final_guard(context):
-        assert any(context is final for final in processed)
-        return guard(context)
-
     monkeypatch.setattr(_call_memory, "refine_call_memory", consumed)
-    monkeypatch.setattr(_call_activation, "lowering_refusal", final_guard)
     caller = (FunctionBuilder().sub_rsp(0x80)
               .ins(add(reg(RCX), reg(RSP), const(0x30)), store(reg(RCX), const(0))))
     outer = _key(caller, 2, "CALL")
@@ -476,8 +474,7 @@ def test_final_lowering_guard_checks_the_memory_consumer_output(models, monkeypa
     callee.ins(store(reg(RDI), const(7))).add_rsp(0x48).ret()
     result = _analyze_units(caller, callee, models=models)
     owner, generic = result["1:1000"], result["1:1600"]
-    assert not owner.activations
-    assert owner.activation_rejections[outer] == "return-overlay-writer-not-lowerable"
+    assert outer not in owner.activation_rejections and outer in owner.activations   # (the lowered context is used)
     entry = _call_activation.replay_activation(owner, generic, outer)
     assert entry is not None and processed
     assert any(row.operation_key == pointer_read and realloc in row.intervening_calls
@@ -485,6 +482,5 @@ def test_final_lowering_guard_checks_the_memory_consumer_output(models, monkeypa
     refined = refine_call_memory(entry)
     assert any(row.preserved and row.demand.call == realloc and row.demand.reader == pointer_read
                for row in refined.call_memory_decisions)
-    assert guard(refined) == "return-overlay-writer-not-lowerable"
     assert any(definition.operation_key == actual_store and definition.span.start == (1 << 64)
                and definition.span.size == 8 for definition in refined.normalized.memory_ssa.definitions)

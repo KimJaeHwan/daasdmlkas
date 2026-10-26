@@ -5120,6 +5120,8 @@ Grow 주소/함수명 특례는 유지하지 않는다. 당시 승인·회귀 �
 원 관찰 push 범위를 대조해 전체/부분 겹침이면 `activation_rejections[call] = return-overlay-writer-not-lowerable`로 자동 override만
 거부하고 generic caller를 유지한다. 독립 entry API는 원 문맥 SSA를 반환한다. 이는 frame ON/OFF와 무관한 표현 경계이며, 스택 전제를
 추가하거나 해당 실행을 불가능하다고 가정하는 처리가 아니다. 기존 return-overlay lowering 일반화는 별도 확장 과제다.
+(§25.73 이후: push가 정의이고 lowering이 반환주소 칸 쓰기를 보통 run으로 남기므로 이 거부는 제거됐다 — 해당 문맥은
+채택되어 그 쓰기가 caller의 push 정의 위에 놓인다. `activation_rejections`는 빈 필드로 남는다.)
 
 #### 비변경 판정과 읽기 해결의 차이
 
@@ -5734,3 +5736,7 @@ v3-win32 22, ue-dev 4)은 §25.72와 같다(가정 없이는 push 칸 별칭을 
 (2) 다중 대상 합성 `frame_or_slot`이 반환주소 칸 run을 아직 버림(반환주소를 고쳐 쓰는 대상에서만 문제). (3) rep `~e` 행의
 count 검사 제어 간선 중복(의미 동일, 간선 수만). (4) SP를 표현 못 하는 호출의 push는 주소 미해결 쓰기가 됨(측정상 영향 없음).
 (5) 특수 경우 → 그래프 사실 조사 목록(`.census6/special_case_survey.md`, 15개 — #1 반영).
+(6) 정리 1차(같은 날): `_call_activation.lowering_refusal` 제거(위 문단), "호출의 첫 행" 탐색을 `forward.first_effect` 하나로,
+rep `~e` 행의 count 검사 제어 간선 별도 루프 제거(행이 기준 연산의 제어 의존을 물려받음 — 간선 수 동일, 중복 없음). 순 -39줄.
+남김: `_call_memory`의 "demand가 geometry+8 밖" 검사(+8은 push 칸 — 지금은 push 정의가 답하므로 -8/-4 기대를 바꾸는 별도 변경으로).
+

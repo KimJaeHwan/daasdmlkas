@@ -47,11 +47,8 @@ def _policy(callee):
 
 
 def _first(normalized, call):
-    if getattr(normalized, "forward_inputs", None) is None:
-        return None
-    return next((effect.operation_key for block in normalized.forward_inputs.effect_unit.blocks
-                 for effect in block.effects
-                 if effect.operation_key == call or effect.operation_key.startswith(call + "~")), None)
+    from .forward import first_effect
+    return first_effect(normalized, call)
 
 
 def _single(value):
@@ -255,33 +252,6 @@ def replay_activation(caller, callee, call, *, readonly_image=None, assumptions=
             return _replay_activation(caller, callee, call, readonly_image=readonly_image, assumptions=assumptions)
     except RefinementRefused:
         return None
-
-
-def lowering_refusal(context):
-    """Keep valid entry SSA separate from the existing summary port limits.
-
-    The generic call-effect lowering omits the observed return overlay. It
-    cannot consume a context that resolves a real body write into that area:
-    doing so would drop the writer while claiming the rest is preserved.
-    This is a lowering refusal, not a frame assumption or invalid entry fact.
-    """
-    from .interprocedural import _register_file
-    from .observed_call_state import observed_call_state_projections
-
-    caller, original, call, _ = context.activation_witness
-    shape = next(row for row in observed_call_state_projections(caller.unit.observation)
-                 if row.call_operation_key == call)
-    transition = shape.memory_transition
-    register, _ = _register_file(original.unit.observation, original.unit.scopes.resolution_context)
-    sp = ByteSpan(register, transition.callee_base.byte_offset, transition.callee_base.byte_size)
-    bias, push = 1 << (8 * sp.size), -transition.displacement_delta
-    for definition in context.normalized.memory_ssa.definitions:
-        step()
-        anchor = context.anchors.get(definition.span.object_id)
-        if definition.kind is MemoryDefinitionKind.DATA_WRITE and anchor is not None and anchor[0] == sp \
-                and definition.span.start < bias + push and bias < definition.span.end:
-            return "return-overlay-writer-not-lowerable"
-    return None
 
 
 def _replay_activation(caller, callee, call, *, readonly_image=None, assumptions=()):

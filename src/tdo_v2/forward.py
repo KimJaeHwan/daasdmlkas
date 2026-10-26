@@ -333,6 +333,17 @@ class ForwardInputs:
     nonstack_spans: frozenset = frozenset()
 
 
+def first_effect(normalized, call_key: str) -> str | None:
+    """The call's first effect in the normalized unit -- its first staged
+    row (the CALL's push, ``~ld`` / ``~in`` staging) or the bare call:
+    before any of the call's writes. None without forward inputs."""
+    inputs = getattr(normalized, "forward_inputs", None)
+    if inputs is None:
+        return None
+    return next((effect.operation_key for block in inputs.effect_unit.blocks for effect in block.effects
+                 if effect.operation_key == call_key or effect.operation_key.startswith(call_key + "~")), None)
+
+
 def probe(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ...]]:
     """Probe under the normalization's captured activation, never ambient state."""
     from ._activation_entry import using_entry
@@ -914,10 +925,7 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
         ``~in`` / ``~ld`` staging, or the bare call -- before any of the call's
         writes) -> the value of each span's single debt-free reaching
         definition, else TOP; with the probe's assumptions."""
-        first = next((effect.operation_key for block in normalized.forward_inputs.effect_unit.blocks
-                      for effect in block.effects
-                      if effect.operation_key == call_key or effect.operation_key.startswith(call_key + "~")),
-                     None) if normalized.forward_inputs is not None else None
+        first = first_effect(normalized, call_key)
         if first is None:
             return {span: Value.top(8 * span.size) for span in spans}, ()
         found, used = probe(normalized, first, spans)

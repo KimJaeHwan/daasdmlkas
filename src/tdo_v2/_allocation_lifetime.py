@@ -270,9 +270,8 @@ class AllocationAnalysis:
         return found.span if type(found) is ResolvedStorage else None
 
     def first(self, call):
-        return next((effect.operation_key for block in self.normalized.forward_inputs.effect_unit.blocks
-                     for effect in block.effects
-                     if effect.operation_key == call or effect.operation_key.startswith(call + "~")), call)
+        from .forward import first_effect
+        return first_effect(self.normalized, call) or call
 
     def port(self, port):
         from .interprocedural import _register_file

@@ -657,7 +657,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     with activation(_ledger_key(functions[key])):
                         result, published = refined_one(key, hypotheses)
                         if _forward_switched_on() and key not in recursive_keys:
-                            from ._call_activation import replay_activation, revalidate_activation, lowering_refusal
+                            from ._call_activation import replay_activation, revalidate_activation
                             from ._call_memory import refine_call_memory
                             from ._forward_memory import RefinementRefused
                             from .summary_engine import run_assumptions
@@ -682,10 +682,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                                                          assumptions=labels)
                                         except RefinementRefused:
                                             pass  # The independently evidenced entry context remains usable.
-                                        reason = lowering_refusal(context)
-                                        if reason is not None:
-                                            result.activation_rejections[call] = reason
-                                            continue
+                                        # (a body write into the return-address slot lowers as
+                                        # an ordinary run onto the CALL's push definition)
                                         if context.summary != done.summary or context.anchors != done.anchors:
                                             contexts[call] = context
                             if contexts:
