@@ -29,7 +29,7 @@ from .pcode_blocks import build_pcode_block_graph
 from .rep_strings import MAX_REP_BYTES, rep_sites
 from .may_alias import (
     ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, EscapeMemo, MayAliasRead,
-    derive_may_alias_reads, private_frame_writes,
+    derive_may_alias_reads, private_frame_calls, private_frame_writes,
 )
 from .call_contracts import FunctionCallSeedUnit
 from .call_observation_contracts import (
@@ -1067,7 +1067,8 @@ def _call_access_request(call_key, evaluation_key, access, register_space, load_
 
 
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries, context,
-                      stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None):
+                      stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None,
+                      globals_disjoint=False, constant_space=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
@@ -1090,48 +1091,6 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     from .call_summary_effects import call_load_keys
 
     planned = call_load_keys(call_key, proven)
-    protected_loads = set()
-
-    def protect(access):
-        step()
-        if access in protected_loads:
-            return
-        protected_loads.add(access)
-        if access.pointer is not None:
-            protect(access.pointer)
-        if access.index is not None and access.index.memory is not None:
-            protect(access.index.memory)
-
-    for access in planned:
-        step()
-        if access.index is not None:
-            # the indexed read itself too, not only its inputs: ``[SP + RDX]``
-            # in the callee may be the return address the push just wrote
-            # (Astra, forward-memory merge review)
-            protect(access)
-    for run in proven.memory_runs:
-        step()
-        if run.write.index is not None:
-            if run.write.pointer is not None:
-                protect(run.write.pointer)
-            if run.write.index.memory is not None:
-                protect(run.write.index.memory)
-    for row in (*proven.runs, *proven.memory_runs, *proven.sink_demands):
-        for pair in row.conditions:
-            step()
-            for side in pair:
-                if side.index is not None:
-                    if side.pointer is not None:
-                        protect(side.pointer)
-                    if side.index.memory is not None:
-                        protect(side.index.memory)
-    for side in (*proven.unknown_memory, *(side for pair in proven.writer_conditions for side in pair)):
-        step()
-        if side.index is not None:
-            if side.pointer is not None:
-                protect(side.pointer)
-            if side.index.memory is not None:
-                protect(side.index.memory)
 
     def temporary():
         span = ResolvedStorage(ByteSpan(
@@ -1181,24 +1140,60 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
         if access in loaded:
             return loaded[access]
         transition = transitions.get(call_key)
-        if access in protected_loads and transition is not None and transition.displacement_delta < 0:
-            # CALL's transient push is removed from persistent SSA. Reading
-            # entry memory for an index/base must not silently read the old
-            # bytes underneath it, including via an indirect RCX=RSP-8 alias.
-            reads, pointer, offset = base(access)
+        if transition is not None and transition.displacement_delta < 0 and access.pointer is None \
+                and access.index is None and access.anchor is not None and access.displacement == 0 \
+                and (access.anchor.start, access.anchor.size) == (
+                    transition.caller_base.byte_offset, transition.caller_base.byte_size) \
+                and access.size == -transition.displacement_delta \
+                and access.space_id == int(call_key.split(":", 1)[0], 16):
+            # exactly the pushed slot (the callee's ``[SP]``, the push's
+            # width, in the space the push stores to -- the CALL's own,
+            # ``observed_call_state``; Astra round 7): at callee entry it
+            # holds the return address the CALL wrote -- a constant, so a
+            # definition with no input (the push's own definition, which the
+            # persistent SSA omits). Partly overlapping reads stay under the
+            # overlay check below.
+            key, target = f"{call_key}~ld{len(loaded)}", temporary()
+            assert planned.get(access, key) == key
+            rows.append(ObservedEffect(key, EffectKind.COPY, reads=(), writes=(target,), block_key=block_key))
+            loaded[access], load_keys[access] = target, key
+            return target
+        absolute = access.pointer is None and access.anchor is None and access.index is None
+        if transition is not None and transition.displacement_delta < 0 and (not absolute or not globals_disjoint):
+            # CALL's transient push is removed from persistent SSA. No read of
+            # callee-entry memory -- plain, through a pointer slot, indexed,
+            # an index/base input or an accessor slot -- may silently read the
+            # old bytes underneath it: the row carries the push overlay and
+            # ``relative_memory.project_anchored`` binds it only when its span
+            # provably avoids the pushed bytes (Astra / Fable, merge review;
+            # also via an RCX = RSP-8 alias) -- nor an absolute address, which
+            # the pushed slot may be unless globals-disjoint-from-stack is
+            # taken (Astra, round 4)
+            if absolute:
+                # (no constant space or no address-space span: no base to
+                # check -- the read stays unresolved, debt; Fable round 5)
+                reads, offset, pointer = (), 0, None
+                if constant_space is not None and access.span is not None \
+                        and access.span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
+                    pointer = ValidatedVarnode(VarnodeKindCode.CONSTANT,
+                                               AddressCoordinate(constant_space, access.span.start),
+                                               transition.caller_base.byte_size)
+            else:
+                reads, pointer, offset = base(access)
             sp = ValidatedVarnode(VarnodeKindCode.REGISTER,
                                  AddressCoordinate(register_space, transition.caller_base.byte_offset),
                                  transition.caller_base.byte_size)
             sp_storage = _resolve_validated_storage(_storage_ref(sp), context)
-            assert type(sp_storage) is ResolvedStorage
             key, target = f"{call_key}~ld{len(loaded)}", temporary()
             assert planned.get(access, key) == key
-            rows.append(ObservedEffect(key, EffectKind.COPY,
-                                       reads=tuple(dict.fromkeys((*reads, sp_storage))),
+            if type(sp_storage) is ResolvedStorage and pointer is not None:
+                reads = (*reads, sp_storage)
+                anchored[key] = (key, pointer, offset, access.size, access.space_id,
+                                 (sp, transition.displacement_delta))
+            # (else no overlay to check: the read stays unresolved -- debt)
+            rows.append(ObservedEffect(key, EffectKind.COPY, reads=tuple(dict.fromkeys(reads)),
                                        writes=(target,), memory_read=UnresolvedMemoryAccess(None, access.size),
                                        block_key=block_key))
-            anchored[key] = (key, pointer, offset, access.size, access.space_id,
-                             (sp, transition.displacement_delta))
             loaded[access], load_keys[access] = target, key
             return target
         if access.pointer is not None or access.index is not None:
@@ -1727,6 +1722,9 @@ class _ScopedNormalizer:
                             _call_stack_span(operation_key, proven_call_effects[operation_key],
                                              call_transitions, observation, context),
                             pointer_rows, value_inputs, accessor_states.get(operation_key, (None,))[0],
+                            globals_disjoint=assume_globals_disjoint_from_stack,
+                            constant_space=next((row.space_id for row in unit.scopes.program.evidence.address_spaces
+                                                 if row.is_constant_space), None),
                         )
                         for row in rows:
                             operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
@@ -1810,7 +1808,39 @@ class _ScopedNormalizer:
             # fixed point leaves without an address: first that fixed point,
             # then on to the next with them
             atoms_on = False
+            # summarized calls that never use a received register as an address
+            # cannot observe a stack-pointer copy either
+            quiet_calls = frozenset(assumed_call_effects) | frozenset(
+                key for key, row in proven_call_effects.items() if not row.observes_registers
+            )
+            # an external model declaring the registers it observes
+            observed_calls = {
+                key: frozenset(offset for span in row.observed_registers for offset in range(span.start, span.end))
+                for key, row in proven_call_effects.items()
+                if row.observes_registers and row.observed_registers is not None
+            }
+            # calls that may leave a stack-pointer-derived value out of sight
+            # (``ProvenCallEffect.escapes_stack``): stack escapes whatever is tainted
+            escaping_calls = frozenset(key for key, row in proven_call_effects.items() if row.escapes_stack)
+            # calls with no proven effect (opaque-callees-leave-no-stack-addresses)
+            opaque_calls = _opaque_calls(observation, proven_call_effects, assumed_call_effects)
+            # callee-entry loads through another base than the stack pointer
+            # (``relative_memory.project_anchored``): bound only at calls where
+            # the new frame is private, as ``may_alias`` decides it
+            # (entry-values-do-not-address-the-new-frame, escapes)
+            overlay_calls = {
+                key: (call_transitions[key].caller_base.byte_offset, call_transitions[key].caller_base.byte_size)
+                for key in dict.fromkeys(row[0].split("~", 1)[0] for row in anchored_call_accesses.values()
+                                         if len(row) == 6)
+            }
+            frame_private = private_frame_calls(
+                effect_unit, observation, context, address_spaces, overlay_calls, assumed_calls=quiet_calls,
+                observed_calls=observed_calls, escaping_calls=escaping_calls, opaque_calls=opaque_calls,
+            ) if overlay_calls else {}
             used_reads: dict = {}  # memory values the projections used (validated at the end)
+            # callee-entry loads bound under entry-values-do-not-address-the-new-frame
+            projection_frame_uses: list = []
+            # (each: (load key, whether opaque-callees-leave-no-stack-addresses was needed))
             # last stage: values behind writes still without an address are used
             # (``settle_pending``); undone if it gives one of those writes an address
             settle, settled_at = True, None
@@ -1846,6 +1876,8 @@ class _ScopedNormalizer:
                     blocked_reads=_blocked_reads,
                     used_reads=used_reads,
                     load_identity_plan=_load_identity_plan,
+                    frame_uses=projection_frame_uses,
+                    frame_private=frame_private,
                 )
                 if projected_effect_unit is effect_unit:
                     # (accessor keys need atoms on even with nothing run once)
@@ -1948,22 +1980,6 @@ class _ScopedNormalizer:
             call_clobber_reads,
             operation_nodes,
         )
-        # summarized calls that never use a received register as an address
-        # cannot observe a stack-pointer copy either
-        quiet_calls = frozenset(assumed_call_effects) | frozenset(
-            key for key, row in proven_call_effects.items() if not row.observes_registers
-        )
-        # an external model declaring the registers it observes
-        observed_calls = {
-            key: frozenset(offset for span in row.observed_registers for offset in range(span.start, span.end))
-            for key, row in proven_call_effects.items()
-            if row.observes_registers and row.observed_registers is not None
-        }
-        # calls that may leave a stack-pointer-derived value out of sight
-        # (``ProvenCallEffect.escapes_stack``): stack escapes whatever is tainted
-        escaping_calls = frozenset(key for key, row in proven_call_effects.items() if row.escapes_stack)
-        # calls with no proven effect (opaque-callees-leave-no-stack-addresses)
-        opaque_calls = _opaque_calls(observation, proven_call_effects, assumed_call_effects)
         frame_uses: list = []
         opaque_uses: list = []
         # the stack escapes once for this normalization (docs 25.31 B0-4)
@@ -2169,8 +2185,9 @@ class _ScopedNormalizer:
             assumed_call_effects=tuple(sorted(assumed_call_effects.items())),
             proven_call_effects=tuple(sorted(proven_call_effects.items())),
             assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
-            assumes_entry_values_not_frame=any(frame_uses),
-            assumes_opaque_callees_leave_no_stack_addresses=any(opaque_uses),
+            assumes_entry_values_not_frame=any(frame_uses) or bool(projection_frame_uses),
+            assumes_opaque_callees_leave_no_stack_addresses=any(opaque_uses) or any(
+                opaque for _, opaque in projection_frame_uses),
             call_below_bounds=below_bounds,
             assumes_readonly_image_constant=readonly_image is not None,
             assumes_import_slots_hold_exports=_import_slots_used(memory_ssa),

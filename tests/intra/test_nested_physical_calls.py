@@ -324,6 +324,7 @@ def test_three_analyzed_levels_use_existing_configured_call_depth():
         evaluate_physical(_record(case, key, limits=Limits(call_depth=2)), entry_reader(vm))
 
 
+@pytest.mark.xfail(strict=True, reason="push-slot overlay (docs 25.72): with entry-values-do-not-address-the-new-frame off a callee-entry load through an entry value is not bound (it may be the pushed slot); to be recovered by the push-as-definition design")
 def test_final_synthetic_call_output_uses_an_inclusive_raw_call_prefix():
     case, _ = _nested_case(register_result=True)
     item = case['item']

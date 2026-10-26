@@ -319,8 +319,10 @@ def test_memory_cuts():
     # rcx = rsp - 8 in the caller: [rcx] is the pushed return address -- not bound
     from synthetic import sub
 
+    # (refused already when the summary is projected -- the push-slot
+    # overlay, docs 25.72 -- so the record names that debt)
     assert _cut([_caller(sub(reg(RCX), reg(RSP), const(8))),
-                 FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "return address"
+                 FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "memory: debt"
     # a pointer chain p = [rsp+8]; rax = [p]
     chain = FunctionBuilder(entry=F).ins(add(t, reg(RSP), const(8)), load(t, t), load(reg(RAX), t)).ret()
     assert _cut([_caller(), chain]) in ("memory: overlay unproven", "unbound memory")
@@ -349,7 +351,8 @@ def test_a_pointer_into_the_return_address_is_cut():
     from synthetic import sub
 
     caller = _caller(sub(reg(RCX), reg(RSP), const(8)))
-    assert _cut([caller, FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "return address"
+    # (the push-slot overlay refuses it in the summary projection: docs 25.72)
+    assert _cut([caller, FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "memory: debt"
 
 
 def _preceding_reader(caller_function):
@@ -520,7 +523,8 @@ def test_memory_output_cuts():
               .add_rsp(0x28).ret())
     record = _record([caller, _keeping_callee(reg(RCX))])
     (call,) = _memory_call(record)   # (the old value at W is the return address: never bound)
-    assert "stitched" not in call and call["stitch_cut"] == "return address"
+    # (the push-slot overlay refuses it in the summary projection: docs 25.72)
+    assert "stitched" not in call and call["stitch_cut"] == "memory: debt"
     # W through rcx (a register anchor): its old-value load is checked whole,
     # and the engine gives that read a may-alias debt with the store through
     # r8 before the call -- cut (the direct-slot case of

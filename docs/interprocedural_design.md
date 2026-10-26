@@ -5622,3 +5622,54 @@ Astra는 최종 두 XML의 전체/실제/skip 집계, 현재 소스·설치/재�
 병합 부모는 정방향 체크포인트 `fbc1a62`와 연산식 `c8379e8`이며, 원격 반영 대상은
 `origin/feature/forward-memory-footprints`다. main으로 병합하거나 강제 push하지 않는다.
 병합 커밋의 실제 ID와 원격 SHA 일치는 Git 이력 및 작업 완료 응답에서 확인한다.
+
+### 25.72 CALL push 칸(반환주소) 읽기의 overlay 검사 (2026-10-26)
+
+**구멍.** persistent SSA는 관찰된 호출 shape의 반환주소 push를 지운다(`observed_call_state`). 그래서 요약된 callee가
+진입 시점에 그 칸 `[SP+delta, SP)`를 읽으면, caller의 호출 전 바이트에 연결되어 **완전하지만 틀린** slice가 된다
+(Fable 재현: callee `[RSP]` 48 silent; main에도 있던 구멍). 같은 칸에 닿는 경로가 여러 형태였다:
+indexed `[RSP+RDX]`, plain `[RSP]`, `RCX=RSP-8` 별칭, 그 주소를 담은 pointer 슬롯 `[[0x2000]]`, accessor 읽기,
+`rsp+r8-8`·once-join 같은 wild 기반, entry pointer, 절대 주소.
+
+**수정(6회 검토, Astra·Fable 최종 승인).**
+
+- `normalize._proven_call_rows.load()`: 호출에 push overlay(`displacement_delta < 0`)가 있으면 전역이 아닌 **모든** 진입
+  load(plain/pointer/indexed/index 입력/accessor)가 `~ld` 행에 `(SP, delta)`를 실어 보낸다(SP 해석 실패면 debt).
+  globals-disjoint-from-stack을 쓰지 않을 때는 절대 주소 load도 같은 길로 간다(상수 공간이 없으면 debt).
+- **정확히 push 칸 그 자체**(callee `[SP+0]`, 폭 = push 폭, push가 쓰는 공간 = CALL 명령의 공간)는 CALL이 쓴
+  반환주소, 즉 입력 없는 정의다. 그래프에 그 정의(입력 없는 COPY)를 둔다 — 지워진 push의 정의를 이 칸에 한해
+  되살린 것. 다른 공간의 `[SP]`는 해당 없음(Astra 7차). 일부만 겹치면 아래 검사. 같은 칸을 `RCX=RSP-8` 별칭이나
+  pointer 슬롯으로 읽으면 거리 0·폭 일치로 칸 자체임이 증명되지만 지금은 debt다(Fable 7차 P2; 후속에서 같은 정의로).
+- `relative_memory.project_anchored(pre_call_overlay=...)`:
+  - 주소가 SP와 같은 atoms면 modulo 거리로 칸과의 비겹침을 증명할 때만 연결한다.
+  - 다른 atoms면: indexed는 거부. 그 외는 `_may_address_frame`(definition/fresh/nonstack/boundary/scaled/stack-derived
+    atom — `_relative_object`가 wild로 만드는 것)이 아니고, SP의 caller 값이 entry-SP + c(c ≤ 0)이며,
+    `may_alias.private_frame_calls`가 그 호출에서 frame이 private이라 할 때만 연결한다
+    (entry-values-do-not-address-the-new-frame 켜짐 + 호출까지 stack escape 없음 — may_alias의 private-frame 규칙과 동일).
+    사용은 `frame_uses`(load key, opaque 가정 필요 여부)로 기록되어 `assumes_entry_values_not_frame` /
+    `assumes_opaque_callees_leave_no_stack_addresses`에 보고된다.
+- 상수 anchor는 `_note_fact`를 하지 않는다(직접 읽기와 같은 span; 거짓 base-dependence 방지).
+
+**회귀 테스트.** `tests/intra/test_indexed_call_overlay.py` 12개(sparse/dense × forward 0/1): 각 경로의 silent == [] 와
+`_pushed_slot_reads`/`_entry_reads`(바인딩 여부 직접 확인 — 별칭형은 may-alias 과근사 때문에 오라클만으로는 안 보임),
+`[RSP+8]` 정확성 유지, entry pointer는 가정 하에 연결·보고, 가정 off/escape/절대 주소(두 가정 off)는 연결 안 함,
+globals-disjoint 하에서 절대 주소 연결. 각 검사는 변이(검사 제거) 시 실패함을 확인했다.
+
+**정밀도 비용(사용자 승인).** 프로그램 오라클 forward 0, main → 이 수정(누락은 양쪽 0, checked 동일):
+debt로만 설명되는 의존성 v2 0→252, v3 0→96, ue-dll-debuggame 977→1217. 원인은 may_alias 규칙 그대로다:
+호출 **자체**에 stack 주소를 넘기면 escape로 보아 그 호출의 entry-value 기반 진입 load를 연결하지 않는다
+(memcpy의 stack 목적지, 포인터 두 단계 sink, home-space 별칭 해소), 가정 off 구성(물리 record)에서도 마찬가지.
+해당 6개 테스트는 `xfail(strict=True)`로 두어 정밀도가 돌아오면 드러나게 했다.
+테스트베드(run_dfbench, main 대비): v2 DFB055(deep_field_passthrough, caller stack의 `&val`을 3단계 호출로 전달)가
+PASS→FAIL(got=[], 불완전 — 틀린 출처 없음; 같은 부류로 보이며 정확한 거부 지점은 후속에서 확인), v3·v3-win32는 동일.
+스냅샷 root(audit2 대비): 기본 구성은 v2 root 1개만 완전→불완전, 가정 off 구성은 다수 완전→불완전, 불완전→완전은 없음. record stitching의 RCX=RSP-8 경우
+3개는 cut 이유가 "return address"에서 "memory: debt"로 바뀌었다(요약 투영 단계에서 이미 거부). 집 브랜치의
+`test_independent_entry_anchor_cannot_be_assumed_disjoint_from_the_call_push`는 "가정 off면 거부, 기본(on)이면 연결·보고"로
+갱신했다(사용자 결정: 기존 이름 붙은 가정 사용 유지).
+
+**후속(설계 검토, 사용자 지시 "그래프를 먼저 바로잡는다").** 칸별 검사 대신 push의 반환주소 쓰기를 memory SSA/그래프의
+실제 정의로 남겨 일반 reaching-definition/may-alias 규칙이 모든 형태를 처리하게 하고, 이 절의 overlay 검사를 걷어낸다
+(테스트는 회귀로 유지). 정밀도 회복 후보: 진입 load에 대해 "호출 **직전까지의** escape만 센다"(Fable 제안, Astra 합의 필요),
+image 매핑 범위 상수는 stack이 아니라는 이름 붙은 가정(Astra: 정적 버퍼 stack이 있어 가정 없이는 불가),
+indexed-access-stays-in-object 같은 스위치(기본값은 사용자 결정). 남은 P2: SP 값을 모르는 호출은 진입 load 전부 debt,
+overlay 행마다 SP 읽기(SP debt 전파), `private_frame_calls`의 escape 분석 1회 추가(EscapeMemo는 effect unit 정체성으로만 공유).

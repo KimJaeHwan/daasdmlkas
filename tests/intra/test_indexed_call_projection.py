@@ -415,13 +415,20 @@ def test_independent_entry_anchor_cannot_be_assumed_disjoint_from_the_call_push(
     reader = f"1:{caller._address(len(caller._rows)):x}:0:LOAD"
     caller.ins(load(reg(RAX, 2), reg(RSI))).add_rsp(0x48).ret()
     units = program_units(caller, leaf)
-    item = analyze_units(units)["1:1000"]
+    # Not without a named assumption: entry RCX may be the pushed slot. With
+    # entry-values-do-not-address-the-new-frame (on by default) the index
+    # load binds, and the use is reported (push-slot overlay, docs 25.72).
+    item = analyze_units(units, assume_entry_values_not_frame=False)["1:1000"]
     projector = _final_projector(item.normalized, item.unit.observation)
     assert all(projector._anchored_expression(key, reference, 8) is None
                for key, reference in _indexed_references(item))
     assert not slice_from(item.normalized, item.normalized.dependencies.node_for_key("op:" + reader)).is_complete
+    assert not item.normalized.assumes_entry_values_not_frame
     program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
     _oracle(item, program, lambda seed: {**_pools(seed), RCX: 0x73000000 + seed * 0x100})
+    assumed = analyze_units(units)["1:1000"]
+    assert assumed.normalized.assumes_entry_values_not_frame
+    _oracle(assumed, program, lambda seed: {**_pools(seed), RCX: 0x73000000 + seed * 0x100})
 
 
 @pytest.mark.parametrize("engine", ["sparse", "dense"])

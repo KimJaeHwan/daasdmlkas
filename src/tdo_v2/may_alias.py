@@ -467,6 +467,29 @@ def private_frame_writes(
     return frozenset(found)
 
 
+def private_frame_calls(
+    unit, observation, context, address_spaces, calls, *, assumed_calls=frozenset(),
+    observed_calls=None, escaping_calls=frozenset(), opaque_calls=frozenset(),
+) -> dict:
+    """call key -> whether this function's new frame is private at the call
+    (``_Policy.is_private``'s rule for a read there): the stack pointer this
+    module finds is ``calls[key]`` (register offset, size), entry-values-do-
+    not-address-the-new-frame is on and no path from the entry to the call
+    passes an escape. The value: None (not private), else whether that needed
+    opaque-callees-leave-no-stack-addresses -- for ``relative_memory``'s
+    callee-entry loads that may not see the removed return-address push."""
+    found, escape, without, _ = _stack_escapes(unit, observation, context, address_spaces, assumed_calls,
+                                               observed_calls, escaping_calls, opaque_calls)
+    if found is None or escape is None:
+        return {key: None for key in calls}
+    _, _, _, offset, size = found
+    return {
+        key: (without is not None and not without.private_read(key))
+        if (offset, size) == register and escape.private_read(key) else None
+        for key, register in calls.items()
+    }
+
+
 DEFAULT_ENGINE = "sparse"  # verified identical to "dense" (docs section 14)
 
 

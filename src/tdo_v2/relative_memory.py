@@ -251,6 +251,8 @@ def project_function_relative_memory(
     blocked_reads: frozenset = frozenset(),
     used_reads: dict | None = None,
     load_identity_plan=None,
+    frame_uses: list | None = None,
+    frame_private: dict | None = None,
 ) -> ObservedEffectUnit:
     """Resolve provably equal indirect addresses, preserving all other debt.
 
@@ -337,6 +339,8 @@ def project_function_relative_memory(
         projector._unsettled = _unsettled_reads(unit)
     projector._blocked = blocked_reads
     projector.used_reads = used_reads
+    projector.frame_uses = frame_uses
+    projector.frame_private = frame_private or {}
     if wild_objects is not None:
         projector.wild_objects = wild_objects
     if fresh_objects is not None:
@@ -1005,6 +1009,12 @@ class _Projector:
         self._unsettled = None
         self._blocked: frozenset = frozenset()
         self.used_reads: dict | None = None
+        # callee-entry loads bound under entry-values-do-not-address-the-new-
+        # frame (``project_anchored``): (load key, whether opaque-callees-
+        # leave-no-stack-addresses was needed), as ``may_alias`` reports uses;
+        # ``frame_private``: call key -> ``may_alias.private_frame_calls``
+        self.frame_uses: list | None = None
+        self.frame_private: dict = {}
         self._nonstack_atoms: set[int] = set()
         self._import_atoms: set[int] = set()   # import-slots-hold-their-exports (``IMPORT_SLOTS``)
         # (the stack pointer's entry atom, entry atoms overlapping its register, its span)
@@ -1131,20 +1141,45 @@ class _Projector:
             return None
         if pre_call_overlay is not None:
             # The persistent SSA omits CALL's transient return-address push.
-            # New indexed base/index entry loads may reuse pre-call RAM only
-            # when their entire span provably avoids that overlay. Resolve
-            # the actual caller address, not merely the callee anchor name.
+            # A callee-entry load may reuse pre-call RAM only when its entire
+            # span provably avoids that overlay. Resolve the actual caller
+            # address, not merely the callee anchor name: an address on the
+            # stack pointer's own atoms (``[RSP]``, an RCX = RSP-8 alias, a
+            # pointer slot holding one) is checked by distance. Another
+            # address may still be the pushed slot at run time (rsp + r8 - 8,
+            # a join of rsp - 8 and a global: Astra, round 2): it binds only
+            # where ``may_alias`` would exclude it from the frame -- a base of
+            # entry values and constants alone, never wild (a definition,
+            # fresh, nonstack, boundary or scaled atom) nor stack-derived,
+            # with the slot in the caller's new frame (below its entry stack
+            # pointer) and private at the call as ``may_alias`` decides it (the
+            # named assumption entry-values-do-not-address-the-new-frame on, no
+            # stack escape before the call: ``frame_private``; recorded in
+            # ``frame_uses``). An indexed reference is refused unless it is
+            # the stack pointer plus a constant.
             sp, delta = pre_call_overlay
             stack = self._expression_for_input(evaluation_key, sp)
-            if stack is None or stack.byte_size != address.byte_size \
-                    or stack.atoms != address.atoms or stack.image != address.image or delta >= 0:
+            if stack is None or stack.byte_size != address.byte_size or delta >= 0:
                 return None
-            modulus = 1 << space.address_size_bits
-            distance = (address.displacement + displacement - stack.displacement - delta) % modulus
-            if width >= modulus or -delta >= modulus or distance < -delta or distance + width > modulus:
+            if stack.atoms == address.atoms and stack.image == address.image:
+                modulus = 1 << space.address_size_bits
+                distance = (address.displacement + displacement - stack.displacement - delta) % modulus
+                if width >= modulus or -delta >= modulus or distance < -delta or distance + width > modulus:
+                    return None
+            elif type(anchor) is tuple and anchor[0] == "indexed":
                 return None
+            elif stack.atoms != ((self._stack_atoms[0], 1),) or stack.image != 0 \
+                    or _signed_wrap(stack.displacement, stack.byte_size) > 0 \
+                    or self._may_address_frame(address) \
+                    or self.frame_private.get(evaluation_key.split("~", 1)[0]) is None:
+                return None
+            elif self.frame_uses is not None:
+                self.frame_uses.append((evaluation_key, self.frame_private[evaluation_key.split("~", 1)[0]]))
         if not address.atoms:
-            _note_fact(self._ssa.function_scope, address, address=True)
+            if type(anchor) is tuple or anchor.kind is not VarnodeKindCode.CONSTANT:
+                # (a callee's absolute load, ``normalize._proven_call_rows``,
+                # makes no new fact: its span is the direct read's -- Fable)
+                _note_fact(self._ssa.function_scope, address, address=True)
             object_id = StorageObjectId(
                 StorageObjectKind.ADDRESS_SPACE, self._context.program_scope, space.space_id,
             )
@@ -1264,6 +1299,14 @@ class _Projector:
         self._boundary[atom] = ("once-join", requested_span.size, requested_span.size, span)
         self._note_opaque_atom(atom, candidates)
         return _AddressExpression(((atom, 1),), 0, requested_span.size)
+
+    def _may_address_frame(self, address) -> bool:
+        """An address whose base may be in this function's new frame: an
+        atom ``_relative_object`` makes wild (a definition, fresh, nonstack,
+        boundary or scaled atom) or a stack-derived one."""
+        return any(atom in self._definition_atoms or atom in self._fresh_atoms or atom in self._nonstack_atoms
+                   or atom in self._boundary or coefficient != 1 or self._is_stack_derived(atom)
+                   for atom, coefficient in address.atoms)
 
     def _is_stack_derived(self, atom: int) -> bool:
         """An entry atom of (a part of) the stack pointer, or an opaque atom
