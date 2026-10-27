@@ -187,8 +187,10 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
             if shadow_row is None or production_row is None:
                 mismatches.append((key, span, "read not in both SSAs"))
                 continue
-            dirty = []
+            first = last = None
             for offset in range(span.start, span.end):
+                if len(mismatches) >= limit:
+                    return
                 expected = state.calls_at((span.object_id, offset))
                 crossed, origins = shadow_closure(_at(shadow_row, span.object_id, offset), span.object_id, offset)
                 if set(expected) != crossed:
@@ -196,10 +198,11 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
                 if production_origins(_at(production_row, span.object_id, offset)) != origins:
                     mismatches.append((key, span.object_id, offset, "origins"))
                 if crossed:
-                    dirty.append(offset)
+                    first = offset if first is None else first
+                    last = offset
                     crossed_all |= crossed
-            if dirty:
-                spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
+            if first is not None:
+                spans.append(ByteSpan(span.object_id, first, last + 1 - first))
         if spans:
             rows.append(CallClobberRead(key, tuple(spans), tuple(sorted(crossed_all))))
 
@@ -216,9 +219,11 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
                 compare(effect, state)
             key = effect.operation_key
             if key in calls:
+                step(1 + len(state.bytes) + sum(span.size for span in preserved.get(key, ())))   # (its byte loops)
                 state = state.called(key, preserved.get(key, ()), key in memory_keeping)
             for evidence in effect.writes:
                 if type(evidence) is ResolvedStorage:
+                    step(evidence.span.size)
                     state = state.written(evidence.span)
         return state
 
