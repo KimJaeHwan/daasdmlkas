@@ -158,6 +158,11 @@ def main() -> int:
                         help="a model binding file for this binary's unexported functions (docs 25.20 F)")
     parser.add_argument("--assume-boundary-effects", action="store_true",
                         help="TEST-ONLY special condition: declared source/sink call effects")
+    parser.add_argument("--no-model-assumption", dest="model_assumptions_off", action="append", default=[],
+                        metavar="LABEL",
+                        help="switch off a model assumption: <file id>:<id> a model file declares, or a "
+                             "registry model assumption (docs/assumptions.md); entries resting on it are not "
+                             "applied (repeatable; also TDO_V2_NO_MODEL_ASSUMPTIONS=a,b)")
     # every engine-wide named assumption comes from the registry (on by default:
     # --no-... or <ENV>=0 turns it off; off by default: --assume-... turns it
     # on; see docs/assumptions.md)
@@ -173,6 +178,10 @@ def main() -> int:
         parser.error("--physical-records requires the summary engine (not --legacy-engine or TDO_V2_INTERPROCEDURAL=legacy)")
     if args.physical_records:
         args.records = True
+    args.model_assumptions_off += [item.strip() for item in os.environ.get("TDO_V2_NO_MODEL_ASSUMPTIONS", "").split(",")
+                                   if item.strip()]
+    if args.model_assumptions_off and legacy:
+        parser.error("--no-model-assumption requires the summary engine")
     for item in switches():
         if item.env and os.environ.get(item.env) == "0":
             setattr(args, item.parameter, False)
@@ -223,24 +232,37 @@ def main() -> int:
         if not legacy:
             from tdo_v2.summary_engine import analyze_frozen_bundle_with_summaries
             print("[run] interprocedural: callee summaries")
+            models = external_models(generation, args.model_dir) if args.external_models else None
+            bindings = tuple(load_binding_file(path) for path in args.binding)
             run = analyze_frozen_bundle_with_summaries(
                 generation,
                 naming_exporter_source=REPO / "ghidra" / "GhidraV2CallNaming.java",
                 boundary_provider=boundary_provider(args.assume_boundary_effects,
                                                     abi_of(generation)),
                 assume_boundary_call_effects=args.assume_boundary_effects,
-                external_models=external_models(generation, args.model_dir) if args.external_models else None,
+                external_models=models,
                 pcodeop_models=pcodeop_models(),  # not imported functions: --no-external-models keeps them
                 stack_evidence=tuple(evidence),
                 linker=linker,
                 origin_witnesses=args.witnesses,
                 operation_records=args.records,
                 physical_memory_records=args.physical_records,
-                model_bindings=tuple(load_binding_file(path) for path in args.binding),
+                model_bindings=bindings,
+                disabled_model_assumptions=tuple(args.model_assumptions_off),
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},
             )
             print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
+            from tdo_v2.summary_store import ExternalModels, assumption_catalog
+
+            # what each assumption a model file declares states (registry ones: docs/assumptions.md)
+            catalog = assumption_catalog(models or ExternalModels(()), *(item.models for item in bindings))
+            for label in run.assumptions:
+                if label in catalog:
+                    _, statement, fails_when = catalog[label]
+                    print(f"[run]   {label}: {statement} (fails when: {fails_when})")
+            if args.model_assumptions_off:
+                print(f"[run] model assumptions switched off: {sorted(set(args.model_assumptions_off))}")
             from tdo_v2.summary_engine import LANE_DIAGNOSTICS
             print(f"[run] lane origins (docs 25.6): {LANE_DIAGNOSTICS}")
             from tdo_v2.relative_memory import INDEX_DIAGNOSTICS, index_addresses

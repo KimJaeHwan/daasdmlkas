@@ -88,7 +88,11 @@ TEMPLATE_VERSION = 3   # 2: stack_values_out; 3: exact scalar literals and entry
 # license whole-memory preservation (old-content/lifetime debt is retained).
 # 20: integrate physical-anchor composed memory outputs with 14..19's literal,
 # indexed-address and lifetime fences; independently derived models are stale.
-ENGINE_SEMANTICS_VERSION = 20
+# 21: model rows carry the registry labels they rest on (fresh / frees /
+# same_object_as: allocator-results-are-fresh, no-use-after-free,
+# no-use-of-old-pointer-after-realloc) and library assumptions are declared by
+# model files (``<file id>:<id>``) -- older templates rest on them unlabelled.
+ENGINE_SEMANTICS_VERSION = 21
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
@@ -633,15 +637,26 @@ def pcodeop_digest(models) -> str:
 
 
 def refusal(model_file, entry, *, external_models, pcodeop_models, private_frame_above,
-            language=None) -> str | None:
+            language=None, catalog=None) -> str | None:
     """Why a template may not be applied in this run, or None: another engine
     version or language version (register offsets are read in this program's
     register file); other analysis parameters or p-code op models; a model
     file it was derived with missing or changed, replaced by an override, or
     joined by another file matching the same names (the lookup it took may
-    resolve otherwise, or fail)."""
+    resolve otherwise, or fail); a declared assumption it rests on that no
+    model file of the run declares (``catalog``: the run's
+    ``summary_store.assumption_catalog``; None: of ``external_models``)."""
+    from .summary_store import assumption_catalog, unresolved_labels
+
     if entry.refusal is not None:
         return entry.refusal
+    catalog = assumption_catalog(external_models) if catalog is None else catalog
+    missing = unresolved_labels(entry.inherited, catalog)
+    if missing:
+        return f"derived resting on {', '.join(missing)}, which no model file of this run declares"
+    for label, stated in (model_file.source_field("declarations") or {}).items():
+        if list(catalog[label][1:]) != stated:
+            return f"derived under another statement of {label}"
     recorded_language = model_file.source_field("language")
     if language is None or recorded_language != {"id": language[0], "major": language[1], "minor": language[2]}:
         return f"derived for language {recorded_language}, this program is {language}"
@@ -697,12 +712,16 @@ def refusal(model_file, entry, *, external_models, pcodeop_models, private_frame
 
 def build_file(results, exports, *, file_id, version, library, external_models, pcodeop_models,
                private_frame_above, base_dependent, readonly_image=None, traps=False, notes=None,
-               producer=None):
+               producer=None, catalog_models=()):
     """(file dict, {export name: refusal reason}) for ``exports`` -- (function
     key, name, original names) -- of one ``analyze_units`` run of ``library``
     under ``relative_memory.ImageBaseTracking`` (``base_dependent``: its
     ``found``) with read-only image folding off. ``producer``: recorded only
-    (e.g. the engine revision; never compared)."""
+    (e.g. the engine revision; never compared). ``catalog_models``: the
+    run's declaration-only model files (``analyze_units``
+    ``assumption_declarations``): what each declaration the templates rest on
+    states is recorded (``source.declarations``) and compared by ``refusal``
+    -- the recorded model files' digests cover their own."""
     from .summary_engine import run_assumptions
 
     if readonly_image is not None:
@@ -738,6 +757,15 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
         "assumptions": list(run_assumptions(results, home_space=private_frame_above, traps=traps,
                                             pcodeop_models=pcodeop_models)),
     }
+    if catalog_models:
+        from .summary_store import ExternalModels, assumption_catalog
+
+        declared = assumption_catalog(external_models or ExternalModels(()), *catalog_models)
+        own = {label for item in (external_models or ExternalModels(())).files for label, _, _ in item.declares}
+        recorded = {label: list(declared[label][1:]) for label in source["assumptions"]
+                    if label in declared and label not in own}
+        if recorded:
+            source["declarations"] = recorded
     if producer:
         source["producer"] = dict(producer)
     raw = {"format_version": 1, "kind": "summary", "id": file_id, "version": version,

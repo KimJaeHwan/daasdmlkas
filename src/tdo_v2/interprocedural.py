@@ -278,7 +278,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_accessor_result_separate=False,
                   assume_accessor_private_state=False, model_bindings=(),
                   record_provenance: dict | None = None,
-                  assume_registered_handlers_not_observed=True, lifecycle_contracts=()) -> dict[str, AnalyzedFunction]:
+                  assume_registered_handlers_not_observed=True, lifecycle_contracts=(),
+                  disabled_model_assumptions=(), assumption_declarations=()) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -295,7 +296,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     thunk or an import slot, ``image_info``) take the declared model of that
     name (``summary_store``); each use is a named assumption
     (``AnalyzedFunction.declared``).
-    ``own_library``: the program is that library (e.g. "UNREALEDITOR-CORE.DLL");
+    ``own_library``: the program is that library (e.g. "LIBFOO.DLL");
     a function exported under a name an ``internal`` model entry of that library
     lists is cut -- not analyzed, its callers take the model (named assumption
     library-internal-model-cuts, reported with each use). ``keep_uncut``:
@@ -326,7 +327,14 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     ``lifecycle_contracts``: independently audited, exact-symbol/digest-bound
     opt-in lifecycle records. Empty by default, never auto-loaded with models.
     New range evidence retains their labels and all original run dependencies;
-    it is not raw allocator/UAF certification or a portable summary input."""
+    it is not raw allocator/UAF certification or a portable summary input.
+    ``disabled_model_assumptions``: model assumptions switched off in this run
+    -- labels model files declare (``<file id>:<id>``, resolved in the run's
+    ``summary_store.assumption_catalog``) or ``assumptions.MODEL_SWITCHABLE``
+    names; an entry resting on one is not applied (an unknown label is an
+    error: a typo must not leave the assumption on). ``assumption_declarations``:
+    more ``ExternalModels`` whose declarations join the catalog, never matched
+    (a library derivation for a run with bindings: ``linking``)."""
     from .call_clobber import _preserved_stack_pointers
 
     from ._scope_results import ConstructedFunctionScope
@@ -348,24 +356,30 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     if IMPORT_SLOTS.get() is not None:
         # an import's address is only worth "not the stack" under this assumption
         IMPORT_SLOTS.get().active = assume_globals_disjoint_from_stack
-    # registry switches off in this run: a model resting on one is not applied
-    disabled = {name for name, on in (
-        ("globals-disjoint-from-stack", assume_globals_disjoint_from_stack),
-        ("readonly-image-data-is-constant", readonly_image is not None),
-        ("direction-flag-clear", assume_direction_flag_clear),
-        ("entry-values-do-not-address-the-new-frame", ENTRY_VALUES_NOT_FRAME.get()),
-        ("win64-home-space-callee-private", bool(private_frame_above) and ENTRY_VALUES_NOT_FRAME.get()),
-        ("opaque-callees-leave-no-stack-addresses", OPAQUE_NO_STACK_ADDRESSES.get()),
-        ("debug-break-traps-do-not-return", assume_debug_break_traps_do_not_return),
+    from .assumptions import MODEL_SWITCHABLE
+    from .assumptions import disabled as switched_off
+    from .summary_store import ExternalModels, ModelError, assumption_catalog
+
+    # every assumption the run's model files declare (one file id, one file)
+    catalog = assumption_catalog(external_models or ExternalModels(()), *(item.models for item in model_bindings),
+                                 *assumption_declarations)
+    unknown = sorted(set(disabled_model_assumptions) - set(catalog) - set(MODEL_SWITCHABLE))
+    if unknown:
+        raise ModelError(f"no model assumption {', '.join(unknown)} to switch off (declared: "
+                         f"{', '.join(sorted(catalog)) or 'none'}; or {', '.join(MODEL_SWITCHABLE)})")
+    # switched off in this run: a model resting on one is not applied
+    disabled = switched_off(
+        globals_disjoint=assume_globals_disjoint_from_stack, readonly_image=readonly_image is not None,
+        direction_flag=assume_direction_flag_clear, entry_values_not_frame=ENTRY_VALUES_NOT_FRAME.get(),
+        home_space=bool(private_frame_above), opaque_no_stack=OPAQUE_NO_STACK_ADDRESSES.get(),
+        traps=assume_debug_break_traps_do_not_return,
         # (the switch alone: binding a model at an import slot needs the slot to
         # hold the export's address, not globals-disjoint-from-stack -- the
         # non-stack inference keeps its own stronger gate, ``_import_slots_active``)
-        ("import-slots-hold-their-exports", _import_slots_switched_on()),
-        ("same-result-functions", assume_same_result_functions),
-        ("accessor-result-separate", assume_accessor_result_separate),
-        ("accessor-private-state", assume_accessor_private_state),
-        ("registered-handlers-are-not-observed", assume_registered_handlers_not_observed),
-    ) if not on}
+        import_slots=_import_slots_switched_on(), same_result=assume_same_result_functions,
+        accessor_separate=assume_accessor_result_separate, accessor_private_state=assume_accessor_private_state,
+        registered_handlers=assume_registered_handlers_not_observed,
+        model_assumptions_off=disabled_model_assumptions)
     cuts = _model_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
                        image_info, external_models, own_library, disabled) \
         if own_library and image_info and external_models else {}
@@ -397,7 +411,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         if entry.template is None:
             return None
         return template_refusal(model_file, entry, external_models=external_models, pcodeop_models=pcodeop_models,
-                                private_frame_above=private_frame_above, language=language)
+                                private_frame_above=private_frame_above, language=language, catalog=catalog)
 
     program = dict(functions)   # every function of the program, cut ones included (program-wide facts)
     functions = {key: unit for key, unit in functions.items() if key not in cuts}
@@ -1871,6 +1885,8 @@ def _model_cuts(functions, image_info, external_models, own_library, disabled) -
 
     from .image_info import ImportedSymbol
 
+    if "library-internal-model-cuts" in disabled:
+        return {}
     library = own_library.upper()
     names: dict = {}
     for export in image_info.exports:

@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 19,
+ "version": 20,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 1,
    "template_version": 3,
-   "semantics_version": 20
+   "semantics_version": 21
   },
   "parameters": {
    "private_frame_above": 0
@@ -33,7 +33,7 @@
    },
    {
     "file": "ue-core-win64",
-    "sha256": "038bf7aea496929efff408e62146ecc013c917da5784051cab38a5a0501bbabb"
+    "sha256": "2be1f1bf655e61b4c495f16c157d38be55e47da7d60d06e688be6894ad24e25d"
    }
   ],
   "pcodeops": "749146c1d7ef52999c899a6665c763eeedd6bba9c6779c0b694b2bfe183ca076",
@@ -41,24 +41,27 @@
    "globals-disjoint-from-stack",
    "stack-switch-check-exceptions",
    "debug-break-traps-do-not-return",
-   "external-model:ue-core-win64/FDebug::CheckVerifyFailedImpl@v4",
-   "external-model:ue-core-win64/FMemory::Free@v4",
-   "external-model:ue-core-win64/FMemory::QuantizeSize@v4",
-   "external-model:ue-core-win64/FMemory::Realloc@v4",
-   "external-model:ue-core-win64/UE4Array_Private::OnInvalidArrayNum@v4",
+   "allocator-results-are-fresh",
+   "external-model:ue-core-win64/FDebug::CheckVerifyFailedImpl@v5",
+   "external-model:ue-core-win64/FMemory::Free@v5",
+   "external-model:ue-core-win64/FMemory::QuantizeSize@v5",
+   "external-model:ue-core-win64/FMemory::Realloc@v5",
+   "external-model:ue-core-win64/UE4Array_Private::OnInvalidArrayNum@v5",
    "library-internal-model-cuts",
+   "no-use-after-free",
+   "no-use-of-old-pointer-after-realloc",
    "registered-handlers-are-not-observed",
-   "ue-core-diagnostics-no-reentrant-callback"
+   "ue-core-win64:diagnostics-no-reentrant-callback"
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "fbc1a62d39bba3eb313e45779af4e11b33ebb053+dirty",
-   "bundle": "a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068",
+   "engine_revision": "e68cdc6b36b369c45315930751039323239c2e0d+dirty",
+   "bundle": "8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50",
    "index_addresses": true,
    "stack_evidence": [
     {
-     "file": "6ebb8a1ea65ccf82e9f9c9945578f0ab38abf1ca21072c9b509d35e08f1988f7",
-     "summary": "/UnrealEditor-Core.dll (sha256 fdea95976487): 52211 functions, 2881565 instructions scanned (15196 of them outside functions); no switch [stack-switch-coefficient-v3; legacy declared preservation RBX,RBP,R12,R13,R14,R15; exceptions: stack-switch-check-exceptions]"
+     "file": "b885e02c8343b69812760464928e6f6e8739093eaf91a92442d9e5c7db808649",
+     "summary": "/libs/UNREALEDITOR-CORE.DLL (sha256 fdea95976487): 52211 functions, 2881565 instructions scanned (15196 of them outside functions); no switch [stack-switch-coefficient-v3; legacy declared preservation RBX,RBP,R12,R13,R14,R15; exceptions: stack-switch-check-exceptions]"
     }
    ]
   }
@@ -546,6 +549,38 @@
         "entry_readers": [],
         "debts": [],
         "crossed": [
+         "alias:dll:1b1:18003bc0c:2:CALL~push",
+         "call:dll:1b1:18003bc0c:2:CALL"
+        ],
+        "conditions": [],
+        "value": null,
+        "literal": null
+       },
+       {
+        "span": {
+         "object": 1,
+         "start": 18446744073709551568,
+         "size": 8
+        },
+        "kind": "unknown",
+        "writers": [
+         "dll:1b1:18003bc0c:2:CALL~push"
+        ],
+        "sources": [
+         {
+          "object": 1,
+          "start": 18446744073709551568,
+          "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
+         }
+        ],
+        "entry_readers": [],
+        "debts": [],
+        "crossed": [
          "call:dll:1b1:18003bc0c:2:CALL"
         ],
         "conditions": [],
@@ -872,6 +907,10 @@
       "registers"
      ],
      [
+      "dll:1b1:18003bc0c:2:CALL~push",
+      1
+     ],
+     [
       "dll:1b1:18003bc0c:2:CALL~sp",
       2
      ],
@@ -1147,7 +1186,43 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -1220,6 +1295,30 @@
           {
            "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -1314,6 +1413,7 @@
          "alias:dll:1b1:1800f5093:2:STORE",
          "alias:dll:1b1:1800f50ac:2:STORE",
          "alias:dll:1b1:1800f50b6:2:STORE",
+         "alias:dll:1b1:1800f50bb:2:CALL~push",
          "alias:dll:1b1:1800f50d6:3:STORE",
          "uncertain:dll:1b1:1800f5078:3:STORE",
          "unknown:dll:1b1:1800f5078:3:STORE",
@@ -1364,7 +1464,43 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -1437,6 +1573,18 @@
           {
            "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -1521,10 +1669,12 @@
          "alias:dll:1b1:1800f503d:2:STORE",
          "alias:dll:1b1:1800f5056:2:STORE",
          "alias:dll:1b1:1800f505b:2:STORE",
+         "alias:dll:1b1:1800f5060:2:CALL~push",
          "alias:dll:1b1:1800f5078:3:STORE",
          "alias:dll:1b1:1800f5093:2:STORE",
          "alias:dll:1b1:1800f50ac:2:STORE",
          "alias:dll:1b1:1800f50b6:2:STORE",
+         "alias:dll:1b1:1800f50bb:2:CALL~push",
          "alias:dll:1b1:1800f50d6:3:STORE",
          "call:dll:1b1:1800f5019:2:CALL",
          "unknown:dll:1b1:1800f5078:3:STORE",
@@ -1539,7 +1689,31 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -1623,6 +1797,18 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551520,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
            "start": 18446744073709551528,
            "size": 8
           }
@@ -1691,10 +1877,12 @@
          "alias:dll:1b1:1800f503d:2:STORE",
          "alias:dll:1b1:1800f5056:2:STORE",
          "alias:dll:1b1:1800f505b:2:STORE",
+         "alias:dll:1b1:1800f5060:2:CALL~push",
          "alias:dll:1b1:1800f5078:3:STORE",
          "alias:dll:1b1:1800f5093:2:STORE",
          "alias:dll:1b1:1800f50ac:2:STORE",
          "alias:dll:1b1:1800f50b6:2:STORE",
+         "alias:dll:1b1:1800f50bb:2:CALL~push",
          "alias:dll:1b1:1800f50d6:3:STORE",
          "call:dll:1b1:1800f5019:2:CALL",
          "unknown:dll:1b1:1800f5078:3:STORE",
@@ -1764,10 +1952,12 @@
          "alias:dll:1b1:1800f503d:2:STORE",
          "alias:dll:1b1:1800f5056:2:STORE",
          "alias:dll:1b1:1800f505b:2:STORE",
+         "alias:dll:1b1:1800f5060:2:CALL~push",
          "alias:dll:1b1:1800f5078:3:STORE",
          "alias:dll:1b1:1800f5093:2:STORE",
          "alias:dll:1b1:1800f50ac:2:STORE",
          "alias:dll:1b1:1800f50b6:2:STORE",
+         "alias:dll:1b1:1800f50bb:2:CALL~push",
          "alias:dll:1b1:1800f50d6:3:STORE",
          "call:dll:1b1:1800f5019:2:CALL",
          "unknown:dll:1b1:1800f5078:3:STORE",
@@ -1784,20 +1974,29 @@
          "size": 8
         },
         "kind": "unknown",
-        "writers": [],
+        "writers": [
+         "dll:1b1:1800f5019:2:CALL~u1",
+         "dll:1b1:1800f5060:2:CALL~push",
+         "dll:1b1:1800f50bb:2:CALL~push"
+        ],
         "sources": [
          {
           "object": 3,
           "start": 18446744073709551520,
           "size": 8
+         },
+         {
+          "object": "registers",
+          "start": 32,
+          "size": 8
          }
         ],
         "entry_readers": [],
-        "debts": [],
+        "debts": [
+         "opaque_call_write"
+        ],
         "crossed": [
          "alias:dll:1b1:1800f500b:2:STORE",
-         "alias:dll:1b1:1800f5019:2:CALL~2",
-         "alias:dll:1b1:1800f5019:2:CALL~u0",
          "alias:dll:1b1:1800f5078:3:STORE",
          "alias:dll:1b1:1800f50d6:3:STORE",
          "call:dll:1b1:1800f5019:2:CALL",
@@ -1953,7 +2152,43 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -2026,6 +2261,30 @@
           {
            "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -2473,8 +2732,8 @@
           },
           {
            "object": 3,
-           "start": 18446744073709551528,
-           "size": 8
+           "start": 18446744073709551520,
+           "size": 16
           }
          ],
          [
@@ -2847,7 +3106,43 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -2920,6 +3215,30 @@
           {
            "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -3101,7 +3420,43 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -3174,6 +3529,30 @@
           {
            "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -3331,7 +3710,43 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -3404,6 +3819,30 @@
           {
            "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -3545,7 +3984,43 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -3618,6 +4093,18 @@
           {
            "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -3762,7 +4249,43 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -3835,6 +4358,30 @@
           {
            "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -3933,8 +4480,8 @@
           },
           {
            "object": 3,
-           "start": 18446744073709551528,
-           "size": 8
+           "start": 18446744073709551520,
+           "size": 16
           }
          ],
          [
@@ -4205,7 +4752,43 @@
           },
           {
            "object": 3,
+           "start": 18446744073709551472,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551616,
+           "size": 8
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -4278,6 +4861,30 @@
           {
            "object": 3,
            "start": 18446744073709551512,
+           "size": 8
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
+           "size": 16
+          }
+         ],
+         [
+          {
+           "object": 2,
+           "start": 18446744073709551624,
+           "size": 4
+          },
+          {
+           "object": 3,
+           "start": 18446744073709551520,
            "size": 8
           }
          ],
@@ -4822,6 +5429,10 @@
       5
      ],
      [
+      "dll:1b1:1800f5019:2:CALL~push",
+      3
+     ],
+     [
       "dll:1b1:1800f5019:2:CALL~sp",
       5
      ],
@@ -5216,6 +5827,10 @@
      [
       "dll:1b1:1800f5060:2:CALL~ld0",
       5
+     ],
+     [
+      "dll:1b1:1800f5060:2:CALL~push",
+      3
      ],
      [
       "dll:1b1:1800f5060:2:CALL~sp",
@@ -5710,6 +6325,10 @@
       5
      ],
      [
+      "dll:1b1:1800f50bb:2:CALL~push",
+      3
+     ],
+     [
       "dll:1b1:1800f50bb:2:CALL~sp",
       5
      ],
@@ -6093,5 +6712,5 @@
    }
   }
  ],
- "notes": "Derived by tools/derive_models from a1f091c5fd2af7c77c49a33563e2de4428d8fec019b613c9f638a8917c112068."
+ "notes": "Derived by tools/derive_models from 8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50."
 }

@@ -15,8 +15,13 @@ Kinds:
 * ``model`` -- carried by declared models (``models/external``,
   ``models/pcodeops``): every use is labelled with the model entry
   (``external-model:<file>/<entry>@v<n>``, ``pcodeop-model:<file>/<op>@v<n>``);
-  the external models as a whole are switched by ``external-models``.
+  the external models as a whole are switched by ``external-models``, the ones
+  of ``MODEL_SWITCHABLE`` one by one (``disabled_model_assumptions``).
 * ``test-only`` -- off by default; for benchmarks only.
+
+What only one library's models rest on is not here: a model file declares it
+(``declares_assumptions``, label ``<file id>:<id>``, ``summary_store``), and
+``render_markdown`` lists the declarations of the bundled model files.
 """
 
 from __future__ import annotations
@@ -196,33 +201,29 @@ REGISTRY: tuple[Assumption, ...] = (
         "memory) is in the model; what it leaves out (allocator bookkeeping, diagnostic/log state, "
         "including heap storage they own and callbacks they run) is observed by no such code.",
         "Code that observes the omitted state: reads allocator internals or the log buffer, reaches them "
-        "through exported data (GMalloc, GLog) or an escaped pointer, or registers a callback the "
-        "function runs.",
+        "through exported data (a global allocator or log object) or an escaped pointer, or registers a "
+        "callback the function runs.",
         "interprocedural._model_cuts / _cut_sites, summary_store (internal entries)"),
     Assumption(
         "no-use-after-free", "model", True,
-        "A freed block is not used again (carried by free / FMemory::Free and by allocators: a new "
-        "block is disjoint from every block that may still be referenced).",
+        "A freed block is not used again (carried by model entries that free -- a frees row -- and by "
+        "allocators -- a fresh or same_object_as row: a new block is disjoint from every block that may "
+        "still be referenced).",
         "Use-after-free bugs in the analysed program.",
-        "models/external crt_*.json, ue_core_win64.json"),
+        "summary_store (entries with frees / fresh / same_object_as rows; reported with each use)"),
     Assumption(
         "no-use-of-old-pointer-after-realloc", "model", True,
-        "After realloc the old pointer is not used again; the result addresses the same object "
-        "(realloc(NULL, n) is a new block).",
+        "After a realloc-like call (a model entry with a same_object_as row) the old pointer is not used "
+        "again; the result addresses the same object (realloc(NULL, n) is a new block).",
         "Programs reading through the pre-realloc pointer.",
-        "models/external crt_*.json (realloc), ue_core_win64.json (FMemory::Realloc); relative_memory._pointer_row (realloc(NULL) through a callee is a new block when it is the call's only pointer value)"),
+        "summary_store (entries with same_object_as rows; reported with each use); relative_memory._pointer_row "
+        "(realloc(NULL) through a callee is a new block when it is the call's only pointer value)"),
     Assumption(
         "allocator-results-are-fresh", "model", True,
-        "malloc / calloc / FMemory::Malloc return a block that is not memory existing before the call "
-        "(not the stack, not a global, not another live block).",
+        "An allocator entry (a fresh row, or a same_object_as row given NULL) returns a block that is not "
+        "memory existing before the call (not the stack, not a global, not another live block).",
         "Custom allocators returning stack or static storage.",
-        "models/external crt_*.json, ue_core_win64.json (\"fresh\")"),
-    Assumption(
-        "ue-core-diagnostics-no-reentrant-callback", "model", True,
-        "FDebug::CheckVerifyFailedImpl and UE4Array_Private::OnInvalidArrayNum write no memory of the "
-        "analysed module (no error delegate or log device calls back into it).",
-        "A plugin that registers such delegates.",
-        "models/external/ue_core_win64.json"),
+        "summary_store (entries with fresh / same_object_as rows; reported with each use)"),
     Assumption(
         "derived-model-runtime-matches", "model", True,
         "A derived model (a library function's summary saved by the engine, models/external kind summary) "
@@ -232,16 +233,6 @@ REGISTRY: tuple[Assumption, ...] = (
         "The program runs with another build of the library (a patch, another configuration) under the same "
         "name.",
         "summary_templates, summary_store (kind summary)"),
-    Assumption(
-        "ue-core-name-pool-private", "model", True,
-        "The FName constructors change no memory the analysed module observes other than the FName they "
-        "construct: the name pool, its locks, thread-local state and the blocks it allocates are "
-        "Core-private, and no callback into the module runs (no allocator hook, ensure/log delegate or "
-        "other reentrant diagnostic). The FName is 12 bytes (UE 5.1 editor build, case preserving).",
-        "A module reading name-pool internals directly (FNamePool / name entry memory through an escaped "
-        "pointer or export), hooking name creation, installing an allocator or diagnostic callback that "
-        "writes module memory, or a Core build with a different FName layout (non-editor: 8 bytes).",
-        "models/external/ue_core_win64.json (FName::FName)"),
     Assumption(
         "lock-markers-have-no-data-effect", "model", True,
         "x86 LOCK/UNLOCK user ops only bracket a lock-prefixed instruction whose memory effect is in "
@@ -308,6 +299,40 @@ REGISTRY: tuple[Assumption, ...] = (
 )
 
 
+# labels the engine records as provenance (a model use, a contract, a test
+# boundary): never a declaration to resolve or a switch
+PROVENANCE_PREFIXES = ("external-model:", "derived-model:", "supplied-model:", "bound-model:", "pcodeop-model:",
+                       "test-only-boundary:", "accessor-state-preserved-by:", "lifecycle-contract:",
+                       "external-summary:")
+# registry ``model`` assumptions a run can switch off one by one
+# (``disabled_model_assumptions``): each is in the inherited labels of every
+# entry resting on it, checked before the entry is applied
+MODEL_SWITCHABLE = ("allocator-results-are-fresh", "no-use-after-free", "no-use-of-old-pointer-after-realloc",
+                    "derived-model-runtime-matches", "library-internal-model-cuts")
+
+
+def disabled(*, globals_disjoint: bool, readonly_image: bool, direction_flag: bool, entry_values_not_frame: bool,
+             home_space: bool, opaque_no_stack: bool, traps: bool, import_slots: bool, same_result: bool,
+             accessor_separate: bool, accessor_private_state: bool, registered_handlers: bool,
+             model_assumptions_off=()) -> set:
+    """The assumption labels a run has switched off: a model entry resting on
+    one is not applied (``interprocedural``, ``linking``)."""
+    return {name for name, on in (
+        ("globals-disjoint-from-stack", globals_disjoint),
+        ("readonly-image-data-is-constant", readonly_image),
+        ("direction-flag-clear", direction_flag),
+        ("entry-values-do-not-address-the-new-frame", entry_values_not_frame),
+        ("win64-home-space-callee-private", home_space and entry_values_not_frame),
+        ("opaque-callees-leave-no-stack-addresses", opaque_no_stack),
+        ("debug-break-traps-do-not-return", traps),
+        ("import-slots-hold-their-exports", import_slots),
+        ("same-result-functions", same_result),
+        ("accessor-result-separate", accessor_separate),
+        ("accessor-private-state", accessor_private_state),
+        ("registered-handlers-are-not-observed", registered_handlers),
+    ) if not on} | set(model_assumptions_off)
+
+
 def by_name(name: str) -> Assumption:
     for item in REGISTRY:
         if item.name == name:
@@ -334,10 +359,41 @@ def render_markdown() -> str:
         switch = item.flag or "-"
         if item.env:
             switch += f" / {item.env}=0"
+        elif item.name in MODEL_SWITCHABLE:
+            switch += f" / --no-model-assumption {item.name}"
         lines.append(
             f"| `{item.name}` | {item.kind} | {'on' if item.default else 'off'} | {switch} | "
             f"{item.statement} | {item.fails_when} | {item.applied_in} |")
+    lines += [
+        "",
+        "## Declared by the bundled model files",
+        "",
+        "A model file declares what only its entries rest on (`declares_assumptions`); each use reports",
+        "`<file id>:<id>`, switched off by `--no-model-assumption <file id>:<id>`.",
+        "",
+        "| Label | File | Assumes | Fails when |",
+        "|---|---|---|---|",
+    ]
+    for path, label, statement, fails_when in bundled_declarations():
+        lines.append(f"| `{label}` | {path} | {statement} | {fails_when} |")
     return "\n".join(lines) + "\n"
 
 
-__all__ = ("Assumption", "REGISTRY", "by_name", "render_markdown", "switches")
+def bundled_declarations() -> list:
+    """(path, label, statement, fails_when) of every declaration in the model
+    files shipped with the engine (``models/``)."""
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    found = []
+    for path in sorted((root / "models").glob("*/*.json")):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        for item in raw.get("declares_assumptions", ()) if type(raw) is dict else ():
+            found.append((path.relative_to(root).as_posix(), f"{raw['id']}:{item['id']}", item["statement"],
+                          item["fails_when"]))
+    return found
+
+
+__all__ = ("Assumption", "MODEL_SWITCHABLE", "PROVENANCE_PREFIXES", "REGISTRY", "bundled_declarations", "by_name",
+           "disabled", "render_markdown", "switches")

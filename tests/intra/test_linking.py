@@ -127,7 +127,8 @@ class FakeDeriver:
     def __call__(self, generation, library, names, *, file_id, models, pcodeops, stack_evidence,
                  private_frame_above, traps, assume_globals_disjoint, direction_flag, per_export, log,
                  import_slots=False, entry_values_not_frame=True, same_result=False, accessor_separate=False,
-                 opaque_no_stack=True, registered_handlers=True):
+                 opaque_no_stack=True, registered_handlers=True, accessor_private_state=False,
+                 model_assumptions_off=(), catalog_models=()):
         assert per_export
         self.calls.append({"names": sorted(names), "private_frame_above": private_frame_above,
                            "globals": assume_globals_disjoint, "direction_flag": direction_flag,
@@ -153,7 +154,8 @@ class FakeDeriver:
                                             assume_accessor_result_separate=accessor_separate)
                 raw, _ = build_file(results, [(f"1:{F:x}", MANGLED, [MANGLED])], file_id=file_id, version=1,
                                     library=library, external_models=models, pcodeop_models=pcodeops,
-                                    private_frame_above=private_frame_above, base_dependent=found, traps=traps)
+                                    private_frame_above=private_frame_above, base_dependent=found, traps=traps,
+                                    catalog_models=catalog_models)
                 raw["source"]["sha256"] = self.sha256
                 files[name] = raw
         return files, refused, [name for name in names if name == BROKEN]
@@ -199,13 +201,14 @@ UNIT = program_units(FunctionBuilder().ret())[0]
 
 def _link(tmp_path, info, models, provider, deriver, *, units=None, private_frame_above=0, refresh=False,
           dry_run=False, globals_disjoint=True, direction_flag=True, traps=True, same_result=False,
-          accessor_separate=False):
+          accessor_separate=False, model_assumptions_off=(), catalog_models=()):
     linker = Linker([LinkTarget(LIBRARY, tmp_path / "synth.dll")], tmp_path / "cache", provider, deriver,
                     refresh=refresh, dry_run=dry_run, log=lambda line: None)
     linked, evidence = linker(units or [UNIT], info, external_models=models, pcodeop_models=None,
                               private_frame_above=private_frame_above, traps=traps,
                               globals_disjoint=globals_disjoint, direction_flag=direction_flag,
-                              same_result=same_result, accessor_separate=accessor_separate)
+                              same_result=same_result, accessor_separate=accessor_separate,
+                              model_assumptions_off=model_assumptions_off, catalog_models=catalog_models)
     return linker.report, linked, evidence
 
 
@@ -453,6 +456,43 @@ def test_an_unusable_template_is_reported_and_left_out(tmp_path, monkeypatch):
     report, linked, _ = _link(tmp_path, info, models, FakeProvider(sha), Stale(sha), private_frame_above=0x28)
     assert _rows(report) == {MANGLED: ("unusable", None)} and report.template_files == []
     assert linked.lookup(_imports(MANGLED)[0]) is None
+
+
+def test_a_template_resting_on_a_switched_off_model_assumption_is_unusable(tmp_path, monkeypatch):
+    """A label a model file declares, switched off for the run: the linked
+    template resting on it is refused at preflight (and the profile, so the
+    cache, differs); one a binding's model file declares resolves too
+    (``catalog_models``), never an unknown-label error (docs 25.74)."""
+    dll, sha, info, _ = _setup(tmp_path)
+    _called(monkeypatch, info, [MANGLED])
+    declaration = [{"id": "x", "statement": "s", "fails_when": "f"}]
+    hand = tmp_path / "hand" / "lib_hand.json"
+    hand.write_text(json.dumps({**json.loads(hand.read_text(encoding="utf-8")),
+                                "declares_assumptions": declaration}), encoding="utf-8")
+    models = load_external_models([hand], *WIN64)
+    bound = tmp_path / "bound"
+    bound.mkdir()
+    (bound / "b.json").write_text(json.dumps({
+        "format_version": 1, "kind": "declared", "id": "bound-decl", "version": 1, "language_id": WIN64[0],
+        "abi_tag": WIN64[1], "stack_pointer": [32, 8], "stack_delta": 8, "preserved": [], "entries": [],
+        "declares_assumptions": declaration}), encoding="utf-8")
+    binding_models = load_external_models([bound / "b.json"], *WIN64)
+
+    class Resting(FakeDeriver):
+        def __call__(self, *args, **kwargs):
+            files, refused, missing = super().__call__(*args, **kwargs)
+            for raw in files.values():
+                raw["source"]["assumptions"] += ["synth-lib-hand:x", "bound-decl:x"]
+            return files, refused, missing
+
+    report, _, _ = _link(tmp_path, info, models, FakeProvider(sha), Resting(sha), catalog_models=(binding_models,))
+    assert _rows(report) == {MANGLED: ("derived", None)}
+    for off in ("synth-lib-hand:x", "bound-decl:x"):
+        report, linked, _ = _link(tmp_path, info, models, FakeProvider(sha), Resting(sha),
+                                  model_assumptions_off=(off,), catalog_models=(binding_models,))
+        assert _rows(report) == {MANGLED: ("unusable", None)} and report.template_files == []
+    report, _, _ = _link(tmp_path, info, models, FakeProvider(sha), Resting(sha))   # bound-decl:x undeclared
+    assert _rows(report) == {MANGLED: ("unusable", None)}
 
 
 def test_an_ordinal_import_is_matched_by_ordinal_and_not_linked(tmp_path, monkeypatch):

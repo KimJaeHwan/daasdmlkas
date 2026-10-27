@@ -142,7 +142,7 @@ def test_a_pure_entry_does_not_rest_on_it():
 def test_the_ue_entries_keep_their_own_assumptions_too():
     model = load_model_file(REPO / "models" / "external" / "ue_core_win64.json")
     entry = next(e for e in model.entries if e.name == "FDebug::CheckVerifyFailedImpl")
-    assert {"ue-core-diagnostics-no-reentrant-callback", LABEL} <= set(entry.inherited)
+    assert {"ue-core-win64:diagnostics-no-reentrant-callback", LABEL} <= set(entry.inherited)
 
 
 def test_the_switch_is_registered():

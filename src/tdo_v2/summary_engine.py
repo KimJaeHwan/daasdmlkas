@@ -134,6 +134,7 @@ def analyze_frozen_bundle_with_summaries(
     assume_accessor_private_state: bool = False,
     model_bindings=(),
     assume_registered_handlers_not_observed: bool = True,
+    disabled_model_assumptions=(),
 ) -> EngineRun:
     """``assume_same_result_functions``: the named assumption
     same-result-functions (off by default; model entries with ``same_result``);
@@ -143,7 +144,8 @@ def analyze_frozen_bundle_with_summaries(
     default); ``assume_registered_handlers_not_observed``:
     registered-handlers-are-not-observed (on by default: model entries
     declaring callbacks.registered apply); ``model_bindings``: ``summary_store.ModelBinding`` files for
-    this binary's unexported functions (docs 25.20 F).
+    this binary's unexported functions (docs 25.20 F). ``disabled_model_assumptions``:
+    model assumptions switched off (``interprocedural.analyze_units``).
     ``origin_witnesses``: put per-root origin witnesses (diagnostics,
     ``origin_witnesses``) in ``RootSlice.explanation``.
     ``operation_records``: put each root's operation record (diagnostics,
@@ -207,6 +209,7 @@ def analyze_frozen_bundle_with_summaries(
             assume_accessor_private_state=assume_accessor_private_state,
             model_bindings=model_bindings,
             assume_registered_handlers_not_observed=assume_registered_handlers_not_observed,
+            disabled_model_assumptions=disabled_model_assumptions,
         )
 
 
@@ -234,6 +237,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
     assume_accessor_private_state: bool = False,
     model_bindings=(),
     assume_registered_handlers_not_observed: bool = True,
+    disabled_model_assumptions=(),
 ) -> EngineRun:
     """The summary engine on already-admitted evidences (the in-memory path:
     synthetic programs, docs 25.30 K2) -- the same analysis as
@@ -264,6 +268,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
         assume_accessor_private_state=assume_accessor_private_state,
         model_bindings=model_bindings,
         assume_registered_handlers_not_observed=assume_registered_handlers_not_observed,
+        disabled_model_assumptions=disabled_model_assumptions,
     )
 
 
@@ -290,6 +295,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     assume_accessor_private_state: bool = False,
     model_bindings=(),
     assume_registered_handlers_not_observed: bool = True,
+    disabled_model_assumptions=(),
 ) -> EngineRun:
     """The post-admission body of the summary engine (unchanged)."""
     operation_records = operation_records or physical_memory_records
@@ -408,7 +414,10 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame,
             opaque_no_stack=assume_opaque_callees_leave_no_stack_addresses,
             same_result=assume_same_result_functions, accessor_separate=assume_accessor_result_separate,
-            registered_handlers=assume_registered_handlers_not_observed)
+            registered_handlers=assume_registered_handlers_not_observed,
+            accessor_private_state=assume_accessor_private_state,
+            model_assumptions_off=tuple(disabled_model_assumptions),
+            catalog_models=tuple(item.models for item in model_bindings))
         linked_evidence = tuple(load_stack_evidence(path) for path in linked_evidence)
         if linked_evidence:
             # a switch in a linked library withdraws the assumption for the run
@@ -439,6 +448,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         assume_accessor_private_state=assume_accessor_private_state,
         model_bindings=tuple(model_bindings),
         assume_registered_handlers_not_observed=assume_registered_handlers_not_observed,
+        disabled_model_assumptions=tuple(disabled_model_assumptions),
         record_provenance=record_provenance,
     )
     assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,

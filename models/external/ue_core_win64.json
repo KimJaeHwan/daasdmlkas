@@ -2,13 +2,25 @@
   "format_version": 1,
   "kind": "declared",
   "id": "ue-core-win64",
-  "version": 4,
+  "version": 5,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
   "libraries": [
     "UNREALEDITOR-CORE.DLL"
   ],
   "notes": "Unreal Engine Core exports a module calls through its import table, matched by library and mangled name. Windows x64 convention (args RCX, RDX, R8, R9; result RAX); register offsets as in crt_win64.json. Every entry is a declared assumption.",
+  "declares_assumptions": [
+    {
+      "id": "diagnostics-no-reentrant-callback",
+      "statement": "FDebug::CheckVerifyFailedImpl and UE4Array_Private::OnInvalidArrayNum write no memory of the analysed module (no error delegate or log device calls back into it).",
+      "fails_when": "A plugin that registers such delegates."
+    },
+    {
+      "id": "name-pool-private",
+      "statement": "The FName constructors change no memory the analysed module observes other than the FName they construct: the name pool, its locks, thread-local state and the blocks it allocates are Core-private, and no callback into the module runs (no allocator hook, ensure/log delegate or other reentrant diagnostic). The FName is 12 bytes (UE 5.1 editor build, case preserving).",
+      "fails_when": "A module reading name-pool internals directly (FNamePool / name entry memory through an escaped pointer or export), hooking name creation, installing an allocator or diagnostic callback that writes module memory, or a Core build with a different FName layout (non-editor: 8 bytes)."
+    }
+  ],
   "stack_pointer": [
     32,
     8
@@ -166,7 +178,7 @@
       "original_names": [
         "?CheckVerifyFailedImpl@FDebug@@SAXPEBD0HPEAXPEB_WZZ"
       ],
-      "notes": "check()/verify() failure report (variadic: may read every argument). Writes no memory of this module -- assumes no reentrant callback into the module (error delegates, log devices): ue-core-diagnostics-no-reentrant-callback. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
+      "notes": "check()/verify() failure report (variadic: may read every argument). Writes no memory of this module -- assumes no reentrant callback into the module (error delegates, log devices): ue-core-win64:diagnostics-no-reentrant-callback. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
       "registers": [],
       "memory": [],
       "callbacks": {"registered": ["UE error / log output devices and crash handlers (GError, GLog, FCoreDelegates)"]},
@@ -175,7 +187,7 @@
       "other_memory": "preserved",
       "internal": true,
       "assumptions": [
-        "ue-core-diagnostics-no-reentrant-callback"
+        "ue-core-win64:diagnostics-no-reentrant-callback"
       ]
     },
     {
@@ -183,7 +195,7 @@
       "original_names": [
         "?OnInvalidArrayNum@UE4Array_Private@@YAXPEB_W_K@Z"
       ],
-      "notes": "Fatal invalid-array-size report. Writes no memory of this module -- assumes no reentrant callback into the module: ue-core-diagnostics-no-reentrant-callback. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
+      "notes": "Fatal invalid-array-size report. Writes no memory of this module -- assumes no reentrant callback into the module: ue-core-win64:diagnostics-no-reentrant-callback. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
       "registers": [],
       "memory": [],
       "callbacks": {"registered": ["UE error / log output devices and crash handlers (GError, GLog, FCoreDelegates)"]},
@@ -192,7 +204,7 @@
       "other_memory": "preserved",
       "internal": true,
       "assumptions": [
-        "ue-core-diagnostics-no-reentrant-callback"
+        "ue-core-win64:diagnostics-no-reentrant-callback"
       ]
     },
     {
@@ -200,7 +212,7 @@
       "original_names": [
         "??0FName@@QEAA@PEB_WW4EFindName@@@Z"
       ],
-      "notes": "FName::FName(const WIDECHAR* Name, EFindName FindType): this = rcx. Writes exactly the FName at [rcx, rcx+12) -- ComparisonIndex, DisplayIndex, Number: UE 5.1 UnrealEditor builds are case preserving (WITH_CASE_PRESERVING_NAME), 12 bytes; checked against the UE testbed DLLs, whose code copies 12 bytes of the constructed FName -- with a value this model does not state (the name pool's index for the string at rdx; read with debt). Returns rcx. Reads the string at rdx and keeps no pointer it receives. Other memory this module can observe is unchanged: the name pool and its locks and allocations are Core-private state, and the constructor runs no callback into the module -- no allocator hook, ensure/log delegate (ue-core-name-pool-private).",
+      "notes": "FName::FName(const WIDECHAR* Name, EFindName FindType): this = rcx. Writes exactly the FName at [rcx, rcx+12) -- ComparisonIndex, DisplayIndex, Number: UE 5.1 UnrealEditor builds are case preserving (WITH_CASE_PRESERVING_NAME), 12 bytes; checked against the UE testbed DLLs, whose code copies 12 bytes of the constructed FName -- with a value this model does not state (the name pool's index for the string at rdx; read with debt). Returns rcx. Reads the string at rdx and keeps no pointer it receives. Other memory this module can observe is unchanged: the name pool and its locks and allocations are Core-private state, and the constructor runs no callback into the module -- no allocator hook, ensure/log delegate (ue-core-win64:name-pool-private).",
       "registers": [
         {
           "write": [
@@ -243,7 +255,7 @@
       "frees": "none",
       "other_memory": "preserved",
       "assumptions": [
-        "ue-core-name-pool-private"
+        "ue-core-win64:name-pool-private"
       ]
     },
     {
@@ -251,7 +263,7 @@
       "original_names": [
         "??0FName@@QEAA@PEBDW4EFindName@@@Z"
       ],
-      "notes": "FName::FName(const ANSICHAR* Name, EFindName FindType): this = rcx. Writes exactly the FName at [rcx, rcx+12) -- ComparisonIndex, DisplayIndex, Number: UE 5.1 UnrealEditor builds are case preserving (WITH_CASE_PRESERVING_NAME), 12 bytes; checked against the UE testbed DLLs, whose code copies 12 bytes of the constructed FName -- with a value this model does not state (the name pool's index for the string at rdx; read with debt). Returns rcx. Reads the string at rdx and keeps no pointer it receives. Other memory this module can observe is unchanged: the name pool and its locks and allocations are Core-private state, and the constructor runs no callback into the module -- no allocator hook, ensure/log delegate (ue-core-name-pool-private).",
+      "notes": "FName::FName(const ANSICHAR* Name, EFindName FindType): this = rcx. Writes exactly the FName at [rcx, rcx+12) -- ComparisonIndex, DisplayIndex, Number: UE 5.1 UnrealEditor builds are case preserving (WITH_CASE_PRESERVING_NAME), 12 bytes; checked against the UE testbed DLLs, whose code copies 12 bytes of the constructed FName -- with a value this model does not state (the name pool's index for the string at rdx; read with debt). Returns rcx. Reads the string at rdx and keeps no pointer it receives. Other memory this module can observe is unchanged: the name pool and its locks and allocations are Core-private state, and the constructor runs no callback into the module -- no allocator hook, ensure/log delegate (ue-core-win64:name-pool-private).",
       "registers": [
         {
           "write": [
@@ -294,7 +306,7 @@
       "frees": "none",
       "other_memory": "preserved",
       "assumptions": [
-        "ue-core-name-pool-private"
+        "ue-core-win64:name-pool-private"
       ]
     }
   ]

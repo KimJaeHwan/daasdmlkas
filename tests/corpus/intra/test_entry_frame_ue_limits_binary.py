@@ -303,7 +303,7 @@ def test_frame_off_current_models_do_not_require_runtime_forward_refinement(trac
 def test_current_ctor_template_retains_both_original_return_alias_conditions(ue_entry_frames, core):
     raw = json.loads((REPO / "models" / "derived" / "ue_core_win64_fstring.json").read_text())
     assert FRAME not in raw["source"]["assumptions"] and HOME not in raw["source"]["assumptions"]
-    assert len(raw["source"]["assumptions"]) == 11
+    assert len(raw["source"]["assumptions"]) == 14   # (+ the three allocator row labels, docs 25.74)
     assert raw["source"]["parameters"]["private_frame_above"] == 0
     assert set(DERIVED_CALLS.values()) <= {entry["name"] for entry in raw["entries"]}
     (ctor,) = [entry["summary"] for entry in raw["entries"] if entry["name"] == "??0FString@@QEAA@XZ"]

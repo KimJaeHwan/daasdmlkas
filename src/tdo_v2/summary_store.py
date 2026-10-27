@@ -101,6 +101,18 @@ code, e.g. ``{"kind": "derived", "library": ..., "sha256": ...}``) or
 (list of labels; also per entry) are the assumptions the model itself rests on: each use
 reports them with the model's own label -- ``external-model:`` (hand),
 ``derived-model:`` or ``supplied-model:`` + ``<file id>/<entry>@v<version>``.
+A label is a registry name (``assumptions``), an engine provenance label
+(``assumptions.PROVENANCE_PREFIXES``), or ``<file id>:<id>`` -- an assumption a
+model file declares (top level ``"declares_assumptions": [{"id", "statement",
+"fails_when"}]``; what only that library's models rest on). Every
+``<file id>:<id>`` must resolve in the run's catalog (``assumption_catalog``:
+the run's model files and binding model files together) -- a declared file
+referring to an undeclared one is an error, a derived file's entries are
+refused. Rows add the registry labels they rest on themselves: a ``fresh``
+row allocator-results-are-fresh and no-use-after-free, a ``frees`` row
+no-use-after-free, a ``same_object_as`` row all three with
+no-use-of-old-pointer-after-realloc. File ids are ``[a-z0-9]`` words joined by
+``-``.
 Extra model directories: ``model_paths`` (``--model-dir``,
 ``TDO_V2_MODEL_DIRS``).
 
@@ -122,6 +134,7 @@ named assumption library-internal-model-cuts.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -231,6 +244,8 @@ class ModelFile:
     source: tuple = (("kind", "hand"),)   # provenance, as sorted (key, value) pairs
     overrides: tuple[str, ...] = ()       # "<file id>/<entry name>" this file replaces
     digest: str = ""                      # sha256 of the file's bytes (template dependencies)
+    # (label "<file id>:<id>", statement, fails_when) of each declared assumption
+    declares: tuple[tuple[str, str, str], ...] = ()
 
     def source_field(self, key):
         return next((json.loads(value) for name, value in self.source if name == key), None)
@@ -240,25 +255,113 @@ SOURCE_KINDS = ("hand", "derived", "external")
 _LABEL_PREFIX = {"hand": "external-model", "derived": "derived-model", "external": "supplied-model"}
 
 
+_WORD = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*\Z")
+
+
+def _file_id(raw, path) -> str:
+    from .assumptions import PROVENANCE_PREFIXES
+
+    file_id = raw.get("id")
+    if type(file_id) is not str or not _WORD.match(file_id) \
+            or any(file_id == prefix[:-1] for prefix in PROVENANCE_PREFIXES):
+        raise ModelError(f"{path}: id must be [a-z0-9] words joined by '-' (not a provenance prefix)")
+    return file_id
+
+
+def _label_problem(label) -> str | None:
+    """None for a registry name, a provenance label or ``<file id>:<id>``."""
+    from .assumptions import PROVENANCE_PREFIXES, REGISTRY
+
+    if label in {item.name for item in REGISTRY} or label.startswith(PROVENANCE_PREFIXES):
+        return None
+    namespace, separator, name = label.partition(":")
+    if separator and _WORD.match(namespace) and _WORD.match(name):
+        return None
+    return f"{label!r} is neither a registered assumption, a provenance label nor <file id>:<id>"
+
+
 def _assumption_labels(assumptions, path, what) -> tuple[str, ...]:
-    """Registered assumption names or namespaced labels (``<namespace>:<name>``)."""
     if type(assumptions) is not list or any(type(item) is not str or not item for item in assumptions):
         raise ModelError(f"{path}: {what} must be a list of labels")
-    from .assumptions import REGISTRY
-
-    registered = {item.name for item in REGISTRY}
     for item in assumptions:
-        if item not in registered and ":" not in item:
-            raise ModelError(f"{path}: {what} {item!r} is neither a registered assumption "
-                             "nor a namespaced label (<namespace>:<name>)")
+        problem = _label_problem(item)
+        if problem is not None:
+            raise ModelError(f"{path}: {what} {problem}")
     return tuple(assumptions)
 
 
-def _source(raw, path):
+def _declarations(raw, file_id, path) -> tuple:
+    items = raw.get("declares_assumptions", [])
+    if type(items) is not list or any(
+            type(item) is not dict or set(item) != {"id", "statement", "fails_when"}
+            or any(type(value) is not str or not value for value in item.values()) or not _WORD.match(item["id"])
+            for item in items):
+        raise ModelError(f"{path}: declares_assumptions lists {{id, statement, fails_when}} ([a-z0-9-] ids)")
+    ids = [item["id"] for item in items]
+    if len(set(ids)) != len(ids):
+        raise ModelError(f"{path}: an assumption is declared twice")
+    return tuple((f"{file_id}:{item['id']}", item["statement"], item["fails_when"]) for item in items)
+
+
+def _row_labels(fresh, frees, same_object) -> tuple[str, ...]:
+    """The registry assumptions an entry's own rows rest on."""
+    labels = []
+    if fresh or same_object:   # (realloc(NULL) is a fresh block)
+        labels.append("allocator-results-are-fresh")
+    if fresh or frees or same_object:
+        labels.append("no-use-after-free")
+    if same_object:
+        labels.append("no-use-of-old-pointer-after-realloc")
+    return tuple(labels)
+
+
+def unresolved_labels(labels, catalog) -> list:
+    """The ``<file id>:<id>`` labels of ``labels`` the run's catalog lacks."""
+    from .assumptions import PROVENANCE_PREFIXES
+
+    return [label for label in labels if ":" in label and label not in catalog
+            and not label.startswith(PROVENANCE_PREFIXES)]
+
+
+def assumption_catalog(*model_sets) -> dict:
+    """``{label: (file id, statement, fails_when)}`` of every assumption the
+    run's model files declare (``ExternalModels`` -- the run's models, each
+    binding's), checked together: one file id names one file (the same file
+    loaded twice is one), and every ``<file id>:<id>`` a declared entry rests
+    on is declared (a derived entry resting on an undeclared one is refused
+    instead, ``summary_templates.refusal``)."""
+    files: dict = {}
+    for models in model_sets:
+        for item in models.files:
+            seen = files.get(item.file_id)
+            if seen is not None and seen.digest != item.digest:
+                raise ModelError(f"two model files have the id {item.file_id}")
+            files.setdefault(item.file_id, item)   # (the first: the run's own copy)
+    catalog = {label: (item.file_id, statement, fails_when)
+               for item in files.values() for label, statement, fails_when in item.declares}
+    for models in model_sets:
+        for item in models.files:
+            for entry in item.entries:
+                missing = [] if entry.template is not None else unresolved_labels(entry.inherited, catalog)
+                if missing:
+                    raise ModelError(f"model {entry.model_id} rests on {', '.join(missing)}, which no loaded model "
+                                     "file declares")
+    return catalog
+
+
+def _source(raw, path, *, recorded=False):
+    """``recorded``: a derived file's assumptions are the record of its
+    derivation run -- labels this engine does not know refuse its entries
+    (``_load_summary_file``), they are no error."""
     source = raw.get("source", {"kind": "hand"})
     if type(source) is not dict or source.get("kind") not in SOURCE_KINDS:
         raise ModelError(f"{path}: source must be an object with kind in {SOURCE_KINDS}")
-    _assumption_labels(source.get("assumptions", []), path, "source.assumptions")
+    if recorded:
+        if type(source.get("assumptions")) is not list or any(
+                type(item) is not str or not item for item in source["assumptions"]):
+            raise ModelError(f"{path}: source.assumptions must be a list of labels")
+    else:
+        _assumption_labels(source.get("assumptions", []), path, "source.assumptions")
     if source["kind"] == "derived" and not (type(source.get("library")) is str and type(source.get("sha256")) is str
                                             and len(source["sha256"]) == 64):
         raise ModelError(f"{path}: a derived model names its library and the library file's sha256")
@@ -335,10 +438,13 @@ def load_model_file(path: str | Path) -> ModelFile:
         return replace(_load_summary_file(raw, path), digest=digest)
     keys = {"format_version", "kind", "id", "version", "language_id", "abi_tag", "stack_pointer",
             "stack_delta", "preserved", "entries"}
-    if type(raw) is not dict or set(raw) - {"notes", "libraries", "source", "overrides"} != keys:
+    if type(raw) is not dict or set(raw) - {"notes", "libraries", "source", "overrides",
+                                            "declares_assumptions"} != keys:
         raise ModelError(f"{path}: model file fields must be exactly {sorted(keys)}")
     if raw["format_version"] != FORMAT_VERSION or raw["kind"] != "declared":
         raise ModelError(f"{path}: unsupported model format or kind")
+    file_id = _file_id(raw, path)
+    declares = _declarations(raw, file_id, path)
     source = _source(raw, path)
     overrides = raw.get("overrides", [])
     if type(overrides) is not list or any(type(item) is not str or "/" not in item for item in overrides):
@@ -416,7 +522,8 @@ def load_model_file(path: str | Path) -> ModelFile:
                                   source_kind=source["kind"], inherited=(*source.get("assumptions", ()), *_assumption_labels(
                                       item.get("assumptions", []), path, f"{item['name']}: assumptions"),
                                       *(("accessor-private-state",) if item.get("omits_private_writes") else ()),
-                                      *(("registered-handlers-are-not-observed",) if registered else ())),
+                                      *(("registered-handlers-are-not-observed",) if registered else ()),
+                                      *_row_labels(fresh, frees, same_object)),
                                   identity=source["sha256"][:12] if source["kind"] == "derived" else "",
                                   internal=item.get("internal", False), unknown_memory=unknown_memory,
                                   noreturn=item.get("noreturn", False), same_result=same_result,
@@ -431,7 +538,7 @@ def load_model_file(path: str | Path) -> ModelFile:
                      _slice(raw["stack_pointer"], "stack pointer"), raw["stack_delta"],
                      tuple(_slice(s, "preserved") for s in raw["preserved"]), tuple(entries), libraries,
                      tuple(sorted((key, json.dumps(value, sort_keys=True)) for key, value in source.items())),
-                     tuple(overrides), digest)
+                     tuple(overrides), digest, declares)
 
 
 def _overlaps(write, read) -> bool:
@@ -502,15 +609,24 @@ def _load_summary_file(raw, path) -> ModelFile:
         raise ModelError(f"{path}: summary file fields must be exactly {sorted(keys)}")
     if raw["format_version"] != FORMAT_VERSION:
         raise ModelError(f"{path}: unsupported model format")
-    source = _source(raw, path)
-    if source["kind"] != "derived" or set(source) - {"producer"} != DERIVED_SOURCE_KEYS:
+    _file_id(raw, path)
+    source = _source(raw, path, recorded=True)
+    if source["kind"] != "derived" or set(source) - {"producer", "declarations"} != DERIVED_SOURCE_KEYS:
         raise ModelError(f"{path}: a summary file's source is derived with {sorted(DERIVED_SOURCE_KEYS)}")
+    declarations = source.get("declarations", {})
+    if type(declarations) is not dict or any(
+            label not in source["assumptions"] or type(stated) is not list or len(stated) != 2
+            or any(type(text) is not str for text in stated) for label, stated in declarations.items()):
+        raise ModelError(f"{path}: source.declarations maps assumption labels to [statement, fails_when]")
     engine = source["engine"]
     expected = {"summary_version": FUNCTION_SUMMARY_VERSION, "template_version": TEMPLATE_VERSION,
                 "semantics_version": ENGINE_SEMANTICS_VERSION}
     if type(engine) is not dict or set(engine) != set(expected):
         raise ModelError(f"{path}: source.engine must give {sorted(expected)}")
     refusal = None if engine == expected else f"derived by engine {engine}, this engine is {expected}"
+    unknown = [label for label in source["assumptions"] if _label_problem(label) is not None]
+    if refusal is None and unknown:
+        refusal = f"derived resting on {', '.join(unknown)}, which this engine does not know"
     models = source["models"]
     if type(models) is not list or any(type(row) is not dict or set(row) != {"file", "sha256"} for row in models):
         raise ModelError(f"{path}: source.models must list {{file, sha256}}")
@@ -534,9 +650,7 @@ def _load_summary_file(raw, path) -> ModelFile:
             raise ModelError(f"{path}: {item['name']}: summary")
         entries.append(ModelEntry(raw["id"], raw["version"], item["name"], (item["name"],), (), (), False,
                                   original_names=tuple(item["original_names"]), source_kind="derived",
-                                  inherited=(*_assumption_labels(source["assumptions"], path,
-                                                                 "source.assumptions"),
-                                             "derived-model-runtime-matches"),
+                                  inherited=(*source["assumptions"], "derived-model-runtime-matches"),
                                   identity=source["sha256"][:12], template=item["summary"], refusal=refusal))
     overrides = raw.get("overrides", [])
     if type(overrides) is not list or any(type(item) is not str or "/" not in item for item in overrides):

@@ -5760,3 +5760,40 @@ run만(`written`). 모든 대상 요약의 반환 칸 run은 자기 aliasing/unk
 없음). 빚은 누적된 `_opaque_rows` 전체에 단다 — 다른 호출의 값이 빠지면 앞 패스에서 겹쳤던 행이 더는 겹쳐 보이지 않을 수 있다
 (Astra 2차). 효과: swap(&x, &x) 뒤 다른 전역 읽기가 정확·완전(main: 불완전). 정밀도 후속(선택): 겹친 바이트만 `~ov` 행으로.
 
+
+### 25.74 모델이 자기 가정을 선언 — 엔진 레지스트리에서 라이브러리 이름 제거 (2026-10-27)
+
+사용자 원칙: 엔진 src에 UE/라이브러리 이름을 두지 않는다. 한 라이브러리 모델만 기대는 가정은 그 모델 파일이 선언한다.
+설계 3차까지 검토(Astra 승인 3차, Fable 승인 2차). 설계 원문: `.census6/design_model_assumptions.md`(로컬).
+
+- 선언: 모델 파일 최상위 `"declares_assumptions": [{"id", "statement", "fails_when"}]`, 보고 이름 `<파일 id>:<id>`.
+  참조는 항상 전체 이름. `assumptions` 항목은 레지스트리 이름, 엔진 출처 label(`assumptions.PROVENANCE_PREFIXES`),
+  또는 `<파일 id>:<id>` 중 하나이며, 마지막은 실행 전체 카탈로그(`summary_store.assumption_catalog`: 실행 모델 +
+  binding 모델)에서 반드시 풀려야 한다 — 오타 이름이 끌 수 없는 가정으로 남지 않는다(Astra 1차 P1). 한 파일 id는
+  한 파일(같은 바이트면 하나, 다르면 오류; Astra/Fable P1). 파일 id는 `[a-z0-9]` 단어를 `-`로 이은 것.
+- 파생 템플릿: 모르는 label은 오류가 아니라 그 항목의 거부(`entry.refusal` / `summary_templates.refusal`) — 낡은
+  템플릿이 실행을 멈추지 않는다(Fable P1-b).
+- 행이 기대는 레지스트리 가정은 행에서 붙인다(Fable P1-a: 지금까지 보고되지 않던 구멍): `fresh` → 할당 결과 새 블록 +
+  해제 후 미사용, `frees` → 해제 후 미사용, `same_object_as` → 셋 다(realloc(NULL)은 새 블록). 템플릿은 파생 실행의
+  가정 목록으로만 받는다. `ENGINE_SEMANTICS_VERSION` 20 → 21(이전 템플릿·링크 캐시 모두 무효; Astra/Fable P1).
+- 끄기: `disabled_model_assumptions`(`--no-model-assumption LABEL`, `TDO_V2_NO_MODEL_ASSUMPTIONS`) — 카탈로그 label과
+  `assumptions.MODEL_SWITCHABLE`(행 가정 3개, derived-model-runtime-matches, library-internal-model-cuts)만, 모르는 이름은
+  오류. 기존 `inherited & disabled` 검사를 그대로 쓴다. `_model_cuts`는 library-internal-model-cuts가 꺼지면 자르지 않는다
+  (전에는 label을 검사 뒤에 붙여 끌 수 없었음). interprocedural·linking의 같은 스위치 표 두 벌은 `assumptions.disabled()`
+  하나로(명시 bool), 링크·파생(`tools/derive_models`)에도 전달 — 파생의 폐포 자르기도 같은 집합을 쓴다(전에는
+  registered-handlers만).
+- UE 가정 2개(`ue-core-win64:diagnostics-no-reentrant-callback`, `ue-core-win64:name-pool-private`)는
+  `models/external/ue_core_win64.json` v5가 선언. `docs/assumptions.md`는 묶음 모델 파일의 선언 표도 생성.
+  lifecycle 계약은 이번 범위 밖(별도 로더). 테스트 `tests/intra/test_model_declared_assumptions.py`(엔진 src에
+  라이브러리 이름이 없음을 grep으로도 확인).
+- 구현 검토(Astra 4차, Fable 1차 승인): binding 모델 파일의 선언도 링크 preflight·파생·캐시 profile의 카탈로그에
+  들어간다(`analyze_units(assumption_declarations=)`, `Linker(catalog_models=)`). 기록된 모델 파일이 아닌 파일(binding)의
+  선언에 기대는 템플릿은 그 문장을 `source.declarations`에 기록하고, 실행의 문장과 다르면 거부된다(기록된 모델 파일은
+  digest가 덮음). 검증은 늘 전체 카탈로그로 — 부분 카탈로그는 파일 사이 참조를 잘못 거부한다. `run_dfbench`는 쓰인 선언
+  가정의 문장도 출력.
+- 템플릿 다시 만듦: `models/derived/ue_core_win64_fstring.json` v20, 이 기계의 Core Bundle `ue-core-probe`
+  (`8d181999...`, 이전 `a1f091c5...`는 이 기계에 없음)와 스택 증거 `core.stack.json`(`b885e02c...`, 같은 DLL
+  `fdea9597...`, 52,211 함수·switch 0), `--no-assume-entry-values-not-frame`, 폐포 6 + 잘림 6. 같은 Bundle로 main 엔진
+  (e68cdc6, 이 변경 없음)이 만든 요약과 **세 항목 모두 같음** — 이 변경은 label만 바꾼다. 생성자는 이전 파일과도 같고,
+  소멸자·AppendChar는 이전 파일과 다르다: §25.73 push 정의(`~push` 별칭 교차, push 칸 run) 등 이미 main에 있던 엔진
+  변화가 semantics 번호를 올리지 않아 이전 템플릿이 그대로 쓰이고 있었다(이번 21로 함께 반영).

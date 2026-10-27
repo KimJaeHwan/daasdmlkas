@@ -65,7 +65,7 @@ class ProviderError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class LinkTarget:
-    library: str      # the import library name, e.g. UNREALEDITOR-CORE.DLL
+    library: str      # the import library name, e.g. LIBFOO.DLL
     dll: Path
 
     @staticmethod
@@ -132,28 +132,27 @@ def declared_models(models):
 
 
 def _disabled(switches: dict) -> set:
-    """The registry assumptions a link run with ``switches`` has switched off."""
-    return {name for name, on in (
-        ("globals-disjoint-from-stack", switches["globals_disjoint"]),
-        ("direction-flag-clear", switches["direction_flag"]),
-        ("entry-values-do-not-address-the-new-frame", switches["entry_values_not_frame"]),
-        ("win64-home-space-callee-private",
-         bool(switches["private_frame_above"]) and switches["entry_values_not_frame"]),
-        ("opaque-callees-leave-no-stack-addresses", switches["opaque_no_stack"]),
-        ("debug-break-traps-do-not-return", switches["traps"]),
-        ("import-slots-hold-their-exports", switches["import_slots"]),
-        ("same-result-functions", switches["same_result"]),
-        ("accessor-result-separate", switches["accessor_separate"]),
-        ("registered-handlers-are-not-observed", switches["registered_handlers"]),
-    ) if not on}
+    """The assumptions a link run with ``switches`` has switched off (read-only
+    image folding is off in every derivation)."""
+    from .assumptions import disabled
+
+    return disabled(
+        globals_disjoint=switches["globals_disjoint"], readonly_image=False,
+        direction_flag=switches["direction_flag"], entry_values_not_frame=switches["entry_values_not_frame"],
+        home_space=bool(switches["private_frame_above"]), opaque_no_stack=switches["opaque_no_stack"],
+        traps=switches["traps"], import_slots=switches["import_slots"], same_result=switches["same_result"],
+        accessor_separate=switches["accessor_separate"], accessor_private_state=switches["accessor_private_state"],
+        registered_handlers=switches["registered_handlers"], model_assumptions_off=switches["model_assumptions_off"])
 
 
 def profile(*, switches: dict, pcodeop_models, models, language_id: str, abi_tag: str,
-            provider_identity: dict, evidence: str | None) -> dict:
+            provider_identity: dict, evidence: str | None, catalog_models=()) -> dict:
     """Everything a linked template depends on besides the DLL itself:
     ``switches``, the run's analysis settings the derivation takes
     (``Linker.__call__``); ``evidence``, the sha256 of the library's stack
-    evidence file (None: none -- a later clean scan derives again)."""
+    evidence file (None: none -- a later clean scan derives again);
+    ``catalog_models``: the declaration-only model files (what each
+    declaration states)."""
     from .function_summary import FUNCTION_SUMMARY_VERSION
     from .interprocedural import MAX_RECURSION_ROUNDS
     from .summary_templates import ENGINE_SEMANTICS_VERSION, TEMPLATE_VERSION, pcodeop_digest
@@ -168,6 +167,8 @@ def profile(*, switches: dict, pcodeop_models, models, language_id: str, abi_tag
         "models": sorted([item.file_id, item.digest] for item in declared_models(models).files),
         "provider": provider_identity,
         "stack_evidence": evidence,
+        "declarations": sorted([label, statement, fails_when] for models in catalog_models
+                               for item in models.files for label, statement, fails_when in item.declares),
     }
 
 
@@ -285,11 +286,14 @@ class Linker:
     def __call__(self, units, image_info, *, external_models, pcodeop_models, private_frame_above: int,
                  traps: bool, globals_disjoint: bool, direction_flag: bool, import_slots: bool = False,
                  entry_values_not_frame: bool = True, same_result: bool = False,
-                 accessor_separate: bool = False, opaque_no_stack: bool = True, registered_handlers: bool = True):
+                 accessor_separate: bool = False, opaque_no_stack: bool = True, registered_handlers: bool = True,
+                 accessor_private_state: bool = False, model_assumptions_off=(), catalog_models=()):
         """(the run's model set with the linked templates, stack evidence
         files). The settings are the run's effective ones (``globals_disjoint``
         after the program's own withdrawal checks): templates are derived with
-        exactly these, so none rests on an assumption the run switched off."""
+        exactly these, so none rests on an assumption the run switched off.
+        ``catalog_models``: the run's binding model files (their declarations
+        resolve labels, ``summary_store.assumption_catalog``)."""
         from .interprocedural import import_call_sites
         from .pe_exports import read_pe_exports
         from .summary_store import ExternalModels, with_model_files
@@ -314,7 +318,9 @@ class Linker:
                     "import_slots": bool(import_slots), "index_addresses": index_addresses(),
                     "entry_values_not_frame": bool(entry_values_not_frame), "same_result": bool(same_result),
                     "accessor_separate": bool(accessor_separate), "opaque_no_stack": bool(opaque_no_stack),
-                    "registered_handlers": bool(registered_handlers)}
+                    "registered_handlers": bool(registered_handlers),
+                    "accessor_private_state": bool(accessor_private_state),
+                    "model_assumptions_off": sorted(set(model_assumptions_off))}
         identity = self.provider.identity()
         declared = declared_models(models)
         checked = []
@@ -359,6 +365,7 @@ class Linker:
         for target, exports, imported in checked:
             evidence = evidences[target]
             profile_raw = profile(switches=switches, pcodeop_models=pcodeop_models, models=models,
+                                  catalog_models=catalog_models,
                                   language_id=language_id, abi_tag=abi_tag, provider_identity=identity,
                                   evidence=_sha256(evidence.read_bytes()) if evidence is not None else None)
             cache = LinkCache(self.cache_root, target.library, exports.sha256, profile_raw)
@@ -403,13 +410,13 @@ class Linker:
                 misses = []
             if misses:
                 self._derive(target, exports, cache, misses, space_id, declared, evidence, switches,
-                             pcodeop_models)
+                             pcodeop_models, catalog_models)
         linked = with_model_files(models, self.report.template_files)
         namespace = units[0].scopes.program.evidence.translation_namespace
         disabled = _disabled(switches)
         if self._preflight(linked, pcodeop_models=pcodeop_models, private_frame_above=switches["private_frame_above"],
                            language=(namespace.language_id, namespace.major_version, namespace.minor_version),
-                           disabled=disabled):
+                           disabled=disabled, catalog_models=catalog_models):
             linked = with_model_files(models, self.report.template_files)
         for row in self.report.rows:
             self.log(f"[link] {row.describe()}")
@@ -454,7 +461,8 @@ class Linker:
             return None
         return path
 
-    def _derive(self, target, exports, cache, misses, space_id, declared, evidence, switches, pcodeop_models):
+    def _derive(self, target, exports, cache, misses, space_id, declared, evidence, switches, pcodeop_models,
+                catalog_models=()):
         names = [export.name for export in misses]
         entries = [(export.name, exports.image_base + export.rva) for export in misses]
         self.log(f"[link] {target.library}: deriving {len(names)} exports from the prepared Ghidra project")
@@ -470,6 +478,8 @@ class Linker:
                 import_slots=switches["import_slots"], entry_values_not_frame=switches["entry_values_not_frame"],
                 same_result=switches["same_result"], accessor_separate=switches["accessor_separate"],
                 opaque_no_stack=switches["opaque_no_stack"], registered_handlers=switches["registered_handlers"],
+                accessor_private_state=switches["accessor_private_state"],
+                model_assumptions_off=tuple(switches["model_assumptions_off"]), catalog_models=catalog_models,
                 per_export=True, log=lambda line: self.log(f"[link]   {line}"))
             for raw in files.values():
                 if raw["source"]["sha256"] != exports.sha256:
@@ -507,14 +517,15 @@ class Linker:
         cache.forget(name)
         self._row(target, name, "refused", reason, refusal_class)
 
-    def _preflight(self, linked, *, pcodeop_models, private_frame_above, language, disabled):
+    def _preflight(self, linked, *, pcodeop_models, private_frame_above, language, disabled, catalog_models=()):
         """Each linked template checked as the engine will check it at a call
         (``summary_templates.refusal`` against the final model set, and the
         assumptions this run switched off): an unusable one is reported and
         left out, never claimed as linked."""
-        from .summary_store import with_model_files
+        from .summary_store import assumption_catalog, with_model_files
         from .summary_templates import refusal
 
+        catalog = assumption_catalog(linked, *catalog_models)
         by_id = {item.file_id: item for item in linked.files}
         usable_files, changed = [], False
         for path in self.report.template_files:
@@ -525,7 +536,7 @@ class Linker:
             model_file = by_id[row.file_id]
             (entry,) = model_file.entries
             reason = refusal(model_file, entry, external_models=linked, pcodeop_models=pcodeop_models,
-                             private_frame_above=private_frame_above, language=language)
+                             private_frame_above=private_frame_above, language=language, catalog=catalog)
             off = sorted(set(entry.inherited) & disabled)
             if reason is None and off:
                 reason = f"rests on {', '.join(off)}, switched off in this run"

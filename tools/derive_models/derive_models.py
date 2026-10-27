@@ -74,7 +74,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                    import_slots: bool = False, per_export: bool = False, log=print,
                    entry_values_not_frame: bool = True, same_result: bool = False,
                    accessor_separate: bool = False, opaque_no_stack: bool = True,
-                   registered_handlers: bool = True):
+                   registered_handlers: bool = True, accessor_private_state: bool = False,
+                   model_assumptions_off=(), catalog_models=()):
     """(model file dict, {export name: refusal reason}, export names the
     Bundle does not export) -- the templates of ``export_names`` of the
     library Bundle at ``generation``, derived with the given analysis
@@ -90,7 +91,11 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
     ``per_export``: each export analyzed alone -- its own closure and the
     cut functions it reaches -- and returned as its own file ({name: file
     dict} in place of the one file): a template then never depends on which
-    other exports were derived with it (linking caches per export)."""
+    other exports were derived with it (linking caches per export).
+    ``model_assumptions_off``: model assumptions switched off
+    (``interprocedural.analyze_units`` ``disabled_model_assumptions``);
+    ``catalog_models``: more model files declaring labels (the program run's
+    bindings, ``assumption_declarations``)."""
     import run_dfbench
     from tdo_v2._scope_results import ConstructedFunctionScope
     from tdo_v2.configured_naming_contracts import CALL_NAMING_GHIDRA_VERSION, NamingBindingExpectation
@@ -98,6 +103,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
     from tdo_v2.integration.configured_bundle import admit_frozen_bundle
     from tdo_v2.integration.observed_function_session import open_observed_function_session
     from tdo_v2 import interprocedural as ip
+    from tdo_v2.assumptions import disabled
     from tdo_v2.relative_memory import ImageBaseTracking
     from tdo_v2.stack_evidence import assumption_allowed, load_stack_evidence
     from tdo_v2.summary_templates import build_file, image_provenance
@@ -148,9 +154,15 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
         """build_file's (file dict, refused) for the exports ``group``."""
         targets = {exports[name] for name in group if exports[name] in by_key}
         # the targets' closure, cut at internal models (the targets themselves kept)
+        # (switched off as ``analyze_units`` below will find them)
+        off = disabled(globals_disjoint=globals_disjoint, readonly_image=False, direction_flag=direction_flag,
+                       entry_values_not_frame=entry_values_not_frame, home_space=bool(private_frame_above),
+                       opaque_no_stack=opaque_no_stack, traps=traps, import_slots=import_slots,
+                       same_result=same_result, accessor_separate=accessor_separate,
+                       accessor_private_state=accessor_private_state, registered_handlers=registered_handlers,
+                       model_assumptions_off=model_assumptions_off)
         cuts = ip._model_cuts({key: unit for key, unit in by_key.items() if key not in targets},
-                              info, models, library,
-                              set() if registered_handlers else {"registered-handlers-are-not-observed"})
+                              info, models, library, off)
         kept = {key: unit for key, unit in by_key.items() if key not in cuts}
         reach, reached_cuts, pending = set(), set(), list(targets)
         while pending:
@@ -178,11 +190,15 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_same_result_functions=same_result,
                                        assume_accessor_result_separate=accessor_separate,
                                        assume_registered_handlers_not_observed=registered_handlers,
+                                       assume_accessor_private_state=accessor_private_state,
+                                       disabled_model_assumptions=tuple(model_assumptions_off),
+                                       assumption_declarations=tuple(catalog_models),
                                        own_library=library, keep_uncut=frozenset(targets))
         log(f"constants: {len(tracking.proofs[True])} proven image addresses, {len(tracking.proofs[False])} "
             f"fixed numbers, {len(tracking.proofs[None])} not understood (possibly base-dependent)")
         rows = [(exports[name], name, [name]) for name in group]
         return build_file(results, rows, file_id=file_id, version=version, library=library,
+                          catalog_models=tuple(catalog_models),
                           external_models=models, pcodeop_models=pcodeops,
                           private_frame_above=private_frame_above, base_dependent=found, traps=traps,
                           producer=producer, notes=f"Derived by tools/derive_models from {generation.name}.")
@@ -237,12 +253,15 @@ def main(argv=None) -> int:
                         help="derive under same-result-functions (docs 25.20)")
     parser.add_argument("--assume-accessor-result-separate", dest="accessor_separate", action="store_true",
                         help="derive under accessor-result-separate (docs 25.20)")
+    parser.add_argument("--no-model-assumption", dest="model_assumptions_off", action="append", default=[],
+                        metavar="LABEL", help="derive with this model assumption switched off (repeat)")
     args = parser.parse_args(argv)
     raw, refused, missing = derive_library(
         args.generation, args.library, args.export, file_id=args.id, version=args.version,
         model_dirs=args.model_dir, stack_evidence=args.stack_evidence,
         private_frame_above=args.private_frame_above, traps=args.traps, same_result=args.same_result,
-        accessor_separate=args.accessor_separate, entry_values_not_frame=args.entry_values_not_frame)
+        accessor_separate=args.accessor_separate, entry_values_not_frame=args.entry_values_not_frame,
+        model_assumptions_off=tuple(args.model_assumptions_off))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(raw, indent=1) + chr(10), encoding="utf-8")
     print(f"wrote {len(raw['entries'])} templates to {args.output}")

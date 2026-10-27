@@ -21,7 +21,10 @@ WIN64 = ("x86:LE:64:default", "win64")
 def _file(directory, name, entries, source=None, overrides=None, file_id="supplied-test"):
     raw = {"format_version": 1, "kind": "declared", "id": file_id, "version": 1,
            "language_id": WIN64[0], "abi_tag": WIN64[1], "stack_pointer": [32, 8], "stack_delta": 8,
-           "preserved": [[24, 8], [40, 8], [48, 8], [56, 8]], "entries": entries}
+           "preserved": [[24, 8], [40, 8], [48, 8], [56, 8]], "entries": entries,
+           # (what the supplying tool's models rest on, declared by the file)
+           "declares_assumptions": [{"id": "tool-trusted", "statement": "The supplying tool's models are right.",
+                                     "fails_when": "The tool is wrong."}]}
     if source is not None:
         raw["source"] = source
     if overrides is not None:
@@ -37,7 +40,7 @@ def _identity(name):
             **NO_CALLBACKS, "other_memory": "preserved"}
 
 
-SUPPLIED = {"kind": "external", "tool": "other-analyzer", "version": "1.0", "assumptions": ["other-analyzer:tool-trusted"]}
+SUPPLIED = {"kind": "external", "tool": "other-analyzer", "version": "1.0", "assumptions": ["supplied-test:tool-trusted"]}
 
 
 def test_hand_models_keep_their_labels():
@@ -55,7 +58,7 @@ def test_a_supplied_model_is_used_and_reported(tmp_path, monkeypatch):
     assert found is not None
     _, entry = found
     assert entry.label == "supplied-model:supplied-test/tool_identity@v1"
-    assert entry.labels == (entry.label, "other-analyzer:tool-trusted")
+    assert entry.labels == (entry.label, "supplied-test:tool-trusted")
     thunk = CODE_BASE + 0xF00
     builder = (FunctionBuilder().sub_rsp(0x28)
                .call(thunk)
@@ -67,7 +70,7 @@ def test_a_supplied_model_is_used_and_reported(tmp_path, monkeypatch):
     results = analyze_units(program_units(builder), image_info=info, external_models=models)
     analyzed = results["1:1000"]
     assert entry.label in analyzed.declared.values()
-    assert analyzed.inherited_assumptions == {"other-analyzer:tool-trusted"}
+    assert analyzed.inherited_assumptions == {"supplied-test:tool-trusted"}
 
 
 def test_two_models_for_one_import_are_an_error(tmp_path):
