@@ -241,3 +241,53 @@ def test_the_oracle_excuses_only_reads_wholly_of_unknown_memory(tmp_path):
     key = lambda index: graph.node(operation_node_at(function, index, 1)).key.removeprefix("op:")
     assert _all_opaque(graph, key(3), rows)
     assert not _all_opaque(graph, key(4), rows)
+
+
+def test_a_partial_overlap_leaves_only_the_shared_bytes_unknown(monkeypatch):
+    """callee: [rcx] = rdx; [r8] = r9 (8 bytes each); the caller passes
+    rcx = rsp + 0x10, r8 = rsp + 0x14: bytes 0x14..0x18 are written twice in
+    an order the summary does not state -- only they are unknown (a ``~ov``
+    row, docs 25.82); 0x10..0x14 and 0x18..0x1c keep their writers."""
+    # (forward off: an activation replays the callee with r8 = rcx + 4 and its own order decides)
+    monkeypatch.setenv("TDO_V2_FORWARD", "0")
+    callee = CODE_BASE + 0xB00
+    t = tmp(0x100)
+    body = FunctionBuilder(entry=callee).ins(store(reg(RCX), reg(RDX))).ins(store(reg(R8), reg(R9))).ret()
+    caller = (FunctionBuilder().sub_rsp(0x48)
+              .ins(add(reg(RCX), reg(RSP), const(0x10)), add(reg(R8), reg(RSP), const(0x14)))
+              .call(callee)                                                                  # instruction 2
+              .ins(add(t, reg(RSP), const(0x10)), load(reg(RSI, 4), t))                      # 3: first only
+              .ins(add(t, reg(RSP), const(0x14)), load(reg(RBX, 4), t))                      # 4: shared
+              .ins(add(t, reg(RSP), const(0x18)), load(reg(RDX, 4), t))                      # 5: second only
+              .add_rsp(0x48).ret())
+    results = analyze_units(program_units(caller, body))
+    function = results["1:1000"].normalized
+    first, shared, second = (slice_from(function, operation_node_at(function, index, 1)) for index in (3, 4, 5))
+    assert not shared.is_complete
+    assert first.is_complete and second.is_complete
+    assert [key for key in function.dependencies._nodes_by_key if key.endswith("~ov0")]
+
+
+def test_an_overlap_row_carries_the_source_labels_of_the_rows_it_stands_for(monkeypatch):
+    """The shared bytes' ``~ov`` row stands for both writes: their callee
+    source labels reach its definitions (Astra, ~ov review)."""
+    from dataclasses import replace
+
+    from tdo_v2.interprocedural import _run_origins, run_definition_nodes
+
+    monkeypatch.setenv("TDO_V2_FORWARD", "0")   # (as above: the generic summary's overlap)
+    callee = CODE_BASE + 0xB00
+    body = FunctionBuilder(entry=callee).ins(store(reg(RCX), reg(RDX))).ins(store(reg(R8), reg(R9))).ret()
+    caller = (FunctionBuilder().sub_rsp(0x48)
+              .ins(add(reg(RCX), reg(RSP), const(0x10)), add(reg(R8), reg(RSP), const(0x14)))
+              .call(callee).add_rsp(0x48).ret())
+    function = analyze_units(program_units(caller, body))["1:1000"].normalized
+    ((ov_row, keys),) = function.overlap_rows
+    call = ov_row.rsplit("~", 1)[0]
+    labelled = tuple(
+        (key, replace(effect, memory_runs=tuple(replace(run, origins=(f"label:{index}",))
+                                                for index, run in enumerate(effect.memory_runs))))
+        if key == call else (key, effect) for key, effect in function.proven_call_effects)
+    origins = _run_origins(replace(function, proven_call_effects=labelled))
+    found = set().union(*(origins.get(node, set()) for node in run_definition_nodes(function, ov_row)))
+    assert len(keys) == 2 and found == {"label:0", "label:1"}

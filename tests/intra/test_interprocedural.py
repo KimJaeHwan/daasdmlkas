@@ -247,9 +247,10 @@ def test_one_object_passed_twice_through_a_tail_call_is_not_trusted():
 
 def test_overlapping_literal_writes_state_no_value():
     """The callee writes two constants through two pointers the caller makes
-    equal: which one is left is not known, so neither row keeps its literal
-    (a forward address through it would be exact and wrong -- Astra, cleanup
-    3C); the caller's read is incomplete and nothing is silent."""
+    equal: which one is left is not known -- the shared bytes are a ``~ov``
+    row's (docs 25.82), whose value is no row's literal (a forward address
+    through it would be exact and wrong -- Astra, cleanup 3C); the caller's
+    read is incomplete and nothing is silent."""
     from synthetic import load, store
     leaf = (FunctionBuilder(entry=LEAF).ins(store(reg(RDI), const(DATA_BASE + 0x100)))
             .ins(store(reg(RSI), const(DATA_BASE + 0x200))).ret())
@@ -266,7 +267,7 @@ def test_overlapping_literal_writes_state_no_value():
         # last store's value, exactly
         assert literals <= {DATA_BASE + 0x200}
     else:
-        assert not literals and not slice_op(function, "LOAD", 4).result.is_complete
+        assert not slice_op(function, "LOAD", 4).result.is_complete
     assert _check(results, program, pools=lambda seed: {RSP: 0x7000_0000}).silent == []
 
 

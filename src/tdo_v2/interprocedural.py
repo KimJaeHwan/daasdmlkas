@@ -2191,13 +2191,22 @@ def run_definition_nodes(normalized, run_key: str) -> list[int]:
 
 
 def _run_origins(normalized) -> dict:
-    """Source labels carried by summarized runs (reached inside the callee)."""
+    """Source labels carried by summarized runs (reached inside the callee);
+    an overlap row (``~ov``, docs 25.82) carries those of every row whose
+    write shares its bytes."""
     origins: dict = {}
+    by_row: dict = {}
     for call, effect in normalized.proven_call_effects:
         for index, run in enumerate((*effect.runs, *effect.memory_runs)):
             if run.origins:
+                by_row[f"{call}~{index}"] = run.origins
                 for node in run_definition_nodes(normalized, f"{call}~{index}"):
                     origins.setdefault(node, set()).update(run.origins)
+    for row, keys in getattr(normalized, "overlap_rows", ()):
+        labels = {label for key in keys for label in by_row.get(key, ())}
+        if labels:
+            for node in run_definition_nodes(normalized, row):
+                origins.setdefault(node, set()).update(labels)
     return origins
 
 

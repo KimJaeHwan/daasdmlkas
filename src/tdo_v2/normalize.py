@@ -170,6 +170,8 @@ class NormalizedFunction:
     # allocator windows (docs 25.79): (fresh result row, bytes, never_null
     # label | None) -- what a summary may export (docs 25.79 3b)
     fresh_window_rows: tuple = ()
+    # (``{call}~ov{k}`` row, the call rows whose writes share its bytes; docs 25.82)
+    overlap_rows: tuple = ()
     # rep string sites made exact (``rep_strings``): (instruction key, count,
     # direction); the evaluator's overrides of their operations
     rep_blocks: tuple = ()
@@ -963,7 +965,7 @@ _CALL_EFFECT_LABELS = {
     "": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD", "sink": "CALL_EFFECT_SINK",
     "ck": "CALL_EFFECT_CHECK", "cr": "CALL_EFFECT_CHECK", "cw": "CALL_EFFECT_CHECK", "sp": "CALL_EFFECT_CHECK",
     "ext": "CALL_EFFECT_CHECK", "u": "CALL_EFFECT", "iu": "CALL_EFFECT_INPUT", "sr": "CALL_EFFECT_CHECK",
-    "push": "CALL_EFFECT",
+    "push": "CALL_EFFECT", "ov": "CALL_EFFECT",
 }
 
 
@@ -1133,7 +1135,10 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     (register runs first, then memory runs), ``~u<j>`` the unknown memory (an
     "opaque_call_write" debt each, ``_materialize_opaque_call_writes``) at the
     address its ``~iu<j>`` row evaluates with the other inputs, before any
-    output. An accessor call (``same_result``, docs 25.20) with a state token
+    output, ``~ov<k>`` an unknown-value write of each region where two of the
+    call's resolved memory writes overlap (``opaque_rows``: the call's
+    regions, ``_call_write_overlaps``; its "opaque_call_write" debt, docs 25.82)
+    after every output. An accessor call (``same_result``, docs 25.20) with a state token
     (``accessor_state``, ``_accessor_states``) also loads its read slot
     (``~ld<j>``) and reads its inputs, the slot's base register and that load
     in a ``~sr`` row -- the key its result's same-result atom is made from
@@ -1339,10 +1344,10 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     unique = sum(getattr(run, "value", None) is not None for _, run, _, _ in staged) == 1
     for index, (kind, run, stage_key, target) in enumerate(staged):
         key = f"{call_key}~{index}"
-        # (a row of ``opaque_rows`` -- its write overlaps another of the call's:
-        # the value left there is not known -- states no value)
-        value = None if key in opaque_rows else getattr(run, "value", None)
-        literal = None if key in opaque_rows else getattr(run, "literal", None)
+        # (a row overlapping another of the call's keeps its value: the bytes
+        # they share are the ``~ov`` rows', last -- docs 25.82)
+        value = getattr(run, "value", None)
+        literal = getattr(run, "literal", None)
         if pointer_rows is not None and literal is not None and not run.conditions and not proven.writer_conditions:
             widths = tuple(span.size for span in run.writes) if kind == "register" else (run.write.size,)
             if len(widths) == 1 and widths[0] == literal.byte_size:
@@ -1392,7 +1397,22 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
             memory_write=UnresolvedMemoryAccess(None, access.size), block_key=block_key,
         ))
         anchored[key] = (stage_key, pointer, offset, access.size, access.space_id)
+    inputs = {row.operation_key: row.reads for row in rows}
+    for index, (span, keys) in enumerate(_overlap_regions(opaque_rows, call_key)):
+        # the bytes two of the call's writes share: which value is left is not
+        # known -- any of theirs (it reads every overlapping row's input: each
+        # stays a candidate origin)
+        reads = tuple(dict.fromkeys(item for key in sorted(keys) for item in inputs.get(key, ())))
+        rows.append(ObservedEffect(f"{call_key}~ov{index}", EffectKind.COPY, reads=reads,
+                                   writes=(ResolvedStorage(span),), block_key=block_key))
     return rows, anchored
+
+
+def _overlap_regions(regions, call_key) -> list:
+    """The call's overlap regions ((call key, span, overlapping row keys)),
+    as (span, row keys) in ``~ov<k>`` order."""
+    return sorted(((span, keys) for call, span, keys in regions if call == call_key),
+                  key=lambda item: (item[0].canonical_key, sorted(item[1])))
 
 
 class NormalizationFailureReason(StrEnum):
@@ -1537,7 +1557,16 @@ class _Retry:
         self.sites = sites
         self.bounds = bounds
         self.uncertain = uncertain or {}  # uncertain-address writers found (``_kept_call_memory``)
-        self.opaque = opaque   # call rows whose value is not known (``_call_write_overlaps``)
+        self.opaque = opaque   # (call key, span, row keys): bytes two of a call's writes share (``_call_write_overlaps``)
+
+
+def _merge_regions(old: frozenset, new: frozenset) -> frozenset:
+    """Overlap regions (call key, span, row keys) by (call key, span), their
+    row keys united: a region found again with other rows is one ``~ov`` row."""
+    merged: dict = {}
+    for call, span, keys in (*old, *new):
+        merged[(call, span)] = merged.get((call, span), frozenset()) | keys
+    return frozenset((call, span, keys) for (call, span), keys in merged.items())
 
 
 def _merge_uncertain(old: dict, new: dict) -> dict:
@@ -1575,7 +1604,7 @@ class _ScopedNormalizer:
                 blocked |= result.failed
                 sites |= result.sites
                 bounds |= result.bounds
-                opaque |= result.opaque
+                opaque = _merge_regions(opaque, result.opaque)
                 uncertain = _merge_uncertain(uncertain, result.uncertain)
                 continue
             reached = dict(result.uncertain_writers)  # its own fixed point (``_normalize_once``)
@@ -2049,15 +2078,16 @@ class _ScopedNormalizer:
         open_nodes = _materialize_open_conditions(
             dependencies, memory_ssa, proven_call_effects, open_conditions or {}, operation_nodes)
         overlaps = _call_write_overlaps(effect_unit, proven_call_effects)
-        if not set(overlaps) <= _opaque_rows:
-            # their values must not be used (forward literals, pointer values):
-            # normalize again with them stating none
-            return _Retry(frozenset(), opaque=frozenset(overlaps))
-        # (every row found overlapping on any pass keeps its debt: with another
-        # call's values dropped, its destination may no longer resolve onto the
-        # other row's -- Astra, cleanup 3C round 2)
-        opaque_nodes = _materialize_opaque_call_writes(dependencies, memory_ssa, proven_call_effects,
-                                                       operation_nodes, sorted(_opaque_rows))
+        if _merge_regions(_opaque_rows, overlaps) != _opaque_rows:
+            # normalize again with an unknown-value ``~ov`` row on each shared
+            # region (docs 25.82)
+            return _Retry(frozenset(), opaque=overlaps)
+        # (every region found on any pass keeps its row and debt: a destination
+        # may resolve elsewhere on another pass -- Astra, cleanup 3C round 2)
+        opaque_nodes = _materialize_opaque_call_writes(
+            dependencies, memory_ssa, proven_call_effects, operation_nodes,
+            [f"{call}~ov{index}" for call in sorted({item[0] for item in _opaque_rows})
+             for index in range(len(_overlap_regions(_opaque_rows, call)))])
         base = dependencies
         all_effects = tuple(effect for block in effect_unit.blocks for effect in block.effects)
         anchors = tuple(sorted(
@@ -2247,6 +2277,10 @@ class _ScopedNormalizer:
             assumes_pre_escape_values_not_frame=any(pre_uses),
             pre_escape_definitions=tuple(sorted(frozenset().union(*pre_uses))),
             fresh_window_rows=tuple(sorted((key, size, label) for key, (size, label) in fresh_windows.items())),
+            overlap_rows=tuple(
+                (f"{call}~ov{index}", tuple(sorted(keys)))
+                for call in sorted({item[0] for item in _opaque_rows})
+                for index, (_, keys) in enumerate(_overlap_regions(_opaque_rows, call))),
             call_below_bounds=below_bounds,
             assumes_readonly_image_constant=readonly_image is not None,
             assumes_import_slots_hold_exports=_import_slots_used(memory_ssa),
@@ -2525,38 +2559,50 @@ def _materialize_open_conditions(dependencies, memory_ssa, proven_call_effects, 
     return tuple(found)
 
 
-def _call_write_overlaps(effect_unit, proven_call_effects) -> list:
-    """Rows of one summarized call whose resolved memory writes land on
-    overlapping caller bytes: the callee took its objects as distinct (the
-    caller passed one object twice, or a pointer to a global the call also
-    writes directly), so which value is left there is not known -- only the
-    place is (the CALL's push excluded: it precedes every callee write)."""
+def _call_write_overlaps(effect_unit, proven_call_effects) -> frozenset:
+    """(call key, span): the caller bytes two rows of one summarized call both
+    write -- the callee took its objects as distinct (the caller passed one
+    object twice, or a pointer to a global the call also writes directly), so
+    which value is left there is not known, only the place (docs 25.82); one
+    span per maximal run of shared bytes of an object (the CALL's push and the
+    ``~ov`` rows themselves excluded)."""
     by_call: dict = {}
     for block in effect_unit.blocks:
         for effect in block.effects:
             base, separator, tag = effect.operation_key.partition("~")
-            if not separator or tag == "push" or base not in proven_call_effects:
+            if not separator or tag == "push" or tag.startswith("ov") or base not in proven_call_effects:
                 continue   # (a summarized call's rows, a tail call's too)
             for item in effect.writes:
                 if type(item) is ResolvedStorage and item.span.object_id.kind in (
                         StorageObjectKind.FUNCTION_RELATIVE, StorageObjectKind.ADDRESS_SPACE):
                     by_call.setdefault(base, []).append((effect.operation_key, item.span))
     found: set = set()
-    for rows in by_call.values():
+    for call, rows in by_call.items():
+        shared: dict = {}
         for index, (key, span) in enumerate(rows):
             for other_key, other in rows[index + 1:]:
                 step()
                 if other_key != key and span.overlaps(other):
-                    found.update((key, other_key))
-    return sorted(found)
+                    for offset in range(max(span.start, other.start), min(span.end, other.end)):
+                        shared.setdefault(span.object_id, {}).setdefault(offset, set()).update((key, other_key))
+        for object_id, offsets in shared.items():
+            ordered = sorted(offsets)
+            first = previous = ordered[0]
+            for offset in ordered[1:] + [None]:
+                if offset is None or offset != previous + 1:
+                    keys = frozenset().union(*(offsets[item] for item in range(first, previous + 1)))
+                    found.add((call, ByteSpan(object_id, first, previous + 1 - first), keys))
+                    first = offset
+                previous = offset
+    return frozenset(found)
 
 
 def _materialize_opaque_call_writes(dependencies, memory_ssa, proven_call_effects, operation_nodes,
                                     overlaps=()) -> tuple:
     """An "opaque_call_write" debt on each ``{call}~u{j}`` row: the call wrote
     those bytes with a value its summary or model does not state -- and on
-    each row of ``overlaps`` (``_call_write_overlaps``: the place is known,
-    the value left there is not)."""
+    each ``{call}~ov{k}`` row of ``overlaps`` (bytes two of the call's writes
+    share: the place is known, the value left there is not; docs 25.82)."""
     keys = [f"{call}~u{index}" for call, effect in sorted(proven_call_effects.items())
             for index in range(len(effect.unknown_memory)) if f"{call}~u{index}" in operation_nodes]
     keys += [key for key in overlaps if key in operation_nodes and key not in keys]

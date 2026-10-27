@@ -156,12 +156,19 @@ def _contains(place, space, offset, modulus=1 << 64) -> bool:
 
 
 def _opaque_rows(function):
-    """call key -> nodes of its unknown-memory rows (``~u<j>``)."""
+    """call key -> nodes of its unknown-memory rows (``~u<j>``) and of its
+    overlap rows (``~ov<k>``, docs 25.82)."""
     graph = function.dependencies
-    return {
-        call: [graph.node_for_key(f"op:{call}~u{index}") for index in range(len(effect.unknown_memory))]
-        for call, effect in function.proven_call_effects if effect.unknown_memory
-    }
+    found = {}
+    for call, effect in function.proven_call_effects:
+        nodes = [graph.node_for_key(f"op:{call}~u{index}") for index in range(len(effect.unknown_memory))]
+        index = 0
+        while (node := graph.node_for_key(f"op:{call}~ov{index}")) is not None:
+            nodes.append(node)
+            index += 1
+        if nodes:
+            found[call] = nodes
+    return found
 
 
 def _all_opaque(graph, reader, rows) -> bool:

@@ -1686,6 +1686,8 @@ class _Builder:
             record["output"] = {"sink": demand.label, "complete": demand.complete}
         elif tag.startswith("u") and tag[1:].isdigit():
             record["output"] = {"kind": "unknown memory write", "index": int(tag[1:])}
+        elif tag.startswith("ov") and tag[2:].isdigit():
+            record["output"] = {"kind": "overlap write", "index": int(tag[2:])}   # (docs 25.82)
         if self.provenance is not None:
             record["provenance"] = _call_provenance(self.provenance, base, effect, tag)
         self.call_ids.append(record["id"])

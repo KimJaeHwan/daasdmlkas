@@ -5974,3 +5974,13 @@ nonstack 창과 같은 장치). 모델 계약 필드 + 그래프 사실, 새 가
   realloc 가정에 기댐(Fable).
 - 테스트 `tests/intra/test_allocator_export.py`(감싼 함수 + 호출자 null 검사/없음, never_null, 창 밖/복사 아님, 두 exit 최소,
   재조정 함수, 중첩 감싸기, 라벨 끄기, 저장된 요약의 라벨 끄기, 템플릿 왕복과 거부; 핵심 부분 mutation 확인).
+### 25.82 한 호출의 겹친 쓰기 -- 겹친 바이트만 모름 (2026-10-28, 밤 작업 5 C `~ov`)
+
+정리 3C는 한 summarized 호출의 두 행이 호출자의 같은 바이트에 쓰면(같은 객체를 두 번 넘김, 전역 포인터) 그 행들 전체에
+"opaque_call_write" debt를 걸고 값도 버렸다 -- 겹치지 않는 바이트까지. 이제 겹친 영역마다 `{call}~ov{k}` 행 하나(겹친 행들의
+입력을 모두 읽는 COPY -- 각 행이 후보 출처로 남음; 그 영역만 씀, 같은 debt)를 호출의 마지막 행 뒤에 둔다: 겹친 바이트를 읽으면 `~ov`(debt, 불완전), 나머지는 원래 행(정확,
+값 유지). 영역: 객체별 쌍 교집합의 합집합을 최대 연속 구간으로. 재시도(`_Retry.opaque`)는 (호출, span)을 나르고 어느 패스에서
+찾은 영역이든 남는다(결정 위치가 바뀌어도 -- 3C Astra). `~u` 행은 자기 쓰기 전체에 debt를 그대로 둔다(Astra). `~ov`/`~push`는
+겹침 탐색에서 뺀다(Fable). 근거: 읽기 전용 probe에서 v2-win-debug-full에 부분 겹침 4건(다른 Bundle 0). 설계 검토 Astra(조건부)·
+Fable(승인) -- `.census6/design_c_ov.md`. 테스트 `test_opaque_call_writes.py::test_a_partial_overlap_leaves_only_the_shared_bytes_unknown`
+(겹친 바이트만 불완전; `~ov` 행 없으면 mutation 실패). 프로그램 오라클은 `~ov` 행도 opaque로 센다.
