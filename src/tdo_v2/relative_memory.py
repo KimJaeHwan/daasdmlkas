@@ -578,11 +578,17 @@ def _final_projector(normalized, observation) -> "_Projector":
         for ordinal, operation in enumerate(instruction.operations)
     }
     operations.update(dict(normalized.operation_overrides))
-    return _Projector(
+    projector = _Projector(
         scopes.resolution_context, scopes.program.evidence.address_spaces, normalized.memory_ssa,
         operations, OpaqueValueEvidenceResolver(NullOpaqueValueEvidenceProvider()),
         scopes.program.evidence.translation_namespace.language_id,
     )
+    from .may_alias import _unit_stub
+
+    # (the stack pointer and the new frame, as the projection's: docs 25.80 R0)
+    projector._stack_atoms = _stack_atoms(_unit_stub(scopes), observation, scopes.resolution_context,
+                                          scopes.program.evidence.address_spaces)
+    return projector
 
 
 def stack_offset_at(memory_ssa, observation, scopes, operation_key, varnode, stack_span,
@@ -673,20 +679,21 @@ def _configured_projector(unit, observation, context, address_spaces, ssa, opera
 def _stack_atoms(unit, observation, context, address_spaces) -> tuple:
     """(the stack object's atom -- the entry stack pointer register, every
     entry atom of a register span overlapping it up to 2x its width, the
-    stack pointer's span) for the may-alias policy's stack pointer
-    (``may_alias._stack_pointer``); (None, empty, None) without one. The
+    stack pointer's span, (the stack object, its bias) -- the new frame lies
+    below the bias) for the may-alias policy's stack pointer
+    (``may_alias._stack_pointer``); (None, empty, None, None) without one. The
     projector also classifies the entry atoms it creates by overlap with the
     span, of any width (``_stack_derived``)."""
     from .may_alias import _stack_pointer
 
     found = _stack_pointer(unit, observation, context, address_spaces)
     if found is None:
-        return None, frozenset(), None
-    _, _, register_space, offset, size = found
+        return None, frozenset(), None, None
+    stack_object, bias, register_space, offset, size = found
     resolved = _resolve_validated_storage(
         StorageRef(VarnodeKind.REGISTER, "", offset, size, space_id=register_space), context)
     if type(resolved) is not ResolvedStorage:
-        return None, frozenset(), None
+        return None, frozenset(), None, None
     span = resolved.span
     whole = _stable_storage_key(span)
     # every register span overlapping it, of any width an atom can have (up
@@ -696,7 +703,7 @@ def _stack_atoms(unit, observation, context, address_spaces) -> tuple:
         for width in range(1, max(16, 2 * span.size) + 1)
         for start in range(max(0, span.start - width + 1), span.end)
     ) | {whole}
-    return whole, overlapping, span
+    return whole, overlapping, span, (stack_object, bias)
 
 
 def stale_reads(effect_unit, observation, context, address_spaces, memory_ssa, used, *, bare=False,
@@ -819,6 +826,37 @@ def register_value_deltas(normalized, observation, requests) -> dict:
             if expression.image != 0:
                 _note_base_dependent(normalized.memory_ssa.function_scope)
             found[(definition_id, span)] = _signed_wrap(expression.displacement, span.size)
+    return found
+
+
+def register_value_offsets(normalized, observation, requests) -> dict:
+    """``requests``: (definition id, span, entry register spans). Returns
+    request -> (entry span, c) when the definition's value is exactly "the
+    entry value of one of those spans + c" (c unsigned, wrapped at the width;
+    image 0; the same width), by the address-expression evaluator -- never a
+    span overlapping the stack pointer, never a stack-derived atom (the
+    stack pointer copied elsewhere, a stale frame byte): docs 25.80 R1."""
+    from ._activation_entry import entry_for
+
+    if entry_for(normalized.memory_ssa.function_scope) is not None:
+        return {}   # (an activation's seeds relate entry values for that activation only)
+    projector = _final_projector(normalized, observation)
+    stack = projector._stack_atoms[2]
+    if stack is None:
+        return {}   # (no stack pointer identified: none could be refused)
+    found = {}
+    for request in requests:
+        definition_id, span, sources = request
+        expression = projector._expression_for_definition(definition_id, span)
+        if expression is None or expression.image != 0 or expression.byte_size != span.size \
+                or len(expression.atoms) != 1 or expression.atoms[0][1] != 1 \
+                or projector._is_stack_derived(expression.atoms[0][0]):
+            continue
+        for source in sources:
+            if source.size == span.size and _stable_storage_key(source) == expression.atoms[0][0] and not (
+                    stack is not None and source.object_id == stack.object_id
+                    and source.start < stack.end and stack.start < source.end):
+                found[request] = (source, _unsigned_wrap(expression.displacement, span.size))
     return found
 
 
@@ -996,7 +1034,8 @@ class _Projector:
         self._nonstack_atoms: set[int] = set()
         self._import_atoms: set[int] = set()   # import-slots-hold-their-exports (``IMPORT_SLOTS``)
         # (the stack pointer's entry atom, entry atoms overlapping its register, its span)
-        self._stack_atoms: tuple = (None, frozenset(), None)
+        self._stack_atoms: tuple = (None, frozenset(), None, None)
+        self._stale: frozenset | None = None   # (``_stale_definitions``, once)
         # boundary atoms (C1): key -> (kind, from bytes, to bytes, (low, high))
         # -- the range is for C2 (relations), unused here
         self._boundary: dict[int, tuple] = {}
@@ -1403,6 +1442,11 @@ class _Projector:
         atom = _digest_ints(b"definition-atom-v1", (*key.encode("utf-8"), _stable_storage_key(requested_span)))
         if getattr(self, "address_metadata", None) is not None:
             self.address_metadata["atoms"][atom] = f"value of {key} #{atom & 0xffffffff:08x}"
+        row = self._pointer_rows.get(key)
+        if self._stale_read(key) or (row is not None and row[0] == "mem" and self._stale_read(row[1])):
+            # a value that may come from a never-written byte of the new frame (docs 25.80 R0)
+            self._stack_derived.add(atom)
+            eligible = False
         if nonstack and not fresh:
             self._nonstack_atoms.add(atom)
         elif key not in self._fresh and not fresh:
@@ -1439,6 +1483,15 @@ class _Projector:
         if row[0] == "nonstack":
             found = self._definition_atom(definition, requested_span, nonstack=True, eligible=True)
             return found if len(row) == 1 else self._windowed(found, row[1:])
+        if row[0] == "off":
+            # the callee returned the caller's register value + c (docs 25.80 R1):
+            # the caller's own expression -- no atom of the call's
+            _, reader, argument, delta = row
+            value = self._expression_for_input(reader, argument)
+            if value is None or value.byte_size != requested_span.size:
+                return None
+            return _AddressExpression(value.atoms, _unsigned_wrap(value.displacement + delta, value.byte_size),
+                                      value.byte_size, value.image)
         if row[0] == "reg":
             _, reader, argument, null_is_fresh, unique = row
             value = self._expression_for_input(reader, argument)
@@ -1461,6 +1514,54 @@ class _Projector:
             # call's only pointer value (two values could name one block)
             return self._definition_atom(definition, requested_span, nonstack=not unique, fresh=unique)
         return value
+
+    def _stale_read(self, key) -> bool:
+        """Whether a byte the operation at ``key`` reads may be stale
+        (``_stale_definitions``; docs 25.80 R0)."""
+        stale = self._stale_definitions()
+        return bool(stale) and any(
+            item in stale for read in self._reads_of_action.get(self._action_ids.get(key), ())
+            for fragment in read.fragments for item in fragment.definition_ids)
+
+    def _stale_definitions(self) -> frozenset:
+        """Definition ids whose bytes may hold a value read from a
+        never-written byte of the new frame (below the entry stack pointer:
+        whatever an older frame left there -- possibly a stack address; docs
+        25.80 R0): those ENTRY definitions, then forward through every
+        operation reading one (its writes) and every join of one -- copies,
+        spills, partial overwrites and arithmetic included."""
+        if self._stale is not None:
+            return self._stale
+        frame = self._stack_atoms[3]
+        stale: set = set()
+        if frame is not None:
+            writes_of: dict = {}
+            for index, definition in enumerate(self._ssa.definitions):
+                if definition.kind is MemoryDefinitionKind.ENTRY:
+                    if definition.span.object_id == frame[0] and definition.span.start < frame[1]:
+                        stale.add(index)
+                elif definition.kind is MemoryDefinitionKind.DATA_WRITE and definition.operation_key is not None:
+                    writes_of.setdefault(self._action_ids.get(definition.operation_key), []).append(index)
+            users: dict = {}
+            if stale:
+                for read in self._ssa.reads:
+                    written = writes_of.get(read.action_id, ())
+                    if written:
+                        for fragment in read.fragments:
+                            for item in fragment.definition_ids:
+                                users.setdefault(item, set()).update(written)
+                for join, sources in self._join_sources.items():
+                    for item in sources:
+                        users.setdefault(item, set()).add(join)
+            pending = list(stale)
+            while pending:
+                step()
+                for user in users.get(pending.pop(), ()):
+                    if user not in stale:
+                        stale.add(user)
+                        pending.append(user)
+        self._stale = frozenset(stale)
+        return self._stale
 
     def _own_value(self, definition) -> bool:
         """The value is the defining operation's own (a LOAD's result, a call's
@@ -1684,6 +1785,8 @@ class _Projector:
         definition = self._ssa.definitions[definition_id]
         if not definition.span.contains(span):
             return None
+        if definition_id in self._stale_definitions():
+            return None   # (a stale byte's value: no class, docs 25.80 R0)
         if definition.kind is MemoryDefinitionKind.ENTRY:
             return ("entry", _stable_storage_key(span))
         if definition.kind is MemoryDefinitionKind.DATA_WRITE:
@@ -1858,6 +1961,17 @@ class _Projector:
         self._active.add(cache_key)
         result: _AddressExpression | None
         constant = None
+        frame = self._stack_atoms[3]
+        if definition.kind is MemoryDefinitionKind.ENTRY and frame is not None                 and requested_span.object_id == frame[0] and requested_span.start < frame[1]:
+            # a never-written byte of the new frame (below the entry stack
+            # pointer): whatever an older frame left there -- possibly a stack
+            # address (docs 25.80 R0): stack-derived, never an entry value
+            atom = _stable_storage_key(requested_span)
+            self._stack_derived.add(atom)
+            result = _AddressExpression(((atom, 1),), 0, requested_span.size)
+            self._active.discard(cache_key)
+            self._cache[cache_key] = result
+            return result
         seed = entry_seed(self._ssa.function_scope, requested_span) \
             if definition.kind is MemoryDefinitionKind.ENTRY \
             and self._translation_namespace.split(":")[1:3] == ["LE", "64"] else None

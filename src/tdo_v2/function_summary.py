@@ -90,7 +90,9 @@ class SummaryRun:
     # ("nonstack",) -- an address of a block a call in the function allocated
     # (never a stack address); ("same", entry span, null_is_fresh) -- the
     # value the entry bytes held (a copy, or, with null_is_fresh, a realloc
-    # of it: a null entry value then means a new block); None: unknown
+    # of it: a null entry value then means a new block); ("offset", entry
+    # register span, c) -- the value that register held at entry + c (c
+    # unsigned, wrapped; never the stack pointer: docs 25.80 R1); None: unknown
     value: tuple | None = None
     # Exact scalar bits at this run's full width, not pointer provenance.
     literal: ExactConstant | None = None
@@ -238,6 +240,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         key=lambda row: (row[0], row[1].kind.value, row[1].space_key),
     )
     exits = _pointer_values(normalized, observation, exits, tracer)
+    exits = _offset_values(normalized, observation, exits)
     exits = _constant_values(normalized, observation, exits)
     # unknown-address writers (conditional ones are ordinary writes, above)
     # leave every root incomplete
@@ -1041,6 +1044,19 @@ def _constant_values(normalized, observation, exits) -> list:
     return result
 
 
+def _new_frame(normalized, observation):
+    """(the stack object, its bias) -- the new frame lies below the bias --
+    or None when the stack pointer is not identified."""
+    from .may_alias import _stack_pointer, _unit_stub
+
+    scopes = getattr(normalized, "scopes", None)
+    if scopes is None:
+        return None
+    found = _stack_pointer(_unit_stub(scopes), observation, scopes.resolution_context,
+                           scopes.program.evidence.address_spaces)
+    return None if found is None else (found[0], found[1])
+
+
 def _pointer_values(normalized, observation, exits, tracer) -> list:
     """Attach ``SummaryRun.value`` to pointer-width COMPUTED runs whose every
     terminal definition traces (``_CopyTracer.origin``: exact copies, no debt,
@@ -1055,6 +1071,7 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
         return exits
     fresh_rows = frozenset(getattr(normalized, "fresh_rows", ()))
     same_rows = {row: (reader, argument) for row, reader, argument in getattr(normalized, "same_object_rows", ())}
+    frame = _new_frame(normalized, observation)
     pointer_rows = dict(getattr(normalized, "pointer_rows", ()))
     proven = dict(normalized.proven_call_effects)
 
@@ -1104,6 +1121,11 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
                 return ("same", spans.pop(), True)
             return None
         if kind == "entry":
+            if item.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE and (
+                    frame is None or (item.object_id == frame[0] and item.start < frame[1])):
+                # a never-written byte of the new frame: stale, no entry value (docs 25.80 R0;
+                # no stack pointer identified: any relative object may be the stack)
+                return None
             return ("same", item, False)
         if item in fresh_rows or nested_nonstack(item):
             return ("nonstack",)
@@ -1150,6 +1172,44 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
                 elif None not in origins:  # several reaching definitions: a join
                     value = value_of(("join", frozenset(origins)))
             runs.append(_replace(run, value=value) if value is not None else run)
+        result.append(ExitSummary(exit_summary.block_key, tuple(runs)))
+    return result
+
+
+def _offset_values(normalized, observation, exits) -> list:
+    """``("offset", entry register span, c)`` for pointer-width COMPUTED
+    register runs no other value is stated for (docs 25.80 R1): every
+    terminal definition evaluates to that one entry register's value + c --
+    no debt, no condition, the same (span, c) for all of them."""
+    from dataclasses import replace as _replace
+
+    from .relative_memory import register_value_offsets
+
+    size = _pointer_size(normalized)
+    if size is None:
+        return exits
+    wanted = {}
+    for exit_summary in exits:
+        for run in exit_summary.runs:
+            sources = tuple(span for span in run.sources
+                            if span.object_id.kind is StorageObjectKind.REGISTER_FILE and span.size == size)
+            if run.value is None and run.literal is None and run.kind is SummaryKind.COMPUTED \
+                    and run.span.object_id.kind is StorageObjectKind.REGISTER_FILE and run.span.size == size \
+                    and run.definitions and not run.debts and not run.conditions and not run.crossed and sources:
+                wanted[run] = tuple((definition, run.span, sources) for definition in run.definitions)
+    if not wanted:
+        return exits
+    found = register_value_offsets(normalized, observation,
+                                   sorted({item for items in wanted.values() for item in items}, key=repr))
+    result = []
+    for exit_summary in exits:
+        runs = []
+        for run in exit_summary.runs:
+            values = {found.get(item) for item in wanted.get(run, ())}
+            if len(values) == 1 and None not in values:
+                span, delta = values.pop()
+                run = _replace(run, value=("offset", span, delta))
+            runs.append(run)
         result.append(ExitSummary(exit_summary.block_key, tuple(runs)))
     return result
 

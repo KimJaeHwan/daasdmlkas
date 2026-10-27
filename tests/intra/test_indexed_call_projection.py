@@ -298,7 +298,9 @@ def test_index_preload_cannot_read_pre_push_bytes_overlaid_by_the_return_address
     units = program_units(caller, leaf)
     results = analyze_units(units)
     item = results["1:1000"]
-    assert results[f"1:{LEAF:x}"].summary.address_relations
+    # (offset -2: two index bytes lie below the leaf's entry stack pointer --
+    # never written by it, stale: no relation, docs 25.80 R0)
+    assert bool(results[f"1:{LEAF:x}"].summary.address_relations) is (offset >= 0)
     references = [(evaluation, reference) for _, evaluation, reference in item.normalized.call_anchors
                   if type(reference) is tuple and reference[0] == "indexed"]
     projector = _final_projector(item.normalized, item.unit.observation)

@@ -157,6 +157,8 @@ def test_a_hard_debt_on_any_pointer_slot_load_of_the_call_refuses_the_value(monk
     normalized = SimpleNamespace(pointer_rows=(("c~2", ("mem", "c~ld1", 8, False, True)),),
                                  proven_call_effects=(), fresh_rows=frozenset(), same_object_rows=())
     monkeypatch.setattr(summary, "_pointer_size", lambda normalized: 8)
+    # (the stub has no stack pointer; its entry span is not the new frame: docs 25.80 R0)
+    monkeypatch.setattr(summary, "_new_frame", lambda normalized, observation: (None, 0))
 
     def composed(indebted):
         tracer = SimpleNamespace(hard_indebted=frozenset(indebted), origin=lambda definition, span: ("row", "c~2"),

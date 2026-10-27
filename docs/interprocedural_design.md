@@ -5921,3 +5921,35 @@ nonstack 창과 같은 장치). 모델 계약 필드 + 그래프 사실, 새 가
   calloc 곱의 overflow 한계는 인자 폭에서(8바이트면 2^63); 거부 시 guarded_windows 항목도 지움. 테스트 추가(메모리 경유
   null 검사, realloc과 join, 루프 안 realloc, 창 안의 프레임 칸을 돌려주는 가짜 할당기를 오라클이 잡음).
 - ENGINE_SEMANTICS_VERSION 22, UE 템플릿 재도출(모델 digest 변경).
+
+### 25.80 스택 주소 누출 요약 -- 가정 해제 작업 (2026-10-28, 밤 작업 4)
+
+목표: §25.77 가정(`pre-escape-values-do-not-address-the-new-frame`)을 쓰는 곳을 줄이고, 못 줄이는 곳은 보고.
+설계 검토 Astra 3차·Fable 3차 승인(`.census6/design_leak_summaries.md`). "레지스터/상수에만 의존"은 분리 증명이 아니다
+(XOR로 프레임 주소를 다시 만들 수 있고, 입력 자체가 오래된 LOAD일 수 있음) -- 그래서 "증명됨" 라벨 대신 그래프 우선:
+호출 결과를 호출자 자신의 식으로 바꿔 가정이 필요 없게 한다(R1). 단계: R0 -> R1 -> R2(메타데이터) -> R3(UAR 후보 보고).
+
+- R0 (기반 규칙 구멍 수정): 새 프레임(진입 SP 아래, `offset < bias`)의 한 번도 쓰이지 않은 바이트는 이전 프레임이 남긴
+  값 -- 스택 주소일 수 있다. 그 ENTRY 정의에서 앞으로 퍼지는 오염(`_stale_definitions`): 그것을 읽는 연산의 모든 쓰기,
+  그것을 포함하는 join -- 복사, spill, 일부 덮어쓰기, 산술 모두 포함(구현 1차 검토 Astra/Fable: 직전 정의만 보면 join과
+  spill 뒤 일부 덮어쓰기에서 놓침). 오염된 값의 원자는 stack-derived(wild), entry 값이 아니고 §25.77 대상도 아니며 같은 값
+  class도 없다(`_definition_class`). 요약 쪽: `_pointer_values`의 "entry" 출처가 그런 스택 바이트면 값 없음(Fable P1);
+  `_final_projector`도 스택 포인터/새 프레임을 안다(Astra P2). `bias` 이상(복귀 슬롯, home space, 스택 인자)은 그대로 --
+  호출자가 썼다는 뜻이 아니라 기반 가정의 fails_when(오래된 호출자 영역 바이트)으로 남는다. 컴파일된 코드는 쓰지 않은 프레임
+  바이트를 읽지 않으므로 잃는 것 없음. 테스트 `tests/intra/test_stale_frame_bytes.py`(각 부분 mutation 확인).
+- R1 (호출 결과를 호출자 식으로): callee 요약의 포인터 폭 COMPUTED 레지스터 run이 모든 정의에서 "진입 레지스터 하나의 값 + c"
+  (평가기, image 0, 같은 폭, c는 폭에서 wrap)이면 `("offset", span, c)`. 스택 포인터와 겹치는 span이나 stack-derived 원자
+  (SP 복사, 오래된 프레임 바이트)는 거부(요약 쪽과 호출 지점 lowering의 call-shape SP 양쪽). 낮춘 값 `("offset_reg", span, c)`
+  -> 호출자 pointer row `("off", staging row, register, c)` -> 호출자의 그 레지스터 식 + c: 호출의 원자가 없으니 §25.77이
+  필요 없다(호출자 원자는 각자 규칙: entry는 기반 가정, load는 §25.77). XOR/곱/메모리 읽기/내부 호출/조건은 관계 없음 --
+  기존처럼 원자이고 가정·보고. 식을 못 만들면 기존 원자로. TEMPLATE_VERSION 4(새 값 tag, 모르는 tag 거부),
+  ENGINE_SEMANTICS_VERSION 23, UE 템플릿 재도출. 테스트 `tests/intra/test_affine_call_results.py`(SP 직접/복사, XOR, 메모리
+  읽기 거부; 호출 행이 pre_escape_definitions에서 빠짐 대 XOR은 남음; 템플릿 왕복과 거부; 각 부분 mutation 확인).
+- R2/R3 (보고만): `may_alias.stack_leaks(normalized, observation)` -- 진입 SP에서 유래한 값이 함수를 떠날 수 있는 곳을
+  (연산 key, 종류, 오프셋)으로: "store"(자기 프레임 포함 저장 -- 그 재로드는 따라가지 않음), "user_op", "call"(레지스터가
+  들고 있는 채 호출), "return"; 오프셋은 저장 값이 정확히 진입 SP + k일 때만. 주장 아님(사후 수명 판단 없음: 오프셋 부호는
+  수명이 아니다 -- Astra). `escapes_stack` / `stack_values_out`은 바꾸지 않는다(Astra P1: held 칸 노출, 중첩 호출 등은
+  보수적 탈출로 남음). 요약/템플릿에는 넣지 않음(템플릿 변경 없음). 테스트 `tests/intra/test_stack_leaks.py`.
+- R4/9e (설계만): 전체 프로그램에서 LOAD 해제 -- 해석 안 된 간접/opaque/계약 없는 모델 호출, tail exit, 불완전 요약을 잠재
+  저장으로 세고, 죽은 프레임에 남은 스택 상주 오래된 포인터도(Astra P1) 포함해야 한다. 비스택 저장이 없다는 것만으로 LOAD를
+  해제할 수 없다.

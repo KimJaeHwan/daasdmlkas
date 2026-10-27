@@ -48,7 +48,8 @@ from .function_summary import (
 from .indexed_address import IndexedAnchor
 from .span_geometry import ByteSpan, StorageObjectId, StorageObjectKind, StorageScopeId, StorageScopeKind
 
-TEMPLATE_VERSION = 3   # 2: stack_values_out; 3: exact scalar literals and entry indexed addresses
+TEMPLATE_VERSION = 4   # 2: stack_values_out; 3: exact scalar literals and entry indexed addresses;
+# 4: ("offset", entry register span, c) run values (docs 25.80 R1)
 # bumped on any change of what a summary means: normalization, alias
 # reasoning, constant evaluation, effect derivation (not only its fields)
 # 2: stack-mixed objects wild (docs 25.7); index addresses, index objects
@@ -94,9 +95,11 @@ TEMPLATE_VERSION = 3   # 2: stack_values_out; 3: exact scalar literals and entry
 # model files (``<file id>:<id>``) -- older templates rest on them unlabelled.
 # 22: allocator size contracts (docs 25.79): fresh rows with a proven extent
 # give null-guarded nonstack windows; calloc is its own CRT entry.
+# 23: never-written new-frame bytes are stale (stack-derived) and callee
+# results "entry register + c" are the caller's own expressions (docs 25.80).
 # (tests/intra/test_template_fingerprint.py fails when derived templates change
 # without a bump here: bump, re-derive models/derived, refresh the record)
-ENGINE_SEMANTICS_VERSION = 22
+ENGINE_SEMANTICS_VERSION = 23
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
@@ -380,6 +383,13 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
         value = raw["value"]
         if value == ["nonstack"]:
             value = ("nonstack",)
+        elif value is not None and type(value) is list and len(value) == 3 and value[0] == "offset":
+            entry = span(value[1])
+            if type(value[2]) is not int or not 0 <= value[2] < 1 << (8 * entry.size) \
+                    or entry.object_id.kind is not StorageObjectKind.REGISTER_FILE \
+                    or entry.size != span(raw["span"]).size:
+                raise TemplateError("run value")
+            value = ("offset", entry, value[2])
         elif value is not None:
             if type(value) is not list or len(value) != 3 or value[0] != "same" or type(value[2]) is not bool:
                 raise TemplateError("run value")

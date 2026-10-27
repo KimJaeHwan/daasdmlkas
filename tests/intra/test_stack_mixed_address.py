@@ -106,7 +106,7 @@ def test_every_part_of_the_stack_pointer_is_a_stack_atom():
 
     (unit,) = program_units(_write_then_read(lambda u: (add(u, reg(RSP), reg(RDI)),)))
     scopes = unit.scopes
-    whole, overlapping, _ = _stack_atoms(_unit_stub(scopes), unit.observation, scopes.resolution_context,
+    whole, overlapping, _, _ = _stack_atoms(_unit_stub(scopes), unit.observation, scopes.resolution_context,
                                       scopes.program.evidence.address_spaces)
 
     def span_of(offset, size):

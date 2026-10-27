@@ -1350,6 +1350,8 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
                 pointer_rows[key] = value
             elif value[0] == "same_reg":
                 pointer_rows[key] = ("reg", stage_key, anchor_varnode(value[1]), value[2], unique)
+            elif value[0] == "offset_reg":
+                pointer_rows[key] = ("off", stage_key, anchor_varnode(value[1]), value[2])
             elif value[1] in load_keys:
                 pointer_rows[key] = ("mem", load_keys[value[1]], value[1].size, value[2], unique)
         if pointer_rows is not None and kind == "register" and len(run.writes) == 1:

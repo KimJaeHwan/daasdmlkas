@@ -1220,6 +1220,55 @@ def stack_values_out(normalized, observation) -> bool:
     return taint is None or bool(taint[2]) or bool(returning)
 
 
+def stack_leaks(normalized, observation) -> tuple | None:
+    """Use-after-return candidates (docs 25.80 R2/R3; a report, never a
+    claim): where a value derived from the entry stack pointer may leave the
+    function -- (operation key, kind, offset) with kind "store" (a store or
+    memory output of one, the function's own frame included: its reloads are
+    not followed), "user_op", "call" (a callee may keep one a register
+    holds) or "return" (a register holds one at the RETURN); offset: the
+    stored value as entry stack pointer + offset when exact, else None.
+    None when the stack pointer or the block graph is not identified.
+    ``escapes_stack`` / ``stack_values_out`` are unchanged by it."""
+    from .relative_memory import _final_projector, _signed_wrap
+
+    scopes = normalized.scopes
+    stub = _unit_stub(scopes)
+    found = _stack_pointer(stub, observation, scopes.resolution_context, scopes.program.evidence.address_spaces)
+    if found is None:
+        return None
+    _, _, register_space, offset, size = found
+    returning: set = set()
+    taint = _stack_taint(observation, register_space, offset, size, entry_key=stub.entry_block_key,
+                         returning=returning)
+    if taint is None:
+        return None
+    operations = {_operation_key(row.address, ordinal, operation.opcode): operation
+                  for row in observation.instructions for ordinal, operation in enumerate(row.operations)}
+    projector = _final_projector(normalized, observation)
+    stack_atom = projector._stack_atoms[0]
+    leaks = []
+    for key in sorted(taint[2]):
+        operation = operations.get(key)
+        opcode = key.rsplit(":", 1)[-1]
+        kind = "call" if opcode in ("CALL", "CALLIND") else "user_op" if opcode == "CALLOTHER" else "store"
+        value = None
+        # (the written value: a STORE's value operand or a COPY's input; another
+        # memory output's value is its result, not an input -- no offset)
+        varnode = None
+        if operation is not None and opcode == "STORE" and len(operation.inputs) == 3:
+            varnode = operation.inputs[2]
+        elif operation is not None and opcode == "COPY" and len(operation.inputs) == 1:
+            varnode = operation.inputs[0]
+        if kind == "store" and varnode is not None:
+            expression = projector._expression_for_input(key, varnode)
+            if expression is not None and stack_atom is not None and expression.atoms == ((stack_atom, 1),)                     and expression.image == 0:
+                value = _signed_wrap(expression.displacement, expression.byte_size)
+        leaks.append((key, kind, value))
+    leaks.extend((key, "return", None) for key in sorted(returning))
+    return tuple(leaks)
+
+
 def stack_object_of(scopes, observation) -> StorageObjectId | None:
     """The stack object (anchored at the entry stack pointer) of a scoped
     function, as the may-alias policy identifies it, or None."""

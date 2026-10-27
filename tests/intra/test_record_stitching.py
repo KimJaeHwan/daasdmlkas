@@ -321,9 +321,10 @@ def test_memory_cuts():
 
     assert _cut([_caller(sub(reg(RCX), reg(RSP), const(8))),
                  FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "return address"
-    # a pointer chain p = [rsp+8]; rax = [p]
+    # a pointer chain p = [rsp+8]; rax = [p] -- p is the caller's never-written
+    # frame slot: stale, maybe a stack address (docs 25.80 R0), so [p] is debt
     chain = FunctionBuilder(entry=F).ins(add(t, reg(RSP), const(8)), load(t, t), load(reg(RAX), t)).ret()
-    assert _cut([_caller(), chain]) in ("memory: overlay unproven", "unbound memory")
+    assert _cut([_caller(), chain]) in ("memory: overlay unproven", "unbound memory", "memory: debt")
 
 
 # -- increment 3: memory through a register, a pointer, a global ----------------

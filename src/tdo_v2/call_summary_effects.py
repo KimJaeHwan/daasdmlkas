@@ -193,7 +193,9 @@ class ProvenRunEffect:
     # pointer value (``SummaryRun.value``) for the caller: ("nonstack",),
     # ("same_reg", register span, null_is_fresh) -- the caller's value of that
     # register at the call -- or ("same_mem", AnchoredSpan, null_is_fresh) --
-    # the caller's memory there at the call; None: unknown
+    # the caller's memory there at the call; ("offset_reg", register span, c):
+    # the caller's value of that register at the call + c (docs 25.80 R1);
+    # None: unknown
     value: tuple | None = None
     literal: ExactConstant | None = None
 
@@ -482,8 +484,10 @@ def derive_proven_call_effect(
         writes = tuple(_spans(register_object, offsets))
         registers, loads = split_sources(sources)
         value = _pointer_value(sources, keeps_old, writes, summary_pointer_size, anchored)
-        if value is not None and value[0] == "same_reg" and value[1] not in registers:
+        if value is not None and value[0] in ("same_reg", "offset_reg") and value[1] not in registers:
             value = None  # the input rows read only the run's registers
+        if value is not None and value[0] == "offset_reg" and skip.intersection(range(value[1].start, value[1].end)):
+            value = None  # (the stack pointer: its callee value is another, docs 25.80 R1)
         if value is not None and value[0] == "same_mem" and value[1] not in loads:
             value = None
         if keeps_old:
@@ -500,7 +504,10 @@ def derive_proven_call_effect(
             spans = list(_spans(object_id, offsets))
             for span in spans:
                 value = _pointer_value(sources, keeps_old, spans, summary_pointer_size, anchored)
-                if value is not None and value[0] == "same_reg" and value[1] not in registers:
+                if value is not None and value[0] in ("same_reg", "offset_reg") and value[1] not in registers:
+                    value = None
+                if value is not None and value[0] == "offset_reg" \
+                        and skip.intersection(range(value[1].start, value[1].end)):
                     value = None
                 if value is not None and value[0] == "same_mem" and value[1] not in loads:
                     value = None
@@ -915,6 +922,9 @@ def _pointer_value(sources, keeps_old, spans, size, anchored):
     value = markers[0]
     if value == ("nonstack",):
         return value
+    if value[0] == "offset":
+        _, entry, delta = value
+        return ("offset_reg", entry, delta) if entry.object_id.kind is StorageObjectKind.REGISTER_FILE else None
     _, entry, null_is_fresh = value
     if entry.object_id.kind is StorageObjectKind.REGISTER_FILE:
         return ("same_reg", entry, null_is_fresh)
