@@ -5,9 +5,13 @@ Builds a ``ScopedFunctionUnit`` through the real scope envelope
 any platform (the Bundle admission path is POSIX-only).
 
 Functions are written with ``FunctionBuilder``: one ``ins(...)`` call per
-machine instruction, labels for branch targets, and x86-64 style helpers for
+machine instruction, labels for branch targets, and x86 style helpers for
 prologue/epilogue so that every function ends with the stack LOAD of the
-return address, as real Ghidra output does.
+return address, as real Ghidra output does. ``arch=X86_32`` builds 32-bit x86
+(Ghidra ``x86:LE:32:default``: 4-byte pointers and pushes, ESP 0x10, EIP
+0x284 -- the offsets of a real Bundle); every function of a program shares one.
+Approximations: LOAD / STORE space selectors stay 8-byte constants (Ghidra
+emits both widths), flag helpers write no PF, images sit at low addresses.
 """
 
 from __future__ import annotations
@@ -38,6 +42,32 @@ RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI = (
 R8, R9 = 0x80, 0x88
 RIP = 0x288
 CF, PF, ZF, SF, OF = 0x200, 0x202, 0x206, 0x207, 0x20B
+
+# Ghidra x86-32 register offsets (x86:LE:32:default).
+EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI = (
+    0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C,
+)
+EIP = 0x284
+
+
+@dataclass(frozen=True)
+class Arch:
+    """What the builder and the provider take from the target: the language,
+    the pointer (and push) width, the address size, the stack and instruction
+    pointers."""
+
+    language_id: str
+    pointer: int
+    sp: int
+    ip: int
+
+    @property
+    def address_bits(self) -> int:
+        return 8 * self.pointer
+
+
+X64 = Arch("x86:LE:64:default", 8, RSP, RIP)
+X86_32 = Arch("x86:LE:32:default", 4, ESP, EIP)
 
 REGISTER_NAMES = {
     RAX: "RAX", RCX: "RCX", RDX: "RDX", RBX: "RBX", RSP: "RSP", RBP: "RBP",
@@ -142,6 +172,13 @@ class FunctionBuilder:
     stride: int = 4
     _rows: list[_Instruction] = field(default_factory=list)
     _labels: dict[str, int] = field(default_factory=dict)
+    arch: Arch = X64
+
+    def _sp(self) -> dict:
+        return reg(self.arch.sp, self.arch.pointer)
+
+    def _word(self, value: int) -> dict:
+        return const(value, self.arch.pointer)
 
     # -- structure ---------------------------------------------------------
     def label(self, name: str) -> "FunctionBuilder":
@@ -160,13 +197,13 @@ class FunctionBuilder:
         return self
 
     def call(self, target: int) -> "FunctionBuilder":
-        """x86-64 ``call imm``: push return address, then CALL."""
+        """x86 ``call imm``: push return address, then CALL."""
         index = len(self._rows)
         self._rows.append(_Instruction(
             [
-                sub(reg(RSP), reg(RSP), const(8)),
-                store(reg(RSP), const(self._address(index + 1))),
-                op("CALL", [ram(target)]),
+                sub(self._sp(), self._sp(), self._word(self.arch.pointer)),
+                store(self._sp(), self._word(self._address(index + 1))),
+                op("CALL", [ram(target, self.arch.pointer)]),
             ],
             "call",
             call_target=target,
@@ -177,12 +214,13 @@ class FunctionBuilder:
         """x86-64 ``call r``: Ghidra copies the target first, then pushes the
         return address and CALLINDs the copy."""
         index = len(self._rows)
+        width = self.arch.pointer
         self._rows.append(_Instruction(
             [
-                copy(tmp(0x400), reg(register)),
-                sub(reg(RSP), reg(RSP), const(8)),
-                store(reg(RSP), const(self._address(index + 1))),
-                op("CALLIND", [tmp(0x400)]),
+                copy(tmp(0x400, width), reg(register, width)),
+                sub(self._sp(), self._sp(), self._word(width)),
+                store(self._sp(), self._word(self._address(index + 1))),
+                op("CALLIND", [tmp(0x400, width)]),
             ],
             "callind",
         ))
@@ -190,7 +228,8 @@ class FunctionBuilder:
 
     def tail_call(self, target: int) -> "FunctionBuilder":
         """x86-64 tail call ``jmp target``: a BRANCH Ghidra flags as a call."""
-        self._rows.append(_Instruction([op("BRANCH", [ram(target)])], "tail", call_target=target))
+        self._rows.append(_Instruction([op("BRANCH", [ram(target, self.arch.pointer)])], "tail",
+                                       call_target=target))
         return self
 
     def branch(self, target: str) -> "FunctionBuilder":
@@ -199,46 +238,51 @@ class FunctionBuilder:
 
     # -- x86-64 helpers ----------------------------------------------------
     def push(self, register: int) -> "FunctionBuilder":
+        width = self.arch.pointer
         return self.ins(
-            sub(reg(RSP), reg(RSP), const(8)),
-            store(reg(RSP), reg(register)),
+            sub(self._sp(), self._sp(), self._word(width)),
+            store(self._sp(), reg(register, width)),
         )
 
     def pop(self, register: int) -> "FunctionBuilder":
+        width = self.arch.pointer
         return self.ins(
-            load(reg(register), reg(RSP)),
-            add(reg(RSP), reg(RSP), const(8)),
+            load(reg(register, width), self._sp()),
+            add(self._sp(), self._sp(), self._word(width)),
         )
 
     def sub_rsp(self, amount: int) -> "FunctionBuilder":
-        """``sub rsp, imm`` including Ghidra's flag writes."""
+        """``sub rsp, imm`` (``sub esp`` on X86_32) including Ghidra's flag writes."""
+        sp, amount_ = self._sp(), self._word(amount)
         return self.ins(
-            op("INT_LESS", [reg(RSP), const(amount)], reg(CF, 1)),
-            op("INT_SBORROW", [reg(RSP), const(amount)], reg(OF, 1)),
-            sub(reg(RSP), reg(RSP), const(amount)),
-            op("INT_SLESS", [reg(RSP), const(0)], reg(SF, 1)),
-            op("INT_EQUAL", [reg(RSP), const(0)], reg(ZF, 1)),
+            op("INT_LESS", [sp, amount_], reg(CF, 1)),
+            op("INT_SBORROW", [sp, amount_], reg(OF, 1)),
+            sub(sp, sp, amount_),
+            op("INT_SLESS", [sp, self._word(0)], reg(SF, 1)),
+            op("INT_EQUAL", [sp, self._word(0)], reg(ZF, 1)),
         )
 
     def add_rsp(self, amount: int) -> "FunctionBuilder":
+        sp, amount_ = self._sp(), self._word(amount)
         return self.ins(
-            op("INT_CARRY", [reg(RSP), const(amount)], reg(CF, 1)),
-            op("INT_SCARRY", [reg(RSP), const(amount)], reg(OF, 1)),
-            add(reg(RSP), reg(RSP), const(amount)),
-            op("INT_SLESS", [reg(RSP), const(0)], reg(SF, 1)),
-            op("INT_EQUAL", [reg(RSP), const(0)], reg(ZF, 1)),
+            op("INT_CARRY", [sp, amount_], reg(CF, 1)),
+            op("INT_SCARRY", [sp, amount_], reg(OF, 1)),
+            add(sp, sp, amount_),
+            op("INT_SLESS", [sp, self._word(0)], reg(SF, 1)),
+            op("INT_EQUAL", [sp, self._word(0)], reg(ZF, 1)),
         )
 
     def ret(self, *, realistic: bool = True) -> "FunctionBuilder":
-        """x86-64 ``ret``: RIP = *(RSP); RSP += 8; RETURN RIP."""
+        """x86 ``ret``: IP = *(SP); SP += pointer; RETURN IP."""
+        width = self.arch.pointer
         if realistic:
             ops = [
-                load(reg(RIP), reg(RSP)),
-                add(reg(RSP), reg(RSP), const(8)),
-                op("RETURN", [reg(RIP)]),
+                load(reg(self.arch.ip, width), self._sp()),
+                add(self._sp(), self._sp(), self._word(width)),
+                op("RETURN", [reg(self.arch.ip, width)]),
             ]
         else:
-            ops = [op("RETURN", [reg(RSP)])]
+            ops = [op("RETURN", [self._sp()])]
         self._rows.append(_Instruction(ops, "return"))
         return self
 
@@ -264,7 +308,7 @@ class FunctionBuilder:
                     raise ValueError(f"unknown label {row.target}")
                 target = self._address(self._labels[row.target])
                 targets = [self._coordinate(target)]
-                destination = ram(target)
+                destination = ram(target, self.arch.pointer)
                 if row.kind == "cbranch":
                     ops.append(op("CBRANCH", [destination, row.condition]))
                     flow = _flow(
@@ -325,10 +369,10 @@ def straight(*instructions: list[tuple], realistic_return: bool = False) -> Func
 # Program provider
 # --------------------------------------------------------------------------
 
-def _space(space_id, *, const=False, reg=False, unique=False, mem=False, external=False):
+def _space(space_id, *, const=False, reg=False, unique=False, mem=False, external=False, bits=64):
     return {
         "space_id": space_id,
-        "address_size_bits": 64,
+        "address_size_bits": bits,
         "addressable_unit_bytes": 1,
         "is_constant_space": const,
         "is_register_space": reg,
@@ -352,6 +396,10 @@ class _Provider:
     def __post_init__(self) -> None:
         self.code = self.code or b"\x90" * self.layout.code_size
         self.data = self.data or b"\x00" * self.layout.data_size
+        arches = {function.arch for function in self.functions}
+        if len(arches) > 1:
+            raise ValueError("one program, one architecture")
+        self.arch = arches.pop() if arches else X64
 
     def original_executable_size(self) -> int:
         return len(self.code) + len(self.data)
@@ -392,16 +440,16 @@ class _Provider:
         return parse_raw_json(json.dumps({
             "address_space_classification_revision": 2,
             "translation_namespace": {
-                "language_id": "x86:LE:64:default",
+                "language_id": self.arch.language_id,
                 "major_version": 4,
                 "minor_version": 6,
             },
             "address_spaces": [
-                _space(CONST, const=True),
-                _space(RAM, mem=True),
-                _space(REG, reg=True),
-                _space(UNIQUE, unique=True),
-                _space(EXTERNAL, external=True),
+                _space(CONST, const=True),   # (Ghidra's constant space is 64-bit on x86-32 too)
+                _space(RAM, mem=True, bits=self.arch.address_bits),
+                _space(REG, reg=True, bits=self.arch.address_bits),
+                _space(UNIQUE, unique=True, bits=self.arch.address_bits),
+                _space(EXTERNAL, external=True, bits=self.arch.address_bits),
             ],
             "image_base": {"space_id": RAM, "byte_offset": self.layout.code_base},
         }))
