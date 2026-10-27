@@ -2028,15 +2028,15 @@ class _ScopedNormalizer:
             proven_preserved=proven_preserved, memory_keeping=memory_keeping,
             unrestored_stack_calls=unrestored,
         )
-        if __import__("os").environ.get("TDO_V2_CHI_SHADOW"):
-            # opaque calls as definitions, checked against this run (never used: docs 25.83)
+        if _chi_shadow_on():
+            # opaque calls as definitions, checked against this pass (never used: docs 25.83)
             from . import _chi_shadow
             from .call_clobber import clobber_inputs
 
             calls, clobber_preserved = clobber_inputs(observation, context, frozenset(assumed_call_effects),
                                                       proven_preserved, unrestored)
             _chi_shadow.record(memory_ssa.function_scope, memory_unit, memory_ssa, effect_unit, calls,
-                               clobber_preserved, memory_keeping & calls)
+                               clobber_preserved, memory_keeping & calls, call_clobber_reads)
         call_clobber_reads = subtract_copy_clobbers(_forward_memory_plan, call_clobber_reads)
         call_clobber_nodes = _materialize_call_clobber_debt(
             dependencies,
@@ -2565,6 +2565,13 @@ def _materialize_open_conditions(dependencies, memory_ssa, proven_call_effects, 
             dependencies.add_edge(node, row, EdgeRecord(EdgeKind.MAY_ALIAS_READ, operation=f"{call}~{index}"))
             found.append((node, pairs))
     return tuple(found)
+
+
+def _chi_shadow_on() -> bool:
+    """The shadow chi check (``TDO_V2_CHI_SHADOW``; docs 25.83): a measurement only."""
+    import os
+
+    return bool(os.environ.get("TDO_V2_CHI_SHADOW"))
 
 
 def _call_write_overlaps(effect_unit, proven_call_effects) -> frozenset:

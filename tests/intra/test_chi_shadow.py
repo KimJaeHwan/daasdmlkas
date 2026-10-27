@@ -26,7 +26,7 @@ def shadow(monkeypatch):
 def _checked(builder):
     analyze_units(program_units(builder))
     assert _chi_shadow.RESULTS
-    for scope, found in _chi_shadow.RESULTS:
+    for scope, found in _chi_shadow.RESULTS.items():
         assert found == [], found
 
 
@@ -65,4 +65,13 @@ def test_globals_and_registers():
     builder = (FunctionBuilder().sub_rsp(0x28).ins(store(const(DATA_BASE + 0x40), reg(RBX)))
                .ins(copy(reg(RAX), reg(RSI))).call(OPAQUE_A)
                .ins(load(reg(R9), const(DATA_BASE + 0x40)), copy(reg(RDX), reg(RAX))).add_rsp(0x28).ret())
+    _checked(builder)
+
+
+def test_a_user_op_output_is_written_after_its_clobber():
+    """rax = CALLOTHER(rsi); r9 = rax: the op's own output is no clobbered byte
+    (call_clobber: reads, then the call, then the op's writes)."""
+    builder = (FunctionBuilder().sub_rsp(0x28)
+               .ins(op("CALLOTHER", [const(7, 4), reg(RSI)], reg(RAX)))
+               .ins(copy(reg(R9), reg(RAX))).add_rsp(0x28).ret())
     _checked(builder)

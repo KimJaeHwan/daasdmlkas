@@ -1,21 +1,28 @@
 """Shadow chi memory SSA -- an equivalence check, never a consumer (design
-``.census6/design_opaque_call_def.md`` round 3, first step).
+``.census6/design_opaque_call_def.md`` round 3, first step; docs 25.83).
 
 An opaque call as a DEFINITION: after each call action of the production
 memory unit the shadow inserts ``{call}~chr`` (reading the call's footprint:
-every tracked span minus what the call is proven to preserve -- the bytes
-``call_clobber`` adds it to) and ``{call}~chi`` (a KILL write of the same
-spans). The reads of ``~chr`` are the pre-call reaching definitions per
-fragment, so a chi definition's sources are byte-exact. The dense engine builds
-the shadow SSA; production is untouched.
+every tracked span minus what the call is proven to preserve and minus the
+call's own writes -- the bytes ``call_clobber`` adds it to, its ``called``
+point lying between the call's reads and its writes) and ``{call}~chi`` (a
+KILL write of the same spans). The reads of ``~chr`` are the pre-call reaching
+definitions per fragment, so a chi definition's sources are byte-exact. The
+dense engine builds the shadow SSA; production is untouched.
 
-Per read byte of the production unit the check compares
+Per read byte of the production unit (streamed, nothing kept but mismatches)
+the check compares
 (a) the calls met walking chi definitions back to their sources (JOINs and
     chis expanded, a visited set for loops) with ``call_clobber``'s byte state
-    at that read (the calls executed since the byte was last written), and
-(b) the ordinary definitions reached (ENTRY / data / kill writes, by canonical
-    key) with the production SSA's reaching definitions (JOINs expanded).
-``check`` returns the mismatches (empty: equivalent)."""
+    at that read (a recorded dense replay of its transfer, same inputs); a
+    byte the replay does not know is a mismatch,
+(b) the ordinary definitions reached (ENTRY / data / kill writes) with the
+    production SSA's reaching definitions (JOINs expanded),
+(c) the public records: per read operation the shadow's (dirty spans, calls)
+    aggregated as ``call_clobber._transfer`` aggregates them equal the
+    production ``CallClobberRead`` rows (before ``subtract_copy_clobbers``;
+    the default sparse engine).
+Work is charged to a ``diagnostic`` ledger (never the analysis budgets)."""
 
 from __future__ import annotations
 
@@ -23,47 +30,50 @@ from dataclasses import replace
 
 from .memory_contracts import LocalStorageAction, MemoryDefinitionKind, MemoryWriteMode
 from .model import ResolvedStorage
-from .resource_limits import step
+from .resource_limits import DiagnosticExhausted, diagnostic, step
 from .span_geometry import ByteSpan, StorageObjectKind
 
 _MEMORY_KINDS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
-# (function scope, mismatches or an error text) per normalization pass checked
-# (``TDO_V2_CHI_SHADOW`` set): a measurement, read by tests and tools
-RESULTS: list = []
-
-
-# calls x footprint spans above which a function is skipped (reported as
-# "skipped"): the shadow kills every tracked span at every call
+# function scope -> mismatches, "skipped", or an error text: the LAST pass of
+# each function checked (``TDO_V2_CHI_SHADOW`` set); read by tests and tools
+RESULTS: dict = {}
+# calls x connected spans above which a function is skipped; diagnostic work bound
 LIMIT = 200_000
+WORK = 20_000_000
 
 
 def record(scope, *args) -> None:
     try:
-        RESULTS.append((scope, check(*args)))
+        with diagnostic(WORK):
+            RESULTS[scope] = check(*args)
+    except DiagnosticExhausted:
+        RESULTS[scope] = "exhausted"
     except Exception as error:   # (the shadow build itself failed: reported, never raised)
-        RESULTS.append((scope, f"{type(error).__name__}: {error}"))
+        RESULTS[scope] = f"{type(error).__name__}: {error}"
 
 
-def _footprint(connected, call, preserved, memory_keeping) -> tuple:
-    """The tracked bytes ``call`` may change: every connected span minus the
-    call's preserved spans (and, for a memory-keeping call, all memory)."""
-    kept = {}
-    for span in preserved.get(call, ()):
-        kept.setdefault(span.object_id, set()).update(range(span.start, span.end))
-    found = []
-    for span in connected:
-        if call in memory_keeping and span.object_id.kind in _MEMORY_KINDS:
+def _subtract(span, holes) -> list:
+    """``span`` minus the ``holes`` spans of its object (intervals)."""
+    pieces = [(span.start, span.end)]
+    for hole in holes:
+        if hole.object_id != span.object_id:
             continue
-        skip = kept.get(span.object_id, ())
-        start = None
-        for offset in range(span.start, span.end + 1):
-            inside = offset < span.end and offset not in skip
-            if inside and start is None:
-                start = offset
-            elif not inside and start is not None:
-                found.append(ByteSpan(span.object_id, start, offset - start))
-                start = None
-    return tuple(found)
+        pieces = [part for start, end in pieces for part in (
+            ((start, min(end, hole.start)),) if hole.start > start else ()) + (
+            ((max(start, hole.end), end),) if hole.end < end else ())
+            if part[0] < part[1]]
+    return [ByteSpan(span.object_id, start, end - start) for start, end in pieces]
+
+
+def _footprint(connected, action, preserved, memory_keeping) -> tuple:
+    """The tracked bytes the call ``action`` may change: every connected span
+    minus its preserved spans and its own writes (and, for a memory-keeping
+    call, all memory)."""
+    call = action.operation_key
+    holes = (*preserved.get(call, ()), *action.writes)
+    return tuple(piece for span in connected
+                 if not (call in memory_keeping and span.object_id.kind in _MEMORY_KINDS)
+                 for piece in _subtract(span, holes))
 
 
 def shadow_unit(unit, calls, preserved, memory_keeping):
@@ -77,7 +87,7 @@ def shadow_unit(unit, calls, preserved, memory_keeping):
         for action in block.actions:
             actions.append(action)
             if action.operation_key in calls:
-                spans = _footprint(connected, action.operation_key, preserved, memory_keeping)
+                spans = _footprint(connected, action, preserved, memory_keeping)
                 if spans:
                     actions.append(LocalStorageAction(f"{action.operation_key}~chr", reads=spans))
                     actions.append(LocalStorageAction(f"{action.operation_key}~chi", writes=spans,
@@ -86,16 +96,13 @@ def shadow_unit(unit, calls, preserved, memory_keeping):
     return replace(unit, blocks=tuple(blocks))
 
 
-def _byte_definitions(ssa):
-    """(operation key -> [(read span, [(fragment span, definition ids)])]),
-    join id -> source ids."""
+def _reads_by_key(ssa):
     keys = [action.operation_key for action in ssa.actions]
     reads: dict = {}
     for read in ssa.reads:
         reads.setdefault(keys[read.action_id], []).append(
             (read.span, [(fragment.span, fragment.definition_ids) for fragment in read.fragments]))
-    joins = {join.join_definition_id: join.source_definition_ids for join in ssa.joins}
-    return reads, joins
+    return reads, {join.join_definition_id: join.source_definition_ids for join in ssa.joins}
 
 
 def _at(fragments, object_id, offset):
@@ -105,82 +112,38 @@ def _at(fragments, object_id, offset):
     return ()
 
 
-def _reference_calls(effect_unit, calls, preserved, memory_keeping) -> dict:
-    """``call_clobber``'s byte state at each read: (operation key, object,
-    offset) -> calls (dense engine, recorded)."""
-    from .call_clobber import _EMPTY
-
-    blocks = {block.key: block for block in effect_unit.blocks}
-    successors: dict = {key: [] for key in blocks}
-    for block in effect_unit.blocks:
-        for predecessor in block.predecessors:
-            successors[predecessor].append(block.key)
-
-    def transfer(block, state, found):
-        for effect in block.effects:
-            if found is not None:
-                for evidence in effect.reads:
-                    if type(evidence) is ResolvedStorage:
-                        span = evidence.span
-                        for offset in range(span.start, span.end):
-                            found[(effect.operation_key, span.object_id, offset)] = \
-                                state.calls_at((span.object_id, offset))
-            key = effect.operation_key
-            if key in calls:
-                state = state.called(key, preserved.get(key, ()), key in memory_keeping)
-            for evidence in effect.writes:
-                if type(evidence) is ResolvedStorage:
-                    state = state.written(evidence.span)
-        return state
-
-    in_states = {effect_unit.entry_block_key: _EMPTY}
-    pending = {effect_unit.entry_block_key}
-    while pending:
-        step()
-        key = min(pending)
-        pending.remove(key)
-        state = transfer(blocks[key], in_states[key], None)
-        for successor in successors[key]:
-            previous = in_states.get(successor)
-            merged = state if previous is None else previous.meet(state)
-            if merged != previous:
-                in_states[successor] = merged
-                pending.add(successor)
-    found: dict = {}
-    for key in sorted(in_states):
-        transfer(blocks[key], in_states[key], found)
-    return found
+def _identity(definition) -> tuple:
+    return (definition.kind.value, definition.span.object_id, definition.span.start, definition.span.size,
+            definition.operation_key, definition.write_ordinal)
 
 
 def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping=frozenset(),
-          limit: int = 20) -> list:
-    """Mismatches between the shadow chi SSA and (a) call_clobber, (b) the
-    production SSA's origins, per read byte; at most ``limit``."""
-    from .memory_ssa import _build_dense
+          public_rows=None, limit: int = 20):
+    """Mismatches (a)-(c), at most ``limit``; "skipped" above ``LIMIT``."""
+    from .call_clobber import CallClobberRead, _EMPTY
+    from .memory_ssa import _build_dense, _build_partition
 
-    from .memory_ssa import _build_partition
-
+    if memory_unit.effect_evidence_digest != effect_unit.effect_evidence_digest:
+        return [("unit", "the memory unit is not this effect unit's")]
     calls = frozenset(calls)
     present = sum(1 for block in memory_unit.blocks for action in block.actions if action.operation_key in calls)
     if present * len(_build_partition(memory_unit).connected) > LIMIT:
         return "skipped"
     shadow = _build_dense(shadow_unit(memory_unit, calls, preserved, memory_keeping))
-    shadow_reads, shadow_joins = _byte_definitions(shadow)
-    production_reads, production_joins = _byte_definitions(memory_ssa)
-    reference = _reference_calls(effect_unit, calls, preserved, memory_keeping)
+    shadow_reads, shadow_joins = _reads_by_key(shadow)
+    production_reads, production_joins = _reads_by_key(memory_ssa)
 
-    def production_origins(ids, object_id, offset):
+    def production_origins(ids):
         found, pending, seen = set(), list(ids), set()
         while pending:
             step()
             item = pending.pop()
-            if item in seen:
-                continue
-            seen.add(item)
-            if item in production_joins:
-                pending.extend(production_joins[item])
-            else:
-                found.add(memory_ssa.definitions[item].canonical_key)
+            if item not in seen:
+                seen.add(item)
+                if item in production_joins:
+                    pending.extend(production_joins[item])
+                else:
+                    found.add(_identity(memory_ssa.definitions[item]))
         return found
 
     def shadow_closure(ids, object_id, offset):
@@ -202,25 +165,81 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
                 for _, fragments in shadow_reads.get(f"{call}~chr", ()):
                     pending.extend(_at(fragments, object_id, offset))
                 continue
-            origins.add(definition.canonical_key)
+            origins.add(_identity(definition))
         return crossed, origins
 
-    mismatches = []
-    for key, rows in sorted(production_reads.items()):
-        for span, fragments in rows:
-            shadow_rows = [row for row in shadow_reads.get(key, ()) if row[0] == span]
-            if len(shadow_rows) != 1:
-                mismatches.append((key, span, "read not in the shadow"))
+    mismatches: list = []
+    rows: list = []
+
+    def compare(effect, state):
+        """One effect's reads at ``state`` (call_clobber's) against the shadow."""
+        spans, crossed_all = [], set()
+        key = effect.operation_key
+        shadow_rows = shadow_reads.get(key, [])
+        production_rows = production_reads.get(key, [])
+        for evidence in effect.reads:
+            if type(evidence) is not ResolvedStorage:
                 continue
+            span = evidence.span
+            shadow_row = next((fragments for read_span, fragments in shadow_rows if read_span == span), None)
+            production_row = next((fragments for read_span, fragments in production_rows if read_span == span),
+                                  None)
+            if shadow_row is None or production_row is None:
+                mismatches.append((key, span, "read not in both SSAs"))
+                continue
+            dirty = []
             for offset in range(span.start, span.end):
-                crossed, origins = shadow_closure(_at(shadow_rows[0][1], span.object_id, offset),
-                                                  span.object_id, offset)
-                expected_calls = reference.get((key, span.object_id, offset))
-                if expected_calls is not None and set(expected_calls) != crossed:
-                    mismatches.append((key, span.object_id, offset, "calls", sorted(expected_calls), sorted(crossed)))
-                expected = production_origins(_at(fragments, span.object_id, offset), span.object_id, offset)
-                if expected != origins:
-                    mismatches.append((key, span.object_id, offset, "origins", len(expected), len(origins)))
-                if len(mismatches) >= limit:
-                    return mismatches
-    return mismatches
+                expected = state.calls_at((span.object_id, offset))
+                crossed, origins = shadow_closure(_at(shadow_row, span.object_id, offset), span.object_id, offset)
+                if set(expected) != crossed:
+                    mismatches.append((key, span.object_id, offset, "calls", sorted(expected), sorted(crossed)))
+                if production_origins(_at(production_row, span.object_id, offset)) != origins:
+                    mismatches.append((key, span.object_id, offset, "origins"))
+                if crossed:
+                    dirty.append(offset)
+                    crossed_all |= crossed
+            if dirty:
+                spans.append(ByteSpan(span.object_id, dirty[0], dirty[-1] + 1 - dirty[0]))
+        if spans:
+            rows.append(CallClobberRead(key, tuple(spans), tuple(sorted(crossed_all))))
+
+    # a recorded dense replay of call_clobber's transfer, comparing as it goes
+    blocks = {block.key: block for block in effect_unit.blocks}
+    successors: dict = {key: [] for key in blocks}
+    for block in effect_unit.blocks:
+        for predecessor in block.predecessors:
+            successors[predecessor].append(block.key)
+
+    def transfer(block, state, comparing):
+        for effect in block.effects:
+            if comparing:
+                compare(effect, state)
+            key = effect.operation_key
+            if key in calls:
+                state = state.called(key, preserved.get(key, ()), key in memory_keeping)
+            for evidence in effect.writes:
+                if type(evidence) is ResolvedStorage:
+                    state = state.written(evidence.span)
+        return state
+
+    in_states = {effect_unit.entry_block_key: _EMPTY}
+    pending = {effect_unit.entry_block_key}
+    while pending:
+        step()
+        key = min(pending)
+        pending.remove(key)
+        state = transfer(blocks[key], in_states[key], False)
+        for successor in successors[key]:
+            previous = in_states.get(successor)
+            merged = state if previous is None else previous.meet(state)
+            if merged != previous:
+                in_states[successor] = merged
+                pending.add(successor)
+    for key in sorted(in_states):
+        transfer(blocks[key], in_states[key], True)
+        if len(mismatches) >= limit:
+            return mismatches[:limit]
+    if public_rows is not None and sorted(rows, key=lambda row: row.operation_key) != \
+            sorted(public_rows, key=lambda row: row.operation_key):
+        mismatches.append(("records", len(rows), len(public_rows)))
+    return mismatches[:limit]

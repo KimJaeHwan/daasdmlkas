@@ -5984,3 +5984,15 @@ nonstack 창과 같은 장치). 모델 계약 필드 + 그래프 사실, 새 가
 겹침 탐색에서 뺀다(Fable). 근거: 읽기 전용 probe에서 v2-win-debug-full에 부분 겹침 4건(다른 Bundle 0). 설계 검토 Astra(조건부)·
 Fable(승인) -- `.census6/design_c_ov.md`. 테스트 `test_opaque_call_writes.py::test_a_partial_overlap_leaves_only_the_shared_bytes_unknown`
 (겹친 바이트만 불완전; `~ov` 행 없으면 mutation 실패). 프로그램 오라클은 `~ov` 행도 opaque로 센다.
+
+### 25.83 opaque CALL을 정의로 -- 첫 단계: 그림자 chi SSA와 동치 검사 (2026-10-28, 밤 작업 7·8, 브랜치에만)
+
+설계 3라운드 승인(`.census6/design_opaque_call_def.md`; `~below`를 죽이는 쓰기로 먼저 하는 안은 Astra 반대로 기각). 생산 경로는
+그대로, `TDO_V2_CHI_SHADOW`일 때만 측정(`_chi_shadow.py`). 그림자 단위: 각 호출 동작 뒤에 `{call}~chr`(footprint를 읽음 -- 그
+조각들이 곧 호출 전 도달 정의, 조각별로 정확) + `{call}~chi`(같은 span의 KILL). footprint = 추적 span - 호출이 보존하는 span -
+호출 자신의 쓰기(call_clobber의 `called`가 읽기와 쓰기 사이). dense 엔진으로 지음. 검사(읽기 바이트마다, 스트리밍): (a) chi를
+출처로 거슬러 만난 호출 = call_clobber 바이트 상태(같은 입력 `call_clobber.clobber_inputs`로 공유), (b) 도달한 보통 정의 =
+생산 SSA(JOIN 펼침), (c') 집계한 행 = 생산 `CallClobberRead`(빼기 전, sparse 엔진). 작업은 diagnostic ledger, 크기 상한.
+결과(기본 설정): v2-win-debug-full 125/125, v3-win-release 91/91, v3-win32 81/81, ue-dll-development 71/71,
+ue-dll-debuggame 119/119, zlib 24/25(큰 함수 1개 메모리 초과) -- 불일치 0. 남은 것: 종료 지점 검사(`_exit_crossings`는
+면제 규칙이 다름 -- 소비자 이전 때 맞출 일), forward probe, 그다음 소비자 이전(C4)과 call_clobber 삭제.
