@@ -126,6 +126,7 @@ def analyze_frozen_bundle_with_summaries(
     assume_import_slots_hold_exports: bool = True,
     assume_entry_values_not_frame: bool = True,
     assume_opaque_callees_leave_no_stack_addresses: bool = True,
+    assume_pre_escape_values_not_frame: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
     physical_memory_records: bool = False,
@@ -201,6 +202,7 @@ def analyze_frozen_bundle_with_summaries(
             assume_import_slots_hold_exports=assume_import_slots_hold_exports,
             assume_entry_values_not_frame=assume_entry_values_not_frame,
             assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
+            assume_pre_escape_values_not_frame=assume_pre_escape_values_not_frame,
             origin_witnesses=origin_witnesses,
             operation_records=operation_records,
             physical_memory_records=physical_memory_records,
@@ -229,6 +231,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
     assume_import_slots_hold_exports: bool = True,
     assume_entry_values_not_frame: bool = True,
     assume_opaque_callees_leave_no_stack_addresses: bool = True,
+    assume_pre_escape_values_not_frame: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
     physical_memory_records: bool = False,
@@ -260,6 +263,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
         assume_import_slots_hold_exports=assume_import_slots_hold_exports,
         assume_entry_values_not_frame=assume_entry_values_not_frame,
         assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
+        assume_pre_escape_values_not_frame=assume_pre_escape_values_not_frame,
         origin_witnesses=origin_witnesses,
         operation_records=operation_records,
         physical_memory_records=physical_memory_records,
@@ -287,6 +291,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     assume_import_slots_hold_exports: bool = True,
     assume_entry_values_not_frame: bool = True,
     assume_opaque_callees_leave_no_stack_addresses: bool = True,
+    assume_pre_escape_values_not_frame: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
     physical_memory_records: bool = False,
@@ -413,6 +418,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             globals_disjoint=assume_globals_disjoint_from_stack, direction_flag=assume_direction_flag_clear,
             import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame,
             opaque_no_stack=assume_opaque_callees_leave_no_stack_addresses,
+            pre_escape=assume_pre_escape_values_not_frame,
             same_result=assume_same_result_functions, accessor_separate=assume_accessor_result_separate,
             registered_handlers=assume_registered_handlers_not_observed,
             accessor_private_state=assume_accessor_private_state,
@@ -443,6 +449,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         assume_import_slots_hold_exports=assume_import_slots_hold_exports,
         assume_entry_values_not_frame=assume_entry_values_not_frame,
         assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
+        assume_pre_escape_values_not_frame=assume_pre_escape_values_not_frame,
         assume_same_result_functions=assume_same_result_functions,
         assume_accessor_result_separate=assume_accessor_result_separate,
         assume_accessor_private_state=assume_accessor_private_state,
@@ -884,6 +891,9 @@ def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, 
     if any(getattr(item.normalized, "assumes_opaque_callees_leave_no_stack_addresses", False)
            for item in results.values()):
         assumptions += ("opaque-callees-leave-no-stack-addresses",)
+    # values no escape precedes taken as no address of the new frame (docs 25.77)
+    if any(getattr(item.normalized, "assumes_pre_escape_values_not_frame", False) for item in results.values()):
+        assumptions += ("pre-escape-values-do-not-address-the-new-frame",)
     # reported whenever a function has a trap the cut applies to: removing the
     # paths behind it can change a summary without leaving a dead exit
     if traps and pcodeop_models and any(trap_operations(item.unit, pcodeop_models) for item in results.values()):

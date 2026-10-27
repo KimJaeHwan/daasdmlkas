@@ -329,6 +329,7 @@ class ForwardInputs:
     below_bounds: tuple            # ((call key, stack object, first kept offset), ...)
     entry_values_not_frame: bool = True      # (may_alias.ENTRY_VALUES_NOT_FRAME as configured)
     opaque_no_stack_addresses: bool = True   # (may_alias.OPAQUE_NO_STACK_ADDRESSES as configured)
+    pre_escape_values_not_frame: bool = True  # (may_alias.PRE_ESCAPE_NOT_FRAME as configured)
     read_separations: object = None
     nonstack_spans: frozenset = frozenset()
 
@@ -372,7 +373,9 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
     from .call_clobber import derive_call_clobber_reads
     from .call_observation_contracts import build_bound_local_memory_ssa
     from .effect_decode import decode_effect_unit
-    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, EscapeMemo, derive_may_alias_reads
+    from .may_alias import (
+        ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME, EscapeMemo, derive_may_alias_reads,
+    )
     from .model import ResolvedStorage
     from .normalize import _memory_spans_except_below
 
@@ -412,7 +415,8 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
     frame_uses: list = []
     opaque_uses: list = []
     tokens = (ENTRY_VALUES_NOT_FRAME.set(inputs.entry_values_not_frame),
-              OPAQUE_NO_STACK_ADDRESSES.set(inputs.opaque_no_stack_addresses))
+              OPAQUE_NO_STACK_ADDRESSES.set(inputs.opaque_no_stack_addresses),
+              PRE_ESCAPE_NOT_FRAME.set(inputs.pre_escape_values_not_frame))
     try:
         aliases = derive_may_alias_reads(
         probed, inputs.observation, inputs.context, inputs.address_spaces,
@@ -430,6 +434,7 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
         read_separations=inputs.read_separations,
         )
     finally:
+        PRE_ESCAPE_NOT_FRAME.reset(tokens[2])
         OPAQUE_NO_STACK_ADDRESSES.reset(tokens[1])
         ENTRY_VALUES_NOT_FRAME.reset(tokens[0])
     used = []
@@ -498,6 +503,7 @@ _NORMALIZATION_ASSUMPTIONS = (
     ("assumes_import_slots_hold_exports", "import-slots-hold-their-exports"),
     ("assumes_entry_values_not_frame", "entry-values-do-not-address-the-new-frame"),
     ("assumes_opaque_callees_leave_no_stack_addresses", "opaque-callees-leave-no-stack-addresses"),
+    ("assumes_pre_escape_values_not_frame", "pre-escape-values-do-not-address-the-new-frame"),
     ("assumed_direction_flag_clear", "direction-flag-clear"),
 )
 

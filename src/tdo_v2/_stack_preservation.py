@@ -17,14 +17,14 @@ from .storage import _resolve_validated_storage
 
 
 def _leaf_summary(unit):
-    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES
+    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
     from .relative_memory import IMAGE_BASE_TRACKING, IMPORT_SLOTS
 
     observation = unit.observation
     if observation is None:
         return None
     # No outer model/readonly/frame/import/trap policy can license this proof.
-    settings = ((ENTRY_VALUES_NOT_FRAME, False), (OPAQUE_NO_STACK_ADDRESSES, False),
+    settings = ((ENTRY_VALUES_NOT_FRAME, False), (OPAQUE_NO_STACK_ADDRESSES, False), (PRE_ESCAPE_NOT_FRAME, False),
                 (IMPORT_SLOTS, None), (IMAGE_BASE_TRACKING, None))
     tokens = [(variable, variable.set(value)) for variable, value in settings]
     try:

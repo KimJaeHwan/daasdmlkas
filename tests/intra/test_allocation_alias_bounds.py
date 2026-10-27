@@ -118,9 +118,12 @@ def _case(case="stack", *, transit="direct", safe_access=False, wrapper=False, t
 
 def _analyze(bodies, models, *, strict=True):
     units = program_units(*bodies)
+    # (non-strict: the defaults but pre-escape-values-do-not-address-the-new-frame,
+    # which takes a fresh base as no address of the new frame -- docs 25.77)
     options = dict(assume_entry_values_not_frame=False,
                    assume_opaque_callees_leave_no_stack_addresses=False,
-                   assume_globals_disjoint_from_stack=False) if strict else {}
+                   assume_globals_disjoint_from_stack=False) if strict \
+        else dict(assume_pre_escape_values_not_frame=False)
     results = analyze_units(units, image_info=_image(), external_models=models, **options)
     return results["1:1000"], {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
 

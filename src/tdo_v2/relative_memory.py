@@ -241,11 +241,14 @@ def project_function_relative_memory(
     wild_objects: set | None = None,
     fresh_keys: frozenset = frozenset(),
     same_object: dict | None = None,
+    same_object_results: frozenset = frozenset(),
     fresh_objects: set | None = None,
     pointer_rows: dict | None = None,
     nonstack_objects: set | None = None,
     nonstack_spans: set | None = None,
     nonstack_labels: dict | None = None,
+    wild_definitions: dict | None = None,
+    ineligible_atoms: set | None = None,
     address_metadata: dict | None = None,
     once_blocks: frozenset | None = None,
     settle_pending: bool = True,
@@ -346,8 +349,13 @@ def project_function_relative_memory(
         projector.nonstack_objects = nonstack_objects
     if nonstack_spans is not None:
         projector.nonstack_spans = nonstack_spans
+    projector._same_object_results = frozenset(same_object_results)
     if nonstack_labels is not None:
         projector.nonstack_labels = nonstack_labels
+    if wild_definitions is not None:
+        projector.wild_definitions = wild_definitions
+    if ineligible_atoms is not None:
+        projector.ineligible_atoms = ineligible_atoms
     if address_metadata is not None:
         projector.address_metadata = address_metadata
     changed = False
@@ -970,6 +978,7 @@ class _Projector:
         self._definition_atoms: set[int] = set()   # wild ones
         self._fresh = fresh_keys
         self._same_object = same_object or {}
+        self._same_object_results: frozenset = frozenset()   # (declared same-object rows, docs 25.77)
         self._fresh_atoms: set[int] = set()
         self.fresh_objects: set = set()
         self._pointer_rows = pointer_rows or {}
@@ -1004,6 +1013,15 @@ class _Projector:
         # atom -> (extent, labels): a call result whose first ``extent`` bytes
         # are in no thread's stack (``result_nonstack``; this function only)
         self._nonstack_extent: dict[int, tuple] = {}
+        # pre-escape-values-do-not-address-the-new-frame (docs 25.77): atom ->
+        # the operation that obtained the value (a LOAD, a plain call result
+        # row) -- recorded only where the value is that operation's own;
+        # ``ineligible_atoms`` (across passes): atoms a same-object (realloc)
+        # value reused; ``wild_definitions`` (across passes): wild object ->
+        # frozenset((atom, operation)) of its atoms, or None (never eligible)
+        self._eligible_atoms: dict[int, str] = {}
+        self.ineligible_atoms: set = set()
+        self.wild_definitions: dict = {}
         self.wild_objects: set = set()
         # diagnostics (``origin_witnesses``): relative object -> (atom tuple,
         # space id) -- the object id is a function of exactly these, so entries
@@ -1292,6 +1310,11 @@ class _Projector:
             self.nonstack_objects.add(object_id)
         if len(address.atoms) == 1 and address.atoms[0][1] == 1 and address.atoms[0][0] in self._nonstack_extent:
             self._nonstack_window(object_id, address, space_id)
+        if object_id in self.wild_objects or object_id in self.fresh_objects or object_id in self.nonstack_objects:
+            # (what pre-escape-values-do-not-address-the-new-frame may decide, docs 25.77)
+            rows = self._pre_escape_rows(address)
+            current = self.wild_definitions.get(object_id, frozenset())
+            self.wild_definitions[object_id] = None if rows is None or current is None else current | rows
         return object_id
 
     def _nonstack_window(self, object_id, address, space_id) -> None:
@@ -1314,7 +1337,7 @@ class _Projector:
             self.nonstack_labels[object_id] = labels | (self.nonstack_labels.get(object_id) or frozenset())
 
     def _definition_atom(self, definition, requested_span, fresh=False,
-                         nonstack=False) -> _AddressExpression | None:
+                         nonstack=False, eligible=False) -> _AddressExpression | None:
         """A value defined once per activation by a call (its summarized or
         modeled effect rows) or by a LOAD, exactly at its own width: an atom
         keyed by that definition (never by its inputs -- two calls with the
@@ -1357,6 +1380,8 @@ class _Projector:
             self._definition_atoms.add(atom)
         else:
             self._fresh_atoms.add(atom)
+        if eligible:
+            self._eligible_atoms[atom] = key   # (``eligible``: the value is the operation's own)
         return _AddressExpression(((atom, 1),), 0, requested_span.size)
 
     def _pointer_row(self, definition, requested_span) -> _AddressExpression | None:
@@ -1375,7 +1400,7 @@ class _Projector:
         if row[0] == "write_back":
             return None   # the slot's new value: a value of its own (``_definition_atom``)
         if row[0] == "nonstack":
-            found = self._definition_atom(definition, requested_span, nonstack=True)
+            found = self._definition_atom(definition, requested_span, nonstack=True, eligible=True)
             return found if len(row) == 1 else self._windowed(found, row[1:])
         if row[0] == "reg":
             _, reader, argument, null_is_fresh, unique = row
@@ -1385,6 +1410,9 @@ class _Projector:
             value = self._expression_from_memory_read(reader, width)
         if value is None or value.byte_size != requested_span.size:
             return None
+        if null_is_fresh:
+            # (the same object through a realloc-like callee: never a pre-escape value, docs 25.77)
+            self.ineligible_atoms.update(atom for atom, _ in value.atoms)
         if null_is_fresh and any(atom in self._nonstack_extent for atom, _ in value.atoms):
             # the same object through a realloc-like callee: not the window's
             # bytes any more (a new block may be smaller) -- a value of its own
@@ -1396,6 +1424,37 @@ class _Projector:
             # call's only pointer value (two values could name one block)
             return self._definition_atom(definition, requested_span, nonstack=not unique, fresh=unique)
         return value
+
+    def _own_value(self, definition) -> bool:
+        """The value is the defining operation's own (a LOAD's result, a call's
+        plain result row): pre-escape-values-do-not-address-the-new-frame may
+        take it (docs 25.77). An allowlist: a LOAD, or a call's register-run
+        row (``{call}~<digits>``) -- not its staging temporaries -- and not a
+        same-object (realloc-like, declared or lowered) row, a write-back slot,
+        an accessor identity row or a reg/mem row whose null may be a new block."""
+        key = definition.operation_key
+        _, separator, tag = key.partition("~")
+        row = self._pointer_rows.get(key)
+        own = tag.isdigit() if separator else key.endswith(":LOAD")
+        return own and key not in self._same_object and key not in self._same_object_results             and (row is None or (row[0] not in ("write_back", "same_result")
+                                 and not (row[0] in ("reg", "mem") and row[3])))
+
+    def _pre_escape_rows(self, address) -> frozenset | None:
+        """(atom, operation) of each value an object's address is built from,
+        when every atom is a pre-escape candidate (``_eligible_atoms``) or an
+        entry-like atom (no definition, fresh, nonstack, boundary or
+        stack-derived class), coefficient one, image 0; else None."""
+        if address.image != 0:
+            return None
+        rows = []
+        for atom, coefficient in address.atoms:
+            if coefficient != 1 or atom in self._boundary or self._is_stack_derived(atom):
+                return None
+            if atom in self._eligible_atoms:
+                rows.append((atom, self._eligible_atoms[atom]))
+            elif atom in self._definition_atoms or atom in self._fresh_atoms or atom in self._nonstack_atoms:
+                return None
+        return frozenset(rows)
 
     def _windowed(self, expression, window):
         """``expression`` (one nonstack atom) with its ``result_nonstack``
@@ -1876,6 +1935,7 @@ class _Projector:
                 result = self._definition_atom(definition, requested_span)
             elif value is not None and value.atoms and value.byte_size == requested_span.size:
                 result = value
+                self.ineligible_atoms.update(atom for atom, _ in value.atoms)   # (realloc: docs 25.77)
             elif value is not None and not value.atoms:
                 _note_fact(self._ssa.function_scope, value)
                 # realloc(NULL, n) is a new block; another constant stays that address
@@ -1891,7 +1951,7 @@ class _Projector:
                 and definition.span != requested_span:
             result = self._preserved_register_low(definition, requested_span)
         if result is None and definition.kind is MemoryDefinitionKind.DATA_WRITE and not waiting:
-            result = self._definition_atom(definition, requested_span)
+            result = self._definition_atom(definition, requested_span, eligible=self._own_value(definition))
         self._active.remove(cache_key)
         self._cache[cache_key] = result
         return result

@@ -61,8 +61,12 @@ def _analyze(tmp_path, builder, get=None, more=(), others=(), **options):
     image = ImageInfo("synthetic", (), tuple(
         ImportedSymbol("CORE", name, None, (), ((1, thunk),))
         for name, thunk in (("GetObj", GET), ("Touch", TOUCH), ("Move", MOVE), ("GetObj2", GET2))), (), ())
+    # (pre-escape-values-do-not-address-the-new-frame off: it alone keeps a
+    # result no escape precedes apart from the push -- docs 25.77; these test
+    # the window)
     return analyze_units(program_units(builder, *others), image_info=image,
-                         external_models=_models(tmp_path, get, more), **options)["1:1000"]
+                         external_models=_models(tmp_path, get, more),
+                         **{"assume_pre_escape_values_not_frame": False, **options})["1:1000"]
 
 
 def _caller(*offsets, move=False):

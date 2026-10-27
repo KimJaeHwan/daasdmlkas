@@ -55,14 +55,14 @@ def _freeze(value):
 
 
 def _signature(options):
-    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES
+    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
     from ._activation_entry import ACTIVE_ENTRY
 
     # Image readers belong to this exact run; never compare by an image name.
     options = {"opaque_value_provider": None, **options}
     return (_freeze({key: value for key, value in options.items() if key != "readonly_image"}),
             id(options.get("readonly_image")), ENTRY_VALUES_NOT_FRAME.get(), OPAQUE_NO_STACK_ADDRESSES.get(),
-            id(ACTIVE_ENTRY.get()))
+            PRE_ESCAPE_NOT_FRAME.get(), id(ACTIVE_ENTRY.get()))
 
 
 def _verification_source_pin(item):
@@ -74,8 +74,8 @@ def _verification_source_pin(item):
     """
     from ._call_activation import _source_signature
     runtime = ()
-    if len(item.normalization_context) == 7:
-        _, _, imports, _, image, _, _ = item.normalization_context
+    if len(item.normalization_context) == 8:
+        _, _, imports, _, image, _, _, _ = item.normalization_context
         runtime = (None if imports is None else (imports.active, _freeze(imports.slots)),
                    None if image is None else (image.ranges, _freeze(image.lengths), id(image.relocates)))
     return (_source_signature(item), item.key, _freeze(item.calls), _freeze(item.multi_calls),

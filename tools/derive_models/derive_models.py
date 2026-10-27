@@ -73,7 +73,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                    traps: bool = True, assume_globals_disjoint: bool = True, direction_flag: bool = False,
                    import_slots: bool = False, per_export: bool = False, log=print,
                    entry_values_not_frame: bool = True, same_result: bool = False,
-                   accessor_separate: bool = False, opaque_no_stack: bool = True,
+                   accessor_separate: bool = False, opaque_no_stack: bool = True, pre_escape: bool = True,
                    registered_handlers: bool = True, accessor_private_state: bool = False,
                    model_assumptions_off=(), catalog_models=()):
     """(model file dict, {export name: refusal reason}, export names the
@@ -157,7 +157,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
         # (switched off as ``analyze_units`` below will find them)
         off = disabled(globals_disjoint=globals_disjoint, readonly_image=False, direction_flag=direction_flag,
                        entry_values_not_frame=entry_values_not_frame, home_space=bool(private_frame_above),
-                       opaque_no_stack=opaque_no_stack, traps=traps, import_slots=import_slots,
+                       opaque_no_stack=opaque_no_stack, traps=traps, import_slots=import_slots, pre_escape=pre_escape,
                        same_result=same_result, accessor_separate=accessor_separate,
                        accessor_private_state=accessor_private_state, registered_handlers=registered_handlers,
                        model_assumptions_off=model_assumptions_off)
@@ -187,6 +187,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_import_slots_hold_exports=import_slots,
                                        assume_entry_values_not_frame=entry_values_not_frame,
                                        assume_opaque_callees_leave_no_stack_addresses=opaque_no_stack,
+                                       assume_pre_escape_values_not_frame=pre_escape,
                                        assume_same_result_functions=same_result,
                                        assume_accessor_result_separate=accessor_separate,
                                        assume_registered_handlers_not_observed=registered_handlers,
@@ -253,6 +254,8 @@ def main(argv=None) -> int:
                         help="derive under same-result-functions (docs 25.20)")
     parser.add_argument("--assume-accessor-result-separate", dest="accessor_separate", action="store_true",
                         help="derive under accessor-result-separate (docs 25.20)")
+    parser.add_argument("--no-assume-pre-escape-values-not-frame", dest="pre_escape", action="store_false",
+                        help="derive without pre-escape-values-do-not-address-the-new-frame (docs 25.77)")
     parser.add_argument("--no-model-assumption", dest="model_assumptions_off", action="append", default=[],
                         metavar="LABEL", help="derive with this model assumption switched off (repeat)")
     args = parser.parse_args(argv)
@@ -261,7 +264,7 @@ def main(argv=None) -> int:
         model_dirs=args.model_dir, stack_evidence=args.stack_evidence,
         private_frame_above=args.private_frame_above, traps=args.traps, same_result=args.same_result,
         accessor_separate=args.accessor_separate, entry_values_not_frame=args.entry_values_not_frame,
-        model_assumptions_off=tuple(args.model_assumptions_off))
+        model_assumptions_off=tuple(args.model_assumptions_off), pre_escape=args.pre_escape)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(raw, indent=1) + chr(10), encoding="utf-8")
     print(f"wrote {len(raw['entries'])} templates to {args.output}")

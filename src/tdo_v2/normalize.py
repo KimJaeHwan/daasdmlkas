@@ -28,7 +28,7 @@ from .control_dependence import (
 from .pcode_blocks import build_pcode_block_graph
 from .rep_strings import MAX_REP_BYTES, rep_sites
 from .may_alias import (
-    ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, EscapeMemo, MayAliasRead,
+    ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME, EscapeMemo, MayAliasRead,
     derive_may_alias_reads, private_frame_writes,
 )
 from .call_contracts import FunctionCallSeedUnit
@@ -162,6 +162,11 @@ class NormalizedFunction:
     # named assumption opaque-callees-leave-no-stack-addresses decided some
     # byte private (it would not be with the opaque calls as escapes)
     assumes_opaque_callees_leave_no_stack_addresses: bool = False
+    # named assumption pre-escape-values-do-not-address-the-new-frame decided
+    # some object not wild (docs 25.77), and the operations whose values it
+    # took (sorted keys: what a stack-leak proof must cover to discharge it)
+    assumes_pre_escape_values_not_frame: bool = False
+    pre_escape_definitions: tuple = ()
     # rep string sites made exact (``rep_strings``): (instruction key, count,
     # direction); the evaluator's overrides of their operations
     rep_blocks: tuple = ()
@@ -563,6 +568,16 @@ def _same_object_rows(proven_call_effects, observation) -> dict:
                     found[f"{key}~{index}"] = (f"{key}~in{index}", ValidatedVarnode(
                         VarnodeKindCode.REGISTER, AddressCoordinate(space, source.start), source.size))
     return found
+
+
+def _same_object_results(proven_call_effects) -> frozenset:
+    """Call effect rows writing a register a same-object relation is declared
+    for (``same_object_registers``), lowered or not: never a value of the call's
+    own (pre-escape-values-do-not-address-the-new-frame, docs 25.77)."""
+    return frozenset(
+        f"{key}~{index}" for key, effect in proven_call_effects.items()
+        for write, _ in effect.same_object_registers
+        for index, run in enumerate(effect.runs) if write in getattr(run, "writes", ()))
 
 
 def _opaque_calls(observation, proven_call_effects, assumed_call_effects) -> frozenset:
@@ -1653,6 +1668,8 @@ class _ScopedNormalizer:
             nonstack_objects: set = set()
             nonstack_spans: set = set()
             nonstack_labels: dict = {}
+            wild_definitions: dict = {}
+            ineligible_atoms: set = set()
             pointer_rows: dict = {}
             value_inputs: dict = {}
             address_metadata: dict = {"objects": {}, "atoms": {}}
@@ -1852,11 +1869,14 @@ class _ScopedNormalizer:
                     wild_objects=wild_objects,
                     fresh_keys=fresh_rows,
                     same_object=same_object_rows,
+                    same_object_results=_same_object_results(proven_call_effects),
                     fresh_objects=fresh_objects,
                     pointer_rows=pointer_rows,
                     nonstack_objects=nonstack_objects,
                     nonstack_spans=nonstack_spans,
                     nonstack_labels=nonstack_labels,
+                    wild_definitions=wild_definitions,
+                    ineligible_atoms=ineligible_atoms,
                     once_blocks=once_blocks,
                     settle_pending=settle,
                     address_metadata=address_metadata,
@@ -1877,12 +1897,13 @@ class _ScopedNormalizer:
                                                      {key: set(values) for key, values in used_reads.items()},
                                                      [set(wild_objects), set(fresh_objects),
                                                       set(nonstack_objects), set(nonstack_spans),
-                                                      dict(nonstack_labels)])
+                                                      dict(nonstack_labels), dict(wild_definitions),
+                                                      set(ineligible_atoms)])
                         continue
                     if settled_at is not None and settled_at[4] - _pending_write_keys(effect_unit):
                         effect_unit, memory_unit, memory_binding, memory_ssa, _, used_reads, kept = settled_at
                         for current, before in zip((wild_objects, fresh_objects, nonstack_objects, nonstack_spans,
-                                                    nonstack_labels), kept):
+                                                    nonstack_labels, wild_definitions, ineligible_atoms), kept):
                             current.clear()
                             current.update(before)
                     break
@@ -1969,6 +1990,12 @@ class _ScopedNormalizer:
         )
         frame_uses: list = []
         opaque_uses: list = []
+        pre_uses: list = []
+        # wild objects built only from values obtained at these operations
+        # (pre-escape-values-do-not-address-the-new-frame, docs 25.77)
+        pre_escape_objects = {
+            item: frozenset(key for _, key in rows) for item, rows in wild_definitions.items()
+            if rows and not any(atom in ineligible_atoms for atom, _ in rows)}
         # the stack escapes once for this normalization (docs 25.31 B0-4)
         escape_memo = EscapeMemo(effect_unit, observation, context, address_spaces)
         private_writes = private_frame_writes(
@@ -2029,6 +2056,7 @@ class _ScopedNormalizer:
                 no_kill_writers=frozenset(key for key, conditions in _uncertain.items() if conditions is None),
                 uses=frame_uses, separations=separations, escape_memo=escape_memo,
                 read_separations=_forward_memory_plan,
+                pre_escape_objects=pre_escape_objects, pre_uses=pre_uses,
             )
             dependencies = base.copy()
             phase_count("fixpoint_rounds", 1)   # (K2 sizes: a graph copy per round, docs 25.31)
@@ -2182,6 +2210,8 @@ class _ScopedNormalizer:
             assumes_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
             assumes_entry_values_not_frame=any(frame_uses),
             assumes_opaque_callees_leave_no_stack_addresses=any(opaque_uses),
+            assumes_pre_escape_values_not_frame=any(pre_uses),
+            pre_escape_definitions=tuple(sorted(frozenset().union(*pre_uses))),
             call_below_bounds=below_bounds,
             assumes_readonly_image_constant=readonly_image is not None,
             assumes_import_slots_hold_exports=_import_slots_used(memory_ssa),
@@ -2228,6 +2258,7 @@ class _ScopedNormalizer:
                 kept_memory=tuple(sorted((key, spans) for key, (spans, _) in kept_memory.items())),
                 below_bounds=below_bounds, entry_values_not_frame=ENTRY_VALUES_NOT_FRAME.get(),
                 opaque_no_stack_addresses=OPAQUE_NO_STACK_ADDRESSES.get(),
+                pre_escape_values_not_frame=PRE_ESCAPE_NOT_FRAME.get(),
                 read_separations=_forward_memory_plan),
             same_result_uses=tuple(
                 (row, pointer_rows[row][1], tuple(sorted(accessor_states[row.rsplit("~", 1)[0]][1])),

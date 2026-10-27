@@ -178,6 +178,7 @@ def _activation_call_provenance(generic, context, original: CallProvenance) -> C
 @analysis_entry
 def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry_values_not_frame=True,
                   assume_opaque_callees_leave_no_stack_addresses=True,
+                  assume_pre_escape_values_not_frame=True,
                   **options) -> dict[str, "AnalyzedFunction"]:
     """``_analyze_units`` (below) under the named assumption
     import-slots-hold-their-exports when ``assume_import_slots_hold_exports``
@@ -186,8 +187,9 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     entry-values-do-not-address-the-new-frame as ``assume_entry_values_not_frame``
     (``may_alias.ENTRY_VALUES_NOT_FRAME``, reset after the run), and
     opaque-callees-leave-no-stack-addresses likewise
-    (``may_alias.OPAQUE_NO_STACK_ADDRESSES``)."""
-    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES
+    (``may_alias.OPAQUE_NO_STACK_ADDRESSES``), and
+    pre-escape-values-do-not-address-the-new-frame (``may_alias.PRE_ESCAPE_NOT_FRAME``)."""
+    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
     from .relative_memory import IMPORT_SLOTS, ImportSlots, reset_index_diagnostics
 
     reset_index_diagnostics()
@@ -195,6 +197,7 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     token = IMPORT_SLOTS.set(ImportSlots(image_info) if assume_import_slots_hold_exports and image_info else None)
     frame = ENTRY_VALUES_NOT_FRAME.set(bool(assume_entry_values_not_frame))
     opaque = OPAQUE_NO_STACK_ADDRESSES.set(bool(assume_opaque_callees_leave_no_stack_addresses))
+    pre = PRE_ESCAPE_NOT_FRAME.set(bool(assume_pre_escape_values_not_frame))
     # the address-expression evaluation (``relative_memory``) follows a chain
     # of dependent values recursively: room for long chains; a function deeper
     # still fails alone (``NormalizationFailureReason.ANALYSIS_DEPTH``)
@@ -204,6 +207,7 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
         return _analyze_units(units, **options)
     finally:
         sys.setrecursionlimit(previous)
+        PRE_ESCAPE_NOT_FRAME.reset(pre)
         OPAQUE_NO_STACK_ADDRESSES.reset(opaque)
         ENTRY_VALUES_NOT_FRAME.reset(frame)
         IMPORT_SLOTS.reset(token)
@@ -350,7 +354,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # which assumptions hold in this run, and so which models may be applied
     if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
         assume_globals_disjoint_from_stack = False
-    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES
+    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
     from .relative_memory import IMPORT_SLOTS
 
     if IMPORT_SLOTS.get() is not None:
@@ -372,6 +376,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         globals_disjoint=assume_globals_disjoint_from_stack, readonly_image=readonly_image is not None,
         direction_flag=assume_direction_flag_clear, entry_values_not_frame=ENTRY_VALUES_NOT_FRAME.get(),
         home_space=bool(private_frame_above), opaque_no_stack=OPAQUE_NO_STACK_ADDRESSES.get(),
+        pre_escape=PRE_ESCAPE_NOT_FRAME.get(),
         traps=assume_debug_break_traps_do_not_return,
         # (the switch alone: binding a model at an import slot needs the slot to
         # hold the export's address, not globals-disjoint-from-stack -- the
@@ -1030,7 +1035,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             imports = IMPORT_SLOTS.get()
             result.normalization_context = (ENTRY_VALUES_NOT_FRAME.get(), OPAQUE_NO_STACK_ADDRESSES.get(),
                                             imports, None if imports is None else imports.active,
-                                            IMAGE_BASE_TRACKING.get(), index_addresses(), DEFINITION_ATOMS)
+                                            IMAGE_BASE_TRACKING.get(), index_addresses(), DEFINITION_ATOMS,
+                                            PRE_ESCAPE_NOT_FRAME.get())
             result.lifetime_models = tuple((call, model_file, entry)
                                            for call, (model_file, entry) in externals[key].items()
                                            if call in proven and entry.frees and entry.same_object)

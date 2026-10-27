@@ -5839,3 +5839,30 @@ run만(`written`). 모든 대상 요약의 반환 칸 run은 자기 aliasing/unk
 - 로컬 게이트 단계(`.census6/check_ue_template.py`, `gate_par.sh`): 이 기계의 Core Bundle로 shipped UE 템플릿을 다시 만들어
   항목·출처(producer 제외 전부)를 비교(`UETEMPLATE OK|STALE|UNVERIFIABLE`, 실패면 종료 코드 1, 게이트에 "GATE FAILURE").
   e68cdc6(옛 템플릿)에서 STALE(소멸자·AppendChar), main에서 OK.
+
+### 25.77 탈출 전 값은 새 프레임을 가리키지 않는다 -- 기존 가정 확장 (2026-10-27~28, 사용자 결정)
+
+push 정의(§25.73) 뒤로 모든 CALL이 private 프레임에 쓰기를 하므로, 호출 결과·메모리에서 읽은 포인터(정의 atom, wild 객체)를
+통한 읽기는 사이의 CALL push를 writer로 가졌다. 사용자 결정(2026-10-27): `entry-values-do-not-address-the-new-frame`을 확장한 별도
+가정 `pre-escape-values-do-not-address-the-new-frame`(switch, 기본 켬, 기본 가정이 꺼지면 함께 꺼짐, `--no-assume-pre-escape-values-not-frame`).
+설계 검토 Astra 2차·Fable 1차 승인(`.census6/design_pre_escape.md`).
+
+- 대상: 연산이 자기 값으로 얻은 값만 -- LOAD 결과, 호출의 일반 결과 행(fresh/nonstack 포함). `~u`(값 없는 쓰기), push,
+  write-back 칸, same-object(realloc) 행, accessor 정체성 행은 아님(`relative_memory._own_value`); same-object 경로가 재사용한
+  atom은 이후 모든 패스에서 자격 상실(`ineligible_atoms`). 객체: 모든 atom이 자격 atom이거나 entry 같은 atom, 계수 1, image 0,
+  boundary·stack-derived 없음(`_pre_escape_rows`; `wild_definitions`: 객체 -> (atom, 연산) 또는 None, 패스 간 공유, settle 스냅샷).
+- 판정(`may_alias.derive_may_alias_reads`, origin 단계 뒤): 객체의 모든 정의 연산이 `escape.private_read`(입구에서 그 연산까지
+  어떤 경로에도 탈출 없음, 연산 포함)이면 wild에서 뺀다 -- private 쓰기(push·spill)가 닿지 않고 그 쓰기가 private 읽기에 닿지
+  않는다. 새 프레임만(“스택 아님” 아님, window 없음). opaque 호출을 탈출로 칠 때 거부되면 opaque 가정도 사용으로 보고.
+- 보고: `NormalizedFunction.assumes_pre_escape_values_not_frame` + `pre_escape_definitions`(결정된 객체의 정의 연산 키 -- 가정
+  해제(스택 주소 누출 요약)를 위한 고리; 사실별 선택 해제는 후속, Astra P2). forward 사실은 `_NORMALIZATION_ASSUMPTIONS`로 label을
+  requires에 담는다(forward 자신의 may_alias는 그대로 보수적). `function_summary._exit_crossings`, `_kept_call_memory`, forward
+  wild-load 검사는 원래 wild 집합 유지(보수적).
+- 스위치 배선: `PRE_ESCAPE_NOT_FRAME`(analyze_units, normalization_context 8원소, `_call_activation`, `_forward_memory` 서명·핀,
+  `_stack_preservation`, forward 입력, summary_engine 진입점, `assumptions.disabled`, linking, derive_models, run_dfbench 레지스트리).
+- 효과의 한계(Fable): push 뒤 다른 탈출(`lea rcx,[rsp+x]; call`)이 오면 그 push는 다시 닿는다 -- 탈출 없는 꼬리 구간에서만.
+  탈출 정밀화(다음 항목)가 넓힌다.
+- 테스트 `tests/intra/test_pre_escape_values.py`(out-parameter로 받은 포인터·호출 결과는 push와 분리, 끄면/기본 가정 끄면 push가
+  writer, 탈출 뒤 값·스택 주소를 받은 호출 결과·realloc 재사용·scaled index는 wild, run label 보고, 오라클: 보통 실행 silent 없음 /
+  호출자 프레임 주소를 돌려주는 callee는 오라클이 잡음). 가정 없는 의미를 보는 기존 테스트(fresh 기저만으로는 경계 증명이 아님 등)는
+  이 가정을 끄고 실행.

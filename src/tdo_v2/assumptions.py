@@ -138,6 +138,27 @@ REGISTRY: tuple[Assumption, ...] = (
         "assume_opaque_callees_leave_no_stack_addresses", "--no-assume-opaque-callees-no-stack-addresses",
         "TDO_V2_ASSUME_OPAQUE_CALLEES_NO_STACK_ADDRESSES"),
     Assumption(
+        "pre-escape-values-do-not-address-the-new-frame", "switch", True,
+        "Extends entry-values-do-not-address-the-new-frame: a value this function obtains -- loaded from "
+        "memory, or a call's plain result -- at an operation that no stack escape precedes on any path from "
+        "the entry (the operation included; a call that may observe or keep a stack-derived value is an escape) "
+        "holds no address of this function's new frame, and no byte read or written by an access whose "
+        "address is built from such values, entry values and constants alone -- coefficient-one sums with a "
+        "displacement, at any access width -- overlaps the new frame. Scaled, differenced and stack-mixed "
+        "addresses, values a call wrote unstated, write-back slots, same-object (realloc) and accessor "
+        "identity values are not covered. Not a claim about the caller's frame (no 'not stack'). Reported "
+        "with the operations whose values were taken (NormalizedFunction.pre_escape_definitions), the "
+        "discharge hook for stack-address leak summaries. Off (or the base assumption off): such values are "
+        "wild as before.",
+        "A pointer to a dead frame kept in memory (use-after-return) or in a callee's static state; saved "
+        "execution contexts (setjmp / jmp_buf, getcontext) and unwind handlers; stack bounds read from "
+        "TEB/TLS; a value another thread or a signal handler wrote from this frame's address; a callee "
+        "returning a stack-derived value its model or summary does not state.",
+        "may_alias.derive_may_alias_reads (PRE_ESCAPE_NOT_FRAME, set per run by "
+        "interprocedural.analyze_units), relative_memory._pre_escape_rows",
+        "assume_pre_escape_values_not_frame", "--no-assume-pre-escape-values-not-frame",
+        "TDO_V2_ASSUME_PRE_ESCAPE_VALUES_NOT_FRAME"),
+    Assumption(
         "win64-home-space-callee-private", "switch", True,
         "Under the Windows x64 convention the return-address slot and the 32-byte home space above a "
         "function's entry stack pointer belong to that function: no other base reaches them unless the "
@@ -317,7 +338,7 @@ MODEL_SWITCHABLE = ("allocator-results-are-fresh", "no-use-after-free", "no-use-
 def disabled(*, globals_disjoint: bool, readonly_image: bool, direction_flag: bool, entry_values_not_frame: bool,
              home_space: bool, opaque_no_stack: bool, traps: bool, import_slots: bool, same_result: bool,
              accessor_separate: bool, accessor_private_state: bool, registered_handlers: bool,
-             model_assumptions_off=()) -> set:
+             model_assumptions_off=(), pre_escape: bool = True) -> set:
     """The assumption labels a run has switched off: a model entry resting on
     one is not applied (``interprocedural``, ``linking``)."""
     return {name for name, on in (
@@ -327,6 +348,7 @@ def disabled(*, globals_disjoint: bool, readonly_image: bool, direction_flag: bo
         ("entry-values-do-not-address-the-new-frame", entry_values_not_frame),
         ("win64-home-space-callee-private", home_space and entry_values_not_frame),
         ("opaque-callees-leave-no-stack-addresses", opaque_no_stack),
+        ("pre-escape-values-do-not-address-the-new-frame", pre_escape and entry_values_not_frame),
         ("debug-break-traps-do-not-return", traps),
         ("import-slots-hold-their-exports", import_slots),
         ("same-result-functions", same_result),

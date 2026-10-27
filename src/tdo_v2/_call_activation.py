@@ -24,20 +24,22 @@ def _source_signature(item):
 @contextmanager
 def _policy(callee):
     import os
-    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES
+    from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
     from .relative_memory import IMPORT_SLOTS, IMAGE_BASE_TRACKING, index_addresses, DEFINITION_ATOMS
     from ._forward_memory import RefinementRefused
 
-    if os.environ.get("TDO_V2_FORWARD") != "1" or len(callee.normalization_context) != 7:
+    if os.environ.get("TDO_V2_FORWARD") != "1" or len(callee.normalization_context) != 8:
         raise RefinementRefused("activation lacks the original normalization policies")
-    frame, opaque, imports, active, image, indexed, atoms = callee.normalization_context
+    frame, opaque, imports, active, image, indexed, atoms, pre = callee.normalization_context
     inputs = callee.normalized.forward_inputs
-    if inputs is None or (inputs.entry_values_not_frame, inputs.opaque_no_stack_addresses) != (frame, opaque) \
+    if inputs is None or (inputs.entry_values_not_frame, inputs.opaque_no_stack_addresses,
+                          inputs.pre_escape_values_not_frame) != (frame, opaque, pre) \
             or index_addresses() != indexed or DEFINITION_ATOMS != atoms \
             or imports is not None and imports.active != active:
         raise RefinementRefused("activation normalization policies changed")
     tokens = [(ENTRY_VALUES_NOT_FRAME, ENTRY_VALUES_NOT_FRAME.set(frame)),
               (OPAQUE_NO_STACK_ADDRESSES, OPAQUE_NO_STACK_ADDRESSES.set(opaque)),
+              (PRE_ESCAPE_NOT_FRAME, PRE_ESCAPE_NOT_FRAME.set(pre)),
               (IMPORT_SLOTS, IMPORT_SLOTS.set(imports)), (IMAGE_BASE_TRACKING, IMAGE_BASE_TRACKING.set(image))]
     try:
         yield

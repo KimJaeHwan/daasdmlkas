@@ -184,6 +184,10 @@ ENTRY_VALUES_NOT_FRAME: ContextVar = ContextVar("ENTRY_VALUES_NOT_FRAME", defaul
 # run by ``interprocedural.analyze_units``; unset = on. Off: every opaque call
 # (no proven effect, not a TEST-ONLY assumed boundary) is a stack escape.
 OPAQUE_NO_STACK_ADDRESSES: ContextVar = ContextVar("OPAQUE_NO_STACK_ADDRESSES", default=True)
+# Named assumption pre-escape-values-do-not-address-the-new-frame (docs 25.77):
+# set per run by ``interprocedural.analyze_units``; unset = on. Off (or the
+# base assumption off): values loaded or returned are wild as before.
+PRE_ESCAPE_NOT_FRAME: ContextVar = ContextVar("PRE_ESCAPE_NOT_FRAME", default=True)
 
 
 class _Policy:
@@ -316,6 +320,8 @@ def derive_may_alias_reads(
     escape_memo: "EscapeMemo | None" = None,
     read_separations: tuple = (),
     nonstack_spans: frozenset = frozenset(),
+    pre_escape_objects: dict | None = None,
+    pre_uses: list | None = None,
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -337,7 +343,13 @@ def derive_may_alias_reads(
     ``opaque_calls``: calls with no proven effect (not TEST-ONLY assumed):
     escapes too when opaque-callees-leave-no-stack-addresses is off; when on,
     ``opaque_uses`` records whether a byte was decided private only because
-    they are not.
+    they are not. ``pre_escape_objects``: wild objects whose address is built
+    only from values obtained at the given operations (``relative_memory``
+    ``wild_definitions``) -- under pre-escape-values-do-not-address-the-new-frame
+    an object all of whose operations no escape precedes (the operation
+    included: ``_Escape.private_read``) is not wild: private frame writes do
+    not reach it, its writes do not reach private frame reads (docs 25.77);
+    ``pre_uses`` records the operations of the objects so decided.
     """
     if type(unit) is not ObservedEffectUnit:
         raise TypeError("may-alias analysis requires an exact effect unit")
@@ -381,6 +393,18 @@ def derive_may_alias_reads(
     origin = (frozenset(fresh_objects) | frozenset(nonstack_objects)) & frozenset(objects)
     checked = _bounded_nonstack_objects(unit, origin, nonstack_spans)
     wild = (frozenset(item for item in objects if item in wild_objects) | origin) - checked
+    if pre_escape_objects and policy.escape is not None and PRE_ESCAPE_NOT_FRAME.get():
+        # (values no escape precedes: no address of the new frame, docs 25.77)
+        decided = {item: pre_escape_objects[item] for item in wild if item in pre_escape_objects
+                   and all(policy.escape.private_read(key) for key in pre_escape_objects[item])}
+        if decided:
+            wild = wild - frozenset(decided)
+            without = policy.escape_without_opaque
+            if without is not None and not all(without.private_read(key) for keys in decided.values()
+                                               for key in keys):
+                policy.opaque_used = True   # (decided only because the opaque calls are no escapes)
+            if pre_uses is not None:
+                pre_uses.append(frozenset(key for keys in decided.values() for key in keys))
     policy.wild_objects = wild
     policy.fresh_objects = frozenset(item for item in objects if item in fresh_objects)
     policy.nonstack_objects = checked

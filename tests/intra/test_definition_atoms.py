@@ -182,10 +182,21 @@ def _assert_unbounded_access_debt(function, view, registers, writers):
         assert function.dependencies.node_for_key("op:" + writer) in view.result.reachable_nodes
 
 
+def _without_pre_escape(builder):
+    """As ``_analyze`` with pre-escape-values-do-not-address-the-new-frame off."""
+    from test_external_models import MODELS, _image
+    from tdo_v2.summary_store import load_external_models
+
+    return analyze_units(program_units(builder), image_info=_image(),
+                         external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"),
+                         assume_pre_escape_values_not_frame=False)
+
+
 def test_a_fresh_block_spilled_to_the_frame_keeps_extent_debt():
     """Fresh describes the returned base, not the range of its eight-byte
-    store. Its possible alias with the pointer's home slot stays explicit."""
-    results = _analyze(_spilled_heap_pointer())
+    store. Its possible alias with the pointer's home slot stays explicit
+    (without pre-escape-values-do-not-address-the-new-frame)."""
+    results = _without_pre_escape(_spilled_heap_pointer())
     function = results["1:1000"].normalized
     _assert_unbounded_access_debt(function, _reload(function), (RSI,),
                                  ("1:100c:1:STORE", "1:1014:0:STORE"))
@@ -203,8 +214,20 @@ def test_without_fresh_the_spilled_pointer_stays_unsure(monkeypatch):
         return replace(model, entries=tuple(replace(entry, fresh=()) for entry in model.entries))
 
     monkeypatch.setattr(store_module, "load_model_file", without_fresh)
-    results = _analyze(_spilled_heap_pointer())
+    results = _without_pre_escape(_spilled_heap_pointer())
     assert not _reload(results["1:1000"].normalized).is_complete
+    assert _check(results).silent == []
+
+
+def test_a_spilled_heap_pointer_under_pre_escape_values():
+    """With pre-escape-values-do-not-address-the-new-frame (default on) the
+    malloc result -- no escape before it -- addresses no byte of the new
+    frame: the reload of its home slot is exact; the label and the call are
+    reported; nothing is silent (docs 25.77)."""
+    results = _analyze(_spilled_heap_pointer())
+    function = results["1:1000"].normalized
+    assert _reload(function).is_complete
+    assert function.assumes_pre_escape_values_not_frame and function.pre_escape_definitions
     assert _check(results).silent == []
 
 
