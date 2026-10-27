@@ -1158,21 +1158,15 @@ class _Builder:
         key = record_node.key[len("op:"):]
         base, _, tag = key.partition("~")
         if tag == "push":
-            # the CALL's push (``normalize._push_row``): the return address,
-            # the constant its transient STORE wrote (``observed_call_state``)
-            projection = self._projection(base)
-            value = None
-            for transient in (() if projection is None else projection.transient_operation_keys):
-                found = self.index.operations.get(transient)
-                if found is not None and found[0].opcode == "STORE":
-                    value = found[0].inputs[2]
-            if value is None or value.kind is not VarnodeKindCode.CONSTANT:
+            # the CALL's push (``normalize._push_row``): its literal row, the
+            # return address
+            row = dict(self.normalized.pointer_rows).get(key)
+            if row is None or row[0] != "const" or len(row) != 4:
                 return self._cut(key, "return address")
-            constant = ("const", value.coordinate.byte_offset, value.byte_size)
+            constant = ("const", row[2], row[1])
             if constant in self.id_of:
                 return self.id_of[constant]
-            return self._new(constant, {"kind": "const", "value": value.coordinate.byte_offset,
-                                        "size": value.byte_size})["id"]
+            return self._new(constant, {"kind": "const", "value": row[2], "size": row[1]})["id"]
         if tag and base in self.proven:
             return self._call(node, key, base, tag, depth)
         if tag.startswith("e") and tag[1:].isdigit():

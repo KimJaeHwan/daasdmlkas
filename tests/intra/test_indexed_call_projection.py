@@ -381,17 +381,22 @@ def test_indirect_register_anchor_cannot_hide_return_address_overlay(monkeypatch
     references = [(evaluation, reference) for _, evaluation, reference in item.normalized.call_anchors
                   if type(reference) is tuple and reference[0] == "indexed"]
     projector = _final_projector(item.normalized, item.unit.observation)
-    if overlay:
+    view = slice_from(item.normalized, item.normalized.dependencies.node_for_key("op:" + reader))
+    if overlay and source == "base-pointer":
+        # the base is the pushed return address itself: the push's literal
+        # (``normalize._push_row``, an image address) places the write at
+        # exactly the demanded bytes -- bound, and complete
+        assert view.is_complete
+    elif overlay:
         assert not references or all(projector._anchored_expression(key, reference, 8) is None
                                      for key, reference in references)
-        view = slice_from(item.normalized, item.normalized.dependencies.node_for_key("op:" + reader))
         assert not view.is_complete
     else:
         assert references and all(projector._anchored_expression(key, reference, 8) is not None
                                   for key, reference in references)
     program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
     report = _oracle(item, program)
-    if not overlay:
+    if not overlay or source == "base-pointer":
         assert report.place_covered and report.through_calls
 
 

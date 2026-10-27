@@ -1388,16 +1388,26 @@ class _Projector:
         return value
 
     def _literal_row(self, definition, requested_span):
+        """A literal row's bytes: ("const", size, value) -- image-independent
+        bits -- or ("const", size, value, 1) -- an image address (the CALL's
+        push, ``normalize._push_row``): whole, it moves with the load base
+        (coefficient 1); a part of it is no image address of its own (None).
+        (Whatever ``IMAGE_BASE_TRACKING``: an image address is never a portable
+        number -- with tracking off nothing reads the coefficient but
+        ``definition_constants``, which then refuses it.)"""
         row = self._pointer_rows.get(definition.operation_key)
-        if row is None or row[0] != "const" or len(row) != 3 \
+        if row is None or row[0] != "const" or len(row) not in (3, 4) \
                 or type(row[1]) is not int or type(row[2]) is not int \
+                or (len(row) == 4 and row[3] != 1) \
                 or not 0 < row[1] <= 16 or row[1] != definition.span.size \
                 or not 0 <= row[2] < 1 << (8 * row[1]) \
                 or not definition.span.contains(requested_span) \
                 or self._translation_namespace.split(":")[1:2] != ["LE"]:
             return None
         shift = 8 * (requested_span.start - definition.span.start)
-        return _AddressExpression((), _unsigned_wrap(row[2] >> shift, requested_span.size), requested_span.size)
+        image = 0 if len(row) == 3 else 1 if requested_span == definition.span else None
+        return _AddressExpression((), _unsigned_wrap(row[2] >> shift, requested_span.size), requested_span.size,
+                                  image)
 
     def _same_result_atom(self, definition, requested_span, row) -> _AddressExpression | None:
         """An accessor call's result (same-result-functions, docs 25.20): the

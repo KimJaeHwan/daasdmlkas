@@ -1067,7 +1067,7 @@ def _call_access_request(call_key, evaluation_key, access, register_space, load_
     return evaluation_key, reference, offset, access.size, access.space_id
 
 
-def _push_row(call_key, transition, block_key, register_space, context):
+def _push_row(call_key, transition, block_key, register_space, context, return_address=None):
     """The CALL's own write: its observed push of the return address at
     [SP + delta, SP) (``observed_call_state``), which the persistent SSA
     omits with the CALL's transient operations -- put back as a definition
@@ -1075,8 +1075,11 @@ def _push_row(call_key, transition, block_key, register_space, context):
     the slot, the caller's reads below SP) reaches it by the ordinary rules.
     The value is the return address, a constant: the row reads only the
     stack pointer, for its address (as a STORE reads its pointer). The space
-    is the CALL's own -- the push stores there. (effect, anchored access) or
-    None (no push in the shape, or no stack pointer storage)."""
+    is the CALL's own -- the push stores there. (effect, anchored access,
+    literal row or None) or None (no push in the shape, or no stack pointer
+    storage). The literal row is ("const", size, return address, 1): the
+    value the observed push stores, an IMAGE address (coefficient 1, by
+    construction -- it moves with the load base; never a portable number)."""
     if transition is None or transition.displacement_delta >= 0 or register_space is None:
         return None
     base = transition.caller_base
@@ -1088,7 +1091,9 @@ def _push_row(call_key, transition, block_key, register_space, context):
     key, size = f"{call_key}~push", -transition.displacement_delta
     effect = ObservedEffect(key, EffectKind.COPY, reads=(storage,),
                             memory_write=UnresolvedMemoryAccess(None, size), block_key=block_key)
-    return effect, (key, sp, transition.displacement_delta, size, int(call_key.split(":", 1)[0], 16))
+    literal = None if return_address is None or not 0 <= return_address < 1 << (8 * size) \
+        else ("const", size, return_address, 1)
+    return effect, (key, sp, transition.displacement_delta, size, int(call_key.split(":", 1)[0], 16)), literal
 
 
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries, context,
@@ -1683,11 +1688,14 @@ class _ScopedNormalizer:
                                 (input_ordinal, constant_node)
                             )
                     pushed = None if block_key is None or operation_key not in call_transitions else _push_row(
-                        operation_key, call_transitions[operation_key], block_key, push_register_space, context)
+                        operation_key, call_transitions[operation_key], block_key, push_register_space, context,
+                        None if instruction.fallthrough is None else instruction.fallthrough.byte_offset)
                     if pushed is not None:
                         # every observed push the persistent SSA drops comes
                         # back as a definition, first: push, callee entry, CALL
-                        push, anchored = pushed
+                        push, anchored, literal = pushed
+                        if literal is not None:
+                            pointer_rows[push.operation_key] = literal
                         operation_nodes[push.operation_key] = dependencies.add_node(NodeRecord(
                             f"op:{push.operation_key}", NodeKind.OPERATION, _CALL_EFFECT_LABELS["push"]))
                         effects.append(push)

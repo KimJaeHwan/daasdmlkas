@@ -180,7 +180,8 @@ def test_conditional_literal_has_no_const_metadata_until_its_condition_is_resolv
     for conditional in (replace(effect, memory_runs=(replace(memory, conditions=(pair,)),)),
                         replace(effect, writer_conditions=(pair,))):
         normalized = FunctionNormalizer().normalize(item.unit, proven_call_effects={call: conditional})
-        assert not any(row[0] == "const" for _, row in normalized.pointer_rows)
+        # (the CALL's push carries its own literal, the return address: not the run's)
+        assert not any(row[0] == "const" for key, row in normalized.pointer_rows if not key.endswith("~push"))
         assert dict(normalized.proven_call_effects)[call] == conditional
         facts = {fact.operation: fact for fact in forward_facts(normalized, item.unit)}
         for name, offset in (("low", 0), ("high", 4)):

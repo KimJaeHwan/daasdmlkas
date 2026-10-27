@@ -319,3 +319,19 @@ def test_a_conditional_calls_push_depends_on_its_condition():
     found = slice_from(function, graph.node_for_key("op:" + reader))
     assert set(range(RSP, RSP + 8)) <= found.register_bytes   # (and the push reached: the read is complete)
     assert found.is_complete
+
+
+def test_the_return_address_read_by_the_callee_is_the_exact_image_address():
+    """The callee returns its return address (``[RSP]``); the caller reads
+    ``[RAX + 0x3000]``: with the push's literal (``normalize._push_row``,
+    an image address) that is exactly the bytes the caller stored RSI to --
+    complete, and not the pre-call 0x1400 / RDI (docs 25.73, item B)."""
+    analyzed, report = _checked((load(reg(RAX), reg(RSP)),))
+    assert report.checked and report.silent == [], report.silent[:4]
+    function = analyzed.normalized
+    (reader,) = [action.operation_key for action in function.memory_ssa.actions
+                 if action.operation_key.endswith(":1:LOAD")]
+    found = slice_from(function, function.dependencies.node_for_key("op:" + reader))
+    assert found.is_complete
+    assert set(range(RSI, RSI + 8)) <= found.register_bytes and not set(range(RDI, RDI + 8)) & found.register_bytes
+

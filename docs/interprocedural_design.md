@@ -5748,4 +5748,9 @@ push 정의가 답한다(callee 쓰기는 run이라 이 판정 자체가 거부�
 run만(`written`). 모든 대상 요약의 반환 칸 run은 자기 aliasing/unknown 저장·내부 호출의 결과(UNKNOWN, writer 없음)라 제외되고,
 `frame_or_slot`의 칸 절은 삭제(프레임 아래 절은 유지). 대상의 실제 반환 칸 쓰기는 이제 경쟁 대상: 한 대상이 칸과 [RDX]를 쓰고 다른
 대상이 칸을 쓰면 칸은 UNKNOWN(main은 keep-old run 둘을 행 순서로 적용해 한 값을 잃었음 — Fable).
+(9) 정리 3차 B 1단계: push 행이 자기 값을 가진다 — `("const", 크기, 다음 명령 주소, 1)`(이미지 계수 1, 구성으로). relative_memory
+`_literal_row`는 전체를 계수 1, 일부 바이트를 None으로; `definition_constants`(요약 상수)는 계수 0만 받으므로 내보내지 않고, forward는
+길이 3 행만 받아 TOP. 기록 계층의 일시 STORE 조회 삭제(상수 노드는 행의 값). 효과: callee가 돌려준 자기 반환주소로 caller가 전역을
+읽으면 정확·완전(main: 불완전). 2단계(후속): 활성화 시드의 반환 칸 — "push 뒤, callee 효과 전" 한 시점의 probe·bind, forward의
+이미지 계수 처리, 32비트 geometry.
 
