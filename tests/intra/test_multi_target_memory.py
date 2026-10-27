@@ -341,3 +341,35 @@ def test_pointer_facts_survive_only_equal_whole_alternatives(monkeypatch, differ
         assert all(run.value is None for run in effect.memory_runs)
     else:
         assert effect.memory_runs[0].value[0] == "same_reg"
+
+
+def test_both_targets_rewriting_their_return_slot_keep_both_values(monkeypatch):
+    """Each target overwrites its own return-address slot (thunk style): a
+    real write there, so it is a contested write like any other -- the
+    composed effect at the caller's push slot reads both values, none is
+    lost. (Not executed: the targets return through the rewritten slot.) A
+    run with no writer -- every target's UNKNOWN slot run crossed by its own
+    aliasing stores -- is no write of its own (docs 25.73, cleanup 3)."""
+    a = FunctionBuilder(entry=A).ins(store(reg(RSP), reg(RSI))).ret()
+    b = FunctionBuilder(entry=B).ins(store(reg(RSP), reg(RDI))).ret()
+    results, _ = _analyze(monkeypatch, _caller(), a, b)
+    effect = _effect(results)
+    (run,) = [run for run in effect.memory_runs if run.write.anchor is not None and run.write.anchor.start == RSP]
+    assert (run.write.displacement, run.write.size) == (0, 8) and not run.keeps_old
+    assert {RSI, RDI} <= {span.start for span in run.reads}
+
+
+def test_a_return_slot_rewrite_with_another_write_is_unknown_not_one_value(monkeypatch):
+    """Target A rewrites its return slot and writes [RDX]; target B rewrites
+    its return slot. No single merged run fits (two anchors), so the slot
+    writes are contested -> UNKNOWN there; formerly the slot clause left them
+    uncontested and the caller applied both keep-old runs in row order --
+    A's value lost (Fable, cleanup 3 review)."""
+    a = FunctionBuilder(entry=A).ins(store(reg(RSP), reg(RSI)), store(reg(RDX), reg(RBX))).ret()
+    b = FunctionBuilder(entry=B).ins(store(reg(RSP), reg(RDI))).ret()
+    results, _ = _analyze(monkeypatch, _caller(), a, b)
+    effect = _effect(results)
+    assert not any(run.write.anchor is not None and run.write.anchor.start == RSP for run in effect.memory_runs)
+    assert any(item.anchor is not None and item.anchor.start == RSP and item.displacement == 0 and item.size == 8
+               for item in effect.unknown_memory)
+

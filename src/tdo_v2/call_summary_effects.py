@@ -571,9 +571,11 @@ def derive_composed_call_effect(
       one shared physical entry-register anchor, one address space, no
       unexplained writes or alias conditions. They merge on anchored bytes,
       without renaming any member's objects. Frame bytes below
-      the callee's entry stack pointer and the return-address slot are left
-      as they are (``derive_proven_call_effect`` handles them before any
-      memory key).
+      the callee's entry stack pointer are left as they are
+      (``derive_proven_call_effect`` handles them before any memory key); a
+      run with no writer (UNKNOWN only by crossings: e.g. every member's
+      return-address slot) is no write of its own to contest. A member's
+      real write into its return slot is contested like any other.
     Writer conditions, sink demands, unknown writers, inner calls, dead exits
     and anchors are united; register deltas are kept where every returning
     member states the same delta. ``memory_sources``, when supplied, records
@@ -598,14 +600,23 @@ def derive_composed_call_effect(
                 conflicted_relations.add(object_id)
             merged_relations[object_id] = relation
 
-    def frame_or_slot(span, anchors) -> bool:
+    def frame(span, anchors) -> bool:
+        """The member's own frame: bytes below its entry stack pointer."""
         row = (anchors or {}).get(span.object_id)
         if row is None or row[0].object_id.kind is not StorageObjectKind.REGISTER_FILE \
                 or (row[0].start, row[0].size) not in stack:
             return False
-        bias = 1 << (8 * row[0].size)
-        push = -(stack_deltas or {}).get((row[0].start, row[0].size), 0)
-        return span.end <= bias or (push > 0 and bias <= span.start and span.end <= bias + push)
+        return span.end <= 1 << (8 * row[0].size)
+
+    def written(run, anchors) -> bool:
+        """A memory run that is a write of the member's: it has writers. A
+        writer-less run (UNKNOWN: bytes the member never wrote that a crossing
+        -- an aliasing store, an unknown-address store, an inner call -- may
+        have changed) is the consequence of effects composed elsewhere
+        (their own runs, ``unknown_writers``, ``inner_calls``): no write of
+        its own to contest -- e.g. every member's return-address slot."""
+        return run.span.object_id.kind not in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE) \
+            and run.kind is not SummaryKind.IDENTITY and bool(run.writers) and not frame(run.span, anchors)
 
     def space_of(span, anchors):
         if span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
@@ -621,11 +632,8 @@ def derive_composed_call_effect(
     for index, (summary, anchors) in enumerate(members):
         for exit_summary in summary.exits:
             for run in exit_summary.runs:
-                kind = run.span.object_id.kind
-                if kind in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE) \
-                        or run.kind is SummaryKind.IDENTITY or frame_or_slot(run.span, anchors):
-                    continue
-                writers.setdefault(space_of(run.span, anchors), {}).setdefault(index, set()).add(run.span.object_id)
+                if written(run, anchors):
+                    writers.setdefault(space_of(run.span, anchors), {}).setdefault(index, set()).add(run.span.object_id)
     contested = {
         space for space, by_member in writers.items()
         if len(by_member) > 1 and (len(set().union(*by_member.values())) > 1 or any(
@@ -652,9 +660,7 @@ def derive_composed_call_effect(
         for exit_summary in summary.exits:
             runs = []
             for run in exit_summary.runs:
-                if run.span.object_id.kind not in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE) \
-                        and run.kind is not SummaryKind.IDENTITY and not frame_or_slot(run.span, anchors) \
-                        and space_of(run.span, anchors) in contested:
+                if written(run, anchors) and space_of(run.span, anchors) in contested:
                     run = _replace(run, kind=SummaryKind.UNKNOWN, debts=(*run.debts, "uncertain:several-targets"),
                                    literal=None)
                 runs.append(run)

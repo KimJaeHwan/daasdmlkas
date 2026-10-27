@@ -5744,4 +5744,8 @@ push 정의가 답한다(callee 쓰기는 run이라 이 판정 자체가 거부�
 조용한 오류 0. `_allocation_memory`는 "할당 호출 동안 살아 있는 메모리"라는 다른 질문이라 칸을 그대로 센다.
 기록만: 다중 대상 `frame_or_slot`의 칸 제외는 모든 대상 요약의 "writer 없는 UNKNOWN" 칸 run(RET 뒤 SP 아래)을 경쟁 쓰기에서 빼는
 역할 — 그래프식 해법은 "writer 없는 run은 쓰기가 아니다"(별도 설계).
+(8) 정리 3차 A(설계 검토 batch 3): 다중 대상 합성은 "writer 없는 run은 쓰기가 아니다" — 경쟁 쓰기 수집과 강등 모두 writer가 있는
+run만(`written`). 모든 대상 요약의 반환 칸 run은 자기 aliasing/unknown 저장·내부 호출의 결과(UNKNOWN, writer 없음)라 제외되고,
+`frame_or_slot`의 칸 절은 삭제(프레임 아래 절은 유지). 대상의 실제 반환 칸 쓰기는 이제 경쟁 대상: 한 대상이 칸과 [RDX]를 쓰고 다른
+대상이 칸을 쓰면 칸은 UNKNOWN(main은 keep-old run 둘을 행 순서로 적용해 한 값을 잃었음 — Fable).
 
