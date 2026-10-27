@@ -219,6 +219,12 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     tracer = _CopyTracer(normalized, observation, context, operation_of, conditions_of)
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain,
                               writer_conditions, dead_keys)
+    from .normalize import _chi_shadow_on
+
+    if _chi_shadow_on():   # (a measurement only: docs 25.83 check (c))
+        from ._chi_shadow import compare_terminals
+
+        compare_terminals(normalized.memory_ssa.function_scope, crossed, dead_keys)
     inner_calls = crossed.pop("inner_calls", ())
     crossing_labels = crossed.pop("label_universe")
 

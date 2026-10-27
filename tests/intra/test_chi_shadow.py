@@ -19,14 +19,19 @@ T, FLAG = tmp(0x100), tmp(0x300, 1)
 def shadow(monkeypatch):
     monkeypatch.setenv("TDO_V2_CHI_SHADOW", "1")
     _chi_shadow.RESULTS.clear()
+    _chi_shadow.TERMINAL_MISMATCHES.clear()
     yield
     _chi_shadow.RESULTS.clear()
+    _chi_shadow.TERMINAL_MISMATCHES.clear()
 
 
 def _checked(builder):
     analyze_units(program_units(builder))
     assert _chi_shadow.RESULTS
     for scope, found in _chi_shadow.RESULTS.items():
+        assert found == [], found
+    assert _chi_shadow.TERMINAL_MISMATCHES   # (check (c) ran)
+    for scope, found in _chi_shadow.TERMINAL_MISMATCHES.items():
         assert found == [], found
 
 

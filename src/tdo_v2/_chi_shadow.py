@@ -37,15 +37,21 @@ _MEMORY_KINDS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_REL
 # function scope -> mismatches, "skipped", or an error text: the LAST pass of
 # each function checked (``TDO_V2_CHI_SHADOW`` set); read by tests and tools
 RESULTS: dict = {}
+# function scope -> {(terminal block, object): {offset: calls}} of the shadow's
+# exit states (nonempty sets only); TERMINAL_MISMATCHES: scope -> check (c)
+# against ``function_summary._exit_crossings`` (``compare_terminals``)
+TERMINALS: dict = {}
+TERMINAL_MISMATCHES: dict = {}
 # calls x connected spans above which a function is skipped; diagnostic work bound
 LIMIT = 200_000
 WORK = 20_000_000
 
 
 def record(scope, *args) -> None:
+    TERMINALS.pop(scope, None)
     try:
         with diagnostic(WORK):
-            RESULTS[scope] = check(*args)
+            RESULTS[scope] = check(*args, scope=scope)
     except DiagnosticExhausted:
         RESULTS[scope] = "exhausted"
     except Exception as error:   # (the shadow build itself failed: reported, never raised)
@@ -118,7 +124,7 @@ def _identity(definition) -> tuple:
 
 
 def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping=frozenset(),
-          public_rows=None, limit: int = 20):
+          public_rows=None, limit: int = 20, scope=None):
     """Mismatches (a)-(c), at most ``limit``; "skipped" above ``LIMIT``."""
     from .call_clobber import CallClobberRead, _EMPTY
     from .memory_ssa import _build_dense, _build_partition
@@ -247,4 +253,50 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
     if public_rows is not None and sorted(rows, key=lambda row: row.operation_key) != \
             sorted(public_rows, key=lambda row: row.operation_key):
         mismatches.append(("records", len(rows), len(public_rows)))
+    if scope is not None:
+        # (c) the calls crossed at each exit byte, for ``compare_terminals``
+        terminals: dict = {}
+        for state in shadow.observed_terminal_states:
+            pending = [state.root_node_id] if state.root_node_id is not None else []
+            while pending:
+                step()
+                node = shadow.state_nodes[pending.pop()]
+                pending.extend(item for item in (node.left_node_id, node.right_node_id) if item is not None)
+                for atom in shadow.atomic_spans[node.start_atom:node.stop_atom]:
+                    for offset in range(atom.start, atom.end):
+                        crossed, _ = shadow_closure(node.definition_ids, atom.object_id, offset)
+                        if crossed:
+                            terminals.setdefault((state.block_key, atom.object_id), {})[offset] = frozenset(crossed)
+        TERMINALS[scope] = terminals
     return mismatches[:limit]
+
+
+def compare_terminals(scope, crossed, dead_keys=frozenset(), limit: int = 20) -> None:
+    """Check (c): ``_exit_crossings``' "call:" labels per exit byte against
+    the shadow's (``TERMINALS``); kinds: "dead" (a call only on dead paths,
+    which ``_exit_crossings`` drops), "tail" (a tail jump's), "other"."""
+    shadow = TERMINALS.get(scope)
+    if shadow is None:
+        return
+    universe = crossed.get("label_universe")
+    found = []
+    keys = {key for key in crossed if type(key) is tuple} | set(shadow)
+    for key in sorted(keys, key=repr):
+        block, object_id = key
+        if object_id.kind is StorageObjectKind.FUNCTION_UNIQUE:
+            continue
+        production = crossed.get(key, {})
+        mine = shadow.get(key, {})
+        for offset in sorted(set(production) | set(mine)):
+            labels = universe.decode(production.get(offset, 0)) if universe is not None else []
+            expected = {label[len("call:"):] for label in labels if label.startswith("call:")}
+            got = set(mine.get(offset, ()))
+            if expected != got:
+                extra = got ^ expected
+                kind = "dead" if any(item.split("~", 1)[0] in dead_keys for item in extra) else \
+                    "tail" if any(not item.endswith(("CALL", "CALLIND", "CALLOTHER")) for item in extra) else "other"
+                found.append((block, object_id.kind.value, offset, kind, sorted(expected), sorted(got)))
+                if len(found) >= limit:
+                    TERMINAL_MISMATCHES[scope] = found
+                    return
+    TERMINAL_MISMATCHES[scope] = found
