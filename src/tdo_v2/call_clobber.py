@@ -182,22 +182,10 @@ def derive_call_clobber_reads(
     if type(context) is not StorageResolutionContext:
         raise TypeError("call-clobber analysis requires an exact storage context")
 
-    opcodes = {
-        _operation_key(instruction.address, ordinal, operation.opcode): operation.opcode
-        for instruction in observation.instructions
-        for ordinal, operation in enumerate(instruction.operations)
-    }
-    calls = {
-        key for key, opcode in opcodes.items() if opcode in _CALL_OPCODES
-    } - set(assumed_calls)
+    calls, preserved = clobber_inputs(observation, context, assumed_calls, proven_preserved,
+                                      unrestored_stack_calls)
     if not calls:
         return ()
-    preserved = _preserved_stack_pointers(observation, context)
-    for key in unrestored_stack_calls:
-        preserved.pop(key, None)
-    for key, spans in (proven_preserved or {}).items():
-        # bytes a callee summary proves unchanged (or rewrites just before the call)
-        preserved[key] = tuple(preserved.get(key, ())) + tuple(spans)
     rows = run_dataflow(
         "call-clobber", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
         unit, calls, preserved, frozenset(memory_keeping) & calls,
@@ -207,6 +195,28 @@ def derive_call_clobber_reads(
         phase_count("cc_rows", len(rows))
         phase_count("cc_intervening_calls", sum(len(row.intervening_calls) for row in rows))
     return rows
+
+
+def clobber_inputs(observation, context, assumed_calls=frozenset(), proven_preserved=None,
+                   unrestored_stack_calls=frozenset()) -> tuple:
+    """(the clobbering call keys, call key -> the spans it leaves unchanged):
+    the inputs of ``derive_call_clobber_reads`` -- shared with the shadow chi
+    check (``_chi_shadow``) so both see one exemption contract."""
+    opcodes = {
+        _operation_key(instruction.address, ordinal, operation.opcode): operation.opcode
+        for instruction in observation.instructions
+        for ordinal, operation in enumerate(instruction.operations)
+    }
+    calls = {
+        key for key, opcode in opcodes.items() if opcode in _CALL_OPCODES
+    } - set(assumed_calls)
+    preserved = _preserved_stack_pointers(observation, context)
+    for key in unrestored_stack_calls:
+        preserved.pop(key, None)
+    for key, spans in (proven_preserved or {}).items():
+        # bytes a callee summary proves unchanged (or rewrites just before the call)
+        preserved[key] = tuple(preserved.get(key, ())) + tuple(spans)
+    return frozenset(calls), preserved
 
 
 DEFAULT_ENGINE = "sparse"  # verified identical to "dense" (docs section 14)

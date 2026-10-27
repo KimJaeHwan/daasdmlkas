@@ -2018,17 +2018,25 @@ class _ScopedNormalizer:
             # keeps every memory byte this function tracks except its stack below the bound
             proven_preserved[key] = tuple(proven_preserved[key]) + _memory_spans_except_below(
                 effect_unit, object_id, bound)
+        memory_keeping = frozenset(
+            key for key, row in proven_call_effects.items()
+            if row.preserves_memory and not row.clobbers_below
+        )
+        unrestored = frozenset(key for key, row in proven_call_effects.items() if not row.restores_stack)
         call_clobber_reads = derive_call_clobber_reads(
             effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects),
-            proven_preserved=proven_preserved,
-            memory_keeping=frozenset(
-                key for key, row in proven_call_effects.items()
-                if row.preserves_memory and not row.clobbers_below
-            ),
-            unrestored_stack_calls=frozenset(
-                key for key, row in proven_call_effects.items() if not row.restores_stack
-            ),
+            proven_preserved=proven_preserved, memory_keeping=memory_keeping,
+            unrestored_stack_calls=unrestored,
         )
+        if __import__("os").environ.get("TDO_V2_CHI_SHADOW"):
+            # opaque calls as definitions, checked against this run (never used: docs 25.83)
+            from . import _chi_shadow
+            from .call_clobber import clobber_inputs
+
+            calls, clobber_preserved = clobber_inputs(observation, context, frozenset(assumed_call_effects),
+                                                      proven_preserved, unrestored)
+            _chi_shadow.record(memory_ssa.function_scope, memory_unit, memory_ssa, effect_unit, calls,
+                               clobber_preserved, memory_keeping & calls)
         call_clobber_reads = subtract_copy_clobbers(_forward_memory_plan, call_clobber_reads)
         call_clobber_nodes = _materialize_call_clobber_debt(
             dependencies,
