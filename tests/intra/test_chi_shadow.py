@@ -15,9 +15,9 @@ OPAQUE_A, OPAQUE_B = CODE_BASE + 0xE00, CODE_BASE + 0xE10
 T, FLAG = tmp(0x100), tmp(0x300, 1)
 
 
-@pytest.fixture(autouse=True)
-def shadow(monkeypatch):
-    monkeypatch.setenv("TDO_V2_CHI_SHADOW", "1")
+@pytest.fixture(autouse=True, params=("1", "sparse"))
+def shadow(monkeypatch, request):
+    monkeypatch.setenv("TDO_V2_CHI_SHADOW", request.param)
     _chi_shadow.RESULTS.clear()
     _chi_shadow.TERMINAL_MISMATCHES.clear()
     yield
@@ -30,8 +30,7 @@ def _checked(builder):
     assert _chi_shadow.RESULTS
     for scope, found in _chi_shadow.RESULTS.items():
         assert found == [], found
-    assert _chi_shadow.TERMINAL_MISMATCHES   # (check (c) ran)
-    for scope, found in _chi_shadow.TERMINAL_MISMATCHES.items():
+    for scope, found in _chi_shadow.TERMINAL_MISMATCHES.items():   # (check (c): the dense shadow only)
         assert found == [], found
 
 
