@@ -512,7 +512,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             tail = _is_tail(call_key)
             if tail and len(program_stack) != 1:
                 return None  # no single stack pointer to compose through
-            return derive_proven_call_effect(
+            return _without_disabled_windows(derive_proven_call_effect(
                 summary, callee or calls[key][call_key], register_object, register_limit,
                 excluded=tuple(program_stack) if tail else tuple(stack_pointers.get(call_key, ())),
                 anchors=anchors,
@@ -520,7 +520,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 tail=tail,
                 failed_conditions=frozenset(failed),
                 rejections=rejections,
-            )
+            ), disabled)
 
         def composed_effect(key, call_key, members, failed=(), memory_sources=None):
             """The effect of a call of ``key`` reaching one of ``members``
@@ -528,13 +528,13 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             register_object, register_limit, stack_pointers, shapes = site(key)
             if register_object is None or _is_tail(call_key):
                 return None
-            return derive_composed_call_effect(
+            return _without_disabled_windows(derive_composed_call_effect(
                 tuple((done.summary, done.anchors) for done in members),
                 "targets:" + "|".join(done.key for done in members), register_object, register_limit,
                 excluded=tuple(stack_pointers.get(call_key, ())), stack_deltas=shapes.get(call_key, {}),
                 failed_conditions=frozenset(failed),
                 memory_sources=memory_sources,
-            )
+            ), disabled)
 
         def boundaries_of(key):
             return (declared_boundaries or {}).get(key, {})
@@ -1772,6 +1772,22 @@ def _prove_extents(unit, normalized, proven, constants, rejected=None) -> bool:
             constants.setdefault(call, {})[slot] = value
             grown = True
     return grown
+
+
+def _without_disabled_windows(effect, disabled):
+    """``effect`` with every exported allocator window (docs 25.79 3b) resting
+    on a switched-off label dropped -- the value stays ("nonstack",)."""
+    if effect is None or not disabled:
+        return effect
+
+    def plain(run):
+        value = getattr(run, "value", None)
+        if value is not None and value[0] == "nonstack" and len(value) == 4 and set(value[3]) & set(disabled):
+            return replace(run, value=("nonstack",))
+        return run
+
+    return replace(effect, runs=tuple(plain(run) for run in effect.runs),
+                   memory_runs=tuple(plain(run) for run in effect.memory_runs))
 
 
 def _is_tail(call_key: str) -> bool:

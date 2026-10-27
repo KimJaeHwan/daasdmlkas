@@ -230,16 +230,17 @@ def test_a_join_with_a_null_path_has_no_window(tmp_path):
     assert not _last_read(analyzed, builder).result.is_complete
 
 
-def test_a_wrapper_exports_no_window(tmp_path):
-    """w() returns GetObj's result: the caller of w gets no window (this
-    function only, docs 25.75)."""
+def test_a_wrapper_exports_the_window(tmp_path):
+    """w() returns GetObj's result: since docs 25.79 3b its summary exports the
+    window (not nullable, resting on the declared label) and the caller of w
+    keeps [rbp + 8] apart from the push."""
     wrapper = FunctionBuilder(entry=WRAP).sub_rsp(0x28).call(GET).add_rsp(0x28).ret()
     builder = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RCX), reg(RBX))).call(WRAP)
                .ins(copy(reg(RBP), reg(RAX))).call(TOUCH)
                .ins(add(T, reg(RBP), const(8)), load(reg(R9), T)).add_rsp(0x28).ret())
     analyzed = _analyze(tmp_path, builder, others=(wrapper,))
-    assert not _last_read(analyzed, builder).result.is_complete
-    assert LABEL not in analyzed.inherited_assumptions
+    assert _last_read(analyzed, builder).result.is_complete
+    assert LABEL in analyzed.normalized.nonstack_labels
 
 
 def test_a_written_back_slot_reloaded_has_no_window(tmp_path):

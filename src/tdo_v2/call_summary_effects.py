@@ -793,6 +793,11 @@ def _compose_fixed_memory(effect, member_effects, memory_sources=None):
             value = runs[0].value if not keeps_old and all(
                 run.write == write and run.value == runs[0].value for run in runs
             ) else None
+            if value is None and runs and not keeps_old and all(
+                    run.write == write and run.value is not None and run.value[0] == "nonstack" for run in runs):
+                from .function_summary import join_nonstack
+
+                value = join_nonstack(run.value for run in runs)   # (windows joined, docs 25.79 3b)
             synthesized.append(ProvenMemoryRun(write, reads, loads, keeps_old, origins, value=value))
             if memory_sources is not None:
                 memory_sources[write] = alternatives
@@ -916,11 +921,15 @@ def _literal_value(sources, keeps_old, spans):
 
 def _pointer_value(sources, keeps_old, spans, size, anchored):
     """The caller-facing pointer value of one output run, or None."""
+    from .function_summary import join_nonstack
+
     markers = [item[1] for item in sources if type(item) is tuple and item[0] == "pointer"]
+    if len(markers) > 1 and all(item is not None and item[0] == "nonstack" for item in markers):
+        markers = [join_nonstack(markers)]   # (exits agreeing on "a block": windows joined, docs 25.79 3b)
     if len(markers) != 1 or markers[0] is None or keeps_old or len(spans) != 1 or spans[0].size != size:
         return None
     value = markers[0]
-    if value == ("nonstack",):
+    if value[0] == "nonstack":
         return value
     if value[0] == "offset":
         _, entry, delta = value

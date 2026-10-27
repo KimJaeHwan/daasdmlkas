@@ -167,6 +167,9 @@ class NormalizedFunction:
     # took (sorted keys: what a stack-leak proof must cover to discharge it)
     assumes_pre_escape_values_not_frame: bool = False
     pre_escape_definitions: tuple = ()
+    # allocator windows (docs 25.79): (fresh result row, bytes, never_null
+    # label | None) -- what a summary may export (docs 25.79 3b)
+    fresh_window_rows: tuple = ()
     # rep string sites made exact (``rep_strings``): (instruction key, count,
     # direction); the evaluator's overrides of their operations
     rep_blocks: tuple = ()
@@ -2243,6 +2246,7 @@ class _ScopedNormalizer:
             assumes_opaque_callees_leave_no_stack_addresses=any(opaque_uses),
             assumes_pre_escape_values_not_frame=any(pre_uses),
             pre_escape_definitions=tuple(sorted(frozenset().union(*pre_uses))),
+            fresh_window_rows=tuple(sorted((key, size, label) for key, (size, label) in fresh_windows.items())),
             call_below_bounds=below_bounds,
             assumes_readonly_image_constant=readonly_image is not None,
             assumes_import_slots_hold_exports=_import_slots_used(memory_ssa),

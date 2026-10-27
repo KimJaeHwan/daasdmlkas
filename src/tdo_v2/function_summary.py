@@ -88,7 +88,9 @@ class SummaryRun:
     conditions: tuple[tuple[ByteSpan, ByteSpan], ...] = ()
     # pointer value of a pointer-width COMPUTED run (``_pointer_values``):
     # ("nonstack",) -- an address of a block a call in the function allocated
-    # (never a stack address); ("same", entry span, null_is_fresh) -- the
+    # (never a stack address); ("nonstack", N, nullable, labels) -- such a
+    # block of N bytes (null too when nullable), resting on ``labels`` (docs
+    # 25.79 3b: the caller keeps its accesses inside apart from the stack); ("same", entry span, null_is_fresh) -- the
     # value the entry bytes held (a copy, or, with null_is_fresh, a realloc
     # of it: a null entry value then means a new block); ("offset", entry
     # register span, c) -- the value that register held at entry + c (c
@@ -1074,6 +1076,20 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
     frame = _new_frame(normalized, observation)
     pointer_rows = dict(getattr(normalized, "pointer_rows", ()))
     proven = dict(normalized.proven_call_effects)
+    # allocator windows (docs 25.79 3b): none from a function resizing any
+    # block -- a declared or lowered same-object row (an alias of a resized
+    # block would keep the old size)
+    resizes = bool(same_rows) or any(effect.same_object_registers for effect in proven.values()) or any(
+        row[0] in ("reg", "mem") and row[3] for row in pointer_rows.values())
+    windows = {} if resizes else {
+        row: (size, label is None, tuple(sorted({"allocator-results-are-fresh", *((label,) if label else ())})))
+        for row, size, label in getattr(normalized, "fresh_window_rows", ())}
+    if not resizes:
+        for row, found in pointer_rows.items():
+            if found[0] == "nonstack" and len(found) == 3:      # (result_nonstack, docs 25.75)
+                windows.setdefault(row, (found[1], False, (found[2],)))
+            elif found[0] == "nonstack" and len(found) == 4:    # (a callee's exported window)
+                windows.setdefault(row, found[1:])
 
     def nested_same(row):
         """A callee run's ("same_reg" / "same_mem") value composed with this
@@ -1099,7 +1115,10 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
         if effect is None or not index.isdigit():
             return False
         items = (*effect.runs, *effect.memory_runs)
-        return int(index) < len(items) and getattr(items[int(index)], "value", None) == ("nonstack",)
+        if int(index) >= len(items):
+            return False
+        value = getattr(items[int(index)], "value", None)
+        return value is not None and value[0] == "nonstack"
 
     def value_of(origin, active=frozenset()):
         """``active``: the call rows being composed on this path -- a row
@@ -1116,6 +1135,8 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
                 return None
             if len(values) == 1:
                 return values.pop()
+            if all(value[0] == "nonstack" for value in values):
+                return join_nonstack(values)
             spans = {value[1] for value in values if value[0] == "same"}
             if len(spans) == 1 and all(value[0] == "same" for value in values):
                 return ("same", spans.pop(), True)
@@ -1127,6 +1148,8 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
                 # no stack pointer identified: any relative object may be the stack)
                 return None
             return ("same", item, False)
+        if item in windows:
+            return ("nonstack", *windows[item])
         if item in fresh_rows or nested_nonstack(item):
             return ("nonstack",)
         if item in active:
@@ -1140,7 +1163,7 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
                 return None
             if found[0] == "same":
                 return ("same", found[1], True)
-            return found
+            return found[:1] if found[0] == "nonstack" else found   # (a resized block: no window)
         inner, flag = nested_same(item)
         if inner is not None:
             # a callee's same-object value of what this function passed: the
@@ -1151,7 +1174,7 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
                 return None
             if found[0] == "same":
                 return ("same", found[1], found[2] or flag)
-            return found
+            return found[:1] if found[0] == "nonstack" else found   # (a resized block: no window)
         return None
 
     result = []
@@ -1171,6 +1194,8 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
                     value = value_of(origins.pop())
                 elif None not in origins:  # several reaching definitions: a join
                     value = value_of(("join", frozenset(origins)))
+                if value is not None and value[0] == "nonstack" and run.kind is not SummaryKind.COMPUTED:
+                    value = ("nonstack",)   # (windows on computed runs only: docs 25.79 3b)
             runs.append(_replace(run, value=value) if value is not None else run)
         result.append(ExitSummary(exit_summary.block_key, tuple(runs)))
     return result
@@ -1212,6 +1237,17 @@ def _offset_values(normalized, observation, exits) -> list:
             runs.append(run)
         result.append(ExitSummary(exit_summary.block_key, tuple(runs)))
     return result
+
+
+def join_nonstack(values) -> tuple:
+    """Nonstack values of several paths or exits as one (docs 25.79 3b): all
+    windowed -- the smallest window, nullable if any is, every label; any
+    windowless -- ("nonstack",)."""
+    values = list(values)
+    if not values or any(len(value) != 4 for value in values):
+        return ("nonstack",)
+    return ("nonstack", min(value[1] for value in values), any(value[2] for value in values),
+            tuple(sorted({label for value in values for label in value[3]})))
 
 
 def _object_spans(atoms, start: int, stop: int):

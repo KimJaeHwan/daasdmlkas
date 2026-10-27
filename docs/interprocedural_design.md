@@ -5953,3 +5953,24 @@ nonstack 창과 같은 장치). 모델 계약 필드 + 그래프 사실, 새 가
 - R4/9e (설계만): 전체 프로그램에서 LOAD 해제 -- 해석 안 된 간접/opaque/계약 없는 모델 호출, tail exit, 불완전 요약을 잠재
   저장으로 세고, 죽은 프레임에 남은 스택 상주 오래된 포인터도(Astra P1) 포함해야 한다. 비스택 저장이 없다는 것만으로 LOAD를
   해제할 수 없다.
+
+### 25.81 할당기 창을 요약으로 내보내기 (2026-10-28, 밤 작업 3b)
+
+§25.79(3a)의 창을 함수 경계 너머로. 설계 검토 Astra 2차·Fable 2차 승인(`.census6/design_alloc_extent.md` "3b").
+- 요약 값 `("nonstack", N, nullable, labels)`: 포인터 폭 COMPUTED run의 모든 종단 정의가 정확한 복사로 창 있는 출처 하나에
+  닿을 때 -- (a) 이 함수의 할당 결과 행(3a `fresh_window_rows`), (b) callee가 이미 내보낸 창(호출자 쪽 4필드 pointer row에서
+  읽음: opaque 행은 값이 없고 라벨은 걸러진 상태), (c) `result_nonstack` 3필드 행(§25.75; nullable 아님). join/여러 exit:
+  N 최소, nullable 하나라도, 라벨 합집합; 창 없는 출처가 끼면 그냥 ("nonstack",). "fresh"는 절대 내보내지 않음.
+- 크기 재조정(realloc류, 선언 또는 lowered `null_is_fresh` 행)이 하나라도 있는 함수는 창을 내보내지 않음(별칭 경유 재조정 --
+  Astra); realloc 통과 값은 창을 버림; COMPUTED가 아닌 run(alias만 지난 UNKNOWN)에는 창 없음.
+- 호출자: 4필드 "nonstack" pointer row -> 창 + `_allocator_atoms`; nullable이면 `_guarded_atoms`(3a의 null 검사 경로). 호출자
+  쪽 join 규칙(가드 필요한 후보가 끼면 창 없음)은 그대로.
+- 끄기: 요약/조합/템플릿 경로 모두 `interprocedural._without_disabled_windows` -- 라벨이 꺼진 창은 ("nonstack",)으로
+  (never_null 라벨이 꺼지면 내보낸 창 전체가 없어진다 -- 3a의 지역 창은 "가드 필요"로 남는 것과 다름, 의도된 비대칭; 템플릿은
+  꺼진 가정에 기대면 그 자체가 거부되므로 이 필터는 그 아래의 방어선). 조합(간접 호출 대상 여럿) 메모리 run도 같은 join.
+  선언된 same_object_as(lowering 여부와 무관)가 있는 함수도 창을 내보내지 않음(Fable).
+- 템플릿: TEMPLATE_VERSION 5 (N은 run 폭 기준 0 < N < 2^(8w-1), nullable bool, labels는 비어 있지 않은 정렬된 문자열 목록);
+  ENGINE_SEMANTICS_VERSION 24, UE 템플릿 재도출. opaque callee 안의 재조정은 보이지 않음 -- no-use-of-old-pointer-after-
+  realloc 가정에 기댐(Fable).
+- 테스트 `tests/intra/test_allocator_export.py`(감싼 함수 + 호출자 null 검사/없음, never_null, 창 밖/복사 아님, 두 exit 최소,
+  재조정 함수, 중첩 감싸기, 라벨 끄기, 저장된 요약의 라벨 끄기, 템플릿 왕복과 거부; 핵심 부분 mutation 확인).

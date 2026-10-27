@@ -203,7 +203,8 @@ def test_nonstack_summary_result_does_not_make_its_offset_addresses_nonstack(mod
     bodies, points = _case(wrapper=True)
     item, program = _analyze(bodies, models)
     (effect,) = [effect for _, effect in item.normalized.proven_call_effects]
-    assert any(run.value == ("nonstack",) for run in effect.runs)
+    # (a window of the allocation's size since docs 25.79 3b: the offset access lies outside it)
+    assert any(run.value is not None and run.value[0] == "nonstack" for run in effect.runs)
     report = check_program(item.normalized, item.unit.observation, program, seeds=range(4),
                            register_pools=_pools, havoc_calls=(REG, RSP, 8),
                            externals={(1, address): name for name, address in THUNKS.items()})

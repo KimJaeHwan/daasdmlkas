@@ -77,8 +77,8 @@
   }
  },
  "versions": {
-  "semantics_version": 23,
+  "semantics_version": 24,
   "summary_version": 1,
-  "template_version": 4
+  "template_version": 5
  }
 }

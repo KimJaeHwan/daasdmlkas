@@ -48,8 +48,9 @@ from .function_summary import (
 from .indexed_address import IndexedAnchor
 from .span_geometry import ByteSpan, StorageObjectId, StorageObjectKind, StorageScopeId, StorageScopeKind
 
-TEMPLATE_VERSION = 4   # 2: stack_values_out; 3: exact scalar literals and entry indexed addresses;
-# 4: ("offset", entry register span, c) run values (docs 25.80 R1)
+TEMPLATE_VERSION = 5   # 2: stack_values_out; 3: exact scalar literals and entry indexed addresses;
+# 4: ("offset", entry register span, c) run values (docs 25.80 R1); 5: ("nonstack", N, nullable,
+# labels) allocator windows (docs 25.79 3b)
 # bumped on any change of what a summary means: normalization, alias
 # reasoning, constant evaluation, effect derivation (not only its fields)
 # 2: stack-mixed objects wild (docs 25.7); index addresses, index objects
@@ -99,7 +100,8 @@ TEMPLATE_VERSION = 4   # 2: stack_values_out; 3: exact scalar literals and entry
 # results "entry register + c" are the caller's own expressions (docs 25.80).
 # (tests/intra/test_template_fingerprint.py fails when derived templates change
 # without a bump here: bump, re-derive models/derived, refresh the record)
-ENGINE_SEMANTICS_VERSION = 23
+# 24: summaries export allocator windows ("nonstack", N, nullable, labels; docs 25.79 3b).
+ENGINE_SEMANTICS_VERSION = 24
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
@@ -288,7 +290,9 @@ class _ObjectTable:
 
     def run(self, run):
         value = run.value
-        if value is not None and value != ("nonstack",):
+        if value is not None and value[0] == "nonstack" and len(value) == 4:
+            value = ["nonstack", value[1], value[2], list(value[3])]
+        elif value is not None and value != ("nonstack",):
             value = [value[0], self.span(value[1]), value[2]]
         elif value is not None:
             value = ["nonstack"]
@@ -383,6 +387,14 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
         value = raw["value"]
         if value == ["nonstack"]:
             value = ("nonstack",)
+        elif type(value) is list and len(value) == 4 and value[0] == "nonstack":
+            width = span(raw["span"]).size
+            labels = value[3]
+            if type(value[1]) is not int or not 0 < value[1] < 1 << (8 * width - 1) or type(value[2]) is not bool \
+                    or type(labels) is not list or not labels or any(type(item) is not str or not item for item in labels) \
+                    or labels != sorted(set(labels)):
+                raise TemplateError("run value")
+            value = ("nonstack", value[1], value[2], tuple(labels))
         elif value is not None and type(value) is list and len(value) == 3 and value[0] == "offset":
             entry = span(value[1])
             if type(value[2]) is not int or not 0 <= value[2] < 1 << (8 * entry.size) \

@@ -1482,7 +1482,7 @@ class _Projector:
             return None   # the slot's new value: a value of its own (``_definition_atom``)
         if row[0] == "nonstack":
             found = self._definition_atom(definition, requested_span, nonstack=True, eligible=True)
-            return found if len(row) == 1 else self._windowed(found, row[1:])
+            return found if len(row) == 1 else self._windowed(found, row[1:], definition.operation_key)
         if row[0] == "off":
             # the callee returned the caller's register value + c (docs 25.80 R1):
             # the caller's own expression -- no atom of the call's
@@ -1594,12 +1594,23 @@ class _Projector:
                 return None
         return frozenset(rows)
 
-    def _windowed(self, expression, window):
-        """``expression`` (one nonstack atom) with its ``result_nonstack``
-        window: (extent, label)."""
-        if expression is not None and expression is not _WAIT and len(expression.atoms) == 1:
+    def _windowed(self, expression, window, key=None):
+        """``expression`` (one nonstack atom) with its window: (extent, label)
+        -- ``result_nonstack`` (docs 25.75) -- or (bytes, nullable, labels) -- a
+        callee's exported allocator window (docs 25.79 3b): a nullable one
+        needs a null test of the call's row ``key`` like an allocation's own."""
+        if expression is None or expression is _WAIT or len(expression.atoms) != 1:
+            return expression
+        atom = expression.atoms[0][0]
+        if len(window) == 2:
             extent, label = window
-            self._nonstack_extent[expression.atoms[0][0]] = (extent, frozenset((label,)))
+            self._nonstack_extent[atom] = (extent, frozenset((label,)))
+        elif len(window) == 3 and key is not None:
+            extent, nullable, labels = window
+            self._nonstack_extent[atom] = (extent, frozenset(labels))
+            self._allocator_atoms.add(atom)
+            if nullable:
+                self._guarded_atoms[atom] = key
         return expression
 
     def _literal_row(self, definition, requested_span):
