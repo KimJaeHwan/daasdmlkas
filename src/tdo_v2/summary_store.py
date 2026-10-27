@@ -48,12 +48,11 @@ caller keeps them where it places them exactly -- ``normalize._kept_call_memory`
 to its import thunk, ends the paths through it.
 ``same_result`` (optional, per entry; docs 25.20, named assumption
 same-result-functions, off by default): ``{"result": slice, "inputs":
-[slices], "reads": [{base, disp, size}], "nonstack": bool}`` -- an accessor:
+[slices], "reads": [{base, disp, size}]}`` -- an accessor:
 within one activation of the caller, two calls with equal ``inputs`` values,
 the same read-slot address and a read-slot value of the same class, at the
 same accessor state, return the same bits in ``result`` (one of the entry's
-register writes), failure included; ``nonstack``: the result addresses no
-thread's stack. One read slot. ``"write_back": true``: the call may rewrite
+register writes), failure included. One read slot. ``"write_back": true``: the call may rewrite
 the slot with a value of the same class (a normalizing cache: an unresolved
 handle becomes the resolved pointer) -- the entry then has one memory row
 writing exactly the slot and loading it (its value rests on the old one).
@@ -61,6 +60,15 @@ writing exactly the slot and loading it (its value rests on the old one).
 assumption accessor-result-separate, off by default): ``{"extent": N}`` --
 the bytes [result, result + N) never overlap the read slot of any call of
 the entry in the caller's activation.
+``result_nonstack`` (optional, per entry; docs 25.75): ``{"result": slice,
+"extent": N, "rests_on": "<this file id>:<id>"}`` -- every byte [result,
+result + N) of every result is in no thread's stack, null included: in the
+calling function an object addressed by exactly that result, every access of
+which lies inside the N bytes, is kept apart from the stack (its private frame
+and pushes included, ``may_alias`` nonstack windows). The claim rests on the
+declared assumption ``rests_on`` -- reported where a window is made,
+switched off by its label (the entry still applies, without the window).
+Only in the function making the call: summaries export no extent.
 ``omits_private_writes`` (optional, per entry; named assumption
 accessor-private-state, off by default): the entry leaves out writes to
 library-private state (locks, tracking tables, a resolver's caches) -- applied
@@ -182,8 +190,11 @@ class ModelEntry:
     # or a jump to it (``interprocedural._noreturn_jumps``), end there
     noreturn: bool = False
     # an accessor (docs 25.20): (result slice, input slices, the read slot's
-    # Access, nonstack) -- applied under same-result-functions only
+    # Access, write_back) -- applied under same-result-functions only
     same_result: tuple | None = None
+    # result_nonstack: (result slice, extent in bytes, the declared label it
+    # rests on), or None
+    nonstack_result: tuple | None = None
     # model ids ("<file>/<entry>", or "*") whose accessor state a call of this
     # entry leaves unchanged
     preserves_accessor_state: tuple[str, ...] = ()
@@ -454,7 +465,7 @@ def load_model_file(path: str | Path) -> ModelFile:
     entries = []
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
-                   "original_names", "internal", "assumptions", "noreturn", "same_result",
+                   "original_names", "internal", "assumptions", "noreturn", "same_result", "result_nonstack",
                    "preserves_accessor_state", "result_separate_from_reads", "omits_private_writes",
                    "callbacks", "callbacks_evidence", "frees"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
@@ -502,6 +513,7 @@ def load_model_file(path: str | Path) -> ModelFile:
         )
         unknown_memory = tuple(_access(row["write"], "memory write") for row in item["memory"] if "value" in row)
         same_result = _same_result(item, registers, fresh, same_object, register_loads, path)
+        nonstack_result = _nonstack_result(item, registers, fresh, same_object, file_id, declares, path)
         separate = item.get("result_separate_from_reads")
         if separate is not None and (same_result is None or type(separate) is not dict or set(separate) != {"extent"}
                                      or type(separate["extent"]) is not int
@@ -527,6 +539,7 @@ def load_model_file(path: str | Path) -> ModelFile:
                                   identity=source["sha256"][:12] if source["kind"] == "derived" else "",
                                   internal=item.get("internal", False), unknown_memory=unknown_memory,
                                   noreturn=item.get("noreturn", False), same_result=same_result,
+                                  nonstack_result=nonstack_result,
                                   preserves_accessor_state=tuple(preserving), register_loads=register_loads,
                                   separate_extent=None if separate is None else separate["extent"],
                                   callbacks_registered=registered, callbacks_invokes=invokes, frees=frees,
@@ -557,12 +570,12 @@ def _same_result(item, registers, fresh, same_object, register_loads, path):
     if raw is None:
         return None
     where = f"{path}: {item['name']}: same_result"
-    if type(raw) is not dict or not {"result", "inputs", "reads"} <= set(raw)             <= {"result", "inputs", "reads", "write_back", "nonstack"}:
-        raise ModelError(f"{where} has result, inputs, reads (write_back, nonstack)")
+    if type(raw) is not dict or not {"result", "inputs", "reads"} <= set(raw) \
+            <= {"result", "inputs", "reads", "write_back"}:
+        raise ModelError(f"{where} has result, inputs, reads (write_back); a result off the stack is "
+                         "result_nonstack, with its extent")
     if type(raw.get("write_back", False)) is not bool:
         raise ModelError(f"{where}: write_back must be true or false")
-    if type(raw.get("nonstack", False)) is not bool:
-        raise ModelError(f"{where}: nonstack must be true or false")
     if item.get("noreturn"):
         raise ModelError(f"{where}: a noreturn entry returns nothing")
     result = _slice(raw["result"], "same_result result")
@@ -592,7 +605,25 @@ def _same_result(item, registers, fresh, same_object, register_loads, path):
                 raw.get("write_back") and "value" not in row and write == read):
             raise ModelError(f"{where}: another memory row writes the slot's bytes "
                              "(only the one write-back row may)")
-    return result, inputs, read, raw.get("nonstack", False), raw.get("write_back", False)
+    return result, inputs, read, raw.get("write_back", False)
+
+
+def _nonstack_result(item, registers, fresh, same_object, file_id, declares, path):
+    """An entry's ``result_nonstack`` (see the docstring), or None."""
+    raw = item.get("result_nonstack")
+    if raw is None:
+        return None
+    where = f"{path}: {item['name']}: result_nonstack"
+    if type(raw) is not dict or set(raw) != {"result", "extent", "rests_on"} or type(raw["extent"]) is not int \
+            or not 0 < raw["extent"] <= MAX_MODEL_EXTENT:
+        raise ModelError(f"{where} is {{result, extent: bytes, rests_on}}")
+    result = _slice(raw["result"], "result_nonstack result")
+    if result not in [write for write, _ in registers] or result in fresh \
+            or result in [write for write, _ in same_object]:
+        raise ModelError(f"{where}: result must be one of the entry's plain register writes")
+    if raw["rests_on"] not in {label for label, _, _ in declares} or not raw["rests_on"].startswith(f"{file_id}:"):
+        raise ModelError(f"{where}: rests_on names an assumption this file declares (<file id>:<id>)")
+    return result, raw["extent"], raw["rests_on"]
 
 
 DERIVED_SOURCE_KEYS = {"kind", "library", "sha256", "image_base", "language", "engine", "parameters",
@@ -941,6 +972,8 @@ def model_effect(derive, model_file, entry, *args):
         else tuple(ByteSpan(args[0], start, size) for start, size in entry.observes),
         escapes_stack=False,       # declared: what it observes is what it may keep
         fresh_registers=tuple(ByteSpan(args[0], start, size) for start, size in entry.fresh),
+        nonstack_results=() if entry.nonstack_result is None else (
+            (ByteSpan(args[0], *entry.nonstack_result[0]), *entry.nonstack_result[1:]),),
         same_object_registers=tuple(
             (ByteSpan(args[0], *write), ByteSpan(args[0], *source)) for write, source in entry.same_object
         ),

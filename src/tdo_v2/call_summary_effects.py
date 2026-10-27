@@ -259,6 +259,11 @@ class ProvenCallEffect:
     # external model's ``fresh``, e.g. malloc): never an address of existing
     # memory, the stack included -- part of that model's named assumption
     fresh_registers: tuple[ByteSpan, ...] = ()
+    # (register span, extent, label): the register's value addresses an object
+    # whose first ``extent`` bytes are in no thread's stack (an external
+    # model's ``result_nonstack``, resting on its declared ``label``) -- used
+    # only in the calling function (``relative_memory`` nonstack windows)
+    nonstack_results: tuple[tuple[ByteSpan, int, str], ...] = ()
     # with ``observes_registers``: the registers it may use as an address or
     # keep (an external model's ``observes``); None: every register
     observed_registers: tuple[ByteSpan, ...] | None = None
@@ -284,8 +289,9 @@ class ProvenCallEffect:
     memory_runs_final: bool = False
     # an accessor model under same-result-functions (docs 25.20): (model id,
     # identity -- the entry's label and its file's digest --, result register
-    # span, input register spans, the read slot as an AnchoredSpan, nonstack,
-    # write_back, the result_separate_from_reads extent under
+    # span, input register spans, the read slot as an AnchoredSpan, the
+    # result's nonstack window -- (extent, label) from ``nonstack_results``, or
+    # None --, write_back, the result_separate_from_reads extent under
     # accessor-result-separate or None)
     same_result: tuple | None = None
     # model ids (or "*") whose accessor state this call leaves unchanged

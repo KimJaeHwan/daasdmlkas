@@ -41,10 +41,12 @@ any memory write executed before it. Both stay unresolved debt as well.
 ``fresh_objects`` / ``nonstack_objects`` record pointer origins, not the
 bounds of arbitrary offset accesses. Without extent evidence their accesses
 are wild. Only explicit ``nonstack_spans`` covering EVERY normalized access
-to an object authorize its nonstack exclusion. Currently only the existing
-import-static rule produces an exact one-byte window; allocator models
-provide no allocation extent. A probe adding an uncovered span revokes the
-exclusion. Same-object memory SSA remains byte-exact.
+to an object authorize its nonstack exclusion. The import-static rule
+produces an exact one-byte window, a model entry's ``result_nonstack`` its
+stated extent from the call's result (docs 25.75, in the calling function
+only); allocator models provide no allocation extent. A probe adding an
+uncovered span revokes the exclusion. Same-object memory SSA remains
+byte-exact.
 
 ``wild_objects`` (``relative_memory`` definition atoms: a call's result, a
 loaded pointer) are exact objects whose base may still point anywhere, the

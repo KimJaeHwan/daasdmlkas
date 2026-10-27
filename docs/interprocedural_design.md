@@ -5797,3 +5797,29 @@ run만(`written`). 모든 대상 요약의 반환 칸 run은 자기 aliasing/unk
   (e68cdc6, 이 변경 없음)이 만든 요약과 **세 항목 모두 같음** — 이 변경은 label만 바꾼다. 생성자는 이전 파일과도 같고,
   소멸자·AppendChar는 이전 파일과 다르다: §25.73 push 정의(`~push` 별칭 교차, push 칸 run) 등 이미 main에 있던 엔진
   변화가 semantics 번호를 올리지 않아 이전 템플릿이 그대로 쓰이고 있었다(이번 21로 함께 반영).
+
+### 25.75 accessor 결과의 크기 계약 — push와 분리 (2026-10-27, 정리 3차 D)
+
+문제: ue-dll-development accessor 구성에서 root TV2R007·TV2R008이 읽기 하나씩 불완전(§25.73 push 정의 이후).
+`ResolveHandle`(binding 모델) 결과는 정의 atom이라 그 객체는 wild이고, 같은 함수의 CALL push 세 개(반환주소
+0x180005245/23a/230)가 `[결과+0x30]` 읽기의 may-alias writer였다(operation record로 확인).
+
+원칙 순서(그래프 → 모델 계약 → 가정): 그래프 사실은 없다(본문이 잘린 bound 모델, 값은 메모리 포인터나 resolver
+결과). 그래서 **모델 계약 필드**: `"result_nonstack": {"result", "extent": N, "rests_on": "<파일 id>:<id>"}` —
+결과부터 N바이트는 어느 스레드의 스택에도 없다(null 포함, 계약문에 명시). 엔진에 이미 있는 장치
+(`may_alias._bounded_nonstack_objects`: 객체의 **모든** 접근이 window 안이면 스택과 분리)에 window를 하나 더 공급할 뿐이다
+(`relative_memory._nonstack_window`, 원점 `1 << 주소 비트`, image 0·계수 1·바이트 주소 공간만; image≠0 접근이 하나라도
+있으면 그 객체 window를 영구 거부). 음수 오프셋·N 이상·N을 넘는 접근 하나면 객체 전체가 wild 그대로.
+- 계약은 `rests_on`의 선언 가정에 기댄다(§25.74): window를 만든 함수의 `inherited_assumptions`로 보고, 그 label을 끄면
+  entry는 그대로 쓰되 window만 없다(`entry.inherited`가 아님 — 끄기가 entry 전체를 거부하지 않게).
+- 값과 함께 다닌다(정체성과 독립): 일반 정의 atom, same-result atom, 정체성을 못 만든 same-result 대체 경로 모두.
+  join은 모든 후보가 window atom일 때만 최소 extent. realloc류(same_object) 결과와 `null_is_fresh` reg 행은 window를
+  잃는다(새 정의 atom, wild). write-back 칸을 다시 읽은 값도 window 없음.
+- **이 함수 안에서만**: 요약은 extent를 내보내지 않는다(run 값은 `("nonstack",)` 그대로, 2-튜플은 pointer_rows에만) —
+  템플릿·call_summary_effects 변경 없음, semantics 번호 그대로.
+- 지움: `same_result.nonstack`(bool, extent 없음 — semantics 17 이후 효과가 없던 origin). tv2 모델 v3:
+  `result_nonstack {extent 0x400, rests_on tv2-tobjectptr:resolved-object-off-stack}` + 선언.
+- 결과: TV2R007·TV2R008 완전. 오라클(`measure_program --models --binding`, forward 0/1) missing 0·unexplained 0,
+  main과 같은 수치. 테스트 `tests/intra/test_result_nonstack.py`(window 안/밖·음수·경계 넘김, same-result 켬/끔, 정체성
+  실패 대체, label 끄기, realloc, 검증, 오라클: 힙 결과는 silent 없음 / 스택을 돌려주는 getter는 오라클이 잡음).
+- 설계 검토: Astra 2차·Fable 2차 승인(`.census6/design_d_accessor_extent.md`, 로컬).

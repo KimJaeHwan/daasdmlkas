@@ -109,7 +109,9 @@ REGISTRY: tuple[Assumption, ...] = (
         "no path to the access; writes: on no path after it). Of the bases kept out of the frame, this "
         "covers entry-value arithmetic (rdi - 16, rdi + rsi); constants and imports rest on "
         "globals-disjoint-from-stack / import-slots-hold-their-exports. Fresh/nonstack pointer origins "
-        "alone do not bound accesses and stay wild. Wild bases (loaded pointers, call results, index and "
+        "alone do not bound accesses and stay wild (a model's result_nonstack window, whose own declared "
+        "assumption is reported, keeps an object off the stack when every access lies inside). Wild bases "
+        "(loaded pointers, call results, index and "
         "stack-mixed addresses) are never kept out. Reported when the rule decided a byte private.",
         "A caller-supplied pointer offset or indexed below the caller's frame bottom (buffer underflow, "
         "alloca-adjacent arithmetic: an entry rdi = entry sp + 8 makes rdi - 16 a byte of the new frame); "
@@ -247,7 +249,8 @@ REGISTRY: tuple[Assumption, ...] = (
         "read-slot address and a read-slot value of the same class, at the same accessor state, return the "
         "same bits in its result register, failure (null) included. The accessor state changes only at calls "
         "not of a same-result entry and not declaring preserves_accessor_state for it; hidden state (handle "
-        "tables, TLS) changes nowhere else. With nonstack, the result addresses no thread's stack. Reported "
+        "tables, TLS) changes nowhere else (a result off the stack is the entry's result_nonstack, its own "
+        "declared assumption). Reported "
         "with the entry's label and every preserves_accessor_state claim a used call relied on.",
         "Transient failure (null, later success for the same key); destruction, handle reuse, hot reload, "
         "callbacks or reentrancy changing what a key denotes between the calls; a resolver depending on "

@@ -245,6 +245,7 @@ def project_function_relative_memory(
     pointer_rows: dict | None = None,
     nonstack_objects: set | None = None,
     nonstack_spans: set | None = None,
+    nonstack_labels: dict | None = None,
     address_metadata: dict | None = None,
     once_blocks: frozenset | None = None,
     settle_pending: bool = True,
@@ -345,6 +346,8 @@ def project_function_relative_memory(
         projector.nonstack_objects = nonstack_objects
     if nonstack_spans is not None:
         projector.nonstack_spans = nonstack_spans
+    if nonstack_labels is not None:
+        projector.nonstack_labels = nonstack_labels
     if address_metadata is not None:
         projector.address_metadata = address_metadata
     changed = False
@@ -990,10 +993,17 @@ class _Projector:
         # opaque atoms computed from a stack-derived value (transitively)
         self._stack_derived: set[int] = set()
         self.nonstack_objects: set = set()
-        # Only proven byte windows authorize nonstack alias exclusions.
-        # Currently the existing import-static rule proves exactly one byte;
-        # allocator models carry no allocation extent and yield no window.
+        # Only proven byte windows authorize nonstack alias exclusions: the
+        # import-static rule proves exactly one byte; a model's
+        # ``result_nonstack`` its extent (docs 25.75) -- allocator models carry
+        # no allocation extent and yield no window.
         self.nonstack_spans: set[ByteSpan] = set()
+        # object -> the declared labels its ``result_nonstack`` window rests on
+        # (reported); None: refused (an image-relative access on it)
+        self.nonstack_labels: dict = {}
+        # atom -> (extent, labels): a call result whose first ``extent`` bytes
+        # are in no thread's stack (``result_nonstack``; this function only)
+        self._nonstack_extent: dict[int, tuple] = {}
         self.wild_objects: set = set()
         # diagnostics (``origin_witnesses``): relative object -> (atom tuple,
         # space id) -- the object id is a function of exactly these, so entries
@@ -1280,7 +1290,28 @@ class _Projector:
             self.fresh_objects.add(object_id)
         if len(address.atoms) == 1 and address.atoms[0][1] == 1 and address.atoms[0][0] in self._nonstack_atoms:
             self.nonstack_objects.add(object_id)
+        if len(address.atoms) == 1 and address.atoms[0][1] == 1 and address.atoms[0][0] in self._nonstack_extent:
+            self._nonstack_window(object_id, address, space_id)
         return object_id
+
+    def _nonstack_window(self, object_id, address, space_id) -> None:
+        """The window [result, result + extent) of a ``result_nonstack``
+        object (``may_alias`` keeps it apart from the stack when every access
+        lies inside). An image-relative access on it (its real address moves
+        with the load base) refuses the window for good."""
+        extent, labels = self._nonstack_extent[address.atoms[0][0]]
+        space = self._spaces.get(space_id)
+        window = None if space is None or space.addressable_unit_bytes != 1 \
+            else ByteSpan(object_id, 1 << space.address_size_bits, extent)
+        if address.image != 0 or window is None:
+            if self.nonstack_labels.get(object_id) is not None:
+                self.nonstack_spans.difference_update(
+                    {span for span in self.nonstack_spans if span.object_id == object_id})
+            self.nonstack_labels[object_id] = None
+        elif object_id not in self.nonstack_labels or self.nonstack_labels[object_id] is not None:
+            # (two calls' atoms are two objects: one window, one extent per object)
+            self.nonstack_spans.add(window)
+            self.nonstack_labels[object_id] = labels | (self.nonstack_labels.get(object_id) or frozenset())
 
     def _definition_atom(self, definition, requested_span, fresh=False,
                          nonstack=False) -> _AddressExpression | None:
@@ -1335,11 +1366,17 @@ class _Projector:
         if row[0] == "const":
             return self._literal_row(definition, requested_span)
         if row[0] == "same_result":
-            return self._same_result_atom(definition, requested_span, row)
+            found = self._same_result_atom(definition, requested_span, row)
+            if found is None and row[8] is not None:
+                # no identity (e.g. the slot's address is not exact): still a
+                # value off the stack in its window
+                return self._windowed(self._definition_atom(definition, requested_span, nonstack=True), row[8])
+            return found
         if row[0] == "write_back":
             return None   # the slot's new value: a value of its own (``_definition_atom``)
         if row[0] == "nonstack":
-            return self._definition_atom(definition, requested_span, nonstack=True)
+            found = self._definition_atom(definition, requested_span, nonstack=True)
+            return found if len(row) == 1 else self._windowed(found, row[1:])
         if row[0] == "reg":
             _, reader, argument, null_is_fresh, unique = row
             value = self._expression_for_input(reader, argument)
@@ -1348,6 +1385,10 @@ class _Projector:
             value = self._expression_from_memory_read(reader, width)
         if value is None or value.byte_size != requested_span.size:
             return None
+        if null_is_fresh and any(atom in self._nonstack_extent for atom, _ in value.atoms):
+            # the same object through a realloc-like callee: not the window's
+            # bytes any more (a new block may be smaller) -- a value of its own
+            return self._definition_atom(definition, requested_span)
         if not value.atoms and null_is_fresh:
             _note_fact(self._ssa.function_scope, value)
         if not value.atoms and null_is_fresh and _unsigned_wrap(value.displacement, value.byte_size) == 0:
@@ -1355,6 +1396,14 @@ class _Projector:
             # call's only pointer value (two values could name one block)
             return self._definition_atom(definition, requested_span, nonstack=not unique, fresh=unique)
         return value
+
+    def _windowed(self, expression, window):
+        """``expression`` (one nonstack atom) with its ``result_nonstack``
+        window: (extent, label)."""
+        if expression is not None and expression is not _WAIT and len(expression.atoms) == 1:
+            extent, label = window
+            self._nonstack_extent[expression.atoms[0][0]] = (extent, frozenset((label,)))
+        return expression
 
     def _literal_row(self, definition, requested_span):
         """A literal row's bytes: ("const", size, value) -- image-independent
@@ -1395,8 +1444,9 @@ class _Projector:
         if self.used_reads is not None:
             self.used_reads.setdefault((("same_result", definition.operation_key, row[2]), requested_span.size),
                                        set()).add(atom)
-        if row[8]:
+        if row[8] is not None:
             self._nonstack_atoms.add(atom)
+            self._windowed(_AddressExpression(((atom, 1),), 0, requested_span.size), row[8])
         else:
             self._definition_atoms.add(atom)
         if getattr(self, "address_metadata", None) is not None:
@@ -1803,6 +1853,12 @@ class _Projector:
                 atom = _digest_ints(b"join-nonstack-v3", (*sources, _stable_storage_key(requested_span)))
                 self._nonstack_atoms.add(atom)
                 result = _AddressExpression(((atom, 1),), 0, requested_span.size)
+                windows = [self._nonstack_extent.get(item.atoms[0][0]) if item.atoms else None for item in candidates]
+                if all(window is not None for window in windows):
+                    # (a null or allocated block on a path: no window -- the
+                    # contract covers its own results only)
+                    self._nonstack_extent[atom] = (min(extent for extent, _ in windows),
+                                                   frozenset().union(*(labels for _, labels in windows)))
             if result is None and candidates and index_addresses() and definition.block_key in self._once_blocks \
                     and definition.span == requested_span and all(
                         item is not None and item.image == 0 and item.byte_size == requested_span.size
@@ -1814,7 +1870,11 @@ class _Projector:
                 and definition.operation_key in self._same_object and definition.span == requested_span:
             reader, argument = self._same_object[definition.operation_key]
             value = self._expression_for_input(reader, argument)
-            if value is not None and value.atoms and value.byte_size == requested_span.size:
+            if value is not None and value.atoms and value.byte_size == requested_span.size \
+                    and any(atom in self._nonstack_extent for atom, _ in value.atoms):
+                # realloc of a windowed result: not the window's bytes any more
+                result = self._definition_atom(definition, requested_span)
+            elif value is not None and value.atoms and value.byte_size == requested_span.size:
                 result = value
             elif value is not None and not value.atoms:
                 _note_fact(self._ssa.function_scope, value)

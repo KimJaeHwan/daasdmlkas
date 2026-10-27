@@ -175,6 +175,9 @@ class NormalizedFunction:
     wild_objects: frozenset = frozenset()
     # Proven nonstack BYTE windows; pointer-origin labels alone are not bounds.
     nonstack_spans: frozenset = frozenset()
+    # the declared labels the ``result_nonstack`` windows made here rest on
+    # (reported with the function, docs 25.75)
+    nonstack_labels: frozenset = frozenset()
     # diagnostics only (``origin_witnesses``): a summarized memory run's
     # ``~in<i>`` row -> how many of its leading reads are the run's value
     # (the rest: its destination address), and the relative objects' atom
@@ -1328,6 +1331,11 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
                 pointer_rows[key] = ("reg", stage_key, anchor_varnode(value[1]), value[2], unique)
             elif value[1] in load_keys:
                 pointer_rows[key] = ("mem", load_keys[value[1]], value[1].size, value[2], unique)
+        if pointer_rows is not None and kind == "register" and len(run.writes) == 1:
+            window = next(((extent, label) for span, extent, label in proven.nonstack_results
+                           if span == run.writes[0]), None)
+            if window is not None:   # (``result_nonstack``: this function only, docs 25.75)
+                pointer_rows[key] = ("nonstack", *window)
         if accessor is not None and accessor[0] == key:
             pointer_rows[key] = accessor[1]
         if accessor is not None and accessor[2] == key:
@@ -1644,6 +1652,7 @@ class _ScopedNormalizer:
             fresh_objects: set = set()
             nonstack_objects: set = set()
             nonstack_spans: set = set()
+            nonstack_labels: dict = {}
             pointer_rows: dict = {}
             value_inputs: dict = {}
             address_metadata: dict = {"objects": {}, "atoms": {}}
@@ -1847,6 +1856,7 @@ class _ScopedNormalizer:
                     pointer_rows=pointer_rows,
                     nonstack_objects=nonstack_objects,
                     nonstack_spans=nonstack_spans,
+                    nonstack_labels=nonstack_labels,
                     once_blocks=once_blocks,
                     settle_pending=settle,
                     address_metadata=address_metadata,
@@ -1866,11 +1876,13 @@ class _ScopedNormalizer:
                         settle, settled_at = False, (effect_unit, memory_unit, memory_binding, memory_ssa, pending,
                                                      {key: set(values) for key, values in used_reads.items()},
                                                      [set(wild_objects), set(fresh_objects),
-                                                      set(nonstack_objects), set(nonstack_spans)])
+                                                      set(nonstack_objects), set(nonstack_spans),
+                                                      dict(nonstack_labels)])
                         continue
                     if settled_at is not None and settled_at[4] - _pending_write_keys(effect_unit):
                         effect_unit, memory_unit, memory_binding, memory_ssa, _, used_reads, kept = settled_at
-                        for current, before in zip((wild_objects, fresh_objects, nonstack_objects, nonstack_spans), kept):
+                        for current, before in zip((wild_objects, fresh_objects, nonstack_objects, nonstack_spans,
+                                                    nonstack_labels), kept):
                             current.clear()
                             current.update(before)
                     break
@@ -2180,6 +2192,8 @@ class _ScopedNormalizer:
             private_frame_writes=private_writes,
             wild_objects=frozenset(wild_objects),
             nonstack_spans=frozenset(nonstack_spans),
+            nonstack_labels=frozenset(label for span in nonstack_spans
+                                      for label in nonstack_labels.get(span.object_id) or ()),
             fresh_rows=fresh_rows,
             same_object_rows=tuple(sorted(
                 ((row, reader, argument) for row, (reader, argument) in same_object_rows.items()),

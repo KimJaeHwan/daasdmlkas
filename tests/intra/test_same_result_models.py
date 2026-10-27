@@ -37,7 +37,7 @@ SLOT = {"base": [RCX, 8], "disp": 0, "size": 8}
 def _get(**changes):
     entry = {"name": "GetObj", "registers": [{"write": [RAX, 8], "from": [[RCX, 8]], "loads": [SLOT]}],
              "memory": [], **NO_CALLBACKS, "other_memory": "preserved", "observes": [[RCX, 8]],
-             "same_result": {"result": [RAX, 8], "inputs": [], "reads": [SLOT], "nonstack": True}}
+             "same_result": {"result": [RAX, 8], "inputs": [], "reads": [SLOT]}}
     entry.update(changes)
     return entry
 
@@ -159,7 +159,7 @@ def test_another_slot_address_is_another_key(tmp_path):
 
 def test_another_input_value_is_another_key(tmp_path):
     entries = [_get(registers=[{"write": [RAX, 8], "from": [[RCX, 8], [RDX, 8]], "loads": [SLOT]}],
-                    same_result={"result": [RAX, 8], "inputs": [[RDX, 8]], "reads": [SLOT], "nonstack": True}),
+                    same_result={"result": [RAX, 8], "inputs": [[RDX, 8]], "reads": [SLOT]}),
                *ENTRIES[1:]]
     for second_rdx, equal in ((reg(RDI), True), (reg(R12), False)):
         # rdx = rdi for the first call; rdi and r12 survive the calls
@@ -251,7 +251,7 @@ def test_without_nonstack_the_object_stays_wild(tmp_path):
     ({"same_result": {"result": [RAX, 8], "inputs": [], "reads": [SLOT, SLOT]}}, "two slots"),
     ({"same_result": {"result": [RAX, 8], "inputs": [], "reads": [SLOT], "nonstack": 1}}, "nonstack"),
     ({"preserves_accessor_state": ["GetObj"]}, "unqualified name"),
-    ({"same_result": {"result": [RAX, 8], "inputs": [[RDX, 8]], "reads": [SLOT], "nonstack": True}},
+    ({"same_result": {"result": [RAX, 8], "inputs": [[RDX, 8]], "reads": [SLOT]}},
      "input not read by the result row"),
     ({"registers": [{"write": [RAX, 8], "from": [[RCX, 8]]}]}, "slot not loaded by the result row"),
 ])
@@ -427,7 +427,7 @@ WRITE_BACK = {"write": SLOT, "from": [[RCX, 8]], "loads": [SLOT]}
 
 def _get_written_back(**changes):
     return _get(**{"memory": [WRITE_BACK], "same_result": {"result": [RAX, 8], "inputs": [], "reads": [SLOT],
-                                                           "nonstack": True, "write_back": True}, **changes})
+                                                           "write_back": True}, **changes})
 
 
 WRITTEN_BACK = [_get_written_back(), *ENTRIES[1:]]
@@ -542,7 +542,7 @@ def test_a_write_back_by_a_call_with_other_inputs_is_an_ordinary_write(tmp_path)
     entries = [_get_written_back(
         registers=[{"write": [RAX, 8], "from": [[RCX, 8], [RDX, 8]], "loads": [SLOT]}],
         memory=[{"write": SLOT, "from": [[RCX, 8], [RDX, 8]], "loads": [SLOT]}],
-        same_result={"result": [RAX, 8], "inputs": [[RDX, 8]], "reads": [SLOT], "nonstack": True,
+        same_result={"result": [RAX, 8], "inputs": [[RDX, 8]], "reads": [SLOT],
                      "write_back": True}), *ENTRIES[1:]]
     builder = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), reg(RCX)))
     for value, keep in ((RDI, RBP), (R12, RSI), (RDI, None)):

@@ -220,8 +220,8 @@ def test_an_object_on_an_opaque_atom_computed_from_the_stack_is_wild():
     stack, opaque = 11, 22
     stub = SimpleNamespace(
         _ssa=normalized.memory_ssa, _import_atoms=set(), _definition_atoms=set(), _fresh_atoms=set(),
-        _nonstack_atoms=set(), _boundary={}, wild_objects=set(), fresh_objects=set(), nonstack_objects=set(),
-        _stack_atoms=(stack, frozenset({stack}), None), _stack_derived={opaque})
+        _nonstack_atoms=set(), _nonstack_extent={}, _boundary={}, wild_objects=set(), fresh_objects=set(),
+        nonstack_objects=set(), _stack_atoms=(stack, frozenset({stack}), None), _stack_derived={opaque})
     stub._is_stack_derived = lambda atom: _Projector._is_stack_derived(stub, atom)
     on_opaque = _Projector._relative_object(stub, _AddressExpression(((opaque, 1),), 0, 8, 0), 1)
     on_stack = _Projector._relative_object(stub, _AddressExpression(((stack, 1),), 0, 8, 0), 1)

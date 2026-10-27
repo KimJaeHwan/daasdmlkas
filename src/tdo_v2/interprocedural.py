@@ -858,6 +858,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     )
                     if effect is None:
                         continue
+                    if effect.nonstack_results:
+                        # a window resting on a switched-off assumption: none
+                        effect = replace(effect, nonstack_results=tuple(
+                            row for row in effect.nonstack_results if row[2] not in disabled))
                     if "same-result-functions" not in disabled:
                         effect = _accessor_effect(effect, model_file, entry, register_object, memory_space,
                                                   "accessor-result-separate" not in disabled)
@@ -1003,7 +1007,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                         label for call in proven if call in externals[key]
                                         for label in externals[key][call][1].inherited)
                                     | {label for _, entry in jumps.values() for label in entry.inherited}
-                                    | _same_result_labels(normalized),
+                                    | _same_result_labels(normalized)
+                                    | getattr(normalized, "nonstack_labels", frozenset()),
                                     refused_models=dict(refused_sites.get(key, {})),
                                     bound_calls={call: bound[callee][2] for call, callee in _direct_calls(
                                         unit, bound).items() if call in proven},
@@ -1401,7 +1406,9 @@ def _accessor_effect(effect, model_file, entry, register_object, memory_space, s
     same-result-functions: its ``same_result`` and ``preserves_accessor_state``
     (``separate``: accessor-result-separate is on -- the extent too)."""
     if entry.same_result is not None:
-        result, inputs, read, nonstack, write_back = entry.same_result
+        result, inputs, read, write_back = entry.same_result
+        nonstack = next(((extent, label) for span, extent, label in effect.nonstack_results
+                         if span == ByteSpan(register_object, *result)), None)
         effect = replace(effect, same_result=(
             entry.model_id, f"{entry.label}#{model_file.digest[:16]}", ByteSpan(register_object, *result),
             tuple(ByteSpan(register_object, *item) for item in inputs),

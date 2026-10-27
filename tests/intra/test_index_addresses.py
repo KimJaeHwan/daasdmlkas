@@ -258,7 +258,7 @@ def test_an_opaque_value_of_an_index_is_wild():
     boundary, entry, scaled_input, opaque = 11, 12, 13, 14
     stub = SimpleNamespace(
         _ssa=function.memory_ssa, _import_atoms=set(), _definition_atoms=set(), _fresh_atoms=set(),
-        _nonstack_atoms=set(), _boundary={boundary: ("zext", 4, 8, (0, 1 << 32))}, wild_objects=set(),
+        _nonstack_atoms=set(), _nonstack_extent={}, _boundary={boundary: ("zext", 4, 8, (0, 1 << 32))}, wild_objects=set(),
         fresh_objects=set(), nonstack_objects=set(), _stack_atoms=(None, frozenset(), None), _stack_derived=set())
     stub._is_stack_derived = lambda atom: _Projector._is_stack_derived(stub, atom)
     for inputs, wild in (((_AddressExpression(((boundary, 1),), 0, 8),), True),
