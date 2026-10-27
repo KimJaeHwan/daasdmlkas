@@ -202,6 +202,93 @@ def test_double_pointer_outparam():
     assert _check(results, program).silent == []
 
 
+def test_one_object_passed_twice_leaves_other_memory_exact():
+    """swap(&x, &x) as above, and the caller reads a global it stored before
+    the call: the two writes land on x (the place is known, the value left
+    there is not -- an opaque-write debt on both rows), so the global read
+    stays exact; formerly both writes stayed address-unresolved and dirtied
+    every byte of every object (docs 25.73, cleanup 3C)."""
+    from synthetic import DATA_BASE, load, store
+    leaf = (FunctionBuilder(entry=LEAF).ins(load(reg(RAX), reg(RDI))).ins(store(reg(RDI), reg(RCX)))
+            .ins(store(reg(RSI), reg(RAX))).ret())
+    caller = (FunctionBuilder().sub_rsp(0x20).ins(store(reg(RSP), reg(RDX)))
+              .ins(store(const(DATA_BASE + 0x40), reg(R8)))
+              .ins(copy(reg(RDI), reg(RSP))).ins(copy(reg(RSI), reg(RSP)))
+              .call(LEAF).ins(load(reg(RBX), reg(RSP))).ins(load(reg(RAX), const(DATA_BASE + 0x40)))
+              .add_rsp(0x20).ret())
+    # (globals-disjoint-from-stack: the call receives the stack address, so
+    # without it the frame writes reach the global by the ordinary may-alias
+    # rule; an address-unresolved write reaches it either way)
+    units = program_units(caller, leaf)
+    results = analyze_units(units, assume_globals_disjoint_from_stack=True)
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
+    report = _check(results, program, pools=lambda seed: {RSP: 0x7000_0000})
+    assert report.silent == []
+    item = results["1:1000"]
+    if not item.activations:
+        assert not slice_op(item.normalized, "LOAD", 6).result.is_complete   # x: the unknown value
+    found = slice_op(item.normalized, "LOAD", 7)
+    assert found.result.is_complete and set(range(R8, R8 + 8)) <= found.register_bytes
+
+
+def test_one_object_passed_twice_through_a_tail_call_is_not_trusted():
+    """The same through a wrapper that tail-calls the writer (``rsi = rdi;
+    jmp leaf``): the wrapper's tail-call rows overlap too (Astra, cleanup 3C:
+    they were missed, a silent miss)."""
+    from synthetic import load, store
+    leaf = FunctionBuilder(entry=LEAF).ins(store(reg(RSI), reg(RDX))).ins(store(reg(RDI), reg(RCX))).ret()
+    middle = FunctionBuilder(entry=MIDDLE).ins(copy(reg(RSI), reg(RDI))).tail_call(LEAF)
+    caller = (FunctionBuilder().sub_rsp(0x20).ins(copy(reg(RDI), reg(RSP)))
+              .call(MIDDLE).ins(load(reg(RBX), reg(RSP))).add_rsp(0x20).ret())
+    results, program = _analyze(caller, middle, leaf)
+    assert _check(results, program, pools=lambda seed: {RSP: 0x7000_0000}).silent == []
+    assert _check(results, program, key=f"1:{MIDDLE:x}", pools=lambda seed: {RSP: 0x7000_0000}).silent == []
+
+
+def test_overlapping_literal_writes_state_no_value():
+    """The callee writes two constants through two pointers the caller makes
+    equal: which one is left is not known, so neither row keeps its literal
+    (a forward address through it would be exact and wrong -- Astra, cleanup
+    3C); the caller's read is incomplete and nothing is silent."""
+    from synthetic import load, store
+    leaf = (FunctionBuilder(entry=LEAF).ins(store(reg(RDI), const(DATA_BASE + 0x100)))
+            .ins(store(reg(RSI), const(DATA_BASE + 0x200))).ret())
+    caller = (FunctionBuilder().sub_rsp(0x20).ins(copy(reg(RDI), reg(RSP))).ins(copy(reg(RSI), reg(RSP)))
+              .call(LEAF).ins(load(reg(RAX), reg(RSP))).ins(load(reg(RBX), reg(RAX))).add_rsp(0x20).ret())
+    results, program = _analyze(caller, leaf)
+    item = results["1:1000"]
+    function = item.normalized
+    call = next(key for key in item.proven)
+    literals = {row[2] for key, row in function.pointer_rows if key.startswith(call + "~")
+                and key != call + "~push" and row[0] == "const"}
+    if item.activations:
+        # the callee analysed with RDI == RSI: its own order decides -- the
+        # last store's value, exactly
+        assert literals <= {DATA_BASE + 0x200}
+    else:
+        assert not literals and not slice_op(function, "LOAD", 4).result.is_complete
+    assert _check(results, program, pools=lambda seed: {RSP: 0x7000_0000}).silent == []
+
+
+def test_overlap_found_on_an_earlier_pass_keeps_its_debt():
+    """Call A writes &g through two pointers to one slot x; call B gets
+    ``rdi = x`` and ``rsi = &g`` and writes through both (``*rsi = rcx;
+    *rdi = rdx``). With A's literal B's rows overlap; once A's value is
+    dropped they no longer resolve onto each other, but their debt must stay
+    (Astra, cleanup 3C round 2: the read of g was complete and missed rdx)."""
+    from synthetic import DATA_BASE, RCX, RDX, load, store
+    leaf = (FunctionBuilder(entry=LEAF).ins(store(reg(RDI), const(DATA_BASE + 0x40)))
+            .ins(store(reg(RSI), const(DATA_BASE + 0x40))).ret())
+    middle = FunctionBuilder(entry=MIDDLE).ins(store(reg(RSI), reg(RCX))).ins(store(reg(RDI), reg(RDX))).ret()
+    caller = (FunctionBuilder().sub_rsp(0x20).ins(copy(reg(RDI), reg(RSP))).ins(copy(reg(RSI), reg(RSP)))
+              .call(LEAF).ins(load(reg(RDI), reg(RSP))).ins(copy(reg(RSI), const(DATA_BASE + 0x40)))
+              .call(MIDDLE).ins(load(reg(RAX), const(DATA_BASE + 0x40))).add_rsp(0x20).ret())
+    results, program = _analyze(caller, leaf, middle)
+    found = slice_op(results["1:1000"].normalized, "LOAD", 7)
+    assert not found.result.is_complete or set(range(RDX, RDX + 8)) <= found.register_bytes
+    assert _check(results, program, pools=lambda seed: {RSP: 0x7000_0000}).silent == []
+
+
 def test_global_written_by_the_callee():
     from synthetic import DATA_BASE, load, store
     leaf = FunctionBuilder(entry=LEAF).ins(store(const(DATA_BASE + 0x20), reg(RDI))).ret()

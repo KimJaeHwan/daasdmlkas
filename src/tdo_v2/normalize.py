@@ -1097,7 +1097,8 @@ def _push_row(call_key, transition, block_key, register_space, context, return_a
 
 
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries, context,
-                      stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None):
+                      stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None,
+                      opaque_rows=frozenset()):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
@@ -1311,8 +1312,10 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
     unique = sum(getattr(run, "value", None) is not None for _, run, _, _ in staged) == 1
     for index, (kind, run, stage_key, target) in enumerate(staged):
         key = f"{call_key}~{index}"
-        value = getattr(run, "value", None)
-        literal = getattr(run, "literal", None)
+        # (a row of ``opaque_rows`` -- its write overlaps another of the call's:
+        # the value left there is not known -- states no value)
+        value = None if key in opaque_rows else getattr(run, "value", None)
+        literal = None if key in opaque_rows else getattr(run, "literal", None)
         if pointer_rows is not None and literal is not None and not run.conditions and not proven.writer_conditions:
             widths = tuple(span.size for span in run.writes) if kind == "register" else (run.write.size,)
             if len(widths) == 1 and widths[0] == literal.byte_size:
@@ -1495,11 +1498,12 @@ class _Retry:
     these rep sites left unexpanded (their count or direction proof failed)."""
 
     def __init__(self, failed: frozenset, sites: frozenset = frozenset(), bounds: frozenset = frozenset(),
-                 uncertain: dict | None = None) -> None:
+                 uncertain: dict | None = None, opaque: frozenset = frozenset()) -> None:
         self.failed = failed
         self.sites = sites
         self.bounds = bounds
         self.uncertain = uncertain or {}  # uncertain-address writers found (``_kept_call_memory``)
+        self.opaque = opaque   # call rows whose value is not known (``_call_write_overlaps``)
 
 
 def _merge_uncertain(old: dict, new: dict) -> dict:
@@ -1527,16 +1531,17 @@ class _ScopedNormalizer:
         uncertain). Both only grow, so this ends."""
         from .function_summary import uncertain_writers_of
 
-        blocked, sites, bounds, uncertain = frozenset(), frozenset(), frozenset(), {}
+        blocked, sites, bounds, uncertain, opaque = frozenset(), frozenset(), frozenset(), {}, frozenset()
         while True:
             step()   # (budget: docs 25.30 K1c)
             result = self._normalize_once(
                 unit, configured_call_effects, _blocked_reads=blocked, _blocked_sites=sites,
-                _blocked_bounds=bounds, _uncertain=uncertain, **options)
+                _blocked_bounds=bounds, _uncertain=uncertain, _opaque_rows=opaque, **options)
             if type(result) is _Retry:
                 blocked |= result.failed
                 sites |= result.sites
                 bounds |= result.bounds
+                opaque |= result.opaque
                 uncertain = _merge_uncertain(uncertain, result.uncertain)
                 continue
             reached = dict(result.uncertain_writers)  # its own fixed point (``_normalize_once``)
@@ -1561,6 +1566,7 @@ class _ScopedNormalizer:
         _blocked_sites: frozenset = frozenset(),
         _blocked_bounds: frozenset = frozenset(),
         _uncertain: dict | None = None,
+        _opaque_rows: frozenset = frozenset(),
         open_conditions: dict | None = None,
         _forward_memory_plan=None,
         _load_identity_plan=None,
@@ -1711,6 +1717,7 @@ class _ScopedNormalizer:
                             _call_stack_span(operation_key, proven_call_effects[operation_key],
                                              call_transitions, observation, context),
                             pointer_rows, value_inputs, accessor_states.get(operation_key, (None,))[0],
+                            opaque_rows=_opaque_rows,
                         )
                         for row in rows:
                             operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
@@ -1978,8 +1985,16 @@ class _ScopedNormalizer:
         ) if any(type(key[0]) is tuple for key in used_reads) else ()
         open_nodes = _materialize_open_conditions(
             dependencies, memory_ssa, proven_call_effects, open_conditions or {}, operation_nodes)
+        overlaps = _call_write_overlaps(effect_unit, proven_call_effects)
+        if not set(overlaps) <= _opaque_rows:
+            # their values must not be used (forward literals, pointer values):
+            # normalize again with them stating none
+            return _Retry(frozenset(), opaque=frozenset(overlaps))
+        # (every row found overlapping on any pass keeps its debt: with another
+        # call's values dropped, its destination may no longer resolve onto the
+        # other row's -- Astra, cleanup 3C round 2)
         opaque_nodes = _materialize_opaque_call_writes(dependencies, memory_ssa, proven_call_effects,
-                                                       operation_nodes)
+                                                       operation_nodes, sorted(_opaque_rows))
         base = dependencies
         all_effects = tuple(effect for block in effect_unit.blocks for effect in block.effects)
         anchors = tuple(sorted(
@@ -2428,11 +2443,41 @@ def _materialize_open_conditions(dependencies, memory_ssa, proven_call_effects, 
     return tuple(found)
 
 
-def _materialize_opaque_call_writes(dependencies, memory_ssa, proven_call_effects, operation_nodes) -> tuple:
+def _call_write_overlaps(effect_unit, proven_call_effects) -> list:
+    """Rows of one summarized call whose resolved memory writes land on
+    overlapping caller bytes: the callee took its objects as distinct (the
+    caller passed one object twice, or a pointer to a global the call also
+    writes directly), so which value is left there is not known -- only the
+    place is (the CALL's push excluded: it precedes every callee write)."""
+    by_call: dict = {}
+    for block in effect_unit.blocks:
+        for effect in block.effects:
+            base, separator, tag = effect.operation_key.partition("~")
+            if not separator or tag == "push" or base not in proven_call_effects:
+                continue   # (a summarized call's rows, a tail call's too)
+            for item in effect.writes:
+                if type(item) is ResolvedStorage and item.span.object_id.kind in (
+                        StorageObjectKind.FUNCTION_RELATIVE, StorageObjectKind.ADDRESS_SPACE):
+                    by_call.setdefault(base, []).append((effect.operation_key, item.span))
+    found: set = set()
+    for rows in by_call.values():
+        for index, (key, span) in enumerate(rows):
+            for other_key, other in rows[index + 1:]:
+                step()
+                if other_key != key and span.overlaps(other):
+                    found.update((key, other_key))
+    return sorted(found)
+
+
+def _materialize_opaque_call_writes(dependencies, memory_ssa, proven_call_effects, operation_nodes,
+                                    overlaps=()) -> tuple:
     """An "opaque_call_write" debt on each ``{call}~u{j}`` row: the call wrote
-    those bytes with a value its summary or model does not state."""
+    those bytes with a value its summary or model does not state -- and on
+    each row of ``overlaps`` (``_call_write_overlaps``: the place is known,
+    the value left there is not)."""
     keys = [f"{call}~u{index}" for call, effect in sorted(proven_call_effects.items())
             for index in range(len(effect.unknown_memory)) if f"{call}~u{index}" in operation_nodes]
+    keys += [key for key in overlaps if key in operation_nodes and key not in keys]
     if not keys:
         return ()
     namespace = f"opaque-call-write-v1:{memory_ssa.function_scope.digest.hex()}:{memory_ssa.unit_digest.hex()}"

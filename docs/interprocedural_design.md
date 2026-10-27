@@ -5753,4 +5753,10 @@ run만(`written`). 모든 대상 요약의 반환 칸 run은 자기 aliasing/unk
 길이 3 행만 받아 TOP. 기록 계층의 일시 STORE 조회 삭제(상수 노드는 행의 값). 효과: callee가 돌려준 자기 반환주소로 caller가 전역을
 읽으면 정확·완전(main: 불완전). 2단계(후속): 활성화 시드의 반환 칸 — "push 뒤, callee 효과 전" 한 시점의 probe·bind, forward의
 이미지 계수 처리, 32비트 geometry.
+(10) 정리 3차 C: 한 요약 호출의 쓰기 행이 caller의 겹치는 바이트에 묶이면(같은 객체를 두 인자로, tail call 포함) relative_memory의
+`blocked`(투영 거부 → 주소 미해결, 모든 객체 오염) 사전 계산·분기를 삭제하고 정상 투영한다. 자리는 알고 남은 값만 모르므로
+`_call_write_overlaps`가 그 행들에 opaque_call_write 빚을 단다. 값 무효화는 정규화 사실 `_opaque_rows`(커지기만 함): 투영 뒤 찾은
+겹침이 그 안에 없으면 `_Retry(opaque=...)`로 다시 정규화하고, 그 행은 literal·포인터 값 없이 만든다(forward TOP, relative_memory 행
+없음). 빚은 누적된 `_opaque_rows` 전체에 단다 — 다른 호출의 값이 빠지면 앞 패스에서 겹쳤던 행이 더는 겹쳐 보이지 않을 수 있다
+(Astra 2차). 효과: swap(&x, &x) 뒤 다른 전역 읽기가 정확·완전(main: 불완전). 정밀도 후속(선택): 겹친 바이트만 `~ov` 행으로.
 

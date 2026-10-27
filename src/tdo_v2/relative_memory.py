@@ -347,35 +347,6 @@ def project_function_relative_memory(
         projector.nonstack_spans = nonstack_spans
     if address_metadata is not None:
         projector.address_metadata = address_metadata
-    # Writes of one summarized call that bind to overlapping caller bytes: the
-    # callee took its objects as distinct, so their order there is unknown here
-    # (caller passed one object twice) -- they stay unresolved (debt). An
-    # anchored write landing on a global the same call writes directly (an
-    # exact row) stays unresolved too: the row order says nothing.
-    blocked: set[str] = set()
-    by_call: dict[str, list] = {}
-    fixed: dict[str, list] = {}
-    for block in unit.blocks:
-        for effect in block.effects:
-            anchored = (anchored_accesses or {}).get(effect.operation_key)
-            if effect.operation_key.endswith("~push"):
-                continue   # the CALL's push: before every callee write -- ordered (``normalize._push_row``)
-            if anchored is not None and effect.memory_write is not None:
-                spans = projector.project_anchored(*anchored)
-                if spans:
-                    by_call.setdefault(effect.operation_key.split("~")[0], []).append(
-                        (effect.operation_key, spans[0]))
-            elif "~" in effect.operation_key:
-                fixed.setdefault(effect.operation_key.split("~")[0], []).extend(
-                    item.span for item in effect.writes
-                    if type(item) is ResolvedStorage and item.span.object_id.kind is StorageObjectKind.ADDRESS_SPACE)
-    for call, rows in by_call.items():
-        for index, (key, span) in enumerate(rows):
-            if any(span.overlaps(other) for other in fixed.get(call, ())):
-                blocked.add(key)
-            for other_key, other in rows[index + 1:]:
-                if span.overlaps(other):
-                    blocked.update((key, other_key))
     changed = False
     blocks: list[ObservedEffectBlock] = []
     for block in unit.blocks:
@@ -383,9 +354,7 @@ def project_function_relative_memory(
         for effect in block.effects:
             operation = operations.get(effect.operation_key)
             anchored = (anchored_accesses or {}).get(effect.operation_key)
-            if effect.operation_key in blocked:
-                projected = None
-            elif anchored is not None and (effect.memory_read is not None or effect.memory_write is not None):
+            if anchored is not None and (effect.memory_read is not None or effect.memory_write is not None):
                 projected = projector.project_anchored(*anchored)
             else:
                 projected = (
