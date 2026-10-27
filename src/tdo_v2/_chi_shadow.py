@@ -60,7 +60,11 @@ def record(scope, *args) -> None:
     except DiagnosticExhausted:
         RESULTS[scope] = "exhausted"
     except Exception as error:   # (the shadow build itself failed: reported, never raised)
-        RESULTS[scope] = f"{type(error).__name__}: {error}"
+        import traceback
+
+        frames = traceback.extract_tb(error.__traceback__)[-3:]
+        where = " <- ".join(f"{frame.name}:{frame.lineno}" for frame in reversed(frames))
+        RESULTS[scope] = f"{type(error).__name__}: {error} [{where}]"
 
 
 def _subtract(span, holes) -> list:
@@ -369,6 +373,25 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
                 spans.append(ByteSpan(span.object_id, first, last + 1 - first))
         if spans:
             rows.append(CallClobberRead(key, tuple(spans), tuple(sorted(crossed_all))))
+
+    if lazy is not None:
+        # the sparse call_clobber engine (production's) as the reference, per
+        # read byte as it emits its rows (docs 25.83 S2a: no dense state)
+        from ._call_clobber_sparse import derive_sparse
+
+        class _At:
+            def __init__(self, at):
+                self.at = at
+
+            def calls_at(self, item):
+                return self.at(*item)
+
+        derive_sparse(effect_unit, set(calls), preserved, frozenset(memory_keeping),
+                      observe=lambda effect, at: compare(effect, _At(at)))
+        if public_rows is not None and sorted(rows, key=lambda row: row.operation_key) != \
+                sorted(public_rows, key=lambda row: row.operation_key):
+            mismatches.append(("records", len(rows), len(public_rows)))
+        return mismatches[:limit]
 
     # a recorded dense replay of call_clobber's transfer, comparing as it goes
     blocks = {block.key: block for block in effect_unit.blocks}
