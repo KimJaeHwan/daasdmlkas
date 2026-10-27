@@ -1,0 +1,84 @@
+{
+ "cases": {
+  "accessor": {
+   "forward_0": "4d775cb4f825fcd5e65625bddefc137f0b91e2477827ab8b19a58c9401d27a7f",
+   "forward_1": "4d775cb4f825fcd5e65625bddefc137f0b91e2477827ab8b19a58c9401d27a7f",
+   "input": "af99668ece17971e447b7174d69111d73a54f0fd1c75ba3a443c762013336c83"
+  },
+  "alias_conditions": {
+   "forward_0": "bf23339033da22fee2c2a75bec254311731a1cdc139bdfc19f8963d6588a83ea",
+   "forward_1": "bf23339033da22fee2c2a75bec254311731a1cdc139bdfc19f8963d6588a83ea",
+   "input": "a22f7925e4c135510b5380ca85c34194234de61fc5a5c03c1d73b3f1774fc1c9"
+  },
+  "call_with_push": {
+   "forward_0": "2f8954190076d2d27080699d3ec585ddfb7489d287ee149836b4f957572cbc75",
+   "forward_1": "2f8954190076d2d27080699d3ec585ddfb7489d287ee149836b4f957572cbc75",
+   "input": "741c58adc91fda8ca3198ce321ba1bab16e58915c9712a0b778ee4753f92850c"
+  },
+  "copy_and_anchored_store": {
+   "forward_0": "374941ba3ccc7dca787f17edaadf90dfce4504ad3ed836c3c9e8574248f52e37",
+   "forward_1": "374941ba3ccc7dca787f17edaadf90dfce4504ad3ed836c3c9e8574248f52e37",
+   "input": "3a1fb31a5273c26ab2ca6c3ab068f01880127cee897fea39c43bbb2a51c5c953"
+  },
+  "frame_and_spill": {
+   "forward_0": "d1534a679a63c1b84cb24b1fc3b7a5341f2d9e02b9d29b11629f53cd0588b22c",
+   "forward_1": "d1534a679a63c1b84cb24b1fc3b7a5341f2d9e02b9d29b11629f53cd0588b22c",
+   "input": "7074bdf5020f964dd4c2a536c469a12fa8afaaff84540aab9c960cde5de1dd51"
+  },
+  "globals_and_image_address": {
+   "forward_0": "942d9309fdc7ea8a3a36edb2d4b6a1af294e49c270e214d67d2505a85d04d462",
+   "forward_1": "942d9309fdc7ea8a3a36edb2d4b6a1af294e49c270e214d67d2505a85d04d462",
+   "input": "2fe58ae8cd3d3ee4fc7643095a42072cb973a30f6d267b557519420e72d993a6"
+  },
+  "internal_cut": {
+   "forward_0": "30eb55ffcdc1199e009e6313856c7d8507d8c3d7c08415876b7dead2ac577519",
+   "forward_1": "30eb55ffcdc1199e009e6313856c7d8507d8c3d7c08415876b7dead2ac577519",
+   "input": "67b0650e8e52a14f06a89ba0e63e410887e84d48bef7ca46065203a022cebf9f"
+  },
+  "join": {
+   "forward_0": "d543acc9fa27d1c82d954497814191b6455efa4506c941978ae94f2026d5a63e",
+   "forward_1": "d543acc9fa27d1c82d954497814191b6455efa4506c941978ae94f2026d5a63e",
+   "input": "2d823aaa8c1e4f18b91ecf26979c5f691524b4ac1571c76abb7b36cc589cce87"
+  },
+  "literals": {
+   "forward_0": "a0107315474faf86e19f39a23894272ea4ad27b3e771a47c1a19044409e7b622",
+   "forward_1": "a0107315474faf86e19f39a23894272ea4ad27b3e771a47c1a19044409e7b622",
+   "input": "c698fefb9e6a7779de0d29595a5d07c0180090d2578b7dc5a1d2a8fa15a03eb4"
+  },
+  "loop": {
+   "forward_0": "c075359827776c9a2993bbae56d26738ff0f4af0f6ce556fd16af323f57276d1",
+   "forward_1": "c075359827776c9a2993bbae56d26738ff0f4af0f6ce556fd16af323f57276d1",
+   "input": "f53e1d2f695ba861f5f5dcd872f0d253668b611f2b1b4f5f7cce51dab442ce22"
+  },
+  "model_calls_and_noreturn": {
+   "forward_0": "dacb4302b6e5c2f09dd3606855436ba4931e81e04ba7d8a3b0b09858265b7768",
+   "forward_1": "dacb4302b6e5c2f09dd3606855436ba4931e81e04ba7d8a3b0b09858265b7768",
+   "input": "82d3b0217f19a4caddbef1cb435cda93c1466473376be5dde68c47fc50fd1a94"
+  },
+  "opaque_indirect_call": {
+   "forward_0": "d8ed29293b757af021e9a2cc783c5396e2cd280bcb09a186f7935a3be7d5d533",
+   "forward_1": "d8ed29293b757af021e9a2cc783c5396e2cd280bcb09a186f7935a3be7d5d533",
+   "input": "cd437dca333b5ce73e37f978b85b0322e59a4c6cd3b15407d41833e1874b19aa"
+  },
+  "pointer_chain": {
+   "forward_0": "18115ce0315ea9d322eab817e5da40cda91a3e27ffa80bf470126d8f1e0d6fe1",
+   "forward_1": "18115ce0315ea9d322eab817e5da40cda91a3e27ffa80bf470126d8f1e0d6fe1",
+   "input": "95551ff52d95c6f17f8fae6d01a959b057cdb1cf5757f8a7a65d6e877d2905a6"
+  },
+  "returns_stack_address": {
+   "forward_0": "6fd893f53f7f45fcc71706a26c42ce8e3d0f89df153e3d227bf105a4b31815fa",
+   "forward_1": "6fd893f53f7f45fcc71706a26c42ce8e3d0f89df153e3d227bf105a4b31815fa",
+   "input": "de1cb4c02f1f95dc212ba6d91aa371a16df58034284ad42e73bbba970dca0b2f"
+  },
+  "scaled_index": {
+   "forward_0": "e0a597648688877948a3fa4e7517aa5b289b0121c77aa778801a906ecf58b0a4",
+   "forward_1": "e0a597648688877948a3fa4e7517aa5b289b0121c77aa778801a906ecf58b0a4",
+   "input": "1bb9540a233db624b4f80c096c3fb16d5b86c5f2dd8144255b80c5a257178484"
+  }
+ },
+ "versions": {
+  "semantics_version": 21,
+  "summary_version": 1,
+  "template_version": 3
+ }
+}

@@ -5823,3 +5823,19 @@ run만(`written`). 모든 대상 요약의 반환 칸 run은 자기 aliasing/unk
   main과 같은 수치. 테스트 `tests/intra/test_result_nonstack.py`(window 안/밖·음수·경계 넘김, same-result 켬/끔, 정체성
   실패 대체, label 끄기, realloc, 검증, 오라클: 힙 결과는 silent 없음 / 스택을 돌려주는 getter는 오라클이 잡음).
 - 설계 검토: Astra 2차·Fable 2차 승인(`.census6/design_d_accessor_extent.md`, 로컬).
+
+### 25.76 템플릿 semantics 번호 검사 (2026-10-27)
+
+§25.74에서 발견: §25.73 push 정의 등 요약을 바꾼 엔진 변경이 `ENGINE_SEMANTICS_VERSION`을 올리지 않아, 이전 엔진으로
+만든 UE 템플릿이 그대로 적용되고 있었다(이번 21로 함께 반영). 두 겹으로 막는다.
+- 저장소 테스트 `tests/intra/test_template_fingerprint.py`: 고정 합성 라이브러리 함수 15개(레지스터·anchor 쓰기, 프레임·spill,
+  push 있는 내부 호출, 전역·이미지 주소, 반복, join, 포인터 사슬, 상수, alias 조건, 모델 호출·noreturn, 라이브러리 내부 잘림,
+  불투명 간접 호출, scaled index, 스택 주소 반환, accessor + 선언 가정 -- Astra·Fable 검토로 추가)의 템플릿을 forward 끔/켬으로
+  만들어 `tests/intra/template_fingerprint.json`과 비교. 케이스마다 입력 digest(synthetic.py + 프로그램 + 모델 + 옵션)와 출력
+  digest(항목 + 실행이 검사하는 출처 필드 + 거부 종류; 진단 문구·producer 제외)를 기록: 버전·입력이 같은데 출력이 다르면 실패
+  (번호 올림 → models/derived 다시 만듦 → `TDO_V2_REFRESH_TEMPLATE_FINGERPRINT=1`로 갱신; 이 경우 갱신도 거부, models/derived가 다른
+  버전을 기록해도 거부, 갱신 뒤 skip). 입력만 바뀐 케이스(테스트·생성기 수정)와 새 케이스는 번호 없이 갱신. 다른 `TDO_V2_*`
+  스위치는 기본값으로 고정. hash seed 무관. 검증: push 정의 직전(91c9beb)과 직후(69293dd)의 출력이 다름(둘 다 semantics 20).
+- 로컬 게이트 단계(`.census6/check_ue_template.py`, `gate_par.sh`): 이 기계의 Core Bundle로 shipped UE 템플릿을 다시 만들어
+  항목·출처(producer 제외 전부)를 비교(`UETEMPLATE OK|STALE|UNVERIFIABLE`, 실패면 종료 코드 1, 게이트에 "GATE FAILURE").
+  e68cdc6(옛 템플릿)에서 STALE(소멸자·AppendChar), main에서 OK.
