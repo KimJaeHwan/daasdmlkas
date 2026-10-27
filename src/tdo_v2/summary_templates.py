@@ -92,9 +92,11 @@ TEMPLATE_VERSION = 3   # 2: stack_values_out; 3: exact scalar literals and entry
 # same_object_as: allocator-results-are-fresh, no-use-after-free,
 # no-use-of-old-pointer-after-realloc) and library assumptions are declared by
 # model files (``<file id>:<id>``) -- older templates rest on them unlabelled.
+# 22: allocator size contracts (docs 25.79): fresh rows with a proven extent
+# give null-guarded nonstack windows; calloc is its own CRT entry.
 # (tests/intra/test_template_fingerprint.py fails when derived templates change
 # without a bump here: bump, re-derive models/derived, refresh the record)
-ENGINE_SEMANTICS_VERSION = 21
+ENGINE_SEMANTICS_VERSION = 22
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

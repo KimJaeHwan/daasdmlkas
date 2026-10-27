@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "ue-core-win64",
-  "version": 5,
+  "version": 6,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
   "libraries": [
@@ -19,6 +19,11 @@
       "id": "name-pool-private",
       "statement": "The FName constructors change no memory the analysed module observes other than the FName they construct: the name pool, its locks, thread-local state and the blocks it allocates are Core-private, and no callback into the module runs (no allocator hook, ensure/log delegate or other reentrant diagnostic). The FName is 12 bytes (UE 5.1 editor build, case preserving).",
       "fails_when": "A module reading name-pool internals directly (FNamePool / name entry memory through an escaped pointer or export), hooking name creation, installing an allocator or diagnostic callback that writes module memory, or a Core build with a different FName layout (non-editor: 8 bytes)."
+    },
+    {
+      "id": "fmemory-malloc-never-null",
+      "statement": "FMemory::Malloc never returns null on a normal return: out of memory is fatal in the supported UE 5.1 editor build (the allocator reports and terminates).",
+      "fails_when": "A build or allocator (GMalloc replacement) that returns null on failure; a custom out-of-memory handler that resumes the caller."
     }
   ],
   "stack_pointer": [
@@ -66,7 +71,7 @@
       "original_names": [
         "?Malloc@FMemory@@SAPEAX_KI@Z"
       ],
-      "notes": "FMemory::Malloc(Count, Alignment): a new block's address (fresh); the allocator's own state is not this module's memory. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
+      "notes": "FMemory::Malloc(Count, Alignment): a new block's address (fresh); the allocator's own state is not this module's memory. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model. Of Count (rcx) bytes; never null (ue-core-win64:fmemory-malloc-never-null): accesses inside the block are apart from the stack (docs 25.79).",
       "registers": [
         {
           "write": [
@@ -74,16 +79,29 @@
             8
           ],
           "from": [],
-          "fresh": true
+          "fresh": true,
+          "extent": {
+            "reg": [
+              8,
+              8
+            ]
+          }
         }
       ],
       "memory": [],
       "observes": [],
-      "callbacks": {"registered": ["GMalloc (the FMalloc allocator object's virtual functions)"]},
+      "callbacks": {
+        "registered": [
+          "GMalloc (the FMalloc allocator object's virtual functions)"
+        ]
+      },
       "callbacks_evidence": "UE Core HAL/UnrealMemory.cpp (FMemory::Malloc -> GMalloc->Malloc); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved",
-      "internal": true
+      "internal": true,
+      "never_null": {
+        "rests_on": "ue-core-win64:fmemory-malloc-never-null"
+      }
     },
     {
       "name": "FMemory::Free",
@@ -94,9 +112,18 @@
       "registers": [],
       "memory": [],
       "observes": [],
-      "callbacks": {"registered": ["GMalloc (the FMalloc allocator object's virtual functions)"]},
+      "callbacks": {
+        "registered": [
+          "GMalloc (the FMalloc allocator object's virtual functions)"
+        ]
+      },
       "callbacks_evidence": "UE Core HAL/UnrealMemory.cpp (FMemory::Free -> GMalloc->Free); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
-      "frees": [[8, 8]],
+      "frees": [
+        [
+          8,
+          8
+        ]
+      ],
       "other_memory": "preserved",
       "internal": true
     },
@@ -126,7 +153,11 @@
       ],
       "memory": [],
       "observes": [],
-      "callbacks": {"registered": ["GMalloc (the FMalloc allocator object's virtual functions)"]},
+      "callbacks": {
+        "registered": [
+          "GMalloc (the FMalloc allocator object's virtual functions)"
+        ]
+      },
       "callbacks_evidence": "UE Core HAL/UnrealMemory.cpp (FMemory::QuantizeSize -> GMalloc->QuantizeSize); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved",
@@ -167,9 +198,18 @@
           8
         ]
       ],
-      "callbacks": {"registered": ["GMalloc (the FMalloc allocator object's virtual functions)"]},
+      "callbacks": {
+        "registered": [
+          "GMalloc (the FMalloc allocator object's virtual functions)"
+        ]
+      },
       "callbacks_evidence": "UE Core HAL/UnrealMemory.cpp (FMemory::Realloc -> GMalloc->Realloc; may free / move); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
-      "frees": [[8, 8]],
+      "frees": [
+        [
+          8,
+          8
+        ]
+      ],
       "other_memory": "preserved",
       "internal": true
     },
@@ -181,7 +221,11 @@
       "notes": "check()/verify() failure report (variadic: may read every argument). Writes no memory of this module -- assumes no reentrant callback into the module (error delegates, log devices): ue-core-win64:diagnostics-no-reentrant-callback. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
       "registers": [],
       "memory": [],
-      "callbacks": {"registered": ["UE error / log output devices and crash handlers (GError, GLog, FCoreDelegates)"]},
+      "callbacks": {
+        "registered": [
+          "UE error / log output devices and crash handlers (GError, GLog, FCoreDelegates)"
+        ]
+      },
       "callbacks_evidence": "UE Core Misc/AssertionMacros.cpp (FDebug::CheckVerifyFailedImpl: logs, error device, crash handling); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved",
@@ -198,7 +242,11 @@
       "notes": "Fatal invalid-array-size report. Writes no memory of this module -- assumes no reentrant callback into the module: ue-core-win64:diagnostics-no-reentrant-callback. Internal contract (library-internal-model-cuts): this is the complete observable effect also for callers inside Core; its private state is observed by no code using the model.",
       "registers": [],
       "memory": [],
-      "callbacks": {"registered": ["UE error / log output devices and crash handlers (GError, GLog, FCoreDelegates)"]},
+      "callbacks": {
+        "registered": [
+          "UE error / log output devices and crash handlers (GError, GLog, FCoreDelegates)"
+        ]
+      },
       "callbacks_evidence": "UE Core Containers/ContainerHelpers.cpp (fatal log of an invalid num); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved",
@@ -250,7 +298,11 @@
           8
         ]
       ],
-      "callbacks": {"registered": ["GMalloc (the FMalloc allocator object's virtual functions)"]},
+      "callbacks": {
+        "registered": [
+          "GMalloc (the FMalloc allocator object's virtual functions)"
+        ]
+      },
       "callbacks_evidence": "UE Core UObject/UnrealNames.cpp (FNamePool blocks allocated through FMemory); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved",
@@ -301,7 +353,11 @@
           8
         ]
       ],
-      "callbacks": {"registered": ["GMalloc (the FMalloc allocator object's virtual functions)"]},
+      "callbacks": {
+        "registered": [
+          "GMalloc (the FMalloc allocator object's virtual functions)"
+        ]
+      },
       "callbacks_evidence": "UE Core UObject/UnrealNames.cpp (FNamePool blocks allocated through FMemory); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved",

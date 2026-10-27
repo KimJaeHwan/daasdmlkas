@@ -8,7 +8,7 @@ import pytest
 
 from synthetic import (RAX, RBX, RCX, RDI, RDX, RSP, add, const, copy,
                        load, op, program_units, reg, store, tmp)
-from test_allocation_lifetime import FLAG, _begin, _contracts, _finish, _guard, _key
+from test_allocation_lifetime import FLAG, _begin, _contracts, _finish, _guard, _key, without_allocator_windows
 from test_external_models import MODELS, THUNKS, _image
 from tdo_v2._allocation_lifetime import AllocationAnalysis
 from tdo_v2._allocation_outcomes import failed_resize
@@ -25,7 +25,7 @@ def engines(request, monkeypatch):
 
 @pytest.fixture(scope="module")
 def models():
-    return load_external_models(MODELS, "x86:LE:64:default", "win64")
+    return without_allocator_windows(load_external_models(MODELS, "x86:LE:64:default", "win64"))
 
 
 def _run(builder, models, contracts):

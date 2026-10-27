@@ -252,7 +252,7 @@ def test_original_control_cuts_and_dependencies_survive_both_replay_layers(model
     if cut != "conditional-jump":
         assert generic.summary.dead_exits
     dependency = ("debug-break-traps-do-not-return" if cut == "trap"
-                  else "external-model:crt-win64/abort@v7")
+                  else "external-model:crt-win64/abort@v8")
     assert any(row.operation_key == reader and realloc in row.intervening_calls
                for row in entry.normalized.call_clobber_reads)
     refined = refine_call_memory(entry)

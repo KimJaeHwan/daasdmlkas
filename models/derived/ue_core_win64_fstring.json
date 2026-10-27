@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 20,
+ "version": 21,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 1,
    "template_version": 3,
-   "semantics_version": 21
+   "semantics_version": 22
   },
   "parameters": {
    "private_frame_above": 0
@@ -29,11 +29,11 @@
   "models": [
    {
     "file": "crt-win64",
-    "sha256": "d59cf14736b85587a16021aa88e67c28f92de8e2773b161ef3e5f6ce5d20309c"
+    "sha256": "09ed7e3c0acd07e6830a75d7b5a58cd3abfb4d871671f99788b8c132e55927a5"
    },
    {
     "file": "ue-core-win64",
-    "sha256": "2be1f1bf655e61b4c495f16c157d38be55e47da7d60d06e688be6894ad24e25d"
+    "sha256": "653c46fe0a9cb1287171d84290d30b92aa3e28ab2a6e001204d6c73c0cdb69e5"
    }
   ],
   "pcodeops": "749146c1d7ef52999c899a6665c763eeedd6bba9c6779c0b694b2bfe183ca076",
@@ -42,11 +42,11 @@
    "stack-switch-check-exceptions",
    "debug-break-traps-do-not-return",
    "allocator-results-are-fresh",
-   "external-model:ue-core-win64/FDebug::CheckVerifyFailedImpl@v5",
-   "external-model:ue-core-win64/FMemory::Free@v5",
-   "external-model:ue-core-win64/FMemory::QuantizeSize@v5",
-   "external-model:ue-core-win64/FMemory::Realloc@v5",
-   "external-model:ue-core-win64/UE4Array_Private::OnInvalidArrayNum@v5",
+   "external-model:ue-core-win64/FDebug::CheckVerifyFailedImpl@v6",
+   "external-model:ue-core-win64/FMemory::Free@v6",
+   "external-model:ue-core-win64/FMemory::QuantizeSize@v6",
+   "external-model:ue-core-win64/FMemory::Realloc@v6",
+   "external-model:ue-core-win64/UE4Array_Private::OnInvalidArrayNum@v6",
    "library-internal-model-cuts",
    "no-use-after-free",
    "no-use-of-old-pointer-after-realloc",
@@ -55,7 +55,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "e68cdc6b36b369c45315930751039323239c2e0d+dirty",
+   "engine_revision": "38b15e37d219f77bd6e1392e7c300763751fcd91+dirty",
    "bundle": "8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50",
    "index_addresses": true,
    "stack_evidence": [

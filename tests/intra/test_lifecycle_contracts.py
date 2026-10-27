@@ -87,8 +87,9 @@ def test_original_frees_and_same_object_pairs_must_agree(model):
 
 
 def test_model_alias_does_not_verify_the_actual_call_symbol_or_size_ports(model):
-    malloc = _entry(model, "malloc")
-    assert "calloc" in malloc.names
+    # (an entry listing both names, as the CRT models did before docs 25.79)
+    malloc = replace(_entry(model, "malloc"), names=("malloc", "calloc"))
+    model = replace(model, entries=tuple(malloc if entry.name == "malloc" else entry for entry in model.entries))
     # Both port descriptions match one model row. The consumer must inspect
     # the actual import symbol before using either size/count interpretation.
     malloc_shape = _contract(model, "allocate", size=(8, 8), count=None, symbol_names=("malloc",))
@@ -208,7 +209,7 @@ def test_selected_glibc_profile_matches_only_its_original_sysv_model_and_symbols
     file = load_model_file(SYSV)
     contracts = load_lifecycle_contracts(SYSV_PROFILE)
     assert file.file_id == "crt-sysv64"
-    assert file.digest == "df8349043fbeb418f7c60be3eee276efc231ac3845e3b25b249b8d78ddc54c4f"
+    assert file.digest == "1aa94d0f34d1e7760cbb8321146061725932e6d4e1eac43642409b05456479bd"
     assert tuple(contract.kind for contract in contracts) == ("allocate", "release", "resize")
     assert tuple(contract.format_version for contract in contracts) == (2, 2, 2)
     assert tuple(contract.contents for contract in contracts) == (
@@ -238,7 +239,8 @@ def test_selected_glibc_profile_matches_only_its_original_sysv_model_and_symbols
         assert contract.label.endswith(contract.canonical_digest)
         with pytest.raises(FrozenInstanceError):
             contract.kind = "release"
-    assert "calloc" in next(entry for entry in file.entries if entry.model_id == malloc.model_id).names
+    # (calloc is an entry of its own since docs 25.79 -- no contract names it)
+    assert "calloc" not in next(entry for entry in file.entries if entry.model_id == malloc.model_id).names
     assert all(reference.startswith("https://sourceware.org/glibc/manual/")
                for contract in contracts for reference in contract.references)
     assert len({reference for contract in contracts for reference in contract.references}) == 4
@@ -254,6 +256,9 @@ def _historical_format_one_raw():
     for row in raw["contracts"]:
         row.pop("contents")
     raw["contracts"][2]["version"] = 1
+    for row in raw["contracts"]:
+        # (the model file digest the payload was written for, before docs 25.79)
+        row["model_digest"] = "df8349043fbeb418f7c60be3eee276efc231ac3845e3b25b249b8d78ddc54c4f"
     return raw
 
 

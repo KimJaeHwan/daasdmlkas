@@ -113,7 +113,7 @@ def test_a_conditional_jump_to_abort_is_no_tail_exit():
     helper = results["1:1000"]
     jump = "1:1008:0:CBRANCH"
     assert helper.summary.tail_exits == () and len(helper.summary.exits) == 1
-    assert helper.declared[jump] == "external-model:crt-win64/abort@v7"
+    assert helper.declared[jump] == "external-model:crt-win64/abort@v8"
     caller = results[f"1:{CALLER:x}"]
     (effect,) = caller.proven.values()  # the helper's summary now applies
     function = caller.normalized

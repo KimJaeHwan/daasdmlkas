@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-sysv64",
-  "version": 7,
+  "version": 8,
   "language_id": "x86:LE:64:default",
   "abi_tag": "sysv64",
   "notes": "C runtime functions under the System V x86-64 convention (args RDI, RSI, RDX, RCX; result RAX). Preserved: RBX, RBP, R12-R15. Every entry is a declared assumption.",
@@ -249,8 +249,17 @@
       "notes": "Never returns to its caller (C11 7.13.2.1, _Noreturn): only the paths after the call end; the setjmp side is not modeled here (an opaque call). Reads the jmp_buf rdi points to (observes rdi).",
       "registers": [],
       "memory": [],
-      "observes": [[56, 8]],
-      "callbacks": {"registered": ["pthread cancellation cleanup handlers of the frames left (glibc _longjmp_unwind)"]},
+      "observes": [
+        [
+          56,
+          8
+        ]
+      ],
+      "callbacks": {
+        "registered": [
+          "pthread cancellation cleanup handlers of the frames left (glibc _longjmp_unwind)"
+        ]
+      },
       "callbacks_evidence": "glibc setjmp/longjmp.c (_longjmp_unwind); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved",
@@ -262,7 +271,11 @@
       "registers": [],
       "memory": [],
       "observes": [],
-      "callbacks": {"registered": ["SIGABRT signal handler (signal / sigaction)"]},
+      "callbacks": {
+        "registered": [
+          "SIGABRT signal handler (signal / sigaction)"
+        ]
+      },
       "callbacks_evidence": "glibc debug/stack_chk_fail.c -> __fortify_fail -> abort (raises SIGABRT); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved",
@@ -274,7 +287,11 @@
       "registers": [],
       "memory": [],
       "observes": [],
-      "callbacks": {"registered": ["SIGABRT signal handler (signal / sigaction)"]},
+      "callbacks": {
+        "registered": [
+          "SIGABRT signal handler (signal / sigaction)"
+        ]
+      },
       "callbacks_evidence": "ISO C17 7.22.4.1; glibc stdlib/abort.c (raises SIGABRT); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved",
@@ -297,10 +314,7 @@
     },
     {
       "name": "malloc",
-      "aliases": [
-        "calloc"
-      ],
-      "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included). Heap bookkeeping is not program-visible memory (assumption).",
+      "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included) of rdi bytes, or null (docs 25.79: the size is used only where a null test dominates the access). Heap bookkeeping is not program-visible memory (assumption).",
       "registers": [
         {
           "write": [
@@ -308,12 +322,58 @@
             8
           ],
           "from": [],
-          "fresh": true
+          "fresh": true,
+          "extent": {
+            "reg": [
+              56,
+              8
+            ]
+          }
         }
       ],
       "memory": [],
       "observes": [],
-      "callbacks": {"registered": ["glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"]},
+      "callbacks": {
+        "registered": [
+          "glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"
+        ]
+      },
+      "callbacks_evidence": "glibc manual: Hooks for Malloc (removed in 2.34); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
+      "other_memory": "preserved"
+    },
+    {
+      "name": "calloc",
+      "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included) of rdi * rsi bytes (zero-filled; taken only without overflow), or null (docs 25.79: the size is used only where a null test dominates the access). Heap bookkeeping is not program-visible memory (assumption).",
+      "registers": [
+        {
+          "write": [
+            0,
+            8
+          ],
+          "from": [],
+          "fresh": true,
+          "extent": {
+            "product": [
+              [
+                56,
+                8
+              ],
+              [
+                48,
+                8
+              ]
+            ]
+          }
+        }
+      ],
+      "memory": [],
+      "observes": [],
+      "callbacks": {
+        "registered": [
+          "glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"
+        ]
+      },
       "callbacks_evidence": "glibc manual: Hooks for Malloc (removed in 2.34); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved"
@@ -324,9 +384,18 @@
       "registers": [],
       "memory": [],
       "observes": [],
-      "callbacks": {"registered": ["glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"]},
+      "callbacks": {
+        "registered": [
+          "glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"
+        ]
+      },
       "callbacks_evidence": "glibc manual: Hooks for Malloc; free releases its argument's block; audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
-      "frees": [[56, 8]],
+      "frees": [
+        [
+          56,
+          8
+        ]
+      ],
       "other_memory": "preserved"
     },
     {
@@ -348,14 +417,31 @@
               8
             ]
           ],
-          "same_object_as": [56, 8]
+          "same_object_as": [
+            56,
+            8
+          ]
         }
       ],
       "memory": [],
-      "observes": [[56, 8]],
-      "callbacks": {"registered": ["glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"]},
+      "observes": [
+        [
+          56,
+          8
+        ]
+      ],
+      "callbacks": {
+        "registered": [
+          "glibc allocation hooks (__malloc_hook / __realloc_hook / __free_hook, glibc before 2.34)"
+        ]
+      },
       "callbacks_evidence": "glibc manual: Hooks for Malloc; realloc may free / move the old block; audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
-      "frees": [[56, 8]],
+      "frees": [
+        [
+          56,
+          8
+        ]
+      ],
       "other_memory": "preserved"
     }
   ]

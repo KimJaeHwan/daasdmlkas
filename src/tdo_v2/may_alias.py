@@ -326,6 +326,7 @@ def derive_may_alias_reads(
     pre_escape_objects: dict | None = None,
     pre_uses: list | None = None,
     boundary_calls: frozenset = frozenset(),
+    guarded_windows: dict | None = None,
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -396,7 +397,7 @@ def derive_may_alias_reads(
     # object's exclusion. Existing import-static one-byte evidence is the
     # only producer of windows, not allocator request sizes or fresh labels.
     origin = (frozenset(fresh_objects) | frozenset(nonstack_objects)) & frozenset(objects)
-    checked = _bounded_nonstack_objects(unit, origin, nonstack_spans)
+    checked = _bounded_nonstack_objects(unit, origin, nonstack_spans, guarded_windows)
     wild = (frozenset(item for item in objects if item in wild_objects) | origin) - checked
     if pre_escape_objects and policy.escape is not None and PRE_ESCAPE_NOT_FRAME.get():
         # (values no escape precedes: no address of the new frame, docs 25.77)
@@ -448,8 +449,10 @@ def derive_may_alias_reads(
     return rows
 
 
-def _bounded_nonstack_objects(unit, candidates, windows) -> frozenset:
-    """Only an explicit byte proof covering every current access grants exclusion."""
+def _bounded_nonstack_objects(unit, candidates, windows, guarded=None) -> frozenset:
+    """Only an explicit byte proof covering every current access grants exclusion.
+    ``guarded``: object -> the operations a null test of its allocation
+    dominates (docs 25.79) -- every access of such an object must be one."""
     if not candidates or not windows:
         return frozenset()
     by_object: dict = {}
@@ -469,6 +472,9 @@ def _bounded_nonstack_objects(unit, candidates, windows) -> frozenset:
                     continue
                 span = evidence.span
                 touched.add(span.object_id)
+                if guarded and span.object_id in guarded and effect.operation_key not in guarded[span.object_id]:
+                    checked.discard(span.object_id)   # (an access the null test does not dominate)
+                    continue
                 covered = False
                 for window in by_object[span.object_id]:
                     step()

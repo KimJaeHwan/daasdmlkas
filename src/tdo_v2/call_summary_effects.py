@@ -264,6 +264,9 @@ class ProvenCallEffect:
     # model's ``result_nonstack``, resting on its declared ``label``) -- used
     # only in the calling function (``relative_memory`` nonstack windows)
     nonstack_results: tuple[tuple[ByteSpan, int, str], ...] = ()
+    # (register span, bytes, never_null label | None): a fresh register's block
+    # size proven at the call (docs 25.79; this function only)
+    fresh_extents: tuple = ()
     # with ``observes_registers``: the registers it may use as an address or
     # keep (an external model's ``observes``); None: every register
     observed_registers: tuple[ByteSpan, ...] | None = None

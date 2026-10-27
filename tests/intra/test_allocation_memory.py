@@ -10,7 +10,7 @@ import pytest
 
 from synthetic import (RBX, RCX, RDI, RDX, RSI, RSP, add,
                        const, copy, load, program_units, reg, store, tmp)
-from test_allocation_lifetime import FLAG, _begin, _contracts, _finish, _guard, _key
+from test_allocation_lifetime import FLAG, _begin, _contracts, _finish, _guard, _key, without_allocator_windows
 from test_external_models import MODELS, THUNKS, _image
 from tdo_v2._allocation_lifetime import AllocationAnalysis
 from tdo_v2._allocation_memory import prepare_allocation_refinement
@@ -34,7 +34,7 @@ def engines(request, monkeypatch):
 
 @pytest.fixture(scope="module")
 def models():
-    return load_external_models(MODELS, "x86:LE:64:default", "win64")
+    return without_allocator_windows(load_external_models(MODELS, "x86:LE:64:default", "win64"))
 
 
 def _case(*, heap_offset=0, heap_width=4, guarded=True, after=None, before=None,

@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declared",
   "id": "crt-win64",
-  "version": 7,
+  "version": 8,
   "language_id": "x86:LE:64:default",
   "abi_tag": "win64",
   "notes": "C runtime functions under the Windows x64 convention (args RCX, RDX, R8, R9; result RAX). Register offsets are Ghidra x86-64: RAX 0, RCX 8, RDX 16, RBX 24, RSP 32, RBP 40, RSI 48, RDI 56, R8 128, R9 136, R12-R15 160-184. Preserved: the non-volatile integer registers; XMM and flags are left unknown (sound, less precise). Every entry is a declared assumption.",
@@ -91,13 +91,24 @@
       "other_memory": "preserved"
     },
     {
-      "name": "malloc", "aliases": ["calloc"],
-      "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included). Heap bookkeeping is not program-visible memory (assumption).",
-      "registers": [{"write": [0, 8], "from": [], "fresh": true}],
+      "name": "malloc",
+      "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included) of rcx bytes, or null (docs 25.79: the size is used only where a null test dominates the access). Heap bookkeeping is not program-visible memory (assumption).",
+      "registers": [{"write": [0, 8], "from": [], "fresh": true, "extent": {"reg": [8, 8]}}],
       "memory": [],
       "observes": [],
       "callbacks": {"registered": ["new handler (_set_new_handler; malloc/realloc call it on failure when _set_new_mode(1))", "CRT allocation hook (_CrtSetAllocHook, debug CRT)"]},
       "callbacks_evidence": "MS docs: malloc, _set_new_mode, _set_new_handler; MS docs: _CrtSetAllocHook (debug CRT: every allocation call); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
+      "frees": "none",
+      "other_memory": "preserved"
+    },
+    {
+      "name": "calloc",
+      "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included) of rcx * rdx bytes (zero-filled), or null; the product is taken only when it does not overflow (docs 25.79: the size is used only where a null test dominates the access). Heap bookkeeping is not program-visible memory (assumption).",
+      "registers": [{"write": [0, 8], "from": [], "fresh": true, "extent": {"product": [[8, 8], [16, 8]]}}],
+      "memory": [],
+      "observes": [],
+      "callbacks": {"registered": ["new handler (_set_new_handler; malloc/realloc call it on failure when _set_new_mode(1))", "CRT allocation hook (_CrtSetAllocHook, debug CRT)"]},
+      "callbacks_evidence": "MS docs: calloc, malloc, _set_new_mode, _set_new_handler; MS docs: _CrtSetAllocHook (debug CRT: every allocation call); audited 2026-10-21 (TDO_v2 forward step 0, docs 25.33)",
       "frees": "none",
       "other_memory": "preserved"
     },

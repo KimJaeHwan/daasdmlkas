@@ -31,7 +31,18 @@ def engines(request, monkeypatch):
 
 @pytest.fixture(scope="module")
 def models():
-    return load_external_models(MODELS, "x86:LE:64:default", "win64")
+    return without_allocator_windows(load_external_models(MODELS, "x86:LE:64:default", "win64"))
+
+
+def without_allocator_windows(models):
+    """``models`` without the fresh rows' sizes (docs 25.79): these tests
+    exercise the opt-in lifecycle contracts, and a default allocator window
+    would remove the same heap-store debt the default run is checked to keep
+    (test_allocator_windows covers the windows). The file digests the
+    contracts match are unchanged."""
+    return replace(models, files=tuple(
+        replace(item, entries=tuple(replace(entry, fresh_extents=()) for entry in item.entries))
+        for item in models.files))
 
 
 def _key(builder, ordinal, opcode):

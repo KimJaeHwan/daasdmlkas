@@ -4,7 +4,7 @@ import pytest
 
 from synthetic import (RAX, RBX, RCX, RDI, RDX, RSI, RSP, FunctionBuilder,
                        add, const, copy, load, op, program_units, reg, store, tmp)
-from test_allocation_lifetime import FLAG, _contracts, _key
+from test_allocation_lifetime import FLAG, _contracts, _key, without_allocator_windows
 from test_external_models import MODELS, THUNKS, _image
 from tdo_v2._allocation_lifetime import AllocationAnalysis
 from tdo_v2.forward import probe
@@ -21,7 +21,7 @@ def engines(request, monkeypatch):
 
 @pytest.fixture(scope="module")
 def models():
-    return load_external_models(MODELS, "x86:LE:64:default", "win64")
+    return without_allocator_windows(load_external_models(MODELS, "x86:LE:64:default", "win64"))
 
 
 def _helper(kind="quiet"):

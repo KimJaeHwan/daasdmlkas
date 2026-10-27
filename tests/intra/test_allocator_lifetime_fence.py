@@ -111,7 +111,7 @@ def test_free_keeps_the_exact_call_as_reachable_memory_debt(mode, models, kind):
     effect = item.proven[points["free"]]
     assert not effect.preserves_memory and not effect.memory_runs
     assert effect.memory_runs_final  # no listed writes does NOT preserve every byte
-    assert item.declared[points["free"]] == "external-model:crt-win64/free@v7"
+    assert item.declared[points["free"]] == "external-model:crt-win64/free@v8"
     assert "registered-handlers-are-not-observed" in item.inherited_assumptions
     view = _assert_fence_debt(item, points["reader"], points["free"])
     assert set(range(RSI, RSI + 8)) <= view.register_bytes
@@ -133,7 +133,7 @@ def test_realloc_keeps_its_same_object_contract_but_not_all_old_bytes(mode, mode
     (call,) = [call for call, label in item.declared.items() if "/realloc@" in label]
     effect = item.proven[call]
     assert not effect.preserves_memory and effect.same_object_registers
-    assert item.declared[call] == "external-model:crt-win64/realloc@v7"
+    assert item.declared[call] == "external-model:crt-win64/realloc@v8"
     assert "registered-handlers-are-not-observed" in item.inherited_assumptions
     (reader,) = [f"{row.address.space_id:x}:{row.address.byte_offset:x}:{ordinal}:LOAD"
                  for row in item.unit.observation.instructions for ordinal, operation in enumerate(row.operations)

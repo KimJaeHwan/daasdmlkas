@@ -5889,3 +5889,35 @@ private-frame 규칙(§25.77 포함)이 그 경로의 나머지에서 꺼진다.
   키에 그 입력 전부와 기하를 넣었다; held 계산의 작업 단위도 memo 재생 수에 든다. `stack_values_out`(요약)은 그대로.
 - 테스트 `tests/intra/test_held_frame_slots.py`(spill 뒤 rcx 쓰기는 프레임 읽기에 닿지 않음 -- main에서는 닿음; 다시 읽어 전역에
   저장/held 중 호출/스택 유래 주소로 읽기/wild 기저로 읽기/globals 없이 상수 주소 읽기 -> 탈출; held 칸 재로드는 §25.77 대상 아님).
+
+### 25.79 할당기 크기 계약 -- null 검사가 지배하는 창 (2026-10-28, 밤 작업 3a)
+
+할당기 결과 `p`의 블록 크기가 호출 지점에서 증명되면, 호출한 함수 안에서 `[p, p + size)` 접근을 스택과 분리한다(§25.75의
+nonstack 창과 같은 장치). 모델 계약 필드 + 그래프 사실, 새 가정 없음(never_null만 선언된 가정). 설계 검토 Astra 2차·Fable 2차
+승인(`.census6/design_alloc_extent.md` G1-G6, H1-H4). 이번은 3a(이 함수 안만); 요약 export는 3b.
+
+- 모델: `fresh` 레지스터 행의 `"extent"`: 바이트 수, `{"reg": slice}`, `{"product": [slice, slice]}`(calloc). crt_win64 /
+  crt_sysv64 malloc(rcx / rdi), calloc은 별도 항목(곱 rcx*rdx / rdi*rsi; 이전엔 malloc의 별칭), FMemory::Malloc(rcx).
+- 크기 증명: extent 레지스터가 `extent_registers`에 들어가 기존 `~ext` 행 / `_prove_extents`(호출 전 값, debt, 영구 거부)로
+  증명된다. calloc은 증명된 두 값의 정확한 부호 없는 곱, 2^63 이상이면 거부; 0이면 창 없음. MAX_MODEL_EXTENT 상한은 쓰지 않음.
+- 창: 할당 호출 자신의 fresh 결과 행 원자(전체 폭)만 크기를 받는다(`fresh_windows`). 라벨 `allocator-results-are-fresh`
+  (+ never_null 라벨). 그 가정을 끄면 창 없음.
+- null 검사(기본): never_null이 아니면, 그 객체의 모든 접근이 "결과 != 0" 쪽 후속 블록에 지배되어야 창을 쓴다
+  (`_null_guard.null_guarded`): 레지스터만의 체인(정확한 SSA 정의, 메모리 읽기 없음) CBRANCH 조건 <- COPY / BOOL_NEGATE <-
+  INT_EQUAL|INT_NOTEQUAL(x, 0)(포인터 폭) <- COPY / INT_AND(x, x) / INT_OR(x, x) / INT_ADD|INT_SUB(x, 0) <- 결과 행.
+  분기는 서로 다른 두 후속과 주소 대상; non-null 후속은 entry가 아니고 유일한 선행이 분기 블록. 매 패스의 최종 effect unit에서
+  다시 계산. 검사가 필요한 창 후보가 하나라도 낀 join은 창 없음(가드 손실 방지). forward의 nonstack 입력에서 가드 창은 뺀다
+  (probe가 검사되지 않은 접근을 더할 수 있으므로).
+- never_null: 항목의 `"never_null": {"rests_on": "<file id>:<id>"}` -- 선언된, 끌 수 있는 모델 가정. UE
+  `ue-core-win64:fmemory-malloc-never-null`(지원 빌드에서 OOM은 치명적). 끄면 malloc처럼 null 검사가 필요.
+- realloc(same_object_as): 창이 있는 할당 결과를 realloc하면 같은 객체 관계는 유지하고 그 창은 거부(새 블록이 더 작을 수 있음).
+  §25.75 `result_nonstack` 창은 기존대로 별도 값.
+- 테스트: `tests/intra/test_allocator_windows.py`(가드 있음/없음, 범위 밖 접근, never_null과 끄기, 크기 미증명, calloc
+  곱/0/overflow, realloc 창 거부, 모델 오류, 오라클 silent 없음 + 스택을 돌려주는 가짜 할당기는 잡힘). opt-in lifecycle 계약
+  테스트(test_allocation_*)는 계약 경로를 보려고 로드한 모델에서 창만 뺀다(`without_allocator_windows`, 파일 digest 그대로).
+  glibc lifecycle 프로파일의 model_digest는 새 crt_sysv64 파일로 갱신.
+- 구현 검토(Astra 1차 P1 2개, Fable 승인 + P2): 가드 체인은 레지스터/임시값만(메모리 피연산자는 다른 쓰기가 바꿀 수 있음);
+  CBRANCH는 블록의 마지막 효과일 때만; 크기가 다시 잡힌(realloc) 후보가 낀 join은 창 없음(join이 거부된 창을 되살리지 않게);
+  calloc 곱의 overflow 한계는 인자 폭에서(8바이트면 2^63); 거부 시 guarded_windows 항목도 지움. 테스트 추가(메모리 경유
+  null 검사, realloc과 join, 루프 안 realloc, 창 안의 프레임 칸을 돌려주는 가짜 할당기를 오라클이 잡음).
+- ENGINE_SEMANTICS_VERSION 22, UE 템플릿 재도출(모델 digest 변경).

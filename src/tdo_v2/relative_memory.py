@@ -249,6 +249,8 @@ def project_function_relative_memory(
     nonstack_labels: dict | None = None,
     wild_definitions: dict | None = None,
     ineligible_atoms: set | None = None,
+    fresh_windows: dict | None = None,
+    guarded_windows: dict | None = None,
     address_metadata: dict | None = None,
     once_blocks: frozenset | None = None,
     settle_pending: bool = True,
@@ -354,6 +356,9 @@ def project_function_relative_memory(
         projector.nonstack_labels = nonstack_labels
     if wild_definitions is not None:
         projector.wild_definitions = wild_definitions
+    projector._fresh_windows = dict(fresh_windows or {})
+    if guarded_windows is not None:
+        projector.guarded_windows = guarded_windows
     if ineligible_atoms is not None:
         projector.ineligible_atoms = ineligible_atoms
     if address_metadata is not None:
@@ -1020,6 +1025,17 @@ class _Projector:
         # value reused; ``wild_definitions`` (across passes): wild object ->
         # frozenset((atom, operation)) of its atoms, or None (never eligible)
         self._eligible_atoms: dict[int, str] = {}
+        # allocator windows (docs 25.79): fresh result row -> (bytes, never_null
+        # label | None); atom -> its row when the window needs a null test;
+        # ``guarded_windows`` (across passes): object -> that row
+        self._fresh_windows: dict = {}
+        self._guarded_atoms: dict[int, str] = {}
+        self.guarded_windows: dict = {}
+        # allocator-window atoms; those a same-object (realloc) value reused:
+        # the relation is kept and the window refused (the new block may be
+        # smaller)
+        self._allocator_atoms: set = set()
+        self._resized_atoms: set = set()
         self.ineligible_atoms: set = set()
         self.wild_definitions: dict = {}
         self.wild_objects: set = set()
@@ -1317,6 +1333,16 @@ class _Projector:
             self.wild_definitions[object_id] = None if rows is None or current is None else current | rows
         return object_id
 
+    def _resized(self, value) -> bool:
+        """A same-object (realloc) value of a windowed result: True -- a value
+        of its own -- for a ``result_nonstack`` window; an allocator window
+        (docs 25.79) is refused instead and the relation kept."""
+        windowed = [atom for atom, _ in value.atoms if atom in self._nonstack_extent]
+        if windowed and all(atom in self._allocator_atoms for atom in windowed):
+            self._resized_atoms.update(windowed)
+            return False
+        return bool(windowed)
+
     def _nonstack_window(self, object_id, address, space_id) -> None:
         """The window [result, result + extent) of a ``result_nonstack``
         object (``may_alias`` keeps it apart from the stack when every access
@@ -1326,7 +1352,8 @@ class _Projector:
         space = self._spaces.get(space_id)
         window = None if space is None or space.addressable_unit_bytes != 1 \
             else ByteSpan(object_id, 1 << space.address_size_bits, extent)
-        if address.image != 0 or window is None:
+        if address.image != 0 or window is None or address.atoms[0][0] in self._resized_atoms:
+            self.guarded_windows.pop(object_id, None)
             if self.nonstack_labels.get(object_id) is not None:
                 self.nonstack_spans.difference_update(
                     {span for span in self.nonstack_spans if span.object_id == object_id})
@@ -1334,6 +1361,8 @@ class _Projector:
         elif object_id not in self.nonstack_labels or self.nonstack_labels[object_id] is not None:
             # (two calls' atoms are two objects: one window, one extent per object)
             self.nonstack_spans.add(window)
+            if address.atoms[0][0] in self._guarded_atoms:
+                self.guarded_windows[object_id] = self._guarded_atoms[address.atoms[0][0]]
             self.nonstack_labels[object_id] = labels | (self.nonstack_labels.get(object_id) or frozenset())
 
     def _definition_atom(self, definition, requested_span, fresh=False,
@@ -1382,6 +1411,14 @@ class _Projector:
             self._fresh_atoms.add(atom)
         if eligible:
             self._eligible_atoms[atom] = key   # (``eligible``: the value is the operation's own)
+        if atom in self._fresh_atoms and key in self._fresh_windows and definition.span == requested_span:
+            # an allocator's block of a size proven at the call (docs 25.79)
+            size, never_null = self._fresh_windows[key]
+            self._nonstack_extent[atom] = (size, frozenset({"allocator-results-are-fresh"}
+                                                           | ({never_null} if never_null else set())))
+            if never_null is None:
+                self._guarded_atoms[atom] = key
+            self._allocator_atoms.add(atom)
         return _AddressExpression(((atom, 1),), 0, requested_span.size)
 
     def _pointer_row(self, definition, requested_span) -> _AddressExpression | None:
@@ -1413,7 +1450,7 @@ class _Projector:
         if null_is_fresh:
             # (the same object through a realloc-like callee: never a pre-escape value, docs 25.77)
             self.ineligible_atoms.update(atom for atom, _ in value.atoms)
-        if null_is_fresh and any(atom in self._nonstack_extent for atom, _ in value.atoms):
+        if null_is_fresh and self._resized(value):
             # the same object through a realloc-like callee: not the window's
             # bytes any more (a new block may be smaller) -- a value of its own
             return self._definition_atom(definition, requested_span)
@@ -1913,7 +1950,11 @@ class _Projector:
                 self._nonstack_atoms.add(atom)
                 result = _AddressExpression(((atom, 1),), 0, requested_span.size)
                 windows = [self._nonstack_extent.get(item.atoms[0][0]) if item.atoms else None for item in candidates]
-                if all(window is not None for window in windows):
+                if all(window is not None for window in windows) and not any(
+                        item.atoms[0][0] in self._guarded_atoms or item.atoms[0][0] in self._resized_atoms
+                        for item in candidates):
+                    # (a candidate needing a null test: none -- the join loses the guard; a
+                    # resized one: none -- its window was refused, docs 25.79)
                     # (a null or allocated block on a path: no window -- the
                     # contract covers its own results only)
                     self._nonstack_extent[atom] = (min(extent for extent, _ in windows),
@@ -1930,7 +1971,7 @@ class _Projector:
             reader, argument = self._same_object[definition.operation_key]
             value = self._expression_for_input(reader, argument)
             if value is not None and value.atoms and value.byte_size == requested_span.size \
-                    and any(atom in self._nonstack_extent for atom, _ in value.atoms):
+                    and self._resized(value):
                 # realloc of a windowed result: not the window's bytes any more
                 result = self._definition_atom(definition, requested_span)
             elif value is not None and value.atoms and value.byte_size == requested_span.size:

@@ -60,6 +60,13 @@ writing exactly the slot and loading it (its value rests on the old one).
 assumption accessor-result-separate, off by default): ``{"extent": N}`` --
 the bytes [result, result + N) never overlap the read slot of any call of
 the entry in the caller's activation.
+A ``fresh`` row may state the block's size (docs 25.79): ``"extent"``: bytes,
+``{"reg": slice}`` or ``{"product": [slice, slice]}`` (calloc) -- read at the
+call when the caller proves the registers constant (``~ext`` rows); the
+calling function then keeps accesses inside [result, result + size) apart
+from the stack, but only where a null test of the result dominates them --
+unless the entry declares ``"never_null": {"rests_on": "<this file id>:<id>"}``
+(it never returns null on a normal return; a declared assumption, switchable).
 ``result_nonstack`` (optional, per entry; docs 25.75): ``{"result": slice,
 "extent": N, "rests_on": "<this file id>:<id>"}`` -- every byte [result,
 result + N) of every result is in no thread's stack, null included: in the
@@ -195,6 +202,10 @@ class ModelEntry:
     # result_nonstack: (result slice, extent in bytes, the declared label it
     # rests on), or None
     nonstack_result: tuple | None = None
+    # fresh rows' sizes: (write slice, bytes | ("reg", slice) | ("product",
+    # slice, slice)); never_null: the declared label it rests on, or None
+    fresh_extents: tuple = ()
+    never_null: str | None = None
     # model ids ("<file>/<entry>", or "*") whose accessor state a call of this
     # entry leaves unchanged
     preserves_accessor_state: tuple[str, ...] = ()
@@ -238,6 +249,9 @@ class ModelEntry:
         for access in self.unknown_memory:
             if type(access.size) is tuple:
                 found.add(access.size)
+        for _, size in self.fresh_extents:
+            if type(size) is tuple:
+                found.update(size[1:])
         return tuple(sorted(found))
 
 
@@ -465,7 +479,7 @@ def load_model_file(path: str | Path) -> ModelFile:
     entries = []
     for item in raw["entries"]:
         allowed = {"name", "aliases", "registers", "memory", "other_memory", "notes", "observes",
-                   "original_names", "internal", "assumptions", "noreturn", "same_result", "result_nonstack",
+                   "original_names", "internal", "assumptions", "noreturn", "same_result", "result_nonstack", "never_null",
                    "preserves_accessor_state", "result_separate_from_reads", "omits_private_writes",
                    "callbacks", "callbacks_evidence", "frees"}
         if type(item) is not dict or not {"name", "registers", "memory", "other_memory"} <= set(item) <= allowed:
@@ -482,15 +496,25 @@ def load_model_file(path: str | Path) -> ModelFile:
             # what it observes is declared, not implied by never returning
             raise ModelError(f"{path}: a noreturn entry has no register or memory rows and declares observes")
         for row in item["registers"]:
-            if type(row) is not dict or not {"write"} <= set(row) <= {"write", "from", "loads", "fresh", "same_object_as"} \
+            if type(row) is not dict or not {"write"} <= set(row) \
+                    <= {"write", "from", "loads", "fresh", "same_object_as", "extent"} \
                     or type(row.get("fresh", False)) is not bool \
-                    or (row.get("fresh") and "same_object_as" in row):
+                    or (row.get("fresh") and "same_object_as" in row) or ("extent" in row and not row.get("fresh")):
                 raise ModelError(f"{path}: register rows are {{write, from, loads, fresh | same_object_as}}")
         registers = tuple(
             (_slice(row["write"], "register write"), tuple(_slice(s, "register read") for s in row.get("from", ())))
             for row in item["registers"]
         )
         fresh = tuple(_slice(row["write"], "register write") for row in item["registers"] if row.get("fresh"))
+        fresh_extents = tuple((_slice(row["write"], "register write"), _fresh_extent(row["extent"], path))
+                              for row in item["registers"] if row.get("fresh") and "extent" in row)
+        never_null = item.get("never_null")
+        if never_null is not None and (
+                type(never_null) is not dict or set(never_null) != {"rests_on"} or not fresh
+                or never_null["rests_on"] not in {label for label, _, _ in declares}
+                or not never_null["rests_on"].startswith(f"{file_id}:")):
+            raise ModelError(f"{path}: {item['name']}: never_null is {{rests_on: <this file id>:<id>}} of an "
+                             "entry with a fresh row")
         register_loads = tuple(
             (_slice(row["write"], "register write"), tuple(_access(load, "register load") for load in row["loads"]))
             for row in item["registers"] if row.get("loads"))
@@ -539,7 +563,8 @@ def load_model_file(path: str | Path) -> ModelFile:
                                   identity=source["sha256"][:12] if source["kind"] == "derived" else "",
                                   internal=item.get("internal", False), unknown_memory=unknown_memory,
                                   noreturn=item.get("noreturn", False), same_result=same_result,
-                                  nonstack_result=nonstack_result,
+                                  nonstack_result=nonstack_result, fresh_extents=fresh_extents,
+                                  never_null=None if never_null is None else never_null["rests_on"],
                                   preserves_accessor_state=tuple(preserving), register_loads=register_loads,
                                   separate_extent=None if separate is None else separate["extent"],
                                   callbacks_registered=registered, callbacks_invokes=invokes, frees=frees,
@@ -606,6 +631,34 @@ def _same_result(item, registers, fresh, same_object, register_loads, path):
             raise ModelError(f"{where}: another memory row writes the slot's bytes "
                              "(only the one write-back row may)")
     return result, inputs, read, raw.get("write_back", False)
+
+
+def _fresh_extent(raw, path):
+    """A fresh row's ``extent``: bytes, ("reg", slice) or ("product", slice, slice)."""
+    if type(raw) is int and raw > 0:
+        return raw
+    if type(raw) is dict and set(raw) == {"reg"}:
+        return ("reg", _slice(raw["reg"], "fresh extent register"))
+    if type(raw) is dict and set(raw) == {"product"} and type(raw["product"]) is list and len(raw["product"]) == 2:
+        return ("product", *(_slice(item, "fresh extent factor") for item in raw["product"]))
+    raise ModelError(f"{path}: a fresh extent is bytes, {{reg: slice}} or {{product: [slice, slice]}}")
+
+
+def fresh_extent_bytes(size, constants) -> int | None:
+    """A fresh block's size at a call (``constants``: register slice -> the
+    value the caller proves): None when a register is not proven, the size is
+    zero, or a product overflows -- unsigned at the factors' width (the
+    narrowest slice), refused from half of it (2^63 for 8-byte slices)."""
+    if type(size) is int:
+        return size
+    factors = [constants.get(item) for item in size[1:]]
+    width_bits = 8 * min(item[1] for item in size[1:])
+    if any(type(value) is not int or not 0 <= value < 1 << width_bits for value in factors):
+        return None
+    product = 1
+    for value in factors:
+        product *= value
+    return product if 0 < product < 1 << (width_bits - 1) else None
 
 
 def _nonstack_result(item, registers, fresh, same_object, file_id, declares, path):
@@ -974,6 +1027,9 @@ def model_effect(derive, model_file, entry, *args):
         fresh_registers=tuple(ByteSpan(args[0], start, size) for start, size in entry.fresh),
         nonstack_results=() if entry.nonstack_result is None else (
             (ByteSpan(args[0], *entry.nonstack_result[0]), *entry.nonstack_result[1:]),),
+        fresh_extents=tuple(
+            (ByteSpan(args[0], *write), size, entry.never_null) for write, size in
+            ((write, fresh_extent_bytes(size, args[-1])) for write, size in entry.fresh_extents) if size),
         same_object_registers=tuple(
             (ByteSpan(args[0], *write), ByteSpan(args[0], *source)) for write, source in entry.same_object
         ),

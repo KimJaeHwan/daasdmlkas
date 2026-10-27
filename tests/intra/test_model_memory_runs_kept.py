@@ -66,7 +66,7 @@ def test_strcpy_keeps_dst0_equal_to_src0():
     results = _analyze(builder)
     item = results["1:1000"]
     ((call, label),) = item.declared.items()
-    assert label == "external-model:crt-win64/strcpy@v7"
+    assert label == "external-model:crt-win64/strcpy@v8"
     assert not item.proven[call].preserves_memory and item.proven[call].memory_runs_final
     assert dict(item.normalized.kept_call_memory)[call]
     first, second = _slice(results, "1:1000", 6), _slice(results, "1:1000", 7)

@@ -570,6 +570,12 @@ def _same_object_rows(proven_call_effects, observation) -> dict:
     return found
 
 
+def _pointer_bytes(observation) -> int:
+    """The program's pointer width (the stack pointer's size), 8 when unknown."""
+    rows = [row.memory_transition.caller_base.byte_size for row in observed_call_state_projections(observation)]
+    return rows[0] if rows and all(item == rows[0] for item in rows) else 8
+
+
 def _same_object_results(proven_call_effects) -> frozenset:
     """Call effect rows writing a register a same-object relation is declared
     for (``same_object_registers``), lowered or not: never a value of the call's
@@ -1670,6 +1676,7 @@ class _ScopedNormalizer:
             nonstack_labels: dict = {}
             wild_definitions: dict = {}
             ineligible_atoms: set = set()
+            guarded_windows: dict = {}
             pointer_rows: dict = {}
             value_inputs: dict = {}
             address_metadata: dict = {"objects": {}, "atoms": {}}
@@ -1680,6 +1687,11 @@ class _ScopedNormalizer:
                 if run.writes and all(span in effect.fresh_registers for span in run.writes)
             )
             same_object_rows = _same_object_rows(proven_call_effects, observation)
+            # allocator windows (docs 25.79): fresh row -> (bytes, never_null label | None)
+            fresh_windows = {
+                f"{key}~{index}": (size, never_null)
+                for key, effect in proven_call_effects.items() for span, size, never_null in effect.fresh_extents
+                for index, run in enumerate(effect.runs) if tuple(getattr(run, "writes", ())) == (span,)}
             push_register_space = (_register_space_id(observation) or _program_register_space(unit)
                                    if call_transitions else None)
             for instruction in sorted(observation.instructions, key=lambda item: item.address):
@@ -1877,6 +1889,7 @@ class _ScopedNormalizer:
                     nonstack_labels=nonstack_labels,
                     wild_definitions=wild_definitions,
                     ineligible_atoms=ineligible_atoms,
+                    fresh_windows=fresh_windows, guarded_windows=guarded_windows,
                     once_blocks=once_blocks,
                     settle_pending=settle,
                     address_metadata=address_metadata,
@@ -1898,12 +1911,13 @@ class _ScopedNormalizer:
                                                      [set(wild_objects), set(fresh_objects),
                                                       set(nonstack_objects), set(nonstack_spans),
                                                       dict(nonstack_labels), dict(wild_definitions),
-                                                      set(ineligible_atoms)])
+                                                      set(ineligible_atoms), dict(guarded_windows)])
                         continue
                     if settled_at is not None and settled_at[4] - _pending_write_keys(effect_unit):
                         effect_unit, memory_unit, memory_binding, memory_ssa, _, used_reads, kept = settled_at
                         for current, before in zip((wild_objects, fresh_objects, nonstack_objects, nonstack_spans,
-                                                    nonstack_labels, wild_definitions, ineligible_atoms), kept):
+                                                    nonstack_labels, wild_definitions, ineligible_atoms,
+                                                    guarded_windows), kept):
                             current.clear()
                             current.update(before)
                     break
@@ -1991,6 +2005,17 @@ class _ScopedNormalizer:
         frame_uses: list = []
         opaque_uses: list = []
         pre_uses: list = []
+        # null tests of the allocations whose windows need one (docs 25.79): on
+        # this pass's final unit
+        if guarded_windows:
+            from ._null_guard import null_guarded
+
+            guards = null_guarded(effect_unit, observation, memory_ssa, context, frozenset(guarded_windows.values()),
+                                  frozenset(row.operation_key for row in call_clobber_reads),
+                                  _pointer_bytes(observation))
+            guarded_accesses = {item: guards.get(row, frozenset()) for item, row in guarded_windows.items()}
+        else:
+            guarded_accesses = {}
         # wild objects built only from values obtained at these operations
         # (pre-escape-values-do-not-address-the-new-frame, docs 25.77)
         pre_escape_objects = {
@@ -2051,7 +2076,7 @@ class _ScopedNormalizer:
                 uses=frame_uses, separations=separations, escape_memo=escape_memo,
                 read_separations=_forward_memory_plan,
                 pre_escape_objects=pre_escape_objects, pre_uses=pre_uses,
-                boundary_calls=frozenset(assumed_call_effects),
+                boundary_calls=frozenset(assumed_call_effects), guarded_windows=guarded_accesses,
             )
             dependencies = base.copy()
             phase_count("fixpoint_rounds", 1)   # (K2 sizes: a graph copy per round, docs 25.31)
@@ -2255,7 +2280,9 @@ class _ScopedNormalizer:
                 private_frame_above=private_frame_above,
                 assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
                 wild_objects=frozenset(wild_objects), fresh_objects=frozenset(fresh_objects),
-                nonstack_objects=frozenset(nonstack_objects), nonstack_spans=frozenset(nonstack_spans),
+                nonstack_objects=frozenset(nonstack_objects),
+                # (forward's probes add accesses the null tests were not checked for: no guarded windows)
+                nonstack_spans=frozenset(span for span in nonstack_spans if span.object_id not in guarded_windows),
                 uncertain_writers=tuple(sorted(_uncertain.items(),
                                                                                          key=lambda item: item[0])),
                 separations=separations, proven_call_effects=tuple(sorted(proven_call_effects.items())),

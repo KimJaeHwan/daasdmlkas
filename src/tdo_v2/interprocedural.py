@@ -867,6 +867,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         # a window resting on a switched-off assumption: none
                         effect = replace(effect, nonstack_results=tuple(
                             row for row in effect.nonstack_results if row[2] not in disabled))
+                    if effect.fresh_extents:
+                        # (allocator windows: none with allocator-results-are-fresh off; a
+                        # switched-off never_null claim leaves the window guarded)
+                        effect = replace(effect, fresh_extents=() if "allocator-results-are-fresh" in disabled
+                                         else tuple((span, size, None if label in disabled else label)
+                                                    for span, size, label in effect.fresh_extents))
                     if "same-result-functions" not in disabled:
                         effect = _accessor_effect(effect, model_file, entry, register_object, memory_space,
                                                   "accessor-result-separate" not in disabled)

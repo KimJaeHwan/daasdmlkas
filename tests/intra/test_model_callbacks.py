@@ -39,10 +39,10 @@ def test_entries_running_registered_handlers_are_the_audited_ones():
     found = {(load_model_file(path).file_id, entry.name) for path in DECLARED
              for entry in load_model_file(path).entries if entry.callbacks_registered}
     assert found == {
-        ("crt-win64", "abort"), ("crt-win64", "longjmp"), ("crt-win64", "malloc"), ("crt-win64", "realloc"),
-        ("crt-win64", "free"),
+        ("crt-win64", "abort"), ("crt-win64", "longjmp"), ("crt-win64", "malloc"), ("crt-win64", "calloc"),
+        ("crt-win64", "realloc"), ("crt-win64", "free"),
         ("crt-sysv64", "abort"), ("crt-sysv64", "longjmp"), ("crt-sysv64", "__stack_chk_fail"),
-        ("crt-sysv64", "malloc"), ("crt-sysv64", "free"), ("crt-sysv64", "realloc"),
+        ("crt-sysv64", "malloc"), ("crt-sysv64", "calloc"), ("crt-sysv64", "free"), ("crt-sysv64", "realloc"),
         ("ue-core-win64", "FMemory::Malloc"), ("ue-core-win64", "FMemory::Free"),
         ("ue-core-win64", "FMemory::QuantizeSize"), ("ue-core-win64", "FMemory::Realloc"),
         ("ue-core-win64", "FDebug::CheckVerifyFailedImpl"), ("ue-core-win64", "UE4Array_Private::OnInvalidArrayNum"),
@@ -109,12 +109,12 @@ def test_a_registered_handler_entry_reports_the_assumption_and_is_switchable():
     models = sorted((REPO / "models" / "external").glob("*.json"))
     on = _malloc_program(models)
     ((call, label),) = on.declared.items()
-    assert label == "external-model:crt-win64/malloc@v7"
+    assert label == "external-model:crt-win64/malloc@v8"
     assert LABEL in on.inherited_assumptions
     off = _malloc_program(models, assume_registered_handlers_not_observed=False)
     assert off.declared == {} and LABEL not in off.inherited_assumptions
     assert off.refused_models[call] == \
-        f"external-model:crt-win64/malloc@v7: rests on {LABEL}, switched off in this run"
+        f"external-model:crt-win64/malloc@v8: rests on {LABEL}, switched off in this run"
 
 
 @pytest.mark.parametrize("change, reason", [
@@ -129,7 +129,7 @@ def test_a_refused_entry_is_not_applied_at_a_call(tmp_path, change, reason):
     item = _malloc_program([path])
     assert item.declared == {}
     ((call, why),) = item.refused_models.items()
-    assert why.startswith("external-model:crt-win64/malloc@v7: ") and reason in why
+    assert why.startswith("external-model:crt-win64/malloc@v8: ") and reason in why
 
 
 def test_a_pure_entry_does_not_rest_on_it():
