@@ -32,6 +32,11 @@ _MEMORY_KINDS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_REL
 RESULTS: list = []
 
 
+# calls x footprint spans above which a function is skipped (reported as
+# "skipped"): the shadow kills every tracked span at every call
+LIMIT = 200_000
+
+
 def record(scope, *args) -> None:
     try:
         RESULTS.append((scope, check(*args)))
@@ -153,7 +158,12 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
     production SSA's origins, per read byte; at most ``limit``."""
     from .memory_ssa import _build_dense
 
+    from .memory_ssa import _build_partition
+
     calls = frozenset(calls)
+    present = sum(1 for block in memory_unit.blocks for action in block.actions if action.operation_key in calls)
+    if present * len(_build_partition(memory_unit).connected) > LIMIT:
+        return "skipped"
     shadow = _build_dense(shadow_unit(memory_unit, calls, preserved, memory_keeping))
     shadow_reads, shadow_joins = _byte_definitions(shadow)
     production_reads, production_joins = _byte_definitions(memory_ssa)
