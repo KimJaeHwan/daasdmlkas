@@ -1998,12 +1998,6 @@ class _ScopedNormalizer:
             if rows and not any(atom in ineligible_atoms for atom, _ in rows)}
         # the stack escapes once for this normalization (docs 25.31 B0-4)
         escape_memo = EscapeMemo(effect_unit, observation, context, address_spaces)
-        private_writes = private_frame_writes(
-            effect_unit, observation, context, address_spaces,
-            assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
-            uses=frame_uses, escaping_calls=escaping_calls, opaque_calls=opaque_calls, opaque_uses=opaque_uses,
-            escape_memo=escape_memo,
-        )
         # uncertain-address writers to their fixed point here: only the
         # may-alias rows and their debt nodes depend on them (a copy of the
         # graph so far per round), the rest of the normalization does not
@@ -2057,6 +2051,7 @@ class _ScopedNormalizer:
                 uses=frame_uses, separations=separations, escape_memo=escape_memo,
                 read_separations=_forward_memory_plan,
                 pre_escape_objects=pre_escape_objects, pre_uses=pre_uses,
+                boundary_calls=frozenset(assumed_call_effects),
             )
             dependencies = base.copy()
             phase_count("fixpoint_rounds", 1)   # (K2 sizes: a graph copy per round, docs 25.31)
@@ -2079,6 +2074,15 @@ class _ScopedNormalizer:
             if grown == _uncertain:
                 break
             _uncertain = grown
+        # (with the final uncertain writers: a held slot rests on them, docs 25.78)
+        private_writes = private_frame_writes(
+            effect_unit, observation, context, address_spaces,
+            assumed_calls=quiet_calls, observed_calls=observed_calls, private_above=private_frame_above,
+            uses=frame_uses, escaping_calls=escaping_calls, opaque_calls=opaque_calls, opaque_uses=opaque_uses,
+            escape_memo=escape_memo, boundary_calls=frozenset(assumed_call_effects),
+            uncertain_writers=frozenset(_uncertain), wild_objects=frozenset(wild_objects),
+            assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+        )
         if any(set(rows) & set(_uncertain) for _, rows in kept_memory.values()):
             # a kept run's write turned out uncertain-address: its place may be
             # another, so the call keeps nothing there -- normalize again

@@ -432,6 +432,7 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
         uses=frame_uses, separations=inputs.separations,
         escape_memo=EscapeMemo(probed, inputs.observation, inputs.context, inputs.address_spaces),
         read_separations=inputs.read_separations,
+        boundary_calls=inputs.assumed_calls,
         )
     finally:
         PRE_ESCAPE_NOT_FRAME.reset(tokens[2])

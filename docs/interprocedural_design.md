@@ -5866,3 +5866,26 @@ push 정의(§25.73) 뒤로 모든 CALL이 private 프레임에 쓰기를 하므
   writer, 탈출 뒤 값·스택 주소를 받은 호출 결과·realloc 재사용·scaled index는 wild, run label 보고, 오라클: 보통 실행 silent 없음 /
   호출자 프레임 주소를 돌려주는 callee는 오라클이 잡음). 가정 없는 의미를 보는 기존 테스트(fresh 기저만으로는 경계 증명이 아님 등)는
   이 가정을 끄고 실행.
+
+### 25.78 프레임 안에 보관한 스택 주소는 탈출이 아니다 -- 탈출 판정 정밀화 (2026-10-28)
+
+`_stack_taint`는 스택 유래 값의 모든 STORE를 탈출로 쳤다 -- 자기 private 프레임에 잠깐 저장(spill)하는 것까지. 그러면
+private-frame 규칙(§25.77 포함)이 그 경로의 나머지에서 꺼진다. 그래프 사실, 가정 없음. 설계 검토 Astra 3차·Fable 2차 승인
+(`.census6/design_escape_precision.md`). 첫 버전은 일부러 좁다 -- spill과 다음 호출 사이에서만 이득.
+
+- 보관(held, `_held_inputs`): 한 번만 해석된 STORE가 스택 객체의 private 프레임(기하만: `offset < bias + private_above`)에
+  정확히 쓰고, uncertain writer가 아니고, rep 사이트가 아니면 스택 유래 값의 저장은 보관 -- 그 바이트가 held mask에 든다(kill 없음,
+  합집합; 두 mask 중 하나라도 바뀌면 후속 재방문).
+- held가 비어 있지 않은 동안 LOAD 출력이 스택 유래가 되는 경우(`tainted_loads`): held 바이트를 읽음, 주소 입력이 스택 유래,
+  미해석·wild 기저(item 1의 un-wild 전 원래 wild 집합), globals-disjoint-from-stack 없이 상수 주소.
+- held가 비어 있지 않은 동안 탈출: TEST-ONLY 경계를 뺀 모든 CALL/CALLIND(callee는 자기 SP로 호출자 프레임을 읽는다 --
+  관찰하지 않는 proven callee도), 모든 CALLOTHER, BRANCHIND, 함수 밖으로의 BRANCH.
+- §25.77과의 관계: held 칸을 다시 읽은 값은 탈출 전 값이 아니다 -- 자격 판정이 `private_read` 와 `not in tainted_loads`를 함께
+  본다(opaque 반사실 판정도 각자의 `tainted_loads`).
+- 쓰기 쪽(`reaches`, private write)은 예전대로: held STORE를 그 탈출로 본다(held 없는 실행의 `reaches`). held 실행의
+  탈출(뒤의 호출들)을 쓰면 그 앞의 모든 쓰기가 탈출에 닿아 private write가 사라진다 -- x86-32는 스택 인자를 push하고
+  호출하므로(gate ep1: v3-win32 9개 함수가 0개로). 읽기 쪽(`escaped`, `escaped_before`, `tainted_loads`)만 held 실행.
+- `private_frame_writes`는 uncertain writer 고정점 뒤에, 같은 입력(경계 호출, uncertain, wild, globals)으로 계산. `EscapeMemo`
+  키에 그 입력 전부와 기하를 넣었다; held 계산의 작업 단위도 memo 재생 수에 든다. `stack_values_out`(요약)은 그대로.
+- 테스트 `tests/intra/test_held_frame_slots.py`(spill 뒤 rcx 쓰기는 프레임 읽기에 닿지 않음 -- main에서는 닿음; 다시 읽어 전역에
+  저장/held 중 호출/스택 유래 주소로 읽기/wild 기저로 읽기/globals 없이 상수 주소 읽기 -> 탈출; held 칸 재로드는 §25.77 대상 아님).

@@ -45,9 +45,9 @@ def _run(program, monkeypatch, memo: bool, **options):
     computed = []
     original = may_alias._stack_escapes
 
-    def counted(*args):
+    def counted(*args, **kwargs):
         computed.append(1)
-        return original(*args)
+        return original(*args, **kwargs)
 
     with monkeypatch.context() as patch:
         patch.setattr(may_alias, "_stack_escapes", counted)
@@ -94,7 +94,7 @@ def test_a_memo_policy_equals_a_fresh_one(program, monkeypatch, entry_values, op
         policy = original(*args, **kwargs)
         if kwargs.get("memo", args[10] if len(args) > 10 else None) is not None:
             plain = list(args[:10]) + [None]
-            fresh = original(*plain)
+            fresh = original(*plain, **{key: value for key, value in kwargs.items() if key != "memo"})
             for name in ("stack_object", "bias", "escape", "escape_without_opaque", "globals_disjoint",
                          "private_above", "private_used", "opaque_used"):
                 assert getattr(policy, name) == getattr(fresh, name), name
@@ -116,7 +116,7 @@ def test_another_input_is_computed_uncached(program):
 def test_a_failed_computation_caches_nothing(monkeypatch):
     memo = may_alias.EscapeMemo("unit", "observation", "context", "spaces")
 
-    def fails(*args):
+    def fails(*args, **kwargs):
         raise resource_limits.AnalysisBudgetExceeded("work")
 
     monkeypatch.setattr(may_alias, "_stack_escapes", fails)
