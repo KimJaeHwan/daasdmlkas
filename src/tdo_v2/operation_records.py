@@ -678,13 +678,13 @@ class _Builder:
         self.objects = dict(normalized.address_objects)
         self.atoms = dict(normalized.address_atoms)
         self.effects = {effect.operation_key: effect for effect in normalized.effects}
-        from .call_clobber import rows_by_node
+        from .call_clobber import debt_calls, rows_by_debt, rows_by_node
 
-        # debt node -> all its rows (a copy proof splits one reader's row)
-        self.debt_rows = {}
-        for rows, nodes in ((normalized.call_clobber_reads, normalized.call_clobber_nodes),
-                            (normalized.may_alias_reads, normalized.may_alias_nodes)):
-            self.debt_rows.update(rows_by_node(rows, nodes))
+        # debt node -> all its rows (a call-clobber node per (read, call); a
+        # copy proof splits one reader's row)
+        self.debt_rows = rows_by_debt(normalized.call_clobber_reads, normalized.call_clobber_debts)
+        self.debt_rows.update(rows_by_node(normalized.may_alias_reads, normalized.may_alias_nodes))
+        self.debt_call = debt_calls(normalized.call_clobber_reads, normalized.call_clobber_debts)
         self.records: list = records if records is not None else []
         self.id_of: dict = {}
         self.expanding: set = set()
@@ -1646,12 +1646,17 @@ class _Builder:
             record["spans"] = [_span_text(span) for span in spans]
             if self.physical_memory:
                 record["physical_spans"] = [_span_dict(span) for span in spans]
+            if node in self.debt_call:
+                record["call"] = self.debt_call[node]   # (the crossing call this node stands for)
             if hasattr(row, "intervening_calls"):
                 record["calls"] = sorted({call for part in rows for call in part.intervening_calls})
             if len(rows) > 1:
                 # a copy proof split the read's row: which calls cross which bytes
                 record["parts"] = [{"spans": [_span_text(span) for span in part.spans],
                                     "calls": list(getattr(part, "intervening_calls", ()))} for part in rows]
+                if self.physical_memory:
+                    for item, part in zip(record["parts"], rows):
+                        item["physical_spans"] = [_span_dict(span) for span in part.spans]
             uncertain = [writer for part in rows for writer in getattr(part, "uncertain", ())]
             if uncertain:
                 record["uncertain_writers"] = list(dict.fromkeys(uncertain))

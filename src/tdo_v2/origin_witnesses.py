@@ -75,10 +75,10 @@ def root_witnesses(normalized, unit, rows, seeds, labels, index, origins, traver
     free = labels_in_lanes(lane_slice(normalized, unit, seeds, index, ignore_debts=True), index, rows) & labels
     context = _Context(normalized, unit, origins)
     may_rows = dict(zip(normalized.may_alias_nodes, normalized.may_alias_reads))
-    from .call_clobber import rows_by_node
+    from .call_clobber import rows_by_debt
 
     # debt node -> all its rows (a copy proof splits one reader's row)
-    clobber_rows = rows_by_node(normalized.call_clobber_reads, normalized.call_clobber_nodes)
+    clobber_rows = rows_by_debt(normalized.call_clobber_reads, normalized.call_clobber_debts)
     found: dict = {label: [] for label in labels}
     truncated: set = set()
     root_debts = []
@@ -172,8 +172,9 @@ class _Context:
         self.atoms = dict(normalized.address_atoms)
         self.anchors = {row: (evaluation, anchor) for row, evaluation, anchor in normalized.call_anchors}
         self.clobbers: dict = {}
-        for row, debt in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes):
-            self.clobbers.setdefault(row.operation_key, []).append((row.spans, debt))
+        for row, debts in zip(normalized.call_clobber_reads, normalized.call_clobber_debts):
+            for debt in debts:   # (one per crossing call)
+                self.clobbers.setdefault(row.operation_key, []).append((row.spans, debt))
 
     def node(self, key):
         try:

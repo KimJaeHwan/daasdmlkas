@@ -38,6 +38,7 @@ from .normalize import (
     NormalizedFunction,
     UnresolvedNormalizedFunction,
 )
+from .call_clobber import debt_identity
 from .opaque_values import OpaqueValueEvidenceProvider
 from .resource_limits import analysis_entry
 from .query_contracts import (
@@ -292,6 +293,9 @@ def analyze_observed_functions(
     discharger = CallClobberDischarger(analyses)
     roots = []
     for analysis in analyses:
+        # a call-clobber debt counts once per read, not per (read, call) node
+        identity = debt_identity(getattr(analysis.normalized, "call_clobber_reads", ()),
+                                 getattr(analysis.normalized, "call_clobber_debts", ()))
         completion_by_node = {
             item.root_node: item for item in completed[analysis.entry]
         }
@@ -386,7 +390,7 @@ def analyze_observed_functions(
                     local_labels,
                     tuple(sorted({proof.label for proof in proofs})),
                     explanation,
-                    _with_unbound(local_completeness(results), unbound),
+                    _with_unbound(local_completeness(results, identity), unbound),
                     _with_unbound(effective_completeness(
                         results,
                         frozenset(
@@ -407,6 +411,7 @@ def analyze_observed_functions(
                                 ),
                             )
                         ),
+                        identity,
                     ), unbound),
                 )
             )

@@ -148,8 +148,11 @@ def _assert_current_rdi_lifetime_debt(results):
     assert operation.output.byte_size == 8
     graph = normalized.dependencies
     index_node = graph.node_for_key("op:" + INDEX)
-    (row, node), = [(row, node) for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
-                    if row.operation_key == INDEX and GROW_CALL in row.intervening_calls]
+    from tdo_v2.call_clobber import debt_pairs
+
+    (row, node), = [(row, node) for row, call, node in debt_pairs(normalized.call_clobber_reads,
+                                                                   normalized.call_clobber_debts)
+                    if row.operation_key == INDEX and call == GROW_CALL]
     assert any(span.start == 56 and span.size == 4 for span in row.spans)
     assert graph.node(node).kind is NodeKind.MEMORY_DEBT
     assert graph.node(node).label == "call_clobber_read" and node in graph.predecessors(index_node)
@@ -170,8 +173,9 @@ def _assert_current_rdi_lifetime_debt(results):
                    if local.memory_ssa.actions[read.action_id].operation_key == reader
                    and read.span.object_id.kind.value == "function_relative"]
         assert read.span.size == 8
-        (debt, debt_node), = [(row, node) for row, node in zip(local.call_clobber_reads, local.call_clobber_nodes)
-                             if row.operation_key == reader and REALLOC in row.intervening_calls]
+        (debt, debt_node), = [(row, node) for row, call, node in debt_pairs(local.call_clobber_reads,
+                                                                             local.call_clobber_debts)
+                             if row.operation_key == reader and call == REALLOC]
         assert read.span in debt.spans
         assert local.dependencies.node(debt_node).kind is NodeKind.MEMORY_DEBT
         assert debt_node in local.dependencies.predecessors(local.dependencies.node_for_key("op:" + reader))

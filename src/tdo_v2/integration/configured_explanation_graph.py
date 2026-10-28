@@ -105,18 +105,20 @@ def root_local_explanation(
                     else occurrence.access.raw_address.stable_key
                 ),
             })
-    for row, node in zip(
+    for row, nodes in zip(
         normalized.call_clobber_reads,
-        normalized.call_clobber_nodes,
+        normalized.call_clobber_debts,
         strict=True,
     ):
-        if node in owned:
-            gaps.append({
-                "kind": "call_clobber_read",
-                "node": node,
-                "operation_key": row.operation_key,
-                "spans": [_span_report(span) for span in row.spans],
-            })
+        for call, node in zip(row.intervening_calls, nodes, strict=True):   # (a node per crossing call)
+            if node in owned:
+                gaps.append({
+                    "kind": "call_clobber_read",
+                    "node": node,
+                    "operation_key": row.operation_key,
+                    "call": call,
+                    "spans": [_span_report(span) for span in row.spans],
+                })
     for row, node in zip(
         normalized.may_alias_reads,
         normalized.may_alias_nodes,
@@ -375,7 +377,7 @@ def conditional_call_byte_overlay(
     unanchored = sorted(set(proof_ordinals.values()) - attached_ordinals)
     debt_nodes = set(normalized.memory_graph.unresolved_read_nodes)
     debt_nodes.update(normalized.memory_graph.unresolved_write_nodes)
-    debt_nodes.update(normalized.call_clobber_nodes)
+    debt_nodes.update(node for nodes in normalized.call_clobber_debts for node in nodes)
     debt_nodes.update(normalized.may_alias_nodes)
     debt_nodes.update(node for node, _ in getattr(normalized, "uncertain_nodes", ()))
     debt_nodes.update(node for node, _ in getattr(normalized, "open_nodes", ()))

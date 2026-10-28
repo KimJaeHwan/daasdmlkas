@@ -129,8 +129,8 @@ def test_a_label_on_the_call_clobber_debt_is_a_value_the_call_produced():
     (unit,) = program_units(_after_an_opaque_call())
     results = analyze_units([unit])
     normalized = results["1:1000"].normalized
-    (debt,) = [node for node, row in zip(normalized.call_clobber_nodes, normalized.call_clobber_reads)
-               if row.operation_key.endswith(":COPY")]
+    (debt,) = [node for nodes, row in zip(normalized.call_clobber_debts, normalized.call_clobber_reads)
+               if row.operation_key.endswith(":COPY") for node in nodes]
     rows = [SimpleNamespace(kind=BoundaryKind.SOURCE, label="S", node=debt, physical_spans=(), occurrence_ordinal=0)]
     node, span = _seed_register(normalized, unit, "COPY", RCX, 8)
     found = root_witnesses(normalized, unit, rows, [(node, (span,))], {"S"}, lane_index(normalized, unit),

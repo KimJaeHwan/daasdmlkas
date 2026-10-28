@@ -134,7 +134,8 @@ class NormalizedFunction:
     call_observations: FunctionCallObservations | None = None
     configured_memory_binding: BoundLocalMemorySsa | None = None
     call_clobber_reads: tuple[CallClobberRead, ...] = ()
-    call_clobber_nodes: tuple[NodeId, ...] = ()
+    # per row: its (reader, call) debt nodes, aligned with its intervening calls
+    call_clobber_debts: tuple[tuple[NodeId, ...], ...] = ()
     may_alias_reads: tuple[MayAliasRead, ...] = ()
     may_alias_nodes: tuple[NodeId, ...] = ()
     control_dependences: tuple[ControlDependence, ...] = ()
@@ -251,18 +252,22 @@ class NormalizedFunction:
             type(row) is not CallClobberRead for row in self.call_clobber_reads
         ):
             raise TypeError("call-clobber reads must be an exact tuple")
-        if type(self.call_clobber_nodes) is not tuple or len(
-            self.call_clobber_nodes
+        if type(self.call_clobber_debts) is not tuple or len(
+            self.call_clobber_debts
         ) != len(self.call_clobber_reads):
-            raise ValueError("call-clobber nodes must align with call-clobber reads")
-        for row, node in zip(self.call_clobber_reads, self.call_clobber_nodes):
-            record = self.dependencies.node(node)
-            if (
-                record.kind is not NodeKind.MEMORY_DEBT
-                or record.label != "call_clobber_read"
-                or not record.key.endswith(f":{row.operation_key}")
-            ):
-                raise ValueError("call-clobber node does not match its read")
+            raise ValueError("call-clobber debts must align with call-clobber reads")
+        for row, nodes in zip(self.call_clobber_reads, self.call_clobber_debts):
+            # every row belongs to a pair of each of its calls (rows have calls)
+            if type(nodes) is not tuple or len(nodes) != len(row.intervening_calls):
+                raise ValueError("call-clobber debts must align with the read's calls")
+            for call, node in zip(row.intervening_calls, nodes):
+                record = self.dependencies.node(node)
+                if (
+                    record.kind is not NodeKind.MEMORY_DEBT
+                    or record.label != "call_clobber_read"
+                    or _pair_of(record.key) != (row.operation_key, call)
+                ):
+                    raise ValueError("call-clobber node does not match its read and call")
         if type(self.may_alias_reads) is not tuple or any(
             type(row) is not MayAliasRead for row in self.may_alias_reads
         ):
@@ -649,9 +654,9 @@ def _reaches_debt(graph, node, varnode, context, clobbers=None) -> bool:
 
 def call_clobber_spans(normalized) -> dict:
     """Call-clobber debt node -> the spans its read may have lost to a call."""
-    from .call_clobber import spans_by_node
+    from .call_clobber import spans_by_debt
 
-    return spans_by_node(normalized.call_clobber_reads, normalized.call_clobber_nodes)
+    return spans_by_debt(normalized.call_clobber_reads, normalized.call_clobber_debts)
 
 
 def _row_reaches_debt(graph, node) -> bool:
@@ -2032,7 +2037,7 @@ class _ScopedNormalizer:
             ),
         )
         call_clobber_reads = subtract_copy_clobbers(_forward_memory_plan, call_clobber_reads)
-        call_clobber_nodes = _materialize_call_clobber_debt(
+        call_clobber_debts = _materialize_call_clobber_debt(
             dependencies,
             memory_ssa,
             call_clobber_reads,
@@ -2128,7 +2133,7 @@ class _ScopedNormalizer:
             view = SimpleNamespace(
                 dependencies=dependencies, memory_ssa=memory_ssa, effects=all_effects, scopes=unit.scopes,
                 may_alias_reads=may_alias_reads, may_alias_nodes=may_alias_nodes,
-                call_clobber_reads=call_clobber_reads, call_clobber_nodes=call_clobber_nodes,
+                call_clobber_reads=call_clobber_reads, call_clobber_debts=call_clobber_debts,
                 uncertain_writers=tuple(_uncertain.items()), uncertain_nodes=uncertain_nodes, call_anchors=anchors,
                 open_nodes=open_nodes, opaque_nodes=opaque_nodes,
             )
@@ -2203,9 +2208,9 @@ class _ScopedNormalizer:
                 # is then 0 (forward) at the site only if every debt is a call
                 # possibly changing DF itself (nothing assigned after it)
                 flag = _resolve_validated_storage(_storage_ref(site.direction), context)
-                from .call_clobber import spans_by_node
+                from .call_clobber import spans_by_debt
 
-                spans = spans_by_node(call_clobber_reads, call_clobber_nodes)
+                spans = spans_by_debt(call_clobber_reads, call_clobber_debts)
                 if assume_direction_flag_clear and rep_plan[address][1] == 1 \
                         and type(flag) is ResolvedStorage and all(
                             debt in spans and all(flag.span.contains(span) for span in spans[debt])
@@ -2269,7 +2274,7 @@ class _ScopedNormalizer:
                 memory_binding if configured_call_effects is not None else None
             ),
             call_clobber_reads=call_clobber_reads,
-            call_clobber_nodes=call_clobber_nodes,
+            call_clobber_debts=call_clobber_debts,
             may_alias_reads=may_alias_reads,
             may_alias_nodes=may_alias_nodes,
             control_dependences=control_dependences,
@@ -2504,31 +2509,45 @@ def _materialize_call_clobber_debt(
     memory_ssa: LocalMemorySsaResult,
     reads: tuple[CallClobberRead, ...],
     operation_nodes: dict[str, NodeId],
-) -> tuple[NodeId, ...]:
-    """One debt node per read that may observe an unevidenced call's write."""
+) -> tuple[tuple[NodeId, ...], ...]:
+    """One debt node per (read, crossing call) -- the call's chi as the read
+    sees it (docs 25.83 S2d) -- per row its nodes in the order of its calls.
+    No edge from the call: the call is named by the key only, so a CALLIND's
+    target never becomes an input of the read."""
     if not reads:
         return ()
     namespace = (
-        f"call-clobber-v1:{memory_ssa.function_scope.digest.hex()}:"
+        f"call-clobber-v2:{memory_ssa.function_scope.digest.hex()}:"
         f"{memory_ssa.unit_digest.hex()}"
     )
     dependencies.claim_namespace(namespace)
-    nodes = []
+    made: dict = {}
+    debts = []
     for row in reads:
-        node = dependencies.add_node(
-            NodeRecord(
-                f"{namespace}:{row.operation_key}",
-                NodeKind.MEMORY_DEBT,
-                "call_clobber_read",
-            )
-        )
-        dependencies.add_edge(
-            node,
-            operation_nodes[row.operation_key],
-            EdgeRecord(EdgeKind.CALL_CLOBBER_READ, operation=row.operation_key),
-        )
-        nodes.append(node)
-    return tuple(nodes)
+        nodes = []
+        for call in row.intervening_calls:
+            pair = (row.operation_key, call)
+            if pair not in made:
+                made[pair] = dependencies.add_node(NodeRecord(
+                    f"{namespace}:{row.operation_key}|{call}", NodeKind.MEMORY_DEBT, "call_clobber_read"))
+                dependencies.add_edge(
+                    made[pair],
+                    operation_nodes[row.operation_key],
+                    EdgeRecord(EdgeKind.CALL_CLOBBER_READ, operation=row.operation_key),
+                )
+            nodes.append(made[pair])
+        debts.append(tuple(nodes))
+    return tuple(debts)
+
+
+def _pair_of(key: str):
+    """(read, call) of a call-clobber pair node key, or None."""
+    prefix, _, rest = key.partition(":")
+    parts = rest.split(":", 2)
+    if prefix != "call-clobber-v2" or len(parts) != 3:
+        return None
+    pair = parts[2].split("|")
+    return tuple(pair) if len(pair) == 2 and all(pair) else None
 
 
 def _import_slots_used(memory_ssa) -> bool:

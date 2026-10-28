@@ -38,8 +38,10 @@ def test_original_r002_resize_lifetime_debt_cannot_supply_an_eight_byte_extent(a
     assert RESIZE_RESULT not in dict(normalized.pointer_rows)
     graph = normalized.dependencies
     upstream = set(graph.backward_reachable((graph.node_for_key("op:" + FIRST_STORE),)))
-    assert any("1b1:180006053:2:CALL" in row.intervening_calls and node in upstream
-               for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes))
+    from tdo_v2.call_clobber import debt_pairs
+
+    assert any(call == "1b1:180006053:2:CALL" and node in upstream
+               for _, call, node in debt_pairs(normalized.call_clobber_reads, normalized.call_clobber_debts))
     assert dict(normalized.uncertain_writers)[FIRST_STORE] is None
     assert roots[R002].effective_completeness.reachable_unresolved_reads > 0
     assert not roots[R002].is_effectively_complete

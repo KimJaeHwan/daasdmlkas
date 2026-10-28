@@ -86,13 +86,16 @@ class CallClobberDischarger:
             for entry, view in self._views.items()
         }
         self._frames: dict[AddressCoordinate, _Frame | None] = {}
+        # one discharge(): a row's judgement per (entry, row, context, active)
+        # -- a read has a debt node per crossing call, each judged on its rows
+        self._judged: dict = {}
         self._preserved: dict[tuple[AddressCoordinate, tuple[object, ...]], bool] = {}
         self._frame_safe: dict[tuple[AddressCoordinate, int, int], bool] = {}
-        from ..call_clobber import rows_by_node
+        from ..call_clobber import rows_by_debt
 
         # debt node -> all its rows (a copy proof splits one reader's row)
         self._clobber_rows = {
-            entry: rows_by_node(view.normalized.call_clobber_reads, view.normalized.call_clobber_nodes)
+            entry: rows_by_debt(view.normalized.call_clobber_reads, view.normalized.call_clobber_debts)
             for entry, view in self._views.items()
         }
 
@@ -105,6 +108,7 @@ class CallClobberDischarger:
     ) -> tuple[CallClobberDischarge, ...]:
         """``labels`` are the origin labels the root reports (local and proven)."""
         context = _Context.root(replacements, proofs, labels)
+        self._judged = {}
         rows = []
         for node, reads in self._clobber_rows[entry].items():
             kinds = self._discharge_reads(entry, reads, context, ())
@@ -116,7 +120,11 @@ class CallClobberDischarger:
         """A debt node's rows: discharged only if every one is."""
         kinds: set[DischargeKind] = set()
         for read in reads:
-            found = self._discharge_read(entry, read, context, active)
+            key = (entry, read, id(context), active)
+            judged = self._judged.get(key)
+            if judged is None or judged[0] is not context:   # (the context kept: its id is not reused)
+                judged = self._judged[key] = (context, self._discharge_read(entry, read, context, active))
+            found = judged[1]
             if found is None:
                 return None
             kinds.update(found)

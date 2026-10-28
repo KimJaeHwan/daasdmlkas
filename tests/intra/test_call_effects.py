@@ -240,7 +240,7 @@ def test_function_without_calls_has_no_call_debt():
         .ins(copy(reg(RCX), reg(RAX)))
         .ret()
     )
-    assert function.call_clobber_nodes == ()
+    assert function.call_clobber_debts == ()
     assert slice_from(function, operation_node_at(function, 1)).is_complete
 
 

@@ -89,6 +89,52 @@ def spans_by_node(rows, nodes) -> dict:
             for node, parts in rows_by_node(rows, nodes).items()}
 
 
+# call-clobber debt per (reader, call) (docs 25.83 S2d): ``debts[i]`` holds
+# the pair nodes of ``rows[i]``, aligned with its ``intervening_calls``; a
+# pair node stands for every row of its reader the call crosses
+
+def rows_by_debt(rows, debts) -> dict:
+    """Pair node -> the rows it stands for (a copy proof splits one reader's row)."""
+    found: dict = {}
+    for row, nodes in zip(rows, debts, strict=True):
+        for node in dict.fromkeys(nodes):
+            found.setdefault(node, []).append(row)
+    return {node: tuple(parts) for node, parts in found.items()}
+
+
+def spans_by_debt(rows, debts) -> dict:
+    """Pair node -> the spans of its rows."""
+    return {node: tuple(span for row in parts for span in row.spans)
+            for node, parts in rows_by_debt(rows, debts).items()}
+
+
+def debt_pairs(rows, debts) -> tuple:
+    """(row, call, pair node) for every row and each of its calls."""
+    return tuple((row, call, node) for row, nodes in zip(rows, debts, strict=True)
+                 for call, node in zip(row.intervening_calls, nodes, strict=True))
+
+
+def debt_calls(rows, debts) -> dict:
+    """Pair node -> its call."""
+    return {node: call for _, call, node in debt_pairs(rows, debts)}
+
+
+def debt_nodes(debts) -> tuple:
+    """Every pair node, once, in order."""
+    return tuple(dict.fromkeys(node for nodes in debts for node in nodes))
+
+
+def debt_identity(rows, debts) -> dict:
+    """Pair node -> its reader's first pair node: the debt identity public
+    completeness counts by (one per reader, as before the pairs)."""
+    first: dict = {}
+    found: dict = {}
+    for row, nodes in zip(rows, debts, strict=True):
+        for node in nodes:
+            found[node] = first.setdefault(row.operation_key, node)
+    return found
+
+
 _Byte = tuple[StorageObjectId, int]
 
 

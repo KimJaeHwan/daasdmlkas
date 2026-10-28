@@ -708,9 +708,10 @@ def evaluate_physical(record, entry, *, max_steps=200000):
             if len(owners) != 1:
                 raise Ineligible("unknown physical register fragment owner")
             original, = owners
-            bands = [(span, debt.get("calls", ())) for identifier in original.get("debts", ())
+            bands = [(span, piece.get("calls", ())) for identifier in original.get("debts", ())
                      for debt in (self.nodes.get(identifier, {}),) if debt.get("debt") == "call_clobber_read"
-                     for span in debt.get("physical_spans", ()) if span.get("kind") == "register_file"]
+                     for piece in debt.get("parts") or (debt,)
+                     for span in piece.get("physical_spans", ()) if span.get("kind") == "register_file"]
             for item in overrides:
                 self.tick()
                 if not isinstance(item, dict):
@@ -1229,10 +1230,11 @@ def evaluate_physical(record, entry, *, max_steps=200000):
 
                         debt = self.nodes[identifier]
                         bindings = list(register_bindings(node.get("operands", ()), retained=True))
-                        for span in debt.get("physical_spans", ()):
-                            if span["kind"] == "register_file" and not covers_register(
-                                    span["start"], span["size"], bindings, debt.get("calls", ())):
-                                raise Ineligible("incomplete physical register debt coverage")
+                        for piece in debt.get("parts") or (debt,):   # (a split row: each part's own calls)
+                            for span in piece.get("physical_spans", ()):
+                                if span["kind"] == "register_file" and not covers_register(
+                                        span["start"], span["size"], bindings, piece.get("calls", ())):
+                                    raise Ineligible("incomplete physical register debt coverage")
                 direct_reads = [item["physical_read"] for item in node.get("operands", ()) if "physical_read" in item]
                 if direct_reads:
                     self.read_debts[node.get("physical_context"), node.get("key")] = node.get("debts", ())

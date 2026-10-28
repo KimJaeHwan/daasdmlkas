@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .call_clobber import debt_nodes
 from .graph_contracts import NodeId, NodeKind
 from .normalize import NormalizedFunction
 from .memory_contracts import LocalMemorySsaResult
@@ -42,7 +43,7 @@ class BackwardSliceQuery:
             if function.dependencies.node(node).kind is NodeKind.CONSTANT
         )
         unresolved_read_set = set(function.memory_graph.unresolved_read_nodes)
-        unresolved_read_set.update(function.call_clobber_nodes)
+        unresolved_read_set.update(debt_nodes(function.call_clobber_debts))
         unresolved_read_set.update(function.may_alias_nodes)
         # debts of other kinds: uncertain-writer nodes not standing for a row,
         # alias conditions this function cannot decide

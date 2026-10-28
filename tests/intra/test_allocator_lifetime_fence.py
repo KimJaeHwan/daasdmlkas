@@ -89,9 +89,11 @@ def _assert_fence_debt(item, reader, call):
     view = _view(item, reader)
     assert not view.is_complete
     normalized = item.normalized
-    assert any(call in row.intervening_calls and node in view.result.reachable_nodes
+    from tdo_v2.call_clobber import debt_pairs
+
+    assert any(crossing == call and node in view.result.reachable_nodes
                and any(span.object_id.kind.value in ("address_space", "function_relative") for span in row.spans)
-               for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes))
+               for row, crossing, node in debt_pairs(normalized.call_clobber_reads, normalized.call_clobber_debts))
     return view
 
 

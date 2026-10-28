@@ -848,11 +848,11 @@ def snapshot_parts(builder, snapshot, start, end):
 
 
 def bind_call_debts(builder, record, debts):
-    from .call_clobber import rows_by_node
+    from .call_clobber import rows_by_debt
 
     covered = []
-    for raw_node, rows in rows_by_node(builder.normalized.call_clobber_reads,
-                                       builder.normalized.call_clobber_nodes).items():
+    for raw_node, rows in rows_by_debt(builder.normalized.call_clobber_reads,
+                                       builder.normalized.call_clobber_debts).items():
         if rows[0].operation_key != record.get("key"):
             continue
         identifier = builder.id_of.get(raw_node)

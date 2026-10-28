@@ -61,6 +61,7 @@ from .observed_call_state import observed_call_state_projections
 from .pcodeop_models import trap_operations
 from .physical_state import PhysicalRegisterSlice
 from .span_geometry import StorageObjectKind
+from .call_clobber import debt_identity
 from .query_contracts import LocalCompleteness, local_completeness
 from .resource_limits import (
     activation, analysis_entry, checkpoint, current_run, limit, reporting, run_exhausted, step,
@@ -383,8 +384,9 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
                 # come from, so it carries the label (the root stays unsure)
                 nodes += [
                     node
-                    for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
-                    if call in row.intervening_calls and any(
+                    for row, debts in zip(normalized.call_clobber_reads, normalized.call_clobber_debts)
+                    for crossing, node in zip(row.intervening_calls, debts)
+                    if crossing == call and any(
                         span.object_id.kind is StorageObjectKind.REGISTER_FILE
                         and any(offset in state for offset in range(span.start, span.end))
                         for span in row.spans
@@ -512,7 +514,9 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         for label, occurrence, root_nodes, results_for_root, node_labels in _raw_root_groups(
                 analysis, nodes[analysis.entry]):
             unbound = _unbound_roots(analysis.normalized, root_nodes)
-            completeness = _with_unbound(local_completeness(results_for_root), unbound)
+            completeness = _with_unbound(local_completeness(results_for_root, debt_identity(
+                getattr(analysis.normalized, "call_clobber_reads", ()),
+                getattr(analysis.normalized, "call_clobber_debts", ()))), unbound)
             inherited = (analysis.entry, label, occurrence) in incomplete_roots
             if inherited:
                 # the callee part of a projected root is incomplete

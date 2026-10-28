@@ -717,8 +717,9 @@ def _uncertain_address_writers(normalized, observation, context, operation_of, c
     # call-clobber debts sit on the reading operation without a span: the
     # row's spans say which of its register inputs a call may have changed
     clobbers: dict = {}
-    for row, debt in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes):
-        clobbers.setdefault(row.operation_key, []).append((row.spans, debt))
+    for row, debts in zip(normalized.call_clobber_reads, normalized.call_clobber_debts):
+        for debt in debts:   # (one per crossing call)
+            clobbers.setdefault(row.operation_key, []).append((row.spans, debt))
 
     def operand_inputs(node, varnode):
         resolved = _resolve_validated_storage(_storage_ref(varnode), context)

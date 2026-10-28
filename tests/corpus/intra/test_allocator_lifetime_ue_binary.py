@@ -69,8 +69,11 @@ def allocator_lifetime(core, trace):
 
 def _assert_named_graph_debt(item, call, reader, width):
     normalized = item.normalized
-    rows = [(row, node) for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
-            if row.operation_key == reader and call in row.intervening_calls]
+    from tdo_v2.call_clobber import debt_pairs
+
+    rows = [(row, node) for row, crossing, node in debt_pairs(normalized.call_clobber_reads,
+                                                               normalized.call_clobber_debts)
+            if row.operation_key == reader and crossing == call]
     assert rows, (call, reader)
     graph = normalized.dependencies
     target = graph.node_for_key(f"op:{reader}")
@@ -199,8 +202,11 @@ def test_original_trace_realloc_first_frame_reload_reaches_uncertain_data_store(
     graph = normalized.dependencies
     reached = set(graph.backward_reachable((graph.node_for_key(f"op:{writer}"),)))
     assert graph.node_for_key(f"op:{reader}") in reached
-    assert any(node in reached for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
-               if row.operation_key == reader and call in row.intervening_calls)
+    from tdo_v2.call_clobber import debt_pairs
+
+    assert any(node in reached for row, crossing, node in debt_pairs(normalized.call_clobber_reads,
+                                                                     normalized.call_clobber_debts)
+               if row.operation_key == reader and crossing == call)
 
 
 @pytest.mark.parametrize("call,index_read,base_read,writer", (
