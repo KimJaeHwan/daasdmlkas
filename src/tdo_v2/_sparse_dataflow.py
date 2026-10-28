@@ -106,8 +106,10 @@ class DominatorGraph:
         def intersect(left, right):
             while left != right:
                 while rank[left] > rank[right]:
+                    step()
                     left = idom[left]
                 while rank[right] > rank[left]:
+                    step()
                     right = idom[right]
             return left
 
@@ -116,6 +118,7 @@ class DominatorGraph:
             step()   # (budget: docs 25.30 K1c)
             changed = False
             for node in order[1:]:
+                step(1 + len(self.predecessors[node]))
                 processed = [item for item in self.predecessors[node] if item in idom]
                 candidate = processed[0]
                 for item in processed[1:]:
@@ -135,6 +138,7 @@ class DominatorGraph:
             for source in sources:
                 runner = source
                 while runner is not None and runner != self.idom[node]:
+                    step()   # (budget: docs 25.30 K1c)
                     frontier[runner].add(node)
                     runner = self.idom[runner]
         return frontier
@@ -176,8 +180,8 @@ class DominatorGraph:
         phis = {self.entry}
         pending = list(writes)
         while pending:  # iterated dominance frontier of the writing blocks
-            step()   # (budget: docs 25.30 K1c)
             node = pending.pop()
+            step(1 + len(self.frontier[node]))   # (budget: docs 25.30 K1c)
             for item in self.frontier[node]:
                 if item not in phis:
                     phis.add(item)
@@ -189,6 +193,7 @@ class DominatorGraph:
             """Nearest dominator-or-self of ``node`` among the points."""
             position = bisect_right(point_pre, self.pre[node]) - 1
             while not self._dominates(points[position], node):
+                step()
                 position -= 1  # entry dominates everything, so this stops
             return points[position]
 
@@ -198,6 +203,7 @@ class DominatorGraph:
             point = nearest(node)
             return exit_of_write(point) if point in writes else phi_value[point]
 
+        step(sum(len(self.predecessors[item]) for item in phis))
         sources = {item: [nearest(pred) for pred in self.predecessors[item]] for item in phis}
         dependents: dict[str, set[str]] = {}
         for item, points_in in sources.items():
@@ -210,9 +216,10 @@ class DominatorGraph:
             step()   # (budget: docs 25.30 K1c)
             item = pending.popleft()
             queued.discard(item)
-            value = entry_value if item == self.entry else frozenset()
-            for point in sources[item]:
-                value |= exit_of_write(point) if point in writes else phi_value[point]
+            parts = [entry_value] if item == self.entry else []
+            parts.extend(exit_of_write(point) if point in writes else phi_value[point] for point in sources[item])
+            step(len(parts) + sum(len(part) for part in parts))   # (one union: no copy per predecessor)
+            value = frozenset().union(*parts)
             if value != phi_value[item]:
                 phi_value[item] = value
                 for dependent in dependents.get(item, ()):
@@ -245,8 +252,8 @@ class DominatorGraph:
         phis = {self.entry}
         pending = [item for item in blocks if item in self.pre]
         while pending:
-            step()   # (budget: docs 25.30 K1c)
             node = pending.pop()
+            step(1 + len(self.frontier[node]))   # (budget: docs 25.30 K1c)
             for item in self.frontier[node]:
                 if item not in phis:
                     phis.add(item)
@@ -262,6 +269,7 @@ class DominatorGraph:
         def nearest(node: str) -> str:
             position = bisect_right(keys, self.pre[node]) - 1
             while not self._dominates(ordered[position], node):
+                step()
                 position -= 1  # the entry dominates everything, so this stops
             return ordered[position]
 

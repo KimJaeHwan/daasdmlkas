@@ -242,7 +242,9 @@ class LazySparse:
         while pending:   # the demand closure: chis a read's value reaches, then theirs
             step()
             block, index, item = pending.pop()
-            for definition in self.value_before(block, index, item):
+            value = self.value_before(block, index, item)
+            step(len(value))
+            for definition in value:
                 if definition in self.chi_at and (definition, item) not in self.sources:
                     self.source_of(definition, item)
                     pending.append((*self.chi_at[definition], item))

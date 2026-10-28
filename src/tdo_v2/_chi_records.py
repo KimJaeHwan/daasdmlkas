@@ -79,7 +79,7 @@ def chi_records(memory_unit, effect_unit, calls, preserved, memory_keeping) -> t
     rows = []
     for block in sorted(effect_unit.blocks, key=lambda item: item.key):
         for effect in block.effects:
-            spans, crossed_all = [], set()
+            spans, crossed_all, merged = [], set(), set()
             for evidence in effect.reads:
                 if type(evidence) is not ResolvedStorage:
                     continue
@@ -91,7 +91,10 @@ def chi_records(memory_unit, effect_unit, calls, preserved, memory_keeping) -> t
                     if crossed:
                         first = offset if first is None else first
                         last = offset
-                        crossed_all |= crossed
+                        if id(crossed) not in merged:   # (crossed_at's cached set: once per read)
+                            merged.add(id(crossed))
+                            step(len(crossed))
+                            crossed_all |= crossed
                 if first is not None:
                     spans.append(ByteSpan(span.object_id, first, last + 1 - first))
             if spans:
