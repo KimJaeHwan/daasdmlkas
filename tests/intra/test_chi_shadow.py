@@ -16,7 +16,7 @@ T, FLAG = tmp(0x100), tmp(0x300, 1)
 
 
 _STATE = (_chi_shadow.RESULTS, _chi_shadow.TERMINALS, _chi_shadow.TERMINAL_MISMATCHES, _chi_shadow.METRICS,
-          _chi_shadow.TERMINAL_KINDS)
+          _chi_shadow.TERMINAL_KINDS, _chi_shadow.LAZY)
 
 
 @pytest.fixture(autouse=True, params=("1", "sparse", "sparse-dense-reference"))
@@ -177,6 +177,31 @@ def test_a_store_on_one_arm_a_call_on_the_other(shadow):
         assert metrics["joins_shadow"] >= metrics["joins_chi_free"]
 
 
+def test_the_live_closure_drops_exactly_the_dead_effects(shadow, monkeypatch):
+    """``live_crossed`` with nothing dead is the exit closure itself; with the
+    calls declared dead, none of them is crossed (the "dead-masked" proof)."""
+    if shadow == "1":
+        return
+    seen = []
+    original = _chi_shadow.compare_terminals
+
+    def spy(scope, crossed, dead_keys=frozenset(), limit=20):
+        lazy = _chi_shadow.LAZY[scope]
+        calls = frozenset(key[:-len("~chi")] for key in (lazy.definitions[item].operation_key
+                                                          for item in lazy.chi_at))
+        for (block, object_id), offsets in _chi_shadow.TERMINALS[scope].items():
+            for offset, found in offsets.items():
+                assert lazy.live_crossed(block, object_id, offset, frozenset()) == found
+                assert not lazy.live_crossed(block, object_id, offset, calls)
+                seen.append(offset)
+        return original(scope, crossed, dead_keys, limit)
+
+    monkeypatch.setattr(_chi_shadow, "compare_terminals", spy)
+    builder = _frame(FunctionBuilder().sub_rsp(0x48), 0x10, reg(RSI)).call(OPAQUE_A).call(OPAQUE_B)
+    _checked(builder.add_rsp(0x48).ret())
+    assert seen
+
+
 class _Labels:
     def __init__(self, codes):
         self.codes = codes
@@ -196,9 +221,18 @@ def test_terminal_differences_are_classified_one_call_at_a_time():
                                 30: frozenset((call,)), 31: frozenset((dead,))}}
     universe = _Labels({0: [], 1: ["call:" + call, "call:" + tail], 2: ["call:" + call]})
     _chi_shadow.TERMINALS["f"] = shadow
+
+    class _Live:   # the dead-transparent closure: only `call` reappears (at byte 31 and 32)
+        def live_crossed(self, block, object_id, offset, dead):
+            return frozenset((call,)) if offset in (31, 32) else frozenset()
+
+    shadow[("exit", frame)][32] = frozenset((dead,))
+    universe.codes[3] = ["call:" + call, "call:" + stray.replace("20", "50")]   # (masked + unrelated)
+    _chi_shadow.LAZY["f"] = _Live()
     try:
-        _chi_shadow.compare_terminals("f", {"label_universe": universe, ("exit", frame): {30: 1, 31: 2}}, frozenset({dead}))
-        assert _chi_shadow.TERMINAL_KINDS["f"] == {"dead": 26, "other": 1, "tail": 1, "dead-masked": 1}
+        _chi_shadow.compare_terminals("f", {"label_universe": universe, ("exit", frame): {30: 1, 31: 2, 32: 3}},
+                                      frozenset({dead}))
+        assert _chi_shadow.TERMINAL_KINDS["f"] == {"dead": 27, "other": 2, "tail": 1, "dead-masked": 2}
         assert len(_chi_shadow.TERMINAL_MISMATCHES["f"]) == 20
     finally:
         for state in _STATE:

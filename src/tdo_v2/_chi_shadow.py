@@ -50,6 +50,8 @@ TERMINALS: dict = {}
 METRICS: dict = {}
 TERMINAL_MISMATCHES: dict = {}
 TERMINAL_KINDS: dict = {}
+# function scope -> its LazySparse until ``compare_terminals`` (the dead-masked proof)
+LAZY: dict = {}
 # calls x connected spans above which a function is skipped; diagnostic work bound
 LIMIT = 200_000
 WORK = 20_000_000
@@ -64,6 +66,7 @@ def record(scope, *args, exits: bool = True) -> None:
 
     TERMINALS.pop(scope, None)
     METRICS.pop(scope, None)
+    LAZY.pop(scope, None)
     engine ="sparse" if os.environ.get("TDO_V2_CHI_SHADOW") == "sparse" else "dense"
     reference = "dense" if engine == "dense" or os.environ.get("TDO_V2_CHI_REFERENCE") == "dense" else "sparse"
     started = time.perf_counter()
@@ -282,6 +285,53 @@ class LazySparse:
         self.metrics["chi_sources_exits"] = len(self.sources) - before_sources
         return found
 
+    def live_crossed(self, block, object_id, offset, dead) -> frozenset:
+        """The calls crossed at exit ``block``'s byte with every effect of
+        ``dead`` (operation keys of dead regions: calls and stores alike)
+        transparent -- ``_exit_crossings``' event view of that byte, for the
+        "dead-masked" proof (no read demand; memoized per class)."""
+        from bisect import bisect_right
+
+        atoms = self.partition.by_object[object_id]
+        item = self.class_of_atom[atoms.offset + bisect_right(atoms.starts, offset) - 1]
+        cache = getattr(self, "_live", None)
+        if cache is None or cache[0] != dead:
+            cache = self._live = (dead, {})
+        if item not in cache[1]:
+            last, written = {}, set()
+            for key, rows in self.actions.items():
+                for operation, _, writes in rows:
+                    if operation.split("~", 1)[0] in dead:
+                        continue
+                    for definition, covered in writes:
+                        if item in covered:
+                            last[key] = definition
+                            written.add(key)
+            values = self.graph.solve(written, set(self.actions), exit_of_write=lambda key: frozenset((last[key],)),
+                                      entry_value=self.entry[item])
+            cache[1][item] = values
+
+        def before(key, index):
+            value = cache[1][item][key]
+            for operation, _, writes in self.actions[key][:index]:
+                if operation.split("~", 1)[0] in dead:
+                    continue
+                for definition, covered in writes:
+                    if item in covered:
+                        value = frozenset((definition,))
+            return value
+
+        crossed, pending, seen = set(), list(before(block, len(self.actions[block]))), set()
+        while pending:
+            step()
+            definition = pending.pop()
+            if definition in seen or definition not in self.chi_at:
+                continue
+            seen.add(definition)
+            crossed.add(self.definitions[definition].operation_key[:-len("~chi")])
+            pending.extend(before(*self.chi_at[definition]))
+        return frozenset(crossed)
+
     def _crossed(self, values, item) -> frozenset:
         crossed, pending, seen = set(), list(values), set()
         while pending:
@@ -463,6 +513,7 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
             mismatches.append(("records", len(rows), len(public_rows)))
         if scope is not None and exits and lazy is not None:
             TERMINALS[scope] = lazy.exit_crossings()   # (c), for ``compare_terminals``
+            LAZY[scope] = lazy
         elif scope is not None and exits:
             # (c) the calls crossed at each exit byte, for ``compare_terminals``
             terminals: dict = {}
@@ -544,23 +595,25 @@ def compare_terminals(scope, crossed, dead_keys=frozenset(), limit: int = 20) ->
     classified on its own, by direction: "dead" (only the shadow has it and it
     is a call of a dead region, which ``_exit_crossings`` drops), "tail" (only
     ``_exit_crossings`` has it and it is no CALL / CALLIND / CALLOTHER: a tail
-    jump), "dead-masked" (only ``_exit_crossings`` has this call and the
-    shadow has a dead call there instead: the dead call's chi killed it in
-    the SSA, ``_exit_crossings`` drops dead calls), else "other". ``TERMINAL_MISMATCHES[scope]``: the first ``limit``
+    jump), "dead-masked" (only ``_exit_crossings`` has this call, and the
+    sparse shadow crosses it at that byte once every dead-region effect is
+    transparent -- ``LazySparse.live_crossed``: a dead store or call killed it
+    in the SSA, ``_exit_crossings`` drops dead effects), else "other". ``TERMINAL_MISMATCHES[scope]``: the first ``limit``
     (byte, call) differences; ``TERMINAL_KINDS[scope]``: all of them counted
     ("exhausted": the diagnostic ledger ran out)."""
     shadow = TERMINALS.get(scope)
+    lazy = LAZY.pop(scope, None)
     if shadow is None:
         return
     try:
         with diagnostic(WORK):
-            _compare_terminals(scope, shadow, crossed, dead_keys, limit)
+            _compare_terminals(scope, shadow, crossed, dead_keys, limit, lazy)
     except DiagnosticExhausted:
         TERMINAL_MISMATCHES[scope] = [("exhausted",)]
         TERMINAL_KINDS[scope] = {"exhausted": 1}
 
 
-def _compare_terminals(scope, shadow, crossed, dead_keys, limit) -> None:
+def _compare_terminals(scope, shadow, crossed, dead_keys, limit, lazy=None) -> None:
     universe = crossed.get("label_universe")
     found, kinds = [], {}
     keys = {key for key in crossed if type(key) is tuple} | set(shadow)
@@ -580,9 +633,10 @@ def _compare_terminals(scope, shadow, crossed, dead_keys, limit) -> None:
                     kind = "dead" if item.split("~", 1)[0] in dead_keys else "other"
                 elif not item.endswith(("CALL", "CALLIND", "CALLOTHER")):
                     kind = "tail"
-                else:   # masked in the SSA by a dead call's chi (Astra r1's diamond: S2c)
-                    kind = "dead-masked" if any(other.split("~", 1)[0] in dead_keys
-                                                for other in got - expected) else "other"
+                else:   # masked in the SSA by a dead region's effects (Astra r1's diamond: S2c),
+                    # proven per call: present again with the dead effects transparent
+                    kind = "dead-masked" if lazy is not None and dead_keys and item in lazy.live_crossed(
+                        block, object_id, offset, frozenset(dead_keys)) else "other"
                 kinds[kind] = kinds.get(kind, 0) + 1
                 if len(found) < limit:
                     found.append((block, object_id.kind.value, offset, kind, item, sorted(expected), sorted(got)))
