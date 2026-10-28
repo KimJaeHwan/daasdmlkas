@@ -101,6 +101,25 @@ def test_a_value_from_before_a_call_names_the_call():
     assert not found["A"]["has_debt_free_path"]
 
 
+def test_a_read_crossing_two_calls_replays_no_truncation(monkeypatch):
+    """A read has a debt node per crossing call (docs 25.83 S2d): both replay the
+    same witness and the same root debt -- a repeat is never a truncation."""
+    import tdo_v2.origin_witnesses as witnesses
+
+    monkeypatch.setattr(witnesses, "MAX_WITNESSES", 1)
+    builder = (FunctionBuilder().sub_rsp(0x28)
+               .ins(copy(reg(RAX), reg(RDI)))
+               .call(CODE_BASE + 0x900).call(CODE_BASE + 0xA00)
+               .ins(copy(reg(RCX), reg(RAX)))
+               .add_rsp(0x28).ret())
+    result = _witnesses(builder, {"A": ("COPY", RAX, 8)}, ("COPY", RCX, 8))
+    found = result["origin_witnesses"]["A"]
+    assert [item["kind"] for item in found["witnesses"]] == ["call_clobber"]
+    assert not found["truncated"]
+    debts = [debt for debt in result["root_debts"] if debt["kind"] == "call_clobber_read"]
+    assert len(debts) == len({debt["sites"][0] for debt in debts})   # (once per read)
+
+
 def test_only_the_stored_bytes_of_a_wider_value_are_its_stored_value():
     # rdx = PIECE(ebx = B, eax = A); [p1+0x30] = edx -- only A is stored
     builder = straight(

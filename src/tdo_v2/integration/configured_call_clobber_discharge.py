@@ -120,15 +120,24 @@ class CallClobberDischarger:
         """A debt node's rows: discharged only if every one is."""
         kinds: set[DischargeKind] = set()
         for read in reads:
-            key = (entry, read, id(context), active)
-            judged = self._judged.get(key)
-            if judged is None or judged[0] is not context:   # (the context kept: its id is not reused)
-                judged = self._judged[key] = (context, self._discharge_read(entry, read, context, active))
-            found = judged[1]
+            found = self._judge(entry, read, context, active)
             if found is None:
                 return None
             kinds.update(found)
         return tuple(sorted(kinds))
+
+    def _judge(self, entry, read, context, active):
+        """``_discharge_read`` once per (entry, row, context, active) within one
+        ``discharge()``: a read's debt nodes (one per crossing call) share rows."""
+        key = (entry, read, id(context), active)
+        judged = self._judged.get(key)
+        if judged is None or judged[0] is not context:   # (the context kept: its id is not reused)
+            judged = self._judged[key] = (context, self._discharge_read(entry, read, context, active))
+        return judged[1]
+
+    def _rows(self, entry) -> tuple:
+        """Every row of ``entry``'s debt nodes, once."""
+        return tuple(dict.fromkeys(read for reads in self._clobber_rows[entry].values() for read in reads))
 
     # -- one read in one context ---------------------------------------------
     def _discharge_read(self, entry, read, context, active):
@@ -393,8 +402,8 @@ class CallClobberDischarger:
     def _callee_read_discharged(self, callee, operation_key, active) -> bool:
         context = _EMPTY_CONTEXT
         return all(
-            self._discharge_read(callee, read, context, active) is not None
-            for reads in self._clobber_rows[callee].values() for read in reads
+            self._judge(callee, read, context, active) is not None
+            for read in self._rows(callee)
             if read.operation_key == operation_key
         )
 
@@ -431,8 +440,8 @@ class CallClobberDischarger:
         context = _EMPTY_CONTEXT
         nested = (*active, (callee, ""))
         return all(
-            self._discharge_read(callee, read, context, nested) is not None
-            for reads in self._clobber_rows[callee].values() for read in reads
+            self._judge(callee, read, context, nested) is not None
+            for read in self._rows(callee)
             if any(s.object_id.kind is StorageObjectKind.REGISTER_FILE for s in read.spans)
         )
 

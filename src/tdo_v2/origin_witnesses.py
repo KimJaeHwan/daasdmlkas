@@ -85,9 +85,13 @@ def root_witnesses(normalized, unit, rows, seeds, labels, index, origins, traver
     unattributed = []
 
     def add(label, witness):
+        # a repeat is no new witness (a read's debt node per crossing call
+        # replays the same ones): never a truncation
+        if witness in found[label]:
+            return
         if len(found[label]) >= MAX_WITNESSES:
             truncated.add(label)
-        elif witness not in found[label]:
+        else:
             found[label].append(witness)
 
     for node in sorted(lanes.demands):
@@ -97,7 +101,8 @@ def root_witnesses(normalized, unit, rows, seeds, labels, index, origins, traver
         clobbers = clobber_rows.get(node)
         if clobbers is not None:
             site = clobbers[0].operation_key
-            root_debts.append({"kind": record.label, "sites": [site]})
+            if {"kind": record.label, "sites": [site]} not in root_debts:   # (once per read, not per call)
+                root_debts.append({"kind": record.label, "sites": [site]})
             for clobber in clobbers:
                 # the value from before the calls reaches the read only if they
                 # left those bytes unchanged

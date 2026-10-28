@@ -329,3 +329,74 @@ def test_unknown_callee_is_not_frame_discharged():
         "sink": _sink(),
     }
     assert not _root(functions).is_effectively_complete
+
+
+# -- a debt node per (read, crossing call) (docs 25.83 S2d) ---------------------
+
+INNER2 = CODE_BASE + 0x600
+
+
+def _keeps_rbx(entry):
+    return FunctionBuilder(entry=entry).push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX).ret()
+
+
+def _main_through_two_helpers():
+    """RBX = source(); helper(); inner(); sink(EBX) -- EBX crosses both."""
+    return (
+        FunctionBuilder(entry=MAIN)
+        .call(SOURCE)
+        .ins(copy(reg(RBX, 4), reg(RAX, 4)))
+        .call(HELPER).call(INNER)
+        .ins(copy(reg(RCX, 4), reg(RBX, 4)))
+        .call(SINK)
+        .ret()
+    )
+
+
+def test_a_read_crossing_two_calls_counts_once_and_needs_both_discharged():
+    functions = {"main": _main_through_two_helpers(), "source": _source_returning_constant(),
+                 "helper": _keeps_rbx(HELPER), "inner": _keeps_rbx(INNER), "sink": _sink()}
+    root = _root(functions)
+    assert root.is_effectively_complete
+    # (one debt per read: rbx=eax after source, rcx=ebx after helper and inner)
+    assert root.local_completeness.reachable_unresolved_reads == 2
+    functions["inner"] = FunctionBuilder(entry=INNER).ins(copy(reg(RBX), const(0))).ret()
+    root = _root(functions)
+    assert not root.is_effectively_complete
+    assert root.effective_completeness.reachable_unresolved_reads == 1   # (helper's pair alone is discharged)
+
+
+def test_a_saved_slot_crossing_two_nested_calls_needs_both_to_keep_it():
+    """helper: push rbx; call inner; call inner2; pop rbx -- the pop crosses both
+    (the callee-side judgement, ``_callee_read_discharged``, on pair rows)."""
+    helper = FunctionBuilder(entry=HELPER).push(RBX).call(INNER).call(INNER2).pop(RBX).ret()
+    functions = {"main": _main_through_helper(), "source": _source_returning_constant(), "helper": helper,
+                 "inner": FunctionBuilder(entry=INNER).ret(), "inner2": FunctionBuilder(entry=INNER2).ret(),
+                 "sink": _sink()}
+    assert _root(functions).is_effectively_complete
+    functions["inner2"] = (FunctionBuilder(entry=INNER2)
+                           .ins(add(T, reg(RSP), const(8)), store(T, reg(RDI))).ret())   # (the saved slot)
+    assert not _root(functions).is_effectively_complete
+
+
+def test_the_callee_side_judges_a_shared_row_once(monkeypatch):
+    """The pop's row stands for two pair nodes (inner, inner2): judged once per
+    context within a discharge, also on the recursive callee path."""
+    from collections import Counter
+
+    from tdo_v2.integration.configured_call_clobber_discharge import CallClobberDischarger
+
+    judged = Counter()
+    original = CallClobberDischarger._discharge_read
+
+    def counting(self, entry, read, context, active):
+        judged[(entry, read, id(context), active)] += 1
+        return original(self, entry, read, context, active)
+
+    monkeypatch.setattr(CallClobberDischarger, "_discharge_read", counting)
+    helper = FunctionBuilder(entry=HELPER).push(RBX).call(INNER).call(INNER2).pop(RBX).ret()
+    root = _root({"main": _main_through_helper(), "source": _source_returning_constant(), "helper": helper,
+                  "inner": FunctionBuilder(entry=INNER).ret(), "inner2": FunctionBuilder(entry=INNER2).ret(),
+                  "sink": _sink()})
+    assert root.is_effectively_complete
+    assert judged and max(judged.values()) == 1
