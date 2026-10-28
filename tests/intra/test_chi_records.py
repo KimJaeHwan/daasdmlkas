@@ -61,3 +61,22 @@ def test_over_the_limit_falls_back_explicitly(monkeypatch):
     _chi_records.FALLBACKS.clear()
     assert _rows(_branchy()) == legacy
     assert set(_chi_records.FALLBACKS.values()) == {"limit"}
+
+
+def test_a_probe_consumes_the_chi_views_rows(monkeypatch):
+    """``only``: [0x10] = rsi; CALL A; read [0x10] -- the probe of that read is
+    indebted by V2's row; a V2 without rows (patched after the analysis)
+    leaves the probe the store's definition."""
+    from tdo_v2.forward import probe
+
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    monkeypatch.setenv("TDO_V2_CHI_RECORDS", "only")
+    builder = _frame(FunctionBuilder().sub_rsp(0x48), 0x10, reg(RSI)).call(OPAQUE_A)
+    normalized = analyze_units(program_units(_read(builder, 0x10).add_rsp(0x48).ret()))["1:1000"].normalized
+    ssa = normalized.memory_ssa
+    read = next(row for row in ssa.reads if ssa.actions[row.action_id].operation_key.endswith(":LOAD")
+                and row.span.object_id.kind.value == "function_relative")
+    key = ssa.actions[read.action_id].operation_key
+    assert probe(normalized, key, (read.span,))[0][read.span] is None
+    monkeypatch.setattr(_chi_records, "chi_records", lambda *args: ())
+    assert probe(normalized, key, (read.span,))[0][read.span] is not None
