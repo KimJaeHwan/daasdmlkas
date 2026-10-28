@@ -237,9 +237,9 @@ def test_debt_coverage_requires_every_original_row_span_not_one_supported_operan
         original(builder, *args, **kwargs)
         register_span = next(definition.span for definition in builder.ssa.definitions
                              if definition.span.object_id.kind.value == 'register_file')
-        for node, row in tuple(builder.debt_rows.items()):
-            if row.operation_key == '1:1004:0:COPY' and row.spans:
-                builder.debt_rows[node] = replace(row, spans=(*row.spans, register_span))
+        for node, rows in tuple(builder.debt_rows.items()):   # (a node's rows: S2d D0)
+            if rows[0].operation_key == '1:1004:0:COPY' and rows[-1].spans:
+                builder.debt_rows[node] = (*rows[:-1], replace(rows[-1], spans=(*rows[-1].spans, register_span)))
                 changed.append(node)
 
     monkeypatch.setattr(records._Builder, '__init__', uncovered_span)

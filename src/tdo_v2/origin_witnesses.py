@@ -75,7 +75,10 @@ def root_witnesses(normalized, unit, rows, seeds, labels, index, origins, traver
     free = labels_in_lanes(lane_slice(normalized, unit, seeds, index, ignore_debts=True), index, rows) & labels
     context = _Context(normalized, unit, origins)
     may_rows = dict(zip(normalized.may_alias_nodes, normalized.may_alias_reads))
-    clobber_rows = dict(zip(normalized.call_clobber_nodes, normalized.call_clobber_reads))
+    from .call_clobber import rows_by_node
+
+    # debt node -> all its rows (a copy proof splits one reader's row)
+    clobber_rows = rows_by_node(normalized.call_clobber_reads, normalized.call_clobber_nodes)
     found: dict = {label: [] for label in labels}
     truncated: set = set()
     root_debts = []
@@ -91,22 +94,25 @@ def root_witnesses(normalized, unit, rows, seeds, labels, index, origins, traver
         record = graph.node(node)
         if record.kind is not NodeKind.MEMORY_DEBT:
             continue
-        clobber = clobber_rows.get(node)
-        if clobber is not None:
-            # the value from before the calls reaches the read only if they
-            # left those bytes unchanged
-            root_debts.append({"kind": record.label, "sites": [clobber.operation_key]})
-            seeds_before = context.clobbered_inputs(clobber)
-            reached = labels_in_lanes(lane_slice(normalized, unit, seeds_before, index), index, rows) & labels \
-                if seeds_before else set()
-            calls = ", ".join(clobber.intervening_calls[:3]) + (" ..." if len(clobber.intervening_calls) > 3 else "")
-            for label in sorted(reached):
-                add(label, {"kind": "call_clobber", "sites": [clobber.operation_key],
-                            "condition": f"the value from before {calls}, if they leave it unchanged",
-                            "reason": None})
+        clobbers = clobber_rows.get(node)
+        if clobbers is not None:
+            site = clobbers[0].operation_key
+            root_debts.append({"kind": record.label, "sites": [site]})
+            for clobber in clobbers:
+                # the value from before the calls reaches the read only if they
+                # left those bytes unchanged
+                seeds_before = context.clobbered_inputs(clobber)
+                reached = labels_in_lanes(lane_slice(normalized, unit, seeds_before, index), index, rows) & labels \
+                    if seeds_before else set()
+                for label in sorted(reached):
+                    add(label, {"kind": "call_clobber", "sites": [site],
+                                "condition": f"the value from before {_calls(clobber.intervening_calls)}, "
+                                             "if they leave it unchanged",
+                                "reason": None})
+            calls = _calls(sorted({call for clobber in clobbers for call in clobber.intervening_calls}))
             produced = labels_in_lanes(lane_slice(normalized, unit, [(node, None)], index), index, rows) & labels
             for label in sorted(produced):
-                add(label, {"kind": "call_value", "sites": [clobber.operation_key], "condition": None,
+                add(label, {"kind": "call_value", "sites": [site], "condition": None,
                             "reason": f"a value {calls} may have produced"})
             continue
         row = may_rows.get(node)
@@ -319,6 +325,10 @@ class _Context:
         if not low <= 0 <= high:
             text += "; equal pointers exclude this transfer"
         return text, None
+
+
+def _calls(calls) -> str:
+    return ", ".join(calls[:3]) + (" ..." if len(calls) > 3 else "")
 
 
 __all__ = ("MAX_WITNESSES", "labels_in_lanes", "root_witnesses")

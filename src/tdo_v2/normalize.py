@@ -649,7 +649,9 @@ def _reaches_debt(graph, node, varnode, context, clobbers=None) -> bool:
 
 def call_clobber_spans(normalized) -> dict:
     """Call-clobber debt node -> the spans its read may have lost to a call."""
-    return dict(zip(normalized.call_clobber_nodes, (row.spans for row in normalized.call_clobber_reads)))
+    from .call_clobber import spans_by_node
+
+    return spans_by_node(normalized.call_clobber_reads, normalized.call_clobber_nodes)
 
 
 def _row_reaches_debt(graph, node) -> bool:
@@ -2201,7 +2203,9 @@ class _ScopedNormalizer:
                 # is then 0 (forward) at the site only if every debt is a call
                 # possibly changing DF itself (nothing assigned after it)
                 flag = _resolve_validated_storage(_storage_ref(site.direction), context)
-                spans = dict(zip(call_clobber_nodes, (row.spans for row in call_clobber_reads)))
+                from .call_clobber import spans_by_node
+
+                spans = spans_by_node(call_clobber_reads, call_clobber_nodes)
                 if assume_direction_flag_clear and rep_plan[address][1] == 1 \
                         and type(flag) is ResolvedStorage and all(
                             debt in spans and all(flag.span.contains(span) for span in spans[debt])

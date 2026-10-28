@@ -88,12 +88,11 @@ class CallClobberDischarger:
         self._frames: dict[AddressCoordinate, _Frame | None] = {}
         self._preserved: dict[tuple[AddressCoordinate, tuple[object, ...]], bool] = {}
         self._frame_safe: dict[tuple[AddressCoordinate, int, int], bool] = {}
+        from ..call_clobber import rows_by_node
+
+        # debt node -> all its rows (a copy proof splits one reader's row)
         self._clobber_rows = {
-            entry: dict(zip(
-                view.normalized.call_clobber_nodes,
-                view.normalized.call_clobber_reads,
-                strict=True,
-            ))
+            entry: rows_by_node(view.normalized.call_clobber_reads, view.normalized.call_clobber_nodes)
             for entry, view in self._views.items()
         }
 
@@ -107,11 +106,21 @@ class CallClobberDischarger:
         """``labels`` are the origin labels the root reports (local and proven)."""
         context = _Context.root(replacements, proofs, labels)
         rows = []
-        for node, read in self._clobber_rows[entry].items():
-            kinds = self._discharge_read(entry, read, context, ())
+        for node, reads in self._clobber_rows[entry].items():
+            kinds = self._discharge_reads(entry, reads, context, ())
             if kinds is not None:
-                rows.append(CallClobberDischarge(read.operation_key, node, kinds))
+                rows.append(CallClobberDischarge(reads[0].operation_key, node, kinds))
         return tuple(rows)
+
+    def _discharge_reads(self, entry, reads, context, active):
+        """A debt node's rows: discharged only if every one is."""
+        kinds: set[DischargeKind] = set()
+        for read in reads:
+            found = self._discharge_read(entry, read, context, active)
+            if found is None:
+                return None
+            kinds.update(found)
+        return tuple(sorted(kinds))
 
     # -- one read in one context ---------------------------------------------
     def _discharge_read(self, entry, read, context, active):
@@ -354,10 +363,10 @@ class CallClobberDischarger:
     def _debt_discharged(self, callee, nodes, context, active) -> bool:
         rows = self._clobber_rows[callee]
         for node in nodes:
-            read = rows.get(node)
-            if read is None:
+            reads = rows.get(node)
+            if reads is None:
                 return False  # unresolved memory debt, not call debt
-            if self._discharge_read(callee, read, context, active) is None:
+            if self._discharge_reads(callee, reads, context, active) is None:
                 return False
         return True
 
@@ -377,7 +386,7 @@ class CallClobberDischarger:
         context = _EMPTY_CONTEXT
         return all(
             self._discharge_read(callee, read, context, active) is not None
-            for read in self._clobber_rows[callee].values()
+            for reads in self._clobber_rows[callee].values() for read in reads
             if read.operation_key == operation_key
         )
 
@@ -415,7 +424,7 @@ class CallClobberDischarger:
         nested = (*active, (callee, ""))
         return all(
             self._discharge_read(callee, read, context, nested) is not None
-            for read in self._clobber_rows[callee].values()
+            for reads in self._clobber_rows[callee].values() for read in reads
             if any(s.object_id.kind is StorageObjectKind.REGISTER_FILE for s in read.spans)
         )
 

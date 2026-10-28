@@ -411,3 +411,42 @@ def test_copy_cache_hit_rechecks_original_mutable_import_slot_policy(models):
         finally:
             slots.active = True
         plan.verify()
+
+
+def test_a_split_debt_row_is_judged_on_all_its_rows(models):
+    """A copy proof splits every reader's row per span (``subtract_copy_clobbers``)
+    and the parts keep the reader's one debt node: every consumer judges the node
+    on ALL its parts, never the last (docs 25.83 S2d D0)."""
+    from tdo_v2.call_clobber import rows_by_node
+    from tdo_v2.integration.configured_call_clobber_discharge import CallClobberDischarger, DischargeKind
+    from tdo_v2.normalize import call_clobber_spans
+    from synthetic import R8
+
+    keys = {}
+
+    def two_registers(builder):   # (rcx and rdx both crossed by the realloc)
+        keys["reader"] = _key(builder, 0, "INT_ADD")
+        builder.ins(add(reg(R8), reg(RCX), reg(RDX)))
+
+    builder, _ = case(barrier=two_registers)
+    item, _ = _run(builder, models, contracts(models))
+    assert copies(item)
+    normalized = item.normalized
+    parts = tuple(row for row in normalized.call_clobber_reads if row.operation_key == keys["reader"])
+    assert len(parts) == 2 and parts[0].spans != parts[1].spans
+    nodes = {node for row, node in zip(normalized.call_clobber_reads, normalized.call_clobber_nodes)
+             if row.operation_key == keys["reader"]}
+    assert len(nodes) == 1
+    (node,) = nodes
+    assert rows_by_node(normalized.call_clobber_reads, normalized.call_clobber_nodes)[node] == parts
+    assert call_clobber_spans(normalized)[node] == parts[0].spans + parts[1].spans
+    # the discharger: one part not dischargeable keeps the node's debt
+    discharger = CallClobberDischarger.__new__(CallClobberDischarger)
+    discharger._clobber_rows = {"f": {node: parts}}
+    for undischargeable in parts:
+        discharger._discharge_read = lambda entry, read, context, active, bad=undischargeable: (
+            None if read is bad else (DischargeKind.PRESERVED,))
+        assert not discharger.discharge("f", ())
+        assert not discharger._debt_discharged("f", (node,), None, ())
+    discharger._discharge_read = lambda entry, read, context, active: (DischargeKind.PRESERVED,)
+    assert [row.debt_node for row in discharger.discharge("f", ())] == [node]

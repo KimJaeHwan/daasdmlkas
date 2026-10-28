@@ -678,11 +678,13 @@ class _Builder:
         self.objects = dict(normalized.address_objects)
         self.atoms = dict(normalized.address_atoms)
         self.effects = {effect.operation_key: effect for effect in normalized.effects}
+        from .call_clobber import rows_by_node
+
+        # debt node -> all its rows (a copy proof splits one reader's row)
         self.debt_rows = {}
         for rows, nodes in ((normalized.call_clobber_reads, normalized.call_clobber_nodes),
                             (normalized.may_alias_reads, normalized.may_alias_nodes)):
-            for row, node in zip(rows, nodes):
-                self.debt_rows[node] = row
+            self.debt_rows.update(rows_by_node(rows, nodes))
         self.records: list = records if records is not None else []
         self.id_of: dict = {}
         self.expanding: set = set()
@@ -1109,15 +1111,16 @@ class _Builder:
                 direct_reads = [operand["physical_read"] for operand in record.get("operands", ())
                                 if operand.get("physical_read", {}).get("complete") is True]
                 covered = []
-                for raw_node, row in self.debt_rows.items():
+                for raw_node, rows in self.debt_rows.items():
                     identifier = self.id_of.get(raw_node)
-                    if identifier not in debts or row.operation_key != key or not row.spans:
+                    spans = [span for row in rows for span in row.spans]
+                    if identifier not in debts or rows[0].operation_key != key or not spans:
                         continue
                     if all(span.object_id.kind is StorageObjectKind.ADDRESS_SPACE
                            and any(read["space"] == span.object_id.space_key
                                    and read["address"] <= span.start
                                    and span.end <= read["address"] + read["width"] for read in direct_reads)
-                           for span in row.spans):
+                           for span in spans):
                         covered.append(identifier)
                 if covered:
                     record["physical_read_debt_ids"] = covered
@@ -1636,16 +1639,22 @@ class _Builder:
         graph_node = self.graph.node(node)
         record = self._new(node, {"kind": "debt", "debt": graph_node.label, "key": graph_node.key})
         self._with_origins(record, node)
-        row = self.debt_rows.get(node)
-        if row is not None:
+        rows = self.debt_rows.get(node)
+        if rows is not None:
+            row, spans = rows[0], [span for part in rows for span in part.spans]
             record["site"] = row.operation_key
-            record["spans"] = [_span_text(span) for span in row.spans]
+            record["spans"] = [_span_text(span) for span in spans]
             if self.physical_memory:
-                record["physical_spans"] = [_span_dict(span) for span in row.spans]
+                record["physical_spans"] = [_span_dict(span) for span in spans]
             if hasattr(row, "intervening_calls"):
-                record["calls"] = list(row.intervening_calls)
-            if getattr(row, "uncertain", ()):
-                record["uncertain_writers"] = list(row.uncertain)
+                record["calls"] = sorted({call for part in rows for call in part.intervening_calls})
+            if len(rows) > 1:
+                # a copy proof split the read's row: which calls cross which bytes
+                record["parts"] = [{"spans": [_span_text(span) for span in part.spans],
+                                    "calls": list(getattr(part, "intervening_calls", ()))} for part in rows]
+            uncertain = [writer for part in rows for writer in getattr(part, "uncertain", ())]
+            if uncertain:
+                record["uncertain_writers"] = list(dict.fromkeys(uncertain))
         sources = []
         writers = 0
         self.expanding.add(node)

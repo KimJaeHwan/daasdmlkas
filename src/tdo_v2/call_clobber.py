@@ -73,6 +73,22 @@ class CallClobberRead:
             raise TypeError("intervening calls must be a sorted, distinct tuple of keys")
 
 
+def rows_by_node(rows, nodes) -> dict:
+    """Debt node -> EVERY row it stands for: a copy proof splits a reader's row
+    per span / run of calls (``subtract_copy_clobbers``) and the parts keep the
+    reader's one node, so a node is judged on all of them, never the last."""
+    found: dict = {}
+    for row, node in zip(rows, nodes, strict=True):
+        found.setdefault(node, []).append(row)
+    return {node: tuple(parts) for node, parts in found.items()}
+
+
+def spans_by_node(rows, nodes) -> dict:
+    """Debt node -> the spans its read may have lost to a call (all its rows')."""
+    return {node: tuple(span for row in parts for span in row.spans)
+            for node, parts in rows_by_node(rows, nodes).items()}
+
+
 _Byte = tuple[StorageObjectId, int]
 
 

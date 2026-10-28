@@ -848,31 +848,39 @@ def snapshot_parts(builder, snapshot, start, end):
 
 
 def bind_call_debts(builder, record, debts):
+    from .call_clobber import rows_by_node
+
     covered = []
-    for row, raw_node in zip(builder.normalized.call_clobber_reads, builder.normalized.call_clobber_nodes):
-        if row.operation_key != record.get("key"):
+    for raw_node, rows in rows_by_node(builder.normalized.call_clobber_reads,
+                                       builder.normalized.call_clobber_nodes).items():
+        if rows[0].operation_key != record.get("key"):
             continue
         identifier = builder.id_of.get(raw_node)
         if identifier not in debts:
             continue
-        if any(context(builder, base) is None for base in row.intervening_calls):
-            continue
-        registers = [part for part in row.spans if part.object_id.kind is StorageObjectKind.REGISTER_FILE]
-        memory = [part for part in row.spans if part.object_id.kind in
-                  (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)]
-        bindings = list(register_bindings(record.get("operands", ()), retained=True))
-        if len(registers) + len(memory) != len(row.spans):
-            continue
-        if memory:
-            load_complete = record.get("opcode") == "LOAD" and record.get("physical_memory", {}).get("complete")
-            direct_complete = identifier in record.get("physical_read_debt_ids", ())
-            if not (load_complete or direct_complete):
-                continue
-        if any(not covers_register(span.start, span.size, bindings, row.intervening_calls) for span in registers):
-            continue
-        covered.append(identifier)
+        # a debt is covered only if every row of its node is (a copy proof
+        # splits one reader's row)
+        if all(_row_covered(builder, record, row, identifier) for row in rows):
+            covered.append(identifier)
     if covered:
         record["physical_call_debt_ids"] = covered
+
+
+def _row_covered(builder, record, row, identifier) -> bool:
+    if any(context(builder, base) is None for base in row.intervening_calls):
+        return False
+    registers = [part for part in row.spans if part.object_id.kind is StorageObjectKind.REGISTER_FILE]
+    memory = [part for part in row.spans if part.object_id.kind in
+              (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)]
+    bindings = list(register_bindings(record.get("operands", ()), retained=True))
+    if len(registers) + len(memory) != len(row.spans):
+        return False
+    if memory:
+        load_complete = record.get("opcode") == "LOAD" and record.get("physical_memory", {}).get("complete")
+        direct_complete = identifier in record.get("physical_read_debt_ids", ())
+        if not (load_complete or direct_complete):
+            return False
+    return all(covers_register(span.start, span.size, bindings, row.intervening_calls) for span in registers)
 
 
 def bind_call_row(builder, record):
