@@ -523,8 +523,10 @@ class bounded:
     """``with bounded(name, work):`` -- an engine's own work bound (docs
     25.83 D5'): the units inside are charged to the run and the active
     function as everywhere, and also counted against ``work``; more raise
-    ``BoundExceeded`` at the exact unit (with or without a run; units inside
-    a ``diagnostic`` or ``reporting`` context are not counted). Not nested."""
+    ``BoundExceeded`` at the exact unit, with or without a run (a run started
+    inside keeps counting). Units inside a run's ``diagnostic`` or
+    ``reporting`` context are not counted (without a run those contexts do
+    nothing: their units count). Not nested."""
 
     __slots__ = ("bound",)
 
@@ -641,6 +643,7 @@ def _begin_run():
         if run.reporting:
             raise AnalysisReportingFailed("an analysis entry during the reporting phase")
         return None
+    _flush(None)   # (pending units before the run: an open bound's -- Astra)
     _CANCEL.clear()
     _active, _active_since = None, 0.0
     run = RunBudget(Limits.from_environment())

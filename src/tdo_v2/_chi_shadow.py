@@ -123,8 +123,11 @@ def shadow_unit(unit, calls, preserved, memory_keeping, sources=True):
     for block in unit.blocks:
         actions = []
         for action in block.actions:
+            step()
             actions.append(action)
             if action.operation_key in calls:
+                # (the footprint's loops: every connected span against every hole)
+                step(len(connected) * (1 + len(preserved.get(action.operation_key, ())) + len(action.writes)))
                 spans = _footprint(connected, action, preserved, memory_keeping)
                 if spans:
                     if sources:
@@ -177,6 +180,7 @@ class LazySparse:
         written_in = [set() for _ in classes.classes]
         chi_blocks = [set() for _ in classes.classes]
         self.last_write = {}
+        self.writes_at = {}          # (block, class) -> ([action index], [definition]) in order
         plain_in = [set() for _ in classes.classes]   # (the chi-free twin: joins metric only)
         self.last_plain = {}
         read_points = [set() for _ in classes.classes]
@@ -194,6 +198,9 @@ class LazySparse:
                     for item in covered:
                         written_in[item].add(block.key)
                         self.last_write[(block.key, item)] = definition
+                        at = self.writes_at.setdefault((block.key, item), ([], []))
+                        at[0].append(index)
+                        at[1].append(definition)
                         if not action.operation_key.endswith("~chi"):
                             plain_in[item].add(block.key)
                             self.last_plain[(block.key, item)] = definition
@@ -361,16 +368,22 @@ class LazySparse:
 
     def _classes(self, span) -> list:
         start, stop = self.partition.covered_range(span)
+        step(stop - start)
         return sorted({self.class_of_atom[atom] for atom in range(start, stop)})
 
     def value_before(self, block, index, item) -> frozenset:
-        """Class ``item``'s definitions just before action ``index`` of ``block``."""
-        value = self.entry_values[(block, item)]
-        for _, _, writes in self.actions[block][:index]:
-            for definition, covered in writes:
-                if item in covered:
-                    value = frozenset((definition,))
-        return value
+        """Class ``item``'s definitions just before action ``index`` of ``block``:
+        the last write covering it before that action, else the block's entry
+        value (indexed: no scan of the block's prefix)."""
+        from bisect import bisect_left
+
+        step()
+        found = self.writes_at.get((block, item))
+        if found is not None:
+            position = bisect_left(found[0], index)
+            if position:
+                return frozenset((found[1][position - 1],))
+        return self.entry_values[(block, item)]
 
     def closure(self, key, object_id, offset):
         """(calls crossed, ordinary definition identities) for one byte read

@@ -556,3 +556,58 @@ def test_bounds_do_not_nest():
                 pass
     with pytest.raises(ValueError):
         bounded("zero", 0)
+
+
+def test_a_run_started_inside_a_bound_keeps_the_bounds_pending_units():
+    """9 units before the run and 9 inside it: 18 > 10 (Astra r1 P2)."""
+    from tdo_v2.resource_limits import BoundExceeded, bounded
+
+    with pytest.raises(BoundExceeded):
+        with bounded("demo", 10):
+            step(9)
+            run_analysis(lambda: step(9))
+
+
+def test_without_a_run_diagnostic_units_count_against_a_bound():
+    """(a diagnostic context does nothing outside a run)"""
+    from tdo_v2.resource_limits import BoundExceeded, bounded, diagnostic
+
+    with pytest.raises(BoundExceeded):
+        with bounded("demo", 2):
+            with diagnostic():
+                step(3)
+
+
+def test_reporting_units_do_not_count_against_a_bound():
+    from tdo_v2.resource_limits import bounded
+
+    found = {}
+
+    def body():
+        with bounded("demo", 10) as bound:
+            with reporting():
+                for _ in range(100):
+                    step()
+            found["bound"] = bound.work
+
+    run_analysis(body)
+    assert found["bound"] == 0
+
+
+def test_a_function_limit_and_a_bound_on_the_same_unit_is_the_functions(monkeypatch):
+    from tdo_v2.resource_limits import BoundExceeded, bounded
+
+    monkeypatch.setenv("TDO_V2_FUNCTION_WORK", "10")
+    found = []
+
+    def body():
+        with activation("a"):   # (1 unit)
+            try:
+                with bounded("demo", 9):
+                    for _ in range(100):
+                        step()
+            except AnalysisBudgetExceeded as error:
+                found.append(error)
+
+    run_analysis(body)
+    assert type(found[0]) is AnalysisBudgetExceeded and not isinstance(found[0], BoundExceeded)

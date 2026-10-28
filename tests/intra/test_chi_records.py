@@ -184,3 +184,100 @@ def test_a_probes_fallback_is_recorded_in_its_run(monkeypatch):
     assert run_analysis(probe, normalized, key, (span,))[0][span] is None   # (call_clobber's row)
     found = _chi_records.fallbacks(last_run())
     assert found == {(normalized.memory_ssa.function_scope, "probe", key): "limit"}
+
+
+def _producer_inputs(builder, monkeypatch):
+    """The arguments ``records`` passed V2 for function 1:1000."""
+    found = []
+    original = _chi_records.chi_records
+
+    def spy(*args):
+        found.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(_chi_records, "chi_records", spy)
+    _rows(builder)
+    monkeypatch.setattr(_chi_records, "chi_records", original)
+    return found[0]
+
+
+def _long_block(reads):
+    builder = _frame(FunctionBuilder().sub_rsp(0x48), 0x10, reg(RSI)).call(OPAQUE_A)
+    for _ in range(reads):
+        builder = _read(builder, 0x10, width=1)
+    return builder.add_rsp(0x48).ret()
+
+
+@pytest.mark.parametrize("case", (*CASES, lambda: _long_block(40)))
+def test_the_indexed_value_before_is_the_prefix_scan(case, monkeypatch):
+    """Every (block, action index, solved class): the last covering write
+    before the action, else the block's entry value -- as the scan gave."""
+    from tdo_v2._chi_shadow import LazySparse
+
+    memory_unit, _, calls, preserved, keeping = _producer_inputs(case(), monkeypatch)
+    lazy = LazySparse(memory_unit, frozenset(calls), preserved, frozenset(keeping))
+    checked = 0
+    for (block, item), entry in list(lazy.entry_values.items()):
+        value = entry
+        for index, (_, _, writes) in enumerate(lazy.actions[block] + [(None, None, ())]):
+            assert lazy.value_before(block, index, item) == value
+            checked += 1
+            for definition, covered in writes:
+                if item in covered:
+                    value = frozenset((definition,))
+    assert checked
+
+
+def test_value_before_scans_no_block_prefix(monkeypatch):
+    """A query reads no action rows: the prefix scan per read was quadratic
+    in a block's length and uncharged (Astra r1 P2), so V2's work is what it
+    charges. (Synthetic blocks are one instruction each: the check is that no
+    row is read at all.)"""
+    from tdo_v2._chi_shadow import LazySparse
+
+    memory_unit, _, calls, preserved, keeping = _producer_inputs(_long_block(400), monkeypatch)
+    lazy = LazySparse(memory_unit, frozenset(calls), preserved, frozenset(keeping))
+
+    class Untouchable(dict):
+        def __getitem__(self, key):
+            raise AssertionError("value_before read a block's actions")
+
+    expected = {(block, item): [lazy.value_before(block, index, item) for index in range(len(rows) + 1)]
+                for (block, item) in list(lazy.entry_values) for rows in (lazy.actions[block],)}
+    lengths = {block: len(rows) for block, rows in lazy.actions.items()}
+    lazy.actions = Untouchable(lazy.actions)
+    assert expected
+    for (block, item), values in expected.items():
+        assert [lazy.value_before(block, index, item) for index in range(lengths[block] + 1)] == values
+
+
+def test_a_probes_work_fallback_is_recorded_in_its_run(monkeypatch):
+    from tdo_v2.forward import probe
+    from tdo_v2.resource_limits import run_analysis
+
+    normalized, key, span = _probed(monkeypatch)
+    monkeypatch.setattr(_chi_records, "WORK_BASE", 1)
+    monkeypatch.setattr(_chi_records, "WORK_PER_ACTION", 0)
+    assert run_analysis(probe, normalized, key, (span,))[0][span] is None   # (call_clobber's row)
+    assert _chi_records.fallbacks(last_run()) == {(normalized.memory_ssa.function_scope, "probe", key): "work"}
+
+
+def test_the_function_budget_still_binds_the_fallback(monkeypatch):
+    """V2 over its own bound, then call_clobber over the function's budget:
+    the function fails typed."""
+    from tdo_v2.normalize import NormalizationFailureReason
+
+    monkeypatch.setattr(_chi_records, "WORK_BASE", 1)
+    monkeypatch.setattr(_chi_records, "WORK_PER_ACTION", 0)
+    original = normalize.derive_call_clobber_reads
+
+    def legacy(*args, **kwargs):
+        from tdo_v2.resource_limits import step
+        step(10_000_000)   # (an expensive fallback)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(normalize, "derive_call_clobber_reads", legacy)
+    monkeypatch.setenv("TDO_V2_FUNCTION_WORK", "1000000")
+    item = analyze_units(program_units(_branchy()))["1:1000"]
+    assert item.normalized.reason is NormalizationFailureReason.ANALYSIS_BUDGET
+    assert item.failure_detail == "function:work"
