@@ -12,9 +12,10 @@ import pytest
 from synthetic import NO_CALLBACKS, CODE_BASE, R9, RAX, RCX, FunctionBuilder, copy, reg
 from tdo_v2.image_info import ImageInfo, ImportedSymbol
 from tdo_v2.interprocedural import analyze_units
-from tdo_v2.summary_store import ModelError, load_external_models, load_model_file, model_paths
+from tdo_v2.summary_store import ModelError, load_binding_file, load_external_models, load_model_file, model_paths
 
-BUILTIN = Path(__file__).resolve().parents[2] / "models" / "external"
+MODELS = Path(__file__).resolve().parents[2] / "models"
+BUILTIN = MODELS / "external"
 WIN64 = ("x86:LE:64:default", "win64")
 
 
@@ -161,3 +162,29 @@ def test_a_model_needing_a_disabled_assumption_is_not_applied(tmp_path, monkeypa
     on = analyze_units(program_units(builder), image_info=info, external_models=models,
                        assume_direction_flag_clear=True)["1:1000"]
     assert on.declared and on.inherited_assumptions == {"direction-flag-clear"}
+
+
+def test_line_endings_do_not_change_model_or_binding_digests(tmp_path):
+    # a checkout with core.autocrlf gives the same JSON in CRLF: template
+    # dependencies and bound-model labels must not see it; LF files keep the
+    # sha256 of their bytes (the digests recorded in models/derived)
+    import hashlib
+
+    loaded = {}
+    for ending in ("lf", "crlf"):
+        for name in ("bindings/tv2_unreal_development.json", "bound/tv2_tobjectptr_win64.json"):
+            data = (MODELS / name).read_bytes().replace(b"\r\n", b"\n")
+            if ending == "crlf":
+                data = data.replace(b"\n", b"\r\n")
+            (tmp_path / ending / name).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / ending / name).write_bytes(data)
+        loaded[ending] = (load_binding_file(tmp_path / ending / "bindings/tv2_unreal_development.json"),
+                          load_model_file(tmp_path / ending / "bound/tv2_tobjectptr_win64.json"))
+    (lf_binding, lf_model), (crlf_binding, crlf_model) = loaded["lf"], loaded["crlf"]
+    assert b"\r\n" in (tmp_path / "crlf/bindings/tv2_unreal_development.json").read_bytes()
+    assert crlf_binding.digest == lf_binding.digest
+    assert crlf_model.digest == lf_model.digest
+    assert crlf_binding.models.files[0].digest == lf_model.digest
+    assert lf_binding.digest == hashlib.sha256(
+        (tmp_path / "lf/bindings/tv2_unreal_development.json").read_bytes()).hexdigest()
+    assert lf_model.digest == hashlib.sha256((tmp_path / "lf/bound/tv2_tobjectptr_win64.json").read_bytes()).hexdigest()

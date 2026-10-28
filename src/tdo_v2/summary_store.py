@@ -268,7 +268,7 @@ class ModelFile:
     libraries: tuple[str, ...] = ()   # upper case; empty: matched by short name
     source: tuple = (("kind", "hand"),)   # provenance, as sorted (key, value) pairs
     overrides: tuple[str, ...] = ()       # "<file id>/<entry name>" this file replaces
-    digest: str = ""                      # sha256 of the file's bytes (template dependencies)
+    digest: str = ""                      # file_digest of the file (template dependencies)
     # (label "<file id>:<id>", statement, fails_when) of each declared assumption
     declares: tuple[tuple[str, str, str], ...] = ()
 
@@ -453,11 +453,20 @@ def _callbacks(item, path):
     return registered, invokes, frees, refusal
 
 
-def load_model_file(path: str | Path) -> ModelFile:
+def file_digest(data: bytes) -> str:
+    """sha256 of a model or binding file's bytes with CRLF read as LF: a
+    checkout's line endings (``core.autocrlf``) never change what a JSON file
+    says -- a raw CR is only whitespace there -- so they must not change its
+    digest either (template dependencies, bound-model labels). LF files keep
+    the digest of their raw bytes."""
     import hashlib
 
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def load_model_file(path: str | Path) -> ModelFile:
     data = Path(path).read_bytes()
-    digest = hashlib.sha256(data).hexdigest()
+    digest = file_digest(data)
     raw = json.loads(data.decode("utf-8"))
     if type(raw) is dict and raw.get("kind") == "summary":
         return replace(_load_summary_file(raw, path), digest=digest)
@@ -895,8 +904,6 @@ class ModelBinding:
 
 
 def load_binding_file(path: str | Path) -> ModelBinding:
-    import hashlib
-
     path = Path(path)
     data = path.read_bytes()
     raw = json.loads(data.decode("utf-8"))
@@ -927,7 +934,7 @@ def load_binding_file(path: str | Path) -> ModelBinding:
         seen.add(rva)
         rows.append((rva, row["model"], row.get("symbol")))
     return ModelBinding(raw["id"], sha, raw["language_id"], raw["abi_tag"], models, tuple(rows),
-                        hashlib.sha256(data).hexdigest())
+                        file_digest(data))
 
 
 def model_summary(model_file: ModelFile, entry: ModelEntry, register_object, register_limit: int,
