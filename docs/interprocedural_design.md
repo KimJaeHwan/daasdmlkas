@@ -6012,5 +6012,8 @@ ue-dll-debuggame 119/119, zlib 24/25(큰 함수 1개 메모리 초과) -- 불일
 - `LazySparse.crossed_at`: (동작, atom class)마다 한 번만 걷는다(같은 class의 바이트는 값을 공유) -- 결과 같고 단위만 줄어듦.
 - 한도 근거(memo 전 측정, 6 Bundle x forward 0/1): 동작당 V2 단위 최대 약 44(v3/v2/UE), zlib 150(동작 7937개 함수); 한도
   100만 + 2000/동작은 zlib에서 약 14배 여유. 대체 0건.
+- 리뷰(Astra 4라운드, Fable 최종): 예산 밖 초선형 작업을 모두 계산에 넣음 -- `value_before` 색인, footprint 정렬 스윕, 공용 `build_atom_classes`/`DominatorGraph`의 안쪽 루프(합류 집합은 한 번에 합침), 수요 계산, 읽기당 호출 집합 한 번 합치기. 공용 엔진의 작업 단위가 늘어 설정된 함수/run 예산에서는 더 일찍 멈출 수 있음(결과는 같음).
+- 시간(2회, main 대비): zlib forward=1 +11%(250 -> 277 s: probe마다 V2를 새로 지음 -- 후속 K2 과제), zlib forward=0 +3~5%, ue-dll-debuggame +1~6%, v2-win-debug 잡음 안; peak +0.3~0.9%. gate d53: 결과 차이 0.
+- M5 전 조건(Fable P2): run별 대체 기록을 도구 출력(scale_point / Bundle 실행)에 내보내기; V2에 K2 카운터(cc_*) 다시 붙이기.
 - call_clobber 데이터흐름 삭제(M5)는 다음 단계: 모든 gate Bundle에서 대체 0건 + 한도 경로 테스트가 조건. 삭제 뒤에는 한도 초과가
   그 함수의 typed 실패(`function:bound`)가 된다.
