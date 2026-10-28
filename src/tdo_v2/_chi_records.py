@@ -4,7 +4,8 @@ sparse chi SSA (``_chi_shadow.LazySparse``, V2) derives the rows
 V1) to stay untouched. Behind ``TDO_V2_CHI_RECORDS`` (off by default):
 
 - ``check``: V2's rows are used and must equal ``call_clobber``'s exactly --
-  same rows, same order (consumers zip rows with their debt nodes by order);
+  same rows, same order (by operation key; consumers zip rows with their
+  debt nodes by order);
   any difference raises ``ChiRecordsMismatch``;
 - ``only``: V2's rows are used, ``call_clobber`` is not run (a measurement
   and the test that consumers receive V2's rows).
@@ -40,9 +41,10 @@ def mode() -> str | None:
 
 
 def chi_records(memory_unit, effect_unit, calls, preserved, memory_keeping) -> tuple:
-    """``call_clobber``'s rows, from the chi view: per effect (blocks by key,
-    effects in order) the read bytes some call's chi reaches -- per read one
-    span from its first to its last such byte -- and the calls crossed."""
+    """``call_clobber``'s rows, from the chi view: per effect the read bytes
+    some call's chi reaches -- per read one span from its first to its last
+    such byte -- and the calls crossed; sorted by operation key as both
+    ``call_clobber`` engines return them."""
     from .call_clobber import CallClobberRead
     from ._chi_shadow import LazySparse
 
@@ -69,7 +71,7 @@ def chi_records(memory_unit, effect_unit, calls, preserved, memory_keeping) -> t
                     spans.append(ByteSpan(span.object_id, first, last + 1 - first))
             if spans:
                 rows.append(CallClobberRead(effect.operation_key, tuple(spans), tuple(sorted(crossed_all))))
-    return tuple(rows)
+    return tuple(sorted(rows, key=lambda row: row.operation_key))
 
 
 def records(scope, legacy, memory_unit, effect_unit, observation, context, assumed_calls, proven_preserved,
