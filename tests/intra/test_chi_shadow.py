@@ -15,7 +15,8 @@ OPAQUE_A, OPAQUE_B = CODE_BASE + 0xE00, CODE_BASE + 0xE10
 T, FLAG = tmp(0x100), tmp(0x300, 1)
 
 
-_STATE = (_chi_shadow.RESULTS, _chi_shadow.TERMINALS, _chi_shadow.TERMINAL_MISMATCHES, _chi_shadow.METRICS)
+_STATE = (_chi_shadow.RESULTS, _chi_shadow.TERMINALS, _chi_shadow.TERMINAL_MISMATCHES, _chi_shadow.METRICS,
+          _chi_shadow.TERMINAL_KINDS)
 
 
 @pytest.fixture(autouse=True, params=("1", "sparse", "sparse-dense-reference"))
@@ -161,3 +162,44 @@ def test_a_probe_read_is_checked(shadow, monkeypatch):
     assert probes and all(_chi_shadow.RESULTS[scope] == [] for scope in probes)
     if function is not None:
         assert _chi_shadow.METRICS[probes[-1]]["chi_sources"] > function["chi_sources"]
+
+
+def test_a_store_on_one_arm_a_call_on_the_other(shadow):
+    """Astra r1's diamond (S2c's measurement): [0x10] = 0 on one arm, CALL A
+    on the other, joined, then read: A reaches the read on one path only."""
+    builder = _frame(FunctionBuilder().sub_rsp(0x48), 0x10, reg(RSI))
+    builder.cbranch("other", FLAG, op("INT_EQUAL", [reg(RCX), const(0)], FLAG))
+    builder = _frame(builder, 0x10, const(0)).branch("join")
+    builder.label("other").call(OPAQUE_A).label("join")
+    _checked(_read(builder, 0x10).add_rsp(0x48).ret())
+    metrics = _metrics(shadow)
+    if metrics is not None:
+        assert metrics["joins_shadow"] >= metrics["joins_chi_free"]
+
+
+class _Labels:
+    def __init__(self, codes):
+        self.codes = codes
+
+    def decode(self, code):
+        return self.codes[code]
+
+
+def test_terminal_differences_are_classified_one_call_at_a_time():
+    """Astra S2a r2: a dead call beside an unexplained one is not all "dead";
+    an unexplained byte after ``limit`` explained ones is still counted."""
+    from tdo_v2.span_geometry import StorageObjectKind
+
+    frame = type("Frame", (), {"kind": StorageObjectKind.FUNCTION_RELATIVE})()   # (hashable)
+    dead, stray, call, tail = "1:10:0:CALL", "1:20:0:CALL", "1:30:0:CALL", "1:40:0:BRANCH"
+    shadow = {("exit", frame): {0: frozenset((dead, stray)), **{offset: frozenset((dead,)) for offset in range(1, 25)},
+                                30: frozenset((call,)), 31: frozenset((dead,))}}
+    universe = _Labels({0: [], 1: ["call:" + call, "call:" + tail], 2: ["call:" + call]})
+    _chi_shadow.TERMINALS["f"] = shadow
+    try:
+        _chi_shadow.compare_terminals("f", {"label_universe": universe, ("exit", frame): {30: 1, 31: 2}}, frozenset({dead}))
+        assert _chi_shadow.TERMINAL_KINDS["f"] == {"dead": 26, "other": 1, "tail": 1, "dead-masked": 1}
+        assert len(_chi_shadow.TERMINAL_MISMATCHES["f"]) == 20
+    finally:
+        for state in _STATE:
+            state.pop("f", None)

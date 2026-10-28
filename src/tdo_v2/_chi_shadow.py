@@ -37,7 +37,9 @@ from .span_geometry import ByteSpan, StorageObjectKind
 
 _MEMORY_KINDS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 # function scope -> mismatches, "skipped", or an error text: the LAST pass of
-# each function checked (``TDO_V2_CHI_SHADOW`` set); read by tests and tools
+# each function checked (``TDO_V2_CHI_SHADOW`` set); read by tests and tools.
+# Forward probes add (scope, "probe", load key, spans) entries, kept for the
+# whole run (a diagnostic: never cleared here)
 RESULTS: dict = {}
 # function scope -> {(terminal block, object): {offset: calls}} of the shadow's
 # exit states (nonempty sets only); TERMINAL_MISMATCHES: scope -> check (c)
@@ -47,6 +49,7 @@ TERMINALS: dict = {}
 # plus the diagnostic work and milliseconds of the whole check ("build_ms": the shadow alone)
 METRICS: dict = {}
 TERMINAL_MISMATCHES: dict = {}
+TERMINAL_KINDS: dict = {}
 # calls x connected spans above which a function is skipped; diagnostic work bound
 LIMIT = 200_000
 WORK = 20_000_000
@@ -72,6 +75,8 @@ def record(scope, *args, exits: bool = True) -> None:
             METRICS[scope]["ms"] = round((time.perf_counter() - started) * 1000)
     except DiagnosticExhausted:
         RESULTS[scope] = "exhausted"
+        if scope in METRICS:
+            METRICS[scope]["exhausted"] = 1   # (partial: no work / ms)
     except Exception as error:   # (the shadow build itself failed: reported, never raised)
         import traceback
 
@@ -139,7 +144,10 @@ class LazySparse:
     counted apart).
     ``metrics``: classes, classes solved for reads / for exits only, chis,
     chi sources demanded by reads / eagerly / by exits, shadow JOIN points
-    (phis with two or more definitions)."""
+    (phis with two or more definitions) vs the same classes solved without
+    chis ("joins_chi_free", same units); "joins_production" (the production
+    SSA's JOIN definitions, per read fragment) is another unit, kept only as
+    context."""
 
     def __init__(self, unit, calls, preserved, memory_keeping, terminals=()):
         from ._memory_ssa_classes import build_atom_classes
@@ -166,6 +174,8 @@ class LazySparse:
         written_in = [set() for _ in classes.classes]
         chi_blocks = [set() for _ in classes.classes]
         self.last_write = {}
+        plain_in = [set() for _ in classes.classes]   # (the chi-free twin: joins metric only)
+        self.last_plain = {}
         read_points = [set() for _ in classes.classes]
         pairs = 0                    # (chi, class) pairs: the sources an eager ~chr computes
         for block in shadow.blocks:
@@ -181,6 +191,9 @@ class LazySparse:
                     for item in covered:
                         written_in[item].add(block.key)
                         self.last_write[(block.key, item)] = definition
+                        if not action.operation_key.endswith("~chi"):
+                            plain_in[item].add(block.key)
+                            self.last_plain[(block.key, item)] = definition
                     if action.operation_key.endswith("~chi"):
                         self.chi_at[definition] = (block.key, index)
                         pairs += len(covered)
@@ -192,9 +205,10 @@ class LazySparse:
                 rows.append((action.operation_key, action.reads, writes))
             self.actions[block.key] = rows
         self.written_in, self.chi_blocks, self.terminals = written_in, chi_blocks, tuple(terminals)
+        self.plain_in = plain_in
         self.entry_values: dict = {}
         self.sources: dict = {}      # (chi definition, class) -> definitions just before it
-        self.joins = 0
+        self.joins = self.joins_chi_free = 0
         pending = []
         for item in range(len(classes.classes)):
             if read_points[item]:
@@ -210,7 +224,7 @@ class LazySparse:
                     pending.append((*self.chi_at[definition], item))
         self.metrics = {"classes": len(classes.classes), "classes_solved": solved, "chis": len(self.chi_at),
                         "chi_sources": len(self.sources), "chi_sources_eager": pairs,
-                        "joins_shadow": self.joins}
+                        "joins_shadow": self.joins, "joins_chi_free": self.joins_chi_free}
 
     def _solve(self, item, needed) -> None:
         """Class ``item``'s entry values at ``needed``, its chis' blocks and
@@ -222,6 +236,12 @@ class LazySparse:
             exit_of_write=lambda key: frozenset((self.last_write[(key, item)],)),
             entry_value=self.entry[item], capture_phi=lambda key, incoming: joins.add(key))
         self.joins += len(joins)
+        # the same class solved without its chis: phi points (two or more
+        # definitions) in the same units, so the two counts compare
+        plain = set()
+        self.graph.solve(self.plain_in[item], (), exit_of_write=lambda key: frozenset((self.last_plain[(key, item)],)),
+                         entry_value=self.entry[item], capture_phi=lambda key, incoming: plain.add(key))
+        self.joins_chi_free += len(plain)
         for key, value in values.items():
             self.entry_values[(key, item)] = value
 
@@ -520,13 +540,29 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
 
 def compare_terminals(scope, crossed, dead_keys=frozenset(), limit: int = 20) -> None:
     """Check (c): ``_exit_crossings``' "call:" labels per exit byte against
-    the shadow's (``TERMINALS``); kinds: "dead" (a call only on dead paths,
-    which ``_exit_crossings`` drops), "tail" (a tail jump's), "other"."""
+    the shadow's (``TERMINALS``), every byte and every differing call
+    classified on its own, by direction: "dead" (only the shadow has it and it
+    is a call of a dead region, which ``_exit_crossings`` drops), "tail" (only
+    ``_exit_crossings`` has it and it is no CALL / CALLIND / CALLOTHER: a tail
+    jump), "dead-masked" (only ``_exit_crossings`` has this call and the
+    shadow has a dead call there instead: the dead call's chi killed it in
+    the SSA, ``_exit_crossings`` drops dead calls), else "other". ``TERMINAL_MISMATCHES[scope]``: the first ``limit``
+    (byte, call) differences; ``TERMINAL_KINDS[scope]``: all of them counted
+    ("exhausted": the diagnostic ledger ran out)."""
     shadow = TERMINALS.get(scope)
     if shadow is None:
         return
+    try:
+        with diagnostic(WORK):
+            _compare_terminals(scope, shadow, crossed, dead_keys, limit)
+    except DiagnosticExhausted:
+        TERMINAL_MISMATCHES[scope] = [("exhausted",)]
+        TERMINAL_KINDS[scope] = {"exhausted": 1}
+
+
+def _compare_terminals(scope, shadow, crossed, dead_keys, limit) -> None:
     universe = crossed.get("label_universe")
-    found = []
+    found, kinds = [], {}
     keys = {key for key in crossed if type(key) is tuple} | set(shadow)
     for key in sorted(keys, key=repr):
         block, object_id = key
@@ -535,15 +571,20 @@ def compare_terminals(scope, crossed, dead_keys=frozenset(), limit: int = 20) ->
         production = crossed.get(key, {})
         mine = shadow.get(key, {})
         for offset in sorted(set(production) | set(mine)):
+            step()
             labels = universe.decode(production.get(offset, 0)) if universe is not None else []
             expected = {label[len("call:"):] for label in labels if label.startswith("call:")}
             got = set(mine.get(offset, ()))
-            if expected != got:
-                extra = got ^ expected
-                kind = "dead" if any(item.split("~", 1)[0] in dead_keys for item in extra) else \
-                    "tail" if any(not item.endswith(("CALL", "CALLIND", "CALLOTHER")) for item in extra) else "other"
-                found.append((block, object_id.kind.value, offset, kind, sorted(expected), sorted(got)))
-                if len(found) >= limit:
-                    TERMINAL_MISMATCHES[scope] = found
-                    return
+            for item in sorted(got ^ expected):
+                if item in got:
+                    kind = "dead" if item.split("~", 1)[0] in dead_keys else "other"
+                elif not item.endswith(("CALL", "CALLIND", "CALLOTHER")):
+                    kind = "tail"
+                else:   # masked in the SSA by a dead call's chi (Astra r1's diamond: S2c)
+                    kind = "dead-masked" if any(other.split("~", 1)[0] in dead_keys
+                                                for other in got - expected) else "other"
+                kinds[kind] = kinds.get(kind, 0) + 1
+                if len(found) < limit:
+                    found.append((block, object_id.kind.value, offset, kind, item, sorted(expected), sorted(got)))
     TERMINAL_MISMATCHES[scope] = found
+    TERMINAL_KINDS[scope] = kinds
