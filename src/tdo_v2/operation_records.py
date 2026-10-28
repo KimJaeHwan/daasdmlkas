@@ -216,15 +216,15 @@ class _Binding:
     register at the call is the callee's entry register, same offsets --
     the call shape's stack-pointer base ``stack`` is the caller's pre-push
     value + ``delta``); entry memory at a direct stack slot (callee entry SP
-    + displacement, outside the return-address overlay [0, push)) from the
-    caller's ``~ld<j>`` row loading it (docs 25.32, increment 2)."""
+    + displacement; the pushed bytes [0, push) included: their fragment is
+    the ``~push`` literal) from the caller's ``~ld<j>`` row loading it (docs
+    25.32, increment 2; survey #4)."""
 
     def __init__(self, caller, reads, stack, delta=0, anchors=None, loads=None, call=None, effect=None, relations=None):
         self.caller, self.reads, self.stack = caller, reads, stack
         self.delta, self.anchors, self.loads = delta, anchors or {}, loads or {}
         self.call, self.effect = call, effect
         self.relations = relations or {}
-        self._pointer = self._witness = None   # (computed once; False: none)
         self._levels: dict = {}
         self.snapshot = next((row for row in getattr(caller.ssa, "call_register_snapshots", ())
                               if row.boundary_key == call), None)
@@ -283,137 +283,19 @@ class _Binding:
             cursor = high
         return parts if cursor == offset + size else None
 
-    # -- the return-address overlay in the caller's coordinates (increment 3) --
-    def _stack_pointer(self):
-        """(stack object, bias, register space, offset, size) of the caller's
-        stack pointer when it is this call shape's base, else False."""
-        if self._pointer is None:
-            from .may_alias import _stack_pointer, _unit_stub
-
-            scopes = self.caller.unit.scopes
-            found = _stack_pointer(_unit_stub(scopes), self.caller.unit.observation, scopes.resolution_context,
-                                   scopes.program.evidence.address_spaces)
-            self._pointer = found if found is not None and (found[3], found[4]) == self.stack else False
-        return self._pointer
-
-    def overlay(self):
-        """(stack object, low, high): the caller's stack-object bytes the call
-        shape's push wrote (the projection removed it), from a debt-free
-        witness of the pre-push stack pointer at the call -- the call's
-        ``~sp`` or an SP-reading ``~in<k>`` row, a direct-SP ``~ld`` (B = s -
-        d), or the last observed operation before the call on a straight
-        path that reads it exactly with no write of it since -- or None."""
-        if self._witness is None:
-            self._witness = self._find_witness() or False
-        return self._witness or None
-
-    def _find_witness(self):
-        from .normalize import _row_reaches_debt, _storage_ref
-        from .relative_memory import stack_offset_at
-        from .scope_identity import AddressCoordinate, ValidatedVarnode
-        from .storage import _resolve_validated_storage
-
-        pointer = self._stack_pointer()
-        if not pointer:
-            return None
-        stack_object, bias, register_space, offset, size = pointer
-        caller, push = self.caller, -self.delta
-        unit = caller.unit
-        varnode = ValidatedVarnode(VarnodeKindCode.REGISTER, AddressCoordinate(register_space, offset), size)
-        resolved = _resolve_validated_storage(_storage_ref(varnode), unit.scopes.resolution_context)
-        stack_span = getattr(resolved, "span", None)
-        if stack_span is None:
-            return None
-
-        def at(key):
-            node = caller.graph.node_for_key(f"op:{key}")
-            if node is None or _row_reaches_debt(caller.graph, node):
-                return None
-            displacement = stack_offset_at(caller.ssa, unit.observation, unit.scopes, key, varnode, stack_span,
-                                           note=False)
-            if displacement is None:
-                return None
-            low = bias + displacement + self.delta
-            return stack_object, low, low + push
-
-        runs = len(self.effect.runs) + len(self.effect.memory_runs) if self.effect is not None else 0
-        for key in (f"{self.call}~sp", *(f"{self.call}~in{index}" for index in range(runs))):
-            if any(read.span == stack_span for read in caller._staged_reads(key)):
-                found = at(key)
-                if found is not None:
-                    return found
-        for load, key in self.loads.items():   # a direct stack-pointer load: B = s - d
-            if load.index is None and load.pointer is None and load.anchor is not None \
-                    and (load.anchor.start, load.anchor.size) == self.stack:
-                node = caller.graph.node_for_key(f"op:{key}")
-                if node is None or _row_reaches_debt(caller.graph, node):
-                    continue
-                read = self._memory_read(load)
-                if read is not None and read.span.object_id == stack_object:
-                    low = read.span.start - load.displacement
-                    return stack_object, low, low + push
-        key = self._preceding_reader(register_space, offset, size)
-        return at(key) if key is not None else None
-
-    def _preceding_reader(self, register_space, offset, size):
-        """The last observed operation before the call on a straight path
-        (each crossed block edge the only one both ways; no call, branch or
-        return on the way; this shape's push skipped) that reads exactly the
-        stack-pointer register, with no write of any byte of it in [it, the
-        call) -- its key, or None."""
-        from .call_seeds import _operation_key
-        from .pcode_blocks import instruction_key
-
-        caller = self.caller
-        graph = caller._pcode_graph()
-        if graph is None:
-            return None
-        space, address, ordinal = _key_parts(self.call)
-        if address is None:
-            return None
-        call_instruction = f"{space}:{address:x}"
-        instructions = {instruction_key(row.address): row for row in caller.unit.observation.instructions}
-        row = instructions.get(call_instruction)
-        if row is None:
-            return None
-        block = graph.block_of(row.address, ordinal)
-        if block is None:
-            return None
-        blocks = {item.key: item for item in graph.blocks}
-        predecessors: dict = {}
-        for item in graph.blocks:
-            for successor in item.successors:
-                predecessors.setdefault(successor, []).append(item.key)
-        projection = caller._projection(self.call)
-        transient = frozenset(projection.transient_operation_keys) if projection is not None else frozenset()
-        barriers = ("CALL", "CALLIND", "CALLOTHER", "BRANCH", "CBRANCH", "BRANCHIND", "RETURN")
-        stop, budget = ordinal, 256
-        while True:
-            instruction = instructions[instruction_key(block.instruction)]
-            for index in range(stop - 1, block.start - 1, -1):
-                operation = instruction.operations[index]
-                if _operation_key(instruction.address, index, operation.opcode) in transient:
-                    continue
-                if operation.opcode in barriers:
-                    return None
-                output = operation.output
-                if output is not None and output.kind is VarnodeKindCode.REGISTER \
-                        and output.coordinate.space_id == register_space \
-                        and output.coordinate.byte_offset < offset + size \
-                        and offset < output.coordinate.byte_offset + output.byte_size:
-                    return None   # (a write of it, the reading operation's own included)
-                if any(item.kind is VarnodeKindCode.REGISTER and item.coordinate.space_id == register_space
-                       and item.coordinate.byte_offset == offset and item.byte_size == size
-                       for item in operation.inputs):
-                    return _operation_key(instruction.address, index, operation.opcode)
-                budget -= 1
-                if budget <= 0:
-                    return None
-            sources = predecessors.get(block.key, ())
-            if block.key == graph.entry or len(sources) != 1 or len(blocks[sources[0]].successors) != 1:
-                return None
-            block = blocks[sources[0]]
-            stop = block.stop
+    def _push_object(self):
+        """The caller's stack object holding this call's push: the object of
+        its resolved ``{call}~push`` DATA_WRITE (``normalize._push_row``), else
+        None. The pushed bytes are then ordinary SSA fragments of the
+        ``~ld`` reads -- the push's literal (survey #4, design_d_push.md)."""
+        if not hasattr(self, "_push_found"):
+            key = f"{self.call}~push"
+            self._push_found = next((definition.span.object_id for definition in self.caller.ssa.definitions
+                                     if definition.kind is MemoryDefinitionKind.DATA_WRITE
+                                     and definition.operation_key == key
+                                     and definition.span.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE),
+                                    None)
+        return self._push_found
 
     def _memory_read(self, load):
         rows = [read for read in self.caller._staged_reads(self.loads[load])
@@ -431,16 +313,20 @@ class _Binding:
     def _check_level(self, load):
         from .normalize import _row_reaches_debt
 
-        push = -self.delta
         if load.index is None and load.pointer is None and load.anchor is not None \
                 and (load.anchor.start, load.anchor.size) == self.stack:
-            # a direct slot: the overlay is [0, push) in callee entry-SP coordinates
-            if load.displacement < push and 0 < load.displacement + load.size:
-                return "return address", None
+            # a direct slot, the pushed bytes included: its ~ld fragments name
+            # the ~push literal there and ordinary definitions elsewhere
             key = self.loads.get(load)
             node = None if key is None else self.caller.graph.node_for_key(f"op:{key}")
             if node is not None and _row_reaches_debt(self.caller.graph, node):
                 return "memory: debt", None   # (a writer the SSA fragments do not show)
+            if load.displacement < -self.delta and 0 < load.displacement + load.size:
+                # over the pushed bytes: only with the push in the SSA on that
+                # read's object (no ~push row: its fragments would be stale)
+                read = None if key is None else self._memory_read(load)
+                if read is None or read.span.object_id != self._push_object():
+                    return "return address", None
             return None, None
         key = self.loads.get(load)
         node = None if key is None else self.caller.graph.node_for_key(f"op:{key}")
@@ -451,14 +337,8 @@ class _Binding:
         read = self._memory_read(load)
         if read is None:
             return "unbound memory", None
-        pointer = self._stack_pointer()
-        if pointer and read.span.object_id == pointer[0]:
-            overlay = self.overlay()
-            if overlay is None:
-                return "memory: no stack witness", None
-            if read.span.start < overlay[2] and overlay[1] < read.span.end:
-                return "return address", None
-            return None, None
+        if read.span.object_id == self._push_object():
+            return None, None   # (the caller's stack object: the push is one of its SSA definitions)
         if read.span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
             if self.caller.normalized.assumes_globals_disjoint_from_stack:
                 return None, "globals-disjoint-from-stack"
@@ -500,8 +380,9 @@ class _Binding:
     def _memory(self, builder, node, span):
         """A ``bound`` node for a callee entry memory definition (possibly
         coalesced), byte range by byte range: the caller's ``~ld<j>`` load of
-        a direct stack slot, or a gap ("return address" / "unbound memory" /
-        "memory: overlay unproven") -- cut only if an import uses it."""
+        a direct stack slot (the pushed bytes: the ``~push`` literal), or a gap
+        ("unbound memory" / "memory: overlay unproven" / "return address" when
+        the push is not in the SSA) -- cut only if an import uses it."""
         from .call_summary_effects import anchored_span
 
         place = anchored_span(span, self.anchors, relations=self.relations)
@@ -545,12 +426,8 @@ class _Binding:
                         labels.add(label)
                     classes.append(load if reason is None else reason)
         else:
-            push = -self.delta
             for index in range(size):
                 displacement = place.displacement + index
-                if 0 <= displacement < push:
-                    classes.append("return address")
-                    continue
                 load = next((item for item in self.loads if item.index is None and item.pointer is None
                              and item.anchor is not None
                              and item.anchor == place.anchor and item.space_id == place.space_id

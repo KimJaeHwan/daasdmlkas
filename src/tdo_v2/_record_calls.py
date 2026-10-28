@@ -340,6 +340,13 @@ def _context(builder, base, identity, *, done=None, shared=None):
     (_, _, store), store_key = stores[0]
     if store.inputs[2].kind is not VarnodeKindCode.CONSTANT:
         raise _StitchCut("physical push value is not observed")
+    # the raw replay's push is the graph's: the ~push literal row (width and
+    # value), when the normalizer has one (survey #10, design_d_push.md E)
+    literal = next((row for key, row in builder.normalized.pointer_rows if key == f"{base}~push"), None)
+    if literal is None:
+        raise _StitchCut("physical push has no ~push literal")   # (the graph cuts it too)
+    if literal[0] != "const" or literal[1] != store.inputs[2].byte_size             or literal[2] != store.inputs[2].coordinate.byte_offset:
+        raise _StitchCut("physical push differs from the ~push literal")
     guard, reason = builder._condition_index().reach_guard(base)
     if guard is None:
         raise _StitchCut(reason or "physical call reach unavailable")

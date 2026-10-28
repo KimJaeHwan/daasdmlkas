@@ -312,15 +312,20 @@ def test_part_of_a_larger_store():
     assert _values(record, part, {RSP: ENTRY_SP, RBX: 0x1234_5678_9ABC_DEF0}) == {0x1234_5678}
 
 
+RETURN_ADDRESS = CODE_BASE + 0xC   # (_caller's call at +8: its fallthrough, the pushed literal)
+
+
+def _push_value(functions):
+    record = _record(functions)
+    _, part = _stitched(record)
+    return _values(record, part, {RSP: ENTRY_SP})
+
+
 def test_memory_cuts():
     t = tmp(0x100)
-    # the return-address slot itself
-    assert _cut([_caller(), FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RSP))).ret()]) == "return address"
-    # rcx = rsp - 8 in the caller: [rcx] is the pushed return address -- not bound
-    from synthetic import sub
-
-    assert _cut([_caller(sub(reg(RCX), reg(RSP), const(8))),
-                 FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "return address"
+    # the return-address slot itself: its ~ld fragment is the CALL's ~push --
+    # the literal fallthrough address (survey #4: no second analysis of the push)
+    assert _push_value([_caller(), FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RSP))).ret()])         == {RETURN_ADDRESS}
     # a pointer chain p = [rsp+8]; rax = [p] -- p is the caller's never-written
     # frame slot: stale, maybe a stack address (docs 25.80 R0), so [p] is debt
     chain = FunctionBuilder(entry=F).ins(add(t, reg(RSP), const(8)), load(t, t), load(reg(RAX), t)).ret()
@@ -346,42 +351,77 @@ def test_a_pointer_to_the_callers_local():
     assert _values(record, part, {RSP: ENTRY_SP, RBX: 0x0123_4567_89AB_CDEF}) == {0x0123_4567_89AB_CDEF}
 
 
-def test_a_pointer_into_the_return_address_is_cut():
+def test_a_pointer_into_the_return_address_reads_the_push():
+    """rcx = rsp - 8 in the caller: [rcx] is the pushed slot -- the push's
+    literal through the caller's SSA (the read's object is the ~push's)."""
     from synthetic import sub
 
     caller = _caller(sub(reg(RCX), reg(RSP), const(8)))
-    assert _cut([caller, FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == "return address"
+    assert _push_value([caller, FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()]) == {RETURN_ADDRESS}
 
 
-def _preceding_reader(caller_function):
-    """The straight-path witness (``_Binding._preceding_reader``) of the
-    caller's one call, checked on its own (other witnesses usually exist)."""
-    from tdo_v2.operation_records import _Binding, _Builder
+def test_the_return_slot_on_x86_32():
+    """32-bit: the push is 4 bytes; [esp] in the callee is its literal."""
+    from synthetic import EAX, ESP, X86_32
 
-    results = analyze_units(program_units(caller_function, FunctionBuilder(entry=F)
-                                          .ins(load(reg(RAX), reg(RCX))).ret()))
-    caller = results[ROOT]
-    builder = _Builder(caller.normalized, caller.unit)
-    call, effect = next(iter(caller.normalized.proven_call_effects))
-    binding = _Binding(builder, (), builder._stack_base(call), builder._stack_base(call, delta=True),
-                       call=call, effect=effect)
-    _, _, space, offset, size = binding._stack_pointer()
-    return binding._preceding_reader(space, offset, size)
+    caller = FunctionBuilder(arch=X86_32).sub_rsp(0x28).call(F).add_rsp(0x28).ret()
+    callee = FunctionBuilder(entry=F, arch=X86_32).ins(load(reg(EAX, 4), reg(ESP, 4))).ret()
+    record = _record([caller, callee])
+    _, part = _stitched(record)
+    assert _values(record, part, {ESP: ENTRY_SP}) == {CODE_BASE + 0x8}
 
 
-def test_the_straight_path_witness():
+def test_a_changed_stack_pointer_binds_through_the_ssa():
+    """rsp changed after the lea (the old straight-path witness had none):
+    [rcx] is an ordinary caller-frame read -- stitched, never the push."""
     from synthetic import sub
 
-    found = _preceding_reader(_caller(add(reg(RCX), reg(RSP), const(0x20))))
-    assert found is not None and found.endswith("INT_ADD")
-    # rsp changed after the lea: the change reads and writes it -- no witness
+    from synthetic import store
+
     changed = (FunctionBuilder().sub_rsp(0x28)
-               .ins(add(reg(RCX), reg(RSP), const(0x20)))
+               .ins(add(reg(RCX), reg(RSP), const(0x20)), store(reg(RCX), const(0x77)))
                .ins(sub(reg(RSP), reg(RSP), const(0x10)))
                .call(F)
                .ins(add(reg(RSP), reg(RSP), const(0x10)))
                .add_rsp(0x28).ret())
-    assert _preceding_reader(changed) is None
+    record = _record([changed, FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RCX))).ret()])
+    _, part = _stitched(record)
+    assert _values(record, part, {RSP: ENTRY_SP}) == {0x77}
+
+
+def test_reads_over_part_of_the_push():
+    """2 bytes at [rsp+1]: bytes 1-2 of the literal; 8 bytes at [rsp+4]: the
+    literal's high half and the caller's [rsp] (the fragments split them)."""
+    from synthetic import store
+
+    t = tmp(0x100)
+    inside = FunctionBuilder(entry=F).ins(add(t, reg(RSP), const(1)), load(reg(RAX, 2), t)).ret()
+    assert _push_value([_caller(), inside]) == {(RETURN_ADDRESS >> 8) & 0xFFFF}
+    across = FunctionBuilder(entry=F).ins(add(t, reg(RSP), const(4)), load(reg(RAX), t)).ret()
+    caller = _caller(store(reg(RSP), const(0xAABBCCDD, 4)))
+    assert _push_value([caller, across]) == {(0xAABBCCDD << 32) | (RETURN_ADDRESS >> 32)}
+
+
+def test_a_conditional_call_then_a_call_reading_its_own_push():
+    """CALL F on one path, then CALL G always; G reads [rsp]: both pushes
+    wrote that slot -- the SSA's reaching ~push is G's (its fallthrough)."""
+    flag = tmp(0x300, 1)
+    caller = (FunctionBuilder().sub_rsp(0x28)
+              .cbranch("skip", flag, op("INT_EQUAL", [reg(RDX), const(0)], flag))
+              .call(F).label("skip").call(G).add_rsp(0x28).ret())
+    callee = FunctionBuilder(entry=G).ins(load(reg(RAX), reg(RSP))).ret()
+    record = _record([caller, FunctionBuilder(entry=F).ret(), callee])
+    call = next(node for node in _call_nodes(record) if node.get("stitched") and node["call"].startswith("1:100c:"))
+    assert _values(record, call["stitched"][0]["part"], {RSP: ENTRY_SP}) == {CODE_BASE + 0x10}
+
+
+def test_a_push_missing_from_the_ssa_keeps_the_return_address_cut(monkeypatch):
+    """No resolved ~push on the read's object (``_push_row`` gave none): the
+    pushed bytes' fragments would be stale -- cut, as before survey #4."""
+    from tdo_v2.operation_records import _Binding
+
+    monkeypatch.setattr(_Binding, "_push_object", lambda self: None)
+    assert _cut([_caller(), FunctionBuilder(entry=F).ins(load(reg(RAX), reg(RSP))).ret()]) == "return address"
 
 
 def test_a_pointer_chain_through_a_stack_argument():
@@ -520,8 +560,15 @@ def test_memory_output_cuts():
               .ins(load(reg(RAX), reg(RBX)))
               .add_rsp(0x28).ret())
     record = _record([caller, _keeping_callee(reg(RCX))])
-    (call,) = _memory_call(record)   # (the old value at W is the return address: never bound)
-    assert "stitched" not in call and call["stitch_cut"] == "return address"
+    (call,) = _memory_call(record)
+    address = next(row["span"] for row in call["inputs"] if row["role"] == "address")
+    if address == "register:rsp":
+        # forward on: rcx is the callee's entry SP -- a CALLEE write over
+        # [0, push), cut (design_d_push.md C, unchanged)
+        assert "stitched" not in call and call["stitch_cut"] == "return address"
+    else:
+        # through rcx: the old value at W is the push's literal (survey #4)
+        assert "stitched" in call and "stitch_cut" not in call
     # W through rcx (a register anchor): its old-value load is checked whole,
     # and the engine gives that read a may-alias debt with the store through
     # r8 before the call -- cut (the direct-slot case of
