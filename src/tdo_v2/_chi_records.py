@@ -75,7 +75,7 @@ def chi_records(memory_unit, effect_unit, calls, preserved, memory_keeping) -> t
 
 
 def records(scope, legacy, memory_unit, effect_unit, observation, context, assumed_calls, proven_preserved,
-            unrestored, memory_keeping):
+            unrestored, memory_keeping, calls=None):
     """The rows the consumers get: ``legacy()`` (call_clobber's) when the
     switch is off or the function is over ``LIMIT``; else V2's, compared
     with ``legacy()`` under ``check``."""
@@ -85,7 +85,7 @@ def records(scope, legacy, memory_unit, effect_unit, observation, context, assum
     from .call_clobber import clobber_inputs
     from .memory_ssa import _build_partition
 
-    calls, preserved = clobber_inputs(observation, context, assumed_calls, proven_preserved, unrestored)
+    calls, preserved = clobber_inputs(observation, context, assumed_calls, proven_preserved, unrestored, calls)
     if not calls:
         return legacy()
     present = sum(1 for block in memory_unit.blocks for action in block.actions if action.operation_key in calls)

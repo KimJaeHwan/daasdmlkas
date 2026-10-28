@@ -2009,20 +2009,20 @@ class _ScopedNormalizer:
             proven_call_effects, call_transitions, effect_unit, memory_ssa, observation, unit.scopes,
             context,
         ) if row[0] not in _blocked_bounds)
-        proven_preserved = {key: row.preserved for key, row in proven_call_effects.items()}
+        from .call_clobber import call_exemptions
+
         kept_memory = _kept_call_memory(proven_call_effects, memory_ssa, wild_objects, _uncertain)
-        for key, (spans, _) in kept_memory.items():
-            # a model's memory runs survive its clobber of the rest of memory
-            proven_preserved[key] = tuple(proven_preserved[key]) + spans
-        for key, object_id, bound in below_bounds:
-            # keeps every memory byte this function tracks except its stack below the bound
-            proven_preserved[key] = tuple(proven_preserved[key]) + _memory_spans_except_below(
-                effect_unit, object_id, bound)
-        memory_keeping = frozenset(
-            key for key, row in proven_call_effects.items()
-            if row.preserves_memory and not row.clobbers_below
-        )
-        unrestored = frozenset(key for key, row in proven_call_effects.items() if not row.restores_stack)
+        # one exemption contract (docs 25.83 S2c): a callee's proven bytes, a
+        # model's kept memory runs (they survive its clobber of the rest), a
+        # below-bound call keeping every tracked memory byte but its stack
+        # below the bound -- shared with probes and _exit_crossings
+        exemptions = call_exemptions(
+            (effect.operation_key for block in effect_unit.blocks for effect in block.effects),
+            frozenset(assumed_call_effects), proven_call_effects,
+            {key: spans for key, (spans, _) in kept_memory.items()}, below_bounds)
+        proven_preserved = exemptions.clobber_preserved(effect_unit)
+        memory_keeping = exemptions.memory_keeping
+        unrestored = exemptions.unrestored
         from ._chi_records import records as _chi_records
 
         # (the chi view's rows under TDO_V2_CHI_RECORDS, else call_clobber's: docs 25.83 S2b')
@@ -2030,16 +2030,16 @@ class _ScopedNormalizer:
             memory_ssa.function_scope, lambda: derive_call_clobber_reads(
                 effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects),
                 proven_preserved=proven_preserved, memory_keeping=memory_keeping,
-                unrestored_stack_calls=unrestored,
+                unrestored_stack_calls=unrestored, calls=exemptions.calls,
             ), memory_unit, effect_unit, observation, context, frozenset(assumed_call_effects), proven_preserved,
-            unrestored, memory_keeping)
+            unrestored, memory_keeping, exemptions.calls)
         if _chi_shadow_on():
             # opaque calls as definitions, checked against this pass (never used: docs 25.83)
             from . import _chi_shadow
             from .call_clobber import clobber_inputs
 
             calls, clobber_preserved = clobber_inputs(observation, context, frozenset(assumed_call_effects),
-                                                      proven_preserved, unrestored)
+                                                      proven_preserved, unrestored, exemptions.calls)
             _chi_shadow.record(memory_ssa.function_scope, memory_unit, memory_ssa, effect_unit, calls,
                                clobber_preserved, memory_keeping & calls, call_clobber_reads)
         call_clobber_reads = subtract_copy_clobbers(_forward_memory_plan, call_clobber_reads)
