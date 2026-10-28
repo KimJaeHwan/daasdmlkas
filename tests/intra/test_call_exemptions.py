@@ -93,7 +93,7 @@ def test_every_view_reads_the_same_contract():
     assert not built.memory_keeping & built.below_keeping
 
 
-def test_a_preserved_byte_below_the_bound_keeps_each_views_semantics():
+def test_a_preserved_byte_below_the_bound_keeps_each_views_semantics(monkeypatch):
     """The retained difference (Round 4b C1''), pinned: a byte both proven
     preserved for the call and below its bound -- normalize's view unions
     (preserved: no row), the exits' view subtracts after the union (crossed)."""
@@ -101,6 +101,7 @@ def test_a_preserved_byte_below_the_bound_keeps_each_views_semantics():
 
     from tdo_v2.call_clobber import derive_call_clobber_reads
 
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")   # (forward_inputs: the effect unit of normalize's view)
     normalized, observation = _run((-0x20,))
     ((call, object_id, bound),) = normalized.call_below_bounds
     below = next(row.span for row in normalized.memory_ssa.reads
@@ -110,13 +111,13 @@ def test_a_preserved_byte_below_the_bound_keeps_each_views_semantics():
     changed = replace(normalized, proven_call_effects=proven)
     exemptions = call_exemptions((effect.operation_key for effect in changed.effects), set(), proven,
                                  dict(changed.kept_call_memory), changed.call_below_bounds)
-    effect_unit = changed.forward_inputs.effect_unit if changed.forward_inputs is not None else None
-    if effect_unit is not None:
-        rows = derive_call_clobber_reads(
-            effect_unit, observation, changed.scopes.resolution_context,
-            proven_preserved=exemptions.clobber_preserved(effect_unit), memory_keeping=exemptions.memory_keeping,
-            unrestored_stack_calls=exemptions.unrestored, calls=exemptions.calls)
-        assert not any(span.overlaps(below) for row in rows for span in row.spans)   # (normalize: preserved)
+    assert changed.forward_inputs is not None
+    effect_unit = changed.forward_inputs.effect_unit
+    rows = derive_call_clobber_reads(
+        effect_unit, observation, changed.scopes.resolution_context,
+        proven_preserved=exemptions.clobber_preserved(effect_unit), memory_keeping=exemptions.memory_keeping,
+        unrestored_stack_calls=exemptions.unrestored, calls=exemptions.calls)
+    assert not any(span.overlaps(below) for row in rows for span in row.spans)   # (normalize: preserved)
     crossed = _exit_crossings(changed, observation, changed.scopes.resolution_context,
                               _preserved_stack_pointers, set())
     universe = crossed["label_universe"]
