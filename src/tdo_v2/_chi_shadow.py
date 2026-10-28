@@ -89,27 +89,42 @@ def record(scope, *args, exits: bool = True) -> None:
 
 
 def _subtract(span, holes) -> list:
-    """``span`` minus the ``holes`` spans of its object (intervals)."""
-    pieces = [(span.start, span.end)]
-    for hole in holes:
-        if hole.object_id != span.object_id:
+    """``span`` minus ``holes``: (start, end) intervals of its object sorted by
+    start -- one sweep (the pieces in order)."""
+    pieces, cursor = [], span.start
+    for start, end in holes:
+        if start >= span.end:
+            break
+        if end <= cursor:
             continue
-        pieces = [part for start, end in pieces for part in (
-            ((start, min(end, hole.start)),) if hole.start > start else ()) + (
-            ((max(start, hole.end), end),) if hole.end < end else ())
-            if part[0] < part[1]]
-    return [ByteSpan(span.object_id, start, end - start) for start, end in pieces]
+        if start > cursor:
+            pieces.append(ByteSpan(span.object_id, cursor, start - cursor))
+        cursor = end
+    if cursor < span.end:
+        pieces.append(ByteSpan(span.object_id, cursor, span.end - cursor))
+    return pieces
 
 
 def _footprint(connected, action, preserved, memory_keeping) -> tuple:
     """The tracked bytes the call ``action`` may change: every connected span
     minus its preserved spans and its own writes (and, for a memory-keeping
-    call, all memory)."""
+    call, all memory). Charged per hole sorted and per (span, hole of its
+    object) swept."""
     call = action.operation_key
-    holes = (*preserved.get(call, ()), *action.writes)
-    return tuple(piece for span in connected
-                 if not (call in memory_keeping and span.object_id.kind in _MEMORY_KINDS)
-                 for piece in _subtract(span, holes))
+    holes: dict = {}
+    for hole in (*preserved.get(call, ()), *action.writes):
+        step()
+        holes.setdefault(hole.object_id, []).append((hole.start, hole.end))
+    for intervals in holes.values():
+        intervals.sort()
+    pieces = []
+    for span in connected:
+        if call in memory_keeping and span.object_id.kind in _MEMORY_KINDS:
+            continue
+        intervals = holes.get(span.object_id, ())
+        step(1 + len(intervals))
+        pieces.extend(_subtract(span, intervals))
+    return tuple(pieces)
 
 
 def shadow_unit(unit, calls, preserved, memory_keeping, sources=True):
@@ -126,8 +141,6 @@ def shadow_unit(unit, calls, preserved, memory_keeping, sources=True):
             step()
             actions.append(action)
             if action.operation_key in calls:
-                # (the footprint's loops: every connected span against every hole)
-                step(len(connected) * (1 + len(preserved.get(action.operation_key, ())) + len(action.writes)))
                 spans = _footprint(connected, action, preserved, memory_keeping)
                 if spans:
                     if sources:
