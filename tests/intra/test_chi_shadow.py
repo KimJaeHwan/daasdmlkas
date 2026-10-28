@@ -15,23 +15,45 @@ OPAQUE_A, OPAQUE_B = CODE_BASE + 0xE00, CODE_BASE + 0xE10
 T, FLAG = tmp(0x100), tmp(0x300, 1)
 
 
-@pytest.fixture(autouse=True, params=("1", "sparse"))
+_STATE = (_chi_shadow.RESULTS, _chi_shadow.TERMINALS, _chi_shadow.TERMINAL_MISMATCHES, _chi_shadow.METRICS)
+
+
+@pytest.fixture(autouse=True, params=("1", "sparse", "sparse-dense-reference"))
 def shadow(monkeypatch, request):
-    monkeypatch.setenv("TDO_V2_CHI_SHADOW", request.param)
-    _chi_shadow.RESULTS.clear()
-    _chi_shadow.TERMINAL_MISMATCHES.clear()
-    yield
-    _chi_shadow.RESULTS.clear()
-    _chi_shadow.TERMINAL_MISMATCHES.clear()
+    monkeypatch.setenv("TDO_V2_CHI_SHADOW", request.param.split("-")[0])
+    if request.param.endswith("reference"):
+        monkeypatch.setenv("TDO_V2_CHI_REFERENCE", "dense")
+    for state in _STATE:
+        state.clear()
+    yield request.param
+    for state in _STATE:
+        state.clear()
 
 
 def _checked(builder):
-    analyze_units(program_units(builder))
+    """Every pass equivalent, check (c) run on every function pass; the
+    function's analysis."""
+    result = analyze_units(program_units(builder))
     assert _chi_shadow.RESULTS
     for scope, found in _chi_shadow.RESULTS.items():
         assert found == [], found
-    for scope, found in _chi_shadow.TERMINAL_MISMATCHES.items():   # (check (c): the dense shadow only)
+    assert _chi_shadow.TERMINAL_MISMATCHES
+    for scope, found in _chi_shadow.TERMINAL_MISMATCHES.items():
         assert found == [], found
+    return result
+
+
+def _metrics(shadow):
+    """The sparse shadow's metrics of the (single) function's last pass."""
+    if shadow == "1":
+        return None
+    found = [metrics for scope, metrics in _chi_shadow.METRICS.items() if not _is_probe(scope)]
+    assert len(found) == 1, list(_chi_shadow.METRICS)
+    return found[0]
+
+
+def _is_probe(scope):
+    return type(scope) is tuple and len(scope) == 4 and scope[1] == "probe"
 
 
 def _frame(builder, offset, value):
@@ -79,3 +101,63 @@ def test_a_user_op_output_is_written_after_its_clobber():
                .ins(op("CALLOTHER", [const(7, 4), reg(RSI)], reg(RAX)))
                .ins(copy(reg(R9), reg(RAX))).add_rsp(0x28).ret())
     _checked(builder)
+
+
+def _overwritten(rewrite):
+    builder = _frame(FunctionBuilder().sub_rsp(0x48), 0x10, reg(RSI)).call(OPAQUE_A)
+    if rewrite:
+        builder = _frame(builder, 0x10, const(0))
+    return _read(builder.call(OPAQUE_B), 0x10).add_rsp(0x48).ret()
+
+
+def test_exits_demand_no_chi_sources(shadow):
+    """[0x10] = rsi; CALL A; ret: A's chi has sources only in check (c)'s
+    exit measurement, never in the read demand; (c) still sees A at the exit."""
+    _checked(_frame(FunctionBuilder().sub_rsp(0x48), 0x10, reg(RSI)).call(OPAQUE_A).add_rsp(0x48).ret())
+    assert any(_chi_shadow.TERMINALS.values())
+    metrics = _metrics(shadow)
+    if metrics is not None:
+        assert metrics["chis"] > 0 and metrics["chi_sources_exits"] > 0
+        assert metrics["chi_sources"] < metrics["chi_sources_eager"]
+
+
+def test_an_overwrite_stops_the_demand(shadow):
+    """CALL A; [0x10] = 0; CALL B; read [0x10]: B's sources stop at the
+    store -- A's chi is not demanded for that class (it is without the store)."""
+    _checked(_overwritten(True))
+    with_store = _metrics(shadow)
+    for state in _STATE:
+        state.clear()
+    _checked(_overwritten(False))
+    without = _metrics(shadow)
+    if with_store is not None:
+        assert with_store["chi_sources"] < without["chi_sources"]
+
+
+def test_a_call_on_each_arm(shadow):
+    builder = _frame(FunctionBuilder().sub_rsp(0x48), 0x10, reg(RSI))
+    builder.cbranch("other", FLAG, op("INT_EQUAL", [reg(RCX), const(0)], FLAG)).call(OPAQUE_A).branch("join")
+    builder.label("other").call(OPAQUE_B).label("join")
+    _checked(_read(builder, 0x10).add_rsp(0x48).ret())
+
+
+def test_a_probe_read_is_checked(shadow, monkeypatch):
+    """A forward probe's added read (here [0x20], read nowhere else, CALL A
+    between its store and the probed load) goes through the shadow too: its
+    unit's chi sources include what that read demands."""
+    from dataclasses import replace
+
+    from tdo_v2.forward import probe
+
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    builder = _frame(_frame(FunctionBuilder().sub_rsp(0x48), 0x10, reg(RSI)), 0x20, reg(RDX)).call(OPAQUE_A)
+    normalized = _checked(_read(builder, 0x10).add_rsp(0x48).ret())["1:1000"].normalized
+    ssa = normalized.memory_ssa
+    read = next(row for row in ssa.reads if ssa.actions[row.action_id].operation_key.endswith(":LOAD")
+                and row.span.object_id.kind.value == "function_relative" and row.span.size == 8)
+    function = _metrics(shadow)
+    probe(normalized, ssa.actions[read.action_id].operation_key, (replace(read.span, start=read.span.start + 0x10),))
+    probes = [scope for scope in _chi_shadow.RESULTS if _is_probe(scope)]
+    assert probes and all(_chi_shadow.RESULTS[scope] == [] for scope in probes)
+    if function is not None:
+        assert _chi_shadow.METRICS[probes[-1]]["chi_sources"] > function["chi_sources"]

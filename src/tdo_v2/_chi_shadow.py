@@ -14,8 +14,10 @@ Per read byte of the production unit (streamed, nothing kept but mismatches)
 the check compares
 (a) the calls met walking chi definitions back to their sources (JOINs and
     chis expanded, a visited set for loops) with ``call_clobber``'s byte state
-    at that read (a recorded dense replay of its transfer, same inputs); a
-    byte the replay does not know is a mismatch,
+    at that read (a recorded dense replay of its transfer, same inputs; or,
+    for the lazy sparse shadow by default, the sparse engine's own value
+    per read byte through ``derive_sparse(observe=)``); a byte the reference
+    does not know is a mismatch,
 (b) the ordinary definitions reached (ENTRY / data / kill writes) with the
     production SSA's reaching definitions (JOINs expanded),
 (c) the public records: per read operation the shadow's (dirty spans, calls)
@@ -42,6 +44,7 @@ RESULTS: dict = {}
 # against ``function_summary._exit_crossings`` (``compare_terminals``)
 TERMINALS: dict = {}
 # function scope -> LazySparse.metrics (the sparse engine, ``TDO_V2_CHI_SHADOW=sparse``)
+# plus the diagnostic work and milliseconds of the whole check ("build_ms": the shadow alone)
 METRICS: dict = {}
 TERMINAL_MISMATCHES: dict = {}
 # calls x connected spans above which a function is skipped; diagnostic work bound
@@ -49,14 +52,24 @@ LIMIT = 200_000
 WORK = 20_000_000
 
 
-def record(scope, *args) -> None:
+def record(scope, *args, exits: bool = True) -> None:
+    """Check one pass of ``scope`` (``exits`` False: no check (c) capture --
+    a forward probe's unit). ``TDO_V2_CHI_REFERENCE=dense``: the sparse
+    shadow against the dense replay (no shared dominator code)."""
     import os
+    import time
 
     TERMINALS.pop(scope, None)
-    engine = "sparse" if os.environ.get("TDO_V2_CHI_SHADOW") == "sparse" else "dense"
+    METRICS.pop(scope, None)
+    engine ="sparse" if os.environ.get("TDO_V2_CHI_SHADOW") == "sparse" else "dense"
+    reference = "dense" if engine == "dense" or os.environ.get("TDO_V2_CHI_REFERENCE") == "dense" else "sparse"
+    started = time.perf_counter()
     try:
-        with diagnostic(WORK):
-            RESULTS[scope] = check(*args, scope=scope, engine=engine)
+        with diagnostic(WORK) as ledger:
+            RESULTS[scope] = check(*args, scope=scope, engine=engine, reference=reference, exits=exits)
+        if scope in METRICS:
+            METRICS[scope]["work"] = ledger.work if ledger is not None else 0
+            METRICS[scope]["ms"] = round((time.perf_counter() - started) * 1000)
     except DiagnosticExhausted:
         RESULTS[scope] = "exhausted"
     except Exception as error:   # (the shadow build itself failed: reported, never raised)
@@ -116,16 +129,19 @@ def shadow_unit(unit, calls, preserved, memory_keeping, sources=True):
 
 class LazySparse:
     """The shadow chi SSA in the sparse engine's style (docs 25.83 S2a): one
-    value per atom class (``build_atom_classes``) solved on the dominator
-    graph (``DominatorGraph.solve``) only at the blocks something demands --
-    the production unit's reads, then, recursively, the blocks of the chis a
-    demanded value reaches (a chi's sources: the class's value just before it).
-    Exits demand nothing (their crossings stay ``_exit_crossings``', S2c).
-    ``metrics``: classes, chis, chis reached, blocks solved lazily vs eagerly
-    (every chi block of a class demanded, as an eager ``~chr`` read would),
-    solves, phi points."""
+    value per atom class (``build_atom_classes``) on the dominator graph
+    (``DominatorGraph.solve``: the class's whole phi fixed point, once, only
+    for a class some read touches). What is lazy is a chi's SOURCES (the
+    class's value just before it): computed only for the chis a read's value
+    reaches, recursively, an overwrite stopping the walk -- an eager ``~chr``
+    would compute them for every (chi, class) pair. Exits demand nothing
+    (``exit_crossings`` is check (c)'s separate measurement, its sources
+    counted apart).
+    ``metrics``: classes, classes solved for reads / for exits only, chis,
+    chi sources demanded by reads / eagerly / by exits, shadow JOIN points
+    (phis with two or more definitions)."""
 
-    def __init__(self, unit, calls, preserved, memory_keeping):
+    def __init__(self, unit, calls, preserved, memory_keeping, terminals=()):
         from ._memory_ssa_classes import build_atom_classes
         from ._sparse_dataflow import DominatorGraph
         from .memory_ssa import _build_partition, _raw_definitions
@@ -148,11 +164,14 @@ class LazySparse:
         self.position = {}           # operation key -> (block, index)
         self.chi_at = {}             # chi definition -> (block, index)
         written_in = [set() for _ in classes.classes]
+        chi_blocks = [set() for _ in classes.classes]
         self.last_write = {}
         read_points = [set() for _ in classes.classes]
+        pairs = 0                    # (chi, class) pairs: the sources an eager ~chr computes
         for block in shadow.blocks:
             rows = []
             for index, action in enumerate(block.actions):
+                step()
                 self.position[action.operation_key] = (block.key, index)
                 writes = []
                 for ordinal, span in enumerate(action.writes):
@@ -164,62 +183,96 @@ class LazySparse:
                         self.last_write[(block.key, item)] = definition
                     if action.operation_key.endswith("~chi"):
                         self.chi_at[definition] = (block.key, index)
+                        pairs += len(covered)
+                        for item in covered:
+                            chi_blocks[item].add(block.key)
                 for span in action.reads:
                     for item in self._classes(span):
                         read_points[item].add((block.key, index))
                 rows.append((action.operation_key, action.reads, writes))
             self.actions[block.key] = rows
-        self.written_in = written_in
+        self.written_in, self.chi_blocks, self.terminals = written_in, chi_blocks, tuple(terminals)
         self.entry_values: dict = {}
         self.sources: dict = {}      # (chi definition, class) -> definitions just before it
-        lazy = eager = solves = phis = 0
+        self.joins = 0
+        pending = []
         for item in range(len(classes.classes)):
-            needed = {block for block, _ in read_points[item]}
-            if not needed:
+            if read_points[item]:
+                self._solve(item, {block for block, _ in read_points[item]})
+                pending.extend((block, index, item) for block, index in read_points[item])
+        solved = len({item for _, item in self.entry_values})
+        while pending:   # the demand closure: chis a read's value reaches, then theirs
+            step()
+            block, index, item = pending.pop()
+            for definition in self.value_before(block, index, item):
+                if definition in self.chi_at and (definition, item) not in self.sources:
+                    self.source_of(definition, item)
+                    pending.append((*self.chi_at[definition], item))
+        self.metrics = {"classes": len(classes.classes), "classes_solved": solved, "chis": len(self.chi_at),
+                        "chi_sources": len(self.sources), "chi_sources_eager": pairs,
+                        "joins_shadow": self.joins}
+
+    def _solve(self, item, needed) -> None:
+        """Class ``item``'s entry values at ``needed``, its chis' blocks and
+        the terminals (one fixed point: ``solve`` is independent of ``needed``,
+        which only selects the blocks returned)."""
+        joins = set()
+        values = self.graph.solve(
+            self.written_in[item], set(needed) | self.chi_blocks[item] | set(self.terminals),
+            exit_of_write=lambda key: frozenset((self.last_write[(key, item)],)),
+            entry_value=self.entry[item], capture_phi=lambda key, incoming: joins.add(key))
+        self.joins += len(joins)
+        for key, value in values.items():
+            self.entry_values[(key, item)] = value
+
+    def source_of(self, definition, item) -> frozenset:
+        """A chi's sources in class ``item`` (memoized)."""
+        found = self.sources.get((definition, item))
+        if found is None:
+            found = self.sources[(definition, item)] = self.value_before(*self.chi_at[definition], item)
+        return found
+
+    def exit_crossings(self) -> dict:
+        """Check (c)'s measurement: {(terminal block, object): {offset: calls}}
+        (nonempty only) -- every class at every terminal, solving the classes
+        no read touched; metrics ``classes_solved_exits`` / ``chi_sources_exits``
+        count what this adds (never the read demand above)."""
+        before_sources = len(self.sources)
+        before_classes = len({item for _, item in self.entry_values})
+        atoms_of: dict = {}
+        for atom, item in enumerate(self.class_of_atom):
+            atoms_of.setdefault(item, []).append(atom)
+        found: dict = {}
+        for item, atoms in sorted(atoms_of.items()):
+            if not any((block, item) in self.entry_values for block in self.terminals):
+                self._solve(item, ())
+            for block in self.terminals:
+                if (block, item) not in self.entry_values:
+                    continue   # (unreachable)
+                crossed = self._crossed(self.value_before(block, len(self.actions[block]), item), item)
+                if not crossed:
+                    continue
+                for atom in atoms:
+                    span = self.partition.atoms[atom]
+                    target = found.setdefault((block, span.object_id), {})
+                    for offset in range(span.start, span.end):
+                        step()
+                        target[offset] = crossed
+        self.metrics["classes_solved_exits"] = len({item for _, item in self.entry_values}) - before_classes
+        self.metrics["chi_sources_exits"] = len(self.sources) - before_sources
+        return found
+
+    def _crossed(self, values, item) -> frozenset:
+        crossed, pending, seen = set(), list(values), set()
+        while pending:
+            step()
+            definition = pending.pop()
+            if definition in seen or definition not in self.chi_at:
                 continue
-            points = set(read_points[item])
-            done: set = set()
-            solved: set = set()
-            while True:
-                if needed - solved:
-                    solves += 1
-                    phi_count = [0]
-
-                    def capture(key, incoming, phi_count=phi_count):
-                        phi_count[0] += 1
-
-                    values = self.graph.solve(
-                        written_in[item], needed,
-                        exit_of_write=lambda key, item=item: frozenset((self.last_write[(key, item)],)),
-                        entry_value=self.entry[item], capture_phi=capture)
-                    phis += phi_count[0]
-                    for key, value in values.items():
-                        self.entry_values[(key, item)] = value
-                    solved = set(needed)
-                grown = set()
-                for point in points - done:
-                    done.add(point)
-                    for definition in self.value_before(point[0], point[1], item):
-                        if definition in self.chi_at:
-                            source = self.chi_at[definition]
-                            if (definition, item) not in self.sources:
-                                self.sources[(definition, item)] = None
-                                grown.add(source)
-                new_blocks = {block for block, _ in grown} - needed
-                points |= grown
-                needed |= new_blocks
-                if not grown:
-                    break
-            for (definition, cls), value in list(self.sources.items()):
-                if cls == item and value is None:
-                    block, index = self.chi_at[definition]
-                    self.sources[(definition, cls)] = self.value_before(block, index, item)
-            lazy += len(needed)
-            eager += len({block for block, _ in read_points[item]}
-                         | {self.chi_at[d][0] for d in self.chi_at if item in self._classes(raw[d].span)})
-        self.metrics = {"classes": len(classes.classes), "chis": len(self.chi_at),
-                        "chi_sources": len(self.sources), "blocks_lazy": lazy, "blocks_eager": eager,
-                        "solves": solves, "phi_points": phis}
+            seen.add(definition)
+            crossed.add(self.definitions[definition].operation_key[:-len("~chi")])
+            pending.extend(self.source_of(definition, item))
+        return frozenset(crossed)
 
     def _classes(self, span) -> list:
         start, stop = self.partition.covered_range(span)
@@ -251,7 +304,7 @@ class LazySparse:
             seen.add(definition)
             if definition in self.chi_at:
                 crossed.add(self.definitions[definition].operation_key[:-len("~chi")])
-                pending.extend(self.sources.get((definition, item)) or ())
+                pending.extend(self.source_of(definition, item))   # (demanded above already)
                 continue
             origins.add(_identity(self.definitions[definition]))
         return crossed, origins
@@ -279,8 +332,11 @@ def _identity(definition) -> tuple:
 
 
 def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping=frozenset(),
-          public_rows=None, limit: int = 20, scope=None, engine: str = "dense"):
-    """Mismatches (a)-(c), at most ``limit``; "skipped" above ``LIMIT``."""
+          public_rows=None, limit: int = 20, scope=None, engine: str = "dense", reference: str = "dense",
+          exits: bool = True):
+    """Mismatches (a)-(c), at most ``limit``; "skipped" above ``LIMIT`` (the
+    dense engine). ``reference``: call_clobber's per-byte state from the
+    sparse engine's rows pass (``observe``) or a dense replay."""
     from .call_clobber import CallClobberRead, _EMPTY
     from .memory_ssa import _build_dense, _build_partition
 
@@ -290,8 +346,15 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
     present = sum(1 for block in memory_unit.blocks for action in block.actions if action.operation_key in calls)
     lazy = None
     if engine == "sparse":
-        lazy = LazySparse(memory_unit, calls, preserved, memory_keeping)
+        import time
+
+        started = time.perf_counter()
+        lazy = LazySparse(memory_unit, calls, preserved, memory_keeping,
+                          memory_unit.observed_terminal_block_keys if exits else ())
         METRICS[scope] = lazy.metrics
+        lazy.metrics["build_ms"] = round((time.perf_counter() - started) * 1000)
+        lazy.metrics["joins_production"] = sum(1 for definition in memory_ssa.definitions
+                                               if definition.kind is MemoryDefinitionKind.JOIN)
         shadow, shadow_reads, shadow_joins = None, {}, {}
     elif present * len(_build_partition(memory_unit).connected) > LIMIT:
         return "skipped"
@@ -374,7 +437,31 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
         if spans:
             rows.append(CallClobberRead(key, tuple(spans), tuple(sorted(crossed_all))))
 
-    if lazy is not None:
+    def exits_and_records():
+        if public_rows is not None and sorted(rows, key=lambda row: row.operation_key) != \
+                sorted(public_rows, key=lambda row: row.operation_key):
+            mismatches.append(("records", len(rows), len(public_rows)))
+        if scope is not None and exits and lazy is not None:
+            TERMINALS[scope] = lazy.exit_crossings()   # (c), for ``compare_terminals``
+        elif scope is not None and exits:
+            # (c) the calls crossed at each exit byte, for ``compare_terminals``
+            terminals: dict = {}
+            for state in shadow.observed_terminal_states:
+                pending = [state.root_node_id] if state.root_node_id is not None else []
+                while pending:
+                    step()
+                    node = shadow.state_nodes[pending.pop()]
+                    pending.extend(item for item in (node.left_node_id, node.right_node_id) if item is not None)
+                    for atom in shadow.atomic_spans[node.start_atom:node.stop_atom]:
+                        for offset in range(atom.start, atom.end):
+                            crossed, _ = shadow_closure(node.definition_ids, atom.object_id, offset)
+                            if crossed:
+                                terminals.setdefault((state.block_key, atom.object_id), {})[offset] = \
+                                    frozenset(crossed)
+            TERMINALS[scope] = terminals
+        return mismatches[:limit]
+
+    if lazy is not None and reference == "sparse":
         # the sparse call_clobber engine (production's) as the reference, per
         # read byte as it emits its rows (docs 25.83 S2a: no dense state)
         from ._call_clobber_sparse import derive_sparse
@@ -388,10 +475,7 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
 
         derive_sparse(effect_unit, set(calls), preserved, frozenset(memory_keeping),
                       observe=lambda effect, at: compare(effect, _At(at)))
-        if public_rows is not None and sorted(rows, key=lambda row: row.operation_key) != \
-                sorted(public_rows, key=lambda row: row.operation_key):
-            mismatches.append(("records", len(rows), len(public_rows)))
-        return mismatches[:limit]
+        return exits_and_records()
 
     # a recorded dense replay of call_clobber's transfer, comparing as it goes
     blocks = {block.key: block for block in effect_unit.blocks}
@@ -431,25 +515,7 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
         transfer(blocks[key], in_states[key], True)
         if len(mismatches) >= limit:
             return mismatches[:limit]
-    if public_rows is not None and sorted(rows, key=lambda row: row.operation_key) != \
-            sorted(public_rows, key=lambda row: row.operation_key):
-        mismatches.append(("records", len(rows), len(public_rows)))
-    if scope is not None and lazy is None:
-        # (c) the calls crossed at each exit byte, for ``compare_terminals``
-        terminals: dict = {}
-        for state in shadow.observed_terminal_states:
-            pending = [state.root_node_id] if state.root_node_id is not None else []
-            while pending:
-                step()
-                node = shadow.state_nodes[pending.pop()]
-                pending.extend(item for item in (node.left_node_id, node.right_node_id) if item is not None)
-                for atom in shadow.atomic_spans[node.start_atom:node.stop_atom]:
-                    for offset in range(atom.start, atom.end):
-                        crossed, _ = shadow_closure(node.definition_ids, atom.object_id, offset)
-                        if crossed:
-                            terminals.setdefault((state.block_key, atom.object_id), {})[offset] = frozenset(crossed)
-        TERMINALS[scope] = terminals
-    return mismatches[:limit]
+    return exits_and_records()
 
 
 def compare_terminals(scope, crossed, dead_keys=frozenset(), limit: int = 20) -> None:

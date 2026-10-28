@@ -403,11 +403,11 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
         preserved[key] = preserved.get(key, ()) + tuple(kept)
     for key, object_id, bound in inputs.below_bounds:
         preserved[key] = preserved.get(key, ()) + _memory_spans_except_below(probed, object_id, bound)
-    clobbers = derive_call_clobber_reads(
+    memory_keeping = frozenset(key for key, row in rows.items() if row.preserves_memory and not row.clobbers_below)
+    unrestored = frozenset(key for key, row in rows.items() if not row.restores_stack)
+    clobbers = raw_clobbers = derive_call_clobber_reads(
         probed, inputs.observation, inputs.context, assumed_calls=inputs.assumed_calls,
-        proven_preserved=preserved,
-        memory_keeping=frozenset(key for key, row in rows.items() if row.preserves_memory and not row.clobbers_below),
-        unrestored_stack_calls=frozenset(key for key, row in rows.items() if not row.restores_stack),
+        proven_preserved=preserved, memory_keeping=memory_keeping, unrestored_stack_calls=unrestored,
     )
     from ._realloc_contents import subtract_copy_clobbers
     clobbers = subtract_copy_clobbers(inputs.read_separations, clobbers)
@@ -454,7 +454,18 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
     if inputs.assume_globals_disjoint_from_stack:
         used.append("globals-disjoint-from-stack")
     indebted = [span for row in (*clobbers, *aliases) if row.operation_key == load_key for span in row.spans]
-    ssa = build_bound_local_memory_ssa(decode_effect_unit(probed)).result
+    memory_unit = decode_effect_unit(probed)
+    ssa = build_bound_local_memory_ssa(memory_unit).result
+    from .normalize import _chi_shadow_on
+
+    if _chi_shadow_on():   # (the probe's added reads, checked too: docs 25.83 S2a; never used)
+        from . import _chi_shadow
+        from .call_clobber import clobber_inputs
+
+        calls, clobber_preserved = clobber_inputs(inputs.observation, inputs.context, inputs.assumed_calls,
+                                                  preserved, unrestored)
+        _chi_shadow.record((ssa.function_scope, "probe", load_key, spans), memory_unit, ssa, probed, calls,
+                           clobber_preserved, memory_keeping & calls, raw_clobbers, exits=False)
     original = normalized.memory_ssa
 
     def identity(definition):
