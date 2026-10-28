@@ -157,7 +157,7 @@ def prepare_load_identities(result, options):
                 or read.span.object_id.kind not in (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE) \
                 or len(read.fragments) != 1:
             continue
-        offsets = _offsets(fact, read.span.size)
+        offsets = _offsets(fact, read.span.size, 64)   # (x64 only: C3)
         space = next((row for row in inputs.address_spaces
                       if row.space_id == operation.inputs[0].coordinate.byte_offset), None)
         if offsets is None or len(offsets[1]) != read.span.size or space is None \

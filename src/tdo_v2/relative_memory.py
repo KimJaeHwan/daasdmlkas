@@ -1985,7 +1985,7 @@ class _Projector:
             return result
         seed = entry_seed(self._ssa.function_scope, requested_span) \
             if definition.kind is MemoryDefinitionKind.ENTRY \
-            and self._translation_namespace.split(":")[1:3] == ["LE", "64"] else None
+            and self._translation_namespace.split(":")[1:3] in (["LE", "64"], ["LE", "32"]) else None
         if seed is not None:
             if seed[0] == "affine":
                 _, base, delta = seed

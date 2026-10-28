@@ -173,12 +173,13 @@ class MemoryRefinement:
             cache[id(self)] = self, pin
 
 
-def _offsets(fact, width):
-    """Finite full-width offsets; modular byte sets commute with any base."""
+def _offsets(fact, width, bits):
+    """Finite full-width offsets; modular byte sets commute with any base.
+    ``bits``: the memory space's address width (the claim must have it)."""
     from .forward import MAX_CANDIDATES
 
     claim = fact.claim
-    if fact.context or fact.input != 1 or claim.bits != 64 or len(claim.items) != 1:
+    if fact.context or fact.input != 1 or claim.bits != bits or len(claim.items) != 1:
         return None
     base, interval = claim.items[0]
     if len(base) != 3 or base[0] != "entry" or base[2] * 8 != claim.bits \
@@ -236,10 +237,12 @@ def prepare_memory_refinement(result, options, *, assumptions=()):
             continue
         space = spaces.get(load.inputs[0].coordinate.byte_offset)
         if load.inputs[0].kind is not VarnodeKindCode.CONSTANT or space is None \
-                or not space.is_memory_space or space.address_size_bits != 64:
+                or not space.is_memory_space or space.address_size_bits not in (32, 64):
             continue
+        # one width per site: space bits == address operand bits == both claims' bits
+        bits = space.address_size_bits
         size = load.output.byte_size
-        left = _offsets(read_fact, size)
+        left = _offsets(read_fact, size, bits)
         if left is None or load.inputs[1].byte_size * 8 != read_fact.claim.bits:
             continue
         reads = [evidence.span for evidence in effects[row.operation_key].reads
@@ -267,7 +270,7 @@ def prepare_memory_refinement(result, options, *, assumptions=()):
             if effect is None or len(writes) != 1 or effect.memory_write is not None \
                     or effect.unresolved_writes or writes[0].size != store.inputs[2].byte_size:
                 continue
-            right = _offsets(write_fact, store.inputs[2].byte_size)
+            right = _offsets(write_fact, store.inputs[2].byte_size, bits)
             if right is None or left[0] != right[0] or left[1] & right[1]:
                 continue
             proofs.append(ReadSeparation(row.operation_key, writer, reads[0], read_fact, write_fact))

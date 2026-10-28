@@ -97,10 +97,11 @@ def test_low_level_memory_space_anchor_mismatch_refuses_the_same_raw_constant():
     assert seeds == witnesses == ()
 
 
-@pytest.mark.parametrize("language", ("x86:BE:64:default", "x86:LE:32:default"))
+@pytest.mark.parametrize("language", ("x86:BE:64:default", "x86:BE:32:default"))
 def test_low_level_projector_language_guard_does_not_consume_le_partial_seed(language):
     # Real x86 LE64 SSA supplies the ENTRY definition. Only the projector's
-    # language parameter is varied below: this is not admitted BE/32-bit SSA.
+    # language parameter is varied below: this is not admitted big-endian SSA
+    # (LE:32 is admitted since design C1: test_call_activation_x86_32.py).
     (item,) = analyze_units(program_units(FunctionBuilder()
         .ins(load(tmp(0x300, 16), reg(RCX))).ret()),
         assume_entry_values_not_frame=False,

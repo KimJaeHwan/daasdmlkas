@@ -38,7 +38,7 @@ def stack_range(analysis, allocation, span):
         return None
     register = analysis.port((offset, width))
     values, used = analysis.numeric.bind(allocation.event, (register,))
-    before = _single(values[register])
+    before = _single(values[register], 64)   # (x64 only: C3)
     if before is None or before[0] != ("entry", offset, width):
         return None
     push = max((-row.memory_transition.displacement_delta

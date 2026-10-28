@@ -53,8 +53,8 @@ def _first(normalized, call):
     return first_effect(normalized, call)
 
 
-def _single(value):
-    if value is None or value.is_top or value.bits != 64 or len(value.items) != 1:
+def _single(value, bits):
+    if value is None or value.is_top or value.bits != bits or len(value.items) != 1:
         return None
     base, offset = value.items[0]
     return (base, offset.lo) if offset.single and offset.signed else None
@@ -83,11 +83,15 @@ def _inputs(caller, callee, call, assumptions, readonly_image):
         return None
     transition = shape.memory_transition
     register, _ = _register_file(callee.unit.observation, callee.unit.scopes.resolution_context)
-    if register is None or transition.callee_base.byte_size != 8 or transition.displacement_delta != -8:
+    # the observed shape's push (its recognizer checked the return-address
+    # STORE and no other stack-pointer write): one pointer width w, 4 or 8
+    width = transition.callee_base.byte_size
+    if register is None or width not in (4, 8) or transition.displacement_delta != -width:
         return None
-    sp = ByteSpan(register, transition.callee_base.byte_offset, 8)
+    bits = 8 * width
+    sp = ByteSpan(register, transition.callee_base.byte_offset, width)
     bases = {anchor for anchor, _ in callee.anchors.values()
-             if anchor.object_id.kind is StorageObjectKind.REGISTER_FILE and anchor.size == 8}
+             if anchor.object_id.kind is StorageObjectKind.REGISTER_FILE and anchor.size == width}
     bases.add(sp)
     analysis = _analyze(caller.normalized, caller.unit, readonly_image=readonly_image, assumptions=assumptions)
     if analysis.bind is None:
@@ -97,17 +101,18 @@ def _inputs(caller, callee, call, assumptions, readonly_image):
     if before is None or before.is_top:
         return None
     after = _moved(before, transition.displacement_delta, transition.displacement_delta, 0)
-    stack = _single(after)
+    stack = _single(after, bits)
     writes = _call_local_writes(caller.unit.observation, call, (sp.start, sp.size))
     if stack is None or writes is None or stack[0][0] != "entry":
         return None
     relations = []
     for span, value in values.items():
         step()
-        current = _single(value)
+        current = _single(value, bits)
         if span == sp or current is None or current[0] != stack[0] \
-                or any(span.start < start + size and start < span.end for start, size in writes):
-            continue
+                or any(span.start < start + size and start < span.end for start, size in writes) \
+                or abs(current[1] - stack[1]) >= 1 << (bits - 2):
+            continue   # (|delta| at the relative-start seam: that relation is refused)
         relations.append((span, sp, current[1] - stack[1]))
     geometry = _stack(caller)
     if not relations or geometry is None:
@@ -117,7 +122,7 @@ def _inputs(caller, callee, call, assumptions, readonly_image):
     space = None if caller_anchor is None else next((row for row in caller.unit.scopes.program.evidence.address_spaces
                                                      if row.space_id == caller_anchor[1]), None)
     if (offset, size) != stack[0][1:] or space is None or not space.is_memory_space \
-            or space.address_size_bits != 64:
+            or space.address_size_bits != bits:
         return None
     return sp, stack[1], caller_object, bias, tuple(relations), tuple(sorted(set(analysis.labels) | set(used)))
 
@@ -181,7 +186,7 @@ def _frame_compatible(callee, normalized, sp, relations):
                 anchor = anchors.get(span.object_id)
                 if anchor is None:
                     return False
-                if anchor[0] != sp or span.start >= (1 << 64) + above:
+                if anchor[0] != sp or span.start >= (1 << (8 * sp.size)) + above:
                     continue
                 previous = old.get(effect.operation_key)
                 if previous is None or not any(
@@ -219,10 +224,11 @@ def _memory_inputs(caller, callee, normalized, sp, delta, caller_object, bias, r
         if not 0 < span.size <= 16 \
                 or anchors.get(span.object_id) != (sp, memory_space):
             continue
-        displacement = span.start - (1 << 64)
-        # The observed CALL pushes its return address here. Caller pre-push
-        # RAM is not the callee's ENTRY value, including partial overlaps.
-        if displacement < 8 and displacement + span.size > 0 \
+        displacement = span.start - (1 << (8 * sp.size))   # (the relative zero point: 2^bits)
+        # The observed CALL pushes its return address here (sp.size bytes:
+        # the shape's push). Caller pre-push RAM is not the callee's ENTRY
+        # value, including partial overlaps.
+        if displacement < sp.size and displacement + span.size > 0 \
                 or any(span.overlaps(previous) for previous, _ in seeds):
             continue
         source = ByteSpan(caller_object, bias + delta + displacement, span.size)
@@ -260,7 +266,8 @@ def _replay_activation(caller, callee, call, *, readonly_image=None, assumptions
     from ._activation_entry import ActivationEntry
     from .normalize import NormalizedFunction
 
-    if callee.unit.scopes.program.evidence.translation_namespace.language_id.split(":")[1:3] != ["LE", "64"] \
+    if callee.unit.scopes.program.evidence.translation_namespace.language_id.split(":")[1:3] \
+            not in (["LE", "64"], ["LE", "32"]) \
             or getattr(caller.normalized, "activation_entry", None) is not None \
             or getattr(callee.normalized, "activation_entry", None) is not None \
             or callee.activations or callee.origins or callee.projected_sinks or callee.recursion_unresolved \

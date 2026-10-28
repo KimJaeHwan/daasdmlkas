@@ -159,10 +159,13 @@ def test_modular_byte_footprints_keep_wrapping_bytes():
     fact = plan.proofs[0].write_fact
     mask = (1 << 64) - 1
     wrapping = replace(fact, claim=Value(64, ((("entry", RSP, 8), Interval.offset(-2, 64)),)))
-    assert refinement._offsets(wrapping, 4) == (("entry", RSP, 8), frozenset((mask - 1, mask, 0, 1)))
-    assert refinement._offsets(wrapping, 17) is None
+    assert refinement._offsets(wrapping, 4, 64) == (("entry", RSP, 8), frozenset((mask - 1, mask, 0, 1)))
+    assert refinement._offsets(wrapping, 17, 64) is None
+    assert refinement._offsets(wrapping, 4, 32) is None   # (claim width != the space's: refused)
     wide = replace(wrapping, claim=Value(64, ((("entry", RSP, 8), Interval(-4, 4, 1, 64, True)),)))
-    assert refinement._offsets(wide, 1) is None  # nine candidates exceed MAX_CANDIDATES
+    assert refinement._offsets(wide, 1, 64) is None  # nine candidates exceed MAX_CANDIDATES
+    narrow = replace(fact, claim=Value(32, ((("entry", RSP, 4), Interval.offset(-2, 32)),)))
+    assert refinement._offsets(narrow, 4, 32) == (("entry", RSP, 4), frozenset(((1 << 32) - 2, (1 << 32) - 1, 0, 1)))
 
 
 def test_n0_assumptions_survive_replay_facts_and_existing_probe():
