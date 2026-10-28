@@ -476,3 +476,138 @@ def test_a_superseded_round_one_result_keeps_its_assumptions(monkeypatch):
     replaced = results["1:1000"].superseded
     assert type(replaced.normalized) is NormalizedFunction
     assert set(run_assumptions({"1:1000": replaced})) <= set(run_assumptions(results))
+
+
+# -- an engine's own bound (docs 25.83 D5') ------------------------------------------
+
+def test_a_bound_trips_at_its_exact_unit_without_a_run():
+    from tdo_v2.resource_limits import BoundExceeded, bounded
+
+    counted = []
+    with pytest.raises(BoundExceeded) as caught:
+        with bounded("demo", 10):
+            for position in range(100):
+                counted.append(position)
+                step()
+    assert len(counted) == 11 and caught.value.name == "demo" and caught.value.scope == "function"
+    step()   # (closed: the bound is gone)
+
+
+def test_a_bounds_units_are_the_runs_and_the_functions_too():
+    from tdo_v2.resource_limits import bounded, last_run
+
+    found = {}
+
+    def body():
+        with activation("a"):
+            for _ in range(5):
+                step()
+            with bounded("demo", 100) as bound:
+                for _ in range(7):
+                    step()
+            found["bound"] = bound.work
+
+    run_analysis(body)
+    run = last_run()
+    assert found["bound"] == 7 and run.work == 1 + 5 + 7 and run.ledgers["a"].work == 1 + 5 + 7
+
+
+def test_a_function_limit_inside_a_bound_is_the_functions(monkeypatch):
+    from tdo_v2.resource_limits import BoundExceeded, bounded
+
+    monkeypatch.setenv("TDO_V2_FUNCTION_WORK", "10")
+    found = []
+
+    def body():
+        with activation("a"):
+            try:
+                with bounded("demo", 1000):
+                    for _ in range(100):
+                        step()
+            except AnalysisBudgetExceeded as error:
+                found.append(error)
+
+    run_analysis(body)
+    assert type(found[0]) is AnalysisBudgetExceeded and not isinstance(found[0], BoundExceeded)
+
+
+def test_diagnostic_units_do_not_count_against_a_bound():
+    from tdo_v2.resource_limits import bounded, diagnostic
+
+    found = {}
+
+    def body():
+        with bounded("demo", 10) as bound:
+            with diagnostic():
+                for _ in range(100):
+                    step()
+            found["bound"] = bound.work
+
+    run_analysis(body)
+    assert found["bound"] == 0
+
+
+def test_bounds_do_not_nest():
+    from tdo_v2.resource_limits import bounded
+
+    with bounded("outer", 10):
+        with pytest.raises(RuntimeError):
+            with bounded("inner", 10):
+                pass
+    with pytest.raises(ValueError):
+        bounded("zero", 0)
+
+
+def test_a_run_started_inside_a_bound_keeps_the_bounds_pending_units():
+    """9 units before the run and 9 inside it: 18 > 10 (Astra r1 P2)."""
+    from tdo_v2.resource_limits import BoundExceeded, bounded
+
+    with pytest.raises(BoundExceeded):
+        with bounded("demo", 10):
+            step(9)
+            run_analysis(lambda: step(9))
+
+
+def test_without_a_run_diagnostic_units_count_against_a_bound():
+    """(a diagnostic context does nothing outside a run)"""
+    from tdo_v2.resource_limits import BoundExceeded, bounded, diagnostic
+
+    with pytest.raises(BoundExceeded):
+        with bounded("demo", 2):
+            with diagnostic():
+                step(3)
+
+
+def test_reporting_units_do_not_count_against_a_bound():
+    from tdo_v2.resource_limits import bounded
+
+    found = {}
+
+    def body():
+        with bounded("demo", 10) as bound:
+            with reporting():
+                for _ in range(100):
+                    step()
+            found["bound"] = bound.work
+
+    run_analysis(body)
+    assert found["bound"] == 0
+
+
+def test_a_function_limit_and_a_bound_on_the_same_unit_is_the_functions(monkeypatch):
+    from tdo_v2.resource_limits import BoundExceeded, bounded
+
+    monkeypatch.setenv("TDO_V2_FUNCTION_WORK", "10")
+    found = []
+
+    def body():
+        with activation("a"):   # (1 unit)
+            try:
+                with bounded("demo", 9):
+                    for _ in range(100):
+                        step()
+            except AnalysisBudgetExceeded as error:
+                found.append(error)
+
+    run_analysis(body)
+    assert type(found[0]) is AnalysisBudgetExceeded and not isinstance(found[0], BoundExceeded)

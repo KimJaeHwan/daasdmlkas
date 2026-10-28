@@ -56,7 +56,6 @@ from .model import ResolvedStorage
 from .span_geometry import ByteSpan, StorageObjectKind
 
 FUNCTION_SUMMARY_VERSION = 1
-_CALL_OPCODES = ("CALL", "CALLIND", "CALLOTHER")
 _ADDRESS_UNCERTAIN = {"may_alias_read", "unresolved_memory_read", "call_clobber_read", "uncertain_write_read",
                       "open_condition", "opaque_call_write"}
 # debt of a read a conditional uncertain-address writer may reach: for roots
@@ -219,6 +218,12 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     tracer = _CopyTracer(normalized, observation, context, operation_of, conditions_of)
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain,
                               writer_conditions, dead_keys)
+    from .normalize import _chi_shadow_on
+
+    if _chi_shadow_on():   # (a measurement only: docs 25.83 check (c))
+        from ._chi_shadow import compare_terminals
+
+        compare_terminals(normalized.memory_ssa.function_scope, crossed, dead_keys)
     inner_calls = crossed.pop("inner_calls", ())
     crossing_labels = crossed.pop("label_universe")
 
@@ -1345,31 +1350,34 @@ def _live_gens_at_exit(graph, events, exit_block: str) -> int:
 def _exit_crossings(normalized, observation, context, preserved_stack_pointers, uncertain,
                     writer_conditions=frozenset(), dead_keys=frozenset()):
     """(terminal block, object) -> {offset: crossed labels at the block exit}."""
+    from .call_clobber import call_exemptions
+
     unit = normalized.memory_unit
-    assumed = {key for key, _ in normalized.assumed_call_effects}
+    # the normalization's exemption contract (docs 25.83 S2c) and this view's
+    # own rules on top: tail jumps are crossings (even when assumed), dead-
+    # region calls and kills are dropped, a below-bound call keeps memory but
+    # is subtracted below its bound (after the union -- exits' semantics)
+    exemptions = call_exemptions(
+        (effect.operation_key for effect in normalized.effects), {key for key, _ in normalized.assumed_call_effects},
+        normalized.proven_call_effects, dict(normalized.kept_call_memory), normalized.call_below_bounds)
     effects_by_block: dict[str, list] = {block.key: [] for block in unit.blocks}
     for effect in normalized.effects:
         if effect.block_key in effects_by_block:
             effects_by_block[effect.block_key].append(effect)
     graph = DominatorGraph(unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks})
     preserved = preserved_stack_pointers(observation, context)
+    for key in exemptions.unrestored:
+        preserved.pop(key, None)  # the call shape's stack pointer is not restored
     tails = set()
     for key, effect in normalized.proven_call_effects:
-        if not effect.restores_stack:
-            preserved.pop(key, None)  # the call shape's stack pointer is not restored
         if effect.tail_stack:
             tails.add(key)  # a composed tail jump: its stack pointer is composed by delta
             preserved[key] = tuple(preserved.get(key, ())) + effect.tail_stack
-    memory_keeping = set()
-    bounds = {key: (object_id, bound) for key, object_id, bound in normalized.call_below_bounds}
-    below_calls = set()
-    kept = dict(normalized.kept_call_memory)  # a model's memory runs (``normalize._kept_call_memory``)
-    for key, effect in normalized.proven_call_effects:  # bytes a callee summary proves kept
-        preserved[key] = tuple(preserved.get(key, ())) + tuple(effect.preserved) + tuple(kept.get(key, ()))
-        if effect.preserves_memory and (not effect.clobbers_below or key in bounds):
-            memory_keeping.add(key)
-            if effect.clobbers_below:
-                below_calls.add(key)
+    bounds = exemptions.below
+    for key, spans in exemptions.proven.items():  # bytes a callee summary proves kept, a model's runs
+        preserved[key] = tuple(preserved.get(key, ())) + spans
+    memory_keeping = set(exemptions.memory_keeping | exemptions.below_keeping)
+    below_calls = set(exemptions.below_keeping)
 
     calls, unknown, writes = [], [], {}       # gen sources / kills
     memory_writes = []                        # (block, position, order, object, key)
@@ -1379,7 +1387,7 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
             key = effect.operation_key
             if key.split("~", 1)[0] in dead_keys:
                 continue  # never executed on a path to an exit (``_dead_region``)
-            if (key.rsplit(":", 1)[-1] in _CALL_OPCODES and key not in assumed) or key in tails:
+            if key in exemptions.calls or key in tails:
                 calls.append((block_key, position, key))
             for index, evidence in enumerate(effect.writes):
                 if type(evidence) is ResolvedStorage:

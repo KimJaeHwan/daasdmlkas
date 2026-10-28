@@ -1,4 +1,5 @@
-"""Sparse call-clobber / may-alias engines reproduce the dense rows exactly.
+"""Sparse call-clobber / may-alias engines reproduce the dense rows exactly,
+and the chi view's call-clobber rows equal them (``TDO_V2_CHI_RECORDS=check``).
 
 Every unit normalized here runs both engines (``TDO_V2_DATAFLOW_CROSSCHECK``)
 and any difference raises ``DataflowEngineMismatch``. The random functions
@@ -23,6 +24,8 @@ from tdo_v2._sparse_dataflow import (
 def test_sparse_engines_match_dense_through_normalization(chunk, monkeypatch):
     monkeypatch.setenv(DATAFLOW_ENGINE_ENV, "sparse")
     monkeypatch.setenv(DATAFLOW_CROSSCHECK_ENV, "dense")
+    # (the call-clobber rows the chi view produces must equal both engines': docs 25.83 D5')
+    monkeypatch.setenv("TDO_V2_CHI_RECORDS", "check")
     counts = {"call-clobber": 0, "may-alias": 0}
     original = {"call-clobber": call_clobber._sparse_rows, "may-alias": may_alias._sparse_rows}
 

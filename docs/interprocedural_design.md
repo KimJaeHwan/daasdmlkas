@@ -5984,3 +5984,36 @@ nonstack 창과 같은 장치). 모델 계약 필드 + 그래프 사실, 새 가
 겹침 탐색에서 뺀다(Fable). 근거: 읽기 전용 probe에서 v2-win-debug-full에 부분 겹침 4건(다른 Bundle 0). 설계 검토 Astra(조건부)·
 Fable(승인) -- `.census6/design_c_ov.md`. 테스트 `test_opaque_call_writes.py::test_a_partial_overlap_leaves_only_the_shared_bytes_unknown`
 (겹친 바이트만 불완전; `~ov` 행 없으면 mutation 실패). 프로그램 오라클은 `~ov` 행도 opaque로 센다.
+
+### 25.83 opaque CALL을 정의로 -- 첫 단계: 그림자 chi SSA와 동치 검사 (2026-10-28, 밤 작업 7·8, 브랜치에만)
+
+설계 3라운드 승인(`.census6/design_opaque_call_def.md`; `~below`를 죽이는 쓰기로 먼저 하는 안은 Astra 반대로 기각). 생산 경로는
+그대로, `TDO_V2_CHI_SHADOW`일 때만 측정(`_chi_shadow.py`). 그림자 단위: 각 호출 동작 뒤에 `{call}~chr`(footprint를 읽음 -- 그
+조각들이 곧 호출 전 도달 정의, 조각별로 정확) + `{call}~chi`(같은 span의 KILL). footprint = 추적 span - 호출이 보존하는 span -
+호출 자신의 쓰기(call_clobber의 `called`가 읽기와 쓰기 사이). dense 엔진으로 지음. 검사(읽기 바이트마다, 스트리밍): (a) chi를
+출처로 거슬러 만난 호출 = call_clobber 바이트 상태(같은 입력 `call_clobber.clobber_inputs`로 공유), (b) 도달한 보통 정의 =
+생산 SSA(JOIN 펼침), (c') 집계한 행 = 생산 `CallClobberRead`(빼기 전, sparse 엔진). 작업은 diagnostic ledger, 크기 상한.
+결과(기본 설정): v2-win-debug-full 125/125, v3-win-release 91/91, v3-win32 81/81, ue-dll-development 71/71,
+ue-dll-debuggame 119/119, zlib 24/25(큰 함수 1개 메모리 초과) -- 불일치 0. 남은 것: 종료 지점 검사(`_exit_crossings`는
+면제 규칙이 다름 -- 소비자 이전 때 맞출 일), forward probe, 그다음 소비자 이전(C4)과 call_clobber 삭제.
+
+#### 25.83 D5' -- 빚 행 생산자를 chi 관점(V2)으로 (2026-10-28)
+
+`CallClobberRead` 행은 이제 기본으로 lazy sparse chi SSA(`_chi_records`, V2)가 만든다. `TDO_V2_CHI_RECORDS`: 없음/`only` = V2,
+`check` = V2 + call_clobber와 행·순서 비교(다르면 `ChiRecordsMismatch`), `legacy` = call_clobber만(V2 안 돎). 그 외 값은 오류.
+- V2의 일은 분석의 일(`step`: 함수·run 예산)이고, 따로 자기 한도가 있다: 현재 호출 수 x 연결 span 수 > `LIMIT`이면 시도하지
+  않고, `resource_limits.bounded("chi_records", WORK_BASE + WORK_PER_ACTION x 메모리 동작 수)`를 넘으면 그 단위에서
+  `BoundExceeded`(종류 "bound", 함수 범위의 `AnalysisBudgetExceeded`)로 멈춘다. 둘 다 그 함수는 call_clobber의 행을 쓰고, 빈
+  행 집합으로 넘어가는 일은 없다. 이 대체는 run마다 `RunBudget.fallbacks["chi_records"]`(함수 scope 또는 probe 키 -> "limit" /
+  "work")에 남는다(예전의 프로세스 전역 `FALLBACKS`는 없앰). `bounded`는 run이 없어도 세고, `diagnostic`/`reporting` 안의
+  단위는 세지 않으며, 중첩하지 않는다.
+- 효과 있는 호출이 없는 함수: chi가 없으니 행도 없다 -- 어느 엔진도 돌리지 않고 `()`(call_clobber도 같은 입력에서 `()`;
+  `check`가 확인).
+- `LazySparse.crossed_at`: (동작, atom class)마다 한 번만 걷는다(같은 class의 바이트는 값을 공유) -- 결과 같고 단위만 줄어듦.
+- 한도 근거(memo 전 측정, 6 Bundle x forward 0/1): 동작당 V2 단위 최대 약 44(v3/v2/UE), zlib 150(동작 7937개 함수); 한도
+  100만 + 2000/동작은 zlib에서 약 14배 여유. 대체 0건.
+- 리뷰(Astra 4라운드, Fable 최종): 예산 밖 초선형 작업을 모두 계산에 넣음 -- `value_before` 색인, footprint 정렬 스윕, 공용 `build_atom_classes`/`DominatorGraph`의 안쪽 루프(합류 집합은 한 번에 합침), 수요 계산, 읽기당 호출 집합 한 번 합치기. 공용 엔진의 작업 단위가 늘어 설정된 함수/run 예산에서는 더 일찍 멈출 수 있음(결과는 같음).
+- 시간(2회, main 대비): zlib forward=1 +11%(250 -> 277 s: probe마다 V2를 새로 지음 -- 후속 K2 과제), zlib forward=0 +3~5%, ue-dll-debuggame +1~6%, v2-win-debug 잡음 안; peak +0.3~0.9%. gate d53: 결과 차이 0.
+- M5 전 조건(Fable P2): run별 대체 기록을 도구 출력(scale_point / Bundle 실행)에 내보내기; V2에 K2 카운터(cc_*) 다시 붙이기.
+- call_clobber 데이터흐름 삭제(M5)는 다음 단계: 모든 gate Bundle에서 대체 0건 + 한도 경로 테스트가 조건. 삭제 뒤에는 한도 초과가
+  그 함수의 typed 실패(`function:bound`)가 된다.

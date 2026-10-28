@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ._memory_ssa_state import iter_runs
+from .resource_limits import step
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,7 @@ def build_atom_classes(unit, partition, write_ids) -> AtomClasses:
     connected_of = [-1] * count
     for index, span in enumerate(partition.connected):
         start, stop = partition.covered_range(span)
+        step(1 + stop - start)   # (budget: docs 25.30 K1c; every inner loop here, D5')
         for atom in range(start, stop):
             connected_of[atom] = index
     if -1 in connected_of:
@@ -49,11 +51,13 @@ def build_atom_classes(unit, partition, write_ids) -> AtomClasses:
         for action in block.actions:
             for ordinal, span in enumerate(action.writes):
                 start, stop = partition.covered_range(span)
+                step(1 + stop - start)
                 definition = write_ids[(action.operation_key, ordinal)]
                 for atom in range(start, stop):
                     writers[atom].append(definition)
     by_signature: dict[tuple, list[int]] = {}
     for atom in range(count):
+        step(1 + len(writers[atom]))
         signature = (connected_of[atom], tuple(sorted(writers[atom])))
         by_signature.setdefault(signature, []).append(atom)
     groups = sorted(by_signature.items(), key=lambda item: item[1][0])
