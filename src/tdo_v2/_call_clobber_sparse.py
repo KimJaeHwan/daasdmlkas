@@ -53,7 +53,10 @@ class _Covering:
 
 
 def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ...]],
-                  memory_keeping: frozenset[str] = frozenset()):
+                  memory_keeping: frozenset[str] = frozenset(), observe=None):
+    """``observe(effect, calls_at)`` (a measurement, docs 25.83): called per
+    effect with reads, ``calls_at(object, offset)`` giving the calls crossed
+    at that read byte; no effect on the rows."""
     from .call_clobber import CallClobberRead
 
     graph = DominatorGraph(unit.entry_block_key, {block.key: block.predecessors for block in unit.blocks})
@@ -232,6 +235,9 @@ def derive_sparse(unit, calls: set[str], preserved: dict[str, tuple[ByteSpan, ..
     rows = []
     for block in sorted(blocks, key=lambda item: item.key):
         for position, effect in enumerate(block.effects):
+            if observe is not None and effect.reads:
+                observe(effect, lambda object_id, offset, key=block.key, position=position: frozenset(
+                    universe.decode(value_at(class_of[(object_id, offset)], key, position))))
             spans = []
             crossed = 0
             for evidence in effect.reads:

@@ -227,6 +227,7 @@ def derive_call_clobber_reads(
     proven_preserved: dict[str, tuple[ByteSpan, ...]] | None = None,
     memory_keeping: frozenset[str] = frozenset(),
     unrestored_stack_calls: frozenset[str] = frozenset(),
+    calls: frozenset[str] | None = None,
 ) -> tuple[CallClobberRead, ...]:
     """Return reads that may observe storage written by an unevidenced call.
 
@@ -244,22 +245,10 @@ def derive_call_clobber_reads(
     if type(context) is not StorageResolutionContext:
         raise TypeError("call-clobber analysis requires an exact storage context")
 
-    opcodes = {
-        _operation_key(instruction.address, ordinal, operation.opcode): operation.opcode
-        for instruction in observation.instructions
-        for ordinal, operation in enumerate(instruction.operations)
-    }
-    calls = {
-        key for key, opcode in opcodes.items() if opcode in _CALL_OPCODES
-    } - set(assumed_calls)
+    calls, preserved = clobber_inputs(observation, context, assumed_calls, proven_preserved,
+                                      unrestored_stack_calls, calls)
     if not calls:
         return ()
-    preserved = _preserved_stack_pointers(observation, context)
-    for key in unrestored_stack_calls:
-        preserved.pop(key, None)
-    for key, spans in (proven_preserved or {}).items():
-        # bytes a callee summary proves unchanged (or rewrites just before the call)
-        preserved[key] = tuple(preserved.get(key, ())) + tuple(spans)
     rows = run_dataflow(
         "call-clobber", {"dense": _dense_rows, "sparse": _sparse_rows}, DEFAULT_ENGINE,
         unit, calls, preserved, frozenset(memory_keeping) & calls,
@@ -269,6 +258,83 @@ def derive_call_clobber_reads(
         phase_count("cc_rows", len(rows))
         phase_count("cc_intervening_calls", sum(len(row.intervening_calls) for row in rows))
     return rows
+
+
+def clobber_inputs(observation, context, assumed_calls=frozenset(), proven_preserved=None,
+                   unrestored_stack_calls=frozenset(), calls=None) -> tuple:
+    """(the clobbering call keys, call key -> the spans it leaves unchanged):
+    the inputs of ``derive_call_clobber_reads`` -- shared with the shadow chi
+    check (``_chi_shadow``) so both see one exemption contract. ``calls``:
+    ``CallExemptions.calls`` (else every call operation not assumed)."""
+    if calls is None:
+        opcodes = {
+            _operation_key(instruction.address, ordinal, operation.opcode): operation.opcode
+            for instruction in observation.instructions
+            for ordinal, operation in enumerate(instruction.operations)
+        }
+        calls = {
+            key for key, opcode in opcodes.items() if opcode in _CALL_OPCODES
+        } - set(assumed_calls)
+    preserved = _preserved_stack_pointers(observation, context)
+    for key in unrestored_stack_calls:
+        preserved.pop(key, None)
+    for key, spans in (proven_preserved or {}).items():
+        # bytes a callee summary proves unchanged (or rewrites just before the call)
+        preserved[key] = tuple(preserved.get(key, ())) + tuple(spans)
+    return frozenset(calls), preserved
+
+
+@dataclass(frozen=True, slots=True)
+class CallExemptions:
+    """The raw call exemption contract of one normalization (docs 25.83 S2c),
+    read by its three views -- normalize (call_clobber / the chi records), a
+    forward probe, ``function_summary._exit_crossings`` -- each keeping its own
+    below-bound semantics:
+
+    ``calls``: call-operation keys with an effect in the unit, not assumed
+    (crossings happen only at effects); ``proven``: call -> the bytes a
+    callee summary proves unchanged plus a model's kept memory runs;
+    ``unrestored``: calls whose shape's stack pointer is not restored;
+    ``memory_keeping``: preserves memory and clobbers nothing below;
+    ``below``: call -> (stack object, bound) of a below-bound call;
+    ``below_keeping``: preserves memory, clobbers below, has a bound (the
+    exits' extra memory keepers, subtracted below the bound there)."""
+
+    calls: frozenset
+    proven: dict
+    unrestored: frozenset
+    memory_keeping: frozenset
+    below: dict
+    below_keeping: frozenset
+
+    def clobber_preserved(self, unit) -> dict:
+        """normalize's / a probe's view: ``proven`` plus, for a below-bound
+        call, every tracked memory byte of ``unit`` except its stack below
+        the bound (a union: ``_memory_spans_except_below``)."""
+        from .normalize import _memory_spans_except_below
+
+        preserved = {key: tuple(spans) for key, spans in self.proven.items()}
+        for key, (object_id, bound) in self.below.items():
+            preserved[key] = preserved.get(key, ()) + tuple(_memory_spans_except_below(unit, object_id, bound))
+        return preserved
+
+
+def call_exemptions(effect_keys, assumed_calls, proven_call_effects, kept=None, below_bounds=()) -> CallExemptions:
+    """``CallExemptions`` from the parts every view already holds:
+    ``proven_call_effects`` call -> its proven effect row, ``kept`` call -> a
+    model's kept memory spans, ``below_bounds`` (call, object, bound) rows."""
+    kept = kept or {}
+    rows = dict(proven_call_effects)
+    below = {key: (object_id, bound) for key, object_id, bound in below_bounds}
+    return CallExemptions(
+        calls=frozenset(key for key in effect_keys if key.rsplit(":", 1)[-1] in _CALL_OPCODES) - set(assumed_calls),
+        proven={key: tuple(row.preserved) + tuple(kept.get(key, ())) for key, row in rows.items()},
+        unrestored=frozenset(key for key, row in rows.items() if not row.restores_stack),
+        memory_keeping=frozenset(key for key, row in rows.items() if row.preserves_memory and not row.clobbers_below),
+        below=below,
+        below_keeping=frozenset(key for key, row in rows.items()
+                                if row.preserves_memory and row.clobbers_below and key in below),
+    )
 
 
 DEFAULT_ENGINE = "sparse"  # verified identical to "dense" (docs section 14)

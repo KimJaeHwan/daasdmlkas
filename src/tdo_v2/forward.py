@@ -377,7 +377,6 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
         ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME, EscapeMemo, derive_may_alias_reads,
     )
     from .model import ResolvedStorage
-    from .normalize import _memory_spans_except_below
 
     inputs = normalized.forward_inputs
     spans = tuple(spans)
@@ -397,18 +396,24 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
     if not hit:
         return found, ()
     probed = replace(unit, blocks=tuple(blocks))
-    rows = dict(inputs.proven_call_effects)
-    preserved = {key: tuple(row.preserved) for key, row in rows.items()}
-    for key, kept in inputs.kept_memory:
-        preserved[key] = preserved.get(key, ()) + tuple(kept)
-    for key, object_id, bound in inputs.below_bounds:
-        preserved[key] = preserved.get(key, ()) + _memory_spans_except_below(probed, object_id, bound)
-    clobbers = derive_call_clobber_reads(
-        probed, inputs.observation, inputs.context, assumed_calls=inputs.assumed_calls,
-        proven_preserved=preserved,
-        memory_keeping=frozenset(key for key, row in rows.items() if row.preserves_memory and not row.clobbers_below),
-        unrestored_stack_calls=frozenset(key for key, row in rows.items() if not row.restores_stack),
-    )
+    from .call_clobber import call_exemptions
+
+    # the normalization's exemption contract (S2c), below spans against the PROBED unit
+    exemptions = call_exemptions(
+        (effect.operation_key for block in probed.blocks for effect in block.effects), inputs.assumed_calls,
+        inputs.proven_call_effects, dict(inputs.kept_memory), inputs.below_bounds)
+    preserved = exemptions.clobber_preserved(probed)
+    memory_keeping, unrestored = exemptions.memory_keeping, exemptions.unrestored
+    from ._chi_records import records as chi_records
+
+    memory_unit = decode_effect_unit(probed)
+    clobbers = raw_clobbers = chi_records(   # (the chi view's rows under TDO_V2_CHI_RECORDS: S2b')
+        (normalized.memory_ssa.function_scope, "probe", load_key), lambda: derive_call_clobber_reads(
+            probed, inputs.observation, inputs.context, assumed_calls=inputs.assumed_calls,
+            proven_preserved=preserved, memory_keeping=memory_keeping, unrestored_stack_calls=unrestored,
+            calls=exemptions.calls,
+        ), memory_unit, probed, inputs.observation, inputs.context, inputs.assumed_calls, preserved, unrestored,
+        memory_keeping, exemptions.calls)
     from ._realloc_contents import subtract_copy_clobbers
     clobbers = subtract_copy_clobbers(inputs.read_separations, clobbers)
     uncertain = dict(inputs.uncertain_writers)
@@ -454,7 +459,17 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
     if inputs.assume_globals_disjoint_from_stack:
         used.append("globals-disjoint-from-stack")
     indebted = [span for row in (*clobbers, *aliases) if row.operation_key == load_key for span in row.spans]
-    ssa = build_bound_local_memory_ssa(decode_effect_unit(probed)).result
+    ssa = build_bound_local_memory_ssa(memory_unit).result
+    from .normalize import _chi_shadow_on
+
+    if _chi_shadow_on():   # (the probe's added reads, checked too: docs 25.83 S2a; never used)
+        from . import _chi_shadow
+        from .call_clobber import clobber_inputs
+
+        calls, clobber_preserved = clobber_inputs(inputs.observation, inputs.context, inputs.assumed_calls,
+                                                  preserved, unrestored, exemptions.calls)
+        _chi_shadow.record((ssa.function_scope, "probe", load_key, spans), memory_unit, ssa, probed, calls,
+                           clobber_preserved, memory_keeping & calls, raw_clobbers, exits=False)
     original = normalized.memory_ssa
 
     def identity(definition):
