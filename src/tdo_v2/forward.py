@@ -407,7 +407,7 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
     from ._chi_records import records as chi_records
 
     memory_unit = decode_effect_unit(probed)
-    clobbers = raw_clobbers = chi_records(   # (the chi view's rows under TDO_V2_CHI_RECORDS: S2b')
+    clobbers = raw_clobbers = chi_records(   # (the chi view's rows: docs 25.83 D5')
         (normalized.memory_ssa.function_scope, "probe", load_key), lambda: derive_call_clobber_reads(
             probed, inputs.observation, inputs.context, assumed_calls=inputs.assumed_calls,
             proven_preserved=preserved, memory_keeping=memory_keeping, unrestored_stack_calls=unrestored,

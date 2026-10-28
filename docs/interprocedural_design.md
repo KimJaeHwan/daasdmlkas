@@ -5996,3 +5996,21 @@ Fable(승인) -- `.census6/design_c_ov.md`. 테스트 `test_opaque_call_writes.p
 결과(기본 설정): v2-win-debug-full 125/125, v3-win-release 91/91, v3-win32 81/81, ue-dll-development 71/71,
 ue-dll-debuggame 119/119, zlib 24/25(큰 함수 1개 메모리 초과) -- 불일치 0. 남은 것: 종료 지점 검사(`_exit_crossings`는
 면제 규칙이 다름 -- 소비자 이전 때 맞출 일), forward probe, 그다음 소비자 이전(C4)과 call_clobber 삭제.
+
+#### 25.83 D5' -- 빚 행 생산자를 chi 관점(V2)으로 (2026-10-28)
+
+`CallClobberRead` 행은 이제 기본으로 lazy sparse chi SSA(`_chi_records`, V2)가 만든다. `TDO_V2_CHI_RECORDS`: 없음/`only` = V2,
+`check` = V2 + call_clobber와 행·순서 비교(다르면 `ChiRecordsMismatch`), `legacy` = call_clobber만(V2 안 돎). 그 외 값은 오류.
+- V2의 일은 분석의 일(`step`: 함수·run 예산)이고, 따로 자기 한도가 있다: 현재 호출 수 x 연결 span 수 > `LIMIT`이면 시도하지
+  않고, `resource_limits.bounded("chi_records", WORK_BASE + WORK_PER_ACTION x 메모리 동작 수)`를 넘으면 그 단위에서
+  `BoundExceeded`(종류 "bound", 함수 범위의 `AnalysisBudgetExceeded`)로 멈춘다. 둘 다 그 함수는 call_clobber의 행을 쓰고, 빈
+  행 집합으로 넘어가는 일은 없다. 이 대체는 run마다 `RunBudget.fallbacks["chi_records"]`(함수 scope 또는 probe 키 -> "limit" /
+  "work")에 남는다(예전의 프로세스 전역 `FALLBACKS`는 없앰). `bounded`는 run이 없어도 세고, `diagnostic`/`reporting` 안의
+  단위는 세지 않으며, 중첩하지 않는다.
+- 효과 있는 호출이 없는 함수: chi가 없으니 행도 없다 -- 어느 엔진도 돌리지 않고 `()`(call_clobber도 같은 입력에서 `()`;
+  `check`가 확인).
+- `LazySparse.crossed_at`: (동작, atom class)마다 한 번만 걷는다(같은 class의 바이트는 값을 공유) -- 결과 같고 단위만 줄어듦.
+- 한도 근거(memo 전 측정, 6 Bundle x forward 0/1): 동작당 V2 단위 최대 약 44(v3/v2/UE), zlib 150(동작 7937개 함수); 한도
+  100만 + 2000/동작은 zlib에서 약 14배 여유. 대체 0건.
+- call_clobber 데이터흐름 삭제(M5)는 다음 단계: 모든 gate Bundle에서 대체 0건 + 한도 경로 테스트가 조건. 삭제 뒤에는 한도 초과가
+  그 함수의 typed 실패(`function:bound`)가 된다.

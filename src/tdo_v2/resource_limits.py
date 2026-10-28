@@ -45,6 +45,15 @@ class AnalysisBudgetExceeded(Exception):
         self.scope = scope
 
 
+class BoundExceeded(AnalysisBudgetExceeded):
+    """A ``bounded`` block's own work bound ran out: kind "bound", scope
+    "function" -- that function fails unless the block's owner catches it."""
+
+    def __init__(self, name: str, detail: str = "") -> None:
+        super().__init__("bound", f"{name}{': ' + detail if detail else ''}", scope="function")
+        self.name = name
+
+
 RESOURCE_FAILURES = (RecursionError, MemoryError, AnalysisBudgetExceeded)
 
 DEFAULT_STACK_MB = 1024
@@ -290,6 +299,7 @@ class RunBudget:
         self.diagnostic: _Ledger | None = None   # an open ``diagnostic`` context's ledger
         self.diagnostic_limit: int | None = None
         self.diagnostic_work = 0                 # every diagnostic context's units, summed
+        self.fallbacks: dict = {}                # engine name -> {function scope: reason} (docs 25.83 D5')
 
     def ledger(self, key) -> _Ledger:
         if key not in self.ledgers:
@@ -302,6 +312,7 @@ _CANCEL = threading.Event()
 _left = QUANTUM          # units until the next slow path
 _quantum = QUANTUM       # the units the current quantum started with
 _active: _Ledger | None = None
+_bound: "_Bound | None" = None   # the open ``bounded`` block
 _active_since = 0.0
 
 
@@ -375,10 +386,13 @@ def _flush(run) -> None:
     _quantum = _left
     if consumed and run is not None and run.diagnostic is not None:
         run.diagnostic.work += consumed   # (diagnostic units: never the run's or a function's)
-    elif consumed and run is not None and not run.reporting:
-        run.work += consumed
-        if _active is not None:
-            _active.work += consumed
+    elif consumed and (run is None or not run.reporting):
+        if run is not None:
+            run.work += consumed
+            if _active is not None:
+                _active.work += consumed
+        if _bound is not None:   # (with or without a run)
+            _bound.work += consumed
 
 
 def _rearm(run) -> None:
@@ -394,6 +408,8 @@ def _rearm(run) -> None:
             size = min(size, max(1, limits.run_work - run.work + 1))
         if limits.function_work is not None and _active is not None:
             size = min(size, max(1, limits.function_work - _active.work + 1))
+    if _bound is not None and (run is None or (run.diagnostic is None and not run.reporting)):
+        size = min(size, max(1, _bound.limit - _bound.work + 1))
     _left = _quantum = size
 
 
@@ -411,6 +427,7 @@ def _slow() -> None:
     if _CANCEL.is_set():
         raise AnalysisCancelled()
     if run is None:
+        _check_bound()
         return
     if run.diagnostic is not None:
         if run.diagnostic_limit is not None and run.diagnostic.work > run.diagnostic_limit:
@@ -437,6 +454,12 @@ def _slow() -> None:
         if limits.function_seconds is not None \
                 and _active.seconds + (time.monotonic() - _active_since) > limits.function_seconds:
             raise AnalysisBudgetExceeded("time", scope="function")
+    _check_bound()
+
+
+def _check_bound() -> None:
+    if _bound is not None and _bound.work > _bound.limit:
+        raise BoundExceeded(_bound.name, f"work {_bound.work} > {_bound.limit}")
 
 
 class activation:
@@ -486,6 +509,46 @@ class activation:
         _active, _active_since = self.previous, now
         _rearm(self.run)
         self.ledger = None
+        return False
+
+
+class _Bound:
+    __slots__ = ("name", "limit", "work")
+
+    def __init__(self, name: str, limit: int) -> None:
+        self.name, self.limit, self.work = name, limit, 0
+
+
+class bounded:
+    """``with bounded(name, work):`` -- an engine's own work bound (docs
+    25.83 D5'): the units inside are charged to the run and the active
+    function as everywhere, and also counted against ``work``; more raise
+    ``BoundExceeded`` at the exact unit (with or without a run; units inside
+    a ``diagnostic`` or ``reporting`` context are not counted). Not nested."""
+
+    __slots__ = ("bound",)
+
+    def __init__(self, name: str, work: int) -> None:
+        if not work > 0:
+            raise ValueError(f"bounded {name}: work must be positive, got {work!r}")
+        self.bound = _Bound(name, work)
+
+    def __enter__(self) -> "_Bound":
+        global _bound
+        if _bound is not None:
+            raise RuntimeError(f"bounded {self.bound.name} inside bounded {_bound.name}")
+        run = _RUN.get()
+        _flush(run)   # (the pending units are the enclosing work's)
+        _bound = self.bound
+        _rearm(run)
+        return self.bound
+
+    def __exit__(self, kind, value, traceback) -> bool:
+        global _bound
+        run = _RUN.get()
+        _flush(run)   # (the block's last units; never raises)
+        _bound = None
+        _rearm(run)
         return False
 
 
@@ -604,7 +667,8 @@ def _end_run(token) -> None:
         _rearm(None)
 
 
-__all__ = ("AnalysisBudgetExceeded", "AnalysisCancelled", "AnalysisReportingFailed", "Limits", "QUANTUM",
-           "RESOURCE_FAILURES", "RunBudget", "activation", "analysis_entry", "charge", "checkpoint", "current_run",
+__all__ = ("AnalysisBudgetExceeded", "AnalysisCancelled", "AnalysisReportingFailed", "BoundExceeded", "Limits",
+           "QUANTUM", "RESOURCE_FAILURES", "RunBudget", "activation", "analysis_entry", "bounded", "charge",
+           "checkpoint", "current_run",
            "DEFAULT_STACK_MB", "limit", "on_worker", "reporting", "run_analysis", "run_exhausted",
            "stack_megabytes", "step", "worker_supported")

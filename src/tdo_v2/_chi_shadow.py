@@ -211,6 +211,7 @@ class LazySparse:
         self.plain_in = plain_in
         self.entry_values: dict = {}
         self.sources: dict = {}      # (chi definition, class) -> definitions just before it
+        self.crossed_memo: dict = {}  # (operation key, class) -> calls crossed (``crossed_at``)
         self.joins = self.joins_chi_free = 0
         pending = []
         for item in range(len(classes.classes)):
@@ -287,13 +288,17 @@ class LazySparse:
 
     def crossed_at(self, key, object_id, offset) -> frozenset:
         """The calls crossed at one byte read by action ``key`` (no origins:
-        ``_chi_records``' rows)."""
+        ``_chi_records``' rows) -- one walk per (action, class): the bytes of a
+        class share its value."""
         from bisect import bisect_right
 
         atoms = self.partition.by_object[object_id]
         item = self.class_of_atom[atoms.offset + bisect_right(atoms.starts, offset) - 1]
-        block, index = self.position[key]
-        return self._crossed(self.value_before(block, index, item), item)
+        found = self.crossed_memo.get((key, item))
+        if found is None:
+            block, index = self.position[key]
+            found = self.crossed_memo[(key, item)] = self._crossed(self.value_before(block, index, item), item)
+        return found
 
     def live_crossed(self, block, object_id, offset, dead) -> frozenset:
         """The calls crossed at exit ``block``'s byte with every effect of

@@ -2032,7 +2032,7 @@ class _ScopedNormalizer:
         unrestored = exemptions.unrestored
         from ._chi_records import records as _chi_records
 
-        # (the chi view's rows under TDO_V2_CHI_RECORDS, else call_clobber's: docs 25.83 S2b')
+        # (the chi view's rows; call_clobber's over its bounds or under TDO_V2_CHI_RECORDS=legacy: docs 25.83 D5')
         call_clobber_reads = _chi_records(
             memory_ssa.function_scope, lambda: derive_call_clobber_reads(
                 effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects),
