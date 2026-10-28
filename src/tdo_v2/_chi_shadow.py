@@ -285,6 +285,16 @@ class LazySparse:
         self.metrics["chi_sources_exits"] = len(self.sources) - before_sources
         return found
 
+    def crossed_at(self, key, object_id, offset) -> frozenset:
+        """The calls crossed at one byte read by action ``key`` (no origins:
+        ``_chi_records``' rows)."""
+        from bisect import bisect_right
+
+        atoms = self.partition.by_object[object_id]
+        item = self.class_of_atom[atoms.offset + bisect_right(atoms.starts, offset) - 1]
+        block, index = self.position[key]
+        return self._crossed(self.value_before(block, index, item), item)
+
     def live_crossed(self, block, object_id, offset, dead) -> frozenset:
         """The calls crossed at exit ``block``'s byte with every effect of
         ``dead`` (operation keys of dead regions: calls and stores alike)

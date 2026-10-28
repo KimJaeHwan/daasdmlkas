@@ -2023,11 +2023,16 @@ class _ScopedNormalizer:
             if row.preserves_memory and not row.clobbers_below
         )
         unrestored = frozenset(key for key, row in proven_call_effects.items() if not row.restores_stack)
-        call_clobber_reads = derive_call_clobber_reads(
-            effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects),
-            proven_preserved=proven_preserved, memory_keeping=memory_keeping,
-            unrestored_stack_calls=unrestored,
-        )
+        from ._chi_records import records as _chi_records
+
+        # (the chi view's rows under TDO_V2_CHI_RECORDS, else call_clobber's: docs 25.83 S2b')
+        call_clobber_reads = _chi_records(
+            memory_ssa.function_scope, lambda: derive_call_clobber_reads(
+                effect_unit, observation, context, assumed_calls=frozenset(assumed_call_effects),
+                proven_preserved=proven_preserved, memory_keeping=memory_keeping,
+                unrestored_stack_calls=unrestored,
+            ), memory_unit, effect_unit, observation, context, frozenset(assumed_call_effects), proven_preserved,
+            unrestored, memory_keeping)
         if _chi_shadow_on():
             # opaque calls as definitions, checked against this pass (never used: docs 25.83)
             from . import _chi_shadow
