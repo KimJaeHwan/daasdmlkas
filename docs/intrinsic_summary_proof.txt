@@ -1,0 +1,78 @@
+ISA intrinsic 증명과 함수 요약 재사용 — semantics26
+
+목적
+기준 bf08469af4b060b6d4f99c409bf44a942297ebe3의 일반 메모리 sink 강화에 이어,
+미지원 CALLOTHER 때문에 실제로 증명 가능한 함수 요약이 손실되는 문제를 강화한다.
+OW2 함수 주소, 함수 이름, 키코드, vector 이름에 맞춘 통과 예외가 아니다.
+동일 ISA 연산을 쓰는 다른 바이너리에도 적용하는 번역 의미 규칙이다.
+
+함수 요약 모델을 쓰면 되는가
+된다. 다만 수동 declared model은 외부 계약/명명된 가정을 공급하는 경로이고,
+derived summary는 본문에서 증명된 사실을 저장하고 다시 적용하는 경로다.
+미지원 userop의 call_clobber_read를 포함한 요약을 저장해도 RSP 증명이 새로 생기지 않는다.
+이번 변경은 하위 연산을 먼저 정확히 해석하여 기존 summarize_function과
+derive_proven_call_effect가 RSP+8을 도출하고, 그 사실이 저장된 요약에서도 재사용되게 한다.
+기존 내부 RVA binding은 derived template를 거부하며, 이를 단순히 해제하지 않았다.
+저장된 외부 derived summary 적용의 기존 derived-model-runtime-matches 가정도 그대로 표시한다.
+
+의미와 근거
+독립 Ghidra12.0.4 userop 표 내보내기로 아래 연결을 확인했다.
+  x86:LE:64:default 4.6 / index483 / vpcmpeqw_avx2
+검증 스크립트 ghidra/GhidraV2ListUserOps.java SHA256:
+  c91ce1daace47e66ab5b08ddb9ebea1182effdcb537209b3266d723d9d8d576f
+내보내기 원문 로그 SHA256:
+  4af2d9f684f000fbf8195066a3e8bbacc828bb180e9a33ff3a59bb264c900846
+사용된 x86-64.sla SHA256:
+  d5adc314e2278228b380d8f653b2b579fa4a65986bb1d39b095e461fd5432481
+avx2.sinc의 VPCMPEQW constructor는 memory LOAD와 architectural destination 쓰기를
+해당 value intrinsic 밖에 둔다. intrinsic은 32바이트 두 값의 16개 word equality 결과다.
+Intel SDM253667-060US의 VEX.256 VPCMPEQW 의미와 destination/flags 효과를 감사했다.
+https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2b-manual.pdf
+printed pages4-244..4-249, zero-based PDF page248의 VEX.256 연산 설명.
+이것은 번역기/ISA 의미에 대한 명시적 신뢰 기반 확장이다. Z3만으로 Intel 하드웨어나
+Ghidra 컴파일러 전체의 정당성을 증명했다고 주장하지 않는다.
+
+증명 코드
+intrinsic_semantics.py:
+  backend 공통 packed-lane lowering, Python 구체 평가와 Z3 검사가 같은 구현을 사용한다.
+  독립적인 per-bit ISA reference와 전체256bit 입력의 miter가 UNSAT이다.
+  다른 lane의 개입 불변 UNSAT 및 양 입력의 lane 내부 byte 영향 witness SAT를 확인한다.
+intrinsic_refinements.py:
+  감사된 언어/version/index/name과 constant-index4B, 두32B register/unique 입력,
+  32B unique 출력 및 실제 address-space classification이 모두 맞아야 승인한다.
+  출력이 있다는 이유나 userop 번호 하나만으로 순수성을 추론하지 않는다.
+  미지원 signature는 기존 opaque CALL OTHER로 남긴다.
+
+엔진 연결
+normalize.py: 원 CALLOTHER operation과 실제 SSA 입력/출력을 유지한다.
+  원 normalized graph의 NodeRecord.semantic_identity에 증명 규칙을 기록한다.
+call_clobber.py / function_summary.py / forward.py:
+  동일한 승인 intrinsic 집합을 chi/legacy call-clobber, summary crossings와 probe에서 사용한다.
+  승인된 value intrinsic만 opaque call crossing에서 제외한다. 원 데이터 연산을 삭제하지 않는다.
+  앞선 미지원 호출이 입력을 clobber했다면 그 부채는 그대로 남긴다.
+lane_slice.py: 결과 byte9를 요구하면 두 입력의 bytes8..9만 따라간다.
+operation_records.py: 원 node에 semantic metadata를 기록하며 동일한 검증 의미로 평가한다.
+  metadata 변조, 잘못된 index/폭/형식, 미지원 userop는 평가를 거부한다.
+  메모리 LOAD/alias/조건/앞선 call debt는 제거하지 않는다.
+
+실제 고정 바이너리의 대조 결과
+대상 SHA256 8d451d6571e604d95d333c8cc05172428f87434f44f98ff0fce7c75f00d23695
+Bundle dfc8fd5a19453f630bc912fafeca5551242c73f2ed79e26eda60d20d6e1cfd9f
+0x14001f610을 추가 가정 전부 끄고 분석했다.
+  기준: assumptions=[], register_deltas=[]
+  수정: assumptions=[], register_deltas=[((32,8),8)]
+원 1b1:14001f6bb:1:CALLOTHER node와 입력/출력 edge가 결과 JSON에 보존된다.
+226함수 closure 재분석은 run_failed_functions=[]이며 기존 가정 목록도 같다.
+1f610->22df4->132bc->13374->KeyNameToVK5ed0에 RSP+8이 전파되어,
+Key780c의 effect.restores_stack=True가 되었다.
+최종7a1c의 RSP clobber는 이제76d9->2730 하나만 남는다.
+최종 wVk memory_candidates/value_ids/complete_pointer_paths는 아직 빈 값이다.
+따라서 이 단계의 성과를 실제 최종 INPUT.wVk 성공으로 보고하지 않는다.
+
+버전과 재현
+ENGINE_SEMANTICS_VERSION25->26, RECORD_VERSION15->16,
+FUNCTION_SUMMARY_VERSION1/TEMPLATE_VERSION5는 유지한다.
+UE FString 모델은 동일 DLL Bundle에서 실제 재도출하며 own version24->25이다.
+최종 commit과 검사 결과, 원 진단·증명 graph·모델·산출물 해시는 외부 단계별 인계 기록을 따른다.
+이 단계 전체 tests/intra: 4818 passed, 35 skipped, 0 failed (555.65초).
+이후 독립 stack certificate 같은 추가 단계는 별도 commit/version 기록으로 구분한다.

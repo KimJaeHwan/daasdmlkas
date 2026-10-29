@@ -6132,3 +6132,17 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
   missing / unexplained 0, 이전 오라클이 잘못 이어 실행하던 것(Astra r2 수용).
 - 관찰(재수출 Bundle, 12.0.4 spec): P0-aarch64 5 proven / 11 unknown, P0-x64 4 / 12, P0-x86 4 / 12, P1-aarch64 5 / 11 --
   unknown은 모두 Bundle 밖(opaque) 호출 때문(culprit CALL, 그 호출을 지나는 복귀 슬롯 읽기의 빚, tail 대상 unknown).
+
+### 25.89 소유자 브랜치 통합 -- 의미 25-27 + main = 28 (F1, 2026-10-29)
+
+소유자 브랜치 `codex/strengthen-memory-sink-tracing`(54fd317 위 3 커밋; 설명은 `docs/physical_memory_sink_strengthening.txt`,
+`docs/intrinsic_summary_proof.txt`, `docs/independent_register_delta_proof.txt`)을 main(fca1b6d) 위에 합침. Astra 사전
+리뷰(`.census6/f1_astra1.md`): 세 커밋 자체에 거짓 증명 / 빚 누락 / 거부 우회 없음, 통합 요구만.
+- 25 물리 메모리 sink: 포인터 LOAD 값을 읽는 시점에 고정, 넓은 STORE의 일부 바이트 결합은 신선도 / 별칭 장벽 유지.
+- 26 한정된 ISA intrinsic(Z3로 검증한 packed-word 비교): 원 CALLOTHER 그래프와 바이트 의존을 유지, 호출 횡단만 제거.
+- 27 독립 레지스터 delta 증명(`register_delta_proofs.py`): 원 CFG에서 레지스터 산술만으로 "정상 출구에 닿으면 entry + c";
+  메모리 writer 조건 거부 뒤에도 증명된 delta만 남김(`_all_unknown`) -- 복원 판정은 main의 3값 규칙이 그 delta로 내림.
+- 통합: main의 `StackRestoration`(tail은 UNKNOWN, 공허한 복원 없음 -- 증명은 tail_stack / tail_stack_delta에 기댐),
+  push 앞 전이 거부(`observed_call_state`), forward 투영 arity 검사, x86-64 전용 image provenance 유지. 버전: 의미 28
+  (27은 브랜치 단독의 의미를 가리킴), template 6, record 17, summary 2; 파생 UE FString 모델은 합친 엔진으로 재도출(own
+  version 27). `ExitRecord.sp_delta`의 출처는 바꾸지 않음(2b-S에서).

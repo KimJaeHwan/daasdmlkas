@@ -11,6 +11,8 @@ from ..physical_state import (
     PhysicalMemorySlice,
     PhysicalRegisterSlice,
     PhysicalStateResolver,
+    PhysicalValueFragment,
+    PhysicalStoreReceipt,
 )
 from .configured_function_view import _FunctionView
 
@@ -54,20 +56,33 @@ class _FunctionPhysicalStateBackend:
             definition_id,
             base_span,
         )
-        candidates = {
-            span
-            for path in paths
-            for address_space_id in self.view.loaded_memory_space_ids
-            if (
-                span := self.view._direct_span(
-                    path.with_offset(selector.displacement),
-                    selector.byte_size,
-                    address_space_id,
-                )
-            )
-            is not None
-        }
+        candidates = set()
+        for path in paths:
+            spans = tuple(self.view._direct_span(path.with_offset(selector.displacement),
+                                                selector.byte_size, space)
+                          for space in self.view.loaded_memory_space_ids)
+            # Never turn a mixed complete/unsupported pointer alternative
+            # into an apparently unique physical address by dropping a path.
+            if not spans or any(span is None for span in spans):
+                return ()
+            candidates.update(spans)
         return tuple(sorted(candidates, key=lambda item: item.canonical_key))
+
+    def value_fragments(self, selector, before_position) -> tuple[PhysicalValueFragment, ...]:
+        """Return current SSA bytes without widening a subrange to its value."""
+        if type(selector) is PhysicalRegisterSlice:
+            span = self.register_span(selector)
+            definition = None if span is None else self.view.state_definition(span, before_position)
+            return (() if definition is None or not self.view.memory.definitions[definition].span.contains(span)
+                    else (PhysicalValueFragment(definition, span),))
+        if type(selector) is not PhysicalMemorySlice:
+            raise TypeError("physical value selector must be exact")
+        candidates = self.memory_candidates(selector, before_position)
+        if len(candidates) == 1:
+            definition = self.view.state_definition(candidates[0], before_position)
+            if definition is not None and self.view.memory.definitions[definition].span.contains(candidates[0]):
+                return (PhysicalValueFragment(definition, candidates[0]),)
+        return _relational_memory_value_fragments(self.view, selector, before_position)
 
     def value_ids(
         self,
@@ -105,7 +120,17 @@ class _FunctionPhysicalStateBackend:
         return relational_ids if len(relational_ids) == 1 else ()
 
 def _relational_memory_value_definition_ids(view, selector, before_position):
-    """Resolve one latest STORE by an exact physical affine relation."""
+    """Compatibility IDs: never silently expose a wider value as a slice."""
+    return tuple(fragment.definition_id for fragment in
+                 _relational_memory_value_fragments(view, selector, before_position, subranges=False))
+
+
+def _relational_memory_value_fragments(view, selector, before_position, *, subranges=True):
+    """Resolve a current STORE's exact source bytes by an affine receipt.
+
+    The one-writer, dominance and intervening-call/write checks remain in
+    force. This is deliberately not a branch-union or loop-unrolling rule.
+    """
     loaded_spaces = tuple(getattr(view, "loaded_memory_space_ids", ()))
     if len(loaded_spaces) != 1:
         return ()
@@ -146,7 +171,8 @@ def _relational_memory_value_definition_ids(view, selector, before_position):
             position >= before_position
             or operation.opcode != "STORE"
             or len(operation.inputs) != 3
-            or operation.inputs[2].byte_size != selector.byte_size
+            or operation.inputs[2].byte_size < selector.byte_size
+            or (not subranges and operation.inputs[2].byte_size != selector.byte_size)
             or not view.definitely_precedes(operation_key, before_key)
         ):
             continue
@@ -165,10 +191,20 @@ def _relational_memory_value_definition_ids(view, selector, before_position):
             if store_pointer is None
             else view.canonical_physical_affine_relation(*store_pointer)
         )
-        if store_relation != target_relation:
+        if store_relation is None or store_relation[:2] != target_relation[:2]:
             continue
+        displacement = target_relation[2] - store_relation[2]
+        store_width = operation.inputs[2].byte_size
+        if displacement < 0 or displacement + selector.byte_size > store_width:
+            continue
+        language = view.analysis.evidence.unit.scopes.program.evidence.translation_namespace.language_id.split(":")
+        if store_width != selector.byte_size and (len(language) < 2 or language[1] != "LE"):
+            continue  # byte-lane source projection is qualified for LE only
         source = view.definition_for_input(operation_key, operation.inputs[2])
         if source is None:
+            continue
+        source_span = ByteSpan(source[1].object_id, source[1].start + displacement, selector.byte_size)
+        if not view.memory.definitions[source[0]].span.contains(source_span):
             continue
         matches.append(
             (
@@ -176,6 +212,9 @@ def _relational_memory_value_definition_ids(view, selector, before_position):
                 operation_key,
                 source[0],
                 address_space.coordinate.byte_offset,
+                source_span,
+                store_relation[2],
+                store_width,
             )
         )
 
@@ -232,7 +271,10 @@ def _relational_memory_value_definition_ids(view, selector, before_position):
             and target_offset < store_offset + store_size
         ):
             return ()
-    return (candidate[2],)
+    receipt = PhysicalStoreReceipt(candidate[1], before_key, before_position, loaded_space,
+                                   target_root, target_span, target_offset, selector.byte_size,
+                                   candidate[5], candidate[6], candidate[4], tuple(between))
+    return (PhysicalValueFragment(candidate[2], candidate[4], receipt),)
 
 def _boundary_state_spans(provider, boundary, match, view, position):
     selectors = provider.state(boundary, match)

@@ -48,9 +48,10 @@ from .function_summary import (
 from .indexed_address import IndexedAnchor
 from .span_geometry import ByteSpan, StorageObjectId, StorageObjectKind, StorageScopeId, StorageScopeKind
 
-TEMPLATE_VERSION = 5   # 2: stack_values_out; 3: exact scalar literals and entry indexed addresses;
+TEMPLATE_VERSION = 6   # 2: stack_values_out; 3: exact scalar literals and entry indexed addresses;
 # 4: ("offset", entry register span, c) run values (docs 25.80 R1); 5: ("nonstack", N, nullable,
 # labels) allocator windows (docs 25.79 3b)
+# 6: original-CFG independent register-delta proof receipts
 # bumped on any change of what a summary means: normalization, alias
 # reasoning, constant evaluation, effect derivation (not only its fields)
 # 2: stack-mixed objects wild (docs 25.7); index addresses, index objects
@@ -101,7 +102,15 @@ TEMPLATE_VERSION = 5   # 2: stack_values_out; 3: exact scalar literals and entry
 # (tests/intra/test_template_fingerprint.py fails when derived templates change
 # without a bump here: bump, re-derive models/derived, refresh the record)
 # 24: summaries export allocator windows ("nonstack", N, nullable, labels; docs 25.79 3b).
-ENGINE_SEMANTICS_VERSION = 24
+# 25: captured pointer LOADs and byte-precise physical STORE bindings carry
+# current-state proofs; older physical sink demands cannot be reused as these.
+# 26: qualified ISA intrinsics retain output/data proofs while removing only
+# their opaque-call crossing; summaries/records preserve that semantic basis.
+# 27: memory-writer refusal retains only separately certified register deltas.
+# 28: the owner's 25-27 combined with main's three-way stack restoration
+# (tails UNKNOWN, never vacuously restored), CallRelation / push-prefix
+# refusal and the x86-64-only image provenance (27 named the branch alone).
+ENGINE_SEMANTICS_VERSION = 28
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
@@ -199,6 +208,7 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
         "inner_calls": [[_key(key), [table.span(span) for span in kept], keeps, below]
                         for key, kept, keeps, below in summary.inner_calls],
         "register_deltas": [[list(slot), delta] for slot, delta in summary.register_deltas],
+        "independent_delta_proofs": _export_delta_proofs(analyzed),
         "dead_exits": [_key(key) for key in summary.dead_exits],
         "writer_conditions": [table.pair(pair) for pair in summary.writer_conditions],
         "stack_values_out": summary.stack_values_out,
@@ -207,6 +217,43 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
         raise TemplateRefused("writer conditions on objects no caller can locate")
     out["objects"] = table.rows
     return out
+
+
+def _export_delta_proofs(analyzed):
+    """Recompute against original code before persisting an independent fact."""
+    from .register_delta_proofs import RegisterDeltaProof, verify_register_delta_proof
+    normalized, summary = analyzed.normalized, analyzed.summary
+    if not summary.independent_delta_proofs:
+        return []
+    facts = dict(summary.register_deltas)
+    records, seen = [], set()
+    register_object = next((definition.span.object_id for definition in normalized.memory_ssa.definitions
+                            if definition.span.object_id.kind is StorageObjectKind.REGISTER_FILE), None)
+    for proof in summary.independent_delta_proofs:
+        if type(proof) is not RegisterDeltaProof or proof.register in seen or register_object is None \
+                or facts.get(proof.register) != proof.delta or not verify_register_delta_proof(
+                    proof, analyzed.unit, ByteSpan(register_object, *proof.register),
+                    dict(normalized.proven_call_effects), dict(normalized.intrinsic_refinements),
+                    assumed_call_effects=normalized.assumed_call_effects):
+            raise TemplateRefused("independent register delta proof no longer matches original evidence")
+        seen.add(proof.register)
+        records.append(proof.record())
+    return records
+
+
+def _import_delta_proofs(records, deltas):
+    """Check receipts inside a compatible derived model; this is not source reproof."""
+    from .register_delta_proofs import validate_proof_record
+    if type(records) is not list:
+        raise TemplateError("independent register delta proofs must be a list")
+    facts, proofs, seen = dict(deltas), [], set()
+    for record in records:
+        proof = validate_proof_record(record)
+        if proof is None or proof.register in seen or facts.get(proof.register) != proof.delta:
+            raise TemplateError("invalid independent register delta proof")
+        seen.add(proof.register)
+        proofs.append(proof)
+    return tuple(proofs)
 
 
 def _closure(analyzed, results):
@@ -321,7 +368,7 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
     register file is ``register_object``; anchored objects are addressed in
     ``memory_space_id``. Object ids are fixed per template ``label`` (stable
     across re-derivations: alias-condition feedback compares them)."""
-    _exact(template, ("exits", "unknown_writers", "writer_objects", "inner_calls", "register_deltas",
+    _exact(template, ("exits", "unknown_writers", "writer_objects", "inner_calls", "register_deltas", "independent_delta_proofs",
                       "dead_exits", "writer_conditions", "stack_values_out", "objects"), "template")
     if type(template["stack_values_out"]) is not bool:
         raise TemplateError("stack_values_out must be a bool")
@@ -451,6 +498,7 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
         tuple(pair(item) for item in template["writer_conditions"]),
         template["stack_values_out"],
         tuple(relations.items()),
+        _import_delta_proofs(template["independent_delta_proofs"], deltas),
     )
     return summary, anchors
 

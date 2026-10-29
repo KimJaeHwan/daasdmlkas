@@ -319,7 +319,8 @@ class CallExemptions:
         return preserved
 
 
-def call_exemptions(effect_keys, assumed_calls, proven_call_effects, kept=None, below_bounds=()) -> CallExemptions:
+def call_exemptions(effect_keys, assumed_calls, proven_call_effects, kept=None, below_bounds=(),
+                    *, intrinsic_calls=frozenset()) -> CallExemptions:
     """``CallExemptions`` from the parts every view already holds:
     ``proven_call_effects`` call -> its proven effect row, ``kept`` call -> a
     model's kept memory spans, ``below_bounds`` (call, object, bound) rows."""
@@ -327,7 +328,11 @@ def call_exemptions(effect_keys, assumed_calls, proven_call_effects, kept=None, 
     rows = dict(proven_call_effects)
     below = {key: (object_id, bound) for key, object_id, bound in below_bounds}
     return CallExemptions(
-        calls=frozenset(key for key in effect_keys if key.rsplit(":", 1)[-1] in _CALL_OPCODES) - set(assumed_calls),
+        # Qualified output-only ISA intrinsics retain their original explicit
+        # reads/writes, but are not opaque calls. This same exclusion must be
+        # used by normalization, forward probes, chi and summary crossings.
+        calls=frozenset(key for key in effect_keys if key.rsplit(":", 1)[-1] in _CALL_OPCODES)
+              - set(assumed_calls) - set(intrinsic_calls),
         proven={key: tuple(row.preserved) + tuple(kept.get(key, ())) for key, row in rows.items()},
         unrestored=frozenset(key for key, row in rows.items() if not row.restores_stack),
         memory_keeping=frozenset(key for key, row in rows.items() if row.preserves_memory and not row.clobbers_below),

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .boundary import BoundaryKind
 from .graph_contracts import NodeId
 from .model import ByteSpan
+from .physical_state import PhysicalStoreReceipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +20,7 @@ class ObservedBoundaryNode:
     occurrence_ordinal: int
     fragment_ordinal: int
     physical_spans: tuple[ByteSpan, ...] = ()
+    binding_receipts: tuple[PhysicalStoreReceipt, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.kind) is not BoundaryKind:
@@ -44,6 +46,9 @@ class ObservedBoundaryNode:
             self.physical_spans
         ):
             raise ValueError("observed boundary physical spans must be unique")
+        if type(self.binding_receipts) is not tuple or any(type(item) is not PhysicalStoreReceipt
+                                                         for item in self.binding_receipts):
+            raise TypeError("observed boundary requires exact physical binding proofs")
 
 
 @dataclass(frozen=True, slots=True)

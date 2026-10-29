@@ -217,7 +217,10 @@ def test_writer_conditions_are_decided_at_the_importer(tmp_path, alias, monkeypa
     a, b = _effect(generic), _effect(derived)
     assert (a.preserves_memory, a.restores_stack, a.preserved) == (b.preserves_memory, b.restores_stack, b.preserved)
     if alias:
-        assert not b.preserves_memory and not b.restores_stack and not b.preserved
+        # The writer guard still refuses every memory/register value claim.
+        # A separately rechecked raw-CFG proof keeps only RET's stack delta.
+        assert not b.preserves_memory and not b.preserved and not b.runs and not b.memory_runs
+        assert b.restores_stack and b.register_delta_proofs
     assert _views(generic, ((6, 1),)) == _views(derived, ((6, 1),))
     if inside.activations and alias:
         actual = _effect(inside)

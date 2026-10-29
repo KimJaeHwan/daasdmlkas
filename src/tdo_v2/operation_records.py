@@ -78,7 +78,7 @@ from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 15  # (15: graph-owned conditional memory-transfer provenance)
+RECORD_VERSION = 17  # 16: ISA intrinsic values; 17: independent register-delta proofs
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -1059,6 +1059,9 @@ class _Builder:
         _, address, ordinal = _key_parts(key)
         record["address"], record["ordinal"] = address, ordinal
         self._with_origins(record, node)
+        effect = self.proven.get(key)
+        if effect is not None and effect.register_delta_proofs:
+            record["register_delta_proofs"] = [proof.record() for proof in effect.register_delta_proofs]
         self.expanding.add(node)
         try:
             if found is None:
@@ -1067,6 +1070,9 @@ class _Builder:
             else:
                 operation, spans, output = found
                 record["opcode"] = operation.opcode
+                intrinsic = self.index.intrinsic(action_id)
+                if intrinsic is not None:
+                    record["intrinsic"] = intrinsic.record()
                 if self.physical_memory:
                     guard, why = self._condition_index().reach_guard(key)
                     if guard is not None:
@@ -1235,13 +1241,13 @@ class _Builder:
                 "parts": [{"node": identifier, "bytes": [0, varnode.byte_size], "at": [0, varnode.byte_size]}]}
 
     def _operands(self, node, action_id, operation, spans, depth):
-        from .lane_slice import FULL, _operand_demands
+        from .lane_slice import FULL, _operation_demands
 
         demand = self._demand(node)
         found = self.index.operation(action_id) if action_id is not None else None
         operand_demands = None
         if demand not in (None, "missing", FULL) and found is not None and self.index.little:
-            operand_demands = _operand_demands(found, demand)
+            operand_demands = _operation_demands(self.index, action_id, found, demand)
         reads = self.index.reads.get(action_id, ()) if action_id is not None else ()
         operands = []
         for position, varnode in enumerate(operation.inputs):
@@ -1548,6 +1554,8 @@ class _Builder:
             "state_proof": effect.state_proof,
             "writer_conditions": len(effect.writer_conditions),
         }
+        if effect.register_delta_proofs:
+            record["facts"]["register_delta_proofs"] = [proof.record() for proof in effect.register_delta_proofs]
         runs = [("register", run) for run in effect.runs] + [("memory", run) for run in effect.memory_runs]
         if tag.isdigit() and int(tag) < len(runs):
             kind, run = runs[int(tag)]
@@ -2778,6 +2786,36 @@ _SUPPORTED = frozenset({
 })
 
 
+def _intrinsic_semantics(node):
+    """Validate both semantic metadata and the original user-op record shape."""
+    if node.get("opcode") != "CALLOTHER" or not isinstance(node.get("intrinsic"), dict):
+        return None
+    from .intrinsic_refinements import semantics_from_record
+    metadata = node["intrinsic"]
+    semantics = semantics_from_record(metadata)
+    if semantics is None:
+        return None
+    operands = node.get("operands")
+    if not isinstance(operands, list) or len(operands) != 3 or any(type(item) is not dict for item in operands):
+        return None
+    index, left, right = operands
+    if any(type(item.get("index")) is not int or type(item.get("width")) is not int for item in operands) \
+            or type(index.get("value")) is not int \
+            or index != {"index": 0, "width": 4, "role": "userop", "value": metadata["userop_index"]} \
+            or [left.get("index"), right.get("index")] != [1, 2] \
+            or any(item.get("role") != "value" for item in (left, right)) \
+            or [left.get("width"), right.get("width")] != metadata["input_byte_sizes"] \
+            or type(node.get("output")) is not dict \
+            or type(node["output"].get("size")) is not int \
+            or node["output"].get("size") != metadata["output_byte_size"]:
+        return None
+    return semantics
+
+
+def _supported_operation(node):
+    return node.get("opcode") in _SUPPORTED or _intrinsic_semantics(node) is not None
+
+
 def _guard_reason(condition, nodes):
     """Static guard evaluation capability, NOT path feasibility. Unknown
     entry bytes are a runtime case; debt/cut/unsupported are not that case."""
@@ -2808,7 +2846,7 @@ def _guard_reason(condition, nodes):
         if node.get("override") is not None or node.get("rep_iteration") is not None:
             return "override"
         if node["kind"] == "op":
-            if node.get("opcode") not in _SUPPORTED:
+            if not _supported_operation(node):
                 return "unsupported " + str(node.get("opcode"))
             if "value" in node:
                 # The existing engine proved a self-cancelling operation
@@ -3004,7 +3042,7 @@ def eligibility(record, route: str = "injected") -> str | None:
             return "unproven rep"
         if node.get("rep_iteration") is not None or node["kind"] == "override":
             return "rep"
-        if node["kind"] == "op" and node["opcode"] not in _SUPPORTED:
+        if node["kind"] == "op" and not _supported_operation(node):
             return f"unsupported {node['opcode']}"
         if node["kind"] == "op" and "value" not in node \
                 and any(operand.get("unresolved") for operand in node.get("operands", ())):
@@ -3477,6 +3515,11 @@ class _Evaluator:
         if "value" in node:
             return node["value"]
         opcode = node["opcode"]
+        if opcode == "CALLOTHER":
+            semantics = _intrinsic_semantics(node)
+            if semantics is None:
+                raise Ineligible("unsupported CALLOTHER")
+            return semantics.evaluate(*(self.operand(operand) for operand in node["operands"][1:]))
         operands = [operand for operand in node["operands"] if "parts" in operand]
         if opcode == "STORE":
             value_operand = next(operand for operand in operands if operand["index"] == 2)

@@ -281,6 +281,22 @@ class _FunctionPointerValueMixin:
                 and len(operation.inputs) >= 2
                 and operation.inputs[0].kind is VarnodeKindCode.CONSTANT
             ):
+                # A pointer LOAD captures the slot's value at this read, not
+                # whatever the slot holds at the eventual physical sink.
+                # Follow only an exact, settled memory read; the same debt
+                # checks as every other value consumer apply here. Otherwise
+                # keep the symbolic dereference (the direct binder refuses it).
+                local_span = self._relative_access_span(
+                    operation_key, read=True, byte_size=operation.output.byte_size
+                )
+                captured_id = (
+                    None if local_span is None
+                    else self.definition_for_span(operation_key, local_span)
+                )
+                if captured_id is not None:
+                    dependency = (captured_id, local_span)
+                    rules[key].append((dependency, "offset", 0, None))
+                    return discover(dependency)
                 dependency = dependency_for_input(
                     operation_key,
                     operation.inputs[1],

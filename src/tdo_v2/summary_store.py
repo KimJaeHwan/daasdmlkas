@@ -741,10 +741,28 @@ def _load_summary_file(raw, path) -> ModelFile:
             raise ModelError(f"{path}: {item['name']}: original_names")
         if type(item["summary"]) is not dict:
             raise ModelError(f"{path}: {item['name']}: summary")
+        entry_refusal = refusal
+        if entry_refusal is None:
+            from .register_delta_proofs import validate_proof_record
+            receipts = item["summary"].get("independent_delta_proofs")
+            if type(receipts) is not list:
+                raise ModelError(f"{path}: {item['name']}: independent_delta_proofs must be a list")
+            for receipt in receipts:
+                proof = validate_proof_record(receipt)
+                if proof is None:
+                    raise ModelError(f"{path}: {item['name']}: invalid independent register delta proof")
+                if proof.executable_sha256 != source["sha256"]:
+                    entry_refusal = "independent register delta proof is from another source binary"
+                    break
+                missing_premises = sorted({label for _, label in proof.assumed_no_effect}
+                                          - set(source["assumptions"]))
+                if missing_premises:
+                    entry_refusal = "independent register delta proof hides assumptions: " + ", ".join(missing_premises)
+                    break
         entries.append(ModelEntry(raw["id"], raw["version"], item["name"], (item["name"],), (), (), False,
                                   original_names=tuple(item["original_names"]), source_kind="derived",
                                   inherited=(*source["assumptions"], "derived-model-runtime-matches"),
-                                  identity=source["sha256"][:12], template=item["summary"], refusal=refusal))
+                                  identity=source["sha256"][:12], template=item["summary"], refusal=entry_refusal))
     overrides = raw.get("overrides", [])
     if type(overrides) is not list or any(type(item) is not str or "/" not in item for item in overrides):
         raise ModelError(f"{path}: overrides must be a list of \"<file id>/<entry name>\"")

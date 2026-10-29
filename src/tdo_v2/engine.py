@@ -388,6 +388,10 @@ def analyze_observed_functions(
                         by_entry,
                     )
                 )
+                from .integration.configured_physical_binding_graph import physical_binding_graph
+                binding_graph = physical_binding_graph(analysis, analysis.boundaries.nodes, label, occurrence)
+                if binding_graph:
+                    explanation["physical_binding_graph"] = binding_graph
             roots.append(
                 RootSlice(
                     analysis.entry.space_id,

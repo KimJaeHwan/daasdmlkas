@@ -56,7 +56,7 @@ def _template(relation, *, writer_condition=False):
     table = _ObjectTable({HEADER: (_reg(RCX), 1)}, {INDEXED: relation})
     run = _summary(relation).exits[0].runs[0]
     return {"exits": [{"block": "dll:exit", "runs": [table.run(run)]}], "unknown_writers": [],
-            "writer_objects": [], "inner_calls": [], "register_deltas": [], "dead_exits": [],
+            "writer_objects": [], "inner_calls": [], "register_deltas": [], "independent_delta_proofs": [], "dead_exits": [],
             "writer_conditions": [table.pair((run.span, ByteSpan(HEADER, BIAS, 8)))] if writer_condition else [],
             "stack_values_out": False, "objects": table.rows}
 

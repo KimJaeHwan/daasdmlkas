@@ -49,7 +49,7 @@ def _template(run):
     table = _ObjectTable({MEMORY: (ByteSpan(REGISTERS, RCX, 8), 1)})
     row = table.run(run)
     return {"exits": [{"block": "dll:exit", "runs": [row]}], "unknown_writers": [],
-            "writer_objects": [], "inner_calls": [], "register_deltas": [], "dead_exits": [],
+            "writer_objects": [], "inner_calls": [], "register_deltas": [], "independent_delta_proofs": [], "dead_exits": [],
             "writer_conditions": [], "stack_values_out": False, "objects": table.rows}
 
 
@@ -183,7 +183,7 @@ def test_template_roundtrip_keeps_scalar_bits_separate_and_versioned(memory):
     assert result.literal == ExactConstant(8, (1 << 64) - 1) and result.value is None
     effect = derive_proven_call_effect(summary, "test", REGISTERS, 128, anchors=anchors)
     assert (effect.memory_runs if memory else effect.runs)[0].literal == result.literal
-    assert TEMPLATE_VERSION == 5 and ENGINE_SEMANTICS_VERSION == 24
+    assert TEMPLATE_VERSION == 6 and ENGINE_SEMANTICS_VERSION == 28
 
 
 @pytest.mark.parametrize("pointer", [("nonstack",), ("same", ByteSpan(REGISTERS, RCX, 8), False)])

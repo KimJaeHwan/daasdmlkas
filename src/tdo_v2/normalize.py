@@ -102,6 +102,16 @@ from .opaque_values import OpaqueValueEvidenceProvider
 from .storage import _resolve_validated_storage
 
 
+def _operation_semantic_identity(key, intrinsics, proven):
+    if key in intrinsics:
+        return intrinsics[key].semantics.semantic_id
+    effect = proven.get(key)
+    if effect is not None and effect.register_delta_proofs:
+        return "register-delta-proof:" + ",".join(
+            proof.record()["content_sha256"] for proof in effect.register_delta_proofs)
+    return None
+
+
 def _forward_inputs(**inputs):
     """``forward.ForwardInputs`` of the accepted normalization, only with the
     forward switch on (TDO_V2_FORWARD=1); None otherwise -- one environment test,
@@ -177,6 +187,8 @@ class NormalizedFunction:
     # direction); the evaluator's overrides of their operations
     rep_blocks: tuple = ()
     operation_overrides: tuple = ()
+    # Exact ISA semantic refinements on original observed operation nodes.
+    intrinsic_refinements: tuple = ()
     # named assumption direction-flag-clear was used (a rep site whose DF is
     # the function's entry value)
     assumed_direction_flag_clear: bool = False
@@ -1666,6 +1678,11 @@ class _ScopedNormalizer:
         observation = unit.observation
         if observation is None:
             raise AssertionError("scoped normalization requires an admitted observation")
+        from .intrinsic_refinements import refinements_for
+        intrinsic_refinements = refinements_for(unit)
+        intrinsic_calls = frozenset(intrinsic_refinements)
+        if intrinsic_calls & (set(assumed_call_effects) | set(proven_call_effects)):
+            raise ValueError("ISA intrinsic refinement conflicts with a supplied call effect")
         context = unit.scopes.resolution_context
         function = unit.scopes.function
         if type(function) is not ConstructedFunctionScope:
@@ -1745,7 +1762,9 @@ class _ScopedNormalizer:
                 for ordinal, operation in enumerate(instruction.operations):
                     operation_key = _operation_key(instruction, ordinal, operation)
                     operation_nodes[operation_key] = dependencies.add_node(
-                        NodeRecord(f"op:{operation_key}", NodeKind.OPERATION, operation.opcode)
+                        NodeRecord(f"op:{operation_key}", NodeKind.OPERATION, operation.opcode,
+                                   _operation_semantic_identity(operation_key, intrinsic_refinements,
+                                                                proven_call_effects))
                     )
                     operation_node = operation_nodes[operation_key]
                     effect = _scoped_effect(instruction, ordinal, operation, context)
@@ -1888,7 +1907,7 @@ class _ScopedNormalizer:
             atoms_on = False
             # summarized calls that never use a received register as an address
             # cannot observe a stack-pointer copy either
-            quiet_calls = frozenset(assumed_call_effects) | frozenset(
+            quiet_calls = intrinsic_calls | frozenset(assumed_call_effects) | frozenset(
                 key for key, row in proven_call_effects.items() if not row.observes_registers
             )
             # an external model declaring the registers it observes
@@ -2032,7 +2051,8 @@ class _ScopedNormalizer:
         exemptions = call_exemptions(
             (effect.operation_key for block in effect_unit.blocks for effect in block.effects),
             frozenset(assumed_call_effects), proven_call_effects,
-            {key: spans for key, (spans, _) in kept_memory.items()}, below_bounds)
+            {key: spans for key, (spans, _) in kept_memory.items()}, below_bounds,
+            intrinsic_calls=intrinsic_calls)
         proven_preserved = exemptions.clobber_preserved(effect_unit)
         memory_keeping = exemptions.memory_keeping
         unrestored = exemptions.unrestored
@@ -2325,6 +2345,7 @@ class _ScopedNormalizer:
             rep_blocks=tuple(sorted((_coordinate_key(address), count, direction)
                                     for address, (count, direction) in rep_plan.items())),
             operation_overrides=tuple(sorted(_rep_overrides(sites, rep_plan, observation).items())),
+            intrinsic_refinements=tuple(sorted(intrinsic_refinements.items())),
             assumed_direction_flag_clear=direction_assumed,
             private_frame_writes=private_writes,
             wild_objects=frozenset(wild_objects),
@@ -2368,7 +2389,7 @@ class _ScopedNormalizer:
                 below_bounds=below_bounds, entry_values_not_frame=ENTRY_VALUES_NOT_FRAME.get(),
                 opaque_no_stack_addresses=OPAQUE_NO_STACK_ADDRESSES.get(),
                 pre_escape_values_not_frame=PRE_ESCAPE_NOT_FRAME.get(),
-                read_separations=_forward_memory_plan),
+                read_separations=_forward_memory_plan, intrinsic_calls=intrinsic_calls),
             same_result_uses=tuple(
                 (row, pointer_rows[row][1], tuple(sorted(accessor_states[row.rsplit("~", 1)[0]][1])),
                  next(iter(values)))

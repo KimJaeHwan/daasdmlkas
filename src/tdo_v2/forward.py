@@ -332,6 +332,7 @@ class ForwardInputs:
     pre_escape_values_not_frame: bool = True  # (may_alias.PRE_ESCAPE_NOT_FRAME as configured)
     read_separations: object = None
     nonstack_spans: frozenset = frozenset()
+    intrinsic_calls: frozenset = frozenset()
 
 
 def first_effect(normalized, call_key: str) -> str | None:
@@ -401,7 +402,8 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
     # the normalization's exemption contract (S2c), below spans against the PROBED unit
     exemptions = call_exemptions(
         (effect.operation_key for block in probed.blocks for effect in block.effects), inputs.assumed_calls,
-        inputs.proven_call_effects, dict(inputs.kept_memory), inputs.below_bounds)
+        inputs.proven_call_effects, dict(inputs.kept_memory), inputs.below_bounds,
+        intrinsic_calls=inputs.intrinsic_calls)
     preserved = exemptions.clobber_preserved(probed)
     memory_keeping, unrestored = exemptions.memory_keeping, exemptions.unrestored
     from ._chi_records import records as chi_records

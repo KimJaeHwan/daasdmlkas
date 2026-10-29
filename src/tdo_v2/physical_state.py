@@ -40,6 +40,65 @@ PhysicalStateSlice = PhysicalRegisterSlice | PhysicalMemorySlice
 
 
 @dataclass(frozen=True, slots=True)
+class PhysicalStoreReceipt:
+    """Current raw STORE proof for a physical memory demand's source bytes."""
+
+    store_operation: str
+    consuming_operation: str
+    before_position: int
+    address_space_id: int
+    target_root_definition: int
+    target_root_span: ByteSpan
+    target_offset: int
+    byte_size: int
+    store_offset: int
+    store_width: int
+    source_span: ByteSpan
+    intervening_operations: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not str or not value for value in (self.store_operation, self.consuming_operation)):
+            raise TypeError("physical STORE proof requires exact operation keys")
+        if any(type(value) is not int or value < 0 for value in
+               (self.before_position, self.address_space_id, self.target_root_definition)):
+            raise TypeError("physical STORE proof requires nonnegative exact identities")
+        if type(self.target_root_span) is not ByteSpan or type(self.source_span) is not ByteSpan:
+            raise TypeError("physical STORE proof requires exact spans")
+        if (type(self.target_offset) is not int or type(self.store_offset) is not int
+                or type(self.byte_size) is not int or type(self.store_width) is not int
+                or self.byte_size <= 0 or self.store_width < self.byte_size
+                or self.target_offset < self.store_offset
+                or self.target_offset + self.byte_size > self.store_offset + self.store_width
+                or self.source_span.size != self.byte_size):
+            raise ValueError("physical STORE proof does not cover the requested byte range")
+        if type(self.intervening_operations) is not tuple or any(type(key) is not str for key in self.intervening_operations):
+            raise TypeError("physical STORE proof needs exact intervening operation keys")
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalValueFragment:
+    """Exact bytes of one SSA value, in that value's own storage.
+
+    A definition ID alone loses the byte selection when a memory demand is
+    supplied by part of a wider STORE. This receipt never describes target
+    memory with a source-register span (or conversely).
+    """
+
+    definition_id: int
+    source_span: ByteSpan
+    store_receipt: PhysicalStoreReceipt | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.definition_id) is not int or self.definition_id < 0:
+            raise TypeError("physical value definition must be a non-negative exact int")
+        if type(self.source_span) is not ByteSpan:
+            raise TypeError("physical value fragment requires an exact source span")
+        if self.store_receipt is not None and (type(self.store_receipt) is not PhysicalStoreReceipt
+                                               or self.store_receipt.source_span != self.source_span):
+            raise TypeError("physical value fragment disagrees with its STORE proof")
+
+
+@dataclass(frozen=True, slots=True)
 class PhysicalMemoryCoordinate:
     """One exact program coordinate observed in a physical memory slice."""
 

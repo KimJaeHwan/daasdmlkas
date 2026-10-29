@@ -77,18 +77,22 @@ ADDED_FIELDS = {
                          "call_memory_decisions": (), "activation_rejections": {}, "allocation_lifetimes": (),
                          "lifetime_models": ()},
     "NormalizedFunction": {"activation_entry": None, "forward_memory_proofs": (), "forward_memory_requires": (),
-                           "load_value_proofs": (), "nonstack_spans": frozenset()},
+                           "load_value_proofs": (), "nonstack_spans": frozenset(), "intrinsic_refinements": ()},
     "RootSlice": {"inherited_incomplete": False},
     "CallMemoryDecision": {"evidence": ()},
     "MemoryGraphBindings": {"transfers": (), "transfer_nodes": ()},
     # (fields of the forward-memory / expression branch, 2026-10-23..26)
-    "FunctionSummary": {"address_relations": ()},
+    "FunctionSummary": {"address_relations": (), "independent_delta_proofs": ()},
     "LocalMemorySsaResult": {"call_register_snapshots": (), "flow_edges": ()},
     "SummaryRun": {"literal": None},
     "ProvenRunEffect": {"literal": None},
     "ProvenMemoryRun": {"literal": None},
     "AnchoredSpan": {"index": None},
     "CallProvenance": {"memory_sources": {}},
+    # (the owner's independent register-delta proofs, semantics 25-28): provenance
+    # fields -- the deltas / restoration they justify remain encoded
+    "ProvenCallEffect": {"register_delta_proofs": ()},
+    "NodeRecord": {"semantic_identity": None},
 }
 
 # fields renamed after the first baselines: encoded under the old name as the
@@ -98,6 +102,9 @@ ADDED_FIELDS = {
 # DISPROVEN / UNKNOWN distinction
 RENAMED_FIELDS = {
     "ProvenCallEffect": {"stack_restoration": ("restores_stack", lambda value: value.value == "proven")},
+    # FunctionSummary.version 2 (docs 25.89) only adds independent_delta_proofs,
+    # itself projected at its default: compared as format 1 (any later format differs)
+    "FunctionSummary": {"version": ("version", lambda value: 1 if value == 2 else value)},
 }
 
 # identity / authority tokens with no content (each is a unique object; only
