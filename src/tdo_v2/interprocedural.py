@@ -593,7 +593,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         candidate, _ = analyze_one(key, hypotheses, refinement=plan, provenance=pending,
                                                   activation_overrides=activation_overrides)
                         if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None:
-                            candidate.inherited_assumptions |= frozenset(plan.requires)
+                            _accept_refinement(candidate, plan.requires)
                             result, published = candidate, pending
                             options = dict(result.normalization_options)
                     except RefinementRefused:
@@ -613,7 +613,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                                       activation_overrides=activation_overrides)
                             if type(candidate.normalized) is not NormalizedFunction or candidate.summary is None:
                                 break
-                            candidate.inherited_assumptions |= frozenset(plan.requires)
+                            _accept_refinement(candidate, plan.requires)
                             candidate.allocation_lifetimes = tuple(proof.write_fact for proof in plan.proofs
                                                                   if isinstance(proof.read_fact, tuple))
                             result, published = candidate, pending
@@ -632,9 +632,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                                       activation_overrides=activation_overrides)
                             if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None \
                                     and accepts_allocation_calls(plan, candidate, results):
-                                candidate.inherited_assumptions |= frozenset(plan.requires)
+                                _accept_refinement(candidate, plan.requires)
                                 candidate.allocation_lifetimes = result.allocation_lifetimes
                                 candidate.call_memory_decisions = plan.call_decisions
+                                _record_decisions(candidate)
                                 result, published = candidate, pending
                                 options = dict(result.normalization_options)
                         except RefinementRefused:
@@ -651,9 +652,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             candidate, _ = analyze_one(key, hypotheses, refinement=copy_plan, provenance=pending,
                                                       activation_overrides=activation_overrides)
                             if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None:
-                                candidate.inherited_assumptions |= frozenset(copy_plan.requires)
+                                _accept_refinement(candidate, copy_plan.requires)
                                 candidate.allocation_lifetimes = result.allocation_lifetimes
                                 candidate.call_memory_decisions = result.call_memory_decisions
+                                _record_decisions(candidate)
                                 result, published = candidate, pending
                                 options = dict(result.normalization_options)
                         except RefinementRefused:
@@ -667,9 +669,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             key, hypotheses, refinement=result.normalized.forward_inputs.read_separations,
                             load_identity=plan, provenance=pending, activation_overrides=activation_overrides)
                         if candidate.summary is not None and plan.accepts(candidate):
-                            candidate.inherited_assumptions |= frozenset(plan.requires)
+                            _accept_refinement(candidate, plan.requires)
                             candidate.allocation_lifetimes = result.allocation_lifetimes
                             candidate.call_memory_decisions = result.call_memory_decisions
+                            _record_decisions(candidate)
                             result, published = candidate, pending
                     except RefinementRefused:
                         pass
@@ -1009,11 +1012,21 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 ({"debug-break-traps-do-not-return"} if traps else set())
                 | {entry.label for _, entry in jumps.values()}
                 | {label for _, entry in jumps.values() for label in entry.inherited}))
-            if type(normalized) is NormalizedFunction and (discharge_uses or summary_requires):
+            accessor_uses = _accessor_uses(normalized, key) if type(normalized) is NormalizedFunction else set()
+            # 2b-P B9: each applied model (its label and what it inherits) at its
+            # call, and each extent it was specialized to (``_prove_extents``)
+            accessor_uses |= {(label, "admission", call) for call in proven if call in externals[key]
+                              for label in (externals[key][call][1].label, *externals[key][call][1].inherited)}
+            accessor_uses |= {(proven[call].callee, "admission", f"{call}~ext") for call in constants
+                              if call in proven and constants[call]}
+            # p-code op models and assumed (TEST-ONLY boundary) effects applied
+            accessor_uses |= {(effect.label, "admission", call) for call, effect in assumed.items()}
+            if type(normalized) is NormalizedFunction and (discharge_uses or summary_requires or accessor_uses):
                 # 2b-P uses decided outside the normalization: caller-side
-                # condition discharges, the summary's trap / modeled-jump cuts
+                # condition discharges, the summary's trap / modeled-jump cuts,
+                # the accessor identity / state decisions (same-result atoms)
                 normalized = replace(normalized, premise_uses=tuple(sorted(
-                    set(normalized.premise_uses) | set(discharge_uses)
+                    set(normalized.premise_uses) | set(discharge_uses) | accessor_uses
                     | {(label, "cut", key) for label in summary_requires})))
             summary = (
                 summarize_function(normalized, observation, origins, roots,
@@ -1300,6 +1313,39 @@ def _bound_cuts(functions, bindings, disabled, external_models, refusals) -> dic
             label = f"bound-model:{binding.binding_id}@{rva:#x}#{binding.digest[:12]}"
             found[key] = (model_file, replace(entry, inherited=(*entry.inherited, label)),
                           (binding.binding_id, binding.digest, rva, sha, entry.label, model_file.digest))
+    return found
+
+
+def _accept_refinement(candidate, requires) -> None:
+    """An accepted refinement: its requirements are the function's inherited
+    labels and (2b-P B8) use records of its refinement decision."""
+    candidate.inherited_assumptions |= frozenset(requires)
+    _add_uses(candidate, {(label, "refinement", candidate.key) for label in requires})
+
+
+def _record_decisions(candidate) -> None:
+    """2b-P B8: each call-memory decision's requirements, at its call."""
+    _add_uses(candidate, {(label, "refinement", decision.demand.call)
+                          for decision in candidate.call_memory_decisions for label in decision.requires})
+
+
+def _add_uses(item, found) -> None:
+    if found and type(item.normalized) is NormalizedFunction:
+        item.normalized = replace(item.normalized, premise_uses=tuple(sorted(
+            set(item.normalized.premise_uses) | set(found))))
+
+
+def _accessor_uses(normalized, key) -> set:
+    """2b-P B7: each same-result atom's decision (the row it made one) and the
+    accessor claims it rested on -- ``_same_result_labels`` per use."""
+    found = set()
+    for row, _identity, claims, _atom in getattr(normalized, "same_result_uses", ()):
+        found.add(("same-result-functions", "normalize", row))
+        for label in claims:
+            name = "accessor-hidden-state-in-memory" if label.startswith("proof:")                 else f"accessor-state-preserved-by:{label}"
+            found.add((name, "normalize", row))
+    if getattr(normalized, "accessor_separations", ()):
+        found.add(("accessor-result-separate", "normalize", key))
     return found
 
 

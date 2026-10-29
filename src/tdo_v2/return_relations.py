@@ -326,6 +326,9 @@ def _premises(normalized) -> list[str]:
         found.append(f"effect:{key}:{effect.callee}")
     for item in getattr(normalized, "forward_memory_requires", ()):
         found.append(f"forward:{item}")
+    if "assumption:globals-disjoint-from-stack" in found:
+        # (its withdrawal check -- the program switches no stack -- rests on this one)
+        found.append("assumption:stack-switch-check-exceptions")
     return found
 
 

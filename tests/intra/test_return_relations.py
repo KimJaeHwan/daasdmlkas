@@ -420,6 +420,7 @@ def test_a_named_assumption_the_normalization_used_is_a_dependency():
     main = FunctionBuilder(entry=MAIN).ins(store(const(0x4000), const(1, 8))).ret()
     with_assumption = _of(_certs(main, assume_globals_disjoint_from_stack=True))
     assert "assumption:globals-disjoint-from-stack" in with_assumption.dependencies
+    assert "assumption:stack-switch-check-exceptions" in with_assumption.dependencies
     assert "assumption:globals-disjoint-from-stack" not in _of(_certs(main)).dependencies
 
 

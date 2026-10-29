@@ -110,6 +110,9 @@ def test_optin_removes_heap_store_then_resize_call_debt_without_losing_saved_wri
     assert any(label.startswith("lifecycle-contract:") for label in requires)
     assert set(refined.normalized.forward_memory_requires) <= set(requires)
     assert set(refined.normalized.forward_memory_requires) <= set(refined.inherited_assumptions)
+    # 2b-P B8: an accepted refinement's requirements are use records
+    used = {name for name, stage, _ in refined.normalized.premise_uses if stage == "refinement"}
+    assert any(label.startswith("lifecycle-contract:") for label in used), used
     allocation, _ = _allocation_source(refined)
     assert set(allocation.requires) <= set(refined.normalized.forward_memory_requires)
     assert all(set(decision.requires) <= set(refined.normalized.forward_memory_requires)

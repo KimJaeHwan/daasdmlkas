@@ -111,6 +111,7 @@ def test_off_by_default_both_stores_may_reach_the_read(tmp_path):
     assert a and b and not complete
     assert analyzed.normalized.same_result_uses == ()
     assert "same-result-functions" not in analyzed.inherited_assumptions
+    assert not any(name == "same-result-functions" for name, _, _ in analyzed.normalized.premise_uses)
 
 
 def test_equal_keys_make_one_object(tmp_path):
@@ -119,6 +120,9 @@ def test_equal_keys_make_one_object(tmp_path):
     uses = analyzed.normalized.same_result_uses
     assert len(uses) == 2 and len({atom for *_, atom in uses}) == 1
     assert "same-result-functions" in analyzed.inherited_assumptions
+    # 2b-P B7: one use record per same-result row
+    rows = {at for name, _, at in analyzed.normalized.premise_uses if name == "same-result-functions"}
+    assert rows == {row for row, *_ in uses}
 
 
 def _store_slot(builder):
@@ -150,6 +154,8 @@ def test_a_declared_preserving_call_keeps_the_state_and_is_reported(tmp_path):
     analyzed, a, b, complete = _verdict(tmp_path, _call(KEEP))
     assert a and not b and complete
     assert "accessor-state-preserved-by:external-model:acc-test/Keep@v1" in analyzed.inherited_assumptions
+    assert any(name == "accessor-state-preserved-by:external-model:acc-test/Keep@v1"
+               for name, _, _ in analyzed.normalized.premise_uses)
 
 
 def test_another_slot_address_is_another_key(tmp_path):
@@ -961,6 +967,9 @@ def test_a_pure_callee_keeps_the_accessor_state(tmp_path):
     assert read.reaches(RDI, 4) and not read.reaches(R12, 4) and _complete_but_for_pushes(analyzed, read)
     assert "accessor-hidden-state-in-memory" in analyzed.inherited_assumptions
     assert not any(label.startswith("accessor-state-preserved-by:proof") for label in analyzed.inherited_assumptions)
+    names = {name for name, _, _ in analyzed.normalized.premise_uses}
+    assert "accessor-hidden-state-in-memory" in names
+    assert not any(name.startswith("accessor-state-preserved-by:proof") for name in names)
 
 
 def _refused(tmp_path, caller, callee):

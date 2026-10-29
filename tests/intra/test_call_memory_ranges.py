@@ -377,6 +377,8 @@ def test_accepted_decision_dependencies_reach_state_inherited_and_probe(models, 
     refined = refine_call_memory(context)
     assert label in refined.inherited_assumptions
     assert label in refined.normalized.activation_entry.requires
+    # 2b-P B8: the decision's requirement is a use record at its call
+    assert any(name == label and stage == "refinement" for name, stage, _ in refined.normalized.premise_uses)
     read = _read(refined, points["reader"])
     found, requires = probe(refined.normalized, points["reader"], (read.span,))
     assert type(found[read.span]) is int and label in requires
@@ -484,3 +486,18 @@ def test_the_memory_consumer_output_keeps_the_slot_writer(models, monkeypatch):
                for row in refined.call_memory_decisions)
     assert any(definition.operation_key == actual_store and definition.span.start == (1 << 64)
                and definition.span.size == 8 for definition in refined.normalized.memory_ssa.definitions)
+
+
+@pytest.mark.parametrize("after", ("delay", "unknown-call"))
+def test_a_replayed_activation_keeps_its_premise_uses(models, after):
+    """Astra 2b-P b79 r1 P2-1/2: a replay rebuilds the normalization only --
+    the generic function's model admissions for the calls it still consumes
+    are kept, and the activation's requirements are use records even when no
+    call-memory decision was preserved."""
+    generic, context, points = _range_case(models, after=after)
+    admitted = {use for use in generic.normalized.premise_uses
+                if use[1] == "admission" and use[2].split("~", 1)[0] == points["realloc"]}
+    assert admitted, generic.normalized.premise_uses
+    assert admitted <= set(context.normalized.premise_uses)
+    activation = {name for name, stage, _ in context.normalized.premise_uses if stage == "activation"}
+    assert set(context.normalized.activation_entry.requires) <= activation

@@ -137,7 +137,28 @@ def _normalize(callee, state, effects=None):
     if effects is not None:
         options["proven_call_effects"] = effects
     with _policy(callee), using_entry(state):
-        return FunctionNormalizer().normalize(callee.unit, **options)
+        normalized = FunctionNormalizer().normalize(callee.unit, **options)
+    from dataclasses import replace as _replace
+
+    from .normalize import NormalizedFunction
+
+    if type(normalized) is NormalizedFunction:
+        normalized = _replace(normalized, premise_uses=_replayed_uses(callee, normalized))
+    return normalized
+
+
+def _replayed_uses(callee, normalized) -> tuple:
+    """2b-P: a replay rebuilds the normalization only -- the original's
+    caller-side decisions for the calls it still consumes (model admissions,
+    condition discharges, cuts) are carried over, and its accessor decisions
+    recomputed from the replayed normalization."""
+    from .interprocedural import _accessor_uses
+
+    consumed = {key for key, _ in normalized.proven_call_effects} | {key for key, _ in normalized.assumed_call_effects}
+    kept = {use for use in getattr(callee.normalized, "premise_uses", ())
+            if use[1] in ("admission", "condition-discharge", "cut")
+            and (use[2] == callee.key or use[2].split("~", 1)[0] in consumed)}
+    return tuple(sorted(set(normalized.premise_uses) | kept | _accessor_uses(normalized, callee.key)))
 
 
 def _summarize(callee, normalized):
@@ -297,7 +318,8 @@ def _replay_activation(caller, callee, call, *, readonly_image=None, assumptions
         return None
     # Keep the requirements captured even when the first normalization can
     # be reused: the input context is independent of optional memory seeds.
-    final = replace(final, activation_entry=state)
+    final = replace(final, activation_entry=state, premise_uses=tuple(sorted(
+        set(final.premise_uses) | {(label, "activation", callee.key) for label in state.requires})))
     # Entry substitution is consumed by the normalizer, probe and crossing
     # calculation alike. No surrogate source/sink graph is built here.
     summary, anchors = _summarize(callee, final)

@@ -255,3 +255,16 @@ def test_a_failed_function_keeps_the_switch_it_failed_under(monkeypatch):
     assert type(item.normalized) is UnresolvedNormalizedFunction, item.normalized
     assert item.normalized.assumes_opaque_callees_restore_stack_pointer is False
     assert "opaque-callees-restore-stack-pointer" not in run_assumptions(results)
+
+
+def test_an_assumed_or_pcodeop_effect_is_an_admission_use():
+    """Astra 2b-P b79 r1 P2-3: a no-effect p-code op model (an assumed call
+    effect) is applied like a model -- recorded at its call."""
+    from synthetic import op
+    from tdo_v2.assumed_call_effects import AssumedCallEffect
+
+    main = FunctionBuilder(entry=MAIN).ins(op("CALLOTHER", [const(17, 4)])).ret()
+    key, label = "1:1000:0:CALLOTHER", "pcodeop-model:x86-markers/LOCK@v1"
+    (result,) = analyze_units(program_units(main),
+                              assumed_call_effects={"1:1000": {key: AssumedCallEffect(label, ())}}).values()
+    assert (label, "admission", key) in result.normalized.premise_uses, result.normalized.premise_uses

@@ -78,6 +78,9 @@ def test_memcpy_with_a_constant_count_is_exact():
     item = results["1:1000"]
     ((call, label),) = item.declared.items()
     assert label == "external-model:crt-win64/memcpy@v8"
+    # 2b-P B9: the model's application and its extent specialization are use records
+    uses = {(name, at) for name, stage, at in item.normalized.premise_uses if stage == "admission"}
+    assert (label, call) in uses and (label, f"{call}~ext") in uses, uses
     effect = item.proven[call]
     assert effect.preserves_memory and len(effect.memory_runs) == 1
     function = item.normalized
@@ -92,6 +95,7 @@ def test_memcpy_with_an_unknown_count_keeps_no_memory():
     results = _analyze(_memcpy_caller(count_register_constant=False))
     effect = next(iter(results["1:1000"].proven.values()))
     assert not effect.preserves_memory and not effect.memory_runs
+    assert not any(at.endswith("~ext") for _, _, at in results["1:1000"].normalized.premise_uses)
     function = results["1:1000"].normalized
     assert not slice_from(function, operation_node_at(function, 6, 1)).is_complete
     pools = lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000, RSI: seed % 9}

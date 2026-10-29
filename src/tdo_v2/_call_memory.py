@@ -186,7 +186,12 @@ def _refine_call_memory(item, *, readonly_image=None, assumptions=()):
     labels = _analyze(final, item.unit, readonly_image=readonly_image, assumptions=state.requires).labels
     state = replace(state, requires=tuple(sorted(set(state.requires) | set(labels)
                                                 | set(final.forward_memory_requires))))
-    final = replace(final, activation_entry=state)
+    # 2b-P B8: each preserved decision's requirements at its call, and the
+    # activation's own requirements
+    uses = {(label, "refinement", row.demand.call) for row in decisions if row.preserved for label in row.requires}
+    uses |= {(label, "activation", item.key) for label in state.requires}
+    final = replace(final, activation_entry=state,
+                    premise_uses=tuple(sorted(set(final.premise_uses) | uses)))
     summary, anchors = _summarize(item, final)
     return replace(base, normalized=final, summary=summary, anchors=anchors, proven=effects,
                    inherited_assumptions=base.inherited_assumptions | frozenset(state.requires)
