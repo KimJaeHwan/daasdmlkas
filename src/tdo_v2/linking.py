@@ -143,7 +143,8 @@ def _disabled(switches: dict) -> set:
         pre_escape=switches["pre_escape"],
         traps=switches["traps"], import_slots=switches["import_slots"], same_result=switches["same_result"],
         accessor_separate=switches["accessor_separate"], accessor_private_state=switches["accessor_private_state"],
-        registered_handlers=switches["registered_handlers"], model_assumptions_off=switches["model_assumptions_off"])
+        registered_handlers=switches["registered_handlers"], model_assumptions_off=switches["model_assumptions_off"],
+        opaque_restores_sp=switches.get("opaque_restores_sp", True))
 
 
 def profile(*, switches: dict, pcodeop_models, models, language_id: str, abi_tag: str,
@@ -288,7 +289,7 @@ class Linker:
                  traps: bool, globals_disjoint: bool, direction_flag: bool, import_slots: bool = False,
                  entry_values_not_frame: bool = True, same_result: bool = False,
                  accessor_separate: bool = False, opaque_no_stack: bool = True, registered_handlers: bool = True,
-                 pre_escape: bool = True,
+                 pre_escape: bool = True, opaque_restores_sp: bool = True,
                  accessor_private_state: bool = False, model_assumptions_off=(), catalog_models=()):
         """(the run's model set with the linked templates, stack evidence
         files). The settings are the run's effective ones (``globals_disjoint``
@@ -324,6 +325,8 @@ class Linker:
                     "registered_handlers": bool(registered_handlers),
                     "accessor_private_state": bool(accessor_private_state),
                     "model_assumptions_off": sorted(set(model_assumptions_off))}
+        if not opaque_restores_sp:   # (recorded only when off: the default profiles keep their identity)
+            switches["opaque_restores_sp"] = False
         identity = self.provider.identity()
         declared = declared_models(models)
         checked = []
@@ -481,7 +484,7 @@ class Linker:
                 import_slots=switches["import_slots"], entry_values_not_frame=switches["entry_values_not_frame"],
                 same_result=switches["same_result"], accessor_separate=switches["accessor_separate"],
                 opaque_no_stack=switches["opaque_no_stack"], registered_handlers=switches["registered_handlers"],
-                pre_escape=switches["pre_escape"],
+                pre_escape=switches["pre_escape"], opaque_restores_sp=switches.get("opaque_restores_sp", True),
                 accessor_private_state=switches["accessor_private_state"],
                 model_assumptions_off=tuple(switches["model_assumptions_off"]), catalog_models=catalog_models,
                 per_export=True, log=lambda line: self.log(f"[link]   {line}"))

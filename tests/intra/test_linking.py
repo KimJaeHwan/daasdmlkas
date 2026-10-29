@@ -128,7 +128,7 @@ class FakeDeriver:
                  private_frame_above, traps, assume_globals_disjoint, direction_flag, per_export, log,
                  import_slots=False, entry_values_not_frame=True, same_result=False, accessor_separate=False,
                  opaque_no_stack=True, registered_handlers=True, accessor_private_state=False, pre_escape=True,
-                 model_assumptions_off=(), catalog_models=()):
+                 model_assumptions_off=(), catalog_models=(), opaque_restores_sp=True):
         assert per_export
         self.calls.append({"names": sorted(names), "private_frame_above": private_frame_above,
                            "globals": assume_globals_disjoint, "direction_flag": direction_flag,

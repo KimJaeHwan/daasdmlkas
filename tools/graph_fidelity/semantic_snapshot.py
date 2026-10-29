@@ -79,8 +79,10 @@ ADDED_FIELDS = {
                          "call_memory_decisions": (), "activation_rejections": {}, "allocation_lifetimes": (),
                          "lifetime_models": ()},
     "NormalizedFunction": {"activation_entry": None, "forward_memory_proofs": (), "forward_memory_requires": (),
-                           "load_value_proofs": (), "nonstack_spans": frozenset(), "intrinsic_refinements": ()},
+                           "load_value_proofs": (), "nonstack_spans": frozenset(), "intrinsic_refinements": (),
+                           "assumes_opaque_callees_restore_stack_pointer": True},
     "RootSlice": {"inherited_incomplete": False},
+    "UnresolvedNormalizedFunction": {"assumes_opaque_callees_restore_stack_pointer": True},
     "CallMemoryDecision": {"evidence": ()},
     "MemoryGraphBindings": {"transfers": (), "transfer_nodes": ()},
     # (fields of the forward-memory / expression branch, 2026-10-23..26)
@@ -210,6 +212,9 @@ def _run(generation: Path, config: str, bindings):
     models = run_dfbench.external_models(generation)
     if config == "off":
         options = {name: False for name in options}
+        # (kept on: the legacy "off" baselines predate this switch and stay
+        # comparable; its OFF behaviour is tested directly -- 2b-P B6)
+        options["assume_opaque_callees_restore_stack_pointer"] = True
         models = None
     elif config == "accessor":
         options.update(assume_same_result_functions=True, assume_accessor_result_separate=True,
@@ -286,7 +291,9 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
     meta = {
         "snapshot_version": SNAPSHOT_VERSION, "generation": generation.name, "config": config,
         "bindings": [Path(path).name for path in bindings],
-        "options": encode(options, "options"),
+        # (a switch added after the baselines is recorded only off its default)
+        "options": encode({name: value for name, value in options.items()
+                           if not (name == "assume_opaque_callees_restore_stack_pointer" and value)}, "options"),
         "models": [[item.file_id, item.digest] for item in models.files] if models is not None else None,
         "python": sys.version.split()[0], "seconds": round(time.time() - started, 1),
     }

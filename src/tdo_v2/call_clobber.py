@@ -20,6 +20,8 @@ pointer escaping, so frame preservation needs callee-side evidence.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 from .phases import count as phase_count, enabled as phases_enabled, measured
 
 from .resource_limits import step
@@ -260,8 +262,14 @@ def derive_call_clobber_reads(
     return rows
 
 
+# Named assumption opaque-callees-restore-stack-pointer (``assumptions``): on, an
+# unproven call with the observed call shape keeps its stack pointer; off, only
+# a callee summary proving the restoration does (2b-P B6)
+OPAQUE_RESTORES_SP: ContextVar[bool] = ContextVar("opaque_restores_sp", default=True)
+
+
 def clobber_inputs(observation, context, assumed_calls=frozenset(), proven_preserved=None,
-                   unrestored_stack_calls=frozenset(), calls=None) -> tuple:
+                   unrestored_stack_calls=frozenset(), calls=None, uses: list | None = None) -> tuple:
     """(the clobbering call keys, call key -> the spans it leaves unchanged):
     the inputs of ``derive_call_clobber_reads`` -- shared with the shadow chi
     check (``_chi_shadow``) so both see one exemption contract. ``calls``:
@@ -278,6 +286,12 @@ def clobber_inputs(observation, context, assumed_calls=frozenset(), proven_prese
     preserved = _preserved_stack_pointers(observation, context)
     for key in unrestored_stack_calls:
         preserved.pop(key, None)
+    for key in [key for key in preserved if key not in (proven_preserved or {})]:
+        # an unproven callee: its stack pointer is kept only under the assumption
+        if not OPAQUE_RESTORES_SP.get():
+            preserved.pop(key)
+        elif uses is not None:
+            uses.append(key)
     for key, spans in (proven_preserved or {}).items():
         # bytes a callee summary proves unchanged (or rewrites just before the call)
         preserved[key] = tuple(preserved.get(key, ())) + tuple(spans)

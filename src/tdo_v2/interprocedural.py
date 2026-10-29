@@ -179,6 +179,7 @@ def _activation_call_provenance(generic, context, original: CallProvenance) -> C
 def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry_values_not_frame=True,
                   assume_opaque_callees_leave_no_stack_addresses=True,
                   assume_pre_escape_values_not_frame=True,
+                  assume_opaque_callees_restore_stack_pointer=True,
                   **options) -> dict[str, "AnalyzedFunction"]:
     """``_analyze_units`` (below) under the named assumption
     import-slots-hold-their-exports when ``assume_import_slots_hold_exports``
@@ -198,6 +199,8 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     frame = ENTRY_VALUES_NOT_FRAME.set(bool(assume_entry_values_not_frame))
     opaque = OPAQUE_NO_STACK_ADDRESSES.set(bool(assume_opaque_callees_leave_no_stack_addresses))
     pre = PRE_ESCAPE_NOT_FRAME.set(bool(assume_pre_escape_values_not_frame))
+    from .call_clobber import OPAQUE_RESTORES_SP
+    restores = OPAQUE_RESTORES_SP.set(bool(assume_opaque_callees_restore_stack_pointer))
     # the address-expression evaluation (``relative_memory``) follows a chain
     # of dependent values recursively: room for long chains; a function deeper
     # still fails alone (``NormalizationFailureReason.ANALYSIS_DEPTH``)
@@ -208,6 +211,7 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     finally:
         sys.setrecursionlimit(previous)
         PRE_ESCAPE_NOT_FRAME.reset(pre)
+        OPAQUE_RESTORES_SP.reset(restores)
         OPAQUE_NO_STACK_ADDRESSES.reset(opaque)
         ENTRY_VALUES_NOT_FRAME.reset(frame)
         IMPORT_SLOTS.reset(token)
@@ -376,7 +380,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         globals_disjoint=assume_globals_disjoint_from_stack, readonly_image=readonly_image is not None,
         direction_flag=assume_direction_flag_clear, entry_values_not_frame=ENTRY_VALUES_NOT_FRAME.get(),
         home_space=bool(private_frame_above), opaque_no_stack=OPAQUE_NO_STACK_ADDRESSES.get(),
-        pre_escape=PRE_ESCAPE_NOT_FRAME.get(),
+        pre_escape=PRE_ESCAPE_NOT_FRAME.get(), opaque_restores_sp=_opaque_restores_sp(),
         traps=assume_debug_break_traps_do_not_return,
         # (the switch alone: binding a model at an import slot needs the slot to
         # hold the export's address, not globals-disjoint-from-stack -- the
@@ -1054,7 +1058,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             result.normalization_context = (ENTRY_VALUES_NOT_FRAME.get(), OPAQUE_NO_STACK_ADDRESSES.get(),
                                             imports, None if imports is None else imports.active,
                                             IMAGE_BASE_TRACKING.get(), index_addresses(), DEFINITION_ATOMS,
-                                            PRE_ESCAPE_NOT_FRAME.get())
+                                            PRE_ESCAPE_NOT_FRAME.get(), _opaque_restores_sp())
             result.lifetime_models = tuple((call, model_file, entry)
                                            for call, (model_file, entry) in externals[key].items()
                                            if call in proven and entry.frees and entry.same_object)
@@ -2114,6 +2118,12 @@ def _decide_conditions(unit, normalized, shapes, pending, uses: list | None = No
                 rows.append((left, right))
         result[(call, tag)] = rows
     return result
+
+
+def _opaque_restores_sp() -> bool:
+    from .call_clobber import OPAQUE_RESTORES_SP
+
+    return OPAQUE_RESTORES_SP.get()
 
 
 def _callind_sites(unit):

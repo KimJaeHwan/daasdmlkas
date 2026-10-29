@@ -74,8 +74,8 @@ def _verification_source_pin(item):
     """
     from ._call_activation import _source_signature
     runtime = ()
-    if len(item.normalization_context) == 8:
-        _, _, imports, _, image, _, _, _ = item.normalization_context
+    if len(item.normalization_context) == 9:
+        _, _, imports, _, image, _, _, _, _ = item.normalization_context
         runtime = (None if imports is None else (imports.active, _freeze(imports.slots)),
                    None if image is None else (image.ranges, _freeze(image.lengths), id(image.relocates)))
     return (_source_signature(item), item.key, _freeze(item.calls), _freeze(item.multi_calls),

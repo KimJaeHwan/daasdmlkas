@@ -299,6 +299,7 @@ _POLICY_FIELDS = {
     "assumes_opaque_callees_leave_no_stack_addresses": "opaque-callees-leave-no-stack-addresses",
     "assumes_pre_escape_values_not_frame": "pre-escape-values-do-not-address-the-new-frame",
     "assumed_direction_flag_clear": "direction-flag-clear",
+    "assumes_opaque_callees_restore_stack_pointer": "opaque-callees-restore-stack-pointer",
 }
 
 

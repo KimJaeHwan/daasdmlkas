@@ -177,6 +177,9 @@ class NormalizedFunction:
     # some object not wild (docs 25.77), and the operations whose values it
     # took (sorted keys: what a stack-leak proof must cover to discharge it)
     assumes_pre_escape_values_not_frame: bool = False
+    # named assumption opaque-callees-restore-stack-pointer was switched on for
+    # this normalization (``call_clobber.OPAQUE_RESTORES_SP``; uses: premise_uses)
+    assumes_opaque_callees_restore_stack_pointer: bool = True
     pre_escape_definitions: tuple = ()
     # allocator windows (docs 25.79): (fresh result row, bytes, never_null
     # label | None) -- what a summary may export (docs 25.79 3b)
@@ -1467,6 +1470,9 @@ class NormalizationFailureReason(StrEnum):
 class UnresolvedNormalizedFunction:
     scopes: ScopeBundleResult
     reason: NormalizationFailureReason
+    # the run's opaque-callees-restore-stack-pointer switch where it failed (a
+    # report after the run must not read the reset ambient switch)
+    assumes_opaque_callees_restore_stack_pointer: bool = field(default_factory=lambda: _opaque_restores_sp())
 
     def __post_init__(self) -> None:
         if type(self.scopes) is not ScopeBundleResult:
@@ -1494,7 +1500,14 @@ class _RecordingImage:
         return getattr(self._inner, name)
 
 
-def _premise_uses(unit, policy_uses, frame_uses, opaque_uses, pre_uses, image_uses, direction, import_slots) -> tuple:
+def _opaque_restores_sp() -> bool:
+    from .call_clobber import OPAQUE_RESTORES_SP
+
+    return OPAQUE_RESTORES_SP.get()
+
+
+def _premise_uses(unit, policy_uses, frame_uses, opaque_uses, pre_uses, image_uses, direction, import_slots,
+                  sp_uses=()) -> tuple:
     """(assumption name, "normalize", where) for every named assumption this
     normalization decided under (2b-P A; function-level where no finer
     location is recorded)."""
@@ -1513,6 +1526,8 @@ def _premise_uses(unit, policy_uses, frame_uses, opaque_uses, pre_uses, image_us
         found.add(("direction-flag-clear", "normalize", here))
     if import_slots:
         found.add(("import-slots-hold-their-exports", "normalize", here))
+    for key in sp_uses:   # an unproven call's stack pointer kept by its call shape
+        found.add(("opaque-callees-restore-stack-pointer", "normalize", key))
     return tuple(sorted(found))
 
 class FunctionNormalizer:
@@ -2125,8 +2140,10 @@ class _ScopedNormalizer:
         call_clobber_reads = subtract_copy_clobbers(_forward_memory_plan, call_clobber_reads)
         from .call_clobber import clobber_inputs as _clobber_inputs
 
+        sp_uses: list = []
         _contract_calls, _contract_preserved = _clobber_inputs(
-            observation, context, frozenset(assumed_call_effects), proven_preserved, unrestored, exemptions.calls)
+            observation, context, frozenset(assumed_call_effects), proven_preserved, unrestored, exemptions.calls,
+            uses=sp_uses)
         call_clobber_contract = (
             _contract_calls,
             {key: tuple(spans) for key, spans in _contract_preserved.items() if key in _contract_calls},
@@ -2398,7 +2415,8 @@ class _ScopedNormalizer:
             intrinsic_refinements=tuple(sorted(intrinsic_refinements.items())),
             assumed_direction_flag_clear=direction_assumed,
             premise_uses=_premise_uses(unit, policy_uses, frame_uses, opaque_uses, pre_uses, image_uses,
-                                       direction_assumed, _import_slots_used(memory_ssa)),
+                                       direction_assumed, _import_slots_used(memory_ssa), sp_uses),
+            assumes_opaque_callees_restore_stack_pointer=_opaque_restores_sp(),
             private_frame_writes=private_writes,
             wild_objects=frozenset(wild_objects),
             nonstack_spans=frozenset(nonstack_spans),

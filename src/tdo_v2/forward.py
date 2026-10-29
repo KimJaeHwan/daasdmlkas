@@ -409,13 +409,21 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
     from ._chi_records import records as chi_records
 
     memory_unit = decode_effect_unit(probed)
-    clobbers = raw_clobbers = chi_records(   # (the chi view's rows: docs 25.83 D5')
-        (normalized.memory_ssa.function_scope, "probe", load_key), lambda: derive_call_clobber_reads(
-            probed, inputs.observation, inputs.context, assumed_calls=inputs.assumed_calls,
-            proven_preserved=preserved, memory_keeping=memory_keeping, unrestored_stack_calls=unrestored,
-            calls=exemptions.calls,
-        ), memory_unit, probed, inputs.observation, inputs.context, inputs.assumed_calls, preserved, unrestored,
-        memory_keeping, exemptions.calls)
+    from .call_clobber import OPAQUE_RESTORES_SP
+
+    # the normalization's own opaque-callees-restore-stack-pointer policy
+    # (a probe may run after the analysis reset the switch)
+    restores = OPAQUE_RESTORES_SP.set(getattr(normalized, "assumes_opaque_callees_restore_stack_pointer", True))
+    try:
+        clobbers = raw_clobbers = chi_records(   # (the chi view's rows: docs 25.83 D5')
+            (normalized.memory_ssa.function_scope, "probe", load_key), lambda: derive_call_clobber_reads(
+                probed, inputs.observation, inputs.context, assumed_calls=inputs.assumed_calls,
+                proven_preserved=preserved, memory_keeping=memory_keeping, unrestored_stack_calls=unrestored,
+                calls=exemptions.calls,
+            ), memory_unit, probed, inputs.observation, inputs.context, inputs.assumed_calls, preserved, unrestored,
+            memory_keeping, exemptions.calls)
+    finally:
+        OPAQUE_RESTORES_SP.reset(restores)
     from ._realloc_contents import subtract_copy_clobbers
     clobbers = subtract_copy_clobbers(inputs.read_separations, clobbers)
     uncertain = dict(inputs.uncertain_writers)

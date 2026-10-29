@@ -75,7 +75,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                    entry_values_not_frame: bool = True, same_result: bool = False,
                    accessor_separate: bool = False, opaque_no_stack: bool = True, pre_escape: bool = True,
                    registered_handlers: bool = True, accessor_private_state: bool = False,
-                   model_assumptions_off=(), catalog_models=()):
+                   model_assumptions_off=(), catalog_models=(), opaque_restores_sp: bool = True):
     """(model file dict, {export name: refusal reason}, export names the
     Bundle does not export) -- the templates of ``export_names`` of the
     library Bundle at ``generation``, derived with the given analysis
@@ -161,7 +161,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                        opaque_no_stack=opaque_no_stack, traps=traps, import_slots=import_slots, pre_escape=pre_escape,
                        same_result=same_result, accessor_separate=accessor_separate,
                        accessor_private_state=accessor_private_state, registered_handlers=registered_handlers,
-                       model_assumptions_off=model_assumptions_off)
+                       model_assumptions_off=model_assumptions_off, opaque_restores_sp=opaque_restores_sp)
         cuts = ip._model_cuts({key: unit for key, unit in by_key.items() if key not in targets},
                               info, models, library, off)
         kept = {key: unit for key, unit in by_key.items() if key not in cuts}
@@ -188,6 +188,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_import_slots_hold_exports=import_slots,
                                        assume_entry_values_not_frame=entry_values_not_frame,
                                        assume_opaque_callees_leave_no_stack_addresses=opaque_no_stack,
+                                       assume_opaque_callees_restore_stack_pointer=opaque_restores_sp,
                                        assume_pre_escape_values_not_frame=pre_escape,
                                        assume_same_result_functions=same_result,
                                        assume_accessor_result_separate=accessor_separate,

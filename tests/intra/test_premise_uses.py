@@ -125,3 +125,133 @@ def test_a_caller_side_discharge_under_globals_disjoint_is_recorded(forward, mon
         assert ("globals-disjoint-from-stack", "condition-discharge") in on, on
     assert any(name == "globals-disjoint-from-stack" for name, _ in on), on
     assert not any(name == "globals-disjoint-from-stack" for name, _ in off), off
+
+
+def _opaque_caller():
+    """sub rsp; [rsp] = 7; call opaque; rax = [rsp]; add rsp; ret -- the slot
+    read after the call is addressed through the call-shape stack pointer."""
+    from synthetic import CODE_BASE, RSP
+
+    return (FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(store(reg(RSP), const(7, 8)))
+            .call(CODE_BASE + 0xC00).ins(load(reg(RAX), reg(RSP))).add_rsp(0x28).ret())
+
+
+def test_an_opaque_calls_kept_stack_pointer_is_a_recorded_use():
+    (result,) = analyze_units(program_units(_opaque_caller())).values()
+    found = [(stage, at) for name, stage, at in result.normalized.premise_uses
+             if name == "opaque-callees-restore-stack-pointer"]
+    assert found and all(at.endswith(":CALL") for _, at in found), result.normalized.premise_uses
+
+
+def test_switching_opaque_restores_sp_off_disables_the_inference():
+    """B6: OFF is not a label change -- the stack pointer after the opaque call
+    is call-clobbered (more debt), and nothing records the assumption."""
+    (on,) = analyze_units(program_units(_opaque_caller())).values()
+    (off,) = analyze_units(program_units(_opaque_caller()),
+                           assume_opaque_callees_restore_stack_pointer=False).values()
+    assert not any(name == "opaque-callees-restore-stack-pointer" for name, _, _ in off.normalized.premise_uses)
+    assert off.normalized.assumes_opaque_callees_restore_stack_pointer is False
+    assert len(off.normalized.call_clobber_debts) > len(on.normalized.call_clobber_debts)
+
+
+def test_the_switch_is_registered_and_disables_dependent_models():
+    from tdo_v2.assumptions import by_name, disabled
+
+    row = by_name("opaque-callees-restore-stack-pointer")
+    assert row.kind == "switch" and row.parameter == "assume_opaque_callees_restore_stack_pointer"
+    base = dict(globals_disjoint=True, readonly_image=True, direction_flag=True, entry_values_not_frame=True,
+                home_space=True, opaque_no_stack=True, traps=True, import_slots=True, same_result=True,
+                accessor_separate=True, accessor_private_state=True, registered_handlers=True)
+    assert "opaque-callees-restore-stack-pointer" in disabled(**base, opaque_restores_sp=False)
+    assert "opaque-callees-restore-stack-pointer" not in disabled(**base)
+
+
+def test_the_linker_takes_the_switch():
+    """Astra B6 r1 P1-1: summary_engine passes opaque_restores_sp to the linker,
+    whose signature did not accept it (a TypeError either way)."""
+    import inspect
+
+    from tdo_v2.linking import Linker
+
+    assert "opaque_restores_sp" in inspect.signature(Linker.__call__).parameters
+
+
+def _sp_then_unknown_jump():
+    """Astra B6 r1 P1-2: mov rax, rsp; call opaque; jmp rax (no RETURN)."""
+    from synthetic import CODE_BASE, RSP, _Instruction, op
+
+    main = FunctionBuilder(entry=MAIN).ins(copy(reg(RAX), reg(RSP))).call(CODE_BASE + 0xC00)
+    main._rows.append(_Instruction([op("BRANCHIND", [reg(RAX)])], "return"))
+    raw = main.to_json
+
+    def jump():
+        data = raw()
+        last = data["instructions"][-1]
+        last["flow_type"] = {key: key in ("is_flow", "is_jump", "is_computed", "is_unconditional")
+                             for key in last["flow_type"]}
+        return data
+
+    main.to_json = jump
+    return main
+
+
+def test_off_the_summary_does_not_export_a_restored_stack_pointer():
+    """Astra B6 r1 P1-2: the summary's exit crossings read the call shape's
+    stack pointer directly -- OFF must neither export it as delta 0 nor list it
+    preserved by the opaque call."""
+    sp = (0x20, 8)
+    (on,) = analyze_units(program_units(_sp_then_unknown_jump())).values()
+    (off,) = analyze_units(program_units(_sp_then_unknown_jump()),
+                           assume_opaque_callees_restore_stack_pointer=False).values()
+    assert dict(on.summary.register_deltas).get(sp) == 0
+    assert sp not in dict(off.summary.register_deltas), off.summary.register_deltas
+    assert all(not kept for _, kept, *_ in off.summary.inner_calls)
+
+
+def test_off_is_captured_for_replay(monkeypatch):
+    """Astra B6 r1 P1-3: the replay policy keeps the switch."""
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    (off,) = analyze_units(program_units(_opaque_caller()),
+                           assume_opaque_callees_restore_stack_pointer=False).values()
+    assert len(off.normalization_context) == 9 and off.normalization_context[-1] is False
+
+
+def test_off_switches_dependent_models_off(monkeypatch):
+    """Astra B6 r1 P1-4: the in-run model filter learns the switch."""
+    from tdo_v2 import assumptions
+
+    seen = []
+    original = assumptions.disabled
+
+    def spy(**kwargs):
+        seen.append(kwargs.get("opaque_restores_sp", True))
+        return original(**kwargs)
+
+    monkeypatch.setattr(assumptions, "disabled", spy)
+    analyze_units(program_units(_opaque_caller()), assume_opaque_callees_restore_stack_pointer=False)
+    assert seen and not any(seen)
+
+
+def test_a_failed_function_reports_the_runs_own_switch():
+    """Astra B6 r1 P2: an unresolved normalization has no recorded policy."""
+    from types import SimpleNamespace
+    from tdo_v2.summary_engine import run_assumptions
+
+    (on,) = analyze_units(program_units(_opaque_caller())).values()
+    failed = SimpleNamespace(normalized=SimpleNamespace(), unit=on.unit, proven={}, superseded=None,
+                             declared={}, inherited_assumptions=frozenset(), summary_inputs=((), (), ()))
+    assert "opaque-callees-restore-stack-pointer" not in run_assumptions({"f": failed}, opaque_restores_sp=False)
+
+
+def test_a_failed_function_keeps_the_switch_it_failed_under(monkeypatch):
+    """Astra B6 r2 P2: a report after the run (template source.assumptions)
+    must read the failure's own switch, not the reset ambient one."""
+    from tdo_v2.normalize import UnresolvedNormalizedFunction
+    from tdo_v2.summary_engine import run_assumptions
+
+    monkeypatch.setenv("TDO_V2_FUNCTION_WORK", "1")
+    results = analyze_units(program_units(_opaque_caller()), assume_opaque_callees_restore_stack_pointer=False)
+    (item,) = results.values()
+    assert type(item.normalized) is UnresolvedNormalizedFunction, item.normalized
+    assert item.normalized.assumes_opaque_callees_restore_stack_pointer is False
+    assert "opaque-callees-restore-stack-pointer" not in run_assumptions(results)

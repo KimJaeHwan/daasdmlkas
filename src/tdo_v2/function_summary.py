@@ -1404,6 +1404,11 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     preserved = preserved_stack_pointers(observation, context)
     for key in exemptions.unrestored:
         preserved.pop(key, None)  # the call shape's stack pointer is not restored
+    if not getattr(normalized, "assumes_opaque_callees_restore_stack_pointer", True):
+        # opaque-callees-restore-stack-pointer off (the normalization's policy):
+        # only a summarized callee proving the restoration keeps it
+        for key in [key for key in preserved if key not in exemptions.proven]:
+            preserved.pop(key)
     tails = set()
     for key, effect in normalized.proven_call_effects:
         if effect.tail_stack:

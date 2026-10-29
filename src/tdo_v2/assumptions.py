@@ -210,11 +210,13 @@ REGISTRY: tuple[Assumption, ...] = (
         "assume_registered_handlers_not_observed", "--no-assume-registered-handlers-not-observed",
         "TDO_V2_ASSUME_REGISTERED_HANDLERS_NOT_OBSERVED"),
     Assumption(
-        "opaque-callees-restore-stack-pointer", "reported", True,
+        "opaque-callees-restore-stack-pointer", "switch", True,
         "A call with the observed call shape whose callee is not summarized returns with the stack "
         "pointer restored (summarized callees are checked instead).",
         "Callees that pop their arguments (stdcall) or switch stacks.",
-        "observed_call_state, call_clobber"),
+        "call_clobber.clobber_inputs (the call-shape stack-pointer exemption of an unproven call)",
+        "assume_opaque_callees_restore_stack_pointer", "--no-assume-opaque-restores-sp",
+        "TDO_V2_ASSUME_OPAQUE_RESTORES_SP"),
     Assumption(
         "library-internal-model-cuts", "model", True,
         "Analyzing a library itself (own_library): a function with a model entry marked internal "
@@ -338,7 +340,7 @@ MODEL_SWITCHABLE = ("allocator-results-are-fresh", "no-use-after-free", "no-use-
 def disabled(*, globals_disjoint: bool, readonly_image: bool, direction_flag: bool, entry_values_not_frame: bool,
              home_space: bool, opaque_no_stack: bool, traps: bool, import_slots: bool, same_result: bool,
              accessor_separate: bool, accessor_private_state: bool, registered_handlers: bool,
-             model_assumptions_off=(), pre_escape: bool = True) -> set:
+             model_assumptions_off=(), pre_escape: bool = True, opaque_restores_sp: bool = True) -> set:
     """The assumption labels a run has switched off: a model entry resting on
     one is not applied (``interprocedural``, ``linking``)."""
     return {name for name, on in (
@@ -348,6 +350,7 @@ def disabled(*, globals_disjoint: bool, readonly_image: bool, direction_flag: bo
         ("entry-values-do-not-address-the-new-frame", entry_values_not_frame),
         ("win64-home-space-callee-private", home_space and entry_values_not_frame),
         ("opaque-callees-leave-no-stack-addresses", opaque_no_stack),
+        ("opaque-callees-restore-stack-pointer", opaque_restores_sp),
         ("pre-escape-values-do-not-address-the-new-frame", pre_escape and entry_values_not_frame),
         ("debug-break-traps-do-not-return", traps),
         ("import-slots-hold-their-exports", import_slots),

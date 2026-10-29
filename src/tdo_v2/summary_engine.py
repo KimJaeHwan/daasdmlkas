@@ -128,6 +128,7 @@ def analyze_frozen_bundle_with_summaries(
     assume_entry_values_not_frame: bool = True,
     assume_opaque_callees_leave_no_stack_addresses: bool = True,
     assume_pre_escape_values_not_frame: bool = True,
+    assume_opaque_callees_restore_stack_pointer: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
     physical_memory_records: bool = False,
@@ -204,6 +205,7 @@ def analyze_frozen_bundle_with_summaries(
             assume_entry_values_not_frame=assume_entry_values_not_frame,
             assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
             assume_pre_escape_values_not_frame=assume_pre_escape_values_not_frame,
+            assume_opaque_callees_restore_stack_pointer=assume_opaque_callees_restore_stack_pointer,
             origin_witnesses=origin_witnesses,
             operation_records=operation_records,
             physical_memory_records=physical_memory_records,
@@ -233,6 +235,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
     assume_entry_values_not_frame: bool = True,
     assume_opaque_callees_leave_no_stack_addresses: bool = True,
     assume_pre_escape_values_not_frame: bool = True,
+    assume_opaque_callees_restore_stack_pointer: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
     physical_memory_records: bool = False,
@@ -265,6 +268,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
         assume_entry_values_not_frame=assume_entry_values_not_frame,
         assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
         assume_pre_escape_values_not_frame=assume_pre_escape_values_not_frame,
+        assume_opaque_callees_restore_stack_pointer=assume_opaque_callees_restore_stack_pointer,
         origin_witnesses=origin_witnesses,
         operation_records=operation_records,
         physical_memory_records=physical_memory_records,
@@ -293,6 +297,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     assume_entry_values_not_frame: bool = True,
     assume_opaque_callees_leave_no_stack_addresses: bool = True,
     assume_pre_escape_values_not_frame: bool = True,
+    assume_opaque_callees_restore_stack_pointer: bool = True,
     origin_witnesses: bool = False,
     operation_records: bool = False,
     physical_memory_records: bool = False,
@@ -421,6 +426,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             import_slots=assume_import_slots_hold_exports, entry_values_not_frame=assume_entry_values_not_frame,
             opaque_no_stack=assume_opaque_callees_leave_no_stack_addresses,
             pre_escape=assume_pre_escape_values_not_frame,
+            opaque_restores_sp=assume_opaque_callees_restore_stack_pointer,
             same_result=assume_same_result_functions, accessor_separate=assume_accessor_result_separate,
             registered_handlers=assume_registered_handlers_not_observed,
             accessor_private_state=assume_accessor_private_state,
@@ -452,6 +458,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         assume_entry_values_not_frame=assume_entry_values_not_frame,
         assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
         assume_pre_escape_values_not_frame=assume_pre_escape_values_not_frame,
+        assume_opaque_callees_restore_stack_pointer=assume_opaque_callees_restore_stack_pointer,
         assume_same_result_functions=assume_same_result_functions,
         assume_accessor_result_separate=assume_accessor_result_separate,
         assume_accessor_private_state=assume_accessor_private_state,
@@ -461,7 +468,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         record_provenance=record_provenance,
     )
     assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,
-                                  traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models)
+                                  traps=assume_debug_break_traps_do_not_return, pcodeop_models=pcodeop_models,
+                                  opaque_restores_sp=assume_opaque_callees_restore_stack_pointer)
     preliminary = []
     failed: dict = {}   # function key -> (NormalizationFailureReason, detail)
     for key, item in by_key.items():
@@ -871,8 +879,15 @@ def _lane_origin_labels(analysis, unit, rows, label, occurrence, node_labels, in
     return found
 
 
-def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, pcodeop_models=None) -> tuple:
-    """Every assumption an ``analyze_units`` run rests on (``EngineRun.assumptions``)."""
+def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, pcodeop_models=None,
+                    opaque_restores_sp: bool | None = None) -> tuple:
+    """Every assumption an ``analyze_units`` run rests on (``EngineRun.assumptions``).
+    ``opaque_restores_sp``: the run's switch (default: the one in effect now) --
+    what a failed function, normalized under no recorded policy, ran under."""
+    if opaque_restores_sp is None:
+        from .call_clobber import OPAQUE_RESTORES_SP
+
+        opaque_restores_sp = OPAQUE_RESTORES_SP.get()
     # a round-1 result replaced by a later failure: its callers used its summary
     results = {**results, **{f"{key}~superseded": item.superseded for key, item in results.items()
                              if getattr(item, "superseded", None) is not None}}
@@ -887,6 +902,7 @@ def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, 
     if any(
         row.call_operation_key not in item.proven
         for item in results.values()
+        if getattr(item.normalized, "assumes_opaque_callees_restore_stack_pointer", opaque_restores_sp)
         for row in observed_call_state_projections(item.unit.observation)
     ):
         assumptions += ("opaque-callees-restore-stack-pointer",)
