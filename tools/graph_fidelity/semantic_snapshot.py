@@ -64,7 +64,7 @@ CONTRACT = {
         "activation_witness": "original caller/callee input pins; context graph and preserved spans remain encoded",
         "activation_inputs": "identity-based invalidation pins of the original inputs",
     }),
-    "FunctionSummary": (None, {}),
+    "FunctionSummary": (None, {"premise_uses": "2b-P use records (docs 25.91) -- reporting, checked by tests"}),
     "ProvenCallEffect": (None, {}),
     "RootSlice": (None, {}),
     "EngineRun": (None, {}),

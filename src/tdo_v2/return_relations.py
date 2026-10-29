@@ -86,7 +86,8 @@ _MECHANISMS = {("AARCH64", "LE", "64"): "link", ("x86", "LE", "64"): "push", ("x
 
 
 def function_certificate(normalized, observation, scopes, callee_certificates: dict,
-                         *, code_reader=None, pac_spec: str | None = None, summary=None) -> ContinuationCertificate:
+                         *, code_reader=None, pac_spec: str | None = None, summary=None,
+                         inherited=()) -> ContinuationCertificate:
     """``callee_certificates``: call / tail operation key -> the target's
     certificate (absent: an opaque or unresolved target -> UNKNOWN);
     ``code_reader(address, size)``: the image's bytes (AArch64's PAC scan);
@@ -107,6 +108,13 @@ def function_certificate(normalized, observation, scopes, callee_certificates: d
         # evidence is never read as another ISA's mechanism
         return ContinuationCertificate("unknown", False, (), ("no-isa-evidence",), tuple(dependencies), entry)
     dependencies.extend(_premises(normalized))
+    # the function's own summary decisions (the callers' effects rest on them;
+    # a caller inherits them through this certificate)
+    dependencies.extend(f"assumption:{name}" for name, _stage, _at in getattr(summary, "premise_uses", ()))
+    # the analysis' own inherited labels (models, call-target resolutions,
+    # activations, forward facts): a conservative function-level union until
+    # each is recorded at its decision (2b-P B3-B9)
+    dependencies.extend(f"inherited:{label}" for label in sorted(inherited))
     witness = _Witness(normalized, observation, scopes, sp, link)
     culprits: list[str] = []
     exits: list[ExitRecord] = []
@@ -341,7 +349,8 @@ def _exit_delta(normalized, observation, scopes, sp) -> tuple[int | None, str | 
 
 def program_certificates(functions: dict, *, code_reader=None, pac_spec=None) -> dict:
     """``functions``: key -> (normalized, observation, scopes, targets: call /
-    tail operation key -> callee key or None[, the function's summary]). Callees first; a call into an
+    tail operation key -> callee key or None[, the function's summary[, its
+    inherited assumption labels]]). Callees first; a call into an
     unfinished function (recursion) is UNKNOWN."""
     done: dict = {}
     active: set = set()
@@ -353,11 +362,13 @@ def program_certificates(functions: dict, *, code_reader=None, pac_spec=None) ->
             return UNKNOWN_CALLEE
         active.add(key)
         normalized, observation, scopes, targets, *rest = functions[key]
+        summary = rest[0] if rest else None
+        inherited = rest[1] if len(rest) > 1 else ()
         callees = {call: certify(target) for call, target in targets.items() if target is not None}
         active.discard(key)
         done[key] = function_certificate(normalized, observation, scopes, callees,
                                          code_reader=code_reader, pac_spec=pac_spec,
-                                         summary=rest[0] if rest else None)
+                                         summary=summary, inherited=inherited)
         return done[key]
 
     for key in functions:

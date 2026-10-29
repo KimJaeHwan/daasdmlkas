@@ -36,7 +36,8 @@ def _certs(*builders, words=None, pac=PAC_SPEC_12_0_4, readable=True, registers=
         for call, entry in (resolved or {}).items():
             if call in targets:
                 targets[call] = next(other for other in results if int(other.split(":")[1], 16) == entry)
-        functions[key] = (item.normalized, item.unit.observation, item.unit.scopes, targets, item.summary)
+        functions[key] = (item.normalized, item.unit.observation, item.unit.scopes, targets, item.summary,
+                          item.inherited_assumptions)
     words = dict(words or {})
 
     def reader(address, size):
@@ -491,3 +492,17 @@ def test_the_oracle_reads_an_external_tails_slot_after_the_external_ran(monkeypa
                               externals={(1, slot): "malloc"})
     with pytest.raises(Unsupported):
         interpreter.run()
+
+
+def test_inherited_labels_reach_the_certificate():
+    """2b-P: model / resolution / activation labels the analysis inherited are
+    a conservative function-level dependency of its certificate."""
+    from tdo_v2.interprocedural import analyze_units
+
+    results = analyze_units(program_units(_leaf(MAIN), registers=register_evidence(AARCH64)))
+    (key, item), = results.items()
+    functions = {key: (item.normalized, item.unit.observation, item.unit.scopes, {}, item.summary,
+                       frozenset({"forward:resolved-by-fact-1"}))}
+    certificate = program_certificates(functions, code_reader=lambda a, s: NOP.to_bytes(4, "little"),
+                                       pac_spec=PAC_SPEC_12_0_4)[key]
+    assert "inherited:forward:resolved-by-fact-1" in certificate.dependencies

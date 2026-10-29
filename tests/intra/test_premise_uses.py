@@ -85,3 +85,43 @@ def test_a_held_slot_above_entry_sp_records_the_home_space(engine, monkeypatch):
     with_home = _uses(main, private_frame_above=0x28)
     assert "win64-home-space-callee-private" in with_home, with_home
     assert "win64-home-space-callee-private" not in _uses(main, private_frame_above=0)
+
+
+def test_the_summary_records_its_own_globals_disjoint_exclusion():
+    """b2: the summary's exit crossings exclude a constant-address write from
+    the stack object under globals-disjoint -- a summary-stage use."""
+    from synthetic import RSP, sub as isub
+
+    main = (FunctionBuilder(entry=MAIN).sub_rsp(0x18)
+            .ins(store(reg(RSP), const(7, 8)), store(const(0x4000), const(1, 8))).add_rsp(0x18).ret())
+    (result,) = analyze_units(program_units(main), assume_globals_disjoint_from_stack=True).values()
+    assert ("globals-disjoint-from-stack", "summary") in {(n, s) for n, s, _ in result.summary.premise_uses}
+    (plain,) = analyze_units(program_units(main), assume_globals_disjoint_from_stack=False).values()
+    assert not plain.summary.premise_uses
+
+
+@pytest.mark.parametrize("forward", ["0", "1"])
+def test_a_caller_side_discharge_under_globals_disjoint_is_recorded(forward, monkeypatch):
+    """b2: the callee writes [rcx] then reads a global -- its result holds
+    while that write misses the global (a writer condition); the caller passes
+    a stack address and discharges it only under globals-disjoint. With forward
+    facts the condition is settled before any caller discharge: the assumption
+    is then recorded at the normalization instead -- recorded either way."""
+    monkeypatch.setenv("TDO_V2_FORWARD", forward)
+    from synthetic import CODE_BASE, DATA_BASE, RCX, RSP, add
+
+    leaf = (FunctionBuilder(entry=CODE_BASE + 0x800)
+            .ins(store(reg(RCX), const(1, 8))).ins(load(reg(RAX), const(DATA_BASE + 0x20))).ret())
+    caller = (FunctionBuilder(entry=MAIN).sub_rsp(0x28)
+              .ins(add(reg(RCX), reg(RSP), const(8))).call(CODE_BASE + 0x800).add_rsp(0x28).ret())
+
+    def uses(flag):
+        results = analyze_units(program_units(caller, leaf), assume_globals_disjoint_from_stack=flag)
+        (main,) = [item for key, item in results.items() if key.endswith(f"{MAIN:x}")]
+        return {(name, stage) for name, stage, _ in main.normalized.premise_uses}
+
+    on, off = uses(True), uses(False)
+    if forward == "0":
+        assert ("globals-disjoint-from-stack", "condition-discharge") in on, on
+    assert any(name == "globals-disjoint-from-stack" for name, _ in on), on
+    assert not any(name == "globals-disjoint-from-stack" for name, _ in off), off

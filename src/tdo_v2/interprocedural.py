@@ -929,6 +929,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 constants = {call: dict(rows) for call, rows in old_constants}
                 rejected = set(old_rejected)
                 opened = {call: dict(rows) for call, rows in old_opened}
+            discharge_uses: list = []
             while True:
                 proven = derive(failed)
                 normalization_options = dict(
@@ -944,7 +945,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     _load_identity_plan=load_identity)
                 if type(normalized) is not NormalizedFunction:
                     break
-                verdicts = _decide_conditions(unit, normalized, shapes, [
+                verdicts = _decide_conditions(unit, normalized, shapes, uses=discharge_uses, pending=[
                     (call, f"cr{index}", run.conditions)
                     for call, effect in proven.items()
                     for index, run in enumerate((*effect.runs, *effect.memory_runs)) if run.conditions
@@ -978,7 +979,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 for node, labels in (extra_origins(key, unit, normalized, calls[key]) if extra_origins else {}).items():
                     origins.setdefault(node, set()).update(labels)
                 roots = list(sink_roots(key, unit, normalized)) if sink_roots else []
-                decided = _decide_conditions(unit, normalized, shapes, [
+                decided = _decide_conditions(unit, normalized, shapes, uses=discharge_uses, pending=[
                     (call, f"ck{index}", demand.conditions)
                     for call, effect in normalized.proven_call_effects
                     for index, demand in enumerate(effect.sink_demands) if demand.conditions
@@ -1004,6 +1005,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 ({"debug-break-traps-do-not-return"} if traps else set())
                 | {entry.label for _, entry in jumps.values()}
                 | {label for _, entry in jumps.values() for label in entry.inherited}))
+            if type(normalized) is NormalizedFunction and (discharge_uses or summary_requires):
+                # 2b-P uses decided outside the normalization: caller-side
+                # condition discharges, the summary's trap / modeled-jump cuts
+                normalized = replace(normalized, premise_uses=tuple(sorted(
+                    set(normalized.premise_uses) | set(discharge_uses)
+                    | {(label, "cut", key) for label in summary_requires})))
             summary = (
                 summarize_function(normalized, observation, origins, roots,
                                    dead_ops, noreturn_jumps=dead_jumps)
@@ -2028,7 +2035,7 @@ def _callee_first_components(calls: dict[str, dict[str, str]]) -> list[set[str]]
     return order
 
 
-def _decide_conditions(unit, normalized, shapes, pending) -> dict:
+def _decide_conditions(unit, normalized, shapes, pending, uses: list | None = None) -> dict:
     """``pending``: (call, row tag, alias conditions) -- the anchored (read,
     write) pairs of a summarized run (``cr<i>``) or projected sink root
     (``ck<k>``). Returns (call, tag) -> one verdict per pair: "ok" (disjoint),
@@ -2101,6 +2108,8 @@ def _decide_conditions(unit, normalized, shapes, pending) -> dict:
             elif stack is not None and StorageObjectKind.ADDRESS_SPACE in (left.object_id.kind, right.object_id.kind) \
                     and stack in (left.object_id, right.object_id):
                 rows.append("ok")  # ASSUMPTION globals-disjoint-from-stack
+                if uses is not None:   # (2b-P: a discharge decided under it)
+                    uses.append(("globals-disjoint-from-stack", "condition-discharge", f"{call}~{tag}"))
             else:
                 rows.append((left, right))
         result[(call, tag)] = rows

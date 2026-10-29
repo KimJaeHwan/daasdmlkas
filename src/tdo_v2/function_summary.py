@@ -46,7 +46,7 @@ from .resource_limits import limit
 
 from .resource_limits import step
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from ._sparse_dataflow import DominatorGraph
@@ -165,6 +165,9 @@ class FunctionSummary:
     # Original-CFG register-only proofs independent of writer conditions.
     # These are not inferred from the conditional register_deltas above.
     independent_delta_proofs: tuple = ()
+    # 2b-P use records (docs 25.91): (named assumption, "summary", where) for
+    # decisions this summary's extraction took under it -- reporting
+    premise_uses: tuple = field(default=(), compare=False)
 
 
 @measured("summarize")
@@ -231,6 +234,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         compare_terminals(normalized.memory_ssa.function_scope, crossed, dead_keys)
     inner_calls = crossed.pop("inner_calls", ())
     crossing_labels = crossed.pop("label_universe")
+    summary_uses = crossed.pop("premise_uses", set())
 
     exits = []
     nodes = ssa.state_nodes
@@ -318,7 +322,16 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         stack_values_out(normalized, observation),
         indexed_relations(normalized, observation, conditions_of),
         independent_delta_proofs,
+        premise_uses=_summary_uses(normalized, summary_uses),
     )
+
+
+def _summary_uses(normalized, names) -> tuple:
+    """(name, "summary", the function) for each named assumption the summary's
+    own decisions used (2b-P)."""
+    entry = normalized.scopes.function.entry
+    here = f"{entry.space_id:x}:{entry.byte_offset:x}"
+    return tuple(sorted((name, "summary", here) for name in names))
 
 
 def _register_deltas(normalized, observation, exits) -> tuple:
@@ -1446,16 +1459,20 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     private = getattr(normalized, "private_frame_writes", frozenset())
     wild = getattr(normalized, "wild_objects", frozenset())
 
+    used: set = set()
+
     def may_alias(left, right) -> bool:
         if left == right:
             return False
         if stack is not None and {left.kind, right.kind} == {StorageObjectKind.ADDRESS_SPACE,
                                                                StorageObjectKind.FUNCTION_RELATIVE}                 and stack in (left, right):
+            used.add("globals-disjoint-from-stack")
             return False
         return not (left.kind is StorageObjectKind.ADDRESS_SPACE
                     and right.kind is StorageObjectKind.ADDRESS_SPACE)
 
     result: dict = {
+        "premise_uses": used,   # (filled by the decisions below)
         "label_universe": crossing_labels,
         "unknown_writers": unknown_writers,
         "inner_calls": tuple(sorted(
