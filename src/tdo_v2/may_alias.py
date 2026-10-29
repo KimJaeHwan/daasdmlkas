@@ -221,6 +221,10 @@ class _Policy:
         # only because they are not used the assumption (``opaque_used``)
         self.escape_without_opaque = escape_without_opaque if stack_object is not None else None
         self.opaque_used = False
+        # globals-disjoint-from-stack excluded an alias pair; a byte above the
+        # entry stack pointer (win64-home-space-callee-private) decided private
+        self.globals_used = False
+        self.home_used = False
         # accessor-result-separate (docs 25.20 D): (result object, start, end,
         # slot span, the slot's call) -- ``excluded``; ``ran(call, writer)``:
         # the call has run whenever the writer does
@@ -254,6 +258,8 @@ class _Policy:
         private = self.escape.private_write(key) if write else self.escape.private_read(key)
         if private:
             self.private_used = True
+            if offset >= self.bias:
+                self.home_used = True
             other = self.escape_without_opaque
             if other is not None and not (other.private_write(key) if write else other.private_read(key)):
                 self.opaque_used = True
@@ -278,6 +284,8 @@ class _Policy:
         if not self.escape.private_before(writer):
             return None
         self.private_used = True
+        if any(offset >= self.bias for offset in range(span.start, span.end)):
+            self.home_used = True
         other = self.escape_without_opaque
         if other is not None and not other.private_before(writer):
             self.opaque_used = True
@@ -295,6 +303,7 @@ class _Policy:
             (left.kind is StorageObjectKind.ADDRESS_SPACE and right == self.stack_object)
             or (right.kind is StorageObjectKind.ADDRESS_SPACE and left == self.stack_object)
         ):
+            self.globals_used = True
             return False  # ASSUMPTION: a constant address is never a stack address
         return True
 
@@ -327,6 +336,7 @@ def derive_may_alias_reads(
     pre_uses: list | None = None,
     boundary_calls: frozenset = frozenset(),
     guarded_windows: dict | None = None,
+    premise_uses: list | None = None,
 ) -> tuple[MayAliasRead, ...]:
     """Return memory reads that a write through another base may have overwritten.
 
@@ -446,7 +456,18 @@ def derive_may_alias_reads(
         uses.append(policy.private_used)
     if opaque_uses is not None:
         opaque_uses.append(policy.opaque_used)
+    _policy_uses(policy, premise_uses)
     return rows
+
+
+def _policy_uses(policy, premise_uses) -> None:
+    """The named assumptions this policy's decisions used (2b-P use records)."""
+    if premise_uses is None:
+        return
+    if policy.globals_used:
+        premise_uses.append("globals-disjoint-from-stack")
+    if policy.home_used:
+        premise_uses.append("win64-home-space-callee-private")
 
 
 def _bounded_nonstack_objects(unit, candidates, windows, guarded=None) -> frozenset:
@@ -516,7 +537,7 @@ def private_frame_writes(
     observed_calls=None, private_above=0, uses: list | None = None, escaping_calls=frozenset(),
     opaque_calls=frozenset(), opaque_uses: list | None = None, escape_memo: "EscapeMemo | None" = None,
     boundary_calls=frozenset(), uncertain_writers=frozenset(), wild_objects=frozenset(),
-    assume_globals_disjoint_from_stack: bool = False,
+    assume_globals_disjoint_from_stack: bool = False, premise_uses: list | None = None,
 ) -> frozenset:
     """(write operation key, object) pairs whose written bytes are all private
     frame bytes at the write (``_Policy.is_private``): such a write reaches
@@ -543,6 +564,7 @@ def private_frame_writes(
         uses.append(policy.private_used)
     if opaque_uses is not None:
         opaque_uses.append(policy.opaque_used)
+    _policy_uses(policy, premise_uses)
     return frozenset(found)
 
 
@@ -770,24 +792,28 @@ def _stack_policy(unit, observation, context, address_spaces, assumed_calls=froz
                frozenset(boundary_calls), frozenset(uncertain), frozenset(wild), private_above, bool(globals_disjoint))
         cached = memo.found.get(key)
         if cached is not None:
-            found, escape, without, pops = cached
+            found, escape, without, pops, held_uses = cached
             for _ in range(pops):
                 step()
-            return _policy_of(found, escape, without, globals_disjoint, private_above)
-    found, escape, without, pops = _stack_escapes(unit, observation, context, address_spaces, assumed_calls,
-                                                  observed_calls, escaping_calls, opaque_calls,
-                                                  held=(boundary_calls, uncertain, wild, private_above,
-                                                        globals_disjoint))
+            return _policy_of(found, escape, without, globals_disjoint, private_above, held_uses)
+    found, escape, without, pops, held_uses = _stack_escapes(
+        unit, observation, context, address_spaces, assumed_calls, observed_calls, escaping_calls, opaque_calls,
+        held=(boundary_calls, uncertain, wild, private_above, globals_disjoint))
     if key is not None:
-        memo.found[key] = (found, escape, without, pops)
-    return _policy_of(found, escape, without, globals_disjoint, private_above)
+        memo.found[key] = (found, escape, without, pops, held_uses)
+    return _policy_of(found, escape, without, globals_disjoint, private_above, held_uses)
 
 
-def _policy_of(found, escape, without, globals_disjoint, private_above) -> _Policy:
+def _policy_of(found, escape, without, globals_disjoint, private_above, held_uses=frozenset()) -> _Policy:
     if found is None:
         return _Policy(None, 0)
     stack_object, bias, _, _, _ = found
-    return _Policy(stack_object, bias, escape, globals_disjoint, private_above, without)
+    policy = _Policy(stack_object, bias, escape, globals_disjoint, private_above, without)
+    # the escapes themselves rest on the held-slot decisions (docs 25.78): what
+    # those used is used by every decision of this policy (2b-P, Astra r1)
+    policy.home_used = "home" in held_uses
+    policy.globals_used = "globals" in held_uses
+    return policy
 
 
 def _stack_escapes(unit, observation, context, address_spaces, assumed_calls, observed_calls, escaping_calls,
@@ -799,11 +825,11 @@ def _stack_escapes(unit, observation, context, address_spaces, assumed_calls, ob
     None: every store of a stack-derived value is an escape (as before)."""
     found = _stack_pointer(unit, observation, context, address_spaces)
     if found is None:
-        return None, None, None, 0
+        return None, None, None, 0, frozenset()
     _, _, register_space, offset, size = found
     if not ENTRY_VALUES_NOT_FRAME.get():
         # entry-values-do-not-address-the-new-frame off: no private bytes
-        return found, None, None, 0
+        return found, None, None, 0, frozenset()
     opaque = frozenset(opaque_calls) - frozenset(escaping_calls)
     if not OPAQUE_NO_STACK_ADDRESSES.get():
         # opaque-callees-leave-no-stack-addresses off: each opaque call escapes
@@ -825,7 +851,7 @@ def _stack_escapes(unit, observation, context, address_spaces, assumed_calls, ob
     escape = escape_of(escaping_calls)
     # (with the assumption on: the escapes it removes, for per-use reporting)
     without = escape_of(frozenset(escaping_calls) | opaque) if opaque else None
-    return found, escape, without, pops[0]
+    return found, escape, without, pops[0], (frame[3] if frame is not None and frame[0] else frozenset())
 
 
 def _held_inputs(unit, found, boundary_calls, uncertain, wild, private_above, globals_disjoint, pops) -> tuple:
@@ -843,6 +869,7 @@ def _held_inputs(unit, found, boundary_calls, uncertain, wild, private_above, gl
     rep = {effect.operation_key.split("~", 1)[0] for block in unit.blocks for effect in block.effects
            if effect.operation_key.partition("~")[2][:1] == "e"}
     stores, loads = {}, {}
+    globals_safe = False
     for block in unit.blocks:
         for effect in block.effects:
             step()
@@ -865,7 +892,17 @@ def _held_inputs(unit, found, boundary_calls, uncertain, wild, private_above, gl
                     for span in spans)
                 loads[key] = "unsafe" if unsafe else ("stack", frozenset(
                     offset for span in spans if span.object_id == stack_object for offset in range(span.start, span.end)))
-    return stores, loads, frozenset(boundary_calls)
+                if not unsafe and any(span.object_id.kind is StorageObjectKind.ADDRESS_SPACE for span in spans):
+                    globals_safe = True
+    # what the held slots rest on (2b-P): a held store above the entry stack
+    # pointer (win64-home-space-callee-private); a constant-address load judged
+    # unable to reach a held slot (globals-disjoint-from-stack)
+    uses = set()
+    if any(offset >= bias for offsets in stores.values() for offset in offsets):
+        uses.add("home")
+    if globals_safe:
+        uses.add("globals")
+    return stores, loads, frozenset(boundary_calls), frozenset(uses)
 
 
 def _stack_pointer(unit, observation, context, address_spaces):
@@ -1021,7 +1058,7 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
         if space == register_space:
             register_mask |= 1 << bit
     observed_masks: dict = {}
-    stores, loads, boundary = frame if frame is not None else ({}, {}, frozenset())
+    stores, loads, boundary = frame[:3] if frame is not None else ({}, {}, frozenset())
     held_bit: dict = {}   # private frame offset -> its bit in the held mask
 
     def held_mask(offsets) -> int:

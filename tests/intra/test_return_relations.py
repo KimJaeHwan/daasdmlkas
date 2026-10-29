@@ -418,8 +418,8 @@ def test_missing_link_evidence_is_never_read_as_a_push_mechanism():
 def test_a_named_assumption_the_normalization_used_is_a_dependency():
     main = FunctionBuilder(entry=MAIN).ins(store(const(0x4000), const(1, 8))).ret()
     with_assumption = _of(_certs(main, assume_globals_disjoint_from_stack=True))
-    assert "assumption:assumes_globals_disjoint_from_stack" in with_assumption.dependencies
-    assert "assumption:assumes_globals_disjoint_from_stack" not in _of(_certs(main)).dependencies
+    assert "assumption:globals-disjoint-from-stack" in with_assumption.dependencies
+    assert "assumption:globals-disjoint-from-stack" not in _of(_certs(main)).dependencies
 
 
 def test_a_return_exit_carries_the_premises_it_rests_on():
@@ -427,8 +427,18 @@ def test_a_return_exit_carries_the_premises_it_rests_on():
     main = FunctionBuilder(entry=MAIN).ins(store(const(0x4000), const(1, 8))).ret()
     certificate = _of(_certs(main, assume_globals_disjoint_from_stack=True))
     (row,) = certificate.exits
-    assert row.proven and "assumption:assumes_globals_disjoint_from_stack" in row.dependencies
+    assert row.proven and "assumption:globals-disjoint-from-stack" in row.dependencies
     assert set(row.dependencies) == set(certificate.dependencies)
+
+
+def test_a_run_synthesized_home_space_premise_reaches_the_certificate():
+    """Astra 2b-P r1: `store [entry RAX], 1; ret` is PROVEN only with the home
+    space private -- the certificate lists that premise (and not without it)."""
+    main = FunctionBuilder(entry=MAIN).ins(store(reg(RAX), const(1, 8))).ret()
+    with_home = _of(_certs(main, private_frame_above=0x28))
+    assert with_home.status == "proven", with_home
+    assert "assumption:win64-home-space-callee-private" in with_home.dependencies
+    assert "assumption:win64-home-space-callee-private" not in _of(_certs(main, private_frame_above=0)).dependencies
 
 
 def test_a_tail_inherits_its_targets_dependencies():

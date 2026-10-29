@@ -282,16 +282,37 @@ def _transfer_gaps(instruction, keys, observed, tail) -> list[str]:
     return gaps
 
 
+# the normalization's policy switches by their registry names (docs 25.91)
+_POLICY_FIELDS = {
+    "assumes_globals_disjoint_from_stack": "globals-disjoint-from-stack",
+    "assumes_readonly_image_constant": "readonly-image-data-is-constant",
+    "assumes_import_slots_hold_exports": "import-slots-hold-their-exports",
+    "assumes_entry_values_not_frame": "entry-values-do-not-address-the-new-frame",
+    "assumes_opaque_callees_leave_no_stack_addresses": "opaque-callees-leave-no-stack-addresses",
+    "assumes_pre_escape_values_not_frame": "pre-escape-values-do-not-address-the-new-frame",
+    "assumed_direction_flag_clear": "direction-flag-clear",
+}
+
+
 def _premises(normalized) -> list[str]:
-    """What this normalization rests on: its named assumptions in force and
-    every call effect it was given (summaries, models), plus the forward
-    proofs it required -- a withdrawal of any invalidates the certificate."""
+    """What this normalization rests on: every policy switch in force (a
+    superset until every producer records its uses), every recorded use
+    (2b-P: incl. run-synthesized ones such as the win64 home space), every
+    assumed / proven call effect, every forward proof it required -- a
+    withdrawal of any invalidates the certificate. An assumption field this
+    table does not know is kept under its field name (never dropped)."""
     import dataclasses
 
     found = []
     for field in dataclasses.fields(normalized):
-        if field.name.startswith(("assumes_", "assumed_")) and getattr(normalized, field.name):
-            found.append(f"assumption:{field.name}")
+        if not field.name.startswith(("assumes_", "assumed_")) or field.name == "assumed_call_effects":
+            continue
+        if getattr(normalized, field.name):
+            found.append(f"assumption:{_POLICY_FIELDS.get(field.name, field.name)}")
+    for name, _stage, _at in getattr(normalized, "premise_uses", ()):
+        found.append(f"assumption:{name}")
+    for key, effect in getattr(normalized, "assumed_call_effects", ()):
+        found.append(f"assumed-effect:{key}:{effect.label}")
     for key, effect in getattr(normalized, "proven_call_effects", ()):
         found.append(f"effect:{key}:{effect.callee}")
     for item in getattr(normalized, "forward_memory_requires", ()):

@@ -192,6 +192,10 @@ class NormalizedFunction:
     # named assumption direction-flag-clear was used (a rep site whose DF is
     # the function's entry value)
     assumed_direction_flag_clear: bool = False
+    # 2b-P use records (docs 25.91): (named assumption, stage, where) for every
+    # decision this normalization took under it -- the assumes_* fields stay the
+    # policy inputs; these say which were actually used (a superset per function)
+    premise_uses: tuple = field(default=(), compare=False)
     # may-alias facts the function summary reuses: (write key, object) pairs
     # writing private frame bytes only, and the wild objects (``may_alias``)
     private_frame_writes: frozenset = frozenset()
@@ -1471,6 +1475,46 @@ class UnresolvedNormalizedFunction:
             raise TypeError("normalization failure reason must be exact")
 
 
+
+class _RecordingImage:
+    """The run's read-only image, noting each value this normalization read
+    from it (readonly-image-data-is-constant used); everything else delegates."""
+
+    def __init__(self, inner, uses: list) -> None:
+        self._inner = inner
+        self._uses = uses
+
+    def value(self, space_id: int, offset: int, size: int):
+        found = self._inner.value(space_id, offset, size)
+        if found is not None:
+            self._uses.append(f"{space_id:x}:{offset:x}")
+        return found
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _premise_uses(unit, policy_uses, frame_uses, opaque_uses, pre_uses, image_uses, direction, import_slots) -> tuple:
+    """(assumption name, "normalize", where) for every named assumption this
+    normalization decided under (2b-P A; function-level where no finer
+    location is recorded)."""
+    entry = unit.scopes.function.entry
+    here = f"{entry.space_id:x}:{entry.byte_offset:x}"
+    found = {(name, "normalize", here) for name in policy_uses}
+    if any(frame_uses):
+        found.add(("entry-values-do-not-address-the-new-frame", "normalize", here))
+    if any(opaque_uses):
+        found.add(("opaque-callees-leave-no-stack-addresses", "normalize", here))
+    for key in frozenset().union(*pre_uses):
+        found.add(("pre-escape-values-do-not-address-the-new-frame", "normalize", key))
+    for at in image_uses:
+        found.add(("readonly-image-data-is-constant", "normalize", at))
+    if direction:
+        found.add(("direction-flag-clear", "normalize", here))
+    if import_slots:
+        found.add(("import-slots-hold-their-exports", "normalize", here))
+    return tuple(sorted(found))
+
 class FunctionNormalizer:
     def normalize(
         self,
@@ -1678,6 +1722,9 @@ class _ScopedNormalizer:
         observation = unit.observation
         if observation is None:
             raise AssertionError("scoped normalization requires an admitted observation")
+        image_uses: list = []
+        if readonly_image is not None:
+            readonly_image = _RecordingImage(readonly_image, image_uses)
         from .intrinsic_refinements import refinements_for
         intrinsic_refinements = refinements_for(unit)
         intrinsic_calls = frozenset(intrinsic_refinements)
@@ -2094,6 +2141,7 @@ class _ScopedNormalizer:
         frame_uses: list = []
         opaque_uses: list = []
         pre_uses: list = []
+        policy_uses: list = []
         # null tests of the allocations whose windows need one (docs 25.79): on
         # this pass's final unit
         if guarded_windows:
@@ -2167,6 +2215,7 @@ class _ScopedNormalizer:
                 read_separations=_forward_memory_plan,
                 pre_escape_objects=pre_escape_objects, pre_uses=pre_uses,
                 boundary_calls=frozenset(assumed_call_effects), guarded_windows=guarded_accesses,
+                premise_uses=policy_uses,
             )
             dependencies = base.copy()
             phase_count("fixpoint_rounds", 1)   # (K2 sizes: a graph copy per round, docs 25.31)
@@ -2197,6 +2246,7 @@ class _ScopedNormalizer:
             escape_memo=escape_memo, boundary_calls=frozenset(assumed_call_effects),
             uncertain_writers=frozenset(_uncertain), wild_objects=frozenset(wild_objects),
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
+            premise_uses=policy_uses,
         )
         if any(set(rows) & set(_uncertain) for _, rows in kept_memory.values()):
             # a kept run's write turned out uncertain-address: its place may be
@@ -2347,6 +2397,8 @@ class _ScopedNormalizer:
             operation_overrides=tuple(sorted(_rep_overrides(sites, rep_plan, observation).items())),
             intrinsic_refinements=tuple(sorted(intrinsic_refinements.items())),
             assumed_direction_flag_clear=direction_assumed,
+            premise_uses=_premise_uses(unit, policy_uses, frame_uses, opaque_uses, pre_uses, image_uses,
+                                       direction_assumed, _import_slots_used(memory_ssa)),
             private_frame_writes=private_writes,
             wild_objects=frozenset(wild_objects),
             nonstack_spans=frozenset(nonstack_spans),

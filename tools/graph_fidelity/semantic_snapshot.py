@@ -49,7 +49,9 @@ CONTRACT = {
                                   "scopes": "input (scope bundle)",
                                   "forward_inputs": "forward-on derivation inputs (docs 25.33 F4a); None when off",
                                   "call_clobber_contract": "inputs of the call-clobber rows (docs 25.84); the rows,"
-                                                           " debts and roots they decide remain encoded"}),
+                                                           " debts and roots they decide remain encoded",
+                                  "premise_uses": "2b-P use records (docs 25.91): which named assumptions the"
+                                                  " encoded decisions used -- reporting, checked by tests"}),
     "UnresolvedNormalizedFunction": (None, {"scopes": "input (scope bundle)"}),
     "AnalyzedFunction": (None, {
         "unit": "input (the scoped unit)",

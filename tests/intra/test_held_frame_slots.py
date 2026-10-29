@@ -164,7 +164,7 @@ def test_a_reload_of_a_held_slot_is_a_tainted_load(tmp_path, monkeypatch):
     analyzed = _analyze(tmp_path, builder)
     reload = _key(builder, 2, 1, "LOAD")
     inputs = analyzed.normalized.forward_inputs
-    _, escape, _, _ = _stack_escapes(
+    _, escape, _, _, _ = _stack_escapes(
         inputs.effect_unit, inputs.observation, inputs.context, inputs.address_spaces, inputs.quiet_calls,
         dict(inputs.observed_calls), inputs.escaping_calls, inputs.opaque_calls,
         held=(inputs.assumed_calls, frozenset(), inputs.wild_objects, inputs.private_frame_above,

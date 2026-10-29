@@ -6160,3 +6160,18 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
 - `ExitRecord.sp_delta` = 그 독립 증명의 delta(요약의 AFFINE 상수가 아님); 증명 digest가 인증서 의존에 들어감.
   범위: "정상 출구에 닿으면" -- 이어짐 판정은 sp_delta를 읽지 않음(증명이 거부해도 PROVEN은 그대로).
 - 의미 29(ARM64 요약이 바뀜), 파생 UE 모델 재도출.
+
+### 25.91 전제 장부 -- Stage 2b-P (부분 a, b1; 2026-10-29 밤)
+
+설계 `.census6/design_premise_2bp_r1.md` .. `_r3.md`(Astra r3 승인). 기존 추론은 그대로(스냅샷 동일), 기록만 더한다.
+- a. `premises.py`: 증거(그래프·spec·엔진 버전 -- 철회 대상 아님) / 전제(`PremiseRef(kind, id, digest)`: model 행, 가정 --
+  registry 행 + 의미 버전 또는 모델 파일 선언 + 소유 파일 digest, hypothesis -- 요약 풀이 내부 전용, link -- 데이터 주장
+  전용) / 의무(남은 빚). `Support`(주장 종류별 허용 전제, established = 의무 없음 + 허용된 전제만), 모르는 라벨은 거부
+  (`UnknownPremise`), SCC 단위 한 번에 모으는 provenance closure(= 도달 가능한 것의 합집합).
+- b1. 사용 기록: `NormalizedFunction.premise_uses` = (가정 이름, 단계, 위치). 정책 스위치(`assumes_*`)는 입력 그대로 두고,
+  결정이 실제로 기댄 곳만 기록 -- 별칭 정책의 globals-disjoint 배제, home space(진입 SP 위) private 판정, 진입값/opaque
+  callee/pre-escape 규칙, 읽기 전용 이미지에서 실제로 읽은 값(읽은 주소), direction flag, import slot.
+- 이어짐 인증서의 의존: 켜진 정책(레지스트리 이름, 모든 생산자가 기록할 때까지의 상위집합) + 사용 기록(예: 실행 단위로
+  합성되던 win64-home-space가 이제 인증서에 나타남) + 가정된/증명된 호출 효과 + forward 요구.
+- 남은 것(b2..): 요약 단계(_exit_crossings), 호출자 조건 해소, 대상 해석, 요약 컷, 접근자 / 할당 정제, 모델 확장 /
+  컷 -- 각 결정 지점의 사용 기록; 철회 = 재계산 검증.
