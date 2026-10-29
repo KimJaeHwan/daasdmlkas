@@ -256,6 +256,29 @@ class FunctionBuilder:
         width = self.arch.pointer
         return op("INT_ADD", [const(self._address(index), width), const(4, width)], reg(self.arch.link, width))
 
+    def stp_pre(self, first: int, second: int, offset: int) -> "FunctionBuilder":
+        """AArch64 ``stp first, second, [sp, #offset]!`` as Ghidra 12.0.4 lifts
+        it (an exported Bundle's p-code): copy both, write back sp, store
+        first at [sp], second at [sp + 8]."""
+        if self.arch.link is None:
+            raise ValueError("stp is AArch64")
+        sp, word = self._sp(), self.arch.pointer
+        a, b, address = tmp(0x73F00), tmp(0x74000), tmp(0x74100)
+        return self.ins(copy(a, reg(first, word)), copy(b, reg(second, word)),
+                        add(sp, sp, const(offset & ((1 << 64) - 1), word)), store(sp, a),
+                        add(address, sp, const(word, word)), store(address, b))
+
+    def ldp_post(self, first: int, second: int, offset: int) -> "FunctionBuilder":
+        """AArch64 ``ldp first, second, [sp], #offset`` as Ghidra lifts it: keep
+        the old sp, write back sp, load [old] and [old + 8], then copy."""
+        if self.arch.link is None:
+            raise ValueError("ldp is AArch64")
+        sp, word = self._sp(), self.arch.pointer
+        old, a, address, b = tmp(0xF100), tmp(0x48400), tmp(0x48500), tmp(0x48700)
+        return self.ins(copy(old, sp), add(sp, sp, const(offset, word)), load(a, old),
+                        add(address, old, const(word, word)), load(b, address),
+                        copy(reg(first, word), a), copy(reg(second, word), b))
+
     def tail_call(self, target: int) -> "FunctionBuilder":
         """x86-64 tail call ``jmp target``: a BRANCH Ghidra flags as a call."""
         self._rows.append(_Instruction([op("BRANCH", [ram(target, self.arch.pointer)])], "tail",
@@ -570,7 +593,7 @@ def register_evidence(arch: "Arch") -> dict:
                 ("EBP", EBP, 4), ("ESI", ESI, 4), ("EDI", EDI, 4), ("EIP", EIP, 4), ("SP", ESP, 2)]
     else:
         rows = [(name, offset, 8) for offset, name in REGISTER_NAMES.items() if offset < 0x200]
-        rows += [("ESP", RSP, 4), ("EAX", RAX, 4)]
+        rows += [("ESP", RSP, 4), ("EAX", RAX, 4), ("RIP", RIP, 8)]
     rows.sort(key=lambda row: (REG, row[1], row[2], row[0]))
     return {"revision": 1, "registers": [
         {"name": name, "space_id": REG, "byte_offset": offset, "byte_size": size} for name, offset, size in rows]}

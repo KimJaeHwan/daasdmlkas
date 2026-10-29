@@ -1081,6 +1081,8 @@ def _projection_sensitive(observation) -> bool:
 
     instructions = {(row.address.space_id, row.address.byte_offset): row for row in observation.instructions}
     for projection in observed_call_state_projections(observation):
+        if len(projection.transient_operation_keys) != 2:
+            return True   # (a push projection has exactly its adjust and store; anything else binds nothing)
         space, address, call = projection.call_operation_key.split(":")[:3]
         adjust, store = (int(key.split(":")[2]) for key in projection.transient_operation_keys)
         instruction = instructions[(int(space, 16), int(address, 16))]

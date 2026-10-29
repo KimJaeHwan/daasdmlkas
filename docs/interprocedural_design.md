@@ -6080,3 +6080,21 @@ below-bound 면제를 잃은 summary 2개.
   식별일 뿐: 복원, 이어짐, 소유, 프레임 제외, 보존 레지스터는 여기서 나오지 않는다(분석은 아직 이 사실을 쓰지 않는다
   -- Stage 2/3이 자기 전제와 함께 쓴다).
 - 재수출 확인: ue-cpp-P0/P1-aarch64 633행(sp 0x8), P0-x64 1439행(RSP 0x20), P0-x86 1379행(ESP 0x10) admission 통과.
+
+### 25.87 CallRelation -- 호출 명령이 스스로 증명하는 것 (ARM64 Stage 2a, 2026-10-29)
+
+설계 `.census6/design_arm64_s2_r5.md`(Astra r5: 2a 승인). `call_relations.call_relations(observation, scopes)`는 호출 명령의
+p-code만 보고 관계를 만든다: 이어짐 값(= fallthrough)을 어디에 쓰는지(link), 호출 대상 진입 전 SP 변화(`delta`), 그 설정
+연산의 순서(`setup_ops`, 대상의 진입 상태 = 호출 op 직전 `entry_ordinal`), 재배치 근거(`relocation`: ISA의 다음 명령 주소로
+계산된 값이면 "instruction-relative", 상수 복사면 "unknown"). 대상 함수에 대해서는 아무것도 말하지 않는다(돌아오는지,
+SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
+- push(x86): 기존 투영을 감싼다 -- 단 내보낸 레지스터 증거의 스택 레지스터일 때만(조정 연산의 출력이 그 레지스터: 공간,
+  오프셋, 폭 모두). 다른 레지스터로 흉내 낸 push, 증거 없는 Bundle -> 관계 없음(안전하게 닫힘; 증거 없는 gate x86
+  Bundle은 재수출 전까지 관계가 없다).
+- link(AArch64): `[COPY pc = Rn;] INT_ADD|COPY x30 = inst_start + 4; CALL|CALLIND` -- x30, pc, sp는 `isa_identity`
+  (link_register, program_counter, stack_register)에서; BLR의 대상 캡처는 정확히 `COPY pc = Rn`(전체 폭, sp/pc 아님)이고
+  CALLIND가 그 pc를 읽어야 한다(대상을 링크 쓰기 전에 읽음, 스택은 안 움직임). 링크 쓰기는 영속 쓰기(transient 아님).
+- 격리: 아직 어떤 분석도 읽지 않는다(테스트로 고정). 재수출 Bundle에서 호출 명령 전부가 관계를 얻는다: P0/P1-aarch64
+  54/54, 26/26(link, delta 0), P0-x64 56/56(push -8), P0-x86 56/56(push -4).
+- 하네스: `stp_pre` / `ldp_post`(내보낸 Bundle의 p-code와 피연산자까지 같다). forward의 투영 가드: adjust와 store 두 연산이
+  아닌 투영은 아무것도 묶지 않는다.
