@@ -268,3 +268,23 @@ def test_an_assumed_or_pcodeop_effect_is_an_admission_use():
     (result,) = analyze_units(program_units(main),
                               assumed_call_effects={"1:1000": {key: AssumedCallEffect(label, ())}}).values()
     assert (label, "admission", key) in result.normalized.premise_uses, result.normalized.premise_uses
+
+
+def test_a_forward_resolved_indirect_call_records_its_premises_at_the_call(monkeypatch):
+    """2b-P: the forward fact resolving a CALLIND rests on premises (here the
+    read-only image holding the function pointer) -- use records at that call."""
+    from synthetic import CODE_BASE, DATA_BASE, synthetic_image
+
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    callee = CODE_BASE + 0x800
+    data = bytearray(4096)
+    data[8:16] = callee.to_bytes(8, "little")
+    info, image = synthetic_image(data=bytes(data))
+    main = (FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(load(reg(RAX), const(DATA_BASE + 8)))
+            .call_indirect(RAX).add_rsp(0x28).ret())
+    leaf = FunctionBuilder(entry=callee).ins(copy(reg(RAX), const(1))).ret()
+    results = analyze_units(program_units(main, leaf), image_info=info, readonly_image=image)
+    item = results[f"1:{MAIN:x}"]
+    (call,) = [key for key, target in item.calls.items() if key.endswith(":CALLIND")]
+    assert item.calls[call] == f"1:{callee:x}"
+    assert ("readonly-image-data-is-constant", "resolution", call) in item.normalized.premise_uses

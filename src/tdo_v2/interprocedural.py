@@ -1082,6 +1082,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                              if call in proven and call in symbols) if lifecycle_contracts else ()
             if key in resolution_requires:   # (forward facts the resolutions of its calls rest on)
                 result.inherited_assumptions = result.inherited_assumptions | resolution_requires[key]
+            _add_uses(result, {(label, "resolution", call)
+                               for call, labels in resolution_call_requires.get(key, {}).items() for label in labels})
             for context in (activation_overrides or {}).values():
                 result.inherited_assumptions |= context.inherited_assumptions
             if provenance is not None:   # publish only after the whole selected analysis succeeds
@@ -1181,6 +1183,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     resolved_cuts: dict = {}
     resolved_multi: dict = {}
     resolution_requires: dict = {}   # (key -> labels of the forward facts its resolutions rest on)
+    resolution_call_requires: dict = {}   # (key -> call -> those labels: 2b-P resolution uses)
     forward = _forward_switched_on()
     rounds = 1 + (sum(1 for unit in functions.values() for instruction in unit.observation.instructions
                       for operation in instruction.operations if operation.opcode == "CALLIND")
@@ -1208,7 +1211,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             results = analyze({key: {**calls[key], **resolved.get(key, {})} for key in calls}, resolved_multi)
             if first is None:
                 first = results
-            found, found_cuts, found_multi, requires = {}, {}, {}, {}
+            found, found_cuts, found_multi, requires, call_requires = {}, {}, {}, {}, {}
             newly_failed = False
             for key, item in results.items():
                 if key in resource_failures or type(item.normalized) is not NormalizedFunction:
@@ -1226,6 +1229,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                 else:
                                     found_multi.setdefault(key, {})[call] = members
                                 requires.setdefault(key, set()).update(labels[call])
+                                call_requires.setdefault(key, {}).setdefault(call, set()).update(labels[call])
                         checkpoint()
                 except ANALYSIS_FAILURES as error:
                     if _is_run_exhaustion(error):
@@ -1243,6 +1247,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 # (the resolutions recomputed on these results: their facts' labels too)
                 for key, labels in requires.items():
                     results[key].inherited_assumptions = results[key].inherited_assumptions | frozenset(labels)
+                for key, rows in call_requires.items():
+                    _add_uses(results[key], {(label, "resolution", call) for call, labels in rows.items()
+                                             for label in labels})
                 return results
             if newly_failed:
                 rounds += 1   # (one more round for the failure; each function fails once)
@@ -1251,8 +1258,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             # earlier round's resolutions, so on their facts' labels too)
             for key, labels in requires.items():
                 resolution_requires[key] = resolution_requires.get(key, frozenset()) | frozenset(labels)
+            for key, rows in call_requires.items():
+                for call, labels in rows.items():
+                    resolution_call_requires.setdefault(key, {}).setdefault(call, set()).update(labels)
         use_externals({})
         resolution_requires.clear()
+        resolution_call_requires.clear()
         return analyze(calls)  # not stable: no indirect resolution at all
     except _Interrupted as stop:
         return stop.results if first is None else with_failures(first)
