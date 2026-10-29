@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from synthetic import RAX, RBX, RCX, RDI, RDX
+from synthetic import RAX, RBX, RCX, RDI, RDX, RSP
 from tdo_v2.call_summary_effects import (
     AnchoredSpan, IndexedOffset, ProvenCallEffect, ProvenMemoryRun, ProvenRunEffect,
     anchored_span, call_load_keys, derive_composed_call_effect, derive_proven_call_effect,
@@ -40,13 +40,16 @@ def _summary(relation, *, register=False, conditions=()):
     span = _reg(RAX) if register else ByteSpan(INDEXED, BIAS + 7, 2)
     run = SummaryRun(span, SummaryKind.COMPUTED, (1,), ("write",), (_reg(RBX, 2),), (), (), (),
                      conditions=conditions)
+    # (a callee that restores the call shape's push: RSP + 8 at its exit)
     return FunctionSummary(FUNCTION_SUMMARY_VERSION, (ExitSummary("exit", (run,)),), (), (),
-                           address_relations=((INDEXED, relation),))
+                           register_deltas=(((RSP, 8), 8),), address_relations=((INDEXED, relation),))
 
 
 def _effect(summary):
-    return derive_proven_call_effect(summary, "indexed", REGISTERS, 128,
-                                     anchors={HEADER: (_reg(RCX), 1)})
+    """At an x86-64 push call (RSP -8): the restoration is proven, so the
+    effect is complete and states its observed registers (docs 25.85)."""
+    return derive_proven_call_effect(summary, "indexed", REGISTERS, 128, excluded=(_reg(RSP),),
+                                     anchors={HEADER: (_reg(RCX), 1)}, stack_deltas={(RSP, 8): -8})
 
 
 def _template(relation, *, writer_condition=False):

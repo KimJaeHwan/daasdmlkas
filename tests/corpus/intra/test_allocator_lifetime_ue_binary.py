@@ -45,7 +45,8 @@ REALLOC_CASES = (
 def allocator_lifetime(core, trace):
     space = core["scope"].evidence.image_base.space_id
     relocates = image_provenance(lambda address, size: core["image"].value(space, address, size),
-                                [(offset, size) for sid, offset, size in core["info"].relocations if sid == space])
+                                [(offset, size) for sid, offset, size in core["info"].relocations if sid == space],
+                                language_id="x86:LE:64:default")
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("TDO_V2_FORWARD", "1")
         with ImageBaseTracking(image_ranges(core["info"], space), relocates):

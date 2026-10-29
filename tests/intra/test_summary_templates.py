@@ -448,11 +448,11 @@ def test_image_provenance_reads_the_encoding():
             return None
         return int.from_bytes(bytes(memory[address + index] for index in range(size)), "little")
 
-    relocates = image_provenance(read, [(0x180001012, 8), (0x1810, 4), (0x180003003, 4)])
+    relocates = image_provenance(read, [(0x180001012, 8), (0x1810, 4), (0x180003003, 4)], language_id="x86:LE:64:default")
     assert relocates(0x180001000, 7, 0x180003007) is True
     assert relocates(0x180001000, 7, 0x180003008) is None          # another constant of a RIP-relative one
     assert relocates(0x180001010, 10, 0x180004000) is True
-    assert image_provenance(read, [])(0x180001010, 10, 0x180004000) is False
+    assert image_provenance(read, [], language_id="x86:LE:64:default")(0x180001010, 10, 0x180004000) is False
     assert relocates(0x180027ff2, 10, 0x180040000) is False
     assert relocates(0x180001030, 7, 0x180002037) is True
     assert relocates(0x180001040, 1, 0x180001041) is None

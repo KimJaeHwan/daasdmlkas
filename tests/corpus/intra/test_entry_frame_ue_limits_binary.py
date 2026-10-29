@@ -78,7 +78,8 @@ def _trace_analysis(trace, enabled, models, *, forward=True):
 def ue_entry_frames(core, trace):
     space = core["scope"].evidence.image_base.space_id
     relocates = image_provenance(lambda address, size: core["image"].value(space, address, size),
-                                [(offset, size) for sid, offset, size in core["info"].relocations if sid == space])
+                                [(offset, size) for sid, offset, size in core["info"].relocations if sid == space],
+                                language_id="x86:LE:64:default")
     found = {}
     for enabled in (True, False):
         with pytest.MonkeyPatch.context() as patch:

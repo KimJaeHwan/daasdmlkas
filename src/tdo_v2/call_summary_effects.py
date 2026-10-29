@@ -31,6 +31,7 @@ unanchored memory, or that an inner call may change, stay opaque.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 from .constant_value import ExactConstant
 from .function_summary import ExitSummary, FunctionSummary, SummaryKind, SummaryRun
@@ -229,6 +230,18 @@ class ProvenSinkDemand:
     conditions: tuple[tuple[AnchoredSpan, AnchoredSpan], ...] = ()
 
 
+class StackRestoration(StrEnum):
+    """Whether the callee's stack pointer at every exit undoes the call
+    shape's push (summary AFFINE c == -displacement delta, docs 25.85):
+    proven, disproven (an exit leaves another known delta), or unknown -- no
+    call shape, an exit with no known delta, or no state proven at all. Only
+    PROVEN is a restoration; never test its truth value."""
+
+    PROVEN = "proven"
+    DISPROVEN = "disproven"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class ProvenCallEffect:
     callee: str                        # callee entry, "space:offset" hex
@@ -241,9 +254,9 @@ class ProvenCallEffect:
     observes_registers: bool = True
     sink_demands: tuple[ProvenSinkDemand, ...] = ()
     # the callee's stack pointer at every exit undoes the call shape's push
-    # (summary AFFINE c == -displacement delta); otherwise the caller's stack
-    # pointer after the call is unknown (call-clobber debt), not assumed
-    restores_stack: bool = True
+    # (``StackRestoration``); unless PROVEN the caller's stack pointer after
+    # the call is unknown (call-clobber debt), not assumed
+    stack_restoration: StackRestoration = StackRestoration.UNKNOWN
     # a composed tail jump (no return-address push): the caller's stack
     # pointer, left out of the runs, moves by the target's AFFINE c at its
     # exit (None: unknown) -- the jumping function's summary adds it
@@ -314,6 +327,11 @@ class ProvenCallEffect:
     # stack taint follows no call output, so the call itself is a stack escape
     # (``may_alias._stack_taint``); a declared model never sets it
     escapes_stack: bool = False
+
+    @property
+    def restores_stack(self) -> bool:
+        """The restoration is PROVEN (the only value that is one)."""
+        return self.stack_restoration is StackRestoration.PROVEN
 
 
 def derive_proven_call_effect(
@@ -521,14 +539,22 @@ def derive_proven_call_effect(
     )
 
     deltas = dict(summary.register_deltas)
-    restores = all(
-        deltas.get(key) == -delta for key, delta in (stack_deltas or {}).items()
-    )
+    if not stack_deltas:
+        restoration = StackRestoration.UNKNOWN   # no call shape: nothing to undo is known
+    elif all(deltas.get(key) == -delta for key, delta in stack_deltas.items()):
+        restoration = StackRestoration.PROVEN
+    elif any(deltas.get(key) is not None and deltas.get(key) != -delta for key, delta in stack_deltas.items()):
+        restoration = StackRestoration.DISPROVEN
+    else:
+        restoration = StackRestoration.UNKNOWN
     # every effect of the call is exported: no inner call, memory kept, no
     # byte of unknown value (the stack pointer's included), the stack pointer
     # restored, every sink root complete -- then the registers the effects read
     # are all the call can use or keep
-    complete = not summary.inner_calls and memory_ok and restores \
+    # (a tail jump pushes nothing: its stack pointer is composed by the
+    # target's delta, ``tail_stack_delta``, not restored)
+    complete = not summary.inner_calls and memory_ok \
+        and (restoration is StackRestoration.PROVEN or tail) \
         and all(value != "unknown" for value in state.values()) and all(demand.complete for demand in sink_demands)
     observed = _observed_registers(runs, memory_runs, unknown_memory, writer_pairs, sink_demands, skip) \
         if complete else None
@@ -546,7 +572,7 @@ def derive_proven_call_effect(
         tail_delta = found.pop() if len(found) == 1 else None
     return ProvenCallEffect(
         callee, tuple(runs), tuple(_spans(register_object, preserved)), tuple(memory_runs), memory_ok,
-        observes, sink_demands, restores, tail_stack, tail_delta, clobbers_below,
+        observes, sink_demands, restoration, tail_stack, tail_delta, clobbers_below,
         writer_conditions=_sorted_pairs(writer_pairs), unknown_memory=unknown_memory,
         observed_registers=observed, escapes_stack=escapes,
     )

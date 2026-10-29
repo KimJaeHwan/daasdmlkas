@@ -140,7 +140,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
     log("image blocks " + ", ".join(f"{start:#x}-{end:#x}" for start, end in ranges))
     image = ReadOnlyImage(generation, info)
     relocates = image_provenance(lambda address, size: image.value(space, address, size),
-                                 [(offset, size) for space_id, offset, size in info.relocations if space_id == space])
+                                 [(offset, size) for space_id, offset, size in info.relocations if space_id == space],
+                                 language_id=units[0].scopes.program.evidence.translation_namespace.language_id)
     evidence = [load_stack_evidence(path) for path in stack_evidence]
     sha = units[0].scopes.program.evidence.executable_sha256.hex()
     globals_disjoint, lines = assumption_allowed(evidence, requested=assume_globals_disjoint and bool(evidence),

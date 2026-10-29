@@ -91,6 +91,15 @@ ADDED_FIELDS = {
     "CallProvenance": {"memory_sources": {}},
 }
 
+# fields renamed after the first baselines: encoded under the old name as the
+# old value, so older snapshots stay comparable -- (old name, projection).
+# ProvenCallEffect.stack_restoration (docs 25.85) replaced restores_stack:
+# the snapshot compares its boolean projection (restored = PROVEN), not the
+# DISPROVEN / UNKNOWN distinction
+RENAMED_FIELDS = {
+    "ProvenCallEffect": {"stack_restoration": ("restores_stack", lambda value: value.value == "proven")},
+}
+
 # identity / authority tokens with no content (each is a unique object; only
 # its presence is semantic)
 TOKENS = {"_BoundSsaIdentity"}
@@ -135,11 +144,19 @@ def encode(value, path="$"):
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         excluded = _check_contract(value, path) or set()
         added = ADDED_FIELDS.get(type(value).__name__, {})
-        return {"type": type(value).__name__, **{
-            field.name: encode(getattr(value, field.name), f"{path}.{field.name}")
+        renamed = RENAMED_FIELDS.get(type(value).__name__, {})
+
+        def named(field):
+            old = renamed.get(field.name)
+            if old is None:
+                return field.name, encode(getattr(value, field.name), f"{path}.{field.name}")
+            return old[0], encode(old[1](getattr(value, field.name)), f"{path}.{old[0]}")
+
+        return {"type": type(value).__name__, **dict(
+            named(field)
             for field in dataclasses.fields(value) if field.name not in excluded
             and not (field.name in added and getattr(value, field.name) == added[field.name])
-        }}
+        )}
     if type(value) in (tuple, list):
         return [encode(item, f"{path}[{index}]") for index, item in enumerate(value)]
     if type(value) in (set, frozenset):

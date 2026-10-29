@@ -596,7 +596,7 @@ _NO_MODRM_KNOWN = frozenset(
 _RELATIVE_FLOW = frozenset([0xE8, 0xE9, 0xEB, 0xE0, 0xE1, 0xE2, 0xE3] + list(range(0x70, 0x80)))
 
 
-def image_provenance(read, relocations):
+def image_provenance(read, relocations, *, language_id: str):
     """``relocates(instruction address, length, value)`` for
     ``ImageBaseTracking``: True -- the instruction proves ``value`` an image
     address: an 8-byte relocation entry inside it holds exactly ``value`` (an
@@ -608,8 +608,14 @@ def image_provenance(read, relocations):
     else: not understood, relative flow, 67, XOP, a relocated or RIP-relative
     instruction's other constants, an unknown length. ``read(address, size)``: the image's
     bytes as an unsigned little-endian int, or None; ``relocations``:
-    (address, size) of the image's relocation entries."""
+    (address, size) of the image's relocation entries; ``language_id``: the
+    program's Ghidra language -- the decoder reads x86-64 encodings only, so
+    any other language proves nothing (None for every instruction, never a
+    "fixed" False: AArch64 ``ADR x16, #0`` decodes as a fixed x86 number)."""
     import bisect
+
+    if not language_id.startswith("x86:LE:64:"):
+        return lambda address, length, value: None
 
     starts = sorted(relocations)
     keys = [start for start, _ in starts]

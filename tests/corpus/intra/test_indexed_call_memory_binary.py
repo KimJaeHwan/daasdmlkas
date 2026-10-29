@@ -63,7 +63,8 @@ def indexed_binary():
                 for flag in ("is_constant_space", "is_register_space", "is_unique_space"))
     memory = scope.evidence.image_base.space_id
     relocates = image_provenance(lambda address, size: image.value(memory, address, size),
-                                [(offset, size) for sid, offset, size in info.relocations if sid == memory])
+                                [(offset, size) for sid, offset, size in info.relocations if sid == memory],
+                                language_id="x86:LE:64:default")
     provenance = {}
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("TDO_V2_FORWARD", "1")

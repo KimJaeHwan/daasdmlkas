@@ -105,7 +105,8 @@ def _projector(item):
 def _core_results(core, monkeypatch, enabled=True, *, tracking=False, frame=True):
     space = core["scope"].evidence.image_base.space_id
     relocates = image_provenance(lambda address, size: core["image"].value(space, address, size),
-                                [(offset, size) for sid, offset, size in core["info"].relocations if sid == space])
+                                [(offset, size) for sid, offset, size in core["info"].relocations if sid == space],
+                                language_id="x86:LE:64:default")
     with monkeypatch.context() as patch:
         patch.setenv("TDO_V2_FORWARD", "1")
         if not enabled:
