@@ -1,0 +1,193 @@
+Physical memory sink strengthening — 개발 에이전트 인계 기록
+
+목적과 원칙
+
+이 변경은 OW2/SendInput 사례만 통과시키는 패치가 아니다.
+일반적인 '포인터가 가리키는 부분 바이트를 함수 호출 전에 소비'하는 질의를 강화한다.
+사용자 요구: 증명되어야 하고, 연결은 그래프에 포함되어야 하며, 가정을 최소화한다.
+새로운 모델/ABI/종료/메모리 보존 가정을 추가하지 않는다.
+후보 출처 라벨이나 오류 메시지 개선을 실제 바이트 연결의 성공으로 취급하지 않는다.
+
+버전과 격리
+
+기준 저장소: https://github.com/KimJaeHwan/daasdmlkas
+기준 branch: main
+기준 commit: 54fd3173fe3a6551254c8a8edcb36f3dc19ed48c
+기준 제목: State at a position is provably current or refused (Stage 0.1 R1a)
+작업 branch: codex/strengthen-memory-sink-tracing
+작업 트리: D:/02_PC_Live/02_win_file/18_OW2_YT_Macro/tdo-strengthening
+원래 daasdmlkas/main 및 별도 실시간 개발 저장소는 수정하지 않는다.
+ENGINE_SEMANTICS_VERSION: 24 -> 25
+FUNCTION_SUMMARY_VERSION=1, TEMPLATE_VERSION=5, Python package version=0.1.0 유지.
+최종 commit 및 patch/bundle 해시는 작업 종료 후 외부 handoff_manifest.json에 기록한다.
+기준 이후 실시간 main의 변경을 이 작업에 자동 병합하지 않았다.
+
+발견한 현상
+
+실제 키 입력 함수에서 SendInput 직전 RDX의 SSA 정의는 찾는다.
+그러나 물리 sink [RDX+8, 2 bytes]를 값 정의에 결합하지 못해 unbound root가 된다.
+포인터는 entry RSP를 기준으로 offsets=[-464,0]인 symbolic dereference로 표현됐다.
+_FunctionPhysicalStateBackend.memory_candidates -> _direct_span은 길이 2 경로를 거부한다.
+relational fallback도 동일 폭/동일 affine relation의 단일 지배 STORE를 찾지 못했다.
+실제 벡터 쓰기는 16바이트이고, 직접 복사와 재할당 삽입 경로로 나뉜다.
+KeyNameToVK 후보 라벨은 스택의 임시 INPUT.wVk STORE와 복사 값에 남지만,
+이것이 최종 API 버퍼의 특정 2바이트를 증명한 것은 아니다.
+
+기존 R1a의 '현재 상태를 증명하거나 거부' 원칙을 완화하면
+과거 슬롯 값, 미지원 분기, 호출 전 값으로 잘못된 완전 결과를 만들 수 있다.
+따라서 조용히 후보를 버리거나, dominance/call/alias 장벽을 제거하는 방식은 사용하지 않는다.
+
+코드별 변경
+
+1. src/tdo_v2/integration/configured_function_pointer_values.py
+   complete_physical_pointer_candidates의 LOAD 처리에서 정확히 정착된 local memory read의
+   definition을 LOAD 시점에 따라간다. definition_for_span/read_settled가 거부하면 기존
+   symbolic dereference를 유지한다. sink 시점의 슬롯을 다시 읽는 재해석은 하지 않는다.
+   p=*slot 후 slot이 바뀌더라도 p는 읽을 때의 포인터다.
+
+2. src/tdo_v2/integration/configured_physical_state.py
+   - 모든 pointer alternative가 물리 span으로 바뀌어야 exact candidates를 반환한다.
+     지원되는 path 하나만 남기고 미지원 path를 버려 falsely unique로 만드는 것을 막는다.
+   - value_fragments로 definition ID와 그 정의 자신의 storage에 속한 정확 source_span을 함께 전달한다.
+   - relational STORE가 요청보다 넓어도 포함 관계/현재성/주소 관계가 모두 증명되면
+     little-endian에서 요청 바이트만 source_span으로 투영한다.
+   - 동일 affine root, range containment, source read_settled, dominance,
+     keys_between 및 intervening call/overlap 거부는 유지한다.
+   - 이전 value_ids adapter는 부분 값에 넓은 ID만 노출하지 않도록 기존 동일 폭 계약을 유지한다.
+   - big-endian 부분 투영은 새로 지원한다고 주장하지 않고 보수적으로 거부한다.
+
+3. src/tdo_v2/physical_state.py
+   PhysicalValueFragment와 PhysicalStoreReceipt를 추가한다.
+   receipt는 실제 STORE/consumer operation, source byte span, target affine root/offset,
+   폭, 위치와 검사한 사이 연산을 보존한다. source span과 target memory span을 혼용하지 않는다.
+
+4. src/tdo_v2/integration/configured_boundary_demands.py
+   부분 바이트 receipt를 physical_spans에 전달한다.
+   같은 넓은 definition을 가리키는 서로 다른 selector의 disjoint bytes를 보존한다.
+   canonicalization은 동일 node의 span을 합치고 서로 다른 소비 occurrence를 유지한다.
+   겹치는 동일 source 요구를 중복 결합하지 않는다.
+
+5. src/tdo_v2/observed_boundary_projection.py
+   경계 node에 typed binding_receipts를 보관한다.
+
+6. src/tdo_v2/integration/configured_physical_binding_graph.py (새 파일)
+   검증된 binder receipt에서만 query proof graph를 만든다.
+   원 normalized SSA의 source/STORE/consumer node ID를 참조한다.
+   stored_value_bytes -> current_memory_bytes -> physical_consumption의 연결을 기록한다.
+   원 normalized graph를 바꾸거나 미해결 부채를 해제하지 않는다.
+   candidate_only=False는 해당 local binding edge가 증명됐다는 뜻이다.
+   상위 모든 origin 및 프로그램 전체의 완전성을 뜻하지 않는다.
+
+7. src/tdo_v2/summary_engine.py 및 engine.py
+   RootSlice.explanation에 physical_binding_graph를 노출한다.
+   summary operation record에도 동일 proof graph를 포함한다.
+   legacy는 기존 include_explanations 옵션을 존중한다.
+   summary의 byte-lane source 선택과 legacy의 node-level 보수적 origin 집합은 구분한다.
+   포함 범위: 결과의 명시적 query proof graph이며 원 immutable normalized dependencies에
+   새 edge를 삽입한 것은 아니다. 원 그래프만 순회하는 기존 소비자는 이 별도 필드를 읽어야 한다.
+   결론 계산은 검증된 source_span을 seed로 기존 lane graph를 따라간다.
+
+8. src/tdo_v2/summary_templates.py, models/derived, tests/intra/template_fingerprint.json
+   의미 버전을 25로 올리고 이전 의미의 파생/캐시 재사용을 차단한다.
+   파생 모델은 버전 숫자만 바꾼 것이 아니라 원 DLL Bundle에서 실제 재도출한다.
+
+파생 모델 재도출 근거
+
+원 DLL SHA-256: fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942
+Bundle: /root/tdo_bundles3/ue-core-probe/8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50
+stack evidence: /root/ghidra_link_evidence/core.stack.json
+stack evidence SHA-256: b885e02c8343b69812760464928e6f6e8739093eaf91a92442d9e5c7db808649
+이는 기존 모델과 동일한 legacy-v3 증거이며 새 stack-switch 증명을 얻었다는 뜻이 아니다.
+--no-assume-entry-values-not-frame, closure 6 + cut 6 조건을 유지했다.
+3개 FString 템플릿의 entries와 가정 목록은 기준과 동일함을 검사했다.
+모델 own version은 23 -> 24, source engine semantics는 24 -> 25다.
+이 모델 재생성은 OW2 추적을 위해 새 외부 효과를 선언한 것이 아니다.
+
+회귀와 반례
+
+tests/intra/test_captured_pointer_sink.py:
+  sparse/dense, LOAD 후 whole/partial/conditional slot overwrite,
+  LOAD 전 갱신, 2단계 pointer LOAD, COPY+offset, ambiguous JOIN,
+  unknown alias/opaque call/unknown STORE/debt 거부,
+  무가정 실제 memory sink -> 원 STORE graph node의 complete slice.
+
+tests/intra/test_physical_sink_fragments.py:
+  16바이트 STORE의 다양한 부분 범위, 범위 밖 거부,
+  이후 overlap/partial/conditional overwrite, opaque call, alias writer,
+  disjoint byte selector의 canonical 보존,
+  원 graph의 lane 의존성이 해당 입력 바이트만 선택,
+  result/operation record의 proof graph,
+  두 source를 넣은 16바이트에서 +8의 2바이트가 hi.ret만 선택하는 무가정 complete 결과.
+
+기존 tests/intra/test_state_barrier.py의 R1a 안전 회귀도 함께 검증한다.
+전체 회귀 결과, 실제 OW2 재실행 상태 및 최종 Astra 검수는 handoff 기록의 최종 항목을 따른다.
+
+실제 사례와 지원 범위의 경계
+
+이 변경만으로 임의 std::vector 재할당/루프/간접 callback/예외 효과를 증명한다고 주장하지 않는다.
+분석 범위에 helper 본문을 넣은 것과 호출 지점에 effect를 증명해 붙인 것은 다르다.
+실제 최종 INPUT[]에서는 reserve/push helper의 미해결 terminal/tail 경로,
+begin/end 관계와 가능한 재할당의 별도 증명이 필요할 수 있다.
+증명되지 않은 최종 wVk는 unbound/incomplete로 남겨야 한다.
+OW2 주소, SendInput, wVk, 벡터 이름에 맞춘 엔진 조건은 없다.
+
+검증된 수정 전후 차이
+
+동일 무가정 synthetic 재현에서 기준 semantics24는 complete=False, origin labels=[]이며,
+수정 semantics25는 complete=True, origin labels=[hi.ret]이다.
+요청은 16바이트 STORE의 +8 위치 2바이트이며, 다른 절반 lo.ret는 summary 결과에 섞이지 않는다.
+결과와 operation record 양쪽의 physical_binding_graph가 동일함도 확인했다.
+legacy는 node 단위의 보수적 출처 집합을 유지하되 hi.ret 및 정확한 2바이트 receipt가 남는다.
+이 결과는 실제 OW2의 성공 증거와 구분한다.
+
+실제 OW2의 226 함수 closure 재실행
+
+고정 Bundle: dfc8fd5a19453f630bc912fafeca5551242c73f2ed79e26eda60d20d6e1cfd9f
+대상 SHA-256: 8d451d6571e604d95d333c8cc05172428f87434f44f98ff0fce7c75f00d23695
+function_seconds=90, run_seconds=900. run_failed_functions=[]이다.
+마지막 selector RDX+8/2 bytes의 complete_pointer_paths/memory_candidates/value_ids는 모두 빈 값이다.
+7a1c INT_ADD가 읽는 RSP의 call-clobber는 76d9 CALL과 780c CALL 두 곳이다.
+76d9의 target은 2730, 780c의 target은 KeyNameToVK 5ed0이다.
+INPUT push1760은 register_deltas[((32,8),8)]를 증명해 793f/79dd에서 restores_stack=True이다.
+따라서 최종 거부를 INPUT push의 스택 복원 실패로 설명하면 부정확하다.
+이와 별도로 vector begin/end/재할당 및 memory-preservation 증명 장벽은 남는다.
+
+추가 Astra 원인 조사:
+5ed0 -> 13374(tail132bc) -> 22df4 -> 1f610 경로에서,
+1f610의 ordinary calls={}만 보고 leaf/no-call로 판정하면 안 된다.
+그 summary.inner_calls에는 1b1:14001f6bb:1:CALLOTHER가 있다.
+userop index483은 32바이트 register 및 unique 입력과 32바이트 unique 출력을 가지며,
+유일 RSP 갱신 ret7e5의 RSP+8 run에도 call_clobber_read debt가 남는다.
+원 명령 바이트 C4 C1 75 75 09는 VPCMPEQW ymm1, ymm1, [r9]이며,
+사용한 Ghidra12.0.4의 avx2.sinc:206-210 constructor는 vpcmpeqw_avx2를 호출한다.
+이는 명령/constructor 연결의 확인이며 runtime userop index->name table을 독립 재출력한 것은 아니다.
+Sleigh도 이 userop를 선언만 하고 body를 제공하지 않는다.
+현재 고정 Bundle에는 이 userop의 side-effect 의미가 없으므로 출력이 있다고 순수성을 추론하지 않는다.
+2730의 하위 경로도 CRT 재귀 SCC의 미해결 복원으로 이어져 이 연산 하나로 전체 문제가 해결되지는 않는다.
+추가 의미 증거/검증된 모델 및 독립적인 loop/heap 관계 증명 없이 최종 성공을 선언할 수 없다.
+
+실제 실행은 기존 기본 가정이 있는 분석이며 무가정 결과가 아니다.
+run_assumptions 원문은 wvk_diagnosis_closure.json에 보존한다. 새 가정은 추가하지 않았다.
+IAT 이름으로 API를 해석하는 질의 위치 근거에도 기존 no-IAT-hook 전제가 있으므로,
+그 해석을 원본 바이너리가 실행 시 실제로 호출할 API의 무조건적 증명으로 확장하지 않는다.
+
+최종 회귀
+
+tests/intra: 4722 passed, 35 skipped, 0 failed (413.65 seconds).
+이후 producer revision만 정확히 기록하도록 동일 모델을 재도출한 뒤 템플릿/지문/CLI 37 passed.
+재도출된 3개 entries와 source assumptions는 기준 JSON과 동일함을 별도 기계 검사했다.
+별도 실제 바이너리 corpus 전체를 실행했다고 주장하지 않는다.
+XML과 실행 명령 및 산출물 해시는 외부 handoff 디렉터리에 보존한다.
+모델 재도출의 producer revision은 Windows worktree Git 경로를 WSL의 GIT_DIR/GIT_WORK_TREE로
+명시해 기록한다. 이 설정은 외부 실행 wrapper에만 있으며 엔진 의미나 모델 가정을 바꾸지 않는다.
+모델 source.producer.engine_revision의 base+dirty는 최종 commit의 source 파일들과 연결해
+handoff_manifest.json의 정확한 최종 commit/tree 및 파일 해시로 식별한다.
+
+통합 시 주의
+
+1. 이 브랜치는 54fd317 기반이다. 실시간 main이 진행 중이면 최신 동작을 읽고 충돌을 검토한다.
+2. R1a 장벽과 새 freshness/byte receipts를 함께 유지한다. 안전 검사를 지워 충돌을 해소하지 않는다.
+3. semantics25가 이미 다른 의미에 사용됐다면 통합 브랜치의 다음 의미 버전을 선택하고
+   파생 모델/지문을 다시 실제 재생성한다. 버전 번호만 일괄 치환하지 않는다.
+4. 새 graph 필드는 설명용 증명 그래프이며 후보 source를 exact graph edge로 승격하지 않는다.
+5. 구체적 관찰/지원 범위를 전체 프로그램 완전성으로 바꾸어 보고하지 않는다.

@@ -526,6 +526,10 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             explanation = _witnesses(analysis, unit, nodes[analysis.entry], label, occurrence, labels,
                                      node_labels, lane_indexes, results[key].origins) \
                 if origin_witnesses else {}
+            from .integration.configured_physical_binding_graph import physical_binding_graph
+            binding_graph = physical_binding_graph(analysis, nodes[analysis.entry], label, occurrence)
+            if binding_graph:
+                explanation["physical_binding_graph"] = binding_graph
             if operation_records:   # (built after the final completeness: ``_with_records``)
                 record_inputs[(analysis.entry.space_id, analysis.entry.byte_offset, label, occurrence)] = (
                     analysis, unit, nodes[analysis.entry], results[key])
@@ -782,9 +786,14 @@ def _root_record(analysis, unit, rows, label, occurrence, analyzed, completeness
     for row in rows:
         if row.kind is BoundaryKind.SOURCE:
             origins.setdefault(row.node, set()).add(row.label)
-    return root_record(analysis.normalized, unit, seeds, origins=origins, declared=analyzed.declared,
+    record = root_record(analysis.normalized, unit, seeds, origins=origins, declared=analyzed.declared,
                        completeness=completeness, provenance=provenance, stitch=stitch,
                        physical_memory=physical_memory_records)
+    from .integration.configured_physical_binding_graph import physical_binding_graph
+    bindings = physical_binding_graph(analysis, rows, label, occurrence)
+    if bindings:
+        record["physical_binding_graph"] = bindings
+    return record
 
 
 def _raw_root_groups(analysis, rows):

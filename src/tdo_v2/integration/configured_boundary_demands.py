@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from ..boundary import BoundaryKind
 from ..memory_contracts import MemoryDefinitionKind
 from ..model import ByteSpan
 from ..observed_boundary_projection import ObservedBoundaryNode, ObservedBoundaryProjection
-from ..physical_state import PhysicalStateResolver, PhysicalValueResolver
+from ..physical_state import PhysicalStateResolver
 from .configured_boundary_mapping import (
     _mapped_or_observed_call_span,
     _mapped_or_observed_pointer_anchor,
@@ -89,34 +90,35 @@ def _direct_sink_boundary_nodes(
     """Bind a sink to exact physical definitions or its exact consume event."""
     backend = _FunctionPhysicalStateBackend(caller)
     span_resolver = PhysicalStateResolver(backend)
-    value_resolver = PhysicalValueResolver(backend)
     rows = []
     event_spans = []
-    seen_definition_ids = set()
+    seen_fragments = []
     fragment_ordinal = 0
     for selector in selectors:
-        selector_definition_ids = value_resolver.resolve(selector, call_position)
+        fragments = backend.value_fragments(selector, call_position)
         span = span_resolver.resolve(selector, call_position)
-        if span is None and not selector_definition_ids:
+        if span is None and not fragments:
             return ()
-        if seen_definition_ids.intersection(selector_definition_ids):
+        if any(old.definition_id == new.definition_id and old.source_span.overlaps(new.source_span)
+               for old in seen_fragments for new in fragments):
             return ()
-        seen_definition_ids.update(selector_definition_ids)
-        if not selector_definition_ids:
+        seen_fragments.extend(fragments)
+        if not fragments:
             if span in event_spans:
                 return ()
             event_spans.append(span)
             fragment_ordinal += 1
             continue
-        for definition_id in selector_definition_ids:
+        for fragment in fragments:
             rows.append(
                 ObservedBoundaryNode(
                     BoundaryKind.SINK,
                     label,
-                    caller.memory_graph.definition_nodes[definition_id],
+                    caller.memory_graph.definition_nodes[fragment.definition_id],
                     occurrence_ordinal,
                     fragment_ordinal,
-                    () if span is None else (span,),
+                    (fragment.source_span,),
+                    () if fragment.store_receipt is None else (fragment.store_receipt,),
                 )
             )
             fragment_ordinal += 1
@@ -216,7 +218,20 @@ def _canonical_boundary_nodes(
 ) -> tuple[ObservedBoundaryNode, ...]:
     unique = {}
     for item in values:
-        unique.setdefault((item.kind.value, item.label, item.node), item)
+        key = (item.kind.value, item.label, item.node, item.occurrence_ordinal)
+        previous = unique.get(key)
+        if previous is None:
+            unique[key] = item
+        else:
+            # Disjoint selectors may consume different bytes of one wide
+            # definition. Canonicalization must retain every selected byte;
+            # an empty span is FULL and cannot be narrowed by another row.
+            spans = (() if not previous.physical_spans or not item.physical_spans else
+                     tuple(sorted(set((*previous.physical_spans, *item.physical_spans)),
+                                  key=lambda span: span.canonical_key)))
+            unique[key] = replace(previous, physical_spans=spans,
+                                  fragment_ordinal=min(previous.fragment_ordinal, item.fragment_ordinal),
+                                  binding_receipts=tuple(dict.fromkeys((*previous.binding_receipts, *item.binding_receipts))))
     return tuple(
         sorted(
             unique.values(),

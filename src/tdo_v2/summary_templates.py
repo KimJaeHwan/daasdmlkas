@@ -101,7 +101,9 @@ TEMPLATE_VERSION = 5   # 2: stack_values_out; 3: exact scalar literals and entry
 # (tests/intra/test_template_fingerprint.py fails when derived templates change
 # without a bump here: bump, re-derive models/derived, refresh the record)
 # 24: summaries export allocator windows ("nonstack", N, nullable, labels; docs 25.79 3b).
-ENGINE_SEMANTICS_VERSION = 24
+# 25: captured pointer LOADs and byte-precise physical STORE bindings carry
+# current-state proofs; older physical sink demands cannot be reused as these.
+ENGINE_SEMANTICS_VERSION = 25
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
