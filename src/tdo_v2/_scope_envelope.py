@@ -216,6 +216,7 @@ class ConfiguredExtractionEnvelope:
             validation.namespace,
             validation.classification_revision,
             unique_spaces,
+            validation.registers,
         )
         assert self._permit is not None
         return ConstructedProgramScope._create(
@@ -469,6 +470,7 @@ def _program_validation_failure(value: _ProgramValidation) -> UnresolvedProgramS
         (value.conflicting_spaces, ScopeConstructionReason.CONFLICTING_PROGRAM_ADDRESS_SPACES),
         (value.missing_image_base, ScopeConstructionReason.MISSING_IMAGE_BASE),
         (value.invalid_image_base, ScopeConstructionReason.INVALID_IMAGE_BASE),
+        (value.invalid_registers, ScopeConstructionReason.INVALID_PROGRAM_REGISTER_EVIDENCE),
     )
     for present, reason in coordinate_reasons:
         if present:

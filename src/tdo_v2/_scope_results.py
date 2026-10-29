@@ -43,6 +43,7 @@ class ScopeConstructionReason(StrEnum):
     CONFLICTING_PROGRAM_ADDRESS_SPACES = "conflicting_program_address_spaces"
     MISSING_IMAGE_BASE = "missing_image_base"
     INVALID_IMAGE_BASE = "invalid_image_base"
+    INVALID_PROGRAM_REGISTER_EVIDENCE = "invalid_program_register_evidence"
     FUNCTION_COORDINATE_DUPLICATE_FIELD = "function_coordinate_duplicate_field"
     PARENT_PROGRAM_UNRESOLVED = "parent_program_unresolved"
     MISSING_FUNCTION_ENTRY = "missing_function_entry"
@@ -70,6 +71,7 @@ _REASON_STAGE = {
     ScopeConstructionReason.CONFLICTING_PROGRAM_ADDRESS_SPACES: ScopeConstructionStage.PROGRAM_COORDINATE,
     ScopeConstructionReason.MISSING_IMAGE_BASE: ScopeConstructionStage.PROGRAM_COORDINATE,
     ScopeConstructionReason.INVALID_IMAGE_BASE: ScopeConstructionStage.PROGRAM_COORDINATE,
+    ScopeConstructionReason.INVALID_PROGRAM_REGISTER_EVIDENCE: ScopeConstructionStage.PROGRAM_COORDINATE,
     ScopeConstructionReason.FUNCTION_COORDINATE_DUPLICATE_FIELD: ScopeConstructionStage.FUNCTION_COORDINATE,
     ScopeConstructionReason.PARENT_PROGRAM_UNRESOLVED: ScopeConstructionStage.FUNCTION_COORDINATE,
     ScopeConstructionReason.MISSING_FUNCTION_ENTRY: ScopeConstructionStage.FUNCTION_COORDINATE,

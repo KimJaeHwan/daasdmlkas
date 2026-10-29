@@ -7,11 +7,15 @@ from dataclasses import dataclass
 
 from ._scope_contracts import (
     AddressCoordinate,
+    AddressSpaceClassV2,
     AddressSpaceEvidence,
     CommittedMemoryRun,
+    RegisterEvidence,
+    RegisterTableEvidence,
     TranslationNamespace,
     U64_LIMIT,
     VarnodeKindCode,
+    classify_address_space_v2,
 )
 from ._scope_raw import RawObject, _FieldState, _field
 
@@ -31,6 +35,8 @@ class _ProgramValidation:
     namespace: TranslationNamespace | None
     spaces: tuple[AddressSpaceEvidence, ...]
     image_base: AddressCoordinate | None
+    invalid_registers: bool = False
+    registers: RegisterTableEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +190,9 @@ def _validate_program_candidate(
     classification_revision: int | None = 1
     spaces: tuple[AddressSpaceEvidence, ...] = ()
     image = None
+    invalid_registers = False
+    registers = None
+    registers_field = None
 
     if type(raw) is not RawObject:
         invalid_translation = True
@@ -238,6 +247,11 @@ def _validate_program_candidate(
                     conflicting_spaces = True
                 by_id[row.space_id] = row
 
+        registers_field = _field(raw, "register_evidence")
+        if registers_field.state is _FieldState.DUPLICATE:
+            duplicate_program = True
+            registers_field = None
+
         image_field = _field(raw, "image_base")
         if image_field.state is _FieldState.DUPLICATE:
             duplicate_coordinate = True
@@ -255,6 +269,10 @@ def _validate_program_candidate(
         invalid_image = not _AddressSpaceIndex(unique_spaces, runs).memory_coordinate(
             image, require_run_start=True
         )
+    if registers_field is not None and registers_field.state is _FieldState.PRESENT:
+        # present evidence is admitted whole or the program fails: never None
+        registers = _parse_registers(registers_field.value, classification_revision, spaces)
+        invalid_registers = registers is None
     return _ProgramValidation(
         duplicate_program,
         missing_translation,
@@ -269,7 +287,57 @@ def _validate_program_candidate(
         namespace,
         spaces,
         image,
+        invalid_registers,
+        registers,
     )
+
+
+def _parse_registers(value, classification_revision, spaces) -> RegisterTableEvidence | None:
+    """The ``register_evidence`` record, or None when anything is malformed:
+    duplicate or missing fields at any level, explicit nulls, bools as ints,
+    an unsupported revision, a row outside a register space, duplicate names,
+    or a program whose address spaces are not classification revision 2."""
+    if classification_revision != 2 or type(value) is not RawObject or _repeats(value):
+        return None
+    fields = {name: _field(value, name) for name in ("revision", "registers")}
+    if any(item.state is not _FieldState.PRESENT for item in fields.values()):
+        return None
+    rows = fields["registers"].value
+    if type(fields["revision"].value) is not int or type(rows) is not tuple:
+        return None
+    parsed = []
+    names = ("name", "space_id", "byte_offset", "byte_size")
+    for item in rows:
+        if type(item) is not RawObject or _repeats(item):
+            return None
+        found = [_field(item, name) for name in names]
+        if any(entry.state is not _FieldState.PRESENT for entry in found):
+            return None
+        name, *numbers = (entry.value for entry in found)
+        if type(name) is not str or any(type(number) is not int for number in numbers):
+            return None
+        try:
+            parsed.append(RegisterEvidence(name, *numbers))
+        except (TypeError, ValueError):
+            return None
+    by_id = {row.space_id: row for row in spaces}
+    try:
+        table = RegisterTableEvidence(fields["revision"].value,
+                                      tuple(sorted(parsed, key=lambda row: row.canonical_key)))
+    except (TypeError, ValueError):
+        return None
+    for row in table.registers:
+        space = by_id.get(row.space_id)
+        if space is None or classify_address_space_v2(space) is not AddressSpaceClassV2.REGISTER \
+                or row.byte_offset + row.byte_size > _space_capacity(space):
+            return None
+    return table
+
+
+def _repeats(raw: RawObject) -> bool:
+    """Any member name twice -- recognized or not (r2: no duplicate field at any level)."""
+    names = [member.name for member in raw.members]
+    return len(set(names)) != len(names)
 
 
 def _parse_translation(value: object) -> _TranslationParse:

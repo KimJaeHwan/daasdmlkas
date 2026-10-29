@@ -31,6 +31,7 @@ import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.address.AddressRange;
 import ghidra.program.model.address.AddressRangeImpl;
 import ghidra.program.model.address.AddressSet;
@@ -564,6 +565,43 @@ public class GhidraV2BundleExport extends GhidraScript {
         result.put("translation_namespace", translation);
         result.put("address_spaces", spaces);
         result.put("image_base", coordinate(currentProgram.getImageBase()));
+        result.put("register_evidence", registerEvidence());
+        return result;
+    }
+
+    /**
+     * The language's register file as an ISA fact (revision 1, docs 25.86):
+     * every non-context register whose storage is whole bytes in the register
+     * space (no bit fields, no memory-mapped registers), overlapping aliases
+     * kept, in (space, offset, size, name) order. Nothing from the compiler
+     * spec.
+     */
+    private Map<String, Object> registerEvidence() {
+        List<Register> kept = new ArrayList<>();
+        for (Register register : currentProgram.getLanguage().getRegisters()) {
+            if (register.isProcessorContext() || !register.getAddress().getAddressSpace().isRegisterSpace()
+                    || register.getLeastSignificantBit() != 0
+                    || register.getBitLength() != 8 * register.getNumBytes()) {
+                continue;
+            }
+            kept.add(register);
+        }
+        kept.sort(Comparator.<Register, BigInteger>comparing(item -> spaceId(item.getAddress().getAddressSpace()))
+            .thenComparing(item -> byteOffset(item.getAddress()))
+            .thenComparingInt(Register::getNumBytes)
+            .thenComparing(Register::getName));
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Register register : kept) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("name", register.getName());
+            row.put("space_id", spaceId(register.getAddress().getAddressSpace()));
+            row.put("byte_offset", byteOffset(register.getAddress()));
+            row.put("byte_size", u64(register.getNumBytes(), "register size"));
+            rows.add(row);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("revision", 1);
+        result.put("registers", rows);
         return result;
     }
 

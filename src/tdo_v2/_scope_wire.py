@@ -57,6 +57,21 @@ def _coordinate(value: AddressCoordinate) -> bytes:
     return _u64(value.space_id) + _u64(value.byte_offset)
 
 
+def _register_evidence(table) -> tuple[bytes, ...]:
+    """Nothing without evidence (every evidence-free preimage stays byte for
+    byte as before); else a tag, the revision and the canonical rows -- an
+    empty table differs from none (docs 25.86)."""
+    if table is None:
+        return ()
+    return (
+        _text("register-evidence"),
+        _u64(table.revision),
+        _u64(len(table.registers)),
+        *(_text(row.name) + _u64(row.space_id) + _u64(row.byte_offset) + _u64(row.byte_size)
+          for row in table.registers),
+    )
+
+
 def _program_scope_preimage(evidence: VerifiedProgramSnapshotEvidence) -> bytes:
     require_exact(evidence, VerifiedProgramSnapshotEvidence, "program evidence")
     namespace = evidence.translation_namespace
@@ -73,6 +88,7 @@ def _program_scope_preimage(evidence: VerifiedProgramSnapshotEvidence) -> bytes:
                 _u64(2),
                 _u64(len(evidence.address_spaces)),
                 *(_address_space_v2(row) for row in evidence.address_spaces),
+                *_register_evidence(evidence.register_evidence),
             )
         )
     return b"".join(

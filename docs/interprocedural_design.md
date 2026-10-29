@@ -6050,3 +6050,33 @@ opaque; jmp sink` -> 출처 없는 "완전"). 설계 `.census6/design_s0_r5.md`(
   P1 10(원래 구멍). R0의 "modeled" 후보 190은 모두 구간 밖(선택된 정의가 덮어쓴 앞 호출의 행). 정밀도 회복은 R1b(읽기 노드).
 - 비용: 질의마다 `state_barrier` O(호출 + 쓰기 행), `keys_between` O(연산 + 쓰기 행); 블록 도달 폐포는 블록마다 한 번
   (메모, 최악 O(블록^2) 메모리). `step()`은 세지 않는다(예전 조회도 같음) -- `hang_probe` TARGETS에 넣음.
+
+### 25.85 스택 복원은 증명 / 반증 / 모름 -- ARM64 Stage 0.2 / 0.3 (2026-10-29)
+
+`ProvenCallEffect.restores_stack`(bool, 기본 True)은 호출 모양이 없을 때(스택 포인터를 모름: 지금의 AArch64) 빈 `all(...)`로
+참이 됐고, 상태를 하나도 증명하지 못한 효과(noreturn, sink만 남은 효과)도 참이라고 주장했다. 이제 `StackRestoration`
+(PROVEN / DISPROVEN / UNKNOWN, 기본 UNKNOWN)이고 `restores_stack`은 "PROVEN인가"라는 속성 -- 읽는 곳(call-clobber의 복원
+안 된 호출, 상태 증명, 호출·할당 메모리)은 모두 보수적으로 남는다. `complete`(관찰 레지스터, 스택 escape)는 PROVEN이
+필요하다(tail 점프는 예외: 그 스택 포인터는 대상의 delta로 합성될 뿐 복원이 아니다). snapshot은 옛 이름의 bool 투영으로
+비교한다. 0.3: `summary_templates.image_provenance`는 프로그램의 언어 id를 받아 x86-64 밖에서는 아무것도 증명하지 않는다
+(디코더는 x86-64 인코딩만 읽는다; AArch64 `ADR x16,#0`이 "고정 수"로 읽혔다). gate: 루트 변화 0, noreturn 호출에서
+below-bound 면제를 잃은 summary 2개.
+
+### 25.86 내보낸 레지스터 증거와 ISA 스택 레지스터 식별 -- ARM64 Stage 1 (2026-10-29)
+
+- 하네스(1a): `synthetic.AARCH64`(pc 0x0, sp 0x8, x0..x30 = 0x4000+8n, 플래그 0x100..; `link = x30`) -- bl = INT_ADD x30 =
+  inst_start, 4; CALL / blr = COPY pc = xN; INT_ADD x30; CALLIND pc / ret = COPY pc = x30 (xN); RETURN pc (Ghidra 12.0.4의
+  p-code와 같다); stride는 4만. 테스트 인터프리터는 반환 주소를 push하지 않는 호출(BL/BLR)에서 RETURN 대상이 호출의 다음
+  주소가 아니면 실행을 거부한다(Stage 2 검증 전 조건). 도구: `run_dfbench.abi_of`는 기계 코드로 표를 고르고(PE/ELF
+  x86-64, i386, AArch64 -> win64 / sysv64 / x86-32 / aapcs64) 모르는 기계는 거부; oracle의 레지스터 표는 언어별
+  (`tools/graph_fidelity/harness_isa.py`).
+- 증거(1b): exporter가 언어의 레지스터 파일을 내보낸다(`register_evidence` revision 1: context 레지스터, 레지스터 공간 밖,
+  비트 필드 제외; 겹치는 별칭 유지). admission은 통째로 받거나 프로그램을 실패시킨다(중복 멤버 -- 모르는 이름도 --,
+  null, bool, 빠진 필드, 다른 revision, 중복 이름, REGISTER로 분류되지 않는 공간, 단위를 곱한 공간 용량 밖 -> 실패;
+  주소 공간 분류 revision 2 필요). 증거가 있을 때만 프로그램 scope preimage에 붙는다 -- 없으면 바이트 그대로(옛 Bundle,
+  snapshot, 템플릿의 digest 불변); 빈 표 != 없음.
+- 식별: `isa_identity.stack_register(evidence)` -- (프로세서, 엔디언, 크기)별 SLEIGH 이름(AArch64 "sp"/8, x86-64
+  "RSP"/8, x86-32 "ESP"/4)을 증거에서 정확한 이름·전체 폭으로 찾는다. cspec, `TYPE_SP`, 하네스 표는 쓰지 않는다.
+  식별일 뿐: 복원, 이어짐, 소유, 프레임 제외, 보존 레지스터는 여기서 나오지 않는다(분석은 아직 이 사실을 쓰지 않는다
+  -- Stage 2/3이 자기 전제와 함께 쓴다).
+- 재수출 확인: ue-cpp-P0/P1-aarch64 633행(sp 0x8), P0-x64 1439행(RSP 0x20), P0-x86 1379행(ESP 0x10) admission 통과.

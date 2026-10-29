@@ -49,17 +49,26 @@ EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI = (
 )
 EIP = 0x284
 
+# Ghidra AArch64 register offsets (AARCH64:LE:64:v8A, AARCH64instructions.sinc):
+# pc, sp, the flags NG ZR CY OV, x0..x30 (w<n> = the low 4 bytes of x<n>).
+PC, SP = 0x0, 0x8
+NG, ZR, CY, OV = 0x100, 0x101, 0x102, 0x103
+X = tuple(0x4000 + 8 * index for index in range(31))
+X0, X1, X2, X3, X8, X19, X29, X30 = X[0], X[1], X[2], X[3], X[8], X[19], X[29], X[30]
+
 
 @dataclass(frozen=True)
 class Arch:
     """What the builder and the provider take from the target: the language,
     the pointer (and push) width, the address size, the stack and instruction
-    pointers."""
+    pointers, and -- for a link-register ISA -- the register a call writes its
+    return address to (a call then pushes nothing)."""
 
     language_id: str
     pointer: int
     sp: int
     ip: int
+    link: int | None = None
 
     @property
     def address_bits(self) -> int:
@@ -68,6 +77,7 @@ class Arch:
 
 X64 = Arch("x86:LE:64:default", 8, RSP, RIP)
 X86_32 = Arch("x86:LE:32:default", 4, ESP, EIP)
+AARCH64 = Arch("AARCH64:LE:64:v8A", 8, SP, PC, link=X30)
 
 REGISTER_NAMES = {
     RAX: "RAX", RCX: "RCX", RDX: "RDX", RBX: "RBX", RSP: "RSP", RBP: "RBP",
@@ -197,8 +207,13 @@ class FunctionBuilder:
         return self
 
     def call(self, target: int) -> "FunctionBuilder":
-        """x86 ``call imm``: push return address, then CALL."""
+        """x86 ``call imm``: push return address, then CALL. AArch64 ``bl``:
+        x30 = inst_start + 4 (Ghidra: INT_ADD of two constants), then CALL."""
         index = len(self._rows)
+        if self.arch.link is not None:
+            self._rows.append(_Instruction(
+                [self._link_write(index), op("CALL", [ram(target, self.arch.pointer)])], "call", call_target=target))
+            return self
         self._rows.append(_Instruction(
             [
                 sub(self._sp(), self._sp(), self._word(self.arch.pointer)),
@@ -212,9 +227,16 @@ class FunctionBuilder:
 
     def call_indirect(self, register: int) -> "FunctionBuilder":
         """x86-64 ``call r``: Ghidra copies the target first, then pushes the
-        return address and CALLINDs the copy."""
+        return address and CALLINDs the copy. AArch64 ``blr xN``: pc = xN, then
+        x30 = inst_start + 4, then CALLIND pc (the target is taken before the
+        link write: ``blr x30`` calls the old x30)."""
         index = len(self._rows)
         width = self.arch.pointer
+        if self.arch.link is not None:
+            self._rows.append(_Instruction(
+                [copy(reg(self.arch.ip, width), reg(register, width)), self._link_write(index),
+                 op("CALLIND", [reg(self.arch.ip, width)])], "callind"))
+            return self
         self._rows.append(_Instruction(
             [
                 copy(tmp(0x400, width), reg(register, width)),
@@ -225,6 +247,14 @@ class FunctionBuilder:
             "callind",
         ))
         return self
+
+    def _link_write(self, index: int) -> tuple:
+        """x30 = inst_start + 4: every AArch64 instruction is 4 bytes, so the
+        builder's stride must be too (else the fallthrough and the link differ)."""
+        if self.stride != 4:
+            raise ValueError("AArch64 instructions are 4 bytes: stride must be 4")
+        width = self.arch.pointer
+        return op("INT_ADD", [const(self._address(index), width), const(4, width)], reg(self.arch.link, width))
 
     def tail_call(self, target: int) -> "FunctionBuilder":
         """x86-64 tail call ``jmp target``: a BRANCH Ghidra flags as a call."""
@@ -238,6 +268,8 @@ class FunctionBuilder:
 
     # -- x86-64 helpers ----------------------------------------------------
     def push(self, register: int) -> "FunctionBuilder":
+        if self.arch.link is not None:
+            raise ValueError("no push on a link-register ISA (use store / sub_rsp)")
         width = self.arch.pointer
         return self.ins(
             sub(self._sp(), self._sp(), self._word(width)),
@@ -245,6 +277,8 @@ class FunctionBuilder:
         )
 
     def pop(self, register: int) -> "FunctionBuilder":
+        if self.arch.link is not None:
+            raise ValueError("no pop on a link-register ISA (use load / add_rsp)")
         width = self.arch.pointer
         return self.ins(
             load(reg(register, width), self._sp()),
@@ -252,8 +286,11 @@ class FunctionBuilder:
         )
 
     def sub_rsp(self, amount: int) -> "FunctionBuilder":
-        """``sub rsp, imm`` (``sub esp`` on X86_32) including Ghidra's flag writes."""
+        """``sub rsp, imm`` (``sub esp`` on X86_32) including Ghidra's flag
+        writes; AArch64 ``sub sp, sp, #imm`` sets no flags."""
         sp, amount_ = self._sp(), self._word(amount)
+        if self.arch.link is not None:
+            return self.ins(sub(sp, sp, amount_))
         return self.ins(
             op("INT_LESS", [sp, amount_], reg(CF, 1)),
             op("INT_SBORROW", [sp, amount_], reg(OF, 1)),
@@ -264,6 +301,8 @@ class FunctionBuilder:
 
     def add_rsp(self, amount: int) -> "FunctionBuilder":
         sp, amount_ = self._sp(), self._word(amount)
+        if self.arch.link is not None:
+            return self.ins(add(sp, sp, amount_))
         return self.ins(
             op("INT_CARRY", [sp, amount_], reg(CF, 1)),
             op("INT_SCARRY", [sp, amount_], reg(OF, 1)),
@@ -272,9 +311,18 @@ class FunctionBuilder:
             op("INT_EQUAL", [sp, self._word(0)], reg(ZF, 1)),
         )
 
-    def ret(self, *, realistic: bool = True) -> "FunctionBuilder":
-        """x86 ``ret``: IP = *(SP); SP += pointer; RETURN IP."""
+    def ret(self, *, realistic: bool = True, via: int | None = None) -> "FunctionBuilder":
+        """x86 ``ret``: IP = *(SP); SP += pointer; RETURN IP. AArch64 ``ret``
+        (``ret xN`` with ``via``): pc = x30 (xN); RETURN pc."""
         width = self.arch.pointer
+        if self.arch.link is not None:
+            source = self.arch.link if via is None else via
+            self._rows.append(_Instruction(
+                [copy(reg(self.arch.ip, width), reg(source, width)), op("RETURN", [reg(self.arch.ip, width)])],
+                "return"))
+            return self
+        if via is not None:
+            raise ValueError("ret via a register is AArch64 only")
         if realistic:
             ops = [
                 load(reg(self.arch.ip, width), self._sp()),
@@ -392,6 +440,9 @@ class _Provider:
     layout: Layout = DEFAULT_LAYOUT
     code: bytes = b""
     data: bytes = b""
+    # the exported ``register_evidence`` record (None: the export has none,
+    # as every existing test's program -- its scope digests unchanged)
+    registers: dict | None = None
 
     def __post_init__(self) -> None:
         self.code = self.code or b"\x90" * self.layout.code_size
@@ -437,7 +488,13 @@ class _Provider:
         return True
 
     def program_candidate(self):
-        return parse_raw_json(json.dumps({
+        candidate = self._program_candidate()
+        if self.registers is not None:
+            candidate["register_evidence"] = self.registers
+        return parse_raw_json(json.dumps(candidate))
+
+    def _program_candidate(self):
+        return ({
             "address_space_classification_revision": 2,
             "translation_namespace": {
                 "language_id": self.arch.language_id,
@@ -452,7 +509,7 @@ class _Provider:
                 _space(EXTERNAL, external=True, bits=self.arch.address_bits),
             ],
             "image_base": {"space_id": RAM, "byte_offset": self.layout.code_base},
-        }))
+        })
 
     def function_handles(self):
         return tuple(range(len(self.functions)))
@@ -488,15 +545,35 @@ def normalize_program(*functions: FunctionBuilder, layout: Layout = DEFAULT_LAYO
     return results
 
 
-def program_units(*functions: FunctionBuilder, layout: Layout = DEFAULT_LAYOUT) -> list:
-    """Scoped units of several functions of one program (distinct ``entry`` values)."""
+def program_units(*functions: FunctionBuilder, layout: Layout = DEFAULT_LAYOUT, registers: dict | None = None) -> list:
+    """Scoped units of several functions of one program (distinct ``entry``
+    values); ``registers``: a ``register_evidence`` record to export
+    (``register_evidence(arch)`` or a hand-made one)."""
     entries = [function.entry for function in functions]
     if len(set(entries)) != len(entries):
         raise ValueError("program functions need distinct entries")
     with open_configured_extraction(
-        _Provider(list(functions), layout), _mint_orchestrator_capability()
+        _Provider(list(functions), layout, registers=registers), _mint_orchestrator_capability()
     ) as envelope:
         return list(envelope.iter_scoped_functions())
+
+
+def register_evidence(arch: "Arch") -> dict:
+    """The register table the exporter writes for ``arch`` (a subset of the
+    SLEIGH register file, with overlapping aliases), revision 1."""
+    if arch is AARCH64:
+        rows = [("pc", PC, 8), ("sp", SP, 8), ("wsp", SP, 4), ("NG", NG, 1), ("ZR", ZR, 1)]
+        rows += [(f"x{index}", offset, 8) for index, offset in enumerate(X)]
+        rows += [(f"w{index}", offset, 4) for index, offset in enumerate(X)]
+    elif arch is X86_32:
+        rows = [("EAX", EAX, 4), ("ECX", ECX, 4), ("EDX", EDX, 4), ("EBX", EBX, 4), ("ESP", ESP, 4),
+                ("EBP", EBP, 4), ("ESI", ESI, 4), ("EDI", EDI, 4), ("EIP", EIP, 4), ("SP", ESP, 2)]
+    else:
+        rows = [(name, offset, 8) for offset, name in REGISTER_NAMES.items() if offset < 0x200]
+        rows += [("ESP", RSP, 4), ("EAX", RAX, 4)]
+    rows.sort(key=lambda row: (REG, row[1], row[2], row[0]))
+    return {"revision": 1, "registers": [
+        {"name": name, "space_id": REG, "byte_offset": offset, "byte_size": size} for name, offset, size in rows]}
 
 
 def normalize_with_observation(function: FunctionBuilder, layout: Layout = DEFAULT_LAYOUT):
@@ -694,8 +771,10 @@ def _naming_for(unit, seeds, names: dict[int, str], tails=()):
 
 
 def boundary(sources: dict[str, int] = (), sinks: dict[str, int] = (), *,
-             assume_call_effect: bool = False):
-    """SymbolBoundaryProvider: sources return in RAX bytes, sinks read RCX bytes.
+             assume_call_effect: bool = False, arch: Arch = None):
+    """SymbolBoundaryProvider: sources return in RAX bytes, sinks read RCX bytes
+    -- on ``arch=AARCH64`` both in x0 (the harness's TEST-ONLY fixture, like the
+    x86 table; no engine convention).
 
     ``assume_call_effect`` marks every rule with the TEST-ONLY declared effect.
     """
@@ -703,13 +782,16 @@ def boundary(sources: dict[str, int] = (), sinks: dict[str, int] = (), *,
     from tdo_v2.boundary_rules import BoundaryRule, SymbolBoundaryProvider
     from tdo_v2.physical_state import PhysicalRegisterSlice
 
+    arch = arch or X64
+    source_register, sink_register = (X0, X0) if arch is AARCH64 else (RAX, RCX)
+    language = LANGUAGE if arch is X64 else arch.language_id
     rules = [
-        BoundaryRule(name, LANGUAGE, BoundaryKind.SOURCE, f"{name}.ret",
-                     (PhysicalRegisterSlice(RAX, size),), assume_call_effect)
+        BoundaryRule(name, language, BoundaryKind.SOURCE, f"{name}.ret",
+                     (PhysicalRegisterSlice(source_register, size),), assume_call_effect)
         for name, size in dict(sources).items()
     ] + [
-        BoundaryRule(name, LANGUAGE, BoundaryKind.SINK, f"{name}.arg0",
-                     (PhysicalRegisterSlice(RCX, size),), assume_call_effect)
+        BoundaryRule(name, language, BoundaryKind.SINK, f"{name}.arg0",
+                     (PhysicalRegisterSlice(sink_register, size),), assume_call_effect)
         for name, size in dict(sinks).items()
     ]
     return SymbolBoundaryProvider(tuple(rules))

@@ -520,6 +520,12 @@ class Interpreter:
                     return run
                 if kind == "return":
                     if self._activations:
+                        expected, call = self._activations[-1]
+                        if self._links(call) and (expected is None or target != expected[1]):
+                            # a link-register call (no return-address push): the
+                            # RETURN target is the only continuation evidence --
+                            # never resume at the caller's fallthrough by default
+                            raise Unsupported("a return to another address than the call's continuation")
                         next_location, _ = self._activations.pop()
                         if not self._activations:
                             self.activation_returns[self._activation_serial] = {
@@ -545,6 +551,14 @@ class Interpreter:
                     return run
                 raise Unsupported("fell off a terminal instruction")
             location = next_location
+
+    def _links(self, call: str) -> bool:
+        """The call instruction pushes no return address (an AArch64 BL / BLR
+        writes it to a register): its callee's RETURN must target the
+        continuation. (An x86 push call keeps the oracle's old resume.)"""
+        space, address = (int(part, 16) for part in call.split(":")[:2])
+        row = self._instructions.get((space, address))
+        return row is not None and not any(operation.opcode == "STORE" for operation in row.operations)
 
     def _enter_activation(self, call, next_location):
         """Open the activation of a program call (outermost: the bookkeeping
@@ -630,9 +644,8 @@ class Interpreter:
         if opcode in ("CALL", "CALLIND", "CALLOTHER"):
             raise Unsupported(opcode)
         if opcode == "RETURN":
-            for item in inputs:
-                self._value(key, item, run)
-            return ("return", None)
+            values = [self._value(key, item, run) for item in inputs]
+            return ("return", values[0] if values else None)
         if opcode == "BRANCH":
             return self._destination(inputs[0])
         if opcode == "CBRANCH":

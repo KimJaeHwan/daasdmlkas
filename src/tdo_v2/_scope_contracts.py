@@ -281,6 +281,55 @@ class CommittedMemoryRun:
 
 
 @dataclass(frozen=True, slots=True)
+class RegisterEvidence:
+    """One SLEIGH register of the program's language: an ISA fact the
+    exporter read from the language's register file (never the compiler
+    spec). Byte-aligned, whole-byte storage in the register space."""
+
+    name: str
+    space_id: int
+    byte_offset: int
+    byte_size: int
+
+    def __post_init__(self) -> None:
+        require_text(self.name, "register name", nonempty=True)
+        require_u64(self.space_id, "register space ID")
+        require_u64(self.byte_offset, "register byte offset")
+        require_u64(self.byte_size, "register byte size")
+        if self.byte_size == 0:
+            raise ValueError("register byte size must be positive")
+        if self.byte_offset + self.byte_size > U64_LIMIT:
+            raise ValueError("register extent exceeds unsigned 64-bit")
+
+    @property
+    def canonical_key(self) -> tuple:
+        return (self.space_id, self.byte_offset, self.byte_size, self.name)
+
+
+REGISTER_EVIDENCE_REVISION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterTableEvidence:
+    """The exported register table (revision 1): rows in canonical order,
+    unique names; overlapping aliases (x0 / w0) kept. Not complete coverage:
+    a missing name only means no evidence about that register."""
+
+    revision: int
+    registers: tuple[RegisterEvidence, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.revision) is not int or self.revision != REGISTER_EVIDENCE_REVISION:
+            raise ValueError("unsupported register-evidence revision")
+        if type(self.registers) is not tuple or any(type(row) is not RegisterEvidence for row in self.registers):
+            raise TypeError("register evidence must be an exact tuple of RegisterEvidence")
+        if tuple(sorted(self.registers, key=lambda row: row.canonical_key)) != self.registers:
+            raise ValueError("register evidence must be in canonical order")
+        if len({row.name for row in self.registers}) != len(self.registers):
+            raise ValueError("register names must be unique")
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedProgramSnapshotEvidence:
     executable_sha256: bytes
     loaded_memory_digest: bytes
@@ -288,6 +337,8 @@ class VerifiedProgramSnapshotEvidence:
     translation_namespace: TranslationNamespace
     address_space_classification_revision: int = 1
     address_spaces: tuple[AddressSpaceEvidence, ...] = ()
+    # the exported register table (docs 25.86); None: the export has none
+    register_evidence: RegisterTableEvidence | None = None
 
     def __post_init__(self) -> None:
         require_digest(self.executable_sha256, "executable SHA-256")
@@ -312,6 +363,18 @@ class VerifiedProgramSnapshotEvidence:
             for row in self.address_spaces
         ):
             raise ValueError("program and address-space revisions must be homogeneous")
+        if self.register_evidence is not None:
+            require_exact(self.register_evidence, RegisterTableEvidence, "register evidence")
+            if self.address_space_classification_revision != 2:
+                raise ValueError("register evidence requires address-space classification revision 2")
+            registers = {row.space_id: row for row in self.address_spaces
+                         if classify_address_space_v2(row) is AddressSpaceClassV2.REGISTER}
+            for row in self.register_evidence.registers:
+                space = registers.get(row.space_id)
+                if space is None:
+                    raise ValueError("a register must lie in a space classified REGISTER")
+                if row.byte_offset + row.byte_size > space.addressable_unit_bytes * (1 << space.address_size_bits):
+                    raise ValueError("a register extent exceeds its space")
 
 
 @dataclass(frozen=True, slots=True)

@@ -104,7 +104,10 @@ def main() -> int:
         regs = next(row.space_id for row in spaces if row.is_register_space)
         unique = next(row.space_id for row in spaces if row.is_unique_space)
         is32 = ":32:" in language
-        default_sp = (0x10, 4) if is32 else (0x20, 8)   # ESP / RSP in Ghidra x86
+        from harness_isa import isa_of
+
+        isa = isa_of(language)
+        default_sp = isa["sp"]
         width = 4 if is32 else 8
         iterator = session.iter_functions()
         while True:
@@ -157,7 +160,7 @@ def main() -> int:
                 base = rng.choice((0x7FFF_1000, 0x7FFF_1008, 0x5000_0000))
                 values = {
                     reg: rng.choice((base, base + 8, base + 0x40, rng.getrandbits(31)))
-                    for reg in range(0, 0x40, 8)
+                    for reg in isa["registers"]
                 }
                 values[sp_offset] = 0x7000_0000
                 return values

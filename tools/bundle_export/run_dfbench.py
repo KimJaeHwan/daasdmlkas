@@ -43,24 +43,38 @@ SOURCES = {"dfb_source_A": 4, "dfb_source_B": 4, "dfb_source_C": 4,
 SINKS = {"dfb_sink_int": 4, "dfb_sink_long": 4, "dfb_sink_ptr": 8, "dfb_sink_buf": 8}
 
 
-FIRST_ARGUMENT = {"win64": 0x8, "sysv64": 0x38}  # RCX / RDI
-LANGUAGES = {"win64": "x86:LE:64:default", "sysv64": "x86:LE:64:default", "x86-32": "x86:LE:32:default"}
+FIRST_ARGUMENT = {"win64": 0x8, "sysv64": 0x38, "aapcs64": 0x4000}  # RCX / RDI / x0
+RESULT = {"win64": 0x0, "sysv64": 0x0, "aapcs64": 0x4000}               # RAX / RAX / x0
+LANGUAGES = {"win64": "x86:LE:64:default", "sysv64": "x86:LE:64:default", "x86-32": "x86:LE:32:default",
+             "aapcs64": "AARCH64:LE:64:v8A"}
 X86_ESP = 0x10
+# executable machine codes -> the harness table (TEST-ONLY data: where the
+# dfb_* fixtures pass their argument and result; no engine convention)
+_PE_MACHINES = {0x8664: "win64", 0x14C: "x86-32", 0xAA64: "aapcs64"}
+_ELF_MACHINES = {0x3E: "sysv64", 0x03: "x86-32", 0xB7: "aapcs64"}
 
 
 def abi_of(generation: Path) -> str:
-    """'win64' (PE32+), 'sysv64' (ELF64) or 'x86-32' (PE32 / ELF32, cdecl:
-    arguments on the stack) from the Bundle's original binary."""
+    """The harness table of the Bundle's original binary, by its machine:
+    'win64' (PE x86-64), 'sysv64' (ELF x86-64), 'x86-32' (PE / ELF i386, cdecl:
+    arguments on the stack) or 'aapcs64' (PE / ELF AArch64: x0). Any other
+    machine is refused -- never read as x86 (an AArch64 ELF was "sysv64", so
+    its sources and sinks silently matched nothing)."""
     manifest = json.loads((generation / "manifest.json").read_text(encoding="utf-8"))
     paths = {row["id"]: row["path"] for row in manifest["members"]}
     head = (generation / paths[manifest["original_member_id"]]).read_bytes()[:0x400]
     if head[:2] == b"MZ":
         pe = int.from_bytes(head[0x3C:0x40], "little")
         machine = int.from_bytes(head[pe + 4:pe + 6], "little")
-        return "x86-32" if machine == 0x14C else "win64"
-    if head[:4] == b"ELF":
-        return "x86-32" if head[4] == 1 else "sysv64"
-    raise ValueError(f"unknown executable format: {head[:4]!r}")
+        table = _PE_MACHINES
+    elif head[:4] == b"ELF":
+        machine = int.from_bytes(head[0x12:0x14], "little" if head[5] == 1 else "big")
+        table = _ELF_MACHINES
+    else:
+        raise ValueError(f"unknown executable format: {head[:4]!r}")
+    if machine not in table:
+        raise ValueError(f"no harness table for machine {machine:#x}")
+    return table[machine]
 
 
 def boundary_provider(assume_call_effect: bool = False, abi: str = "win64"):
@@ -76,7 +90,7 @@ def boundary_provider(assume_call_effect: bool = False, abi: str = "win64"):
     language = LANGUAGES[abi]
     wide = abi != "x86-32"
     rules = [BoundaryRule(name, language, BoundaryKind.SOURCE, f"{name}.ret",
-                          (PhysicalRegisterSlice(0x0, size if wide else 4),), assume_call_effect)
+                          (PhysicalRegisterSlice(RESULT.get(abi, 0x0), size if wide else 4),), assume_call_effect)
              for name, size in SOURCES.items()]
     for name, size in SINKS.items():
         if wide:

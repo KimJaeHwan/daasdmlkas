@@ -69,7 +69,10 @@ def main() -> int:
         address_bits = {row.space_id: row.address_size_bits for row in spaces if row.is_memory_space}
         memory_space_ids = sorted(address_bits)
         language = session.program_result.evidence.translation_namespace.language_id
-        default_sp = (0x10, 4) if ":32:" in language else (0x20, 8)
+        from harness_isa import isa_of
+
+        isa = isa_of(language)
+        default_sp = isa["sp"]
         units = [evidence.unit for evidence in session.iter_functions()]
     began = time.time()
     options, externals, userops, external_abi = {}, None, frozenset(), "win64"
@@ -90,9 +93,12 @@ def main() -> int:
         userops = frozenset(index for model in markers if language in model.languages for index in model.no_effect)
         # every modeled import runs for real (or the run is skipped: Unsupported)
         # the models' convention is the binary's (models/external per ABI)
-        external_abi = "sysv64" if run_dfbench.abi_of(args.generation) == "sysv64" else "win64"
+        abi = run_dfbench.abi_of(args.generation)
+        external_abi = "sysv64" if abi == "sysv64" else "win64"
         externals = {thunk: models.lookup(row)[1].name for row in (info.imports if info else ())
                      if models.lookup(row) for thunk in (*row.thunks, *row.slots)}
+        if externals and abi == "aapcs64":
+            raise ValueError("the oracle runs external models in x86 conventions only (not aapcs64)")
     if args.binding:
         from tdo_v2.summary_store import load_binding_file
 
@@ -135,7 +141,7 @@ def main() -> int:
             rng = random.Random(seed)
             base = rng.choice((0x7FFF_1000, 0x7FFF_1008, 0x5000_0000))
             values = {reg: rng.choice((base, base + 8, base + 0x40, rng.getrandbits(31)))
-                      for reg in range(0, 0x40, 8)}
+                      for reg in isa["registers"]}
             values[sp_offset] = 0x7000_0000
             return values
 
