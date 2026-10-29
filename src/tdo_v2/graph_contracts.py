@@ -28,6 +28,7 @@ class NodeRecord:
     key: str
     kind: NodeKind
     label: str
+    semantic_identity: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.key) is not str or not self.key:
@@ -36,6 +37,8 @@ class NodeRecord:
             raise TypeError("node kind must be an exact NodeKind")
         if type(self.label) is not str:
             raise TypeError("node label must be an exact str")
+        if self.semantic_identity is not None and (type(self.semantic_identity) is not str or not self.semantic_identity):
+            raise TypeError("node semantic identity must be a nonempty exact str or None")
 
 
 class EdgeKind(StrEnum):

@@ -1359,7 +1359,8 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     # is subtracted below its bound (after the union -- exits' semantics)
     exemptions = call_exemptions(
         (effect.operation_key for effect in normalized.effects), {key for key, _ in normalized.assumed_call_effects},
-        normalized.proven_call_effects, dict(normalized.kept_call_memory), normalized.call_below_bounds)
+        normalized.proven_call_effects, dict(normalized.kept_call_memory), normalized.call_below_bounds,
+        intrinsic_calls=frozenset(key for key, _ in getattr(normalized, "intrinsic_refinements", ())))
     effects_by_block: dict[str, list] = {block.key: [] for block in unit.blocks}
     for effect in normalized.effects:
         if effect.block_key in effects_by_block:

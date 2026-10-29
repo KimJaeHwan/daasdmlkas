@@ -103,7 +103,9 @@ TEMPLATE_VERSION = 5   # 2: stack_values_out; 3: exact scalar literals and entry
 # 24: summaries export allocator windows ("nonstack", N, nullable, labels; docs 25.79 3b).
 # 25: captured pointer LOADs and byte-precise physical STORE bindings carry
 # current-state proofs; older physical sink demands cannot be reused as these.
-ENGINE_SEMANTICS_VERSION = 25
+# 26: qualified ISA intrinsics retain output/data proofs while removing only
+# their opaque-call crossing; summaries/records preserve that semantic basis.
+ENGINE_SEMANTICS_VERSION = 26
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

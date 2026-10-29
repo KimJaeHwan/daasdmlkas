@@ -84,6 +84,7 @@ class _Index:
         from .storage import _resolve_validated_storage
 
         self.graph = normalized.dependencies
+        self.intrinsic_refinements = dict(getattr(normalized, "intrinsic_refinements", ()))
         ssa, bindings = normalized.memory_ssa, normalized.memory_graph
         self.ssa = ssa
         self.definition_of = {node: index for index, node in enumerate(bindings.definition_nodes)}
@@ -118,6 +119,28 @@ class _Index:
 
     def operation(self, action_id):
         return self.operations.get(self.ssa.actions[action_id].operation_key)
+
+    def intrinsic(self, action_id):
+        """A qualified intrinsic of this exact observed operation, or None."""
+        key = self.ssa.actions[action_id].operation_key
+        refinement = self.intrinsic_refinements.get(key)
+        found = self.operation(action_id)
+        if refinement is None or found is None:
+            return None
+        operation = found[0]
+        metadata = refinement.record()
+        from .intrinsic_refinements import semantics_from_record
+        semantics = semantics_from_record(metadata)
+        if semantics is None or semantics != refinement.semantics or operation.opcode != "CALLOTHER" \
+                or len(operation.inputs) != 3 or operation.output is None \
+                or operation.output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE) \
+                or operation.inputs[0].kind is not VarnodeKindCode.CONSTANT \
+                or operation.inputs[0].coordinate.byte_offset != metadata["userop_index"] \
+                or operation.inputs[0].byte_size != 4 \
+                or [value.byte_size for value in operation.inputs[1:]] != metadata["input_byte_sizes"] \
+                or operation.output.byte_size != metadata["output_byte_size"]:
+            return None
+        return refinement
 
 
 def lane_index(normalized, unit) -> "_Index":
@@ -282,7 +305,7 @@ def _value_bytes(index, writer, span, wanted):
     if found is None:
         return FULL
     operation, _, output = found
-    if operation.opcode not in _LANE_OPS:
+    if operation.opcode not in _LANE_OPS and index.intrinsic(action_id) is None:
         return FULL
     if operation.opcode == "STORE":
         value = operation.inputs[2] if len(operation.inputs) > 2 else None
@@ -300,7 +323,7 @@ def _operation(index, node, demand, add, clobbered=None):
     reads = index.reads.get(action_id, ())
     changed = (clobbered or {}).get(index.ssa.actions[action_id].operation_key, ())
     operand_demands = None if demand is FULL or found is None or not index.little \
-        else _operand_demands(found, demand)
+        else _operation_demands(index, action_id, found, demand)
     for read in reads:
         if operand_demands is None:
             wanted = None
@@ -374,6 +397,21 @@ def _other(index, node, add, covered=None):
 
 _ARITY = {"COPY": 1, "INT_NEGATE": 1, "LOAD": 2, "STORE": 3, "SUBPIECE": 2, "PIECE": 2, "INT_ZEXT": 1,
           "INT_SEXT": 1, "INT_AND": 2, "INT_OR": 2, "INT_XOR": 2}
+
+
+def _operation_demands(index, action_id, found, demand):
+    """Keep ordinary p-code lane maps independent from intrinsic approval."""
+    intrinsic = index.intrinsic(action_id) if found[0].opcode == "CALLOTHER" else None
+    if intrinsic is None:
+        return _operand_demands(found, demand)
+    semantics = intrinsic.semantics
+    if any(type(byte) is not int or not 0 <= byte < semantics.vector_byte_size for byte in demand):
+        return None
+    requested = {1: set(), 2: set()}
+    for byte in demand:
+        for operand, start, size in semantics.input_byte_ranges(byte, 1):
+            requested[operand + 1].update(range(start, start + size))
+    return {operand: frozenset(bytes_) for operand, bytes_ in requested.items()}
 
 
 def _operand_demands(found, demand):
