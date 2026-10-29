@@ -178,6 +178,14 @@ def _observed_call_state_projection(
     if len(calls) != 1:
         return None
     call_key, call_ordinal, _ = calls[0]
+    if any(
+        operation.opcode in {"BRANCH", "CBRANCH", "BRANCHIND", "RETURN"}
+        for _, ordinal, operation in keyed_operations
+        if ordinal < call_ordinal
+    ):
+        # a transfer before the call may skip the push: the projection states
+        # an effect every path to the callee executes (Astra 2b r7)
+        return None
     candidates = []
     for adjust_key, adjust_ordinal, adjust in keyed_operations:
         if (

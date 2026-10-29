@@ -6098,3 +6098,37 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
   54/54, 26/26(link, delta 0), P0-x64 56/56(push -8), P0-x86 56/56(push -4).
 - 하네스: `stp_pre` / `ldp_post`(내보낸 Bundle의 p-code와 피연산자까지 같다). forward의 투영 가드: adjust와 store 두 연산이
   아닌 투영은 아무것도 묶지 않는다.
+
+### 25.88 복귀 관계와 이어짐 인증서 -- ARM64 Stage 2b (관찰만, 2026-10-29)
+
+설계 r5 3-5절 + r6(Astra r6: 2b 승인). `return_relations.function_certificate / program_certificates` -- 아직 어떤 분석도
+읽지 않는다(2c가 소비자).
+- 오라클 먼저(2b-1): 테스트 인터프리터는 모든 RETURN 대상을 검증한다 -- link 호출(x30)뿐 아니라 push 호출(밀어 넣은
+  슬롯), 외부 모델의 tail ret, 하네스의 축약 `RETURN SP`(= [SP]). 일부러 망가진 복귀를 실행해야 하는 기록 테스트만
+  `resume_unvalidated_returns=True`로 명시한다; 그 밖의 거부는 통과가 아니다.
+- CLOSED: 후속 그래프 완전 -- 명령어마다 나가는 전이를 허용 목록으로 분류(`_transfer_gaps`, Astra r1-r4): BRANCH /
+  CBRANCH는 주소 또는 명령어 안 p-code 상대 위치만, RETURN / CALL / CALLIND / BRANCHIND는 마지막 연산으로만; p-code가
+  뜻하는 후속(주소 대상 + 끝에 닿으면 fallthrough)이 수출된 후속(`control_successor_coordinates`)과 정확히 같고 모두
+  이 함수의 관찰된 코드; 있는 fallthrough는 플래그와 일치; 호출 / tail의 수출 대상(과 직접 피연산자)은 모두 인증서가 증명한 함수의 진입(인증서의 `entry`, Astra r5) -- 개수만이 아니라 정체;
+  fallthrough도 분류된 전이도 없이 끝나는 명령어는 unresolved 출구(NORETURN 아님). 함수 안 BRANCHIND는 하나도 없어야
+  한다(수출된 대상 목록(점프 표)은 찾은 것일 뿐 값이 다른 곳일 수 없다는 증거가 아니다 -- 완전성 증거가 생기기 전까지
+  culprit [정방향]). tail 대상이 PROVEN / NORETURN이 아니면 닫히지 않음; 호출마다 PROVEN(또는 NORETURN) 인증서 -- PROVEN callee는 자기 진입 링크로 돌아갈 뿐이므로, 그 링크가 이 호출의 fallthrough라는 호출 자신의 관계(2a `CallRelation`, 언어의 방식, continuation == fallthrough)가 있어야 합성(Astra r6; 없으면 `no-continuation-relation`; push 투영(`observed_call_state`, 엔진 공용)은 호출 앞에
+  BRANCH / CBRANCH / BRANCHIND / RETURN이 있는 명령어를 거부 -- push를 건너뛸 수 있다, Astra r7)(소유자 결정: opaque
+  callee는 모든 ISA에서 UNKNOWN), 모델 없는 CALLOTHER 없음(PAC 연산이 보이는 경우 포함), AArch64는 PAC 표(r6 B, spec
+  digest `PAC_SPEC_12_0_4`에 묶임) 스캔 통과 -- 다른 spec, 읽을 수 없는 바이트 -> 닫히지 않음.
+- 출구: RETURN -- 대상이 진입 링크(AArch64 x30, x86 진입 SP 슬롯)와 바이트 단위로 같음을 SSA로(COPY / LOAD / STORE
+  사슬, JOIN은 모든 출처, 전폭만, 읽기마다 빚 없음; LOAD / STORE를 따라갈 때는 주소의 역방향 슬라이스 전체에 빚이 없어야 --
+  `ret 8` callee 뒤 `add rsp`의 SP처럼 이름상 span과 실제 주소가 어긋날 수 있다, Astra r7 `address-debt`); tail -- 대상 인증서 PROVEN이고 점프 시점의 링크가 진입 링크(점프
+  블록의 SSA 종료 상태; 함수가 링크 바이트를 쓰지도 읽지도 않으면 진입값 그대로)(`x30 = BAD; b G` -> 증명 안 됨);
+  x86 tail은 2b 범위 밖(UNKNOWN). 재귀 -> UNKNOWN(낙관 가정 없음). 출구 없는 CLOSED -> NORETURN.
+- 호출 방식은 언어 id(processor, endianness, size)로 고른다: AARCH64 -> link(x30 증거 필수, 없으면 UNKNOWN
+  `no-isa-evidence`), x86-64 / x86-32 -> push; 어떤 레지스터 행이 있는지로 추측하지 않는다(Astra r1).
+- 인증서의 의존: 그래프(scope digest), PAC spec, 정규화의 전제(켜진 assumes_* / assumed_* 이름, proven 호출 효과,
+  forward 요구), 호출 / tail마다의 인증서와 그 의존(전이적 합집합) -- 하나라도 철회되면 인증서도 무효.
+- 출구 기록: guard(2b는 "unknown"), witness(동등 증명이 지나간 연산들), sp_delta(함수 요약의 SP AFFINE 상수; tail은
+  None), dependencies(RETURN: 함수 의존 전체 -- 보수적; tail: 대상 인증서의 것).
+- 오라클: 외부 모델로 가는 tail의 복귀 슬롯은 외부 실행 뒤에 읽는다. zlib 게이트의 checked 188958 -> 175725는 75 실행
+  중 4개가 havoc 입력 포인터로 복귀 슬롯이 덮여(`1b1:1075ed` RETURN, 무작위 64비트 대상) 이제 거부되기 때문 --
+  missing / unexplained 0, 이전 오라클이 잘못 이어 실행하던 것(Astra r2 수용).
+- 관찰(재수출 Bundle, 12.0.4 spec): P0-aarch64 5 proven / 11 unknown, P0-x64 4 / 12, P0-x86 4 / 12, P1-aarch64 5 / 11 --
+  unknown은 모두 Bundle 밖(opaque) 호출 때문(culprit CALL, 그 호출을 지나는 복귀 슬롯 읽기의 빚, tail 대상 unknown).

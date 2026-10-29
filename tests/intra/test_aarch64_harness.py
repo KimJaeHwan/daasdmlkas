@@ -216,3 +216,24 @@ def test_the_oracle_refuses_a_return_through_an_overwritten_link():
 
     with pytest.raises(Unsupported):
         _run_main(_a64(SOURCE).ins(copy(_reg(X30), const(0x2000, 8))).ret())
+
+
+def test_the_oracle_refuses_an_x86_return_through_a_damaged_slot():
+    """callee: [rsp] = 0xdead; ret -- a push call's continuation is the pushed
+    slot; the oracle never resumes at the caller's fallthrough by default
+    (Astra r4 P2: refusal is not validation)."""
+    from pcode_interpreter import Interpreter, Unsupported
+    from synthetic import RSP, store
+
+    callee = FunctionBuilder(entry=SOURCE).ins(store(_reg(RSP), const(0xDEAD, 8))).ret()
+    good = FunctionBuilder(entry=SOURCE).ins(copy(_reg(X1), const(5, 8))).ret()
+    for body, refused in ((callee, True), (good, False)):
+        program = _observations(FunctionBuilder(entry=MAIN).call(SOURCE).ins(copy(_reg(X0), const(9, 8))).ret(), body)
+        (main_key,) = [key for key in program if key[1] == MAIN]
+        observation = program.pop(main_key)
+        interpreter = Interpreter(observation, constant_space=0, seed=1, program=program)
+        if refused:
+            with pytest.raises(Unsupported):
+                interpreter.run()
+        else:
+            assert interpreter.run().completed

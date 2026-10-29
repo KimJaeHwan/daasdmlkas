@@ -166,11 +166,13 @@ def test_the_link_register_identity():
 
 
 def test_no_analysis_reads_the_relations_yet():
-    """Isolation (2a): only the producer and its tests name it."""
+    """Isolation (2a): only the producer, the (itself observational) 2b
+    certificates and tests name it; no analysis names either."""
     source = Path(__file__).resolve().parents[2] / "src" / "tdo_v2"
-    users = [path.name for path in source.rglob("*.py")
-             if "call_relations" in path.read_text(encoding="utf-8") and path.name != "call_relations.py"]
-    assert users == []
+    for name, readers in (("call_relations", ["return_relations.py"]), ("return_relations", [])):
+        users = sorted(path.name for path in source.rglob("*.py")
+                       if name in path.read_text(encoding="utf-8") and path.name != f"{name}.py")
+        assert users == readers, name
 
 
 def test_a_push_projection_of_another_arity_binds_nothing(monkeypatch):
@@ -220,4 +222,19 @@ def test_a_push_in_another_register_space_is_no_stack_relation():
                                     _mint_orchestrator_capability()) as envelope:
         units = list(envelope.iter_scoped_functions())
     (unit,) = [unit for unit in units if unit.scopes.function.entry.byte_offset == MAIN]
+    assert call_relations(unit.observation, unit.scopes) == {}
+
+
+@pytest.mark.parametrize("skip", ["BRANCH", "CBRANCH"])
+def test_a_push_a_branch_before_the_call_may_skip_is_no_projection(skip):
+    """Astra 2b r7: a relative branch to the CALL bypasses the push -- neither
+    the observed projection nor a relation states it."""
+    from synthetic import ZF
+    from tdo_v2.observed_call_state import observed_call_state_projections
+
+    main = FunctionBuilder(entry=MAIN).sub_rsp(0x28).call(CALLEE).ret()
+    main._rows[1].ops.insert(0, op(skip, [const(3, 8)] + ([reg(ZF, 1)] if skip == "CBRANCH" else [])))
+    units = program_units(main, FunctionBuilder(entry=CALLEE).ret(), registers=register_evidence(X64))
+    (unit,) = [unit for unit in units if unit.scopes.function.entry.byte_offset == MAIN]
+    assert observed_call_state_projections(unit.observation) == ()
     assert call_relations(unit.observation, unit.scopes) == {}

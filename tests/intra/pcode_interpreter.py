@@ -95,7 +95,8 @@ class Interpreter:
                  track_provenance: bool = False, program: dict | None = None,
                  sinks: tuple | None = None, externals: dict | None = None,
                  no_effect_userops: frozenset = frozenset(), address_bits: dict | None = None,
-                 abi_calls: dict | None = None, external_abi: str = "win64") -> None:
+                 abi_calls: dict | None = None, external_abi: str = "win64",
+                 resume_unvalidated_returns: bool = False) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
 
         ``external_abi``: the calling convention ``externals`` run with --
@@ -124,6 +125,10 @@ class Interpreter:
         size) slices): a CALL to a sink target inside an activation records the
         caller-level inputs of its argument bytes (``Run.sink_reads``)."""
         self._sinks = sinks
+        # a VM for record tests that must execute a wrong return (a damaged
+        # return address) may resume at the caller's continuation anyway; as
+        # an oracle, a return elsewhere is refused (Unsupported, never a pass)
+        self._resume_unvalidated = resume_unvalidated_returns
         # ``externals``: call target (space, offset) -> C library function name,
         # executed with its real semantics (win64 arguments) instead of havoc:
         # the oracle for declared external models (``summary_store``)
@@ -521,10 +526,11 @@ class Interpreter:
                 if kind == "return":
                     if self._activations:
                         expected, call = self._activations[-1]
-                        if self._links(call) and (expected is None or target != expected[1]):
-                            # a link-register call (no return-address push): the
-                            # RETURN target is the only continuation evidence --
-                            # never resume at the caller's fallthrough by default
+                        if not self._resume_unvalidated and (expected is None or target != expected[1]):
+                            # the RETURN target is the continuation evidence, for
+                            # a link call (x30) and a push call (the pushed slot)
+                            # alike: never resume at the caller's fallthrough by
+                            # default (a refusal is not a validation)
                             raise Unsupported("a return to another address than the call's continuation")
                         next_location, _ = self._activations.pop()
                         if not self._activations:
@@ -635,7 +641,10 @@ class Interpreter:
             self._stack_provenance = [None] * sp_size
             self._run_external(
                 self._externals[(inputs[0].coordinate.space_id, inputs[0].coordinate.byte_offset)], key)
-            return ("return", None)
+            # the address its ret returns to: the slot it pops, read AFTER the
+            # external ran (it may have written it)
+            target = sum(self._byte(self._order[0][0], current + i)[0] << (8 * i) for i in range(sp_size))
+            return ("return", target)
         if opcode == "BRANCHIND":
             target = self._value(key, inputs[0], run)
             space_id = self._order[0][0]
@@ -645,6 +654,11 @@ class Interpreter:
             raise Unsupported(opcode)
         if opcode == "RETURN":
             values = [self._value(key, item, run) for item in inputs]
+            if values and self._havoc is not None and inputs[0].kind is VarnodeKindCode.REGISTER                     and (inputs[0].coordinate.byte_offset, inputs[0].byte_size) == self._havoc[1:]:
+                # the harness's abstract ``RETURN SP`` (``ret(realistic=False)``)
+                # returns to the address stored at [SP]
+                return ("return", sum(self._byte(self._order[0][0], values[0] + i)[0] << (8 * i)
+                                      for i in range(inputs[0].byte_size)))
             return ("return", values[0] if values else None)
         if opcode == "BRANCH":
             return self._destination(inputs[0])

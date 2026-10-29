@@ -53,7 +53,8 @@ class _WitnessInterpreter(Interpreter):
 
 
 def _execute(case, *, pointer=POINTER, value=7, saved=0x22, stack=STACK, registers=(), memory=(), expected_opaque=()):
-    vm = _WitnessInterpreter(case['item'].unit.observation, constant_space=CONST, seed=0, program=case['program'])
+    vm = _WitnessInterpreter(case['item'].unit.observation, constant_space=CONST, seed=0, program=case['program'],
+                             resume_unvalidated_returns=True)  # (a VM: damaged returns run on)
     for offset, contents in ((RSP, stack), (RCX, pointer), (RDX, value), (RBX, saved), *registers):
         vm.preset(REG, offset, 8, contents)
     vm.preset(RAM, stack, 8, 0x2000)
