@@ -134,3 +134,132 @@ def test_compose_keeps_an_iterator_of_supports():
     child = Support(ClaimType.CONTINUATION, "g", obligations=("unresolved call",))
     parent = compose(ClaimType.CONTINUATION, "f", via=iter((child,)))
     assert parent.via == (child,) and not parent.established
+
+
+def _models(digest="a" * 64, statement="s"):
+    from types import SimpleNamespace
+
+    entry = SimpleNamespace(label="external-model:crt/memcpy@v1", name="memcpy")
+    item = SimpleNamespace(file_id="crt", digest=digest, entries=(entry,),
+                           declares=(("crt:no-sbrk", statement, "f"),))
+    return SimpleNamespace(files=(item,))
+
+
+def test_the_resolver_authenticates_against_loaded_inputs():
+    from tdo_v2.premises import PremiseResolver
+    from tdo_v2.pcodeop_models import PcodeOpModel
+
+    lock = PcodeOpModel("x86-markers", 1, frozenset({("x86:LE:64:default", 1, 0)}), {17: "LOCK"})
+    resolver = PremiseResolver(model_sets=(_models(),), pcodeop_models=(lock,))
+    assert resolver.resolve("globals-disjoint-from-stack").kind is PremiseKind.ASSUMPTION
+    assert resolver.resolve("external-model:crt/memcpy@v1").kind is PremiseKind.MODEL
+    assert resolver.resolve("crt:no-sbrk").kind is PremiseKind.ASSUMPTION
+    assert resolver.resolve("pcodeop-model:x86-markers/LOCK@v1").kind is PremiseKind.MODEL
+    for label in ("external-model:crt/other@v1", "pcodeop-model:x86-markers/UNLOCK@v1",
+                  "lifecycle-contract:x@v1#" + "0" * 64, "lib:undeclared"):
+        with pytest.raises(UnknownPremise):
+            resolver.resolve(label)   # a prefix never authenticates
+    found, unknown = resolver.resolve_all(["globals-disjoint-from-stack", "lib:undeclared"])
+    assert len(found) == 1 and unknown == ("lib:undeclared",)
+
+
+def test_an_edited_input_under_the_same_label_changes_identity():
+    from tdo_v2.premises import PremiseResolver
+
+    one = PremiseResolver(model_sets=(_models("a" * 64),))
+    two = PremiseResolver(model_sets=(_models("b" * 64),))
+    edited = PremiseResolver(model_sets=(_models("a" * 64, statement="edited"),))
+    assert one.identity != two.identity and one.identity != edited.identity
+    assert one.resolve("external-model:crt/memcpy@v1") != two.resolve("external-model:crt/memcpy@v1")
+    assert one.resolve("crt:no-sbrk") != edited.resolve("crt:no-sbrk")
+
+
+def test_a_contract_label_must_carry_the_loaded_contracts_digest():
+    from types import SimpleNamespace
+    from tdo_v2.premises import PremiseResolver
+
+    good = "lifecycle-contract:alloc@v1#" + "c" * 64
+    contract = SimpleNamespace(label=good, canonical_digest="c" * 64)
+    resolver = PremiseResolver(lifecycle_contracts=(contract,))
+    assert resolver.resolve(good).kind is PremiseKind.MODEL
+    with pytest.raises(UnknownPremise):
+        resolver.resolve("lifecycle-contract:alloc@v1#" + "d" * 64)
+
+
+def test_the_resolver_snapshots_the_registry(monkeypatch):
+    """Astra pc1 r1 P1: a registry edit after construction neither changes an
+    existing resolver's answers nor escapes a new resolver's identity."""
+    from tdo_v2 import assumptions
+    from tdo_v2.premises import PremiseResolver
+
+    before = PremiseResolver()
+    answer = before.resolve("globals-disjoint-from-stack")
+    rows = tuple(dataclasses.replace(row, statement=row.statement + " (edited)")
+                 if row.name == "globals-disjoint-from-stack" else row for row in assumptions.REGISTRY)
+    monkeypatch.setattr(assumptions, "REGISTRY", rows)
+    assert before.resolve("globals-disjoint-from-stack") == answer
+    assert PremiseResolver().identity != before.identity
+
+
+def test_binding_rows_are_authenticated():
+    from types import SimpleNamespace
+    from tdo_v2.premises import PremiseResolver
+
+    binding = SimpleNamespace(binding_id="tv2", digest="e" * 64, executable_sha256="f" * 64,
+                              rows=((0x4e10, "m1", None),), models=None)
+    resolver = PremiseResolver(bindings=(binding,))
+    assert resolver.resolve("bound-model:tv2@0x4e10#" + "e" * 12).kind is PremiseKind.MODEL
+    for label in ("bound-model:tv2@0x4e14#" + "e" * 12, "bound-model:tv2@0x4e10#" + "0" * 12):
+        with pytest.raises(UnknownPremise):
+            resolver.resolve(label)
+
+
+def test_the_accessor_wrapper_needs_a_loaded_model_entry():
+    from tdo_v2.premises import PremiseResolver
+
+    resolver = PremiseResolver(model_sets=(_models(),))
+    assert resolver.resolve("accessor-state-preserved-by:external-model:crt/memcpy@v1").kind is PremiseKind.MODEL
+    for label in ("accessor-state-preserved-by:globals-disjoint-from-stack",
+                  "accessor-state-preserved-by:accessor-state-preserved-by:external-model:crt/memcpy@v1"):
+        with pytest.raises(UnknownPremise):
+            resolver.resolve(label)
+
+
+def test_a_trap_only_pcode_model_is_part_of_the_identity():
+    from tdo_v2.pcodeop_models import PcodeOpModel
+    from tdo_v2.premises import PremiseResolver
+
+    language = frozenset({("x86:LE:64:default", 1, 0)})
+    one = PremiseResolver(pcodeop_models=(PcodeOpModel("t", 1, language, {}, {41: frozenset({3})}),))
+    two = PremiseResolver(pcodeop_models=(PcodeOpModel("t", 1, language, {}, {41: frozenset({4})}),))
+    assert len({one.identity, two.identity, PremiseResolver().identity}) == 3
+
+
+def test_resolver_inputs_may_be_iterators():
+    """Astra pc1 r2 P2-2: a bindings iterator read twice lost every row."""
+    from types import SimpleNamespace
+    from tdo_v2.premises import PremiseResolver
+
+    binding = SimpleNamespace(binding_id="tv2", digest="e" * 64, executable_sha256="f" * 64,
+                              rows=((0x4e10, "m1", None),), models=_models())
+    from_iter = PremiseResolver(bindings=iter((binding,)), model_sets=iter(()))
+    from_tuple = PremiseResolver(bindings=(binding,))
+    assert from_iter.identity == from_tuple.identity
+    assert from_iter.resolve("bound-model:tv2@0x4e10#" + "e" * 12).kind is PremiseKind.MODEL
+
+
+def test_a_pcode_label_exported_by_two_models_is_refused():
+    """Astra pc1 r2 P2-1: order must not choose between two exporters."""
+    from tdo_v2.pcodeop_models import PcodeOpModel
+    from tdo_v2.premises import PremiseResolver
+
+    language = frozenset({("x86:LE:64:default", 1, 0)})
+    one = PcodeOpModel("x86-markers", 1, language, {17: "LOCK"}, {41: frozenset({3})})
+    two = PcodeOpModel("x86-markers", 1, language, {17: "LOCK"}, {41: frozenset({4})})
+    forward, backward = PremiseResolver(pcodeop_models=(one, two)), PremiseResolver(pcodeop_models=(two, one))
+    assert forward.identity == backward.identity
+    for resolver in (forward, backward):
+        with pytest.raises(UnknownPremise):
+            resolver.resolve("pcodeop-model:x86-markers/LOCK@v1")
+    assert PremiseResolver(pcodeop_models=(one,)).resolve("pcodeop-model:x86-markers/LOCK@v1").kind \
+        is PremiseKind.MODEL

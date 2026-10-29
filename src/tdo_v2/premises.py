@@ -194,6 +194,118 @@ def resolve_label(label: str, *, catalog: dict | None = None, file_digests: dict
     raise UnknownPremise(label)
 
 
+def _canonical(value):
+    """A deterministic JSON-ready form (dataclasses, mappings, sets, tuples)."""
+    import dataclasses
+
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _canonical(getattr(value, field.name)) for field in dataclasses.fields(value)}
+    if isinstance(value, dict):
+        return sorted(([_canonical(key), _canonical(item)] for key, item in value.items()), key=repr)
+    if isinstance(value, (set, frozenset)):
+        return sorted((_canonical(item) for item in value), key=repr)
+    if isinstance(value, (list, tuple)):
+        return [_canonical(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+class PremiseResolver:
+    """Labels -> PremiseRefs against the immutable inputs a run consumed
+    (docs 25.91, design r5 A), snapshotted at construction: the assumption
+    registry (each row's identity incl. the engine semantics version); every
+    loaded model file's entries (file digest + the entry's canonical content)
+    and declarations; model bindings (each row's ``bound-model:`` label, bound
+    to the binding digest, rva, model id and executable); p-code op model
+    files (each file hashed whole, traps included); lifecycle contracts (the
+    label's digest must be the loaded contract's). A prefix classifies, never
+    authenticates: a label no loaded input names is ``UnknownPremise``.
+    ``identity``: a digest of every input (support evidence, cache keys)."""
+
+    _WRAPPER = "accessor-state-preserved-by:"
+
+    def __init__(self, *, model_sets=(), bindings=(), pcodeop_models=(), lifecycle_contracts=()) -> None:
+        from .assumptions import REGISTRY
+
+        # (iterables materialized once: each is read more than once below)
+        model_sets, bindings = tuple(model_sets), tuple(bindings)
+        pcodeop_models, lifecycle_contracts = tuple(pcodeop_models), tuple(lifecycle_contracts)
+        self._registry = {row.name: registry_premise(row.name) for row in REGISTRY}
+        self._models: dict = {}
+        self._files: dict = {}
+        self._declarations: dict = {}
+        for models in (*model_sets, *(getattr(binding, "models", None) for binding in bindings)):
+            if models is None:
+                continue
+            for item in models.files:
+                self._files[item.file_id] = item.digest
+                for label, statement, fails_when in item.declares:
+                    self._declarations[label] = (item.file_id, statement, fails_when)
+                for entry in item.entries:
+                    self._models[entry.label] = (item.digest, _digest(_canonical(entry)))
+        self._bound = {}
+        for binding in bindings:
+            for rva, model_id, _ in binding.rows:
+                label = f"bound-model:{binding.binding_id}@{rva:#x}#{binding.digest[:12]}"
+                self._bound[label] = _digest([binding.digest, rva, model_id, binding.executable_sha256])
+        self._pcodeop_files = []
+        exporters: dict = {}
+        for model in pcodeop_models:
+            digest = _digest(_canonical(model))
+            self._pcodeop_files.append(digest)
+            for name in model.no_effect.values():
+                exporters.setdefault(f"pcodeop-model:{model.file_id}/{name}@v{model.version}", set()).add(digest)
+        # a label two different loaded models export names neither: refused
+        self._pcodeops = {label: next(iter(found)) for label, found in exporters.items() if len(found) == 1}
+        self._pcodeop_conflicts = frozenset(label for label, found in exporters.items() if len(found) > 1)
+        self._contracts = {contract.label: contract.canonical_digest for contract in lifecycle_contracts}
+        self.identity = _digest([sorted((name, ref.digest) for name, ref in self._registry.items()),
+                                 sorted(self._models.items()), sorted(self._files.items()),
+                                 sorted(self._declarations.items()), sorted(self._bound.items()),
+                                 sorted(self._pcodeop_files), sorted(self._pcodeops.items()),
+                                 sorted(self._pcodeop_conflicts), sorted(self._contracts.items())])
+
+    def resolve(self, label: str) -> PremiseRef:
+        if label.startswith(self._WRAPPER):
+            # a preservation claim of a loaded model entry -- never of anything
+            # else, never nested
+            inner = label[len(self._WRAPPER):]
+            if inner not in self._models:
+                raise UnknownPremise(f"{label} (not a loaded model entry)")
+            file_digest, content = self._models[inner]
+            return PremiseRef(PremiseKind.MODEL, label, _digest([self._WRAPPER, inner, file_digest, content]))
+        if label in self._registry:
+            return self._registry[label]
+        if label in self._models:
+            file_digest, content = self._models[label]
+            return model_premise(label, file_digest, content)
+        if label in self._bound:
+            return model_premise(label, self._bound[label])
+        if label in self._pcodeop_conflicts:
+            raise UnknownPremise(f"{label} (exported by more than one loaded p-code model)")
+        if label in self._pcodeops:
+            return model_premise(label, self._pcodeops[label])
+        if label in self._contracts:
+            if not label.endswith("#" + self._contracts[label]):
+                raise UnknownPremise(f"{label} (its digest is not the loaded contract's)")
+            return model_premise(label, self._contracts[label])
+        if label in self._declarations:
+            return declaration_premise(label, self._declarations, self._files)
+        raise UnknownPremise(label)
+
+    def resolve_all(self, labels) -> tuple[frozenset, tuple]:
+        """(resolved PremiseRefs, unknown labels) -- an unknown label is an
+        obligation of every support consuming it, never dropped."""
+        found, unknown = set(), []
+        for label in labels:
+            try:
+                found.add(self.resolve(label))
+            except UnknownPremise:
+                unknown.append(label)
+        return frozenset(found), tuple(sorted(set(unknown)))
+
+
 # -- provenance closure ----------------------------------------------------------------
 
 def provenance_closure(own: dict, depends: dict) -> dict:
@@ -264,6 +376,6 @@ def provenance_closure(own: dict, depends: dict) -> dict:
     return result
 
 
-__all__ = ["ADMISSIBLE", "ClaimType", "EvidenceRef", "PremiseKind", "PremiseRef", "PremiseUse", "STAGES",
+__all__ = ["ADMISSIBLE", "ClaimType", "EvidenceRef", "PremiseKind", "PremiseRef", "PremiseResolver", "PremiseUse", "STAGES",
            "Support", "UnknownPremise", "compose", "declaration_premise", "model_premise", "provenance_closure",
            "registry_premise", "resolve_label"]
