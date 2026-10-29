@@ -246,6 +246,12 @@ class NormalizedFunction:
     load_value_proofs: tuple = field(default=(), compare=False, repr=False)
     # A caller-owned replay, never an unconditional summary/template input.
     activation_entry: object = field(default=None, compare=False, repr=False)
+    # the call exemption contract the call-clobber rows were derived under
+    # (``call_clobber.clobber_inputs``): (clobbering calls, call -> spans it
+    # leaves unchanged, calls keeping all memory) -- state-at-position lookups
+    # cross a call exactly as a read would (docs 25.84); () = every call
+    # clobbers everything
+    call_clobber_contract: tuple = field(default=(), compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -2050,6 +2056,15 @@ class _ScopedNormalizer:
             _chi_shadow.record(memory_ssa.function_scope, memory_unit, memory_ssa, effect_unit, calls,
                                clobber_preserved, memory_keeping & calls, call_clobber_reads)
         call_clobber_reads = subtract_copy_clobbers(_forward_memory_plan, call_clobber_reads)
+        from .call_clobber import clobber_inputs as _clobber_inputs
+
+        _contract_calls, _contract_preserved = _clobber_inputs(
+            observation, context, frozenset(assumed_call_effects), proven_preserved, unrestored, exemptions.calls)
+        call_clobber_contract = (
+            _contract_calls,
+            {key: tuple(spans) for key, spans in _contract_preserved.items() if key in _contract_calls},
+            memory_keeping & _contract_calls,
+        )
         call_clobber_debts = _materialize_call_clobber_debt(
             dependencies,
             memory_ssa,
@@ -2304,6 +2319,7 @@ class _ScopedNormalizer:
                 for call in sorted({item[0] for item in _opaque_rows})
                 for index, (_, keys) in enumerate(_overlap_regions(_opaque_rows, call))),
             call_below_bounds=below_bounds,
+            call_clobber_contract=call_clobber_contract,
             assumes_readonly_image_constant=readonly_image is not None,
             assumes_import_slots_hold_exports=_import_slots_used(memory_ssa),
             rep_blocks=tuple(sorted((_coordinate_key(address), count, direction)

@@ -99,6 +99,8 @@ class _FunctionMemoryViewMixin:
         fragment = reads[0].fragments[0]
         if fragment.span != span or len(fragment.definition_ids) != 1:
             return None
+        if not self.read_settled(action_id, span):
+            return None
         return fragment.definition_ids[0]
 
     def materialize_path(
@@ -328,7 +330,11 @@ class _FunctionMemoryViewMixin:
                 for other in candidates
             )
         )
-        return (latest[0][0], latest[0][1]) if len(latest) == 1 else None
+        if len(latest) != 1 or not self.state_unchanged(
+            span, latest[0][2], before_key, own_definition_id=latest[0][1]
+        ):
+            return None
+        return (latest[0][0], latest[0][1])
 
     def state_definition(self, span: ByteSpan, before_position: int) -> int | None:
         """Return the one observed definition holding a span before a call."""
@@ -343,18 +349,9 @@ class _FunctionMemoryViewMixin:
             ),
             None,
         )
-        if before_key is None:
-            return None
-        if any(
-            definition.kind is MemoryDefinitionKind.DATA_WRITE
-            and definition.operation_key is not None
-            and any(
-                candidate.contains(span)
-                for candidate in self.definition_access_spans(definition)
-            )
-            and self.may_precede(definition.operation_key, before_key)
-            for definition in self.memory.definitions
-        ):
+        # the entry value only when nothing may change the span on any walk
+        # from the entry (the failed local lookup proves nothing)
+        if before_key is None or not self.state_unchanged(span, None, before_key):
             return None
         entries = tuple(
             definition_id
@@ -363,6 +360,34 @@ class _FunctionMemoryViewMixin:
             and definition.span.contains(span)
         )
         return entries[0] if len(entries) == 1 else None
+
+    def state_definitions(
+        self, span: ByteSpan, before_position: int
+    ) -> tuple[int, ...] | None:
+        """The current definition of each of this function's atoms covering a
+        span before a position (in byte order), or None when one piece has no
+        provably current definition or the atoms leave a gap. A span joining
+        several atoms (a callee's merged entry bytes) is answered piece by
+        piece, never by one stale containing definition."""
+        pieces = sorted(
+            (
+                ByteSpan(span.object_id, max(atom.start, span.start), min(atom.end, span.end) - max(atom.start, span.start))
+                for atom in self.memory.atomic_spans
+                if atom.object_id == span.object_id and atom.overlaps(span)
+            ),
+            key=lambda item: item.start,
+        )
+        position = span.start
+        found = []
+        for piece in pieces:
+            if piece.start != position:
+                return None
+            definition_id = self.state_definition(piece, before_position)
+            if definition_id is None:
+                return None
+            found.append(definition_id)
+            position = piece.end
+        return tuple(found) if found and position == span.end else None
 
     def source_origin_definition_ids(
         self, physical_spans: tuple[ByteSpan, ...]

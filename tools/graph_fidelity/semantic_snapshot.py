@@ -47,7 +47,9 @@ SNAPSHOT_VERSION = 1
 CONTRACT = {
     "NormalizedFunction": (None, {"document": "input (the function document)",
                                   "scopes": "input (scope bundle)",
-                                  "forward_inputs": "forward-on derivation inputs (docs 25.33 F4a); None when off"}),
+                                  "forward_inputs": "forward-on derivation inputs (docs 25.33 F4a); None when off",
+                                  "call_clobber_contract": "inputs of the call-clobber rows (docs 25.84); the rows,"
+                                                           " debts and roots they decide remain encoded"}),
     "UnresolvedNormalizedFunction": (None, {"scopes": "input (scope bundle)"}),
     "AnalyzedFunction": (None, {
         "unit": "input (the scoped unit)",

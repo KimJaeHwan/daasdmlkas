@@ -336,16 +336,21 @@ class CallClobberDischarger:
 
     def _caller_state_explained(self, caller, span, position, context, active) -> bool:
         view = self._views[caller]
-        definition_id = view.state_definition(span, position)
-        if definition_id is None:
+        # every caller atom of the span, each provably current (a callee's
+        # merged entry bytes are several caller definitions: R1a, docs 25.84)
+        definition_ids = view.state_definitions(span, position)
+        if definition_ids is None:
             return False
-        node = view.normalized.memory_graph.definition_nodes[definition_id]
-        result = BackwardSliceQuery().run(view.normalized, node)
-        if result.function_unresolved_write_nodes:
-            return False
-        if not self._debt_discharged(caller, result.reachable_unresolved_read_nodes, context, active):
-            return False
-        return self._labels_reported(view, result.reachable_nodes, context)
+        for definition_id in definition_ids:
+            node = view.normalized.memory_graph.definition_nodes[definition_id]
+            result = BackwardSliceQuery().run(view.normalized, node)
+            if result.function_unresolved_write_nodes:
+                return False
+            if not self._debt_discharged(caller, result.reachable_unresolved_read_nodes, context, active):
+                return False
+            if not self._labels_reported(view, result.reachable_nodes, context):
+                return False
+        return True
 
     @staticmethod
     def _reported_source_write(view, write_key, context) -> bool:

@@ -351,7 +351,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         for row in own_sink_nodes(analysis, _FunctionView(analysis)):
             groups.setdefault((row.label, row.occurrence_ordinal), []).append(row.node)
         return [
-            (label, tuple(sorted(set(group))), not _unbound_roots(normalized, group))
+            (label, tuple(sorted(set(group))), not _unbound_roots(normalized, group, label))
             for (label, _), group in sorted(groups.items())
         ]
 
@@ -513,7 +513,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         found = []
         for label, occurrence, root_nodes, results_for_root, node_labels in _raw_root_groups(
                 analysis, nodes[analysis.entry]):
-            unbound = _unbound_roots(analysis.normalized, root_nodes)
+            unbound = _unbound_roots(analysis.normalized, root_nodes, label)
             completeness = _with_unbound(local_completeness(results_for_root, debt_identity(
                 getattr(analysis.normalized, "call_clobber_reads", ()),
                 getattr(analysis.normalized, "call_clobber_debts", ()))), unbound)

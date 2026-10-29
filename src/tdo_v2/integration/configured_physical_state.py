@@ -195,17 +195,15 @@ def _relational_memory_value_definition_ids(view, selector, before_position):
         return ()
     candidate = latest[0]
     target_root, target_span, target_offset = target_relation
-    for operation_key, (_, operation) in view.operations.items():
-        if (
-            operation_key == candidate[1]
-            or operation_key == before_key
-            or operation_key in transient_keys
-            or not view.may_precede(candidate[1], operation_key)
-            or not view.may_precede(operation_key, before_key)
-        ):
+    # the same barrier as the materialized lookup (Stage 0.1 R1a A3): no call,
+    # CALLOTHER included, and no memory write this scan cannot relate
+    between = view.keys_between(candidate[1], before_key)
+    if between is None:
+        return ()
+    for operation_key in between:
+        operation = view.operations[operation_key][1]
+        if operation_key in transient_keys:
             continue
-        if operation.opcode in {"CALL", "CALLIND"}:
-            return ()
         if operation.opcode != "STORE" or len(operation.inputs) != 3:
             continue
         address_space = operation.inputs[0]

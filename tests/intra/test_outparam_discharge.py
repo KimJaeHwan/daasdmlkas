@@ -70,11 +70,29 @@ def _writer(*ops):
     return builder.ret()
 
 
-def test_outparam_from_caller_source_is_discharged():
+def test_outparam_from_caller_source_is_not_discharged_until_its_caller_state_is():
+    """W's value is the caller's EDX, set from EAX after ``call source``. That
+    read crosses the call (debt); its discharge nested inside this proof (the
+    same caller function) is not attempted, so W's value is not fully
+    explained. Before Stage 0.1 R1a the caller state was looked up as one
+    stale ENTRY definition (the callee's merged entry bytes RCX..EDX had no
+    containing write) and the proof passed vacuously -- see
+    ``test_outparam_value_clobbered_in_the_caller_is_not_discharged`` for the
+    hole that lookup opened (docs 25.84)."""
     root = _root(_writer([store(reg(RCX), reg(RDX, 4))]))
     assert root.reached_origin_labels == ("source.ret",)
     assert not root.is_locally_complete
-    assert root.is_effectively_complete
+    assert not root.is_effectively_complete
+
+
+def test_outparam_value_clobbered_in_the_caller_is_not_discharged():
+    """main: edx = source(); call opaque; rcx = &slot; writer(); ecx = slot;
+    sink -- the opaque call may change EDX before ``writer`` stores it: W's
+    value is unknown, never "explained" by a stale entry definition."""
+    def clobbered_rdx(builder):
+        builder.call(SOURCE).ins(copy(reg(RDX, 4), reg(RAX, 4))).call(OTHER)
+    root = _root(_writer([store(reg(RCX), reg(RDX, 4))]), main=_main(before=(clobbered_rdx,)))
+    assert not root.is_effectively_complete
 
 
 def test_outparam_constant_has_no_proof_and_stays_incomplete():
@@ -110,14 +128,20 @@ def test_outparam_then_call_that_writes_the_caller_slot_is_not_discharged():
     assert not _root(writer, extra={"other": other}).is_effectively_complete
 
 
-def test_outparam_then_call_that_keeps_its_own_frame_is_discharged():
+def test_outparam_then_call_that_keeps_its_own_frame_is_judged_like_the_plain_outparam():
+    """A nested call keeping its own frame adds no debt to W: the root is what
+    the plain outparam's is (not discharged while the caller's EDX read across
+    ``call source`` is not -- ``test_outparam_from_caller_source_...``)."""
     writer = _writer([store(reg(RCX), reg(RDX, 4))], lambda b: b.call(OTHER))
     other = (
         FunctionBuilder(entry=OTHER)
         .ins(add(T, reg(RSP), const(-0x10 & 0xFFFFFFFFFFFFFFFF)), store(T, const(0, 4)))
         .ret()
     )
-    assert _root(writer, extra={"other": other}).is_effectively_complete
+    root = _root(writer, extra={"other": other})
+    plain = _root(_writer([store(reg(RCX), reg(RDX, 4))]))
+    assert (root.reached_origin_labels, root.is_effectively_complete) == (
+        plain.reached_origin_labels, plain.is_effectively_complete)
 
 
 def test_partial_coverage_is_not_discharged():

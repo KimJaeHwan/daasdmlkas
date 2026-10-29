@@ -278,6 +278,19 @@ def build_observed_function_analyses(
                             occurrence_ordinal,
                             selectors,
                         )
+                        if not sink_nodes:
+                            # unrepresentable state: an unbound root at the
+                            # call, never a lost one (Stage 0.1 R1a A6)
+                            node = caller.normalized.dependencies.node_for_key(
+                                f"op:{seed.operation_key}"
+                            )
+                            if node is None:
+                                raise AssertionError(f"no operation node for sink call {seed.operation_key}")
+                            sink_nodes = (
+                                ObservedBoundaryNode(
+                                    BoundaryKind.SINK, match.label, node, occurrence_ordinal, 0
+                                ),
+                            )
                         nodes[caller.entry].extend(sink_nodes)
 
     _bind_tail_call_sinks(preliminary, views, provider, nodes)

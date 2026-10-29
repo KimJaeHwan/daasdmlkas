@@ -210,15 +210,23 @@ def analyze_frozen_bundle(
         )
 
 
-def _unbound_roots(normalized: NormalizedFunction, root_nodes) -> int:
-    """Roots bound to an operation (a call's consume event) with no data inputs:
-    the boundary state is not represented in the graph at all."""
+def _unbound_roots(normalized: NormalizedFunction, root_nodes, label: str | None = None) -> int:
+    """Roots bound to an operation (a call's consume event): binders use the
+    operation only when the boundary state has no exact graph definition, so
+    the root is unbound whatever the operation itself reads -- a CALLIND's
+    target is not the sink's argument (Stage 0.1 R1a A5). The one exception: a
+    call whose TEST-ONLY assumed effect declares THIS root's boundary (its
+    label) reads that boundary's state itself, so the operation is bound for
+    that label when it has data inputs; any other label at the call stays
+    unbound."""
     graph = normalized.dependencies
+    declared = {f"op:{key}" for key, effect in normalized.assumed_call_effects
+                if label is not None and effect.label == label and effect.reads}
     return sum(
         1
         for node in root_nodes
         if graph.node(node).kind is NodeKind.OPERATION
-        and not graph.backward_reachable((node,))[1:]
+        and not (graph.node(node).key in declared and graph.backward_reachable((node,))[1:])
     )
 
 
@@ -333,7 +341,7 @@ def analyze_observed_functions(
             )
             root_nodes = tuple(sorted({item.root.node for item in group}))
             results = tuple(item.result for item in group)
-            unbound = _unbound_roots(analysis.normalized, root_nodes)
+            unbound = _unbound_roots(analysis.normalized, root_nodes, label)
             explanation: dict[str, object] = {}
             if include_explanations:
                 explanation = root_local_explanation(

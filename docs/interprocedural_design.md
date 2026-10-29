@@ -6017,3 +6017,36 @@ ue-dll-debuggame 119/119, zlib 24/25(큰 함수 1개 메모리 초과) -- 불일
 - M5 전 조건(Fable P2): run별 대체 기록을 도구 출력(scale_point / Bundle 실행)에 내보내기; V2에 K2 카운터(cc_*) 다시 붙이기.
 - call_clobber 데이터흐름 삭제(M5)는 다음 단계: 모든 gate Bundle에서 대체 0건 + 한도 경로 테스트가 조건. 삭제 뒤에는 한도 초과가
   그 함수의 typed 실패(`function:bound`)가 된다.
+
+### 25.84 위치의 상태는 증명된 최신값이거나 거부 -- Stage 0.1 R1a (2026-10-29)
+
+ARM64 P0에서 드러난 구멍(x86에도 있음, `.census6/arm64_p0_report.md`): `latest_definition` / `state_definition`은 chi 없는
+값 관점(V1)과 raw 연산에서 "위치를 담는 지배하는 쓰기 하나"를 골랐다 -- opaque 호출(V1에 정의 없음), 부분·조건부 덮어쓰기
+(후보가 아님), 모델 행(`~`, raw 위치 없음)을 못 봐서 싱크 루트와 판단 소비자가 낡은 정의에 빚 없이 묶였다(`rcx=0; call
+opaque; jmp sink` -> 출처 없는 "완전"). 설계 `.census6/design_s0_r5.md`(Astra r6 승인), 구현 `configured_state_barrier.py`:
+- A1/A2 장벽: 답(지역 후보, 실패 뒤 ENTRY는 따로)은 그 정의(ENTRY면 함수 시작)에서 위치까지의 어떤 걸음(walk: 역방향 간선
+  포함, 같은 블록이면 뒤의 연산도 루프로)에도 범위를 바꿀 수 있는 것이 없을 때만 선다: 호출(CALL/CALLIND/CALLOTHER)은
+  읽기의 call-clobber 행과 같은 면제 계약(`call_clobber.clobber_inputs`: 가정된 호출 제외, callee가 증명한 바이트, 복원되는
+  호출 모양의 SP, 메모리를 지키는 요약 호출; `NormalizedFunction.call_clobber_contract`에 기록)으로 판단 -- 같은 위치의 같은
+  바이트를 읽기와 다르게 보지 않는다; 겹치는 DATA_WRITE/KILL(부분·조건부·모델 행: `op~row`는 raw `op` 순서로, 모르는 앵커는
+  거부, 위치 자신의 연산에 붙은 행은 소비 뒤); 메모리 범위면 다른 메모리 객체에 대한 쓰기(서로 다름이 증명된 쌍 -- 상수
+  주소와 스택, 함수의 이름 붙은 가정 아래 -- 만 제외)와 미해결·불확실 쓰기. 블록·위치를 모르는 연산은 사이에 있다고 보고,
+  대상 없는 BRANCHIND가 있는 함수는 경로 증명을 하지 않는다. 소비하는 연산 자신의 효과는 소비 뒤지만, 그 연산이 루프로 다시
+  실행되면 앞선 실행의 효과는 사이에 있다. 상수 주소와 함수의 스택 객체(may-alias 정책이 식별한 그 객체)만 가정 아래 서로
+  다르다 -- 다른 상대 객체(진입 포인터의 객체)는 어디든 가리킬 수 있다.
+- A3 관계형 대체(`_relational_memory_value_definition_ids`): 같은 장벽(`keys_between`) -- CALLOTHER, raw STORE 자신의 쓰기가
+  아닌 메모리 행(STORE에 붙은 rep 원소 `op~e<i>`, 미해결·불확실 행 포함: 그 STORE의 포인터가 가리키는 바이트가 아님), 순서
+  없는 행에서 거부.
+- A4 판단 입력: 모든 평가기가 입력을 따라가는 `definition_for_span`은 그 입력 범위에 call-clobber / may-alias 행이 걸린 읽기,
+  (메모리면) 그 동작의 다른 메모리 빚이나 함수의 미해결 쓰기가 있으면, 또는 함수의 후속 그래프가 불완전하면(SSA의 도달 정의가
+  해결 안 된 점프의 경로를 모름) 따라가지 않는다(값은 모름).
+- A5 루트: 연산(OPERATION)에 묶인 루트는 그 연산이 무엇을 읽든 미바인딩(예외: TEST-ONLY 가정 효과의 호출은 선언된 경계 상태를
+  스스로 읽는다 -- 그 효과가 선언한 라벨의 루트에만). A6: legacy 엔진은 묶지 못한 싱크를 버리지 않고 연산 루트로 남긴다.
+- 빚 정리의 호출자 상태(`_caller_state_explained`): callee의 합쳐진 진입 바이트(예: RCX..EDX 12바이트)를 호출자 atom마다
+  (`state_definitions`) 확인한다. 예전엔 담는 쓰기가 없으면 낡은 ENTRY 하나로 통과해서, 그 사이 덮어써진 값도 "설명됨"이 됐다
+  (`test_outparam_value_clobbered_in_the_caller_is_not_discharged`). 값의 원천 읽기가 같은 함수의 다른 호출을 건너면(EDX =
+  source 뒤 EAX) 그 빚의 중첩 정리는 시도하지 않는다 -- 그 outparam은 R1b 전까지 미완성.
+- 비용(측정): x86 gate Bundle 7개는 거부 0, v3-win32 14(스택 인자 push 뒤 다른 앵커 객체 쓰기: 겹치지 않음 증명 없음), ARM64
+  P1 10(원래 구멍). R0의 "modeled" 후보 190은 모두 구간 밖(선택된 정의가 덮어쓴 앞 호출의 행). 정밀도 회복은 R1b(읽기 노드).
+- 비용: 질의마다 `state_barrier` O(호출 + 쓰기 행), `keys_between` O(연산 + 쓰기 행); 블록 도달 폐포는 블록마다 한 번
+  (메모, 최악 O(블록^2) 메모리). `step()`은 세지 않는다(예전 조회도 같음) -- `hang_probe` TARGETS에 넣음.

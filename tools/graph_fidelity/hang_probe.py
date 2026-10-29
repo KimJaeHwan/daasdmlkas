@@ -30,6 +30,9 @@ TARGETS = {
     "tdo_v2.integration.configured_function_memory": (
         "resolve_local_pointer_prefix", "latest_definition", "_latest_definition",
     ),
+    "tdo_v2.integration.configured_state_barrier": (
+        "state_barrier", "keys_between", "read_settled",
+    ),
     "tdo_v2.integration.configured_origin_projection": (
         "_value_origins", "_origins_from_latest_state", "_origins_from_parent_entries",
     ),

@@ -17,6 +17,7 @@ from .configured_control_order import block_dominators as _block_dominators
 from .configured_function_control import _FunctionControlOrderMixin
 from .configured_function_memory import _FunctionMemoryViewMixin
 from .configured_function_values import _FunctionValueProjectionMixin
+from .configured_state_barrier import _FunctionStateBarrierMixin
 from .configured_interprocedural_contracts import ConfiguredFunctionAnalysis
 from .configured_interprocedural_records import (
     PointerPath as _PointerPath,
@@ -71,6 +72,7 @@ class _FunctionView(
     _FunctionControlOrderMixin,
     _FunctionMemoryViewMixin,
     _FunctionValueProjectionMixin,
+    _FunctionStateBarrierMixin,
 ):
     def __init__(self, analysis: ConfiguredFunctionAnalysis) -> None:
         self.analysis = analysis
