@@ -543,11 +543,22 @@ def derive_proven_call_effect(
     )
 
     deltas = dict(summary.register_deltas)
+    def delta_of(key):
+        # a link call (shape delta 0): a register whose every byte is unchanged in
+        # the merged state -- no exit writes it (an exported run is a write, even
+        # of a known value) and every inner call preserves it -- has delta 0.
+        # A push call's stack pointer is excluded from that state (its bytes
+        # read "self" only by default): there the summary's delta alone decides.
+        if key not in deltas and stack_deltas.get(key) == 0                 and all(state.get((register_object, offset), "self") == "self"
+                        for offset in range(key[0], key[0] + key[1])):
+            return 0
+        return deltas.get(key)
+
     if not stack_deltas:
         restoration = StackRestoration.UNKNOWN   # no call shape: nothing to undo is known
-    elif all(deltas.get(key) == -delta for key, delta in stack_deltas.items()):
+    elif all(delta_of(key) == -delta for key, delta in stack_deltas.items()):
         restoration = StackRestoration.PROVEN
-    elif any(deltas.get(key) is not None and deltas.get(key) != -delta for key, delta in stack_deltas.items()):
+    elif any(delta_of(key) is not None and delta_of(key) != -delta for key, delta in stack_deltas.items()):
         restoration = StackRestoration.DISPROVEN
     else:
         restoration = StackRestoration.UNKNOWN

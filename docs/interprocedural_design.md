@@ -6146,3 +6146,17 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
   push 앞 전이 거부(`observed_call_state`), forward 투영 arity 검사, x86-64 전용 image provenance 유지. 버전: 의미 28
   (27은 브랜치 단독의 의미를 가리킴), template 6, record 17, summary 2; 파생 UE FString 모델은 합친 엔진으로 재도출(own
   version 27). `ExitRecord.sp_delta`의 출처는 바꾸지 않음(2b-S에서).
+
+### 25.90 링크 호출의 스택 복원과 독립 SP delta -- ARM64 Stage 2b-S (2026-10-29)
+
+설계 `.census6/design_premise_2bp_r3.md` 2절(Astra r3 승인; F1 다음, 2b-P 앞의 별도 게이트 단계).
+- 링크 호출(2a `CallRelation` kind link)은 callee 스택 복원 판정의 호출 모양: delta 0(`interprocedural._link_call_shapes`)
+  -- 호출 효과의 복원 판정에만; 별칭 결정 / 스택 소유권은 push 모양 그대로(Stage 3).
+- 복원 판정(`derive_proven_call_effect`): 요약의 register_deltas에 없는 레지스터라도, 어느 출구도 쓰지 않고 모든 내부
+  호출이 보존하는 바이트(효과의 preserved)면 delta 0 -- ISA 무관한 사실. 내부 opaque 호출은 아무것도 보존하지 않으므로
+  `bl opaque; ret`인 callee는 UNKNOWN(손대지 않았다고 0이 되지 않음).
+- 독립 register-delta 증명(v2): 링크 호출을 receipt kind `link-call`(delta 0, push 없음, `:CALL`)로 받음 -- callee
+  복원이 PROVEN일 때만; 수신 검증도 그 규칙을 강제.
+- `ExitRecord.sp_delta` = 그 독립 증명의 delta(요약의 AFFINE 상수가 아님); 증명 digest가 인증서 의존에 들어감.
+  범위: "정상 출구에 닿으면" -- 이어짐 판정은 sp_delta를 읽지 않음(증명이 거부해도 PROVEN은 그대로).
+- 의미 29(ARM64 요약이 바뀜), 파생 UE 모델 재도출.

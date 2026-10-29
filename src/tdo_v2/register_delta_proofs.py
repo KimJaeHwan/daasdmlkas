@@ -25,7 +25,7 @@ from .span_geometry import ByteSpan, StorageObjectKind
 from .storage import _resolve_validated_storage
 
 
-PROOF_VERSION = 1
+PROOF_VERSION = 2   # 2: AArch64 link calls (kind "link-call", delta 0)
 _EXPLICIT = frozenset({"COPY", "LOAD", "STORE", "INT_ADD", "INT_SUB", "INT_MULT", "INT_DIV", "INT_REM",
     "INT_SDIV", "INT_SREM", "INT_AND", "INT_OR", "INT_XOR", "INT_NEGATE", "INT_2COMP", "INT_LEFT",
     "INT_RIGHT", "INT_SRIGHT", "INT_ZEXT", "INT_SEXT", "INT_EQUAL", "INT_NOTEQUAL", "INT_LESS",
@@ -132,6 +132,9 @@ def derive_register_delta_proof(unit, register_span, proven_call_effects, intrin
     assumed = dict(assumed_call_effects)
     audited_intrinsics = refinements_for(unit)
     projections = {row.call_operation_key: row for row in observed_call_state_projections(unit.observation)}
+    from .call_relations import call_relations
+    links = {key: relation for key, relation in call_relations(unit.observation, unit.scopes).items()
+             if relation.kind == "link"}
     incoming, pending, receipts, call_facts, intrinsic_facts = {graph.entry: 0}, [graph.entry], {}, {}, {}
     assumed_facts = {}
     original_keys = []
@@ -183,6 +186,7 @@ def derive_register_delta_proof(unit, register_span, proven_call_effects, intrin
                         or effect.noreturn is not False:
                     return None
                 push = None
+                kind = "tail" if tail else "call"
                 if tail:
                     if block.successors or ordinal != block.stop - 1 or effect.tail_stack != (register_span,) \
                             or type(effect.tail_stack_delta) is not int:
@@ -190,16 +194,25 @@ def derive_register_delta_proof(unit, register_span, proven_call_effects, intrin
                     adjustment = effect.tail_stack_delta
                 else:
                     projection = projections.get(opkey)
-                    if projection is None or effect.restores_stack is not True or effect.tail_stack \
-                            or effect.tail_stack_delta is not None or block.exits or len(block.successors) != 1:
+                    link = links.get(opkey)
+                    if (projection is None) == (link is None) or effect.restores_stack is not True \
+                            or effect.tail_stack or effect.tail_stack_delta is not None or block.exits \
+                            or len(block.successors) != 1:
                         return None
-                    base = projection.memory_transition.caller_base
-                    if (base.byte_offset, base.byte_size) != register:
-                        return None
-                    push = projection.memory_transition.displacement_delta
-                    adjustment = -push
+                    if link is not None:
+                        # the link call moves no stack pointer: the callee's entry SP is
+                        # the caller's, and its restoration (callee SP delta 0) is proven
+                        if (link.sp.byte_offset, link.sp.byte_size) != register or link.delta != 0:
+                            return None
+                        kind, adjustment = "link-call", 0
+                    else:
+                        base = projection.memory_transition.caller_base
+                        if (base.byte_offset, base.byte_size) != register:
+                            return None
+                        push = projection.memory_transition.displacement_delta
+                        adjustment = -push
                 delta = signed(delta + adjustment)
-                call_facts[opkey] = RegisterDeltaCallFact(opkey, callee, "tail" if tail else "call",
+                call_facts[opkey] = RegisterDeltaCallFact(opkey, callee, kind,
                     signed(adjustment), push, _call_fingerprint(effect, register))
                 continue
             if opcode in ("BRANCH", "CBRANCH", "RETURN"):
@@ -300,10 +313,11 @@ def validate_proof_record(record):
         blocks.append(RegisterDeltaBlock(row["key"], tuple(row["successors"]), row["exits"], row["entry_delta"], row["exit_delta"]))
     for row in record["call_facts"]:
         if type(row) is not dict or set(row) != {"operation_key", "callee", "kind", "delta", "observed_push_delta", "effect_fingerprint"} \
-                or not text(row["operation_key"]) or not text(row["callee"]) or row["kind"] not in ("call", "tail") \
+                or not text(row["operation_key"]) or not text(row["callee"]) \
+                or row["kind"] not in ("call", "link-call", "tail") \
                 or not delta(row["delta"]) or not digest(row["effect_fingerprint"]) \
                 or (row["kind"] == "call" and (not delta(row["observed_push_delta"]) or row["observed_push_delta"] >= 0)) \
-                or (row["kind"] == "tail" and row["observed_push_delta"] is not None):
+                or (row["kind"] in ("tail", "link-call") and row["observed_push_delta"] is not None):
             return None
         facts.append(RegisterDeltaCallFact(**row))
     for row in record["intrinsics"]:
@@ -330,6 +344,7 @@ def validate_proof_record(record):
             or any(f.kind == "call" and (f.observed_push_delta != -record["register"][1]
                                          or f.delta != record["register"][1]
                                          or not f.operation_key.endswith(":CALL")) for f in facts) \
+            or any(f.kind == "link-call" and (f.delta != 0 or not f.operation_key.endswith(":CALL")) for f in facts) \
             or any(f.kind == "tail" and not f.operation_key.endswith(":BRANCH") for f in facts) \
             or any(key not in record["operation_keys"] or not key.endswith(":CALLOTHER")
                    for key, _ in (*intrinsics, *assumed)):

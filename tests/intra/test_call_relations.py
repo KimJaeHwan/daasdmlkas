@@ -166,10 +166,13 @@ def test_the_link_register_identity():
 
 
 def test_no_analysis_reads_the_relations_yet():
-    """Isolation (2a): only the producer, the (itself observational) 2b
-    certificates and tests name it; no analysis names either."""
+    """Isolation: the readers are exactly the ones a stage enabled -- the 2b
+    certificates (observational) and, from 2b-S, the link-call restoration
+    shape (interprocedural) and the register-delta proof's link calls; no
+    analysis reads the certificates."""
     source = Path(__file__).resolve().parents[2] / "src" / "tdo_v2"
-    for name, readers in (("call_relations", ["return_relations.py"]), ("return_relations", [])):
+    for name, readers in (("call_relations", ["interprocedural.py", "register_delta_proofs.py",
+                                              "return_relations.py"]), ("return_relations", [])):
         users = sorted(path.name for path in source.rglob("*.py")
                        if name in path.read_text(encoding="utf-8") and path.name != f"{name}.py")
         assert users == readers, name

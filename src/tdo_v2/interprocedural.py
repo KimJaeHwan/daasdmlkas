@@ -502,6 +502,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 }
                 for row in observed_call_state_projections(observation)
             }
+            # an AArch64 link call (2a CallRelation): the callee's entry SP is the
+            # caller's (delta 0), so a callee whose summary SP delta is 0
+            # restores it -- for the call effect's restoration only (alias
+            # decisions / stack ownership keep the push shapes: Stage 3)
+            shapes.update(_link_call_shapes(unit))
             return register_object, register_limit, _preserved_stack_pointers(observation, context), shapes
 
         def site_effect(key, call_key, summary, anchors, failed=(), callee=None, rejections=None):
@@ -1794,6 +1799,14 @@ def _is_tail(call_key: str) -> bool:
     """A tail jump site: ``BRANCH`` to a function, or ``BRANCHIND`` through an
     import slot (``_external_sites``)."""
     return call_key.endswith(":BRANCH") or call_key.endswith(":BRANCHIND")
+
+
+def _link_call_shapes(unit) -> dict:
+    """Call key -> {(SP offset, size): 0} for every link-kind CallRelation."""
+    from .call_relations import call_relations
+
+    return {key: {(relation.sp.byte_offset, relation.sp.byte_size): 0}
+            for key, relation in call_relations(unit.observation, unit.scopes).items() if relation.kind == "link"}
 
 
 def _bottom_summary(stack_pointers, shapes, call_key, program_stack):

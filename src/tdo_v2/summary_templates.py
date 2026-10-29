@@ -110,7 +110,9 @@ TEMPLATE_VERSION = 6   # 2: stack_values_out; 3: exact scalar literals and entry
 # 28: the owner's 25-27 combined with main's three-way stack restoration
 # (tails UNKNOWN, never vacuously restored), CallRelation / push-prefix
 # refusal and the x86-64-only image provenance (27 named the branch alone).
-ENGINE_SEMANTICS_VERSION = 28
+# 29: an AArch64 link call is a call shape for the callee's stack restoration
+# (delta 0), and a link call in the independent register-delta proof (v2).
+ENGINE_SEMANTICS_VERSION = 29
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

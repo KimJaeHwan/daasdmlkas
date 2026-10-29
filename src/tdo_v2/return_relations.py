@@ -114,7 +114,9 @@ def function_certificate(normalized, observation, scopes, callee_certificates: d
         dependencies.append(f"pac:{pac_spec}")
         culprits.extend(_pac_scan(observation, code_reader, pac_spec))
     observed = {(row.address.space_id, row.address.byte_offset) for row in observation.instructions}
-    sp_delta = _exit_delta(summary, sp)
+    sp_delta, proof_digest = _exit_delta(normalized, observation, scopes, sp)
+    if proof_digest is not None:
+        dependencies.append(f"register-delta-proof:{proof_digest}")
     relations = call_relations(observation, scopes)
     for instruction in observation.instructions:
         keys = [_operation_key(instruction.address, index, op.opcode) for index, op in enumerate(instruction.operations)]
@@ -297,13 +299,23 @@ def _premises(normalized) -> list[str]:
     return found
 
 
-def _exit_delta(summary, sp) -> int | None:
-    if summary is None:
-        return None
-    for (offset, size), delta in summary.register_deltas:
-        if (offset, size) == (sp.byte_offset, sp.byte_size):
-            return delta
-    return None
+def _exit_delta(normalized, observation, scopes, sp) -> tuple[int | None, str | None]:
+    """SP at a normal exit - SP at entry, from the independent register-only
+    proof over the original CFG (``register_delta_proofs``, docs 25.89) --
+    never the summary's own AFFINE constant; (None, None) when it refuses.
+    Scope: IF a normal exit is reached; neither continuation nor termination."""
+    from types import SimpleNamespace
+
+    from .register_delta_proofs import derive_register_delta_proof
+
+    register = StorageObjectId(StorageObjectKind.REGISTER_FILE, scopes.program.scope, 0)
+    proof = derive_register_delta_proof(
+        SimpleNamespace(scopes=scopes, observation=observation), ByteSpan(register, sp.byte_offset, sp.byte_size),
+        dict(normalized.proven_call_effects), dict(getattr(normalized, "intrinsic_refinements", ())),
+        assumed_call_effects=getattr(normalized, "assumed_call_effects", ()))
+    if proof is None:
+        return None, None
+    return proof.delta, proof.record()["content_sha256"]
 
 
 def program_certificates(functions: dict, *, code_reader=None, pac_spec=None) -> dict:

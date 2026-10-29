@@ -50,6 +50,13 @@ def test_no_known_delta_leaves_it_unknown():
     assert effect.stack_restoration is StackRestoration.UNKNOWN and not effect.restores_stack
 
 
+def test_an_untouched_register_is_delta_zero_only_for_a_link_shape():
+    """2b-S (Astra r2 P2): the "unchanged, so 0" fallback serves a link call
+    (shape delta 0); a push call's untouched stack pointer stays UNKNOWN -- its
+    bytes are excluded from the merged state, not shown unchanged."""
+    assert _effect(_summary()).stack_restoration is StackRestoration.UNKNOWN
+
+
 def test_no_call_shape_is_never_a_restoration():
     """No stack pointer known at the call (no push shape): nothing was shown
     restored -- the old ``all(...)`` over an empty shape said True."""
