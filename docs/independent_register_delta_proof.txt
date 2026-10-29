@@ -1,0 +1,87 @@
+메모리 조건과 독립인 register delta 증명 — semantics27
+
+기준: 7a410c91ba9d394e4fcb26e240e559f646934462 (semantics26)
+branch: codex/strengthen-memory-sink-tracing
+이 변경은 OW2/CRT 함수 주소나 이름으로 결과를 통과시키는 예외가 아니다.
+원 P-code CFG에서 검증되는 register-only 정리를 일반적으로 함수 요약에 보존한다.
+최종 commit과 전체 검사/실제 사례의 최종 상태는 외부 단계별 인계 기록을 따른다.
+
+현상
+call_summary_effects._all_unknown은 generic writer_conditions를 caller가 결정하지 못하면
+모든 상태와 register_deltas를 지웠다. 이 보수적 처리는 SP의 메모리 spill/LOAD 복원이
+조건에 의존할 때 필수이지만, SP가 오직 상수 산술과 검증된 호출만 거칠 때도 정보를 잃었다.
+실제 helper29c14/29988은 각각 writer_conditions6개와 summary RSP+8이 있었지만
+caller22a0c의22a28/22a63 효과는 restores_stack=False였다.
+기존 delta를 단순히 남기는 수정은 하지 않는다.
+
+증명기
+register_delta_proofs.derive_register_delta_proof는 입력 ByteSpan의 register를 대상으로
+원 CFG의 모든 도달 블록과 정상 exit를 검사한다. 레지스터는 이름으로 선택하지 않는다.
+  - full-width self ADD/SUB의 정확 폭 상수만 허용한다. delta는 register 폭의 modular 산술이다.
+  - joins의 모든 도착 delta가 같아야 한다. zero-delta loop는 가능하나 상충 backedge는 거부한다.
+  - 해당 register의 LOAD/COPY/부분 쓰기/미지원 갱신은 거부한다.
+  - CALL은 원 observed push shape와 조건 없는 기존 restores_stack 사실을 함께 확인한다.
+  - tail은 정확한 대상, tail_stack span과 tail_stack_delta를 확인한다.
+  - 미해결/간접 호출·tail, 미지원 userop, register-space STORE는 보수적으로 거부한다.
+  - 승인된 ISA intrinsic만 output-only 의미로 사용한다.
+  - 기존 no-effect AssumedCallEffect는 실제 CALLOTHER index-only/no-output 형태,
+    empty reads/writes가 맞을 때만 허용하며 (원 opkey,label)을 proof.assumed_no_effect에 기록한다.
+    실제 LOCK/UNLOCK 모델 전제를 지우거나 ISA 무가정 사실로 바꾸지 않는다.
+STORE 주소나 memory SSA의 alias 조건을 이 register-only 계산의 전제로 읽지 않는다.
+
+증명 범위
+정상 exit에 도달하면 entry register + delta라는 정리다.
+종료성, return target의 유효성, 함수의 다른 값/메모리 보존을 증명하지 않는다.
+기존 callee 사실과 명시된 모델 전제의 정확성은 해당 기존 증명/가정에 의존한다.
+RETURN을 만났다는 이유나 summary의 기존 delta 값만으로 결과를 승인하지 않는다.
+
+증명 보존과 재사용
+FunctionSummary.independent_delta_proofs에 별도로 계산한 certificate를 저장한다.
+writer_conditions가 있고 기존 delta 후보가 있는 경우만 별도 원 코드 검사를 시도한다.
+증명된 delta와 후보가 일치해야 포함된다.
+_all_unknown은 이 certificate-backed delta만 남기며, 다른 register/memory 값은 계속 unknown이다.
+ProvenCallEffect.register_delta_proofs에는 실제 stack claim에 사용한 원 증명을 남긴다.
+원 CALL NodeRecord.semantic_identity와 operation record의 register_delta_proofs가 이를 참조한다.
+증명에는 원 program/function/observation/binary identity, 원 opkeys, CFG entry/exit delta,
+call fact receipts, intrinsic 의미 ID, 기존 no-effect 전제가 포함된다.
+여러 간접 target 요약의 합성은 초기 지원 범위에서 certificate를 버려 보수적으로 동작한다.
+
+모델 저장/로드
+template export는 원 admitted unit과 현재 callee/intrinsic/no-effect 사실로 증명을 재계산한다.
+기존 source가 바뀌었거나 다시 hash한 가짜 receipt는 export가 거부한다.
+import의 strict schema/content hash 검사는 그 자체로 원 코드 재증명이 아니다.
+기존 engine/language/model/pcodeop/parameter 호환 검사를 그대로 거치고,
+proof의 source executable SHA가 모델 source와 같으며 명시된 모델 전제들이
+source.assumptions에 모두 기록되어야 한다. 누락 시 entry를 거부하고 caller에 적용하지 않는다.
+저장된 외부 derived 모델 적용의 기존 derived-model-runtime-matches 가정은 유지한다.
+
+회귀 근거
+상수 SP 산술+검증 CALL/pure tail/같은 delta의 분기 및 loop,
+unknown/conditional CALL, SP LOAD, partial write, 다른 branch delta, 잘못된 register object,
+미지원 userop, 미해결 tail/BRANCHIND, register-space STORE 반례를 포함한다.
+writer 조건 실패 후 원 memory/value unknown이 유지되고 SP만 증명되는지 검사한다.
+bare old delta, source 변경, rehashed fake receipt, 잘못된 template, 숨긴 전제/다른 binary가
+거부되는지와 실제 import caller에서 모델이 적용되지 않는지도 검사한다.
+정상 template roundtrip과 모델 전제의 inherited 보존을 검사한다.
+
+실제 작은 범위의 확인
+고정 Bundle의 helper29b8c/29988/29bec/29c14에서 원 코드 재검증이 성공했다.
+기존 LOCK/UNLOCK 전제를 명시적으로 사용했고, 조건부 helper 두 개의 호출 효과가
+restores_stack=True로 바뀌었다. 전체226함수 결과와 최종 wVk의 상태는 아래에 별도로 기록한다.
+
+전체226함수 재실행 결과
+run_failed_functions=[]이며 기존 run_assumptions 목록은 semantics26 단계와 같다.
+Key76d9와780c 모두 restores_stack=True, 최종7a1c의 RSP call-clobber는 없다.
+원 entry RSP 기반 offsets[-464,0] 포인터 경로가 다시 도출된다.
+그러나 begin slot LOAD는 reserve78bd와 push793f/79dd의 메모리 효과 때문에 미정이며,
+memory_candidates/value_ids는 비어 있다. 실제 최종 wVk 증명은 아직 완료되지 않았다.
+begin을 보존한다고 단정할 수 없다. reserve/push는 실제로 begin/end/cap을 갱신할 수 있으므로,
+각 정상 return의 새 포인터 값과 그 새 객체의 byte lineage가 다음 증명 대상이다.
+
+전체 tests/intra: 4877 passed, 35 skipped, 0 failed (299.94초).
+
+버전
+FUNCTION_SUMMARY_VERSION1->2, TEMPLATE_VERSION5->6,
+ENGINE_SEMANTICS_VERSION26->27, RECORD_VERSION16->17.
+파생 UE FString 모델은 동일 원 DLL Bundle에서 실제 재도출하고 own version25->26으로 기록한다.
+기존 모델/지문을 새 의미로 조용히 재사용하지 않는다.

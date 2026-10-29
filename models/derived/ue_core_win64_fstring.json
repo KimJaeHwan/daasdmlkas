@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 25,
+ "version": 26,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -19,9 +19,9 @@
    "minor": 6
   },
   "engine": {
-   "summary_version": 1,
-   "template_version": 5,
-   "semantics_version": 26
+   "summary_version": 2,
+   "template_version": 6,
+   "semantics_version": 27
   },
   "parameters": {
    "private_frame_above": 0
@@ -55,7 +55,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "bf08469af4b060b6d4f99c409bf44a942297ebe3+dirty",
+   "engine_revision": "7a410c91ba9d394e4fcb26e240e559f646934462+dirty",
    "bundle": "8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50",
    "index_addresses": true,
    "stack_evidence": [
@@ -497,6 +497,7 @@
       8
      ]
     ],
+    "independent_delta_proofs": [],
     "dead_exits": [],
     "writer_conditions": [],
     "stack_values_out": false,
@@ -997,6 +998,7 @@
       8
      ]
     ],
+    "independent_delta_proofs": [],
     "dead_exits": [],
     "writer_conditions": [],
     "stack_values_out": false,
@@ -6675,6 +6677,7 @@
       8
      ]
     ],
+    "independent_delta_proofs": [],
     "dead_exits": [
      "dll:1b1:1800f506f",
      "dll:1b1:1800f50ca"

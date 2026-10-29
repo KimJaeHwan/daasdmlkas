@@ -30,7 +30,7 @@ unanchored memory, or that an inner call may change, stay opaque.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .constant_value import ExactConstant
 from .function_summary import ExitSummary, FunctionSummary, SummaryKind, SummaryRun
@@ -314,6 +314,10 @@ class ProvenCallEffect:
     # stack taint follows no call output, so the call itself is a stack escape
     # (``may_alias._stack_taint``); a declared model never sets it
     escapes_stack: bool = False
+    # Provenance only: the facts in restores_stack/tail_stack_delta remain
+    # semantic. Original-CFG certificates justify them independently of a
+    # refused memory-writer condition and survive in the query graph/record.
+    register_delta_proofs: tuple = field(default=(), compare=False)
 
 
 def derive_proven_call_effect(
@@ -549,6 +553,8 @@ def derive_proven_call_effect(
         observes, sink_demands, restores, tail_stack, tail_delta, clobbers_below,
         writer_conditions=_sorted_pairs(writer_pairs), unknown_memory=unknown_memory,
         observed_registers=observed, escapes_stack=escapes,
+        register_delta_proofs=tuple(proof for proof in summary.independent_delta_proofs
+            if proof.register in stack and deltas.get(proof.register) == proof.delta),
     )
 
 
@@ -963,8 +969,23 @@ def _all_unknown(summary, register_object, register_limit):
                      ("conditional-writer",), (), (), (), ("uncertain:conditional-writer",))
     return _replace(
         summary, exits=tuple(ExitSummary(item.block_key, (run,)) for item in summary.exits),
-        unknown_writers=("conditional-writer",), register_deltas=(), writer_conditions=(),
+        unknown_writers=("conditional-writer",),
+        # Preserve only separately recomputed original-CFG facts. Ordinary
+        # register_deltas may have used a conditional spill/LOAD and are lost.
+        register_deltas=_independent_delta_facts(summary),
+        writer_conditions=(),
     )
+
+
+def _independent_delta_facts(summary):
+    from .register_delta_proofs import RegisterDeltaProof, validate_proof_record
+    facts, kept = dict(summary.register_deltas), {}
+    for proof in summary.independent_delta_proofs:
+        if type(proof) is not RegisterDeltaProof or validate_proof_record(proof.record()) != proof \
+                or proof.register in kept or facts.get(proof.register) != proof.delta:
+            raise ValueError("invalid independent register delta certificate in summary")
+        kept[proof.register] = proof.delta
+    return tuple(sorted(kept.items()))
 
 
 def _anchored_conditions(run, anchored, failed, rejections=None, where=None):

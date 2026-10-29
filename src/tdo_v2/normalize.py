@@ -102,6 +102,16 @@ from .opaque_values import OpaqueValueEvidenceProvider
 from .storage import _resolve_validated_storage
 
 
+def _operation_semantic_identity(key, intrinsics, proven):
+    if key in intrinsics:
+        return intrinsics[key].semantics.semantic_id
+    effect = proven.get(key)
+    if effect is not None and effect.register_delta_proofs:
+        return "register-delta-proof:" + ",".join(
+            proof.record()["content_sha256"] for proof in effect.register_delta_proofs)
+    return None
+
+
 def _forward_inputs(**inputs):
     """``forward.ForwardInputs`` of the accepted normalization, only with the
     forward switch on (TDO_V2_FORWARD=1); None otherwise -- one environment test,
@@ -1753,8 +1763,8 @@ class _ScopedNormalizer:
                     operation_key = _operation_key(instruction, ordinal, operation)
                     operation_nodes[operation_key] = dependencies.add_node(
                         NodeRecord(f"op:{operation_key}", NodeKind.OPERATION, operation.opcode,
-                                   None if operation_key not in intrinsic_refinements
-                                   else intrinsic_refinements[operation_key].semantics.semantic_id)
+                                   _operation_semantic_identity(operation_key, intrinsic_refinements,
+                                                                proven_call_effects))
                     )
                     operation_node = operation_nodes[operation_key]
                     effect = _scoped_effect(instruction, ordinal, operation, context)

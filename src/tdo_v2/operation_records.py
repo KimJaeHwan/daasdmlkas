@@ -78,7 +78,7 @@ from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 
-RECORD_VERSION = 16  # 15: conditional memory transfers; 16: qualified ISA intrinsic value proofs
+RECORD_VERSION = 17  # 16: ISA intrinsic values; 17: independent register-delta proofs
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -1059,6 +1059,9 @@ class _Builder:
         _, address, ordinal = _key_parts(key)
         record["address"], record["ordinal"] = address, ordinal
         self._with_origins(record, node)
+        effect = self.proven.get(key)
+        if effect is not None and effect.register_delta_proofs:
+            record["register_delta_proofs"] = [proof.record() for proof in effect.register_delta_proofs]
         self.expanding.add(node)
         try:
             if found is None:
@@ -1551,6 +1554,8 @@ class _Builder:
             "state_proof": effect.state_proof,
             "writer_conditions": len(effect.writer_conditions),
         }
+        if effect.register_delta_proofs:
+            record["facts"]["register_delta_proofs"] = [proof.record() for proof in effect.register_delta_proofs]
         runs = [("register", run) for run in effect.runs] + [("memory", run) for run in effect.memory_runs]
         if tag.isdigit() and int(tag) < len(runs):
             kind, run = runs[int(tag)]

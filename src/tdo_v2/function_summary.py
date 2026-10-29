@@ -24,7 +24,9 @@ an unknown-address write -- unless that debt reduces to alias conditions
 static object when the conditions hold: it is an ordinary write here, and its
 conditions are ``writer_conditions``, carried by every run that is not
 IDENTITY/UNKNOWN; a caller that cannot decide them, or finds one failing,
-treats the whole call as unknown (``call_summary_effects``).
+treats the call's state as unknown (``call_summary_effects``). Separately
+checked register-only CFG certificates may retain a delta independent of
+these memory conditions; no ordinary conditional value survives by default.
 * ``AFFINE`` -- reserved for the stack pointer (S2).
 
 Bytes the function never touches do not appear in the terminal state; they
@@ -55,7 +57,7 @@ from .memory_contracts import MemoryDefinitionKind
 from .model import ResolvedStorage
 from .span_geometry import ByteSpan, StorageObjectKind
 
-FUNCTION_SUMMARY_VERSION = 1
+FUNCTION_SUMMARY_VERSION = 2
 _ADDRESS_UNCERTAIN = {"may_alias_read", "unresolved_memory_read", "call_clobber_read", "uncertain_write_read",
                       "open_condition", "opaque_call_write"}
 # debt of a read a conditional uncertain-address writer may reach: for roots
@@ -160,6 +162,9 @@ class FunctionSummary:
     stack_values_out: bool = True
     # Bounded original-entry base/index address relations for relative objects.
     address_relations: tuple = ()
+    # Original-CFG register-only proofs independent of writer conditions.
+    # These are not inferred from the conditional register_deltas above.
+    independent_delta_proofs: tuple = ()
 
 
 @measured("summarize")
@@ -255,6 +260,22 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     # the stack pointer's delta is a claim like any other: it holds with the
     # writer conditions, which a caller decides (or drops every claim)
     register_deltas = _register_deltas(normalized, observation, exits)
+    independent_delta_proofs = ()
+    if writer_conditions and register_deltas:
+        from types import SimpleNamespace
+        from .register_delta_proofs import derive_register_delta_proof
+        register_object = next((definition.span.object_id for definition in definitions
+                                if definition.span.object_id.kind is StorageObjectKind.REGISTER_FILE), None)
+        if register_object is not None:
+            source = SimpleNamespace(scopes=normalized.scopes, observation=observation)
+            found_proofs = []
+            for slot, delta in register_deltas:
+                proof = derive_register_delta_proof(source, ByteSpan(register_object, *slot),
+                    dict(normalized.proven_call_effects), dict(getattr(normalized, "intrinsic_refinements", ())),
+                    assumed_call_effects=normalized.assumed_call_effects)
+                if proof is not None and proof.delta == delta:
+                    found_proofs.append(proof)
+            independent_delta_proofs = tuple(found_proofs)
     if writer_conditions:
         exits = [ExitSummary(item.block_key, tuple(
             run if run.kind in (SummaryKind.IDENTITY, SummaryKind.UNKNOWN)
@@ -296,6 +317,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         tuple(sorted(writer_conditions, key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))),
         stack_values_out(normalized, observation),
         indexed_relations(normalized, observation, conditions_of),
+        independent_delta_proofs,
     )
 
 
