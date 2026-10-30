@@ -80,9 +80,9 @@ export TDO_PY=~/venvs/tdo/bin/python
    G=$(ls -d ~/tdo_data/tdo_bundles_so/libyolo/*/ | head -1)
    PYTHONHASHSEED=0 PYTHONPATH=src ~/venvs/tdo/bin/python tools/analyze_bundle/analyze_query.py "$G" --list-calls --out /tmp/libyolo_calls.json
    ```
-3. 전체 게이트: main을 기준선 `pc1b`(개발 PC에서 같은 코드로 만든 스냅샷)와 비교 (개발 PC 약 30분):
+3. 전체 게이트: main을 기준선 `macg2`(개발 PC에서 같은 main 코드로 만든 스냅샷, 데이터 패키지에 들어 있다)와 비교 (개발 PC 약 26분):
    ```bash
-   SUITE_WORKERS=8 SNAP_JOBS=6 ORACLE_JOBS=8 bash tools/gate/gate_par.sh pc1b mac-main1
+   SUITE_WORKERS=8 SNAP_JOBS=6 ORACLE_JOBS=8 bash tools/gate/gate_par.sh macg2 mac-main1
    grep -vE 'identical' ~/tdo_data/gate_par_mac-main1/snapshot.txt | head -30
    ```
    - 스냅샷이 모두 `identical`이고 테스트가 통과하면: Mac 네이티브 게이트를 그대로 쓴다.
