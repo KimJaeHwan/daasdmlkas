@@ -1,0 +1,525 @@
+{
+ "format_version": 1,
+ "kind": "declared",
+ "id": "crt-aarch64-android",
+ "version": 1,
+ "language_id": "AARCH64:LE:64:v8A",
+ "abi_tag": "aapcs64",
+ "notes": "C runtime (Android bionic) and C++ runtime (libc++) functions under AAPCS64 (args x0, x1, x2, x3; result x0; the call writes x30 and moves no stack pointer). Preserved: x19-x29 (AAPCS64 6.1.1 callee-saved -- a declared assumption of this file, like every entry). Carried from crt-sysv64 v8; hand models to be replaced by models derived from the device's libc.so / libc++.so where their code is analyzable (walls: allocator internals, system calls, ifunc dispatch stay declared).",
+ "stack_pointer": [
+  8,
+  8
+ ],
+ "stack_delta": 0,
+ "preserved": [
+  [
+   16536,
+   8
+  ],
+  [
+   16544,
+   8
+  ],
+  [
+   16552,
+   8
+  ],
+  [
+   16560,
+   8
+  ],
+  [
+   16568,
+   8
+  ],
+  [
+   16576,
+   8
+  ],
+  [
+   16584,
+   8
+  ],
+  [
+   16592,
+   8
+  ],
+  [
+   16600,
+   8
+  ],
+  [
+   16608,
+   8
+  ],
+  [
+   16616,
+   8
+  ]
+ ],
+ "entries": [
+  {
+   "name": "memcpy",
+   "aliases": [
+    "memmove"
+   ],
+   "notes": "dst[0, n) = src[0, n); returns dst. Exact only when n is proven constant at the call.",
+   "registers": [
+    {
+     "write": [
+      16384,
+      8
+     ],
+     "from": [
+      [
+       16384,
+       8
+      ]
+     ]
+    }
+   ],
+   "memory": [
+    {
+     "write": {
+      "base": [
+       16384,
+       8
+      ],
+      "disp": 0,
+      "size": {
+       "reg": [
+        16400,
+        8
+       ]
+      }
+     },
+     "from": [
+      [
+       16384,
+       8
+      ],
+      [
+       16392,
+       8
+      ],
+      [
+       16400,
+       8
+      ]
+     ],
+     "loads": [
+      {
+       "base": [
+        16392,
+        8
+       ],
+       "disp": 0,
+       "size": {
+        "reg": [
+         16400,
+         8
+        ]
+       }
+      }
+     ]
+    }
+   ],
+   "callbacks": "none",
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "preserved"
+  },
+  {
+   "name": "memset",
+   "notes": "dst[0, n) = (byte)c; returns dst.",
+   "registers": [
+    {
+     "write": [
+      16384,
+      8
+     ],
+     "from": [
+      [
+       16384,
+       8
+      ]
+     ]
+    }
+   ],
+   "memory": [
+    {
+     "write": {
+      "base": [
+       16384,
+       8
+      ],
+      "disp": 0,
+      "size": {
+       "reg": [
+        16400,
+        8
+       ]
+      }
+     },
+     "from": [
+      [
+       16384,
+       8
+      ],
+      [
+       16392,
+       8
+      ],
+      [
+       16400,
+       8
+      ]
+     ],
+     "loads": []
+    }
+   ],
+   "callbacks": "none",
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "preserved"
+  },
+  {
+   "name": "strcpy",
+   "notes": "For a defined call (src NUL-terminated, dst writable and large enough, no overlap -- otherwise undefined behaviour): dst[0] = src[0] when it returns (strcpy copies at least the terminating NUL, src[0] first); the rest has an extent known only at run time: all other memory is unknown. Returns dst.",
+   "registers": [
+    {
+     "write": [
+      16384,
+      8
+     ],
+     "from": [
+      [
+       16384,
+       8
+      ]
+     ]
+    }
+   ],
+   "memory": [
+    {
+     "write": {
+      "base": [
+       16384,
+       8
+      ],
+      "disp": 0,
+      "size": 1
+     },
+     "from": [
+      [
+       16384,
+       8
+      ],
+      [
+       16392,
+       8
+      ]
+     ],
+     "loads": [
+      {
+       "base": [
+        16392,
+        8
+       ],
+       "disp": 0,
+       "size": 1
+      }
+     ]
+    }
+   ],
+   "callbacks": "none",
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "clobbered"
+  },
+  {
+   "name": "strcat",
+   "aliases": [
+    "strncpy",
+    "strncat"
+   ],
+   "notes": "Writes an extent known only at run time (strncpy with n == 0 writes nothing; strcat writes after dst's string): no memory is kept. Returns dst.",
+   "registers": [
+    {
+     "write": [
+      16384,
+      8
+     ],
+     "from": [
+      [
+       16384,
+       8
+      ]
+     ]
+    }
+   ],
+   "memory": [],
+   "callbacks": "none",
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "clobbered"
+  },
+  {
+   "name": "longjmp",
+   "notes": "Never returns to its caller (C11 7.13.2.1, _Noreturn): only the paths after the call end; the setjmp side is not modeled here (an opaque call). Reads the jmp_buf x0 points to (observes x0).",
+   "registers": [],
+   "memory": [],
+   "observes": [
+    [
+     16384,
+     8
+    ]
+   ],
+   "callbacks": {
+    "registered": [
+     "pthread cancellation cleanup handlers of the frames left (the C library _longjmp_unwind) (carried from glibc: bionic's longjmp not audited; kept as declared handlers)"
+    ]
+   },
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "preserved",
+   "noreturn": true
+  },
+  {
+   "name": "__stack_chk_fail",
+   "notes": "bionic's stack-protector failure: never returns (declared noreturn); uses no pointer it receives.",
+   "registers": [],
+   "memory": [],
+   "observes": [],
+   "callbacks": {
+    "registered": [
+     "SIGABRT signal handler (signal / sigaction)"
+    ]
+   },
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "preserved",
+   "noreturn": true
+  },
+  {
+   "name": "abort",
+   "notes": "Never returns to its caller (C11 7.22.4.1): the paths through it end there. Uses no pointer it receives (observes nothing).",
+   "registers": [],
+   "memory": [],
+   "observes": [],
+   "callbacks": {
+    "registered": [
+     "SIGABRT signal handler (signal / sigaction)"
+    ]
+   },
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "preserved",
+   "noreturn": true
+  },
+  {
+   "name": "strlen",
+   "aliases": [
+    "strcmp",
+    "strncmp",
+    "memcmp"
+   ],
+   "notes": "Reads memory of unknown extent: the result is left unknown; memory unchanged.",
+   "registers": [],
+   "memory": [],
+   "callbacks": "none",
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "preserved"
+  },
+  {
+   "name": "malloc",
+   "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included) of x0 bytes, or null (docs 25.79: the size is used only where a null test dominates the access). Heap bookkeeping is not program-visible memory (assumption).",
+   "registers": [
+    {
+     "write": [
+      16384,
+      8
+     ],
+     "from": [],
+     "fresh": true,
+     "extent": {
+      "reg": [
+       16384,
+       8
+      ]
+     }
+    }
+   ],
+   "memory": [],
+   "observes": [],
+   "callbacks": {
+    "registered": [
+     "bionic malloc hooks / malloc debug (libc.debug.malloc.*, malloc_hooks: __malloc_hook, __free_hook, ...)"
+    ]
+   },
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "preserved"
+  },
+  {
+   "name": "calloc",
+   "notes": "Returns a new block's address (no program data flows into it; fresh: never an address of memory existing before the call, the stack included) of x0 * x1 bytes (zero-filled; taken only without overflow), or null (docs 25.79: the size is used only where a null test dominates the access). Heap bookkeeping is not program-visible memory (assumption).",
+   "registers": [
+    {
+     "write": [
+      16384,
+      8
+     ],
+     "from": [],
+     "fresh": true,
+     "extent": {
+      "product": [
+       [
+        16384,
+        8
+       ],
+       [
+        16392,
+        8
+       ]
+      ]
+     }
+    }
+   ],
+   "memory": [],
+   "observes": [],
+   "callbacks": {
+    "registered": [
+     "bionic malloc hooks / malloc debug (libc.debug.malloc.*, malloc_hooks: __malloc_hook, __free_hook, ...)"
+    ]
+   },
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": "none",
+   "other_memory": "preserved"
+  },
+  {
+   "name": "free",
+   "notes": "Assumes no use after free: the freed block's contents are not read again. Uses no pointer it receives on program-visible memory and keeps none (observes nothing).",
+   "registers": [],
+   "memory": [],
+   "observes": [],
+   "callbacks": {
+    "registered": [
+     "bionic malloc hooks / malloc debug (libc.debug.malloc.*, malloc_hooks: __malloc_hook, __free_hook, ...)"
+    ]
+   },
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": [
+    [
+     16384,
+     8
+    ]
+   ],
+   "other_memory": "preserved"
+  },
+  {
+   "name": "realloc",
+   "notes": "Returns a block holding the old contents: the same object as the old pointer, assuming the old pointer is not used afterwards (no-use-of-old-pointer-after-realloc); realloc(NULL, n) is a fresh block.",
+   "registers": [
+    {
+     "write": [
+      16384,
+      8
+     ],
+     "from": [
+      [
+       16384,
+       8
+      ],
+      [
+       16392,
+       8
+      ]
+     ],
+     "same_object_as": [
+      16384,
+      8
+     ]
+    }
+   ],
+   "memory": [],
+   "observes": [
+    [
+     16384,
+     8
+    ]
+   ],
+   "callbacks": {
+    "registered": [
+     "bionic malloc hooks / malloc debug (libc.debug.malloc.*, malloc_hooks: __malloc_hook, __free_hook, ...)"
+    ]
+   },
+   "callbacks_evidence": "ISO C17 / POSIX semantics as implemented by Android bionic (AOSP libc); hand model carried from crt-sysv64 v8 on 2026-10-30, NOT yet audited against the device libc.so (Android 9, SM-G955N, saved for derivation)",
+   "frees": [
+    [
+     16384,
+     8
+    ]
+   ],
+   "other_memory": "preserved"
+  },
+  {
+   "name": "_Znwm",
+   "notes": "C++ operator new(size_t) / new[](size_t) (libc++): returns a new block's address of x0 bytes (no program data flows into it; fresh), or does not return normally (throws std::bad_alloc: exception paths are not modeled -- the call is taken to return); null is still allowed (no never-null claim). Heap bookkeeping is not program-visible memory (assumption).",
+   "registers": [
+    {
+     "write": [
+      16384,
+      8
+     ],
+     "from": [],
+     "fresh": true,
+     "extent": {
+      "reg": [
+       16384,
+       8
+      ]
+     }
+    }
+   ],
+   "memory": [],
+   "observes": [],
+   "callbacks": {
+    "registered": [
+     "std::set_new_handler handler (invoked on allocation failure)",
+     "bionic malloc hooks / malloc debug (libc.debug.malloc.*, malloc_hooks: __malloc_hook, __free_hook, ...) (operator new calls malloc)"
+    ]
+   },
+   "callbacks_evidence": "ISO C++17 [new.delete.single] / [new.handling]; libc++ new.cpp (calls malloc); bionic malloc_hooks (API 28+); hand model 2026-10-30, NOT yet derived from the device libc++.so",
+   "frees": "none",
+   "other_memory": "preserved",
+   "aliases": [
+    "_Znam"
+   ]
+  },
+  {
+   "name": "_ZdlPv",
+   "notes": "C++ operator delete(void*) / delete[](void*) (libc++): releases x0's block. Assumes no use after free. Uses no pointer it receives on program-visible memory (observes nothing).",
+   "registers": [],
+   "memory": [],
+   "observes": [],
+   "callbacks": {
+    "registered": [
+     "bionic malloc hooks / malloc debug (libc.debug.malloc.*, malloc_hooks: __malloc_hook, __free_hook, ...) (operator delete calls free)"
+    ]
+   },
+   "callbacks_evidence": "ISO C++17 [new.delete.single]; libc++ new.cpp (calls free); bionic malloc_hooks (API 28+: __free_hook); hand model 2026-10-30, NOT yet derived from the device libc++.so",
+   "frees": [
+    [
+     16384,
+     8
+    ]
+   ],
+   "other_memory": "preserved",
+   "aliases": [
+    "_ZdaPv"
+   ]
+  }
+ ]
+}

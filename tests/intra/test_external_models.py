@@ -54,7 +54,8 @@ def _check(results, key="1:1000", seeds=range(6), pools=None):
 def test_model_files_load():
     for path in MODELS:
         model = load_model_file(path)
-        assert model.entries and model.stack_delta == 8
+        # (a call's own stack-pointer move: the x86 return-address push 8, an AArch64 link call 0)
+        assert model.entries and model.stack_delta == (0 if model.abi_tag == "aapcs64" else 8), path.name
 
 
 def _memcpy_caller(count_register_constant=True):

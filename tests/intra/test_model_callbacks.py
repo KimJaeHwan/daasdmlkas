@@ -43,6 +43,10 @@ def test_entries_running_registered_handlers_are_the_audited_ones():
         ("crt-win64", "realloc"), ("crt-win64", "free"),
         ("crt-sysv64", "abort"), ("crt-sysv64", "longjmp"), ("crt-sysv64", "__stack_chk_fail"),
         ("crt-sysv64", "malloc"), ("crt-sysv64", "calloc"), ("crt-sysv64", "free"), ("crt-sysv64", "realloc"),
+        ("crt-aarch64-android", "abort"), ("crt-aarch64-android", "longjmp"),
+        ("crt-aarch64-android", "__stack_chk_fail"), ("crt-aarch64-android", "malloc"),
+        ("crt-aarch64-android", "calloc"), ("crt-aarch64-android", "free"), ("crt-aarch64-android", "realloc"),
+        ("crt-aarch64-android", "_Znwm"), ("crt-aarch64-android", "_ZdlPv"),
         ("ue-core-win64", "FMemory::Malloc"), ("ue-core-win64", "FMemory::Free"),
         ("ue-core-win64", "FMemory::QuantizeSize"), ("ue-core-win64", "FMemory::Realloc"),
         ("ue-core-win64", "FDebug::CheckVerifyFailedImpl"), ("ue-core-win64", "UE4Array_Private::OnInvalidArrayNum"),
@@ -54,6 +58,9 @@ def test_entries_running_registered_handlers_are_the_audited_ones():
              for entry in load_model_file(path).entries if entry.frees}
     assert frees == {("crt-win64", "free"): ((8, 8),), ("crt-win64", "realloc"): ((8, 8),),
                      ("crt-sysv64", "free"): ((56, 8),), ("crt-sysv64", "realloc"): ((56, 8),),
+                     ("crt-aarch64-android", "free"): ((0x4000, 8),),
+                     ("crt-aarch64-android", "realloc"): ((0x4000, 8),),
+                     ("crt-aarch64-android", "_ZdlPv"): ((0x4000, 8),),
                      ("ue-core-win64", "FMemory::Free"): ((8, 8),), ("ue-core-win64", "FMemory::Realloc"): ((8, 8),)}
 
 
@@ -151,3 +158,27 @@ def test_the_switch_is_registered():
     item = by_name(LABEL)
     assert item.kind == "switch" and item.default is True
     assert item.parameter == "assume_registered_handlers_not_observed"
+
+
+def _a64_delete_program(models, **options):
+    """AArch64: x0 = 0x40; bl operator delete (an import thunk)."""
+    from synthetic import AARCH64, X0, X29, X30, register_evidence
+
+    caller = (FunctionBuilder(arch=AARCH64).stp_pre(X29, X30, -0x20).ins(move(reg(X0, 8), const(0x40, 8)))
+              .call(MALLOC).ldp_post(X29, X30, 0x20).ret())
+    image = ImageInfo("synthetic", (), (ImportedSymbol("libc++.so", "_ZdlPv", None, (), ((1, MALLOC),)),), (), ())
+    return analyze_units(program_units(caller, registers=register_evidence(AARCH64)), image_info=image,
+                         external_models=load_external_models(models, "AARCH64:LE:64:v8A", "aapcs64"),
+                         **options)["1:1000"]
+
+
+def test_operator_delete_rests_on_the_allocator_hooks_too():
+    """Astra mdl r1 P1: operator delete calls free, so bionic's malloc hooks (__free_hook) run in it."""
+    models = sorted((REPO / "models" / "external").glob("*.json"))
+    on = _a64_delete_program(models)
+    ((call, label),) = on.declared.items()
+    assert label == "external-model:crt-aarch64-android/_ZdlPv@v1"
+    assert LABEL in on.inherited_assumptions
+    off = _a64_delete_program(models, assume_registered_handlers_not_observed=False)
+    assert off.declared == {} and LABEL not in off.inherited_assumptions
+    assert off.refused_models[call] ==         f"external-model:crt-aarch64-android/_ZdlPv@v1: rests on {LABEL}, switched off in this run"
