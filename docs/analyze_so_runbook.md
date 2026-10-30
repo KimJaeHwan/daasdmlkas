@@ -1,7 +1,9 @@
 # Android ARM64 .so 분석하기 (실행 순서)
 
 ARM64 `.so` 하나를 Bundle로 내보내고, source/sink 질의를 돌려 결과를 보는 순서.
-모든 명령은 WSL(root)에서, 저장소 루트(작업 트리)에서 실행한다.
+모든 명령은 저장소 루트(작업 트리)에서 실행한다. 개발 PC는 WSL(root), Mac은 `docs/mac_setup.md`.
+아래 `python3`는 프로젝트 venv의 python이다(Mac: `~/venvs/tdo/bin/python`). Bundle 경로 `/root/...`는
+Mac에서 `~/tdo_data/...`로 읽는다.
 
 ## 0. 준비
 
@@ -16,12 +18,12 @@ ARM64 `.so` 하나를 Bundle로 내보내고, source/sink 질의를 돌려 결�
 
 JNI 진입점(`JNI_OnLoad`, `Java_*`)과 그 밖의 내보낸 함수:
 ```bash
-readelf --dyn-syms -W ~/so_in/libyolo/libyolo.so 2>/dev/null | awk '$4=="FUNC" && $7!="UND" {print $8}' | sed 's/@.*//' | sort -u
+readelf --dyn-syms -W ~/so_in/libyolo/libyolo.so | awk '$4=="FUNC" && $7!="UND" {print $8}' | sed 's/@.*//' | sort -u
 ```
 
 ## 2. Bundle로 내보내기 (Ghidra 12.0.4 headless)
 
-선택한 함수와 그 호출 closure를 내보낸다. Bundle은 Linux 파일시스템(`/root/...`)에 둔다(`/mnt/d`는 admission 불가).
+선택한 함수와 그 호출 closure를 내보낸다. Bundle은 POSIX 파일시스템(WSL `/root/...`, Mac 홈 폴더)에 둔다(WSL의 `/mnt/d`는 admission 불가).
 ```bash
 PYTHONPATH=src python3 tools/bundle_export/export_bundle.py ~/so_in/libyolo/libyolo.so \
     --function-name JNI_OnLoad --function-name Java_com_nx_assist_lua_YoloV5_nativeDetect \
@@ -30,7 +32,8 @@ PYTHONPATH=src python3 tools/bundle_export/export_bundle.py ~/so_in/libyolo/liby
 - 함수가 많으면 `--function-name`을 여러 번 쓴다. 출력 마지막 줄 `[export] published <경로>`의 경로가 이번 Bundle이다
   (같은 폴더에 여러 번 내보내면 generation이 여러 개 생긴다 -- 반드시 이번에 나온 경로를 쓴다).
 - Ghidra 위치 기본값은 "저장소 폴더의 옆"(`../ghidra_12.0.4_PUBLIC`)이다. `.census6/wt_*` 같은 작업 트리에서 실행하면
-  `--ghidra /mnt/d/01_gitproject/14_TDO_v2/ghidra_12.0.4_PUBLIC`를 붙인다.
+  `--ghidra <Ghidra 폴더>`를 붙인다(개발 PC: `/mnt/d/01_gitproject/14_TDO_v2/ghidra_12.0.4_PUBLIC`).
+- Mac에서는 JDK 위치도 붙인다: `--java-home "$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home"`.
 
 ## 3. 어떤 호출이 있는지 보기
 
