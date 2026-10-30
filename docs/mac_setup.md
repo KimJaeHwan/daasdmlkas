@@ -19,6 +19,12 @@
 그래서 같은 Bundle이라도 아주 깊은 함수는 macOS에서 실패(예산/재귀)하고 Linux에서는 성공할 수 있다.
 게이트 결과가 개발 PC 기준선과 다르면 먼저 이것을 의심한다. 그때는 아래 "Linux VM으로 게이트 돌리기"를 쓴다.
 
+개발 PC에서 worker를 끄고(`TDO_V2_ANALYSIS_WORKER=0`, macOS와 같은 조건) 미리 재 본 결과 (2026-10-30):
+- zlib, v3-win-release-full, ue-dll-debuggame 스냅샷, fixture chain-5k / wide-6k: 기준선과 **동일**
+- fixture **chain-8k**(값 의존 8000단계): 정규화가 `ANALYSIS_DEPTH`로 실패(틀린 결과가 아니라 "깊이 초과"로 정직하게 실패)
+- 그래서 Mac 네이티브 게이트는 `fixture-chain-8k` 하나가 다르게 나올 것으로 예상한다. 그 밖의 차이는 새 문제다.
+- 큰 `.so` 분석에서 `failed_functions`에 `ANALYSIS_DEPTH`가 보이면 이 제한 때문이다: 그 함수는 Linux(VM)에서 다시 돌린다.
+
 ## 설치
 
 1. 기본 도구
