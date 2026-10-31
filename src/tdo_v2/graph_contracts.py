@@ -52,6 +52,9 @@ class EdgeKind(StrEnum):
     LOOP_MEMORY_ADDRESS = "loop_memory_address"  # occurrence-qualified address equation, not a fixed value
     LOOP_POSSIBLE_WRITE = "loop_possible_write"  # weak occurrence effect; never a ByteSpan overwrite
     LOOP_POSSIBLE_READ = "loop_possible_read"    # unresolved occurrence read; never an exact read-from
+    LOOP_READ_FROM_VALUE = "loop_read_from_value"  # original STORE value bytes at writer(k) -> transfer
+    LOOP_READ_FROM = "loop_read_from"            # same-visit last-writer bytes -> LOAD output
+    LOOP_READ_FROM_WITNESS = "loop_read_from_witness"  # address/order evidence, not stored value
     MEMORY_JOIN_INPUT = "memory_join_input"      # definition -> JOIN
     UNRESOLVED_READ = "unresolved_read"          # debt -> reading operation
     UNRESOLVED_WRITE = "unresolved_write"        # writing operation -> debt

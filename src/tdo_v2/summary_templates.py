@@ -119,7 +119,13 @@ TEMPLATE_VERSION = 6   # 2: stack_values_out; 3: exact scalar literals and entry
 # ineligible for private-frame/freshness claims.
 # 32: occurrence-qualified loop memory families are weak graph effects;
 # exact SSA targets and unresolved/alias obligations are unchanged.
-ENGINE_SEMANTICS_VERSION = 32
+# 33: same-visit last-STORE value fragments carry original operand-use,
+# byte and cut-DAG evidence without removing exact-SSA/alias obligations.
+# 34: path-equivalent full-pointer transitions retain all original backedges;
+# operand-use phases and read-from share the same single-visit cut-DAG.
+# 35: STORE values retain each original SSA byte fragment when projecting
+# same-visit read-from; ENTRY/JOIN/KILL sources keep their existing meaning.
+ENGINE_SEMANTICS_VERSION = 35
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

@@ -459,7 +459,8 @@ def test_loop_plan_authority_pins_original_immutable_inputs_not_just_equal_ssa_c
     # scopes.resolution_context constructs an equivalent context per access;
     # forward_inputs retains the actual context used by this normalization.
     expected_inputs = (normalized.memory_unit, unit.observation, unit.scopes.function.entry,
-                       normalized.forward_inputs.context, unit.scopes.program.evidence.address_spaces)
+                       normalized.forward_inputs.context, unit.scopes.program.evidence.address_spaces,
+                       unit.scopes.program.evidence.translation_namespace)
     assert len(proof.inputs) == len(expected_inputs)
     assert all(actual is expected for actual, expected in zip(proof.inputs, expected_inputs))
     with pytest.raises(FrozenInstanceError):
@@ -482,6 +483,7 @@ def test_loop_plan_snapshot_retains_public_evidence_but_cannot_reauthorize_it():
     normalized, _, _ = _fixture(chain=True)
     plan = _binding(normalized).plan
     public = {field: getattr(plan, field) for field in ("function_scope", "unit_digest", "families", "accesses")}
+    assert plan.read_from == ()  # An absent/default relation preserves old snapshots.
     encoded = json.loads(json.dumps(encode(plan)))
     assert encoded == {"type": "LoopMemoryPlan", **{field: encode(value) for field, value in public.items()}}
     _, excluded = CONTRACT["LoopMemoryPlan"]

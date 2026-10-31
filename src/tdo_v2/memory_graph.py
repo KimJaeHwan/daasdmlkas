@@ -60,11 +60,15 @@ class LoopMemoryGraph:
     plan: LoopMemoryPlan
     family_nodes: tuple[NodeId, ...]
     access_nodes: tuple[NodeId, ...]
+    read_from_nodes: tuple[NodeId, ...] = ()
+    read_from_source_nodes: tuple[NodeId, ...] = ()
 
     def __post_init__(self):
         if type(self.plan) is not LoopMemoryPlan:
             raise TypeError("loop graph requires an exact loop memory plan")
-        for nodes, rows in ((self.family_nodes, self.plan.families), (self.access_nodes, self.plan.accesses)):
+        for nodes, rows in ((self.family_nodes, self.plan.families), (self.access_nodes, self.plan.accesses),
+                            (self.read_from_nodes, self.plan.read_from),
+                            (self.read_from_source_nodes, self.plan.read_from)):
             if type(nodes) is not tuple or len(nodes) != len(rows) \
                     or any(type(node) is not int or node < 0 for node in nodes):
                 raise ValueError("loop graph nodes must align with its bound family/access records")
@@ -180,10 +184,11 @@ def _materialize_local_memory_ssa(
         _transfer_node_record(namespace, index, transfer)
         for index, transfer in enumerate(transfers)
     )
-    family_records, access_records = _loop_node_records(namespace, loop_memory)
+    family_records, access_records, read_from_records = _loop_node_records(namespace, loop_memory)
     if any(
         graph.node_for_key(record.key) is not None
-        for record in (*definition_records, *debt_records, *transfer_records, *family_records, *access_records)
+        for record in (*definition_records, *debt_records, *transfer_records, *family_records, *access_records,
+                       *read_from_records)
     ):
         raise ValueError("memory namespace collides with existing graph nodes")
     graph.claim_namespace(namespace)
@@ -282,8 +287,15 @@ def _materialize_local_memory_ssa(
         for definition_id, definition in enumerate(result.definitions)
         if definition.kind is MemoryDefinitionKind.ENTRY
     )
-    loop_graph = LoopMemoryGraph(loop_memory, tuple(graph.add_node(row) for row in family_records),
-                                 tuple(graph.add_node(row) for row in access_records)) if loop_memory is not None else None
+    loop_graph = None
+    if loop_memory is not None:
+        sources = tuple(definition_nodes[row.source_definition_id] if row.source_definition_id is not None
+                        else graph.node_for_key(_loop_constant_key(row.constant)) for row in loop_memory.read_from)
+        if any(node is None for node in sources):
+            raise ValueError("loop read-from requires the original STORE value constant")
+        loop_graph = LoopMemoryGraph(loop_memory, tuple(graph.add_node(row) for row in family_records),
+            tuple(graph.add_node(row) for row in access_records),
+            tuple(graph.add_node(row) for row in read_from_records), sources)
     bindings = MemoryGraphBindings(
         result.contract_version,
         result.function_scope,
@@ -320,6 +332,7 @@ def _validate_materialized_local_memory_ssa(
         *bindings.transfer_nodes,
         *(bindings.loop_memory.family_nodes if bindings.loop_memory else ()),
         *(bindings.loop_memory.access_nodes if bindings.loop_memory else ()),
+        *(bindings.loop_memory.read_from_nodes if bindings.loop_memory else ()),
     )
     _validate_transfers(result, bindings.transfers)
     if len(bindings.transfer_nodes) != len(bindings.transfers):
@@ -332,10 +345,15 @@ def _validate_materialized_local_memory_ssa(
     if loop is not None:
         validate_loop_memory(loop.plan, result)
         records = _loop_node_records(namespace, loop.plan)
-        for nodes, expected_records in zip((loop.family_nodes, loop.access_nodes), records, strict=True):
+        for nodes, expected_records in zip((loop.family_nodes, loop.access_nodes, loop.read_from_nodes), records, strict=True):
             for node, expected in zip(nodes, expected_records, strict=True):
                 if not graph.has_node(node) or graph.node(node) != expected:
                     raise ValueError("loop memory binding must match its weak graph node")
+        for row, source in zip(loop.plan.read_from, loop.read_from_source_nodes, strict=True):
+            expected = (bindings.definition_nodes[row.source_definition_id] if row.source_definition_id is not None
+                        else graph.node_for_key(_loop_constant_key(row.constant)))
+            if expected is None or source != expected:
+                raise ValueError("loop read-from must bind the actual STORE value source")
     actions = {action.operation_key: node for action, node in zip(
         result.actions, bindings.action_nodes, strict=True
     )}
@@ -446,14 +464,21 @@ def _expected_memory_edges(
 
 def _loop_node_records(namespace, plan):
     if plan is None:
-        return (), ()
+        return (), (), ()
     def record(kind, number, row):
         identity = sha256(repr(row).encode("utf-8")).hexdigest()
         return NodeRecord(f"memory:{namespace}:loop-{kind}:{number}:{identity}", NodeKind.EFFECT,
-                          "loop_address_family" if kind == "family" else f"loop_possible_memory_{row.direction}",
+                          "loop_address_family" if kind == "family" else "loop_same_visit_read_from"
+                          if kind == "read-from" else f"loop_possible_memory_{row.direction}",
                           semantic_identity=identity)
     return (tuple(record("family", i, row) for i, row in enumerate(plan.families)),
-            tuple(record("access", i, row) for i, row in enumerate(plan.accesses)))
+            tuple(record("access", i, row) for i, row in enumerate(plan.accesses)),
+            tuple(record("read-from", i, row) for i, row in enumerate(plan.read_from)))
+
+
+def _loop_constant_key(constant):
+    space, value, size = constant
+    return f"constant:constant:{space:x}:{value:x}:{size:x}"
 
 
 def _loop_memory_edges(result, bindings):
@@ -485,6 +510,18 @@ def _loop_memory_edges(result, bindings):
             edges.extend(((operation, node, possible), (node, debt, possible)))
         else:
             edges.extend(((debt, node, possible), (node, operation, possible)))
+    for row, node, source in zip(loop.plan.read_from, loop.read_from_nodes, loop.read_from_source_nodes, strict=True):
+        writer, reader = loop.plan.accesses[row.writer_access], loop.plan.accesses[row.reader_access]
+        value = EdgeRecord(EdgeKind.LOOP_READ_FROM_VALUE, operation=writer.operation_key,
+                           occurrence=row.value_offset, span=row.source_span)
+        output = EdgeRecord(EdgeKind.LOOP_READ_FROM, operation=reader.operation_key,
+                            occurrence=row.output_offset, span=row.output_span)
+        witness = EdgeRecord(EdgeKind.LOOP_READ_FROM_WITNESS, operation=writer.operation_key)
+        edges.extend(((source, node, value), (node, bindings.action_nodes[actions[reader.operation_key]], output),
+            (bindings.action_nodes[actions[writer.operation_key]], node, witness),
+            (loop.access_nodes[row.writer_access], node, witness),
+            (loop.access_nodes[row.reader_access], node, witness),
+            (loop.family_nodes[reader.family_index], node, witness)))
     return tuple(edges)
 
 

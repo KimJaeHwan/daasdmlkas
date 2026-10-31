@@ -1,6 +1,8 @@
 """Occurrence-qualified affine memory effects over the ORIGINAL SSA.
 
-These are weak graph relations, NOT exact storage objects or read-from facts.
+Families/accesses are weak relations, NOT exact physical storage objects.
+Issued read_from fragments separately guarantee the same-visit last writer
+conditional on that original reader executing successfully in this model.
 S(k) denotes the induction bytes at a particular header visit, initialized
 by the complete original entry edge. It is never an activation-wide atom.
 No trip count, buffer extent, non-aliasing or successful access is inferred.
@@ -20,31 +22,48 @@ from .storage import _resolve_validated_storage
 @dataclass(frozen=True, slots=True)
 class LoopMemoryFamily:
     header: str
-    latch: str
+    latches: tuple[str, ...]
     preheader: str
     blocks: tuple[str, ...]
     span: ByteSpan
     entry_edges: tuple[MemoryFlowEdge, ...]
     backedge_edges: tuple[MemoryFlowEdge, ...]
-    transition_definition_id: int
+    transition_definition_ids: tuple[int, ...]
     stride: int
     address_bits: int
 
     def __post_init__(self):
-        if any(type(key) is not str or not key for key in (self.header, self.latch, self.preheader)) \
+        if any(type(key) is not str or not key for key in (self.header, self.preheader)) \
+                or type(self.latches) is not tuple or not self.latches \
+                or any(type(key) is not str or not key for key in self.latches) \
+                or tuple(sorted(set(self.latches))) != self.latches \
                 or type(self.blocks) is not tuple or not self.blocks or len(set(self.blocks)) != len(self.blocks) \
                 or any(type(key) is not str or not key for key in self.blocks) \
-                or self.header not in self.blocks or self.latch not in self.blocks or self.preheader in self.blocks:
+                or self.header not in self.blocks or not set(self.latches) <= set(self.blocks) \
+                or self.preheader in self.blocks:
             raise ValueError("loop family requires distinct original entry/backedge evidence")
         if type(self.span) is not ByteSpan or self.span.object_id.kind is not StorageObjectKind.REGISTER_FILE \
                 or type(self.address_bits) is not int or self.address_bits != 8 * self.span.size \
                 or type(self.stride) is not int or not 0 < self.stride < 1 << self.address_bits \
-                or type(self.transition_definition_id) is not int or self.transition_definition_id < 0:
+                or type(self.transition_definition_ids) is not tuple or not self.transition_definition_ids \
+                or any(type(identifier) is not int or identifier < 0 for identifier in self.transition_definition_ids) \
+                or tuple(sorted(set(self.transition_definition_ids))) != self.transition_definition_ids:
             raise ValueError("loop family requires a full-width modular induction")
-        for edges, source in ((self.entry_edges, self.preheader), (self.backedge_edges, self.latch)):
+        for edges, sources in ((self.entry_edges, {self.preheader}), (self.backedge_edges, set(self.latches))):
             if type(edges) is not tuple or not edges or any(type(row) is not MemoryFlowEdge
-                    or row.predecessor_key != source or row.block_key != self.header for row in edges):
+                    or row.predecessor_key not in sources or row.block_key != self.header for row in edges) \
+                    or {row.predecessor_key for row in edges} != sources:
                 raise ValueError("loop family edges must name its original entry and backedge")
+
+    @property
+    def latch(self):
+        """Legacy singleton view; never select an arbitrary backedge."""
+        return self.latches[0] if len(self.latches) == 1 else None
+
+    @property
+    def transition_definition_id(self):
+        """Legacy singleton view; all transitions live in the plural field."""
+        return self.transition_definition_ids[0] if len(self.transition_definition_ids) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +85,51 @@ class LoopMemoryAccess:
             raise ValueError("loop memory access requires exact original operation/address references")
 
 
+@dataclass(frozen=True, slots=True)
+class LoopMemoryReadFrom:
+    """Last-writer bytes conditional on this reader's successful same visit.
+
+    The source is the STORE value operand at writer(k), not a fixed value of
+    its static SSA definition. This is not an exact physical ByteSpan read.
+    """
+
+    writer_access: int
+    reader_access: int
+    write_offset: int
+    read_offset: int
+    width: int
+    source_definition_id: int | None
+    source_span: ByteSpan | None
+    constant: tuple[int, int, int] | None
+    output_span: ByteSpan
+    visit_delta: int = 0
+
+    def __post_init__(self):
+        if any(type(value) is not int or value < 0 for value in
+               (self.writer_access, self.reader_access, self.write_offset, self.read_offset)) \
+                or type(self.width) is not int or self.width <= 0 \
+                or type(self.visit_delta) is not int or self.visit_delta != 0 \
+                or type(self.output_span) is not ByteSpan or self.output_span.size != self.width:
+            raise ValueError("loop read-from requires same-visit byte fragments")
+        if self.constant is not None:
+            if type(self.constant) is not tuple or len(self.constant) != 3 \
+                    or any(type(value) is not int or value < 0 for value in self.constant) \
+                    or self.constant[2] < self.write_offset + self.width \
+                    or self.source_definition_id is not None or self.source_span is not None:
+                raise ValueError("loop read-from constant must retain the original value operand")
+        elif type(self.source_definition_id) is not int or self.source_definition_id < 0 \
+                or type(self.source_span) is not ByteSpan or self.source_span.size != self.width:
+            raise ValueError("loop read-from must name the STORE value's original SSA bytes")
+
+    @property
+    def value_offset(self):
+        return self.write_offset
+
+    @property
+    def output_offset(self):
+        return self.read_offset
+
+
 _DERIVATION_AUTHORITY = object()
 
 
@@ -83,6 +147,7 @@ class LoopMemoryPlan:
     unit_digest: bytes
     families: tuple[LoopMemoryFamily, ...]
     accesses: tuple[LoopMemoryAccess, ...]
+    read_from: tuple[LoopMemoryReadFrom, ...] = ()
     # Process-local authority, not a serializable proof or an independent
     # re-derivation. Immutable SSA/input identities and the entire public
     # payload are pinned without copying their graphs or memory states.
@@ -105,13 +170,24 @@ class LoopMemoryPlan:
             family = self.families[row.family_index]
             if row.address_span.size * 8 != family.address_bits or row.offset >= 1 << family.address_bits:
                 raise ValueError("loop access width/offset must match its family")
+        if type(self.read_from) is not tuple or any(type(row) is not LoopMemoryReadFrom for row in self.read_from):
+            raise TypeError("loop read-from must retain typed issued fragments")
+        for row in self.read_from:
+            if max(row.writer_access, row.reader_access) >= len(self.accesses):
+                raise ValueError("loop read-from must name its own accesses")
+            writer, reader = self.accesses[row.writer_access], self.accesses[row.reader_access]
+            if writer.direction != "write" or reader.direction != "read" \
+                    or writer.family_index != reader.family_index or writer.space_id != reader.space_id \
+                    or row.write_offset + row.width > writer.width or row.read_offset + row.width > reader.width:
+                raise ValueError("loop read-from byte fragments must belong to one family and space")
 
 
-def derive_loop_memory(memory, ssa, observation, entry, context, address_spaces):
+def derive_loop_memory(memory, ssa, observation, entry, context, address_spaces, namespace):
     """Describe supported unresolved raw LOAD/STOREs without changing SSA.
 
-    One full-span induction write per iteration, a single entry/backedge and
-    a DAG between visits are deliberately required. Unsupported cases retain
+    Exactly one full-span induction write on every header-return path, a
+    single entry and a DAG between visits are deliberately required. Each
+    backedge must carry the same modular stride. Unsupported cases retain
     their original unresolved access, not a guessed recurrence.
     """
     if not ssa.joins or not (ssa.unresolved_reads or ssa.unresolved_writes):
@@ -161,21 +237,25 @@ def derive_loop_memory(memory, ssa, observation, entry, context, address_spaces)
                 space.space_id, width, offset, address[1], address[0]))
     if not accesses:
         return None
-    payload = ssa.function_scope, ssa.unit_digest, tuple(families), tuple(accesses)
+    from ._loop_memory_reads import derive_read_from
+
+    families, accesses = tuple(families), tuple(accesses)
+    read_from = derive_read_from(index, memory, families, accesses, namespace)
+    payload = ssa.function_scope, ssa.unit_digest, families, accesses, read_from
     return LoopMemoryPlan(*payload, _proof=_Derivation(_DERIVATION_AUTHORITY, ssa,
-        (memory, observation, entry, context, address_spaces), payload))
+        (memory, observation, entry, context, address_spaces, namespace), payload))
 
 
 def _check_origin(plan, ssa=None):
     proof = plan._proof
     if type(proof) is not _Derivation or proof.authority is not _DERIVATION_AUTHORITY \
-            or proof.payload != (plan.function_scope, plan.unit_digest, plan.families, plan.accesses) \
+            or proof.payload != (plan.function_scope, plan.unit_digest, plan.families, plan.accesses, plan.read_from) \
             or ssa is not None and proof.ssa is not ssa:
         raise ValueError("loop memory requires the unchanged derive result and original SSA identity")
 
 
 def validate_loop_memory(plan, ssa):
-    """Bind every weak relation to this exact SSA; never grant a read-from."""
+    """Bind issued relations to this SSA; never grant an exact physical read."""
     if plan is None:
         return
     if type(plan) is not LoopMemoryPlan or plan.function_scope != ssa.function_scope or plan.unit_digest != ssa.unit_digest:
@@ -186,7 +266,9 @@ def validate_loop_memory(plan, ssa):
     for family in plan.families:
         if any(edge not in flows for edge in (*family.entry_edges, *family.backedge_edges)):
             raise ValueError("loop memory must retain original predecessor flow evidence")
-        for edges in (family.entry_edges, family.backedge_edges):
+        groups = (family.entry_edges, *(tuple(edge for edge in family.backedge_edges
+                  if edge.predecessor_key == latch) for latch in family.latches))
+        for edges in groups:
             position, identifiers = family.span.start, None
             for edge in sorted(edges, key=lambda row: row.span.start):
                 start, end = max(edge.span.start, family.span.start), min(edge.span.end, family.span.end)
@@ -196,11 +278,11 @@ def validate_loop_memory(plan, ssa):
                 position, identifiers = end, current
             if position != family.span.end:
                 raise ValueError("loop entry/backedge must cover the entire induction span")
-        if family.transition_definition_id >= len(ssa.definitions):
+        if any(identifier >= len(ssa.definitions) for identifier in family.transition_definition_ids):
             raise ValueError("loop transition is outside the SSA")
-        transition = ssa.definitions[family.transition_definition_id]
-        if transition.kind is not MemoryDefinitionKind.DATA_WRITE or transition.span != family.span \
-                or {d for edge in family.backedge_edges for d in edge.definition_ids} != {family.transition_definition_id}:
+        if any(ssa.definitions[identifier].kind is not MemoryDefinitionKind.DATA_WRITE
+                or ssa.definitions[identifier].span != family.span for identifier in family.transition_definition_ids) \
+                or {d for edge in family.backedge_edges for d in edge.definition_ids} != set(family.transition_definition_ids):
             raise ValueError("loop backedge must retain the full induction transition")
     actions = {row.operation_key: i for i, row in enumerate(ssa.actions)}
     unresolved = {(direction, row.action_id): row.access for direction, rows in
@@ -215,6 +297,11 @@ def validate_loop_memory(plan, ssa):
                 or original.address.span != access.address_span \
                 or (action, access.address_span, access.address_definition_id) not in references:
             raise ValueError("loop access must retain its original unresolved address operand")
+    for row in plan.read_from:
+        if row.source_definition_id is not None and (
+                row.source_definition_id >= len(ssa.definitions)
+                or not ssa.definitions[row.source_definition_id].span.contains(row.source_span)):
+            raise ValueError("loop read-from value bytes must belong to the original SSA")
 
 
 class _Index(SsaCycleIndex):
@@ -231,6 +318,7 @@ class _Index(SsaCycleIndex):
         self.joins = {row.join_definition_id: row.source_definition_ids for row in ssa.joins}
         self.positions = {action.operation_key: (block.key, i)
                           for block in memory.blocks for i, action in enumerate(block.actions)}
+        self.memory_blocks = {block.key: block for block in memory.blocks}
         # Raw CALL effects may change a register without an explicit SSA
         # output. No ABI or hidden-preservation assumption is added here.
         self.barrier_blocks = {self.locations[key] for key, operation in self.raw.items()
@@ -240,7 +328,7 @@ class _Index(SsaCycleIndex):
             step()
             if flow.block_key in self.region_of:
                 self.flow_by_edge.setdefault((flow.predecessor_key, flow.block_key), []).append(flow)
-        self.proofs, self.regions = {}, {}
+        self.proofs, self.regions, self.orders = {}, {}, {}
 
     def span(self, value):
         kind = {VarnodeKindCode.REGISTER: VarnodeKind.REGISTER,
@@ -313,22 +401,25 @@ class _Index(SsaCycleIndex):
         if len(heads) == 1:
             header, = heads
             before, back = self.predecessors[header] - members, self.predecessors[header] & members
-            if len(before) == len(back) == 1:
+            if len(before) == 1 and back:
                 preheader, = before
-                latch, = back
-                degree = {key: len(self.predecessors[key] & members) - int(key == header) for key in members}
-                pending, count = deque(key for key in members if degree[key] == 0), 0
+                predecessors = {key: tuple(sorted(self.predecessors[key] & members))
+                                if key != header else () for key in members}
+                degree = {key: len(rows) for key, rows in predecessors.items()}
+                pending, order = deque(sorted(key for key in members if degree[key] == 0)), []
                 while pending:
                     step()
                     key = pending.popleft()
-                    count += 1
+                    order.append((key, predecessors[key]))
                     for target in self.blocks[key].successors:
-                        if target in members and (key, target) != (latch, header):
+                        step()
+                        if target in members and target != header:
                             degree[target] -= 1
                             if degree[target] == 0:
                                 pending.append(target)
-                if count == len(members):
-                    result = header, latch, preheader, members
+                if len(order) == len(members) and order[0][0] == header:
+                    result = header, tuple(sorted(back)), preheader, members
+                    self.orders[number] = tuple(order)
         self.regions[number] = result
         return result
 
@@ -355,9 +446,13 @@ class _Index(SsaCycleIndex):
         loop = self.region(region)
         if loop is None:
             return None
-        header, latch, preheader, members = loop
-        initial, back = self.edge(preheader, header, span), self.edge(latch, header, span)
-        if initial is None or back is None or len(back[1]) != 1 or initial[1] & back[1]:
+        header, latches, preheader, members = loop
+        initial = self.edge(preheader, header, span)
+        backs = tuple(self.edge(latch, header, span) for latch in latches)
+        if initial is None or any(back is None for back in backs):
+            return None
+        transitions = frozenset(identifier for back in backs for identifier in back[1])
+        if initial[1] & transitions:
             return None
         if any(self.locations.get(self.ssa.definitions[d].operation_key) in members
                or self.ssa.definitions[d].kind not in (MemoryDefinitionKind.ENTRY, MemoryDefinitionKind.DATA_WRITE)
@@ -370,41 +465,48 @@ class _Index(SsaCycleIndex):
                     and definition.span.overlaps(span) \
                     and self.positions.get(definition.operation_key, (None,))[0] in members:
                 writes.append(identifier)
-        if len(writes) != 1 or frozenset(writes) != back[1] or self.ssa.definitions[writes[0]].span != span:
+        if not writes or frozenset(writes) != transitions or any(
+                self.ssa.definitions[identifier].span != span
+                or self.ssa.definitions[identifier].kind is not MemoryDefinitionKind.DATA_WRITE for identifier in writes):
             return None
-        proof = _Proof(self, loop, span, initial, back, writes[0])
-        transition = proof.form(writes[0], span, self.ssa.definitions[writes[0]].operation_key)
-        if transition is None or transition[0] != 1 or transition[1] == 0:
+        proof = _Proof(self, loop, span, initial[1] | transitions, writes, self.orders[region])
+        if any(proof.exit_counts[latch] != (1, 1) for latch in latches):
             return None
-        proof.family = LoopMemoryFamily(header, latch, preheader, tuple(sorted(members)), span,
-            initial[0], back[0], writes[0], transition[1], 8 * span.size)
+        forms = tuple(proof.form(identifier, span, self.ssa.definitions[identifier].operation_key)
+                      for identifier in writes)
+        transition = forms[0]
+        if transition is None or transition[0] != 1 or transition[1] == 0 \
+                or any(form != transition for form in forms):
+            return None
+        proof.family = LoopMemoryFamily(header, latches, preheader, tuple(sorted(members)), span,
+            initial[0], tuple(edge for back in backs for edge in back[0]), tuple(writes), transition[1], 8 * span.size)
         self.proofs[token] = proof
         return proof
 
 
 class _Proof:
-    def __init__(self, index, loop, span, initial, back, transition):
+    def __init__(self, index, loop, span, sources, transitions, order):
         self.index, self.loop, self.span = index, loop, span
-        self.sources = initial[1] | back[1]
-        self.transition = index.ssa.definitions[transition].operation_key
+        self.sources = sources
         self.modulus = 1 << (8 * span.size)
         self.cache, self.family = {}, None
-        header, latch, _, members = loop
-        update_block = index.positions[self.transition][0]
-        pending, self.after = list(index.blocks[update_block].successors), set()
-        while pending:
-            key = pending.pop()
-            if key not in members or (update_block, key) == (latch, header) or key in self.after:
-                continue
-            step()
-            self.after.add(key)
-            pending.extend(target for target in index.blocks[key].successors if (key, target) != (latch, header))
+        updates = {index.ssa.definitions[identifier].operation_key for identifier in transitions}
+        self.before_counts, self.exit_counts = {}, {}
+        for key, predecessors in order:
+            step(1 + len(predecessors))
+            lo = min((self.exit_counts[p][0] for p in predecessors), default=0)
+            hi = max((self.exit_counts[p][1] for p in predecessors), default=0)
+            for action in index.memory_blocks[key].actions:
+                step()
+                self.before_counts[action.operation_key] = lo, hi
+                if action.operation_key in updates:
+                    lo, hi = min(2, lo + 1), min(2, hi + 1)
+            self.exit_counts[key] = lo, hi
 
     def before_update(self, consumer):
-        point, update = self.index.positions.get(consumer), self.index.positions[self.transition]
-        if point is None or point[0] not in self.loop[3]:
-            return False
-        return point[1] <= update[1] if point[0] == update[0] else point[0] not in self.after
+        # JOINs are reaching-definition sets at a read, not header phi nodes.
+        # Only a use before every path's update denotes this visit's S(k).
+        return self.before_counts.get(consumer) == (0, 0)
 
     def form(self, identifier, span, consumer):
         """Iterative SSA expression walk; no recursion or path combinations."""
