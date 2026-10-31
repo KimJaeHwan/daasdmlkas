@@ -397,7 +397,9 @@ def test_weak_family_graph_addition_preserves_exact_ssa_summary_and_load_identit
     def original_edges(graph):
         return Counter((graph.node(source).key, graph.node(target).key, edge)
                        for source, target, edge in graph.weighted_edges()
-                       if edge.kind not in ("loop_memory_address", "loop_possible_read", "loop_possible_write"))
+                       if edge.kind not in ("loop_memory_address", "loop_possible_read", "loop_possible_write",
+                                            "loop_read_from", "loop_read_from_value", "loop_read_from_witness",
+                                            "loop_previous_read_from", "loop_previous_read_from_value"))
 
     assert original_edges(after.dependencies) == original_edges(before.dependencies)
     summaries = [summarize_function(normalized, unit.observation) for normalized in (before, after)]

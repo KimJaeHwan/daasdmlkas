@@ -89,6 +89,7 @@ ADDED_FIELDS = {
     "MemoryGraphBindings": {"transfers": (), "transfer_nodes": (), "loop_memory": None},
     "LoopMemoryPlan": {"read_from": ()},
     "LoopMemoryGraph": {"read_from_nodes": (), "read_from_source_nodes": ()},
+    "LoopMemoryReadFrom": {"requires_backedge": False},
     # (fields of the forward-memory / expression branch, 2026-10-23..26)
     "FunctionSummary": {"address_relations": (), "independent_delta_proofs": ()},
     "LocalMemorySsaResult": {"call_register_snapshots": (), "flow_edges": ()},

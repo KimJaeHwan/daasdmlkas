@@ -468,8 +468,10 @@ def _loop_node_records(namespace, plan):
     def record(kind, number, row):
         identity = sha256(repr(row).encode("utf-8")).hexdigest()
         return NodeRecord(f"memory:{namespace}:loop-{kind}:{number}:{identity}", NodeKind.EFFECT,
-                          "loop_address_family" if kind == "family" else "loop_same_visit_read_from"
-                          if kind == "read-from" else f"loop_possible_memory_{row.direction}",
+                          "loop_address_family" if kind == "family" else
+                          ("loop_previous_visit_read_from_if_backedge" if row.requires_backedge
+                           else "loop_same_visit_read_from") if kind == "read-from"
+                          else f"loop_possible_memory_{row.direction}",
                           semantic_identity=identity)
     return (tuple(record("family", i, row) for i, row in enumerate(plan.families)),
             tuple(record("access", i, row) for i, row in enumerate(plan.accesses)),
@@ -512,9 +514,11 @@ def _loop_memory_edges(result, bindings):
             edges.extend(((debt, node, possible), (node, operation, possible)))
     for row, node, source in zip(loop.plan.read_from, loop.read_from_nodes, loop.read_from_source_nodes, strict=True):
         writer, reader = loop.plan.accesses[row.writer_access], loop.plan.accesses[row.reader_access]
-        value = EdgeRecord(EdgeKind.LOOP_READ_FROM_VALUE, operation=writer.operation_key,
+        value_kind = EdgeKind.LOOP_PREVIOUS_READ_FROM_VALUE if row.requires_backedge else EdgeKind.LOOP_READ_FROM_VALUE
+        output_kind = EdgeKind.LOOP_PREVIOUS_READ_FROM if row.requires_backedge else EdgeKind.LOOP_READ_FROM
+        value = EdgeRecord(value_kind, operation=writer.operation_key,
                            occurrence=row.value_offset, span=row.source_span)
-        output = EdgeRecord(EdgeKind.LOOP_READ_FROM, operation=reader.operation_key,
+        output = EdgeRecord(output_kind, operation=reader.operation_key,
                             occurrence=row.output_offset, span=row.output_span)
         witness = EdgeRecord(EdgeKind.LOOP_READ_FROM_WITNESS, operation=writer.operation_key)
         edges.extend(((source, node, value), (node, bindings.action_nodes[actions[reader.operation_key]], output),

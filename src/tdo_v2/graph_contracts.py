@@ -55,6 +55,8 @@ class EdgeKind(StrEnum):
     LOOP_READ_FROM_VALUE = "loop_read_from_value"  # original STORE value bytes at writer(k) -> transfer
     LOOP_READ_FROM = "loop_read_from"            # same-visit last-writer bytes -> LOAD output
     LOOP_READ_FROM_WITNESS = "loop_read_from_witness"  # address/order evidence, not stored value
+    LOOP_PREVIOUS_READ_FROM_VALUE = "loop_previous_read_from_value"  # STORE operand bytes at writer(k-1)
+    LOOP_PREVIOUS_READ_FROM = "loop_previous_read_from"  # LOAD(k) bytes ONLY on same-activation backedge entry
     MEMORY_JOIN_INPUT = "memory_join_input"      # definition -> JOIN
     UNRESOLVED_READ = "unresolved_read"          # debt -> reading operation
     UNRESOLVED_WRITE = "unresolved_write"        # writing operation -> debt

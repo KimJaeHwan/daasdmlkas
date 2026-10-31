@@ -193,7 +193,10 @@ def test_no_same_visit_fact_when_writer_is_not_must_last(variant):
     normalized, observation, keys = _fixture(variant)
     plan = _plan(normalized)
     assert any(row.operation_key == keys["read"] for row in plan.accesses)
-    assert not _rows(normalized, keys)
+    rows = _rows(normalized, keys)
+    assert not any(row.visit_delta == 0 for row in rows)
+    assert all(row.visit_delta == -1 and row.requires_backedge for row in rows)
+    assert bool(rows) is (variant == "previous")
     if variant in ("alias", "other-family", "direct-memory"):
         graph = normalized.dependencies
         assert graph.node_for_key("op:" + keys["alias"]) in graph.backward_reachable(
@@ -660,6 +663,7 @@ def test_same_visit_snapshot_keeps_value_and_byte_evidence_without_authority():
                             "source_definition_id", "constant", "write_offset", "read_offset", "output_span",
                             "visit_delta"}
                for row in public["read_from"])
+    assert all(row.get("requires_backedge", False) is False for row in public["read_from"])
     assert "_proof" not in public
 
 
