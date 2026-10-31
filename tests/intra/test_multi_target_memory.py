@@ -214,7 +214,7 @@ def test_an_opaque_inner_call_does_not_turn_into_old_memory(monkeypatch):
 def test_an_unknown_address_writer_blocks_fixed_memory_promotion(monkeypatch):
     a = FunctionBuilder(entry=A).ins(store(reg(RDX), reg(RSI))).ret()
     b = (FunctionBuilder(entry=B)
-         .ins(op("INT_XOR", [reg(RDX), reg(RSI)], tmp(0x100)), store(tmp(0x100), reg(RBX)))
+         .ins(op("INT_DIV", [reg(RDX), reg(RSI)], tmp(0x100)), store(tmp(0x100), reg(RBX)))
          .ins(store(reg(RDX), reg(RDI))).ret())
     results, program = _analyze(monkeypatch, _caller(), a, b)
     assert results["1:1900"].summary.unknown_writers

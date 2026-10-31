@@ -37,7 +37,11 @@ def _fixture(case="shared"):
         builder.ins(*operations)
 
     mask = 0x80000003 if case == "sext-zext" else 3
-    ins("index_store", 2, op("INT_AND", [reg(RCX, 4), const(mask, 4)], index),
+    # AND now has an exact address identity even with forward analysis off.
+    # Keep a value-preserving operation outside the affine/bitwise projector
+    # so these tests still exercise N2 LOAD identity, refusal and budget paths.
+    ins("index_store", 3, op("INT_AND", [reg(RCX, 4), const(mask, 4)], index),
+        op("INT_DIV", [index, const(1, 4)], index),
         add(slot, reg(RSP), const(0x30)), store(slot, index))
     if case == "different-index":
         builder.ins(op("INT_AND", [reg(RDI, 4), const(3, 4)], index),

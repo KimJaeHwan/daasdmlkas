@@ -112,7 +112,14 @@ TEMPLATE_VERSION = 6   # 2: stack_values_out; 3: exact scalar literals and entry
 # refusal and the x86-64-only image provenance (27 named the branch alone).
 # 29: an AArch64 link call is a call shape for the callee's stack restoration
 # (delta 0), and a link call in the independent register-delta proof (v2).
-ENGINE_SEMANTICS_VERSION = 29
+# 30: exact nonconstant bitwise/shift address identities retain local memory
+# writers and guard inputs; same-width self-cancellation is validated.
+# 31: blocked memory-content substitution does not erase a once raw LOAD's
+# own output identity; captured outputs remain wild, stack-derived and
+# ineligible for private-frame/freshness claims.
+# 32: occurrence-qualified loop memory families are weak graph effects;
+# exact SSA targets and unresolved/alias obligations are unchanged.
+ENGINE_SEMANTICS_VERSION = 32
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

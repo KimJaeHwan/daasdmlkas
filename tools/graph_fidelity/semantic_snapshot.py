@@ -45,6 +45,8 @@ SNAPSHOT_VERSION = 1
 # type name -> (encoded fields, {excluded field: reason}); every dataclass field
 # of these types must be in one of the two
 CONTRACT = {
+    "LoopMemoryPlan": (None, {"_proof": "process-local derivation authority and immutable input pins;"
+                                          " public family/access evidence is encoded, never re-authorized by JSON"}),
     "NormalizedFunction": (None, {"document": "input (the function document)",
                                   "scopes": "input (scope bundle)",
                                   "forward_inputs": "forward-on derivation inputs (docs 25.33 F4a); None when off",
@@ -84,7 +86,7 @@ ADDED_FIELDS = {
     "RootSlice": {"inherited_incomplete": False},
     "UnresolvedNormalizedFunction": {"assumes_opaque_callees_restore_stack_pointer": True},
     "CallMemoryDecision": {"evidence": ()},
-    "MemoryGraphBindings": {"transfers": (), "transfer_nodes": ()},
+    "MemoryGraphBindings": {"transfers": (), "transfer_nodes": (), "loop_memory": None},
     # (fields of the forward-memory / expression branch, 2026-10-23..26)
     "FunctionSummary": {"address_relations": (), "independent_delta_proofs": ()},
     "LocalMemorySsaResult": {"call_register_snapshots": (), "flow_edges": ()},

@@ -1061,7 +1061,7 @@ class _Projector:
         # the operation that obtained the value (a LOAD, a plain call result
         # row) -- recorded only where the value is that operation's own;
         # ``ineligible_atoms`` (across passes): atoms a same-object (realloc)
-        # value reused; ``wild_definitions`` (across passes): wild object ->
+        # value reused, or captured blocked-LOAD outputs; ``wild_definitions``: wild object ->
         # frozenset((atom, operation)) of its atoms, or None (never eligible)
         self._eligible_atoms: dict[int, str] = {}
         # allocator windows (docs 25.79): fresh result row -> (bytes, never_null
@@ -1280,6 +1280,40 @@ class _Projector:
             self._definition_atoms.add(atom)   # wild like its input
         return _AddressExpression(((atom, 1),), 0, byte_size, 0)
 
+    def _bitwise_expression(self, operation_key, operation, byte_size):
+        """A deterministic bit operation of already admitted SSA values.
+
+        This is an equality identity, not an affine relation or an allocation
+        fact. In particular a masked/shifted entry pointer may reach the new
+        frame: its object is always wild. Unknown recurrences and blocked
+        content substitutions are never rescued here; separately admitted
+        captured LOAD outputs may compose like other SSA values.
+        """
+        if len(operation.inputs) != 2 or operation.inputs[0].byte_size != byte_size:
+            return None
+        bitwise = operation.opcode in ("INT_AND", "INT_OR", "INT_XOR")
+        if bitwise and operation.inputs[1].byte_size != byte_size:
+            return None
+        inputs = tuple(self._expression_for_input(operation_key, item) for item in operation.inputs)
+        if any(item is None for item in inputs):
+            return None
+        left, right = inputs
+        if not left.atoms and not right.atoms:
+            a, b = (_unsigned_wrap(item.displacement, item.byte_size) for item in inputs)
+            if bitwise:
+                value = a & b if operation.opcode == "INT_AND" else a | b if operation.opcode == "INT_OR" else a ^ b
+            else:
+                # P-code shifts do not mask the count as some ISAs do. Clamp
+                # before the Python shift (also handles arbitrarily wide counts).
+                value = (_signed_wrap(a, byte_size) if operation.opcode == "INT_SRIGHT" else a) >> min(b, 8 * byte_size)
+            return _AddressExpression((), _unsigned_wrap(value, byte_size), byte_size, _opaque_image(*inputs))
+        if not index_addresses():
+            return None
+        atom = _opaque_atom_key(operation.opcode, inputs, byte_size, domain=b"bitwise-address-atom-v1")
+        self._boundary[atom] = ("bitwise", byte_size, byte_size, None)
+        self._note_opaque_atom(atom, inputs)
+        return _AddressExpression(((atom, 1),), 0, byte_size, _opaque_image(*inputs))
+
     def _once_join_expression(self, definition_id, requested_span, candidates) -> _AddressExpression:
         """A join, at a block run once per activation (after the first fixed
         point: ``_once_blocks``), of values that all have expressions (each
@@ -1412,7 +1446,12 @@ class _Projector:
         same arguments may return different values). A value a call wrote
         without stating it (a ``~u`` row) is such an atom too, a wild one:
         stores through it are uncertain-address writers ("opaque_call_write"
-        is address-uncertain, ``function_summary._ADDRESS_UNCERTAIN``)."""
+        is address-uncertain, ``function_summary._ADDRESS_UNCERTAIN``).
+
+        A blocked raw LOAD may retain its own output identity, never its old
+        memory-content expression. That capture is always stack-derived and
+        ineligible for private-frame exclusions, regardless of its inputs.
+        """
         key = definition.operation_key
         if key is None or definition.span != requested_span:
             return None
@@ -1434,14 +1473,30 @@ class _Projector:
             reader = row[1] if row is not None and row[0] == "mem" else key if "~" not in key else None
             if reader is not None and self._unsettled(reader):
                 return None
+        captured_output = False
         if self._blocked:
             row = self._pointer_rows.get(key)
             reader = row[1] if row is not None and row[0] == "mem" else key if "~" not in key else None
             if reader in self._blocked:
-                return None  # a value read from memory that failed validation: no identity
+                # Block the old CONTENT expression, not the identity of one
+                # raw LOAD's own output. Rebuild from the original unit with
+                # this separate, wild value; never reuse a former target or
+                # qualify a call/pointer/shared-content row this way.
+                if reader != key or "~" in key or fresh or nonstack or key in self._fresh \
+                        or key in self._pointer_rows or key in self._same_object \
+                        or operation.output is None or self._resolved_span(operation.output) != requested_span:
+                    return None
+                captured_output = True
         atom = _digest_ints(b"definition-atom-v1", (*key.encode("utf-8"), _stable_storage_key(requested_span)))
         if getattr(self, "address_metadata", None) is not None:
-            self.address_metadata["atoms"][atom] = f"value of {key} #{atom & 0xffffffff:08x}"
+            label = "captured LOAD output" if captured_output else "value of"
+            self.address_metadata["atoms"][atom] = f"{label} {key} #{atom & 0xffffffff:08x}"
+        if captured_output:
+            self._definition_atoms.add(atom)
+            self._stack_derived.add(atom)
+            self.ineligible_atoms.add(atom)
+            self._eligible_atoms.pop(atom, None)
+            eligible = False
         row = self._pointer_rows.get(key)
         if self._stale_read(key) or (row is not None and row[0] == "mem" and self._stale_read(row[1])):
             # a value that may come from a never-written byte of the new frame (docs 25.80 R0)
@@ -1453,7 +1508,7 @@ class _Projector:
             self._definition_atoms.add(atom)
         else:
             self._fresh_atoms.add(atom)
-        if eligible:
+        if eligible and atom not in self.ineligible_atoms:
             self._eligible_atoms[atom] = key   # (``eligible``: the value is the operation's own)
         if atom in self._fresh_atoms and key in self._fresh_windows and definition.span == requested_span:
             # an allocator's block of a size proven at the call (docs 25.79)
@@ -2215,16 +2270,12 @@ class _Projector:
         if operation.opcode == "LOAD" and len(operation.inputs) >= 2:
             return self._expression_from_memory_read(operation_key, byte_size)
         if operation.opcode in ("INT_XOR", "INT_SUB", "BOOL_XOR") and len(operation.inputs) == 2 \
-                and operation.inputs[0] == operation.inputs[1]:
+                and operation.inputs[0] == operation.inputs[1] and operation.inputs[0].byte_size == byte_size:
             return _AddressExpression((), 0, byte_size)  # x ^ x, x - x (``normalize``)
-        if operation.opcode in ("INT_AND", "INT_OR", "INT_XOR") and len(operation.inputs) == 2:
-            left, right = [self._expression_for_input(operation_key, item) for item in operation.inputs]
-            if left is not None and right is not None and not left.atoms and not right.atoms:
-                a = _unsigned_wrap(left.displacement, left.byte_size)
-                b = _unsigned_wrap(right.displacement, right.byte_size)
-                value = a & b if operation.opcode == "INT_AND" else a | b if operation.opcode == "INT_OR" else a ^ b
-                return _AddressExpression((), _unsigned_wrap(value, byte_size), byte_size,
-                                          _opaque_image(left, right))
+        if operation.opcode in ("INT_AND", "INT_OR", "INT_XOR", "INT_RIGHT", "INT_SRIGHT"):
+            value = self._bitwise_expression(operation_key, operation, byte_size)
+            if value is not None:
+                return value
         if operation.opcode == "SUBPIECE" and len(operation.inputs) == 2 \
                 and operation.inputs[1].kind is VarnodeKindCode.CONSTANT:
             value = self._expression_for_input(operation_key, operation.inputs[0])
@@ -2540,9 +2591,9 @@ def _function_relative_object_id(
     )
 
 
-def _opaque_atom_key(token: str, inputs, byte_size: int) -> int:
+def _opaque_atom_key(token: str, inputs, byte_size: int, *, domain=b"opaque-address-atom-v1") -> int:
     digest = hashlib.sha256()
-    _digest_field(digest, b"opaque-address-atom-v1")
+    _digest_field(digest, domain)
     _digest_field(digest, token.encode("utf-8"))
     _digest_integer(digest, byte_size)
     for item in inputs:

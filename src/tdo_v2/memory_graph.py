@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from hashlib import sha256
 
+from ._loop_memory import LoopMemoryPlan, validate_loop_memory
 from .graph import RustworkxDependencyGraph
 from .graph_contracts import EdgeKind, EdgeRecord, NodeId, NodeKind, NodeRecord
 from .memory_contracts import LocalMemorySsaResult, MemoryDefinitionKind
@@ -54,6 +56,21 @@ class MemoryTransfer:
 
 
 @dataclass(frozen=True, slots=True)
+class LoopMemoryGraph:
+    plan: LoopMemoryPlan
+    family_nodes: tuple[NodeId, ...]
+    access_nodes: tuple[NodeId, ...]
+
+    def __post_init__(self):
+        if type(self.plan) is not LoopMemoryPlan:
+            raise TypeError("loop graph requires an exact loop memory plan")
+        for nodes, rows in ((self.family_nodes, self.plan.families), (self.access_nodes, self.plan.accesses)):
+            if type(nodes) is not tuple or len(nodes) != len(rows) \
+                    or any(type(node) is not int or node < 0 for node in nodes):
+                raise ValueError("loop graph nodes must align with its bound family/access records")
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryGraphBindings:
     contract_version: int
     function_scope: StorageScopeId
@@ -65,6 +82,7 @@ class MemoryGraphBindings:
     entry_bindings: tuple[tuple[NodeId, ResolvedStorage], ...]
     transfers: tuple[MemoryTransfer, ...] = ()
     transfer_nodes: tuple[NodeId, ...] = ()
+    loop_memory: LoopMemoryGraph | None = None
 
     def __post_init__(self) -> None:
         if type(self.contract_version) is not int:
@@ -103,6 +121,8 @@ class MemoryGraphBindings:
             raise TypeError("binding transfers must be an exact tuple of MemoryTransfer")
         if len(self.transfers) != len(self.transfer_nodes):
             raise ValueError("transfer records and nodes must align")
+        if self.loop_memory is not None and type(self.loop_memory) is not LoopMemoryGraph:
+            raise TypeError("loop memory graph must be an exact binding or None")
 
 
 def _materialize_local_memory_ssa(
@@ -110,6 +130,7 @@ def _materialize_local_memory_ssa(
     result: LocalMemorySsaResult,
     operation_nodes: dict[str, NodeId],
     transfers: tuple[MemoryTransfer, ...] = (),
+    loop_memory: LoopMemoryPlan | None = None,
 ) -> MemoryGraphBindings:
     if type(graph) is not RustworkxDependencyGraph:
         raise TypeError("memory graph materialization requires the exact graph backend")
@@ -129,6 +150,7 @@ def _materialize_local_memory_ssa(
         for operation_key in expected_actions
     )
     _validate_transfers(result, transfers)
+    validate_loop_memory(loop_memory, result)
     namespace = (
         f"memory-v{result.contract_version}:{result.function_scope.digest.hex()}:"
         f"{result.unit_digest.hex()}"
@@ -158,9 +180,10 @@ def _materialize_local_memory_ssa(
         _transfer_node_record(namespace, index, transfer)
         for index, transfer in enumerate(transfers)
     )
+    family_records, access_records = _loop_node_records(namespace, loop_memory)
     if any(
         graph.node_for_key(record.key) is not None
-        for record in (*definition_records, *debt_records, *transfer_records)
+        for record in (*definition_records, *debt_records, *transfer_records, *family_records, *access_records)
     ):
         raise ValueError("memory namespace collides with existing graph nodes")
     graph.claim_namespace(namespace)
@@ -259,7 +282,9 @@ def _materialize_local_memory_ssa(
         for definition_id, definition in enumerate(result.definitions)
         if definition.kind is MemoryDefinitionKind.ENTRY
     )
-    return MemoryGraphBindings(
+    loop_graph = LoopMemoryGraph(loop_memory, tuple(graph.add_node(row) for row in family_records),
+                                 tuple(graph.add_node(row) for row in access_records)) if loop_memory is not None else None
+    bindings = MemoryGraphBindings(
         result.contract_version,
         result.function_scope,
         result.unit_digest,
@@ -270,7 +295,11 @@ def _materialize_local_memory_ssa(
         entry_bindings,
         transfers,
         transfer_nodes,
+        loop_graph,
     )
+    for source, target, edge in _loop_memory_edges(result, bindings):
+        graph.add_edge(source, target, edge)
+    return bindings
 
 
 def _validate_materialized_local_memory_ssa(
@@ -289,6 +318,8 @@ def _validate_materialized_local_memory_ssa(
         *bindings.unresolved_read_nodes,
         *bindings.unresolved_write_nodes,
         *bindings.transfer_nodes,
+        *(bindings.loop_memory.family_nodes if bindings.loop_memory else ()),
+        *(bindings.loop_memory.access_nodes if bindings.loop_memory else ()),
     )
     _validate_transfers(result, bindings.transfers)
     if len(bindings.transfer_nodes) != len(bindings.transfers):
@@ -297,6 +328,14 @@ def _validate_materialized_local_memory_ssa(
         f"memory-v{result.contract_version}:{result.function_scope.digest.hex()}:"
         f"{result.unit_digest.hex()}"
     )
+    loop = bindings.loop_memory
+    if loop is not None:
+        validate_loop_memory(loop.plan, result)
+        records = _loop_node_records(namespace, loop.plan)
+        for nodes, expected_records in zip((loop.family_nodes, loop.access_nodes), records, strict=True):
+            for node, expected in zip(nodes, expected_records, strict=True):
+                if not graph.has_node(node) or graph.node(node) != expected:
+                    raise ValueError("loop memory binding must match its weak graph node")
     actions = {action.operation_key: node for action, node in zip(
         result.actions, bindings.action_nodes, strict=True
     )}
@@ -401,6 +440,51 @@ def _expected_memory_edges(
                 else (action_node, debt_node)
             )
             edges.append((*endpoints, edge))
+    edges.extend(_loop_memory_edges(result, bindings))
+    return tuple(edges)
+
+
+def _loop_node_records(namespace, plan):
+    if plan is None:
+        return (), ()
+    def record(kind, number, row):
+        identity = sha256(repr(row).encode("utf-8")).hexdigest()
+        return NodeRecord(f"memory:{namespace}:loop-{kind}:{number}:{identity}", NodeKind.EFFECT,
+                          "loop_address_family" if kind == "family" else f"loop_possible_memory_{row.direction}",
+                          semantic_identity=identity)
+    return (tuple(record("family", i, row) for i, row in enumerate(plan.families)),
+            tuple(record("access", i, row) for i, row in enumerate(plan.accesses)))
+
+
+def _loop_memory_edges(result, bindings):
+    loop = bindings.loop_memory
+    if loop is None:
+        return ()
+    edges = []
+    actions = {row.operation_key: i for i, row in enumerate(result.actions)}
+    debts = {(direction, row.action_id): node for direction, rows, nodes in (
+        ("read", result.unresolved_reads, bindings.unresolved_read_nodes),
+        ("write", result.unresolved_writes, bindings.unresolved_write_nodes))
+        for row, node in zip(rows, nodes, strict=True)}
+    for family, node in zip(loop.plan.families, loop.family_nodes, strict=True):
+        for ordinal, flow in enumerate((*family.entry_edges, *family.backedge_edges)):
+            for identifier in flow.definition_ids:
+                edges.append((bindings.definition_nodes[identifier], node,
+                    EdgeRecord(EdgeKind.LOOP_MEMORY_ADDRESS, operation=result.definitions[identifier].operation_key,
+                               occurrence=ordinal, span=flow.span)))
+    for access, node in zip(loop.plan.accesses, loop.access_nodes, strict=True):
+        family = loop.family_nodes[access.family_index]
+        action = actions[access.operation_key]
+        operation, debt = bindings.action_nodes[action], debts[access.direction, action]
+        edge = EdgeRecord(EdgeKind.LOOP_MEMORY_ADDRESS, operation=access.operation_key, span=access.address_span)
+        edges.extend(((family, node, edge), (family, operation, edge),
+                      (bindings.definition_nodes[access.address_definition_id], node, edge)))
+        possible = EdgeRecord(EdgeKind.LOOP_POSSIBLE_WRITE if access.direction == "write"
+                              else EdgeKind.LOOP_POSSIBLE_READ, operation=access.operation_key)
+        if access.direction == "write":
+            edges.extend(((operation, node, possible), (node, debt, possible)))
+        else:
+            edges.extend(((debt, node, possible), (node, operation, possible)))
     return tuple(edges)
 
 

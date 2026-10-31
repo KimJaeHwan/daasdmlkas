@@ -49,6 +49,9 @@ class EdgeKind(StrEnum):
     MEMORY_DEFINES = "memory_defines"            # operation -> memory definition
     MEMORY_READ = "memory_read"                  # definition -> reading operation
     MEMORY_TRANSFER = "memory_transfer"          # preserved byte source/CALL -> transfer
+    LOOP_MEMORY_ADDRESS = "loop_memory_address"  # occurrence-qualified address equation, not a fixed value
+    LOOP_POSSIBLE_WRITE = "loop_possible_write"  # weak occurrence effect; never a ByteSpan overwrite
+    LOOP_POSSIBLE_READ = "loop_possible_read"    # unresolved occurrence read; never an exact read-from
     MEMORY_JOIN_INPUT = "memory_join_input"      # definition -> JOIN
     UNRESOLVED_READ = "unresolved_read"          # debt -> reading operation
     UNRESOLVED_WRITE = "unresolved_write"        # writing operation -> debt
