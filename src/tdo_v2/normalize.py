@@ -2093,7 +2093,8 @@ class _ScopedNormalizer:
             dependencies, memory_ssa, memory_operation_nodes,
             transfers=transfers_for(_forward_memory_plan, memory_ssa),
             loop_memory=derive_loop_memory(memory_unit, memory_ssa, observation,
-                unit.scopes.function.entry, context, unit.scopes.program.evidence.address_spaces),
+                unit.scopes.function.entry, context, unit.scopes.program.evidence.address_spaces,
+                unit.scopes.program.evidence.translation_namespace),
         )
         observed_inputs = tuple(storage for _, storage in memory_graph.entry_bindings)
         expected_entry_nodes = tuple(node for node, _ in memory_graph.entry_bindings)

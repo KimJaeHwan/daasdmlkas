@@ -87,6 +87,8 @@ ADDED_FIELDS = {
     "UnresolvedNormalizedFunction": {"assumes_opaque_callees_restore_stack_pointer": True},
     "CallMemoryDecision": {"evidence": ()},
     "MemoryGraphBindings": {"transfers": (), "transfer_nodes": (), "loop_memory": None},
+    "LoopMemoryPlan": {"read_from": ()},
+    "LoopMemoryGraph": {"read_from_nodes": (), "read_from_source_nodes": ()},
     # (fields of the forward-memory / expression branch, 2026-10-23..26)
     "FunctionSummary": {"address_relations": (), "independent_delta_proofs": ()},
     "LocalMemorySsaResult": {"call_register_snapshots": (), "flow_edges": ()},
