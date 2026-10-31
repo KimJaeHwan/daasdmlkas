@@ -238,10 +238,11 @@ def test_mixed_pre_and_post_update_address_join_is_not_a_header_value():
 
 
 @pytest.mark.parametrize("shape", ("multiple", "three"))
-def test_previous_visit_writer_and_initial_memory_remain_unproved(shape):
+def test_previous_visit_writer_is_conditional_and_initial_memory_remains(shape):
     normalized, observation, keys = _fixture(shape, variant="previous")
     assert normalized.memory_graph.loop_memory is not None
-    assert not _relations(normalized)
+    assert set(_relations(normalized)) == {keys["read-header"]}
+    assert all(row.visit_delta == -1 and row.requires_backedge for _, row in _relations(normalized).values())
     _original_debts(normalized, keys)
     _, run, result = _execute(observation, 3)
     assert result == VALUE

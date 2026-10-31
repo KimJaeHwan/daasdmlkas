@@ -1,8 +1,9 @@
 """Occurrence-qualified affine memory effects over the ORIGINAL SSA.
 
 Families/accesses are weak relations, NOT exact physical storage objects.
-Issued read_from fragments separately guarantee the same-visit last writer
-conditional on that original reader executing successfully in this model.
+Issued read_from fragments separately guarantee an occurrence-qualified
+last writer conditional on that original reader executing successfully.
+Previous-visit rows additionally require entry through a family backedge.
 S(k) denotes the induction bytes at a particular header visit, initialized
 by the complete original entry edge. It is never an activation-wide atom.
 No trip count, buffer extent, non-aliasing or successful access is inferred.
@@ -87,10 +88,14 @@ class LoopMemoryAccess:
 
 @dataclass(frozen=True, slots=True)
 class LoopMemoryReadFrom:
-    """Last-writer bytes conditional on this reader's successful same visit.
+    """Last-writer bytes conditional on this reader executing successfully.
 
-    The source is the STORE value operand at writer(k), not a fixed value of
-    its static SSA definition. This is not an exact physical ByteSpan read.
+    The source is the STORE operand-use at writer(k + visit_delta), never a
+    fixed value of its static SSA definition or an exact physical RAM span.
+    A -1 row applies ONLY when this header visit entered via one of its
+    family's original backedges in the same activation, not via preheader.
+    This requirement is retained, not asserted to have happened. Initial
+    memory and all original uncertain accesses remain in the graph.
     """
 
     writer_access: int
@@ -103,14 +108,17 @@ class LoopMemoryReadFrom:
     constant: tuple[int, int, int] | None
     output_span: ByteSpan
     visit_delta: int = 0
+    requires_backedge: bool = False
 
     def __post_init__(self):
         if any(type(value) is not int or value < 0 for value in
                (self.writer_access, self.reader_access, self.write_offset, self.read_offset)) \
                 or type(self.width) is not int or self.width <= 0 \
-                or type(self.visit_delta) is not int or self.visit_delta != 0 \
+                or type(self.visit_delta) is not int or self.visit_delta not in (0, -1) \
+                or type(self.requires_backedge) is not bool \
+                or self.requires_backedge != (self.visit_delta == -1) \
                 or type(self.output_span) is not ByteSpan or self.output_span.size != self.width:
-            raise ValueError("loop read-from requires same-visit byte fragments")
+            raise ValueError("loop read-from requires a same-visit or backedge-qualified previous-visit fragment")
         if self.constant is not None:
             if type(self.constant) is not tuple or len(self.constant) != 3 \
                     or any(type(value) is not int or value < 0 for value in self.constant) \
