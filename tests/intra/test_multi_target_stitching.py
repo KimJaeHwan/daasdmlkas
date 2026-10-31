@@ -177,12 +177,28 @@ def test_nested_helper_exit_choices_are_scoped_to_the_selected_target(monkeypatc
          .ins(add(reg(RAX), reg(RAX), const(100))).add_rsp(0x28).ret())
     b = (FunctionBuilder(entry=B).sub_rsp(0x28).call(helper_address)
          .ins(add(reg(RAX), reg(RAX), const(200))).add_rsp(0x28).ret())
-    _, found, _, _ = record(monkeypatch, caller(memory=False), a, b, helper)
-    assert evaluate(found, entry, route='stitched') == {111, 122, 211, 222}
+    item, found, program, exit_key = record(monkeypatch, caller(memory=False), a, b, helper)
+
+    def condition(value):
+        def read(node):
+            if isinstance(node, dict) and node.get('register', {}).get('offset') == R8:
+                return value
+            return entry(node)
+        return read
+
+    # The bitwise caller address now retains R8's guard input too. A known
+    # predicate selects a real exit; an unknown one still keeps both exits.
+    assert evaluate(found, condition(0), route='stitched') == {111, 211}
+    assert evaluate(found, condition(1), route='stitched') == {122, 222}
+    assert evaluate(found, condition(None), route='stitched') == {111, 122, 211, 222}
     nested_instances = {node['instance'] for node in found['nodes'] if node.get('reason') == 'callee exits'}
     assert len(nested_instances) == 2
     assert any('@1:1800' in instance for instance in nested_instances)
     assert any('@1:1900' in instance for instance in nested_instances)
+    report = check_stitched(item, program, found, register=RAX, exit_key=exit_key, seeds=range(8),
+                            register_pools=lambda seed: {RSP: 0x70000000, R8: seed & 1, R9: (seed >> 1) & 1})
+    assert report.evaluated == report.through_stitched == 8
+    assert not report.failures and not report.skipped
 
 
 def _nested_output_target(*, joined=False):

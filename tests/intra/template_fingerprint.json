@@ -10,6 +10,11 @@
    "forward_1": "92f7ffdc305f096b482634843f12d9ae49f092962ebb731d8850282639ca8cff",
    "input": "2046ba5ae5329ad999daf571554058c5ba0a61ca223ad197bb93b959c94f37e7"
   },
+  "bitwise_index_last_writer": {
+   "forward_0": "c8da0bf5c1f019179a121b291f00874c7ee16862b61530e9fc2b6a0fa3b44f44",
+   "forward_1": "c8da0bf5c1f019179a121b291f00874c7ee16862b61530e9fc2b6a0fa3b44f44",
+   "input": "e367dd88d455a240ae35aa9c99ade6e9e25deb053a5cbd1679739623958f4f0c"
+  },
   "call_with_push": {
    "forward_0": "2512c340a3b6f7dbb23756e56d1b6fd0e1ea761dda70df4a2c8de168e9c17b39",
    "forward_1": "2512c340a3b6f7dbb23756e56d1b6fd0e1ea761dda70df4a2c8de168e9c17b39",
@@ -77,7 +82,7 @@
   }
  },
  "versions": {
-  "semantics_version": 29,
+  "semantics_version": 32,
   "summary_version": 2,
   "template_version": 6
  }

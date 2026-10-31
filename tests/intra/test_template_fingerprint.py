@@ -134,6 +134,11 @@ def _cases():
                                   .call_indirect(RAX).ins(load(reg(RAX), reg(RDX))).add_rsp(0x28).ret()], {}),
         "scaled_index": ([FunctionBuilder(entry=F).ins(op("INT_MULT", [reg(RDX), const(8)], T2))
                           .ins(add(T, reg(RCX), T2), load(reg(RAX), T)).ret()], {}),
+        "bitwise_index_last_writer": ([FunctionBuilder(entry=F)
+                                       .ins(op("INT_AND", [reg(RDX), const(0xff)], T2),
+                                            op("INT_RIGHT", [T2, const(4, 4)], T2),
+                                            add(T, reg(RCX), T2), store(T, reg(RDX)))
+                                       .ins(load(reg(RAX), T)).ret()], {}),
         "returns_stack_address": ([FunctionBuilder(entry=F).sub_rsp(0x28).ins(add(reg(RAX), reg(RSP), const(8)))
                                    .add_rsp(0x28).ret()], {}),
         "accessor": ([FunctionBuilder(entry=F).sub_rsp(0x28).ins(copy(reg(RBX), reg(RCX))).call(GETOBJ)

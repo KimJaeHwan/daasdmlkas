@@ -2088,9 +2088,12 @@ class _ScopedNormalizer:
             for action in memory_ssa.actions
         }
         from ._realloc_contents import transfers_for, subtract_copy_clobbers
+        from ._loop_memory import derive_loop_memory
         memory_graph = _materialize_local_memory_ssa(
             dependencies, memory_ssa, memory_operation_nodes,
             transfers=transfers_for(_forward_memory_plan, memory_ssa),
+            loop_memory=derive_loop_memory(memory_unit, memory_ssa, observation,
+                unit.scopes.function.entry, context, unit.scopes.program.evidence.address_spaces),
         )
         observed_inputs = tuple(storage for _, storage in memory_graph.entry_bindings)
         expected_entry_nodes = tuple(node for node, _ in memory_graph.entry_bindings)
