@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .._scope_contracts import VarnodeKindCode
 from ..model import ByteSpan, StorageObjectId, StorageObjectKind
 from ..observed_call_state import observed_call_state_projections
+from ..resource_limits import step
 from ..physical_state import (
     PhysicalMemorySlice,
     PhysicalRegisterSlice,
@@ -15,6 +16,33 @@ from ..physical_state import (
     PhysicalStoreReceipt,
 )
 from .configured_function_view import _FunctionView
+
+MAX_PHYSICAL_VALUE_FRAGMENTS = 128
+
+
+def _memory_relation(view, definition, span, width, space, displacement=0):
+    """One non-wrapping interval in the observed address space's modulus.
+
+    Affine peeling accumulates mathematical offsets, not machine addresses:
+    ``base + 2**bits + 8`` aliases ``base + 8``. Compare every request and
+    STORE in the same coordinates. A seam-crossing or mixed-width interval
+    needs a split proof, which this single-STORE receipt does not provide.
+    """
+    bits = view.space_bits.get(space)
+    if bits is None or span.size * 8 != bits:
+        return None
+    modulus = 1 << bits
+    if width > modulus:
+        return None
+    relation = view.canonical_physical_affine_relation(definition, span, displacement)
+    if relation is None:
+        return None
+    root, root_span, offset = relation
+    offset %= modulus
+    if offset + width > modulus:
+        return None
+    return root, root_span, offset
+
 
 def _register_span(view, selector):
     register_spaces = tuple(
@@ -73,8 +101,9 @@ class _FunctionPhysicalStateBackend:
         if type(selector) is PhysicalRegisterSlice:
             span = self.register_span(selector)
             definition = None if span is None else self.view.state_definition(span, before_position)
-            return (() if definition is None or not self.view.memory.definitions[definition].span.contains(span)
-                    else (PhysicalValueFragment(definition, span),))
+            if definition is not None and self.view.memory.definitions[definition].span.contains(span):
+                return (PhysicalValueFragment(definition, span),)
+            return () if span is None else _materialized_value_fragments(self.view, span, before_position)
         if type(selector) is not PhysicalMemorySlice:
             raise TypeError("physical value selector must be exact")
         candidates = self.memory_candidates(selector, before_position)
@@ -82,6 +111,9 @@ class _FunctionPhysicalStateBackend:
             definition = self.view.state_definition(candidates[0], before_position)
             if definition is not None and self.view.memory.definitions[definition].span.contains(candidates[0]):
                 return (PhysicalValueFragment(definition, candidates[0]),)
+            fragments = _materialized_value_fragments(self.view, candidates[0], before_position)
+            if fragments:
+                return fragments
         return _relational_memory_value_fragments(self.view, selector, before_position)
 
     def value_ids(
@@ -125,7 +157,92 @@ def _relational_memory_value_definition_ids(view, selector, before_position):
                  _relational_memory_value_fragments(view, selector, before_position, subranges=False))
 
 
+def _materialized_value_fragments(view, requested, before_position):
+    """An exact current cover in original SSA atoms, never widened definitions.
+
+    Keep the state barrier on every piece. In particular a definition covering
+    the whole request is not reused across a later partial overwrite.
+    """
+    pieces = sorted((atom.intersection(requested) for atom in view.memory.atomic_spans
+                     if atom.overlaps(requested)), key=lambda span: span.start)
+    if not pieces or len(pieces) > MAX_PHYSICAL_VALUE_FRAGMENTS:
+        return ()
+    cursor, fragments = requested.start, []
+    for piece in pieces:
+        step()
+        if piece.start != cursor:
+            return ()
+        definition = view.state_definition(piece, before_position)
+        if definition is None or not view.memory.definitions[definition].span.contains(piece):
+            return ()
+        if (fragments and fragments[-1].definition_id == definition
+                and fragments[-1].source_span.end == piece.start):
+            old = fragments[-1].source_span
+            fragments[-1] = PhysicalValueFragment(definition, ByteSpan(old.object_id, old.start, old.size + piece.size))
+        else:
+            fragments.append(PhysicalValueFragment(definition, piece))
+        cursor = piece.end
+    return tuple(fragments) if cursor == requested.end else ()
+
+
 def _relational_memory_value_fragments(view, selector, before_position, *, subranges=True):
+    """Compose current STORE receipts at observed byte boundaries only.
+
+    Each piece must independently pass the original dominance, source and
+    interference checks. No partial cover is published as a complete demand.
+    The definition-only compatibility API retains its single-value contract.
+    """
+    single = _single_store_value_fragments(view, selector, before_position, subranges=subranges)
+    if single or not subranges:
+        return single
+    base = _register_span(view, selector.base)
+    definition = None if base is None else view.state_definition(base, before_position)
+    spaces = tuple(getattr(view, "loaded_memory_space_ids", ()))
+    if definition is None or len(spaces) != 1:
+        return ()
+    relation = _memory_relation(view, definition, base, selector.byte_size, spaces[0], selector.displacement)
+    if relation is None:
+        return ()
+    start, end = relation[2], relation[2] + selector.byte_size
+    boundaries = {start, end}
+    for key, (position, operation) in view.operations.items():
+        step()
+        if position >= before_position or operation.opcode != "STORE" or len(operation.inputs) != 3:
+            continue
+        space = operation.inputs[0]
+        if space.kind is not VarnodeKindCode.CONSTANT or space.coordinate.byte_offset != spaces[0]:
+            continue
+        pointer = view._observed_input_definition(key, operation.inputs[1])
+        store = None if pointer is None else _memory_relation(
+            view, *pointer, operation.inputs[2].byte_size, spaces[0])
+        if store is None or store[:2] != relation[:2]:
+            continue
+        lo, hi = max(start, store[2]), min(end, store[2] + operation.inputs[2].byte_size)
+        if lo < hi:
+            boundaries.update((lo, hi))
+        if len(boundaries) > MAX_PHYSICAL_VALUE_FRAGMENTS + 1:
+            return ()
+    ordered = sorted(boundaries)
+    if len(ordered) <= 2:
+        return ()  # the original single-STORE proof already refused this range
+    fragments = []
+    for lo, hi in zip(ordered, ordered[1:]):
+        step()
+        piece = replace(selector, displacement=selector.displacement + lo - start, byte_size=hi - lo)
+        found = _single_store_value_fragments(view, piece, before_position)
+        if not found:
+            return ()
+        fragment, = found
+        # The current public fragment has no general target-lane field. Keep
+        # repeated source-byte demands refused rather than losing multiplicity.
+        if any(old.definition_id == fragment.definition_id and old.source_span.overlaps(fragment.source_span)
+               for old in fragments):
+            return ()
+        fragments.append(fragment)
+    return tuple(fragments)
+
+
+def _single_store_value_fragments(view, selector, before_position, *, subranges=True):
     """Resolve a current STORE's exact source bytes by an affine receipt.
 
     The one-writer, dominance and intervening-call/write checks remain in
@@ -141,9 +258,12 @@ def _relational_memory_value_fragments(view, selector, before_position, *, subra
     base_definition = view.state_definition(base_span, before_position)
     if base_definition is None:
         return ()
-    target_relation = view.canonical_physical_affine_relation(
+    target_relation = _memory_relation(
+        view,
         base_definition,
         base_span,
+        selector.byte_size,
+        loaded_space,
         selector.displacement,
     )
     before_keys = tuple(
@@ -189,7 +309,7 @@ def _relational_memory_value_fragments(view, selector, before_position, *, subra
         store_relation = (
             None
             if store_pointer is None
-            else view.canonical_physical_affine_relation(*store_pointer)
+            else _memory_relation(view, *store_pointer, operation.inputs[2].byte_size, loaded_space)
         )
         if store_relation is None or store_relation[:2] != target_relation[:2]:
             continue
@@ -258,7 +378,7 @@ def _relational_memory_value_fragments(view, selector, before_position, *, subra
         store_relation = (
             None
             if store_pointer is None
-            else view.canonical_physical_affine_relation(*store_pointer)
+            else _memory_relation(view, *store_pointer, operation.inputs[2].byte_size, loaded_space)
         )
         if store_relation is None:
             return ()
