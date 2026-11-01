@@ -12,6 +12,10 @@ from .resource_limits import step
 from .span_geometry import ByteSpan, StorageObjectKind
 
 
+_CALL_ADDRESS_DEBT_QUERIES = 64
+_CALL_ADDRESS_DEBT_WORK = 4096
+
+
 def identity_operand(operation):
     """Exact full-width transport (e.g. machine TEST x,x), not a new solver."""
     if operation.output is None or operation.output.byte_size != 8:
@@ -171,6 +175,9 @@ class AllocationAnalysis:
                 self.contracts[call] = matches[0]
         self.numeric = _analyze(self.normalized, item.unit, readonly_image=readonly_image,
                                 assumptions=self.requires)
+        from ._call_value_ports import scalar_call_rows
+        self._call_values = scalar_call_rows(self.normalized)
+        self._call_address_debts = {}
         self._definitions, self._arguments, self._lives, self._extents = {}, {}, {}, {}
         self._argument_active, self._live_active, self._quiet = set(), set(), {}
         self._call_states = {}
@@ -351,6 +358,69 @@ class AllocationAnalysis:
             return None
         return rows[0].fragments[0].definition_ids[0]
 
+    def _clean_call_address(self, identifier):
+        """An original value definition, including transitive source debts.
+
+        A fresh STORE may clean a slot without cleaning a stale address that
+        appears to name it. Reuse the existing data-graph debt walk; cache
+        only inside this immutable analysis. Exhaustion never means clean.
+        """
+        if identifier in self._call_address_debts:
+            return not self._call_address_debts[identifier]
+        if len(self._call_address_debts) >= _CALL_ADDRESS_DEBT_QUERIES:
+            return False
+        from .normalize import _row_reaches_debt
+        from .resource_limits import BoundExceeded, bounded
+
+        node = self.normalized.memory_graph.definition_nodes[identifier]
+        try:
+            with bounded("allocation-call-address-debt", _CALL_ADDRESS_DEBT_WORK):
+                indebted = _row_reaches_debt(self.normalized.dependencies, node)
+        except BoundExceeded as error:
+            if error.name != "allocation-call-address-debt":
+                raise
+            indebted = True
+        self._call_address_debts[identifier] = indebted
+        return not indebted
+
+    def _call_value(self, key, span, active):
+        """An existing allocation through a proven ORIGINAL pre-call port.
+
+        The staged one-byte token is dependency aggregation, not a pointer.
+        This value equality proves neither a new allocation nor that the
+        CALL left its pointee alive; lifetime() still crosses the actual CALL.
+        """
+        port = self._call_values.get(key)
+        if port is None or port.width != 8 or span.size != 8:
+            return PointerFact()
+        row = port.row
+        if row[0] in ("reg", "off"):
+            fact = self.input(row[1], row[2], active)
+            if row[0] == "off":
+                delta = row[3]
+                if delta >= 1 << 63:
+                    delta -= 1 << 64  # Same signed addend as an original INT_ADD64.
+                fact = replace(fact, targets=frozenset(PointerTarget(target.allocation, target.offset + delta)
+                               for target in fact.targets),
+                               unknown=fact.unknown or (delta != 0 and None in fact.nulls))
+            return fact
+        if row[0] != "mem":
+            return PointerFact()  # A scalar literal is never an allocation birth.
+        reads = self.reads.get(self.actions.get(row[1]), ())
+        memory = [read for read in reads if read.span.object_id.kind in (
+            StorageObjectKind.FUNCTION_RELATIVE, StorageObjectKind.ADDRESS_SPACE)]
+        if len(memory) != 1 or memory[0].span.size != 8:
+            return PointerFact()
+        # The selector checked placement/width/wildness. The consumer must
+        # still check BOTH the original address uses and loaded value uses:
+        # a projected old frame slot behind a clobbered pointer is no proof.
+        for read in reads:
+            if read is not memory[0]:
+                identifier = self.read_definition(row[1], read.span)
+                if identifier is None or not self._clean_call_address(identifier):
+                    return PointerFact()
+        return self.read(row[1], memory[0].span, active)
+
     def definition(self, identifier, span, active=frozenset()):
         step()
         cache = identifier, span
@@ -402,7 +472,9 @@ class AllocationAnalysis:
                         fact = replace(fact, unknown=True)
             else:
                 operation = self.ops.get(key)
-                if operation is not None and operation.opcode == "STORE":
+                if operation is None and key in self._call_values:
+                    fact = self._call_value(key, span, active)
+                elif operation is not None and operation.opcode == "STORE":
                     if operation.inputs[2].byte_size == span.size:
                         fact = self.input(key, operation.inputs[2], active)
                 elif operation is not None and operation.output is not None and operation.output.byte_size == span.size:

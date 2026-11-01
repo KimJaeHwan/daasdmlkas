@@ -36,7 +36,7 @@ def _transfer_index():
         graph=graph, ssa=ssa, definition_node=bindings.definition_nodes,
         definition_of={node: number for number, node in enumerate(bindings.definition_nodes)},
         action_of={node: number for number, node in enumerate(bindings.action_nodes)},
-        reads=reads, joins={}, little=True,
+        reads=reads, joins={}, little=True, read_sources={}, read_port_effects={},
         transfer_of={bindings.transfer_nodes[0]: transfer},
         transfer_node={(transfer.definition_id, transfer.action_id, transfer.span): bindings.transfer_nodes[0]},
         operation=lambda action_id: (load, (None, None), None) if action_id == transfer.action_id else None,

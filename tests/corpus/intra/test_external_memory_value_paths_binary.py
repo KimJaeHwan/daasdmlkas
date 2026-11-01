@@ -134,8 +134,8 @@ def test_original_external_memory_store_value_candidate_reaches_load(external_un
         alias_node = graph.node_for_key("op:" + alias)
         assert any(target == debt and edge.kind == "may_alias_write" for _, target, edge in graph.out_edges(alias_node))
         assert any(target == read_node and edge.kind == "may_alias_read" for _, target, edge in graph.out_edges(debt))
-    # No loop address recurrence is necessary for this already-resolved
-    # relative-memory path, and no new same-visit must proof is claimed.
+    # No loop address recurrence is necessary for this relative-memory path.
+    # A local last-write proof, if issued, is separate from loop read-from.
     loop = normalized.memory_graph.loop_memory
     assert loop is None or all(loop.plan.accesses[row.reader_access].operation_key != reader for row in loop.plan.read_from)
     if entry == 0x548970:
@@ -166,16 +166,19 @@ def test_ncnn_load_expression_keeps_real_eight_byte_value_path_but_refuses_numer
     load = next(node for node in record["nodes"] if node.get("key") == reader and not node.get("cycle_only"))
     (memory,) = load["memory"]
     (part,) = memory["parts"]
-    store = nodes[part["node"]]
-    (value,) = [operand for operand in store["operands"] if operand["index"] == 2]
-    (value_part,) = value["parts"]
-    copied = nodes[value_part["node"]]
+    # The validated port directly references the original STORE operand
+    # bytes, without pretending the whole STORE/address is the loaded value.
+    assert load["local_read"]["writer"] == writer
+    copied = nodes[part["node"]]
     (copy_part,) = copied["operands"][0]["parts"]
     arithmetic = nodes[copy_part["node"]]
-    assert store["key"] == writer and copied["key"] == PRODUCERS[0x548970]
+    assert copied["key"] == PRODUCERS[0x548970]
     assert arithmetic["key"] == "1b1:548c74:3:INT_ADD" and arithmetic["opcode"] == "INT_ADD"
-    assert all(item["bytes"] == item["at"] == [0, 8] for item in (part, value_part, copy_part))
-    assert load["debts"] and normalized.may_alias_reads
+    assert all(item["bytes"] == item["at"] == [0, 8] for item in (part, copy_part))
+    assert not load.get("debts") and normalized.may_alias_reads
+    assert sum(len(row.writers) for row in normalized.may_alias_reads if row.operation_key == reader) == 56
+    assert any(node["kind"] == "debt" and node.get("debt") == "call_clobber_read"
+               for node in record["nodes"])  # Independent original address/value debts remain.
     assert record["truncated"] is not diagnostic
     assert any(node.get("writers_truncated") for node in record["nodes"]) is not diagnostic
     reason = "loop" if diagnostic else "truncated"

@@ -84,6 +84,8 @@ class _Index:
         from .storage import _resolve_validated_storage
 
         self.graph = normalized.dependencies
+        from ._memory_read_sources import read_sources
+        self.read_sources = read_sources(normalized)
         self.intrinsic_refinements = dict(getattr(normalized, "intrinsic_refinements", ()))
         ssa, bindings = normalized.memory_ssa, normalized.memory_graph
         self.ssa = ssa
@@ -95,6 +97,14 @@ class _Index:
             (row.definition_id, row.action_id, row.span): node
             for node, row in self.transfer_of.items()
         }
+        self.read_port_effects = {}
+        if bindings.local_reads is not None:
+            i = 0
+            for row in bindings.local_reads.plan.reads:
+                for part in row.parts:
+                    self.read_port_effects[bindings.local_reads.effect_nodes[i]] = (
+                        bindings.local_reads.source_nodes[i], row, part)
+                    i += 1
         self.reads = {}
         for read in ssa.reads:
             self.reads.setdefault(read.action_id, []).append(read)
@@ -231,6 +241,8 @@ def lane_slice(normalized, unit, seeds, index=None, ignore_debts=False, budget=N
             _operation(index, node, demand, add, clobbered)
         elif node in index.transfer_of:
             _transfer(index, node, demand, add)
+        elif node in index.read_port_effects:
+            _read_port(index, node, demand, add)
         else:
             _other(index, node, add, covered)
     phase_count("lane_slices", 1)   # (K2 sizes: slices x steps, docs 25.31)
@@ -321,10 +333,13 @@ def _operation(index, node, demand, add, clobbered=None):
     action_id = index.action_of[node]
     found = index.operation(action_id)
     reads = index.reads.get(action_id, ())
+    source_view = index.read_sources.get(index.ssa.actions[action_id].operation_key)
     changed = (clobbered or {}).get(index.ssa.actions[action_id].operation_key, ())
     operand_demands = None if demand is FULL or found is None or not index.little \
         else _operation_demands(index, action_id, found, demand)
     for read in reads:
+        if source_view is not None and read.span.object_id.kind in _MEMORY_OBJECTS:
+            continue
         if operand_demands is None:
             wanted = None
         else:
@@ -345,9 +360,32 @@ def _operation(index, node, demand, add, clobbered=None):
     # debts and every other predecessor that is not one of its reads or a
     # constant input (CONTROL_DEPENDENCE: data-only)
     for source, _, record in index.graph.in_edges(node):
+        if source_view is not None and source in source_view.inactive_debts:
+            continue
+        if record.kind == EdgeKind.LOCAL_READ_FROM.value:
+            # Partial evidence cannot replace raw reads/debts, but its own
+            # byte port still consumes only the requested LOAD output bytes.
+            part = index.read_port_effects[source][2]
+            if demand is FULL or any(part.output_offset <= byte < part.output_offset + part.width
+                                     for byte in demand):
+                add(source, FULL if demand is FULL else frozenset(demand))
+            continue
         if record.kind not in (EdgeKind.MEMORY_READ.value, EdgeKind.VALUE_INPUT.value,
                                EdgeKind.CONTROL_DEPENDENCE.value):
             add(source, FULL)
+
+
+def _read_port(index, node, demand, add):
+    source, row, part = index.read_port_effects[node]
+    wanted = range(part.output_offset, part.output_offset + part.width) if demand is FULL else (
+        i for i in demand if part.output_offset <= i < part.output_offset + part.width)
+    wanted = tuple(wanted)
+    if not wanted:
+        return
+    if part.source_span is not None:
+        add(source, frozenset(part.source_span.start + i - part.output_offset for i in wanted))
+    else:
+        add(source, FULL)
 
 
 def _transfer(index, node, demand, add):

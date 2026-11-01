@@ -128,7 +128,7 @@ TEMPLATE_VERSION = 6   # 2: stack_values_out; 3: exact scalar literals and entry
 # 36: immediately preceding STORE occurrences carry an explicit backedge
 # entry requirement and distinct typed edges; never unconditional first-visit
 # or exact/numeric memory facts. Original SSA and uncertain reads are retained.
-ENGINE_SEMANTICS_VERSION = 36
+ENGINE_SEMANTICS_VERSION = 40
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

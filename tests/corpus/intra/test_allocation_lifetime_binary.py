@@ -12,10 +12,12 @@ import pytest
 from test_forward_memory_footprints_binary import actual, REPO
 import run_dfbench
 from tdo_v2._allocation_lifetime import AllocationAnalysis
+from tdo_v2._allocation_memory import ExistingStackRange
 from tdo_v2.forward import probe
 from tdo_v2.interprocedural import analyze_units
 from tdo_v2.lifecycle_contracts import load_lifecycle_contracts
 from tdo_v2.memory_contracts import MemoryDefinitionKind
+from tdo_v2.model import ResolvedStorage
 from tdo_v2.query import BackwardSliceQuery
 
 
@@ -80,12 +82,36 @@ def test_original_nonnull_realloc_closes_only_its_own_two_stack_ranges(actual, e
     assert analysis.lifetime(pointer, REALLOC).live
     assert HEAP_STORES <= {proof.writer for proof in normalized.forward_memory_proofs}
     assert all(proof.write_fact.live for proof in normalized.forward_memory_proofs if proof.writer in HEAP_STORES)
-    # The explicit v2 content contract also proves the result-spill STORE
-    # disjoint from the copied payload bytes. Its evidence is a copy proof,
-    # not the pre-resize heap STORE's lifetime; test that separately.
+    # Closing the independent pre-CALL snapshot now permits one original
+    # four-byte copy proof. Its result-prefix authority also separates the
+    # two original return-address pushes and the result-pointer spill. This
+    # is an exact three-writer set, not permission to waive other bytes/CALLs.
+    (copied,) = normalized.forward_inputs.read_separations.copy_proofs
+    assert copied.call == REALLOC and copied.reader == "1b1:104a4e:0:LOAD"
+    assert copied.source[1] == "1b1:104a1d:1:STORE" and copied.span == _read(item, copied.reader).span
+    assert (copied.offset, copied.span.size, copied.old_size, copied.new_size) == (0, 4, 8, 16)
+    assert copied.input_lifetime.live and copied.writer_lifetime.live
     extra = [proof for proof in normalized.forward_memory_proofs if proof.writer not in HEAP_STORES]
-    assert all(proof.writer == "1b1:104a3f:2:STORE" and proof.read == "1b1:104a4e:0:LOAD"
-               and proof.span.size == 4 for proof in extra)
+    stack_offsets = {"1b1:104a27:2:CALL~push": -48, REALLOC + "~push": -48,
+                     "1b1:104a3f:2:STORE": -32}
+    assert len(extra) == 3 and {proof.writer for proof in extra} == set(stack_offsets)
+    effects = {effect.operation_key: effect for effect in normalized.effects}
+    for proof in extra:
+        assert proof.read == copied.reader and proof.span == copied.span
+        assert proof.write_fact == (REALLOC, "resize-result-owned-prefix")
+        assert type(proof.read_fact) is tuple and len(proof.read_fact) == 2
+        old, current = proof.read_fact
+        assert type(old) is ExistingStackRange and type(current) is ExistingStackRange
+        assert old.allocation == target.allocation and current.allocation.event == REALLOC
+        assert current.allocation.function == FUNCTION and current.allocation.context == target.allocation.context
+        assert current.allocation.result == analysis.contracts[REALLOC].result
+        assert current.allocation.contract == analysis.contracts[REALLOC].canonical_digest
+        (writer_span,) = [row.span for row in effects[proof.writer].writes
+                          if type(row) is ResolvedStorage and row.span.object_id.kind.value == "function_relative"]
+        assert old.span == current.span == writer_span and writer_span.size == 8
+        assert writer_span.start - old.upper == stack_offsets[proof.writer]
+        assert old.lower <= writer_span.start < writer_span.end <= old.upper
+        assert current.lower <= writer_span.start < writer_span.end <= current.upper
     assert all(any(label.startswith("lifecycle-contract:") for label in row.requires)
                for row in item.call_memory_decisions)
     assert set(normalized.forward_memory_requires) <= set(item.inherited_assumptions)
@@ -136,7 +162,11 @@ def test_public_observed_entry_accepts_only_explicit_profile_and_reports_its_dep
     monkeypatch.setenv("TDO_V2_DATAFLOW_ENGINE", "sparse")
     monkeypatch.setenv("TDO_V2_MEMORY_SSA_ENGINE", "sparse")
     source = REPO / "ghidra/GhidraV2CallNaming.java"
-    binding = NamingBindingExpectation(sha256(source.read_bytes()).digest(), CALL_NAMING_GHIDRA_VERSION)
+    # This fixture was exported with the LF producer; other frozen fixtures
+    # use CRLF. Select its exact known producer without relaxing admission.
+    producer = sha256(source.read_bytes().replace(b"\r\n", b"\n")).digest()
+    assert producer.hex() == "69a175c7154ea56bc02f96ba00249e9701048e771dc4170745eb7411d9d54e5b"
+    binding = NamingBindingExpectation(producer, CALL_NAMING_GHIDRA_VERSION)
     with open_observed_function_session(admit_frozen_bundle(actual["generation"]), naming_binding=binding) as session:
         scope = session.program_result
         evidences = [row for row in session.iter_functions()

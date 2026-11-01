@@ -498,9 +498,11 @@ def derive_proven_call_effect(
         return (tuple(sorted(registers, key=lambda span: span.canonical_key)),
                 tuple(sorted(set(loads), key=repr)))
 
-    # the width of the pointers whose values the summary states
+    # Narrow scalar copies do not redefine the summary's pointer width.
+    # Their width is checked per marker/output below; allocation/offset
+    # identities retain the existing pointer-width policy.
     summary_pointer_size = next((run.span.size for item in summary.exits for run in item.runs
-                                 if run.value is not None), None)
+                                 if run.value is not None and not _narrow_scalar_copy(run.value, run.span.size)), None)
     runs = []
     for (sources, keeps_old, conditions), offsets in sorted(register_groups.items(), key=lambda item: min(item[1])):
         writes = tuple(_spans(register_object, offsets))
@@ -962,6 +964,11 @@ def _literal_value(sources, keeps_old, spans):
     return literal if original == spans[0] and literal.byte_size == spans[0].size else None
 
 
+def _narrow_scalar_copy(value, width):
+    return width in (1, 2, 4) and type(value) is tuple and len(value) == 3 \
+        and value[0] == "same" and value[2] is False and type(value[1]) is ByteSpan and value[1].size == width
+
+
 def _pointer_value(sources, keeps_old, spans, size, anchored):
     """The caller-facing pointer value of one output run, or None."""
     from .function_summary import join_nonstack
@@ -969,11 +976,15 @@ def _pointer_value(sources, keeps_old, spans, size, anchored):
     markers = [item[1] for item in sources if type(item) is tuple and item[0] == "pointer"]
     if len(markers) > 1 and all(item is not None and item[0] == "nonstack" for item in markers):
         markers = [join_nonstack(markers)]   # (exits agreeing on "a block": windows joined, docs 25.79 3b)
-    if len(markers) != 1 or markers[0] is None or keeps_old or len(spans) != 1 or spans[0].size != size:
+    if len(markers) != 1 or markers[0] is None or keeps_old or len(spans) != 1:
         return None
     value = markers[0]
+    if not _narrow_scalar_copy(value, spans[0].size) and spans[0].size != size:
+        return None
     if value[0] == "nonstack":
         return value
+    if len(value) != 3 or type(value[1]) is not ByteSpan or value[1].size != spans[0].size:
+        return None
     if value[0] == "offset":
         _, entry, delta = value
         return ("offset_reg", entry, delta) if entry.object_id.kind is StorageObjectKind.REGISTER_FILE else None

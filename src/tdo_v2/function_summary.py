@@ -1106,7 +1106,12 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
     single reaching definitions, equal at joins) to one origin: an entry span
     (a copy of it), a fresh call result or a callee run already proven
     nonstack (``("nonstack",)``), or a same-object call result (realloc) of a
-    traced entry span (null is fresh) or of a nonstack value."""
+    traced entry span (null is fresh) or of a nonstack value.
+
+    The same tracer also states exact 1/2/4-byte scalar copies. Those may
+    carry only ``("same", same-width entry span, False)``: narrowing never
+    manufactures pointer freshness, allocation windows or upper bytes.
+    """
     from dataclasses import replace as _replace
 
     size = _pointer_size(normalized)
@@ -1228,7 +1233,8 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
             computed = run.kind is SummaryKind.COMPUTED or (
                 run.kind is SummaryKind.UNKNOWN and not run.debts and run.crossed
                 and all(label.startswith("alias:") for label in run.crossed))
-            if computed and run.span.size == size and run.definitions \
+            narrow = run.span.size in (1, 2, 4) and run.span.size < size
+            if computed and (run.span.size == size or narrow) and run.definitions \
                     and run.span.object_id.kind is not StorageObjectKind.FUNCTION_UNIQUE:
                 origins = {tracer.origin(definition, run.span) for definition in run.definitions}
                 if len(origins) == 1:
@@ -1237,6 +1243,9 @@ def _pointer_values(normalized, observation, exits, tracer) -> list:
                     value = value_of(("join", frozenset(origins)))
                 if value is not None and value[0] == "nonstack" and run.kind is not SummaryKind.COMPUTED:
                     value = ("nonstack",)   # (windows on computed runs only: docs 25.79 3b)
+                if narrow and (value is None or value[0] != "same" or value[2] is not False
+                               or type(value[1]) is not ByteSpan or value[1].size != run.span.size):
+                    value = None
             runs.append(_replace(run, value=value) if value is not None else run)
         result.append(ExitSummary(exit_summary.block_key, tuple(runs)))
     return result

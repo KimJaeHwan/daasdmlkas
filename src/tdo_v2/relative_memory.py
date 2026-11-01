@@ -797,11 +797,14 @@ def project_anchored_after(normalized, observation, requests) -> dict:
 
 def constant_values(normalized, observation, requests, addresses=False) -> dict:
     """``requests``: (operation key, input varnode). Returns request -> the
-    constant the varnode provably holds at that operation (no atoms; the
-    final memory SSA's single reaching definition chain); others absent.
+    constant candidate from the final memory SSA's reaching definition
+    chain (no atoms); others absent. Both callers MUST retain their existing
+    source-debt checks before accepting an indirect target or model extent.
     ``addresses``: the values are used as addresses (a call target), so an
     address in the image is base-independent (``IMAGE_BASE_TRACKING``)."""
     projector = _final_projector(normalized, observation)
+    from ._call_value_ports import scalar_call_rows
+    projector._pointer_rows = {key: port.row for key, port in scalar_call_rows(normalized).items()}
     found = {}
     for operation_key, varnode in requests:
         expression = projector._expression_for_input(operation_key, varnode)

@@ -45,6 +45,10 @@ SNAPSHOT_VERSION = 1
 # type name -> (encoded fields, {excluded field: reason}); every dataclass field
 # of these types must be in one of the two
 CONTRACT = {
+    "LocalReadPlan": (None, {"_proof": "process-local derivation authority and original input pins;"
+                                         " public local read byte ports remain encoded"}),
+    "GuardedImagePlan": (None, {"_proof": "process-local derivation authority; original input identities"
+                                             " are pinned, public alternatives remain encoded"}),
     "LoopMemoryPlan": (None, {"_proof": "process-local derivation authority and immutable input pins;"
                                           " public family/access evidence is encoded, never re-authorized by JSON"}),
     "NormalizedFunction": (None, {"document": "input (the function document)",
@@ -76,6 +80,8 @@ CONTRACT = {
 # fields added after the first baselines: omitted while at this value, so
 # older snapshots stay comparable (a non-default value is encoded and differs)
 ADDED_FIELDS = {
+    "ReadSourcePart": {"writer": None},
+    "LocalReadFrom": {"complete": True},
     "EngineRun": {"failed_functions": ()},
     "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {},
                          "call_memory_decisions": (), "activation_rejections": {}, "allocation_lifetimes": (),
@@ -86,7 +92,8 @@ ADDED_FIELDS = {
     "RootSlice": {"inherited_incomplete": False},
     "UnresolvedNormalizedFunction": {"assumes_opaque_callees_restore_stack_pointer": True},
     "CallMemoryDecision": {"evidence": ()},
-    "MemoryGraphBindings": {"transfers": (), "transfer_nodes": (), "loop_memory": None},
+    "MemoryGraphBindings": {"transfers": (), "transfer_nodes": (), "loop_memory": None, "image_reads": None,
+                            "local_reads": None},
     "LoopMemoryPlan": {"read_from": ()},
     "LoopMemoryGraph": {"read_from_nodes": (), "read_from_source_nodes": ()},
     "LoopMemoryReadFrom": {"requires_backedge": False},

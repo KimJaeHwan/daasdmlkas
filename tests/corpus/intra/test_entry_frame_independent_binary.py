@@ -110,10 +110,32 @@ def test_original_epilogue_separations_are_valid_with_either_frame_policy(actual
         assert proof.write_fact.claim.items[0][1].lo == -40
         assert proof.write_fact.claim.items[0][1].hi == -28
         assert proof.write_fact.claim.items[0][1].stride == 4
-    assert {row.operation_key for row in normalized.may_alias_reads} == {
-        "1b1:104c44:2:CALL~ld0", "1b1:104c44:2:CALL~ld1"}
-    assert all(row.plain == (ARRAY_STORE,) and not row.uncertain and not row.unknown_address
-               for row in normalized.may_alias_reads)
+    # The global four-byte read still admits the array writer. The separate
+    # eight-byte return-address read is not gone: this CALL's own observed
+    # push completely defines it after the array STORE, killing that older
+    # alias without borrowing an epilogue separation or a scalar-call value.
+    global_read, return_read = ("1b1:104c44:2:CALL~ld0", "1b1:104c44:2:CALL~ld1")
+    remaining, = normalized.may_alias_reads
+    assert remaining.operation_key == global_read
+    assert remaining.plain == (ARRAY_STORE,) and not remaining.uncertain and not remaining.unknown_address
+    global_memory = _memory_read(normalized, global_read)
+    assert global_memory.span.object_id.kind.value == "address_space" and global_memory.span.size == 4
+    assert remaining.spans == (global_memory.span,)
+    return_memory = _memory_read(normalized, return_read)
+    assert (return_memory.span.start - (1 << 64), return_memory.span.size) == (-48, 8)
+    fragment, = return_memory.fragments
+    identifier, = fragment.definition_ids
+    definition = normalized.memory_ssa.definitions[identifier]
+    push = "1b1:104c44:2:CALL~push"
+    assert definition.kind is MemoryDefinitionKind.DATA_WRITE and definition.operation_key == push
+    assert fragment.span == definition.span == return_memory.span
+    graph = normalized.dependencies
+    definition_node = normalized.memory_graph.definition_nodes[identifier]
+    assert any(target == definition_node and edge.kind == "memory_defines"
+               and edge.span == return_memory.span and edge.occurrence == definition.write_ordinal
+               for _, target, edge in graph.out_edges(graph.node_for_key("op:" + push)))
+    assert any(source == definition_node and edge.kind == "memory_read" and edge.span == return_memory.span
+               for source, _, edge in graph.in_edges(graph.node_for_key("op:" + return_read)))
 
     operations = {f"{instruction.address.space_id:x}:{instruction.address.byte_offset:x}:{n}:{op.opcode}": op
                   for instruction in item.unit.observation.instructions
@@ -127,10 +149,14 @@ def test_original_epilogue_separations_are_valid_with_either_frame_policy(actual
         assert load.inputs[0].byte_size == 8 and load.output.byte_size == 8
     (space,) = [space for space in inputs.address_spaces if space.space_id == selector.coordinate.byte_offset]
     assert space.is_memory_space and space.address_size_bits == 64
+    original_push = operations["1b1:104c44:1:STORE"]
+    assert original_push.inputs[1].coordinate.byte_offset == 0x20
+    assert original_push.inputs[1].byte_size == original_push.inputs[2].byte_size == 8
+    assert original_push.inputs[2].coordinate.byte_offset == 0x104c49
 
     # Separate current configuration from inherited model assumptions; never
     # scrub an inherited dependency just to advertise a switch as disabled.
-    assert tuple(results[STRCPY].declared.values()) == ("external-model:crt-sysv64/strcpy@v7",)
+    assert tuple(results[STRCPY].declared.values()) == ("external-model:crt-sysv64/strcpy@v8",)
     assert not results[STRCPY].inherited_assumptions
     inherited = {label for result in results.values() for label in result.inherited_assumptions}
     # Forward replay itself carries its dependencies in inherited_assumptions;
