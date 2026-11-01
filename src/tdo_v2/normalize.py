@@ -327,6 +327,15 @@ class NormalizedFunction:
             raise TypeError("memory graph must be exact MemoryGraphBindings")
         if (self.memory_ssa is None) != (self.memory_graph is None):
             raise ValueError("memory SSA and graph bindings must be present together")
+        if self.memory_graph is not None and self.memory_graph.image_reads is not None \
+                and self.assumes_readonly_image_constant is not True:
+            raise ValueError("guarded image alternatives require the original readonly-image policy")
+        if self.memory_graph is not None and self.memory_graph.image_reads is not None:
+            from ._guarded_image_reads import validate_guarded_image_reads
+            validate_guarded_image_reads(self.memory_graph.image_reads.plan, self.memory_ssa, normalized=self)
+        if self.memory_graph is not None and self.memory_graph.local_reads is not None:
+            from ._memory_read_sources import validate_local_reads
+            validate_local_reads(self.memory_graph.local_reads.plan, self.memory_ssa, normalized=self)
         if type(self.scopes) is ScopeBundleResult and self.terminal_cuts is None:
             raise ValueError("scoped normalization requires exact terminal-cut evidence")
         if self.terminal_cuts is not None and type(self.terminal_cuts) is not FunctionTerminalCuts:
@@ -1159,7 +1168,7 @@ def _push_row(call_key, transition, block_key, register_space, context, return_a
 
 def _proven_call_rows(call_key, proven, block_key, scope, register_space, transitions, temporaries, context,
                       stack_span=None, pointer_rows=None, value_inputs=None, accessor_state=None,
-                      opaque_rows=frozenset()):
+                      opaque_rows=frozenset(), pointer_width=None):
     """Effects of one summarized call (``call_summary_effects``), in order:
     ``~ld<j>`` loads of callee-entry memory, ``~in<i>`` gathering each run's
     inputs into a call-local temporary, ``~sink<k>`` gathering the inputs of
@@ -1373,7 +1382,17 @@ def _proven_call_rows(call_key, proven, block_key, scope, register_space, transi
                 anchor_varnode(read.anchor), displacement(read), load_keys[read], read.size, nonstack,
                 accessor_state, extent, read.space_id), None if written is None else f"{call_key}~{written}")
     # a value that may be a new block is fresh only as the call's sole pointer value
-    unique = sum(getattr(run, "value", None) is not None for _, run, _, _ in staged) == 1
+    pointer_values = 0
+    for kind, run, _, _ in staged:
+        value = getattr(run, "value", None)
+        if value is None:
+            continue
+        width = (run.writes[0].size if kind == "register" and len(run.writes) == 1 else
+                 run.write.size if kind == "memory" else None)
+        scalar = pointer_width is not None and width in (1, 2, 4) and width < pointer_width \
+            and value[0] in ("same_reg", "same_mem") and value[2] is False and value[1].size == width
+        pointer_values += not scalar
+    unique = pointer_values == 1
     for index, (kind, run, stage_key, target) in enumerate(staged):
         key = f"{call_key}~{index}"
         # (a row overlapping another of the call's keeps its value: the bytes
@@ -1873,6 +1892,7 @@ class _ScopedNormalizer:
                         effects.append(push)
                         anchored_call_accesses[push.operation_key] = anchored
                     if block_key is not None and operation_key in proven_call_effects:
+                        from .function_summary import _pointer_size
                         # the callee's proven effects, placed just before the CALL so
                         # their writes survive it (the call preserves them, see
                         # call_clobber); every run reads the values at the call
@@ -1884,6 +1904,7 @@ class _ScopedNormalizer:
                                              call_transitions, observation, context),
                             pointer_rows, value_inputs, accessor_states.get(operation_key, (None,))[0],
                             opaque_rows=_opaque_rows,
+                            pointer_width=_pointer_size(unit),
                         )
                         for row in rows:
                             operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
@@ -2347,6 +2368,19 @@ class _ScopedNormalizer:
         )
         if failed or failed_sites or failed_bounds:
             return _Retry(frozenset(failed), failed_sites, failed_bounds)
+        from ._guarded_image_reads import derive_guarded_image_reads
+        from .memory_graph import _materialize_guarded_image_reads
+        memory_graph = _materialize_guarded_image_reads(dependencies, memory_ssa, memory_graph,
+            derive_guarded_image_reads(memory_unit, memory_ssa, observation, function.entry,
+                context, address_spaces, unit.scopes.program.evidence.translation_namespace,
+                readonly_image, frozenset(wild_objects), call_clobber_reads,
+                excluded=frozenset(_rep_overrides(sites, rep_plan, observation)) | frozenset(intrinsic_refinements)))
+        from ._memory_read_sources import derive_local_read_sources
+        from .memory_graph import _materialize_local_read_sources
+        memory_graph = _materialize_local_read_sources(dependencies, memory_ssa, memory_graph,
+            derive_local_read_sources(memory_unit, memory_ssa, observation, function.entry, context,
+                address_spaces, unit.scopes.program.evidence.translation_namespace, call_clobber_reads,
+                frozenset(_rep_overrides(sites, rep_plan, observation)) | frozenset(intrinsic_refinements)))
         control_dependences = derive_control_dependences(observation, function.entry)
         # a row staged for an operation (a call's ``~push`` / effect rows, a
         # rep store's ``~e`` elements) runs when the operation does: it has

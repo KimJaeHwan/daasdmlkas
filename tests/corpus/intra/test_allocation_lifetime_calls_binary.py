@@ -58,7 +58,7 @@ def binary():
     generation = Path(location)
     assert sha256((REPO / "tests/corpus/fixtures/allocation_lifetime.c").read_bytes()).hexdigest() == SOURCE_SHA
     assert sha256((generation / "original.bin").read_bytes()).hexdigest() == IMAGE_SHA
-    binding = NamingBindingExpectation(sha256((REPO / "ghidra/GhidraV2CallNaming.java").read_bytes()).digest(),
+    binding = NamingBindingExpectation(sha256((REPO / "ghidra/GhidraV2CallNaming.java").read_bytes().replace(b"\r\n", b"\n")).digest(),
                                        CALL_NAMING_GHIDRA_VERSION)
     with open_observed_function_session(admit_frozen_bundle(generation), naming_binding=binding) as session:
         scope = session.program_result

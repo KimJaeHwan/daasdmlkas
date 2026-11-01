@@ -49,7 +49,7 @@ def actual():
         pytest.skip("set TDO_FORWARD_MEMORY_BUNDLE to the original sealed Suite09 subset")
     generation = Path(location)
     binding = NamingBindingExpectation(
-        sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
+        sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes().replace(b"\r\n", b"\n")).digest(),
         CALL_NAMING_GHIDRA_VERSION,
     )
     with open_observed_function_session(admit_frozen_bundle(generation), naming_binding=binding) as session:

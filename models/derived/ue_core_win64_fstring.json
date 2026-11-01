@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 2,
    "template_version": 6,
-   "semantics_version": 36
+   "semantics_version": 40
   },
   "parameters": {
    "private_frame_above": 0
@@ -55,7 +55,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "89162ae4f4de76536494d56312f81da4f5786cb5+dirty",
+   "engine_revision": "ba7053447eca371fe63f36a68ea2fba95fbc4f2f+dirty",
    "bundle": "8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50",
    "index_addresses": true,
    "stack_evidence": [

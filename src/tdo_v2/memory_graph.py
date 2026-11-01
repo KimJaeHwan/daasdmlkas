@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 
 from ._loop_memory import LoopMemoryPlan, validate_loop_memory
+from ._guarded_image_reads import GuardedImagePlan, validate_guarded_image_reads
+from ._memory_read_sources import LocalReadPlan, validate_local_reads
 from .graph import RustworkxDependencyGraph
 from .graph_contracts import EdgeKind, EdgeRecord, NodeId, NodeKind, NodeRecord
 from .memory_contracts import LocalMemorySsaResult, MemoryDefinitionKind
@@ -75,6 +77,36 @@ class LoopMemoryGraph:
 
 
 @dataclass(frozen=True, slots=True)
+class GuardedImageGraph:
+    plan: GuardedImagePlan
+    candidate_nodes: tuple[NodeId, ...]
+    source_nodes: tuple[NodeId, ...]
+    constant_nodes: tuple[NodeId, ...]
+
+    def __post_init__(self):
+        validate_guarded_image_reads(self.plan)
+        count = sum(len(row.candidates) for row in self.plan.reads)
+        for nodes in (self.candidate_nodes, self.source_nodes, self.constant_nodes):
+            if type(nodes) is not tuple or len(nodes) != count \
+                    or any(type(node) is not int or node < 0 for node in nodes):
+                raise ValueError("image graph nodes must align with its complete alternatives")
+
+
+@dataclass(frozen=True, slots=True)
+class LocalReadGraph:
+    plan: LocalReadPlan
+    effect_nodes: tuple[NodeId, ...]
+    source_nodes: tuple[NodeId, ...]
+
+    def __post_init__(self):
+        validate_local_reads(self.plan)
+        count = sum(len(row.parts) for row in self.plan.reads)
+        if any(type(nodes) is not tuple or len(nodes) != count
+               or any(type(n) is not int or n < 0 for n in nodes) for nodes in (self.effect_nodes, self.source_nodes)):
+            raise ValueError("local read sources must align with original byte ports")
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryGraphBindings:
     contract_version: int
     function_scope: StorageScopeId
@@ -87,6 +119,8 @@ class MemoryGraphBindings:
     transfers: tuple[MemoryTransfer, ...] = ()
     transfer_nodes: tuple[NodeId, ...] = ()
     loop_memory: LoopMemoryGraph | None = None
+    image_reads: GuardedImageGraph | None = None
+    local_reads: LocalReadGraph | None = None
 
     def __post_init__(self) -> None:
         if type(self.contract_version) is not int:
@@ -127,6 +161,10 @@ class MemoryGraphBindings:
             raise ValueError("transfer records and nodes must align")
         if self.loop_memory is not None and type(self.loop_memory) is not LoopMemoryGraph:
             raise TypeError("loop memory graph must be an exact binding or None")
+        if self.image_reads is not None and type(self.image_reads) is not GuardedImageGraph:
+            raise TypeError("image graph must be an exact binding or None")
+        if self.local_reads is not None and type(self.local_reads) is not LocalReadGraph:
+            raise TypeError("local read graph must be an exact binding or None")
 
 
 def _materialize_local_memory_ssa(
@@ -333,6 +371,9 @@ def _validate_materialized_local_memory_ssa(
         *(bindings.loop_memory.family_nodes if bindings.loop_memory else ()),
         *(bindings.loop_memory.access_nodes if bindings.loop_memory else ()),
         *(bindings.loop_memory.read_from_nodes if bindings.loop_memory else ()),
+        *(bindings.image_reads.source_nodes if bindings.image_reads else ()),
+        *(bindings.image_reads.candidate_nodes if bindings.image_reads else ()),
+        *(bindings.local_reads.effect_nodes if bindings.local_reads else ()),
     )
     _validate_transfers(result, bindings.transfers)
     if len(bindings.transfer_nodes) != len(bindings.transfers):
@@ -342,6 +383,29 @@ def _validate_materialized_local_memory_ssa(
         f"{result.unit_digest.hex()}"
     )
     loop = bindings.loop_memory
+    local = bindings.local_reads
+    if local is not None:
+        validate_local_reads(local.plan, result)
+        records = _local_read_records(namespace, local.plan)
+        expected_sources = []
+        for row in local.plan.reads:
+            for part in row.parts:
+                expected_sources.append(bindings.definition_nodes[part.source_definition_id]
+                    if part.source_definition_id is not None else graph.node_for_key(_loop_constant_key(part.constant)))
+        if local.source_nodes != tuple(expected_sources):
+            raise ValueError("local read source must be the original STORE value bytes")
+        for node, record in zip(local.effect_nodes, records, strict=True):
+            if not graph.has_node(node) or graph.node(node) != record:
+                raise ValueError("local read node differs from its original proof")
+    image = bindings.image_reads
+    if image is not None:
+        validate_guarded_image_reads(image.plan, result)
+        records = _image_node_records(namespace, image.plan)
+        for nodes, expected_records in zip((image.candidate_nodes, image.source_nodes, image.constant_nodes),
+                                            records, strict=True):
+            for node, expected in zip(nodes, expected_records, strict=True):
+                if not graph.has_node(node) or graph.node(node) != expected:
+                    raise ValueError("image binding must match its original image/selector alternative")
     if loop is not None:
         validate_loop_memory(loop.plan, result)
         records = _loop_node_records(namespace, loop.plan)
@@ -459,6 +523,109 @@ def _expected_memory_edges(
             )
             edges.append((*endpoints, edge))
     edges.extend(_loop_memory_edges(result, bindings))
+    edges.extend(_guarded_image_edges(result, bindings))
+    edges.extend(_local_read_edges(result, bindings))
+    return tuple(edges)
+
+
+def _local_read_records(namespace, plan):
+    return tuple(NodeRecord(f"memory:{namespace}:local-read:{sha256(repr((row, part) if part.writer is None else (row, part, part.writer)).encode()).hexdigest()}",
+                            NodeKind.EFFECT, "local_memory_read_from")
+                 for row in plan.reads for part in row.parts)
+
+
+def _materialize_local_read_sources(graph, result, bindings, plan):
+    if plan is None:
+        return bindings
+    validate_local_reads(plan, result)
+    namespace = f"memory-v{result.contract_version}:{result.function_scope.digest.hex()}:{result.unit_digest.hex()}"
+    records = _local_read_records(namespace, plan)
+    if bindings.local_reads is not None or any(graph.node_for_key(r.key) is not None for r in records):
+        raise ValueError("local read graph namespace is already materialized")
+    sources = tuple(bindings.definition_nodes[part.source_definition_id] if part.source_definition_id is not None
+                    else graph.node_for_key(_loop_constant_key(part.constant)) for row in plan.reads for part in row.parts)
+    if any(node is None for node in sources):
+        raise ValueError("local read requires the original STORE source constant")
+    bindings = replace(bindings, local_reads=LocalReadGraph(plan, tuple(graph.add_node(r) for r in records), sources))
+    for source, target, edge in _local_read_edges(result, bindings):
+        graph.add_edge(source, target, edge)
+    return bindings
+
+
+def _local_read_edges(result, bindings):
+    local = bindings.local_reads
+    if local is None:
+        return ()
+    actions = {r.operation_key: n for r, n in zip(result.actions, bindings.action_nodes, strict=True)}
+    edges, i = [], 0
+    for row in local.plan.reads:
+        for part in row.parts:
+            writer = part.writer or row.writer
+            source, effect = local.source_nodes[i], local.effect_nodes[i]
+            i += 1
+            output = ByteSpan(row.output_span.object_id, row.output_span.start + part.output_offset, part.width)
+            edges.extend(((source, effect, EdgeRecord(EdgeKind.LOCAL_READ_FROM_VALUE, operation=writer,
+                                                     occurrence=part.value_offset, span=part.source_span)),
+                          (effect, actions[row.reader], EdgeRecord(EdgeKind.LOCAL_READ_FROM,
+                             operation=row.reader, occurrence=part.output_offset, span=output)),
+                          (actions[writer], effect, EdgeRecord(EdgeKind.LOCAL_READ_FROM_WITNESS,
+                                                              operation=writer))))
+    return tuple(edges)
+
+
+def _materialize_guarded_image_reads(graph, result, bindings, plan):
+    """Append typed conditional alternatives; existing IDs and edges stay intact."""
+    if plan is None:
+        return bindings
+    validate_guarded_image_reads(plan, result)
+    if bindings.image_reads is not None:
+        raise ValueError("image relations already materialized")
+    namespace = f"memory-v{result.contract_version}:{result.function_scope.digest.hex()}:{result.unit_digest.hex()}"
+    records = _image_node_records(namespace, plan)
+    if any(graph.node_for_key(record.key) is not None for rows in records[:2] for record in rows):
+        raise ValueError("image relation namespace collides")
+    image = GuardedImageGraph(plan, *(tuple(graph.add_node(record) for record in rows) for rows in records))
+    bindings = replace(bindings, image_reads=image)
+    for source, target, edge in _guarded_image_edges(result, bindings):
+        graph.add_edge(source, target, edge)
+    return bindings
+
+
+def _image_node_records(namespace, plan):
+    alternatives, sources, constants = [], [], []
+    for row in plan.reads:
+        for candidate in row.candidates:
+            identity = sha256(repr((row, candidate)).encode("utf-8")).hexdigest()
+            for records, kind, label in ((alternatives, "alternative", "guarded_image_read_alternative"),
+                                         (sources, "source", "readonly_image_bytes")):
+                records.append(NodeRecord(f"memory:{namespace}:image-{kind}:{identity}", NodeKind.EFFECT,
+                                          label, semantic_identity=identity))
+            key = f"constant:{row.constant_space_id:x}:{candidate.value:x}:{row.output_span.size:x}"
+            constants.append(NodeRecord(f"constant:{key}", NodeKind.CONSTANT, key))
+    return tuple(alternatives), tuple(sources), tuple(constants)
+
+
+def _guarded_image_edges(result, bindings):
+    image = bindings.image_reads
+    if image is None:
+        return ()
+    actions = {row.operation_key: node for row, node in zip(result.actions, bindings.action_nodes, strict=True)}
+    edges, index = [], 0
+    for row in image.plan.reads:
+        for ordinal, candidate in enumerate(row.candidates):
+            node, source, constant = image.candidate_nodes[index], image.source_nodes[index], image.constant_nodes[index]
+            index += 1
+            value = EdgeRecord(EdgeKind.GUARDED_IMAGE_VALUE, operation=row.operation_key,
+                               occurrence=ordinal, span=candidate.span)
+            edges.extend(((constant, source, value), (source, node, value),
+                (node, actions[row.operation_key], EdgeRecord(EdgeKind.GUARDED_IMAGE_READ,
+                    operation=row.operation_key, occurrence=ordinal, span=row.output_span)),
+                (bindings.definition_nodes[row.selector_definition_id], node,
+                    EdgeRecord(EdgeKind.GUARDED_IMAGE_SELECTOR, occurrence=ordinal, span=row.selector_span))))
+            witness = EdgeRecord(EdgeKind.GUARDED_IMAGE_WITNESS, operation=row.guard, occurrence=ordinal)
+            edges.extend(((actions[row.guard], node, witness),
+                          (bindings.definition_nodes[row.address_definition_id], node, witness)))
+            edges.extend((actions[key], node, witness) for key in row.reloads)
     return tuple(edges)
 
 

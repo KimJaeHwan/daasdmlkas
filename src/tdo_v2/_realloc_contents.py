@@ -36,6 +36,178 @@ class ResizeCopy:
     requires: tuple
 
 
+@dataclass(frozen=True, slots=True)
+class OldAllocationSnapshotDemand:
+    """One original STORE's bytes requested BEFORE a particular resize CALL."""
+    call: str
+    source: tuple
+    span: ByteSpan
+
+
+_SNAPSHOT_DEMANDS = 64
+_SNAPSHOT_PROOFS = 128
+_SNAPSHOT_EFFECTS = 4096
+
+
+def prepare_old_allocation_snapshot(item, demands, *, results=None):
+    """Disjoint active-stack writes, using ONLY the old live owned allocation.
+
+    This is a pre-CALL query certificate, not a resize-copy certificate. It
+    does not inspect a result, outcome, post-CALL LOAD, or copy proof. The
+    original probe must still independently find the unique requested STORE;
+    unknown writers and CALL clobbers receive no exception here.
+    """
+    from ._call_activation import _policy
+    from .normalize import NormalizedFunction
+    demands = tuple(demands)
+    if not demands or len(demands) > _SNAPSHOT_DEMANDS \
+            or any(type(row) is not OldAllocationSnapshotDemand for row in demands) \
+            or len(set(demands)) != len(demands) or not item.allocation_contracts \
+            or type(item.normalized) is not NormalizedFunction or item.normalized.forward_inputs is None \
+            or item.normalized.load_value_proofs or len(item.normalized.effects) > _SNAPSHOT_EFFECTS:
+        return None
+    with _policy(item):
+        return _old_allocation_snapshot(item, demands, results)
+
+
+def _old_allocation_snapshot(item, demands, results):
+    from ._allocation_memory import stack_range
+    from ._call_activation import _source_signature
+    from .observed_call_state import observed_call_state_projections
+    options = dict(item.normalization_options)
+    prior = item.normalized.forward_inputs.read_separations
+    if prior is not None:
+        # An in-construction/final copy result must not establish its own
+        # earlier snapshot. Earlier independent allocation/address batches
+        # remain pinned and recursively verified as usual.
+        if prior.evidence_kind in ("allocation-snapshot", "realloc-copy"):
+            return None
+        prior.verify()
+    # Reject feedback before AllocationAnalysis/numeric can consume a prior
+    # plan, not merely before emitting the new certificate.
+    analysis = AllocationAnalysis(item, readonly_image=options.get("readonly_image"), results=results)
+    if len(analysis.ops) > _SNAPSHOT_EFFECTS:
+        return None
+    excluded = set(dict(item.normalized.operation_overrides)) | set(dict(item.normalized.intrinsic_refinements))
+    effects = {row.operation_key: row for row in item.normalized.effects}
+    identifiers = {definition_identity(row): index for index, row in enumerate(analysis.ssa.definitions)}
+    projections = {row.call_operation_key: row for row in observed_call_state_projections(item.unit.observation)}
+    proofs = list(item.normalized.forward_memory_proofs)
+    requires = set(analysis.requires) | set(item.normalized.forward_memory_requires)
+    added = False
+    for demand in demands:
+        step()
+        call, span = demand.call, demand.span
+        contract = analysis.contracts.get(call)
+        raw_call = analysis.ops.get(call)
+        identifier = identifiers.get(demand.source)
+        if contract is None or contract.kind != "resize" or not contract.owned_footprint \
+                or call not in analysis.once or call in excluded or raw_call is None \
+                or raw_call.opcode not in ("CALL", "CALLIND") or identifier is None \
+                or type(span) is not ByteSpan or not 0 < span.size <= 16:
+            return None
+        source = analysis.ssa.definitions[identifier]
+        writer = analysis.ops.get(source.operation_key)
+        if source.kind is not MemoryDefinitionKind.DATA_WRITE or writer is None or writer.opcode != "STORE" \
+                or source.operation_key not in analysis.once or source.operation_key in excluded \
+                or span.object_id != source.span.object_id \
+                or not source.span.start <= span.start < span.end <= source.span.end \
+                or _raw_access(analysis, source.operation_key, writer,
+                               effects.get(source.operation_key), "write") != source.span:
+            return None
+        pointer = analysis.argument(call, contract.pointer)
+        life = analysis.lifetime(pointer, call)
+        if not life.live or pointer.unknown or len(pointer.targets) != 1:
+            return None
+        (target,) = pointer.targets
+        old = target.allocation
+        birth = analysis.contracts.get(old.event)
+        if target.offset != 0 or old.function != item.key or old.context != analysis.context \
+                or old.occurrence != "single" or birth is None or not birth.owned_footprint \
+                or old.event in excluded or any(identity[1] in excluded for identity in pointer.definitions):
+            return None
+        extent, used = analysis.extent(old)
+        access = analysis.access(source.operation_key)
+        if extent is None or access is None or len(access.pointer.targets) != 1:
+            return None
+        (stored,) = access.pointer.targets
+        offset = stored.offset + span.start - source.span.start
+        if stored.allocation != old or offset < 0 or offset + span.size > extent \
+                or any(identity[1] in excluded for identity in access.pointer.definitions):
+            return None
+        # Original operation-order reachability: a future writer cannot be
+        # used as an old snapshot demand. The probe still proves must-source.
+        edges = analysis.operation_edges()
+        pending, seen = list(edges[source.operation_key]), set()
+        while pending:
+            step()
+            key = pending.pop()
+            if key == call or key in seen:
+                continue
+            seen.add(key)
+            pending.extend(edges[key])
+        if call not in edges[source.operation_key] and not any(call in edges[key] for key in seen):
+            return None
+        local = set(life.requires) | set(access.requires) | set(used) | {contract.label, birth.label}
+        # Enumerate ORIGINAL writers, not post-LOAD alias rows or the result
+        # of the snapshot query being justified. Non-stack writers are left
+        # to the original probe, including genuine heap overwrites.
+        for key, effect in effects.items():
+            step()
+            store = analysis.ops.get(key)
+            if key.endswith("~push"):
+                original_call = key[:-5]
+                projection = projections.get(original_call)
+                if projection is None or original_call in excluded \
+                        or effect.memory_write is not None or effect.unresolved_writes:
+                    continue
+                spans = [row.span for row in effect.writes if type(row) is ResolvedStorage
+                         and row.span.object_id.kind in (StorageObjectKind.FUNCTION_RELATIVE,
+                                                        StorageObjectKind.ADDRESS_SPACE)]
+                transition = projection.memory_transition
+                if len(spans) != 1 or spans[0].size != -transition.displacement_delta:
+                    continue
+                stack_span = spans[0]
+                address_span = analysis.port((transition.caller_base.byte_offset,
+                                              transition.caller_base.byte_size))
+            else:
+                if key in excluded or store is None or store.opcode != "STORE":
+                    continue
+                stack_span = _raw_access(analysis, key, store, effect, "write")
+                if stack_span is None or store.inputs[0].coordinate.byte_offset \
+                        != writer.inputs[0].coordinate.byte_offset:
+                    continue
+                address_span = analysis.span(store.inputs[1])
+            # Projected geometry is not an address proof. In particular a
+            # CALL-clobbered old stack address can retain that geometry after
+            # COPYs. Check the original operand USE and its transitive graph
+            # debts, independently of the stored value's debts. The existing
+            # guard is cached and bounded (64 queries, 4096 graph steps each).
+            if address_span is None or ResolvedStorage(address_span) not in effect.reads:
+                continue
+            address = analysis.read_definition(key, address_span)
+            if address is None or not analysis._clean_call_address(address):
+                continue
+            witness = stack_range(analysis, old, stack_span)
+            if witness is None:
+                continue
+            local.update(witness.requires)
+            proof = ReadSeparation(analysis.first(call), key, span, (life, access), witness)
+            if proof not in proofs:
+                proofs.append(proof)
+                added = True
+            if len(proofs) > _SNAPSHOT_PROOFS:
+                return None
+        requires.update(local)
+    if not added:
+        return None
+    peers = tuple(sorted((results or {}).items()))
+    return MemoryRefinement(item.unit, item.normalized, _signature(options), tuple(proofs),
+        tuple(sorted(requires)), tuple(options.items()), item, (), "allocation-snapshot", peers,
+        item.allocation_contracts, tuple((key, _source_signature(peer)) for key, peer in peers),
+        snapshot_demands=demands)
+
+
 def _address(analysis, key, value, active=frozenset()):
     """Original full-width resize result + exact constant byte displacement."""
     witnesses = []
@@ -247,6 +419,14 @@ def prepare_realloc_contents(item, *, results=None):
                     if stored.allocation != old or stored.offset + fragment.span.start - source.span.start != start:
                         continue
                     snapshot, labels = probe(item.normalized, analysis.first(call), (fragment.span,))
+                    if snapshot[fragment.span] != identifier:
+                        demand = OldAllocationSnapshotDemand(call, definition_identity(source), fragment.span)
+                        before = prepare_old_allocation_snapshot(item, (demand,), results=results)
+                        if before is not None:
+                            temporary = replace(item.normalized, forward_inputs=replace(
+                                item.normalized.forward_inputs, read_separations=before))
+                            snapshot, used = probe(temporary, analysis.first(call), (fragment.span,))
+                            labels = tuple(sorted(set(used) | set(before.requires)))
                     if snapshot[fragment.span] != identifier:
                         continue
                     claims = tuple(sorted(local_requires | set(access.requires) | set(labels)))

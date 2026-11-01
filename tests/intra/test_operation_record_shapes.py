@@ -62,13 +62,25 @@ def test_load_and_store_keep_address_and_value_roles():
     builder = (FunctionBuilder().sub_rsp(0x20)
                .ins(add(t, reg(RSP), const(8)), store(t, reg(RDI)))
                .ins(add(t, reg(RSP), const(8)), load(reg(RAX), t)).add_rsp(0x20).ret())
-    record = _record(_analyzed(builder), RAX)
+    analyzed = _analyzed(builder)
+    record = _record(analyzed, RAX)
     (loaded,) = _nodes(record, "op", "LOAD")
-    (stored,) = _nodes(record, "op", "STORE")
     assert [operand["role"] for operand in loaded["operands"]] == ["space", "address"]
-    assert [operand["role"] for operand in stored["operands"]] == ["space", "address", "value"]
-    assert record["nodes"][loaded["memory"][0]["parts"][0]["node"]] is stored
+    assert "local_read" in loaded
+    source = record["nodes"][loaded["memory"][0]["parts"][0]["node"]]
+    assert source["kind"] == "entry" and source["register"]["offset"] == RDI
     assert eligibility(record) is None
+
+    # The read port uses the STORE's original value bytes. The STORE itself
+    # remains independently addressable, with its address/value roles intact.
+    normalized = analyzed.normalized
+    key = next(action.operation_key for action in normalized.memory_ssa.actions
+               if action.operation_key.endswith(":STORE"))
+    stored_record = root_record(normalized, analyzed.unit,
+                                [(normalized.dependencies.node_for_key("op:" + key), None)])
+    (stored,) = _nodes(stored_record, "op", "STORE")
+    assert [operand["role"] for operand in stored["operands"]] == ["space", "address", "value"]
+    assert eligibility(stored_record) == "whole-node root"
 
 
 def test_a_join_is_a_phi_of_alternatives():

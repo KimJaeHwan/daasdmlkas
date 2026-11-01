@@ -1,9 +1,8 @@
-"""Forward value facts, increment F0 (docs 25.33): an abstract interpreter over
-a normalized function's own memory SSA (registers, temporaries and memory in
-one SSA), producing facts about the values that operations read. F0 has no
-consumer: nothing in the engine reads these facts, so analysis results are
-the same with or without them; ``semantic_snapshot`` records them only when
-``TDO_V2_FORWARD=1``.
+"""Forward values over a normalized function's existing unified memory SSA.
+
+Facts feed the existing address and indirect-call consumers when forward
+analysis is enabled. No calling convention is inferred: scalar call values
+reuse proven physical-byte contracts and their original pre-output staging.
 
 Domain (per value of a fixed bit width): TOP, or up to ``MAX_BASES`` items
 (base, offsets). A base is ``("abs",)`` (a plain number) or ``("entry", offset,
@@ -23,9 +22,12 @@ definition covers it (low bytes of a number keep their interval only when it
 fits; any constant is sliced exactly); a read of several fragments whose
 values are all exact numbers is their concatenation in byte order (little-
 endian languages only, as every byte slice here); a read with several
-definitions or other fragments, an unresolved read, a call effect's definition, a KILL, or an
+definitions or other fragments, an unresolved read, an unsupported call effect's definition, a KILL, or an
 entry value of memory (other than a read-only image byte under
-readonly-image-data-is-constant) is TOP. JOIN definitions join their sources;
+readonly-image-data-is-constant) is TOP.
+Unconditional validated const/reg/off/mem call ports retain their source
+debts and taint; dependency-gathering staging tokens have no numeric meaning.
+JOIN definitions join their sources;
 after ``WIDEN_AFTER`` changes a join widens to the full range. The iteration
 is ascending: a definition not evaluated yet contributes nothing (bottom), so
 every value only grows until the fixpoint; facts are published only there.
@@ -220,7 +222,14 @@ def _numeric(opcode: str, inputs: list[Interval], constant: list, bits: int) -> 
     if opcode == "COPY" or opcode == "INT_ZEXT":
         return _make(a.lo, a.hi, a.stride, bits)
     if opcode == "INT_SEXT":
-        return _make(a.lo, a.hi, a.stride, bits) if a.hi < 1 << (a.bits - 1) else None
+        if bits < a.bits:
+            return None
+        if a.hi < 1 << (a.bits - 1):
+            return _make(a.lo, a.hi, a.stride, bits)
+        if a.lo >= 1 << (a.bits - 1):
+            delta = (1 << bits) - (1 << a.bits)
+            return _make(a.lo + delta, a.hi + delta, a.stride, bits)
+        return None  # A range crossing the sign boundary is not one output interval.
     if opcode == "SUBPIECE" and c == 0:
         return _make(a.lo, a.hi, a.stride, bits)   # (None when it does not fit: truncation)
     if opcode == "INT_AND" and c is not None:
@@ -246,6 +255,8 @@ def _transfer(opcode: str, values: list[Value], widths: list[int], out_size: int
     from .operation_records import _compute
 
     bits = 8 * out_size
+    if opcode == "INT_SEXT" and widths and out_size < widths[0]:
+        return Value.top(bits)
     singles = [value.single_number() for value in values]
     if values and all(single is not None for single in singles):
         try:
@@ -571,6 +582,8 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
     ssa = normalized.memory_ssa
     if ssa is None or unit.observation is None or _projection_sensitive(unit.observation):
         return _Analysis((), (), None)
+    from ._memory_read_sources import read_sources
+    read_ports = read_sources(normalized)
     activation = entry_for(ssa.function_scope)
     context = normalized.scopes.resolution_context
     operations = {
@@ -607,6 +620,8 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
 
     values: dict = {}
     literal_rows = {key: row for key, row in normalized.pointer_rows if row[0] == "const"}
+    from ._call_value_ports import scalar_call_rows
+    call_value_ports = scalar_call_rows(normalized)
     used_readonly: set = set()
     changes: dict = {}
     # definitions resting on a read with a debt (transitively): their value
@@ -673,7 +688,7 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
         rows = [read for read in reads_of.get(action_id, ()) if read.span == span]
         if any(index in tainted for row in rows for fragment in row.fragments for index in fragment.definition_ids):
             taint[0] = True   # (before any TOP below: a TOP read of a tainted place is tainted too)
-        if len(rows) != 1:
+        if not rows or any(row.fragments != rows[0].fragments for row in rows[1:]):
             return Value.top(8 * span.size)
         if len(rows[0].fragments) > 1:
             return pieces(rows[0].fragments, span)
@@ -769,6 +784,39 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
         a ranged read (``ranged_value``)."""
         action_id = action_ids.get(operation_key)
         size = operation.output.byte_size
+        port = read_ports.get(operation_key)
+        if port is not None:
+            if port.image is not None:
+                result = None
+                for candidate in port.image.candidates:
+                    part = Value.number(candidate.value, size * 8)
+                    result = part if result is None else join(result, part)
+                used_readonly.add(operation_key)
+                return result
+            parts = port.local.parts
+            if any(part.source_definition_id in tainted for part in parts):
+                taint[0] = True  # Include later fragments even if an earlier value is TOP/bottom.
+            if len(parts) == 1 and parts[0].width == size and parts[0].value_offset == 0:
+                writer_key = parts[0].writer or port.local.writer
+                writer = operations.get(writer_key)
+                if writer is not None and writer.inputs[2].byte_size == size:
+                    return input_value(writer_key, writer.inputs[2])
+            number, cursor = 0, 0
+            for part in parts:
+                if part.output_offset != cursor:
+                    return Value.top(8 * size)
+                if part.constant is not None:
+                    value = Value.number(part.constant[1] >> (8 * part.value_offset), 8 * part.width)
+                else:
+                    value = definition_value(part.source_definition_id, part.source_span)
+                if value is None:
+                    return None
+                single = value.single_number()
+                if single is None:
+                    return Value.top(8 * size)
+                number |= single << (8 * cursor)
+                cursor += part.width
+            return Value.number(number, 8 * size) if cursor == size else Value.top(8 * size)
         if action_id is None:
             return Value.top(8 * size)
         if action_id in unresolved or operation_key in unknown_address_reads:
@@ -793,6 +841,38 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
         input_value(key, varnode)
         found, taint[0] = taint[0], saved or taint[0]
         return found
+
+    def call_value(port):
+        row, size = port.row, port.width
+        if row[0] in ("reg", "off"):
+            value = input_value(row[1], row[2])
+            if value is None or value.bits != 8 * size:
+                return value if value is None else Value.top(8 * size)
+            return value if row[0] == "reg" else _transfer(
+                "INT_ADD", [value, Value.number(row[3], 8 * size)], [size, size], size)
+        if row[0] == "mem":
+            action = action_ids.get(row[1])
+            reads = reads_of.get(action, ())
+            memory = [read for read in reads if read.span.object_id.kind in (
+                StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)]
+            if len(memory) != 1 or memory[0].span.size != size:
+                return Value.top(8 * size)
+            if action in unresolved or row[1] in unknown_address_reads \
+                    or memory[0].span.object_id in normalized.wild_objects:
+                taint[0] = True
+                return Value.top(8 * size)
+            # A staged ~ld's other reads locate its memory, not its value.
+            # A clean unknown entry pointer may locate a relative object;
+            # a clobbered/tainted address may not recover its old contents.
+            saved, taint[0] = taint[0], False
+            for read in reads:
+                if read is not memory[0]:
+                    read_value(action, read.span)
+            indebted, taint[0] = taint[0], saved or taint[0]
+            if indebted:
+                return Value.top(8 * size)
+            return read_value(action, memory[0].span)
+        return Value.top(8 * size)
 
     def evaluate(index):
         taint[0] = False
@@ -844,6 +924,9 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
                     and row[1] == definition.span.size and 0 < row[1] <= 16 \
                     and 0 <= row[2] < 1 << bits:
                 return Value.number(row[2], bits)
+            port = call_value_ports.get(definition.operation_key)
+            if port is not None and port.width == definition.span.size:
+                return call_value(port)
             return Value.top(bits)
         key = definition.operation_key
         if operation.opcode == "STORE" and len(operation.inputs) == 3:
@@ -855,7 +938,9 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
             return Value.top(bits)
         output_span = span_of(operation.output)
         if operation.opcode == "LOAD":
-            if len(operation.inputs) > 1 and address_tainted(key, operation.inputs[1]):
+            if key in read_ports:
+                whole = memory_value(key, operation)
+            elif len(operation.inputs) > 1 and address_tainted(key, operation.inputs[1]):
                 whole = Value.top(8 * operation.output.byte_size)
             else:
                 whole = memory_value(key, operation)
@@ -892,7 +977,7 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
         return _Analysis((), (), None)   # (no fixpoint within the bound: no facts)
 
     def local_value(instruction, ordinal, varnode):
-        """A CALLIND / BRANCHIND target: the call's own action reads nothing,
+        """A CALLIND target: the call's own action reads nothing,
         so the value is the definition an earlier operation of the same
         instruction made of that varnode (``COPY t <- r``, ``LOAD t <- [..]``)."""
         from .pcode_blocks import has_internal_flow
@@ -932,7 +1017,12 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
             if key in dict(normalized.operation_overrides):
                 continue   # (an override's operands are its own: F0 leaves rep sites out)
             varnode = operation.inputs[position]
-            if operation.opcode in ("CALLIND", "BRANCHIND") and varnode.kind is not VarnodeKindCode.CONSTANT:
+            if key in read_ports and read_ports[key].image is not None:
+                claim = None
+                for candidate in read_ports[key].image.candidates:
+                    part = Value.number(candidate.span.start, varnode.byte_size * 8)
+                    claim = part if claim is None else join(claim, part)
+            elif operation.opcode == "CALLIND" and varnode.kind is not VarnodeKindCode.CONSTANT:
                 claim = local_value(instruction, ordinal, varnode)
             else:
                 claim = input_value(key, varnode)

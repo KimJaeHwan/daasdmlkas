@@ -14,6 +14,7 @@ from test_realloc_contents_binary import (
 )
 from tdo_v2._allocation_lifetime import AllocationAnalysis
 from tdo_v2._load_identity import definition_identity
+from tdo_v2._realloc_contents import OldAllocationSnapshotDemand, prepare_old_allocation_snapshot
 from tdo_v2.forward import probe
 from tdo_v2.lifecycle_contracts import load_lifecycle_contracts
 from tdo_v2.query import BackwardSliceQuery
@@ -55,8 +56,22 @@ def test_original_dfb031_prefix_snapshot_and_transfer_leave_source_a_debt(actual
     assert not pointer.unknown and {target.allocation.event for target in pointer.targets} == {MALLOC}
     # Independently re-read the pre-CALL snapshot: no retrospective target
     # LOAD/transfer may provide the old source's own definition.
-    snapshot, snapshot_labels = probe(normalized, analysis.first(REALLOC), (proof.span,))
-    assert snapshot[proof.span] == identifier and set(snapshot_labels) <= set(proof.requires)
+    copy_plan = normalized.forward_inputs.read_separations
+    original = copy_plan.source
+    original_analysis = AllocationAnalysis(original, readonly_image=actual["readonly"], results=dict(copy_plan.peers))
+    timestamp = original_analysis.first(REALLOC)
+    unproved, _ = probe(original.normalized, timestamp, (proof.span,))
+    assert unproved[proof.span] is None
+    snapshot_plan = prepare_old_allocation_snapshot(original,
+        (OldAllocationSnapshotDemand(REALLOC, proof.source, proof.span),), results=dict(copy_plan.peers))
+    assert snapshot_plan is not None and snapshot_plan.source is original
+    assert not snapshot_plan.copy_proofs and not snapshot_plan.call_effects and not snapshot_plan.call_decisions
+    temporary = replace(original.normalized, forward_inputs=replace(
+        original.normalized.forward_inputs, read_separations=snapshot_plan))
+    snapshot, snapshot_labels = probe(temporary, timestamp, (proof.span,))
+    assert snapshot[proof.span] is not None
+    assert definition_identity(original.normalized.memory_ssa.definitions[snapshot[proof.span]]) == proof.source
+    assert set(snapshot_labels) | set(snapshot_plan.requires) <= set(proof.requires)
     found, labels = probe(normalized, READER, (read.span,))
     assert found[read.span] == identifier and proof.contract in labels
     _assert_transfer_graph(item, (proof,))

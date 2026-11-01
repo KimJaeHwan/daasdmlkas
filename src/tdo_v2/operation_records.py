@@ -11,7 +11,9 @@ normalized dependency graph:
   placed at bytes c..d of the operand; several parts concatenate fragments of
   different definitions; ``{pruned: true, at}``: bytes no demanded result
   byte depends on). LOAD: operand 1 is the address, ``memory`` the loaded
-  bytes per candidate place. A producer's value is its output (STORE: the
+  bytes per candidate place. A graph-owned ``image_read`` additionally keeps
+  the original selector, successful guard and correlated image alternatives;
+  ``local_read`` uses the original STORE value byte ports. A producer's value is its output (STORE: the
   stored value). ``debts``: debt nodes on the operation. ``override``: the
   operation the address evaluator sees instead after a proven rep string
   (``override`` node, the observed op kept as ``replaced``), or "unproven".
@@ -77,6 +79,7 @@ from ._scope_contracts import VarnodeKindCode
 from .graph_contracts import EdgeKind, NodeKind
 from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
+from . import _record_read_sources as _read_source_records
 
 RECORD_VERSION = 17  # 16: ISA intrinsic values; 17: independent register-delta proofs
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
@@ -586,6 +589,7 @@ def _node_parts(node, *, include_condition=True):
             yield from item.get("parts", ())
     if include_condition:
         yield from node.get("condition", {}).get("operand", {}).get("parts", ())
+    yield from _read_source_records.parts(node)
 
 
 def _gap_used(records, start, outputs):
@@ -717,6 +721,7 @@ class _Builder:
         self.control_reach = {}
         self.control_decisions = {}
         self.memory_index = None
+        self.read_sources = None
         self.controls = parent.controls if parent is not None else _ControlPool()
         self.physical_context = None
         self.physical_calls = parent.physical_calls if parent is not None else {}
@@ -1088,7 +1093,9 @@ class _Builder:
                                                 "width": operation.output.byte_size}
                 record["operands"] = self._operands(node, action_id, operation, spans, depth)
                 if operation.opcode == "LOAD":
-                    record["memory"] = self._loaded(node, action_id, spans, depth)
+                    source = self._read_source(key)
+                    image = source is not None and _read_source_records.annotate(self, record, source, depth)
+                    record["memory"] = [] if image else self._loaded(node, action_id, spans, depth)
                     record["space"] = operation.inputs[0].coordinate.byte_offset
                     if self.physical_memory:
                         self._physical_load(record, key, depth)
@@ -1109,6 +1116,11 @@ class _Builder:
                 else:
                     record["override"] = self._override(node, action_id, override, found, depth)
             debts = self._debts(node, depth)
+            if "local_read" in record:
+                # A STORE value-use can have its own call-clobber debt even
+                # when the unchanged register-only SSA still names ENTRY.
+                writer = self.graph.node_for_key("op:" + record["local_read"]["writer"])
+                debts = sorted(set(debts) | set(self._debts(writer, depth + 1)))
             if debts:
                 record["debts"] = debts
             if "physical_memory" in record:
@@ -1494,6 +1506,9 @@ class _Builder:
 
     def _loaded(self, node, action_id, spans, depth):
         """A LOAD's dereferenced bytes, one entry per candidate place."""
+        source = self._read_source(self.graph.node(node).key.removeprefix("op:"))
+        if source is not None and source.local is not None:
+            return [{"span": _span_text(source.output_span), "parts": _read_source_records.local_parts(self, source, depth)}]
         explicit = {span for span in spans if span is not None}
         candidates = []
         for read in self.index.reads.get(action_id, ()):
@@ -1511,12 +1526,25 @@ class _Builder:
                 for read in self.index.reads.get(action_id, ())]
 
     def _debts(self, node, depth):
+        source = self._read_source(self.graph.node(node).key.removeprefix("op:"))
+        inactive = () if source is None else source.inactive_debts
         found = []
         for source, _, record in self.graph.in_edges(node):
-            if record.kind in _DEBT_EDGES:
+            if record.kind in _DEBT_EDGES and source not in inactive:
                 found.append(self._debt(source, depth + 1))
                 self._edge()
         return sorted(set(found))
+
+    def _read_source(self, key):
+        from ._memory_read_sources import read_sources
+
+        # Whole-function source IDs are not one-visit state-input ports.
+        # Preserve the transition builder's existing occurrence proof.
+        if getattr(self, "cycle_projection", False):
+            return None
+        if self.read_sources is None:
+            self.read_sources = read_sources(self.normalized)
+        return self.read_sources.get(key)
 
     def _rep_element(self, node, key, base, iteration, depth):
         found = self.index.operations.get(base)
@@ -2749,6 +2777,15 @@ def _render_node(node, nodes=None):
             text += f" => RAM[{write['space']:x}:{write['address']:x}+{write['width']}]"
         if node.get("memory"):
             text += " mem{" + " | ".join("+".join(_render_parts(item["parts"], nodes)) for item in node["memory"]) + "}"
+        if "local_read" in node:
+            text += " [read from " + node["local_read"]["writer"] + "]"
+        if "image_read" in node:
+            image = node["image_read"]
+            selector = "+".join(_render_parts(image["selector"]["parts"], nodes))
+            choices = " | ".join(f"{candidate['selector']} => RAM[{candidate['address']['space']:x}:"
+                                  f"{candidate['address']['start']:x}] = {candidate['value']:#x}"
+                                  for candidate in image["candidates"])
+            text += f" image_read({selector}) {{{choices}}} if {image['guard']} -> {image['success_edge'][1]}"
         if node.get("physical_memory"):
             memory = node["physical_memory"]
             text += " physical{" + ", ".join(f"{event['kind']}@{event['key']} if g{event['guard']}"
@@ -2853,8 +2890,12 @@ def _guard_reason(condition, nodes):
                 # (xor/sub of the same storage) reads no inputs. Its folded
                 # value must not require the intentionally absent operands.
                 continue
-            if node.get("opcode") == "LOAD" and len(node.get("memory", ())) != 1:
+            if node.get("opcode") == "LOAD" and "image_read" not in node and len(node.get("memory", ())) != 1:
                 return "ambiguous memory"
+            if "image_read" in node:
+                reason = _read_source_records.validate(node, nodes)
+                if reason is not None:
+                    return reason
             if any(item.get("unresolved") for item in node.get("operands", ())):
                 return "unresolved operand"
         elif node["kind"] == "phi":
@@ -3031,11 +3072,19 @@ def eligibility(record, route: str = "injected") -> str | None:
         parts = [*node.get("alternatives", ()),
                  *(part for operand in node.get("operands", ()) for part in operand.get("parts", ())),
                  *(part for item in node.get("memory", ()) for part in item["parts"])]
+        parts.extend(_read_source_records.parts(node))
         if any(part.get("loop") for part in parts):
             return "loop"
     if any(part.get("loop") for part in record.get("root", ())):
         return "loop"
+    image_nodes = None
     for node in nodes:
+        if "image_read" in node:
+            if image_nodes is None:
+                image_nodes = {item["id"]: item for item in record["nodes"]}
+            reason = _read_source_records.validate(node, image_nodes)
+            if reason is not None:
+                return reason
         if node["kind"] == "debt" or node.get("debts"):
             return "debt"
         if node.get("override") == "unproven":
@@ -3170,6 +3219,7 @@ def _choice_contract(record, nodes, own, route="injected"):
             raise Ineligible("control reference")
     elif any("guarded_sources" in node for node in own) or "execution_guard" in record:
         raise Ineligible("missing control DAG")
+    _read_source_records.bind_choices(checked.values(), nodes, choice_keys)
     return choice_keys, control
 
 
@@ -3525,6 +3575,10 @@ class _Evaluator:
             value_operand = next(operand for operand in operands if operand["index"] == 2)
             return self.operand(value_operand)
         if opcode == "LOAD":
+            if "image_read" in node:
+                return _read_source_records.evaluate(self, identifier, node)
+            if "local_read" in node:
+                return self.operand(dict(width=node["output"]["size"], parts=node["memory"][0]["parts"]))
             address = self.operand(next(operand for operand in operands if operand["index"] == 1))
             places = node["memory"]
             if not places:
@@ -3635,6 +3689,8 @@ def _reached(record) -> set:
             for item in node.get(name, ()):
                 for inner in item.get("parts", ()):
                     push(inner)
+        for inner in _read_source_records.parts(node):
+            push(inner)
         if kind == "op" and node.get("override") is not None and node["override"] != "unproven":
             pending.append(({"node": node["override"], "bytes": [0, 0]}, 0, 0))
         for debt in node.get("debts", ()):

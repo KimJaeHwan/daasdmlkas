@@ -57,6 +57,13 @@ class EdgeKind(StrEnum):
     LOOP_READ_FROM_WITNESS = "loop_read_from_witness"  # address/order evidence, not stored value
     LOOP_PREVIOUS_READ_FROM_VALUE = "loop_previous_read_from_value"  # STORE operand bytes at writer(k-1)
     LOOP_PREVIOUS_READ_FROM = "loop_previous_read_from"  # LOAD(k) bytes ONLY on same-activation backedge entry
+    GUARDED_IMAGE_VALUE = "guarded_image_value"  # image bits -> candidate, not an unconditional operand
+    GUARDED_IMAGE_READ = "guarded_image_read"  # selected candidate -> original LOAD output
+    GUARDED_IMAGE_SELECTOR = "guarded_image_selector"  # original selector -> conditional alternative
+    GUARDED_IMAGE_WITNESS = "guarded_image_witness"  # original guard/address/reload evidence
+    LOCAL_READ_FROM_VALUE = "local_read_from_value"  # original STORE operand bytes -> read port
+    LOCAL_READ_FROM = "local_read_from"  # no-intervening-write source -> LOAD output bytes
+    LOCAL_READ_FROM_WITNESS = "local_read_from_witness"  # original address/order prerequisites
     MEMORY_JOIN_INPUT = "memory_join_input"      # definition -> JOIN
     UNRESOLVED_READ = "unresolved_read"          # debt -> reading operation
     UNRESOLVED_WRITE = "unresolved_write"        # writing operation -> debt

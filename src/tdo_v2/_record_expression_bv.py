@@ -168,6 +168,8 @@ class Adapter:
         if kind != 'op':
             raise Ineligible('expression view: unsupported ' + kind)
         opcode = node['opcode']
+        if node.get('image_read') is not None:
+            raise Ineligible('expression view: guarded image read')
         if opcode in ('LOAD', 'STORE'):
             if not self.memory:
                 raise Ineligible('expression view: memory requires validated one-visit correspondence')

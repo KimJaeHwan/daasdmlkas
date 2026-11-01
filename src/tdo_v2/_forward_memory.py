@@ -110,6 +110,7 @@ class MemoryRefinement:
     call_effects: tuple = ()
     call_decisions: tuple = ()
     copy_proofs: tuple = ()
+    snapshot_demands: tuple = ()
 
     def bind(self, unit, options):
         if unit is not self.unit or unit.observation is not self.baseline.forward_inputs.observation \
@@ -123,13 +124,15 @@ class MemoryRefinement:
             self._verify()
 
     def _verify(self):
+        if self.snapshot_demands and self.evidence_kind != "allocation-snapshot":
+            raise RefinementRefused("snapshot demands require their independent proof kind")
         if self.source.unit is not self.unit or self.source.normalized is not self.baseline:
             raise RefinementRefused("original analysis changed")
         from ._call_activation import _source_signature, _policy
         import os
         from .relative_memory import index_addresses, DEFINITION_ATOMS
         cache, pin = None, None
-        if self.evidence_kind in ("allocation", "allocation-call", "realloc-copy"):
+        if self.evidence_kind in ("allocation", "allocation-call", "realloc-copy", "allocation-snapshot"):
             with _policy(self.source):
                 pass
             for _, peer in self.peers:
@@ -138,7 +141,8 @@ class MemoryRefinement:
                         pass
             pin = (_verification_source_pin(self.source),
                    tuple((key, _verification_source_pin(item)) for key, item in self.peers),
-                   _signature(dict(self.options)), os.environ.get("TDO_V2_FORWARD"), index_addresses(), DEFINITION_ATOMS)
+                   _signature(dict(self.options)), os.environ.get("TDO_V2_FORWARD"), index_addresses(), DEFINITION_ATOMS,
+                   self.snapshot_demands)
             prior = self.baseline.forward_inputs.read_separations
             if prior is not None:
                 prior.verify()  # A parent hit cannot hide a changed earlier batch.
@@ -146,14 +150,17 @@ class MemoryRefinement:
             cached = cache.get(id(self))
             if cached is not None and cached[0] is self and cached[1] == pin:
                 return
-        if self.evidence_kind in ("allocation", "allocation-call", "realloc-copy"):
+        if self.evidence_kind in ("allocation", "allocation-call", "realloc-copy", "allocation-snapshot"):
             from ._allocation_memory import prepare_allocation_refinement, prepare_allocation_call_refinement
             from ._call_activation import _source_signature
             if self.contracts != self.source.allocation_contracts:
                 raise RefinementRefused("lifecycle contract input changed")
             if self.peer_signatures != tuple((key, _source_signature(item)) for key, item in self.peers):
                 raise RefinementRefused("lifecycle peer snapshot changed")
-            if self.evidence_kind == "realloc-copy":
+            if self.evidence_kind == "allocation-snapshot":
+                from ._realloc_contents import prepare_old_allocation_snapshot
+                expected = prepare_old_allocation_snapshot(self.source, self.snapshot_demands, results=dict(self.peers))
+            elif self.evidence_kind == "realloc-copy":
                 from ._realloc_contents import prepare_realloc_contents
                 expected = prepare_realloc_contents(self.source, results=dict(self.peers))
             else:
@@ -166,8 +173,10 @@ class MemoryRefinement:
             raise RefinementRefused("unsupported sealed memory proof kind")
         if expected is None or expected.signature != self.signature or expected.proofs != self.proofs \
                 or expected.options != self.options \
+                or expected.assumptions != self.assumptions \
                 or expected.requires != self.requires or expected.call_effects != self.call_effects \
-                or expected.call_decisions != self.call_decisions or expected.copy_proofs != self.copy_proofs:
+                or expected.call_decisions != self.call_decisions or expected.copy_proofs != self.copy_proofs \
+                or expected.snapshot_demands != self.snapshot_demands:
             raise RefinementRefused("baseline address evidence changed")
         if cache is not None:
             cache[id(self)] = self, pin
