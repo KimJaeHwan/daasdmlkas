@@ -288,11 +288,18 @@ class _Index(SsaCycleIndex):
     def unchanged_reload(self, source, target, dom):
         if self.memory_span(source) != self.memory_span(target):
             raise _Refused()
+        # One projected span is not one address: a CALL before the loads may
+        # change each address register independently (its call debts). The
+        # original address operand-uses themselves must be structurally equal.
+        from ._memory_read_sources import _Address, _same_address
+        terms, ports = [_Address(self).operand(key, self.raw[key].inputs[1]) for key in (source, target)], []
+        if not _same_address(*terms, self, dom, ports):
+            raise _Refused()
         from ._memory_corridor import write_free_corridor
         evidence = write_free_corridor(self, source, target, dom)
         if evidence is None:
             raise _Refused()
-        return evidence
+        return tuple(sorted(set(evidence).union(*(port[3] for port in ports))))
 
 
 class _Tree:

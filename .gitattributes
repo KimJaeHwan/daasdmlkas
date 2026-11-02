@@ -2,3 +2,5 @@
 *.sh text eol=lf
 # Derived model provenance hashes raw model bytes: use the same bytes on every OS.
 models/**/*.json text eol=lf
+# Corpus C sources are pinned by SHA-256 of their bytes (binary fixtures): LF on every OS.
+tests/corpus/sources/*.c text eol=lf

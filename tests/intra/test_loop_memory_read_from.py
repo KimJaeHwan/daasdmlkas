@@ -773,3 +773,111 @@ def test_read_from_topology_refuses_forged_source_or_missing_typed_value_edge(ch
     with pytest.raises(ValueError, match="topology"):
         _validate_materialized_local_memory_ssa(graph, normalized.memory_ssa, binding)
     _validate_materialized_local_memory_ssa(normalized.dependencies, normalized.memory_ssa, binding)
+
+
+
+def _fragmented(count):
+    builder = FunctionBuilder()
+    pointer, counter, flag = reg(RBX), tmp(0x9000), tmp(0x9010, 1)
+    builder.ins(load(pointer, const(SLOT)), copy(counter, reg(RCX)))
+    builder.cbranch("done", flag, op("INT_EQUAL", [counter, const(0)], flag)).label("loop")
+    for number in range(count):
+        # Disjoint one-byte STOREs: every one adds intervals to the state.
+        builder.ins(add(tmp(0xa000), pointer, const(2 * number)), store(tmp(0xa000), const(number & 0xff, 1)))
+    builder.ins(load(tmp(0xb000, 1), pointer))
+    builder.ins(add(pointer, pointer, const(2 * count)), sub(counter, counter, const(1)))
+    builder.cbranch("loop", flag, op("INT_NOTEQUAL", [counter, const(0)], flag)).label("done").ret()
+    unit, = program_units(builder)
+    return unit
+
+
+def test_fragmented_stores_splice_touched_intervals_without_dropping_the_first_writer(monkeypatch):
+    from tdo_v2 import _loop_memory_reads
+
+    count = 400  # 801 intervals: below the cap, so every writer is kept
+    steps, original = [0], _loop_memory_reads.step
+
+    def counted():
+        steps[0] += 1
+        return original()
+
+    monkeypatch.setattr(_loop_memory_reads, "step", counted)
+    plan = _plan(FunctionNormalizer().normalize(_fragmented(count)))
+    # The first STORE is still the byte's last writer.
+    (row,) = plan.read_from
+    assert plan.accesses[row.writer_access].operation_key.endswith(":STORE") and row.constant[1] == 0
+    assert (row.read_offset, row.width, row.visit_delta) == (0, 1, 0)
+    assert steps[0] < 20 * count  # a full rebuild per STORE charged ~count**2
+
+
+def test_fragmented_stores_beyond_the_interval_cap_forget_writers_instead_of_copying(monkeypatch):
+    from tdo_v2 import _loop_memory_reads
+
+    count, sizes, original = 1000, [], _loop_memory_reads._overwrite  # 2001 intervals
+
+    def measured(state, *args):
+        sizes.append(len(state))  # each splice copies the whole state
+        return original(state, *args)
+
+    monkeypatch.setattr(_loop_memory_reads, "_overwrite", measured)
+    capped = _plan(FunctionNormalizer().normalize(_fragmented(count))).read_from
+    assert len(sizes) == count and max(sizes) <= _loop_memory_reads._MAX_INTERVALS + 2
+    monkeypatch.setattr(_loop_memory_reads, "_MAX_INTERVALS", 1 << 30)
+    full = _plan(FunctionNormalizer().normalize(_fragmented(count))).read_from
+    # Forgetting writers only drops rows; it never invents or changes one.
+    assert set(capped) <= set(full) and len(full) == 1 and not capped
+
+
+def _exclusive_branches(count, *, latches):
+    """Eight-byte STOREs, then mutually exclusive branches each overwriting
+    a different odd byte: every join (or latch fold) fragments the meet."""
+    builder = FunctionBuilder()
+    pointer, counter, flag = reg(RBX), tmp(0x9000), tmp(0x9010, 1)
+    builder.ins(load(pointer, const(SLOT)), copy(counter, reg(RCX)))
+    builder.cbranch("done", flag, op("INT_EQUAL", [counter, const(0)], flag)).label("loop")
+    builder.ins(load(tmp(0xb000, 1), pointer))
+    for number in range(count // 4 + 1):
+        builder.ins(add(tmp(0xa000), pointer, const(8 * number)), store(tmp(0xa000), reg(RDX)))
+    advance = (add(pointer, pointer, const(8 * (count // 4 + 1))), sub(counter, counter, const(1)))
+    for number in range(count):
+        builder.cbranch(f"w{number}", flag, op("INT_EQUAL", [reg(RSI), const(number)], flag))
+    builder.branch("join")
+    for number in range(count):
+        builder.label(f"w{number}").ins(add(tmp(0xa000), pointer, const(2 * number + 1)),
+                                        store(tmp(0xa000), const(number & 0xff, 1)))
+        if latches:
+            builder.ins(*advance)
+            builder.cbranch("loop", flag, op("INT_NOTEQUAL", [counter, const(0)], flag)).branch("done")
+        else:
+            builder.branch("join")
+    builder.label("join").ins(*advance)
+    builder.cbranch("loop", flag, op("INT_NOTEQUAL", [counter, const(0)], flag)).label("done").ret()
+    unit, = program_units(builder)
+    return unit
+
+
+@pytest.mark.parametrize("latches", (False, True), ids=("fan-in", "latches"))
+def test_joins_and_latch_folds_are_capped_like_stores(monkeypatch, latches):
+    from tdo_v2 import _loop_memory_reads
+
+    sizes, meet, overwrite = [], _loop_memory_reads._meet, _loop_memory_reads._overwrite
+
+    def measured_meet(left, right):
+        sizes.append(max(len(left), len(right)))
+        return meet(left, right)
+
+    def measured_overwrite(state, *args):
+        sizes.append(len(state))
+        return overwrite(state, *args)
+
+    monkeypatch.setattr(_loop_memory_reads, "_meet", measured_meet)
+    monkeypatch.setattr(_loop_memory_reads, "_overwrite", measured_overwrite)
+    monkeypatch.setattr(_loop_memory_reads, "_MAX_INTERVALS", 32)
+    unit = _exclusive_branches(64, latches=latches)
+    capped = _plan(FunctionNormalizer().normalize(unit)).read_from
+    assert sizes and max(sizes) <= 32 + 2  # without the join cap the meets reach ~128 intervals
+    sizes.clear()
+    monkeypatch.setattr(_loop_memory_reads, "_MAX_INTERVALS", 1 << 30)
+    full = _plan(FunctionNormalizer().normalize(unit)).read_from
+    assert max(sizes) > 64  # the fixture really fragments the meets
+    assert set(capped) <= set(full)

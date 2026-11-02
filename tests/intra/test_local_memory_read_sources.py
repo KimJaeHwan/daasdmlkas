@@ -566,3 +566,27 @@ def test_partial_read_ports_keep_byte_demand_without_waiving_original_memory_deb
     for fragment in read.fragments:
         if any(fragment.span.start <= read.span.start + byte < fragment.span.end for byte in selected):
             assert {normalized.memory_graph.definition_nodes[i] for i in fragment.definition_ids} <= lane.nodes
+
+
+def test_address_equality_never_expands_shared_subterms_with_tuple_equality():
+    from tdo_v2._memory_read_sources import _same_address
+
+    calls = [0]
+
+    class Term(tuple):
+        def __eq__(self, other):
+            calls[0] += 1
+            return tuple.__eq__(self, other)
+
+        __hash__ = tuple.__hash__
+
+    def shared(depth):
+        term = Term(("entry", 0, "span"))
+        for _ in range(depth):
+            term = Term(("INT_ADD", 8, Term((term, term))))  # ADD(x, x): 2**depth paths
+        return term
+
+    # Two independently built (not identical) DAGs: only the memoized walk may
+    # compare them, never a recursive tuple comparison of whole sub-DAGs.
+    assert _same_address(shared(16), shared(16), None, None, [])
+    assert calls[0] < 1000

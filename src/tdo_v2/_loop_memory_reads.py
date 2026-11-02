@@ -8,12 +8,19 @@ the second pass never feeds itself back into the header.
 All original uncertain/alias reads remain in the graph, even after a proof.
 """
 
+from bisect import bisect_left, bisect_right
 from dataclasses import replace
 
 from ._loop_memory import LoopMemoryReadFrom
 from ._scope_contracts import TranslationNamespace, VarnodeKindCode
 from .model import ByteSpan, StorageObjectKind
 from .resource_limits import step
+
+# Last-writer intervals per state. Each splice / meet still copies states, so
+# beyond this the known writers are forgotten (as after an unresolved write):
+# fewer optional rows, never a wrong one, and no quadratic copying. Applied to
+# every state a STORE, join, latch fold or backedge shift produces.
+_MAX_INTERVALS = 1024
 
 
 def derive_read_from(index, memory, families, accesses, namespace):
@@ -44,7 +51,7 @@ def derive_read_from(index, memory, families, accesses, namespace):
             for key, predecessors in order:
                 state = initial if key == family.header else states[predecessors[0]]
                 for predecessor in predecessors[1:]:
-                    state = _meet(state, states[predecessor])
+                    state = _bounded(_meet(state, states[predecessor]), unknown)
                 for action in blocks[key].actions:
                     step()
                     if action.operation_key in selected_reads:
@@ -68,6 +75,7 @@ def derive_read_from(index, memory, families, accesses, namespace):
                         # Missing source bytes never revive an earlier writer.
                         for lo, hi, bias in _pieces(writer.offset, writer.width, modulus):
                             state = _overwrite(state, lo, hi, writer_id, bias)
+                        state = _bounded(state, unknown)
                     elif action.unresolved_writes or any(span.object_id.kind not in (
                             StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE) for span in action.writes) \
                             or raw is not None and raw.output is not None and raw.output.kind not in (
@@ -81,11 +89,11 @@ def derive_read_from(index, memory, families, accesses, namespace):
         states = visit(unknown, 0)
         previous = states[family.latches[0]]
         for latch in family.latches[1:]:
-            previous = _meet(previous, states[latch])
+            previous = _bounded(_meet(previous, states[latch]), unknown)
         if any(row[2] is not None for row in previous):
             # Conditional on an actual backedge entry, never on preheader
             # entry. The phase qualifier remains part of every issued row.
-            previous = _previous(previous, family.stride, modulus)
+            previous = _bounded(_previous(previous, family.stride, modulus), unknown)
             if _overlaps_reads(previous, selected_reads, modulus):
                 visit(previous, -1)
     rows = []
@@ -144,7 +152,7 @@ def _read_rows(index, accesses, reader_id, reader, state, modulus, value_sources
     if output is None or output.size != reader.width or reader.width >= modulus:
         return
     for start, stop, read_bias in _pieces(reader.offset, reader.width, modulus):
-        for lo, hi, writer_id, write_bias, delta in state:
+        for lo, hi, writer_id, write_bias, delta in _touched(state, start, stop):
             step()
             lo, hi = max(lo, start), min(hi, stop)
             if lo >= hi or writer_id is None or delta != required_delta:
@@ -224,18 +232,39 @@ def _overlaps_reads(state, readers, modulus):
     return False
 
 
+def _bounded(state, unknown):
+    return unknown if len(state) > _MAX_INTERVALS else state
+
+
+def _touched(state, lo, hi):
+    """Rows of a sorted, disjoint state that overlap [lo, hi): bisect, not a full scan."""
+    return state[bisect_right(state, lo, key=_end):bisect_left(state, hi, key=_start)]
+
+
+def _start(row):
+    return row[0]
+
+
+def _end(row):
+    return row[1]
+
+
 def _overwrite(state, lo, hi, writer, bias):
-    rows = []
-    for start, end, old, old_bias, delta in state:
+    # Splice only the touched rows: fragmented STOREs would otherwise rebuild
+    # (and charge) the whole state per STORE, quadratic in the fragments.
+    # Untouched rows are already canonical; only the two seams can merge.
+    first, last = bisect_right(state, lo, key=_end), bisect_left(state, hi, key=_start)
+    rows = list(state[:first])
+    for start, end, old, old_bias, delta in state[first:last]:
         step()
-        if end <= lo or start >= hi:
-            _append(rows, start, end, old, old_bias, delta)
-            continue
         if start < lo:
             _append(rows, start, lo, old, old_bias, delta)
         _append(rows, max(start, lo), min(end, hi), writer, bias, 0)
         if end > hi:
             _append(rows, hi, end, old, old_bias, delta)
+    if last < len(state):
+        _append(rows, *state[last])
+        rows.extend(state[last + 1:])
     return tuple(rows)
 
 

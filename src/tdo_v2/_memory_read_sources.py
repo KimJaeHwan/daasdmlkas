@@ -207,7 +207,9 @@ def _same_address(left, right, index, dom, ports, memo=None):
     if len(memo) >= 2048:
         return False
     if isinstance(left, tuple) and isinstance(right, tuple) \
-            and left and right and left[0] == right[0] == "use":
+            and left and right and left[0] == "use" and right[0] == "use":
+        # (Each tag against "use" alone: left[0] == right[0] would compare two
+        # whole shared sub-DAGs with tuple equality, outside the memo.)
         if left[2] != right[2]:
             return False
         if left[1] == right[1]:

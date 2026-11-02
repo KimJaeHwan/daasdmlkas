@@ -34,7 +34,7 @@ def _fixture(variant="base", *, bound=4, base=TABLE, polarity="false", form="mul
     selector = reg(RCX, bits // 8)
     wide, scaled, address, flag = tmp(0x6000), tmp(0x6010), tmp(0x6020), tmp(0x6030, 1)
     slot, first, second = tmp(0x6040), tmp(0x6050, bits // 8), tmp(0x6060, bits // 8)
-    reload = variant in ("reload", "rewrite", "partial-write", "alias-write", "call")
+    reload = variant in ("reload", "rewrite", "partial-write", "alias-write", "call", "call-split", "call-same")
 
     def ins(name, *operations):
         keys[name] = f"1:{builder.entry + len(builder._rows) * builder.stride:x}:{len(operations)-1}:{operations[-1][0]}"
@@ -42,7 +42,13 @@ def _fixture(variant="base", *, bound=4, base=TABLE, polarity="false", form="mul
 
     if reload:
         builder.sub_rsp(0x40).ins(add(slot, reg(RSP), const(0x10)), store(slot, selector))
-        ins("guard_reload", load(first, slot))
+        pointer = slot
+        if variant in ("call-split", "call-same"):
+            # One pointer in two registers, then a CALL before BOTH loads.
+            builder.ins(copy(reg(RDI), slot), copy(reg(RDX), slot))
+            builder.call(0x1f00)
+            pointer = reg(RDI)
+        ins("guard_reload", load(first, pointer))
         selector = first
     if variant == "bypass":
         builder.cbranch("accepted", reg(RDX, 1))
@@ -75,7 +81,8 @@ def _fixture(variant="base", *, bound=4, base=TABLE, polarity="false", form="mul
             ins("change", store(reg(RDI), const(7, 4)))
         elif variant == "call":
             builder.call(0x1f00)
-        ins("address_reload", load(second, slot))
+        ins("address_reload", load(second, reg(RDX) if variant == "call-split"
+                                  else reg(RDI) if variant == "call-same" else slot))
         selector = second
     if bits < 64:
         ins("extend", op("INT_SEXT" if variant in ("sign-extend", "signed-high") else "INT_ZEXT", [selector], wide))
@@ -212,10 +219,18 @@ def test_two_original_reloads_of_one_unchanged_slot_keep_their_evidence():
 
 
 @pytest.mark.parametrize("variant", ("bypass", "redefined", "other-selector", "rewrite", "partial-write",
-                                     "alias-write", "call", "signed-guard"))
+                                     "alias-write", "call", "call-split", "signed-guard"))
 def test_a_guard_does_not_certify_a_bypassing_or_different_value(variant):
     normalized, _, keys, _, _ = _normalize(variant)
     assert not _rows(normalized, keys["read"])
+
+
+def test_one_register_reloaded_after_a_call_is_still_one_address():
+    # The CALL may change the register, but both loads read its one current
+    # value (no write between them): the reload proof keeps that corridor.
+    normalized, _, keys, _, _ = _normalize("call-same")
+    (row,) = _rows(normalized, keys["read"])
+    assert set(row.reloads) == {keys["guard_reload"], keys["address_reload"]}
 
 
 @pytest.mark.parametrize("change", ("missing", "writable", "volatile", "uninitialized", "iat"))
