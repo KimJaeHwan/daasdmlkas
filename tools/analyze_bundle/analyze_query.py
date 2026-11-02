@@ -165,12 +165,24 @@ def main() -> int:
         args.generation, naming_exporter_source=REPO / "ghidra/GhidraV2CallNaming.java",
         boundary_provider=provider, external_models=run_dfbench.external_models(args.generation),
         pcodeop_models=run_dfbench.pcodeop_models(), origin_witnesses=True, operation_records=False)
+    # (2b-P P-c4) the premises each root's function rests on, by kind, and what
+    # keeps them unestablished; "unpadded": recorded uses only
+    supports = {int(row.function.split(":")[1], 16): row for row in run.supports}
+
+    def premises(offset):
+        row = supports.get(offset)
+        if row is None:
+            return None
+        return {"published": dict(row.published), "unpadded": dict(row.unpadded),
+                "obligations": list(row.obligations), "established": row.established}
+
     roots = [{"function": hex(root.function_byte_offset), "label": root.label,
               "occurrence": root.occurrence_ordinal, "origins": root.reached_origin_labels,
               "complete": root.is_effectively_complete,
               "local_completeness": asdict(root.local_completeness),
               "effective_completeness": asdict(root.effective_completeness),
-              "inherited_incomplete": root.inherited_incomplete, "explanation": root.explanation}
+              "inherited_incomplete": root.inherited_incomplete, "explanation": root.explanation,
+              "premises": premises(root.function_byte_offset)}
              for root in run.roots]
     result = {"generation": str(args.generation), "sha256": run.executable_sha256,
               "language_id": evidence.translation_namespace.language_id,
@@ -179,7 +191,9 @@ def main() -> int:
               "call_targets": dict(provider.seen.most_common())}
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     print(f"{len(roots)} roots, {sum(root['complete'] for root in roots)} complete, "
-          f"{len(run.failed_functions)} failed functions, {len(provider.seen)} call targets, "
+          f"{len(run.failed_functions)} failed functions, "
+          f"{sum(not row.established for row in run.supports)} functions with unestablished premises, "
+          f"{len(provider.seen)} call targets, "
           f"{result['seconds']} s -> {args.out}")
     return 0
 

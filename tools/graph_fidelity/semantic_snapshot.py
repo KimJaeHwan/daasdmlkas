@@ -69,11 +69,13 @@ CONTRACT = {
         "replay_feedback": "captured alias/extent feedback inputs; final effects/conditions are encoded",
         "activation_witness": "original caller/callee input pins; context graph and preserved spans remain encoded",
         "activation_inputs": "identity-based invalidation pins of the original inputs",
+        "consumed": "2b-P exact producer instances (analysis objects); the effects they produced remain encoded",
     }),
     "FunctionSummary": (None, {"premise_uses": "2b-P use records (docs 25.91) -- reporting, checked by tests"}),
     "ProvenCallEffect": (None, {}),
     "RootSlice": (None, {}),
-    "EngineRun": (None, {}),
+    "EngineRun": (None, {"supports": "2b-P premise report (docs 25.91): which premises the encoded results"
+                                      " rest on -- reporting, checked by tests"}),
 }
 
 

@@ -6175,3 +6175,30 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
   합성되던 win64-home-space가 이제 인증서에 나타남) + 가정된/증명된 호출 효과 + forward 요구.
 - 남은 것(b2..): 요약 단계(_exit_crossings), 호출자 조건 해소, 대상 해석, 요약 컷, 접근자 / 할당 정제, 모델 확장 /
   컷 -- 각 결정 지점의 사용 기록; 철회 = 재계산 검증.
+
+### 25.92 전제 장부 -- 생산자 근거, 결과별 근거, 보고, 기록 완전성 측정 (Stage 2b-P P-c2..P-c5; 2026-11-02)
+
+설계 `.census6/design_premise_2bp_r5.md`(Astra r5 승인)의 B..E. 기존 추론과 스냅샷·작업 단위는 그대로, 기록과 보고만 더한다.
+- P-c2 생산자 근거(`producer_support.py`). `AnalyzedFunction.consumed` = 호출 키 -> 그 효과를 만든 **정확한** 분석
+  인스턴스(일반 요약, 다중 대상 호출의 모든 멤버, 호출 맥락별 재분석, 검증된 재귀 라운드의 멤버; "~lifecycle" = 할당 /
+  realloc 정제가 실제로 읽은 결과, 중첩 피호출 포함 -- `_ReadRecorder`). 연산 기록을 켜지 않아도 남는다. 공개 결과에서
+  도달하는 인스턴스마다 `ProducerSupport`(기록된 사용 / bridge / 모르는 라벨 / 의존 / 빠진 생산자), SCC 합집합 closure를
+  세 번(기록된 사용만 = unpadded, + 정책 padding·상속 bridge = published, 의무). 모르는 라벨·검증 안 된 재귀 가정은 그것에
+  닿는 모든 결과의 의무(fail closed). 정방향 단계(refinement / activation / resolution)의 라벨 중 실행 전체 가정 목록에 드는
+  것은 bridge로 둔다 -- 정방향 사실의 requires가 그 목록 전체를 담기 때문.
+- P-c3 결과별 근거(`return_relations.certificate_supports`). continuation: 자기 closure + 피호출 인증서 근거(via), 의무 =
+  culprit + 증명 안 된 출구 + closure 의무. SP: 독립 증명(증거: digest, 감사된 intrinsic, 엔진·resolver identity)의 영수증마다
+  지문을 다시 맞춘 효과 + 그 효과를 만든 그 피호출 인스턴스(키 = 영수증의 callee)의 closure + 그 호출에서의 호출자 결정;
+  효과 없음 영수증은 그 위치에서 바로 그 라벨을 admission한 기록이 있어야 한다. continuation과 독립(UNKNOWN이어도 SP 근거 유지).
+- P-c4 보고. `EngineRun.supports` = 함수별 `FunctionPremises`(published / unpadded 전제를 종류별로, 의무). resolver는 그 실행이
+  소비한 입력으로 만든다(외부 모델, 바인딩, p-code op 모델, lifecycle 계약 -- 한 번만 tuple로). 보고 단계 마감 시간을 단계마다
+  확인한다. 스냅샷에서 제외. `analyze_query.py`는 root마다 그 함수의 전제와 의무를 쓴다.
+- P-c5 측정(`tools/graph_fidelity/premise_acceptance.py`, 기본 게이트 아님). 스위치 S마다 ON / S만 OFF 두 실행, 함수별 주장
+  (요약, 정규화 그래프·alias 사실, 호출 효과, root, continuation, SP)이 바뀌면 그 종류의 unpadded 근거에 S가 있어야 한다
+  ("missing"이 아니어야). 철회는 전체 재계산(fresh OFF)으로 하고 선택(누락 없음, OFF에만 있는 함수는 선택된 함수에서
+  도달), 꺼진 전제에 기댄 템플릿 거부를 따로 시험한다(Astra r4 답 4, pc5 r2 수락).
+- 측정(게이트 Bundle 8개 + zlib, 정방향 on/off, UE accessor + 바인딩): 정방향 off, accessor + 바인딩, external-models(바인딩과 함께)
+  는 누락 0. 정방향 on에서 readonly-image-data-is-constant와 opaque-callees-restore-stack-pointer만 Bundle당 1~3건 누락
+  (v3-win32 1+1, v2-win-debug-full 2+1, corpus 3종 각 1) -- 모두 padding이 덮는다. 원인: 그 결정들이 정방향 단계(정방향
+  메모리 정제, 다중 대상 CALLIND 해석)에만 기록되고 그 라벨은 실행 전체 목록에서 온 bridge다. 따라서 padding / bridge 제거
+  (r5 E의 다음 단계)는 정방향 사실이 사실별로 자기 전제를 기록한 뒤에 한다(별도 설계).

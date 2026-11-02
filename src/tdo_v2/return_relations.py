@@ -28,6 +28,7 @@ from .integration.configured_value_domain import storage_ref
 from .isa_identity import link_register, stack_register
 from .memory_contracts import MemoryDefinitionKind
 from .model import ByteSpan, ResolvedStorage, StorageObjectId, StorageObjectKind
+from .premises import POLICY_FIELDS as _POLICY_FIELDS  # (the normalization's policy switches, docs 25.91)
 from .relative_memory import _function_relative_object_id
 from .storage import _resolve_validated_storage
 
@@ -290,19 +291,6 @@ def _transfer_gaps(instruction, keys, observed, tail) -> list[str]:
     return gaps
 
 
-# the normalization's policy switches by their registry names (docs 25.91)
-_POLICY_FIELDS = {
-    "assumes_globals_disjoint_from_stack": "globals-disjoint-from-stack",
-    "assumes_readonly_image_constant": "readonly-image-data-is-constant",
-    "assumes_import_slots_hold_exports": "import-slots-hold-their-exports",
-    "assumes_entry_values_not_frame": "entry-values-do-not-address-the-new-frame",
-    "assumes_opaque_callees_leave_no_stack_addresses": "opaque-callees-leave-no-stack-addresses",
-    "assumes_pre_escape_values_not_frame": "pre-escape-values-do-not-address-the-new-frame",
-    "assumed_direction_flag_clear": "direction-flag-clear",
-    "assumes_opaque_callees_restore_stack_pointer": "opaque-callees-restore-stack-pointer",
-}
-
-
 def _premises(normalized) -> list[str]:
     """What this normalization rests on: every policy switch in force (a
     superset until every producer records its uses), every recorded use
@@ -337,18 +325,22 @@ def _exit_delta(normalized, observation, scopes, sp) -> tuple[int | None, str | 
     proof over the original CFG (``register_delta_proofs``, docs 25.89) --
     never the summary's own AFFINE constant; (None, None) when it refuses.
     Scope: IF a normal exit is reached; neither continuation nor termination."""
+    proof = _delta_proof(normalized, observation, scopes, sp)
+    if proof is None:
+        return None, None
+    return proof.delta, proof.record()["content_sha256"]
+
+
+def _delta_proof(normalized, observation, scopes, sp):
     from types import SimpleNamespace
 
     from .register_delta_proofs import derive_register_delta_proof
 
     register = StorageObjectId(StorageObjectKind.REGISTER_FILE, scopes.program.scope, 0)
-    proof = derive_register_delta_proof(
+    return derive_register_delta_proof(
         SimpleNamespace(scopes=scopes, observation=observation), ByteSpan(register, sp.byte_offset, sp.byte_size),
         dict(normalized.proven_call_effects), dict(getattr(normalized, "intrinsic_refinements", ())),
         assumed_call_effects=getattr(normalized, "assumed_call_effects", ()))
-    if proof is None:
-        return None, None
-    return proof.delta, proof.record()["content_sha256"]
 
 
 def program_certificates(functions: dict, *, code_reader=None, pac_spec=None) -> dict:
@@ -378,6 +370,167 @@ def program_certificates(functions: dict, *, code_reader=None, pac_spec=None) ->
     for key in functions:
         certify(key)
     return done
+
+
+@dataclass(frozen=True, slots=True)
+class CertificateSupport:
+    """2b-P P-c3 (design r5 C): one function's typed supports. ``*_unpadded``
+    rest on recorded uses and producer dependencies only (P-c5 acceptance);
+    the others also carry the policy switches in force and the inherited /
+    run-union bridges until their removal is reviewed. ``sp`` is independent
+    of continuation: an UNKNOWN continuation leaves a proven SP delta's
+    support intact (None: no independent proof)."""
+
+    continuation: object
+    continuation_unpadded: object
+    sp: object = None
+    sp_unpadded: object = None
+
+
+def certificate_supports(certificates: dict, results: dict, resolver, *, run_bridge=()) -> dict:
+    """``certificates``: ``program_certificates`` of ``results`` (the published
+    ``analyze_units`` results); ``resolver``: the run's ``PremiseResolver``.
+    Returns key -> ``CertificateSupport``.
+
+    Continuation: the function's own resolved uses and the closure of every
+    producer it consumed (``producer_support``) + the callee / tail
+    certificates' supports (``via``); obligations: culprits, unproven exits,
+    unknown labels and missing producers reached. SP: the independent proof
+    (evidence: its digest and audited intrinsics, the engine and resolver
+    identities); for each receipt the exact admitted effect it names
+    (fingerprint re-matched), backed by the exact producer instance it was
+    consumed from -- the receipt's own callee -- and that instance's closure
+    (no such backing: an obligation), plus the caller's own decisions at that
+    call (admission, discharge, resolution, context; an unresolved one is an
+    obligation); each assumed no-effect receipt backed by the caller's
+    admission of that very label at that operation, with its decisions there
+    likewise. The published set
+    also carries the caller's bridges (an unresolved one: an obligation)."""
+    from .premises import ClaimType, EvidenceRef, Support, UnknownPremise, compose
+    from .producer_support import producer_closures
+    from .register_delta_proofs import _call_fingerprint
+    from .summary_templates import ENGINE_SEMANTICS_VERSION
+
+    closures = producer_closures(results, resolver, run_bridge)
+    base = {EvidenceRef("engine", str(ENGINE_SEMANTICS_VERSION)), EvidenceRef("resolver", resolver.identity)}
+    done: dict = {}
+    active: set = set()
+
+    def evidence_of(certificate) -> set:
+        found = set(base)
+        for item in certificate.dependencies:
+            kind, _, value = item.partition(":")
+            if kind in ("graph", "pac", "register-delta-proof"):
+                found.add(EvidenceRef(kind, value))
+        return found
+
+    def continuation(key):
+        if key in done:
+            return done[key]
+        if key in active or key not in certificates or key not in results:
+            stub = Support(ClaimType.CONTINUATION, key, obligations=("recursion" if key in active else "opaque",))
+            return stub, stub
+        active.add(key)
+        certificate, item = certificates[key], results[key]
+        closure = closures.of(item)
+        obligations = [*certificate.culprits, *(f"exit:{row.key}:{row.reason}" for row in certificate.exits
+                                                if not row.proven)]
+        if certificate.status == "unknown":
+            obligations.append("status:unknown")
+        obligations.extend(closure.obligations)
+        targets = sorted(set(item.calls.values()))
+        callees = [continuation(target) for target in targets]
+        active.discard(key)
+        evidence = evidence_of(certificate)
+        done[key] = (
+            compose(ClaimType.CONTINUATION, key, own=closure.published, evidence=evidence,
+                    obligations=tuple(dict.fromkeys(obligations)), via=[row[0] for row in callees]),
+            compose(ClaimType.CONTINUATION, key, own=closure.premises, evidence=evidence,
+                    obligations=tuple(dict.fromkeys(obligations)), via=[row[1] for row in callees]))
+        return done[key]
+
+    def stack(key):
+        certificate, item = certificates[key], results[key]
+        normalized = item.normalized
+        if getattr(normalized, "memory_ssa", None) is None:
+            return None, None
+        evidence = item.unit.scopes.program.evidence
+        sp = stack_register(evidence)
+        if sp is None:
+            return None, None
+        proof = _delta_proof(normalized, item.unit.observation, item.unit.scopes, sp)
+        if proof is None:
+            return None, None
+        name = closures.names[id(item)]
+        caller = closures.supports[name]
+        effects = dict(normalized.proven_call_effects)
+        unpadded, published, obligations = set(), set(), []
+        found_evidence = {*base, EvidenceRef("proof", proof.record()["content_sha256"]),
+                          *(EvidenceRef("intrinsic", f"{where}:{semantic}") for where, semantic in proof.intrinsics)}
+        def at_call(call) -> set:
+            """The caller's own decisions at ``call`` (admission of a model,
+            alias discharge, a resolution, an extent / context): the resolved
+            ones are premises, an unresolved one an obligation. Returns the
+            labels admitted there."""
+            admitted = set()
+            for use in caller.uses:
+                where = use.at[len(name) + 1:]
+                if where == call or where.startswith(call + "~"):
+                    unpadded.add(use.premise)
+                    if use.stage == "admission" and where == call:
+                        admitted.add(use.premise.id)
+            for label, stage, where in caller.unresolved_uses:
+                if where == call or where.startswith(call + "~"):
+                    obligations.append(label)
+                    if stage == "admission" and where == call:
+                        admitted.add(label)
+            return admitted
+
+        for fact in proof.call_facts:
+            effect = effects.get(fact.operation_key)
+            if effect is None or _call_fingerprint(effect, proof.register) != fact.effect_fingerprint:
+                obligations.append(f"receipt:{fact.operation_key}")
+                continue
+            at_call(fact.operation_key)
+            # backing: the exact instance the effect was consumed from, and it
+            # is the receipt's own callee (its summary produced the effect). A
+            # receipt the checker admits names a function address, so a model
+            # (labelled effect) never backs one: no other backing is accepted
+            producers = item.consumed.get(fact.operation_key, ())
+            if len(producers) != 1 or getattr(producers[0], "key", None) != fact.callee                     or producers[0].summary is None:
+                obligations.append(f"unbacked-receipt:{fact.operation_key}")
+                continue
+            found = closures.of(producers[0])
+            if found is None:
+                obligations.append(f"unestablished-producer:{fact.operation_key}")
+                continue
+            unpadded |= found.premises
+            published |= found.published
+            obligations.extend(found.obligations)
+        for where, label in proof.assumed_no_effect:
+            # a no-effect p-code op: the very model the caller admitted at that
+            # operation (its application), plus its other decisions there
+            if label not in at_call(where):
+                obligations.append(f"unbacked-receipt:{where}")
+                continue
+            try:
+                unpadded.add(resolver.resolve(label))
+            except UnknownPremise:
+                obligations.append(label)
+        published |= unpadded | caller.bridges
+        own = tuple(dict.fromkeys(obligations))
+        return (Support(ClaimType.REGISTER_DELTA, key, frozenset(published), frozenset(found_evidence),
+                        tuple(dict.fromkeys((*own, *caller.unresolved_bridges)))),
+                Support(ClaimType.REGISTER_DELTA, key, frozenset(unpadded), frozenset(found_evidence), own))
+
+    result = {}
+    for key in certificates:
+        if key not in results:
+            continue
+        padded, unpadded = continuation(key)
+        sp, sp_unpadded = stack(key)
+        result[key] = CertificateSupport(padded, unpadded, sp, sp_unpadded)
+    return result
 
 
 def _pac_scan(observation, code_reader, pac_spec) -> list[str]:

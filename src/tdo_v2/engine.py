@@ -124,6 +124,10 @@ class EngineRun:
     # with no nodes; roots projected through its calls are not enumerated, so
     # an empty origin set anywhere in the run is no evidence of absence for it
     failed_functions: tuple[tuple[str, str, str], ...] = ()   # (key, reason, detail)
+    # 2b-P P-c4 (summary engine): per function, the premises its producer
+    # closure rests on by kind and what keeps it unestablished
+    # (``producer_support.FunctionPremises``); ``assumptions`` stays the run union
+    supports: tuple = ()
 
 
 @analysis_entry

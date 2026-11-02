@@ -143,6 +143,19 @@ def compose(claim: ClaimType, subject: str, *, own=(), evidence=(), obligations=
     return Support(claim, subject, frozenset(premises), frozenset(found_evidence), tuple(obligations), tuple(via))
 
 
+# the normalization's policy switches by their registry names (docs 25.91)
+POLICY_FIELDS = {
+    "assumes_globals_disjoint_from_stack": "globals-disjoint-from-stack",
+    "assumes_readonly_image_constant": "readonly-image-data-is-constant",
+    "assumes_import_slots_hold_exports": "import-slots-hold-their-exports",
+    "assumes_entry_values_not_frame": "entry-values-do-not-address-the-new-frame",
+    "assumes_opaque_callees_leave_no_stack_addresses": "opaque-callees-leave-no-stack-addresses",
+    "assumes_pre_escape_values_not_frame": "pre-escape-values-do-not-address-the-new-frame",
+    "assumed_direction_flag_clear": "direction-flag-clear",
+    "assumes_opaque_callees_restore_stack_pointer": "opaque-callees-restore-stack-pointer",
+}
+
+
 # -- identities ------------------------------------------------------------------------
 
 def registry_premise(name: str) -> PremiseRef:
@@ -308,13 +321,14 @@ class PremiseResolver:
 
 # -- provenance closure ----------------------------------------------------------------
 
-def provenance_closure(own: dict, depends: dict) -> dict:
+def provenance_closure(own: dict, depends: dict, tick=None) -> dict:
     """``own``: node -> frozenset of its own PremiseRefs (uses at its decisions);
     ``depends``: node -> nodes whose claims it consumed (the verified
     dependency graph of the FINAL effects -- no edge for a call left opaque).
     Returns node -> frozenset: within a strongly connected component every
     member gets the union of all members' own premises plus every dependency
-    component's (dependencies first, one pass)."""
+    component's (dependencies first, one pass). ``tick``: called per node
+    visited and per component (a reporting deadline check; charges no work)."""
     nodes = sorted(set(own) | set(depends) | {target for targets in depends.values() for target in targets})
     index: dict = {}
     low: dict = {}
@@ -331,6 +345,8 @@ def provenance_closure(own: dict, depends: dict) -> dict:
         stack.append(root)
         on_stack.add(root)
         while work:
+            if tick is not None:
+                tick()
             node, children = work[-1]
             advanced = False
             for child in children:
@@ -364,6 +380,8 @@ def provenance_closure(own: dict, depends: dict) -> dict:
     result: dict = {}
     supports: list = []
     for number, component in enumerate(components):
+        if tick is not None:
+            tick()
         total = set()
         for member in component:
             total |= own.get(member, frozenset())
@@ -376,6 +394,6 @@ def provenance_closure(own: dict, depends: dict) -> dict:
     return result
 
 
-__all__ = ["ADMISSIBLE", "ClaimType", "EvidenceRef", "PremiseKind", "PremiseRef", "PremiseResolver", "PremiseUse", "STAGES",
+__all__ = ["ADMISSIBLE", "ClaimType", "POLICY_FIELDS", "EvidenceRef", "PremiseKind", "PremiseRef", "PremiseResolver", "PremiseUse", "STAGES",
            "Support", "UnknownPremise", "compose", "declaration_premise", "model_premise", "provenance_closure",
            "registry_premise", "resolve_label"]

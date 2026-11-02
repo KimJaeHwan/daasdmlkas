@@ -310,6 +310,11 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
 ) -> EngineRun:
     """The post-admission body of the summary engine (unchanged)."""
     operation_records = operation_records or physical_memory_records
+    # (inputs read more than once -- analysis, linking, the premise report --
+    # materialized once: an iterator would reach the report empty)
+    model_bindings, lifecycle_contracts = tuple(model_bindings), tuple(lifecycle_contracts or ())
+    if pcodeop_models is not None:
+        pcodeop_models = tuple(pcodeop_models)
     from .integration.configured_boundary_demands import (
         _analyses_from_boundary_nodes, _direct_sink_boundary_nodes,
     )
@@ -618,6 +623,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         run = EngineRun(
             program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(found),
             assumptions, tuple((key, failed[key][0].value, failed[key][1]) for key in sorted(failed)),
+            supports=_function_supports(results, assumptions, external_models, model_bindings, pcodeop_models,
+                                        lifecycle_contracts),
         )
         checkpoint()   # (never returned after the reporting deadline)
         return run
@@ -628,6 +635,24 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         run = _with_records(run, record_inputs, record_provenance,
                             physical_memory_records=physical_memory_records)
     return run
+
+
+def _function_supports(results, assumptions, external_models, model_bindings, pcodeop_models,
+                       lifecycle_contracts) -> tuple:
+    """The run's per-function premise report (2b-P P-c4): labels resolved
+    against the inputs this run consumed (``premises.PremiseResolver``), the
+    closure over exact consumed producers (``producer_support``). Reporting
+    only: no analysis reads it, and it charges no work unit."""
+    from .premises import PremiseResolver
+    from .producer_support import function_premises
+    from .resource_limits import checkpoint
+
+    checkpoint()
+    resolver = PremiseResolver(model_sets=() if external_models is None else (external_models,),
+                               bindings=tuple(model_bindings), pcodeop_models=tuple(pcodeop_models or ()),
+                               lifecycle_contracts=tuple(lifecycle_contracts or ()))
+    checkpoint()
+    return function_premises(results, resolver, run_bridge=assumptions, tick=checkpoint)
 
 
 def _with_records(run, record_inputs, provenance=None, *, physical_memory_records=False) -> "EngineRun":

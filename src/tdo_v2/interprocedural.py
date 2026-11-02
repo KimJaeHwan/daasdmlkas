@@ -110,6 +110,46 @@ class AnalyzedFunction:
     allocation_contracts: tuple = field(default=(), repr=False)
     allocation_lifetimes: tuple = ()
     replay_feedback: tuple = field(default=(), repr=False)
+    # 2b-P P-c2 (design r5 B): the exact producer instances this analysis
+    # consumed -- call key -> the AnalyzedFunction(s) whose summary its effect
+    # came from (every composition member; an activation context; a verified
+    # recursion round's member), "~lifecycle" -> every function result an
+    # accepted lifecycle refinement read (nested callee analyses included,
+    # ``_ReadRecorder``). Kept whether or not operation records are on
+    # (``producer_support``); never the latest result of a key.
+    consumed: dict = field(default_factory=dict, repr=False, compare=False)
+
+
+class _ReadRecorder(dict):
+    """The run's results as a lifecycle analysis sees them (P-c2): every result
+    it reads by key (``get`` / ``[]``, nested callee analyses included) is kept,
+    the exact instance. (``{**results}`` / ``items()`` -- the run-union labels
+    and the frozen peer pins -- are not reads of a producer's facts.)"""
+
+    def __init__(self, results):
+        super().__init__(results)
+        self.read: dict = {}
+
+    def get(self, key, default=None):
+        if dict.__contains__(self, key):
+            found = dict.__getitem__(self, key)
+            self.read[id(found)] = found
+            return found
+        return default
+
+    def __getitem__(self, key):
+        found = dict.__getitem__(self, key)
+        self.read[id(found)] = found
+        return found
+
+
+@dataclass(frozen=True, slots=True)
+class _Hypothesis:
+    """A consumed recursion hypothesis (P-c2): replaced by the callee's member
+    of the verified round that discharged it (``solve``); left in place it is
+    an unestablished producer (``producer_support``: fail closed)."""
+
+    callee: str
 
 
 def _import_slots_switched_on() -> bool:
@@ -593,7 +633,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         candidate, _ = analyze_one(key, hypotheses, refinement=plan, provenance=pending,
                                                   activation_overrides=activation_overrides)
                         if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None:
-                            _accept_refinement(candidate, plan.requires)
+                            _accept_refinement(candidate, plan.requires, plan)
                             result, published = candidate, pending
                             options = dict(result.normalization_options)
                     except RefinementRefused:
@@ -601,8 +641,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 if lifecycle_contracts:
                     from ._allocation_memory import prepare_allocation_refinement
                     for _ in range(8):
+                        reads = _ReadRecorder(results)
                         try:
-                            plan = prepare_allocation_refinement(result, options, results=results)
+                            plan = prepare_allocation_refinement(result, options, results=reads)
                         except RefinementRefused:
                             break  # Unsupported/stale optional inputs keep the original graph.
                         if plan is None:
@@ -613,7 +654,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                                       activation_overrides=activation_overrides)
                             if type(candidate.normalized) is not NormalizedFunction or candidate.summary is None:
                                 break
-                            _accept_refinement(candidate, plan.requires)
+                            _accept_refinement(candidate, plan.requires, plan, reads)
                             candidate.allocation_lifetimes = tuple(proof.write_fact for proof in plan.proofs
                                                                   if isinstance(proof.read_fact, tuple))
                             result, published = candidate, pending
@@ -621,8 +662,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         except RefinementRefused:
                             break
                     from ._allocation_memory import prepare_allocation_call_refinement, accepts_allocation_calls
+                    reads = _ReadRecorder(results)
                     try:
-                        plan = prepare_allocation_call_refinement(result, results=results)
+                        plan = prepare_allocation_call_refinement(result, results=reads)
                     except RefinementRefused:
                         plan = None
                     if plan is not None:
@@ -631,8 +673,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             candidate, _ = analyze_one(key, hypotheses, refinement=plan, provenance=pending,
                                                       activation_overrides=activation_overrides)
                             if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None \
-                                    and accepts_allocation_calls(plan, candidate, results):
-                                _accept_refinement(candidate, plan.requires)
+                                    and accepts_allocation_calls(plan, candidate, reads):
+                                _accept_refinement(candidate, plan.requires, plan, reads)
                                 candidate.allocation_lifetimes = result.allocation_lifetimes
                                 candidate.call_memory_decisions = plan.call_decisions
                                 _record_decisions(candidate)
@@ -642,8 +684,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             pass
                 if lifecycle_contracts:
                     from ._realloc_contents import prepare_realloc_contents
+                    reads = _ReadRecorder(results)
                     try:
-                        copy_plan = prepare_realloc_contents(result, results=results)
+                        copy_plan = prepare_realloc_contents(result, results=reads)
                     except RefinementRefused:
                         copy_plan = None
                     if copy_plan is not None:
@@ -652,7 +695,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             candidate, _ = analyze_one(key, hypotheses, refinement=copy_plan, provenance=pending,
                                                       activation_overrides=activation_overrides)
                             if type(candidate.normalized) is NormalizedFunction and candidate.summary is not None:
-                                _accept_refinement(candidate, copy_plan.requires)
+                                _accept_refinement(candidate, copy_plan.requires, copy_plan, reads)
                                 candidate.allocation_lifetimes = result.allocation_lifetimes
                                 candidate.call_memory_decisions = result.call_memory_decisions
                                 _record_decisions(candidate)
@@ -669,7 +712,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             key, hypotheses, refinement=result.normalized.forward_inputs.read_separations,
                             load_identity=plan, provenance=pending, activation_overrides=activation_overrides)
                         if candidate.summary is not None and plan.accepts(candidate):
-                            _accept_refinement(candidate, plan.requires)
+                            _accept_refinement(candidate, plan.requires, plan)
                             candidate.allocation_lifetimes = result.allocation_lifetimes
                             candidate.call_memory_decisions = result.call_memory_decisions
                             _record_decisions(candidate)
@@ -772,12 +815,14 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             sources: dict = {}
             rejections: dict = {}
             compositions: dict = {}
+            consumed: dict = {}   # (2b-P P-c2: kept whether or not operation records are on)
 
             def derive(failed):
                 proven = {}
                 sources.clear()
                 rejections.clear()
                 compositions.clear()
+                consumed.clear()
                 if register_object is None:
                     return proven
                 for call_key, declaration in boundaries_of(key).items():
@@ -795,6 +840,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         if hypotheses.get(call_key) is not None:
                             proven[call_key] = hypotheses[call_key]
                             sources[call_key] = ("recursive hypothesis", callee)
+                            consumed[call_key] = (_Hypothesis(callee),)
                             note = hypothesis_notes.get((key, call_key))
                             if note:   # (its derivation: every condition failed by construction)
                                 rejections[call_key] = [*note["rejections"], *(
@@ -836,6 +882,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     if effect is not None:
                         proven[call_key] = effect
                         sources[call_key] = ("summary", done)
+                        consumed[call_key] = (done,)
                 for call_key, members in multi.get(key, {}).items():
                     if call_key in assumed or call_key in proven \
                             or any(component_of[member] == component_of[key] for member in members):
@@ -848,6 +895,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     if effect is not None:
                         proven[call_key] = effect
                         sources[call_key] = ("summaries", tuple(dones))
+                        consumed[call_key] = tuple(dones)
                         if memory_sources:
                             compositions[call_key] = memory_sources
                 register_space = _register_space_id(observation) or _program_register_space(unit)
@@ -1060,6 +1108,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                                  if call in proven})
             result.normalization_options = tuple(normalization_options.items())
             result.summary_inputs = (dead_ops, dead_jumps, summary_requires)
+            result.consumed = {call: found for call, found in consumed.items() if call in proven}
             result.replay_feedback = (
                 tuple((call, frozenset(rows)) for call, rows in sorted(failed.items())),
                 tuple((call, tuple(rows.items())) for call, rows in sorted(constants.items())),
@@ -1138,6 +1187,13 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         note,
                     )
                 if derived == hypotheses:
+                    # (P-c2) the hypotheses this round consumed are discharged by
+                    # this very round's members: the producers are those instances
+                    for item in round_results.values():
+                        item.consumed = {call: tuple(round_results[found.callee] if type(found) is _Hypothesis
+                                                     and found.callee in round_results else found
+                                                     for found in rows)
+                                         for call, rows in item.consumed.items()}
                     return round_results
                 hypotheses = derived
                 hypothesis_notes.clear()
@@ -1327,11 +1383,20 @@ def _bound_cuts(functions, bindings, disabled, external_models, refusals) -> dic
     return found
 
 
-def _accept_refinement(candidate, requires) -> None:
+def _accept_refinement(candidate, requires, plan=None, reads=None) -> None:
     """An accepted refinement: its requirements are the function's inherited
-    labels and (2b-P B8) use records of its refinement decision."""
+    labels and (2b-P B8) use records of its refinement decision; (P-c2) every
+    function result a lifecycle plan read (``reads``: its ``_ReadRecorder``),
+    accumulated over the refinement chain (the plan's source is the previous
+    accepted result)."""
     candidate.inherited_assumptions |= frozenset(requires)
     _add_uses(candidate, {(label, "refinement", candidate.key) for label in requires})
+    source = getattr(plan, "source", None)
+    earlier = tuple(getattr(source, "consumed", {}).get("~lifecycle", ())) if source is not None else ()
+    found = {id(item): item for item in (*earlier, *(reads.read.values() if reads is not None else ()))
+             if item is not candidate}
+    if found:
+        candidate.consumed = {**candidate.consumed, "~lifecycle": tuple(found.values())}
 
 
 def _record_decisions(candidate) -> None:
