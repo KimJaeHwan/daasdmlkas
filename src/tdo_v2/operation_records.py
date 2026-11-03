@@ -2526,6 +2526,11 @@ def root_record(normalized, unit, seeds, *, origins=None, declared=None, limits=
         metadata["completeness"] = {"complete": completeness.complete,
                                     "reachable_unresolved_reads": completeness.reachable_unresolved_reads,
                                     "function_unresolved_writes": completeness.function_unresolved_writes}
+        # (U2a, docs 25.93: only when present, so records without one stay as they were)
+        if completeness.control_obligations:
+            metadata["completeness"]["control_obligations"] = list(completeness.control_obligations)
+        if completeness.conditional_roots:
+            metadata["completeness"]["conditional_roots"] = completeness.conditional_roots
     # function-wide unresolved writes (outside the slice too)
     metadata["function_unresolved_writes"] = len(normalized.memory_graph.unresolved_write_nodes) \
         if normalized.memory_graph is not None else None

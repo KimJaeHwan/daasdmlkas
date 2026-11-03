@@ -6202,3 +6202,36 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
   (v3-win32 1+1, v2-win-debug-full 2+1, corpus 3종 각 1) -- 모두 padding이 덮는다. 원인: 그 결정들이 정방향 단계(정방향
   메모리 정제, 다중 대상 CALLIND 해석)에만 기록되고 그 라벨은 실행 전체 목록에서 온 bridge다. 따라서 padding / bridge 제거
   (r5 E의 다음 단계)는 정방향 사실이 사실별로 자기 전제를 기록한 뒤에 한다(별도 설계).
+
+### 25.93 미지 제어 전이는 함수 전체를 버리지 않고 표시한다 -- U2a (2026-11-03)
+
+설계 `.census6/design_local_uncertainty_r3.md` + r4 + r5(Astra r5 · Fable 승인, 수정 반영) + r6(Astra 승인, 수정 반영).
+소유자 방향(2026-11-03):
+하나의 미지(UD2, 대상 없는 점프)가 관찰 그래프로 풀리는 경로를 버리면 안 된다 -- 값과 연결은 두고 미지 부분을 위치별로
+표시해, 나중의 확인(분석가 링크, 전제, 실행)이 그 위치에 기댄 것만 정리하게 한다.
+- 위치(UNKNOWN TRANSFER site): flow target이 없는 BRANCHIND -- 상태 장벽이 후속 그래프를 불완전하다고 보는 바로 그 술어
+  (`_BarrierFacts.complete`). 키 `control:<함수>:<명령 주소>`. 예외(r6): import-slots-hold-their-exports가 켜진 실행에서
+  엔진이 import 슬롯을 거치는 점프로 인식하는 끝 `jmp [__imp_X]`(`import_call_sites`, import 모델을 묶는 그 인식기)는
+  import로의 tail 호출이다 -- `call [__imp_X]; ret`과 같은 분류(분석 집합 밖 피호출: 2c 몫). `EngineRun.control_exemptions`에
+  (위치, 전제)로 남기고, 그 전제를 실행 가정 목록에 넣는다. 장벽(W1)과 조건부 표시는 그대로; 템플릿은 이미지 사실이 없어
+  예외 없이 거부(보수적). 게이트 Bundle의 대상 없는 점프 8개 중 7개가 이 예외(UE DLL), 1개(v3 `jmp rdx`)는 위치.
+- 제어 맥락(`control_context.py`): 함수 자신의 위치 ∪ 도달할 수 있는 모든 함수의 위치. 간선 = 관찰의 직접 호출·tail·Ghidra가
+  나열한 대상, 실행이 해석한 호출 대상(`calls`), 다중 대상 해석의 모든 후보(`multi_candidates`: `call in proven` 거르기 전).
+  데이터와 무관, 순환 포함(SCC). 실패했거나 관찰이 없는 함수는 `control:unavailable:<함수>`(없음이 아니라 모름). 분석 집합
+  밖의 피호출·해석 안 된 간접 호출은 키를 내지 않는다 -- 그 continuation은 opaque 규칙으로 UNKNOWN(호출 상태 단계 2c 몫).
+- 조건부 조회(`conditional_state_definition`): `state_definition`과 같되 W1 검사만 건너뛴다(대상 없는 점프는 관찰 그래프에서
+  나가는 간선이 없다). 호출·쓰기·alias·미배치 위치 검사는 그대로. 유일한 소비자는 보고 단계의 sink root 바인딩(`bind` ->
+  `own_sink_nodes(conditional=...)`, tail sink 포함)이며 sink 전용 `_ConditionalSinkState`(sink 선택자 상태와 메모리
+  선택자의 기준 레지스터)만 쓴다. 요약용 `sink_roots`, 투영 요구, 엄격 경로(`engine.analyze_observed_functions`), 그 밖의
+  모든 조회(`read_settled`, `keys_between`, STORE 영수증 ...)는 그대로 거부한다 -- 분석 산출물(정규화, 요약, 효과, 정제,
+  정방향, 템플릿 내용, replay 입력)은 같은 유효 분석 입력(링크된 모델 포함)에 대해 바이트 단위로 같다 -- 새로 거부된
+  템플릿 내보내기는 그것을 import하는 프로그램의 모델과 결과를 바꿀 수 있다(의도된 변화, 링크 단계가 보고).
+- 완전성(`LocalCompleteness`): `control_obligations`(맥락의 위치 키), `conditional_roots`(조건부로 묶인 root). 생성자 불변식
+  `complete => 의무 없음 and 조건부 없음`. 두 단계 공개: `function_roots`가 조건부 root에 자기 위치를 바로 붙이고, `report()`가
+  모든 늦은 실패·`_dependents_incomplete`·실패 root 뒤에 `control_contexts(results, failed)`를 한 번 계산해 모든 root에 그 함수의
+  맥락을 붙인다. `EngineRun.control_contexts` = 비어 있지 않은 맥락. 기록·스냅샷은 비어 있지 않을 때만 쓴다.
+- 템플릿: 맥락이 비어 있지 않은 함수는 내보내지 않는다("rests on an unknown control transfer"); 맥락 그래프 어디든 자원
+  실패가 있으면 transient(링크가 다시 시도).
+- U2a가 주지 않는 것: 조건부 호출 효과(UD2를 가진 피호출의 요약은 지금처럼 거부), 조건부 결정. 맥락이 피호출로만 비어
+  있지 않은 함수의 분석 산출물은 지금과 같고(기존 구멍, 2c의 강제 규칙이 막을 몫이며 이후 모든 opening의 선행 조건),
+  U2a는 그 root를 표시한다. F1(`faults-end-the-execution`, 기본 OFF)은 별도 단계.

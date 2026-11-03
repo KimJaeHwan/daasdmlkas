@@ -812,6 +812,37 @@ def refusal(model_file, entry, *, external_models, pcodeop_models, private_frame
     return None
 
 
+def _control_contexts(results) -> dict:
+    """The run's control contexts (U2a, docs 25.93) -- the failure map derived
+    from the results themselves (a function that did not normalize)."""
+    from .control_context import control_contexts
+    from .normalize import NormalizedFunction
+
+    failed = {key for key, item in results.items() if type(item.normalized) is not NormalizedFunction}
+    return control_contexts(results, failed)
+
+
+def _refuse_control_context(key, context, results, *, resource_only=False) -> None:
+    """A template states the function's effects unconditionally: one that
+    rests on an unknown control transfer -- its own or a reachable function's
+    (U2a, docs 25.93) -- is not exported. Out of a resource somewhere in the
+    context graph: TRANSIENT (linking retries it); otherwise semantic
+    (``resource_only``: the transient check alone)."""
+    from .normalize import NormalizationFailureReason
+
+    if not context:
+        return
+    resource = (NormalizationFailureReason.ANALYSIS_DEPTH, NormalizationFailureReason.ANALYSIS_BUDGET,
+                NormalizationFailureReason.ANALYSIS_RUN_BUDGET)
+    prefix = "control:unavailable:"
+    if any(item.startswith(prefix) and getattr(getattr(results.get(item[len(prefix):]), "normalized", None),
+                                               "reason", None) in resource for item in context):
+        raise TemplateRefused(f"{key}: rests on a function out of a resource: {', '.join(sorted(context))}",
+                              "transient")
+    if not resource_only:
+        raise TemplateRefused(f"rests on an unknown control transfer: {', '.join(sorted(context))}")
+
+
 def build_file(results, exports, *, file_id, version, library, external_models, pcodeop_models,
                private_frame_above, base_dependent, readonly_image=None, traps=False, notes=None,
                producer=None, catalog_models=()):
@@ -831,6 +862,7 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
     if base_dependent is None:
         raise TemplateRefused("derive under ImageBaseTracking")
     entries, refused = [], {}
+    contexts = None
     for key, name, original_names in exports:
         analyzed = results.get(key)
         try:
@@ -839,8 +871,15 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
             if any(label.startswith("derived-model:") for item in _closure(analyzed, results)
                    for label in item.declared.values()):
                 raise TemplateRefused("derived from another derived model")
-            entries.append({"name": name, "original_names": list(original_names),
-                            "summary": export_summary(analyzed, results, base_dependent)})
+            if contexts is None:
+                contexts = _control_contexts(results)
+            context = contexts.get(key, frozenset())
+            # (a resource failure anywhere in the context graph first: transient,
+            # as export_summary's own closure check -- the semantic checks after)
+            _refuse_control_context(key, context, results, resource_only=True)
+            summary = export_summary(analyzed, results, base_dependent)
+            _refuse_control_context(key, context, results)
+            entries.append({"name": name, "original_names": list(original_names), "summary": summary})
         except TemplateRefused as error:
             refused[name] = Refusal(str(error), error.kind)
     first = next(iter(results.values()))

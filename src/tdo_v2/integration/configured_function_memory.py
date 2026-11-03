@@ -293,6 +293,11 @@ class _FunctionMemoryViewMixin:
     def latest_definition(
         self, span: ByteSpan, before_position: int
     ) -> tuple[int, int] | None:
+        return self._latest_definition_row(span, before_position, False)
+
+    def _latest_definition_row(
+        self, span: ByteSpan, before_position: int, accept_incomplete: bool
+    ) -> tuple[int, int] | None:
         before_key = next(
             (
                 operation_key
@@ -331,14 +336,26 @@ class _FunctionMemoryViewMixin:
             )
         )
         if len(latest) != 1 or not self.state_unchanged(
-            span, latest[0][2], before_key, own_definition_id=latest[0][1]
+            span, latest[0][2], before_key, own_definition_id=latest[0][1],
+            accept_incomplete=accept_incomplete,
         ):
             return None
         return (latest[0][0], latest[0][1])
 
     def state_definition(self, span: ByteSpan, before_position: int) -> int | None:
         """Return the one observed definition holding a span before a call."""
-        local = self.latest_definition(span, before_position)
+        return self._state_definition_id(span, before_position, False)
+
+    def conditional_state_definition(self, span: ByteSpan, before_position: int) -> int | None:
+        """``state_definition`` on the observed graph although it is incomplete
+        (a BRANCHIND without targets): every other barrier check applies. The
+        answer holds only if no such transfer resumes -- its one consumer is
+        the sink-root binder of the reporting phase (U2a, docs 25.93), which marks
+        the root; no other lookup reaches it."""
+        return self._state_definition_id(span, before_position, True)
+
+    def _state_definition_id(self, span: ByteSpan, before_position: int, accept_incomplete: bool) -> int | None:
+        local = self._latest_definition_row(span, before_position, accept_incomplete)
         if local is not None:
             return local[1]
         before_key = next(
@@ -351,7 +368,8 @@ class _FunctionMemoryViewMixin:
         )
         # the entry value only when nothing may change the span on any walk
         # from the entry (the failed local lookup proves nothing)
-        if before_key is None or not self.state_unchanged(span, None, before_key):
+        if before_key is None or not self.state_unchanged(span, None, before_key,
+                                                          accept_incomplete=accept_incomplete):
             return None
         entries = tuple(
             definition_id

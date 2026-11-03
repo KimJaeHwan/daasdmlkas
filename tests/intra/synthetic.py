@@ -289,6 +289,20 @@ class FunctionBuilder:
         self._rows.append(_Instruction([], "branch", target))
         return self
 
+    def ud2(self) -> "FunctionBuilder":
+        """x86 ``ud2`` as Ghidra 12.0.4 lifts it: t = CALLOTHER
+        invalidInstructionException (user op 0x4d); BRANCHIND t -- no flow
+        target, no fallthrough (an unknown control transfer)."""
+        target = tmp(0x500, self.arch.pointer)
+        return self.jump_indirect(target, op("CALLOTHER", [const(0x4D, 4)], target))
+
+    def jump_indirect(self, target: dict, *pre: tuple) -> "FunctionBuilder":
+        """A terminal ``BRANCHIND target`` Ghidra lists no flow target for
+        (``jmp rax``, ``jmp [slot]`` with ``target = ram(slot)``); ``pre``:
+        the instruction's ops before it."""
+        self._rows.append(_Instruction([*pre, op("BRANCHIND", [target])], "jumpind"))
+        return self
+
     # -- x86-64 helpers ----------------------------------------------------
     def push(self, register: int) -> "FunctionBuilder":
         if self.arch.link is not None:
@@ -365,8 +379,8 @@ class FunctionBuilder:
         return {"space_id": RAM, "byte_offset": address}
 
     def to_json(self) -> dict:
-        if not self._rows or self._rows[-1].kind not in {"return", "branch", "tail"}:
-            raise ValueError("function must end with ret(), branch() or tail_call()")
+        if not self._rows or self._rows[-1].kind not in {"return", "branch", "tail", "jumpind"}:
+            raise ValueError("function must end with ret(), branch(), tail_call() or jump_indirect()")
         rows = []
         for index, row in enumerate(self._rows):
             address = self._address(index)
@@ -405,6 +419,8 @@ class FunctionBuilder:
                 flow = _flow(is_flow=True, is_call=True, is_terminal=True, is_unconditional=True)
             elif row.kind == "return":
                 flow = _flow(is_flow=True, is_terminal=True, is_unconditional=True)
+            elif row.kind == "jumpind":
+                flow = _flow(is_flow=True, is_jump=True, is_computed=True, is_unconditional=True)
             else:
                 flow = _flow(has_fallthrough=True)
             rows.append({
@@ -858,7 +874,7 @@ def analyze_program(functions: dict[str, FunctionBuilder], provider, *, layout: 
 
 
 def analyze_summaries(functions, provider, *, names=None, layout: Layout = DEFAULT_LAYOUT, data: bytes = b"",
-                      image: bool = False, **options):
+                      image: bool = False, imports=(), **options):
     """The summary engine (``summary_engine.analyze_observed_with_summaries``)
     on synthetic functions: ``functions`` -- FunctionBuilders (bodies);
     ``names`` -- address -> symbol for call targets, bodies or not (opaque
@@ -867,7 +883,7 @@ def analyze_summaries(functions, provider, *, names=None, layout: Layout = DEFAU
     occurrence kept)."""
     from tdo_v2.summary_engine import analyze_observed_with_summaries
 
-    inputs = summary_inputs(functions, names, layout=layout, data=data, image=image)
+    inputs = summary_inputs(functions, names, layout=layout, data=data, image=image, imports=imports)
     return analyze_observed_with_summaries(inputs.program, inputs.evidences, image_info=inputs.image_info,
                                            readonly_image=inputs.readonly_image, boundary_provider=provider,
                                            **options)

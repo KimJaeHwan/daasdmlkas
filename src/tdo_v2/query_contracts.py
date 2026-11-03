@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .graph_contracts import NodeId
 
@@ -40,6 +40,19 @@ class LocalCompleteness:
     # roots bound to a call's consume event (no exact definition of the sink's
     # argument state): nothing can be claimed complete
     unbound_roots: int = 0
+    # unknown control transfers the root rests on (U2a, docs 25.93): the site
+    # keys ``control:<function>:<instruction>`` of the control context of the
+    # root's function (``control:unavailable:<function>`` where none could be
+    # computed) -- the root is the observed graph's answer, true only if no
+    # such transfer resumes
+    control_obligations: tuple[str, ...] = ()
+    # roots bound on an incomplete successor graph (the sink's own state read
+    # through ``conditional_state_definition``)
+    conditional_roots: int = 0
+
+    def __post_init__(self) -> None:
+        if self.complete and (self.control_obligations or self.conditional_roots):
+            raise ValueError("a root resting on an unknown control transfer is never complete")
 
 
 def local_completeness(
@@ -80,3 +93,15 @@ def effective_completeness(
         len(reads),
         local.function_unresolved_writes,
     )
+
+
+def with_control(completeness: LocalCompleteness, obligations=(), conditional_roots: int = 0) -> LocalCompleteness:
+    """``completeness`` resting also on ``obligations`` (control site keys)
+    and, with ``conditional_roots``, bound on an incomplete successor graph:
+    never complete then (U2a, docs 25.93)."""
+    keys = tuple(sorted(set(completeness.control_obligations) | set(obligations)))
+    conditional = max(completeness.conditional_roots, conditional_roots)
+    if keys == completeness.control_obligations and conditional == completeness.conditional_roots:
+        return completeness
+    return replace(completeness, complete=completeness.complete and not keys and not conditional,
+                   control_obligations=keys, conditional_roots=conditional)

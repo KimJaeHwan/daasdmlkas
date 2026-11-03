@@ -62,7 +62,8 @@ from .pcodeop_models import trap_operations
 from .physical_state import PhysicalRegisterSlice
 from .span_geometry import StorageObjectKind
 from .call_clobber import debt_identity
-from .query_contracts import LocalCompleteness, local_completeness
+from .control_context import control_contexts, import_tail_sites, unknown_transfer_sites
+from .query_contracts import LocalCompleteness, local_completeness, with_control
 from .resource_limits import (
     activation, analysis_entry, checkpoint, current_run, limit, reporting, run_exhausted, step,
 )
@@ -316,7 +317,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     if pcodeop_models is not None:
         pcodeop_models = tuple(pcodeop_models)
     from .integration.configured_boundary_demands import (
-        _analyses_from_boundary_nodes, _direct_sink_boundary_nodes,
+        _analyses_from_boundary_nodes, _conditional_direct_sink_boundary_nodes, _direct_sink_boundary_nodes,
     )
     from .integration.configured_function_view import _FunctionView
     from .integration.configured_interprocedural_contracts import ConfiguredFunctionAnalysis
@@ -333,8 +334,11 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     } if assume_boundary_call_effects else {}
     boundaries = {key: _boundaries(item) for key, item in by_key.items()}
 
-    def own_sink_nodes(analysis, view):
-        """ObservedBoundaryNode SINK rows of the function's own boundaries."""
+    def own_sink_nodes(analysis, view, *, conditional=None):
+        """ObservedBoundaryNode SINK rows of the function's own boundaries.
+        ``conditional`` (``bind`` only -- the reported roots, never a summary's
+        sink demand): a set collecting (entry, label, occurrence) of the roots
+        bound on an incomplete successor graph (U2a, docs 25.93)."""
         key = function_key(analysis.entry)
         rows: list = []
         for occurrence, (seed, boundary) in enumerate(boundaries[key]):
@@ -343,16 +347,22 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
                 continue
             for match in boundary_provider.classify(boundary):
                 if match.kind is BoundaryKind.SINK:
-                    bound = _direct_sink_boundary_nodes(
-                        view, match.label, seed.operation_key, position, occurrence,
-                        boundary_provider.state(boundary, match),
-                    )
+                    selectors = boundary_provider.state(boundary, match)
+                    if conditional is None:
+                        bound = _direct_sink_boundary_nodes(
+                            view, match.label, seed.operation_key, position, occurrence, selectors)
+                    else:
+                        bound, used = _conditional_direct_sink_boundary_nodes(
+                            view, match.label, seed.operation_key, position, occurrence, selectors)
+                        if used and bound:
+                            conditional.add((analysis.entry, match.label, occurrence))
                     if not bound:  # unrepresentable state: unbound root, not a lost one
                         node = analysis.normalized.dependencies.node_for_key(f"op:{seed.operation_key}")
                         bound = (ObservedBoundaryNode(BoundaryKind.SINK, match.label, node, occurrence, 0),)
                     rows.extend(bound)
         tails = {analysis.entry: []}
-        _bind_tail_call_sinks((analysis,), {analysis.entry: view}, boundary_provider, tails)
+        _bind_tail_call_sinks((analysis,), {analysis.entry: view}, boundary_provider, tails,
+                              conditional=conditional)
         return rows + tails[analysis.entry]
 
     def sink_roots(key, unit, normalized):
@@ -495,6 +505,18 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         preliminary.append(ConfiguredFunctionAnalysis(item, normalized, EMPTY_OBSERVED_BOUNDARIES, ()))
     nodes: dict = {}
     incomplete_roots: set = set()  # (entry, label, occurrence) of projected roots
+    # import-slot tail jumps are tail calls to imports, no unknown transfer --
+    # under import-slots-hold-their-exports (r6; ``control_context``)
+    import_tail_image = image_info if assume_import_slots_hold_exports else None
+    exempt_of: dict = {}
+
+    def exempt_sites(key, unit):
+        """The function's unknown-transfer sites that are import-slot tails (once per function)."""
+        if key not in exempt_of:
+            exempt_of[key] = unknown_transfer_sites(key, getattr(unit, "observation", None)) \
+                & import_tail_sites(key, unit, import_tail_image)
+        return exempt_of[key]
+    conditional_roots: set = set()  # (entry, label, occurrence) bound on an incomplete graph
 
     def bind(analysis):
         """The function's ObservedBoundaryNode rows (its origins, own sinks
@@ -505,7 +527,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         for fragment, (node, labels) in enumerate(sorted(results[key].origins.items())):
             for label in sorted(labels):
                 rows.append(ObservedBoundaryNode(BoundaryKind.SOURCE, label, node, 0, fragment))
-        rows.extend(own_sink_nodes(analysis, view))
+        rows.extend(own_sink_nodes(analysis, view, conditional=conditional_roots))
         # projected roots: occurrences after the function's own call sites and tails
         base = len(analysis.evidence.seeds.callsites) + len(analysis.evidence.tails)
         for index, (call, _, label, root_nodes, complete) in enumerate(results[key].projected_sinks):
@@ -534,6 +556,11 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             if inherited:
                 # the callee part of a projected root is incomplete
                 completeness = replace(completeness, complete=False)
+            if (analysis.entry, label, occurrence) in conditional_roots:
+                # bound on the observed graph: rests on the function's own
+                # unknown transfers at once (the full context: ``report``)
+                completeness = with_control(completeness, unknown_transfer_sites(key, unit.observation)
+                                            - exempt_sites(key, unit), conditional_roots=1)
             labels = _lane_origin_labels(analysis, unit, nodes[analysis.entry], label, occurrence, node_labels,
                                          lane_indexes)
             explanation = _witnesses(analysis, unit, nodes[analysis.entry], label, occurrence, labels,
@@ -588,6 +615,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             nodes.pop(analysis.entry, None)
             incomplete_roots.difference_update(
                 {row for row in incomplete_roots if row[0] == analysis.entry})
+            conditional_roots.difference_update(
+                {row for row in conditional_roots if row[0] == analysis.entry})
             if _is_run_exhaustion(error):
                 run_budget(preliminary[index:])
                 break
@@ -620,11 +649,23 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         for key in sorted(failed):
             found.extend(_failure_roots(by_key[key], boundaries[key], boundary_provider, failed[key][0]))
             checkpoint()
+        # every late failure is in: each root rests on its function's control
+        # context (U2a, docs 25.93; reporting only -- no analysis reads it)
+        exempt = frozenset().union(*(exempt_sites(key, item.unit) for key, item in sorted(results.items())))
+        contexts = control_contexts(results, failed, exempt)
+        checkpoint()
+        found = _with_control_contexts(found, contexts)
+        # an exemption is a use of its premise (r6; an unmodeled import's jump
+        # records it nowhere else)
+        labels = assumptions if not exempt or "import-slots-hold-their-exports" in assumptions \
+            else (*assumptions, "import-slots-hold-their-exports")
         run = EngineRun(
             program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(found),
-            assumptions, tuple((key, failed[key][0].value, failed[key][1]) for key in sorted(failed)),
-            supports=_function_supports(results, assumptions, external_models, model_bindings, pcodeop_models,
+            labels, tuple((key, failed[key][0].value, failed[key][1]) for key in sorted(failed)),
+            supports=_function_supports(results, labels, external_models, model_bindings, pcodeop_models,
                                         lifecycle_contracts),
+            control_contexts=tuple((key, tuple(sorted(keys))) for key, keys in sorted(contexts.items()) if keys),
+            control_exemptions=tuple((site, "import-slots-hold-their-exports") for site in sorted(exempt)),
         )
         checkpoint()   # (never returned after the reporting deadline)
         return run
@@ -693,6 +734,20 @@ def _with_records(run, record_inputs, provenance=None, *, physical_memory_record
             explanation["rests_on_failed"] = root.explanation["rests_on_failed"]
         roots.append(replace(root, explanation=explanation))
     return replace(run, roots=tuple(roots))
+
+
+def _with_control_contexts(roots, contexts) -> list:
+    """Each root with its function's control context as obligations (both
+    completeness values): a root of a function with a non-empty context is
+    never complete (U2a, docs 25.93)."""
+    found = []
+    for root in roots:
+        keys = contexts.get(f"{root.function_space_id:x}:{root.function_byte_offset:x}")
+        if keys:
+            root = replace(root, local_completeness=with_control(root.local_completeness, keys),
+                           effective_completeness=with_control(root.effective_completeness, keys))
+        found.append(root)
+    return found
 
 
 def _dependents_incomplete(roots, failed, results, by_key) -> list:

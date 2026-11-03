@@ -79,7 +79,34 @@ def _sink_boundary_nodes(
         )
     return tuple(rows)
 
-def _direct_sink_boundary_nodes(
+class _ConditionalSinkState:
+    """The function view as the sink-root binder of the reporting phase sees
+    it (U2a, docs 25.93): ``state_definition`` answers on the observed graph
+    although a BRANCHIND without targets leaves it incomplete
+    (``conditional_state_definition``: every other barrier check applies);
+    everything else is the view's own, strict. Private to one root's binding:
+    nothing it answers is cached, reused or exported, and ``used`` tells
+    whether an answer rested on the incomplete graph."""
+
+    __slots__ = ("_view", "used")
+
+    def __init__(self, view) -> None:
+        self._view = view
+        self.used = False
+
+    def __getattr__(self, name):
+        return getattr(self._view, name)
+
+    def state_definition(self, span, before_position):
+        found = self._view.state_definition(span, before_position)
+        if found is None:
+            found = self._view.conditional_state_definition(span, before_position)
+            if found is not None:
+                self.used = True
+        return found
+
+
+def _conditional_direct_sink_boundary_nodes(
     caller,
     label,
     call_operation_key,
@@ -87,8 +114,53 @@ def _direct_sink_boundary_nodes(
     occurrence_ordinal,
     selectors,
 ):
-    """Bind a sink to exact physical definitions or its exact consume event."""
-    backend = _FunctionPhysicalStateBackend(caller)
+    """``_direct_sink_boundary_nodes`` for a reported root (``bind`` only):
+    in a function whose successor graph is incomplete the sink's own state is
+    read on the observed graph (``_ConditionalSinkState``). (rows, whether a
+    binding rested on that graph); elsewhere exactly the strict binding."""
+    from ..resource_limits import DiagnosticExhausted, diagnostic
+
+    if not caller._barrier_facts().complete:
+        state = _ConditionalSinkState(caller)
+        try:
+            # reporting work no analysis result depends on: its own bounded
+            # ledger (TDO_V2_CONDITIONAL_BINDING_WORK units); on a cut, the
+            # strict binding below (today's unbound root)
+            with diagnostic(_conditional_binding_work()):
+                rows = _direct_sink_boundary_nodes(
+                    caller, label, call_operation_key, call_position, occurrence_ordinal, selectors, state=state)
+            # (a root left at its consume event is unbound, not conditionally bound)
+            definitions = set(caller.memory_graph.definition_nodes)
+            return rows, state.used and any(row.node in definitions for row in rows)
+        except DiagnosticExhausted:
+            pass
+    return _direct_sink_boundary_nodes(
+        caller, label, call_operation_key, call_position, occurrence_ordinal, selectors), False
+
+
+CONDITIONAL_BINDING_WORK = 2_000_000
+
+
+def _conditional_binding_work() -> int:
+    import os
+
+    raw = os.environ.get("TDO_V2_CONDITIONAL_BINDING_WORK")
+    return int(raw) if raw else CONDITIONAL_BINDING_WORK
+
+
+def _direct_sink_boundary_nodes(
+    caller,
+    label,
+    call_operation_key,
+    call_position,
+    occurrence_ordinal,
+    selectors,
+    *,
+    state=None,
+):
+    """Bind a sink to exact physical definitions or its exact consume event
+    (``state``: the view the physical state is read from, default ``caller``)."""
+    backend = _FunctionPhysicalStateBackend(caller if state is None else state)
     span_resolver = PhysicalStateResolver(backend)
     rows = []
     event_spans = []
@@ -245,4 +317,4 @@ def _canonical_boundary_nodes(
         )
     )
 
-__all__ = ["_analyses_from_boundary_nodes","_canonical_boundary_nodes","_direct_sink_boundary_nodes","_project_sink_entry_demand","_sink_boundary_nodes"]
+__all__ = ["_analyses_from_boundary_nodes","_canonical_boundary_nodes","_conditional_direct_sink_boundary_nodes","_direct_sink_boundary_nodes","_project_sink_entry_demand","_sink_boundary_nodes"]

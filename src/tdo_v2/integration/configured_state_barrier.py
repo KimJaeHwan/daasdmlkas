@@ -179,12 +179,15 @@ class _FunctionStateBarrierMixin:
         before_key: str,
         *,
         own_definition_id: int | None = None,
+        accept_incomplete: bool = False,
     ) -> bool:
         """Nothing that may change ``span`` lies between ``origin_key`` (None:
         the function entry) and ``before_key``'s own effects (rows anchored at
-        ``before_key`` follow the consumption, as the lookups always ordered)."""
+        ``before_key`` follow the consumption, as the lookups always ordered).
+        ``accept_incomplete``: see ``state_barrier``."""
         return self.state_barrier(
-            span, origin_key, before_key, own_definition_id=own_definition_id
+            span, origin_key, before_key, own_definition_id=own_definition_id,
+            accept_incomplete=accept_incomplete,
         ) is None
 
     def state_barrier(
@@ -194,10 +197,15 @@ class _FunctionStateBarrierMixin:
         before_key: str,
         *,
         own_definition_id: int | None = None,
+        accept_incomplete: bool = False,
     ) -> str | None:
-        """Why the span may change in between (None: it may not)."""
+        """Why the span may change in between (None: it may not).
+        ``accept_incomplete`` (only ``conditional_state_definition``): judge
+        on the observed graph although a BRANCHIND without targets leaves it
+        incomplete -- every other check unchanged; the answer is conditional
+        on those transfers (design U2a, docs 25.93)."""
         facts = self._barrier_facts()
-        if not facts.complete:
+        if not facts.complete and not accept_incomplete:
             return "incomplete-successors"
         target = facts.place.get(before_key)
         if target is None:

@@ -90,6 +90,10 @@ class AnalyzedFunction:
     # summaries (``derive_composed_call_effect``). Not in ``calls``: a consumer
     # that does not know this map sees an opaque indirect call
     multi_calls: dict = field(default_factory=dict)
+    # every multi-target resolution of the round, before the ``call in proven``
+    # filter of ``multi_calls``: the control-context edges (U2a, docs 25.93)
+    # -- reporting only, no analysis reads it
+    multi_candidates: dict = field(default_factory=dict, repr=False)
     # Private replay inputs and caller-owned specializations; never replace
     # the program's generic callee entry with an activation.
     normalization_options: tuple = field(default=(), repr=False)
@@ -1107,6 +1111,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     multi_calls={call: members for call, members in multi.get(key, {}).items()
                                                  if call in proven})
             result.normalization_options = tuple(normalization_options.items())
+            result.multi_candidates = {call: tuple(members) for call, members in multi.get(key, {}).items()}
             result.summary_inputs = (dead_ops, dead_jumps, summary_requires)
             result.consumed = {call: found for call, found in consumed.items() if call in proven}
             result.replay_feedback = (

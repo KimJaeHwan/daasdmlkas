@@ -70,6 +70,7 @@ CONTRACT = {
         "activation_witness": "original caller/callee input pins; context graph and preserved spans remain encoded",
         "activation_inputs": "identity-based invalidation pins of the original inputs",
         "consumed": "2b-P exact producer instances (analysis objects); the effects they produced remain encoded",
+        "multi_candidates": "U2a control-context edges (reporting only); multi_calls remains encoded",
     }),
     "FunctionSummary": (None, {"premise_uses": "2b-P use records (docs 25.91) -- reporting, checked by tests"}),
     "ProvenCallEffect": (None, {}),
@@ -84,7 +85,9 @@ CONTRACT = {
 ADDED_FIELDS = {
     "ReadSourcePart": {"writer": None},
     "LocalReadFrom": {"complete": True},
-    "EngineRun": {"failed_functions": ()},
+    "EngineRun": {"failed_functions": (), "control_contexts": (), "control_exemptions": ()},
+    # U2a (docs 25.93): control obligations, conditional bindings
+    "LocalCompleteness": {"control_obligations": (), "conditional_roots": 0},
     "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {},
                          "call_memory_decisions": (), "activation_rejections": {}, "allocation_lifetimes": (),
                          "lifetime_models": ()},
@@ -299,6 +302,11 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
     run_level = {
         "assumptions": encode(run.assumptions, "assumptions"),
         "failed_functions": encode(getattr(run, "failed_functions", ()), "failed_functions"),
+        # (U2a: only when a function has a control context)
+        **({"control_contexts": encode(run.control_contexts, "control_contexts")}
+           if getattr(run, "control_contexts", ()) else {}),
+        **({"control_exemptions": encode(run.control_exemptions, "control_exemptions")}
+           if getattr(run, "control_exemptions", ()) else {}),
         "lane_diagnostics": encode(dict(LANE_DIAGNOSTICS), "lane"),
         "index_diagnostics": encode(dict(INDEX_DIAGNOSTICS), "index"),
     }

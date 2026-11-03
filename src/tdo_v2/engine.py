@@ -128,6 +128,14 @@ class EngineRun:
     # closure rests on by kind and what keeps it unestablished
     # (``producer_support.FunctionPremises``); ``assumptions`` stays the run union
     supports: tuple = ()
+    # U2a (docs 25.93, summary engine): (function key, sorted site keys) of every
+    # function with a non-empty control context -- the unknown transfers its
+    # roots rest on (``LocalCompleteness.control_obligations``)
+    control_contexts: tuple = ()
+    # (site key, named assumption) of every BRANCHIND without targets taken as
+    # no unknown transfer: a terminal jump through an import slot, a tail call
+    # to the import under import-slots-hold-their-exports
+    control_exemptions: tuple = ()
 
 
 @analysis_entry

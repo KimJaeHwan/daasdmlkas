@@ -24,6 +24,7 @@ from ..observed_boundary_projection import (
 from .configured_boundary_demands import (
     _analyses_from_boundary_nodes,
     _canonical_boundary_nodes,
+    _conditional_direct_sink_boundary_nodes,
     _direct_sink_boundary_nodes,
     _project_sink_entry_demand,
     _sink_boundary_nodes,
@@ -47,13 +48,17 @@ from .configured_target_resolution import (
 from .configured_write_event_engine import _stabilized_write_events
 from .observed_function_session import ObservedFunctionEvidence
 
-def _bind_tail_call_sinks(preliminary, views, provider, nodes) -> None:
+def _bind_tail_call_sinks(preliminary, views, provider, nodes, *, conditional=None) -> None:
     """A sink reached by a tail call (``jmp sink``): root at the jump's state.
 
     Boundary recognition only -- no callee projection or demand propagation.
     If the argument state has no exact graph definition, the root is bound to
     the jump operation itself, which reads nothing, so the engine reports it
     as an unbound (incomplete) root instead of dropping it.
+    ``conditional`` (the summary engine's reported roots only): a set that
+    collects (entry, label, occurrence) of the roots bound on an incomplete
+    successor graph (``_conditional_direct_sink_boundary_nodes``); None:
+    strict binding.
     """
     for caller in preliminary:
         view = views[caller.entry]
@@ -81,10 +86,18 @@ def _bind_tail_call_sinks(preliminary, views, provider, nodes) -> None:
             for match in provider.classify(boundary):
                 if match.kind is not BoundaryKind.SINK:
                     continue  # a tail-called source has no local reader
-                sink_nodes = _direct_sink_boundary_nodes(
-                    view, match.label, tail.operation_key, position, base + index,
-                    provider.state(boundary, match),
-                )
+                if conditional is None:
+                    sink_nodes = _direct_sink_boundary_nodes(
+                        view, match.label, tail.operation_key, position, base + index,
+                        provider.state(boundary, match),
+                    )
+                else:
+                    sink_nodes, used = _conditional_direct_sink_boundary_nodes(
+                        view, match.label, tail.operation_key, position, base + index,
+                        provider.state(boundary, match),
+                    )
+                    if used and sink_nodes:
+                        conditional.add((caller.entry, match.label, base + index))
                 if not sink_nodes:
                     node = caller.normalized.dependencies.node_for_key(f"op:{tail.operation_key}")
                     sink_nodes = (
