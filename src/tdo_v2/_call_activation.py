@@ -172,6 +172,13 @@ def _summarize(callee, normalized):
         summary = summarize_function(normalized, callee.unit.observation, {}, (), dead_ops,
                                      noreturn_jumps=dead_jumps)
         anchors = _relative_anchors(callee.unit, normalized)
+    if callee.summary is not None and callee.summary.fault_references:
+        # (F1: a replay after publication keeps the instance's references; one
+        # during the analysis gets them with every retained instance,
+        # ``interprocedural._with_fault_references``)
+        from dataclasses import replace as _replace
+
+        summary = _replace(summary, fault_references=callee.summary.fault_references)
     return summary, anchors
 
 

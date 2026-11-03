@@ -181,6 +181,33 @@ REGISTRY: tuple[Assumption, ...] = (
         "assume_debug_break_traps_do_not_return", "--no-assume-debug-break-traps-do-not-return",
         "TDO_V2_ASSUME_DEBUG_BREAK_TRAPS_DO_NOT_RETURN"),
     Assumption(
+        "stock-ghidra-translator", "switch", False,
+        "The Bundle's p-code was produced by the stock Ghidra translator of its attested version (Ghidra "
+        "12.0.4: the naming sidecar's version, compared at admission), whose user-op table is the one the "
+        "engine's fault rows were exported from (GhidraV2ListUserOps, x86-64.sla d5adc314...). A Bundle "
+        "attests the version and the language, never the compiled translator: recognizing a fault "
+        "instruction (ud2) rests on this, recorded per recognized site.",
+        "A locally rebuilt translator reporting the same Ghidra and language versions with another user-op "
+        "table or other semantics.",
+        "fault_premise.fault_sites (recognition), with faults-end-the-execution",
+        "assume_stock_ghidra_translator", "--assume-stock-ghidra-translator"),
+    Assumption(
+        "faults-end-the-execution", "switch", False,
+        "A recognized fault instruction (x86-64 ud2: CALLOTHER invalidInstructionException + BRANCHIND, "
+        "needs stock-ghidra-translator) ends the analysed execution: no handler of any kind (the faulting or "
+        "a caller frame's, a vectored / continue / unhandled-exception filter, a signal handler, a debugger, "
+        "the OS) resumes into the program, observes or writes its state, calls back into it or lets it "
+        "escape; it is not inside a hardware transaction; the stack at the fault is the one the observed "
+        "graph implies. A site with a hazard (an exception-directory handler covering it or a caller's call "
+        "site, a malformed or unreadable directory, a transactional instruction in it or a caller) is not "
+        "discharged; a discharged fault ends its path (FunctionSummary.fault_outcomes) but never makes a "
+        "function noreturn. Hazard absence is no proof.",
+        "Structured exception handling (__try/__except) around the call, a vectored or unhandled-exception "
+        "handler, a signal handler, a debugger resuming, a transaction aborting to its fallback path.",
+        "fault_premise (plan, hazards), interprocedural (round state, fallback), function_summary "
+        "(fault outcomes), configured_state_barrier (the jump as a terminal), control_context (exemption)",
+        "assume_faults_end_execution", "--assume-faults-end-execution"),
+    Assumption(
         "external-models", "switch", True,
         "Imported functions behave as their models (models/external, plus --model-dir directories and "
         "TDO_V2_MODEL_DIRS). Each use is reported by provenance: external-model:<file>/<entry>@v<n> "
@@ -340,9 +367,12 @@ MODEL_SWITCHABLE = ("allocator-results-are-fresh", "no-use-after-free", "no-use-
 def disabled(*, globals_disjoint: bool, readonly_image: bool, direction_flag: bool, entry_values_not_frame: bool,
              home_space: bool, opaque_no_stack: bool, traps: bool, import_slots: bool, same_result: bool,
              accessor_separate: bool, accessor_private_state: bool, registered_handlers: bool,
-             model_assumptions_off=(), pre_escape: bool = True, opaque_restores_sp: bool = True) -> set:
+             model_assumptions_off=(), pre_escape: bool = True, opaque_restores_sp: bool = True,
+             faults_end_execution: bool = False, stock_translator: bool = False) -> set:
     """The assumption labels a run has switched off: a model entry resting on
-    one is not applied (``interprocedural``, ``linking``)."""
+    one is not applied (``interprocedural``, ``linking``). The fault premise's
+    two switches are off unless given (a caller that does not pass them runs
+    without them)."""
     return {name for name, on in (
         ("globals-disjoint-from-stack", globals_disjoint),
         ("readonly-image-data-is-constant", readonly_image),
@@ -358,6 +388,8 @@ def disabled(*, globals_disjoint: bool, readonly_image: bool, direction_flag: bo
         ("accessor-result-separate", accessor_separate),
         ("accessor-private-state", accessor_private_state),
         ("registered-handlers-are-not-observed", registered_handlers),
+        ("faults-end-the-execution", faults_end_execution),
+        ("stock-ghidra-translator", stock_translator),
     ) if not on} | set(model_assumptions_off)
 
 

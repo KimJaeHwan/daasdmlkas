@@ -85,15 +85,17 @@ CONTRACT = {
 ADDED_FIELDS = {
     "ReadSourcePart": {"writer": None},
     "LocalReadFrom": {"complete": True},
-    "EngineRun": {"failed_functions": (), "control_contexts": (), "control_exemptions": ()},
+    "EngineRun": {"failed_functions": (), "control_contexts": (), "control_exemptions": (), "fault_report": ()},
     # U2a (docs 25.93): control obligations, conditional bindings
     "LocalCompleteness": {"control_obligations": (), "conditional_roots": 0},
     "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {},
+                         "fault_decisions": (),
                          "call_memory_decisions": (), "activation_rejections": {}, "allocation_lifetimes": (),
                          "lifetime_models": ()},
     "NormalizedFunction": {"activation_entry": None, "forward_memory_proofs": (), "forward_memory_requires": (),
                            "load_value_proofs": (), "nonstack_spans": frozenset(), "intrinsic_refinements": (),
-                           "assumes_opaque_callees_restore_stack_pointer": True},
+                           "assumes_opaque_callees_restore_stack_pointer": True,
+                           "fault_cuts": (), "fault_reachable": False},
     "RootSlice": {"inherited_incomplete": False},
     "UnresolvedNormalizedFunction": {"assumes_opaque_callees_restore_stack_pointer": True},
     "CallMemoryDecision": {"evidence": ()},
@@ -103,7 +105,9 @@ ADDED_FIELDS = {
     "LoopMemoryGraph": {"read_from_nodes": (), "read_from_source_nodes": ()},
     "LoopMemoryReadFrom": {"requires_backedge": False},
     # (fields of the forward-memory / expression branch, 2026-10-23..26)
-    "FunctionSummary": {"address_relations": (), "independent_delta_proofs": ()},
+    "FunctionSummary": {"address_relations": (), "independent_delta_proofs": (),
+                        # (the fault premise, F1: off by default)
+                        "fault_outcomes": (), "fault_references": (), "fault_reachable": False},
     "LocalMemorySsaResult": {"call_register_snapshots": (), "flow_edges": ()},
     "SummaryRun": {"literal": None},
     "ProvenRunEffect": {"literal": None},
@@ -315,7 +319,9 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
         "bindings": [Path(path).name for path in bindings],
         # (a switch added after the baselines is recorded only off its default)
         "options": encode({name: value for name, value in options.items()
-                           if not (name == "assume_opaque_callees_restore_stack_pointer" and value)}, "options"),
+                           if not (name == "assume_opaque_callees_restore_stack_pointer" and value)
+                           and not (name in ("assume_faults_end_execution", "assume_stock_ghidra_translator")
+                                    and not value)}, "options"),
         "models": [[item.file_id, item.digest] for item in models.files] if models is not None else None,
         "python": sys.version.split()[0], "seconds": round(time.time() - started, 1),
     }

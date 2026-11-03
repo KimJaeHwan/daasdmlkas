@@ -6235,3 +6235,40 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
 - U2a가 주지 않는 것: 조건부 호출 효과(UD2를 가진 피호출의 요약은 지금처럼 거부), 조건부 결정. 맥락이 피호출로만 비어
   있지 않은 함수의 분석 산출물은 지금과 같고(기존 구멍, 2c의 강제 규칙이 막을 몫이며 이후 모든 opening의 선행 조건),
   U2a는 그 root를 표시한다. F1(`faults-end-the-execution`, 기본 OFF)은 별도 단계.
+
+### 25.94 장애 전제 -- UD2는 실행을 끝낸다 (F1, opt-in; 2026-11-03)
+
+설계 `.census6/design_fault_premise_r8.md` + r9 + r10 + r11(Astra r11 승인; r7 반려 후 소유자 결정: noreturn 없음, 늦은
+위험 요소는 그 위치를 빼고 다시 분석, 장애 결과 구조 기록). 두 스위치, 둘 다 기본 OFF, 둘 다 켜야 동작:
+- `stock-ghidra-translator`: Bundle의 p-code가 증명된 Ghidra 버전(12.0.4, 이름 sidecar로 admission 비교)의 표준 번역기에서
+  나왔다 -- Bundle은 번역기(`.sla`) 자체를 증명하지 않으므로 인식이 이 가정에 기댄다(인식한 위치마다 기록).
+- `faults-end-the-execution`: 인식한 장애 명령이 실행을 끝낸다(어떤 처리기도 재개·관찰·호출하지 않음, 트랜잭션 밖, 스택은
+  관찰 그래프대로). 위험 요소의 부재는 증명이 아니다.
+- 인식(`fault_premise.fault_sites`): 한 명령이 정확히 `t = CALLOTHER(c); BRANCHIND t`, c = 4바이트 상수 77
+  (x86:LE:64:default 4.6 `invalidInstructionException`), t = UNIQUE 8바이트, fallthrough·flow target 없음. 표는 코드에 둔다
+  (`intrinsic_refinements`처럼; p-code 모델 파일을 바꾸면 템플릿의 pcodeop digest가 바뀐다). x86-32 / AArch64 행은 export와
+  관찰 사례가 생기면.
+- 위험 요소(하나라도 있으면 그 위치는 풀지 않음): H1 봉인된 `original.bin`의 PE32+ 예외 디렉터리(`exception_directory.py`,
+  모든 범위 검사, 손상·검증 불가 = 위험)가 그 위치를 처리기로 덮음; H2 함수 안 TSX(xabort/xbegin/xend/xtest); H3 그 함수를
+  (관찰 호출 그래프 + 라운드마다 해석된 대상·다중 후보로) 부를 수 있는 함수에 TSX가 있거나 그 호출 위치가 처리기로 덮임.
+- 풀린 집합 D는 `analyze_units` 라운드 상태: 라운드 뒤 H3를 다시 보고 줄어들기만 한다(고정점 비교에 포함, 줄면 한 라운드 더).
+  불안정 종료는 가장 작은 D, 자원 소진 fallback(1라운드 결과)은 D가 줄었으면 취소된 위치에 기대는 함수와 그 호출자 전부를
+  실패("fault:revoked")로 공개(`_without_revoked_faults`, 원시 후보·호출 그래프 전용 순회).
+- D와 `may_reach_fault`는 정규화 입력(`NormalizedFunction.fault_cuts` / `fault_reachable`, `normalization_options`):
+  replay·activation이 같은 결정을 본다. 요약은 그 CALLOTHER에서 경로를 끝내고(호출·crossing 아님), 그 블록은 tail exit도 dead
+  exit도 아닌 `FunctionSummary.fault_outcomes`(위치, cut, 원 함수, 전제, 근거: 행·이미지 digest·예외 entry·판정, guard: 레이블
+  붙은 제어 의존 부분 그래프 -- 중첩·대안·순환·`unknown-edge` 유지, state: 그 블록의 종단 상태를 출구처럼 분류); 상태 장벽은
+  그 BRANCHIND를 종단으로 본다; control context에서 빠지고 `control_exemptions`에 (위치, 전제).
+- noreturn은 장애에서 나오지 않는다: 단 하나의 판정 `summary_noreturn`이 fault_outcomes / fault_references /
+  `fault_reachable`이면 거부. `may_reach_fault`는 1라운드 전에 고정 -- 모든 CALLIND·BRANCHIND와 분석 집합 밖 호출을 와일드카드로
+  둔 역도달이라 이후 라운드가 벗어날 수 없다. 장애로만 끝나는 함수는 호출자에게 불투명(지금처럼).
+- `FunctionSummary.fault_references`: 분석 뒤, (호출, 피호출)마다 하나(직접·해석·다중 후보 전부), 호출 블록의 guard;
+  재귀는 순환으로 남아 유한(게시·보유된 모든 인스턴스에: activation, 소비된 생산자, witness, superseded; guard는 진단 장부).
+  템플릿은 장애 cut / outcome / reference에 기댄 함수를 내보내지 않는다(`fault_reachable`만인 요약은 더 약할 뿐이라 허용).
+- H3는 관찰된 모든 함수(모델·바인딩으로 분석에서 잘린 함수 포함)를 호출자로 본다. `EngineRun.fault_report` = 인식한 위치마다
+  (위치, discharged | hazard | revoked, 사유) + 보고 전용 등록 import(AddVectoredExceptionHandler, SetUnhandledExceptionFilter,
+  RtlAddFunctionTable, sigaction ...). 두 스위치를 끄면 모델 admission도 그 전제에 기댄 모델을 거부한다(`assumptions.disabled`).
+- 측정(Mulp 전체 405 함수, 두 스위치 ON + 봉인 이미지의 예외 디렉터리): 장애 534개 한 모양, 1라운드 위험 없음 390, 라운드
+  H3 뒤 343 풀림; 미해결 종단 때문에 요약이 거부된 함수 259 -> 172, 증명된 호출 효과 407 -> 605, unbound 76 -> 73.
+  complete는 0 그대로: Mulp의 런타임에 채워지는 `jmp [.rdata slot]` 64개가 거의 모든 함수의 맥락에 남는다(분석가 링크 /
+  실행 단계 몫). 게이트 Bundle에는 장애가 없다(OFF·ON 같음).

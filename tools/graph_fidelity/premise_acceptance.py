@@ -51,6 +51,8 @@ CLAIMS = (*DATA_CLAIMS, "continuation", "sp")
 # measured one off
 ACCESSOR = ("same-result-functions", "accessor-result-separate", "accessor-private-state")
 PREREQUISITES = {name: ACCESSOR for name in ACCESSOR}
+# the fault premise discharges nothing without the translator identity (F1)
+PREREQUISITES["faults-end-the-execution"] = ("stock-ghidra-translator",)
 
 
 def _graph(normalized):

@@ -55,6 +55,7 @@ from .interprocedural import (
     ANALYSIS_FAILURES, _failure_detail, _failure_reason, _is_run_exhaustion, _ledger_key, analyze_units,
     function_key, run_definition_nodes,
 )
+from .exception_directory import load_exception_directory
 from .image_info import ReadOnlyImage, load_image_info
 from .normalize import NormalizationFailureReason, NormalizedFunction
 from .observed_call_state import observed_call_state_projections
@@ -123,6 +124,8 @@ def analyze_frozen_bundle_with_summaries(
     pcodeop_models=None,
     assume_win64_home_space_private: bool = True,
     assume_debug_break_traps_do_not_return: bool = True,
+    assume_faults_end_execution: bool = False,
+    assume_stock_ghidra_translator: bool = False,
     stack_evidence=(),
     linker=None,
     assume_import_slots_hold_exports: bool = True,
@@ -200,6 +203,10 @@ def analyze_frozen_bundle_with_summaries(
             pcodeop_models=pcodeop_models,
             assume_win64_home_space_private=assume_win64_home_space_private,
             assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
+            assume_faults_end_execution=assume_faults_end_execution,
+            assume_stock_ghidra_translator=assume_stock_ghidra_translator,
+            exception_directory=(load_exception_directory(generation_path)
+                                 if assume_faults_end_execution else None),
             stack_evidence=stack_evidence,
             linker=linker,
             assume_import_slots_hold_exports=assume_import_slots_hold_exports,
@@ -230,6 +237,9 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
     pcodeop_models=None,
     assume_win64_home_space_private: bool = True,
     assume_debug_break_traps_do_not_return: bool = True,
+    assume_faults_end_execution: bool = False,
+    assume_stock_ghidra_translator: bool = False,
+    exception_directory=None,
     stack_evidence=(),
     linker=None,
     assume_import_slots_hold_exports: bool = True,
@@ -263,6 +273,9 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
         pcodeop_models=pcodeop_models,
         assume_win64_home_space_private=assume_win64_home_space_private,
         assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
+        assume_faults_end_execution=assume_faults_end_execution,
+        assume_stock_ghidra_translator=assume_stock_ghidra_translator,
+        exception_directory=exception_directory,
         stack_evidence=stack_evidence,
         linker=linker,
         assume_import_slots_hold_exports=assume_import_slots_hold_exports,
@@ -292,6 +305,9 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     pcodeop_models=None,
     assume_win64_home_space_private: bool = True,
     assume_debug_break_traps_do_not_return: bool = True,
+    assume_faults_end_execution: bool = False,
+    assume_stock_ghidra_translator: bool = False,
+    exception_directory=None,
     stack_evidence=(),
     linker=None,
     assume_import_slots_hold_exports: bool = True,
@@ -469,6 +485,9 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         assume_direction_flag_clear=assume_direction_flag_clear,
         private_frame_above=home_space,
         assume_debug_break_traps_do_not_return=assume_debug_break_traps_do_not_return,
+        assume_faults_end_execution=assume_faults_end_execution,
+        assume_stock_ghidra_translator=assume_stock_ghidra_translator,
+        exception_directory=exception_directory,
         assume_import_slots_hold_exports=assume_import_slots_hold_exports,
         assume_entry_values_not_frame=assume_entry_values_not_frame,
         assume_opaque_callees_leave_no_stack_addresses=assume_opaque_callees_leave_no_stack_addresses,
@@ -516,6 +535,11 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             exempt_of[key] = unknown_transfer_sites(key, getattr(unit, "observation", None)) \
                 & import_tail_sites(key, unit, import_tail_image)
         return exempt_of[key]
+
+    def fault_exempt(key):
+        """The function's discharged fault sites (the fault premise, F1)."""
+        item = results.get(key)
+        return frozenset(row[0] for row in getattr(getattr(item, "normalized", None), "fault_cuts", ()))
     conditional_roots: set = set()  # (entry, label, occurrence) bound on an incomplete graph
 
     def bind(analysis):
@@ -560,7 +584,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
                 # bound on the observed graph: rests on the function's own
                 # unknown transfers at once (the full context: ``report``)
                 completeness = with_control(completeness, unknown_transfer_sites(key, unit.observation)
-                                            - exempt_sites(key, unit), conditional_roots=1)
+                                            - exempt_sites(key, unit) - fault_exempt(key), conditional_roots=1)
             labels = _lane_origin_labels(analysis, unit, nodes[analysis.entry], label, occurrence, node_labels,
                                          lane_indexes)
             explanation = _witnesses(analysis, unit, nodes[analysis.entry], label, occurrence, labels,
@@ -652,7 +676,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         # every late failure is in: each root rests on its function's control
         # context (U2a, docs 25.93; reporting only -- no analysis reads it)
         exempt = frozenset().union(*(exempt_sites(key, item.unit) for key, item in sorted(results.items())))
-        contexts = control_contexts(results, failed, exempt)
+        faults = frozenset().union(*(fault_exempt(key) for key in sorted(results)))
+        contexts = control_contexts(results, failed, exempt | faults)
         checkpoint()
         found = _with_control_contexts(found, contexts)
         # an exemption is a use of its premise (r6; an unmodeled import's jump
@@ -665,7 +690,10 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             supports=_function_supports(results, labels, external_models, model_bindings, pcodeop_models,
                                         lifecycle_contracts),
             control_contexts=tuple((key, tuple(sorted(keys))) for key, keys in sorted(contexts.items()) if keys),
-            control_exemptions=tuple((site, "import-slots-hold-their-exports") for site in sorted(exempt)),
+            control_exemptions=tuple(sorted(
+                [(site, "import-slots-hold-their-exports") for site in exempt]
+                + [(site, "faults-end-the-execution") for site in faults])),
+            fault_report=_fault_report(results, image_info),
         )
         checkpoint()   # (never returned after the reporting deadline)
         return run
@@ -734,6 +762,26 @@ def _with_records(run, record_inputs, provenance=None, *, physical_memory_record
             explanation["rests_on_failed"] = root.explanation["rests_on_failed"]
         roots.append(replace(root, explanation=explanation))
     return replace(run, roots=tuple(roots))
+
+
+# registration / dynamic-table imports (the fault premise's report-only hazard:
+# a handler registered at run time that no static evidence shows)
+FAULT_REGISTRATION_IMPORTS = frozenset((
+    "AddVectoredExceptionHandler", "AddVectoredContinueHandler", "SetUnhandledExceptionFilter",
+    "RtlAddVectoredExceptionHandler", "RtlAddVectoredContinueHandler", "RtlAddFunctionTable",
+    "RtlInstallFunctionTableCallback", "sigaction", "signal", "bsd_signal", "sysv_signal", "sigset",
+))
+
+
+def _fault_report(results, image_info) -> tuple:
+    """``EngineRun.fault_report``: every recognized site's decision and, when
+    any site was recognized, the registration imports of the image
+    ("registration-import", name, library) -- reported, never a verdict."""
+    rows = sorted(row for item in results.values() for row in item.fault_decisions)
+    if rows and image_info is not None:
+        rows += sorted(("registration-import", symbol.name, symbol.library) for symbol in image_info.imports
+                       if symbol.name in FAULT_REGISTRATION_IMPORTS)
+    return tuple(rows)
 
 
 def _with_control_contexts(roots, contexts) -> list:
@@ -1007,6 +1055,17 @@ def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, 
     # paths behind it can change a summary without leaving a dead exit
     if traps and pcodeop_models and any(trap_operations(item.unit, pcodeop_models) for item in results.values()):
         assumptions += ("debug-break-traps-do-not-return",)
+    # the fault premise (F1, docs 25.94): a discharged fault (both labels), or
+    # a recognized site (the translator identity alone)
+    # (labels activations inherit -- ``summary_inputs`` -- come below: not twice)
+    inherited = {label for item in results.values() for label in item.inherited_assumptions}
+    if any(getattr(item.normalized, "fault_cuts", ()) for item in results.values()):
+        assumptions += tuple(label for label in ("faults-end-the-execution", "stock-ghidra-translator")
+                             if label not in inherited)
+    elif "stock-ghidra-translator" not in inherited and any(
+            label == "stock-ghidra-translator" for item in results.values()
+            for label, _, _ in getattr(item.normalized, "premise_uses", ())):
+        assumptions += ("stock-ghidra-translator",)
     if any(getattr(item.normalized, "assumed_direction_flag_clear", False) for item in results.values()):
         # a rep string site whose direction flag is the function's entry value
         assumptions += ("direction-flag-clear",)

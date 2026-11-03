@@ -136,6 +136,9 @@ class EngineRun:
     # no unknown transfer: a terminal jump through an import slot, a tail call
     # to the import under import-slots-hold-their-exports
     control_exemptions: tuple = ()
+    # the fault premise (F1, docs 25.94): (site key, status, detail) of every
+    # recognized fault site (``AnalyzedFunction.fault_decisions``)
+    fault_report: tuple = ()
 
 
 @analysis_entry

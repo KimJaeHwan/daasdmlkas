@@ -184,6 +184,12 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
     if summary is None:
         raise TemplateRefused("no summary")
     for item in closure:
+        # the fault premise (F1, docs 25.94): no template states a cut fault path
+        found = item.summary
+        if getattr(item.normalized, "fault_cuts", ()) or found is not None and (
+                found.fault_outcomes or found.fault_references):
+            raise TemplateRefused(f"{item.key}: rests on faults-end-the-execution")
+    for item in closure:
         # a function of the closure the analysis refused (an unsupported shape):
         # the export is refused too, never shipped with that call left opaque
         if item is not analyzed and getattr(item.normalized, "reason", None) is not None:

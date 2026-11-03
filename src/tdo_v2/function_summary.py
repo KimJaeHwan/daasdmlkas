@@ -108,6 +108,40 @@ class ExitSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class FaultOutcome:
+    """A path ended by a discharged fault (F1, docs 25.94), recorded apart
+    from every normal or dead exit: where (``site``, its CALLOTHER ``cut``,
+    the ``origin`` function), under what (``premises``, ``evidence``: the
+    recognition row, image digest, exception entry, hazard verdicts), on
+    which condition (``guard``: the labelled control-dependence rows reaching
+    the fault block -- (decision, decision block, successor | "unknown-edge",
+    dependent block); None when the block graph is unsupported) and in what
+    state (``state``: the fault block's terminal state, classified as an exit
+    would be). Nothing reads it for an effect: under the premise nothing
+    resumes there."""
+
+    site: str
+    cut: str
+    origin: str
+    premises: tuple[str, ...]
+    evidence: tuple
+    guard: tuple | None
+    state: ExitSummary
+
+
+@dataclass(frozen=True, slots=True)
+class FaultReference:
+    """A call of this function that may reach a callee's fault outcomes
+    (own or referenced), one per (call, callee): the callee's outcomes stay
+    scoped to the callee's summary; ``guard`` is the call block's labelled
+    control dependence (``FaultOutcome.guard``)."""
+
+    call: str
+    callee: str
+    guard: tuple | None
+
+
+@dataclass(frozen=True, slots=True)
 class SinkDemand:
     """What one sink root of the function needs from its callers: the entry
     bytes its backward data slice reaches (``sources``), the debts on the way,
@@ -167,6 +201,13 @@ class FunctionSummary:
     independent_delta_proofs: tuple = ()
     # 2b-P use records (docs 25.91): (named assumption, "summary", where) for
     # decisions this summary's extraction took under it -- reporting
+    # the fault premise (F1, docs 25.94): paths ended by discharged faults,
+    # references to callees' ones (set after the analysis), and whether a
+    # discharged fault may be reached at all (``fault_premise.may_reach``) --
+    # each blocks noreturn (``call_summary_effects.summary_noreturn``)
+    fault_outcomes: tuple = ()
+    fault_references: tuple = ()
+    fault_reachable: bool = False
     premise_uses: tuple = field(default=(), compare=False)
 
 
@@ -217,6 +258,9 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     # writers whose address debt is conditional land on their static object
     # (the conditions travel with the summary); the others may land anywhere
     dead_keys, dead_exit = _dead_region(normalized, observation, dead_ops)
+    # a discharged fault's CALLOTHER (F1) ends its path: no call, no crossing
+    # (its block stays a terminal, kept apart as a fault outcome below)
+    dead_keys = dead_keys | frozenset(row[1] for row in getattr(normalized, "fault_cuts", ()))
     # a writer only on dead paths never writes: its conditions are not needed
     conditional = {key: pairs for key, pairs in uncertain_conditions.items()
                    if pairs is not None and key.split("~", 1)[0] not in dead_keys}
@@ -236,6 +280,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     crossing_labels = crossed.pop("label_universe")
     summary_uses = crossed.pop("premise_uses", set())
 
+    fault_blocks = _fault_blocks(normalized, observation)
     exits = []
     nodes = ssa.state_nodes
     dead_exits = []
@@ -258,6 +303,9 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     exits = _pointer_values(normalized, observation, exits, tracer)
     exits = _offset_values(normalized, observation, exits)
     exits = _constant_values(normalized, observation, exits)
+    # (a discharged fault's block is classified as an exit, then kept apart)
+    fault_states = {item.block_key: item for item in exits if item.block_key in fault_blocks}
+    exits = [item for item in exits if item.block_key not in fault_blocks]
     # unknown-address writers (conditional ones are ordinary writes, above)
     # leave every root incomplete
     unconditional_writers = bool(crossed.get("unknown_writers", ()))
@@ -281,13 +329,14 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
                     found_proofs.append(proof)
             independent_delta_proofs = tuple(found_proofs)
     if writer_conditions:
-        exits = [ExitSummary(item.block_key, tuple(
+        exits, fault_list = ([ExitSummary(item.block_key, tuple(
             run if run.kind in (SummaryKind.IDENTITY, SummaryKind.UNKNOWN)
             or run.span.object_id.kind is StorageObjectKind.FUNCTION_UNIQUE
             else replace(run, conditions=tuple(sorted(
                 set(run.conditions) | writer_conditions,
                 key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))))
-            for run in item.runs)) for item in exits]
+            for run in item.runs)) for item in rows] for rows in (exits, list(fault_states.values())))
+        fault_states = {item.block_key: item for item in fault_list}
     demands = []
     for root in sink_roots:
         label, root_nodes, complete = root[:3]
@@ -314,7 +363,8 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     return FunctionSummary(
         FUNCTION_SUMMARY_VERSION, tuple(exits), tuple(sorted(crossed.get("unknown_writers", ()))),
         tuple(writer_objects),
-        tuple(key for key in _tail_exits(normalized, observation, noreturn_jumps) if not dead_exit(key)),
+        tuple(key for key in _tail_exits(normalized, observation, noreturn_jumps)
+              if not dead_exit(key) and key not in fault_blocks),
         inner_calls, tuple(demands),
         register_deltas,
         tuple(sorted(dead_exits)),
@@ -322,6 +372,8 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         stack_values_out(normalized, observation),
         indexed_relations(normalized, observation, conditions_of),
         independent_delta_proofs,
+        fault_outcomes=_fault_outcomes(normalized, observation, fault_blocks, fault_states),
+        fault_reachable=bool(getattr(normalized, "fault_reachable", False)),
         premise_uses=_summary_uses(normalized, summary_uses),
     )
 
@@ -388,6 +440,64 @@ def _register_deltas(normalized, observation, exits) -> tuple:
         if len(deltas) == 1 and None not in deltas:
             found.append(((start, size), deltas.pop()))
     return tuple(found)
+
+
+_FAULT_CACHE: dict = {}   # (kind, id(observation)) -> (observation, value): one per observation, bounded
+
+
+def _cached(kind, observation, compute):
+    """``compute()`` once per observation object (identity-checked)."""
+    found = _FAULT_CACHE.get((kind, id(observation)))
+    if found is not None and found[0] is observation:
+        return found[1]
+    if len(_FAULT_CACHE) > 4096:
+        _FAULT_CACHE.clear()
+    value = compute()
+    _FAULT_CACHE[(kind, id(observation))] = (observation, value)
+    return value
+
+
+def _fault_blocks(normalized, observation) -> dict:
+    """Block key -> fault cut row (site, cut, branch, evidence) of every block
+    ending in a discharged fault's BRANCHIND (``NormalizedFunction.fault_cuts``)."""
+    rows = {branch: row for row in getattr(normalized, "fault_cuts", ()) for branch in (row[2],)}
+    if not rows:
+        return {}
+    ends = _cached("ends", observation, lambda: _block_ends(normalized, observation))
+    return {block: rows[key] for block, key in ends.items() if key in rows}
+
+
+def _block_ends(normalized, observation) -> dict:
+    """Block key -> the operation key ending it (every block of the graph)."""
+    from .call_seeds import _operation_key
+    from .pcode_blocks import build_pcode_block_graph
+
+    graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
+    instructions = {row.address: row for row in observation.instructions}
+    found = {}
+    for block in graph.blocks:
+        if block.stop == 0:
+            continue
+        row = instructions[block.instruction]
+        found[block.key] = _operation_key(row.address, block.stop - 1, row.operations[block.stop - 1].opcode)
+    return found
+
+
+def _fault_outcomes(normalized, observation, fault_blocks, fault_states) -> tuple:
+    """The function's ``FaultOutcome`` rows (sorted by site)."""
+    if not fault_blocks:
+        return ()
+    from .control_dependence import guard_rows, labelled_control_dependences
+    from .fault_premise import LABELS
+
+    labelled = _cached("guards", observation,
+                       lambda: labelled_control_dependences(observation, normalized.scopes.function.entry))
+    origin = f"{normalized.scopes.function.entry.space_id:x}:{normalized.scopes.function.entry.byte_offset:x}"
+    found = []
+    for block, (site, cut, _, evidence) in fault_blocks.items():
+        found.append(FaultOutcome(site, cut, origin, LABELS, tuple(evidence), guard_rows(labelled, block),
+                                  fault_states.get(block, ExitSummary(block, ()))))
+    return tuple(sorted(found, key=lambda row: row.site))
 
 
 def _tail_exits(normalized, observation, noreturn_jumps=frozenset()) -> tuple[str, ...]:

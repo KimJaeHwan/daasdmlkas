@@ -84,8 +84,10 @@ class _BarrierFacts:
         self.writes = tuple(rows)
         # an indirect branch whose targets Ghidra did not resolve leaves the
         # successor graph incomplete: no path claim is a proof
+        # (a discharged fault's jump is a terminal: the fault premise, F1)
+        faults = {branch for _, _, branch, _ in getattr(view.normalized, "fault_cuts", ())}
         self.complete = not any(
-            operation.opcode == "BRANCHIND" and not view.operation_flow_targets.get(key)
+            operation.opcode == "BRANCHIND" and not view.operation_flow_targets.get(key) and key not in faults
             for key, (_, operation) in view.operations.items())
         self.reach: dict = {}
         self.coreach: dict = {}

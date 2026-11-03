@@ -105,6 +105,67 @@ def derive_control_dependences(
     return tuple(sorted(rows, key=lambda row: (row.decision, row.dependent)))
 
 
+def labelled_control_dependences(observation, entry) -> tuple:
+    """The same construction as ``derive_control_dependences``, keeping the
+    successor edge each dependence comes from: rows (decision op key,
+    decision block, successor block -- "unknown-edge" for a BRANCHIND --,
+    dependent block), sorted; None when the block graph is unsupported.
+    The fault premise's guards (F1, docs 25.94); nothing else reads it."""
+    graph = build_pcode_block_graph(observation, entry)
+    if graph.unsupported is not None:
+        return None
+    instructions = {row.address: row for row in observation.instructions}
+    blocks = {block.key: block for block in graph.blocks}
+    successors: dict = {}
+    for block in graph.blocks:
+        targets = tuple(target for target in block.successors if target in blocks)
+        if block.exits or not targets:
+            targets = (*targets, _EXIT)
+        successors[block.key] = targets
+    successors[_EXIT] = ()
+    _connect_exitless(successors)
+    immediate = _immediate_postdominators(successors)
+    rows = set()
+    for key, targets in successors.items():
+        if key == _EXIT or len(set(targets)) < 2:
+            continue
+        block = blocks[key]
+        row = instructions[block.instruction]
+        last = row.operations[block.stop - 1]
+        if last.opcode not in ("CBRANCH", "BRANCHIND"):
+            continue
+        decision = _operation_key(row.address, block.stop - 1, last.opcode)
+        stop = immediate[key]
+        for target in set(targets):
+            label = "unknown-edge" if last.opcode == "BRANCHIND" or target == _EXIT else target
+            node = target
+            while node is not None and node != stop and node != _EXIT:
+                step()
+                rows.add((decision, key, label, node))
+                node = immediate[node]
+    return tuple(sorted(rows))
+
+
+def guard_rows(rows, block: str) -> tuple:
+    """The labelled control-dependence sub-graph reached backward from
+    ``block``: every row whose dependent is ``block`` or a decision block of
+    such a row (alternatives and cycles kept); None stays None (unknown)."""
+    if rows is None:
+        return None
+    incoming: dict = {}
+    for row in rows:
+        incoming.setdefault(row[3], []).append(row)
+    found, pending, seen = set(), [block], {block}
+    while pending:
+        node = pending.pop()
+        for row in incoming.get(node, ()):
+            found.add(row)
+            if row[1] not in seen:
+                seen.add(row[1])
+                pending.append(row[1])
+    return tuple(sorted(found))
+
+
 def _connect_exitless(successors) -> None:
     """Give every node that cannot reach EXIT a virtual edge to it."""
     reverse: dict[object, set] = {node: set() for node in successors}

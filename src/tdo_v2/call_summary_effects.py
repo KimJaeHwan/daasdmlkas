@@ -338,6 +338,16 @@ class ProvenCallEffect:
         return self.stack_restoration is StackRestoration.PROVEN
 
 
+def summary_noreturn(summary) -> bool:
+    """The callee never returns: no exit, no tail exit, some dead exit (a trap,
+    a call that never returns) -- and nothing of the fault premise: a fault
+    outcome, a reference to one, or a discharged fault it may reach (F1, docs
+    25.94: a fault is never a reason for noreturn). The ONE reader of that
+    conjunction (a test keeps it so)."""
+    return (not summary.exits and not summary.tail_exits and bool(summary.dead_exits)
+            and not summary.fault_outcomes and not summary.fault_references and not summary.fault_reachable)
+
+
 def derive_proven_call_effect(
     summary: FunctionSummary,
     callee: str,
@@ -391,7 +401,7 @@ def derive_proven_call_effect(
     clobbers_below = False
     sink_demands = tuple(_sink_demand(demand, anchored, rejections, f"sink{index}")
                          for index, demand in enumerate(summary.sink_demands))
-    if not summary.exits and not summary.tail_exits and summary.dead_exits:
+    if summary_noreturn(summary):
         return ProvenCallEffect(callee, (), (), sink_demands=sink_demands, noreturn=True, escapes_stack=True)
     if summary.tail_exits or not summary.exits:
         if not sink_demands:
@@ -653,7 +663,7 @@ def derive_composed_call_effect(
     # proves no state -- but every member's sink demands still bind at the call
     opaque_members = []
     for index, (summary, anchors) in enumerate(members):
-        if summary.tail_exits or (not summary.exits and not summary.dead_exits):
+        if summary.tail_exits or (not summary.exits and not summary_noreturn(summary)):
             opaque_members.append(f"opaque-member:{index}")
         merged_anchors.update(anchors or {})
         for object_id, relation in dict(getattr(summary, "address_relations", ())).items():
@@ -747,6 +757,9 @@ def derive_composed_call_effect(
         values_out,
         tuple(sorted(((key, value) for key, value in merged_relations.items() if key not in conflicted_relations),
                      key=lambda pair: repr(pair[0]))),
+        # (a member that may reach a fault: the composition is never noreturn, F1)
+        fault_reachable=any(summary.fault_reachable or summary.fault_outcomes or summary.fault_references
+                            for summary, _ in members),
     )
     effect = derive_proven_call_effect(
         composed, callee, register_object, register_limit, excluded=excluded, anchors=merged_anchors,

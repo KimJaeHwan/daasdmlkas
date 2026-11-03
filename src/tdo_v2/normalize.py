@@ -271,6 +271,13 @@ class NormalizedFunction:
     # cross a call exactly as a read would (docs 25.84); () = every call
     # clobbers everything
     call_clobber_contract: tuple = field(default=(), compare=False, repr=False)
+    # the fault premise (F1, docs 25.94), a normalization input: the function's
+    # discharged fault sites ((site key, CALLOTHER cut key, BRANCHIND key,
+    # evidence rows), sorted) -- the summary ends their paths, the state
+    # barrier takes their jumps as terminals -- and whether a discharged fault
+    # may be reached from it (``fault_premise.may_reach``: never noreturn)
+    fault_cuts: tuple = ()
+    fault_reachable: bool = False
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -1562,6 +1569,8 @@ class FunctionNormalizer:
         assume_direction_flag_clear: bool = False,
         private_frame_above: int = 0,
         open_conditions: dict | None = None,
+        fault_cuts: tuple = (),
+        fault_reachable: bool = False,
         _forward_memory_plan=None,
         _load_identity_plan=None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
@@ -1613,6 +1622,8 @@ class FunctionNormalizer:
         from dataclasses import replace
 
         entry = entry_for(function.scope)
+        if type(result) is NormalizedFunction and (fault_cuts or fault_reachable):
+            result = replace(result, fault_cuts=tuple(sorted(fault_cuts)), fault_reachable=bool(fault_reachable))
         return replace(result, activation_entry=entry) if type(result) is NormalizedFunction and entry else result
 
     def normalize_configured(

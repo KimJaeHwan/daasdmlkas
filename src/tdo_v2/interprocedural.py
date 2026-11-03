@@ -94,6 +94,9 @@ class AnalyzedFunction:
     # filter of ``multi_calls``: the control-context edges (U2a, docs 25.93)
     # -- reporting only, no analysis reads it
     multi_candidates: dict = field(default_factory=dict, repr=False)
+    # the fault premise (F1, docs 25.94): (site key, "discharged" | "hazard" |
+    # "revoked", detail) of every recognized fault site -- reporting
+    fault_decisions: tuple = ()
     # Private replay inputs and caller-owned specializations; never replace
     # the program's generic callee entry with an activation.
     normalization_options: tuple = field(default=(), repr=False)
@@ -251,8 +254,11 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     previous = sys.getrecursionlimit()
     sys.setrecursionlimit(max(previous, ANALYSIS_RECURSION_LIMIT))
     try:
-        return _analyze_units(units, **options)
+        return _with_fault_references(_analyze_units(units, **options))
     finally:
+        from .function_summary import _FAULT_CACHE
+
+        _FAULT_CACHE.clear()   # (one run's observations only)
         sys.setrecursionlimit(previous)
         PRE_ESCAPE_NOT_FRAME.reset(pre)
         OPAQUE_RESTORES_SP.reset(restores)
@@ -318,6 +324,150 @@ class _Interrupted(Exception):
         self.results = results
 
 
+FAULT_REFERENCE_WORK = 1_000_000   # (the guards of one call's reference: a bounded diagnostic)
+
+
+def _retained_instances(results) -> list:
+    """Every analysis instance the run publishes or retains: the published
+    results, their activations, the exact producers they consumed, activation
+    witnesses (caller and callee analyses) and superseded results -- closed
+    under the same relations (the instances ``producer_support`` reports)."""
+    found, seen, pending = [], set(), list(results.values())
+    while pending:
+        item = pending.pop()
+        if type(item) is not AnalyzedFunction or id(item) in seen:
+            continue
+        seen.add(id(item))
+        found.append(item)
+        pending.extend(item.activations.values())
+        pending.extend(instance for rows in item.consumed.values() for instance in rows)
+        pending.extend(member for member in item.activation_witness[:2])
+        if item.superseded is not None:
+            pending.append(item.superseded)
+    return found
+
+
+def _with_fault_references(results) -> dict:
+    """Each summary's ``fault_references`` (F1, docs 25.94), after the
+    analysis: one ``FaultReference`` per (call, callee) whose callee has fault
+    outcomes or reaches one (direct and resolved calls, every multi-target
+    member and raw candidate), with the call block's labelled guard -- on
+    EVERY instance the run publishes or retains (``_retained_instances``),
+    each from its own calls: a failed latest result never suppresses its
+    completed producers. Read by nothing that derives an effect (noreturn is
+    vetoed by the static ``fault_reachable``); recursion is a cycle here,
+    never an unrolled chain. Reporting work: the guards run under a bounded
+    diagnostic ledger (no run budget; a cut leaves the guard unknown, None),
+    so a finished or fallback publication is never lost."""
+    instances = _retained_instances(results)
+    owners = {item.key for item in instances if item.summary is not None and item.summary.fault_outcomes}
+    if not owners:
+        return results
+    from .control_dependence import guard_rows, labelled_control_dependences
+    from .function_summary import FaultReference
+    from .pcode_blocks import build_pcode_block_graph
+    from .resource_limits import DiagnosticExhausted, diagnostic
+
+    def calls_of(item) -> dict:
+        rows = {}
+        for call, callee in item.calls.items():
+            rows.setdefault(call, set()).add(callee)
+        for source in (item.multi_calls, getattr(item, "multi_candidates", {})):
+            for call, members in source.items():
+                rows.setdefault(call, set()).update(members)
+        return rows
+
+    edges: dict = {}   # function key -> callees over every instance of it
+    for item in instances:
+        edges.setdefault(item.key, set()).update(callee for callees in calls_of(item).values() for callee in callees)
+    reach = set(owners)
+    changed = True
+    while changed:
+        changed = False
+        for key, callees in edges.items():
+            if key not in reach and callees & reach:
+                reach.add(key)
+                changed = True
+    guards: dict = {}   # (function key, call key) -> guard rows (one computation per function)
+
+    def guard(item, call):
+        if (item.key, call) in guards:
+            return guards[(item.key, call)]
+        try:
+            with diagnostic(FAULT_REFERENCE_WORK):
+                observation = item.unit.observation
+                entry = item.unit.scopes.function.entry
+                labelled = guards.get((item.key, None))
+                if labelled is None:
+                    labelled = guards[(item.key, None)] = (labelled_control_dependences(observation, entry),
+                                                           build_pcode_block_graph(observation, entry))
+                rows, graph = labelled
+                space, offset, ordinal = call.split(":")[:3]
+                address = next((row.address for row in observation.instructions
+                                if f"{row.address.space_id:x}:{row.address.byte_offset:x}" == f"{space}:{offset}"),
+                               None)
+                block = None if address is None else graph.block_of(address, int(ordinal.split("~")[0]))
+                found = None if block is None else guard_rows(rows, block.key)
+        except DiagnosticExhausted:
+            found = None
+        guards[(item.key, call)] = found
+        return found
+
+    for item in instances:
+        if item.summary is None or item.key not in reach:
+            continue
+        pairs = sorted((call, callee) for call, callees in calls_of(item).items() for callee in callees
+                       if callee in reach)
+        if pairs:
+            references = tuple(FaultReference(call, callee, guard(item, call)) for call, callee in pairs)
+            if item.summary.fault_references != references:
+                item.summary = replace(item.summary, fault_references=references)
+    return results
+
+
+def _without_revoked_faults(published, plan, discharged, functions, calls, revoked_reasons=None) -> dict:
+    """A fallback publication (round 1 after a run exhaustion) when D shrank
+    after round 1 (F1): every function whose round-1 result rests on a revoked
+    fault -- its owner and every function whose calls may reach it (direct
+    calls, resolved calls, multi-target candidates, observation targets) --
+    is published failed, never with the stale cut."""
+    revoked = plan.discharged - discharged
+    if not revoked:
+        return published
+    from .fault_premise import observed_calls
+
+    owners = {key for key, rows in plan.sites.items() if any(site.key in revoked for site in rows)}
+    callers: dict = {}
+    keys = frozenset(functions)
+    for key, unit in functions.items():
+        targets = set(observed_calls(unit, keys)[0]) | set(calls.get(key, {}).values())
+        item = published.get(key)
+        if item is not None:
+            targets |= set(item.calls.values())
+            targets |= {member for members in (*item.multi_calls.values(), *getattr(item, "multi_candidates", {}).values())
+                        for member in members}
+        for target in targets:
+            callers.setdefault(target, set()).add(key)
+    affected, pending = set(owners), list(owners)
+    while pending:
+        node = pending.pop()
+        for caller in callers.get(node, ()):
+            if caller not in affected:
+                affected.add(caller)
+                pending.append(caller)
+    from .fault_premise import decisions
+
+    found = dict(published)
+    for key in sorted(affected):
+        if key in found:
+            found[key] = AnalyzedFunction(key, functions[key], UnresolvedNormalizedFunction(
+                functions[key].scopes, NormalizationFailureReason.ANALYSIS_RUN_BUDGET), None, calls.get(key, {}),
+                failure_detail="fault:revoked", superseded=None)
+            if plan.sites.get(key):
+                found[key].fault_decisions = decisions(plan, key, discharged, revoked_reasons or {})
+    return found
+
+
 @measured("analyze_units")
 def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_globals_disjoint_from_stack=False, sink_roots=None,
@@ -331,7 +481,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_accessor_private_state=False, model_bindings=(),
                   record_provenance: dict | None = None,
                   assume_registered_handlers_not_observed=True, lifecycle_contracts=(),
-                  disabled_model_assumptions=(), assumption_declarations=()) -> dict[str, AnalyzedFunction]:
+                  disabled_model_assumptions=(), assumption_declarations=(),
+                  assume_faults_end_execution=False, assume_stock_ghidra_translator=False,
+                  exception_directory=None) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -432,6 +584,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         import_slots=_import_slots_switched_on(), same_result=assume_same_result_functions,
         accessor_separate=assume_accessor_result_separate, accessor_private_state=assume_accessor_private_state,
         registered_handlers=assume_registered_handlers_not_observed,
+        faults_end_execution=assume_faults_end_execution, stock_translator=assume_stock_ghidra_translator,
         model_assumptions_off=disabled_model_assumptions)
     cuts = _model_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
                        image_info, external_models, own_library, disabled) \
@@ -469,6 +622,17 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     program = dict(functions)   # every function of the program, cut ones included (program-wide facts)
     functions = {key: unit for key, unit in functions.items() if key not in cuts}
     calls = {key: _direct_calls(unit, functions) for key, unit in functions.items()}
+    # the fault premise (F1, docs 25.94): recognized sites, hazards, the
+    # discharged set D (round state: it only shrinks) and the static
+    # may-reach-fault set, decided before the first round
+    from .fault_premise import EMPTY_PLAN, LABELS as FAULT_LABELS, TRANSLATOR_PREMISE, plan_faults
+    from .fault_premise import decisions as fault_decisions, revoke as revoke_faults
+    fault_on = bool(assume_faults_end_execution and assume_stock_ghidra_translator)
+    image_base = next(iter(functions.values())).scopes.program.evidence.image_base.byte_offset \
+        if functions else None
+    fault_plan = plan_faults(functions, exception_directory, image_base, program) \
+        if fault_on and functions else EMPTY_PLAN
+    fault_state = {"discharged": fault_plan.discharged, "revoked": {}}
     local_entries = frozenset((unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset)
                               for unit in program.values())
     externals = {
@@ -999,6 +1163,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     private_frame_above=private_frame_above,
                     open_conditions=opened,
                 )
+                fault_cuts = fault_plan.cuts_of(key, fault_state["discharged"])
+                if fault_cuts:
+                    normalization_options["fault_cuts"] = fault_cuts
+                if key in fault_plan.may_reach_fault:
+                    normalization_options["fault_reachable"] = True
                 normalized = FunctionNormalizer().normalize(
                     unit, **normalization_options, _forward_memory_plan=refinement,
                     _load_identity_plan=load_identity)
@@ -1062,6 +1231,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             dead_jumps = frozenset(jump for jump in jumps if jump.endswith(":CBRANCH"))
             summary_requires = tuple(sorted(
                 ({"debug-break-traps-do-not-return"} if traps else set())
+                | (set(FAULT_LABELS) if getattr(normalized, "fault_cuts", ()) else set())
                 | {entry.label for _, entry in jumps.values()}
                 | {label for _, entry in jumps.values() for label in entry.inherited}))
             accessor_uses = _accessor_uses(normalized, key) if type(normalized) is NormalizedFunction else set()
@@ -1073,6 +1243,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                               if call in proven and constants[call]}
             # p-code op models and assumed (TEST-ONLY boundary) effects applied
             accessor_uses |= {(effect.label, "admission", call) for call, effect in assumed.items()}
+            # (F1: every recognized fault site rests on the translator identity)
+            accessor_uses |= {(TRANSLATOR_PREMISE, "admission", fault.key) for fault in fault_plan.sites.get(key, ())}
             if type(normalized) is NormalizedFunction and (discharge_uses or summary_requires or accessor_uses):
                 # 2b-P uses decided outside the normalization: caller-side
                 # condition discharges, the summary's trap / modeled-jump cuts,
@@ -1112,6 +1284,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                                  if call in proven})
             result.normalization_options = tuple(normalization_options.items())
             result.multi_candidates = {call: tuple(members) for call, members in multi.get(key, {}).items()}
+            if fault_plan.sites.get(key):   # (F1: every recognized site's decision, as analysed)
+                result.fault_decisions = fault_decisions(fault_plan, key, fault_state["discharged"],
+                                                         fault_state["revoked"])
             result.summary_inputs = (dead_ops, dead_jumps, summary_requires)
             result.consumed = {call: found for call, found in consumed.items() if call in proven}
             result.replay_feedback = (
@@ -1303,8 +1478,26 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     found[key] = direct
                 if cut := {call: cuts[target] for call, target in targets.items() if target in cuts}:
                     found_cuts[key] = cut
+            # (F1) the round's graph may show a new contextual hazard: D shrinks
+            discharged = fault_state["discharged"]
+            if discharged:
+                edges: dict = {}
+                for owner, rows in (*found.items(), *found_multi.items()):
+                    for call, targets in rows.items():
+                        offset = int(call.split(":")[1], 16)
+                        for target in ((targets,) if isinstance(targets, str) else tuple(targets)):
+                            edges.setdefault(owner, {}).setdefault(target, set()).add(offset)
+                for owner, item in results.items():
+                    for call, members in getattr(item, "multi_candidates", {}).items():
+                        for target in members:
+                            edges.setdefault(owner, {}).setdefault(target, set()).add(int(call.split(":")[1], 16))
+                kept, reasons = revoke_faults(fault_plan, functions, discharged, edges, exception_directory,
+                                              image_base, program)
+                fault_state["revoked"].update(reasons)
+            else:
+                kept = discharged
             if found == resolved and found_cuts == resolved_cuts and found_multi == resolved_multi \
-                    and not newly_failed:
+                    and not newly_failed and kept == discharged:
                 # (the resolutions recomputed on these results: their facts' labels too)
                 for key, labels in requires.items():
                     results[key].inherited_assumptions = results[key].inherited_assumptions | frozenset(labels)
@@ -1314,6 +1507,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 return results
             if newly_failed:
                 rounds += 1   # (one more round for the failure; each function fails once)
+            if kept != discharged:
+                rounds += 1   # (one more round for the revoked faults; D only shrinks)
+                fault_state["discharged"] = kept
             resolved, resolved_cuts, resolved_multi = found, found_cuts, found_multi
             # (accumulated over the rounds: each round's results rest on every
             # earlier round's resolutions, so on their facts' labels too)
@@ -1327,11 +1523,15 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         resolution_call_requires.clear()
         return analyze(calls)  # not stable: no indirect resolution at all
     except _Interrupted as stop:
-        return stop.results if first is None else with_failures(first)
+        published = stop.results if first is None else with_failures(first)
+        return _without_revoked_faults(published, fault_plan, fault_state["discharged"], functions, calls,
+                                       fault_state["revoked"])
     except AnalysisBudgetExceeded as error:
         if not _is_run_exhaustion(error) or first is None:
             raise
-        return with_failures(first)   # (round 1 finished; later rounds rest on unrevalidated resolutions)
+        # (round 1 finished; later rounds rest on unrevalidated resolutions)
+        return _without_revoked_faults(with_failures(first), fault_plan, fault_state["discharged"], functions, calls,
+                                       fault_state["revoked"])
 
 
 MAX_RECURSION_ROUNDS = 8
