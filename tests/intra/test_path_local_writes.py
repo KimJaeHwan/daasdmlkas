@@ -179,3 +179,13 @@ def test_a_template_manifest_becomes_one_model_key_per_row_and_its_scope():
 
 
 
+
+
+def test_a_wildcard_holder_is_a_static_writer_from_the_start():
+    """Astra code r4: an indirect call may resolve to a writing model in a later round -- its holder
+    counts as a static writer before round 1 (the set never changes between rounds), so D.3 declines
+    a later cut there and leaves a vetoed-noreturn site."""
+    from tdo_v2.fault_premise import observed_calls
+
+    (unit,) = program_units(FunctionBuilder(entry=MAIN).ins(copy(reg(RAX), const(G))).call_indirect(RAX).ret())
+    assert observed_calls(unit, frozenset())[1]

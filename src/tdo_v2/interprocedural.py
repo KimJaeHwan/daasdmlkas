@@ -653,9 +653,16 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     def static_writers() -> frozenset:
         if "found" not in _static:
             stack_registers = frozenset((span.start, span.size) for span in program_stack)
-            # (a model's memory effects are writes this function's call effects make)
+            # (a model's memory effects are writes this function's call effects make;
+            # a wildcard transfer -- an indirect call or jump, a call outside the
+            # analysed set -- may resolve to such a model in any later round, so its
+            # holder counts from the start: the set never changes between rounds)
+            from .fault_premise import observed_calls
+
+            keys = frozenset(functions)
             _static["found"] = frozenset(key for key, unit in functions.items()
-                                         if memory_writer(unit, stack_registers) or externals.get(key))
+                                         if memory_writer(unit, stack_registers) or externals.get(key)
+                                         or observed_calls(unit, keys)[1])
         return _static["found"]
 
     def own_frontier(key) -> frozenset:
