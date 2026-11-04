@@ -153,6 +153,26 @@ def memory_writer(unit, stack_registers=frozenset()) -> bool:
     from ._scope_contracts import VarnodeKindCode
 
     stackish = {"INT_ADD", "INT_SUB", "COPY", "PTRADD", "PTRSUB", "INT_ZEXT", "INT_SEXT", "SUBPIECE"}
+    # the stack register is trusted as a base only if the function moves it by
+    # constants alone (``rsp = rsp +/- c``): any other write may make it anything
+    for row in observation.instructions:
+        defined = {}
+        for operation in row.operations:
+            output = operation.output
+            if output is not None and output.kind is VarnodeKindCode.REGISTER \
+                    and (output.coordinate.byte_offset, output.byte_size) in stack_registers:
+                inputs = operation.inputs
+                same = any(item.kind is VarnodeKindCode.REGISTER
+                           and (item.coordinate.byte_offset, item.byte_size) in stack_registers for item in inputs)
+                constant = any(item.kind is VarnodeKindCode.CONSTANT
+                               or defined.get((item.kind, item.coordinate)) is not None
+                               and defined[(item.kind, item.coordinate)].opcode == "COPY"
+                               and defined[(item.kind, item.coordinate)].inputs[0].kind is VarnodeKindCode.CONSTANT
+                               for item in inputs)
+                if operation.opcode not in ("INT_ADD", "INT_SUB") or not same or not constant:
+                    return True
+            if output is not None:
+                defined[(output.kind, output.coordinate)] = operation
     for row in observation.instructions:
         defined = {}
         for operation in row.operations:

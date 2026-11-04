@@ -257,17 +257,19 @@ def test_nonreturning_members_do_not_contribute_old_memory_alternatives(monkeypa
     results = analyze_with_abort_model(_caller(), a, b)
     program = {(1, int(key.split(":")[1], 16)): item.unit.observation for key, item in results.items()}
     assert results["1:1900"].summary.dead_exits and not results["1:1900"].summary.exits
-    effect = _effect(results)
-    assert effect.noreturn is all_dead
+    # (B', docs 25.96: the members call an import -- a wildcard edge in a program
+    # with memory writers -- so a member's noreturn is declined; the composition
+    # proves nothing past the call and the caller owns a vetoed-noreturn site)
+    from tdo_v2.call_summary_effects import vetoed_noreturn
+
+    assert vetoed_noreturn(results["1:1900"].summary)
+    item = results[ROOT]
+    assert any(site.endswith(":vetoed-noreturn") for site in item.normalized.callee_support)
+    assert not any(effect.noreturn for effect in item.proven.values())
     sources = {}
     derived = _derive(_members(results), memory_sources=sources)
-    if all_dead:
-        assert not effect.memory_runs and not derived.memory_runs and not sources
-    else:
-        (run,) = effect.memory_runs
-        assert not run.keeps_old
-        assert tuple(index for index, _ in sources[run.write]) == (0,)
-    _check(results, program, complete=not all_dead, externals={(1, ABORT): "abort"})
+    assert derived is None or not derived.noreturn
+    _check(results, program, complete=False, externals={(1, ABORT): "abort"})
 
 
 @pytest.mark.parametrize("problem", ("debt", "condition", "writer-condition"))

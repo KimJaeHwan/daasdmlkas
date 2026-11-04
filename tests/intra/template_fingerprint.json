@@ -56,8 +56,8 @@
    "input": "c279b10137e020683f01a1488b630b3cc82415f7dcc33122a4779b810ff67f29"
   },
   "model_calls_and_noreturn": {
-   "forward_0": "cee1fd13dbdc8bf22ebb9aad1e95d6fcd4e7687114a0d5291d0657c554cec802",
-   "forward_1": "cee1fd13dbdc8bf22ebb9aad1e95d6fcd4e7687114a0d5291d0657c554cec802",
+   "forward_0": "f0f6417ca20474cfd7e79e920cc52e4e656004b778b74bbe5bb082415bccd885",
+   "forward_1": "f0f6417ca20474cfd7e79e920cc52e4e656004b778b74bbe5bb082415bccd885",
    "input": "a58c01312a3d2930ddc9e8ff5cf433ec9ebf3692df97f61651d075964b7b321c"
   },
   "opaque_indirect_call": {

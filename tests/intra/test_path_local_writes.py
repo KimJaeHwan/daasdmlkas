@@ -140,3 +140,37 @@ def test_a_callee_without_a_summary_is_unavailable_to_its_caller():
 def test_no_writer_no_key():
     results = analyze_units(program_units(_rooted(entry=MAIN), FunctionBuilder(entry=SINK).ret()))
     assert results[_key(MAIN)].summary.control_support == ()
+
+
+def test_a_rewritten_stack_pointer_is_no_trusted_base():
+    """Astra code r1: ``rsp = rdx * rcx; [rsp] = rax`` writes anywhere -- a static writer for D.3."""
+    from synthetic import RSP
+    from tdo_v2.control_context import memory_writer
+
+    stack = frozenset({(RSP, 8)})
+    rewritten = FunctionBuilder(entry=MAIN).ins(op("INT_MULT", [reg(RDX), reg(RCX)], reg(RSP)),
+                                                store(reg(RSP), reg(RAX))).ret()
+    plain = FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(store(reg(RSP), reg(RAX))).add_rsp(0x28).ret()
+    (unit,) = program_units(rewritten)
+    assert memory_writer(unit, stack)
+    (unit,) = program_units(plain)
+    assert not memory_writer(unit, stack)
+
+
+def test_a_template_manifest_becomes_one_model_key_per_row_and_its_scope():
+    """The shipped UE template's AppendChar states a memory-writes row: an importer owns its row key
+    and, separately, the closure's continuation (settling the writer leaves it)."""
+    import json
+    from pathlib import Path
+    from tdo_v2.interprocedural import _register_file
+    from tdo_v2.summary_templates import instantiate
+
+    path = Path(__file__).resolve().parents[2] / "models" / "derived" / "ue_core_win64_fstring.json"
+    entries = {entry["name"]: entry for entry in json.loads(path.read_text(encoding="utf-8"))["entries"]}
+    template = entries["?AppendChar@FString@@QEAAAEAV1@_W@Z"]["summary"]
+    assert template["control"]["rows"][0][0] == "memory-writes" and template["control"]["scope"]
+    (unit,) = program_units(FunctionBuilder(entry=MAIN).ret())
+    register_object, _ = _register_file(unit.observation, unit.scopes.resolution_context)
+    summary, _ = instantiate(template, "ue:AppendChar", register_object, 1)
+    assert summary.control_support == ("control:model:ue:AppendChar:0:memory-writes",
+                                       "control:model:ue:AppendChar:scope:continuation")

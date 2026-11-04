@@ -324,11 +324,13 @@ def _site_kind(site: str) -> str:
     return "unknown-transfer"
 
 
-def _control_manifest(context, results) -> list:
-    """The template's "control" rows (B', docs 25.96): one per memory-writes /
-    vetoed-noreturn site of its context -- [kind, function, details] in
-    library-relative keys (writer operations with their RAM / WILD class, or
-    the call's instruction) -- what an importer's link must name to settle it."""
+def _control_manifest(context, results, closure) -> dict | None:
+    """The template's "control" manifest (B', docs 25.96): ``rows`` -- one per
+    memory-writes / vetoed-noreturn site of its context, [kind, function,
+    details] in library-relative keys (writer operations with their RAM / WILD
+    class; or the call's instruction and its callees) -- and ``scope``: the
+    closure's functions, the continuation an importer's model key names
+    separately (settling a writer leaves it). None: nothing to state."""
     from .write_classes import WriterClasses, unresolved_writers
 
     rows = []
@@ -338,9 +340,8 @@ def _control_manifest(context, results) -> list:
             continue
         parts = site.split(":")
         function = ":".join(parts[1:3])
+        item = results.get(function)
         if kind == "memory-writes":
-            item = results.get(function)
-            names = set()
             details = []
             if item is not None and item.summary is not None:
                 names = {name for name, _ in unresolved_writers(item.normalized)} | set(item.summary.unknown_writers)
@@ -348,8 +349,15 @@ def _control_manifest(context, results) -> list:
                 details = [[_key(name), classes.classify(name)] for name in sorted(names)]
             rows.append([kind, _key(function), details])
         else:
-            rows.append([kind, _key(function), [_key(":".join(parts[3:5]))]])
-    return rows
+            instruction = ":".join(parts[3:5])
+            callees = sorted({callee for call, callee in getattr(item, "calls", {}).items()
+                              if call.startswith(instruction + ":")}
+                             | {member for call, members in getattr(item, "multi_calls", {}).items()
+                                if call.startswith(instruction + ":") for member in members})
+            rows.append([kind, _key(function), [_key(instruction), [_key(callee) for callee in callees]]])
+    if not rows:
+        return None
+    return {"rows": rows, "scope": sorted(_key(item.key) for item in closure)}
 
 
 def _crossing(label: str) -> str:
@@ -452,7 +460,10 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
     fields = ("exits", "unknown_writers", "writer_objects", "inner_calls", "register_deltas", "independent_delta_proofs",
               "dead_exits", "writer_conditions", "stack_values_out", "objects")
     _exact(template, fields + (("control",) if "control" in template else ()), "template")
-    control = template.get("control", [])
+    manifest = template.get("control", {"rows": [], "scope": []})
+    if type(manifest) is not dict or set(manifest) != {"rows", "scope"} or type(manifest["scope"]) is not list:
+        raise TemplateError("control is {rows, scope}")
+    control = manifest["rows"]
     if type(control) is not list or any(
             type(row) is not list or len(row) != 3 or row[0] not in ("memory-writes", "vetoed-noreturn")
             or type(row[1]) is not str or type(row[2]) is not list for row in control):
@@ -588,8 +599,8 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
         _import_delta_proofs(template["independent_delta_proofs"], deltas),
         # (B', docs 25.96) each manifest row is a site of the importer: the
         # model's internal control is the condition (``control:model:...``)
-        control_support=tuple(sorted(f"control:model:{label}:{index}:{row[0]}"
-                                     for index, row in enumerate(control))),
+        control_support=tuple(sorted([f"control:model:{label}:{index}:{row[0]}" for index, row in enumerate(control)]
+                                     + ([f"control:model:{label}:scope:continuation"] if control else []))),
     )
     return summary, anchors
 
@@ -948,8 +959,8 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
             _refuse_control_context(key, context, results, resource_only=True)
             summary = export_summary(analyzed, results, base_dependent)
             _refuse_control_context(key, context, results)
-            manifest = _control_manifest(context, results)
-            if manifest:
+            manifest = _control_manifest(context, results, _closure(analyzed, results))
+            if manifest is not None:
                 summary["control"] = manifest
             entries.append({"name": name, "original_names": list(original_names), "summary": summary})
         except TemplateRefused as error:

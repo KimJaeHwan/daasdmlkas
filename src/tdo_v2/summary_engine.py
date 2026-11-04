@@ -819,9 +819,12 @@ def _control_sites(results, contexts) -> tuple:
             rows.append((site, "unavailable", site[len("control:unavailable:"):], ()))
             continue
         if site.startswith("control:model:"):
-            # (the model label, the manifest row index and kind: the template file states the row)
+            # (the model label, the manifest row index -- or "scope" -- and kind: the
+            # template file states the row; the consumers own the key)
             label, index, kind = site[len("control:model:"):].rsplit(":", 2)
-            rows.append((site, "model", label, (index, kind)))
+            consumers = tuple(sorted(key for key, item in results.items()
+                                     if item.summary is not None and site in item.summary.control_support))
+            rows.append((site, "model", label, (index, kind, consumers)))
             continue
         parts = site.split(":")
         function = ":".join(parts[1:3])
@@ -836,7 +839,13 @@ def _control_sites(results, contexts) -> tuple:
                 writers = tuple((name, classes.classify(name)) for name in sorted(names))
             rows.append((site, "memory-writes", function, writers))
         elif site.endswith(":vetoed-noreturn"):
-            rows.append((site, "vetoed-noreturn", function, (":".join(parts[3:5]),)))
+            instruction = ":".join(parts[3:5])
+            item = results.get(function)
+            callees = tuple(sorted({callee for call, callee in getattr(item, "calls", {}).items()
+                                    if call.startswith(instruction + ":")}
+                                   | {member for call, members in getattr(item, "multi_calls", {}).items()
+                                      if call.startswith(instruction + ":") for member in members}))
+            rows.append((site, "vetoed-noreturn", function, (instruction, callees)))
         else:
             rows.append((site, "unknown-transfer", function, (":".join(parts[3:5]),)))
     return tuple(rows)

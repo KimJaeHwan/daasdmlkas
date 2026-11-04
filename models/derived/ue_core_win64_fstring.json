@@ -6712,22 +6712,30 @@
       "local": true
      }
     ],
-    "control": [
-     [
-      "memory-writes",
-      "dll:1b1:1800f4fd0",
+    "control": {
+     "rows": [
       [
+       "memory-writes",
+       "dll:1b1:1800f4fd0",
        [
-        "dll:1b1:1800f5078:3:STORE",
-        "ram"
-       ],
-       [
-        "dll:1b1:1800f50d6:3:STORE",
-        "ram"
+        [
+         "dll:1b1:1800f5078:3:STORE",
+         "ram"
+        ],
+        [
+         "dll:1b1:1800f50d6:3:STORE",
+         "ram"
+        ]
        ]
       ]
+     ],
+     "scope": [
+      "dll:1b1:1800570d0",
+      "dll:1b1:1800f4fd0",
+      "dll:1b1:18010b8d0",
+      "dll:1b1:180bca600"
      ]
-    ]
+    }
    }
   }
  ],

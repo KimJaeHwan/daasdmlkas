@@ -653,8 +653,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     def static_writers() -> frozenset:
         if "found" not in _static:
             stack_registers = frozenset((span.start, span.size) for span in program_stack)
+            # (a model's memory effects are writes this function's call effects make)
             _static["found"] = frozenset(key for key, unit in functions.items()
-                                         if memory_writer(unit, stack_registers))
+                                         if memory_writer(unit, stack_registers) or externals.get(key))
         return _static["found"]
 
     def own_frontier(key) -> frozenset:
@@ -667,11 +668,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
 
     def site_reachable_of() -> frozenset:
         if "found" not in site_reachable_set:
-            # (B': a memory-writes site reaches its callers over known edges through
-            # their callee support -- only an unknown-transfer site needs the
-            # static wildcard reach; an unknown edge to a writer is the
-            # opaque-continuation condition, as for any opaque callee)
-            site_reachable_set["found"] = site_reach(functions, control_exempt)
+            # (B': a static writer -- syntactic, or a caller of a model -- triggers
+            # the wildcard reach as a site candidate does: an unknown edge may reach
+            # a writer; a declined cut leaves its vetoed-noreturn key)
+            site_reachable_set["found"] = site_reach(functions, control_exempt, static_writers())
         return site_reachable_set["found"]
 
     # (U2b D.3) call keys of each function whose targets this round's analysis
@@ -1118,12 +1118,17 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         sources[call_key] = ("summary", done)
                         consumed[call_key] = (done,)
                 for call_key, members in multi.get(key, {}).items():
+                    # (B') every member's dependency first -- a member in the
+                    # caller's SCC is unavailable (no ordinary composed effect)
+                    for member in members:
+                        if component_of[member] == component_of[key]:
+                            dependencies.add(f"control:unavailable:{member}")
+                        else:
+                            depend(call_key, member, results.get(member))
                     if call_key in assumed or call_key in proven \
                             or any(component_of[member] == component_of[key] for member in members):
                         continue   # (a member in the caller's SCC: opaque)
                     dones = [results.get(member) for member in members]
-                    for member, done in zip(members, dones):
-                        depend(call_key, member, done)
                     if any(done is None or done.summary is None for done in dones):
                         continue   # (a member failed or has no summary: opaque)
                     memory_sources = {} if record_provenance is not None else None

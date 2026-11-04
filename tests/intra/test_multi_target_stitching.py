@@ -145,11 +145,19 @@ def test_a_nonreturning_target_has_no_normal_output_alternative(monkeypatch):
     item = results[ROOT]
     run = next(run for exit_summary in item.summary.exits for run in exit_summary.runs
                if run.span.object_id.kind.value == 'register_file' and run.span.start == RAX)
+    # (B', docs 25.96: B calls an import -- a wildcard edge in a program with a
+    # memory writer -- so its noreturn is declined; the caller owns a
+    # vetoed-noreturn site at the indirect call, and no value is claimed past it)
+    from tdo_v2.call_summary_effects import vetoed_noreturn
+    from tdo_v2.operation_records import Ineligible
+
+    assert vetoed_noreturn(results['1:1900'].summary)
+    assert any(site.endswith(':vetoed-noreturn') for site in item.normalized.callee_support)
     found = root_record(item.normalized, item.unit,
                         [(item.normalized.memory_graph.definition_nodes[index], (run.span,)) for index in run.definitions],
                         provenance=provenance[id(item)][1], stitch=StitchContext(provenance))
-    assert evaluate(found, entry, route='stitched') == {18}
-    assert all(choice['function'] != '1:1900' for node in found['nodes'] for choice in node.get('choices', ()))
+    with pytest.raises(Ineligible):
+        evaluate(found, entry, route='stitched')
 
 
 def test_record_collection_does_not_change_the_composed_effect(monkeypatch):
