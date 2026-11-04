@@ -322,7 +322,12 @@ def test_an_indirect_transfer_vetoes_noreturn_while_a_fault_is_discharged():
     # (the premise off: the ud2 is a site, so the wrapper may reach one -- U2b
     # vetoes noreturn as well; with no site anywhere it is noreturn as today)
     assert _noreturn_calls(off, H) == []
-    assert _noreturn_calls(_analyze_traps(wrapper, caller), H)
+    # (B', docs 25.96: any memory-writing function -- the call shape's push is one --
+    # triggers the wildcard reach too: the wrapper's noreturn is declined and the
+    # caller owns a vetoed-noreturn site at the call)
+    plain = _analyze_traps(wrapper, caller)
+    assert _noreturn_calls(plain, H) == []
+    assert any(site.endswith(":vetoed-noreturn") for site in plain[_key(H)].normalized.callee_support)
 
 
 def test_the_noreturn_conjunction_has_one_reader():

@@ -142,18 +142,20 @@ def test_no_writer_no_key():
     assert results[_key(MAIN)].summary.control_support == ()
 
 
-def test_a_rewritten_stack_pointer_is_no_trusted_base():
-    """Astra code r1: ``rsp = rdx * rcx; [rsp] = rax`` writes anywhere -- a static writer for D.3."""
+def test_every_memory_writing_function_is_a_static_writer():
+    """Astra code r1-r3: no syntactic exemption survives (rewritten / partial stack pointer, other
+    spaces, overlapping temporaries) -- any STORE makes a static writer; none does not."""
     from synthetic import RSP
     from tdo_v2.control_context import memory_writer
 
     stack = frozenset({(RSP, 8)})
-    rewritten = FunctionBuilder(entry=MAIN).ins(op("INT_MULT", [reg(RDX), reg(RCX)], reg(RSP)),
-                                                store(reg(RSP), reg(RAX))).ret()
-    plain = FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(store(reg(RSP), reg(RAX))).add_rsp(0x28).ret()
-    (unit,) = program_units(rewritten)
-    assert memory_writer(unit, stack)
-    (unit,) = program_units(plain)
+    for body in (FunctionBuilder(entry=MAIN).ins(op("INT_MULT", [reg(RDX), reg(RCX)], reg(RSP)),
+                                                 store(reg(RSP), reg(RAX))).ret(),
+                 FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(store(reg(RSP), reg(RAX))).add_rsp(0x28).ret(),
+                 FunctionBuilder(entry=MAIN).ins(op("STORE", [const(REG), reg(RSP), reg(RAX)])).ret()):
+        (unit,) = program_units(body)
+        assert memory_writer(unit, stack)
+    (unit,) = program_units(FunctionBuilder(entry=MAIN).ins(copy(reg(RAX), const(1))).ret())
     assert not memory_writer(unit, stack)
 
 
@@ -177,14 +179,3 @@ def test_a_template_manifest_becomes_one_model_key_per_row_and_its_scope():
 
 
 
-def test_partial_stack_writes_and_wild_selectors_are_static_writers():
-    """Astra code r2: a write of part of the stack register, a STORE to another space -- writers for D.3."""
-    from synthetic import RSP
-    from tdo_v2.control_context import memory_writer
-
-    stack = frozenset({(RSP, 8)})
-    partial = FunctionBuilder(entry=MAIN).ins(copy(reg(RSP, 2), reg(RDX, 2)), store(reg(RSP), reg(RAX))).ret()
-    wild = FunctionBuilder(entry=MAIN).ins(op("STORE", [const(REG), reg(RSP), reg(RAX)])).ret()
-    for body in (partial, wild):
-        (unit,) = program_units(body)
-        assert memory_writer(unit, stack)

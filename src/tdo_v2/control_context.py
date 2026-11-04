@@ -142,74 +142,23 @@ def _graph(results, failed, exempt) -> tuple[dict, dict]:
 
 
 def memory_writer(unit, stack_registers=frozenset()) -> bool:
-    """The function's own code has a memory-writing operation whose address is
-    neither a constant nor computed (inside its instruction) from the stack
-    pointer and constants alone -- a syntactic over-approximation of an
-    unknown-address writer, decidable before any round (B', docs 25.96).
-    ``stack_registers``: (offset, size) of the program's stack pointer."""
+    """The function's own code writes memory (any STORE, any operation with a
+    memory output) -- the static over-approximation of an unknown-address
+    writer, decidable before any round (B', docs 25.96). Deliberately not
+    syntactic about addresses: a register or temporary may be rewritten in
+    part, at another offset, through another space; only the analysis decides
+    where a write lands, and this predicate runs before it. It feeds the
+    wildcard trigger of ``site_reach`` and D.3's cut veto only, where a wider
+    set costs precision (a declined cut leaves a key), never soundness.
+    ``stack_registers``: unused (kept for the callers)."""
     observation = getattr(unit, "observation", None)
     if observation is None:
         return True
     from ._scope_contracts import VarnodeKindCode
 
-    stackish = {"INT_ADD", "INT_SUB", "COPY", "PTRADD", "PTRSUB", "INT_ZEXT", "INT_SEXT", "SUBPIECE"}
-    # the stack register is trusted as a base only if the function moves it by
-    # constants alone (``rsp = rsp +/- c``): any other write may make it anything
-    def overlaps_stack(node) -> bool:
-        start, end = node.coordinate.byte_offset, node.coordinate.byte_offset + node.byte_size
-        return any(start < offset + size and offset < end for offset, size in stack_registers)
-
-    for row in observation.instructions:
-        defined = {}
-        for operation in row.operations:
-            output = operation.output
-            if output is not None and output.kind is VarnodeKindCode.REGISTER and overlaps_stack(output):
-                # (a write of any byte of it -- a partial one included -- must be the
-                # full register moved by a constant)
-                if (output.coordinate.byte_offset, output.byte_size) not in stack_registers:
-                    return True
-                inputs = operation.inputs
-                same = any(item.kind is VarnodeKindCode.REGISTER
-                           and (item.coordinate.byte_offset, item.byte_size) in stack_registers for item in inputs)
-                constant = any(item.kind is VarnodeKindCode.CONSTANT
-                               or defined.get((item.kind, item.coordinate)) is not None
-                               and defined[(item.kind, item.coordinate)].opcode == "COPY"
-                               and defined[(item.kind, item.coordinate)].inputs[0].kind is VarnodeKindCode.CONSTANT
-                               for item in inputs)
-                if operation.opcode not in ("INT_ADD", "INT_SUB") or not same or not constant:
-                    return True
-            if output is not None:
-                defined[(output.kind, output.coordinate)] = operation
-    from .write_classes import memory_space_ids
-
-    spaces = memory_space_ids(unit.scopes)
-    for row in observation.instructions:
-        defined = {}
-        for operation in row.operations:
-            if operation.opcode == "STORE" and len(operation.inputs) >= 2:
-                selector = operation.inputs[0]
-                if selector.kind is not VarnodeKindCode.CONSTANT or selector.coordinate.byte_offset not in spaces:
-                    return True   # (a write outside the program's memory spaces: WILD)
-                pending, seen, plain = [operation.inputs[1]], 0, True
-                while pending and plain:
-                    seen += 1
-                    node = pending.pop()
-                    if node.kind is VarnodeKindCode.CONSTANT or seen > 32:
-                        plain = plain and seen <= 32
-                        continue
-                    if node.kind is VarnodeKindCode.REGISTER \
-                            and (node.coordinate.byte_offset, node.byte_size) in stack_registers:
-                        continue
-                    producer = defined.get((node.kind, node.coordinate))
-                    if producer is None or producer.opcode not in stackish:
-                        plain = False
-                        continue
-                    pending.extend(producer.inputs)
-                if not plain:
-                    return True
-            if operation.output is not None:
-                defined[(operation.output.kind, operation.output.coordinate)] = operation
-    return False
+    return any(operation.opcode == "STORE"
+               or operation.output is not None and operation.output.kind is VarnodeKindCode.ADDRESS
+               for row in observation.instructions for operation in row.operations)
 
 
 def site_reach(units: dict, exempt: dict, writers=frozenset()) -> frozenset:

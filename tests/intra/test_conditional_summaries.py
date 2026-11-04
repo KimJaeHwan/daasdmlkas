@@ -205,8 +205,11 @@ def test_no_noreturn_cut_at_a_call_resolved_in_a_supported_function():
     key = next(key for key in on.calls if key.endswith(":CALLIND"))
     assert on.calls[key] == _key(X)
     assert key in on.proven and not on.proven[key].noreturn
+    # (B', docs 25.96: a memory-writing function -- its call shape's push -- also
+    # declines the cut; the declined cut is a vetoed-noreturn site at the call)
     off = _analyze_traps(plain, x)[_key(A)]
-    assert off.proven[next(key for key in off.calls if key.endswith(":CALLIND"))].noreturn
+    assert not off.proven[next(key for key in off.calls if key.endswith(":CALLIND"))].noreturn
+    assert any(site.endswith(":vetoed-noreturn") for site in off.normalized.callee_support)
 
 
 # -- composition and invariants -------------------------------------------------------
