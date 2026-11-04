@@ -6337,5 +6337,9 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
   RAM / WILD 또는 호출 명령)를 싣는다. 가져오는 쪽에서 모델 요약의 지지 = `control:model:<label>:<i>:<kind>`(행마다 하나) --
   그 모델을 부르는 함수의 위치. 의미 버전 44, UE 템플릿 재파생.
 - 보고: `EngineRun.control_sites` -- 실행의 모든 자기 키(종류: unknown-transfer, memory-writes, vetoed-noreturn, unavailable,
-  model)와 나중에 링크 / 트레이스가 그것을 정리할 때 이름 붙일 것(명령, 쓰기 연산과 분류, manifest 행).
+  model)와 나중에 링크 / 트레이스가 그것을 정리할 때 이름 붙일 것(명령, 쓰기 연산과 분류, manifest 행; vetoed-noreturn은
+  (명령, 피호출 함수, 모델 레이블) -- 거절된 모델 잘림은 그 모델 이름).
+- 재귀(SCC): 거절된 noreturn 멤버에서 나온 가설은 호출자의 vetoed-noreturn 키를 지닌다(보통 호출의 `depend`와 같음). 그런
+  멤버의 효과가 없으면(싱크 요구 없음) 가설이 없고 호출자는 `control:unavailable:<멤버>`를 지닌다 -- 더 강한 표시라 건전하나
+  vetoed-noreturn 행 대신 unavailable 행이 보고된다(Fable 후속 P3-a, 선택).
 - 측정: Mulp "제어 표시만 남은" root 상한 52 -> 약 164; 게이트 Bundle 완전 228 -> 213(15개: v3 x64 1, UE debuggame 7 + 7).

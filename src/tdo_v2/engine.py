@@ -141,8 +141,9 @@ class EngineRun:
     fault_report: tuple = ()
     # B' (docs 25.96): one row per own control key of the run -- (key, kind
     # "unknown-transfer" | "memory-writes" | "vetoed-noreturn" | "unavailable",
-    # function, detail: the instruction, or the writer operation keys with their
-    # RAM / WILD class) -- what a later link or trace must name to settle it
+    # function, detail: the instruction; for vetoed-noreturn (instruction,
+    # callees, model labels); for memory-writes the writer operation keys with
+    # their RAM / WILD class) -- what a later link or trace must name to settle it
     control_sites: tuple = ()
 
 
