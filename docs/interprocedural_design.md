@@ -6300,6 +6300,10 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
 - 템플릿: 프런티어·지지가 있으면, 또는 `site_reachable`인데 출구 없이 dead exit만 있으면(가져오는 쪽에서 veto 없이 noreturn이
   된다) 내보내지 않는다. 기록: 요약 run 기록에 비어 있지 않은 `control_support`. U2b-2(위치를 가진 함수 안의 조회를 여는 것)는
   별도 단계(측정상 추가 효과 없음).
+- 의미 버전 43(템플릿에 veto가 없다: 버전 42 템플릿 거부; UE 템플릿 재파생 -- 항목 동일). 불변식은 실행이 공개·보유하는 모든
+  인스턴스(activation, 소비된 생산자, superseded)를 돈다. replay 계획(정방향 메모리, load identity)은 분석이 넘긴 정규화
+  입력 전부로 봉인되므로 bind도 F1·U2b 입력(`fault_cuts`, `fault_reachable`, `control_exempt`, `site_reachable`)을 포함해
+  비교한다(전에는 그 입력이 있으면 정제가 조용히 거부됐다 -- F1에도 있던 잠재 불일치, Astra 코드 리뷰 r4).
 - 측정 상한(Mulp 405 함수, U2a+F1 ON, `.census6/ab_now.py`): 미해결 종단 때문에 효과를 못 주던 요약 172 -> 37(131개는 위치만이
   원인), 증명된 호출 효과 735 -> 1368; "제어 표시만 남은" root 52 그대로 -- 새 효과도 피호출의 주소 모를 쓰기로 메모리를 잃는다
   (벽 A/B; A+B 상한 258, U2b와 함께 270).

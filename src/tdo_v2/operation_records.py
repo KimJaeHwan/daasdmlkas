@@ -2585,7 +2585,8 @@ def _frontier_run(run) -> dict:
     return {"span": _span_text(run.span), "run_kind": run.kind.value, "definitions": list(run.definitions),
             "writers": list(run.writers), "sources": [_span_text(span) for span in run.sources],
             "entry_readers": list(run.entry_readers), "debts": list(run.debts), "crossed": list(run.crossed),
-            "origins": list(run.origins), "conditions": len(run.conditions),
+            "origins": list(run.origins),
+            "conditions": [[_span_dict(read), _span_dict(write)] for read, write in run.conditions],
             "value": None if run.value is None else repr(run.value),
             "literal": None if run.literal is None else repr(run.literal)}
 

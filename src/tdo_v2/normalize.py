@@ -1621,10 +1621,18 @@ class FunctionNormalizer:
             private_frame_above=private_frame_above,
             open_conditions=open_conditions or {},
         )
+        # a replay plan was sealed over every normalization input the analysis
+        # passed (``AnalyzedFunction.normalization_options``): the fault-premise
+        # and control inputs (F1, U2b) included, as given when set
+        replay = dict(options)
+        for name, given in (("fault_cuts", fault_cuts), ("fault_reachable", fault_reachable),
+                            ("control_exempt", control_exempt), ("site_reachable", site_reachable)):
+            if given:
+                replay[name] = given
         if _forward_memory_plan is not None:
-            _forward_memory_plan.bind(value, options)
+            _forward_memory_plan.bind(value, replay)
         if _load_identity_plan is not None:
-            _load_identity_plan.bind(value, options, _forward_memory_plan)
+            _load_identity_plan.bind(value, replay, _forward_memory_plan)
         result = _ScopedNormalizer().normalize(value, **options, _forward_memory_plan=_forward_memory_plan,
                                               _load_identity_plan=_load_identity_plan)
         from ._activation_entry import entry_for

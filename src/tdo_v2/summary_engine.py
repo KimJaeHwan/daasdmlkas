@@ -841,17 +841,26 @@ def _check_control_support(results, failed, contexts) -> None:
         consumed = {site for _, effect in normalized.proven_call_effects for site in effect.control_sites}
         if not (own | consumed) <= support or bool(own | consumed) != (continuation_key(key) in support):
             raise ControlSupportViolation(f"{key}: support {sorted(support)} misses {sorted((own | consumed) - support)}")
+        # (1) over every call any representation names: the effect the
+        # normalization consumed counts; the published copy carries the same
+        # marks; a producer with support needs that consumed effect
         normalized_effects = dict(normalized.proven_call_effects)
-        for call, effect in sorted(item.proven.items()):
-            # (the effect the normalization consumed is the one that counts; the
-            # two representations carry the same marks)
-            used = normalized_effects.get(call, effect)
-            if set(used.control_sites) != set(effect.control_sites):
+        # (a provenance row that is no call -- ``~lifecycle`` -- has no effect;
+        # its producers are checked as retained instances)
+        for call in sorted((set(item.proven) | set(normalized_effects) | set(item.consumed))
+                           - {key for key in item.consumed if key.startswith("~")}):
+            used, published = normalized_effects.get(call), item.proven.get(call)
+            supports = [set(getattr(getattr(producer, "summary", None), "control_support", ()))
+                        for producer in item.consumed.get(call, ())]
+            marks = set() if used is None else set(used.control_sites)
+            if (used is None) != (published is None) and (marks or published is not None and published.control_sites
+                                                           or any(supports)):
+                raise ControlSupportViolation(f"{key}: the effect at {call} is missing from one representation")
+            if used is not None and published is not None and marks != set(published.control_sites):
                 raise ControlSupportViolation(f"{key}: effect at {call} carries other marks than its normalization's")
-            for producer in item.consumed.get(call, ()):
-                produced = getattr(getattr(producer, "summary", None), "control_support", ())
-                if not set(produced) <= set(used.control_sites):
-                    raise ControlSupportViolation(f"{key}: effect at {call} drops {sorted(set(produced) - set(used.control_sites))}")
+            for produced in supports:
+                if not produced <= marks:
+                    raise ControlSupportViolation(f"{key}: effect at {call} drops {sorted(produced - marks)}")
         context = contexts.get(key, frozenset())
         for site in sorted(support):
             owner = continuation_owner(site)

@@ -342,3 +342,33 @@ def test_frontier_records_keep_the_state_sources():
                   if record["record"] == "unknown transfer"]
         states.append(row["state"])
     assert states[0] != states[1]
+
+
+@pytest.mark.parametrize("side", ["normalized", "published"])
+def test_a_missing_carrier_entry_raises(side):
+    """Astra code r3: the conditional call's effect deleted from one representation."""
+    results = analyze_units(_units(_caller(), _frontier()))
+    contexts = control_contexts(results, {})
+    main = results[_key(MAIN)]
+    call = next(key for key, callee in main.calls.items() if callee == _key(G))
+    if side == "normalized":
+        main.normalized = replace(main.normalized, proven_call_effects=tuple(
+            row for row in main.normalized.proven_call_effects if row[0] != call))
+    else:
+        main.proven = {key: effect for key, effect in main.proven.items() if key != call}
+    main.summary = replace(main.summary, control_support=())
+    with pytest.raises(ControlSupportViolation):
+        _check_control_support(results, {}, contexts)
+
+
+def test_frontier_records_keep_the_condition_operands():
+    from tdo_v2.operation_records import _frontier_run
+    from tdo_v2.function_summary import SummaryKind, SummaryRun
+    from tdo_v2.span_geometry import ByteSpan
+
+    results = analyze_units(_units(_caller(), _frontier()))
+    run = results[_key(G)].summary.unknown_transfers[0].state.runs[0]
+    other = ByteSpan(run.span.object_id, run.span.start, run.span.size)
+    a = replace(run, conditions=((run.span, other),))
+    b = replace(run, conditions=((run.span, ByteSpan(run.span.object_id, run.span.start + 1, run.span.size)),))
+    assert _frontier_run(a)["conditions"] != _frontier_run(b)["conditions"]

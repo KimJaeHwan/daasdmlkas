@@ -164,3 +164,17 @@ def test_unknown_helper_without_summary_cannot_transfer_lifetime(models):
     item, _, pointer, lifetime = _lifetime(results, points)
     assert not lifetime.live
     assert _debt(item, points) is not None
+
+
+def test_an_unrelated_site_keeps_the_refinement(models):
+    """U2b (Astra code r4): a site elsewhere makes the caller ``site_reachable`` -- a
+    normalization input its replay plan is sealed over, so the refinement still binds."""
+    caller, points = _caller()
+    site = FunctionBuilder(entry=0x1800).jump_indirect(reg(RAX))
+    units = program_units(caller, _helper(), site)
+    results = analyze_units(units, image_info=_image(), external_models=models,
+                            lifecycle_contracts=_contracts(models, release=True), private_frame_above=40,
+                            assume_globals_disjoint_from_stack=True, assume_entry_values_not_frame=False,
+                            assume_opaque_callees_leave_no_stack_addresses=False)
+    item = results["1:1000"]
+    assert any(proof.writer == points["writer"] for proof in item.normalized.forward_memory_proofs)
