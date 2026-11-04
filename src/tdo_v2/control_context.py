@@ -155,12 +155,19 @@ def memory_writer(unit, stack_registers=frozenset()) -> bool:
     stackish = {"INT_ADD", "INT_SUB", "COPY", "PTRADD", "PTRSUB", "INT_ZEXT", "INT_SEXT", "SUBPIECE"}
     # the stack register is trusted as a base only if the function moves it by
     # constants alone (``rsp = rsp +/- c``): any other write may make it anything
+    def overlaps_stack(node) -> bool:
+        start, end = node.coordinate.byte_offset, node.coordinate.byte_offset + node.byte_size
+        return any(start < offset + size and offset < end for offset, size in stack_registers)
+
     for row in observation.instructions:
         defined = {}
         for operation in row.operations:
             output = operation.output
-            if output is not None and output.kind is VarnodeKindCode.REGISTER \
-                    and (output.coordinate.byte_offset, output.byte_size) in stack_registers:
+            if output is not None and output.kind is VarnodeKindCode.REGISTER and overlaps_stack(output):
+                # (a write of any byte of it -- a partial one included -- must be the
+                # full register moved by a constant)
+                if (output.coordinate.byte_offset, output.byte_size) not in stack_registers:
+                    return True
                 inputs = operation.inputs
                 same = any(item.kind is VarnodeKindCode.REGISTER
                            and (item.coordinate.byte_offset, item.byte_size) in stack_registers for item in inputs)
@@ -173,10 +180,16 @@ def memory_writer(unit, stack_registers=frozenset()) -> bool:
                     return True
             if output is not None:
                 defined[(output.kind, output.coordinate)] = operation
+    from .write_classes import memory_space_ids
+
+    spaces = memory_space_ids(unit.scopes)
     for row in observation.instructions:
         defined = {}
         for operation in row.operations:
             if operation.opcode == "STORE" and len(operation.inputs) >= 2:
+                selector = operation.inputs[0]
+                if selector.kind is not VarnodeKindCode.CONSTANT or selector.coordinate.byte_offset not in spaces:
+                    return True   # (a write outside the program's memory spaces: WILD)
                 pending, seen, plain = [operation.inputs[1]], 0, True
                 while pending and plain:
                     seen += 1

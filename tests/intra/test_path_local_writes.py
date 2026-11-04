@@ -174,3 +174,17 @@ def test_a_template_manifest_becomes_one_model_key_per_row_and_its_scope():
     summary, _ = instantiate(template, "ue:AppendChar", register_object, 1)
     assert summary.control_support == ("control:model:ue:AppendChar:0:memory-writes",
                                        "control:model:ue:AppendChar:scope:continuation")
+
+
+
+def test_partial_stack_writes_and_wild_selectors_are_static_writers():
+    """Astra code r2: a write of part of the stack register, a STORE to another space -- writers for D.3."""
+    from synthetic import RSP
+    from tdo_v2.control_context import memory_writer
+
+    stack = frozenset({(RSP, 8)})
+    partial = FunctionBuilder(entry=MAIN).ins(copy(reg(RSP, 2), reg(RDX, 2)), store(reg(RSP), reg(RAX))).ret()
+    wild = FunctionBuilder(entry=MAIN).ins(op("STORE", [const(REG), reg(RSP), reg(RAX)])).ret()
+    for body in (partial, wild):
+        (unit,) = program_units(body)
+        assert memory_writer(unit, stack)

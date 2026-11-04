@@ -843,8 +843,10 @@ def _control_sites(results, contexts) -> tuple:
             item = results.get(function)
             callees = tuple(sorted({callee for call, callee in getattr(item, "calls", {}).items()
                                     if call.startswith(instruction + ":")}
-                                   | {member for call, members in getattr(item, "multi_calls", {}).items()
-                                      if call.startswith(instruction + ":") for member in members}))
+                                   | {member for rows in (getattr(item, "multi_calls", {}),
+                                                          getattr(item, "multi_candidates", {}))
+                                      for call, members in rows.items() if call.startswith(instruction + ":")
+                                      for member in members}))
             rows.append((site, "vetoed-noreturn", function, (instruction, callees)))
         else:
             rows.append((site, "unknown-transfer", function, (":".join(parts[3:5]),)))

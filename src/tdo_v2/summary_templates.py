@@ -300,6 +300,10 @@ def _closure(analyzed, results):
             continue
         seen[item.key] = item
         pending.extend(results[callee] for callee in item.calls.values() if callee in results)
+        # (B': every known target, a declined composition's candidates included)
+        pending.extend(results[member] for members in (*getattr(item, "multi_calls", {}).values(),
+                                                       *getattr(item, "multi_candidates", {}).values())
+                       for member in members if member in results)
     return list(seen.values())
 
 
@@ -352,8 +356,9 @@ def _control_manifest(context, results, closure) -> dict | None:
             instruction = ":".join(parts[3:5])
             callees = sorted({callee for call, callee in getattr(item, "calls", {}).items()
                               if call.startswith(instruction + ":")}
-                             | {member for call, members in getattr(item, "multi_calls", {}).items()
-                                if call.startswith(instruction + ":") for member in members})
+                             | {member for rows in (getattr(item, "multi_calls", {}), getattr(item, "multi_candidates", {}))
+                                for call, members in rows.items() if call.startswith(instruction + ":")
+                                for member in members})
             rows.append([kind, _key(function), [_key(instruction), [_key(callee) for callee in callees]]])
     if not rows:
         return None
