@@ -161,6 +161,22 @@ def memory_writer(unit, stack_registers=frozenset()) -> bool:
                for row in observation.instructions for operation in row.operations)
 
 
+def static_writers(units: dict, models: dict, stack_registers=frozenset()) -> frozenset:
+    """The static writers (B', docs 25.96), fixed before round 1: functions
+    whose own code writes memory (``memory_writer``), that call a model
+    (``models``: function key -> its model-bound calls; a model's memory
+    effects are writes this function's call effects make), or that hold a
+    wildcard transfer -- an indirect call or jump, a call outside ``units``:
+    it may resolve to such a model in any later round, so its holder counts
+    from the start and the set never changes between rounds. They trigger the
+    wildcard reach of ``site_reach``; D.3 declines a cut in them."""
+    from .fault_premise import observed_calls
+
+    keys = frozenset(units)
+    return frozenset(key for key, unit in units.items()
+                     if memory_writer(unit, stack_registers) or models.get(key) or observed_calls(unit, keys)[1])
+
+
 def site_reach(units: dict, exempt: dict, writers=frozenset()) -> frozenset:
     """The static may-reach-a-site set (U2b, docs 25.95), fixed before the
     first round: functions owning a site candidate that is not exempt

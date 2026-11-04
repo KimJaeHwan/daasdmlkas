@@ -71,6 +71,7 @@ CONTRACT = {
         "activation_inputs": "identity-based invalidation pins of the original inputs",
         "consumed": "2b-P exact producer instances (analysis objects); the effects they produced remain encoded",
         "multi_candidates": "U2a control-context edges (reporting only); multi_calls remains encoded",
+        "vetoed_models": "B' declined model cuts' labels (reporting only); EngineRun.control_sites remains encoded",
     }),
     "FunctionSummary": (None, {"premise_uses": "2b-P use records (docs 25.91) -- reporting, checked by tests"}),
     "ProvenCallEffect": (None, {}),

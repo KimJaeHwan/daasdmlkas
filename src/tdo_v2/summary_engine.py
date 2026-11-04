@@ -847,7 +847,10 @@ def _control_sites(results, contexts) -> tuple:
                                                           getattr(item, "multi_candidates", {}))
                                       for call, members in rows.items() if call.startswith(instruction + ":")
                                       for member in members}))
-            rows.append((site, "vetoed-noreturn", function, (instruction, callees)))
+            # (a declined model cut: the model's label, Fable code P3-4)
+            models = tuple(sorted({label for call, label in getattr(item, "vetoed_models", {}).items()
+                                   if call.startswith(instruction + ":")}))
+            rows.append((site, "vetoed-noreturn", function, (instruction, callees, models)))
         else:
             rows.append((site, "unknown-transfer", function, (":".join(parts[3:5]),)))
     return tuple(rows)

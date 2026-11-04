@@ -221,3 +221,75 @@ def test_an_unresolved_recursion_is_unavailable_to_its_members(monkeypatch):
     assert f"control:unavailable:{_key(G)}" in obligations or f"control:unavailable:{_key(H)}" in obligations
     kinds = {row[0]: row[1] for row in run.control_sites}
     assert "unavailable" in kinds.values()
+
+
+def test_a_vetoed_member_of_a_recursion_leaves_a_site_at_its_intra_scc_call():
+    """Fable code P3-2: G: [rdx*rcx] = rax; rcx = 7; call sink; call H; int3 -- dead-only, vetoed by
+    its own support, its sink root still binding (a sink-only hypothesis). H: call G; rax = 7; ret.
+    The path past H's call of G exists only through the declined noreturn: H owns a vetoed-noreturn
+    site there, as at a call outside the recursion."""
+    from tdo_v2.pcodeop_models import PcodeOpModel
+
+    trap = op("CALLOTHER", [const(SWI, 4), const(3, 4)], None)
+    g = FunctionBuilder(entry=G).sub_rsp(0x28).ins(*_ram_write()).ins(copy(reg(RCX), const(7))).call(SINK)         .call(H).ins(trap).ret()
+    h = FunctionBuilder(entry=H).sub_rsp(0x28).call(G).ins(copy(reg(RAX), const(7))).add_rsp(0x28).ret()
+    namespace = program_units(g)[0].scopes.program.evidence.translation_namespace
+    model = PcodeOpModel("x86-markers", 1, frozenset({(namespace.language_id, namespace.major_version,
+                                                        namespace.minor_version)}), {}, {SWI: frozenset({3})})
+    run = _run(g, h, pcodeop_models=(model,), assume_debug_break_traps_do_not_return=True)
+    rows = [row for row in run.control_sites if row[1] == "vetoed-noreturn" and row[2] == _key(H)]
+    assert rows and rows[0][0].startswith(f"control:{_key(H)}:")
+    assert _key(G) in rows[0][3][1]          # (the callee the declined decision was about)
+
+
+def test_a_declined_model_cut_names_its_model(tmp_path):
+    """Fable code P3-4: rdx = &Helper; call rdx -- the constant target is
+    a cut function whose internal model never returns; the caller (a static writer: its call
+    pushes) declines the cut, and the vetoed-noreturn row names the model."""
+    import json
+
+    from synthetic import R9, RDX, NO_CALLBACKS
+    from tdo_v2.image_info import ExportedSymbol, ImageInfo
+    from tdo_v2.summary_engine import _control_sites
+    from tdo_v2.summary_store import load_external_models
+
+    helper, mangled = CODE_BASE + 0x800, "?Helper@@YA_K_K@Z"
+    entry = {"name": "Helper", "original_names": [mangled], "registers": [], "memory": [], **NO_CALLBACKS,
+             "other_memory": "preserved", "internal": True, "noreturn": True, "observes": []}
+    raw = {"format_version": 1, "kind": "declared", "id": "synth", "version": 1,
+           "language_id": "x86:LE:64:default", "abi_tag": "win64", "libraries": ["SYNTH.DLL"],
+           "stack_pointer": [32, 8], "stack_delta": 8, "preserved": [[24, 8], [40, 8], [48, 8], [56, 8]],
+           "entries": [entry]}
+    path = tmp_path / "synth.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    models = load_external_models([path], "x86:LE:64:default", "win64")
+    caller = FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(copy(reg(RDX), const(helper))).call_indirect(RDX) \
+        .ins(copy(reg(R9), reg(RAX))).add_rsp(0x28).ret()
+    info = ImageInfo("synthetic", (), (), (ExportedSymbol(1, helper, mangled, True),), ())
+    results = analyze_units(program_units(caller, FunctionBuilder(entry=helper).ret()), image_info=info,
+                            external_models=models, own_library="synth.dll")
+    item = results[_key(MAIN)]
+    call = next(call for call in item.vetoed_models)
+    assert "Helper" in item.vetoed_models[call]
+    assert call not in item.proven and item.summary.exits     # (the path past the call stays)
+    space, offset = call.split(":")[:2]
+    site = f"control:{_key(MAIN)}:{space}:{offset}:vetoed-noreturn"
+    assert site in item.summary.control_support
+    (row,) = [row for row in _control_sites(results, {_key(MAIN): (site,)}) if row[0] == site]
+    assert row[1] == "vetoed-noreturn" and row[3][0] == f"{space}:{offset}"
+    assert row[3][2] == (item.vetoed_models[call],)
+
+
+def test_a_caller_of_a_model_is_a_static_writer(monkeypatch):
+    """Fable code P3-5: the model branch of the static writers -- with no store of its own
+    (``memory_writer`` patched to say so) and no wildcard transfer (its one call is direct, inside
+    the analysed set), a function is a static writer exactly when it has a model-bound call."""
+    import tdo_v2.control_context as control_context
+
+    monkeypatch.setattr(control_context, "memory_writer", lambda unit, stack=frozenset(): False)
+    caller = FunctionBuilder(entry=MAIN).sub_rsp(0x28).call(G).add_rsp(0x28).ret()
+    units = {_key(unit.scopes.function.entry.byte_offset): unit
+             for unit in program_units(caller, FunctionBuilder(entry=G).ret())}
+    call = next(iter(analyze_units(list(units.values()))[_key(MAIN)].calls))
+    assert control_context.static_writers(units, {}) == frozenset()
+    assert control_context.static_writers(units, {_key(MAIN): {call: "model"}}) == {_key(MAIN)}

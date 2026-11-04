@@ -94,6 +94,10 @@ class AnalyzedFunction:
     # filter of ``multi_calls``: the control-context edges (U2a, docs 25.93)
     # -- reporting only, no analysis reads it
     multi_candidates: dict = field(default_factory=dict, repr=False)
+    # (B', docs 25.96) declined noreturn cuts at a model call: call key -> the
+    # model's label -- the vetoed-noreturn rows of ``EngineRun.control_sites``
+    # name it (reporting only, no analysis reads it)
+    vetoed_models: dict = field(default_factory=dict, repr=False)
     # the fault premise (F1, docs 25.94): (site key, "discharged" | "hazard" |
     # "revoked", detail) of every recognized fault site -- reporting
     fault_decisions: tuple = ()
@@ -647,23 +651,14 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # code writes memory (any STORE / memory output), call a model, or hold a
     # wildcard transfer -- they trigger the static may-reach set's wildcard
     # reach, and D.3 declines a cut in them
-    from .control_context import memory_writer
-
     _static = {}
 
     def static_writers() -> frozenset:
         if "found" not in _static:
-            stack_registers = frozenset((span.start, span.size) for span in program_stack)
-            # (a model's memory effects are writes this function's call effects make;
-            # a wildcard transfer -- an indirect call or jump, a call outside the
-            # analysed set -- may resolve to such a model in any later round, so its
-            # holder counts from the start: the set never changes between rounds)
-            from .fault_premise import observed_calls
+            from .control_context import static_writers as writers_of
 
-            keys = frozenset(functions)
-            _static["found"] = frozenset(key for key, unit in functions.items()
-                                         if memory_writer(unit, stack_registers) or externals.get(key)
-                                         or observed_calls(unit, keys)[1])
+            stack_registers = frozenset((span.start, span.size) for span in program_stack)
+            _static["found"] = writers_of(functions, externals, stack_registers)
         return _static["found"]
 
     def own_frontier(key) -> frozenset:
@@ -1039,10 +1034,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             consumed: dict = {}   # (2b-P P-c2: kept whether or not operation records are on)
             # (B', docs 25.96) the control keys of every transfer target, effects or not
             dependencies: set = set()
+            vetoed_models: dict = {}   # (the model label of each declined model cut: records)
 
             def vetoed_key(call_key) -> str:
-                space, offset, _, _ = call_key.split(":")
-                return f"control:{key}:{space}:{offset}:vetoed-noreturn"
+                return _vetoed_key(key, call_key)
 
             def depend(call_key, callee, done) -> None:
                 if done is None or done.summary is None:
@@ -1055,6 +1050,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             def derive(failed):
                 proven = {}
                 dependencies.clear()
+                vetoed_models.clear()
                 sources.clear()
                 rejections.clear()
                 compositions.clear()
@@ -1158,6 +1154,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         dependencies.update(summary.control_support)
                         if vetoed_noreturn(summary):
                             dependencies.add(vetoed_key(call_key))
+                            vetoed_models[call_key] = entry.label
                         if _is_tail(call_key) and len(program_stack) != 1:
                             continue
                         effect = site_effect(key, call_key, summary, anchors, failed.get(call_key, ()),
@@ -1214,6 +1211,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             continue
                         dependencies.add(vetoed_key(call_key))
                         if call_key in externals[key]:
+                            vetoed_models[call_key] = externals[key][call_key][1].label
                             del proven[call_key]   # (its ``sources`` row is filtered by ``proven``)
                         else:
                             proven[call_key] = ProvenCallEffect(
@@ -1393,6 +1391,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                                  if call in proven})
             result.normalization_options = tuple(normalization_options.items())
             result.multi_candidates = {call: tuple(members) for call, members in multi.get(key, {}).items()}
+            result.vetoed_models = dict(vetoed_models)
             if fault_plan.sites.get(key):   # (F1: every recognized site's decision, as analysed)
                 result.fault_decisions = fault_decisions(fault_plan, key, fault_state["discharged"],
                                                          fault_state["revoked"])
@@ -1475,6 +1474,14 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         tuple(site(key)[2].get(call_key, ())) or tuple(program_stack),
                         note,
                     )
+                    if derived[(key, call_key)] is not None and vetoed_noreturn(done.summary):
+                        # (B', Fable code P3-2) a member whose noreturn was declined: the
+                        # path past this intra-SCC call is the caller's vetoed-noreturn
+                        # site, as at any other call (``depend``) -- carried by the
+                        # hypothesis, so the fixpoint compares it too
+                        hypothesis = derived[(key, call_key)]
+                        derived[(key, call_key)] = replace(hypothesis, control_sites=tuple(sorted(
+                            {*hypothesis.control_sites, _vetoed_key(key, call_key)})))
                 if derived == hypotheses:
                     # (P-c2) the hypotheses this round consumed are discharged by
                     # this very round's members: the producers are those instances
@@ -2276,6 +2283,13 @@ def _bottom_summary(stack_pointers, shapes, call_key, program_stack):
     # (no stack-derived value out either: the rounds raise it like the rest)
     return FunctionSummary(FUNCTION_SUMMARY_VERSION, (ExitSummary("bottom", ()),), (), (),
                            register_deltas=deltas, stack_values_out=False)
+
+
+def _vetoed_key(owner, call_key) -> str:
+    """``control:<owner>:<space>:<offset>:vetoed-noreturn`` -- a declined
+    noreturn decision at a call of ``owner`` (B', docs 25.96)."""
+    space, offset = call_key.split(":")[:2]
+    return f"control:{owner}:{space}:{offset}:vetoed-noreturn"
 
 
 def _recursive_hypothesis(derive, stack, notes=None):
