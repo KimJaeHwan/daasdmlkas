@@ -234,3 +234,111 @@ def test_a_dropped_mark_raises(forge):
         main.summary = replace(main.summary, control_support=())
     with pytest.raises(ControlSupportViolation):
         _check_control_support(results, {}, contexts)
+
+
+def test_an_omitted_frontier_raises():
+    """Astra code r1: the frontier and the support deleted together."""
+    results = analyze_units(_units(_caller(), _frontier()))
+    contexts = control_contexts(results, {})
+    g = results[_key(G)]
+    g.summary = replace(g.summary, unknown_transfers=(), control_support=())
+    with pytest.raises(ControlSupportViolation):
+        _check_control_support(results, {}, contexts)
+
+
+def test_a_retained_producer_instance_is_checked():
+    """A consumed producer instance (not the published one) with a dropped support raises."""
+    import copy as _copy
+
+    results = analyze_units(_units(_caller(), _frontier()))
+    contexts = control_contexts(results, {})
+    main, g = results[_key(MAIN)], results[_key(G)]
+    forged = _copy.copy(g)
+    forged.summary = replace(g.summary, control_support=())
+    call = next(key for key, callee in main.calls.items() if callee == _key(G))
+    main.consumed = {**main.consumed, call: (*main.consumed.get(call, ()), forged)}
+    with pytest.raises(ControlSupportViolation):
+        _check_control_support(results, {}, contexts)
+
+
+def test_the_records_list_the_frontier():
+    from tdo_v2.operation_records import render, run_records
+
+    results = analyze_units(_units(_caller(), FunctionBuilder(entry=G).jump_indirect(reg(RAX))))
+    g = results[_key(G)]
+    records = run_records(g.normalized, g.unit, g.summary)
+    (row,) = [record for record in records if record["record"] == "unknown transfer"]
+    assert row["site"] == _site(G, 0) and row["control_support"] == list(g.summary.control_support)
+    assert "site=" in render(row)
+
+
+def test_a_tail_jump_into_a_frontier_function_carries_its_support():
+    main = FunctionBuilder(entry=MAIN).tail_call(G)
+    # (a call shape elsewhere names the program's one stack pointer: tails compose through it)
+    results = analyze_units(_units(main, _frontier(), _caller(G, entry=K)))
+    item = results[_key(MAIN)]
+    effects = [effect for key, effect in item.proven.items() if item.calls.get(key) == _key(G)]
+    assert effects and all(_site(G, 3) in effect.control_sites for effect in effects)
+    assert _site(G, 3) in item.summary.control_support
+
+
+def test_a_recursive_component_with_a_frontier_converges_with_its_support():
+    """F: if (zf) goto s; call H; ret; s: jmp rax -- H: call F; ret (one SCC)."""
+    f = FunctionBuilder(entry=A).sub_rsp(0x28).cbranch("s", reg(ZF, 1)).call(H).add_rsp(0x28).ret() \
+        .label("s").jump_indirect(reg(RAX))
+    h = FunctionBuilder(entry=H).sub_rsp(0x28).call(A).add_rsp(0x28).ret()
+    run = analyze_summaries([_caller(H), f, h, FunctionBuilder(entry=SINK).ret()], REGISTER_SINK, names=NAMES)
+    contexts = dict(run.control_contexts)
+    site = site_key(_key(A), SimpleNamespace(space_id=RAM, byte_offset=A + 2 * STRIDE))
+    for key in (MAIN, A, H):
+        assert continuation_key(_key(key)) in contexts[_key(key)]
+    assert any(key.startswith("control:") for key in contexts[_key(MAIN)])
+
+
+@pytest.mark.parametrize("forge", ["site", "continuation"])
+def test_a_mark_outside_the_context_raises(forge):
+    """Invariant (2): a site key the context lacks; a continuation scope the function cannot reach."""
+    results = analyze_units(_units(_caller(), _frontier()))
+    contexts = control_contexts(results, {})
+    g = results[_key(G)]
+    if forge == "site":
+        contexts = {**contexts, _key(G): frozenset({continuation_key(_key(G))})}
+    else:
+        g.summary = replace(g.summary, control_support=tuple(sorted(
+            {*g.summary.control_support, continuation_key(_key(MAIN))})))
+    with pytest.raises(ControlSupportViolation):
+        _check_control_support(results, {}, contexts)
+
+
+def test_the_semantics_version_moved():
+    """Templates derived before U2b may carry a noreturn the veto forbids: refused by version."""
+    from tdo_v2.summary_templates import ENGINE_SEMANTICS_VERSION
+
+    assert ENGINE_SEMANTICS_VERSION == 43
+
+
+def test_a_carrier_lost_in_the_normalization_raises():
+    """Astra code r2: the normalized effect lost its marks, the published copy kept them."""
+    results = analyze_units(_units(_caller(), _frontier()))
+    contexts = control_contexts(results, {})
+    main = results[_key(MAIN)]
+    main.normalized = replace(main.normalized, proven_call_effects=tuple(
+        (key, replace(effect, control_sites=())) for key, effect in main.normalized.proven_call_effects))
+    main.summary = replace(main.summary, control_support=())
+    with pytest.raises(ControlSupportViolation):
+        _check_control_support(results, {}, contexts)
+
+
+def test_frontier_records_keep_the_state_sources():
+    """``rax = rcx; jmp rax`` and ``rax = rdx; jmp rax``: different frontier states, different records."""
+    from synthetic import RDX
+    from tdo_v2.operation_records import run_records
+
+    states = []
+    for source in (RCX, RDX):
+        jump = FunctionBuilder(entry=G).ins(copy(reg(RAX), reg(source))).jump_indirect(reg(RAX))
+        g = analyze_units(_units(_caller(), jump))[_key(G)]
+        (row,) = [record for record in run_records(g.normalized, g.unit, g.summary)
+                  if record["record"] == "unknown transfer"]
+        states.append(row["state"])
+    assert states[0] != states[1]

@@ -203,8 +203,18 @@ def test_off_the_summary_does_not_export_a_restored_stack_pointer():
     (on,) = analyze_units(program_units(_sp_then_unknown_jump())).values()
     (off,) = analyze_units(program_units(_sp_then_unknown_jump()),
                            assume_opaque_callees_restore_stack_pointer=False).values()
-    assert dict(on.summary.register_deltas).get(sp) == 0
+    # (U2b, docs 25.95: the ``jmp rax`` is a site -- a frontier row, no exit, no delta)
+    assert on.summary.unknown_transfers and on.summary.register_deltas == ()
     assert sp not in dict(off.summary.register_deltas), off.summary.register_deltas
+    assert all(not kept for _, kept, *_ in off.summary.inner_calls)
+    # the same through a RETURN: ON exports the restored pointer (+8), OFF nothing
+    from synthetic import CODE_BASE, RSP
+
+    returning = lambda: FunctionBuilder(entry=MAIN).ins(copy(reg(RAX), reg(RSP))).call(CODE_BASE + 0xC00).ret()
+    (on,) = analyze_units(program_units(returning())).values()
+    (off,) = analyze_units(program_units(returning()), assume_opaque_callees_restore_stack_pointer=False).values()
+    assert dict(on.summary.register_deltas).get(sp) == 8
+    assert sp not in dict(off.summary.register_deltas)
     assert all(not kept for _, kept, *_ in off.summary.inner_calls)
 
 

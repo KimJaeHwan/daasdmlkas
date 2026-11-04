@@ -112,20 +112,13 @@ def control_contexts(results, failed, exempt=frozenset()) -> dict:
     return {key: keys | {continuation_key(key)} if keys else keys for key, keys in _closure(own, edges).items()}
 
 
-def reachable(results, failed, key) -> frozenset:
-    """Every function ``key`` may reach over the context edges, itself included
-    (the scope of its ``continuation:<key>:*``)."""
-    keys = set(results) | set(failed)
-    seen, pending = set(), [key]
-    while pending:
-        node = pending.pop()
-        if node in seen:
-            continue
-        seen.add(node)
-        item = results.get(node)
-        if item is not None:
-            pending.extend(_edges(node, item, keys))
-    return frozenset(seen)
+def owner_reach(results, failed, owners) -> dict:
+    """{function key: the functions of ``owners`` it may reach over the
+    context edges, itself included} -- one closure (O(nodes + edges) set
+    unions), for checking ``continuation:<P>:*`` scopes."""
+    own, edges = _graph(results, failed, frozenset())
+    owners = frozenset(owners)
+    return _closure({key: {key} if key in owners else set() for key in own}, edges)
 
 
 def _graph(results, failed, exempt) -> tuple[dict, dict]:
@@ -236,5 +229,5 @@ def _closure(own: dict, edges: dict) -> dict:
         sets.append(frozenset(found))
     return {key: sets[component[key]] for key in own}
 
-__all__ = ("continuation_key", "continuation_owner", "control_contexts", "import_tail_sites", "reachable",
+__all__ = ("continuation_key", "continuation_owner", "control_contexts", "import_tail_sites", "owner_reach",
            "site_key", "site_reach", "unavailable_key", "unknown_transfer_sites")

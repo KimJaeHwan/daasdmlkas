@@ -2567,7 +2567,27 @@ def run_records(normalized, unit, summary, *, origins=None, declared=None, limit
                 record = _build(normalized, unit, [(node, (run.span,)) for node in nodes], metadata,
                                 origins=origins, declared=declared, limits=limits, physical_memory=physical_memory)
             found.append(record)
+    # (U2b, docs 25.95) the frontier: where a path ends in an unknown transfer,
+    # on what condition and in what state -- no exit, so no run record
+    for row in summary.unknown_transfers:
+        found.append({
+            "record": "unknown transfer", "site": row.site, "exit": row.block,
+            "guard": None if row.guard is None else [[str(part) for part in item] for item in row.guard],
+            "state": [_frontier_run(run) for run in row.state.runs
+                      if run.span.object_id.kind is not StorageObjectKind.FUNCTION_UNIQUE],
+            "control_support": list(summary.control_support),
+            "truncated": False, "root": [], "nodes": []})
     return found
+
+
+def _frontier_run(run) -> dict:
+    """A frontier state's run with its facts (as a summary run record states them)."""
+    return {"span": _span_text(run.span), "run_kind": run.kind.value, "definitions": list(run.definitions),
+            "writers": list(run.writers), "sources": [_span_text(span) for span in run.sources],
+            "entry_readers": list(run.entry_readers), "debts": list(run.debts), "crossed": list(run.crossed),
+            "origins": list(run.origins), "conditions": len(run.conditions),
+            "value": None if run.value is None else repr(run.value),
+            "literal": None if run.literal is None else repr(run.literal)}
 
 
 def _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits, physical_memory=False):
@@ -2582,7 +2602,9 @@ def _run_phi(normalized, unit, nodes, run, metadata, origins, declared, limits, 
 def render(record) -> str:
     """A text form: one line per node, ``n<id> = ...``."""
     facts = []
-    if record.get("record") == "summary run":
+    if record.get("record") == "unknown transfer":
+        facts.append(f"site={record.get('site')}")
+    elif record.get("record") == "summary run":
         facts.append(f"kind={record.get('run_kind')}")
         for name in ("crossed", "debts", "unknown_writers", "tail_exits", "control_support"):
             if record.get(name):

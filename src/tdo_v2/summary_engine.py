@@ -530,10 +530,18 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     exempt_of: dict = {}
 
     def exempt_sites(key, unit):
-        """The function's unknown-transfer sites that are import-slot tails (once per function)."""
+        """The function's unknown-transfer sites that are import-slot tails (once
+        per function): those its published normalization took as input
+        (``control_exempt``, U2b); recognized here only for a function the
+        analysis published without one (a failure)."""
         if key not in exempt_of:
-            exempt_of[key] = unknown_transfer_sites(key, getattr(unit, "observation", None)) \
-                & import_tail_sites(key, unit, import_tail_image)
+            item = results.get(key)
+            options = dict(getattr(item, "normalization_options", ()))
+            if options:
+                exempt_of[key] = frozenset(options.get("control_exempt", ()))
+            else:
+                exempt_of[key] = unknown_transfer_sites(key, getattr(unit, "observation", None)) \
+                    & import_tail_sites(key, unit, import_tail_image)
         return exempt_of[key]
 
     def fault_exempt(key):
@@ -790,62 +798,64 @@ class ControlSupportViolation(RuntimeError):
 
 
 def _check_control_support(results, failed, contexts) -> None:
-    """The U2b invariants over every published summary (docs 25.95), each a
-    raise: (3) normalization -> summary: the summary's frontier sites are site
-    candidates its normalization does not exempt, its ``control_support``
-    holds them and every ``control_sites`` its normalization consumed, plus
-    ``continuation:<function>:*`` when either is non-empty; (1) summary ->
+    """The U2b invariants (docs 25.95) over every instance the run publishes
+    or retains (``interprocedural._retained_instances``: published results,
+    activations, consumed producers, witnesses, superseded results), each a
+    raise: (3) normalization -> summary: the summary's frontier sites are
+    EXACTLY the sites recomputed from its observation's block ends minus the
+    normalization's exemptions, and its ``control_support`` holds them, every
+    ``control_sites`` its normalization consumed, and
+    ``continuation:<function>:*`` iff either is non-empty; (1) summary ->
     effect: each proven call's ``control_sites`` hold the support of every
     summary it consumed; (2) support -> context: a site key is in the
     function's control context, a ``continuation:<P>:*`` names a function P it
     may reach."""
-    from .control_context import continuation_key, continuation_owner, unknown_transfer_sites
-    from .control_context import _edges as context_edges
+    from .control_context import continuation_key, continuation_owner, owner_reach, unknown_transfer_sites
+    from .function_summary import _block_ends
+    from .interprocedural import _retained_instances
 
-    keys = set(results) | set(failed)
-    reach: dict = {}
+    instances = _retained_instances(results)
+    owners = {continuation_owner(site) for item in instances if item.summary is not None
+              for site in item.summary.control_support} - {None}
+    reach = owner_reach(results, failed, owners) if owners else {}
 
-    def reaches(key, target) -> bool:
-        """``target`` is ``key`` or reachable from it (memoized searches)."""
-        seen = reach.setdefault(key, set())
-        if target == key or target in seen:
-            return True
-        pending, visited = [key], {key}
-        while pending:
-            node = pending.pop()
-            item = results.get(node)
-            if item is None:
-                continue
-            for other in context_edges(node, item, keys):
-                if other not in visited:
-                    visited.add(other)
-                    seen.add(other)
-                    if other == target:
-                        return True
-                    pending.append(other)
-        return False
+    def frontier_sites(key, item) -> set:
+        """Sites ending a block of the observation, minus the normalization's exemptions."""
+        observation, normalized = item.unit.observation, item.normalized
+        candidates = unknown_transfer_sites(key, observation)
+        if not candidates:
+            return set()
+        ends = {f"control:{key}:{end.split(':')[0]}:{end.split(':')[1]}"
+                for end in _block_ends(normalized, observation).values() if end.endswith(":BRANCHIND")}
+        exempt = set(normalized.control_exempt) | {row[0] for row in normalized.fault_cuts}
+        return (set(candidates) & ends) - exempt
 
-    for key, item in sorted(results.items()):
-        summary, normalized = item.summary, item.normalized
+    for item in instances:
+        summary, normalized, key = item.summary, item.normalized, item.key
         if summary is None or type(normalized) is not NormalizedFunction:
             continue
         support = set(summary.control_support)
         own = {row.site for row in summary.unknown_transfers}
-        exempt = set(normalized.control_exempt) | {row[0] for row in normalized.fault_cuts}
-        if not own <= set(unknown_transfer_sites(key, item.unit.observation)) - exempt:
+        if own != frontier_sites(key, item):
             raise ControlSupportViolation(f"{key}: frontier {sorted(own)} is not its non-exempt sites")
         consumed = {site for _, effect in normalized.proven_call_effects for site in effect.control_sites}
         if not (own | consumed) <= support or bool(own | consumed) != (continuation_key(key) in support):
             raise ControlSupportViolation(f"{key}: support {sorted(support)} misses {sorted((own | consumed) - support)}")
+        normalized_effects = dict(normalized.proven_call_effects)
         for call, effect in sorted(item.proven.items()):
+            # (the effect the normalization consumed is the one that counts; the
+            # two representations carry the same marks)
+            used = normalized_effects.get(call, effect)
+            if set(used.control_sites) != set(effect.control_sites):
+                raise ControlSupportViolation(f"{key}: effect at {call} carries other marks than its normalization's")
             for producer in item.consumed.get(call, ()):
                 produced = getattr(getattr(producer, "summary", None), "control_support", ())
-                if not set(produced) <= set(effect.control_sites):
-                    raise ControlSupportViolation(f"{key}: effect at {call} drops {sorted(set(produced) - set(effect.control_sites))}")
+                if not set(produced) <= set(used.control_sites):
+                    raise ControlSupportViolation(f"{key}: effect at {call} drops {sorted(set(produced) - set(used.control_sites))}")
         context = contexts.get(key, frozenset())
         for site in sorted(support):
             owner = continuation_owner(site)
-            if owner is None and site not in context or owner is not None and not reaches(key, owner):
+            if owner is None and site not in context or owner is not None and owner not in reach.get(key, ()):
                 raise ControlSupportViolation(f"{key}: {site} is outside its control context")
 
 

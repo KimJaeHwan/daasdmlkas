@@ -536,8 +536,21 @@ def _fault_outcomes(normalized, observation, fault_blocks, fault_states) -> tupl
 def _frontier_blocks(normalized, observation) -> dict:
     """Block key -> site key of every block ending in a BRANCHIND without
     flow targets that this normalization does not exempt (``control_exempt``:
-    import-slot tails; ``fault_cuts``: discharged faults) -- U2b, docs 25.95."""
+    import-slot tails; ``fault_cuts``: discharged faults) -- U2b, docs 25.95.
+    (Keys formatted as ``control_context.site_key`` / ``continuation_key``,
+    which this module cannot import: keep them in step.)"""
+    candidates = _cached("frontier", observation, lambda: _frontier_candidates(normalized, observation))
+    if not candidates:
+        return {}
     exempt = set(getattr(normalized, "control_exempt", ())) | {row[0] for row in getattr(normalized, "fault_cuts", ())}
+    return {block: site for block, site in candidates.items() if site not in exempt}
+
+
+def _frontier_candidates(normalized, observation) -> dict:
+    """Block key -> site key of every block ending in a targetless BRANCHIND (observation only)."""
+    if not any(not row.flow_targets and any(operation.opcode == "BRANCHIND" for operation in row.operations)
+               for row in observation.instructions):
+        return {}
     ends = _cached("ends", observation, lambda: _block_ends(normalized, observation))
     rows = {(row.address.space_id, row.address.byte_offset): row for row in observation.instructions}
     entry = normalized.scopes.function.entry
@@ -547,11 +560,8 @@ def _frontier_blocks(normalized, observation) -> dict:
         if opcode != "BRANCHIND":
             continue
         row = rows.get((int(space, 16), int(offset, 16)))
-        if row is None or row.flow_targets:
-            continue
-        site = f"control:{entry.space_id:x}:{entry.byte_offset:x}:{space}:{offset}"
-        if site not in exempt:
-            found[block] = site
+        if row is not None and not row.flow_targets:
+            found[block] = f"control:{entry.space_id:x}:{entry.byte_offset:x}:{space}:{offset}"
     return found
 
 

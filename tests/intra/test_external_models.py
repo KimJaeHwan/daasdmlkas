@@ -224,7 +224,8 @@ def test_tail_jump_through_an_import_slot_takes_the_model():
     off = analyze_units(units, image_info=image,
                         external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))
     middle = off[f"1:{CODE_BASE + 0x600:x}"]
-    assert not middle.declared and middle.summary.tail_exits
+    # (U2b, docs 25.95: without the assumption the jump is a site -- a frontier row, not a tail exit)
+    assert not middle.declared and middle.summary.unknown_transfers and not middle.summary.tail_exits
     assert any("import-slots-hold-their-exports" in reason for reason in middle.refused_models.values())
     program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
     analyzed = results["1:1000"]

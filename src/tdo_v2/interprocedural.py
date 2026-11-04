@@ -651,8 +651,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         sites = unknown_transfer_sites(key, functions[key].observation) - control_exempt.get(key, frozenset())
         return sites - {row[0] for row in fault_plan.cuts_of(key, fault_state["discharged"])} if sites else sites
 
-    # (U2b D.3) call keys of each function resolved this round from the
-    # analysed graphs (indirect targets, cut targets, multi-target members)
+    # (U2b D.3) call keys of each function whose targets this round's analysis
+    # USES from a resolution (the previous round's indirect targets, cut
+    # targets and multi-target members)
     round_resolved: dict = {}
     local_entries = frozenset((unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset)
                               for unit in program.values())
@@ -1146,7 +1147,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         if effect is None or not effect.noreturn:
                             continue
                         if call_key in externals[key]:
-                            del proven[call_key]
+                            del proven[call_key]   # (its ``sources`` row is filtered by ``proven``)
                         else:
                             proven[call_key] = ProvenCallEffect(
                                 effect.callee, (), (), sink_demands=effect.sink_demands, escapes_stack=True,

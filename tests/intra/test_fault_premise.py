@@ -249,6 +249,9 @@ def test_a_hazard_found_in_a_later_round_revokes_the_cut():
     assert _key(HELPER) in results[_key(MAIN)].calls.values()
     assert _discharged(results) == ()
     assert results[_key(HELPER)].summary.unknown_transfers
+    # (U2b: the revoked site is a frontier row again; its caller's effect carries it)
+    site = results[_key(HELPER)].summary.unknown_transfers[0].site
+    assert any(site in effect.control_sites for effect in results[_key(MAIN)].proven.values())
 
 
 # -- noreturn is never inferred from a fault -------------------------------------
