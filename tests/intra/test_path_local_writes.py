@@ -181,11 +181,24 @@ def test_a_template_manifest_becomes_one_model_key_per_row_and_its_scope():
 
 
 
-def test_a_wildcard_holder_is_a_static_writer_from_the_start():
-    """Astra code r4: an indirect call may resolve to a writing model in a later round -- its holder
-    counts as a static writer before round 1 (the set never changes between rounds), so D.3 declines
-    a later cut there and leaves a vetoed-noreturn site."""
-    from tdo_v2.fault_premise import observed_calls
+def test_a_wildcard_holder_is_a_static_writer_from_the_start(monkeypatch):
+    """Astra code r4/r5: an indirect call may resolve in a later round to a target whose cut a writer
+    would make unsafe -- its holder is a static writer from the start, independently of its own stores
+    (here: none counted), so D.3 declines the resolved noreturn cut and leaves a vetoed-noreturn site."""
+    import tdo_v2.control_context as control_context
+    from tdo_v2.pcodeop_models import PcodeOpModel
 
-    (unit,) = program_units(FunctionBuilder(entry=MAIN).ins(copy(reg(RAX), const(G))).call_indirect(RAX).ret())
-    assert observed_calls(unit, frozenset())[1]
+    monkeypatch.setattr(control_context, "memory_writer", lambda unit, stack=frozenset(): False)
+    trap = op("CALLOTHER", [const(SWI, 4), const(3, 4)], None)
+    target = FunctionBuilder(entry=G).ins(trap).ret()
+    holder = FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(copy(reg(RAX), const(G))).call_indirect(RAX)         .ins(copy(reg(RAX), const(7))).add_rsp(0x28).ret()
+    units = program_units(holder, target)
+    namespace = units[0].scopes.program.evidence.translation_namespace
+    model = PcodeOpModel("x86-markers", 1, frozenset({(namespace.language_id, namespace.major_version,
+                                                        namespace.minor_version)}), {}, {SWI: frozenset({3})})
+    item = analyze_units(units, pcodeop_models=(model,), assume_debug_break_traps_do_not_return=True)[_key(MAIN)]
+    call = next(key for key in item.calls if key.endswith(":CALLIND"))
+    assert item.calls[call] == _key(G)
+    assert call in item.proven and not item.proven[call].noreturn
+    assert item.summary.exits
+    assert any(site.endswith(":vetoed-noreturn") for site in item.normalized.callee_support)
