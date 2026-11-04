@@ -144,7 +144,8 @@ def test_another_shape_is_no_fault_site(variant):
 def test_off_the_site_stays_an_unknown_transfer():
     results = _analyze(_caller(), _checked_helper())
     helper = results[_key(HELPER)]
-    assert helper.normalized.fault_cuts == () and helper.summary.tail_exits
+    # (a site: a frontier row of a conditional summary, U2b -- no tail exit)
+    assert helper.normalized.fault_cuts == () and helper.summary.unknown_transfers and not helper.summary.tail_exits
     assert helper.summary.fault_outcomes == ()
     run = _run(_caller(), _checked_helper())
     assert not _root(run).is_effectively_complete
@@ -204,7 +205,7 @@ def test_the_barrier_takes_a_discharged_jump_as_a_terminal():
 def test_without_an_exception_directory_nothing_is_discharged():
     results = _analyze(_caller(), _checked_helper(), directory=None, **ON)
     assert _discharged(results) == ()
-    assert results[_key(HELPER)].summary.tail_exits
+    assert results[_key(HELPER)].summary.unknown_transfers
 
 
 @pytest.mark.parametrize("flags", [1, 2])
@@ -247,7 +248,7 @@ def test_a_hazard_found_in_a_later_round_revokes_the_cut():
     results = _analyze(main, _checked_helper(), directory=_pe([(*_rva(MAIN), 1)]), **ON)
     assert _key(HELPER) in results[_key(MAIN)].calls.values()
     assert _discharged(results) == ()
-    assert results[_key(HELPER)].summary.tail_exits
+    assert results[_key(HELPER)].summary.unknown_transfers
 
 
 # -- noreturn is never inferred from a fault -------------------------------------
@@ -315,7 +316,10 @@ def test_an_indirect_transfer_vetoes_noreturn_while_a_fault_is_discharged():
     assert results[_key(G)].normalized.fault_reachable
     assert _noreturn_calls(results, H) == []
     off = _analyze_traps(_caller(), _checked_helper(), wrapper, caller)
-    assert _noreturn_calls(off, H)   # (the premise off: noreturn as today)
+    # (the premise off: the ud2 is a site, so the wrapper may reach one -- U2b
+    # vetoes noreturn as well; with no site anywhere it is noreturn as today)
+    assert _noreturn_calls(off, H) == []
+    assert _noreturn_calls(_analyze_traps(wrapper, caller), H)
 
 
 def test_the_noreturn_conjunction_has_one_reader():

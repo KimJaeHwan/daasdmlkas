@@ -95,7 +95,9 @@ ADDED_FIELDS = {
     "NormalizedFunction": {"activation_entry": None, "forward_memory_proofs": (), "forward_memory_requires": (),
                            "load_value_proofs": (), "nonstack_spans": frozenset(), "intrinsic_refinements": (),
                            "assumes_opaque_callees_restore_stack_pointer": True,
-                           "fault_cuts": (), "fault_reachable": False},
+                           "fault_cuts": (), "fault_reachable": False,
+                           # (U2b, docs 25.95: conditional summaries)
+                           "control_exempt": (), "site_reachable": False},
     "RootSlice": {"inherited_incomplete": False},
     "UnresolvedNormalizedFunction": {"assumes_opaque_callees_restore_stack_pointer": True},
     "CallMemoryDecision": {"evidence": ()},
@@ -107,7 +109,9 @@ ADDED_FIELDS = {
     # (fields of the forward-memory / expression branch, 2026-10-23..26)
     "FunctionSummary": {"address_relations": (), "independent_delta_proofs": (),
                         # (the fault premise, F1: off by default)
-                        "fault_outcomes": (), "fault_references": (), "fault_reachable": False},
+                        "fault_outcomes": (), "fault_references": (), "fault_reachable": False,
+                        # (U2b, docs 25.95: conditional summaries)
+                        "unknown_transfers": (), "control_support": (), "site_reachable": False},
     "LocalMemorySsaResult": {"call_register_snapshots": (), "flow_edges": ()},
     "SummaryRun": {"literal": None},
     "ProvenRunEffect": {"literal": None},
@@ -116,7 +120,7 @@ ADDED_FIELDS = {
     "CallProvenance": {"memory_sources": {}},
     # (the owner's independent register-delta proofs, semantics 25-28): provenance
     # fields -- the deltas / restoration they justify remain encoded
-    "ProvenCallEffect": {"register_delta_proofs": ()},
+    "ProvenCallEffect": {"register_delta_proofs": (), "control_sites": ()},
     "NodeRecord": {"semantic_identity": None},
 }
 

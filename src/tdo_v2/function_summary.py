@@ -130,6 +130,20 @@ class FaultOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class UnknownTransfer:
+    """A terminal block ending in an unknown-transfer site (a BRANCHIND
+    without flow targets that the run does not exempt; U2b, docs 25.95),
+    kept apart from the exits, tail exits and dead exits: the summary's exits
+    are the observed graph's answer, true only if no site resumes. ``guard``
+    and ``state`` as in ``FaultOutcome``. Nothing reads it for an effect."""
+
+    site: str
+    block: str
+    guard: tuple | None
+    state: ExitSummary
+
+
+@dataclass(frozen=True, slots=True)
 class FaultReference:
     """A call of this function that may reach a callee's fault outcomes
     (own or referenced), one per (call, callee): the callee's outcomes stay
@@ -208,6 +222,15 @@ class FunctionSummary:
     fault_outcomes: tuple = ()
     fault_references: tuple = ()
     fault_reachable: bool = False
+    # conditional summaries (U2b, docs 25.95): the frontier (``UnknownTransfer``
+    # rows), the keys every claim of the summary rests on (own frontier sites,
+    # the ``control_sites`` of every effect the normalization consumed, and
+    # ``continuation:<function>:*`` when either is non-empty) -- copied into
+    # every effect derived from it -- and whether a site may be reached from
+    # the function at all (``control_context.site_reach``): each blocks noreturn
+    unknown_transfers: tuple = ()
+    control_support: tuple = ()
+    site_reachable: bool = False
     premise_uses: tuple = field(default=(), compare=False)
 
 
@@ -281,11 +304,15 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     summary_uses = crossed.pop("premise_uses", set())
 
     fault_blocks = _fault_blocks(normalized, observation)
+    # (U2b) a block ending in a site is no exit of any kind, even behind a cut
+    frontier = {block: site for block, site in _frontier_blocks(normalized, observation).items()
+                if block not in fault_blocks}
+    frontier_states = {}
     exits = []
     nodes = ssa.state_nodes
     dead_exits = []
     for state in ssa.observed_terminal_states:
-        if dead_exit(state.block_key):
+        if state.block_key not in frontier and dead_exit(state.block_key):
             dead_exits.append(state.block_key)
             continue
         runs = []
@@ -294,6 +321,9 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
                 runs.append(_classify(span, node.definition_ids, definitions, definition_slice,
                                       crossed.get((state.block_key, span.object_id), {}), uncertain,
                                       tracer, crossing_labels))
+        if state.block_key in frontier:
+            frontier_states[state.block_key] = ExitSummary(state.block_key, tuple(runs))
+            continue
         exits.append(ExitSummary(state.block_key, tuple(runs)))
     writer_objects = sorted(
         {(item.operation_key, item.span.object_id) for item in definitions
@@ -364,7 +394,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         FUNCTION_SUMMARY_VERSION, tuple(exits), tuple(sorted(crossed.get("unknown_writers", ()))),
         tuple(writer_objects),
         tuple(key for key in _tail_exits(normalized, observation, noreturn_jumps)
-              if not dead_exit(key) and key not in fault_blocks),
+              if not dead_exit(key) and key not in fault_blocks and key not in frontier),
         inner_calls, tuple(demands),
         register_deltas,
         tuple(sorted(dead_exits)),
@@ -374,6 +404,9 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         independent_delta_proofs,
         fault_outcomes=_fault_outcomes(normalized, observation, fault_blocks, fault_states),
         fault_reachable=bool(getattr(normalized, "fault_reachable", False)),
+        unknown_transfers=_unknown_transfers(normalized, observation, frontier, frontier_states),
+        control_support=control_support(normalized, frontier.values()),
+        site_reachable=bool(getattr(normalized, "site_reachable", False)),
         premise_uses=_summary_uses(normalized, summary_uses),
     )
 
@@ -498,6 +531,54 @@ def _fault_outcomes(normalized, observation, fault_blocks, fault_states) -> tupl
         found.append(FaultOutcome(site, cut, origin, LABELS, tuple(evidence), guard_rows(labelled, block),
                                   fault_states.get(block, ExitSummary(block, ()))))
     return tuple(sorted(found, key=lambda row: row.site))
+
+
+def _frontier_blocks(normalized, observation) -> dict:
+    """Block key -> site key of every block ending in a BRANCHIND without
+    flow targets that this normalization does not exempt (``control_exempt``:
+    import-slot tails; ``fault_cuts``: discharged faults) -- U2b, docs 25.95."""
+    exempt = set(getattr(normalized, "control_exempt", ())) | {row[0] for row in getattr(normalized, "fault_cuts", ())}
+    ends = _cached("ends", observation, lambda: _block_ends(normalized, observation))
+    rows = {(row.address.space_id, row.address.byte_offset): row for row in observation.instructions}
+    entry = normalized.scopes.function.entry
+    found = {}
+    for block, key in ends.items():
+        space, offset, _, opcode = key.split(":")
+        if opcode != "BRANCHIND":
+            continue
+        row = rows.get((int(space, 16), int(offset, 16)))
+        if row is None or row.flow_targets:
+            continue
+        site = f"control:{entry.space_id:x}:{entry.byte_offset:x}:{space}:{offset}"
+        if site not in exempt:
+            found[block] = site
+    return found
+
+
+def _unknown_transfers(normalized, observation, frontier, states) -> tuple:
+    """The function's ``UnknownTransfer`` rows (sorted by site, block)."""
+    if not frontier:
+        return ()
+    from .control_dependence import guard_rows, labelled_control_dependences
+
+    labelled = _cached("guards", observation,
+                       lambda: labelled_control_dependences(observation, normalized.scopes.function.entry))
+    return tuple(sorted((UnknownTransfer(site, block, guard_rows(labelled, block),
+                                         states.get(block, ExitSummary(block, ())))
+                         for block, site in frontier.items()), key=lambda row: (row.site, row.block)))
+
+
+def control_support(normalized, sites) -> tuple:
+    """A summary's ``control_support``: its own frontier ``sites``, the
+    ``control_sites`` of every effect its normalization consumed and, when
+    either is non-empty, ``continuation:<function>:*`` (U2b, docs 25.95)."""
+    found = set(sites)
+    for _, effect in getattr(normalized, "proven_call_effects", ()):
+        found.update(getattr(effect, "control_sites", ()))
+    if found:
+        entry = normalized.scopes.function.entry
+        found.add(f"continuation:{entry.space_id:x}:{entry.byte_offset:x}:*")
+    return tuple(sorted(found))
 
 
 def _tail_exits(normalized, observation, noreturn_jumps=frozenset()) -> tuple[str, ...]:

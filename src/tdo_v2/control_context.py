@@ -21,6 +21,13 @@ recorded by the caller; r6).
 A pure function of the final results: computed once at publication
 (``summary_engine.report``) and by the template export; no analysis product
 reads it.
+
+Conditional summaries (U2b, docs 25.95): a function whose site context is
+non-empty also gets ``continuation:<function>:*`` -- "every CALL / CALLIND in
+the function and in every function it may reach returns to its observed next
+instruction" -- the second condition every conditional claim rests on (a site
+removed from a summary's exits exposes paths through opaque calls).
+``site_reach`` is the static may-reach-a-site set that vetoes noreturn.
 """
 
 from __future__ import annotations
@@ -34,6 +41,17 @@ def site_key(entry: str, address) -> str:
 
 def unavailable_key(entry: str) -> str:
     return f"control:unavailable:{entry}"
+
+
+def continuation_key(entry: str) -> str:
+    return f"continuation:{entry}:*"
+
+
+def continuation_owner(key: str) -> str | None:
+    """The function of a ``continuation:<function>:*`` key (None: another key)."""
+    if key.startswith("continuation:") and key.endswith(":*"):
+        return key[len("continuation:"):-2]
+    return None
 
 
 def unknown_transfer_sites(entry: str, observation) -> frozenset:
@@ -86,8 +104,31 @@ def _edges(entry: str, item, keys) -> set:
 def control_contexts(results, failed, exempt=frozenset()) -> dict:
     """{function key: frozenset(site keys)} over the published results
     (``analyze_units`` items) and the failure map (function key -> anything):
-    own sites united with every reachable function's; ``exempt``: site keys
-    that are no unknown transfer (``import_tail_sites``)."""
+    own sites united with every reachable function's, plus the function's
+    ``continuation:<function>:*`` key when that is non-empty (U2b);
+    ``exempt``: site keys that are no unknown transfer (``import_tail_sites``,
+    discharged faults)."""
+    own, edges = _graph(results, failed, exempt)
+    return {key: keys | {continuation_key(key)} if keys else keys for key, keys in _closure(own, edges).items()}
+
+
+def reachable(results, failed, key) -> frozenset:
+    """Every function ``key`` may reach over the context edges, itself included
+    (the scope of its ``continuation:<key>:*``)."""
+    keys = set(results) | set(failed)
+    seen, pending = set(), [key]
+    while pending:
+        node = pending.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        item = results.get(node)
+        if item is not None:
+            pending.extend(_edges(node, item, keys))
+    return frozenset(seen)
+
+
+def _graph(results, failed, exempt) -> tuple[dict, dict]:
     keys = set(results) | set(failed)
     own, edges = {}, {}
     for key in keys:
@@ -98,7 +139,44 @@ def control_contexts(results, failed, exempt=frozenset()) -> dict:
             found.add(unavailable_key(key))
         own[key] = found
         edges[key] = set() if item is None else _edges(key, item, keys)
-    return _closure(own, edges)
+    return own, edges
+
+
+def site_reach(units: dict, exempt: dict) -> frozenset:
+    """The static may-reach-a-site set (U2b, docs 25.95), fixed before the
+    first round: functions owning a site candidate that is not exempt
+    (``exempt``: key -> import-tail site keys; a fault site counts whatever the
+    fault premise discharges, its set only shrinks), every wildcard holder of
+    the fault premise's observation graph (``fault_premise.observed_calls``:
+    every CALLIND, every BRANCHIND -- an exempt import tail included --, every
+    call outside ``units``, a function without observation) when any such
+    owner exists, and every function reaching one of those over direct edges.
+    No function in it is ever noreturn (``summary_noreturn``)."""
+    from .fault_premise import observed_calls
+
+    owners = {key for key, unit in units.items()
+              if unknown_transfer_sites(key, getattr(unit, "observation", None)) - exempt.get(key, frozenset())}
+    if not owners:
+        return frozenset()
+    keys = frozenset(units)
+    calls, wildcard = {}, set()
+    for key, unit in units.items():
+        calls[key], wild = observed_calls(unit, keys)
+        if wild:
+            wildcard.add(key)
+    callers: dict = {}
+    for caller, callees in calls.items():
+        for callee in callees:
+            callers.setdefault(callee, set()).add(caller)
+    found = set(owners) | wildcard
+    pending = list(found)
+    while pending:
+        node = pending.pop()
+        for caller in callers.get(node, ()):
+            if caller not in found:
+                found.add(caller)
+                pending.append(caller)
+    return frozenset(found & keys)
 
 
 def _closure(own: dict, edges: dict) -> dict:
@@ -158,4 +236,5 @@ def _closure(own: dict, edges: dict) -> dict:
         sets.append(frozenset(found))
     return {key: sets[component[key]] for key in own}
 
-__all__ = ("control_contexts", "import_tail_sites", "site_key", "unavailable_key", "unknown_transfer_sites")
+__all__ = ("continuation_key", "continuation_owner", "control_contexts", "import_tail_sites", "reachable",
+           "site_key", "site_reach", "unavailable_key", "unknown_transfer_sites")

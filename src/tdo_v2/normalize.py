@@ -278,6 +278,13 @@ class NormalizedFunction:
     # may be reached from it (``fault_premise.may_reach``: never noreturn)
     fault_cuts: tuple = ()
     fault_reachable: bool = False
+    # conditional summaries (U2b, docs 25.95), normalization inputs: the
+    # function's unknown-transfer sites that are no site in this run (sorted
+    # site keys of import-slot tails; discharged faults are ``fault_cuts``) and
+    # whether a site may be reached from it (``control_context.site_reach``:
+    # never noreturn)
+    control_exempt: tuple = ()
+    site_reachable: bool = False
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -1571,6 +1578,8 @@ class FunctionNormalizer:
         open_conditions: dict | None = None,
         fault_cuts: tuple = (),
         fault_reachable: bool = False,
+        control_exempt: tuple = (),
+        site_reachable: bool = False,
         _forward_memory_plan=None,
         _load_identity_plan=None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
@@ -1624,6 +1633,9 @@ class FunctionNormalizer:
         entry = entry_for(function.scope)
         if type(result) is NormalizedFunction and (fault_cuts or fault_reachable):
             result = replace(result, fault_cuts=tuple(sorted(fault_cuts)), fault_reachable=bool(fault_reachable))
+        if type(result) is NormalizedFunction and (control_exempt or site_reachable):
+            result = replace(result, control_exempt=tuple(sorted(control_exempt)),
+                             site_reachable=bool(site_reachable))
         return replace(result, activation_entry=entry) if type(result) is NormalizedFunction and entry else result
 
     def normalize_configured(

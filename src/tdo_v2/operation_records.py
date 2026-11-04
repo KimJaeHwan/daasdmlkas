@@ -2555,6 +2555,8 @@ def run_records(normalized, unit, summary, *, origins=None, declared=None, limit
                 "conditions": len(run.conditions), "writer_conditions": len(summary.writer_conditions),
                 "unknown_writers": list(summary.unknown_writers), "tail_exits": list(summary.tail_exits),
                 "origins": list(run.origins),
+                # (U2b: the keys every claim of a conditional summary rests on)
+                **({"control_support": list(summary.control_support)} if summary.control_support else {}),
             }
             if run.kind.value == "identity":
                 found.append({**metadata, "truncated": False, "demand_complete": True, "root": [], "nodes": []})
@@ -2582,7 +2584,7 @@ def render(record) -> str:
     facts = []
     if record.get("record") == "summary run":
         facts.append(f"kind={record.get('run_kind')}")
-        for name in ("crossed", "debts", "unknown_writers", "tail_exits"):
+        for name in ("crossed", "debts", "unknown_writers", "tail_exits", "control_support"):
             if record.get(name):
                 facts.append(f"{name}={','.join(record[name])}")
         for name in ("conditions", "writer_conditions"):

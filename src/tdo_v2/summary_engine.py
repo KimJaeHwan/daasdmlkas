@@ -679,6 +679,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         faults = frozenset().union(*(fault_exempt(key) for key in sorted(results)))
         contexts = control_contexts(results, failed, exempt | faults)
         checkpoint()
+        _check_control_support(results, failed, contexts)
         found = _with_control_contexts(found, contexts)
         # an exemption is a use of its premise (r6; an unmodeled import's jump
         # records it nowhere else)
@@ -782,6 +783,70 @@ def _fault_report(results, image_info) -> tuple:
         rows += sorted(("registration-import", symbol.name, symbol.library) for symbol in image_info.imports
                        if symbol.name in FAULT_REGISTRATION_IMPORTS)
     return tuple(rows)
+
+
+class ControlSupportViolation(RuntimeError):
+    """A conditional-summary invariant failed (U2b, docs 25.95): an engine bug."""
+
+
+def _check_control_support(results, failed, contexts) -> None:
+    """The U2b invariants over every published summary (docs 25.95), each a
+    raise: (3) normalization -> summary: the summary's frontier sites are site
+    candidates its normalization does not exempt, its ``control_support``
+    holds them and every ``control_sites`` its normalization consumed, plus
+    ``continuation:<function>:*`` when either is non-empty; (1) summary ->
+    effect: each proven call's ``control_sites`` hold the support of every
+    summary it consumed; (2) support -> context: a site key is in the
+    function's control context, a ``continuation:<P>:*`` names a function P it
+    may reach."""
+    from .control_context import continuation_key, continuation_owner, unknown_transfer_sites
+    from .control_context import _edges as context_edges
+
+    keys = set(results) | set(failed)
+    reach: dict = {}
+
+    def reaches(key, target) -> bool:
+        """``target`` is ``key`` or reachable from it (memoized searches)."""
+        seen = reach.setdefault(key, set())
+        if target == key or target in seen:
+            return True
+        pending, visited = [key], {key}
+        while pending:
+            node = pending.pop()
+            item = results.get(node)
+            if item is None:
+                continue
+            for other in context_edges(node, item, keys):
+                if other not in visited:
+                    visited.add(other)
+                    seen.add(other)
+                    if other == target:
+                        return True
+                    pending.append(other)
+        return False
+
+    for key, item in sorted(results.items()):
+        summary, normalized = item.summary, item.normalized
+        if summary is None or type(normalized) is not NormalizedFunction:
+            continue
+        support = set(summary.control_support)
+        own = {row.site for row in summary.unknown_transfers}
+        exempt = set(normalized.control_exempt) | {row[0] for row in normalized.fault_cuts}
+        if not own <= set(unknown_transfer_sites(key, item.unit.observation)) - exempt:
+            raise ControlSupportViolation(f"{key}: frontier {sorted(own)} is not its non-exempt sites")
+        consumed = {site for _, effect in normalized.proven_call_effects for site in effect.control_sites}
+        if not (own | consumed) <= support or bool(own | consumed) != (continuation_key(key) in support):
+            raise ControlSupportViolation(f"{key}: support {sorted(support)} misses {sorted((own | consumed) - support)}")
+        for call, effect in sorted(item.proven.items()):
+            for producer in item.consumed.get(call, ()):
+                produced = getattr(getattr(producer, "summary", None), "control_support", ())
+                if not set(produced) <= set(effect.control_sites):
+                    raise ControlSupportViolation(f"{key}: effect at {call} drops {sorted(set(produced) - set(effect.control_sites))}")
+        context = contexts.get(key, frozenset())
+        for site in sorted(support):
+            owner = continuation_owner(site)
+            if owner is None and site not in context or owner is not None and not reaches(key, owner):
+                raise ControlSupportViolation(f"{key}: {site} is outside its control context")
 
 
 def _with_control_contexts(roots, contexts) -> list:

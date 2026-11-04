@@ -6272,3 +6272,34 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
   H3 뒤 343 풀림; 미해결 종단 때문에 요약이 거부된 함수 259 -> 172, 증명된 호출 효과 407 -> 605, unbound 76 -> 73.
   complete는 0 그대로: Mulp의 런타임에 채워지는 `jmp [.rdata slot]` 64개가 거의 모든 함수의 맥락에 남는다(분석가 링크 /
   실행 단계 몫). 게이트 Bundle에는 장애가 없다(OFF·ON 같음).
+
+### 25.95 조건부 요약 -- 점프 위치는 요약의 출구가 아니다 (U2b, 2026-11-04)
+
+설계 `.census6/design_conditional_summaries_r1.md` + r2..r6(Astra r1-r4 반려, r5 승인, r6 수정 조건부 승인; Fable r1 · 최종
+수정 조건부 승인, 수정 반영). U2a(25.93)의 첫 "후속 개방": 요약 효과. 새 가정 없음 -- 모두 표시.
+- 프런티어: 실행이 면제하지 않는 위치(대상 없는 BRANCHIND; import-slot tail은 그 스위치 아래 면제, F1의 D는 장애)로 끝나는
+  블록은 출구·tail exit·dead exit 어느 것도 아니다(`FunctionSummary.unknown_transfers`: 위치, 블록, guard, 그 블록의 종단
+  상태; cut 뒤에 있어도 행으로 남는다). 요약은 나머지 정상 출구로 만든다. 면제는 정규화 입력(`NormalizedFunction.control_exempt`,
+  F1의 `fault_cuts`)이라 replay·activation·라운드가 같은 결정을 본다(늦게 취소된 장애는 다시 프런티어 행).
+- 지지(`FunctionSummary.control_support`, `summarize_function` 안에서 정규화로부터 계산): 자기 프런티어 위치 + 정규화가 소비한
+  모든 효과의 `control_sites` + 둘 중 하나라도 있으면 `continuation:<함수>:*`. `derive_proven_call_effect`가 돌려주는 모든 효과
+  (noreturn·sink 전용 포함)는 `ProvenCallEffect.control_sites` = 생산자 요약의 지지; 다중 대상 합성은 구성원들의 합집합.
+- `continuation:<f>:*` = "f와 f가 닿을 수 있는 모든 함수(맥락 간선)의 모든 CALL / CALLIND가 관찰된 다음 명령으로 돌아온다".
+  위치를 출구에서 빼면 불투명 호출을 지나는 경로가 새로 드러난다(Astra r1-r4: 그 경로의 호출, 반환 전용 가지의 호출, 지지를
+  소비하는 호출자의 호출, 깊이와 무관한 보조 함수의 호출) -- 호출마다 키를 다는 대신 함수마다 하나의 closure 키. 위치 맥락이
+  비어 있지 않은 모든 함수의 맥락에 붙는다(`control_contexts`): 완전성은 바뀌지 않는다(이미 불완전). 위치 맥락이 빈 함수는
+  그대로(오늘의 2c 구멍, 넓어지지 않음). 2c의 continuation 인증서만 이 키를 지울 수 있다(부분 인증은 아무것도 지우지 않음).
+- cut은 위치에 기대지 않는다: (1) 정적 `site_reach`(1라운드 전, `fault_premise.observed_calls`의 와일드카드 술어 재사용 --
+  모든 CALLIND·BRANCHIND, 면제된 import tail 포함, 분석 집합 밖 호출, 관찰 없는 함수; 면제되지 않은 위치 후보가 하나라도 있을
+  때만) -> `NormalizedFunction.site_reachable` / `FunctionSummary.site_reachable`, `summary_noreturn`이 프런티어 또는 이것이면
+  거부. (2) 자기 프런티어가 있거나 조건부 효과를 소비한 함수는, 그 라운드에 해석한 간접 호출(해석 대상, cut 대상, 다중 후보)의
+  noreturn을 cut으로 쓰지 않는다(`derive` 안, 정규화 전: 요약 출처는 sink 전용 효과, 모델 출처는 불투명).
+- 불변식(보고 시점, 위반 = 엔진 버그 `ControlSupportViolation`): 정규화 -> 요약(프런티어 = 면제 안 된 위치 후보의 부분, 지지가
+  자기 위치·소비 지지·자기 continuation 키를 담음), 요약 -> 효과(호출의 `control_sites`가 소비한 모든 요약의 지지를 담음),
+  지지 -> 맥락(위치 키는 맥락에, `continuation:<P>:*`는 P에 닿을 수 있을 때).
+- 템플릿: 프런티어·지지가 있으면, 또는 `site_reachable`인데 출구 없이 dead exit만 있으면(가져오는 쪽에서 veto 없이 noreturn이
+  된다) 내보내지 않는다. 기록: 요약 run 기록에 비어 있지 않은 `control_support`. U2b-2(위치를 가진 함수 안의 조회를 여는 것)는
+  별도 단계(측정상 추가 효과 없음).
+- 측정 상한(Mulp 405 함수, U2a+F1 ON, `.census6/ab_now.py`): 미해결 종단 때문에 효과를 못 주던 요약 172 -> 37(131개는 위치만이
+  원인), 증명된 호출 효과 735 -> 1368; "제어 표시만 남은" root 52 그대로 -- 새 효과도 피호출의 주소 모를 쓰기로 메모리를 잃는다
+  (벽 A/B; A+B 상한 258, U2b와 함께 270).

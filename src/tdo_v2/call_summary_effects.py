@@ -327,6 +327,11 @@ class ProvenCallEffect:
     # stack taint follows no call output, so the call itself is a stack escape
     # (``may_alias._stack_taint``); a declared model never sets it
     escapes_stack: bool = False
+    # conditional summaries (U2b, docs 25.95): the producer summary's
+    # ``control_support`` -- every claim of this effect is the observed graph's
+    # answer, true only if none of these sites resumes and every call in the
+    # named functions' reach returns to its next instruction
+    control_sites: tuple[str, ...] = ()
     # Provenance only: the facts in restores_stack/tail_stack_delta remain
     # semantic. Original-CFG certificates justify them independently of a
     # refused memory-writer condition and survive in the query graph/record.
@@ -342,13 +347,28 @@ def summary_noreturn(summary) -> bool:
     """The callee never returns: no exit, no tail exit, some dead exit (a trap,
     a call that never returns) -- and nothing of the fault premise: a fault
     outcome, a reference to one, or a discharged fault it may reach (F1, docs
-    25.94: a fault is never a reason for noreturn). The ONE reader of that
-    conjunction (a test keeps it so)."""
+    25.94: a fault is never a reason for noreturn) -- and no unknown-transfer
+    frontier and no site it may reach (U2b, docs 25.95: a cut deletes the
+    paths a site mark would follow). The ONE reader of that conjunction (a
+    test keeps it so)."""
     return (not summary.exits and not summary.tail_exits and bool(summary.dead_exits)
-            and not summary.fault_outcomes and not summary.fault_references and not summary.fault_reachable)
+            and not summary.fault_outcomes and not summary.fault_references and not summary.fault_reachable
+            and not summary.unknown_transfers and not summary.site_reachable)
 
 
-def derive_proven_call_effect(
+def derive_proven_call_effect(summary: FunctionSummary, *args, **kwargs) -> ProvenCallEffect | None:
+    """``_derive_proven_call_effect`` (below), every effect it returns -- the
+    noreturn and sink-only shapes included -- carrying the summary's
+    ``control_support`` as ``control_sites`` (U2b, docs 25.95)."""
+    effect = _derive_proven_call_effect(summary, *args, **kwargs)
+    if effect is not None and summary.control_support:
+        from dataclasses import replace as _replace
+
+        effect = _replace(effect, control_sites=tuple(summary.control_support))
+    return effect
+
+
+def _derive_proven_call_effect(
     summary: FunctionSummary,
     callee: str,
     register_object,
@@ -760,6 +780,11 @@ def derive_composed_call_effect(
         # (a member that may reach a fault: the composition is never noreturn, F1)
         fault_reachable=any(summary.fault_reachable or summary.fault_outcomes or summary.fault_references
                             for summary, _ in members),
+        # (U2b: every member's frontier and support -- one conditional member
+        # makes the composition conditional)
+        unknown_transfers=tuple(row for summary, _ in members for row in summary.unknown_transfers),
+        control_support=tuple(sorted({key for summary, _ in members for key in summary.control_support})),
+        site_reachable=any(summary.site_reachable for summary, _ in members),
     )
     effect = derive_proven_call_effect(
         composed, callee, register_object, register_limit, excluded=excluded, anchors=merged_anchors,

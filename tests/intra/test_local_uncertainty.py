@@ -21,7 +21,7 @@ from synthetic import (
 )
 from tdo_v2.boundary import BoundaryKind
 from tdo_v2.boundary_rules import BoundaryRule, SymbolBoundaryProvider
-from tdo_v2.control_context import _closure, control_contexts, site_key, unavailable_key
+from tdo_v2.control_context import _closure, continuation_key, control_contexts, site_key, unavailable_key
 from tdo_v2.image_info import ImportedSymbol
 from tdo_v2.physical_state import PhysicalMemorySlice, PhysicalRegisterSlice
 from tdo_v2.query_contracts import LocalCompleteness, with_control
@@ -39,6 +39,11 @@ def _key(entry):
 def _site(entry, index):
     """The site key of the ``index``-th instruction of the function at ``entry``."""
     return site_key(_key(entry), SimpleNamespace(space_id=RAM, byte_offset=entry + index * STRIDE))
+
+
+def _marks(*sites, owner=MAIN):
+    """A root's obligations: the sites and its function's continuation key (U2b, docs 25.95)."""
+    return tuple(sorted({*sites, continuation_key(_key(owner))}))
 
 
 def _main(entry=MAIN):
@@ -78,7 +83,7 @@ def test_a_sink_before_a_ud2_path_is_bound_and_marked():
     completeness = root.effective_completeness
     assert completeness.unbound_roots == 0
     assert completeness.conditional_roots == 1
-    assert completeness.control_obligations == (_site(MAIN, index),)
+    assert completeness.control_obligations == _marks(_site(MAIN, index))
     assert not root.is_effectively_complete and not root.is_locally_complete
 
 
@@ -100,7 +105,7 @@ def test_another_barrier_still_refuses_the_conditional_lookup():
     root, = _roots(_run(main))
     completeness = root.effective_completeness
     assert completeness.unbound_roots == 1 and completeness.conditional_roots == 0
-    assert completeness.control_obligations == (_site(MAIN, index),)
+    assert completeness.control_obligations == _marks(_site(MAIN, index))
     assert not root.is_effectively_complete
 
 
@@ -114,10 +119,10 @@ def test_a_callee_site_marks_every_root_of_its_callers():
     root, = _roots(run)
     completeness = root.effective_completeness
     assert completeness.unbound_roots == 0 and completeness.conditional_roots == 0
-    assert completeness.control_obligations == (_site(HELPER, index),)
+    assert completeness.control_obligations == _marks(_site(HELPER, index))
     assert not root.is_effectively_complete
-    assert dict(run.control_contexts) == {_key(MAIN): (_site(HELPER, index),),
-                                          _key(HELPER): (_site(HELPER, index),)}
+    assert dict(run.control_contexts) == {_key(MAIN): _marks(_site(HELPER, index)),
+                                          _key(HELPER): _marks(_site(HELPER, index), owner=HELPER)}
 
 
 def test_a_function_without_a_site_is_unchanged():
@@ -136,7 +141,7 @@ def test_a_tail_sink_is_bound_and_marked():
     root, = _roots(_run(main))
     completeness = root.effective_completeness
     assert completeness.unbound_roots == 0 and completeness.conditional_roots == 1
-    assert completeness.control_obligations == (_site(MAIN, index),)
+    assert completeness.control_obligations == _marks(_site(MAIN, index))
 
 
 def test_a_memory_sink_names_its_fragment_through_the_conditional_pointer():
@@ -153,7 +158,7 @@ def test_a_memory_sink_names_its_fragment_through_the_conditional_pointer():
     root, = _roots(_run(main, provider=provider), label="sink.mem")
     completeness = root.effective_completeness
     assert completeness.unbound_roots == 0 and completeness.conditional_roots == 1
-    assert completeness.control_obligations == (_site(MAIN, index),)
+    assert completeness.control_obligations == _marks(_site(MAIN, index))
 
 
 def test_the_summary_sink_demand_stays_strict():
@@ -169,7 +174,7 @@ def test_the_summary_sink_demand_stays_strict():
     assert own.effective_completeness.conditional_roots == 1
     for root in _roots(run, MAIN):
         assert root.inherited_incomplete and not root.is_effectively_complete
-        assert root.effective_completeness.control_obligations == (_site(HELPER, index),)
+        assert root.effective_completeness.control_obligations == _marks(_site(HELPER, index))
         assert root.effective_completeness.conditional_roots == 0
 
 
@@ -178,7 +183,7 @@ def test_the_record_lists_the_obligations():
                                lambda b: b.call(SINK).add_rsp(0x28).ret())
     root, = _roots(_run(main, operation_records=True))
     completeness = root.explanation["record"]["completeness"]
-    assert completeness["control_obligations"] == [_site(MAIN, index)]
+    assert completeness["control_obligations"] == list(_marks(_site(MAIN, index)))
     assert completeness["conditional_roots"] == 1
     plain = _main().ins(copy(reg(RCX), const(7))).call(SINK).add_rsp(0x28).ret()
     root, = _roots(_run(plain, operation_records=True))
@@ -219,7 +224,7 @@ def test_without_the_premise_the_import_jump_is_a_site():
     run = _run(_caller_of_thunk(), extra=(_thunk(),), image=True, imports=IMPORTS,
                assume_import_slots_hold_exports=False)
     root, = _roots(run)
-    assert root.effective_completeness.control_obligations == (_site(HELPER, 0),)
+    assert root.effective_completeness.control_obligations == _marks(_site(HELPER, 0))
     assert run.control_exemptions == ()
     assert "import-slots-hold-their-exports" not in run.assumptions
 
@@ -230,7 +235,7 @@ def test_a_jump_to_an_unknown_destination_stays_a_site(target):
     thunk = _thunk(SLOT + 8) if target == "global-slot" else FunctionBuilder(entry=HELPER).jump_indirect(reg(RAX))
     run = _run(_caller_of_thunk(), extra=(thunk,), image=True, imports=IMPORTS)
     root, = _roots(run)
-    assert root.effective_completeness.control_obligations == (_site(HELPER, 0),)
+    assert root.effective_completeness.control_obligations == _marks(_site(HELPER, 0))
     assert not root.is_effectively_complete
     assert run.control_exemptions == ()
 
@@ -269,7 +274,7 @@ def test_a_cut_conditional_binding_falls_back_to_the_strict_one(monkeypatch):
     root, = _roots(_run(main))
     completeness = root.effective_completeness
     assert completeness.unbound_roots == 1 and completeness.conditional_roots == 0
-    assert completeness.control_obligations == (_site(MAIN, index),)
+    assert completeness.control_obligations == _marks(_site(MAIN, index))
 
 
 def test_a_resource_failure_in_the_context_graph_refuses_transient_first():
@@ -319,7 +324,7 @@ def test_a_root_left_at_its_consume_event_is_not_marked_conditional():
     root, = _roots(_run(main, provider=provider), label="sink.mem")
     completeness = root.effective_completeness
     assert completeness.conditional_roots == 0
-    assert completeness.control_obligations == (_site(MAIN, index),)
+    assert completeness.control_obligations == _marks(_site(MAIN, index))
 
 
 def test_a_callee_failing_after_its_callers_roots_marks_them_unavailable(monkeypatch):
@@ -386,8 +391,10 @@ def test_contexts_follow_calls_candidates_and_cycles():
     }
     found = control_contexts(results, {_key(e): "failed"})
     site = site_key(_key(b), SimpleNamespace(space_id=RAM, byte_offset=b))
-    assert found[_key(a)] == found[_key(b)] == found[_key(c)] == frozenset({site})
-    assert found[_key(d)] == found[_key(e)] == frozenset({unavailable_key(_key(e))})
+    for key in (a, b, c):   # (each with its own continuation key, U2b)
+        assert found[_key(key)] == frozenset({site, continuation_key(_key(key))})
+    for key in (d, e):
+        assert found[_key(key)] == frozenset({unavailable_key(_key(e)), continuation_key(_key(key))})
 
 
 def test_the_closure_is_reachability():

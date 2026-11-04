@@ -217,6 +217,12 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
             raise TemplateRefused(f"{item.key}: depends on the library's load address")
     if summary.tail_exits:
         raise TemplateRefused("tail exits not composed")
+    if summary.unknown_transfers or summary.control_support:
+        raise TemplateRefused("rests on an unknown control transfer")
+    if summary.site_reachable and not summary.exits and summary.dead_exits:
+        # (U2b: the template carries no veto -- it would be noreturn in the
+        # importing program while a site may be reached here)
+        raise TemplateRefused("never returns only while no reachable unknown transfer resumes")
     if summary.sink_demands:
         raise TemplateRefused("sink demands")
     if any(run.origins for item in summary.exits for run in item.runs):

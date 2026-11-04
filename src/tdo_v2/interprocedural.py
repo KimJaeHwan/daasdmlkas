@@ -633,6 +633,27 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     fault_plan = plan_faults(functions, exception_directory, image_base, program) \
         if fault_on and functions else EMPTY_PLAN
     fault_state = {"discharged": fault_plan.discharged, "revoked": {}}
+    # conditional summaries (U2b, docs 25.95): the import-slot tails that are
+    # no unknown-transfer site in this run (fixed: the switch and the image),
+    # and the static may-reach-a-site set (never noreturn), before round 1
+    from .control_context import import_tail_sites, site_reach, unknown_transfer_sites
+    from .relative_memory import IMPORT_SLOTS as _IMPORT_SLOTS
+
+    tail_image = image_info if _IMPORT_SLOTS.get() is not None else None
+    control_exempt = {key: unknown_transfer_sites(key, unit.observation) & import_tail_sites(key, unit, tail_image)
+                      for key, unit in functions.items()}
+    control_exempt = {key: sites for key, sites in control_exempt.items() if sites}
+    site_reachable = site_reach(functions, control_exempt)
+
+    def own_frontier(key) -> frozenset:
+        """The function's own site candidates this round (no import tail, no
+        discharged fault)."""
+        sites = unknown_transfer_sites(key, functions[key].observation) - control_exempt.get(key, frozenset())
+        return sites - {row[0] for row in fault_plan.cuts_of(key, fault_state["discharged"])} if sites else sites
+
+    # (U2b D.3) call keys of each function resolved this round from the
+    # analysed graphs (indirect targets, cut targets, multi-target members)
+    round_resolved: dict = {}
     local_entries = frozenset((unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset)
                               for unit in program.values())
     externals = {
@@ -1116,6 +1137,20 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     sources[call_key] = ("model", entry.label)
                 for call_key in _unplaced_noreturn(unit, proven):
                     del proven[call_key]  # opaque: the cut would drop an observed edge
+                # (U2b D.3) a function whose values may rest on a site takes no
+                # noreturn cut at a call it resolved from them: the call stays
+                # (its sink demands bind; a model's cut target stays opaque)
+                if own_frontier(key) or any(effect.control_sites for effect in proven.values()):
+                    for call_key in sorted(round_resolved.get(key, ())):
+                        effect = proven.get(call_key)
+                        if effect is None or not effect.noreturn:
+                            continue
+                        if call_key in externals[key]:
+                            del proven[call_key]
+                        else:
+                            proven[call_key] = ProvenCallEffect(
+                                effect.callee, (), (), sink_demands=effect.sink_demands, escapes_stack=True,
+                                control_sites=effect.control_sites)
                 # Retain independently approved CALL-byte decisions when a
                 # later reader-local content proof replays their normalization.
                 chain, cursor = [], refinement
@@ -1168,6 +1203,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     normalization_options["fault_cuts"] = fault_cuts
                 if key in fault_plan.may_reach_fault:
                     normalization_options["fault_reachable"] = True
+                if key in control_exempt:
+                    normalization_options["control_exempt"] = tuple(sorted(control_exempt[key]))
+                if key in site_reachable:
+                    normalization_options["site_reachable"] = True
                 normalized = FunctionNormalizer().normalize(
                     unit, **normalization_options, _forward_memory_plan=refinement,
                     _load_identity_plan=load_identity)
@@ -1444,6 +1483,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         while done < rounds:
             done += 1
             use_externals(resolved_cuts)
+            round_resolved.clear()
+            for rows in (resolved, resolved_cuts, resolved_multi):
+                for owner, found_calls in rows.items():
+                    round_resolved.setdefault(owner, set()).update(found_calls)
             results = analyze({key: {**calls[key], **resolved.get(key, {})} for key in calls}, resolved_multi)
             if first is None:
                 first = results
@@ -1519,6 +1562,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 for call, labels in rows.items():
                     resolution_call_requires.setdefault(key, {}).setdefault(call, set()).update(labels)
         use_externals({})
+        round_resolved.clear()
         resolution_requires.clear()
         resolution_call_requires.clear()
         return analyze(calls)  # not stable: no indirect resolution at all
