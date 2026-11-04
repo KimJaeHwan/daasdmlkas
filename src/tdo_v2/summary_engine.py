@@ -577,12 +577,12 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
 
     def wild_writes(normalized, unit) -> frozenset:
         """The function's WILD unresolved-write nodes (B', docs 25.96; once per function)."""
-        found = wild_of.get(id(normalized))
-        if found is None:
+        row = wild_of.get(id(normalized))
+        if row is None or row[0] is not normalized:
             from .write_classes import wild_write_nodes
 
-            found = wild_of[id(normalized)] = wild_write_nodes(normalized, unit.observation)
-        return found
+            row = wild_of[id(normalized)] = (normalized, wild_write_nodes(normalized, unit.observation))
+        return row[1]
 
     def function_roots(analysis):
         """The RootSlices of one bound function."""

@@ -319,6 +319,8 @@ _TEMPLATE_SITE_KINDS = frozenset({"memory-writes", "vetoed-noreturn", "continuat
 def _site_kind(site: str) -> str:
     if site.startswith("continuation:"):
         return "continuation"
+    if site.startswith("control:model:"):
+        return "model"   # (a library model's own manifest: not re-exported -- refused)
     if site.startswith("control:unavailable:"):
         return "unavailable"
     if site.endswith(":memory-writes"):

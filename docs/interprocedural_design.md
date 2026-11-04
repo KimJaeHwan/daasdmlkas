@@ -6327,8 +6327,12 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
 - 잘림: `summary_noreturn`은 지지가 비어 있어야 한다. 거부된 noreturn(`vetoed_noreturn`)과 D.3이 거절한 해석된 간접 호출의
   noreturn은 그 호출에 `control:<G>:<호출>:vetoed-noreturn`을 남긴다. `callee_support`(정규화 입력, replay 정체성): 이번 라운드에
   옮겨 갈 수 있는 모든 피호출의 지지(효과가 있든 없든), 쓸 수 있는 요약이 없는 피호출은 `control:unavailable:<피호출>`(풀리지
-  않은 재귀 포함), 템플릿 모델의 manifest 키 -- D.3이 잘림 전에 본다. 정적 `site_reach`의 와일드카드 도달은 U2a 위치 후보가 있을
-  때만(메모리 쓰기 위치는 알려진 간선의 지지로 전달; 모르는 간선은 opaque-continuation 조건, 2c).
+  않은 재귀 포함), 템플릿 모델의 manifest 키 -- D.3이 잘림 전에 본다. 정적 쓰기 함수(`control_context.memory_writer` 또는
+  모델 호출 또는 와일드카드 보유 -- 간접 호출 / 점프, 분석 집합 밖 호출; 주소에 대한 구문 판단은 없다, 라운드 사이에 바뀌지 않는다)가
+  하나라도 있으면 정적 `site_reach`의 와일드카드 도달이 켜지고(U2a 위치 후보와 같이), D.3은 정적 쓰기 함수 안에서 거절한다.
+  결과: 메모리에 쓰는 프로그램에서는 와일드카드 보유 함수(와 그 호출자)가 noreturn이 되지 않고, 해석된 간접 호출의 noreturn 잘림은
+  일어나지 않는다 -- 대신 그 호출마다 vetoed-noreturn 키(정밀도 비용, 소유자 수용; 설계 R4의 구문 좁히기는 Astra 코드 리뷰
+  r1-r4의 반례로 폐기).
 - 템플릿(버전 7): 맥락이 memory-writes / vetoed-noreturn 종류만이면 내보내고 `control` manifest(종류, 함수, 쓰기 연산과
   RAM / WILD 또는 호출 명령)를 싣는다. 가져오는 쪽에서 모델 요약의 지지 = `control:model:<label>:<i>:<kind>`(행마다 하나) --
   그 모델을 부르는 함수의 위치. 의미 버전 44, UE 템플릿 재파생.

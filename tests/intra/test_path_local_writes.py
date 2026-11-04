@@ -202,3 +202,22 @@ def test_a_wildcard_holder_is_a_static_writer_from_the_start(monkeypatch):
     assert call in item.proven and not item.proven[call].noreturn
     assert item.summary.exits
     assert any(site.endswith(":vetoed-noreturn") for site in item.normalized.callee_support)
+
+
+
+def test_an_unresolved_recursion_is_unavailable_to_its_members(monkeypatch):
+    """Fable code: the fallback of an SCC without a verified fixpoint -- each intra-SCC call is a
+    dependency on an unavailable member, in the member's support, its callers' contexts and the
+    records."""
+    import tdo_v2.interprocedural as interprocedural
+
+    monkeypatch.setattr(interprocedural, "MAX_RECURSION_ROUNDS", 0)
+    a = FunctionBuilder(entry=G).sub_rsp(0x28).call(H).add_rsp(0x28).ret()
+    b = FunctionBuilder(entry=H).sub_rsp(0x28).call(G).add_rsp(0x28).ret()
+    caller = FunctionBuilder(entry=MAIN).sub_rsp(0x28).call(G).ins(copy(reg(RCX), const(7))).call(SINK) \
+        .add_rsp(0x28).ret()
+    run = _run(caller, a, b)
+    obligations = _root(run).effective_completeness.control_obligations
+    assert f"control:unavailable:{_key(G)}" in obligations or f"control:unavailable:{_key(H)}" in obligations
+    kinds = {row[0]: row[1] for row in run.control_sites}
+    assert "unavailable" in kinds.values()

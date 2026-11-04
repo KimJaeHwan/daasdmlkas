@@ -643,9 +643,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     control_exempt = {key: unknown_transfer_sites(key, unit.observation) & import_tail_sites(key, unit, tail_image)
                       for key, unit in functions.items()}
     control_exempt = {key: sites for key, sites in control_exempt.items() if sites}
-    # (B', docs 25.96) functions whose own code writes memory at a place that
-    # is neither constant nor the stack pointer's (syntactic, before round 1):
-    # owners of the static may-reach set, and D.3 declines a cut in them
+    # (B', docs 25.96) static writers, fixed before round 1: functions whose own
+    # code writes memory (any STORE / memory output), call a model, or hold a
+    # wildcard transfer -- they trigger the static may-reach set's wildcard
+    # reach, and D.3 declines a cut in them
     from .control_context import memory_writer
 
     _static = {}
