@@ -139,6 +139,11 @@ class EngineRun:
     # the fault premise (F1, docs 25.94): (site key, status, detail) of every
     # recognized fault site (``AnalyzedFunction.fault_decisions``)
     fault_report: tuple = ()
+    # B' (docs 25.96): one row per own control key of the run -- (key, kind
+    # "unknown-transfer" | "memory-writes" | "vetoed-noreturn" | "unavailable",
+    # function, detail: the instruction, or the writer operation keys with their
+    # RAM / WILD class) -- what a later link or trace must name to settle it
+    control_sites: tuple = ()
 
 
 @analysis_entry

@@ -6307,3 +6307,31 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
 - 측정 상한(Mulp 405 함수, U2a+F1 ON, `.census6/ab_now.py`): 미해결 종단 때문에 효과를 못 주던 요약 172 -> 37(131개는 위치만이
   원인), 증명된 호출 효과 735 -> 1368; "제어 표시만 남은" root 52 그대로 -- 새 효과도 피호출의 주소 모를 쓰기로 메모리를 잃는다
   (벽 A/B; A+B 상한 258, U2b와 함께 270).
+
+### 25.96 주소 모를 쓰기 -- 데이터는 경로 단위, 제어는 위치 (B', 2026-11-04)
+
+설계 `.census6/design_path_local_writes_r1.md` .. r8 + `design_path_local_writes_final.md`(Astra r1-r7 반려, r8 수정 조건부
+승인; Fable r1 · 최종 수정 조건부 승인, 수정 반영). 소유자 결정(a): 지금 "완전"인 결과 중 피호출의 주소 모를 쓰기가 제어를 바꾸지
+않는다는 것에 기대던 결과가 표시 붙은 결과가 되는 것을 받아들인다(측정: 게이트 228개 중 15개).
+- 분류(`write_classes`): 예전 차단 규칙이 세던 모든 쓰기 -- SSA의 미해결 쓰기, 요약의 무조건 `unknown_writers`(불확실 주소
+  쓰기 포함) -- 를 원래 연산으로 한 번 분류한다. RAM: 공간 선택자가 프로그램 메모리 공간을 가리키는 STORE, 호출 효과의 위치 없는
+  메모리 쓰기(생산자 기준), RAM으로의 무조건 불확실 STORE. WILD: 그 밖(레지스터 / unique 공간, 상수 아닌 선택자, CALLOTHER 등의
+  메모리 출력, 원시 StorageRef 쓰기). 하나의 술어 `effects.unknown_write`를 SSA · may-alias · 요약 crossing · alias 조건이 같이 쓴다.
+- 데이터: WILD는 지금의 함수 전체 차단을 유지한다. RAM은 root의 완전성(`local_completeness(blocking_writes=WILD)`, 요약 엔진
+  경로만; legacy 엔진은 그대로)과 sink demand의 완전성을 막지 않는다 -- 그 쓰기가 값에 닿는 길은 둘뿐이다: 읽기 기반 값은 그
+  쓰기를 이름으로 가진 may-alias debt, 정의 기반 값(sink 메모리 조각, 투영된 demand, 진입 값, STORE receipt)은 상태 장벽의 거부.
+  `SinkDemand.complete`는 데이터 완전성만 뜻한다(제어는 맥락에서).
+- 제어: 그런 쓰기를 가진 함수 F는 `control:<F>:memory-writes`("F의 주소 모를 쓰기가 어디서든 -- F, 그 쓰기가 닿는 다른
+  활성화(호출자의 복귀 슬롯, 저장된 레지스터), 코드 포인터 -- 제어를 바꾸지 않는다")를 자기 위치로 가진다. U2a 위치와 같다(맥락,
+  `continuation:<f>:*`, U2b 지지, 효과의 `control_sites`, 불변식). 프런티어는 아니다(출구는 그대로).
+- 잘림: `summary_noreturn`은 지지가 비어 있어야 한다. 거부된 noreturn(`vetoed_noreturn`)과 D.3이 거절한 해석된 간접 호출의
+  noreturn은 그 호출에 `control:<G>:<호출>:vetoed-noreturn`을 남긴다. `callee_support`(정규화 입력, replay 정체성): 이번 라운드에
+  옮겨 갈 수 있는 모든 피호출의 지지(효과가 있든 없든), 쓸 수 있는 요약이 없는 피호출은 `control:unavailable:<피호출>`(풀리지
+  않은 재귀 포함), 템플릿 모델의 manifest 키 -- D.3이 잘림 전에 본다. 정적 `site_reach`의 와일드카드 도달은 U2a 위치 후보가 있을
+  때만(메모리 쓰기 위치는 알려진 간선의 지지로 전달; 모르는 간선은 opaque-continuation 조건, 2c).
+- 템플릿(버전 7): 맥락이 memory-writes / vetoed-noreturn 종류만이면 내보내고 `control` manifest(종류, 함수, 쓰기 연산과
+  RAM / WILD 또는 호출 명령)를 싣는다. 가져오는 쪽에서 모델 요약의 지지 = `control:model:<label>:<i>:<kind>`(행마다 하나) --
+  그 모델을 부르는 함수의 위치. 의미 버전 44, UE 템플릿 재파생.
+- 보고: `EngineRun.control_sites` -- 실행의 모든 자기 키(종류: unknown-transfer, memory-writes, vetoed-noreturn, unavailable,
+  model)와 나중에 링크 / 트레이스가 그것을 정리할 때 이름 붙일 것(명령, 쓰기 연산과 분류, manifest 행).
+- 측정: Mulp "제어 표시만 남은" root 상한 52 -> 약 164; 게이트 Bundle 완전 228 -> 213(15개: v3 x64 1, UE debuggame 7 + 7).

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from ._scope_contracts import VarnodeKindCode
 from .call_seeds import _operation_key
 from .call_summary_effects import (
-    AnchoredSpan, ProvenCallEffect, derive_composed_call_effect, derive_proven_call_effect,
+    AnchoredSpan, ProvenCallEffect, derive_composed_call_effect, derive_proven_call_effect, vetoed_noreturn,
 )
 from .function_summary import FunctionSummary, summarize_function
 from dataclasses import replace
@@ -643,13 +643,36 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     control_exempt = {key: unknown_transfer_sites(key, unit.observation) & import_tail_sites(key, unit, tail_image)
                       for key, unit in functions.items()}
     control_exempt = {key: sites for key, sites in control_exempt.items() if sites}
-    site_reachable = site_reach(functions, control_exempt)
+    # (B', docs 25.96) functions whose own code writes memory at a place that
+    # is neither constant nor the stack pointer's (syntactic, before round 1):
+    # owners of the static may-reach set, and D.3 declines a cut in them
+    from .control_context import memory_writer
+
+    _static = {}
+
+    def static_writers() -> frozenset:
+        if "found" not in _static:
+            stack_registers = frozenset((span.start, span.size) for span in program_stack)
+            _static["found"] = frozenset(key for key, unit in functions.items()
+                                         if memory_writer(unit, stack_registers))
+        return _static["found"]
 
     def own_frontier(key) -> frozenset:
         """The function's own site candidates this round (no import tail, no
         discharged fault)."""
         sites = unknown_transfer_sites(key, functions[key].observation) - control_exempt.get(key, frozenset())
         return sites - {row[0] for row in fault_plan.cuts_of(key, fault_state["discharged"])} if sites else sites
+
+    site_reachable_set: dict = {}
+
+    def site_reachable_of() -> frozenset:
+        if "found" not in site_reachable_set:
+            # (B': a memory-writes site reaches its callers over known edges through
+            # their callee support -- only an unknown-transfer site needs the
+            # static wildcard reach; an unknown edge to a writer is the
+            # opaque-continuation condition, as for any opaque callee)
+            site_reachable_set["found"] = site_reach(functions, control_exempt)
+        return site_reachable_set["found"]
 
     # (U2b D.3) call keys of each function whose targets this round's analysis
     # USES from a resolution (the previous round's indirect targets, cut
@@ -1006,9 +1029,24 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             rejections: dict = {}
             compositions: dict = {}
             consumed: dict = {}   # (2b-P P-c2: kept whether or not operation records are on)
+            # (B', docs 25.96) the control keys of every transfer target, effects or not
+            dependencies: set = set()
+
+            def vetoed_key(call_key) -> str:
+                space, offset, _, _ = call_key.split(":")
+                return f"control:{key}:{space}:{offset}:vetoed-noreturn"
+
+            def depend(call_key, callee, done) -> None:
+                if done is None or done.summary is None:
+                    dependencies.add(f"control:unavailable:{callee}")
+                    return
+                dependencies.update(done.summary.control_support)
+                if vetoed_noreturn(done.summary):
+                    dependencies.add(vetoed_key(call_key))
 
             def derive(failed):
                 proven = {}
+                dependencies.clear()
                 sources.clear()
                 rejections.clear()
                 compositions.clear()
@@ -1027,6 +1065,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         continue
                     if component_of[callee] == component_of[key]:
                         # recursion: the SCC's current hypothesis (``solve``), or opaque
+                        # (an unresolved component: the member is unavailable, B')
+                        if hypotheses.get(call_key) is None:
+                            dependencies.add(f"control:unavailable:{callee}")
+                        else:
+                            dependencies.update(hypotheses[call_key].control_sites)
                         if hypotheses.get(call_key) is not None:
                             proven[call_key] = hypotheses[call_key]
                             sources[call_key] = ("recursive hypothesis", callee)
@@ -1037,6 +1080,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     ("recursive hypothesis", pair, "failed")
                                     for pair in sorted(note["failed"], key=repr))]
                         continue
+                    depend(call_key, callee, done)
                     if done is None or done.summary is None:
                         continue
                     tail = _is_tail(call_key)
@@ -1078,6 +1122,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             or any(component_of[member] == component_of[key] for member in members):
                         continue   # (a member in the caller's SCC: opaque)
                     dones = [results.get(member) for member in members]
+                    for member, done in zip(members, dones):
+                        depend(call_key, member, done)
                     if any(done is None or done.summary is None for done in dones):
                         continue   # (a member failed or has no summary: opaque)
                     memory_sources = {} if record_provenance is not None else None
@@ -1095,6 +1141,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     if entry.template is not None:
                         # a derived summary: the in-Bundle path, conditions decided here
                         summary, anchors = templates(entry, register_object, memory_space)
+                        # (B') its manifest sites, and a declined noreturn, are this caller's
+                        dependencies.update(summary.control_support)
+                        if vetoed_noreturn(summary):
+                            dependencies.add(vetoed_key(call_key))
                         if _is_tail(call_key) and len(program_stack) != 1:
                             continue
                         effect = site_effect(key, call_key, summary, anchors, failed.get(call_key, ()),
@@ -1141,11 +1191,15 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 # (U2b D.3) a function whose values may rest on a site takes no
                 # noreturn cut at a call it resolved from them: the call stays
                 # (its sink demands bind; a model's cut target stays opaque)
-                if own_frontier(key) or any(effect.control_sites for effect in proven.values()):
+                # (B': also with any dependency or an own unknown-address writer;
+                # a declined cut is a vetoed-noreturn site at the call)
+                if own_frontier(key) or key in static_writers() or dependencies \
+                        or any(effect.control_sites for effect in proven.values()):
                     for call_key in sorted(round_resolved.get(key, ())):
                         effect = proven.get(call_key)
                         if effect is None or not effect.noreturn:
                             continue
+                        dependencies.add(vetoed_key(call_key))
                         if call_key in externals[key]:
                             del proven[call_key]   # (its ``sources`` row is filtered by ``proven``)
                         else:
@@ -1206,8 +1260,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     normalization_options["fault_reachable"] = True
                 if key in control_exempt:
                     normalization_options["control_exempt"] = tuple(sorted(control_exempt[key]))
-                if key in site_reachable:
+                if key in site_reachable_of():
                     normalization_options["site_reachable"] = True
+                if dependencies:
+                    normalization_options["callee_support"] = tuple(sorted(dependencies))
                 normalized = FunctionNormalizer().normalize(
                     unit, **normalization_options, _forward_memory_plan=refinement,
                     _load_identity_plan=load_identity)

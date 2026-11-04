@@ -130,12 +130,56 @@ def _graph(results, failed, exempt) -> tuple[dict, dict]:
         found = set(unknown_transfer_sites(key, observation)) - set(exempt)
         if key in failed or observation is None:
             found.add(unavailable_key(key))
+        # (B', docs 25.96) every key its published summary rests on -- its
+        # memory-writes site, vetoed-noreturn sites at its calls, unavailable /
+        # model keys of its callees -- is its own: each reaches every ancestor
+        summary = None if item is None else getattr(item, "summary", None)
+        if summary is not None:
+            found.update(site for site in summary.control_support if continuation_owner(site) is None)
         own[key] = found
         edges[key] = set() if item is None else _edges(key, item, keys)
     return own, edges
 
 
-def site_reach(units: dict, exempt: dict) -> frozenset:
+def memory_writer(unit, stack_registers=frozenset()) -> bool:
+    """The function's own code has a memory-writing operation whose address is
+    neither a constant nor computed (inside its instruction) from the stack
+    pointer and constants alone -- a syntactic over-approximation of an
+    unknown-address writer, decidable before any round (B', docs 25.96).
+    ``stack_registers``: (offset, size) of the program's stack pointer."""
+    observation = getattr(unit, "observation", None)
+    if observation is None:
+        return True
+    from ._scope_contracts import VarnodeKindCode
+
+    stackish = {"INT_ADD", "INT_SUB", "COPY", "PTRADD", "PTRSUB", "INT_ZEXT", "INT_SEXT", "SUBPIECE"}
+    for row in observation.instructions:
+        defined = {}
+        for operation in row.operations:
+            if operation.opcode == "STORE" and len(operation.inputs) >= 2:
+                pending, seen, plain = [operation.inputs[1]], 0, True
+                while pending and plain:
+                    seen += 1
+                    node = pending.pop()
+                    if node.kind is VarnodeKindCode.CONSTANT or seen > 32:
+                        plain = plain and seen <= 32
+                        continue
+                    if node.kind is VarnodeKindCode.REGISTER \
+                            and (node.coordinate.byte_offset, node.byte_size) in stack_registers:
+                        continue
+                    producer = defined.get((node.kind, node.coordinate))
+                    if producer is None or producer.opcode not in stackish:
+                        plain = False
+                        continue
+                    pending.extend(producer.inputs)
+                if not plain:
+                    return True
+            if operation.output is not None:
+                defined[(operation.output.kind, operation.output.coordinate)] = operation
+    return False
+
+
+def site_reach(units: dict, exempt: dict, writers=frozenset()) -> frozenset:
     """The static may-reach-a-site set (U2b, docs 25.95), fixed before the
     first round: functions owning a site candidate that is not exempt
     (``exempt``: key -> import-tail site keys; a fault site counts whatever the
@@ -149,7 +193,11 @@ def site_reach(units: dict, exempt: dict) -> frozenset:
 
     owners = {key for key, unit in units.items()
               if unknown_transfer_sites(key, getattr(unit, "observation", None)) - exempt.get(key, frozenset())}
-    if not owners:
+    # (B', docs 25.96) a function with an unknown-address writer owns its key in
+    # its summary's support, which every caller sees over a known edge before
+    # its own summary (``summary_noreturn``); only the wildcard edges need this
+    # static set -- triggered by a syntactic writer as by a site candidate
+    if not owners and not writers:
         return frozenset()
     keys = frozenset(units)
     calls, wildcard = {}, set()
@@ -229,5 +277,6 @@ def _closure(own: dict, edges: dict) -> dict:
         sets.append(frozenset(found))
     return {key: sets[component[key]] for key in own}
 
-__all__ = ("continuation_key", "continuation_owner", "control_contexts", "import_tail_sites", "owner_reach",
+__all__ = ("continuation_key", "continuation_owner", "control_contexts", "import_tail_sites", "memory_writer",
+           "owner_reach",
            "site_key", "site_reach", "unavailable_key", "unknown_transfer_sites")

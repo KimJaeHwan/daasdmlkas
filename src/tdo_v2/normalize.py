@@ -285,6 +285,10 @@ class NormalizedFunction:
     # never noreturn)
     control_exempt: tuple = ()
     site_reachable: bool = False
+    # (B', docs 25.96) the control keys of everything this function may transfer
+    # to this round, effects or not: each callee's support, an unavailable key
+    # for one without a usable summary, its own vetoed-noreturn keys (sorted)
+    callee_support: tuple = ()
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -1580,6 +1584,7 @@ class FunctionNormalizer:
         fault_reachable: bool = False,
         control_exempt: tuple = (),
         site_reachable: bool = False,
+        callee_support: tuple = (),
         _forward_memory_plan=None,
         _load_identity_plan=None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
@@ -1626,7 +1631,8 @@ class FunctionNormalizer:
         # and control inputs (F1, U2b) included, as given when set
         replay = dict(options)
         for name, given in (("fault_cuts", fault_cuts), ("fault_reachable", fault_reachable),
-                            ("control_exempt", control_exempt), ("site_reachable", site_reachable)):
+                            ("control_exempt", control_exempt), ("site_reachable", site_reachable),
+                            ("callee_support", callee_support)):
             if given:
                 replay[name] = given
         if _forward_memory_plan is not None:
@@ -1641,9 +1647,9 @@ class FunctionNormalizer:
         entry = entry_for(function.scope)
         if type(result) is NormalizedFunction and (fault_cuts or fault_reachable):
             result = replace(result, fault_cuts=tuple(sorted(fault_cuts)), fault_reachable=bool(fault_reachable))
-        if type(result) is NormalizedFunction and (control_exempt or site_reachable):
+        if type(result) is NormalizedFunction and (control_exempt or site_reachable or callee_support):
             result = replace(result, control_exempt=tuple(sorted(control_exempt)),
-                             site_reachable=bool(site_reachable))
+                             site_reachable=bool(site_reachable), callee_support=tuple(sorted(callee_support)))
         return replace(result, activation_entry=entry) if type(result) is NormalizedFunction and entry else result
 
     def normalize_configured(

@@ -85,7 +85,8 @@ CONTRACT = {
 ADDED_FIELDS = {
     "ReadSourcePart": {"writer": None},
     "LocalReadFrom": {"complete": True},
-    "EngineRun": {"failed_functions": (), "control_contexts": (), "control_exemptions": (), "fault_report": ()},
+    "EngineRun": {"failed_functions": (), "control_contexts": (), "control_exemptions": (), "fault_report": (),
+                  "control_sites": ()},
     # U2a (docs 25.93): control obligations, conditional bindings
     "LocalCompleteness": {"control_obligations": (), "conditional_roots": 0},
     "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {},
@@ -97,7 +98,7 @@ ADDED_FIELDS = {
                            "assumes_opaque_callees_restore_stack_pointer": True,
                            "fault_cuts": (), "fault_reachable": False,
                            # (U2b, docs 25.95: conditional summaries)
-                           "control_exempt": (), "site_reachable": False},
+                           "control_exempt": (), "site_reachable": False, "callee_support": ()},
     "RootSlice": {"inherited_incomplete": False},
     "UnresolvedNormalizedFunction": {"assumes_opaque_callees_restore_stack_pointer": True},
     "CallMemoryDecision": {"evidence": ()},

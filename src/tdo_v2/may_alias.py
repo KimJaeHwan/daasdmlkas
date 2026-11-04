@@ -713,7 +713,9 @@ def _unknown_read(effect) -> bool:
 
 
 def _unknown_write(effect) -> bool:
-    return effect.memory_write is not None or bool(effect.unresolved_writes)
+    from .effects import unknown_write
+
+    return unknown_write(effect)
 
 
 def _written_anywhere(state: dict, writer: str, objects) -> dict:

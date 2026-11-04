@@ -95,11 +95,13 @@ def _check_probes(program, run) -> list:
             local = root.effective_completeness
             # the probe's own path: no unresolved read reachable from the root and
             # the root bound; unresolved writes elsewhere in the function (which
-            # make every root of the function incomplete) are reported apart
+            # make every root of the function incomplete) and control obligations
+            # (U2a sites, B' memory-writes sites: docs 25.96) are reported apart
             path_complete = (local.reachable_unresolved_reads == 0 and local.unbound_roots == 0
                              and not root.inherited_incomplete and "failure" not in root.explanation
                              and "rests_on_failed" not in root.explanation
-                             and (local.complete or local.function_unresolved_writes > 0))
+                             and (local.complete or local.function_unresolved_writes > 0
+                                  or bool(local.control_obligations)))
             verdict.update(labels=sorted(labels), complete=root.is_effectively_complete, path_complete=path_complete,
                            unresolved_reads=local.reachable_unresolved_reads,
                            function_unresolved_writes=local.function_unresolved_writes)

@@ -48,10 +48,11 @@ from .function_summary import (
 from .indexed_address import IndexedAnchor
 from .span_geometry import ByteSpan, StorageObjectId, StorageObjectKind, StorageScopeId, StorageScopeKind
 
-TEMPLATE_VERSION = 6   # 2: stack_values_out; 3: exact scalar literals and entry indexed addresses;
+TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry indexed addresses;
 # 4: ("offset", entry register span, c) run values (docs 25.80 R1); 5: ("nonstack", N, nullable,
 # labels) allocator windows (docs 25.79 3b)
 # 6: original-CFG independent register-delta proof receipts
+# 7: "control" -- the memory-writes / vetoed-noreturn sites the template rests on (B', docs 25.96)
 # bumped on any change of what a summary means: normalization, alias
 # reasoning, constant evaluation, effect derivation (not only its fields)
 # 2: stack-mixed objects wild (docs 25.7); index addresses, index objects
@@ -132,7 +133,7 @@ TEMPLATE_VERSION = 6   # 2: stack_values_out; 3: exact scalar literals and entry
 # STORE receipts; affine STORE comparisons respect the observed address modulus.
 # 42: a guarded image reload equates two LOADs only when their original address
 # operand-uses are structurally equal (call-changed register uses need a corridor).
-ENGINE_SEMANTICS_VERSION = 43
+ENGINE_SEMANTICS_VERSION = 44
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
@@ -217,7 +218,8 @@ def export_summary(analyzed, results, base_dependent=frozenset()) -> dict:
             raise TemplateRefused(f"{item.key}: depends on the library's load address")
     if summary.tail_exits:
         raise TemplateRefused("tail exits not composed")
-    if summary.unknown_transfers or summary.control_support:
+    if summary.unknown_transfers or any(_site_kind(site) not in _TEMPLATE_SITE_KINDS
+                                        for site in summary.control_support):
         raise TemplateRefused("rests on an unknown control transfer")
     if summary.site_reachable and not summary.exits and summary.dead_exits:
         # (U2b: the template carries no veto -- it would be noreturn in the
@@ -303,6 +305,51 @@ def _closure(analyzed, results):
 
 def _key(key: str) -> str:
     return KEY_PREFIX + key
+
+
+# (B', docs 25.96) the site kinds a template may rest on: stated in its
+# "control" manifest, owned by every importing caller as model keys
+_TEMPLATE_SITE_KINDS = frozenset({"memory-writes", "vetoed-noreturn", "continuation"})
+
+
+def _site_kind(site: str) -> str:
+    if site.startswith("continuation:"):
+        return "continuation"
+    if site.startswith("control:unavailable:"):
+        return "unavailable"
+    if site.endswith(":memory-writes"):
+        return "memory-writes"
+    if site.endswith(":vetoed-noreturn"):
+        return "vetoed-noreturn"
+    return "unknown-transfer"
+
+
+def _control_manifest(context, results) -> list:
+    """The template's "control" rows (B', docs 25.96): one per memory-writes /
+    vetoed-noreturn site of its context -- [kind, function, details] in
+    library-relative keys (writer operations with their RAM / WILD class, or
+    the call's instruction) -- what an importer's link must name to settle it."""
+    from .write_classes import WriterClasses, unresolved_writers
+
+    rows = []
+    for site in sorted(context):
+        kind = _site_kind(site)
+        if kind == "continuation":
+            continue
+        parts = site.split(":")
+        function = ":".join(parts[1:3])
+        if kind == "memory-writes":
+            item = results.get(function)
+            names = set()
+            details = []
+            if item is not None and item.summary is not None:
+                names = {name for name, _ in unresolved_writers(item.normalized)} | set(item.summary.unknown_writers)
+                classes = WriterClasses(item.normalized.scopes, item.unit.observation)
+                details = [[_key(name), classes.classify(name)] for name in sorted(names)]
+            rows.append([kind, _key(function), details])
+        else:
+            rows.append([kind, _key(function), [_key(":".join(parts[3:5]))]])
+    return rows
 
 
 def _crossing(label: str) -> str:
@@ -402,8 +449,14 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
     register file is ``register_object``; anchored objects are addressed in
     ``memory_space_id``. Object ids are fixed per template ``label`` (stable
     across re-derivations: alias-condition feedback compares them)."""
-    _exact(template, ("exits", "unknown_writers", "writer_objects", "inner_calls", "register_deltas", "independent_delta_proofs",
-                      "dead_exits", "writer_conditions", "stack_values_out", "objects"), "template")
+    fields = ("exits", "unknown_writers", "writer_objects", "inner_calls", "register_deltas", "independent_delta_proofs",
+              "dead_exits", "writer_conditions", "stack_values_out", "objects")
+    _exact(template, fields + (("control",) if "control" in template else ()), "template")
+    control = template.get("control", [])
+    if type(control) is not list or any(
+            type(row) is not list or len(row) != 3 or row[0] not in ("memory-writes", "vetoed-noreturn")
+            or type(row[1]) is not str or type(row[2]) is not list for row in control):
+        raise TemplateError("control rows are [kind, function, details]")
     if type(template["stack_values_out"]) is not bool:
         raise TemplateError("stack_values_out must be a bool")
     scope = StorageScopeId(StorageScopeKind.FUNCTION, hashlib.sha256(f"template:{label}".encode()).digest())
@@ -533,6 +586,10 @@ def instantiate(template: dict, label: str, register_object, memory_space_id: in
         template["stack_values_out"],
         tuple(relations.items()),
         _import_delta_proofs(template["independent_delta_proofs"], deltas),
+        # (B', docs 25.96) each manifest row is a site of the importer: the
+        # model's internal control is the condition (``control:model:...``)
+        control_support=tuple(sorted(f"control:model:{label}:{index}:{row[0]}"
+                                     for index, row in enumerate(control))),
     )
     return summary, anchors
 
@@ -842,8 +899,8 @@ def _refuse_control_context(key, context, results, *, resource_only=False) -> No
     (``resource_only``: the transient check alone)."""
     from .normalize import NormalizationFailureReason
 
-    if not context:
-        return
+    if not context or all(_site_kind(site) in _TEMPLATE_SITE_KINDS for site in context):
+        return   # (B': memory-writes / vetoed-noreturn sites travel in the manifest)
     resource = (NormalizationFailureReason.ANALYSIS_DEPTH, NormalizationFailureReason.ANALYSIS_BUDGET,
                 NormalizationFailureReason.ANALYSIS_RUN_BUDGET)
     prefix = "control:unavailable:"
@@ -891,6 +948,9 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
             _refuse_control_context(key, context, results, resource_only=True)
             summary = export_summary(analyzed, results, base_dependent)
             _refuse_control_context(key, context, results)
+            manifest = _control_manifest(context, results)
+            if manifest:
+                summary["control"] = manifest
             entries.append({"name": name, "original_names": list(original_names), "summary": summary})
         except TemplateRefused as error:
             refused[name] = Refusal(str(error), error.kind)

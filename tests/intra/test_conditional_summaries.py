@@ -314,7 +314,7 @@ def test_the_semantics_version_moved():
     """Templates derived before U2b may carry a noreturn the veto forbids: refused by version."""
     from tdo_v2.summary_templates import ENGINE_SEMANTICS_VERSION
 
-    assert ENGINE_SEMANTICS_VERSION == 43
+    assert ENGINE_SEMANTICS_VERSION >= 43
 
 
 def test_a_carrier_lost_in_the_normalization_raises():

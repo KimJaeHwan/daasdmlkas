@@ -351,9 +351,23 @@ def summary_noreturn(summary) -> bool:
     frontier and no site it may reach (U2b, docs 25.95: a cut deletes the
     paths a site mark would follow). The ONE reader of that conjunction (a
     test keeps it so)."""
-    return (not summary.exits and not summary.tail_exits and bool(summary.dead_exits)
-            and not summary.fault_outcomes and not summary.fault_references and not summary.fault_reachable
-            and not summary.unknown_transfers and not summary.site_reachable)
+    return _dead_only(summary) and not _noreturn_vetoed(summary)
+
+
+def _dead_only(summary) -> bool:
+    return not summary.exits and not summary.tail_exits and bool(summary.dead_exits)
+
+
+def _noreturn_vetoed(summary) -> bool:
+    return bool(summary.fault_outcomes or summary.fault_references or summary.fault_reachable
+                or summary.unknown_transfers or summary.site_reachable or summary.control_support)
+
+
+def vetoed_noreturn(summary) -> bool:
+    """The summary would be noreturn but a veto declined it (B', docs 25.96):
+    a path past a call to it exists only if something the observation does not
+    show happens -- each caller owns a vetoed-noreturn site at that call."""
+    return _dead_only(summary) and _noreturn_vetoed(summary)
 
 
 def derive_proven_call_effect(summary: FunctionSummary, *args, **kwargs) -> ProvenCallEffect | None:

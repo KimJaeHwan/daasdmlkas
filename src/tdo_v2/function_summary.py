@@ -336,9 +336,14 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     # (a discharged fault's block is classified as an exit, then kept apart)
     fault_states = {item.block_key: item for item in exits if item.block_key in fault_blocks}
     exits = [item for item in exits if item.block_key not in fault_blocks]
-    # unknown-address writers (conditional ones are ordinary writes, above)
-    # leave every root incomplete
-    unconditional_writers = bool(crossed.get("unknown_writers", ()))
+    # unknown-address writers (conditional ones are ordinary writes, above):
+    # a WILD one leaves every root incomplete; a RAM one reaches a demand's
+    # value only through a debt on its slice or a refused binding, and makes
+    # the function own its memory-writes site (B', docs 25.96)
+    from .write_classes import WILD, WriterClasses
+
+    writer_classes = WriterClasses(normalized.scopes, observation)
+    unconditional_writers = any(writer_classes.classify(key) == WILD for key in crossed.get("unknown_writers", ()))
     # the stack pointer's delta is a claim like any other: it holds with the
     # writer conditions, which a caller decides (or drops every claim)
     register_deltas = _register_deltas(normalized, observation, exits)
@@ -384,8 +389,8 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         demands.append(SinkDemand(
             label, tuple(sorted(sources, key=lambda item: item.canonical_key)), tuple(sorted(debts)),
             tuple(sorted(origins)),
-            # like the engine's local completeness: any unknown-address write in
-            # the function leaves every root incomplete
+            # data completeness only (B'): a WILD unknown-address writer leaves
+            # every demand incomplete; control is the contexts' (never folded in)
             bool(complete) and not debts and not unconditional_writers,
             tuple(sorted(conditions, key=lambda pair: (pair[0].canonical_key, pair[1].canonical_key))),
         ))
@@ -405,7 +410,8 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
         fault_outcomes=_fault_outcomes(normalized, observation, fault_blocks, fault_states),
         fault_reachable=bool(getattr(normalized, "fault_reachable", False)),
         unknown_transfers=_unknown_transfers(normalized, observation, frontier, frontier_states),
-        control_support=control_support(normalized, frontier.values()),
+        control_support=control_support(normalized, frontier.values(), tuple(
+            key for key in (memory_writes_key(normalized, crossed.get("unknown_writers", ())),) if key)),
         site_reachable=bool(getattr(normalized, "site_reachable", False)),
         premise_uses=_summary_uses(normalized, summary_uses),
     )
@@ -578,11 +584,27 @@ def _unknown_transfers(normalized, observation, frontier, states) -> tuple:
                          for block, site in frontier.items()), key=lambda row: (row.site, row.block)))
 
 
-def control_support(normalized, sites) -> tuple:
-    """A summary's ``control_support``: its own frontier ``sites``, the
-    ``control_sites`` of every effect its normalization consumed and, when
-    either is non-empty, ``continuation:<function>:*`` (U2b, docs 25.95)."""
-    found = set(sites)
+def memory_writes_key(normalized, unknown_writers=()) -> str | None:
+    """``control:<function>:memory-writes`` when the function has an unknown-
+    address writer (an unresolved write of its memory SSA, or an unconditional
+    unknown writer of its summary): the write may change where control goes --
+    in the function, in any activation whose memory it may reach, or any code
+    pointer (B', docs 25.96). None otherwise."""
+    graph = getattr(normalized, "memory_graph", None)
+    if not unknown_writers and not getattr(graph, "unresolved_write_nodes", ()):
+        return None
+    entry = normalized.scopes.function.entry
+    return f"control:{entry.space_id:x}:{entry.byte_offset:x}:memory-writes"
+
+
+def control_support(normalized, sites, own=()) -> tuple:
+    """A summary's ``control_support``: its own frontier ``sites`` and ``own``
+    keys (its memory-writes site), the ``control_sites`` of every effect its
+    normalization consumed, the ``callee_support`` it was normalized with
+    (every callee's support, ``control:unavailable:<callee>`` for one without a
+    usable summary, its own vetoed-noreturn keys -- B', docs 25.96) and, when
+    any is non-empty, ``continuation:<function>:*`` (U2b, docs 25.95)."""
+    found = set(sites) | set(own) | set(getattr(normalized, "callee_support", ()))
     for _, effect in getattr(normalized, "proven_call_effects", ()):
         found.update(getattr(effect, "control_sites", ()))
     if found:
@@ -868,10 +890,9 @@ def _alias_conditions(normalized) -> dict:
         if definition.kind is Kind.DATA_WRITE and definition.operation_key is not None \
                 and definition.span.object_id.kind in _MEMORY_KINDS:
             spans_of.setdefault(definition.operation_key, set()).add(definition.span)
-    unknown = {
-        effect.operation_key for effect in normalized.effects
-        if effect.memory_write is not None or effect.unresolved_writes
-    }
+    from .effects import unknown_write
+
+    unknown = {effect.operation_key for effect in normalized.effects if unknown_write(effect)}
     uncertain = dict(getattr(normalized, "uncertain_writers", ()))
     graph = normalized.dependencies
     found = {}
@@ -1630,6 +1651,8 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     memory_keeping = set(exemptions.memory_keeping | exemptions.below_keeping)
     below_calls = set(exemptions.below_keeping)
 
+    from .effects import unknown_write
+
     calls, unknown, writes = [], [], {}       # gen sources / kills
     memory_writes = []                        # (block, position, order, object, key)
     unknown_writers = set()
@@ -1650,7 +1673,7 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                         if key in uncertain:  # may land anywhere, after its own write
                             unknown.append((block_key, position, 1 + len(effect.writes), key))
                             unknown_writers.add(key)
-            if effect.memory_write is not None or effect.unresolved_writes:
+            if unknown_write(effect):
                 unknown.append((block_key, position, 1 + len(effect.writes), key))
                 unknown_writers.add(key)
 

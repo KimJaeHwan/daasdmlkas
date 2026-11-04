@@ -20,6 +20,15 @@ from .model import (
 StorageEvidence = StorageRef | ResolvedStorage | UnresolvedStorage | NonStorage
 
 
+def unknown_write(effect) -> bool:
+    """The effect writes memory at an address the projection could not place:
+    an unresolved write, a memory output, or a raw StorageRef write -- the
+    memory SSA's unresolved writes (``effect_decode``), the one predicate of
+    may-alias, summary crossings and alias conditions (B', docs 25.96)."""
+    return effect.memory_write is not None or bool(effect.unresolved_writes) \
+        or any(type(value) is StorageRef for value in effect.writes)
+
+
 EFFECT_DECODE_CONTRACT_VERSION = 3
 
 

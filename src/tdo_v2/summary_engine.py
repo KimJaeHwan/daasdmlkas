@@ -573,6 +573,17 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
                 incomplete_roots.add((analysis.entry, label, occurrence))
         return rows
 
+    wild_of: dict = {}
+
+    def wild_writes(normalized, unit) -> frozenset:
+        """The function's WILD unresolved-write nodes (B', docs 25.96; once per function)."""
+        found = wild_of.get(id(normalized))
+        if found is None:
+            from .write_classes import wild_write_nodes
+
+            found = wild_of[id(normalized)] = wild_write_nodes(normalized, unit.observation)
+        return found
+
     def function_roots(analysis):
         """The RootSlices of one bound function."""
         key = function_key(analysis.entry)
@@ -583,7 +594,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
             unbound = _unbound_roots(analysis.normalized, root_nodes, label)
             completeness = _with_unbound(local_completeness(results_for_root, debt_identity(
                 getattr(analysis.normalized, "call_clobber_reads", ()),
-                getattr(analysis.normalized, "call_clobber_debts", ()))), unbound)
+                getattr(analysis.normalized, "call_clobber_debts", ())),
+                blocking_writes=wild_writes(analysis.normalized, unit)), unbound)
             inherited = (analysis.entry, label, occurrence) in incomplete_roots
             if inherited:
                 # the callee part of a projected root is incomplete
@@ -703,6 +715,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
                 [(site, "import-slots-hold-their-exports") for site in exempt]
                 + [(site, "faults-end-the-execution") for site in faults])),
             fault_report=_fault_report(results, image_info),
+            control_sites=_control_sites(results, contexts),
         )
         checkpoint()   # (never returned after the reporting deadline)
         return run
@@ -793,6 +806,42 @@ def _fault_report(results, image_info) -> tuple:
     return tuple(rows)
 
 
+def _control_sites(results, contexts) -> tuple:
+    """``EngineRun.control_sites`` (B', docs 25.96): every own key named by a
+    published context, with its kind and what a link must name to settle it."""
+    from .control_context import continuation_owner
+    from .write_classes import WriterClasses, unresolved_writers
+
+    keys = sorted({site for found in contexts.values() for site in found if continuation_owner(site) is None})
+    rows = []
+    for site in keys:
+        if site.startswith("control:unavailable:"):
+            rows.append((site, "unavailable", site[len("control:unavailable:"):], ()))
+            continue
+        if site.startswith("control:model:"):
+            # (the model label, the manifest row index and kind: the template file states the row)
+            label, index, kind = site[len("control:model:"):].rsplit(":", 2)
+            rows.append((site, "model", label, (index, kind)))
+            continue
+        parts = site.split(":")
+        function = ":".join(parts[1:3])
+        if site.endswith(":memory-writes"):
+            item = results.get(function)
+            writers = ()
+            if item is not None and type(item.normalized) is NormalizedFunction:
+                classes = WriterClasses(item.normalized.scopes, item.unit.observation)
+                names = {name for name, _ in unresolved_writers(item.normalized)}
+                if item.summary is not None:
+                    names |= set(item.summary.unknown_writers)
+                writers = tuple((name, classes.classify(name)) for name in sorted(names))
+            rows.append((site, "memory-writes", function, writers))
+        elif site.endswith(":vetoed-noreturn"):
+            rows.append((site, "vetoed-noreturn", function, (":".join(parts[3:5]),)))
+        else:
+            rows.append((site, "unknown-transfer", function, (":".join(parts[3:5]),)))
+    return tuple(rows)
+
+
 class ControlSupportViolation(RuntimeError):
     """A conditional-summary invariant failed (U2b, docs 25.95): an engine bug."""
 
@@ -813,6 +862,7 @@ def _check_control_support(results, failed, contexts) -> None:
     from .control_context import continuation_key, continuation_owner, owner_reach, unknown_transfer_sites
     from .function_summary import _block_ends
     from .interprocedural import _retained_instances
+    from .write_classes import unresolved_writers
 
     instances = _retained_instances(results)
     owners = {continuation_owner(site) for item in instances if item.summary is not None
@@ -838,7 +888,11 @@ def _check_control_support(results, failed, contexts) -> None:
         own = {row.site for row in summary.unknown_transfers}
         if own != frontier_sites(key, item):
             raise ControlSupportViolation(f"{key}: frontier {sorted(own)} is not its non-exempt sites")
+        # (B') its memory-writes site, recomputed from the SSA and the summary
+        if unresolved_writers(normalized) or summary.unknown_writers:
+            own.add(f"control:{key}:memory-writes")
         consumed = {site for _, effect in normalized.proven_call_effects for site in effect.control_sites}
+        consumed |= set(normalized.callee_support)
         if not (own | consumed) <= support or bool(own | consumed) != (continuation_key(key) in support):
             raise ControlSupportViolation(f"{key}: support {sorted(support)} misses {sorted((own | consumed) - support)}")
         # (1) over every call any representation names: the effect the
