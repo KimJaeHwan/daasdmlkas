@@ -815,6 +815,57 @@ def constant_values(normalized, observation, requests, addresses=False) -> dict:
     return found
 
 
+def import_values(normalized, observation, requests, image_info) -> dict:
+    """Exact named import identities of finished-SSA input snapshots.
+
+    Reuse the projector's whole-slot atoms; no numeric address, candidate,
+    partial pointer or nonzero offset is an import identity. The consumer
+    MUST check the snapshot's source debts, as for ``constant_values``.
+    This intentionally retains ImportSlots' existing active gate.
+    """
+    imports = IMPORT_SLOTS.get()
+    language = normalized.scopes.program.evidence.translation_namespace.language_id.split(":")
+    if imports is None or not imports.active or language[1:2] != ["LE"]:
+        return {}
+    symbols, ambiguous = {}, set()
+    for symbol in image_info.imports:
+        for space, offset in symbol.slots:
+            atom = imports.atom(space, offset)
+            if atom is None:
+                continue
+            previous = symbols.get(atom)
+            identity = lambda row: (row.library.upper(), row.original_name or row.name)
+            if previous is not None and identity(previous) != identity(symbol):
+                ambiguous.add(atom)  # digest collisions never choose a symbol
+            symbols[atom] = symbol
+    if not symbols:
+        return {}
+    projector = _final_projector(normalized, observation)
+    from ._call_value_ports import scalar_call_rows
+    projector._pointer_rows = {key: port.row for key, port in scalar_call_rows(normalized).items()}
+    found = {}
+    scope = normalized.memory_ssa.function_scope
+    used = scope in imports.used
+    try:
+        for request in requests:
+            key, varnode = request
+            if str(varnode.byte_size * 8) != language[2]:
+                continue
+            value = projector._expression_for_input(key, varnode)
+            if value is None or value.image != 0 or value.byte_size != varnode.byte_size \
+                    or value.displacement != 0 or len(value.atoms) != 1 or value.atoms[0][1] != 1:
+                continue
+            atom = value.atoms[0][0]
+            if atom in symbols and atom not in ambiguous:
+                found[request] = symbols[atom]
+    finally:
+        # This is a candidate query, not a normalization fact. The model
+        # consumer labels accepted resolutions; never erase a prior real use.
+        if not used:
+            imports.used.discard(scope)
+    return found
+
+
 def register_value_deltas(normalized, observation, requests) -> dict:
     """``requests``: (definition id, register span) of the final memory SSA.
     Returns request -> c when the definition's value is exactly "entry value of

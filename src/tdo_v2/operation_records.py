@@ -1078,6 +1078,10 @@ class _Builder:
                 intrinsic = self.index.intrinsic(action_id)
                 if intrinsic is not None:
                     record["intrinsic"] = intrinsic.record()
+                else:
+                    output_only = self.index.output_only_intrinsic(action_id)
+                    if output_only is not None:
+                        record["intrinsic_effect"] = output_only.record()
                 if self.physical_memory:
                     guard, why = self._condition_index().reach_guard(key)
                     if guard is not None:

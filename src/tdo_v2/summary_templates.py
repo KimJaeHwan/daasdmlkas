@@ -133,7 +133,11 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # STORE receipts; affine STORE comparisons respect the observed address modulus.
 # 42: a guarded image reload equates two LOADs only when their original address
 # operand-uses are structurally equal (call-changed register uses need a corridor).
-ENGINE_SEMANTICS_VERSION = 44
+# 45: version-qualified legacy SSE2 PACKSSWB/PSHUFLW change only their
+# explicit output; their value/precise lane semantics remain unsupported.
+# 46: independently seeded, debt-free final SSA import identities bind
+# CALLIND models across proven-preserving calls; no ABI or numeric guess.
+ENGINE_SEMANTICS_VERSION = 46
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

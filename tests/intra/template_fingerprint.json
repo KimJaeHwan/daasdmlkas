@@ -65,6 +65,16 @@
    "forward_1": "68f10c199d2c000f38908d904ffbbb35d8f16840f20972cf2235f7bbee7b54b3",
    "input": "6d74ac2676c2da6d4cfe3796347992c4e8ee553720f1141d3885e25e3e4128f4"
   },
+  "output_only_packsswb": {
+   "forward_0": "d702c39d52c0df50c66c93199070f97e0cdf42c278b4656a47eed260acc2be87",
+   "forward_1": "d702c39d52c0df50c66c93199070f97e0cdf42c278b4656a47eed260acc2be87",
+   "input": "0989b85fc68799fd9cc640b9d7f241643c6e1c9a676bdbddae1c49f285736a51"
+  },
+  "output_only_pshuflw": {
+   "forward_0": "0fff162026fbe53d51ebd3bd81e911e9bcfa66e829ccc39b9884cd120d40dc51",
+   "forward_1": "0fff162026fbe53d51ebd3bd81e911e9bcfa66e829ccc39b9884cd120d40dc51",
+   "input": "db2a5dcc91dc48db77b878c7284a42dcad451a357ce52d5cda30cdc523ee8603"
+  },
   "pointer_chain": {
    "forward_0": "5f44d750bcc0b82471420530cde2b5d4018022c879862f979b1078ce5090cd1a",
    "forward_1": "5f44d750bcc0b82471420530cde2b5d4018022c879862f979b1078ce5090cd1a",
@@ -79,10 +89,20 @@
    "forward_0": "f1edfafc3ac6a21f39dcd2d7b5ac0ff8d84ca73aca93669fed1b5d3fe7453a42",
    "forward_1": "f1edfafc3ac6a21f39dcd2d7b5ac0ff8d84ca73aca93669fed1b5d3fe7453a42",
    "input": "e77fb8c00c7ab80837f7cd15a817c4c5d2047adc1104c7ad66779f41fe57a96e"
+  },
+  "ssa_import_after_preserving_call": {
+   "forward_0": "470343c0e47798ba18012d21baf125d98b360e3dcdb062b45f8a8f40a049d5ee",
+   "forward_1": "2ae98cd6a1bda38bf81ee1519218a98927362b0bc784047029897ab27f30b601",
+   "input": "4d9cbf08789728930b987d39a6aff0262dec86f9450c02079ef69a0aa3a28905"
+  },
+  "unknown_value_userop": {
+   "forward_0": "963a455785d8ad2c7e25def40ff9956c8bf6535eea3eafe564dd12c7a75b04aa",
+   "forward_1": "963a455785d8ad2c7e25def40ff9956c8bf6535eea3eafe564dd12c7a75b04aa",
+   "input": "c15f2b9179e64481c58349a282fe4280389275f2e7672e42fd0360e7f3fe9556"
   }
  },
  "versions": {
-  "semantics_version": 44,
+  "semantics_version": 46,
   "summary_version": 2,
   "template_version": 7
  }

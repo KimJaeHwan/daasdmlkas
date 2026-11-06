@@ -158,7 +158,7 @@ def derive_register_delta_proof(unit, register_span, proven_call_effects, intrin
                 if proof is not None:
                     if opkey in assumed or proof != audited_intrinsics.get(opkey) or overlaps(operation.output):
                         return None
-                    intrinsic_facts[opkey] = proof.semantics.semantic_id
+                    intrinsic_facts[opkey] = proof.semantic_id
                 else:
                     declared = assumed.get(opkey)
                     if type(declared) is not AssumedCallEffect or declared.reads or declared.writes \

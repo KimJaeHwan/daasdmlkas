@@ -104,7 +104,7 @@ from .storage import _resolve_validated_storage
 
 def _operation_semantic_identity(key, intrinsics, proven):
     if key in intrinsics:
-        return intrinsics[key].semantics.semantic_id
+        return intrinsics[key].semantic_id
     effect = proven.get(key)
     if effect is not None and effect.register_delta_proofs:
         return "register-delta-proof:" + ",".join(

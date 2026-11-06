@@ -79,9 +79,10 @@ OWN = {
     "stack_pointer": [RSP, 8], "stack_delta": 8, "preserved": [[24, 8], [40, 8], [48, 8], [56, 8]],
     "entries": [{"name": "H", "original_names": ["?H@@YA_K_K@Z"], "internal": True, "other_memory": "preserved",
                  **NO_CALLBACKS, "registers": [{"write": [RAX, 8], "from": [[RCX, 8]]}], "memory": []}]}
-IMPORTS = tuple(ImportedSymbol("OTHER.DLL", name.strip("?").split("@")[0], name, (), ((1, thunk),))
-                for name, thunk in (("?G@@YA_KPEA_K_K@Z", G), ("?Abort@@YAXXZ", ABORT),
-                                    ("?GetObj@@YAPEAXPEAX@Z", GETOBJ)))
+IMPORTS = tuple(ImportedSymbol("OTHER.DLL", name.strip("?").split("@")[0], name,
+                              ((1, DATA_BASE + 0x700 + index * 8),), ((1, thunk),))
+                for index, (name, thunk) in enumerate((("?G@@YA_KPEA_K_K@Z", G), ("?Abort@@YAXXZ", ABORT),
+                                                      ("?GetObj@@YAPEAXPEAX@Z", GETOBJ))))
 
 
 def _helper():
@@ -124,6 +125,15 @@ def _cases():
                            .ins(add(T, T2, const(0x10)), load(reg(RAX), T)).ret()], {}),
         "literals": ([FunctionBuilder(entry=F).ins(store(reg(RCX), const(0x1234)))
                       .ins(copy(reg(RAX), const(0x5678))).ret()], {}),
+        "output_only_packsswb": ([FunctionBuilder(entry=F).ins(
+            op("CALLOTHER", [const(132, 4), reg(0x1200, 16), reg(0x1240, 16)], reg(0x1200, 16)))
+            .ins(op("SUBPIECE", [reg(0x1200, 16), const(0, 4)], reg(RAX))).ret()], {}),
+        "output_only_pshuflw": ([FunctionBuilder(entry=F).ins(
+            op("CALLOTHER", [const(157, 4), reg(0x1200, 16), reg(0x1240, 16), const(0x1B)], reg(0x1200, 16)))
+            .ins(op("SUBPIECE", [reg(0x1200, 16), const(0, 4)], reg(RAX))).ret()], {}),
+        "unknown_value_userop": ([FunctionBuilder(entry=F).ins(
+            op("CALLOTHER", [const(999, 4), reg(0x1200, 16), reg(0x1240, 16)], reg(0x1200, 16)))
+            .ins(op("SUBPIECE", [reg(0x1200, 16), const(0, 4)], reg(RAX))).ret()], {}),
         # (Astra / Fable review: alias conditions, models and noreturn, internal
         # cuts, opaque indirect calls, scaled indexes, stack values out, accessors)
         "alias_conditions": ([FunctionBuilder(entry=F).ins(store(reg(RCX), reg(RDX)))
@@ -132,6 +142,11 @@ def _cases():
         "internal_cut": ([FunctionBuilder(entry=F).sub_rsp(0x28).call(HELPER).add_rsp(0x28).ret(), _helper()], {}),
         "opaque_indirect_call": ([FunctionBuilder(entry=F).sub_rsp(0x28).ins(load(reg(RAX), reg(RCX)))
                                   .call_indirect(RAX).ins(load(reg(RAX), reg(RDX))).add_rsp(0x28).ret()], {}),
+        "ssa_import_after_preserving_call": ([
+            FunctionBuilder(entry=F).sub_rsp(0x28).ins(load(reg(RBX), const(DATA_BASE + 0x700)))
+            .call(HELPER).call_indirect(RBX).ins(load(reg(RAX), reg(RCX))).add_rsp(0x28).ret(),
+            FunctionBuilder(entry=HELPER).ins(copy(reg(RAX), reg(RCX))).ret()],
+            {"assume_import_slots_hold_exports": True, "assume_globals_disjoint_from_stack": True}),
         "scaled_index": ([FunctionBuilder(entry=F).ins(op("INT_MULT", [reg(RDX), const(8)], T2))
                           .ins(add(T, reg(RCX), T2), load(reg(RAX), T)).ret()], {}),
         "bitwise_index_last_writer": ([FunctionBuilder(entry=F)

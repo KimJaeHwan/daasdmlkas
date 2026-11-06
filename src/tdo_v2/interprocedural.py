@@ -1544,6 +1544,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # round 1 resolves no indirect call: its results rest on no hypothesis --
     # what a run exhaustion in a later round publishes (docs 25.30 K1c-3)
     first = None
+    import_seeds = None   # round-1 opaque baseline only; later rounds may revoke, never self-seed
 
     def with_failures(published):
         """``published`` with every function failure recorded since (a failed
@@ -1568,6 +1569,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             if first is None:
                 first = results
             found, found_cuts, found_multi, requires, call_requires = {}, {}, {}, {}, {}
+            found_imports = {}
             newly_failed = False
             for key, item in results.items():
                 if key in resource_failures or type(item.normalized) is not NormalizedFunction:
@@ -1586,6 +1588,25 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     found_multi.setdefault(key, {})[call] = members
                                 requires.setdefault(key, set()).update(labels[call])
                                 call_requires.setdefault(key, {}).setdefault(call, set()).update(labels[call])
+                            if image_info and external_models:
+                                symbols = _import_indirect_targets(item, image_info, base_externals[key])
+                                if import_seeds is not None:
+                                    symbols = {call: symbol for call, symbol in symbols.items()
+                                               if import_seeds.get(key, {}).get(call) == symbol}
+                                bound_imports = _external_sites(
+                                    item.unit, image_info, external_models, disabled, usable,
+                                    refused_sites.setdefault(key, {}), local_entries, sites=symbols)
+                                item.refused_models.update(refused_sites[key])
+                                # Static bindings and independently resolved Bundle entries retain
+                                # precedence. These are model effects, not fabricated body edges.
+                                for call, model in bound_imports.items():
+                                    if call not in base_externals[key] and call not in targets \
+                                            and call not in found_multi.get(key, {}):
+                                        found_cuts.setdefault(key, {})[call] = model
+                                        found_imports.setdefault(key, {})[call] = symbols[call]
+                                        requires.setdefault(key, set()).add("import-slots-hold-their-exports")
+                                        call_requires.setdefault(key, {}).setdefault(call, set()).add(
+                                            "import-slots-hold-their-exports")
                         checkpoint()
                 except ANALYSIS_FAILURES as error:
                     if _is_run_exhaustion(error):
@@ -1597,7 +1618,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 if direct := {call: target for call, target in targets.items() if target in functions}:
                     found[key] = direct
                 if cut := {call: cuts[target] for call, target in targets.items() if target in cuts}:
-                    found_cuts[key] = cut
+                    found_cuts.setdefault(key, {}).update(cut)
+            if import_seeds is None:
+                # Resolution identities must already hold with every newly bound
+                # CALLIND opaque. In particular a loop cannot use its own model's
+                # preservation to establish the pointer that selects that model.
+                import_seeds = found_imports
             # (F1) the round's graph may show a new contextual hazard: D shrinks
             discharged = fault_state["discharged"]
             if discharged:
@@ -1922,7 +1948,7 @@ def _unproven_image_operands(unit) -> bool:
 
 
 def _external_sites(unit, image_info, external_models, disabled=frozenset(), usable=None, refused=None,
-                    local_functions=frozenset()) -> dict:
+                    local_functions=frozenset(), *, sites=None) -> dict:
     """Call key -> (model file, entry) for calls to imported symbols with a
     model, at the import call shapes ``import_call_sites`` recognizes
     (``call [__imp_X]``, ``mov rax, [__imp_X]; call rax``, a terminal ``jmp
@@ -1930,7 +1956,7 @@ def _external_sites(unit, image_info, external_models, disabled=frozenset(), usa
     switched off in this run (``disabled``) is not applied: the call stays
     opaque; so is one ``usable`` finds a reason against (put in ``refused``)."""
     found = {}
-    for key, symbol in import_call_sites(unit, image_info, local_functions).items():
+    for key, symbol in (import_call_sites(unit, image_info, local_functions) if sites is None else sites).items():
         model = external_models.lookup(symbol)
         if model is not None and (key.endswith(":CALLIND") or key.endswith(":BRANCHIND")):
             # bound through an import slot: the slot holds the export's address
@@ -2632,6 +2658,60 @@ def _forward_targets(item, functions, readonly_image) -> tuple[dict, dict]:
             found[fact.operation] = tuple(keys)
             labels[fact.operation] = frozenset(fact.requires)
     return found, labels
+
+
+def _import_indirect_targets(item, image_info, excluded=()) -> dict:
+    """A final original CALLIND snapshot's debt-free exact import identity.
+
+    Only the last whole target write in a straight-line call instruction is
+    consumed. No backwards instruction scan, ABI preservation, or candidate
+    value becomes an identity. CALLIND without this explicit snapshot stays
+    unknown. Model admission remains ``_external_sites``' responsibility.
+    """
+    from .graph_contracts import NodeKind
+    from .pcode_blocks import has_internal_flow
+    from .relative_memory import import_values
+
+    if not _import_slots_active():
+        return {}
+    sites = []
+    for instruction in item.unit.observation.instructions:
+        if has_internal_flow(instruction):
+            continue
+        for ordinal, operation in enumerate(instruction.operations):
+            if operation.opcode != "CALLIND" or not operation.inputs:
+                continue
+            call = _operation_key(instruction.address, ordinal, "CALLIND")
+            if call in excluded:
+                continue
+            target = operation.inputs[0]
+            if target.kind not in (VarnodeKindCode.UNIQUE, VarnodeKindCode.REGISTER):
+                continue
+            for index in range(ordinal - 1, -1, -1):
+                earlier = instruction.operations[index]
+                if earlier.opcode in _CALL_OPCODES_ALL:
+                    break
+                if not _overlaps(earlier.output, target):
+                    continue
+                if earlier.opcode == "COPY" and earlier.output == target and len(earlier.inputs) == 1:
+                    sites.append((call, _operation_key(instruction.address, index, "COPY"), earlier.inputs[0]))
+                break
+    if not sites:
+        return {}
+    normalized = item.normalized
+    graph = normalized.dependencies
+    values = import_values(normalized, item.unit.observation, [(copy, value) for _, copy, value in sites], image_info)
+    found = {}
+    for call, copy, value in sites:
+        symbol = values.get((copy, value))
+        if symbol is None:
+            continue
+        node = graph.node_for_key(f"op:{copy}")
+        if node is None or any(graph.node(other).kind is NodeKind.MEMORY_DEBT
+                               for other in graph.backward_reachable((node,))):
+            continue
+        found[call] = symbol
+    return found
 
 
 @measured("indirect_targets")

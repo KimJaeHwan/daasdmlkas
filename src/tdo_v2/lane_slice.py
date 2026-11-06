@@ -87,6 +87,8 @@ class _Index:
         from ._memory_read_sources import read_sources
         self.read_sources = read_sources(normalized)
         self.intrinsic_refinements = dict(getattr(normalized, "intrinsic_refinements", ()))
+        self._unit = unit
+        self._audited_output_only = None
         ssa, bindings = normalized.memory_ssa, normalized.memory_graph
         self.ssa = ssa
         self.definition_of = {node: index for index, node in enumerate(bindings.definition_nodes)}
@@ -151,6 +153,21 @@ class _Index:
                 or operation.output.byte_size != metadata["output_byte_size"]:
             return None
         return refinement
+
+    def output_only_intrinsic(self, action_id):
+        """Effect metadata only, independently checked against this observed unit.
+
+        Never feeds the precision/evaluation accessor above. Audit lazily
+        once per index, and only if an effect-only operation is requested.
+        """
+        key = self.ssa.actions[action_id].operation_key
+        refinement = self.intrinsic_refinements.get(key)
+        if refinement is None or refinement.output_only is None or refinement.semantics is not None:
+            return None
+        if self._audited_output_only is None:
+            from .intrinsic_refinements import refinements_for
+            self._audited_output_only = refinements_for(self._unit)
+        return refinement if refinement == self._audited_output_only.get(key) else None
 
 
 def lane_index(normalized, unit) -> "_Index":
