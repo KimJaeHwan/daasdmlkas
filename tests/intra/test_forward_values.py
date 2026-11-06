@@ -17,7 +17,7 @@ from tdo_v2.interprocedural import analyze_units
 from tdo_v2.operation_records import _compute
 
 ROOT = "1:1000"
-OPS = ("INT_ADD", "INT_SUB", "INT_MULT", "INT_AND", "INT_OR", "INT_LEFT", "INT_RIGHT", "INT_ZEXT", "INT_SEXT",
+OPS = ("INT_ADD", "INT_SUB", "INT_MULT", "INT_AND", "INT_OR", "INT_XOR", "INT_LEFT", "INT_RIGHT", "INT_ZEXT", "INT_SEXT",
        "SUBPIECE", "INT_EQUAL", "INT_LESS", "INT_SLESS", "INT_REM", "INT_DIV", "COPY", "POPCOUNT", "INT_NEGATE")
 
 

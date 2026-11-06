@@ -206,6 +206,31 @@ def _offsets(fact, width, bits):
                            for byte in range(width))
 
 
+def _raw_unresolved_store(effect, store, context):
+    """One original STORE's unresolved access, never an unknown effect policy.
+
+    The forward fact describes its possible address bytes only. Keep the raw
+    memory write and all summary unknown-writer evidence; a separation can
+    waive this occurrence solely at the independently proven reader bytes.
+    """
+    from .effects import EffectKind, UnresolvedMemoryAccess
+    from .model import ResolvedStorage, UnresolvedStorage
+    from .normalize import _storage_ref
+    from .storage import _resolve_validated_storage
+
+    if effect is None or store.opcode != "STORE" or len(store.inputs) != 3 or store.output is not None \
+            or effect.kind is not EffectKind.UNKNOWN_WRITE or effect.writes or effect.call_targets \
+            or effect.memory_read is not None or effect.unresolved_reads or effect.unresolved_writes:
+        return False
+    raw = tuple(_storage_ref(value) for value in store.inputs[1:])
+    resolved = tuple(_resolve_validated_storage(value, context) for value in raw)
+    if any(type(value) is UnresolvedStorage for value in resolved):
+        return False
+    reads = tuple(value for value in resolved if type(value) is ResolvedStorage)
+    return effect.reads == reads and effect.memory_write == UnresolvedMemoryAccess(
+        resolved[0], store.inputs[2].byte_size, raw[0])
+
+
 def prepare_memory_refinement(result, options, *, assumptions=()):
     """A plan from N0 only, or None. No fact from its replay is accepted here."""
     from .forward import forward_facts
@@ -265,7 +290,8 @@ def prepare_memory_refinement(result, options, *, assumptions=()):
             store, write_fact = original.get(writer), facts.get(writer)
             # A selector is the memory-space ID, not an address operand.
             # Ghidra can encode the same ID with different constant widths.
-            if store is None or store.opcode != "STORE" or writer in overrides or write_fact is None \
+            if store is None or store.opcode != "STORE" or len(store.inputs) != 3 \
+                    or writer in overrides or write_fact is None \
                     or store.inputs[0].kind is not VarnodeKindCode.CONSTANT \
                     or store.inputs[0].coordinate.byte_offset != space.space_id \
                     or write_fact.function != read_fact.function \
@@ -275,9 +301,13 @@ def prepare_memory_refinement(result, options, *, assumptions=()):
             writes = [] if effect is None else [e.span for e in effect.writes if type(e) is ResolvedStorage
                        and e.span.object_id.kind in (StorageObjectKind.ADDRESS_SPACE,
                                                     StorageObjectKind.FUNCTION_RELATIVE)]
-            # Extra/unknown effects cannot be justified by this one raw STORE.
-            if effect is None or len(writes) != 1 or effect.memory_write is not None \
-                    or effect.unresolved_writes or writes[0].size != store.inputs[2].byte_size:
+            resolved_store = effect is not None and len(writes) == 1 and effect.memory_write is None \
+                and not effect.unresolved_writes and writes[0].size == store.inputs[2].byte_size
+            # An exact raw unknown STORE may carry a finite may-write footprint.
+            # It still has no definite write span and remains unknown everywhere
+            # except the reader bytes certified below. Extra effects are refused.
+            if not resolved_store and not _raw_unresolved_store(
+                    effect, store, normalized.forward_inputs.context):
                 continue
             right = _offsets(write_fact, store.inputs[2].byte_size, bits)
             if right is None or left[0] != right[0] or left[1] & right[1]:
@@ -303,6 +333,8 @@ def exclusions_for(plan, effect_unit):
     if effect_unit.function_scope != plan.unit.scopes.function.scope:
         raise RefinementRefused("activation changed")
     effects = {effect.operation_key: effect for block in effect_unit.blocks for effect in block.effects}
+    original = {effect.operation_key: effect for block in plan.baseline.forward_inputs.effect_unit.blocks
+                for effect in block.effects} if plan.evidence_kind == "address" else {}
     found = {}
     for proof in plan.proofs:
         step()
@@ -314,6 +346,10 @@ def exclusions_for(plan, effect_unit):
         if type(proof) is not ReadSeparation or read is None or writer is None \
                 or not (exact_read or contained_read):
             raise RefinementRefused("original read occurrence changed")
+        baseline_writer = original.get(proof.writer)
+        if baseline_writer is not None and baseline_writer.memory_write is not None \
+                and writer != baseline_writer:
+            raise RefinementRefused("original unresolved STORE effect changed")
         for offset in range(proof.span.start, proof.span.end):
             step()
             found.setdefault((proof.read, proof.span.object_id, offset), set()).add(proof.writer)

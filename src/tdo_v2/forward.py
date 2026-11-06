@@ -236,6 +236,10 @@ def _numeric(opcode: str, inputs: list[Interval], constant: list, bits: int) -> 
         if a.hi <= c and (c + 1) & c == 0:
             return _make(a.lo, a.hi, a.stride, bits)   # a low-bit mask covering the interval
         return _make(0, min(c, a.hi) if (c + 1) & c == 0 else c, 1, bits)
+    if opcode == "INT_XOR" and c is not None and a.bits == bits and 0 <= c <= full:
+        # A low-bit hull, not an enumeration: neither operand can set a bit
+        # above the highest bit present in the interval or literal.
+        return a if c == 0 else _make(0, (1 << max(a.hi, c).bit_length()) - 1, 1, bits)
     if opcode == "INT_MULT" and c is not None:
         return _make(a.lo * c, a.hi * c, a.stride * c, bits)
     if opcode == "INT_LEFT" and c is not None and c < bits:
@@ -591,7 +595,10 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
         for instruction in unit.observation.instructions
         for ordinal, operation in enumerate(instruction.operations)
     }
-    operations.update(dict(normalized.operation_overrides))
+    overrides = dict(normalized.operation_overrides)
+    operations.update(overrides)
+    from ._guarded_ranges import copy_read_ranges
+    guarded_ranges = copy_read_ranges(unit, overrides)
     action_ids = {action.operation_key: index for index, action in enumerate(ssa.actions)}
     reads_of: dict = {}
     for read in ssa.reads:
@@ -707,7 +714,13 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
         action_id = action_ids.get(operation_key)
         if span is None or action_id is None:
             return Value.top(8 * varnode.byte_size)
-        return read_value(action_id, span)
+        value = read_value(action_id, span)
+        bound = guarded_ranges.get((operation_key, varnode))
+        if bound is not None:
+            # The independent point bound does not erase read_value's taint
+            # or any graph debt. It is valid even when the loop JOIN widened.
+            return Value(8 * varnode.byte_size, ((_ABS, Interval(*bound, 1, 8 * varnode.byte_size)),))
+        return value
 
     probes: dict = {}
     probe_labels: set = set()

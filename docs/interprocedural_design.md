@@ -6343,3 +6343,46 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
   멤버의 효과가 없으면(싱크 요구 없음) 가설이 없고 호출자는 `control:unavailable:<멤버>`를 지닌다 -- 더 강한 표시라 건전하나
   vetoed-noreturn 행 대신 unavailable 행이 보고된다(Fable 후속 P3-a, 선택).
 - 측정: Mulp "제어 표시만 남은" root 상한 52 -> 약 164; 게이트 Bundle 완전 228 -> 213(15개: v3 x64 1, UE debuggame 7 + 7).
+
+### 25.97 원 CFG 범위와 불변 기준값을 기존 메모리 그래프에 연결 (2026-11-07)
+
+목적은 특정 API의 행위 보고가 아니라 기존 SSA/그래프의 실제 누락을 공통 엔진에서 줄이는 것이다.
+새 호출 규약·메모리 분리·외부 효과 가정은 추가하지 않는다.
+
+- `_guarded_ranges.copy_read_ranges`는 명령 내부의 특정 UNIQUE COPY 읽기까지 모든 유입 경로를 검사한다.
+  `INT_RIGHT(x,c) != 0`인 간선은 unsigned `c < x의 비트폭`을 보장한다. 비교 극성, 인접 producer의 유일 선행자,
+  counter의 동일 폭·현재 값을 확인한다. 다른 유입은 동일 폭 상수 COPY로도 닫을 수 있지만, 미검증 경로·순환·
+  덮어쓰기·호출·flow override·작업 상한 초과가 있으면 범위를 만들지 않는다. loop 전체의 종료성 증명이 아니다.
+- `forward`는 이 독립 범위와 XOR의 보수적인 low-bit hull을 원 SSA의 값 전달에 사용한다.
+  기존 reader를 먼저 평가하여 taint와 부채를 보존한다. 원 연산/정의/합류는 교체하지 않는다.
+- `_forward_memory`는 원 STORE 효과의 주소·값 operand, 폭과 단일 unknown-write 형태까지 재검증한다.
+  동일 entry base의 유한 modular byte footprint가 특정 exact LOAD와 겹치지 않을 때만 그 읽기의 plain alias를 면제한다.
+  STORE에 definite 위치를 부여하지 않으며, 원 unresolved STORE·summary unknown-writer·uncertain label과
+  다른 읽기의 부채는 유지한다. 원 입력/옵션/전체 fact를 기존 sealed refinement 경로에서 다시 확인한다.
+- 반복 주소는 기존 induction 증명을 재사용하면서 동일 폭 `x * 1`을 항등 전달하고, 별도의 불변 기준 register SSA
+  token을 보존한다. family identity와 issued payload, graph witness는 그 기준값을 구분한다.
+  기준값의 전체 정의·입구 지배·반복 내 쓰기 부재와 원 정의→소비 사이 CALL/CALLIND/CALLOTHER 부재를 확인한다.
+  CALL이 있는 SCC의 경계 재방문과 JOIN source를 통한 검사 우회도 거절한다. 호출 이후의 오래된 SSA 상수를 사용하지 않는다.
+- 서로 다른 기준값은 서로 다른 family이지만 비별칭이라는 뜻은 아니다. 다른 family의 STORE는 기존 간섭을 유지한다.
+  `loop_address` 기록은 원 SSA 정의와 `B + S(k) + offset`을 참조하는 weak 관계다. 수치 평가·수명 인증·부채 제거의 근거가 아니다.
+  기준값 없는 기존 weak node key는 유지한다. graph/메모리 상태를 복사하지 않고 corridor와 CFG 정보를 재사용한다.
+
+반례는 signed shift·잘못된 분기 극성·미검증 유입·부분 덮어쓰기·호출/재진입·예산 소진,
+주소/폭/base 변경·modular wrap·겹치는 STORE·서로 다른 기준값의 실제 alias를 포함한다.
+기존 exact STORE 바이트 연결과 원 부채가 유지되는지 별도로 확인한다.
+
+외부 모델/실제 DLL 연결·정확한 바이너리 binding·opt-in lifecycle 수신부는 기존 기능을 재사용한다.
+관찰된 API 이름만으로 DLL 정체성이나 보존/할당 계약을 만들지 않는다. 정확한 target/effect 자료가 없는 경계는 미해결이다.
+이번 범위는 임의 바이너리 전체의 그래프 완성이나 모든 가변 주소·재귀·외부 효과 해소 선언이 아니다.
+
+의미 판 47, operation record 18. summary 2/template 7은 유지한다.
+Core 모델은 같은 원 DLL Bundle에서 own version 33으로 다시 도출하며 기존 entries와 가정 목록은 그대로이다.
+
+완료 경계와 검증:
+- 가변 주소는 검증한 유한 footprint의 읽기별 분리에 한정한다. 임의 주소를 exact 위치로 바꾸지 않는다.
+- 호출 전후 상태·간접 target은 기존 SSA/효과 경로를 재사용한다. target operand의 연결은 실제 DLL/export 정체성의 증명과 다르다.
+- 반복은 불변 기준값이 있는 주소 관계를 추가한다. 반복 횟수·임의 재귀의 종료·모든 방문의 수명/비별칭은 증명하지 않는다.
+- 힙/외부 효과는 검증된 모델·binding·opt-in 수명 계약이 없으면 여전히 미해결이다. 수신부가 있다는 이유로 계약을 만들어 넣지 않는다.
+- 그래프의 원 연산 노드 coverage는 모든 메모리 간선과 실행 경로의 의미적 완성을 뜻하지 않는다.
+- 정방향 OFF/ON의 단위 회귀는 각각 6,407 통과·73 skip·실패 0. 별도 corpus 432개는 필요한 Bundle 경로가 없어
+  모두 skip이며 통과로 세지 않는다. 실제 바이너리 전후 비교는 이 skip과 별개로 수행한다.

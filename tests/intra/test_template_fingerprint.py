@@ -42,6 +42,7 @@ from tdo_v2.interprocedural import analyze_units
 from tdo_v2.relative_memory import ImageBaseTracking
 from tdo_v2.summary_store import load_external_models
 from tdo_v2.summary_templates import ENGINE_SEMANTICS_VERSION, TEMPLATE_VERSION, build_file
+from test_guarded_ranges import _scan
 
 REPO = Path(__file__).resolve().parents[2]
 RECORD = Path(__file__).with_name("template_fingerprint.json")
@@ -107,7 +108,17 @@ def _cases():
                    .call(ABORT)
                    .label("go").ins(copy(reg(RCX), reg(RDX))).call(G)
                    .ins(load(reg(RAX), reg(RDX))).add_rsp(0x28).ret())
+    scan, _ = _scan()
+    guarded_memory = (FunctionBuilder(entry=F).sub_rsp(0x40)
+                      .ins(add(T, reg(RSP), const(0x30)), store(T, const(0x8877, 2)))
+                      .ins(*scan)
+                      .ins(op("INT_XOR", [reg(RAX, 4), const(28, 4)], reg(RAX, 4)),
+                           op("INT_RIGHT", [reg(RAX, 4), const(2, 4)], reg(RAX, 4)),
+                           op("INT_ZEXT", [reg(RAX, 4)], reg(RAX)))
+                      .ins(add(T2, reg(RSP), reg(RAX)), store(T2, reg(RDX, 1)))
+                      .ins(load(reg(RAX, 2), T)).add_rsp(0x40).ret())
     return {
+        "guarded_micro_loop_memory": ([guarded_memory], {}),
         "copy_and_anchored_store": ([FunctionBuilder(entry=F).ins(copy(reg(RAX), reg(RCX)))
                                      .ins(store(reg(RDX), reg(RSI))).ret()], {}),
         "frame_and_spill": ([FunctionBuilder(entry=F).sub_rsp(0x28)

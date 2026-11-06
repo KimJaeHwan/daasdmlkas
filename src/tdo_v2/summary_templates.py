@@ -137,7 +137,10 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # explicit output; their value/precise lane semantics remain unsupported.
 # 46: independently seeded, debt-free final SSA import identities bind
 # CALLIND models across proven-preserving calls; no ABI or numeric guess.
-ENGINE_SEMANTICS_VERSION = 46
+# 47: original micro-CFG guards bound COPY reads, XOR preserves numeric
+# hulls, and certified unknown STORE footprints separate only exact reads;
+# loop address families retain independently certified invariant SSA bases.
+ENGINE_SEMANTICS_VERSION = 47
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

@@ -10,14 +10,28 @@ No trip count, buffer extent, non-aliasing or successful access is inferred.
 """
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ._scope_contracts import AddressSpaceClassV2, VarnodeKindCode, classify_address_space_v2
 from ._ssa_cycles import SsaCycleIndex
+from ._sparse_dataflow import DominatorGraph
 from .memory_contracts import MemoryDefinitionKind, MemoryFlowEdge
 from .model import ByteSpan, ResolvedStorage, StorageObjectKind, StorageRef, StorageScopeId, VarnodeKind
 from .resource_limits import step
 from .storage import _resolve_validated_storage
+
+
+@dataclass(frozen=True, slots=True)
+class LoopMemoryBase:
+    """One unchanged register snapshot, not a numeric or allocation identity."""
+
+    span: ByteSpan
+    definition_id: int
+
+    def __post_init__(self):
+        if type(self.span) is not ByteSpan or self.span.object_id.kind is not StorageObjectKind.REGISTER_FILE \
+                or type(self.definition_id) is not int or self.definition_id < 0:
+            raise ValueError("loop invariant base requires original register SSA bytes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +46,7 @@ class LoopMemoryFamily:
     transition_definition_ids: tuple[int, ...]
     stride: int
     address_bits: int
+    invariant_base: LoopMemoryBase | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if any(type(key) is not str or not key for key in (self.header, self.preheader)) \
@@ -50,6 +65,10 @@ class LoopMemoryFamily:
                 or any(type(identifier) is not int or identifier < 0 for identifier in self.transition_definition_ids) \
                 or tuple(sorted(set(self.transition_definition_ids))) != self.transition_definition_ids:
             raise ValueError("loop family requires a full-width modular induction")
+        if self.invariant_base is not None and (type(self.invariant_base) is not LoopMemoryBase
+                or self.invariant_base.span.size != self.span.size
+                or self.invariant_base.span.overlaps(self.span)):
+            raise ValueError("loop invariant base must be a separate full-width register")
         for edges, sources in ((self.entry_edges, {self.preheader}), (self.backedge_edges, set(self.latches))):
             if type(edges) is not tuple or not edges or any(type(row) is not MemoryFlowEdge
                     or row.predecessor_key not in sources or row.block_key != self.header for row in edges) \
@@ -65,6 +84,10 @@ class LoopMemoryFamily:
     def transition_definition_id(self):
         """Legacy singleton view; all transitions live in the plural field."""
         return self.transition_definition_ids[0] if len(self.transition_definition_ids) == 1 else None
+
+    @property
+    def identity(self):
+        return self.header, self.span, self.invariant_base
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +192,7 @@ class LoopMemoryPlan:
                 or type(self.accesses) is not tuple or not self.accesses \
                 or any(type(row) is not LoopMemoryAccess for row in self.accesses):
             raise TypeError("loop memory plan requires exact bound SSA evidence")
-        if len({(row.header, row.span) for row in self.families}) != len(self.families) \
+        if len({row.identity for row in self.families}) != len(self.families) \
                 or len({(row.operation_key, row.direction) for row in self.accesses}) != len(self.accesses):
             raise ValueError("loop family/access identities must be unique")
         for row in self.accesses:
@@ -224,20 +247,20 @@ def derive_loop_memory(memory, ssa, observation, entry, context, address_spaces,
                 continue
             address = index.reference(key, operation.inputs[1])
             region = index.region_of.get(index.locations.get(key))
-            if address is None or region is None or row.access.width != width \
+            if address is None or region is None or index.region(region) is None or row.access.width != width \
                     or type(row.access.address) is not ResolvedStorage or row.access.address.span != address[1]:
                 continue
             matches = []
             for span in index.candidates(address):
                 proof = index.proof(region, span)
                 if proof is not None:
-                    form = proof.form(*address)
+                    form = proof.address_form(*address)
                     if form is not None and form[0] == 1:
-                        matches.append((proof.family, form[1]))
+                        matches.append((replace(proof.family, invariant_base=form[2]), form[1]))
             if len(matches) != 1:
                 continue
             family, offset = matches[0]
-            identity = (family.header, family.span)
+            identity = family.identity
             if identity not in admitted:
                 admitted[identity] = len(families)
                 families.append(family)
@@ -292,6 +315,12 @@ def validate_loop_memory(plan, ssa):
                 or ssa.definitions[identifier].span != family.span for identifier in family.transition_definition_ids) \
                 or {d for edge in family.backedge_edges for d in edge.definition_ids} != set(family.transition_definition_ids):
             raise ValueError("loop backedge must retain the full induction transition")
+        if family.invariant_base is not None:
+            base = family.invariant_base
+            if base.definition_id >= len(ssa.definitions) \
+                    or ssa.definitions[base.definition_id].kind is not MemoryDefinitionKind.DATA_WRITE \
+                    or ssa.definitions[base.definition_id].span != base.span:
+                raise ValueError("loop invariant base must retain its original full SSA definition")
     actions = {row.operation_key: i for i, row in enumerate(ssa.actions)}
     unresolved = {(direction, row.action_id): row.access for direction, rows in
                   (("read", ssa.unresolved_reads), ("write", ssa.unresolved_writes)) for row in rows}
@@ -305,11 +334,22 @@ def validate_loop_memory(plan, ssa):
                 or original.address.span != access.address_span \
                 or (action, access.address_span, access.address_definition_id) not in references:
             raise ValueError("loop access must retain its original unresolved address operand")
+    # The process-local receipt already pins the original immutable SSA,
+    # derivation inputs and entire base-bearing payload. Do not rebuild a
+    # CFG/dominator index at every graph/record consumption.
     for row in plan.read_from:
         if row.source_definition_id is not None and (
                 row.source_definition_id >= len(ssa.definitions)
                 or not ssa.definitions[row.source_definition_id].span.contains(row.source_span)):
             raise ValueError("loop read-from value bytes must belong to the original SSA")
+
+
+class _DominanceOnly(DominatorGraph):
+    def _frontiers(self):
+        return {}
+
+    def solve(self, *args, **kwargs):
+        raise AssertionError("loop base certification does not solve dataflow")
 
 
 class _Index(SsaCycleIndex):
@@ -332,11 +372,28 @@ class _Index(SsaCycleIndex):
         self.barrier_blocks = {self.locations[key] for key, operation in self.raw.items()
                                if operation.opcode in ("CALL", "CALLIND", "CALLOTHER")}
         self.region_of = {key: number for number, members in enumerate(self.cyclic) for key in members}
+        self.call_regions = {number for number, members in enumerate(self.cyclic)
+                             if self.barrier_blocks.intersection(members)}
         for flow in ssa.flow_edges:
             step()
             if flow.block_key in self.region_of:
                 self.flow_by_edge.setdefault((flow.predecessor_key, flow.block_key), []).append(flow)
-        self.proofs, self.regions, self.orders = {}, {}, {}
+        self.proofs, self.regions, self.orders, self.dominators = {}, {}, {}, None
+        self.clean_references, self.call_corridors = {}, {}
+        step(len(self.raw))
+        self.block_calls = {}
+        for key, operation in self.raw.items():
+            if operation.opcode in ("CALL", "CALLIND", "CALLOTHER"):
+                self.block_calls.setdefault(self.locations[key], []).append(int(key.split(":")[2]))
+
+    def dominates_header(self, block, header):
+        if block not in self.blocks:
+            return False
+        if self.dominators is None:
+            self.dominators = _DominanceOnly(self.cfg.entry,
+                {key: tuple(sorted(rows)) for key, rows in self.predecessors.items()})
+        step()
+        return self.dominators._dominates(block, header)
 
     def span(self, value):
         kind = {VarnodeKindCode.REGISTER: VarnodeKind.REGISTER,
@@ -356,16 +413,82 @@ class _Index(SsaCycleIndex):
         fragment = read.fragments[0]
         if fragment.span != span or len(fragment.definition_ids) != 1:
             return None
-        return fragment.definition_ids[0], span, key
+        identifier, = fragment.definition_ids
+        definition = self.ssa.definitions[identifier]
+        if span.object_id.kind is StorageObjectKind.REGISTER_FILE \
+                and definition.kind is MemoryDefinitionKind.DATA_WRITE \
+                and not self.call_free(definition.operation_key, key):
+            return None
+        return identifier, span, key
+
+    def call_free(self, writer, reader):
+        """No implicit register clobber between a raw definition and use.
+
+        This proof precedes the normalizer's call-debt calculation. Refuse
+        even a potentially preserving call rather than name stale SSA bits.
+        """
+        token = writer, reader
+        if token in self.clean_references:
+            return self.clean_references[token]
+        first, last = self.locations.get(writer), self.locations.get(reader)
+        result = False
+        if first is not None and last is not None:
+            before, after = int(writer.split(":")[2]), int(reader.split(":")[2])
+            if self.region_of.get(first) in self.call_regions or self.region_of.get(last) in self.call_regions:
+                # A CALL after an earlier reader visit is before the next
+                # visit. Do not cut such cycles at a boundary block.
+                result = False
+            elif not self.barrier_blocks:
+                result = True
+            elif first == last:
+                result = before < after and not any(before < ordinal < after
+                    for ordinal in self.block_calls.get(first, ()))
+            elif self.region_of.get(first) is not None and self.region_of.get(first) == self.region_of.get(last) \
+                    and self.regions.get(self.region_of[first]) is not None:
+                result = True  # the certified whole cyclic region contains no implicit-call barrier
+            else:
+                pair = first, last
+                if pair not in self.call_corridors:
+                    def reach(start, stop, reverse):
+                        pending, seen = [start], set()
+                        while pending:
+                            node = pending.pop()
+                            if node in seen:
+                                continue
+                            step()
+                            seen.add(node)
+                            if node != stop:
+                                pending.extend(self.predecessors[node] if reverse else self.blocks[node].successors)
+                        return seen
+                    forward, backward = reach(first, last, False), reach(last, first, True)
+                    step(len(forward) + len(backward))
+                    interior = (forward & backward) - {first, last}
+                    self.call_corridors[pair] = last in forward and not (interior & self.barrier_blocks)
+                result = self.call_corridors[pair] \
+                    and not any(ordinal > before for ordinal in self.block_calls.get(first, ())) \
+                    and not any(ordinal < after for ordinal in self.block_calls.get(last, ()))
+        self.clean_references[token] = result
+        return result
 
     def operands(self, definition, span):
         operation = self.raw.get(definition.operation_key)
         if definition.kind is not MemoryDefinitionKind.DATA_WRITE or definition.span != span \
                 or operation is None or operation.output is None or self.span(operation.output) != span \
-                or operation.opcode not in ("COPY", "INT_ADD", "INT_SUB") \
+                or operation.opcode not in ("COPY", "INT_ADD", "INT_SUB", "INT_MULT") \
                 or len(operation.inputs) != (1 if operation.opcode == "COPY" else 2) \
                 or any(value.byte_size != span.size for value in operation.inputs):
             return None
+        if operation.opcode == "INT_MULT":
+            # Same-width multiplication by one is a physical identity. No
+            # other multiplier, truncation, extension or overflow claim.
+            ones = [i for i, value in enumerate(operation.inputs)
+                    if value.kind is VarnodeKindCode.CONSTANT and value.coordinate.byte_offset == 1]
+            if not ones:
+                return None
+            value = operation.inputs[1 - ones[0]]
+            operand = ((0, value.coordinate.byte_offset % (1 << (8 * span.size)))
+                       if value.kind is VarnodeKindCode.CONSTANT else self.reference(definition.operation_key, value))
+            return None if operand is None else ("COPY", (operand,))
         operands = []
         for value in operation.inputs:
             if value.kind is VarnodeKindCode.CONSTANT:
@@ -497,7 +620,7 @@ class _Proof:
         self.index, self.loop, self.span = index, loop, span
         self.sources = sources
         self.modulus = 1 << (8 * span.size)
-        self.cache, self.family = {}, None
+        self.cache, self.address_cache, self.base_cache, self.family = {}, {}, {}, None
         updates = {index.ssa.definitions[identifier].operation_key for identifier in transitions}
         self.before_counts, self.exit_counts = {}, {}
         for key, predecessors in order:
@@ -527,6 +650,14 @@ class _Proof:
             step()
             identifier, requested, at = token
             definition = self.index.ssa.definitions[identifier]
+            if not finish and definition.kind is MemoryDefinitionKind.DATA_WRITE \
+                    and requested.object_id.kind is StorageObjectKind.REGISTER_FILE \
+                    and definition.operation_key != at \
+                    and not self.index.call_free(definition.operation_key, at):
+                # JOIN source expansion must not bypass the operand-use
+                # clobber check performed by reference().
+                self.cache[token] = None
+                continue
             if finish:
                 opcode, operands = recipes.pop(token)
                 values = [item if len(item) == 2 else self.cache.get(item) for item in operands]
@@ -564,3 +695,94 @@ class _Proof:
             pending.append((token, True))
             pending.extend((item, False) for item in reversed(recipe[1]) if len(item) == 3 and item not in self.cache)
         return self.cache.get(root)
+
+    def _invariant_base(self, identifier, span):
+        token = identifier, span
+        if token not in self.base_cache:
+            index, members = self.index, self.loop[3]
+            definition = index.ssa.definitions[identifier]
+            raw = index.raw.get(definition.operation_key)
+            valid = span.size == self.span.size and span.object_id.kind is StorageObjectKind.REGISTER_FILE \
+                and not span.overlaps(self.span) and definition.kind is MemoryDefinitionKind.DATA_WRITE \
+                and definition.span == span and raw is not None and raw.output is not None \
+                and raw.output.kind is VarnodeKindCode.REGISTER and index.span(raw.output) == span \
+                and index.locations.get(definition.operation_key) not in members \
+                and index.dominates_header(index.locations.get(definition.operation_key), self.loop[0])
+            if valid:
+                for other in index.ssa.definitions:
+                    step()
+                    if other.kind in (MemoryDefinitionKind.DATA_WRITE, MemoryDefinitionKind.KILL) \
+                            and other.span.overlaps(span) \
+                            and index.positions.get(other.operation_key, (None,))[0] in members:
+                        valid = False
+                        break
+            self.base_cache[token] = LoopMemoryBase(span, identifier) if valid else None
+        return self.base_cache[token]
+
+    def address_form(self, identifier, span, consumer):
+        """S(k) + constant + one exact invariant register snapshot.
+
+        Only the original operand's reaching definition may name the base.
+        Its unknown value and source debts remain independent prerequisites.
+        """
+        root = identifier, span, consumer
+        pending, active, recipes = [(root, False)], set(), {}
+        while pending:
+            token, finish = pending.pop()
+            if token in self.address_cache:
+                continue
+            step()
+            identifier, requested, at = token
+            if finish:
+                opcode, operands = recipes.pop(token)
+                values = [(item[0], item[1], None) if len(item) == 2 else self.address_cache.get(item)
+                          for item in operands]
+                result = None
+                if all(value is not None for value in values):
+                    if opcode == "JOIN":
+                        result = values[0] if values and all(value == values[0] for value in values) else None
+                    elif opcode == "COPY":
+                        result = values[0]
+                    else:
+                        left, right = values
+                        # Exactly one positive base term. Even equal tokens
+                        # are not cancelled or multiplied into a new family.
+                        if (left[2] is None or right[2] is None) and not (opcode == "INT_SUB" and right[2] is not None):
+                            sign = 1 if opcode == "INT_ADD" else -1
+                            result = ((left[0] + sign * right[0]) % self.modulus,
+                                      (left[1] + sign * right[1]) % self.modulus, left[2] or right[2])
+                active.remove(token)
+                self.address_cache[token] = result
+                continue
+            original = self.form(identifier, requested, at)
+            if original is not None:
+                self.address_cache[token] = (*original, None)
+                continue
+            if token in active:
+                self.address_cache[token] = None
+                continue
+            definition = self.index.ssa.definitions[identifier]
+            if requested.size != self.span.size or definition.span != requested:
+                self.address_cache[token] = None
+                continue
+            if definition.kind is MemoryDefinitionKind.DATA_WRITE \
+                    and requested.object_id.kind is StorageObjectKind.REGISTER_FILE \
+                    and definition.operation_key != at \
+                    and not self.index.call_free(definition.operation_key, at):
+                self.address_cache[token] = None
+                continue
+            base = self._invariant_base(identifier, requested)
+            if base is not None:
+                self.address_cache[token] = (0, 0, base)
+                continue
+            recipe = (("JOIN", tuple((source, requested, at) for source in self.index.joins[identifier]))
+                      if definition.kind is MemoryDefinitionKind.JOIN else self.index.operands(definition, requested))
+            if recipe is None:
+                self.address_cache[token] = None
+                continue
+            active.add(token)
+            recipes[token] = recipe
+            pending.append((token, True))
+            pending.extend((item, False) for item in reversed(recipe[1]) if len(item) == 3
+                           and item not in self.address_cache)
+        return self.address_cache.get(root)

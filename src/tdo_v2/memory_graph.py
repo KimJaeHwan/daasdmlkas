@@ -633,7 +633,11 @@ def _loop_node_records(namespace, plan):
     if plan is None:
         return (), (), ()
     def record(kind, number, row):
-        identity = sha256(repr(row).encode("utf-8")).hexdigest()
+        # Preserve existing base-free weak node identities. A base-bearing
+        # family must hash its exact token even though its optional field is
+        # omitted from the legacy repr; equality/receipt payload retain it.
+        payload = (row, row.invariant_base) if kind == "family" and row.invariant_base is not None else row
+        identity = sha256(repr(payload).encode("utf-8")).hexdigest()
         return NodeRecord(f"memory:{namespace}:loop-{kind}:{number}:{identity}", NodeKind.EFFECT,
                           "loop_address_family" if kind == "family" else
                           ("loop_previous_visit_read_from_if_backedge" if row.requires_backedge
@@ -661,6 +665,11 @@ def _loop_memory_edges(result, bindings):
         ("write", result.unresolved_writes, bindings.unresolved_write_nodes))
         for row, node in zip(rows, nodes, strict=True)}
     for family, node in zip(loop.plan.families, loop.family_nodes, strict=True):
+        if family.invariant_base is not None:
+            base = family.invariant_base
+            edges.append((bindings.definition_nodes[base.definition_id], node,
+                EdgeRecord(EdgeKind.LOOP_MEMORY_ADDRESS,
+                           operation=result.definitions[base.definition_id].operation_key, span=base.span)))
         for ordinal, flow in enumerate((*family.entry_edges, *family.backedge_edges)):
             for identifier in flow.definition_ids:
                 edges.append((bindings.definition_nodes[identifier], node,

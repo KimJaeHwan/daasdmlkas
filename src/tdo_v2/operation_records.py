@@ -81,7 +81,7 @@ from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 from . import _record_read_sources as _read_source_records
 
-RECORD_VERSION = 17  # 16: ISA intrinsic values; 17: independent register-delta proofs
+RECORD_VERSION = 18  # 18: weak loop addresses retain exact invariant-base SSA identities
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})
@@ -1096,6 +1096,10 @@ class _Builder:
                     record["physical_write"] = {"space": address.space_id, "address": address.byte_offset,
                                                 "width": operation.output.byte_size}
                 record["operands"] = self._operands(node, action_id, operation, spans, depth)
+                if operation.opcode in ("LOAD", "STORE"):
+                    from ._record_loop_memory import annotate
+
+                    annotate(self, record)
                 if operation.opcode == "LOAD":
                     source = self._read_source(key)
                     image = source is not None and _read_source_records.annotate(self, record, source, depth)

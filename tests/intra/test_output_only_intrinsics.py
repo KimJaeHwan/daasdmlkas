@@ -239,7 +239,7 @@ def test_cold_and_saved_summaries_preserve_the_same_physical_state_and_reject_ol
     assert not any(label.startswith("pcodeop-model:") for label in saved.inherited_assumptions)
     path = tmp_path / "derived.json"
     raw = json.loads(path.read_text())
-    assert raw["source"]["engine"]["semantics_version"] == 46
+    assert raw["source"]["engine"]["semantics_version"] == 47
     raw["source"]["engine"]["semantics_version"] = 44
     path.write_text(json.dumps(raw))
     old = load_external_models([path], *WIN64)
