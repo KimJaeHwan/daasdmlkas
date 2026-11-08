@@ -13,8 +13,17 @@ from .span_geometry import ByteSpan, StorageObjectKind
 
 
 def _source_signature(item):
-    from ._forward_memory import _freeze
+    from ._forward_memory import _freeze, RefinementRefused
     options = dict(item.normalization_options)
+    receipt = options.get("_once_control")
+    if receipt is not None:
+        try:
+            from .relative_memory import _OnceControlReceipt
+            if type(receipt) is not _OnceControlReceipt:
+                raise ValueError("unissued once control")
+            receipt.verify(item.unit, options.get("fault_cuts", ()))
+        except (TypeError, ValueError) as error:
+            raise RefinementRefused("source control evidence changed") from error
     reader = options.pop("readonly_image", None)
     return (id(item.unit), id(item.normalized), _freeze(options), id(reader),
             item.normalization_context, item.summary_inputs, item.lifetime_models,

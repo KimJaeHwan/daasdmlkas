@@ -144,7 +144,16 @@ def test_real_work_limit_during_replay_or_caller_reanalysis_never_publishes_cand
     assert all(identifier == id(item) and item in result.values() and not item.activations
                for identifier, (item, _) in provenance.items())
     budget = resource_limits.last_run()
-    assert budget.diagnostic_work == 0
+    # The entry overlay only publishes existing state references after the
+    # exhausted analysis. No replay/verification work may leak into this
+    # ledger: permit exactly one reference observation per original call.
+    from tdo_v2.interprocedural import _retained_instances
+    retained = [item for item in _retained_instances(result)
+                if type(item.normalized).__name__ == 'NormalizedFunction']
+    original_calls = sum(operation.opcode in ('CALL', 'CALLIND') for item in retained
+                         for row in item.unit.observation.instructions for operation in row.operations)
+    overlay_calls = sum(len({relation.call for relation in item.entry_relations}) for item in retained)
+    assert budget.diagnostic_work == original_calls == overlay_calls
     assert (budget.exhausted == "work") == (scope == "run")
     assert budget.work >= event[1] and ACTIVE_ENTRY.get() is None
     assert (budget.work if scope == "run" else budget.ledgers[_ledger_key(failed.unit)].work) > limit

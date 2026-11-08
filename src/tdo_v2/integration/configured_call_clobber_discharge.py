@@ -567,7 +567,7 @@ def _sole_terminal_writer(view, definition_id: int, span: ByteSpan) -> bool:
     reaching ones (a JOIN with the entry value still qualifies), which is not
     a must-write.
     """
-    states = view.memory.observed_terminal_states
+    states = view.memory.exit_states
     if not states or any(state.root_node_id is None for state in states):
         return False
     for state in states:

@@ -145,6 +145,12 @@ class EngineRun:
     # callees, model labels); for memory-writes the writer operation keys with
     # their RAM / WILD class) -- what a later link or trace must name to settle it
     control_sites: tuple = ()
+    # Sealed members refused before observation/naming admission. They have
+    # no admitted function key, roots, summary or successful analysis.
+    admission_failures: tuple = ()
+    # (admitted function key, original control observation) for a disconnected
+    # normalization refusal. These are not successful SSA/dependency graphs.
+    refused_control_graphs: tuple = ()
 
 
 @analysis_entry

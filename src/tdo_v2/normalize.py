@@ -49,7 +49,9 @@ from .configured_effect_contracts import ConfiguredFunctionCallEffectEvidenceV4
 from .effect_decode import decode_effect_unit
 from .control_contracts import FunctionTerminalCuts
 from .control_projection import (
+    ObservedControlGraph,
     control_successor_coordinates,
+    project_observed_control_graph,
     project_observed_terminal_cuts,
 )
 from .effects import (
@@ -1510,12 +1512,19 @@ class UnresolvedNormalizedFunction:
     # the run's opaque-callees-restore-stack-pointer switch where it failed (a
     # report after the run must not read the reset ambient switch)
     assumes_opaque_callees_restore_stack_pointer: bool = field(default_factory=lambda: _opaque_restores_sp())
+    observed_control: ObservedControlGraph | None = None
 
     def __post_init__(self) -> None:
         if type(self.scopes) is not ScopeBundleResult:
             raise TypeError("unresolved normalization must retain an exact scope bundle")
         if type(self.reason) is not NormalizationFailureReason:
             raise TypeError("normalization failure reason must be exact")
+        if self.observed_control is not None and (
+            type(self.observed_control) is not ObservedControlGraph
+            or type(self.scopes.function) is not ConstructedFunctionScope
+            or self.observed_control.observation_digest != self.scopes.function.observation_digest
+        ):
+            raise ValueError("refused control observation must match the exact function scope")
 
 
 
@@ -1587,6 +1596,7 @@ class FunctionNormalizer:
         callee_support: tuple = (),
         _forward_memory_plan=None,
         _load_identity_plan=None,
+        _once_control=None,
     ) -> NormalizedFunction | UnresolvedNormalizedFunction:
         """``assumed_call_effects`` (TEST-ONLY, opt-in): call operation key ->
         declared effect; see ``tdo_v2.assumed_call_effects``.
@@ -1611,11 +1621,18 @@ class FunctionNormalizer:
                 value.scopes,
                 NormalizationFailureReason.MISSING_CONSTRUCTED_FUNCTION_SCOPE,
             )
+        if _once_control is not None:
+            from .relative_memory import _OnceControlReceipt
+
+            if type(_once_control) is not _OnceControlReceipt:
+                raise TypeError("once control requires an exact issued receipt")
+            _once_control.verify(value, fault_cuts)
         admission_failure = _cfg_admission_failure(
             value.observation, function
         ) or _intra_instruction_flow_failure(value.observation, function.entry)
         if admission_failure is not None:
-            return UnresolvedNormalizedFunction(value.scopes, admission_failure)
+            return UnresolvedNormalizedFunction(value.scopes, admission_failure,
+                                                observed_control=_refused_control_graph(value, admission_failure))
         options = dict(
             opaque_value_provider=opaque_value_provider,
             assumed_call_effects=assumed_call_effects or {},
@@ -1626,6 +1643,8 @@ class FunctionNormalizer:
             private_frame_above=private_frame_above,
             open_conditions=open_conditions or {},
         )
+        if _once_control is not None:
+            options["_once_control"] = _once_control
         # a replay plan was sealed over every normalization input the analysis
         # passed (``AnalyzedFunction.normalization_options``): the fault-premise
         # and control inputs (F1, U2b) included, as given when set
@@ -1679,7 +1698,8 @@ class FunctionNormalizer:
             value.observation, function
         ) or _intra_instruction_flow_failure(value.observation, function.entry)
         if admission_failure is not None:
-            return UnresolvedNormalizedFunction(value.scopes, admission_failure)
+            return UnresolvedNormalizedFunction(value.scopes, admission_failure,
+                                                observed_control=_refused_control_graph(value, admission_failure))
         return _ScopedNormalizer().normalize(
             value,
             effects,
@@ -1773,6 +1793,7 @@ class _ScopedNormalizer:
         open_conditions: dict | None = None,
         _forward_memory_plan=None,
         _load_identity_plan=None,
+        _once_control=None,
     ) -> NormalizedFunction | _Retry:
         """``_blocked_reads``: values read from memory that a projection may not
         use (``relative_memory.stale_reads``; set by the validation below).
@@ -1819,6 +1840,9 @@ class _ScopedNormalizer:
         cfg = self._build_cfg(observation, function.entry)
         cfg.freeze()
         terminal_cuts = project_observed_terminal_cuts(unit.scopes, observation, cfg)
+        terminal_addresses = {site.instruction_address for site in terminal_cuts.sites}
+        terminal_stops = {row.address: len(row.operations) for row in observation.instructions
+                          if row.address in terminal_addresses}
         # x86 rep movs/stos sites (``rep_strings``): one straight block each; the
         # element accesses appear once the count and direction are proven
         # (re-normalized here; the plan only grows)
@@ -1847,8 +1871,8 @@ class _ScopedNormalizer:
                 for block in block_graph.blocks
                 for ordinal in range(block.start, block.stop)
             }
-            once_keys = single_execution_keys(observation, block_graph, frozenset(sites))
-            once_blocks = single_execution_blocks(observation, block_graph, frozenset(sites))
+            once_keys = single_execution_keys(observation, block_graph, frozenset(sites), control=_once_control)
+            once_blocks = single_execution_blocks(observation, block_graph, frozenset(sites), control=_once_control)
             accessor_states = _accessor_states(observation, block_graph, _coordinate_key(function.entry),
                                                proven_call_effects, assumed_call_effects, once_blocks)
             wild_objects: set = set()
@@ -1996,7 +2020,11 @@ class _ScopedNormalizer:
                     )
                     for block_key in effects_by_block
                 ),
-                tuple(sorted(block.key for block in block_graph.blocks if not block.successors)),
+                # Observed terminal cuts are memory observation points even
+                # when the raw p-code ends in a self-loop. The SSA pins their
+                # non-exit role; exit consumers must use ``exit_states``.
+                tuple(sorted(block.key for block in block_graph.blocks if not block.successors
+                             or terminal_stops.get(block.instruction) == block.stop)),
                 effect_evidence_digest=(
                     configured_call_effects.canonical_digest
                     if configured_call_effects is not None
@@ -2082,6 +2110,7 @@ class _ScopedNormalizer:
                     blocked_reads=_blocked_reads,
                     used_reads=used_reads,
                     load_identity_plan=_load_identity_plan,
+                    read_address_plan=_forward_memory_plan,
                 )
                 if projected_effect_unit is effect_unit:
                     # (accessor keys need atoms on even with nothing run once)
@@ -2152,7 +2181,8 @@ class _ScopedNormalizer:
             transfers=transfers_for(_forward_memory_plan, memory_ssa),
             loop_memory=derive_loop_memory(memory_unit, memory_ssa, observation,
                 unit.scopes.function.entry, context, unit.scopes.program.evidence.address_spaces,
-                unit.scopes.program.evidence.translation_namespace),
+                unit.scopes.program.evidence.translation_namespace,
+                proven_call_effects),
         )
         observed_inputs = tuple(storage for _, storage in memory_graph.entry_bindings)
         expected_entry_nodes = tuple(node for node, _ in memory_graph.entry_bindings)
@@ -2641,6 +2671,14 @@ def _assumed_call_writes(effect, assumed, operation, context, space_id):
         reads=effect.reads + resolve(assumed.reads),
         writes=effect.writes + resolve(assumed.writes),
     )
+
+
+def _refused_control_graph(unit, reason):
+    if reason is not NormalizationFailureReason.DISCONNECTED_OBSERVED_CFG:
+        return None
+    cfg = _ScopedNormalizer()._build_cfg(unit.observation, unit.scopes.function.entry)
+    cfg.freeze()
+    return project_observed_control_graph(unit.scopes, unit.observation, cfg)
 
 
 def _intra_instruction_flow_failure(observation, entry) -> NormalizationFailureReason | None:

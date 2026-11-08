@@ -311,7 +311,7 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     exits = []
     nodes = ssa.state_nodes
     dead_exits = []
-    for state in ssa.observed_terminal_states:
+    for state in ssa.exit_states:
         if state.block_key not in frontier and dead_exit(state.block_key):
             dead_exits.append(state.block_key)
             continue
@@ -1720,7 +1720,7 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     }
     ssa = normalized.memory_ssa
     terminal_objects: dict[str, dict] = {}
-    for state in ssa.observed_terminal_states:
+    for state in ssa.exit_states:
         offsets: dict = {}
         for node in _state_runs(ssa.state_nodes, state.root_node_id):
             for atom in ssa.atomic_spans[node.start_atom:node.stop_atom]:

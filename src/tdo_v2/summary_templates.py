@@ -140,7 +140,10 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # 47: original micro-CFG guards bound COPY reads, XOR preserves numeric
 # hulls, and certified unknown STORE footprints separate only exact reads;
 # loop address families retain independently certified invariant SSA bases.
-ENGINE_SEMANTICS_VERSION = 47
+# 48: unconditional direct callee effects can preserve exact register bytes
+# for weak loop address families; call-containing families still issue no
+# current- or previous-visit read-from value claims or remove original debts.
+ENGINE_SEMANTICS_VERSION = 48
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

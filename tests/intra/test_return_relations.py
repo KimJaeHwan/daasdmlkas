@@ -329,11 +329,11 @@ def test_recursion_is_unknown():
     assert _of(_certs(main)).status == "unknown"
 
 
-def test_a_function_that_does_not_normalize_is_unknown():
-    """(The harness cannot build a normalizable exit-free function: a lone
-    ``b loop`` does not normalize -- and is then never certified.)"""
+def test_an_exit_free_absolute_self_loop_has_no_return_certificate():
+    """An absolute self edge is valid control, not a return proof."""
     certificate = _of(_certs(_a64().label("loop").branch("loop")))
-    assert certificate.status == "unknown" and certificate.culprits == ("not-normalized",)
+    assert certificate.status == "unknown"
+    assert certificate.culprits == ("unclassified-successor:1:1000:0:BRANCH",)
 
 
 # -- PAC (design r6 B) -------------------------------------------------------------------

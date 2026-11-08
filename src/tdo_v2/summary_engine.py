@@ -143,7 +143,15 @@ def analyze_frozen_bundle_with_summaries(
     assume_registered_handlers_not_observed: bool = True,
     disabled_model_assumptions=(),
 ) -> EngineRun:
-    """``assume_same_result_functions``: the named assumption
+    """Analyze admitted members and retain each scope refusal separately.
+
+    ``EngineRun.admission_failures`` preserves sealed member identities that
+    never became admissible function evidence. Program/transport/hash/naming
+    failures still abort; a nonempty refusal inventory is not a complete
+    program graph. The reference ``engine.analyze_frozen_bundle`` entry keeps
+    its strict whole-run-failure contract.
+
+    ``assume_same_result_functions``: the named assumption
     same-result-functions (off by default; model entries with ``same_result``);
     ``assume_accessor_result_separate``: accessor-result-separate (off by
     default; their ``result_separate_from_reads`` extents);
@@ -193,7 +201,7 @@ def analyze_frozen_bundle_with_summaries(
             if assume_readonly_image_constant and image_info is not None else None
         )
         return _analyze_session(
-            program, list(session.iter_functions()), image_info, readonly_image,
+            program, list(session.iter_outcomes()), image_info, readonly_image,
             boundary_provider=boundary_provider,
             assume_boundary_call_effects=assume_boundary_call_effects,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
@@ -257,7 +265,11 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
     assume_registered_handlers_not_observed: bool = True,
     disabled_model_assumptions=(),
 ) -> EngineRun:
-    """The summary engine on already-admitted evidences (the in-memory path:
+    """The summary engine on admitted evidences and explicit scope outcomes.
+
+    ``ObservedFunctionAdmissionFailure`` records from the same program are
+    retained in ``EngineRun.admission_failures``, never normalized or named.
+    For admitted evidences (the in-memory path:
     synthetic programs, docs 25.30 K2) -- the same analysis as
     ``analyze_frozen_bundle_with_summaries`` after admission; ``image_info`` /
     ``readonly_image`` as that entry derives them from a Bundle (None: no
@@ -343,6 +355,12 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     if type(program) is not ConstructedProgramScope:
         raise ValueError("program scope is unresolved")
     evidences = list(evidences)
+    from .integration.observed_function_session import ObservedFunctionAdmissionFailure
+
+    admission_failures = tuple(item for item in evidences if type(item) is ObservedFunctionAdmissionFailure)
+    if any(item.unit.scopes.program != program for item in admission_failures):
+        raise ValueError("admission failure belongs to a different program result")
+    evidences = [item for item in evidences if type(item) is not ObservedFunctionAdmissionFailure]
     by_key = {function_key(item.unit.scopes.function.entry): item for item in evidences}
     assumed = {
         key: assumed_boundary_effects(item, boundary_provider)
@@ -716,6 +734,10 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
                 + [(site, "faults-end-the-execution") for site in faults])),
             fault_report=_fault_report(results, image_info),
             control_sites=_control_sites(results, contexts),
+            admission_failures=admission_failures,
+            refused_control_graphs=tuple(
+                (key, item.normalized.observed_control) for key, item in sorted(results.items())
+                if getattr(item.normalized, "observed_control", None) is not None),
         )
         checkpoint()   # (never returned after the reporting deadline)
         return run

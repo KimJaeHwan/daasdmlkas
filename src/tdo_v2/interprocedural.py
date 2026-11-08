@@ -129,6 +129,9 @@ class AnalyzedFunction:
     # ``_ReadRecorder``). Kept whether or not operation records are on
     # (``producer_support``); never the latest result of a key.
     consumed: dict = field(default_factory=dict, repr=False, compare=False)
+    # Query-independent physical entry overlay. Not producer-support or a
+    # return effect; exact instances and original SSA state roots are shared.
+    entry_relations: tuple = field(default=(), repr=False, compare=False)
 
 
 class _ReadRecorder(dict):
@@ -231,6 +234,7 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
                   assume_opaque_callees_leave_no_stack_addresses=True,
                   assume_pre_escape_values_not_frame=True,
                   assume_opaque_callees_restore_stack_pointer=True,
+                  base_graphs=None,
                   **options) -> dict[str, "AnalyzedFunction"]:
     """``_analyze_units`` (below) under the named assumption
     import-slots-hold-their-exports when ``assume_import_slots_hold_exports``
@@ -240,7 +244,26 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     (``may_alias.ENTRY_VALUES_NOT_FRAME``, reset after the run), and
     opaque-callees-leave-no-stack-addresses likewise
     (``may_alias.OPAQUE_NO_STACK_ADDRESSES``), and
-    pre-escape-values-do-not-address-the-new-frame (``may_alias.PRE_ESCAPE_NOT_FRAME``)."""
+    pre-escape-values-do-not-address-the-new-frame (``may_alias.PRE_ESCAPE_NOT_FRAME``).
+
+    ``base_graphs`` is an opt-in caller-owned ``BaseGraphPublication`` over
+    these exact units. Its separate opaque-call pass completes before any
+    summary work, and remains available even if this proof pass is cancelled.
+    Base instances never enter the summary producer pool. Without this
+    handle there is no extra normalization pass or change of defaults.
+    """
+    if base_graphs is not None:
+        from .base_graph import BaseGraphPublication
+
+        if type(base_graphs) is not BaseGraphPublication:
+            raise TypeError("base_graphs requires an exact BaseGraphPublication")
+        units = tuple(units)
+        base_graphs.require_inputs(units)
+        if not base_graphs._started:
+            base_graphs.build()
+        snapshot = base_graphs.snapshot
+        if snapshot.stop != "finished" or not snapshot.local_pass_finished or not snapshot.entry_links_finished:
+            raise ValueError("base graph pass did not finish; proof pass was not started")
     from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
     from .relative_memory import IMPORT_SLOTS, ImportSlots, reset_index_diagnostics
 
@@ -258,7 +281,15 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     previous = sys.getrecursionlimit()
     sys.setrecursionlimit(max(previous, ANALYSIS_RECURSION_LIMIT))
     try:
-        return _with_fault_references(_analyze_units(units, **options))
+        from .call_entry_graph import connect_call_entries
+        from .resource_limits import diagnostic
+
+        results = _with_fault_references(_analyze_units(units, **options))
+        # Like fault-reference publication, this overlay observes retained
+        # graphs after analysis. Exhausted analysis budgets must not discard
+        # their existing fallback publication while attaching references.
+        with diagnostic():
+            return connect_call_entries(results)
     finally:
         from .function_summary import _FAULT_CACHE
 
@@ -1267,6 +1298,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 fault_cuts = fault_plan.cuts_of(key, fault_state["discharged"])
                 if fault_cuts:
                     normalization_options["fault_cuts"] = fault_cuts
+                    from .relative_memory import _fault_once_control
+
+                    normalization_options["_once_control"] = _fault_once_control(unit, fault_plan, fault_state)
                 if key in fault_plan.may_reach_fault:
                     normalization_options["fault_reachable"] = True
                 if key in control_exempt:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import current_thread
 from typing import Iterator
 
@@ -13,6 +13,7 @@ from .._scope_results import (
     ConstructedProgramScope,
     ProgramScopeConstructionResult,
     ScopedFunctionUnit,
+    UnresolvedFunctionScope,
 )
 from ..call_contracts import FunctionCallSeedUnit
 from ..call_seeds import seed_function_calls, seed_tail_calls
@@ -31,6 +32,7 @@ from ..scope_identity import open_configured_extraction, parse_raw_json
 
 __all__ = (
     "ObservedFunctionEvidence",
+    "ObservedFunctionAdmissionFailure",
     "ObservedFunctionSession",
     "open_observed_function_session",
 )
@@ -47,6 +49,40 @@ class ObservedFunctionEvidence:
 
     def __reduce_ex__(self, protocol: int):
         raise TypeError("observed function evidence cannot be serialized")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedFunctionAdmissionFailure:
+    """A sealed member's scope refusal, never an admitted function evidence.
+
+    The member identity remains available even when the observation was not
+    valid enough to construct an entry or a function scope. Naming has not
+    been admitted and this unit must not be passed to a normalizer.
+    """
+
+    generation_id: bytes
+    function_id: str
+    observation_member_id: str
+    observation_sha256: bytes
+    unit: ScopedFunctionUnit
+    stage: str = field(init=False)
+    reason: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.generation_id) is not bytes or len(self.generation_id) != 32:
+            raise TypeError("admission failure requires the sealed generation identity")
+        for value in (self.function_id, self.observation_member_id):
+            if type(value) is not str or not value:
+                raise TypeError("admission failure requires exact nonempty member identities")
+        if type(self.observation_sha256) is not bytes or len(self.observation_sha256) != 32:
+            raise TypeError("admission failure requires the sealed observation SHA-256")
+        if type(self.unit) is not ScopedFunctionUnit or (
+            type(self.unit.scopes.program) is not ConstructedProgramScope
+            or type(self.unit.scopes.function) is not UnresolvedFunctionScope
+        ):
+            raise TypeError("admission failure requires an exact function refusal in a constructed program")
+        object.__setattr__(self, "stage", self.unit.scopes.function.stage.value)
+        object.__setattr__(self, "reason", self.unit.scopes.function.reason.value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,12 +252,26 @@ class ObservedFunctionSession:
         return self._envelope.program_result
 
     def iter_functions(self) -> Iterator[ObservedFunctionEvidence]:
+        """Strict compatibility iterator: any scope/naming failure stops it."""
+        return self._iter_functions(outcomes=False)
+
+    def iter_outcomes(self) -> Iterator[ObservedFunctionEvidence | ObservedFunctionAdmissionFailure]:
+        """Preserve per-function scope refusals without admitting their names.
+
+        Program, transport, hash and naming failures still propagate. This
+        iterator and ``iter_functions`` share the same single-use lease.
+        """
+        return self._iter_functions(outcomes=True)
+
+    def _iter_functions(self, *, outcomes: bool):
         self._require_active()
+        if outcomes and type(self.program_result) is not ConstructedProgramScope:
+            raise ValueError("Bundle program scope is unresolved")
         if self._iterator_claimed:
             raise RuntimeError("observed function iterator is single-use")
         self._iterator_claimed = True
         assert self._envelope is not None
-        return _ObservedFunctionIterator(self, self._envelope.iter_scoped_functions())
+        return _ObservedFunctionIterator(self, self._envelope.iter_scoped_functions(), outcomes=outcomes)
 
     def _decode_function(
         self,
@@ -274,22 +324,24 @@ class ObservedFunctionSession:
 
 
 class _ObservedFunctionIterator:
-    __slots__ = ("_failed", "_scoped", "_session")
+    __slots__ = ("_failed", "_outcomes", "_scoped", "_session")
 
     def __init__(
         self,
         session: ObservedFunctionSession,
         scoped: Iterator[ScopedFunctionUnit],
+        *, outcomes: bool = False,
     ) -> None:
         self._session = session
         self._scoped = scoped
         self._failed = False
+        self._outcomes = outcomes
 
     def __iter__(self) -> "_ObservedFunctionIterator":
         self._session._require_active()
         return self
 
-    def __next__(self) -> ObservedFunctionEvidence:
+    def __next__(self) -> ObservedFunctionEvidence | ObservedFunctionAdmissionFailure:
         self._session._require_active()
         if self._failed:
             raise RuntimeError("observed function iterator failed")
@@ -299,6 +351,14 @@ class _ObservedFunctionIterator:
         try:
             unit = next(self._scoped)
             captured = adapter.collect_function_roles()
+            if self._outcomes and type(unit.scopes.program) is ConstructedProgramScope \
+                    and type(unit.scopes.function) is UnresolvedFunctionScope:
+                identity = captured.transport_identity
+                member = identity.observation_member
+                return ObservedFunctionAdmissionFailure(
+                    self._session._generation_id, identity.function_id, member.member_id,
+                    member.sha256_digest, unit,
+                )
             return self._session._decode_function(unit, captured)
         except StopIteration:
             raise

@@ -246,7 +246,7 @@ def certify_call_byte_replacement(
         instruction for instruction in callee.observation.instructions
         if instruction.flow is not None and instruction.flow.is_terminal
     )
-    if (not terminals or len(terminals) != len(callee.memory.observed_terminal_states)
+    if (not terminals or len(terminals) != len(callee.memory.exit_states)
             or any(not instruction.operations
                    or instruction.operations[-1].opcode != "RETURN"
                    for instruction in terminals)):

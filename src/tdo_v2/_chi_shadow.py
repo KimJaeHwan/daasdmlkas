@@ -560,7 +560,7 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
         elif scope is not None and exits:
             # (c) the calls crossed at each exit byte, for ``compare_terminals``
             terminals: dict = {}
-            for state in shadow.observed_terminal_states:
+            for state in shadow.exit_states:
                 pending = [state.root_node_id] if state.root_node_id is not None else []
                 while pending:
                     step()

@@ -88,7 +88,7 @@ class _FunctionControlOrderMixin:
     ) -> bool:
         """Prove that an observed nested-call write remains live at every exit."""
         call_block = self.operation_blocks.get(event.call_operation_key)
-        states = self.memory.observed_terminal_states
+        states = self.memory.exit_states
         if call_block is None or not states:
             return False
         if any(
@@ -124,7 +124,7 @@ class _FunctionControlOrderMixin:
         """Prove one CFG path keeps an observed call write live to an exit."""
         call_block = self.operation_blocks.get(event.call_operation_key)
         terminal_blocks = {
-            state.block_key for state in self.memory.observed_terminal_states
+            state.block_key for state in self.memory.exit_states
         }
         if call_block is None or not terminal_blocks:
             return False

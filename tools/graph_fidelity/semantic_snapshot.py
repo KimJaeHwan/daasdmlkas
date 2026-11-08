@@ -25,6 +25,7 @@ any difference, 2 on a missing / truncated / failed artifact.
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
 import dataclasses
 import enum
 import gzip
@@ -59,6 +60,8 @@ CONTRACT = {
                                   "premise_uses": "2b-P use records (docs 25.91): which named assumptions the"
                                                   " encoded decisions used -- reporting, checked by tests"}),
     "UnresolvedNormalizedFunction": (None, {"scopes": "input (scope bundle)"}),
+    "ObservedControlGraph": (None, {"observation": "original validated input; digest and complete CFG remain encoded"}),
+    "ObservedFunctionAdmissionFailure": (None, {"unit": "refused input; sealed member identity and reason remain encoded"}),
     "AnalyzedFunction": (None, {
         "unit": "input (the scoped unit)",
         "normalization_options": "frozen replay inputs; effects/graph outputs are encoded separately",
@@ -70,6 +73,7 @@ CONTRACT = {
         "activation_witness": "original caller/callee input pins; context graph and preserved spans remain encoded",
         "activation_inputs": "identity-based invalidation pins of the original inputs",
         "consumed": "2b-P exact producer instances (analysis objects); the effects they produced remain encoded",
+        "entry_relations": "physical entry overlay pins exact analysis instances; original state roots remain encoded",
         "multi_candidates": "U2a control-context edges (reporting only); multi_calls remains encoded",
         "vetoed_models": "B' declined model cuts' labels (reporting only); EngineRun.control_sites remains encoded",
     }),
@@ -84,10 +88,11 @@ CONTRACT = {
 # fields added after the first baselines: omitted while at this value, so
 # older snapshots stay comparable (a non-default value is encoded and differs)
 ADDED_FIELDS = {
+    "ObservedTerminalMemoryState": {"is_exit": True},
     "ReadSourcePart": {"writer": None},
     "LocalReadFrom": {"complete": True},
     "EngineRun": {"failed_functions": (), "control_contexts": (), "control_exemptions": (), "fault_report": (),
-                  "control_sites": ()},
+                  "control_sites": (), "admission_failures": (), "refused_control_graphs": ()},
     # U2a (docs 25.93): control obligations, conditional bindings
     "LocalCompleteness": {"control_obligations": (), "conditional_roots": 0},
     "AnalyzedFunction": {"failure_detail": "", "superseded": None, "multi_calls": {}, "activations": {},
@@ -101,7 +106,7 @@ ADDED_FIELDS = {
                            # (U2b, docs 25.95: conditional summaries)
                            "control_exempt": (), "site_reachable": False, "callee_support": ()},
     "RootSlice": {"inherited_incomplete": False},
-    "UnresolvedNormalizedFunction": {"assumes_opaque_callees_restore_stack_pointer": True},
+    "UnresolvedNormalizedFunction": {"assumes_opaque_callees_restore_stack_pointer": True, "observed_control": None},
     "CallMemoryDecision": {"evidence": ()},
     "MemoryGraphBindings": {"transfers": (), "transfer_nodes": (), "loop_memory": None, "image_reads": None,
                             "local_reads": None},
@@ -114,7 +119,8 @@ ADDED_FIELDS = {
                         "fault_outcomes": (), "fault_references": (), "fault_reachable": False,
                         # (U2b, docs 25.95: conditional summaries)
                         "unknown_transfers": (), "control_support": (), "site_reachable": False},
-    "LocalMemorySsaResult": {"call_register_snapshots": (), "flow_edges": ()},
+    "LocalMemorySsaResult": {"call_register_snapshots": (), "flow_edges": (),
+                             "call_state_nodes": (), "call_memory_states": ()},
     "SummaryRun": {"literal": None},
     "ProvenRunEffect": {"literal": None},
     "ProvenMemoryRun": {"literal": None},
@@ -147,6 +153,44 @@ class Unhandled(TypeError):
     pass
 
 
+_BASE_GRAPH_EXPORT = ContextVar("tdo_base_graph_export", default=False)
+
+
+def encode_base_graph(value, path="$"):
+    """Opt-in lossless graph payload without expanding virtual writer edges.
+
+    Ordinary semantic snapshots keep their original encoding. This export
+    retains original node IDs, physical multiedges and one shared writer
+    table per identity; bit i means table.nodes[i] -> debt with records[i].
+    It is a stored observation, not a portable authority/SSA receipt.
+    """
+    token = _BASE_GRAPH_EXPORT.set(True)
+    try:
+        return encode(value, path)
+    finally:
+        _BASE_GRAPH_EXPORT.reset(token)
+
+
+def _compact_graph(graph, path):
+    tables, indexes, debts = [], {}, []
+    for debt in sorted(graph.virtual_debts()):
+        writers, bits = graph.virtual_writers(debt)
+        identity = id(writers)
+        if identity not in indexes:
+            indexes[identity] = len(tables)
+            tables.append({"labels": encode(writers.universe.labels, path + ".writer_labels"),
+                "nodes": list(writers.nodes),
+                "records": [encode(record, path + ".writer_records") for record in writers.records]})
+        debts.append({"debt": debt, "table": indexes[identity], "bits_hex": format(bits, "x")})
+    physical = graph.physical_weighted_edges()
+    return {"representation": "physical+virtual-writers-v1", "node_count": graph.node_count,
+        "logical_edge_count": graph.edge_count,
+        "nodes": [[index, encode(graph.node(index), f"{path}.nodes[{index}]")] for index in range(graph.node_count)],
+        "physical_edges": [[source, target, encode(record, path + ".physical_edges")]
+                           for source, target, record in physical],
+        "virtual_writer_tables": tables, "virtual_writer_debts": debts}
+
+
 def _check_contract(value, path):
     name = type(value).__name__
     if name not in CONTRACT:
@@ -174,6 +218,8 @@ def encode(value, path="$"):
     if type(value) is bytes:
         return {"bytes": value.hex()}
     if type(value) is RustworkxDependencyGraph:
+        if _BASE_GRAPH_EXPORT.get():
+            return _compact_graph(value, path)
         return {
             "nodes": [encode(value.node(index), f"{path}.nodes[{index}]") for index in range(value.node_count)],
             "edges": [[source, target, encode(record, f"{path}.edges")]
@@ -312,6 +358,12 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
     run_level = {
         "assumptions": encode(run.assumptions, "assumptions"),
         "failed_functions": encode(getattr(run, "failed_functions", ()), "failed_functions"),
+        # Scope refusals have no admitted entry/summary; do not lose their
+        # sealed member identity when functions/roots happen to be empty.
+        **({"admission_failures": encode(run.admission_failures, "admission_failures")}
+           if getattr(run, "admission_failures", ()) else {}),
+        **({"refused_control_graphs": encode(run.refused_control_graphs, "refused_control_graphs")}
+           if getattr(run, "refused_control_graphs", ()) else {}),
         # (U2a: only when a function has a control context)
         **({"control_contexts": encode(run.control_contexts, "control_contexts")}
            if getattr(run, "control_contexts", ()) else {}),

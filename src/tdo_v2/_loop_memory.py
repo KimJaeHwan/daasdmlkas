@@ -213,7 +213,8 @@ class LoopMemoryPlan:
                 raise ValueError("loop read-from byte fragments must belong to one family and space")
 
 
-def derive_loop_memory(memory, ssa, observation, entry, context, address_spaces, namespace):
+def derive_loop_memory(memory, ssa, observation, entry, context, address_spaces, namespace,
+                       proven_call_effects=None):
     """Describe supported unresolved raw LOAD/STOREs without changing SSA.
 
     Exactly one full-span induction write on every header-return path, a
@@ -223,7 +224,9 @@ def derive_loop_memory(memory, ssa, observation, entry, context, address_spaces,
     """
     if not ssa.joins or not (ssa.unresolved_reads or ssa.unresolved_writes):
         return None
-    index = _Index(memory, ssa, observation, entry, context)
+    # Keep the original call-site/effect identities, not a mutable caller map.
+    call_effects = tuple(sorted((proven_call_effects or {}).items()))
+    index = _Index(memory, ssa, observation, entry, context, dict(call_effects))
     if not index.cyclic or not index.ssa_matches or index.cfg.unsupported is not None:
         return None
     families, accesses, admitted = [], [], {}
@@ -273,8 +276,10 @@ def derive_loop_memory(memory, ssa, observation, entry, context, address_spaces,
     families, accesses = tuple(families), tuple(accesses)
     read_from = derive_read_from(index, memory, families, accesses, namespace)
     payload = ssa.function_scope, ssa.unit_digest, families, accesses, read_from
-    return LoopMemoryPlan(*payload, _proof=_Derivation(_DERIVATION_AUTHORITY, ssa,
-        (memory, observation, entry, context, address_spaces, namespace), payload))
+    inputs = (memory, observation, entry, context, address_spaces, namespace)
+    if call_effects:
+        inputs += (call_effects,)
+    return LoopMemoryPlan(*payload, _proof=_Derivation(_DERIVATION_AUTHORITY, ssa, inputs, payload))
 
 
 def _check_origin(plan, ssa=None):
@@ -353,7 +358,7 @@ class _DominanceOnly(DominatorGraph):
 
 
 class _Index(SsaCycleIndex):
-    def __init__(self, memory, ssa, observation, entry, context):
+    def __init__(self, memory, ssa, observation, entry, context, proven_call_effects=None):
         super().__init__(memory, ssa, observation, entry, include_flow=False)
         self.context = context
         if not self.cyclic or not self.ssa_matches or self.cfg.unsupported is not None:
@@ -367,10 +372,30 @@ class _Index(SsaCycleIndex):
         self.positions = {action.operation_key: (block.key, i)
                           for block in memory.blocks for i, action in enumerate(block.actions)}
         self.memory_blocks = {block.key: block for block in memory.blocks}
-        # Raw CALL effects may change a register without an explicit SSA
-        # output. No ABI or hidden-preservation assumption is added here.
+        # Raw CALLs remain memory barriers. Only an existing, unconditional
+        # physical effect may certify particular register bytes across them.
         self.barrier_blocks = {self.locations[key] for key, operation in self.raw.items()
                                if operation.opcode in ("CALL", "CALLIND", "CALLOTHER")}
+        # Keep maximal SCCs for CALL corridors. A nested component can leave
+        # its parent and be visited again, so it cannot justify that shortcut.
+        maximal = self.cyclic
+        self.component_of = {key: number for number, members in enumerate(maximal) for key in members}
+        regions, seen_regions = list(maximal), set(maximal)
+        for members in regions:
+            members = frozenset(members)
+            heads = {key for key in members if key == self.cfg.entry or self.predecessors[key] - members}
+            step(len(members))
+            if len(heads) == 1:
+                header, = heads
+                # Peel only an original unique entry, never manufacture a
+                # CFG edge or merge outer and inner visits. SCC traversal is
+                # iterative and resource-charged by the existing index.
+                for component in self.sccs(members - {header}):
+                    if len(component) < len(members) and component not in seen_regions and self.is_cyclic(component):
+                        seen_regions.add(component)
+                        regions.append(component)
+        self.cyclic = tuple(regions)
+        self.nested_regions = frozenset(range(len(maximal), len(regions)))
         self.region_of = {key: number for number, members in enumerate(self.cyclic) for key in members}
         self.call_regions = {number for number, members in enumerate(self.cyclic)
                              if self.barrier_blocks.intersection(members)}
@@ -379,12 +404,23 @@ class _Index(SsaCycleIndex):
             if flow.block_key in self.region_of:
                 self.flow_by_edge.setdefault((flow.predecessor_key, flow.block_key), []).append(flow)
         self.proofs, self.regions, self.orders, self.dominators = {}, {}, {}, None
-        self.clean_references, self.call_corridors = {}, {}
+        self.clean_references, self.call_corridors, self.call_preservation = {}, {}, {}
+        self.call_effects = dict(proven_call_effects or {})
         step(len(self.raw))
         self.block_calls = {}
+        instruction_keys = {f"{address.space_id:x}:{address.byte_offset:x}": row
+                            for address, row in self.instructions.items()}
+        self.call_instruction_writes = {}
         for key, operation in self.raw.items():
             if operation.opcode in ("CALL", "CALLIND", "CALLOTHER"):
-                self.block_calls.setdefault(self.locations[key], []).append(int(key.split(":")[2]))
+                self.block_calls.setdefault(self.locations[key], []).append(key)
+                instruction = instruction_keys[key.rsplit(":", 2)[0]]
+                self.call_instruction_writes[key] = tuple(self.span(row.output) for row in instruction.operations
+                    if row.output is not None and row.output.kind is VarnodeKindCode.REGISTER)
+        self.region_calls = {number: tuple(key for block in members
+                                         for key in self.block_calls.get(block, ()))
+                             for number, members in enumerate(self.cyclic)}
+        self.component_calls = {number: self.region_calls[number] for number in range(len(maximal))}
 
     def dominates_header(self, block, header):
         if block not in self.blocks:
@@ -417,39 +453,78 @@ class _Index(SsaCycleIndex):
         definition = self.ssa.definitions[identifier]
         if span.object_id.kind is StorageObjectKind.REGISTER_FILE \
                 and definition.kind is MemoryDefinitionKind.DATA_WRITE \
-                and not self.call_free(definition.operation_key, key):
+                and not self.call_free(definition.operation_key, key, span):
             return None
         return identifier, span, key
 
-    def call_free(self, writer, reader):
-        """No implicit register clobber between a raw definition and use.
+    def preserves(self, call, span):
+        """Unconditional whole-byte preservation, without ABI defaults.
 
-        This proof precedes the normalizer's call-debt calculation. Refuse
-        even a potentially preserving call rather than name stale SSA bits.
+        Explicit outputs override a broad preserved mask. The raw calling
+        instruction's own writes (e.g. SP push or link register) are separate
+        from the callee's return effect and must also be absent.
         """
-        token = writer, reader
+        token = call, span
+        if token in self.call_preservation:
+            return self.call_preservation[token]
+        from .call_summary_effects import ProvenCallEffect
+
+        effect, operation = self.call_effects.get(call), self.raw[call]
+        valid = span is not None and span.object_id.kind is StorageObjectKind.REGISTER_FILE \
+            and operation.opcode == "CALL" and len(operation.inputs) == 1 \
+            and operation.inputs[0].kind is VarnodeKindCode.ADDRESS \
+            and type(effect) is ProvenCallEffect and effect.preserves_memory \
+            and not (effect.writer_conditions or effect.control_sites or effect.noreturn)
+        if valid:
+            target = operation.inputs[0].coordinate
+            valid = effect.callee == f"{target.space_id:x}:{target.byte_offset:x}"
+        if valid:
+            outputs = [write for run in effect.runs for write in run.writes]
+            outputs.extend(effect.fresh_registers)
+            outputs.extend(row[0] for row in effect.nonstack_results)
+            outputs.extend(row[0] for row in effect.same_object_registers)
+            outputs.extend(effect.tail_stack)
+            outputs.extend(self.call_instruction_writes[call])
+            step(len(outputs))
+            valid = not any(write is None or write.overlaps(span) for write in outputs)
+        if valid:
+            position = span.start
+            for kept in sorted((row for row in effect.preserved if row.overlaps(span)), key=lambda row: row.start):
+                step()
+                if kept.start > position:
+                    break
+                position = max(position, min(span.end, kept.end))
+            valid = position == span.end
+        self.call_preservation[token] = valid
+        return valid
+
+    def call_free(self, writer, reader, span=None):
+        """All CALLs on every definition/use corridor preserve these bytes.
+
+        Entire cyclic corridors are included: a CALL after a reader on one
+        visit is before that reader on the next. Cache keys include the span.
+        """
+        token = writer, reader, span
         if token in self.clean_references:
             return self.clean_references[token]
         first, last = self.locations.get(writer), self.locations.get(reader)
         result = False
         if first is not None and last is not None:
             before, after = int(writer.split(":")[2]), int(reader.split(":")[2])
-            if self.region_of.get(first) in self.call_regions or self.region_of.get(last) in self.call_regions:
-                # A CALL after an earlier reader visit is before the next
-                # visit. Do not cut such cycles at a boundary block.
-                result = False
-            elif not self.barrier_blocks:
+            if not self.barrier_blocks:
                 result = True
-            elif first == last:
+            elif first == last and first not in self.component_of:
                 result = before < after and not any(before < ordinal < after
-                    for ordinal in self.block_calls.get(first, ()))
-            elif self.region_of.get(first) is not None and self.region_of.get(first) == self.region_of.get(last) \
-                    and self.regions.get(self.region_of[first]) is not None:
-                result = True  # the certified whole cyclic region contains no implicit-call barrier
+                    and not self.preserves(call, span)
+                    for call in self.block_calls.get(first, ()) for ordinal in (int(call.split(":")[2]),))
+            elif self.component_of.get(first) is not None and self.component_of.get(first) == self.component_of.get(last):
+                # No path can leave an SCC and re-enter it; all later visits
+                # are covered without another whole-CFG traversal per use.
+                result = all(self.preserves(call, span) for call in self.component_calls[self.component_of[first]])
             else:
                 pair = first, last
                 if pair not in self.call_corridors:
-                    def reach(start, stop, reverse):
+                    def reach(start, reverse):
                         pending, seen = [start], set()
                         while pending:
                             node = pending.pop()
@@ -457,16 +532,19 @@ class _Index(SsaCycleIndex):
                                 continue
                             step()
                             seen.add(node)
-                            if node != stop:
-                                pending.extend(self.predecessors[node] if reverse else self.blocks[node].successors)
+                            pending.extend(self.predecessors[node] if reverse else self.blocks[node].successors)
                         return seen
-                    forward, backward = reach(first, last, False), reach(last, first, True)
+                    forward, backward = reach(first, False), reach(last, True)
                     step(len(forward) + len(backward))
-                    interior = (forward & backward) - {first, last}
-                    self.call_corridors[pair] = last in forward and not (interior & self.barrier_blocks)
-                result = self.call_corridors[pair] \
-                    and not any(ordinal > before for ordinal in self.block_calls.get(first, ())) \
-                    and not any(ordinal < after for ordinal in self.block_calls.get(last, ()))
+                    corridor = forward & backward
+                    self.call_corridors[pair] = (last in forward, tuple(call for block in corridor
+                        for call in self.block_calls.get(block, ())))
+                reachable, calls = self.call_corridors[pair]
+                result = reachable and all(self.preserves(call, span) for call in calls
+                    if (self.locations[call] != first or first in self.component_of
+                        or int(call.split(":")[2]) > before)
+                    and (self.locations[call] != last or last in self.component_of
+                         or int(call.split(":")[2]) < after))
         self.clean_references[token] = result
         return result
 
@@ -524,9 +602,6 @@ class _Index(SsaCycleIndex):
         if number in self.regions:
             return self.regions[number]
         members = frozenset(self.cyclic[number])
-        if self.barrier_blocks & members:
-            self.regions[number] = None
-            return None
         heads = {key for key in members if key == self.cfg.entry or self.predecessors[key] - members}
         result = None
         if len(heads) == 1:
@@ -575,7 +650,7 @@ class _Index(SsaCycleIndex):
             return self.proofs[token]
         self.proofs[token] = None
         loop = self.region(region)
-        if loop is None:
+        if loop is None or not all(self.preserves(call, span) for call in self.region_calls[region]):
             return None
         header, latches, preheader, members = loop
         initial = self.edge(preheader, header, span)
@@ -653,7 +728,7 @@ class _Proof:
             if not finish and definition.kind is MemoryDefinitionKind.DATA_WRITE \
                     and requested.object_id.kind is StorageObjectKind.REGISTER_FILE \
                     and definition.operation_key != at \
-                    and not self.index.call_free(definition.operation_key, at):
+                    and not self.index.call_free(definition.operation_key, at, requested):
                 # JOIN source expansion must not bypass the operand-use
                 # clobber check performed by reference().
                 self.cache[token] = None
@@ -707,7 +782,9 @@ class _Proof:
                 and definition.span == span and raw is not None and raw.output is not None \
                 and raw.output.kind is VarnodeKindCode.REGISTER and index.span(raw.output) == span \
                 and index.locations.get(definition.operation_key) not in members \
-                and index.dominates_header(index.locations.get(definition.operation_key), self.loop[0])
+                and index.dominates_header(index.locations.get(definition.operation_key), self.loop[0]) \
+                and all(index.preserves(call, span)
+                        for call in index.region_calls[index.region_of[self.loop[0]]])
             if valid:
                 for other in index.ssa.definitions:
                     step()
@@ -768,7 +845,7 @@ class _Proof:
             if definition.kind is MemoryDefinitionKind.DATA_WRITE \
                     and requested.object_id.kind is StorageObjectKind.REGISTER_FILE \
                     and definition.operation_key != at \
-                    and not self.index.call_free(definition.operation_key, at):
+                    and not self.index.call_free(definition.operation_key, at, requested):
                 self.address_cache[token] = None
                 continue
             base = self._invariant_base(identifier, requested)

@@ -133,6 +133,7 @@ def build_bound_local_memory_ssa(
     """Build SSA and retain the exact input/output identities in one live receipt."""
     _require_exact(unit, LocalMemoryUnit, "local-memory SSA binding unit")
     result = build_local_memory_ssa(unit)
+    result.validate_terminal_roles(unit)
     identity = _BoundSsaIdentity(_BOUND_SSA_AUTHORITY)
     value = object.__new__(BoundLocalMemorySsa)
     object.__setattr__(value, "unit", unit)

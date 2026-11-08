@@ -7,7 +7,7 @@ from .phases import measured
 from .resource_limits import step
 from ._activation_entry import entry_seed
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 
 from ._scope_contracts import (
@@ -257,6 +257,7 @@ def project_function_relative_memory(
     blocked_reads: frozenset = frozenset(),
     used_reads: dict | None = None,
     load_identity_plan=None,
+    read_address_plan=None,
 ) -> ObservedEffectUnit:
     """Resolve provably equal indirect addresses, preserving all other debt.
 
@@ -333,6 +334,16 @@ def project_function_relative_memory(
     # rep string sites (``normalize._rep_overrides``): what the evaluator sees
     # for their one-iteration operations (None: unknown)
     operations.update(operation_overrides or {})
+    finite_reads = {}
+    if read_address_plan is not None and read_address_plan.address_reads:
+        from ._forward_memory import MemoryRefinement, RefinementRefused
+
+        if type(read_address_plan) is not MemoryRefinement \
+                or read_address_plan.unit.observation is not observation \
+                or read_address_plan.baseline.forward_inputs.context != context:
+            raise RefinementRefused("finite read projection inputs changed")
+        read_address_plan.verify()
+        finite_reads = {row.read: row.spans for row in read_address_plan.address_reads}
     projector = _configured_projector(
         unit, observation, context, address_spaces, first_pass, operations, translation_namespace,
         opaque_value_provider=opaque_value_provider, readonly_image=readonly_image, once_keys=once_keys,
@@ -370,7 +381,13 @@ def project_function_relative_memory(
         for effect in block.effects:
             operation = operations.get(effect.operation_key)
             anchored = (anchored_accesses or {}).get(effect.operation_key)
-            if anchored is not None and (effect.memory_read is not None or effect.memory_write is not None):
+            if effect.operation_key in finite_reads and effect.memory_read is not None:
+                from ._forward_memory import _load_shape, RefinementRefused
+
+                if operation is None or not _load_shape(effect, operation, context):
+                    raise RefinementRefused("original finite LOAD effect changed")
+                projected = finite_reads[effect.operation_key]
+            elif anchored is not None and (effect.memory_read is not None or effect.memory_write is not None):
                 projected = projector.project_anchored(*anchored)
             else:
                 projected = (
@@ -449,13 +466,96 @@ _VALUE_KINDS = frozenset({StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUN
 _WAIT = object()   # an accessor result whose key waits for pending writes (``_same_result_atom``)
 
 
-def single_execution_keys(observation, block_graph, straight=frozenset()) -> frozenset:
+_ONCE_CONTROL_AUTHORITY = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _OnceControlReceipt:
+    """The run's discharged fault exits, not observed terminal metadata.
+
+    Only the internal issuer may bind a FaultPlan decision to an original
+    unit. The current discharged set and mutable plan evidence are checked
+    again on every normalization/replay; a revoked fault is never a cut.
+    """
+
+    program_scope: object
+    function_scope: object
+    observation_digest: bytes
+    cuts: tuple
+    requires: tuple[str, ...]
+    _proof: tuple = field(default=(), repr=False, compare=False)
+
+    def verify(self, unit, fault_cuts):
+        from .fault_premise import FaultPlan, LABELS, fault_sites, transactional
+
+        if len(self._proof) != 7 or self._proof[0] is not _ONCE_CONTROL_AUTHORITY:
+            raise ValueError("once control requires an internally issued fault receipt")
+        _, original, observation, plan, state, image, evidence = self._proof
+        if unit is not original or unit.observation is not observation \
+                or unit.scopes.program.scope != self.program_scope \
+                or unit.scopes.function.scope != self.function_scope \
+                or unit.scopes.function.observation_digest != self.observation_digest \
+                or tuple(fault_cuts) != self.cuts or self.requires != tuple(LABELS):
+            raise ValueError("once control source or normalization fault policy changed")
+        if type(plan) is not FaultPlan or type(state) is not dict \
+                or type(state.get("discharged")) is not frozenset \
+                or plan.image_digest != image or transactional(unit):
+            raise ValueError("once control fault plan changed")
+        recognized = {site.key: (site.cut, site.branch) for site in fault_sites(unit)}
+        key = f"{unit.scopes.function.entry.space_id:x}:{unit.scopes.function.entry.byte_offset:x}"
+        if plan.cuts_of(key, state["discharged"]) != self.cuts:
+            raise ValueError("once control fault discharge was revoked or replaced")
+        current = []
+        for site, cut, branch, rows in self.cuts:
+            if recognized.get(site) != (cut, branch) or site not in plan.discharged \
+                    or site not in state["discharged"] or plan.hazards.get(site) != () \
+                    or plan.evidence.get(site) != rows:
+                raise ValueError("once control requires the unchanged discharged fault evidence")
+            facts = dict(rows)
+            if facts.get("h1") not in ("no-entry", "no-handler") \
+                    or facts.get("h2") != "none" or facts.get("h3") != "none" \
+                    or facts.get("image") != image:
+                raise ValueError("once control fault hazards are not discharged")
+            current.append((site, plan.hazards[site], rows))
+        if tuple(current) != evidence:
+            raise ValueError("once control evidence snapshot changed")
+        return frozenset(row[2] for row in self.cuts)
+
+    def branches_for(self, observation):
+        if len(self._proof) != 7 or observation is not self._proof[2]:
+            raise ValueError("once control observation changed")
+        return self.verify(self._proof[1], self.cuts)
+
+
+def _fault_once_control(unit, plan, state):
+    """Issue only from the existing FaultPlan/current discharged decision."""
+    from .fault_premise import FaultPlan, LABELS
+
+    if type(plan) is not FaultPlan or type(state) is not dict \
+            or type(state.get("discharged")) is not frozenset:
+        raise TypeError("once control requires the original fault decision")
+    key = f"{unit.scopes.function.entry.space_id:x}:{unit.scopes.function.entry.byte_offset:x}"
+    cuts = plan.cuts_of(key, state["discharged"])
+    if not cuts:
+        return None
+    evidence = tuple((site, plan.hazards.get(site), rows) for site, _, _, rows in cuts)
+    receipt = _OnceControlReceipt(unit.scopes.program.scope, unit.scopes.function.scope,
+        unit.scopes.function.observation_digest, cuts, tuple(LABELS),
+        (_ONCE_CONTROL_AUTHORITY, unit, unit.observation, plan, state, plan.image_digest, evidence))
+    receipt.verify(unit, cuts)
+    return receipt
+
+
+def single_execution_keys(observation, block_graph, straight=frozenset(), *, control=None) -> frozenset:
     """Operation keys of blocks on no cycle of ``block_graph`` (the p-code
     block graph the memory SSA uses, intra-instruction flow included): each
     runs at most once per activation. Empty when the graph may miss an edge
     (unsupported flow, or a BRANCHIND with targets outside the observation:
     a jump table could close a loop). ``straight`` instructions (rep sites)
     repeat inside one block and are excluded."""
+    if control is not None and type(control) is not _OnceControlReceipt:
+        raise TypeError("once control requires an exact issued receipt")
+    certified = control.branches_for(observation) if control is not None else frozenset()
     if block_graph.unsupported is not None:
         return frozenset()
     instructions = {row.address: row for row in observation.instructions}
@@ -463,7 +563,9 @@ def single_execution_keys(observation, block_graph, straight=frozenset()) -> fro
     for block in blocks.values():
         last = instructions[block.instruction].operations[block.stop - 1] if block.stop else None
         if last is not None and last.opcode == "BRANCHIND" and block.exits:
-            return frozenset()
+            key = _operation_key(block.instruction, block.stop - 1, last)
+            if key not in certified:
+                return frozenset()
     cyclic = _cyclic_blocks({key: [item for item in block.successors if item in blocks]
                              for key, block in blocks.items()})
     found = set()
@@ -512,9 +614,9 @@ def _unsettled_reads(unit):
     return unsettled
 
 
-def single_execution_blocks(observation, block_graph, straight=frozenset()) -> frozenset:
+def single_execution_blocks(observation, block_graph, straight=frozenset(), *, control=None) -> frozenset:
     """Block keys of ``single_execution_keys`` (joins at their entries run once)."""
-    keys = single_execution_keys(observation, block_graph, straight)
+    keys = single_execution_keys(observation, block_graph, straight, control=control)
     if not keys:
         return frozenset()
     rows = {row.address: row for row in observation.instructions}

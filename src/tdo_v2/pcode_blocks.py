@@ -154,9 +154,10 @@ def _split(row, local, entry):
             if target < count:
                 leaders.add(target)
             targets[ordinal] = ("relative", target)
-        elif destination.coordinate == row.address:
-            targets[ordinal] = ("relative", 0)
         else:
+            # An absolute self destination re-enters this instruction at its
+            # first operation, but remains an observed instruction successor.
+            # It is not a CONSTANT-relative intra-instruction branch.
             targets[ordinal] = ("address", destination.coordinate)
     starts = sorted(leaders)
     if _landing_pads(row, local, entry):
@@ -220,6 +221,11 @@ def _split(row, local, entry):
         reached.add(key)
         pending.extend(by_key[key].successors)
     leaving = {successor for key in reached for successor in by_key[key].successors if successor not in by_key}
+    leaving.update(
+        instruction_key(targets[by_key[key].stop - 1][1]) for key in reached
+        if by_key[key].stop - 1 in targets and targets[by_key[key].stop - 1][0] == "address"
+        and targets[by_key[key].stop - 1][1] in local
+    )
     observed = control_successor_coordinates(row, local_addresses=local, function_entry=entry)
     if {instruction_key(target) for target in observed if target in local} - leaving:
         return "observed successors the instruction's p-code does not reach"

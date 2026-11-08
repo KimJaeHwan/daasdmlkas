@@ -8,16 +8,22 @@
 Ghidra x86-64 언어 4.6의 검증된 SSE2 `PACKSSWB`·`PSHUFLW` 서명은 원 CALLOTHER·모든 입력·출력 SSA를 유지하면서
 출력 이외의 레지스터·RAM에 불필요한 호출 clobber를 만들지 않습니다. 연산 기록의 `intrinsic_effect`는 이 효과 근거이며
 수치 의미가 아닙니다. 두 연산의 계산값 평가·정밀 바이트 선택은 아직 미지원이고, 기존 미해결 입력·메모리 부채도 유지합니다.
-다른 언어 버전·32비트·MMX·AVX 변형·서명이 다른 CALLOTHER에는 이 규칙을 적용하지 않습니다. 엔진 의미 판은 47입니다.
+다른 언어 버전·32비트·MMX·AVX 변형·서명이 다른 CALLOTHER에는 이 규칙을 적용하지 않습니다. 엔진 의미 판은 48입니다.
 
 정방향 분석은 원 명령 내부 CFG의 모든 유입 경로가 증명하는 COPY 입력 범위를 사용합니다. 비영 logical shift의
 조건과 동일 폭 상수 쓰기만으로 범위를 확인하며, 미검증 경로·덮어쓰기·호출·순환은 거절합니다. XOR의 보수적 수치
 범위도 전달합니다. 원 미확정 STORE의 유한 쓰기 범위는 특정 정확한 LOAD와의 불교차에만 사용하고, 원 미확정
 쓰기·함수 전체 unknown-writer·다른 읽기의 부채는 유지합니다. 새 실행 가정이나 ISA 명령 이름별 예외는 없습니다.
 
-반복 주소 관계는 같은 SSA 값으로 유지되는 기준 레지스터와 `index * 1`도 보존합니다. 기준값은 원 정의와 소비 시점
-사이 호출·덮어쓰기 부재를 확인하며, 서로 다른 기준값을 가진 관계는 별개로 관리합니다. 이는 조건부 반복 주소/쓰기
-연결의 확장이지, 두 포인터의 비별칭·힙 수명·반복 횟수나 메모리 완전성의 증명이 아닙니다. 원 부채는 남습니다.
+반복 주소 관계는 같은 SSA 값으로 유지되는 기준 레지스터와 `index * 1`도 보존합니다. 원 정의와 소비 시점 사이의
+덮어쓰기와 호출을 검사하며, 기존의 무조건부 직접 호출 효과가 필요한 레지스터 바이트 전체의 보존을 증명할 때만
+호출을 통과합니다. 명시적 출력·부분쓰기·원 호출 명령의 SP/link 쓰기는 보존 목록보다 우선합니다. 서로 다른 기준값은
+별개로 관리합니다. 중첩 반복은 원 CFG의 단일 진입점을 제외한 내부 SCC를 기존 순회로 분리하고, 각 내부 반복에
+동일한 진입·되돌이·갱신 검사를 적용합니다. 호출 포함 또는 새로 식별한 중첩 반복에는 주소/접근 관계만 추가하고
+현재·직전 회차의 `read_from`은 발급하지 않습니다. 기존 호출 없는 반복의 값 연결은 유지합니다.
+호출이 반복 진입 전에만 있으면 기존 maximal call-free 반복의 값 관계 규칙을 적용합니다. 진입 메모리는 unknown으로
+시작하며 반복 밖 STORE를 이전 회차의 값으로 가져오지 않습니다.
+이는 비별칭·힙 수명·반복 횟수나 메모리 완전성의 증명이 아닙니다. 원 SSA와 부채는 남고 새 실행 가정은 없습니다.
 
 `TDO_V2_FORWARD=1`에서는 import 슬롯에서 읽은 포인터가 다른 호출을 지나도 기존 SSA가 정확한 보존을 증명하면
 간접 호출의 외부/파생 모델까지 연결합니다. 원 CALLIND의 마지막 전체 COPY 스냅샷·포인터 폭·단일 import 정체성·
@@ -109,6 +115,55 @@ Astra가 최종 근거를 독립 대조하고 이번 한정 통합 목표 달성
 - Python 3.11 이상 (`rustworkx`, `z3-solver`) — `pip install -e .`
 - Bundle 내보내기: Ghidra **12.0.4**, JDK 21, **Linux(WSL) 파일 시스템**. Bundle 수용(admission)은 POSIX 권한을 검사하므로
   Windows 드라이브(`/mnt/d` 등)에 둔 Bundle은 받아들이지 않습니다. 자세한 내용은 `tools/bundle_export/README.md`.
+
+## 요약 증명과 독립된 기본 그래프
+
+`tdo_v2.base_graph`는 기존 `FunctionNormalizer`로 모든 수용된 함수의 **기본 SSA 그래프를 먼저 생성·보존**합니다.
+source/sink 선택이나 함수 요약은 실행하지 않습니다. CALL 효과는 미확인으로 남기고, 기존 `call_entry_graph`로
+원 호출 직전 SSA와 피호출 함수의 입구를 별도 문맥으로 연결합니다. 입구 연결은 반환값·메모리 내용 보존 증명이 아니며,
+간접 호출의 미확인 대상과 tail jump도 완성된 호출 연결로 세지 않습니다.
+
+새 `BaseGraphPolicy`의 기본값은 여섯 가정 모두 OFF입니다. 이는 **기존 summary API의 기본값 변경이 아닙니다.**
+요청/실효 정책과 정책 digest를 결과에 남깁니다. 외부 모델·readonly image·호출자 activation·재귀 가설·후속 refinement는
+기본 그래프에 주입하지 않습니다. 증명 결과는 원 기본 그래프를 덮어쓰지 않는 별도 분석 결과입니다.
+
+```python
+from tdo_v2.base_graph import BaseGraphPublication
+from tdo_v2.interprocedural import analyze_units
+
+units = tuple(admitted_units)
+publication = BaseGraphPublication(units)
+try:
+    # 선택 사항: 기본 그래프 순회를 마친 뒤 기존 요약/증명 분석을 실행.
+    # 기본 그래프만 필요하면 publication.build()만 호출한다.
+    proofs = analyze_units(units, base_graphs=publication)
+finally:
+    snapshot = publication.snapshot  # 후속 증명 실패/취소도 이미 완성한 그래프를 지우지 않음
+
+graph = snapshot.graphs[function_key]
+local_result = graph.query(original_ssa_node_id)  # 기존 함수 내부 조회기 재사용
+entry_edges = graph.entry_edges()               # 별도 문맥의 실제 호출 입구 간선
+```
+
+`graphs`·`failures`·`pending`과 `admission_failures`를 따로 확인해야 합니다. `local_pass_finished`와
+`entry_links_finished`는 각 순회의 완료 여부이며, 모든 메모리 간선이 증명됐다는 뜻이 아닙니다.
+취소 예외는 그대로 전달합니다. 봉인 Bundle API `build_frozen_bundle_graphs(..., on_publication=callback)`의
+callback으로도 분석 시작 전에 handle을 받아 둘 수 있습니다. 세션 종료 후 조회에는 원 공급자 I/O가 필요 없습니다.
+기본/증명 함수별 작업 한도는 분리하고, 전체 실행 한도에는 두 단계의 비용을 모두 누적합니다.
+여기서 보존은 호출자가 보유한 **메모리 handle의 수명 동안**을 뜻하며, 프로세스 종료 후의 디스크 보존은 아닙니다.
+
+명령줄에서는 source/sink 질의 없이 실제 그래프를 저장할 수 있습니다.
+
+```bash
+PYTHONPATH=src python tools/analyze_bundle/analyze_query.py <Bundle generation> \
+    --base-graphs-only --out base-graphs.json
+```
+
+index가 참조하는 함수별 `json.gz`에는 원 노드 ID·CFG·SSA·호출 입구 간선을 담고, 잠재적 쓰기 간선은 기존 공유 테이블과
+bitset으로 보존합니다. 저장 파일은 조회용 관찰 결과이며, JSON을 다시 읽는 것만으로 유효한 증명 권위가 생기지는 않습니다.
+사용자 취소 시 CLI는 대규모 저장을 자동 강행하지 않고, 실제 그래프를 저장하지 않았다는 metadata만 명시합니다.
+전체 저장은 최종 index와 참조 payload가 모두 있어야 완료입니다. 메모리에서 그래프 생성이 끝났거나 임시 `json.gz`가
+일부 생겼더라도 전체 저장 완료로 취급하지 않습니다. 큰 입력에서는 생성과 저장 시간을 따로 확인해야 합니다.
 
 ## 빠른 시작
 

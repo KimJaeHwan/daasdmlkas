@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ._scope_contracts import AddressCoordinate
 from ._scope_wire import _observation_digest
 from .control_contracts import FunctionTerminalCuts, ObservedTerminalCut
 from .graph import RustworkxDependencyGraph
 from .graph_contracts import NodeKind
+from .resource_limits import step
 from .scope_identity import (
     ConstructedFunctionScope,
     ConstructedProgramScope,
@@ -14,6 +17,70 @@ from .scope_identity import (
     ValidatedFunctionObservation,
     ValidatedInstruction,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedControlGraph:
+    """Lossless control observation of a refused function, not normalized SSA.
+
+    ``cfg`` has every original instruction, including entry-unreachable
+    islands. Outside successors remain numeric evidence, never invented local
+    connectors. No method of this record issues a reachability/value proof.
+    """
+
+    observation_digest: bytes
+    observation: ValidatedFunctionObservation
+    cfg: RustworkxDependencyGraph
+    entry_reachable: tuple[str, ...]
+    unreachable: tuple[str, ...]
+    weak_components: tuple[tuple[str, ...], ...]
+    outside_observed_successors: tuple[tuple[AddressCoordinate, AddressCoordinate], ...]
+
+
+def project_observed_control_graph(scopes, observation, cfg) -> ObservedControlGraph:
+    """Annotate the existing instruction CFG without dropping any observation."""
+    if type(scopes) is not ScopeBundleResult or type(scopes.function) is not ConstructedFunctionScope \
+            or type(observation) is not ValidatedFunctionObservation \
+            or type(cfg) is not RustworkxDependencyGraph or not cfg.is_frozen:
+        raise TypeError("observed control graph requires exact constructed inputs and a frozen CFG")
+    digest = _observation_digest(observation)
+    if digest != scopes.function.observation_digest:
+        raise ValueError("observed control graph does not match the function scope")
+    known = {row.address for row in observation.instructions}
+    nodes = {point: cfg.node_for_key(f"instruction:{_coordinate_key(point)}") for point in known}
+    if None in nodes.values() or cfg.node_count != len(nodes):
+        raise ValueError("observed control graph must retain exactly every instruction")
+    labels = {node: _coordinate_key(point) for point, node in nodes.items()}
+    outside = []
+    for row in observation.instructions:
+        step()
+        targets = control_successor_coordinates(row, local_addresses=known, function_entry=scopes.function.entry)
+        if set(cfg.successors(nodes[row.address])) != {nodes[target] for target in targets if target in known}:
+            raise ValueError("observed control graph changed an original successor")
+        outside.extend((row.address, target) for target in targets if target not in known)
+    reached, pending = set(), [nodes[scopes.function.entry]] if scopes.function.entry in nodes else []
+    while pending:
+        step()
+        node = pending.pop()
+        if node not in reached:
+            reached.add(node)
+            pending.extend(cfg.successors(node))
+    remaining, components = set(labels), []
+    while remaining:
+        part, pending = set(), [min(remaining)]
+        while pending:
+            step()
+            node = pending.pop()
+            if node not in part:
+                part.add(node)
+                pending.extend((set(cfg.successors(node)) | set(cfg.predecessors(node))) - part)
+        remaining -= part
+        components.append(tuple(sorted(labels[node] for node in part)))
+    return ObservedControlGraph(
+        digest, observation, cfg, tuple(sorted(labels[node] for node in reached)),
+        tuple(sorted(labels[node] for node in set(labels) - reached)), tuple(sorted(components)),
+        tuple(sorted(set(outside))),
+    )
 
 
 def project_observed_terminal_cuts(
@@ -95,4 +162,5 @@ def control_successor_coordinates(
 
 def _coordinate_key(value) -> str:
     return f"{value.space_id:x}:{value.byte_offset:x}"
-__all__ = ("control_successor_coordinates", "project_observed_terminal_cuts")
+__all__ = ("ObservedControlGraph", "control_successor_coordinates", "project_observed_control_graph",
+           "project_observed_terminal_cuts")

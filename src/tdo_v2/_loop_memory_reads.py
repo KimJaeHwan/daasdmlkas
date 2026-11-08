@@ -40,6 +40,14 @@ def derive_read_from(index, memory, families, accesses, namespace):
     for (family_id, space_id), selected_reads in sorted(readers.items()):
         step()
         family = families[family_id]
+        # Register preservation / nested discovery certify an address recurrence, not RAM
+        # noninterference (a callee may still write below its stack pointer).
+        # Keep all original debts; no current/previous read-from for CALL
+        # or newly discovered nested families until a separate memory-range
+        # proof supports that claim.
+        if index.region_of[family.header] in index.nested_regions \
+                or any(block in index.barrier_blocks for block in family.blocks):
+            continue
         modulus = 1 << family.address_bits
         order = index.orders[index.region_of[family.header]]
         # Offsets live in one modular family coordinate, not absolute RAM.

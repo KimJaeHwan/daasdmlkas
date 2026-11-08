@@ -622,7 +622,7 @@ class _Witness:
             return "" if not any(row.span.object_id == self.entry.object_id and row.span.overlaps(self.entry)
                                  for row in self.ssa.definitions
                                  if row.kind is not MemoryDefinitionKind.ENTRY) else "link-untracked-but-written"
-        states = [state for state in self.ssa.observed_terminal_states
+        states = [state for state in self.ssa.exit_states
                   if state.block_key == block and state.root_node_id is not None]
         if len(states) != 1:
             return "no-terminal-state"

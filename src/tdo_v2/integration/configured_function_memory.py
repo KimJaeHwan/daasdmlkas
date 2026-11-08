@@ -413,7 +413,7 @@ class _FunctionMemoryViewMixin:
         """Find terminal definitions for explicitly selected physical bytes."""
         if not physical_spans:
             return ()
-        states = self.memory.observed_terminal_states
+        states = self.memory.exit_states
         if not states or any(state.root_node_id is None for state in states):
             return ()
         terminal_maps = tuple(
@@ -472,7 +472,7 @@ class _FunctionMemoryViewMixin:
             raise TypeError("terminal cover requires exact definition/span and a charge callback")
         charge(1)
         memory = self.memory
-        exits, atoms, nodes = memory.observed_terminal_states, memory.atomic_spans, memory.state_nodes
+        exits, atoms, nodes = memory.exit_states, memory.atomic_spans, memory.state_nodes
         if (not exits or len(exits) > 32 or not atoms or len(atoms) > 4096
                 or not nodes or len(nodes) > 8192 or not 0 <= definition_id < len(memory.definitions)
                 or requested_span.object_id.kind is not StorageObjectKind.REGISTER_FILE
@@ -589,7 +589,7 @@ class _FunctionMemoryViewMixin:
         )
 
     def _shared_terminal_writes(self) -> tuple[tuple[int, ByteSpan], ...]:
-        states = self.memory.observed_terminal_states
+        states = self.memory.exit_states
         if not states or any(state.root_node_id is None for state in states):
             return ()
         terminal_maps = tuple(

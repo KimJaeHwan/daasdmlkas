@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 
 
 _LAZY_EXPORTS = {
+    "BaseGraphPolicy": (".base_graph", "BaseGraphPolicy"),
+    "BaseGraphPublication": (".base_graph", "BaseGraphPublication"),
+    "build_observed_graphs": (".base_graph", "build_observed_graphs"),
+    "build_frozen_bundle_graphs": (".base_graph", "build_frozen_bundle_graphs"),
     "BackwardSliceQuery": (".query", "BackwardSliceQuery"),
     "FunctionNormalizer": (".normalize", "FunctionNormalizer"),
     "NormalizedFunction": (".normalize", "NormalizedFunction"),
@@ -40,6 +44,10 @@ def __getattr__(name: str) -> Any:
     return value
 
 __all__ = [
+    "BaseGraphPolicy",
+    "BaseGraphPublication",
+    "build_observed_graphs",
+    "build_frozen_bundle_graphs",
     "BackwardSliceQuery",
     "ByteSpan",
     "FunctionNormalizer",

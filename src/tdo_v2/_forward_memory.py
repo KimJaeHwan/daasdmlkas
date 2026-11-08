@@ -9,15 +9,16 @@ these claims grants an object-wide policy or clears unrelated unknown effects.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 from .resource_limits import step
-from .span_geometry import ByteSpan, StorageObjectKind
+from .span_geometry import ByteSpan, StorageObjectId, StorageObjectKind
 
 MAX_PROOFS = 64
 MAX_ACCESS_BYTES = 16
+MAX_READ_ADDRESSES = 64
 _VERIFIED = ContextVar("tdo_memory_refinement_verification", default=None)
 
 
@@ -84,6 +85,59 @@ def _verification_source_pin(item):
             None if item.superseded is None else _verification_source_pin(item.superseded))
 
 
+def _address_verification_pin(plan):
+    """Current inputs of the optional address derivation, never its result.
+
+    Frozen accepted SSA/model records retain their exact identities. Mutable
+    option/ForwardInputs maps and import policies are copied by value. An
+    arbitrary image/provider has no content-generation receipt: do not cache
+    it. Every lookup still checks current fault authority and source policy.
+    """
+    import os
+    from ._activation_entry import ACTIVE_ENTRY
+    from ._call_activation import _policy
+    from .call_clobber import OPAQUE_RESTORES_SP
+    from .forward import ForwardInputs
+    from .relative_memory import DEFINITION_ATOMS, IMAGE_BASE_TRACKING, IMPORT_SLOTS, ImportSlots, index_addresses
+
+    source, normalized = plan.source, plan.baseline
+    options = dict(plan.options)
+    if not hasattr(source, "normalization_context") or len(source.normalization_context) != 9 \
+            or options.get("readonly_image") is not None or options.get("opaque_value_provider") is not None \
+            or IMAGE_BASE_TRACKING.get() is not None or source.normalization_context[4] is not None \
+            or type(normalized.forward_inputs) is not ForwardInputs:
+        return None
+    captured_imports = source.normalization_context[2]
+    imports = IMPORT_SLOTS.get()
+    if any(value is not None and type(value) is not ImportSlots for value in (imports, captured_imports)):
+        return None
+    # This is deliberately before the cache lookup, including a warm hit.
+    # _source_signature inside the source pin revalidates once/fault receipts.
+    with _policy(source):
+        pass
+    if not normalized.dependencies.is_frozen or not normalized.cfg.is_frozen:
+        return None
+    from ._memory_read_sources import read_sources
+
+    try:
+        ports = _freeze(read_sources(normalized))  # Recheck original read-port authority, not a new solve.
+    except (TypeError, ValueError) as error:
+        raise RefinementRefused("source read-port authority changed") from error
+    inputs = normalized.forward_inputs
+    input_values = tuple((field.name, _freeze(getattr(inputs, field.name))) for field in fields(inputs))
+    normalized_values = tuple((field.name, _freeze(getattr(normalized, field.name))) for field in fields(normalized))
+    claims = tuple((field.name, _freeze(getattr(plan, field.name))) for field in fields(plan)
+                   if field.name not in ("unit", "baseline", "source", "peers"))
+    return ("address", _verification_source_pin(source),
+            tuple((key, _verification_source_pin(peer)) for key, peer in plan.peers),
+            id(plan.unit), id(plan.unit.observation), id(normalized), id(inputs),
+            id(normalized.memory_ssa), id(normalized.memory_unit), id(normalized.memory_graph),
+            normalized_values, input_values, ports, claims, _signature(options),
+            os.environ.get("TDO_V2_FORWARD"), index_addresses(), DEFINITION_ATOMS,
+            OPAQUE_RESTORES_SP.get(), id(ACTIVE_ENTRY.get()),
+            None if imports is None else (id(imports), imports.active, _freeze(imports.slots)))
+
+
 @dataclass(frozen=True, slots=True)
 class ReadSeparation:
     read: str
@@ -91,6 +145,14 @@ class ReadSeparation:
     span: ByteSpan
     read_fact: object
     write_fact: object
+
+
+@dataclass(frozen=True, slots=True)
+class ReadAddressProjection:
+    """All possible starts of one LOAD, not a contiguous or selected read."""
+    read: str
+    spans: tuple[ByteSpan, ...]
+    read_fact: object
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +173,7 @@ class MemoryRefinement:
     call_decisions: tuple = ()
     copy_proofs: tuple = ()
     snapshot_demands: tuple = ()
+    address_reads: tuple[ReadAddressProjection, ...] = ()
 
     def bind(self, unit, options):
         if unit is not self.unit or unit.observation is not self.baseline.forward_inputs.observation \
@@ -121,11 +184,24 @@ class MemoryRefinement:
 
     def verify(self):
         with verification_session():
-            self._verify()
+            cache = _VERIFIED.get()
+            active = ("address-active", id(self))
+            if self.evidence_kind != "address":
+                self._verify()  # Keep the existing lifecycle cache and contract unchanged.
+                return
+            if active in cache:
+                raise RefinementRefused("cyclic address baseline verification")
+            cache[active] = self
+            try:
+                self._verify()
+            finally:
+                del cache[active]
 
     def _verify(self):
         if self.snapshot_demands and self.evidence_kind != "allocation-snapshot":
             raise RefinementRefused("snapshot demands require their independent proof kind")
+        if self.address_reads and self.evidence_kind != "address":
+            raise RefinementRefused("read projections require their independent address proof kind")
         if self.source.unit is not self.unit or self.source.normalized is not self.baseline:
             raise RefinementRefused("original analysis changed")
         from ._call_activation import _source_signature, _policy
@@ -168,6 +244,21 @@ class MemoryRefinement:
                         results=dict(self.peers), assumptions=self.assumptions) if self.evidence_kind == "allocation"
                         else prepare_allocation_call_refinement(self.source, results=dict(self.peers)))
         elif self.evidence_kind == "address":
+            # In particular, a frozen receipt cannot hide current fault
+            # revocation merely because its public value still compares equal.
+            if hasattr(self.source, "normalization_options"):
+                _source_signature(self.source)
+            prior = self.baseline.forward_inputs.read_separations
+            if prior is not None:
+                if type(prior) is not MemoryRefinement:
+                    raise RefinementRefused("address baseline requires an issued memory plan")
+                prior.verify()  # A warm address hit cannot bypass an earlier batch.
+            pin = _address_verification_pin(self)
+            if pin is not None:
+                cache = _VERIFIED.get()
+                cached = cache.get(id(self))
+                if cached is not None and cached[0] is self and cached[1] == pin:
+                    return
             expected = prepare_memory_refinement(self.source, dict(self.options), assumptions=self.assumptions)
         else:
             raise RefinementRefused("unsupported sealed memory proof kind")
@@ -176,9 +267,11 @@ class MemoryRefinement:
                 or expected.assumptions != self.assumptions \
                 or expected.requires != self.requires or expected.call_effects != self.call_effects \
                 or expected.call_decisions != self.call_decisions or expected.copy_proofs != self.copy_proofs \
-                or expected.snapshot_demands != self.snapshot_demands:
+                or expected.snapshot_demands != self.snapshot_demands or expected.address_reads != self.address_reads:
             raise RefinementRefused("baseline address evidence changed")
         if cache is not None:
+            if self.evidence_kind == "address" and _address_verification_pin(self) != pin:
+                raise RefinementRefused("address inputs changed during verification")
             cache[id(self)] = self, pin
 
 
@@ -231,6 +324,65 @@ def _raw_unresolved_store(effect, store, context):
         resolved[0], store.inputs[2].byte_size, raw[0])
 
 
+def _load_shape(effect, load, context, *, projected=False):
+    """Exact raw LOAD dependencies; existing projected memory reads only."""
+    from .effects import EffectKind, UnresolvedMemoryAccess
+    from .model import ResolvedStorage, UnresolvedStorage
+    from .normalize import _storage_ref
+    from .storage import _resolve_validated_storage
+
+    if effect is None or load.opcode != "LOAD" or len(load.inputs) != 2 or load.output is None \
+            or effect.kind is not EffectKind.READ or effect.call_targets or effect.memory_write is not None \
+            or effect.unresolved_reads or effect.unresolved_writes:
+        return False
+    raw = _storage_ref(load.inputs[1])
+    address = _resolve_validated_storage(raw, context)
+    output = _resolve_validated_storage(_storage_ref(load.output), context)
+    if type(address) is UnresolvedStorage or type(output) is not ResolvedStorage \
+            or effect.writes != (output,):
+        return False
+    reads = (address,) if type(address) is ResolvedStorage else ()
+    if effect.memory_read is not None:
+        return effect.reads == reads and effect.memory_read == UnresolvedMemoryAccess(
+            address, load.output.byte_size, raw)
+    memory = effect.reads[len(reads):]
+    return projected and effect.reads[:len(reads)] == reads and bool(memory) and all(
+        type(row) is ResolvedStorage and row.span.size == load.output.byte_size
+        and row.span.object_id.kind in (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
+        for row in memory)
+
+
+def _absolute_read(fact, load, space, context):
+    """Conservative finite modulo domain, without assuming image contents.
+
+    Refuse a full/large domain or any candidate crossing the address-space
+    seam; never truncate candidates or widen the original LOAD's value width.
+    """
+    from ._scope_contracts import AddressSpaceClassV2, classify_address_space_v2
+
+    bits, width = space.address_size_bits, load.output.byte_size
+    claim = fact.claim
+    if fact.context or fact.input != 1 or claim.bits != bits or len(claim.items) != 1 \
+            or bits not in (32, 64) or load.inputs[1].byte_size * 8 != bits \
+            or not 0 < width <= MAX_ACCESS_BYTES or space.classification_revision != 2 \
+            or space.addressable_unit_bytes != 1 \
+            or classify_address_space_v2(space) is not AddressSpaceClassV2.ADDRESS:
+        return None
+    base, interval = claim.items[0]
+    if base != ("abs",) or interval.signed or interval.bits != bits \
+            or not 0 <= interval.lo <= interval.hi < 1 << bits \
+            or not interval.single and interval.stride <= 0:
+        return None
+    count = 1 if interval.single else (interval.hi - interval.lo) // interval.stride + 1
+    if not 0 < count <= MAX_READ_ADDRESSES:
+        return None
+    starts = range(interval.lo, interval.hi + 1, interval.stride or 1)
+    object_id = StorageObjectId(StorageObjectKind.ADDRESS_SPACE, context.program_scope, space.space_id)
+    step(count * width)
+    spans = tuple(ByteSpan(object_id, start, width) for start in starts if start + width <= 1 << bits)
+    return spans if len(spans) == count else None
+
+
 def prepare_memory_refinement(result, options, *, assumptions=()):
     """A plan from N0 only, or None. No fact from its replay is accepted here."""
     from .forward import forward_facts
@@ -241,7 +393,8 @@ def prepare_memory_refinement(result, options, *, assumptions=()):
 
     normalized, unit = result.normalized, result.unit
     if type(normalized) is not NormalizedFunction or normalized.forward_inputs is None \
-            or normalized.forward_memory_proofs or not normalized.may_alias_reads:
+            or normalized.forward_memory_proofs \
+            or getattr(normalized.forward_inputs.read_separations, "address_reads", ()):
         return None
     original = {}
     for instruction in unit.observation.instructions:
@@ -255,8 +408,6 @@ def prepare_memory_refinement(result, options, *, assumptions=()):
     candidates = [row for row in normalized.may_alias_reads
                   if row.operation_key in original and original[row.operation_key].opcode == "LOAD"
                   and row.plain and not row.unknown_address]
-    if not candidates:
-        return None
     assumptions = tuple(sorted(set(assumptions) | set(run_assumptions(
         {result.key: result}, readonly_image=options.get("readonly_image"),
         home_space=options.get("private_frame_above", 0)))))
@@ -264,6 +415,25 @@ def prepare_memory_refinement(result, options, *, assumptions=()):
         normalized, unit, readonly_image=options.get("readonly_image"), assumptions=assumptions)}
     effects = {effect.operation_key: effect for block in normalized.forward_inputs.effect_unit.blocks
                for effect in block.effects}
+    address_reads = []
+    for key, load in original.items():
+        fact = facts.get(key)
+        if load.opcode != "LOAD" or key in overrides or fact is None or fact.function != result.key \
+                or len(load.inputs) != 2 or load.output is None \
+                or load.inputs[0].kind is not VarnodeKindCode.CONSTANT \
+                or not _load_shape(effects.get(key), load, normalized.forward_inputs.context, projected=True):
+            continue
+        space = spaces.get(load.inputs[0].coordinate.byte_offset)
+        spans = None if space is None else _absolute_read(fact, load, space, normalized.forward_inputs.context)
+        if spans is None:
+            continue
+        old = tuple(row.span for row in effects[key].reads if type(row) is ResolvedStorage
+                    and row.span.object_id.kind in (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE))
+        if effects[key].memory_read is None and old == spans:
+            continue
+        address_reads.append(ReadAddressProjection(key, spans, fact))
+        if len(address_reads) > MAX_PROOFS:
+            return None
     proofs = []
     for row in candidates:
         load, read_fact = original[row.operation_key], facts.get(row.operation_key)
@@ -315,12 +485,13 @@ def prepare_memory_refinement(result, options, *, assumptions=()):
             proofs.append(ReadSeparation(row.operation_key, writer, reads[0], read_fact, write_fact))
             if len(proofs) > MAX_PROOFS:
                 return None  # local optional cap: keep the complete original result
-    if not proofs:
+    if not proofs and not address_reads:
         return None
     requires = tuple(sorted(set(assumptions) | {label for proof in proofs
-                            for fact in (proof.read_fact, proof.write_fact) for label in fact.requires}))
+                            for fact in (proof.read_fact, proof.write_fact) for label in fact.requires}
+                            | {label for proof in address_reads for label in proof.read_fact.requires}))
     return MemoryRefinement(unit, normalized, _signature(options), tuple(proofs), requires, tuple(options.items()),
-                            result, assumptions)
+                            result, assumptions, address_reads=tuple(address_reads))
 
 
 def exclusions_for(plan, effect_unit):

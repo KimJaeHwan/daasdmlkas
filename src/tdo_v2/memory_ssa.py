@@ -27,6 +27,7 @@ from ._memory_ssa_state import (
 )
 from .memory_contracts import (
     LOCAL_MEMORY_CONTRACT_VERSION,
+    CallBoundaryMemoryState,
     CallBoundaryRegisterState,
     LocalMemorySsaResult,
     LocalMemoryUnit,
@@ -278,12 +279,23 @@ def _build_dense(unit: LocalMemoryUnit, *, compress_chains: bool = True) -> Loca
     boundaries = _call_boundaries(unit)
     registers = _register_ranges(partition) if boundaries else ()
     snapshot_cost = sum(stop - start for _, start, stop in registers)
+    call_states = _CallStateArena(len(partition.atoms)) if boundaries else None
 
     def block_reads(block):
         state = in_states[block.key]
+        remaining = sum(action.operation_key in boundaries for action in block.actions)
+        observed, root = False, None
         for action in block.actions:
             snapshot = None
             if action.operation_key in boundaries:
+                if not observed:
+                    values = []
+                    for run in _iter_runs(state.root):
+                        values.extend((tuple(run.definitions),) * (run.stop - run.start))
+                    root = call_states.seed(values)
+                    observed = True
+                call_states.roots[boundaries[action.operation_key]] = root
+                remaining -= 1
                 step(snapshot_cost)
                 snapshot = tuple(fragment for _, start, stop in registers
                                  for fragment in _read_fragments(state, start, stop, partition.atoms))
@@ -292,12 +304,17 @@ def _build_dense(unit: LocalMemoryUnit, *, compress_chains: bool = True) -> Loca
                 for span in action.reads
             ], snapshot
             state = _apply_writes(state, action, partition, write_ids, pool)
+            if observed and remaining:
+                for ordinal, span in enumerate(action.writes):
+                    root = call_states.update(root, *partition.covered_range(span),
+                                              (write_ids[(action.operation_key, ordinal)],))
 
     return _assemble(
         unit, partition, raw_definitions, writes_by_action, blocks, block_reads,
         {key: out_states[key] for key in unit.observed_terminal_block_keys},
         _dense_flow_edges(unit, partition, write_ids, in_states, out_states),
         boundaries,
+        call_states,
     )
 
 
@@ -388,7 +405,7 @@ def _dense_flow_edges(unit, partition, write_ids, in_states, out_states):
 
 def _assemble(
     unit, partition, raw_definitions, writes_by_action, blocks, block_reads, terminal_out_states,
-    raw_flow_edges=(), call_boundaries=None,
+    raw_flow_edges=(), call_boundaries=None, call_states=None,
 ) -> LocalMemorySsaResult:
     """Engine-independent result assembly. ``block_reads(block)`` yields, per
     action in order, (read fragments, register snapshot or None). A snapshot
@@ -521,6 +538,7 @@ def _assemble(
         terminal_out_states,
         raw_to_final,
         definitions,
+        nonexit_keys=frozenset(predecessor for block in unit.blocks for predecessor in block.predecessors),
     )
     flow_edges = []
     for span, predecessor, block, sources in raw_flow_edges:
@@ -535,6 +553,13 @@ def _assemble(
             encoded.append(RegisterStateFragment(span, tuple(sorted(raw_to_final[source] for source in sources))))
         snapshots.append(CallBoundaryRegisterState(
             boundary, block, first_action, tuple(sorted(encoded, key=lambda item: item.span.canonical_key))))
+    # Separate, hash-consed arena keeps every pre-existing terminal node ID
+    # stable. Only tracked SSA atoms are observed, never a copy of RAM.
+    call_state_nodes, root_ids = ((), {}) if call_states is None else call_states.serialize(
+        raw_to_final, definitions)
+    memory_states = tuple(CallBoundaryMemoryState(
+        state.boundary_key, state.block_key, state.first_action_key, root_ids[state.boundary_key])
+        for state in sorted(snapshots, key=lambda item: item.boundary_key))
 
     return LocalMemorySsaResult(
         LOCAL_MEMORY_CONTRACT_VERSION,
@@ -561,6 +586,8 @@ def _assemble(
         terminal_states,
         tuple(sorted(flow_edges, key=lambda edge: edge.canonical_key)),
         tuple(sorted(snapshots, key=lambda state: state.boundary_key)),
+        call_state_nodes,
+        memory_states,
     )
 
 
@@ -579,11 +606,97 @@ def _build_sparse(unit: LocalMemoryUnit) -> LocalMemorySsaResult:
 register_memory_ssa_engine("sparse", _build_sparse)
 
 
+class _CallStateArena:
+    """Persistent observation of fixed atoms, separate from the RD solver.
+
+    One midpoint shape for every engine and state. Only action writes copy
+    paths; a CALL retains one root ID. Assembly visits only pinned roots, so
+    temporary update nodes never enter the public arena. Raw definition sets
+    remain raw: observing a union does not demand a JOIN or a memory read.
+    """
+
+    def __init__(self, atom_count):
+        self.atom_count = atom_count
+        self.nodes = []
+        self.interned = {}
+        self.roots = {}
+
+    def _intern(self, atom, values, left, right):
+        key = atom, values, left, right
+        found = self.interned.get(key)
+        if found is None:
+            found = len(self.nodes)
+            self.nodes.append(key)
+            self.interned[key] = found
+        return found
+
+    def seed(self, values):
+        values = tuple(values)
+        if len(values) != self.atom_count:
+            raise AssertionError("call state must cover every tracked atom")
+
+        def build(start, stop):
+            if start == stop:
+                return None
+            step()
+            middle = (start + stop) // 2
+            return self._intern(middle, values[middle], build(start, middle), build(middle + 1, stop))
+
+        return build(0, len(values))
+
+    def update(self, root, start, stop, values):
+        def visit(identifier, lower, upper):
+            if identifier is None or stop <= lower or upper <= start:
+                return identifier
+            step()
+            atom, current, left, right = self.nodes[identifier]
+            left = visit(left, lower, atom)
+            right = visit(right, atom + 1, upper)
+            return self._intern(atom, values if start <= atom < stop else current, left, right)
+
+        return visit(root, 0, self.atom_count)
+
+    def serialize(self, raw_to_final, definitions):
+        nodes, encoded, interned, roots = [], {}, {}, {}
+        for boundary, root in sorted(self.roots.items()):
+            if root is None:
+                roots[boundary] = None
+                continue
+            pending = [(root, False)]
+            while pending:
+                identifier, expanded = pending.pop()
+                if identifier in encoded:
+                    continue
+                step()
+                atom, values, left, right = self.nodes[identifier]
+                if not expanded:
+                    pending.append((identifier, True))
+                    if right is not None and right not in encoded:
+                        pending.append((right, False))
+                    if left is not None and left not in encoded:
+                        pending.append((left, False))
+                    continue
+                public = tuple(sorted(raw_to_final[value] for value in values))
+                if any(definitions[value].kind is MemoryDefinitionKind.JOIN for value in public):
+                    raise AssertionError("call states cannot contain JOIN definitions")
+                key = (atom, atom + 1, public, None if left is None else encoded[left],
+                       None if right is None else encoded[right])
+                found = interned.get(key)
+                if found is None:
+                    found = len(nodes)
+                    nodes.append(MemoryStateNode(*key))
+                    interned[key] = found
+                encoded[identifier] = found
+            roots[boundary] = encoded[root]
+        return tuple(nodes), roots
+
+
 def _serialize_terminal_states(
     terminal_keys: tuple[str, ...],
     out_states: dict[str, _State],
     raw_to_final: tuple[int, ...],
     definitions: tuple[MemoryDefinition, ...],
+    *, nonexit_keys: frozenset[str] = frozenset(),
 ) -> tuple[tuple[MemoryStateNode, ...], tuple[ObservedTerminalMemoryState, ...]]:
     nodes: list[MemoryStateNode] = []
     interned: dict[tuple[object, ...], int] = {}
@@ -594,7 +707,7 @@ def _serialize_terminal_states(
     for block_key in terminal_keys:
         root = out_states[block_key].root
         if root is None:
-            terminal_states.append(ObservedTerminalMemoryState(block_key, None))
+            terminal_states.append(ObservedTerminalMemoryState(block_key, None, block_key not in nonexit_keys))
             continue
         # Serialize a canonical shape: the balanced tree rebuilt from the run
         # sequence, so the nodes depend only on the state's content and not on
@@ -640,7 +753,7 @@ def _serialize_terminal_states(
             encoded[identity] = node_id
 
         terminal_states.append(
-            ObservedTerminalMemoryState(block_key, encoded[id(root)])
+            ObservedTerminalMemoryState(block_key, encoded[id(root)], block_key not in nonexit_keys)
         )
 
     return tuple(nodes), tuple(terminal_states)

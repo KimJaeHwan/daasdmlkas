@@ -198,7 +198,8 @@ def test_frozen_entry_forwards_the_opt_in_after_admission(leaf_program, monkeypa
 
     @contextmanager
     def session(*args, **kwargs):
-        yield SimpleNamespace(program_result=inputs.program, iter_functions=lambda: iter(inputs.evidences))
+        yield SimpleNamespace(program_result=inputs.program, iter_functions=lambda: iter(inputs.evidences),
+                              iter_outcomes=lambda: iter(inputs.evidences))
 
     monkeypatch.setattr(configured, 'admit_frozen_bundle', lambda path: path)
     monkeypatch.setattr(engine, 'open_observed_function_session', session)

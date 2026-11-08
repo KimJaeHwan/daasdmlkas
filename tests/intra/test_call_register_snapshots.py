@@ -86,7 +86,7 @@ def test_ambiguous_snapshot_retains_raw_sources_without_demanding_a_join_or_read
         baseline = _engines(unit)
     finally:
         memory_ssa._call_boundaries = original
-    assert replace(result, call_register_snapshots=()) == baseline
+    assert replace(result, call_register_snapshots=(), call_state_nodes=(), call_memory_states=()) == baseline
 
 
 def test_loop_snapshot_observes_the_existing_fixed_point_before_the_local_write():

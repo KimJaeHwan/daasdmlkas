@@ -415,11 +415,40 @@ class MemoryStateNode:
 class ObservedTerminalMemoryState:
     block_key: str
     root_node_id: int | None
+    # No outgoing LocalMemoryUnit successor. This does not prove RETURN,
+    # termination, or that a fault/frontier/dead-state policy is discharged.
+    is_exit: bool = True
 
     def __post_init__(self) -> None:
         _require_nonempty_string(self.block_key, "observed terminal block key")
         if self.root_node_id is not None:
             _require_nonnegative_int(self.root_node_id, "terminal-state root node ID")
+        if type(self.is_exit) is not bool:
+            raise TypeError("terminal-state exit role must be an exact bool")
+
+
+@dataclass(frozen=True, slots=True)
+class CallBoundaryMemoryState:
+    """Existing tracked storage before a normalized call group's first action.
+
+    The root belongs to ``call_state_nodes``, not the terminal-state arena.
+    This is a state observation, not memory preservation or alias evidence.
+    Raw call setup omitted by normalization is a separate entry transition.
+    """
+
+    boundary_key: str
+    block_key: str
+    first_action_key: str
+    root_node_id: int | None
+
+    def __post_init__(self) -> None:
+        for value in (self.boundary_key, self.block_key, self.first_action_key):
+            _require_nonempty_string(value, "call memory boundary key")
+        if self.boundary_key.rsplit(":", 1)[-1] not in ("CALL", "CALLIND") \
+                or self.first_action_key.partition("~")[0] != self.boundary_key:
+            raise ValueError("call memory boundary must name its raw CALL/CALLIND group")
+        if self.root_node_id is not None:
+            _require_nonnegative_int(self.root_node_id, "call memory root node ID")
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,6 +467,23 @@ class LocalMemorySsaResult:
     observed_terminal_states: tuple[ObservedTerminalMemoryState, ...] = ()
     flow_edges: tuple[MemoryFlowEdge, ...] = ()
     call_register_snapshots: tuple[CallBoundaryRegisterState, ...] = ()
+    call_state_nodes: tuple[MemoryStateNode, ...] = ()
+    call_memory_states: tuple[CallBoundaryMemoryState, ...] = ()
+
+    @property
+    def exit_states(self) -> tuple[ObservedTerminalMemoryState, ...]:
+        """CFG-exit snapshots only; callers still classify faults/frontiers."""
+        return tuple(state for state in self.observed_terminal_states if state.is_exit)
+
+    def validate_terminal_roles(self, unit: LocalMemoryUnit) -> None:
+        """Pin snapshot roles to the exact original unit once at binding."""
+        if type(unit) is not LocalMemoryUnit or self.unit_digest != unit.canonical_digest:
+            raise ValueError("terminal roles require the original local-memory unit")
+        if tuple(state.block_key for state in self.observed_terminal_states) != unit.observed_terminal_block_keys:
+            raise ValueError("terminal snapshots must cover exactly the requested observation points")
+        outgoing = {predecessor for block in unit.blocks for predecessor in block.predecessors}
+        if any(state.is_exit != (state.block_key not in outgoing) for state in self.observed_terminal_states):
+            raise ValueError("terminal-state exit role disagrees with the original CFG")
 
     def __post_init__(self) -> None:
         if type(self.contract_version) is not int:
@@ -472,6 +518,8 @@ class LocalMemorySsaResult:
         _require_exact_tuple(self.flow_edges, MemoryFlowEdge, "memory flow edges")
         _require_exact_tuple(self.call_register_snapshots, CallBoundaryRegisterState,
                              "call boundary register states")
+        _require_exact_tuple(self.call_state_nodes, MemoryStateNode, "call memory state nodes")
+        _require_exact_tuple(self.call_memory_states, CallBoundaryMemoryState, "call memory states")
         self._validate_canonical_order()
         self._validate_relations()
 
@@ -529,6 +577,8 @@ class LocalMemorySsaResult:
         )
         _require_sorted_unique(self.call_register_snapshots, key=lambda item: item.boundary_key,
                                label="call boundary register states")
+        _require_sorted_unique(self.call_memory_states, key=lambda item: item.boundary_key,
+                               label="call memory states")
 
     def _validate_relations(self) -> None:
         definition_count = len(self.definitions)
@@ -576,6 +626,14 @@ class LocalMemorySsaResult:
         self._validate_flow_edges()
         self._validate_call_register_snapshots()
         self._validate_state_arena()
+        if self.call_memory_states or self.call_state_nodes:
+            registers = {row.boundary_key: row for row in self.call_register_snapshots}
+            for state in self.call_memory_states:
+                other = registers.get(state.boundary_key)
+                if other is None or (state.block_key, state.first_action_key) != \
+                        (other.block_key, other.first_action_key):
+                    raise ValueError("call memory and register boundaries must agree")
+            self._validate_state_arena(self.call_state_nodes, self.call_memory_states)
 
     def _validate_call_register_snapshots(self) -> None:
         if not self.call_register_snapshots:
@@ -630,11 +688,13 @@ class LocalMemorySsaResult:
                 if not definition.span.contains(edge.span):
                     raise ValueError("flow-edge definitions must cover its span")
 
-    def _validate_state_arena(self) -> None:
+    def _validate_state_arena(self, nodes=None, roots=None) -> None:
+        nodes = self.state_nodes if nodes is None else nodes
+        roots = self.observed_terminal_states if roots is None else roots
         atom_count = len(self.atomic_spans)
         contiguous_run_ends = _contiguous_run_ends(self.atomic_spans)
         subtree_bounds: list[tuple[int, int]] = []
-        for node_id, node in enumerate(self.state_nodes):
+        for node_id, node in enumerate(nodes):
             if node.stop_atom > atom_count:
                 raise ValueError("state-node atom range is outside the partition")
             for child_id, side in (
@@ -674,7 +734,7 @@ class LocalMemorySsaResult:
                         "right state subtree must start exactly at its parent run"
                     )
             subtree_bounds.append((left_start, right_stop))
-        for state in self.observed_terminal_states:
+        for state in roots:
             if state.root_node_id is None:
                 if atom_count:
                     raise ValueError(
@@ -683,7 +743,7 @@ class LocalMemorySsaResult:
                 continue
             _require_id_in_range(
                 state.root_node_id,
-                len(self.state_nodes),
+                len(nodes),
                 "terminal-state root node",
             )
             if subtree_bounds[state.root_node_id] != (0, atom_count):
@@ -693,7 +753,7 @@ class LocalMemorySsaResult:
         reachable: set[int] = set()
         pending = [
             state.root_node_id
-            for state in self.observed_terminal_states
+            for state in roots
             if state.root_node_id is not None
         ]
         while pending:
@@ -701,13 +761,13 @@ class LocalMemorySsaResult:
             if node_id in reachable:
                 continue
             reachable.add(node_id)
-            node = self.state_nodes[node_id]
+            node = nodes[node_id]
             pending.extend(
                 child
                 for child in (node.left_node_id, node.right_node_id)
                 if child is not None
             )
-        if reachable != set(range(len(self.state_nodes))):
+        if reachable != set(range(len(nodes))):
             raise ValueError("memory state nodes must be reachable from terminal roots")
 
 

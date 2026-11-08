@@ -398,7 +398,7 @@ def terminal_register(builder, span, block, return_key):
     """Requested terminal register bytes from the existing raw run-tree only."""
     from .operation_records import _StitchCut
 
-    states = [state for state in builder.ssa.observed_terminal_states if state.block_key == block]
+    states = [state for state in builder.ssa.exit_states if state.block_key == block]
     if len(states) != 1 or states[0].root_node_id is None:
         raise _StitchCut("physical terminal state unavailable")
     pieces, pending = [], [states[0].root_node_id]
