@@ -2232,7 +2232,7 @@ def _slot_loaded_register(unit, image_info) -> dict:
                 register, before = last.inputs[0], prefix[:writes[-1]]
             else:
                 continue
-            if any(_overlaps(item.output, register) for item in before):
+            if any(_storage_overlaps(item.output, register) for item in before):
                 continue
             into = predecessors.get(block.key, [])
             if block.key == graph.entry or len(into) != 1 or into[0].key == block.key:
@@ -2241,7 +2241,7 @@ def _slot_loaded_register(unit, image_info) -> dict:
             if block.start != 0 or not _plain_into(rows[source.instruction], source, row.address):
                 continue
             source_operations = rows[source.instruction].operations
-            writes = [position for position, item in enumerate(source_operations) if _overlaps(item.output, register)]
+            writes = [position for position, item in enumerate(source_operations) if _storage_overlaps(item.output, register)]
             if not writes:
                 continue
             last = source_operations[writes[-1]]

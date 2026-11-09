@@ -428,3 +428,35 @@ def test_physical_record_target_producer_uses_the_final_write_rule(monkeypatch, 
     base = f"{instruction.address.space_id:x}:{instruction.address.byte_offset:x}:{ordinal}:CALLIND"
     found = target_producer(item.unit, base)
     assert (found is None) if alias else (found is not None and found[0].endswith(":0:COPY"))
+
+
+def test_forward_memory_target_overwritten_by_a_store_is_not_resolved(monkeypatch):
+    # (review fix, Astra round 4, forward.local_value) a STORE has no output varnode
+    built = FunctionBuilder().ins(copy(reg(RBX), reg(RCX))).call_indirect(RBX).ret()
+    row = _callind_row(built)
+    slot = ram(DATA_BASE + 0x200)
+    row.ops = [copy(slot, const(KEEP)), store(const(DATA_BASE + 0x200), const(0x1e00)), op("CALLIND", [slot])]
+    item, _ = _analyze(monkeypatch, built, FunctionBuilder(entry=KEEP).ret(), imports=False)
+    assert f"1:{KEEP:x}" not in item.calls.values()
+
+
+@pytest.mark.parametrize("where", ("predecessor", "call-instruction"))
+@pytest.mark.parametrize("shape", ("register", "unique"))
+def test_slot_loaded_register_sees_register_aliases_through_another_space(monkeypatch, where, shape):
+    # (review fix, Astra round 4) _slot_loaded_register's register scans use SSA storage overlap
+    _second_space(monkeypatch, register=True)
+
+    def caller(alias):
+        built = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), ram(SLOT))).call_indirect(RBX).add_rsp(0x28).ret()
+        load_row, row = built._rows[1], _callind_row(built)
+        if shape == "register":
+            row.ops = [op("CALLIND", [reg(RBX)])]
+        if alias:
+            write = copy(dict(reg(RBX), space_id=6), const(0x1e00))
+            (load_row.ops.append(write) if where == "predecessor" else row.ops.insert(0, write))
+        return built
+
+    item, _ = _analyze(monkeypatch, caller(False), forward=False)
+    assert len(item.declared) == 1  # the static path is exercised
+    item, _ = _analyze(monkeypatch, caller(True), forward=False)
+    assert not item.declared

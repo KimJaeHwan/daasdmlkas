@@ -997,6 +997,8 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
 
         if has_internal_flow(instruction):
             return None   # (a branch inside the instruction: no straight line)
+        if varnode.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE):
+            return None   # (memory: a STORE with no output varnode may overwrite it -- Astra review round 4)
         from .pcode_blocks import storage_overlaps
 
         span = span_of(varnode)
