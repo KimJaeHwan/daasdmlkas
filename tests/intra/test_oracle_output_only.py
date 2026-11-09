@@ -44,3 +44,22 @@ def test_flags_kept_across_the_op_and_an_unshared_refinement_is_caught(shared):
         assert report.silent == [] and report.covered_by_debt == []
     else:   # the engine keeps ZF across pshuflw; an oracle without the entry havocs it: a visible disagreement
         assert report.silent or report.covered_by_debt
+
+
+@pytest.mark.parametrize("ops, expected", (
+    ([PSHUFLW], True),
+    ([op("CALLOTHER", [const(157, 4), XMM1, XMM1, const(0x1B, 8)], XMM0)], False),   # destination not first
+    ([op("CALLOTHER", [const(483, 4), reg(0x1200, 32), reg(0x1240, 32)], {"kind_code": 3, "space_id": 3,
+                                                                           "byte_offset": 0x500, "byte_size": 32})],
+     True),                                                                           # vpcmpeqw: a temporary
+    ([op("CALLOTHER", [const(483, 4), reg(0x1200, 32), reg(0x1240, 32)], reg(0x1200, 32))], False),
+))
+def test_the_oracle_table_checks_operand_shape_independently(ops, expected):
+    # (Astra review round 5) output kind and the destination-first relation, not sizes only
+    from pcode_interpreter import Interpreter
+
+    unit, = program_units(FunctionBuilder().ins(*ops).ret())
+    operation = unit.observation.instructions[0].operations[0]
+    probe = Interpreter.__new__(Interpreter)
+    probe._output_only_userops = TABLE
+    assert Interpreter._output_only(probe, operation.inputs, operation.output) is expected

@@ -460,3 +460,36 @@ def test_slot_loaded_register_sees_register_aliases_through_another_space(monkey
     assert len(item.declared) == 1  # the static path is exercised
     item, _ = _analyze(monkeypatch, caller(True), forward=False)
     assert not item.declared
+
+
+@pytest.mark.parametrize("write", ("store", "copy"))
+@pytest.mark.parametrize("shape", ("slot", "register"))
+def test_static_import_needs_an_unwritten_slot(monkeypatch, shape, write):
+    # (review fix, Astra round 5) import-slots-hold-their-exports: a write the function makes to the slot voids it
+    def caller(written):
+        built = FunctionBuilder().sub_rsp(0x28)
+        if written:
+            built.ins(store(const(SLOT), const(0x1800)) if write == "store" else copy(ram(SLOT), reg(RCX)))
+        built = built.ins(copy(reg(RBX), ram(SLOT))).call_indirect(RBX).add_rsp(0x28).ret()
+        if shape == "slot":
+            row = _callind_row(built)
+            row.ops[0] = copy(row.ops[0][2], ram(SLOT))
+        return built
+
+    item, _ = _analyze(monkeypatch, caller(False), forward=False)
+    assert len(item.declared) == 1
+    item, _ = _analyze(monkeypatch, caller(True), forward=False)
+    assert not item.declared
+
+
+@pytest.mark.parametrize("shape", ("slot", "register"))
+def test_static_import_needs_the_whole_slot(monkeypatch, shape):
+    # (review fix, Astra round 5) a 4-byte read of an 8-byte slot is no import identity
+    built = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX, 4), ram(SLOT, 4))).call_indirect(RBX).add_rsp(0x28).ret()
+    row = _callind_row(built)
+    if shape == "slot":
+        row.ops = [copy(tmp(0x400, 4), ram(SLOT, 4)), op("CALLIND", [tmp(0x400, 4)])]
+    else:
+        row.ops = [op("CALLIND", [reg(RBX, 4)])]
+    item, _ = _analyze(monkeypatch, built, forward=False)
+    assert not item.declared

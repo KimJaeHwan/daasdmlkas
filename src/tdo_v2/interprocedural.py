@@ -2140,13 +2140,11 @@ def import_call_sites(unit, image_info, local_functions=frozenset()) -> dict:
                 symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
             elif operation.opcode == "BRANCHIND" and target.kind is VarnodeKindCode.ADDRESS \
                     and instruction.fallthrough is None and ordinal == len(operations) - 1:
-                symbol = image_info.import_at_slot(target.coordinate.space_id, target.coordinate.byte_offset)
+                symbol = _static_slot_symbol(unit, image_info, target)
             elif operation.opcode == "CALLIND":
                 copy = _final_target_write(instruction, ordinal)
-                if copy is not None and copy.opcode == "COPY" and copy.output == target \
-                        and copy.inputs[0].kind is VarnodeKindCode.ADDRESS:
-                    source = copy.inputs[0].coordinate
-                    symbol = image_info.import_at_slot(source.space_id, source.byte_offset)
+                if copy is not None and copy.opcode == "COPY" and copy.output == target:
+                    symbol = _static_slot_symbol(unit, image_info, copy.inputs[0])
                 if symbol is None:
                     symbol = loaded.get(key)
             if symbol is not None:
@@ -2247,11 +2245,44 @@ def _slot_loaded_register(unit, image_info) -> dict:
             last = source_operations[writes[-1]]
             if last.opcode != "COPY" or last.output != register or last.inputs[0].kind is not VarnodeKindCode.ADDRESS:
                 continue
-            slot = last.inputs[0].coordinate
-            symbol = image_info.import_at_slot(slot.space_id, slot.byte_offset)
+            symbol = _static_slot_symbol(unit, image_info, last.inputs[0])
             if symbol is not None:
                 found[_operation_key(row.address, block.start + index, operation.opcode)] = symbol
     return found
+
+
+def _static_slot_symbol(unit, image_info, read):
+    """The import an ADDRESS varnode ``read`` of an import slot gives under
+    import-slots-hold-their-exports, for the static recognizers (no SSA): the
+    slot read whole (its space's pointer width) and never written by this
+    function -- an explicit write (an ADDRESS output or a STORE to a constant
+    address overlapping the slot) voids the slot's entry value, whatever its
+    position (review fix, Astra round 5: an overwritten slot, a partial read)."""
+    if read.kind is not VarnodeKindCode.ADDRESS:
+        return None
+    coordinate = read.coordinate
+    space = next((row for row in unit.scopes.program.evidence.address_spaces
+                  if row.space_id == coordinate.space_id), None)
+    if space is None or read.byte_size * 8 != space.address_size_bits:
+        return None
+    symbol = image_info.import_at_slot(coordinate.space_id, coordinate.byte_offset)
+    if symbol is None:
+        return None
+    low, high = coordinate.byte_offset, coordinate.byte_offset + read.byte_size
+    for instruction in unit.observation.instructions:
+        for operation in instruction.operations:
+            output = operation.output
+            if output is not None and output.kind is VarnodeKindCode.ADDRESS \
+                    and output.coordinate.space_id == coordinate.space_id \
+                    and output.coordinate.byte_offset < high and low < output.coordinate.byte_offset + output.byte_size:
+                return None
+            if operation.opcode == "STORE" and len(operation.inputs) == 3:
+                target, pointer, value = operation.inputs
+                if target.kind is VarnodeKindCode.CONSTANT and target.coordinate.byte_offset == coordinate.space_id \
+                        and pointer.kind is VarnodeKindCode.CONSTANT \
+                        and pointer.coordinate.byte_offset < high and low < pointer.coordinate.byte_offset + value.byte_size:
+                    return None
+    return symbol
 
 
 def _plain_into(source_row, source, call_address) -> bool:

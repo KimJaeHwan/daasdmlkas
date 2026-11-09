@@ -90,10 +90,13 @@ def _signed(value: int, size: int) -> int:
 # PACKSSWB, PSHUFLW, VPCMPEQW -- destination only, flags unchanged; Ghidra 12.0.4 x86 4.6 user-op indices).
 # Deliberately separate from src/tdo_v2/intrinsic_refinements.py: a wrong engine entry must show up as an
 # oracle miss, not be mirrored (Astra review round 4 P2).
+# index -> (operand sizes, output size, output kind, the first operand is the output itself). Ghidra's legacy
+# SSE2 constructors pass the destination as the first operand and assign it; the AVX2 constructor assigns a
+# temporary that a later COPY moves to the destination.
 ORACLE_OUTPUT_ONLY = {("x86:LE:64:default", 4, 6): {
-    132: ((16, 16), 16),        # packsswb xmm, xmm/m128
-    157: ((16, 16, 8), 16),     # pshuflw xmm, xmm/m128, imm8 (the immediate is an 8-byte constant)
-    483: ((32, 32), 32),        # vpcmpeqw ymm, ymm, ymm/m256
+    132: ((16, 16), 16, VarnodeKindCode.REGISTER, True),       # packsswb xmm, xmm/m128
+    157: ((16, 16, 8), 16, VarnodeKindCode.REGISTER, True),    # pshuflw xmm, xmm/m128, imm8 (8-byte constant)
+    483: ((32, 32), 32, VarnodeKindCode.UNIQUE, False),        # vpcmpeqw ymm, ymm, ymm/m256
 }}
 
 
@@ -441,12 +444,16 @@ class Interpreter:
 
     def _output_only(self, inputs, output) -> bool:
         """An output-only user op of ``ORACLE_OUTPUT_ONLY``: a constant index, the
-        listed operand sizes, a REGISTER output."""
-        if not inputs or inputs[0].kind is not VarnodeKindCode.CONSTANT or output.kind is not VarnodeKindCode.REGISTER:
+        listed operand sizes, the listed output kind, and (legacy SSE2) the
+        destination passed as the first operand."""
+        if not inputs or inputs[0].kind is not VarnodeKindCode.CONSTANT:
             return False
         signature = self._output_only_userops.get(inputs[0].coordinate.byte_offset)
-        return signature is not None and tuple(item.byte_size for item in inputs[1:]) == signature[0] \
-            and output.byte_size == signature[1]
+        if signature is None:
+            return False
+        sizes, size, kind, destination_first = signature
+        return tuple(item.byte_size for item in inputs[1:]) == sizes and output.byte_size == size \
+            and output.kind is kind and (not destination_first or (len(inputs) > 1 and inputs[1] == output))
 
     def final_bytes(self):
         """(space, offset) -> (value, writer, provenance) of every byte the run wrote."""
