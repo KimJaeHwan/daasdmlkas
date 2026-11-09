@@ -5,6 +5,7 @@ domain is issued, with each selector/address/image-value alternative intact.
 These are additional graph relations, not execution, new SSA, or debt removal.
 """
 
+from time import monotonic
 from dataclasses import dataclass, field
 
 from ._scope_contracts import AddressSpaceClassV2, VarnodeKindCode, classify_address_space_v2
@@ -52,6 +53,9 @@ class GuardedImagePlan:
     function_scope: object
     unit_digest: bytes
     reads: tuple[GuardedImageRead, ...]
+    # guards whose solving hit the last-resort wall-clock cap (``_Budget``): their reads were refused
+    # because of host time, not of the formula -- the only load-dependent outcome, reported here
+    time_limited_guards: tuple[str, ...] = ()
     _proof: _Derivation | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
@@ -66,7 +70,7 @@ def validate_guarded_image_reads(plan, ssa=None, *, normalized=None):
     proof = plan._proof
     if type(proof) is not _Derivation \
             or proof.authority is not _AUTHORITY \
-            or proof.payload != (plan.function_scope, plan.unit_digest, plan.reads) \
+            or proof.payload != (plan.function_scope, plan.unit_digest, plan.reads, plan.time_limited_guards) \
             or ssa is not None and proof.ssa is not ssa:
         raise ValueError("guarded image reads require the unchanged derivation and original SSA")
     if normalized is not None:
@@ -82,25 +86,41 @@ class _Refused(Exception):
     pass
 
 
+class _TimeLimited(_Refused):
+    """Refused by the last-resort wall-clock cap (reported in the plan)."""
+
+
 class _Budget:
     """Per-function solver budget in addition to normal analysis step limits:
-    at most ``QUERIES`` checks of at most ``RLIMIT`` z3 resource units each.
-    Deterministic -- no wall-clock limit: the same input gets the same answers
-    whatever the host load (a time-out made results load-dependent, e.g. a
-    gate test that failed only under load). ``unknown`` stays a refusal."""
+    at most ``QUERIES`` checks of at most ``RLIMIT`` z3 resource units each,
+    on formulas ``_admissible`` keeps small. Those limits are deterministic.
+    z3's resource accounting is sparse inside bit-blasting, so a last-resort
+    wall-clock cap remains (``CHECK_MS`` per check, ``TOTAL_SECONDS`` per
+    function), far above ordinary checks (milliseconds): only a guard that
+    reaches it can depend on host load, and it is reported
+    (``GuardedImagePlan.time_limited_guards``), never silently dropped.
+    Before, a 0.5 s budget refused ordinary checks on a loaded host."""
 
-    QUERIES, RLIMIT = 64, 20_000
+    QUERIES, RLIMIT, CHECK_MS, TOTAL_SECONDS = 64, 20_000, 1000, 5.0
 
     def __init__(self):
-        self.queries, self.attempts = 0, 0
+        self.queries, self.attempts, self.seconds = 0, 0, 0.0
 
-    def check(self, solver):
+    def check(self, solver, z3=None):
         step()
         if self.queries >= self.QUERIES:
             raise _Refused()
-        solver.set(rlimit=self.RLIMIT, random_seed=0)
+        if self.seconds >= self.TOTAL_SECONDS:
+            raise _TimeLimited()
+        solver.set(rlimit=self.RLIMIT, random_seed=0, timeout=self.CHECK_MS)
         self.queries += 1
-        return solver.check()
+        start = monotonic()
+        result = solver.check()
+        self.seconds += monotonic() - start
+        if z3 is not None and result == z3.unknown \
+                and any(word in solver.reason_unknown() for word in ("timeout", "canceled")):
+            raise _TimeLimited()
+        return result
 
 
 _MAX_NODES, _MAX_PRODUCTS, _MAX_SHIFTS, _MAX_WIDTH, _MAX_ADDER_BITS = 512, 2, 2, 64, 4096
@@ -187,7 +207,7 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
         return None
     dom = DominatorGraph(index.cfg.entry, index.predecessors)
     spaces = {row.space_id: row for row in address_spaces}
-    budget, found = _Budget(), []
+    budget, found, time_limited = _Budget(), [], []
     for action in ssa.actions:
         step()
         key = action.operation_key
@@ -225,7 +245,7 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
                 if taken in block.successors and len(success) == 1:
                     budget.attempts += 1
                     if budget.attempts > 16:
-                        return _plan(ssa, found, memory, observation, entry, context,
+                        return _plan(ssa, found, time_limited, memory, observation, entry, context,
                                      address_spaces, namespace, readonly_image, wild_objects, clobbered, excluded)
                     guard_key = next(k for k in index.keys[ancestor] if index.raw.get(k) is guard)
                     try:
@@ -241,7 +261,7 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
                         solver.add((condition != 0) if success[0] == taken else (condition == 0))
                         selectors = []
                         while True:
-                            outcome = budget.check(solver)
+                            outcome = budget.check(solver, z3)
                             if outcome == z3.unsat:
                                 break
                             if outcome != z3.sat or len(selectors) == MAX_CANDIDATES:
@@ -272,20 +292,22 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
                             tuple(tree.reloads[k] for k in sorted(tree.reloads)), address_id, output,
                             operation.inputs[0].coordinate.space_id, tuple(candidates)))
                         break
+                    except _TimeLimited:
+                        time_limited.append(guard_key)
                     except (_Refused, Ineligible):
                         pass
             parent = dom.idom.get(ancestor)
             if parent is None or parent == ancestor:
                 break
             ancestor = parent
-    return _plan(ssa, found, memory, observation, entry, context, address_spaces,
+    return _plan(ssa, found, time_limited, memory, observation, entry, context, address_spaces,
                  namespace, readonly_image, wild_objects, clobbered, excluded)
 
 
-def _plan(ssa, rows, *inputs):
-    if not rows:
+def _plan(ssa, rows, time_limited, *inputs):
+    if not rows and not time_limited:
         return None
-    payload = ssa.function_scope, ssa.unit_digest, tuple(rows)
+    payload = ssa.function_scope, ssa.unit_digest, tuple(rows), tuple(sorted(set(time_limited)))
     return GuardedImagePlan(*payload, _proof=_Derivation(_AUTHORITY, ssa, inputs, payload))
 
 

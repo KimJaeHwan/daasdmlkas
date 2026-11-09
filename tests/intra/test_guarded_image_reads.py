@@ -401,7 +401,7 @@ def test_solver_refusal_after_a_candidate_cannot_publish_a_partial_domain(monkey
 
     original, calls = _guarded_image_reads._Budget.check, []
 
-    def stop_after_one(self, solver):
+    def stop_after_one(self, solver, z3_module=None):
         calls.append(None)
         if len(calls) == 2:
             if outcome == "budget-refusal":
@@ -409,7 +409,7 @@ def test_solver_refusal_after_a_candidate_cannot_publish_a_partial_domain(monkey
             # Solver timeouts use this same unknown outcome. The test does
             # not depend on host timing to reproduce a partial enumeration.
             return z3.unknown
-        return original(self, solver)
+        return original(self, solver, z3_module)
 
     monkeypatch.setattr(_guarded_image_reads._Budget, "check", stop_after_one)
     normalized, _, keys, _, _ = _normalize()
@@ -493,7 +493,8 @@ def test_solver_budget_does_not_depend_on_host_speed(monkeypatch):
 
     budget, solver = _guarded_image_reads._Budget(), Slow()
     assert [budget.check(solver) for _ in range(5)] == ["sat"] * 5
-    assert all(set(params) == {"rlimit", "random_seed"} for params in solver.params)   # no time-out
+    # deterministic limits plus the last-resort cap, far above ordinary checks
+    assert all(params == {"rlimit": 20_000, "random_seed": 0, "timeout": 1000} for params in solver.params)
     budget.queries = budget.QUERIES
     with pytest.raises(_guarded_image_reads._Refused):
         budget.check(solver)
@@ -543,3 +544,24 @@ def test_expression_shape_is_limited_before_solving():
     # the node cap: a wide sum of distinct leaves
     leaves = [z3.BitVec(f"v{i}", 8) for i in range(600)]
     assert admit(z3, z3.Sum(leaves) == 0, base) is None
+
+
+def test_the_last_resort_time_cap_is_reported_not_silent(monkeypatch):
+    """A guard refused by the wall-clock cap stays visible in the plan (time_limited_guards); its read is not
+    issued. The cap is per check (z3 reason "timeout"/"canceled") and per function (TOTAL_SECONDS)."""
+    from tdo_v2 import _guarded_image_reads
+
+    budget = _guarded_image_reads._Budget()
+    budget.seconds = budget.TOTAL_SECONDS
+    with pytest.raises(_guarded_image_reads._TimeLimited):
+        budget.check(object())
+
+    def limited(self, solver, z3=None):
+        raise _guarded_image_reads._TimeLimited()
+
+    monkeypatch.setattr(_guarded_image_reads._Budget, "check", limited)
+    normalized, _, keys, _, _ = _normalize()
+    plan = normalized.memory_graph.image_reads.plan
+    assert plan.reads == () and plan.time_limited_guards == (keys["guard"],)
+    assert _rows(normalized, keys["read"]) == ()
+
