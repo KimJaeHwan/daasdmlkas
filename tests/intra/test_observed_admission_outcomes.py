@@ -141,10 +141,13 @@ def test_public_observed_entry_preserves_refusals_but_never_normalizes_them(monk
     assert not run.failed_functions and not run.roots
 
 
-def test_public_bundle_entry_consumes_outcomes_by_default(monkeypatch, tmp_path):
+def _bundle_entry(monkeypatch, tmp_path):
     from tdo_v2 import summary_engine
     from tdo_v2.boundary_rules import SymbolBoundaryProvider
 
+    # the session is owner-thread confined: keep the analysis on this thread (the Linux large-stack
+    # worker would otherwise run it elsewhere -- the test failed on Linux only)
+    monkeypatch.setenv("TDO_V2_ANALYSIS_WORKER", "0")
     session, _ = _session(monkeypatch)
     monkeypatch.setattr(summary_engine, "open_observed_function_session", lambda *a, **k: session)
     monkeypatch.setattr(summary_engine, "load_image_info", lambda path: None)
@@ -153,8 +156,19 @@ def test_public_bundle_entry_consumes_outcomes_by_default(monkeypatch, tmp_path)
     monkeypatch.setattr(configured_bundle, "admit_frozen_bundle", lambda path: object())
     source = tmp_path / "naming.java"
     source.write_bytes(b"test naming binding")
-    run = summary_engine.analyze_frozen_bundle_with_summaries(
-        tmp_path, naming_exporter_source=source, boundary_provider=SymbolBoundaryProvider(()))
+    return lambda **options: summary_engine.analyze_frozen_bundle_with_summaries(
+        tmp_path, naming_exporter_source=source, boundary_provider=SymbolBoundaryProvider(()), **options)
+
+
+def test_public_bundle_entry_keeps_strict_refusal_by_default(monkeypatch, tmp_path):
+    # (review fix, Astra P1-3) the existing failure channel: a refused member still raises by default
+    analyze = _bundle_entry(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="scope could not be constructed"):
+        analyze()
+
+
+def test_public_bundle_entry_retains_refusals_when_asked(monkeypatch, tmp_path):
+    run = _bundle_entry(monkeypatch, tmp_path)(retain_admission_failures=True)
     assert len(run.admission_failures) == 1
     assert run.admission_failures[0].observation_member_id == "function-1"
 

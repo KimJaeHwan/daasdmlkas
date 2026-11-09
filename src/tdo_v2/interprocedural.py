@@ -2164,6 +2164,18 @@ def _overlaps(varnode, other) -> bool:
         and other.coordinate.byte_offset < varnode.coordinate.byte_offset + varnode.byte_size
 
 
+def _storage_overlaps(varnode, other) -> bool:
+    """``_overlaps`` on the storage the SSA uses: every UNIQUE-kind space is one
+    function temporary object (``FUNCTION_UNIQUE``), so two UNIQUE varnodes
+    overlap by bytes whatever their space ids (review fix, Astra P1-1: a write
+    to the same bytes through another UNIQUE space id must stop the scan)."""
+    if varnode is None or other is None or varnode.kind is not other.kind:
+        return False
+    if varnode.kind is not VarnodeKindCode.UNIQUE:
+        return _overlaps(varnode, other)
+    return varnode.coordinate.byte_offset < other.coordinate.byte_offset + other.byte_size         and other.coordinate.byte_offset < varnode.coordinate.byte_offset + varnode.byte_size
+
+
 def _slot_loaded_register(unit, image_info) -> dict:
     """CALLIND key -> import for ``mov rax, [__imp_X]; call rax`` (the 09
     testbed's debug build calls its import DLL this way), on the engine's
@@ -2725,7 +2737,7 @@ def _import_indirect_targets(item, image_info, excluded=()) -> dict:
                 earlier = instruction.operations[index]
                 if earlier.opcode in _CALL_OPCODES_ALL:
                     break
-                if not _overlaps(earlier.output, target):
+                if not _storage_overlaps(earlier.output, target):
                     continue
                 if earlier.opcode == "COPY" and earlier.output == target and len(earlier.inputs) == 1:
                     sites.append((call, _operation_key(instruction.address, index, "COPY"), earlier.inputs[0]))

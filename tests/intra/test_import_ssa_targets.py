@@ -104,6 +104,27 @@ def test_overwritten_call_snapshot_cannot_resolve_an_earlier_copy(monkeypatch):
     assert not item.declared
 
 
+def test_overwrite_through_another_unique_space_cannot_resolve_the_copy(monkeypatch):
+    # (review fix, Astra P1-1) the SSA keeps every UNIQUE-kind space in one function temporary object:
+    # a write to the same bytes through a second UNIQUE space id overwrites the target
+    import synthetic
+
+    original = synthetic._Provider._program_candidate
+
+    def two_unique_spaces(self):
+        candidate = original(self)
+        candidate["address_spaces"].append(synthetic._space(5, unique=True, bits=self.arch.address_bits))
+        return candidate
+
+    monkeypatch.setattr(synthetic._Provider, "_program_candidate", two_unique_spaces)
+    caller = _caller()
+    call_row = caller._rows[4]
+    target, alias = tmp(0x400), dict(tmp(0x400), space_id=5)
+    call_row.ops = [copy(target, reg(RBX)), copy(alias, const(0x1e00)), op("CALLIND", [target])]
+    item, _ = _analyze(monkeypatch, caller, FunctionBuilder(entry=KEEP).ret())
+    assert not item.declared
+
+
 @pytest.mark.parametrize("other", (OTHER_SLOT, None))
 def test_different_import_or_unknown_path_join_is_not_a_single_identity(monkeypatch, other):
     flag = tmp(0x600, 1)

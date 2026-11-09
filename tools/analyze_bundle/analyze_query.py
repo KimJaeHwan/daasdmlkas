@@ -321,7 +321,8 @@ def main() -> int:
     run = analyze_frozen_bundle_with_summaries(
         args.generation, naming_exporter_source=REPO / "ghidra/GhidraV2CallNaming.java",
         boundary_provider=provider, external_models=run_dfbench.external_models(args.generation),
-        pcodeop_models=run_dfbench.pcodeop_models(), origin_witnesses=True, operation_records=False)
+        pcodeop_models=run_dfbench.pcodeop_models(), origin_witnesses=True, operation_records=False,
+        retain_admission_failures=True)
     # (2b-P P-c4) the premises each root's function rests on, by kind, and what
     # keeps them unestablished; "unpadded": recorded uses only
     supports = {int(row.function.split(":")[1], 16): row for row in run.supports}

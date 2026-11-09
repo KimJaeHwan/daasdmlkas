@@ -145,6 +145,10 @@ local_result = graph.query(original_ssa_node_id)  # 기존 함수 내부 조회�
 entry_edges = graph.entry_edges()               # 별도 문맥의 실제 호출 입구 간선
 ```
 
+요약 엔진 `analyze_frozen_bundle_with_summaries`는 기존 계약대로 거부된 함수가 하나라도 있으면 예외를 냅니다.
+`retain_admission_failures=True`일 때만 나머지 함수를 분석하고 거부를 `EngineRun.admission_failures`에 남깁니다
+(`tools/analyze_bundle/analyze_query.py`가 켭니다).
+
 `graphs`·`failures`·`pending`과 `admission_failures`를 따로 확인해야 합니다. `local_pass_finished`와
 `entry_links_finished`는 각 순회의 완료 여부이며, 모든 메모리 간선이 증명됐다는 뜻이 아닙니다.
 취소 예외는 그대로 전달합니다. 봉인 Bundle API `build_frozen_bundle_graphs(..., on_publication=callback)`의

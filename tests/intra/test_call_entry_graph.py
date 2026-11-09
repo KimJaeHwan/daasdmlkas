@@ -278,3 +278,30 @@ def test_mutated_preservation_contract_is_rejected_before_and_after_lazy_cache(c
     owner.normalized.call_clobber_contract[1]['modified'] = ()
     with pytest.raises(ValueError, match='clobber contract changed'):
         relation.bindings()
+
+
+@pytest.mark.parametrize('opaque_between', (False, True))
+def test_entry_address_through_a_register_clobbered_upstream_stays_unresolved(opaque_between):
+    # (review fix, Astra P1-2) RDI = RBP after an opaque call: the write clears RDI's own clobber, but its
+    # input RBP may have been changed by the callee -- the caller place must not be published
+    from synthetic import RBP, RDI
+    before = [copy(ram(DATA_BASE), const(7)), copy(reg(RBP), const(DATA_BASE))]
+    caller = FunctionBuilder().ins(before[0]).ins(before[1])
+    if opaque_between:
+        caller = caller.call(0x1f00)
+    caller = caller.ins(copy(reg(RDI), reg(RBP))).call(LEAF).ret()
+    leaf = FunctionBuilder(entry=LEAF).ins(load(reg(RAX), reg(RDI))).ret()
+    results, _, relation = _relations(caller, leaf)
+    anchors = relation._callee.anchors
+    identifier = next(index for index, definition in enumerate(results['1:1800'].normalized.memory_ssa.definitions)
+                      if definition.kind is MemoryDefinitionKind.ENTRY
+                      and definition.span.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE
+                      and anchors.get(definition.span.object_id, (None,))[0] is not None
+                      and anchors[definition.span.object_id][0].start == RDI)
+    binding = relation.memory_binding(identifier)
+    if opaque_between:
+        assert binding.caller_place is None
+        assert 'entry memory address correspondence unresolved' in binding.frontier
+    else:
+        assert binding.caller_place is not None and binding.caller_place.start == DATA_BASE
+

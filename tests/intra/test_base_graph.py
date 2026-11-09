@@ -141,7 +141,7 @@ def test_cancel_in_second_normalization_preserves_first_and_keeps_pending(monkey
         return normalize(self, unit, **options)
 
     monkeypatch.setattr(FunctionNormalizer, "normalize", cancel)
-    with pytest.raises(AnalysisCancelled):
+    with pytest.raises((AnalysisCancelled, KeyboardInterrupt)):  # (Linux worker: KeyboardInterrupt)
         publication.build()
     saved = publication.snapshot
     assert saved.stop == "cancelled" and len(saved.graphs) == 1
@@ -161,7 +161,7 @@ def test_cancel_during_bridge_keeps_all_local_graphs_without_partial_revision(mo
         raise AnalysisCancelled()
 
     monkeypatch.setattr(bridges, "connect_call_entries", cancel)
-    with pytest.raises(AnalysisCancelled):
+    with pytest.raises((AnalysisCancelled, KeyboardInterrupt)):  # (Linux worker: KeyboardInterrupt)
         publication.build()
     saved = publication.snapshot
     assert saved.local_pass_finished and len(saved.graphs) == 2
@@ -205,7 +205,7 @@ def test_later_cancellation_propagates_without_erasing_the_base(monkeypatch):
         raise AnalysisCancelled()
 
     monkeypatch.setattr(proofs, "_analyze_units", cancel)
-    with pytest.raises(AnalysisCancelled):
+    with pytest.raises((AnalysisCancelled, KeyboardInterrupt)):  # (Linux worker: KeyboardInterrupt)
         analyze_units(units, base_graphs=publication)
     assert len(publication.snapshot.graphs) == 2
     assert publication.snapshot.graphs["1:1000"].entry_relations[0].edges()

@@ -142,14 +142,17 @@ def analyze_frozen_bundle_with_summaries(
     model_bindings=(),
     assume_registered_handlers_not_observed: bool = True,
     disabled_model_assumptions=(),
+    retain_admission_failures: bool = False,
 ) -> EngineRun:
-    """Analyze admitted members and retain each scope refusal separately.
+    """Analyze the Bundle's members; a scope refusal aborts the run by default.
 
-    ``EngineRun.admission_failures`` preserves sealed member identities that
-    never became admissible function evidence. Program/transport/hash/naming
-    failures still abort; a nonempty refusal inventory is not a complete
-    program graph. The reference ``engine.analyze_frozen_bundle`` entry keeps
-    its strict whole-run-failure contract.
+    ``retain_admission_failures`` (opt-in): analyze the admitted members and
+    keep each scope refusal in ``EngineRun.admission_failures`` (sealed member
+    identities that never became admissible function evidence) instead of
+    raising. Program/transport/hash/naming failures still abort either way; a
+    nonempty refusal inventory is not a complete program graph. Off (default),
+    the strict whole-run-failure contract is kept: the first refused member
+    raises ``ValueError`` as before.
 
     ``assume_same_result_functions``: the named assumption
     same-result-functions (off by default; model entries with ``same_result``);
@@ -201,7 +204,9 @@ def analyze_frozen_bundle_with_summaries(
             if assume_readonly_image_constant and image_info is not None else None
         )
         return _analyze_session(
-            program, list(session.iter_outcomes()), image_info, readonly_image,
+            program,
+            list(session.iter_outcomes() if retain_admission_failures else session.iter_functions()),
+            image_info, readonly_image,
             boundary_provider=boundary_provider,
             assume_boundary_call_effects=assume_boundary_call_effects,
             assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,

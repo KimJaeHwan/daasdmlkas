@@ -327,6 +327,15 @@ class CallEntryRelation:
         return EntryBinding(definition_id, span, "memory-state", sources,
                             caller_place=place, frontier=tuple(sorted(set(frontier))))
 
+    def _upstream_debt(self, definition_ids) -> bool:
+        """Any debt (call clobber, unresolved read, may-alias, ...) in the
+        backward slice of the caller definitions that give the register."""
+        from .graph_contracts import NodeKind
+
+        graph, nodes = self._normalized.dependencies, self._normalized.memory_graph.definition_nodes
+        seeds = tuple(nodes[identifier] for identifier in definition_ids)
+        return any(graph.node(node).kind is NodeKind.MEMORY_DEBT for node in graph.backward_reachable(seeds))
+
     def _memory_place(self, span):
         if span.object_id.kind is StorageObjectKind.ADDRESS_SPACE:
             return span, None
@@ -358,6 +367,10 @@ class CallEntryRelation:
         ssa, unit = self._normalized.memory_ssa, self._caller.unit
         sources = state_sources(ssa, self.state, register) if self.state else ()
         if len(sources) != 1 or not _covered(sources, register):
+            return None, None
+        if self._upstream_debt(sources[0].definition_ids):
+            # (review fix, Astra P1-2) the register's own clobber is cleared by its last write, but that
+            # write's inputs may come through an opaque call / unresolved read: no address correspondence
             return None, None
         projector = self._index.address_projector()
         expressions = [projector._expression_for_definition(identifier, register)
