@@ -128,16 +128,15 @@ def target_producer(unit, base):
                 continue
             if operation.opcode != "CALLIND" or len(operation.inputs) != 1 or has_internal_flow(row):
                 return None
+            from .pcode_blocks import final_target_index
+
+            # (Astra review round 3) the shared final-write rule: SSA storage overlap, stop at a call
             target = operation.inputs[0]
-            for index in range(ordinal - 1, -1, -1):
-                earlier = row.operations[index]
-                output = earlier.output
-                if output is None or output.coordinate.space_id != target.coordinate.space_id:
-                    continue
-                if output.coordinate.byte_offset < target.coordinate.byte_offset + target.byte_size \
-                        and target.coordinate.byte_offset < output.coordinate.byte_offset + output.byte_size:
-                    return (_operation_key(row.address, index, earlier.opcode), target) if output == target else None
-            return None
+            index = final_target_index(row, ordinal)
+            if index is None:
+                return None
+            earlier = row.operations[index]
+            return (_operation_key(row.address, index, earlier.opcode), target) if earlier.output == target else None
     return None
 
 

@@ -64,6 +64,45 @@ def instruction_key(address: AddressCoordinate) -> str:
     return f"{address.space_id:x}:{address.byte_offset:x}"
 
 
+_CALL_LIKE = ("CALL", "CALLIND", "CALLOTHER")
+
+
+def storage_overlaps(varnode, other) -> bool:
+    """Whether two varnodes share a byte of the storage the memory SSA uses:
+    every REGISTER-kind space is one register file and every UNIQUE-kind space
+    one function temporary object, so those compare by bytes whatever their
+    space ids; other kinds also need the same space (review fixes, Astra
+    rounds 1-3: a write through another space id of the same storage is a write)."""
+    if varnode is None or other is None or varnode.kind is not other.kind:
+        return False
+    if varnode.kind not in (VarnodeKindCode.UNIQUE, VarnodeKindCode.REGISTER) \
+            and varnode.coordinate.space_id != other.coordinate.space_id:
+        return False
+    return (varnode.coordinate.byte_offset < other.coordinate.byte_offset + other.byte_size
+            and other.coordinate.byte_offset < varnode.coordinate.byte_offset + varnode.byte_size)
+
+
+def final_target_index(instruction, ordinal):
+    """Index of the operation that supplies ``instruction.operations[ordinal]``'s
+    target (input 0) in its own instruction: the last earlier operation whose
+    output overlaps it by SSA storage (``storage_overlaps``). None -- no
+    instruction-local producer -- when the instruction has internal flow (the
+    write may be skipped), the target is not a REGISTER/UNIQUE varnode (memory
+    can be written by a STORE with no output varnode), a CALL/CALLIND/CALLOTHER
+    comes first, or nothing writes it (review fixes, Astra rounds 2-3)."""
+    operations = instruction.operations
+    target = operations[ordinal].inputs[0]
+    if target.kind not in (VarnodeKindCode.UNIQUE, VarnodeKindCode.REGISTER) or has_internal_flow(instruction):
+        return None
+    for index in range(ordinal - 1, -1, -1):
+        item = operations[index]
+        if item.opcode in _CALL_LIKE:
+            return None
+        if storage_overlaps(item.output, target):
+            return index
+    return None
+
+
 def has_internal_flow(instruction) -> bool:
     operations = instruction.operations
     for ordinal, operation in enumerate(operations):

@@ -997,11 +997,15 @@ def _analyze_active(normalized, unit, *, readonly_image=None, assumptions=()) ->
 
         if has_internal_flow(instruction):
             return None   # (a branch inside the instruction: no straight line)
+        from .pcode_blocks import storage_overlaps
+
         span = span_of(varnode)
         for index in range(ordinal - 1, -1, -1):
             earlier = instruction.operations[index]
+            if earlier.opcode in ("CALL", "CALLIND", "CALLOTHER"):
+                return None   # (a call in between may change the target: Astra review round 3)
             output = earlier.output
-            if output is not None and output != varnode and _overlap(output, varnode):
+            if output is not None and output != varnode and storage_overlaps(output, varnode):
                 return None   # (a later partial write of the target)
             if output != varnode:
                 continue

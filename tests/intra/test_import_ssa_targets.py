@@ -343,3 +343,88 @@ def test_bundle_target_resolution_uses_only_the_final_target_write(monkeypatch, 
 
     assert f"1:{KEEP:x}" in run(False).calls.values()  # the path is exercised
     assert f"1:{KEEP:x}" not in run(True).calls.values()
+
+
+def _second_space(monkeypatch, *, register):
+    import synthetic
+
+    original = synthetic._Provider._program_candidate
+
+    def extra(self):
+        candidate = original(self)
+        space = synthetic._space(6, reg=True, bits=self.arch.address_bits) if register \
+            else synthetic._space(5, unique=True, bits=self.arch.address_bits)
+        candidate["address_spaces"].append(space)
+        return candidate
+
+    monkeypatch.setattr(synthetic._Provider, "_program_candidate", extra)
+
+
+def _callind_row(built):
+    return next(row for row in built._rows if any(o[0] == "CALLIND" for o in row.ops))
+
+
+def test_forward_target_uses_only_the_final_write_by_storage(monkeypatch):
+    # (review fix, Astra round 3, forward.local_value) an alias write through another UNIQUE space id
+    _second_space(monkeypatch, register=False)
+
+    def run(alias):
+        built = FunctionBuilder().ins(copy(reg(RBX), reg(RCX))).call_indirect(RBX).ret()
+        row = _callind_row(built)
+        target = row.ops[-1][1][0]
+        row.ops[0] = copy(target, const(KEEP))
+        if alias:
+            row.ops.insert(1, copy(dict(target, space_id=5), const(0x1e00)))
+        item, _ = _analyze(monkeypatch, built, FunctionBuilder(entry=KEEP).ret(), imports=False)
+        return item
+
+    assert f"1:{KEEP:x}" in run(False).calls.values()  # the forward path is exercised
+    assert f"1:{KEEP:x}" not in run(True).calls.values()
+
+
+@pytest.mark.parametrize("case", ("register-alias", "internal-flow", "memory-target"))
+def test_final_write_rule_rejects_other_storage_skipped_writes_and_memory_targets(monkeypatch, case):
+    # (review fixes, Astra round 3) the shared final_target_index rule
+    from synthetic import ZF, op as raw_op
+    from tdo_v2.pcode_blocks import final_target_index
+
+    if case == "register-alias":
+        _second_space(monkeypatch, register=True)
+    built = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), ram(SLOT))).call_indirect(RBX).add_rsp(0x28).ret()
+    row = _callind_row(built)
+    target = row.ops[-1][1][0]
+    if case == "register-alias":
+        row.ops = [copy(reg(RAX), ram(SLOT)), copy(dict(reg(RAX), space_id=6), const(0x1e00)),
+                   raw_op("CALLIND", [reg(RAX)])]
+    elif case == "internal-flow":
+        row.ops = [copy(target, const(0x1e00)), raw_op("CBRANCH", [const(2), reg(ZF, 1)]),
+                   copy(target, reg(RBX)), raw_op("CALLIND", [target])]
+    else:
+        row.ops = [copy(ram(DATA_BASE + 0x200), reg(RBX)), store(const(DATA_BASE + 0x200), const(0x1e00)),
+                   raw_op("CALLIND", [ram(DATA_BASE + 0x200)])]
+    item, results = _analyze(monkeypatch, built, forward=False)
+    assert not item.declared
+    instruction = next(row for row in item.unit.observation.instructions
+                       if any(o.opcode == "CALLIND" for o in row.operations))
+    ordinal = next(i for i, o in enumerate(instruction.operations) if o.opcode == "CALLIND")
+    # the alias write (another register space id) is the final write; no producer otherwise
+    assert final_target_index(instruction, ordinal) == (1 if case == "register-alias" else None)
+
+
+@pytest.mark.parametrize("alias", (False, True))
+def test_physical_record_target_producer_uses_the_final_write_rule(monkeypatch, alias):
+    # (review fix, Astra round 3, _record_calls.target_producer)
+    from tdo_v2._record_calls import target_producer
+
+    _second_space(monkeypatch, register=False)
+    built = FunctionBuilder().ins(copy(reg(RBX), const(KEEP))).call_indirect(RBX).ret()
+    row = _callind_row(built)
+    if alias:
+        row.ops.insert(1, copy(dict(row.ops[-1][1][0], space_id=5), const(0x1e00)))
+    item, _ = _analyze(monkeypatch, built, FunctionBuilder(entry=KEEP).ret(), imports=False)
+    instruction = next(row for row in item.unit.observation.instructions
+                       if any(o.opcode == "CALLIND" for o in row.operations))
+    ordinal = next(i for i, o in enumerate(instruction.operations) if o.opcode == "CALLIND")
+    base = f"{instruction.address.space_id:x}:{instruction.address.byte_offset:x}:{ordinal}:CALLIND"
+    found = target_producer(item.unit, base)
+    assert (found is None) if alias else (found is not None and found[0].endswith(":0:COPY"))
