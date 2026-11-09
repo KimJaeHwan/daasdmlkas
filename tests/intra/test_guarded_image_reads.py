@@ -90,8 +90,11 @@ def _fixture(variant="base", *, bound=4, base=TABLE, polarity="false", form="mul
         ins("extend", copy(wide, selector))
     if form == "or":
         ins("or", op("INT_OR", [wide, const(1)], wide))
-    ins("scale", op("INT_LEFT" if form == "shift" else "INT_MULT",
-                     [wide, const(2 if form == "shift" else 4)], scaled))
+    factor = const(2 if form == "shift" else 4)
+    if form == "copied-scale":   # the scale copied into a temporary first (Astra review: still a constant)
+        factor = tmp(0x6080)
+        ins("scale_const", copy(factor, const(4)))
+    ins("scale", op("INT_LEFT" if form == "shift" else "INT_MULT", [wide, factor], scaled))
     ins("address", add(address, const(base), scaled))
     ins("read", load(reg(RAX, 4), address))
     builder.label("done").ret()
@@ -196,7 +199,7 @@ def _execute(unit, keys, expected, image, selectors, *, bits=32):
 
 
 @pytest.mark.parametrize("polarity", ("false", "true"))
-@pytest.mark.parametrize("form", ("mul", "shift", "or"))
+@pytest.mark.parametrize("form", ("mul", "shift", "or", "copied-scale"))
 def test_original_unsigned_guard_and_exact_arithmetic_select_real_image_bytes(polarity, form):
     normalized, unit, keys, expected, image = _normalize(polarity=polarity, form=form)
     (row,) = _rows(normalized, keys["read"])
@@ -490,7 +493,7 @@ def test_solver_budget_does_not_depend_on_host_speed(monkeypatch):
 
     budget, solver = _guarded_image_reads._Budget(), Slow()
     assert [budget.check(solver) for _ in range(5)] == ["sat"] * 5
-    assert all(set(params) == {"rlimit"} for params in solver.params)   # no time-out
+    assert all(set(params) == {"rlimit", "random_seed"} for params in solver.params)   # no time-out
     budget.queries = budget.QUERIES
     with pytest.raises(_guarded_image_reads._Refused):
         budget.check(solver)
@@ -504,9 +507,22 @@ def test_expression_shape_is_limited_before_solving():
     from tdo_v2 import _guarded_image_reads
 
     x, base = z3.BitVec("x", 64), z3.BitVecVal(0x1000, 64)
-    assert _guarded_image_reads._admissible(z3, z3.ULT(x, 8) == True, base + x * 8)
+    admit = _guarded_image_reads._admissible
+    assert admit(z3, z3.ULT(x, 8) == True, base + x * 8) is not None
+    assert admit(z3, z3.ULT(x, 8) == True, base + x * (z3.BitVecVal(4, 64) | 0)) is not None   # folded constant
     chain = x
     for i in range(16):
         chain = chain * (x + i + 1)
-    assert not _guarded_image_reads._admissible(z3, chain == 123456789, base + x)
-    assert not _guarded_image_reads._admissible(z3, x * x == 4, base)
+    assert admit(z3, chain == 123456789, base + x) is None
+    assert admit(z3, x * x == 4, base) is None
+    # products by dense constants: refused once the weighted cost passes the cap (Astra's xorshift-multiply)
+    import random
+
+    rng, wide, mixed = random.Random(123), z3.BitVec("w", 256), None
+    mixed = wide
+    for _ in range(16):
+        mixed = (mixed ^ z3.LShR(mixed, 13)) * rng.getrandbits(64)
+    assert admit(z3, mixed == 123456789, base) is None
+    # the node cap: a wide balanced sum of distinct leaves
+    leaves = [z3.BitVec(f"v{i}", 8) for i in range(5000)]
+    assert admit(z3, z3.Sum(leaves) == 0, base) is None
