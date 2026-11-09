@@ -6377,6 +6377,24 @@ SP를 복원하는지는 Stage 2b의 ReturnRelation / 인증서).
 
 의미 판 47, operation record 18. summary 2/template 7은 유지한다.
 Core 모델은 같은 원 DLL Bundle에서 own version 33으로 다시 도출하며 기존 entries와 가정 목록은 그대로이다.
+(이후 42548b8에서 의미 판 48, Core 모델 own version 34로 올렸다 -- `summary_templates.ENGINE_SEMANTICS_VERSION`,
+`models/derived/ue_core_win64_fstring.json`.)
+
+회사 PC 검토 수정(2026-11-09, Astra 6라운드 + Fable, review/wall-a-home-fixes):
+- 호출 대상의 명령 내부 생산자는 `pcode_blocks.final_target_index` 하나로 고른다: REGISTER/UNIQUE 대상만,
+  명령 내부 흐름이 없을 때, 앞선 CALL/CALLIND/CALLOTHER가 없을 때, 대상과 SSA 저장소로 겹치는 마지막 쓰기
+  (`storage_overlaps`: REGISTER/UNIQUE는 space id와 무관하게 바이트로 비교). import_call_sites,
+  _slot_loaded_register, _callind_sites, _record_calls.target_producer가 쓰고 forward.local_value도 같은 겹침/호출 규칙을 쓴다.
+- 정적 import 인식(`_static_slot_symbol`)은 import-slots-hold-their-exports를 문서대로 적용한다: 슬롯을 포인터 폭
+  전체로 읽고, 함수가 그 슬롯에 쓰지 않을 때만. 남은 한계: 쓰기는 구문으로만 본다(ADDRESS 출력, 상수 주소 STORE).
+  슬롯 주소를 담은 레지스터를 통한 STORE나 피호출 효과가 쓰는 경우는 정적 경로가 보지 못한다(SSA 경로
+  `import_values`는 도달 정의로 본다). 함수 어디서든 쓰면(호출 뒤라도) 정적 결합을 하지 않는다.
+- call-entry 주소 대응은 주소 레지스터의 정의 slice에 부채가 있으면 만들지 않는다(`_upstream_debt`).
+- 요약 진입점은 기본으로 거부 함수가 있으면 예외(기존 계약), `retain_admission_failures=True`일 때만 남긴다.
+- 기본 동작 변화(기능 스위치와 무관): 자기 자신으로 가는 종결 명령(Ghidra의 HLT `goto inst_start` 등)으로 끝나는
+  함수가 이제 정규화된다(그 블록은 출구가 아닌 관찰 지점, 이전에는 "memory terminal states must cover the terminal cuts"
+  실패). 호출 경계 상태(call-state arena, 모든 저장소 class)와 call-entry 연결은 모든 분석에서 만들어진다(결과는 같고 비용만 는다).
+- 프로그램 오라클은 자기 표(`tests/intra/pcode_interpreter.ORACLE_OUTPUT_ONLY`)로 출력 전용 사용자 연산을 실행한다.
 
 완료 경계와 검증:
 - 가변 주소는 검증한 유한 footprint의 읽기별 분리에 한정한다. 임의 주소를 exact 위치로 바꾸지 않는다.
