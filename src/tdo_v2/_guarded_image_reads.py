@@ -6,7 +6,6 @@ These are additional graph relations, not execution, new SSA, or debt removal.
 """
 
 from dataclasses import dataclass, field
-from time import monotonic
 
 from ._scope_contracts import AddressSpaceClassV2, VarnodeKindCode, classify_address_space_v2
 from ._ssa_cycles import SsaCycleIndex
@@ -84,21 +83,24 @@ class _Refused(Exception):
 
 
 class _Budget:
-    """Per-function solver budget in addition to normal analysis step limits."""
+    """Per-function solver budget in addition to normal analysis step limits:
+    at most ``QUERIES`` checks of at most ``RLIMIT`` z3 resource units each.
+    Deterministic -- no wall-clock limit: the same input gets the same answers
+    whatever the host load (a time-out made results load-dependent, e.g. a
+    gate test that failed only under load). ``unknown`` stays a refusal."""
+
+    QUERIES, RLIMIT = 64, 20_000
 
     def __init__(self):
-        self.queries, self.attempts, self.seconds = 0, 0, 0.0
+        self.queries, self.attempts = 0, 0
 
     def check(self, solver):
         step()
-        if self.queries >= 64 or self.seconds >= .5:
+        if self.queries >= self.QUERIES:
             raise _Refused()
-        solver.set(timeout=max(1, min(50, int((.5 - self.seconds) * 1000))), rlimit=20_000)
+        solver.set(rlimit=self.RLIMIT)
         self.queries += 1
-        start = monotonic()
-        result = solver.check()
-        self.seconds += monotonic() - start
-        return result
+        return solver.check()
 
 
 def derive_guarded_image_reads(memory, ssa, observation, entry, context, address_spaces,

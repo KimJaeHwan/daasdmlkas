@@ -468,3 +468,29 @@ def test_optional_image_relations_keep_original_ssa_summary_candidates_and_debts
     # The new alternatives are not numerically consumed by the original
     # function summary. Its old facts and their own premise uses stay exact.
     assert left == right and left.premise_uses == right.premise_uses
+
+
+def test_solver_budget_does_not_depend_on_host_speed(monkeypatch):
+    """The per-function solver budget counts queries and z3 resource units only: slow checks (a loaded host) get
+    the same answers (before: a 0.5 s wall-clock budget refused later queries, a load-dependent result)."""
+    import time
+
+    from tdo_v2 import _guarded_image_reads
+
+    class Slow:
+        def __init__(self):
+            self.params = []
+
+        def set(self, **params):
+            self.params.append(params)
+
+        def check(self):
+            time.sleep(0.2)
+            return "sat"
+
+    budget, solver = _guarded_image_reads._Budget(), Slow()
+    assert [budget.check(solver) for _ in range(5)] == ["sat"] * 5
+    assert all(set(params) == {"rlimit"} for params in solver.params)   # no time-out
+    budget.queries = budget.QUERIES
+    with pytest.raises(_guarded_image_reads._Refused):
+        budget.check(solver)
