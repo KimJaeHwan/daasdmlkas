@@ -127,8 +127,11 @@ def main() -> int:
         for unit in units if unit.observation is not None
     }
     # output-only user ops by the oracle's own table (not the engine's: a wrong engine entry is an oracle miss)
+    # (keyed by the full translation namespace -- ``language`` is only the language id without --models)
     from pcode_interpreter import ORACLE_OUTPUT_ONLY
-    output_only = ORACLE_OUTPUT_ONLY.get(language, {})
+    namespace = units[0].scopes.program.evidence.translation_namespace if units else None
+    output_only = ORACLE_OUTPUT_ONLY.get(
+        namespace and (namespace.language_id, namespace.major_version, namespace.minor_version), {})
     for key, item in sorted(results.items()):
         totals["functions"] += 1
         totals["calls_internal"] += len(item.calls)
