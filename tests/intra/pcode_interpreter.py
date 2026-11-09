@@ -96,7 +96,8 @@ class Interpreter:
                  sinks: tuple | None = None, externals: dict | None = None,
                  no_effect_userops: frozenset = frozenset(), address_bits: dict | None = None,
                  abi_calls: dict | None = None, external_abi: str = "win64",
-                 resume_unvalidated_returns: bool = False) -> None:
+                 resume_unvalidated_returns: bool = False,
+                 output_only_calls: frozenset = frozenset()) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
 
         ``external_abi``: the calling convention ``externals`` run with --
@@ -135,6 +136,9 @@ class Interpreter:
         self._externals = dict(externals or {})
         # CALLOTHER indices with no data effect (models/pcodeops: x86 LOCK/UNLOCK)
         self._no_effect_userops = frozenset(no_effect_userops)
+        # CALLOTHER operation keys the engine takes as audited output-only intrinsics
+        # (intrinsic_refinements.refinements_for): they write their output only
+        self._output_only_calls = frozenset(output_only_calls)
         self._heap = 0x6000_0000
         self._instructions = {
             (row.address.space_id, row.address.byte_offset): row
@@ -621,6 +625,13 @@ class Interpreter:
         if opcode == "CALLOTHER" and len(inputs) == 2                 and all(item.kind is VarnodeKindCode.CONSTANT for item in inputs)                 and inputs[1].coordinate.byte_offset in _TRAP_USEROPS.get(inputs[0].coordinate.byte_offset, ()):
             return ("halt", None)  # int 3 / int 0x29 (debug-break-traps-do-not-return)
         if opcode == "CALLOTHER" and output is None and len(inputs) == 1                 and inputs[0].kind is VarnodeKindCode.CONSTANT                 and inputs[0].coordinate.byte_offset in self._no_effect_userops:
+            return None
+        if opcode == "CALLOTHER" and output is not None and key in self._output_only_calls:
+            for item in inputs[1:]:
+                if item.kind is not VarnodeKindCode.CONSTANT:
+                    self._value(key, item, run)
+            self._write(key, output.coordinate.space_id, output.coordinate.byte_offset,
+                        output.byte_size, self._rng.getrandbits(8 * output.byte_size))
             return None
         if opcode in ("CALL", "CALLIND", "CALLOTHER") and self._havoc is not None:
             for item in inputs[1:] if opcode != "CALLOTHER" else inputs:

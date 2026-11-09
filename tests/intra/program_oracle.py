@@ -216,7 +216,7 @@ def _covering_runs(proven, writer, space, offset, reachable, reg_space, located=
 def check_program(function, observation, program, *, seeds=range(6), register_pools=None,
                   spaces=(CONST, REG, UNIQUE), havoc_calls=None, image=None,
                   externals=None, no_effect_userops=frozenset(), private_frame_above=0,
-                  address_bits=None, external_abi="win64") -> ProgramReport:
+                  address_bits=None, external_abi="win64", output_only_calls=frozenset()) -> ProgramReport:
     """``program``: callee entry (space, offset) -> observation.
     ``external_abi``: the convention the modeled externals run with
     (``Interpreter.external_abi``: the binary's, "win64" or "sysv64").
@@ -264,7 +264,7 @@ def check_program(function, observation, program, *, seeds=range(6), register_po
                                   havoc_calls=havoc_calls, image=image, program=program,
                                   externals=externals, no_effect_userops=no_effect_userops,
                                   address_bits=address_bits, abi_calls=abi_calls,
-                                  external_abi=external_abi)
+                                  external_abi=external_abi, output_only_calls=output_only_calls)
         for register, value in (register_pools(seed) if register_pools else {}).items():
             interpreter.preset(reg_space, register, 8, value)
         try:

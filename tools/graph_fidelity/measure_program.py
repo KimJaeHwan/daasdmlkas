@@ -126,6 +126,9 @@ def main() -> int:
         (unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset): unit.observation
         for unit in units if unit.observation is not None
     }
+    # the audited output-only intrinsics the engine applies (every function the program runs)
+    from tdo_v2.intrinsic_refinements import refinements_for
+    output_only = frozenset(key for unit in units if unit.observation is not None for key in refinements_for(unit))
     for key, item in sorted(results.items()):
         totals["functions"] += 1
         totals["calls_internal"] += len(item.calls)
@@ -149,7 +152,7 @@ def main() -> int:
                                register_pools=pool, spaces=(const, regs, unique),
                                havoc_calls=(regs, sp_offset, sp_size), image=image,
                                externals=externals, no_effect_userops=userops, address_bits=address_bits,
-                               external_abi=external_abi,
+                               external_abi=external_abi, output_only_calls=output_only,
                                private_frame_above=options.get("private_frame_above", 0))
         totals["runs"] += report.runs
         totals["skipped_runs"] += report.unsupported
