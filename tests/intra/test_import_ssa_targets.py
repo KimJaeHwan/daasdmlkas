@@ -284,3 +284,62 @@ def test_failed_candidate_query_also_preserves_assumption_uses(monkeypatch):
         assert not slots.used
     finally:
         memory.IMPORT_SLOTS.reset(token)
+
+
+def _second_unique_space(monkeypatch):
+    import synthetic
+
+    original = synthetic._Provider._program_candidate
+
+    def two_unique_spaces(self):
+        candidate = original(self)
+        candidate["address_spaces"].append(synthetic._space(5, unique=True, bits=self.arch.address_bits))
+        return candidate
+
+    monkeypatch.setattr(synthetic._Provider, "_program_candidate", two_unique_spaces)
+
+
+def _overwrite(row, where, *, space):
+    # an overwrite of the CALLIND's target bytes just before the CALLIND (same or another UNIQUE space id)
+    target = next(o for o in row.ops if o[0] == "CALLIND")[1][0]
+    written = dict(target, space_id=5) if space == "other" else target
+    row.ops.insert(where, copy(written, const(0x1e00)))
+
+
+@pytest.mark.parametrize("space", ("same", "other"))
+@pytest.mark.parametrize("shape", ("register", "slot"))
+def test_static_import_paths_use_only_the_final_target_write(monkeypatch, shape, space):
+    # (review fix, Astra round 2) _slot_loaded_register / the direct-slot scan of import_call_sites
+    _second_unique_space(monkeypatch)
+
+    def caller():
+        built = FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), ram(SLOT))).call_indirect(RBX).add_rsp(0x28).ret()
+        row = next(row for row in built._rows if any(o[0] == "CALLIND" for o in row.ops))
+        if shape == "slot":
+            row.ops[0] = copy(row.ops[0][2], ram(SLOT))
+        return built, row
+
+    built, _ = caller()
+    item, _ = _analyze(monkeypatch, built, forward=False)
+    assert len(item.declared) == 1  # the path is exercised
+    built, row = caller()
+    _overwrite(row, 1, space=space)
+    item, _ = _analyze(monkeypatch, built, forward=False)
+    assert not item.declared
+
+
+@pytest.mark.parametrize("space", ("same", "other"))
+def test_bundle_target_resolution_uses_only_the_final_target_write(monkeypatch, space):
+    # (review fix, Astra round 2) _callind_sites: a stale COPY of a constant register is not the target
+    _second_unique_space(monkeypatch)
+    monkeypatch.setenv("TDO_V2_FORWARD", "0")
+
+    def run(overwrite):
+        built = FunctionBuilder().ins(copy(reg(RBX), const(KEEP))).call_indirect(RBX).ret()
+        if overwrite:
+            _overwrite(next(row for row in built._rows if any(o[0] == "CALLIND" for o in row.ops)), 1, space=space)
+        results = analyze_units(program_units(built, FunctionBuilder(entry=KEEP).ret()))
+        return results["1:1000"]
+
+    assert f"1:{KEEP:x}" in run(False).calls.values()  # the path is exercised
+    assert f"1:{KEEP:x}" not in run(True).calls.values()

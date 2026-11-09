@@ -2142,11 +2142,11 @@ def import_call_sites(unit, image_info, local_functions=frozenset()) -> dict:
                     and instruction.fallthrough is None and ordinal == len(operations) - 1:
                 symbol = image_info.import_at_slot(target.coordinate.space_id, target.coordinate.byte_offset)
             elif operation.opcode == "CALLIND":
-                for copy in operations[:ordinal]:
-                    if copy.opcode == "COPY" and copy.output == target \
-                            and copy.inputs[0].kind is VarnodeKindCode.ADDRESS:
-                        source = copy.inputs[0].coordinate
-                        symbol = image_info.import_at_slot(source.space_id, source.byte_offset)
+                copy = _final_target_write(operations, ordinal)
+                if copy is not None and copy.opcode == "COPY" and copy.output == target \
+                        and copy.inputs[0].kind is VarnodeKindCode.ADDRESS:
+                    source = copy.inputs[0].coordinate
+                    symbol = image_info.import_at_slot(source.space_id, source.byte_offset)
                 if symbol is None:
                     symbol = loaded.get(key)
             if symbol is not None:
@@ -2173,7 +2173,29 @@ def _storage_overlaps(varnode, other) -> bool:
         return False
     if varnode.kind is not VarnodeKindCode.UNIQUE:
         return _overlaps(varnode, other)
-    return varnode.coordinate.byte_offset < other.coordinate.byte_offset + other.byte_size         and other.coordinate.byte_offset < varnode.coordinate.byte_offset + varnode.byte_size
+    return (varnode.coordinate.byte_offset < other.coordinate.byte_offset + other.byte_size
+            and other.coordinate.byte_offset < varnode.coordinate.byte_offset + varnode.byte_size)
+
+
+def _final_target_index(operations, ordinal):
+    """Index of the last operation before ``operations[ordinal]`` (a call) that
+    writes storage overlapping its target (``_storage_overlaps``); None when a
+    call / user op comes first or nothing in the instruction writes it. Only
+    that write supplies the target: an earlier COPY of the right shape that a
+    later write overlaps is stale (review fix, Astra round 2)."""
+    target = operations[ordinal].inputs[0]
+    for index in range(ordinal - 1, -1, -1):
+        item = operations[index]
+        if item.opcode in _CALL_OPCODES_ALL:
+            return None
+        if _storage_overlaps(item.output, target):
+            return index
+    return None
+
+
+def _final_target_write(operations, ordinal):
+    index = _final_target_index(operations, ordinal)
+    return None if index is None else operations[index]
 
 
 def _slot_loaded_register(unit, image_info) -> dict:
@@ -2222,7 +2244,7 @@ def _slot_loaded_register(unit, image_info) -> dict:
             elif target.kind is VarnodeKindCode.UNIQUE:
                 # a temporary: only operations naming it write it (memory a
                 # STORE may reach is not one)
-                writes = [position for position, item in enumerate(prefix) if _overlaps(item.output, target)]
+                writes = [position for position, item in enumerate(prefix) if _storage_overlaps(item.output, target)]
                 if not writes:
                     continue
                 last = prefix[writes[-1]]
@@ -2661,12 +2683,15 @@ def _callind_sites(unit):
         for ordinal, operation in enumerate(operations):
             if operation.opcode != "CALLIND" or not operation.inputs:
                 continue
-            for index in range(ordinal):
-                copy = operations[index]
-                if copy.opcode == "COPY" and copy.output == operation.inputs[0] \
-                        and copy.inputs[0].kind is VarnodeKindCode.REGISTER:
-                    yield (_operation_key(instruction.address, ordinal, "CALLIND"),
-                           _operation_key(instruction.address, index, "COPY"), copy.inputs[0])
+            # (review fix, Astra round 2) only the final write of the target before the CALLIND supplies it
+            index = _final_target_index(operations, ordinal)
+            if index is None:
+                continue
+            copy = operations[index]
+            if copy.opcode == "COPY" and copy.output == operation.inputs[0] \
+                    and copy.inputs[0].kind is VarnodeKindCode.REGISTER:
+                yield (_operation_key(instruction.address, ordinal, "CALLIND"),
+                       _operation_key(instruction.address, index, "COPY"), copy.inputs[0])
 
 
 def _forward_switched_on() -> bool:
