@@ -507,22 +507,39 @@ def test_expression_shape_is_limited_before_solving():
     from tdo_v2 import _guarded_image_reads
 
     x, base = z3.BitVec("x", 64), z3.BitVecVal(0x1000, 64)
+    import random
+    import time
+
     admit = _guarded_image_reads._admissible
     assert admit(z3, z3.ULT(x, 8) == True, base + x * 8) is not None
-    assert admit(z3, z3.ULT(x, 8) == True, base + x * (z3.BitVecVal(4, 64) | 0)) is not None   # folded constant
+    assert admit(z3, z3.ULT(x, 8) == True, base + x * (z3.BitVecVal(4, 64) | 0)) is not None   # constant factor
+    assert admit(z3, z3.Or([x == i for i in range(32)]), base + x) is not None                 # small switch
     chain = x
     for i in range(16):
         chain = chain * (x + i + 1)
     assert admit(z3, chain == 123456789, base + x) is None
     assert admit(z3, x * x == 4, base) is None
-    # products by dense constants: refused once the weighted cost passes the cap (Astra's xorshift-multiply)
-    import random
-
-    rng, wide, mixed = random.Random(123), z3.BitVec("w", 256), None
-    mixed = wide
-    for _ in range(16):
-        mixed = (mixed ^ z3.LShR(mixed, 13)) * rng.getrandbits(64)
-    assert admit(z3, mixed == 123456789, base) is None
-    # the node cap: a wide balanced sum of distinct leaves
-    leaves = [z3.BitVec(f"v{i}", 8) for i in range(5000)]
+    # (Astra round 3) repeated squaring is refused fast -- no simplify expansion first
+    square = x
+    for _ in range(18):
+        square = square * square
+    began = time.monotonic()
+    assert admit(z3, square == 4, base) is None and time.monotonic() - began < 1
+    # products by constants: at most two, at most 64 bits wide (sparse and dense constants alike)
+    rng, wide = random.Random(123), z3.BitVec("w", 256)
+    dense, sparse = wide, wide
+    for _ in range(15):
+        dense = (dense ^ z3.LShR(dense, 13)) * rng.getrandbits(64)
+        sparse = (sparse * 0x8000000000000001) ^ wide
+    assert admit(z3, dense == 123456789, base) is None and admit(z3, sparse != 123456788, base) is None
+    assert admit(z3, wide * 3 == 9, base) is None                                               # wider than 64
+    narrow = x
+    for _ in range(3):
+        narrow = narrow * 5 + 1
+    assert admit(z3, narrow == 7, base) is None and admit(z3, x * 5 * 3 == 7, base) is not None
+    # adder bits: a 256-bit sum of 100 terms (0.76 s within rlimit) is refused, 15 terms are admitted
+    assert admit(z3, z3.Sum([z3.LShR(wide, i) ^ i for i in range(100)]) == 5, base) is None
+    assert admit(z3, z3.Sum([z3.LShR(wide, i) ^ i for i in range(15)]) == 5, base) is not None
+    # the node cap: a wide sum of distinct leaves
+    leaves = [z3.BitVec(f"v{i}", 8) for i in range(600)]
     assert admit(z3, z3.Sum(leaves) == 0, base) is None

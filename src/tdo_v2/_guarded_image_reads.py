@@ -103,58 +103,66 @@ class _Budget:
         return solver.check()
 
 
-_MAX_NODES, _MAX_COST = 4096, 8192
+_MAX_NODES, _MAX_PRODUCTS, _MAX_SHIFTS, _MAX_WIDTH, _MAX_ADDER_BITS = 512, 2, 2, 64, 4096
 
 
 def _admissible(z3, *expressions):
-    """A deterministic shape and cost limit before any solver call (Astra review:
-    z3 accounts bit-blasting sparsely -- multiplier chains took seconds within
-    rlimit). Constants copied through temporaries are folded first
-    (``z3.simplify``), so a scaled index stays a product by a numeral. Refused
-    (None): a multiplication with two or more non-constant factors, more than
-    ``_MAX_NODES`` distinct nodes, or a weighted bit-blast cost above
-    ``_MAX_COST`` -- a product by a constant costs width x its one bits (width
-    for a power of two), a shift by a symbolic amount width x log2(width), an
-    addition or comparison width per operand, anything else 1. Calibrated on
-    z3 4.16.0: cost 8192 is about 0.04 s per check; bounds checks, masks,
-    scaled indexes and small switches cost under 400. Otherwise the simplified
-    expressions (the same formulas) are returned for solving."""
-    import math
-
-    simplified = tuple(z3.simplify(expression) for expression in expressions)
-    seen, stack, total = set(), list(simplified), 0
-    shifts = (z3.Z3_OP_BSHL, z3.Z3_OP_BLSHR, z3.Z3_OP_BASHR)
-    linear = (z3.Z3_OP_BADD, z3.Z3_OP_BSUB, z3.Z3_OP_ULT, z3.Z3_OP_ULEQ, z3.Z3_OP_UGT, z3.Z3_OP_UGEQ,
-              z3.Z3_OP_SLT, z3.Z3_OP_SLEQ, z3.Z3_OP_SGT, z3.Z3_OP_SGEQ)
+    """A deterministic grammar limit before any solver call, on the expressions
+    as built (no z3.simplify: it can expand a shared DAG exponentially before
+    any refusal -- Astra review). z3's resource accounting is sparse inside
+    bit-blasted multipliers (seconds within rlimit), so the admitted shapes are
+    small instead of costed: at most ``_MAX_NODES`` distinct nodes; at most
+    ``_MAX_PRODUCTS`` multiplications with a non-constant factor and
+    ``_MAX_SHIFTS`` shifts by a non-constant amount, each at most
+    ``_MAX_WIDTH`` bits; no multiplication of two non-constant factors; at most
+    ``_MAX_ADDER_BITS`` bits of non-constant additions/subtractions/ordered
+    comparisons (a 256-bit sum of 100 terms took 0.76 s within rlimit). A
+    subexpression without free symbols counts as a constant (a scale copied
+    through temporaries stays a constant factor). Bounds checks, masks, scaled
+    indexes and small switches fit. Returns the expressions, or None."""
+    constant, order, stack = {}, [], [(expression, False) for expression in expressions]
     while stack:
-        expression = stack.pop()
+        expression, done = stack.pop()
         identifier = expression.get_id()
-        if identifier in seen:
+        if done:
+            children = expression.children() if z3.is_app(expression) else ()
+            constant[identifier] = z3.is_bv_value(expression) or (
+                bool(children) and not z3.is_const(expression) and all(constant[child.get_id()] for child in children))
+            order.append(expression)
             continue
-        seen.add(identifier)
-        if len(seen) > _MAX_NODES:
+        if identifier in constant:
+            continue
+        constant[identifier] = None   # visiting
+        if len(constant) > _MAX_NODES:
             return None
+        stack.append((expression, True))
+        if z3.is_app(expression):
+            stack.extend((child, False) for child in expression.children() if child.get_id() not in constant)
+    products = shifts = adder_bits = 0
+    adders = (z3.Z3_OP_BADD, z3.Z3_OP_BSUB, z3.Z3_OP_ULT, z3.Z3_OP_ULEQ, z3.Z3_OP_UGT, z3.Z3_OP_UGEQ,
+              z3.Z3_OP_SLT, z3.Z3_OP_SLEQ, z3.Z3_OP_SGT, z3.Z3_OP_SGEQ)
+    for expression in order:
         if not z3.is_app(expression):
             continue
         children = expression.children()
-        stack.extend(children)
-        width = expression.size() if z3.is_bv(expression) else             children[0].size() if children and z3.is_bv(children[0]) else 1
         if z3.is_app_of(expression, z3.Z3_OP_BMUL):
-            constants = [child.as_long() for child in children if z3.is_bv_value(child)]
-            if len(children) - len(constants) >= 2:
+            variable = sum(not constant[child.get_id()] for child in children)
+            if variable >= 2:
                 return None
-            constant = constants[0] if constants else 0
-            total += width if constant & (constant - 1) == 0 else width * bin(constant).count("1")
-        elif any(z3.is_app_of(expression, kind) for kind in shifts):
-            total += width if z3.is_bv_value(children[1]) else width * max(1, math.ceil(math.log2(width)))
-        elif any(z3.is_app_of(expression, kind) for kind in linear):
-            total += width * max(1, len(children) - 1)
-        else:
-            total += 1
-        if total > _MAX_COST:
-            return None
+            if variable:
+                products += 1
+                if expression.size() > _MAX_WIDTH or products > _MAX_PRODUCTS:
+                    return None
+        elif any(z3.is_app_of(expression, kind) for kind in adders)                 and not all(constant[child.get_id()] for child in children):
+            adder_bits += children[0].size() * max(1, len(children) - 1)
+            if adder_bits > _MAX_ADDER_BITS:
+                return None
+        elif any(z3.is_app_of(expression, kind) for kind in (z3.Z3_OP_BSHL, z3.Z3_OP_BLSHR, z3.Z3_OP_BASHR))                 and not constant[children[1].get_id()]:
+            shifts += 1
+            if expression.size() > _MAX_WIDTH or shifts > _MAX_SHIFTS:
+                return None
     step()
-    return simplified
+    return expressions
 
 
 def derive_guarded_image_reads(memory, ssa, observation, entry, context, address_spaces,
@@ -227,10 +235,8 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
                             raise _Refused()
                         tree.address_phase = True
                         address = tree.definition(address_id)
-                        admitted = _admissible(z3, condition, address)
-                        if admitted is None:
+                        if _admissible(z3, condition, address) is None:
                             raise _Refused()
-                        condition, address = admitted
                         solver = z3.Solver()
                         solver.add((condition != 0) if success[0] == taken else (condition == 0))
                         selectors = []
