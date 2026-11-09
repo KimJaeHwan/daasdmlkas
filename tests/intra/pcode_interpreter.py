@@ -86,6 +86,17 @@ def _signed(value: int, size: int) -> int:
     return value - (1 << bits) if value >> (bits - 1) & 1 else value
 
 
+# The oracle's own table of x86 user ops whose ISA effect writes only the destination register (Intel SDM:
+# PACKSSWB, PSHUFLW, VPCMPEQW -- destination only, flags unchanged; Ghidra 12.0.4 x86 4.6 user-op indices).
+# Deliberately separate from src/tdo_v2/intrinsic_refinements.py: a wrong engine entry must show up as an
+# oracle miss, not be mirrored (Astra review round 4 P2).
+ORACLE_OUTPUT_ONLY = {("x86:LE:64:default", 4, 6): {
+    132: ((16, 16), 16),        # packsswb xmm, xmm/m128
+    157: ((16, 16, 8), 16),     # pshuflw xmm, xmm/m128, imm8 (the immediate is an 8-byte constant)
+    483: ((32, 32), 32),        # vpcmpeqw ymm, ymm, ymm/m256
+}}
+
+
 class Interpreter:
     def __init__(self, observation, *, constant_space: int, seed: int,
                  register_values: dict[int, int] | None = None,
@@ -97,7 +108,7 @@ class Interpreter:
                  no_effect_userops: frozenset = frozenset(), address_bits: dict | None = None,
                  abi_calls: dict | None = None, external_abi: str = "win64",
                  resume_unvalidated_returns: bool = False,
-                 output_only_calls: frozenset = frozenset()) -> None:
+                 output_only_userops: dict | None = None) -> None:
         """``havoc_calls`` = (register space, stack pointer offset, stack pointer size).
 
         ``external_abi``: the calling convention ``externals`` run with --
@@ -136,9 +147,11 @@ class Interpreter:
         self._externals = dict(externals or {})
         # CALLOTHER indices with no data effect (models/pcodeops: x86 LOCK/UNLOCK)
         self._no_effect_userops = frozenset(no_effect_userops)
-        # CALLOTHER operation keys the engine takes as audited output-only intrinsics
-        # (intrinsic_refinements.refinements_for): they write their output only
-        self._output_only_calls = frozenset(output_only_calls)
+        # CALLOTHER index -> (input byte sizes, output byte size) of user ops whose ISA effect is
+        # "write the output register only" (``ORACLE_OUTPUT_ONLY``, the oracle's own table -- not the
+        # engine's: Astra review round 4 P2); other CALLOTHERs havoc as before
+        self._output_only_userops = dict(output_only_userops or {})
+        self._output_only_keys = set()
         self._heap = 0x6000_0000
         self._instructions = {
             (row.address.space_id, row.address.byte_offset): row
@@ -398,7 +411,8 @@ class Interpreter:
             else:
                 self._call_bytes.discard(key)
         if inside:
-            if operation.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") or operation in self._assumed:
+            if operation.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") \
+                    and operation not in self._output_only_keys or operation in self._assumed:
                 tags = frozenset({("call", operation)})
             else:
                 tags = frozenset(self._operation_inputs)
@@ -417,12 +431,22 @@ class Interpreter:
                     self._copy_source.pop(key, None)
             return
         if self._track:
-            if writer.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") or writer in self._assumed:
+            if writer.rsplit(":", 1)[-1] in ("CALL", "CALLIND", "CALLOTHER") \
+                    and writer not in self._output_only_keys or writer in self._assumed:
                 tags = frozenset({("call", writer)})
             else:
                 tags = frozenset(self._operation_inputs)
             for key in keys:
                 self.provenance[key] = tags
+
+    def _output_only(self, inputs, output) -> bool:
+        """An output-only user op of ``ORACLE_OUTPUT_ONLY``: a constant index, the
+        listed operand sizes, a REGISTER output."""
+        if not inputs or inputs[0].kind is not VarnodeKindCode.CONSTANT or output.kind is not VarnodeKindCode.REGISTER:
+            return False
+        signature = self._output_only_userops.get(inputs[0].coordinate.byte_offset)
+        return signature is not None and tuple(item.byte_size for item in inputs[1:]) == signature[0] \
+            and output.byte_size == signature[1]
 
     def final_bytes(self):
         """(space, offset) -> (value, writer, provenance) of every byte the run wrote."""
@@ -626,7 +650,8 @@ class Interpreter:
             return ("halt", None)  # int 3 / int 0x29 (debug-break-traps-do-not-return)
         if opcode == "CALLOTHER" and output is None and len(inputs) == 1                 and inputs[0].kind is VarnodeKindCode.CONSTANT                 and inputs[0].coordinate.byte_offset in self._no_effect_userops:
             return None
-        if opcode == "CALLOTHER" and output is not None and key in self._output_only_calls:
+        if opcode == "CALLOTHER" and output is not None and self._output_only(inputs, output):
+            self._output_only_keys.add(key)
             for item in inputs[1:]:
                 if item.kind is not VarnodeKindCode.CONSTANT:
                     self._value(key, item, run)
