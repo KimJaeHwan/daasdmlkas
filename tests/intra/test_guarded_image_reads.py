@@ -494,3 +494,19 @@ def test_solver_budget_does_not_depend_on_host_speed(monkeypatch):
     budget.queries = budget.QUERIES
     with pytest.raises(_guarded_image_reads._Refused):
         budget.check(solver)
+
+
+def test_expression_shape_is_limited_before_solving():
+    """Symbolic-by-symbolic products are refused before any check (z3 accounts them sparsely: seconds within
+    rlimit -- Astra review); scaled indexes and plain comparisons stay admitted."""
+    import z3
+
+    from tdo_v2 import _guarded_image_reads
+
+    x, base = z3.BitVec("x", 64), z3.BitVecVal(0x1000, 64)
+    assert _guarded_image_reads._admissible(z3, z3.ULT(x, 8) == True, base + x * 8)
+    chain = x
+    for i in range(16):
+        chain = chain * (x + i + 1)
+    assert not _guarded_image_reads._admissible(z3, chain == 123456789, base + x)
+    assert not _guarded_image_reads._admissible(z3, x * x == 4, base)

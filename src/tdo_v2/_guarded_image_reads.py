@@ -103,6 +103,35 @@ class _Budget:
         return solver.check()
 
 
+_MAX_NODES = 4096
+
+
+def _admissible(z3, *expressions) -> bool:
+    """A deterministic shape limit before any solver call (Astra review: z3's
+    resource accounting is sparse inside bit-blasted multipliers -- a chain of
+    symbolic-by-symbolic products took seconds within rlimit). Refused: more
+    than ``_MAX_NODES`` distinct expression nodes, or a multiplication with two
+    or more non-constant factors. A product by a constant (scaled indexes)
+    stays admitted."""
+    seen, stack = set(), list(expressions)
+    while stack:
+        expression = stack.pop()
+        identifier = expression.get_id()
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        if len(seen) > _MAX_NODES:
+            return False
+        if not z3.is_app(expression):
+            continue
+        children = expression.children()
+        if z3.is_app_of(expression, z3.Z3_OP_BMUL)                 and sum(not z3.is_bv_value(child) for child in children) >= 2:
+            return False
+        stack.extend(children)
+    step()
+    return True
+
+
 def derive_guarded_image_reads(memory, ssa, observation, entry, context, address_spaces,
                                namespace, readonly_image, wild_objects=frozenset(), clobbered=(),
                                excluded=frozenset()):
@@ -173,6 +202,8 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
                             raise _Refused()
                         tree.address_phase = True
                         address = tree.definition(address_id)
+                        if not _admissible(z3, condition, address):
+                            raise _Refused()
                         solver = z3.Solver()
                         solver.add((condition != 0) if success[0] == taken else (condition == 0))
                         selectors = []
