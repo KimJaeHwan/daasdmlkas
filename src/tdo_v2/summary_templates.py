@@ -945,7 +945,7 @@ def _refuse_control_context(key, context, results, *, resource_only=False) -> No
 
 def build_file(results, exports, *, file_id, version, library, external_models, pcodeop_models,
                private_frame_above, base_dependent, readonly_image=None, traps=False, notes=None,
-               producer=None, catalog_models=()):
+               producer=None, catalog_models=(), code_only=None):
     """(file dict, {export name: refusal reason}) for ``exports`` -- (function
     key, name, original names) -- of one ``analyze_units`` run of ``library``
     under ``relative_memory.ImageBaseTracking`` (``base_dependent``: its
@@ -954,7 +954,11 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
     run's declaration-only model files (``analyze_units``
     ``assumption_declarations``): what each declaration the templates rest on
     states is recorded (``source.declarations``) and compared by ``refusal``
-    -- the recorded model files' digests cover their own."""
+    -- the recorded model files' digests cover their own. ``code_only``: the
+    run's ``code_only_profile.CodeOnlyProfile`` -- the file records the
+    profile's switch vector and takes its compatibility ABI tag (a run with
+    no model file has none of its own); a template resting on a label the
+    profile does not allow is refused."""
     from .summary_engine import run_assumptions
 
     if readonly_image is not None:
@@ -1001,6 +1005,13 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
         "assumptions": list(run_assumptions(results, home_space=private_frame_above, traps=traps,
                                             pcodeop_models=pcodeop_models)),
     }
+    if code_only is not None:
+        from .code_only_profile import label_allowed, switch_vector
+
+        outside = sorted(label for label in source["assumptions"] if not label_allowed(label))
+        if outside:
+            raise TemplateRefused("code-only profile: the derivation rests on " + ", ".join(outside))
+        source["code_only_switches"] = switch_vector()
     if catalog_models:
         from .summary_store import ExternalModels, assumption_catalog
 
@@ -1013,7 +1024,8 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
     if producer:
         source["producer"] = dict(producer)
     raw = {"format_version": 1, "kind": "summary", "id": file_id, "version": version,
-           "language_id": namespace.language_id, "abi_tag": _abi_tag(external_models),
+           "language_id": namespace.language_id,
+           "abi_tag": code_only.abi_tag if code_only is not None else _abi_tag(external_models),
            "libraries": [library], "source": source, "entries": entries}
     if notes:
         raw["notes"] = notes

@@ -142,6 +142,7 @@ def analyze_frozen_bundle_with_summaries(
     model_bindings=(),
     assume_registered_handlers_not_observed: bool = True,
     disabled_model_assumptions=(),
+    code_only_profile=None,
     retain_admission_failures: bool = False,
 ) -> EngineRun:
     """Analyze the Bundle's members; a scope refusal aborts the run by default.
@@ -236,6 +237,7 @@ def analyze_frozen_bundle_with_summaries(
             model_bindings=model_bindings,
             assume_registered_handlers_not_observed=assume_registered_handlers_not_observed,
             disabled_model_assumptions=disabled_model_assumptions,
+            code_only_profile=code_only_profile,
         )
 
 
@@ -269,6 +271,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
     model_bindings=(),
     assume_registered_handlers_not_observed: bool = True,
     disabled_model_assumptions=(),
+    code_only_profile=None,
 ) -> EngineRun:
     """The summary engine on admitted evidences and explicit scope outcomes.
 
@@ -309,6 +312,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
         model_bindings=model_bindings,
         assume_registered_handlers_not_observed=assume_registered_handlers_not_observed,
         disabled_model_assumptions=disabled_model_assumptions,
+        code_only_profile=code_only_profile,
     )
 
 
@@ -341,8 +345,35 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     model_bindings=(),
     assume_registered_handlers_not_observed: bool = True,
     disabled_model_assumptions=(),
+    code_only_profile=None,
 ) -> EngineRun:
     """The post-admission body of the summary engine (unchanged)."""
+    if code_only_profile is not None:
+        # the code-only profile (``code_only_profile``): one assumption vector
+        # for the whole run, whatever was asked -- the locals below feed the
+        # home-space slot, the stack-evidence withdrawal and the run's
+        # recorded assumptions; ``analyze_units`` forces the same again
+        from .code_only_profile import forced_arguments
+
+        code_only_profile.check_inputs(model_bindings=model_bindings, lifecycle_contracts=lifecycle_contracts,
+                                       linker=linker, boundary_call_effects=assume_boundary_call_effects)
+        forced = forced_arguments()
+        assume_globals_disjoint_from_stack = forced["assume_globals_disjoint_from_stack"]
+        assume_direction_flag_clear = forced["assume_direction_flag_clear"]
+        assume_win64_home_space_private = forced["assume_win64_home_space_private"]
+        assume_debug_break_traps_do_not_return = forced["assume_debug_break_traps_do_not_return"]
+        assume_faults_end_execution = forced["assume_faults_end_execution"]
+        assume_stock_ghidra_translator = forced["assume_stock_ghidra_translator"]
+        assume_import_slots_hold_exports = forced["assume_import_slots_hold_exports"]
+        assume_entry_values_not_frame = forced["assume_entry_values_not_frame"]
+        assume_opaque_callees_leave_no_stack_addresses = forced["assume_opaque_callees_leave_no_stack_addresses"]
+        assume_pre_escape_values_not_frame = forced["assume_pre_escape_values_not_frame"]
+        assume_opaque_callees_restore_stack_pointer = forced["assume_opaque_callees_restore_stack_pointer"]
+        assume_same_result_functions = forced["assume_same_result_functions"]
+        assume_accessor_result_separate = forced["assume_accessor_result_separate"]
+        assume_accessor_private_state = forced["assume_accessor_private_state"]
+        assume_registered_handlers_not_observed = forced["assume_registered_handlers_not_observed"]
+        external_models = code_only_profile.admit(external_models)
     operation_records = operation_records or physical_memory_records
     # (inputs read more than once -- analysis, linking, the premise report --
     # materialized once: an iterator would reach the report empty)
@@ -522,6 +553,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         model_bindings=tuple(model_bindings),
         assume_registered_handlers_not_observed=assume_registered_handlers_not_observed,
         disabled_model_assumptions=tuple(disabled_model_assumptions),
+        code_only_profile=code_only_profile,
         record_provenance=record_provenance,
     )
     assumptions = run_assumptions(results, readonly_image=readonly_image, home_space=home_space,

@@ -234,7 +234,7 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
                   assume_opaque_callees_leave_no_stack_addresses=True,
                   assume_pre_escape_values_not_frame=True,
                   assume_opaque_callees_restore_stack_pointer=True,
-                  base_graphs=None,
+                  base_graphs=None, code_only_profile=None,
                   **options) -> dict[str, "AnalyzedFunction"]:
     """``_analyze_units`` (below) under the named assumption
     import-slots-hold-their-exports when ``assume_import_slots_hold_exports``
@@ -251,7 +251,21 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     summary work, and remains available even if this proof pass is cancelled.
     Base instances never enter the summary producer pool. Without this
     handle there is no extra normalization pass or change of defaults.
+
+    ``code_only_profile`` (``code_only_profile.CodeOnlyProfile``): the run's
+    assumption switches are the profile's whatever was asked, only its
+    pinned derived templates are models, and every selection checks it.
     """
+    if code_only_profile is not None:
+        from .code_only_profile import forced_arguments
+
+        forced = forced_arguments()
+        assume_import_slots_hold_exports = forced["assume_import_slots_hold_exports"]
+        assume_entry_values_not_frame = forced["assume_entry_values_not_frame"]
+        assume_opaque_callees_leave_no_stack_addresses = forced["assume_opaque_callees_leave_no_stack_addresses"]
+        assume_pre_escape_values_not_frame = forced["assume_pre_escape_values_not_frame"]
+        assume_opaque_callees_restore_stack_pointer = forced["assume_opaque_callees_restore_stack_pointer"]
+        options = code_only_profile.analysis_options(options)
     if base_graphs is not None:
         from .base_graph import BaseGraphPublication
 
@@ -518,7 +532,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_registered_handlers_not_observed=True, lifecycle_contracts=(),
                   disabled_model_assumptions=(), assumption_declarations=(),
                   assume_faults_end_execution=False, assume_stock_ghidra_translator=False,
-                  exception_directory=None) -> dict[str, AnalyzedFunction]:
+                  exception_directory=None, code_only_profile=None) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -621,6 +635,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         registered_handlers=assume_registered_handlers_not_observed,
         faults_end_execution=assume_faults_end_execution, stock_translator=assume_stock_ghidra_translator,
         model_assumptions_off=disabled_model_assumptions)
+    if code_only_profile is not None:
+        code_only_profile.check_disabled(disabled)   # (the effective vector, after every coupling)
     cuts = _model_cuts({key: unit for key, unit in functions.items() if key not in keep_uncut},
                        image_info, external_models, own_library, disabled) \
         if own_library and image_info and external_models else {}
@@ -647,6 +663,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         refused_sites.setdefault(key, {}).update(reasons)
 
     def usable(model_file, entry):
+        if code_only_profile is not None:
+            reason = code_only_profile.refusal(model_file, entry)
+            if reason is not None:
+                return reason
         if entry.refusal is not None:   # (undeclared callbacks / frees, invoked callbacks, engine version)
             return entry.refusal
         if entry.template is None:

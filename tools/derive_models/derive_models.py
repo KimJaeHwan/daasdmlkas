@@ -75,7 +75,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                    entry_values_not_frame: bool = True, same_result: bool = False,
                    accessor_separate: bool = False, opaque_no_stack: bool = True, pre_escape: bool = True,
                    registered_handlers: bool = True, accessor_private_state: bool = False,
-                   model_assumptions_off=(), catalog_models=(), opaque_restores_sp: bool = True):
+                   model_assumptions_off=(), catalog_models=(), opaque_restores_sp: bool = True,
+                   code_only_profile=None):
     """(model file dict, {export name: refusal reason}, export names the
     Bundle does not export) -- the templates of ``export_names`` of the
     library Bundle at ``generation``, derived with the given analysis
@@ -95,7 +96,10 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
     ``model_assumptions_off``: model assumptions switched off
     (``interprocedural.analyze_units`` ``disabled_model_assumptions``);
     ``catalog_models``: more model files declaring labels (the program run's
-    bindings, ``assumption_declarations``)."""
+    bindings, ``assumption_declarations``).
+    ``code_only_profile`` (``tdo_v2.code_only_profile``): every setting above
+    is the profile's, the models are the pinned templates in ``model_dirs``
+    only (no hand model), and the library must be a file the build pins."""
     import run_dfbench
     from tdo_v2._scope_results import ConstructedFunctionScope
     from tdo_v2.configured_naming_contracts import CALL_NAMING_GHIDRA_VERSION, NamingBindingExpectation
@@ -109,6 +113,28 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
     from tdo_v2.summary_templates import build_file, image_provenance
 
     generation = Path(generation)
+    if code_only_profile is not None:
+        from tdo_v2.code_only_profile import MODEL_OFF, ProfileError, forced_arguments
+
+        if tuple(catalog_models):
+            raise ProfileError("code-only profile: declaration-only model files are hand models")
+        forced = forced_arguments()
+        private_frame_above = 0
+        traps = forced["assume_debug_break_traps_do_not_return"]
+        assume_globals_disjoint = forced["assume_globals_disjoint_from_stack"]
+        direction_flag = forced["assume_direction_flag_clear"]
+        import_slots = forced["assume_import_slots_hold_exports"]
+        entry_values_not_frame = forced["assume_entry_values_not_frame"]
+        same_result = forced["assume_same_result_functions"]
+        accessor_separate = forced["assume_accessor_result_separate"]
+        opaque_no_stack = forced["assume_opaque_callees_leave_no_stack_addresses"]
+        pre_escape = forced["assume_pre_escape_values_not_frame"]
+        registered_handlers = forced["assume_registered_handlers_not_observed"]
+        accessor_private_state = forced["assume_accessor_private_state"]
+        opaque_restores_sp = forced["assume_opaque_callees_restore_stack_pointer"]
+        model_assumptions_off = tuple(sorted(set(model_assumptions_off) | set(MODEL_OFF)))
+        if models is not None:
+            models = code_only_profile.admit(models)
     if not entry_values_not_frame:
         private_frame_above = 0   # the home-space extension is inactive without its base assumption
     binding = NamingBindingExpectation(sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
@@ -124,7 +150,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                 failures[unit.scopes.function.stage.name] += 1
     info = load_image_info(generation)
     if models is None:
-        models = run_dfbench.external_models(generation, model_dirs)
+        models = code_only_profile.load_models(model_dirs) if code_only_profile is not None             else run_dfbench.external_models(generation, model_dirs)
     if pcodeops is _DEFAULT:
         pcodeops = run_dfbench.pcodeop_models()
     library = library.upper()
@@ -144,6 +170,10 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                  language_id=units[0].scopes.program.evidence.translation_namespace.language_id)
     evidence = [load_stack_evidence(path) for path in stack_evidence]
     sha = units[0].scopes.program.evidence.executable_sha256.hex()
+    if code_only_profile is not None and code_only_profile.library_sha(library) != sha:
+        from tdo_v2.code_only_profile import ProfileError
+
+        raise ProfileError(f"code-only profile: the build does not pin {library} at {sha}")
     globals_disjoint, lines = assumption_allowed(evidence, requested=assume_globals_disjoint and bool(evidence),
                                                  require_for=sha)
     for line in lines:
@@ -196,7 +226,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_accessor_private_state=accessor_private_state,
                                        disabled_model_assumptions=tuple(model_assumptions_off),
                                        assumption_declarations=tuple(catalog_models),
-                                       own_library=library, keep_uncut=frozenset(targets))
+                                       own_library=library, keep_uncut=frozenset(targets),
+                                       code_only_profile=code_only_profile)
         log(f"constants: {len(tracking.proofs[True])} proven image addresses, {len(tracking.proofs[False])} "
             f"fixed numbers, {len(tracking.proofs[None])} not understood (possibly base-dependent)")
         rows = [(exports[name], name, [name]) for name in group]
@@ -204,7 +235,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                           catalog_models=tuple(catalog_models),
                           external_models=models, pcodeop_models=pcodeops,
                           private_frame_above=private_frame_above, base_dependent=found, traps=traps,
-                          producer=producer, notes=f"Derived by tools/derive_models from {generation.name}.")
+                          producer=producer, notes=f"Derived by tools/derive_models from {generation.name}.",
+                          code_only=code_only_profile)
 
     present = [name for name in names if name in exports]
     if not per_export:
@@ -260,13 +292,22 @@ def main(argv=None) -> int:
                         help="derive without pre-escape-values-do-not-address-the-new-frame (docs 25.77)")
     parser.add_argument("--no-model-assumption", dest="model_assumptions_off", action="append", default=[],
                         metavar="LABEL", help="derive with this model assumption switched off (repeat)")
+    parser.add_argument("--code-only-build", type=Path, metavar="MANIFEST",
+                        help="derive under the code-only profile of this build manifest "
+                             "(tdo_v2.code_only_profile; overrides every assumption setting above)")
     args = parser.parse_args(argv)
+    profile = None
+    if args.code_only_build is not None:
+        from tdo_v2.code_only_profile import load_build_manifest
+
+        profile = load_build_manifest(args.code_only_build)
     raw, refused, missing = derive_library(
         args.generation, args.library, args.export, file_id=args.id, version=args.version,
         model_dirs=args.model_dir, stack_evidence=args.stack_evidence,
         private_frame_above=args.private_frame_above, traps=args.traps, same_result=args.same_result,
         accessor_separate=args.accessor_separate, entry_values_not_frame=args.entry_values_not_frame,
-        model_assumptions_off=tuple(args.model_assumptions_off), pre_escape=args.pre_escape)
+        model_assumptions_off=tuple(args.model_assumptions_off), pre_escape=args.pre_escape,
+        code_only_profile=profile)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(raw, indent=1) + chr(10), encoding="utf-8")
     print(f"wrote {len(raw['entries'])} templates to {args.output}")

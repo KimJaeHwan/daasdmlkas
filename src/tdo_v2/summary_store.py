@@ -704,8 +704,12 @@ def _load_summary_file(raw, path) -> ModelFile:
         raise ModelError(f"{path}: unsupported model format")
     _file_id(raw, path)
     source = _source(raw, path, recorded=True)
-    if source["kind"] != "derived" or set(source) - {"producer", "declarations"} != DERIVED_SOURCE_KEYS:
+    if source["kind"] != "derived"             or set(source) - {"producer", "declarations", "code_only_switches"} != DERIVED_SOURCE_KEYS:
         raise ModelError(f"{path}: a summary file's source is derived with {sorted(DERIVED_SOURCE_KEYS)}")
+    switches = source.get("code_only_switches", {})
+    if type(switches) is not dict or any(type(name) is not str or type(on) is not bool
+                                         for name, on in switches.items()):
+        raise ModelError(f"{path}: source.code_only_switches maps switch names to booleans")
     declarations = source.get("declarations", {})
     if type(declarations) is not dict or any(
             label not in source["assumptions"] or type(stated) is not list or len(stated) != 2

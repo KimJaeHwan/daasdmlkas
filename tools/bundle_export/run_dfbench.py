@@ -177,6 +177,10 @@ def main() -> int:
                         help="switch off a model assumption: <file id>:<id> a model file declares, or a "
                              "registry model assumption (docs/assumptions.md); entries resting on it are not "
                              "applied (repeatable; also TDO_V2_NO_MODEL_ASSUMPTIONS=a,b)")
+    parser.add_argument("--code-only-build", type=Path, metavar="MANIFEST",
+                        help="run under the code-only profile of this build manifest (tdo_v2.code_only_profile): "
+                             "one forced assumption vector, only the pinned derived templates in --model-dir, "
+                             "no hand model; every assumption switch below is ignored")
     # every engine-wide named assumption comes from the registry (on by default:
     # --no-... or <ENV>=0 turns it off; off by default: --assume-... turns it
     # on; see docs/assumptions.md)
@@ -214,6 +218,15 @@ def main() -> int:
         print("[run] globals-disjoint-from-stack: withdrawal checks the Bundle's functions only "
               "(no whole-program stack evidence given: --stack-evidence)")
 
+    profile = None
+    if args.code_only_build is not None:
+        from tdo_v2.code_only_profile import load_build_manifest
+
+        if legacy or args.link or args.binding or args.assume_boundary_effects:
+            parser.error("--code-only-build takes no --legacy-engine, --link, --binding or --assume-boundary-effects")
+        profile = load_build_manifest(args.code_only_build)
+        print(f"[run] code-only profile: build manifest {profile.digest[:12]}, "
+              f"{len(profile.libraries)} pinned libraries; assumption switches forced")
     linker = None
     if args.link:
         if args.legacy_engine or args.ghidra_project is None or not args.external_models:
@@ -246,7 +259,10 @@ def main() -> int:
         if not legacy:
             from tdo_v2.summary_engine import analyze_frozen_bundle_with_summaries
             print("[run] interprocedural: callee summaries")
-            models = external_models(generation, args.model_dir) if args.external_models else None
+            if profile is not None:
+                models = profile.load_models(args.model_dir)
+            else:
+                models = external_models(generation, args.model_dir) if args.external_models else None
             bindings = tuple(load_binding_file(path) for path in args.binding)
             run = analyze_frozen_bundle_with_summaries(
                 generation,
@@ -263,6 +279,7 @@ def main() -> int:
                 physical_memory_records=args.physical_records,
                 model_bindings=bindings,
                 disabled_model_assumptions=tuple(args.model_assumptions_off),
+                code_only_profile=profile,
                 **{item.parameter: getattr(args, item.parameter) for item in switches()
                    if item.parameter != "external_models"},
             )
