@@ -164,3 +164,19 @@ def test_a_derived_template_does_not_keep_an_unlisted_vector_byte(tmp_path, vect
     assert any(label.startswith("derived-model:universe-derived/F@v1#") for label in analyzed.declared.values())
     function = analyzed.normalized
     assert not slice_from(function, operation_node_at(function, index, 0)).is_complete
+
+
+def test_a_lone_tail_jump_thunk_to_a_model_keeps_no_unlisted_vector_byte(tmp_path):
+    # ``jmp LEAF`` alone (no register of its own: the program's register file
+    # is its fallback) -- the shape of an import thunk
+    thunk = FunctionBuilder(entry=CODE_BASE + 0x200).tail_call(LEAF)
+    builder = (FunctionBuilder(entry=CALLER)
+               .ins(copy(reg(XMM0, 8), const(5)))
+               .sub_rsp(0x28).call(CODE_BASE + 0x200).add_rsp(0x28))
+    index = len(builder._rows)
+    builder = builder.ins(copy(reg(RAX), reg(XMM0, 8))).ret()
+    results = _analyze(tmp_path, thunk, builder)
+    caller = results[f"1:{CALLER:x}"]
+    assert caller.proven, "the thunk call has an effect"
+    function = caller.normalized
+    assert not slice_from(function, operation_node_at(function, index, 0, entry=CALLER)).is_complete
