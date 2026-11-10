@@ -143,7 +143,10 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # 48: unconditional direct callee effects can preserve exact register bytes
 # for weak loop address families; call-containing families still issue no
 # current- or previous-visit read-from value claims or remove original debts.
-ENGINE_SEMANTICS_VERSION = 48
+# 49: a declared model's unlisted register bytes are unknown up to the program's
+# register limit (the limit its call effect is derived with), not the calling
+# function's own; only fewer bytes are kept (design r6 I-1).
+ENGINE_SEMANTICS_VERSION = 49
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

@@ -1043,9 +1043,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             unit = functions[key]
             observation = unit.observation
             context = unit.scopes.resolution_context
-            register_object, register_limit = _register_file(observation, context)
+            register_object, _ = _register_file(observation, context)
             if register_object is None:  # e.g. a thunk that is a lone tail jump
-                register_object, register_limit = program_registers
+                register_object = program_registers[0]
             stack_pointers = _preserved_stack_pointers(observation, context)
             shapes = {
                 row.call_operation_key: {
@@ -1196,10 +1196,13 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             proven[call_key] = effect
                             sources[call_key] = ("derived model", entry.label)
                         continue
+                    # the model's unknown bytes reach the limit its effect is derived
+                    # with (``site``: the program's register bytes) -- a byte past this
+                    # function's own registers is one the model does not list, not kept
                     effect = model_effect(
                         lambda summary, anchors, call_key=call_key: site_effect(
                             key, call_key, summary, anchors, callee=entry.label),
-                        model_file, entry, register_object, register_limit, register_space, memory_space,
+                        model_file, entry, register_object, site(key)[1], register_space, memory_space,
                         constants.get(call_key, {}),
                     )
                     if effect is None:
