@@ -53,8 +53,9 @@ class GuardedImagePlan:
     function_scope: object
     unit_digest: bytes
     reads: tuple[GuardedImageRead, ...]
-    # guards whose solving hit the last-resort wall-clock cap (``_Budget``): their reads were refused
-    # because of host time, not of the formula -- the only load-dependent outcome, reported here
+    # the guard whose solving hit the last-resort wall-clock cap (``_Budget``): its read was refused because
+    # of host time, and the derivation STOPPED there (no later read of the function was attempted) -- the only
+    # load-dependent outcome, reported here; empty when every guard finished within the deterministic limits
     time_limited_guards: tuple[str, ...] = ()
     _proof: _Derivation | None = field(default=None, repr=False, compare=False)
 
@@ -116,9 +117,11 @@ class _Budget:
         self.queries += 1
         start = monotonic()
         result = solver.check()
-        self.seconds += monotonic() - start
-        if z3 is not None and result == z3.unknown \
-                and any(word in solver.reason_unknown() for word in ("timeout", "canceled")):
+        elapsed = monotonic() - start
+        self.seconds += elapsed
+        # an unknown is time-limited only when the check actually ran into the cap (z3 also reports
+        # "canceled" for rlimit exhaustion, a deterministic refusal -- Astra review)
+        if z3 is not None and result == z3.unknown and elapsed * 1000 >= 0.9 * self.CHECK_MS:
             raise _TimeLimited()
         return result
 
@@ -134,7 +137,10 @@ def _admissible(z3, *expressions):
     small instead of costed: at most ``_MAX_NODES`` distinct nodes; at most
     ``_MAX_PRODUCTS`` multiplications with a non-constant factor and
     ``_MAX_SHIFTS`` shifts by a non-constant amount, each at most
-    ``_MAX_WIDTH`` bits; no multiplication of two non-constant factors; at most
+    ``_MAX_WIDTH`` bits; no non-constant bit-vector wider than ``_MAX_WIDTH``
+    (z3 did not honour its own time-out on a 128-bit OR/shift equation -- 30 s+
+    with timeout=1000 -- while every probe up to 64 bits stayed under 0.4 s);
+    no multiplication of two non-constant factors; at most
     ``_MAX_ADDER_BITS`` bits of non-constant additions/subtractions/ordered
     comparisons (a 256-bit sum of 100 terms took 0.76 s within rlimit). A
     subexpression without free symbols counts as a constant (a scale copied
@@ -162,6 +168,8 @@ def _admissible(z3, *expressions):
     adders = (z3.Z3_OP_BADD, z3.Z3_OP_BSUB, z3.Z3_OP_ULT, z3.Z3_OP_ULEQ, z3.Z3_OP_UGT, z3.Z3_OP_UGEQ,
               z3.Z3_OP_SLT, z3.Z3_OP_SLEQ, z3.Z3_OP_SGT, z3.Z3_OP_SGEQ)
     for expression in order:
+        if z3.is_bv(expression) and not constant[expression.get_id()] and expression.size() > _MAX_WIDTH:
+            return None   # (wider symbolic values: z3 ran past its own time-out on a 128-bit OR/shift guard)
         if not z3.is_app(expression):
             continue
         children = expression.children()
@@ -293,7 +301,11 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
                             operation.inputs[0].coordinate.space_id, tuple(candidates)))
                         break
                     except _TimeLimited:
+                        # stop here: a time-out must not shift later guards' shared attempt budget
+                        # unreported (Astra review) -- reads after this guard are not derived at all
                         time_limited.append(guard_key)
+                        return _plan(ssa, found, time_limited, memory, observation, entry, context,
+                                     address_spaces, namespace, readonly_image, wild_objects, clobbered, excluded)
                     except (_Refused, Ineligible):
                         pass
             parent = dom.idom.get(ancestor)

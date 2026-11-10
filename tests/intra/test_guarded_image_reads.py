@@ -540,7 +540,11 @@ def test_expression_shape_is_limited_before_solving():
     assert admit(z3, narrow == 7, base) is None and admit(z3, x * 5 * 3 == 7, base) is not None
     # adder bits: a 256-bit sum of 100 terms (0.76 s within rlimit) is refused, 15 terms are admitted
     assert admit(z3, z3.Sum([z3.LShR(wide, i) ^ i for i in range(100)]) == 5, base) is None
-    assert admit(z3, z3.Sum([z3.LShR(wide, i) ^ i for i in range(15)]) == 5, base) is not None
+    assert admit(z3, z3.Sum([z3.LShR(wide, i) ^ i for i in range(15)]) == 5, base) is None      # > 64 bits
+    assert admit(z3, z3.Sum([z3.LShR(x, i) ^ i for i in range(15)]) == 5, base) is not None
+    # (Astra round 5) z3 ran past its own time-out on this 128-bit guard: symbolic values wider than 64 bits
+    wider = z3.BitVec("q", 128)
+    assert admit(z3, ((wider | (wider << 1)) ^ z3.LShR(wider, 3)) == 0, base) is None
     # the node cap: a wide sum of distinct leaves
     leaves = [z3.BitVec(f"v{i}", 8) for i in range(600)]
     assert admit(z3, z3.Sum(leaves) == 0, base) is None
@@ -564,4 +568,60 @@ def test_the_last_resort_time_cap_is_reported_not_silent(monkeypatch):
     plan = normalized.memory_graph.image_reads.plan
     assert plan.reads == () and plan.time_limited_guards == (keys["guard"],)
     assert _rows(normalized, keys["read"]) == ()
+
+
+def _two_guarded_reads():
+    """Two bounds-checked table reads in a row (selectors RCX then RDX): two independent guards."""
+    builder = FunctionBuilder()
+    for number, selector in enumerate((RCX, RDX)):
+        flag, wide, scaled, address = (tmp(0x6100 + 0x40 * number + 0x10 * k, 1 if k == 0 else 8)
+                                       for k in range(4))
+        builder.cbranch(f"skip{number}", flag, op("INT_LESS", [const(4, 4), reg(selector, 4)], flag))
+        builder.ins(op("INT_ZEXT", [reg(selector, 4)], wide))
+        builder.ins(op("INT_MULT", [wide, const(4)], scaled))
+        builder.ins(add(address, const(TABLE), scaled))
+        builder.ins(load(reg(RAX + 0x10 * number, 4), address))
+        builder.label(f"skip{number}")
+    (unit,) = program_units(builder.ret())
+    return unit
+
+
+def test_a_time_limited_guard_stops_the_derivation(monkeypatch):
+    """(Astra round 5) after a time-out nothing later is attempted -- it could otherwise shift the shared attempt
+    budget of later guards unreported. Ordinary run: both reads; first guard time-limited: no read, one check."""
+    from tdo_v2 import _guarded_image_reads
+
+    image = _image(_expected())
+    normalized = FunctionNormalizer().normalize(_two_guarded_reads(), readonly_image=image)
+    assert len(normalized.memory_graph.image_reads.plan.reads) == 2   # the fixture is exercised
+    calls = []
+
+    def limited(self, solver, z3=None):
+        calls.append(None)
+        raise _guarded_image_reads._TimeLimited()
+
+    monkeypatch.setattr(_guarded_image_reads._Budget, "check", limited)
+    normalized = FunctionNormalizer().normalize(_two_guarded_reads(), readonly_image=image)
+    plan = normalized.memory_graph.image_reads.plan
+    assert len(calls) == 1 and plan.reads == () and len(plan.time_limited_guards) == 1
+
+
+def test_a_fast_unknown_is_an_ordinary_refusal_not_a_time_limit():
+    """(Astra round 5) z3 also reports "canceled" for rlimit exhaustion: only a check that ran into the cap is
+    time-limited."""
+    import z3
+
+    from tdo_v2 import _guarded_image_reads
+
+    class Fast:
+        def set(self, **params):
+            pass
+
+        def check(self):
+            return z3.unknown
+
+        def reason_unknown(self):
+            return "canceled"
+
+    assert _guarded_image_reads._Budget().check(Fast(), z3) == z3.unknown
 
