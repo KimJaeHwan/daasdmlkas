@@ -123,7 +123,7 @@ def test_a_leaf_template_derived_and_consumed_under_the_profile_keeps_its_preser
     profile = _profile()
     path, raw = _derive(tmp_path, profile)   # (bootstrap: no model file at all, the ABI tag from the profile)
     assert raw["abi_tag"] == "win64" and raw["source"]["models"] == []
-    assert raw["source"]["code_only_switches"] == switch_vector()
+    assert raw["source"]["code_only_switches"] == {**switch_vector(), "readonly-image-data-is-constant": False}
     models = profile.admit(load_external_models([path], *WIN64))
     analyzed, kept = _consume(profile, models)
     assert any(label.startswith("derived-model:synth-derived/F@v1#") for label in analyzed.declared.values())
@@ -182,10 +182,66 @@ def test_a_derivation_resting_on_a_label_outside_the_allowlist_is_refused():
     with ImageBaseTracking((IMAGE,), lambda address, length, value: IMAGE[0] <= value <= IMAGE[1]) as found:
         results = analyze_units(program_units(_uses_globals_disjoint()), image_info=info, own_library=LIBRARY,
                                 assume_globals_disjoint_from_stack=True)
-    with pytest.raises(TemplateRefused, match="code-only profile: the derivation rests on"):
+    with pytest.raises(TemplateRefused, match="not of a run under this profile"):
         build_file(results, [("1:1000", "F", ["F"])], file_id="x", version=1, library=LIBRARY,
                    external_models=ExternalModels(()), pcodeop_models=None, private_frame_above=0,
                    base_dependent=found, code_only=profile)
+    # (a profile run cannot use the label: the same results presented as one still are refused for it)
+    faked = profile.results(results, required_off())
+    with pytest.raises(TemplateRefused, match="code-only profile: the derivation rests on"):
+        build_file(faked, [("1:1000", "F", ["F"])], file_id="x", version=1, library=LIBRARY,
+                   external_models=ExternalModels(()), pcodeop_models=None, private_frame_above=0,
+                   base_dependent=found, code_only=profile)
+
+
+def test_the_template_records_the_switches_the_derivation_had_on(tmp_path):
+    _, raw = _derive(tmp_path, _profile())
+    recorded = raw["source"]["code_only_switches"]
+    # a derivation runs without read-only image folding: recorded off (fewer facts)
+    assert recorded["readonly-image-data-is-constant"] is False
+    assert recorded == {**switch_vector(), "readonly-image-data-is-constant": False}
+
+
+def test_a_template_recording_a_switch_on_that_the_profile_keeps_off_is_refused(tmp_path):
+    profile = _profile()
+    path, raw = _derive(tmp_path, profile)
+    raw["source"]["code_only_switches"]["opaque-callees-restore-stack-pointer"] = True
+    path.write_text(json.dumps(raw))
+    analyzed, kept = _consume(profile, profile.admit(load_external_models([path], *WIN64)))
+    assert not analyzed.declared and not kept.is_complete
+    assert any("another assumption vector" in reason for reason in analyzed.refused_models.values())
+
+
+@pytest.mark.parametrize("nesting", ["models", "label"])
+def test_a_nested_template_is_refused(tmp_path, nesting):
+    profile = _profile()
+    path, raw = _derive(tmp_path, profile)
+    if nesting == "models":
+        raw["source"]["models"] = [{"file": "other-derived", "sha256": "b" * 64}]
+    else:
+        raw["source"]["assumptions"] = [*raw["source"]["assumptions"], "derived-model:other-derived/G@v1#0123456789ab"]
+    path.write_text(json.dumps(raw))
+    models = profile.admit(load_external_models([path], *WIN64))
+    (model_file,) = models.files
+    reason = profile.refusal(model_file, model_file.entries[0])
+    assert reason is not None and ("nested" in reason or "rests on derived-model:" in reason)
+
+
+def test_p_code_op_models_are_the_pinned_set_only():
+    from pathlib import Path
+
+    from tdo_v2.pcodeop_models import load_pcodeop_models
+    from tdo_v2.summary_templates import pcodeop_digest
+
+    markers = load_pcodeop_models(sorted((Path(__file__).resolve().parents[2] / "models" / "pcodeops").glob("*.json")))
+    unpinned = _profile("0" * 64)
+    with pytest.raises(ProfileError, match="p-code op models"):
+        unpinned.analysis_options({"pcodeop_models": markers})
+    pinned = CodeOnlyProfile(*WIN64, (), pcodeop_digest(markers))
+    pinned.analysis_options({"pcodeop_models": markers})   # the pinned set: taken
+    other = (*markers, type(markers[0])("arbitrary-hand", 1, markers[0].languages, {0x77: "pretend"}, {}))
+    with pytest.raises(ProfileError, match="p-code op models"):
+        pinned.analysis_options({"pcodeop_models": other})
 
 
 # -- inputs the profile does not take
@@ -251,4 +307,4 @@ def test_the_build_manifest(tmp_path):
 def test_a_template_file_keeps_the_recorded_vector(tmp_path):
     path, _ = _derive(tmp_path, _profile())
     model_file = load_model_file(path)
-    assert model_file.source_field("code_only_switches") == switch_vector()
+    assert model_file.source_field("code_only_switches") == {**switch_vector(), "readonly-image-data-is-constant": False}

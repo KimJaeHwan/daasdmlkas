@@ -298,12 +298,21 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
         from .call_entry_graph import connect_call_entries
         from .resource_limits import diagnostic
 
+        if code_only_profile is not None:
+            from .code_only_profile import EFFECTIVE_OFF
+
+            effective = EFFECTIVE_OFF.set(None)
         results = _with_fault_references(_analyze_units(units, **options))
         # Like fault-reference publication, this overlay observes retained
         # graphs after analysis. Exhausted analysis budgets must not discard
         # their existing fallback publication while attaching references.
         with diagnostic():
-            return connect_call_entries(results)
+            results = connect_call_entries(results)
+        if code_only_profile is not None:
+            # (the switches the run had in effect: what a template derived from it records)
+            results = code_only_profile.results(results, EFFECTIVE_OFF.get())
+            EFFECTIVE_OFF.reset(effective)
+        return results
     finally:
         from .function_summary import _FAULT_CACHE
 

@@ -17,10 +17,18 @@ effects nobody derived. A run under this profile:
   (``summary_templates``) of the libraries the build manifest pins, by the
   full SHA-256 of the file analyzed -- a template of any other file is not
   applicable (as if absent);
-* admits a template only when it was derived under the same vector
-  (``source.code_only_switches``) and every label it rests on, transitively,
-  is in ``ALLOWED_LABELS`` / ``ALLOWED_PREFIXES`` (an allowlist: a new
-  label is refused until someone decides it is not a convention).
+* takes p-code op models (CALLOTHER semantics: the translator's marker
+  ops) only as the exact set the manifest pins (``pcodeops``: their
+  ``summary_templates.pcodeop_digest``), else none;
+* admits a template only when the run that derived it was a profile run
+  (``source.code_only_switches``: the switches actually in effect there --
+  none on that the profile keeps off), it depends on no other model file
+  (nested templates: not yet), and every label it rests on is in
+  ``ALLOWED_LABELS`` / ``ALLOWED_PREFIXES`` (an allowlist: a new label is
+  refused until someone decides it is not a convention).
+
+Read-only image folding is on whenever the run has the image (a Bundle
+run forces it; a derivation runs without it -- fewer facts, recorded).
 
 The manifest's ``language_id`` / ``abi_tag`` are compatibility labels for
 the model file format only; they license no ABI semantics. Library names
@@ -29,6 +37,7 @@ are data (the manifest), never engine code.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 from dataclasses import dataclass
@@ -48,11 +57,24 @@ MODEL_OFF = ("allocator-results-are-fresh", "no-use-after-free", "no-use-of-old-
 # labels a consumed template may rest on (transitively)
 ALLOWED_LABELS = frozenset({"derived-model-runtime-matches", "import-slots-hold-their-exports",
                             "readonly-image-data-is-constant", "lock-markers-have-no-data-effect"})
-ALLOWED_PREFIXES = ("derived-model:", "pcodeop-model:")
+ALLOWED_PREFIXES = ("pcodeop-model:",)   # (the run's p-code op set itself is pinned)
 
 
 class ProfileError(ValueError):
     """An input the code-only profile does not take (a hand model, a binding...)."""
+
+
+# the switched-off labels the current profile run found in effect (``check_disabled``)
+EFFECTIVE_OFF: contextvars.ContextVar = contextvars.ContextVar("code_only_effective_off", default=None)
+
+
+class ProfiledResults(dict):
+    """``analyze_units`` results of a profile run: ``profile`` and the run's
+    effective switched-off labels (``effective_off``) -- what
+    ``summary_templates.build_file`` records as the derivation's vector."""
+
+    profile: "CodeOnlyProfile"
+    effective_off: frozenset
 
 
 def switch_vector() -> dict[str, bool]:
@@ -90,14 +112,25 @@ class CodeOnlyProfile:
     language_id: str
     abi_tag: str                            # a model-file compatibility label only
     libraries: tuple[tuple[str, str], ...]  # (upper-case file name, sha256 hex) pinned
+    pcodeops: str | None = None             # pinned ``pcodeop_digest`` of the run's p-code op models
     digest: str = ""                        # of the manifest (reports, caches)
 
     def library_sha(self, name: str) -> str | None:
         return dict(self.libraries).get(name.upper())
 
+    def check_pcodeops(self, pcodeop_models) -> None:
+        """The run's p-code op models are the pinned set (or none when none is pinned)."""
+        from .summary_templates import pcodeop_digest
+
+        if not tuple(pcodeop_models or ()):
+            return
+        if self.pcodeops is None or pcodeop_digest(pcodeop_models) != self.pcodeops:
+            raise ProfileError("code-only profile: p-code op models other than the build manifest pins")
+
     def check_inputs(self, *, model_bindings=(), lifecycle_contracts=(), linker=None,
-                     boundary_call_effects=False) -> None:
+                     boundary_call_effects=False, pcodeop_models=None) -> None:
         """Inputs no code-only run takes: a refusal, never a silent drop."""
+        self.check_pcodeops(pcodeop_models)
         if tuple(model_bindings):
             raise ProfileError("code-only profile: model bindings are hand models")
         if tuple(lifecycle_contracts or ()):
@@ -114,6 +147,7 @@ class CodeOnlyProfile:
                 raise ProfileError(f"code-only profile: {key} are hand models")
         if options.get("declared_boundaries") or options.get("assumed_call_effects"):
             raise ProfileError("code-only profile: test-only boundary effects")
+        self.check_pcodeops(options.get("pcodeop_models"))
         forced = dict(options)
         forced.update({key: False for key in _ANALYSIS_OFF})
         forced["private_frame_above"] = 0   # (win64-home-space-callee-private off)
@@ -123,12 +157,18 @@ class CodeOnlyProfile:
         forced["code_only_profile"] = self
         return forced
 
+    def results(self, results, effective_off) -> ProfiledResults:
+        out = ProfiledResults(results)
+        out.profile, out.effective_off = self, frozenset(effective_off)
+        return out
+
     def check_disabled(self, disabled) -> None:
         """The run's effective switched-off labels include every one the
         profile turns off (a coupling or a new switch cannot re-enable one)."""
         missing = required_off() - set(disabled)
         if missing:
             raise ProfileError("code-only profile: still on in this run: " + ", ".join(sorted(missing)))
+        EFFECTIVE_OFF.set(frozenset(disabled))
 
     def admit(self, external_models):
         """``external_models`` with only the templates of pinned files: a
@@ -178,8 +218,13 @@ class CodeOnlyProfile:
         if len(model_file.libraries) != 1 \
                 or self.library_sha(model_file.libraries[0]) != model_file.source_field("sha256"):
             return "code-only profile: a template of a file the build does not pin"
-        if model_file.source_field("code_only_switches") != switch_vector():
+        recorded = model_file.source_field("code_only_switches")
+        vector = switch_vector()
+        if type(recorded) is not dict or set(recorded) != set(vector) \
+                or any(on and not vector[name] for name, on in recorded.items()):
             return "code-only profile: derived under another assumption vector"
+        if model_file.source_field("models"):
+            return "code-only profile: a template depending on other model files (nested templates: not yet)"
         outside = sorted(label for label in entry.inherited if not label_allowed(label))
         if outside:
             return "code-only profile: rests on " + ", ".join(outside)
@@ -188,10 +233,10 @@ class CodeOnlyProfile:
 
 def load_build_manifest(path: str | Path) -> CodeOnlyProfile:
     """``{"format": "tdo-code-only-build/1", "language_id", "abi_tag",
-    "libraries": {"<file name>": "<sha256 hex>"}}``."""
+    "libraries": {"<file name>": "<sha256 hex>"}, "pcodeops"?: "<pcodeop_digest>"}``."""
     data = Path(path).read_bytes()
     raw = json.loads(data)
-    if type(raw) is not dict or set(raw) - {"notes"} != {"format", "language_id", "abi_tag", "libraries"} \
+    if type(raw) is not dict or set(raw) - {"notes", "pcodeops"} != {"format", "language_id", "abi_tag", "libraries"} \
             or raw["format"] != MANIFEST_FORMAT:
         raise ProfileError(f"{path}: a build manifest is {{format: {MANIFEST_FORMAT}, language_id, abi_tag, "
                            "libraries, notes?}")
@@ -205,9 +250,12 @@ def load_build_manifest(path: str | Path) -> CodeOnlyProfile:
         raise ProfileError(f"{path}: a library named twice")
     if type(raw["language_id"]) is not str or type(raw["abi_tag"]) is not str:
         raise ProfileError(f"{path}: language_id / abi_tag are strings")
-    return CodeOnlyProfile(raw["language_id"], raw["abi_tag"], tuple(sorted(upper.items())),
+    pcodeops = raw.get("pcodeops")
+    if pcodeops is not None and (type(pcodeops) is not str or len(pcodeops) != 64):
+        raise ProfileError(f"{path}: pcodeops is the sha256 hex pcodeop_digest of the pinned p-code op models")
+    return CodeOnlyProfile(raw["language_id"], raw["abi_tag"], tuple(sorted(upper.items())), pcodeops,
                            hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest())
 
 
-__all__ = ("ALLOWED_LABELS", "ALLOWED_PREFIXES", "CodeOnlyProfile", "MANIFEST_FORMAT", "MODEL_OFF", "ON",
+__all__ = ("ALLOWED_LABELS", "ALLOWED_PREFIXES", "CodeOnlyProfile", "ProfiledResults", "MANIFEST_FORMAT", "MODEL_OFF", "ON",
            "ProfileError", "forced_arguments", "label_allowed", "load_build_manifest", "switch_vector")

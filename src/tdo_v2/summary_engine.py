@@ -200,6 +200,8 @@ def analyze_frozen_bundle_with_summaries(
         if type(program) is not ConstructedProgramScope:
             raise ValueError("Bundle program scope is unresolved")
         image_info = load_image_info(generation_path)
+        if code_only_profile is not None:   # (the profile's vector: read-only image folding on)
+            assume_readonly_image_constant = True
         readonly_image = (
             ReadOnlyImage(generation_path, image_info)
             if assume_readonly_image_constant and image_info is not None else None
@@ -356,7 +358,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         from .code_only_profile import forced_arguments
 
         code_only_profile.check_inputs(model_bindings=model_bindings, lifecycle_contracts=lifecycle_contracts,
-                                       linker=linker, boundary_call_effects=assume_boundary_call_effects)
+                                       linker=linker, boundary_call_effects=assume_boundary_call_effects,
+                                       pcodeop_models=pcodeop_models)
         forced = forced_arguments()
         assume_globals_disjoint_from_stack = forced["assume_globals_disjoint_from_stack"]
         assume_direction_flag_clear = forced["assume_direction_flag_clear"]

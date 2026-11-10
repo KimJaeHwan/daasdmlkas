@@ -1006,12 +1006,16 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
                                             pcodeop_models=pcodeop_models)),
     }
     if code_only is not None:
-        from .code_only_profile import label_allowed, switch_vector
+        from .code_only_profile import ProfiledResults, label_allowed, switch_vector
 
+        if type(results) is not ProfiledResults or results.profile != code_only or results.effective_off is None:
+            raise TemplateRefused("code-only profile: the results are not of a run under this profile")
         outside = sorted(label for label in source["assumptions"] if not label_allowed(label))
         if outside:
             raise TemplateRefused("code-only profile: the derivation rests on " + ", ".join(outside))
-        source["code_only_switches"] = switch_vector()
+        # the switches the derivation actually had on (read-only image folding is
+        # off in every derivation: fewer facts)
+        source["code_only_switches"] = {name: name not in results.effective_off for name in switch_vector()}
     if catalog_models:
         from .summary_store import ExternalModels, assumption_catalog
 
