@@ -234,13 +234,13 @@ def test_p_code_op_models_are_the_pinned_set_only():
     from tdo_v2.summary_templates import pcodeop_digest
 
     markers = load_pcodeop_models(sorted((Path(__file__).resolve().parents[2] / "models" / "pcodeops").glob("*.json")))
-    unpinned = _profile("0" * 64)
-    with pytest.raises(ProfileError, match="p-code op models"):
-        unpinned.analysis_options({"pcodeop_models": markers})
+    _profile("0" * 64).analysis_options({"pcodeop_models": markers})   # approved markers: taken
+    with pytest.raises(ProfileError, match="other than the build manifest pins"):
+        CodeOnlyProfile(*WIN64, (), "c" * 64).analysis_options({"pcodeop_models": markers})
     pinned = CodeOnlyProfile(*WIN64, (), pcodeop_digest(markers))
     pinned.analysis_options({"pcodeop_models": markers})   # the pinned set: taken
     other = (*markers, type(markers[0])("arbitrary-hand", 1, markers[0].languages, {0x77: "pretend"}, {}))
-    with pytest.raises(ProfileError, match="p-code op models"):
+    with pytest.raises(ProfileError, match="p-code op model"):
         pinned.analysis_options({"pcodeop_models": other})
 
 
@@ -308,3 +308,35 @@ def test_a_template_file_keeps_the_recorded_vector(tmp_path):
     path, _ = _derive(tmp_path, _profile())
     model_file = load_model_file(path)
     assert model_file.source_field("code_only_switches") == {**switch_vector(), "readonly-image-data-is-constant": False}
+
+
+def test_a_pinned_p_code_op_model_outside_the_approved_markers_is_refused():
+    from tdo_v2.code_only_profile import label_allowed
+    from tdo_v2.pcodeop_models import PcodeOpModel
+    from tdo_v2.summary_templates import pcodeop_digest
+
+    pretend = (PcodeOpModel("arbitrary-hand", 1, frozenset({("x86:LE:64:default", 4, 6)}), {0x77: "pretend"}, {}),)
+    pinned = CodeOnlyProfile(*WIN64, (), pcodeop_digest(pretend))   # pinned by digest: still not approved
+    with pytest.raises(ProfileError, match="outside the approved markers"):
+        pinned.analysis_options({"pcodeop_models": pretend})
+    renamed = (PcodeOpModel("x86-markers", 1, frozenset({("x86:LE:64:default", 4, 6)}), {17: "UNLOCK"}, {}),)
+    with pytest.raises(ProfileError, match="outside the approved markers"):
+        _profile("0" * 64).analysis_options({"pcodeop_models": renamed})   # (index and name must agree)
+    assert label_allowed("pcodeop-model:x86-markers/LOCK@v1")
+    assert not label_allowed("pcodeop-model:arbitrary-hand/pretend@v1")
+
+
+def test_an_exhausted_budget_publishes_results_without_certifying_them(tmp_path, monkeypatch):
+    import tdo_v2.interprocedural as ip
+
+    monkeypatch.setattr(ip, "run_exhausted", lambda: True)   # (the run budget out before analysis)
+    profile = _profile()
+    info = ImageInfo("synthetic", (), (), (ExportedSymbol(1, F, "F", True),), ())
+    with ImageBaseTracking((IMAGE,), lambda address, length, value: IMAGE[0] <= value <= IMAGE[1]) as found:
+        results = analyze_units(program_units(_leaf()), image_info=info, own_library=LIBRARY,
+                                code_only_profile=profile)
+    assert results.profile == profile and results.effective_off is None   # (stopped before they were settled)
+    with pytest.raises(TemplateRefused, match="not of a run under this profile"):
+        build_file(results, [(f"1:{F:x}", "F", ["F"])], file_id="x", version=1, library=LIBRARY,
+                       external_models=ExternalModels(()), pcodeop_models=None, private_frame_above=0,
+                       base_dependent=found, code_only=profile)

@@ -294,14 +294,13 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     # still fails alone (``NormalizationFailureReason.ANALYSIS_DEPTH``)
     previous = sys.getrecursionlimit()
     sys.setrecursionlimit(max(previous, ANALYSIS_RECURSION_LIMIT))
+    from .code_only_profile import EFFECTIVE_OFF
+
+    effective = EFFECTIVE_OFF.set(None)
     try:
         from .call_entry_graph import connect_call_entries
         from .resource_limits import diagnostic
 
-        if code_only_profile is not None:
-            from .code_only_profile import EFFECTIVE_OFF
-
-            effective = EFFECTIVE_OFF.set(None)
         results = _with_fault_references(_analyze_units(units, **options))
         # Like fault-reference publication, this overlay observes retained
         # graphs after analysis. Exhausted analysis budgets must not discard
@@ -309,11 +308,12 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
         with diagnostic():
             results = connect_call_entries(results)
         if code_only_profile is not None:
-            # (the switches the run had in effect: what a template derived from it records)
+            # (the switches the run had in effect: what a template derived from it
+            # records; None when a budget stopped the run before they were settled)
             results = code_only_profile.results(results, EFFECTIVE_OFF.get())
-            EFFECTIVE_OFF.reset(effective)
         return results
     finally:
+        EFFECTIVE_OFF.reset(effective)
         from .function_summary import _FAULT_CACHE
 
         _FAULT_CACHE.clear()   # (one run's observations only)

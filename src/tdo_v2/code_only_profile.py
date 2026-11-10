@@ -17,9 +17,10 @@ effects nobody derived. A run under this profile:
   (``summary_templates``) of the libraries the build manifest pins, by the
   full SHA-256 of the file analyzed -- a template of any other file is not
   applicable (as if absent);
-* takes p-code op models (CALLOTHER semantics: the translator's marker
-  ops) only as the exact set the manifest pins (``pcodeops``: their
-  ``summary_templates.pcodeop_digest``), else none;
+* takes p-code op models (CALLOTHER semantics) only when every no-effect
+  op they declare is one of ``APPROVED_MARKERS`` -- the translator's
+  LOCK/UNLOCK markers, by language version and CALLOTHER index (and, when
+  the manifest pins ``pcodeops``, only that exact set);
 * admits a template only when the run that derived it was a profile run
   (``source.code_only_switches``: the switches actually in effect there --
   none on that the profile keeps off), it depends on no other model file
@@ -57,7 +58,16 @@ MODEL_OFF = ("allocator-results-are-fresh", "no-use-after-free", "no-use-of-old-
 # labels a consumed template may rest on (transitively)
 ALLOWED_LABELS = frozenset({"derived-model-runtime-matches", "import-slots-hold-their-exports",
                             "readonly-image-data-is-constant", "lock-markers-have-no-data-effect"})
-ALLOWED_PREFIXES = ("pcodeop-model:",)   # (the run's p-code op set itself is pinned)
+ALLOWED_PREFIXES = ("pcodeop-model:",)   # (only approved marker names: ``label_allowed``)
+# CALLOTHER ops with no data effect a profile run may take, by translator
+# language version: index -> name (ghidra/GhidraV2ListUserOps.java listing
+# of Ghidra 12.0.4's x86 4.6 languages). LOCK / UNLOCK bracket a
+# lock-prefixed instruction whose memory effect is already in its own p-code.
+APPROVED_MARKERS = {
+    ("x86:LE:64:default", 4, 6): {17: "LOCK", 18: "UNLOCK"},
+    ("x86:LE:32:default", 4, 6): {17: "LOCK", 18: "UNLOCK"},
+}
+_MARKER_NAMES = frozenset(name for table in APPROVED_MARKERS.values() for name in table.values())
 
 
 class ProfileError(ValueError):
@@ -104,7 +114,11 @@ _ANALYSIS_OFF = ("assume_globals_disjoint_from_stack", "assume_direction_flag_cl
 
 
 def label_allowed(label: str) -> bool:
-    return label in ALLOWED_LABELS or label.startswith(ALLOWED_PREFIXES)
+    if label in ALLOWED_LABELS:
+        return True
+    if label.startswith("pcodeop-model:"):   # pcodeop-model:<file>/<name>@v<n>
+        return label.rpartition("/")[2].partition("@")[0] in _MARKER_NAMES
+    return False
 
 
 @dataclass(frozen=True)
@@ -124,7 +138,15 @@ class CodeOnlyProfile:
 
         if not tuple(pcodeop_models or ()):
             return
-        if self.pcodeops is None or pcodeop_digest(pcodeop_models) != self.pcodeops:
+        for model in pcodeop_models:
+            for language in model.languages:
+                approved = APPROVED_MARKERS.get(language, {})
+                wrong = sorted(f"{index}:{name}" for index, name in model.no_effect.items()
+                               if approved.get(index) != name)
+                if wrong:
+                    raise ProfileError(f"code-only profile: p-code op model {model.file_id} declares no-effect ops "
+                                       f"outside the approved markers for {language}: {', '.join(wrong)}")
+        if self.pcodeops is not None and pcodeop_digest(pcodeop_models) != self.pcodeops:
             raise ProfileError("code-only profile: p-code op models other than the build manifest pins")
 
     def check_inputs(self, *, model_bindings=(), lifecycle_contracts=(), linker=None,
@@ -158,8 +180,11 @@ class CodeOnlyProfile:
         return forced
 
     def results(self, results, effective_off) -> ProfiledResults:
+        """``effective_off`` None: the run stopped before its switches were
+        settled (an exhausted budget) -- published, never certified."""
         out = ProfiledResults(results)
-        out.profile, out.effective_off = self, frozenset(effective_off)
+        out.profile = self
+        out.effective_off = None if effective_off is None else frozenset(effective_off)
         return out
 
     def check_disabled(self, disabled) -> None:
@@ -257,5 +282,5 @@ def load_build_manifest(path: str | Path) -> CodeOnlyProfile:
                            hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest())
 
 
-__all__ = ("ALLOWED_LABELS", "ALLOWED_PREFIXES", "CodeOnlyProfile", "ProfiledResults", "MANIFEST_FORMAT", "MODEL_OFF", "ON",
+__all__ = ("ALLOWED_LABELS", "ALLOWED_PREFIXES", "APPROVED_MARKERS", "CodeOnlyProfile", "ProfiledResults", "MANIFEST_FORMAT", "MODEL_OFF", "ON",
            "ProfileError", "forced_arguments", "label_allowed", "load_build_manifest", "switch_vector")
