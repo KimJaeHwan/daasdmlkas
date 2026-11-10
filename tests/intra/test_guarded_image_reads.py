@@ -492,7 +492,9 @@ def test_solver_budget_does_not_depend_on_host_speed(monkeypatch):
             return "sat"
 
     budget, solver = _guarded_image_reads._Budget(), Slow()
-    assert [budget.check(solver) for _ in range(5)] == ["sat"] * 5
+    import z3
+
+    assert [budget.check(solver, z3) for _ in range(5)] == ["sat"] * 5
     # deterministic limits plus the last-resort cap, far above ordinary checks
     assert all(params == {"rlimit": 20_000, "random_seed": 0, "timeout": 1000} for params in solver.params)
     budget.queries = budget.QUERIES
@@ -524,8 +526,7 @@ def test_expression_shape_is_limited_before_solving():
     square = x
     for _ in range(18):
         square = square * square
-    began = time.monotonic()
-    assert admit(z3, square == 4, base) is None and time.monotonic() - began < 1
+    assert admit(z3, square == 4, base) is None
     # products by constants: at most two, at most 64 bits wide (sparse and dense constants alike)
     rng, wide = random.Random(123), z3.BitVec("w", 256)
     dense, sparse = wide, wide
@@ -624,4 +625,73 @@ def test_a_fast_unknown_is_an_ordinary_refusal_not_a_time_limit():
             return "canceled"
 
     assert _guarded_image_reads._Budget().check(Fast(), z3) == z3.unknown
+
+
+def test_widened_64_bit_arithmetic_stays_admitted():
+    """(Fable review) 64-bit signed compares build a 65-bit borrow, mul/imul a 128-bit product (INT_MULT:16 in real
+    Bundles): admitted; wide OR/XOR or symbolic shifts are not."""
+    import z3
+
+    from tdo_v2 import _guarded_image_reads
+    from tdo_v2._record_expression_bv import arithmetic
+
+    x, base = z3.BitVec("x", 64), z3.BitVecVal(0x1000, 64)
+    masked = x & 7
+    borrow = arithmetic("INT_SBORROW", [masked, z3.BitVecVal(4, 64)], 1)
+    less = arithmetic("INT_SLESS", [masked, z3.BitVecVal(4, 64)], 1)
+    assert _guarded_image_reads._admissible(z3, (borrow ^ less) != 0, base + masked * 8) is not None
+    product = z3.Extract(63, 0, z3.SignExt(64, x) * 56)                              # imul rax, rcx, 56
+    assert _guarded_image_reads._admissible(z3, z3.ULT(x, 8) == True, base + product) is not None
+    wide = z3.SignExt(64, x)
+    assert _guarded_image_reads._admissible(z3, (wide | (wide << 1)) == 0, base) is None
+    assert _guarded_image_reads._admissible(z3, (wide << (wide & 3)) == 0, base) is None
+
+
+def test_a_check_that_ran_into_the_cap_is_time_limited(monkeypatch):
+    """(Fable review) the positive classification: an unknown whose check took the whole cap."""
+    import z3
+
+    from tdo_v2 import _guarded_image_reads
+
+    clock = iter((0.0, 1.0))
+    monkeypatch.setattr(_guarded_image_reads, "monotonic", lambda: next(clock))
+
+    class Capped:
+        def set(self, **params):
+            pass
+
+        def check(self):
+            return z3.unknown
+
+    with pytest.raises(_guarded_image_reads._TimeLimited):
+        _guarded_image_reads._Budget().check(Capped(), z3)
+
+
+def test_reads_before_a_time_limited_guard_are_kept(monkeypatch):
+    """(Fable review) the first guard's read is published and validated; the second guard is time-limited."""
+    from tdo_v2 import _guarded_image_reads
+
+    original = _guarded_image_reads._Budget.check
+
+    def second_guard_limited(self, solver, z3=None):
+        if self.attempts >= 2:
+            raise _guarded_image_reads._TimeLimited()
+        return original(self, solver, z3)
+
+    monkeypatch.setattr(_guarded_image_reads._Budget, "check", second_guard_limited)
+    normalized = FunctionNormalizer().normalize(_two_guarded_reads(), readonly_image=_image(_expected()))
+    plan = normalized.memory_graph.image_reads.plan
+    assert len(plan.reads) == 1 and len(plan.time_limited_guards) == 1
+    assert plan.time_limited_guards[0] != plan.reads[0].guard
+
+
+def test_an_inadmissible_guard_makes_no_solver_call(monkeypatch):
+    """(Fable review) the shape limit is applied before solving, in the derivation itself."""
+    from tdo_v2 import _guarded_image_reads
+
+    calls = []
+    monkeypatch.setattr(_guarded_image_reads, "_admissible", lambda z3, *expressions: None)
+    monkeypatch.setattr(_guarded_image_reads._Budget, "check", lambda self, solver, z3=None: calls.append(None))
+    normalized, _, keys, _, _ = _normalize()
+    assert calls == [] and _rows(normalized, keys["read"]) == ()
 

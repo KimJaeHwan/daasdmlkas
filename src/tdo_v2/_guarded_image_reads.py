@@ -53,8 +53,9 @@ class GuardedImagePlan:
     function_scope: object
     unit_digest: bytes
     reads: tuple[GuardedImageRead, ...]
-    # the guard whose solving hit the last-resort wall-clock cap (``_Budget``): its read was refused because
-    # of host time, and the derivation STOPPED there (no later read of the function was attempted) -- the only
+    # the guard at which the last-resort wall-clock cap (``_Budget``) stopped the derivation -- its own check
+    # ran into the cap, or the function's total solving time was already spent (then an earlier check was the
+    # slow one): its read was refused because of host time and no later read was attempted -- the only
     # load-dependent outcome, reported here; empty when every guard finished within the deterministic limits
     time_limited_guards: tuple[str, ...] = ()
     _proof: _Derivation | None = field(default=None, repr=False, compare=False)
@@ -127,6 +128,7 @@ class _Budget:
 
 
 _MAX_NODES, _MAX_PRODUCTS, _MAX_SHIFTS, _MAX_WIDTH, _MAX_ADDER_BITS = 512, 2, 2, 64, 4096
+_MAX_WIDE = 128   # widened 64-bit arithmetic only (see _admissible)
 
 
 def _admissible(z3, *expressions):
@@ -167,9 +169,19 @@ def _admissible(z3, *expressions):
     products = shifts = adder_bits = 0
     adders = (z3.Z3_OP_BADD, z3.Z3_OP_BSUB, z3.Z3_OP_ULT, z3.Z3_OP_ULEQ, z3.Z3_OP_UGT, z3.Z3_OP_UGEQ,
               z3.Z3_OP_SLT, z3.Z3_OP_SLEQ, z3.Z3_OP_SGT, z3.Z3_OP_SGEQ)
+    wide_kinds = (z3.Z3_OP_ZERO_EXT, z3.Z3_OP_SIGN_EXT, z3.Z3_OP_EXTRACT, z3.Z3_OP_CONCAT, z3.Z3_OP_BMUL,
+                  z3.Z3_OP_BADD, z3.Z3_OP_BSUB, z3.Z3_OP_BSHL, z3.Z3_OP_BLSHR, z3.Z3_OP_BASHR)
     for expression in order:
         if z3.is_bv(expression) and not constant[expression.get_id()] and expression.size() > _MAX_WIDTH:
-            return None   # (wider symbolic values: z3 ran past its own time-out on a 128-bit OR/shift guard)
+            # wider symbolic values only as widened 64-bit arithmetic (extension, extraction, a product,
+            # add/sub, a shift by a constant -- 64-bit signed compares and mul/imul build 65/128-bit
+            # values); no wide OR/XOR/AND/NOT or symbolic shift (z3 ran past its own time-out on a
+            # 128-bit OR/shift guard)
+            if expression.size() > _MAX_WIDE or not z3.is_app(expression) \
+                    or not any(z3.is_app_of(expression, kind) for kind in wide_kinds) \
+                    or any(z3.is_app_of(expression, kind) for kind in (z3.Z3_OP_BSHL, z3.Z3_OP_BLSHR, z3.Z3_OP_BASHR)) \
+                    and not constant[expression.children()[1].get_id()]:
+                return None
         if not z3.is_app(expression):
             continue
         children = expression.children()
@@ -179,7 +191,7 @@ def _admissible(z3, *expressions):
                 return None
             if variable:
                 products += 1
-                if expression.size() > _MAX_WIDTH or products > _MAX_PRODUCTS:
+                if expression.size() > _MAX_WIDE or products > _MAX_PRODUCTS:
                     return None
         elif any(z3.is_app_of(expression, kind) for kind in adders)                 and not all(constant[child.get_id()] for child in children):
             adder_bits += children[0].size() * max(1, len(children) - 1)
@@ -265,8 +277,12 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
                         address = tree.definition(address_id)
                         if _admissible(z3, condition, address) is None:
                             raise _Refused()
-                        solver = z3.Solver()
-                        solver.add((condition != 0) if success[0] == taken else (condition == 0))
+                        # a fresh z3 context per guard: the resource accounting does not depend on what
+                        # this process solved before (Fable review: a guard flipped with process history)
+                        fresh = z3.Context()
+                        solver = z3.Solver(ctx=fresh)
+                        solver.add(((condition != 0) if success[0] == taken else (condition == 0)).translate(fresh))
+                        symbol = tree.symbol.translate(fresh)
                         selectors = []
                         while True:
                             outcome = budget.check(solver, z3)
@@ -274,9 +290,9 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
                                 break
                             if outcome != z3.sat or len(selectors) == MAX_CANDIDATES:
                                 raise _Refused()
-                            number = solver.model().eval(tree.symbol, model_completion=True).as_long()
+                            number = solver.model().eval(symbol, model_completion=True).as_long()
                             selectors.append(number)
-                            solver.add(tree.symbol != number)
+                            solver.add(symbol != number)
                         if not selectors:
                             raise _Refused()
                         candidates = []
@@ -304,6 +320,9 @@ def derive_guarded_image_reads(memory, ssa, observation, entry, context, address
                         # stop here: a time-out must not shift later guards' shared attempt budget
                         # unreported (Astra review) -- reads after this guard are not derived at all
                         time_limited.append(guard_key)
+                        from .phases import count
+
+                        count("guarded_image_time_limited", 1)
                         return _plan(ssa, found, time_limited, memory, observation, entry, context,
                                      address_spaces, namespace, readonly_image, wild_objects, clobbered, excluded)
                     except (_Refused, Ineligible):
