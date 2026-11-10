@@ -90,6 +90,16 @@ def _fixture(variant="base", *, bound=4, base=TABLE, polarity="false", form="mul
         ins("extend", copy(wide, selector))
     if form == "or":
         ins("or", op("INT_OR", [wide, const(1)], wide))
+    if form == "wide-mul":   # a 128-bit product read back through SUBPIECE (mul/imul; Astra round 7)
+        wide16, product16 = tmp(0x6090, 16), tmp(0x60b0, 16)
+        ins("extend16", op("INT_ZEXT", [wide], wide16))
+        ins("scale", op("INT_MULT", [wide16, const(4, 16)], product16))
+        ins("narrow", op("SUBPIECE", [product16, const(0, 4)], scaled))
+        ins("address", add(address, const(base), scaled))
+        ins("read", load(reg(RAX, 4), address))
+        builder.label("done").ret()
+        (unit,) = program_units(builder)
+        return unit, keys
     factor = const(2 if form == "shift" else 4)
     if form == "copied-scale":   # the scale copied into a temporary first (Astra review: still a constant)
         factor = tmp(0x6080)
@@ -199,7 +209,7 @@ def _execute(unit, keys, expected, image, selectors, *, bits=32):
 
 
 @pytest.mark.parametrize("polarity", ("false", "true"))
-@pytest.mark.parametrize("form", ("mul", "shift", "or", "copied-scale"))
+@pytest.mark.parametrize("form", ("mul", "shift", "or", "copied-scale", "wide-mul"))
 def test_original_unsigned_guard_and_exact_arithmetic_select_real_image_bytes(polarity, form):
     normalized, unit, keys, expected, image = _normalize(polarity=polarity, form=form)
     (row,) = _rows(normalized, keys["read"])

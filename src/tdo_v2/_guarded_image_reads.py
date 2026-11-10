@@ -174,11 +174,15 @@ def _admissible(z3, *expressions):
     for expression in order:
         if z3.is_bv(expression) and not constant[expression.get_id()] and expression.size() > _MAX_WIDTH:
             # wider symbolic values only as widened 64-bit arithmetic (extension, extraction, a product,
-            # add/sub, a shift by a constant -- 64-bit signed compares and mul/imul build 65/128-bit
-            # values); no wide OR/XOR/AND/NOT or symbolic shift (z3 ran past its own time-out on a
-            # 128-bit OR/shift guard)
+            # add/sub, a shift by a constant, OR/AND/XOR with at most one non-constant operand -- the
+            # operand assembly builds 0 | (Extract << 0); 64-bit signed compares and mul/imul build
+            # 65/128-bit values); no wide OR/XOR/AND of two symbolic values, NOT or symbolic shift (z3
+            # ran past its own time-out on a 128-bit OR/shift guard)
+            bitwise_with_constants = z3.is_app(expression) and any(
+                z3.is_app_of(expression, kind) for kind in (z3.Z3_OP_BOR, z3.Z3_OP_BAND, z3.Z3_OP_BXOR)) \
+                and sum(not constant[child.get_id()] for child in expression.children()) <= 1
             if expression.size() > _MAX_WIDE or not z3.is_app(expression) \
-                    or not any(z3.is_app_of(expression, kind) for kind in wide_kinds) \
+                    or not (bitwise_with_constants or any(z3.is_app_of(expression, kind) for kind in wide_kinds)) \
                     or any(z3.is_app_of(expression, kind) for kind in (z3.Z3_OP_BSHL, z3.Z3_OP_BLSHR, z3.Z3_OP_BASHR)) \
                     and not constant[expression.children()[1].get_id()]:
                 return None
