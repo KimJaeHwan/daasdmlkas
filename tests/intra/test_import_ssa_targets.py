@@ -148,8 +148,15 @@ def test_a_loop_cannot_use_its_own_import_model_to_prove_its_target(monkeypatch)
 
 
 def test_a_new_import_binding_cannot_seed_another_from_its_own_effect(monkeypatch):
+    # (the first binding comes from a later round: the same slot on both paths
+    # of a join -- no static chain since design S-R r3 takes plain loads a few
+    # instructions back -- so the second has no round-1 target proof)
+    flag = tmp(0x600, 1)
     caller = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RDI), ram(SLOT)))
-              .ins(copy(reg(RBX), ram(OTHER_SLOT))).ins(copy(reg(RCX), const(0)))
+              .cbranch("other", flag, op("INT_NOTEQUAL", [reg(RCX), const(0)], flag))
+              .ins(copy(reg(RBX), ram(OTHER_SLOT))).branch("join").label("other")
+              .ins(copy(reg(RBX), ram(OTHER_SLOT)))
+              .label("join").ins(copy(reg(RCX), const(0)))
               .call_indirect(RBX).call_indirect(RDI).add_rsp(0x28).ret())
     item, _ = _analyze(monkeypatch, caller)
     assert list(item.declared.values()) == ["external-model:crt-win64/free@v8"]

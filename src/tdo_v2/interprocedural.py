@@ -743,12 +743,36 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     round_resolved: dict = {}
     local_entries = frozenset((unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset)
                               for unit in program.values())
+    slot_register: dict = {}   # (design S-R) key -> calls bound only through ``_slot_loaded_register``
     externals = {
         key: {**(_external_sites(unit, image_info, external_models, disabled, usable,
-                                 refused_sites.setdefault(key, {}), local_entries)
+                                 refused_sites.setdefault(key, {}), local_entries,
+                                 register_keys=slot_register.setdefault(key, set()))
                  if image_info and external_models else {}), **_cut_sites(unit, cuts)}
         for key, unit in functions.items()
     }
+    # (design S-R r3) a binding whose identity rests on "every execution of the
+    # call comes through the slot load" -- a claim about the OBSERVED graph --
+    # holds, on a function with a targetless BRANCHIND, only if no such site
+    # lands in the load chain: the bound effect carries the function's own
+    # frontier this round (``own_frontier``: discharged faults leave it, a
+    # revocation puts them back) and its import-tail sites (exempt from the
+    # frontier, but an export reached by the tail may re-enter: a re-entry
+    # obligation of the binding). Static ``mov R, [slot]; ...; call R``
+    # bindings and later-round slot-identity admissions of a CALLIND; never a
+    # ``jmp [slot]`` tail or an in-instruction ``call [slot]``, whose identity
+    # makes no predecessor claim.
+    relies_on_graph = frozenset(key for key, unit in functions.items()
+                                if unknown_transfer_sites(key, unit.observation))
+    slot_admissions: dict = {}   # (key -> CALLIND keys the previous round admitted through an import slot)
+
+    def predecessor_dependent(key) -> frozenset:
+        if key not in relies_on_graph:
+            return frozenset()
+        return frozenset(slot_register.get(key, ())) | frozenset(slot_admissions.get(key, ()))
+
+    def binding_support(key) -> frozenset:
+        return own_frontier(key) | control_exempt.get(key, frozenset())
     noreturn_jumps = {
         key: _noreturn_jumps(unit, image_info, external_models, calls[key], disabled, usable,
                              refused_sites.setdefault(key, {}))
@@ -1259,6 +1283,16 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             ByteSpan(register_object, offset, size) for offset, size in slices))
                     proven[call_key] = effect
                     sources[call_key] = ("model", entry.label)
+                # (design S-R r3) predecessor-dependent bindings rest on the
+                # function's targetless sites (own frontier + import tails)
+                dependent = predecessor_dependent(key)
+                support = binding_support(key) if dependent else frozenset()
+                if support:
+                    for call_key in sorted(dependent):
+                        effect = proven.get(call_key)
+                        if effect is not None and call_key in externals[key]:
+                            proven[call_key] = replace(effect, control_sites=tuple(sorted(
+                                set(effect.control_sites) | support)))
                 for call_key in _unplaced_noreturn(unit, proven):
                     del proven[call_key]  # opaque: the cut would drop an observed edge
                 # (U2b D.3) a function whose values may rest on a site takes no
@@ -1268,7 +1302,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 # a declined cut is a vetoed-noreturn site at the call)
                 if own_frontier(key) or key in static_writers() or dependencies \
                         or any(effect.control_sites for effect in proven.values()):
-                    for call_key in sorted(round_resolved.get(key, ())):
+                    # (design S-R r3: a predecessor-dependent binding with support
+                    # takes no cut either -- its identity rests on those sites)
+                    for call_key in sorted(set(round_resolved.get(key, ())) | (dependent if support else set())):
                         effect = proven.get(call_key)
                         if effect is None or not effect.noreturn:
                             continue
@@ -1723,6 +1759,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 rounds += 1   # (one more round for the revoked faults; D only shrinks)
                 fault_state["discharged"] = kept
             resolved, resolved_cuts, resolved_multi = found, found_cuts, found_multi
+            # (design S-R r3) the slot-identity CALLIND admissions the next round binds
+            slot_admissions.clear()
+            slot_admissions.update({key: {call for call in rows if call.endswith(":CALLIND")}
+                                    for key, rows in found_imports.items()})
             # (accumulated over the rounds: each round's results rest on every
             # earlier round's resolutions, so on their facts' labels too)
             for key, labels in requires.items():
@@ -1731,6 +1771,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 for call, labels in rows.items():
                     resolution_call_requires.setdefault(key, {}).setdefault(call, set()).update(labels)
         use_externals({})
+        slot_admissions.clear()
         round_resolved.clear()
         resolution_requires.clear()
         resolution_call_requires.clear()
@@ -2014,15 +2055,17 @@ def _unproven_image_operands(unit) -> bool:
 
 
 def _external_sites(unit, image_info, external_models, disabled=frozenset(), usable=None, refused=None,
-                    local_functions=frozenset(), *, sites=None) -> dict:
+                    local_functions=frozenset(), *, sites=None, register_keys=None) -> dict:
     """Call key -> (model file, entry) for calls to imported symbols with a
     model, at the import call shapes ``import_call_sites`` recognizes
     (``call [__imp_X]``, ``mov rax, [__imp_X]; call rax``, a terminal ``jmp
     [__imp_X]`` -- a tail call composed like ``BRANCH`` tails, ...). A model resting on an assumption
     switched off in this run (``disabled``) is not applied: the call stays
-    opaque; so is one ``usable`` finds a reason against (put in ``refused``)."""
+    opaque; so is one ``usable`` finds a reason against (put in ``refused``).
+    ``register_keys``: see ``import_call_sites`` (static recognition only)."""
     found = {}
-    for key, symbol in (import_call_sites(unit, image_info, local_functions) if sites is None else sites).items():
+    for key, symbol in (import_call_sites(unit, image_info, local_functions, register_keys)
+                        if sites is None else sites).items():
         model = external_models.lookup(symbol)
         if model is not None and (key.endswith(":CALLIND") or key.endswith(":BRANCHIND")):
             # bound through an import slot: the slot holds the export's address
@@ -2140,7 +2183,7 @@ def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset
     return found
 
 
-def import_call_sites(unit, image_info, local_functions=frozenset()) -> dict:
+def import_call_sites(unit, image_info, local_functions=frozenset(), register_keys=None) -> dict:
     """Call key -> imported symbol for the import call shapes the engine binds
     to models: ``CALL`` of an import thunk, a terminal ``BRANCH`` to one (``jmp
     free``: a tail call), ``CALLIND`` of a value copied from
@@ -2150,7 +2193,10 @@ def import_call_sites(unit, image_info, local_functions=frozenset()) -> dict:
     into the call (``mov rax, [__imp_X]; call rax``, ``_slot_loaded_register``).
     ``local_functions``: entries (space id, offset) of the program's functions
     -- a jump to one of them is a tail call to that body (``_direct_calls``),
-    never the import's model, even at an import thunk's address."""
+    never the import's model, even at an import thunk's address.
+    ``register_keys`` (a set, optional): receives the keys recognized only
+    through ``_slot_loaded_register`` -- the bindings whose predecessor claim
+    is about the observed graph (the return shape stays key -> symbol)."""
     found = {}
     loaded = _slot_loaded_register(unit, image_info)
     for instruction in unit.observation.instructions:
@@ -2179,6 +2225,8 @@ def import_call_sites(unit, image_info, local_functions=frozenset()) -> dict:
                     symbol = _static_slot_symbol(unit, image_info, copy.inputs[0])
                 if symbol is None:
                     symbol = loaded.get(key)
+                    if symbol is not None and register_keys is not None:
+                        register_keys.add(key)
             if symbol is not None:
                 found[key] = symbol
     return found
@@ -2207,28 +2255,40 @@ def _final_target_write(instruction, ordinal):
     return None if index is None else instruction.operations[index]
 
 
+_SLOT_CHAIN_LIMIT = 16   # plain instructions walked back from a register call to its slot load
+
+
 def _slot_loaded_register(unit, image_info) -> dict:
-    """CALLIND key -> import for ``mov rax, [__imp_X]; call rax`` (the 09
-    testbed's debug build calls its import DLL this way), on the engine's
-    p-code block graph (``pcode_blocks``, the flow memory SSA uses):
-    - the block B holding the CALLIND starts its instruction, is not the entry
-      block and has exactly one predecessor block P (P is not B): every
-      execution of the call comes from the end of P; P is a whole plain
-      instruction falling through into B (``_plain_into``);
-    - in B before the CALLIND: no call, and the target is the register R
-      itself (no write overlapping R) or a temporary (``UNIQUE``; never
-      memory, which a ``STORE`` may overwrite unnamed) whose last write is a
-      COPY of R (no write overlapping R before that COPY);
-    - in P: the last write overlapping R is a COPY of all of R from an import
-      slot (P has no call that could change R with no output).
-    Functions with a BRANCHIND (unknown targets) or an unsupported graph: none."""
+    """CALLIND key -> import for ``mov rax, [__imp_X]; ...; call rax`` (the 09
+    testbed's debug build calls its import DLL this way; Mulp loads the slot
+    into a register a few instructions earlier), on the engine's p-code block
+    graph (``pcode_blocks``, the flow memory SSA uses):
+    - the block B holding the CALLIND starts its instruction; in B before the
+      CALLIND: no call, and the target is the register R itself (no write
+      overlapping R) or a temporary (``UNIQUE``; never memory, which a
+      ``STORE`` may overwrite unnamed) whose last write is a COPY of R (no
+      write overlapping R before that COPY);
+    - walking back from B (at most ``_SLOT_CHAIN_LIMIT`` instructions): the
+      current block is not the entry block and has exactly one predecessor
+      block P (P is not it), a whole plain instruction falling through into
+      it (``_plain_into``: no call, CALLOTHER, branch or return, no flow
+      targets or override) -- every execution of the call comes through P;
+      the nearest write overlapping R in P must be a COPY of all of R from an
+      import slot (the load: P may be the entry block), and P with no write
+      overlapping R continues the walk (P must then not be the entry block);
+      any other write of R ends it with no import.
+    The claim "exactly one predecessor" is about the OBSERVED graph: a
+    targetless BRANCHIND may land anywhere, so on a function with one the
+    binding rests on those sites -- the analysis stamps them on the bound
+    effect (``analyze_units``: predecessor-dependent bindings, design S-R r3);
+    the recognizer itself is exemption-blind and never refuses a whole
+    function. An unsupported graph: none."""
     from .pcode_blocks import build_pcode_block_graph
 
     observation = unit.observation
     function = unit.scopes.function
     entry = getattr(function, "entry", None)
-    if entry is None or any(operation.opcode == "BRANCHIND" for row in observation.instructions
-                            for operation in row.operations):
+    if entry is None:
         return {}
     graph = build_pcode_block_graph(observation, entry)
     if graph.unsupported is not None:
@@ -2264,23 +2324,40 @@ def _slot_loaded_register(unit, image_info) -> dict:
                 continue
             if any(_storage_overlaps(item.output, register) for item in before):
                 continue
-            into = predecessors.get(block.key, [])
-            if block.key == graph.entry or len(into) != 1 or into[0].key == block.key:
+            if block.start != 0:
                 continue
-            source = into[0]
-            if block.start != 0 or not _plain_into(rows[source.instruction], source, row.address):
+            load = _slot_chain_load(graph, rows, predecessors, block, register)
+            if load is None:
                 continue
-            source_operations = rows[source.instruction].operations
-            writes = [position for position, item in enumerate(source_operations) if _storage_overlaps(item.output, register)]
-            if not writes:
-                continue
-            last = source_operations[writes[-1]]
-            if last.opcode != "COPY" or last.output != register or last.inputs[0].kind is not VarnodeKindCode.ADDRESS:
-                continue
-            symbol = _static_slot_symbol(unit, image_info, last.inputs[0])
+            symbol = _static_slot_symbol(unit, image_info, load.inputs[0])
             if symbol is not None:
                 found[_operation_key(row.address, block.start + index, operation.opcode)] = symbol
     return found
+
+
+def _slot_chain_load(graph, rows, predecessors, block, register):
+    """The COPY loading all of ``register`` from an import slot that every
+    execution of ``block`` comes through (``_slot_loaded_register``), or None."""
+    current, seen = block, set()
+    for _ in range(_SLOT_CHAIN_LIMIT):
+        if current.key == graph.entry or current.key in seen:
+            return None   # (walking past the entry: the callers' values reach it too)
+        seen.add(current.key)
+        into = predecessors.get(current.key, [])
+        if len(into) != 1 or into[0].key == current.key:
+            return None
+        source = into[0]
+        if not _plain_into(rows[source.instruction], source, current.instruction):
+            return None
+        operations = rows[source.instruction].operations
+        writes = [position for position, item in enumerate(operations) if _storage_overlaps(item.output, register)]
+        if writes:
+            last = operations[writes[-1]]   # (the nearest write decides: never past a clobber)
+            if last.opcode != "COPY" or last.output != register or last.inputs[0].kind is not VarnodeKindCode.ADDRESS:
+                return None
+            return last
+        current = source
+    return None
 
 
 def _static_slot_symbol(unit, image_info, read):

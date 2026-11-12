@@ -1,7 +1,9 @@
 """Import call shapes (``interprocedural.import_call_sites``): besides ``call
 [__imp_X]``, ``mov rax, [__imp_X]; call rax`` -- the debug build of the 09
 testbed calls its import DLL this way (docs 25.13) -- when nothing else can
-reach the call with another rax."""
+reach the call with another rax. The load may be a few plain instructions back
+(design S-R r3: a chain of single-predecessor fall-throughs that never writes
+rax); targetless jumps elsewhere: ``test_slot_register_sites``."""
 
 from synthetic import (
     CODE_BASE, RAX, RCX, RSP, FunctionBuilder, add, const, copy, op, program_units, ram, reg, store, sub, tmp,
@@ -45,13 +47,14 @@ def test_a_later_write_of_part_of_the_register_keeps_it_opaque():
     assert _sites(builder) == {}
 
 
-def test_a_load_two_instructions_back_is_not_taken():
+def test_a_load_two_instructions_back_is_taken():
+    # (design S-R r3) a plain instruction that does not write rax in between
     builder = (FunctionBuilder().sub_rsp(0x28)
                .ins(copy(reg(RAX), ram(SLOT)))
                .ins(copy(reg(RCX), const(1)))
                .call_indirect(RAX)
                .add_rsp(0x28).ret())
-    assert _sites(builder) == {}
+    assert list(_sites(builder).values()) == ["f"]
 
 
 def test_a_call_after_the_load_keeps_it_opaque():

@@ -782,7 +782,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
                 [(site, "import-slots-hold-their-exports") for site in exempt]
                 + [(site, "faults-end-the-execution") for site in faults])),
             fault_report=_fault_report(results, image_info),
-            control_sites=_control_sites(results, contexts),
+            control_sites=_control_sites(results, contexts, exempt),
             admission_failures=admission_failures,
             refused_control_graphs=tuple(
                 (key, item.normalized.observed_control) for key, item in sorted(results.items())
@@ -881,9 +881,13 @@ def _fault_report(results, image_info) -> tuple:
     return tuple(rows)
 
 
-def _control_sites(results, contexts) -> tuple:
+def _control_sites(results, contexts, exempt=frozenset()) -> tuple:
     """``EngineRun.control_sites`` (B', docs 25.96): every own key named by a
-    published context, with its kind and what a link must name to settle it."""
+    published context, with its kind and what a link must name to settle it.
+    ``exempt``: the run's import-tail sites (``control_exemptions``); one that
+    is in a context got there as a binding's re-entry obligation (design S-R
+    r3: a predecessor-dependent slot-register binding), kind
+    ``import-tail-reentry`` -- exempt from the frontier, still an obligation."""
     from .control_context import continuation_owner
     from .write_classes import WriterClasses, unresolved_writers
 
@@ -926,6 +930,8 @@ def _control_sites(results, contexts) -> tuple:
             models = tuple(sorted({label for call, label in getattr(item, "vetoed_models", {}).items()
                                    if call.startswith(instruction + ":")}))
             rows.append((site, "vetoed-noreturn", function, (instruction, callees, models)))
+        elif site in exempt:
+            rows.append((site, "import-tail-reentry", function, (":".join(parts[3:5]),)))
         else:
             rows.append((site, "unknown-transfer", function, (":".join(parts[3:5]),)))
     return tuple(rows)

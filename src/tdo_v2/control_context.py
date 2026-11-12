@@ -16,7 +16,12 @@ the opaque-callee rule, the call-state stage's, not this one's -- and so does
 a terminal ``jmp [__imp_X]`` the engine recognizes as a jump through an import
 slot (``import_call_sites``) under import-slots-hold-their-exports: a tail
 call to an import, the transfer ``call [__imp_X]; ret`` makes (``exempt``,
-recorded by the caller; r6).
+recorded by the caller; r6). Exempt from the FRONTIER only: a binding whose
+identity is a claim about the observed graph (``mov R, [slot]; ...; call R``
+on a function with a targetless jump, design S-R r3) carries the tail site
+as a re-entry obligation -- the export may come back into the load chain --
+so the same key can be both an exemption and, through the summary's
+support, a key of the context (reported as ``import-tail-reentry``).
 
 A pure function of the final results: computed once at publication
 (``summary_engine.report``) and by the template export; no analysis product
