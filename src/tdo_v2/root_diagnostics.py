@@ -28,8 +28,13 @@ row per (where, reason): items -- ``{"where", "reason": "items", "lists",
 "shown", "total"}`` summed over the cut lists of records that were kept; work --
 ``{"where", "reason": "work", "shown", "total": None}``.
 
+A work-truncated report is NOT diffable against another run: the cut point
+depends on the data, so two runs stop at different functions (diff tools must
+refuse it; set ``TDO_V2_DIAGNOSTIC_WORK`` explicitly for large programs).
+
 A fact the analysis did not retain is reported as ``"unavailable"``; the
-builder never reconstructs it by re-running an analysis step.
+builder never reconstructs it by re-running an analysis step. A function a
+model binding cuts is listed with status ``"model-bound"`` only.
 
 Phase P1a (this module): F0 status, F1 call inventory (no producers), F2
 writers and call rows, F4 sink demands, R3 operation-bound candidates, R4
@@ -72,14 +77,19 @@ def build_diagnostics(run, results, by_key) -> dict:
     itself is returned unchanged by the caller."""
     from .resource_limits import AnalysisCancelled, diagnostic
 
+    import re
+
     try:
         items, work = limits_from_environment()
-        with diagnostic(work):
+        with diagnostic(work) as ledger:
+            if ledger is None:   # (no run, or inside another diagnostic: the allowance would not hold)
+                return {"version": VERSION, "phase": PHASE, "error": "no diagnostic context"}
             return _Builder(run, results, by_key, items, work).build()
-    except AnalysisCancelled:
+    except AnalysisCancelled:   # (a BaseException; listed for the reader)
         raise
     except Exception as error:   # (a builder bug never breaks the run)
-        return {"version": VERSION, "phase": PHASE, "error": f"{type(error).__name__}: {error}"}
+        text = re.sub(r"0x[0-9a-fA-F]+", "0x?", f"{type(error).__name__}: {error}")   # (no process addresses)
+        return {"version": VERSION, "phase": PHASE, "error": text[:500]}
 
 
 # -- canonical order -----------------------------------------------------------------
@@ -167,12 +177,17 @@ class _Builder:
         truncated: list = []
         where = "functions"
         try:
-            self.charge(len(self.run.failed_functions) + len(self.results))
+            self.charge(len(self.run.failed_functions) + len(self.results) + len(self.by_key))
             failed = {key: (reason, detail) for key, reason, detail in self.run.failed_functions}
-            keys = set(self.results) | set(failed)
+            keys = set(self.results) | set(failed) | set(self.by_key)
             self.charge(len(keys))
             for key in sorted(keys, key=_function_order):
                 self.pending = {}
+                if key not in self.results and key not in failed:
+                    # a function a model binding cuts (``interprocedural._bound_cuts``):
+                    # its callers take the model; it has no analysis of its own
+                    functions[key] = {"status": "model-bound"}
+                    continue
                 record = self.function(key, failed.get(key))
                 functions[key] = record   # (atomic: built, then kept)
                 self.commit()
@@ -263,6 +278,8 @@ class _Builder:
                 row["tail"] = True
             if call in item.refused_models:
                 row["refused_model"] = str(item.refused_models[call])
+            if call in item.vetoed_models:   # (a declined noreturn cut: its proven effect was dropped)
+                row["vetoed_model"] = str(item.vetoed_models[call])
             effect = proven.get(call)
             if effect is not None:
                 row["effect"] = "proven"
@@ -388,6 +405,11 @@ class _Builder:
             row["derived_rows"] = [key for key, _, _ in found]
             row["writers"] = writers
             rows.append(row)
+        record["call_rows_summary"] = {   # (over every call, before the cap)
+            "calls": len(rows), "derived": sum(row["derived"] for row in rows),
+            "writer_rows": sum(row["writer_rows"] for row in rows),
+            "exact": sum(row["exact"] for row in rows), "unresolved": sum(row["unresolved"] for row in rows),
+        }
         self.cap_kept(record, "call_rows", rows, "functions.call_rows",
                       (("derived_rows", "functions.call_rows.derived_rows"),
                        ("writers", "functions.call_rows.writers")))
@@ -398,7 +420,12 @@ class _Builder:
         (``index`` is the demand's position in ``summary.sink_demands``)."""
         summary = getattr(item, "summary", None)
         if summary is None:
-            return UNAVAILABLE
+            # a failure published over a round-1 result: its callers used that
+            # result's summary (``AnalyzedFunction.superseded``) -- retained, shown as such
+            summary = getattr(getattr(item, "superseded", None), "summary", None)
+            if summary is None:
+                return UNAVAILABLE
+            record["demands_from"] = "superseded"
         demands = summary.sink_demands
         self.charge(len(demands))
         rows = []
@@ -451,18 +478,31 @@ class _Builder:
             candidates.append(row)
         self.charge(len(candidates))
         candidates.sort(key=lambda row: _operation_order(row["op"]))
+        projected = self.projected(key, item, normalized, root)
         if candidates:
-            unbound: dict = {"cause": UNAVAILABLE}
+            # the binder's own fallback for a projected root whose ~sink row did
+            # not materialize (``summary_engine.bind``) is a known cause; any other
+            # refusal is not retained (P3)
+            fallback = isinstance(projected, dict) and not projected["materialized"] \
+                and [row["op"] for row in candidates] == [projected["call"]]
+            unbound: dict = {"cause": "projection-not-materialized" if fallback else UNAVAILABLE}
             self.cap(unbound, "candidates", candidates, "roots.unbound")
             record["unbound"] = unbound
-        projected = self.projected(key, item, normalized, root)
         if projected is not None:
             record["projected"] = projected
         return record
 
     def projected(self, key, item, normalized, root):
         """R4: the callee demand a projected root comes from (occurrences after
-        the function's own call sites and tails, ``summary_engine.bind``)."""
+        the function's own call sites and tails, ``summary_engine.bind``).
+
+        ``demand_index`` indexes the CALL's lowered effect
+        (``normalized.proven_call_effects[call].sink_demands``), not the callee's
+        ``summary.sink_demands`` (F4 ``index``): they coincide only for a
+        single-target, non-recursive call -- a multi-target effect concatenates
+        its members' demands, a recursion hypothesis merges them by label. Join
+        R4 to F4 by ``target`` and ``label`` (possibly several F4 rows), never by
+        index."""
         evidence = self.by_key.get(key)
         if evidence is None:
             return None
@@ -477,7 +517,11 @@ class _Builder:
         lowered = None
         if effect is not None and 0 <= demand_index < len(effect.sink_demands):
             lowered = bool(effect.sink_demands[demand_index].complete)
-        return {"call": call, "demand_index": demand_index, "label": label,
+        target = self.target(item, call)
+        if target is not None and "members" in target:
+            self.cap(target, "members", target["members"], "roots.projected.members")
+        return {"call": call, "target": target, "demand_index": demand_index,
+                "demand_index_space": "lowered-effect", "label": label,
                 "lowered_complete": UNAVAILABLE if lowered is None else lowered,
                 "projected_complete": bool(complete), "materialized": bool(nodes),
                 "source_demand": UNAVAILABLE}

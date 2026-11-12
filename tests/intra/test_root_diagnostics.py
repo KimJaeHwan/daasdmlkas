@@ -137,6 +137,9 @@ def test_the_chain_reads_call_writer_demand_and_projection(monkeypatch):
     (projected,) = [root for root in run.diagnostics["roots"] if "projected" in root]
     assert projected["function"] == _key(MAIN) and projected["inherited"] is True
     assert projected["projected"]["call"] == to_g["call"]
+    assert projected["projected"]["target"] == {"function": _key(G)}
+    assert (projected["projected"]["demand_index"], projected["projected"]["label"]) == (0, "sink.arg0")
+    assert projected["projected"]["demand_index_space"] == "lowered-effect"
     assert projected["projected"]["lowered_complete"] is False
     assert projected["projected"]["projected_complete"] is False
     assert projected["projected"]["materialized"] is True
@@ -300,6 +303,12 @@ def test_every_work_cut_is_a_clean_truncation(monkeypatch):
         assert all(row["total"] is None for row in cut)
         if cut:
             seen.add((len(report["functions"]), len(report["roots"])))
+            # the cut report is a prefix of the full one, in canonical order
+            assert list(report["functions"]) == list(full["functions"])[:len(report["functions"])]
+            assert [(r["function"], r["label"], r["occurrence"]) for r in report["roots"]] == \
+                [(r["function"], r["label"], r["occurrence"]) for r in full["roots"]][:len(report["roots"])]
+            if cut[0]["where"] == "functions":
+                assert {"where": "roots", "reason": "work", "shown": 0, "total": None} in cut
     assert (0, 0) in seen and len(seen) > 1
 
 
@@ -525,3 +534,40 @@ def test_multi_target_members_are_listed_and_capped(monkeypatch):
     rows = {row["where"]: row for row in run.diagnostics["truncated"] if row["reason"] == "items"}
     assert rows["functions.calls.members"] == {"where": "functions.calls.members", "reason": "items", "lists": 1,
                                                "shown": 1, "total": 2}
+
+
+# -- Fable final review ----------------------------------------------------------------------------
+
+def _two_sinks(entry):
+    """``rcx = 1; call sink; rcx = 2; call sink`` -- two demands with one label."""
+    return FunctionBuilder(entry=entry).sub_rsp(0x28).ins(copy(reg(RCX), const(1))).call(SINK) \
+        .ins(copy(reg(RCX), const(2))).call(SINK).add_rsp(0x28).ret()
+
+
+def test_demands_with_one_label_keep_their_own_indices():
+    main = FunctionBuilder(entry=MAIN).sub_rsp(0x28).call(G).add_rsp(0x28).ret()
+    run = _run(main, _two_sinks(G), root_diagnostics=True)
+    assert [(row["index"], row["label"]) for row in run.diagnostics["functions"][_key(G)]["demands"]] == \
+        [(0, "sink.arg0"), (1, "sink.arg0")]
+    projected = [root["projected"] for root in run.diagnostics["roots"] if "projected" in root]
+    assert sorted(row["demand_index"] for row in projected) == [0, 1]
+    assert all(row["target"] == {"function": _key(G)} and row["label"] == "sink.arg0" for row in projected)
+
+
+def test_a_multi_target_calls_demand_index_is_not_a_callee_index(monkeypatch):
+    """Both members have one demand (F4 index 0 each); the composed effect
+    concatenates them, so R4's lowered-effect indices are 0 and 1 -- the join
+    to F4 is by target and label, never by index."""
+    from test_multi_target_calls import A, B, _table
+
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    member = lambda entry, value: FunctionBuilder(entry=entry).sub_rsp(0x28).ins(copy(reg(RCX), const(value))) \
+        .call(SINK).add_rsp(0x28).ret()
+    run = _run(_table(), member(A, 1), member(B, 2), root_diagnostics=True)
+    functions = run.diagnostics["functions"]
+    assert [row["index"] for row in functions[_key(A)]["demands"]] == [0]
+    assert [row["index"] for row in functions[_key(B)]["demands"]] == [0]
+    projected = [root["projected"] for root in run.diagnostics["roots"]
+                 if root["function"] == _key(MAIN) and "projected" in root]
+    assert sorted(row["demand_index"] for row in projected) == [0, 1]
+    assert all(row["target"] == {"members": [_key(A), _key(B)]} for row in projected)
