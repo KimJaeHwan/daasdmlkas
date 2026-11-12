@@ -332,6 +332,7 @@ class _Builder:
         instructions = getattr(observation, "instructions", ()) if observation is not None else ()
         self.charge(len(instructions))
         self.charge(sum(len(row.operations) for row in instructions))   # (the classifier's operation index)
+        self.charge(len(normalized.scopes.program.evidence.address_spaces))   # (its memory-space set)
         classes = WriterClasses(normalized.scopes, observation)
         self.charge(len(ssa.unresolved_writes))
         rows = []

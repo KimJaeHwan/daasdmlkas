@@ -481,3 +481,47 @@ def test_the_report_is_the_same_under_any_hash_seed(limits):
             assert report["functions"]
     else:
         assert report["functions"] and report["roots"]
+
+
+# -- Astra round 2 ------------------------------------------------------------------------------------
+
+def test_the_writer_classifier_is_charged_before_it_reads_the_address_spaces(monkeypatch):
+    """Every address-space row the classifier scans is charged first: the
+    last diagnostic charge before ``memory_space_ids`` covers them."""
+    from tdo_v2 import root_diagnostics, write_classes
+
+    charges = []
+    original_charge = root_diagnostics._Builder.charge
+    original_spaces = write_classes.memory_space_ids
+    scanned = []
+
+    def charge(n):
+        charges.append(n)
+        original_charge(n)
+
+    def spaces(scopes):
+        if charges:   # (the analysis classifies too, before the diagnostics start)
+            scanned.append((len(scopes.program.evidence.address_spaces), charges[-1]))
+        return original_spaces(scopes)
+
+    monkeypatch.setattr(root_diagnostics._Builder, "charge", staticmethod(charge))
+    monkeypatch.setattr(write_classes, "memory_space_ids", spaces)
+    _run(_caller(), _callee(), root_diagnostics=True)
+    assert scanned and all(charged >= max(1, size) for size, charged in scanned)
+
+
+def test_multi_target_members_are_listed_and_capped(monkeypatch):
+    """call [table + (rcx & 1) * 8] -- resolved to two members (forward on)."""
+    from test_multi_target_calls import A, B, _returns, _table
+
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    run = _run(_table(), _returns(A, 1), _returns(B, 2), root_diagnostics=True)
+    (row,) = [row for row in run.diagnostics["functions"][_key(MAIN)]["calls"] if row["call"].endswith(":CALLIND")]
+    assert row["target"] == {"members": [_key(A), _key(B)]} and row["effect"] == "proven"
+    monkeypatch.setenv("TDO_V2_DIAGNOSTIC_ITEMS", "1")
+    run = _run(_table(), _returns(A, 1), _returns(B, 2), root_diagnostics=True)
+    (row,) = [row for row in run.diagnostics["functions"][_key(MAIN)]["calls"] if row["call"].endswith(":CALLIND")]
+    assert row["target"] == {"members": [_key(A)], "members_total": 2}
+    rows = {row["where"]: row for row in run.diagnostics["truncated"] if row["reason"] == "items"}
+    assert rows["functions.calls.members"] == {"where": "functions.calls.members", "reason": "items", "lists": 1,
+                                               "shown": 1, "total": 2}
