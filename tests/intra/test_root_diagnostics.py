@@ -216,7 +216,157 @@ def test_a_failed_function_is_reported_with_its_failure_roots(monkeypatch):
             assert root["projected"] == "unavailable"
 
 
+
+
+# -- regressions of the code review (Astra round 1) -------------------------------------------
+
+def test_an_opaque_tail_call_is_in_the_inventory():
+    """rcx = 7; jmp sink -- a tail call the engine seeded, with no resolved target."""
+    main = FunctionBuilder(entry=MAIN).ins(copy(reg(RCX), const(7))).tail_call(SINK)
+    run = analyze_summaries([main], REGISTER_SINK, names=NAMES, root_diagnostics=True)
+    (row,) = run.diagnostics["functions"][_key(MAIN)]["calls"]
+    assert row["call"].endswith(":BRANCH") and row["tail"] is True
+    assert row["effect"] == "none" and row["stack"] == "unknown" and row["target"] is None
+
+
+def test_a_callee_that_moves_the_stack_pointer_is_disproven():
+    """G: add rsp, 8; ret -- its exit leaves another known delta."""
+    callee = FunctionBuilder(entry=G).add_rsp(8).ret()
+    main = FunctionBuilder(entry=MAIN).sub_rsp(0x28).call(G).ins(copy(reg(RCX), const(7))).call(SINK) \
+        .add_rsp(0x28).ret()
+    run = _run(main, callee, root_diagnostics=True)
+    assert _call(run.diagnostics["functions"][_key(MAIN)], G)["stack"] == "disproven"
+
+
+def test_a_test_only_declared_boundary_shows_its_label():
+    """The summary engine carries a TEST-ONLY declared boundary as a proven
+    effect with a declared label (never ``assumed_call_effects``): F1 shows the
+    label next to the target; ``_unbound_roots``' exception cannot apply, so
+    no candidate is marked and the counts still reconcile."""
+    source = CODE_BASE + 0x800
+    provider = boundary({"source": 4}, {"sink": 4}, assume_call_effect=True)
+    main = (FunctionBuilder(entry=MAIN).call(source).cbranch("zero", reg(ZF, 1)).ins(copy(reg(RCX, 4), reg(RAX, 4)))
+            .branch("join").label("zero").ins(copy(reg(RCX, 4), const(0, 4))).label("join").call(SINK).ret())
+    bodies = [main, FunctionBuilder(entry=source).ins(copy(reg(RAX, 4), const(7, 4))).ret(),
+              FunctionBuilder(entry=SINK).ret()]
+    run = analyze_summaries(bodies, provider, names={SINK: "sink", source: "source"}, root_diagnostics=True,
+                            assume_boundary_call_effects=True)
+    calls = run.diagnostics["functions"][_key(MAIN)]["calls"]
+    assert {row["target"]["model"] for row in calls} == {"test-only-boundary:source.ret",
+                                                         "test-only-boundary:sink.arg0"}
+    (root,) = [root for root in run.diagnostics["roots"] if root["function"] == _key(MAIN)]
+    assert all("exception" not in candidate for candidate in root["unbound"]["candidates"])
+    _reconcile(run)
+
+
+def test_item_caps_reach_demands_and_keep_their_indices(monkeypatch):
+    monkeypatch.setenv("TDO_V2_DIAGNOSTIC_ITEMS", "1")
+    run = _run(_caller(), _callee(), root_diagnostics=True)
+    caller = run.diagnostics["functions"][_key(MAIN)]
+    assert caller["demands_summary"]["total"] == 2 and caller["demands_total"] == 2
+    assert [row["index"] for row in caller["demands"]] == [0]
+    rows = {row["where"]: row for row in run.diagnostics["truncated"] if row["reason"] == "items"}
+    assert rows["functions.demands"]["total"] >= 2 and rows["functions.demands"]["shown"] >= 1
+
+
+def _cut_lists(report):
+    """Lists in the kept records that carry ``<name>_total`` (a cap cut them)."""
+    found = 0
+    stack = [report["functions"], report["roots"]]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            found += sum(1 for key in value if key.endswith("_total"))
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return found
+
+
+def test_every_work_cut_is_a_clean_truncation(monkeypatch):
+    """Any work allowance -- also one that cuts before the first function --
+    gives tables, never an error; item rows count only kept records."""
+    full = _run(_caller(), _callee(), root_diagnostics=True).diagnostics
+    assert full["truncated"] == []
+    monkeypatch.setenv("TDO_V2_DIAGNOSTIC_ITEMS", "1")
+    seen = set()
+    for work in (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610):
+        monkeypatch.setenv("TDO_V2_DIAGNOSTIC_WORK", str(work))
+        report = _run(_caller(), _callee(), root_diagnostics=True).diagnostics
+        assert "error" not in report, report
+        cut = [row for row in report["truncated"] if row["reason"] == "work"]
+        items = [row for row in report["truncated"] if row["reason"] == "items"]
+        assert sum(row["lists"] for row in items) == _cut_lists(report)
+        assert all(row["total"] is None for row in cut)
+        if cut:
+            seen.add((len(report["functions"]), len(report["roots"])))
+    assert (0, 0) in seen and len(seen) > 1
+
+
+def test_writers_carry_a_stable_identity():
+    run = _run(_caller(), _callee(), root_diagnostics=True)
+    for record in run.diagnostics["functions"].values():
+        for row in record["writers"]:
+            assert row["id"] == f"{row['op']}#{row['occurrence']}"
+
+
 # -- C1 / C2: on and off -------------------------------------------------------------------------
+
+def _semantic(monkeypatch, analyze):
+    """(run, encoded run, premise report, encoded summaries, run work, ledgers,
+    results) of one analysis: what C1 and C2 compare."""
+    from semantic_snapshot import encode
+    from tdo_v2 import summary_engine
+
+    captured = {}
+    original = summary_engine.analyze_units
+
+    def capture(*args, **kwargs):
+        captured["results"] = original(*args, **kwargs)
+        return captured["results"]
+
+    monkeypatch.setattr(summary_engine, "analyze_units", capture)
+    try:
+        run = analyze()
+    finally:
+        monkeypatch.setattr(summary_engine, "analyze_units", original)
+    last = resource_limits.last_run()
+    results = captured["results"]
+    summaries = {key: encode(item.summary) for key, item in sorted(results.items())}
+    return (run, encode(run), run.supports, summaries, last.work,
+            {key: item.work for key, item in last.ledgers.items()}, results)
+
+
+def _same(on, off):
+    """C1 + C2: every encoded output, the premise report (not encoded), every
+    published summary, the run and every function work ledger."""
+    assert on[1] == off[1]
+    assert on[2] == off[2]
+    assert on[3] == off[3]
+    assert (on[4], on[5]) == (off[4], off[5])
+
+
+def _bodies(name):
+    return {
+        "chain": lambda: (_caller(), _callee()),
+        "unbound": lambda: (FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(copy(reg(RCX), const(7))).call(OPAQUE)
+                            .cbranch("ok", reg(ZF, 1)).ud2().label("ok").call(SINK).add_rsp(0x28).ret(),),
+        "tail": lambda: (FunctionBuilder(entry=MAIN).ins(copy(reg(RCX), const(7))).tail_call(SINK),),
+        "disproven": lambda: (FunctionBuilder(entry=MAIN).sub_rsp(0x28).call(G).ins(copy(reg(RCX), const(7)))
+                              .call(SINK).add_rsp(0x28).ret(), FunctionBuilder(entry=G).add_rsp(8).ret()),
+        "limited": lambda: (_caller(), _callee()),
+    }[name]()
+
+
+@pytest.mark.parametrize("name", ["chain", "unbound", "tail", "disproven", "limited"])
+def test_small_programs_are_unchanged(monkeypatch, name):
+    if name == "limited":
+        monkeypatch.setenv("TDO_V2_LIMIT_GRAPH_NODES", "40")
+    off = _semantic(monkeypatch, lambda: _run(*_bodies(name)))
+    on = _semantic(monkeypatch, lambda: _run(*_bodies(name), root_diagnostics=True))
+    _same(on, off)
+    assert off[0].diagnostics is None and "error" not in on[0].diagnostics
+
 
 @pytest.fixture(scope="module")
 def program():
@@ -229,17 +379,14 @@ def program():
     return fixture, inputs
 
 
-def _scaled(program, diagnostics, records=False):
-    from semantic_snapshot import encode
+def _scaled(monkeypatch, program, diagnostics, records=False):
     from tdo_v2.summary_engine import analyze_observed_with_summaries
 
     fixture, inputs = program
-    run = analyze_observed_with_summaries(
+    return _semantic(monkeypatch, lambda: analyze_observed_with_summaries(
         inputs.program, inputs.evidences, image_info=inputs.image_info, readonly_image=inputs.readonly_image,
         boundary_provider=fixture.provider, pcodeop_models=fixture.pcodeop_models(inputs.evidences),
-        operation_records=records, root_diagnostics=diagnostics)
-    last = resource_limits.last_run()
-    return run, encode(run), last.work, {key: item.work for key, item in last.ledgers.items()}
+        operation_records=records, root_diagnostics=diagnostics))
 
 
 @pytest.mark.parametrize("limits", [{}, {"TDO_V2_FUNCTION_WORK": 0.3}, {"TDO_V2_FUNCTION_WORK": 0.7},
@@ -247,45 +394,50 @@ def _scaled(program, diagnostics, records=False):
                                     {"TDO_V2_DIAGNOSTIC_WORK": 20}, {"TDO_V2_DIAGNOSTIC_ITEMS": 1}])
 @pytest.mark.parametrize("records", [False, True])
 def test_diagnostics_change_no_other_result(program, monkeypatch, limits, records):
-    _, _, total, ledgers = _scaled(program, False)
+    base = _scaled(monkeypatch, program, False)
     for name, value in limits.items():
         if name.startswith("TDO_V2_DIAGNOSTIC"):
             monkeypatch.setenv(name, str(value))
         else:
-            base = total if name == "TDO_V2_RUN_WORK" else max(ledgers.values())
-            monkeypatch.setenv(name, str(max(1, int(base * value))))
-    off_run, off, off_work, off_ledgers = _scaled(program, False, records)
-    on_run, on, on_work, on_ledgers = _scaled(program, True, records)
-    assert on == off
-    assert (on_work, on_ledgers) == (off_work, off_ledgers)
-    assert off_run.diagnostics is None and "error" not in on_run.diagnostics
+            size = base[4] if name == "TDO_V2_RUN_WORK" else max(base[5].values())
+            monkeypatch.setenv(name, str(max(1, int(size * value))))
+    off = _scaled(monkeypatch, program, False, records)
+    on = _scaled(monkeypatch, program, True, records)
+    _same(on, off)
+    run, results = on[0], on[6]
+    assert off[0].diagnostics is None and "error" not in run.diagnostics
+    truncated = run.diagnostics["truncated"]
     if "TDO_V2_DIAGNOSTIC_WORK" in limits:
-        assert any(row["reason"] == "work" for row in on_run.diagnostics["truncated"])
-    elif not limits or records:
-        assert not any(row["reason"] == "work" for row in on_run.diagnostics["truncated"])
+        assert any(row["reason"] == "work" for row in truncated)
+    else:
+        assert not any(row["reason"] == "work" for row in truncated)
+        # F0: every failure -- a late one over a published normalization included
+        for key, reason, _ in run.failed_functions:
+            assert run.diagnostics["functions"][key]["status"] == f"failed:{reason}"
+        assert set(run.diagnostics["functions"]) == set(results)
     if "TDO_V2_DIAGNOSTIC_ITEMS" in limits:
-        assert any(row["reason"] == "items" for row in on_run.diagnostics["truncated"])
-        for record in on_run.diagnostics["functions"].values():
+        assert any(row["reason"] == "items" for row in truncated)
+        for record in run.diagnostics["functions"].values():
             if isinstance(record.get("calls"), list):
                 assert len(record["calls"]) <= 1
                 if record["calls_summary"]["total"] > 1:
                     assert record["calls_total"] == record["calls_summary"]["total"]
     if not limits:
-        _reconcile(on_run)
+        _reconcile(run)
 
 
 def test_a_builder_error_leaves_the_run_unchanged(program, monkeypatch):
     from tdo_v2 import root_diagnostics
 
-    _, off, off_work, off_ledgers = _scaled(program, False)
+    off = _scaled(monkeypatch, program, False)
 
     def broken(self, key, failure):
         raise KeyError("boom")
 
     monkeypatch.setattr(root_diagnostics._Builder, "function", broken)
-    run, on, on_work, on_ledgers = _scaled(program, True)
-    assert (on, on_work, on_ledgers) == (off, off_work, off_ledgers)
-    assert run.diagnostics == {"version": 1, "phase": "P1a", "error": "KeyError: 'boom'"}
+    on = _scaled(monkeypatch, program, True)
+    _same(on, off)
+    assert on[0].diagnostics == {"version": 1, "phase": "P1a", "error": "KeyError: 'boom'"}
 
 
 # -- C4: deterministic across hash seeds ---------------------------------------------------------
@@ -305,20 +457,27 @@ print(json.dumps(run.diagnostics))
 """
 
 
-@pytest.mark.parametrize("items", [None, "1"])
-def test_the_report_is_the_same_under_any_hash_seed(items):
-    script = _SEEDED.format(src=str(REPO / "src"), intra=str(REPO / "tests" / "intra"), tools=str(REPO / "tools" / "graph_fidelity"))
+@pytest.mark.parametrize("limits", [{}, {"TDO_V2_DIAGNOSTIC_ITEMS": "1"}, {"TDO_V2_DIAGNOSTIC_WORK": "300"},
+                                    {"TDO_V2_DIAGNOSTIC_WORK": "2500"},
+                                    {"TDO_V2_DIAGNOSTIC_ITEMS": "1", "TDO_V2_DIAGNOSTIC_WORK": "2500"}])
+def test_the_report_is_the_same_under_any_hash_seed(limits):
+    script = _SEEDED.format(src=str(REPO / "src"), intra=str(REPO / "tests" / "intra"),
+                            tools=str(REPO / "tools" / "graph_fidelity"))
     outputs = []
     for seed in ("0", "1"):
-        env = {**os.environ, "PYTHONHASHSEED": seed}
-        env.pop("TDO_V2_DIAGNOSTIC_ITEMS", None)
-        if items is not None:
-            env["TDO_V2_DIAGNOSTIC_ITEMS"] = items
+        env = {key: value for key, value in os.environ.items() if not key.startswith("TDO_V2_DIAGNOSTIC")}
+        env.update(limits, PYTHONHASHSEED=seed)
         found = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True,
                                check=True, cwd=REPO)
         outputs.append(found.stdout)
     assert outputs[0] == outputs[1]
     report = json.loads(outputs[0])
-    assert report["functions"] and report["roots"] and "error" not in report
-    if items is not None:
+    assert "error" not in report
+    if "TDO_V2_DIAGNOSTIC_ITEMS" in limits:
         assert any(row["reason"] == "items" for row in report["truncated"])
+    if "TDO_V2_DIAGNOSTIC_WORK" in limits:
+        assert any(row["reason"] == "work" for row in report["truncated"])
+        if limits["TDO_V2_DIAGNOSTIC_WORK"] == "2500":   # (a cut after some functions; the whole report is 2663 units)
+            assert report["functions"]
+    else:
+        assert report["functions"] and report["roots"]

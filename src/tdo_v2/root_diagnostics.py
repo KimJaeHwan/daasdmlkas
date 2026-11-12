@@ -13,10 +13,20 @@ context -- it reads final results only, adds no analysis-phase step, charge,
 checkpoint or retention, and charges only its own diagnostic ledger, so every
 semantic output and every run / function work ledger is identical with the
 option on or off (``run.diagnostic_work`` aside). Overhead is bounded by
-``TDO_V2_DIAGNOSTIC_WORK`` units (default 5,000,000) and
-``TDO_V2_DIAGNOSTIC_ITEMS`` per inner list (default 64); wall-clock / RSS
-outcomes are not promised identical. Output is deterministic: every list is put
-in canonical order before it is capped, and no process ``id()`` appears.
+``TDO_V2_DIAGNOSTIC_WORK`` units (default 5,000,000; every potentially large
+read, copy or sort is charged by its known size BEFORE it happens) and
+``TDO_V2_DIAGNOSTIC_ITEMS`` per inner list (default 64; the top-level
+``functions`` / ``roots`` tables are bounded by the work allowance only);
+wall-clock / RSS outcomes are not promised identical. Output is deterministic:
+every list is put in canonical order before it is capped, and no process
+``id()`` appears.
+
+Truncation: a capped inner list keeps its first ``items`` entries and carries
+``<name>_total``; a work cut stops at a function / root boundary, discards the
+unfinished record, and leaves the tables built so far. ``truncated`` holds one
+row per (where, reason): items -- ``{"where", "reason": "items", "lists",
+"shown", "total"}`` summed over the cut lists of records that were kept; work --
+``{"where", "reason": "work", "shown", "total": None}``.
 
 A fact the analysis did not retain is reported as ``"unavailable"``; the
 builder never reconstructs it by re-running an analysis step.
@@ -37,8 +47,8 @@ PHASE = "P1a"
 DEFAULT_ITEMS = 64
 DEFAULT_WORK = 5_000_000
 _CALL_OPCODES = frozenset({"CALL", "CALLIND"})
-_TAIL_OPCODES = frozenset({"BRANCH", "BRANCHIND"})
 UNAVAILABLE = "unavailable"
+STACK_PREMISE = "opaque-callees-restore-stack-pointer"
 
 
 def limits_from_environment() -> tuple[int, int]:
@@ -58,8 +68,8 @@ def limits_from_environment() -> tuple[int, int]:
 
 def build_diagnostics(run, results, by_key) -> dict:
     """The run's diagnostics dict (``EngineRun.diagnostics``). Any exception
-    other than a cancellation yields ``{"version", "error"}``: the run itself is
-    returned unchanged by the caller."""
+    other than a cancellation yields ``{"version", "phase", "error"}``: the run
+    itself is returned unchanged by the caller."""
     from .resource_limits import AnalysisCancelled, diagnostic
 
     try:
@@ -104,10 +114,11 @@ class _Builder:
     def __init__(self, run, results, by_key, items: int, work: int) -> None:
         self.run, self.results, self.by_key = run, results, by_key
         self.items, self.work = items, work
-        self.cuts: dict = {}   # where -> number of lists cut by the item cap
-        self.proven: dict = {}   # function key -> its proven call effects (R4 lookups)
+        self.cuts: dict = {}      # where -> [lists, shown, total] of kept records
+        self.pending: dict = {}   # the same for the record being built
+        self.lookups: dict = {}   # (function key, name) -> dict built once (charged)
 
-    # -- budget and caps ---------------------------------------------------------------
+    # -- budget, caps, lookups ----------------------------------------------------------
 
     @staticmethod
     def charge(n: int) -> None:
@@ -117,14 +128,34 @@ class _Builder:
 
     def cap(self, record: dict, name: str, values: list, where: str) -> None:
         """``record[name]`` = the first ``items`` of ``values`` (already in
-        canonical order); a cut adds ``<name>_total`` and one count per
-        ``where`` to the run's truncation rows."""
+        canonical order); a cut adds ``<name>_total`` and is staged for the
+        record's truncation row (committed only if the record is kept)."""
         if len(values) > self.items:
             record[name] = values[:self.items]
             record[f"{name}_total"] = len(values)
-            self.cuts[where] = self.cuts.get(where, 0) + 1
+            row = self.pending.setdefault(where, [0, 0, 0])
+            row[0] += 1
+            row[1] += self.items
+            row[2] += len(values)
         else:
             record[name] = values
+
+    def commit(self) -> None:
+        for where, (lists, shown, total) in self.pending.items():
+            row = self.cuts.setdefault(where, [0, 0, 0])
+            row[0] += lists
+            row[1] += shown
+            row[2] += total
+        self.pending = {}
+
+    def lookup(self, key: str, name: str, pairs) -> dict:
+        """A dict of the function's ``pairs`` (a tuple of (key, value)), built
+        once per function and charged by its size first."""
+        found = self.lookups.get((key, name))
+        if found is None:
+            self.charge(len(pairs))
+            found = self.lookups[(key, name)] = dict(pairs)
+        return found
 
     # -- the report ----------------------------------------------------------------------
 
@@ -134,27 +165,36 @@ class _Builder:
         functions: dict = {}
         roots: list = []
         truncated: list = []
-        failed = {key: (reason, detail) for key, reason, detail in self.run.failed_functions}
-        keys = sorted(set(self.results) | set(failed), key=_function_order)
-        self.charge(len(keys))
-        done = "functions"
+        where = "functions"
         try:
-            for key in keys:
-                functions[key] = self.function(key, failed.get(key))   # (atomic: built, then kept)
-            done = "roots"
+            self.charge(len(self.run.failed_functions) + len(self.results))
+            failed = {key: (reason, detail) for key, reason, detail in self.run.failed_functions}
+            keys = set(self.results) | set(failed)
+            self.charge(len(keys))
+            for key in sorted(keys, key=_function_order):
+                self.pending = {}
+                record = self.function(key, failed.get(key))
+                functions[key] = record   # (atomic: built, then kept)
+                self.commit()
+            where = "roots"
+            self.charge(len(self.run.roots))
             ordered = sorted(self.run.roots, key=lambda root: (
                 root.function_space_id, root.function_byte_offset, root.label, root.occurrence_ordinal))
-            self.charge(len(ordered))
             for root in ordered:
-                roots.append(self.root(root))
-            done = None
+                self.pending = {}
+                record = self.root(root)
+                roots.append(record)
+                self.commit()
+            where = None
         except DiagnosticExhausted:
-            shown = len(functions) if done == "functions" else len(roots)
-            truncated.append({"where": done, "reason": "work", "shown": shown, "total": None})
-            if done == "functions":
+            self.pending = {}
+            truncated.append({"where": where, "reason": "work",
+                              "shown": len(functions) if where == "functions" else len(roots), "total": None})
+            if where == "functions":
                 truncated.append({"where": "roots", "reason": "work", "shown": 0, "total": None})
-        for where in sorted(self.cuts):
-            truncated.append({"where": where, "reason": "items", "lists": self.cuts[where]})
+        for name in sorted(self.cuts):
+            lists, shown, total = self.cuts[name]
+            truncated.append({"where": name, "reason": "items", "lists": lists, "shown": shown, "total": total})
         return {
             "version": VERSION, "phase": PHASE, "functions": functions, "roots": roots,
             "limits": {"items": self.items, "work": self.work}, "truncated": truncated,
@@ -182,46 +222,48 @@ class _Builder:
         record["recursion_unresolved"] = bool(getattr(item, "recursion_unresolved", False))
         if type(normalized) is not NormalizedFunction or item is None:
             record["calls"] = record["writers"] = record["call_rows"] = UNAVAILABLE
-            record["demands"] = self.demands(item)
+            record["demands"] = self.demands(record, item)
             return record
-        self.calls(record, item, normalized)
+        self.calls(record, key, item, normalized)
         self.writers(record, item, normalized)
         self.call_rows(record, normalized)
-        record["demands"] = self.demands(item)
+        record["demands"] = self.demands(record, item)
         return record
 
-    def calls(self, record: dict, item, normalized) -> None:
-        """F1: every CALL / CALLIND of the observation, and every tail BRANCH /
-        BRANCHIND some call map of the function names (a tail call the engine
-        bound or resolved); the target, the effect, and its stack restoration."""
+    def calls(self, record: dict, key: str, item, normalized) -> None:
+        """F1: every CALL / CALLIND of the observation and every tail call the
+        engine seeded (``call_seeds.seed_tail_calls``: a call-flagged BRANCH /
+        CBRANCH / BRANCHIND, its operation key -- bound, resolved or opaque);
+        the target, the effect, and its stack restoration. Map entries of
+        other operations are not listed."""
         observation = getattr(item.unit, "observation", None)
         instructions = getattr(observation, "instructions", ()) if observation is not None else ()
         self.charge(len(instructions))
         self.charge(sum(len(row.operations) for row in instructions))
-        proven = dict(normalized.proven_call_effects)
-        assumed = dict(normalized.assumed_call_effects)
-        maps = (item.calls, item.multi_calls, item.declared, item.bound_calls, item.refused_models, proven, assumed)
-        self.charge(sum(len(found) for found in maps))
-        named = set().union(*(found.keys() for found in maps))
-        keys = set()
+        evidence = self.by_key.get(key)
+        tails = tuple(getattr(evidence, "tails", ()) or ())
+        self.charge(len(tails))
+        tail_keys = {seed.operation_key for seed in tails}
+        keys = set(tail_keys)
         for row in instructions:
             for ordinal, operation in enumerate(row.operations):
-                if operation.opcode in _CALL_OPCODES or operation.opcode in _TAIL_OPCODES:
-                    key = f"{row.address.space_id:x}:{row.address.byte_offset:x}:{ordinal}:{operation.opcode}"
-                    if operation.opcode in _CALL_OPCODES or key in named:
-                        keys.add(key)
-        # (a mapped call the observation does not show: listed too, never dropped)
-        keys |= {key for key in named if _operation_order(key)[0] == 0}
+                if operation.opcode in _CALL_OPCODES:
+                    keys.add(f"{row.address.space_id:x}:{row.address.byte_offset:x}:{ordinal}:{operation.opcode}")
+        proven = self.lookup(key, "proven", normalized.proven_call_effects)
+        assumed = self.lookup(key, "assumed", normalized.assumed_call_effects)
+        self.charge(len(normalized.premise_uses))
         sp_uses = {where for name, stage, where in normalized.premise_uses
-                   if name == "opaque-callees-restore-stack-pointer" and stage == "normalize"}
+                   if name == STACK_PREMISE and stage == "normalize"}
         self.charge(len(keys))
         rows = []
-        for key in sorted(keys, key=_operation_order):
+        for call in sorted(keys, key=_operation_order):
             self.charge(1)
-            row: dict = {"call": key, "target": self.target(item, key)}
-            if key in item.refused_models:
-                row["refused_model"] = str(item.refused_models[key])
-            effect = proven.get(key)
+            row: dict = {"call": call, "target": self.target(item, call)}
+            if call in tail_keys:
+                row["tail"] = True
+            if call in item.refused_models:
+                row["refused_model"] = str(item.refused_models[call])
+            effect = proven.get(call)
             if effect is not None:
                 row["effect"] = "proven"
                 row["stack"] = str(effect.stack_restoration.value)
@@ -231,13 +273,13 @@ class _Builder:
                 row["memory_runs"] = len(effect.memory_runs)
                 row["sink_demands"] = len(effect.sink_demands)
                 row["tail_stack"] = bool(effect.tail_stack)
-            elif key in assumed:
+            elif call in assumed:
                 row["effect"] = "assumed"   # (TEST-ONLY assumed boundary effect)
                 row["stack"] = None
             else:
                 row["effect"] = "none"
                 # the exact use the normalization recorded (normalize._premise_uses)
-                row["stack"] = "assumed" if key in sp_uses else "unknown"
+                row["stack"] = "assumed" if call in sp_uses else "unknown"
             rows.append(row)
         record["calls_summary"] = {
             "total": len(rows),
@@ -246,18 +288,35 @@ class _Builder:
             "none": sum(1 for row in rows if row["effect"] == "none"),
         }
         self.cap(record, "calls", rows, "functions.calls")
+        for row in record["calls"]:   # (inner caps on kept entries only)
+            if row["target"] is not None and "members" in row["target"]:
+                self.cap(row["target"], "members", row["target"]["members"], "functions.calls.members")
 
-    @staticmethod
-    def target(item, key: str):
-        if key in item.calls:
-            return {"function": item.calls[key]}
-        if key in item.multi_calls:
-            return {"members": sorted(item.multi_calls[key], key=_function_order)}
-        if key in item.bound_calls:
-            return {"model": str(item.bound_calls[key][4])}
-        if key in item.declared:
-            return {"model": str(item.declared[key])}
-        return None
+    def cap_kept(self, record: dict, name: str, rows: list, where: str, inner: tuple) -> None:
+        """Cap ``rows`` into ``record[name]``, then each kept row's ``inner``
+        (field, where) lists -- a dropped row's lists are never counted."""
+        self.cap(record, name, rows, where)
+        for row in record[name]:
+            for field, inner_where in inner:
+                self.cap(row, field, row[field], inner_where)
+
+    def target(self, item, call: str):
+        """The call's target: the callee function (``calls``), the members of a
+        multi-target call (``multi_calls``), and the model label it takes
+        (``bound_calls`` / ``declared`` -- also a TEST-ONLY declared boundary);
+        None when the engine resolved none."""
+        found: dict = {}
+        if call in item.calls:
+            found["function"] = item.calls[call]
+        elif call in item.multi_calls:
+            members = item.multi_calls[call]
+            self.charge(len(members))
+            found["members"] = sorted(members, key=_function_order)   # (capped once the row is kept)
+        if call in item.bound_calls:
+            found["model"] = str(item.bound_calls[call][4])
+        elif call in item.declared:
+            found["model"] = str(item.declared[call])
+        return found or None
 
     def writers(self, record: dict, item, normalized) -> None:
         """F2: every unresolved-write occurrence of the memory SSA with its
@@ -279,7 +338,8 @@ class _Builder:
         for occurrence in ssa.unresolved_writes:
             op = ssa.actions[occurrence.action_id].operation_key
             kind = classes.classify(op)
-            rows.append({"op": op, "occurrence": occurrence.occurrence_ordinal, "class": kind,
+            rows.append({"id": f"{op}#{occurrence.occurrence_ordinal}", "op": op,
+                         "occurrence": occurrence.occurrence_ordinal, "class": kind,
                          "blocks_function_data_completeness": kind == WILD})
         self.charge(len(rows))
         rows.sort(key=lambda row: (_operation_order(row["op"]), row["occurrence"]))
@@ -293,7 +353,10 @@ class _Builder:
     def call_rows(self, record: dict, normalized) -> None:
         """F2 call rows: per call, every effect row derived from it
         (``<call>~<suffix>``) in the FINAL effects, and the rows that write
-        memory with exact / unresolved destination counts (Astra 10.1)."""
+        memory with exact / unresolved destination counts (Astra 10.1): exact
+        -- each ResolvedStorage write naming a memory object (address space or
+        function-relative); unresolved -- the memory write, each unresolved
+        write, each raw StorageRef write."""
         from .model import ResolvedStorage, StorageRef
         from .span_geometry import StorageObjectKind
 
@@ -314,21 +377,24 @@ class _Builder:
         self.charge(len(by_call))
         rows = []
         for call in sorted(by_call, key=_operation_order):
+            self.charge(len(by_call[call]))
             found = sorted(by_call[call], key=lambda row: _operation_order(row[0]))
-            self.charge(len(found))
             writers = [{"row": key, "exact": exact, "unresolved": unresolved}
                        for key, exact, unresolved in found if exact or unresolved]
             row: dict = {"call": call, "derived": len(found), "writer_rows": len(writers),
                          "exact": sum(item["exact"] for item in writers),
                          "unresolved": sum(item["unresolved"] for item in writers)}
-            self.cap(row, "derived_rows", [key for key, _, _ in found], "functions.call_rows.derived_rows")
-            self.cap(row, "writers", writers, "functions.call_rows.writers")
+            row["derived_rows"] = [key for key, _, _ in found]
+            row["writers"] = writers
             rows.append(row)
-        self.cap(record, "call_rows", rows, "functions.call_rows")
+        self.cap_kept(record, "call_rows", rows, "functions.call_rows",
+                      (("derived_rows", "functions.call_rows.derived_rows"),
+                       ("writers", "functions.call_rows.writers")))
 
-    def demands(self, item):
+    def demands(self, record: dict, item):
         """F4: the summary's sink demands in order -- what one sink root of the
-        function needs from callers, whether it is complete, and its debts."""
+        function needs from callers, whether it is complete, and its debts
+        (``index`` is the demand's position in ``summary.sink_demands``)."""
         summary = getattr(item, "summary", None)
         if summary is None:
             return UNAVAILABLE
@@ -339,9 +405,15 @@ class _Builder:
             self.charge(1 + len(demand.debts))
             row: dict = {"index": index, "label": demand.label, "complete": bool(demand.complete),
                          "conditions": len(demand.conditions)}
-            self.cap(row, "debts", [str(debt) for debt in demand.debts], "functions.demands.debts")
+            row["debts"] = [str(debt) for debt in demand.debts]
             rows.append(row)
-        return rows
+        record["demands_summary"] = {"total": len(rows),
+                                     "incomplete": sum(1 for row in rows if not row["complete"])}
+        found: dict = {}
+        self.cap_kept(found, "demands", rows, "functions.demands", (("debts", "functions.demands.debts"),))
+        if "demands_total" in found:
+            record["demands_total"] = found["demands_total"]
+        return found["demands"]
 
     # -- RootRecord ----------------------------------------------------------------------
 
@@ -364,14 +436,15 @@ class _Builder:
         # R3: operation-bound candidates (a consume-event binding); the
         # refusal that made the binder fall back is not retained (P3)
         graph = normalized.dependencies
-        declared = {f"op:{call}": effect for call, effect in normalized.assumed_call_effects}
+        assumed = self.lookup(key, "assumed", normalized.assumed_call_effects)
         candidates = []
         for node in root.root_nodes:
             node_record = graph.node(node)
             if node_record.kind is not NodeKind.OPERATION:
                 continue
-            row: dict = {"op": node_record.key[3:] if node_record.key.startswith("op:") else node_record.key}
-            effect = declared.get(node_record.key)
+            op = node_record.key[3:] if node_record.key.startswith("op:") else node_record.key
+            row: dict = {"op": op}
+            effect = assumed.get(op)
             if effect is not None and effect.label == root.label and effect.reads:
                 row["exception"] = "not-evaluated"   # (the TEST-ONLY assumed-effect exception may apply)
             candidates.append(row)
@@ -399,11 +472,7 @@ class _Builder:
         if index >= len(item.projected_sinks):
             return UNAVAILABLE
         call, demand_index, label, nodes, complete = item.projected_sinks[index]
-        proven = self.proven.get(key)
-        if proven is None:
-            self.charge(len(normalized.proven_call_effects))
-            proven = self.proven[key] = dict(normalized.proven_call_effects)
-        effect = proven.get(call)
+        effect = self.lookup(key, "proven", normalized.proven_call_effects).get(call)
         lowered = None
         if effect is not None and 0 <= demand_index < len(effect.sink_demands):
             lowered = bool(effect.sink_demands[demand_index].complete)
