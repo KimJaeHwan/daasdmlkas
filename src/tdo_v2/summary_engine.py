@@ -136,6 +136,7 @@ def analyze_frozen_bundle_with_summaries(
     origin_witnesses: bool = False,
     operation_records: bool = False,
     physical_memory_records: bool = False,
+    root_diagnostics: bool = False,
     assume_same_result_functions: bool = False,
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
@@ -172,6 +173,10 @@ def analyze_frozen_bundle_with_summaries(
     ``physical_memory_records``: include opt-in concrete physical memory and
     call evidence in those diagnostic records; implies ``operation_records``
     without changing summaries, assumptions or static eligibility.
+    ``root_diagnostics``: per-function / per-root blocker diagnostics
+    (``root_diagnostics``) in ``EngineRun.diagnostics`` -- built after
+    reporting under their own diagnostic budget; every other output and every
+    work ledger is the same as with it off.
     ``external_models``: declared models of imported functions
     (``summary_store.ExternalModels``), bound through the Bundle's sealed image
     facts (``image_info``); each model used is listed in ``EngineRun.assumptions``.
@@ -233,6 +238,7 @@ def analyze_frozen_bundle_with_summaries(
             origin_witnesses=origin_witnesses,
             operation_records=operation_records,
             physical_memory_records=physical_memory_records,
+            root_diagnostics=root_diagnostics,
             assume_same_result_functions=assume_same_result_functions,
             assume_accessor_result_separate=assume_accessor_result_separate,
             assume_accessor_private_state=assume_accessor_private_state,
@@ -267,6 +273,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
     origin_witnesses: bool = False,
     operation_records: bool = False,
     physical_memory_records: bool = False,
+    root_diagnostics: bool = False,
     assume_same_result_functions: bool = False,
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
@@ -308,6 +315,7 @@ def analyze_observed_with_summaries(program, evidences, *, image_info=None, read
         origin_witnesses=origin_witnesses,
         operation_records=operation_records,
         physical_memory_records=physical_memory_records,
+        root_diagnostics=root_diagnostics,
         assume_same_result_functions=assume_same_result_functions,
         assume_accessor_result_separate=assume_accessor_result_separate,
         assume_accessor_private_state=assume_accessor_private_state,
@@ -341,6 +349,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     origin_witnesses: bool = False,
     operation_records: bool = False,
     physical_memory_records: bool = False,
+    root_diagnostics: bool = False,
     assume_same_result_functions: bool = False,
     assume_accessor_result_separate: bool = False,
     assume_accessor_private_state: bool = False,
@@ -787,6 +796,10 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     if operation_records:
         run = _with_records(run, record_inputs, record_provenance,
                             physical_memory_records=physical_memory_records)
+    if root_diagnostics:   # (after every root is final, records included; reporting only)
+        from .root_diagnostics import build_diagnostics
+
+        run = replace(run, diagnostics=build_diagnostics(run, results, by_key))
     return run
 
 

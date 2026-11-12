@@ -81,7 +81,9 @@ CONTRACT = {
     "ProvenCallEffect": (None, {}),
     "RootSlice": (None, {}),
     "EngineRun": (None, {"supports": "2b-P premise report (docs 25.91): which premises the encoded results"
-                                      " rest on -- reporting, checked by tests"}),
+                                      " rest on -- reporting, checked by tests",
+                         "diagnostics": "opt-in per-root blocker diagnostics (root_diagnostics) -- reporting"
+                                        " only, built after the results; checked by tests"}),
 }
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 
@@ -151,6 +151,10 @@ class EngineRun:
     # (admitted function key, original control observation) for a disconnected
     # normalization refusal. These are not successful SSA/dependency graphs.
     refused_control_graphs: tuple = ()
+    # opt-in per-function / per-root blocker diagnostics (``root_diagnostics``;
+    # summary engine ``root_diagnostics=True``): a JSON-ready dict, None when
+    # off -- reporting only, never compared (no result depends on it)
+    diagnostics: dict | None = field(default=None, compare=False, hash=False, repr=False)
 
 
 @analysis_entry
