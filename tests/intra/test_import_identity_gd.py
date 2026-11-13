@@ -7,7 +7,8 @@ from dataclasses import replace
 import pytest
 
 from synthetic import DATA_BASE, RBX, RCX, RDX, RSP, FunctionBuilder, add, const, copy, load, ram, reg, store, tmp
-from test_import_ssa_targets import INFO, KEEP, SLOT, _analyze, _caller
+from test_import_ssa_targets import INFO, KEEP, SLOT, _caller
+from test_import_ssa_targets import _analyze as _analyze_any
 from tdo_v2.interprocedural import import_call_sites
 from tdo_v2.normalize import NormalizedFunction
 from tdo_v2.summary_engine import run_assumptions
@@ -21,6 +22,11 @@ FRAME = "entry-values-do-not-address-the-new-frame"
 def engines(monkeypatch, request):
     monkeypatch.setenv("TDO_V2_MEMORY_SSA_ENGINE", request.param)
     monkeypatch.setenv("TDO_V2_DATAFLOW_ENGINE", request.param)
+
+
+def _analyze(monkeypatch, caller, callee=None, *, globals_disjoint, **options):
+    # (every case states its globals-disjoint setting: no module default)
+    return _analyze_any(monkeypatch, caller, callee, globals_disjoint=globals_disjoint, **options)
 
 
 def _switching(monkeypatch):
@@ -243,13 +249,14 @@ def test_identity_query_keeps_tracking_and_normalization_state(monkeypatch, fail
 
 
 def test_captured_policy_without_globals_disjoint_refuses_a_changed_policy(monkeypatch):
-    # (Astra r2 P2-1) a gd-OFF run's retained proofs (realloc copy proofs, import-slots ON) verify,
-    # are refused once the captured policy changes, and verify again when it is restored
+    # (Astra r2 P2-1) the retained-evidence policy under gd OFF + import-slots ON (no SSA import
+    # binding here): realloc copy proofs verify, are refused once the captured policy changes, and
+    # verify again when it is restored; the forward verification pin follows the policy
     from synthetic import program_units
     from test_external_models import _image
     from test_realloc_contents import case, contracts
     from tdo_v2._call_activation import _policy
-    from tdo_v2._forward_memory import RefinementRefused, verification_session
+    from tdo_v2._forward_memory import RefinementRefused, _verification_source_pin, verification_session
     from tdo_v2.interprocedural import analyze_units
     from tdo_v2.summary_store import load_external_models
     from test_allocation_lifetime import MODELS as LIFETIME_MODELS
@@ -271,8 +278,10 @@ def test_captured_policy_without_globals_disjoint_refuses_a_changed_policy(monke
         plan.verify()
         with _policy(item):
             pass
+        pin = _verification_source_pin(item)
         slots.active = True
         try:
+            assert _verification_source_pin(item) != pin
             with pytest.raises(RefinementRefused, match="policies changed"):
                 plan.verify()
             with pytest.raises(RefinementRefused, match="policies changed"):
@@ -280,6 +289,7 @@ def test_captured_policy_without_globals_disjoint_refuses_a_changed_policy(monke
                     pass
         finally:
             slots.active = False
+        assert _verification_source_pin(item) == pin
         plan.verify()
 
 
