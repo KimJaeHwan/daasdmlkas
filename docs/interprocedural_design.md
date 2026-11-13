@@ -6445,10 +6445,13 @@ Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나�
   `active`의 의미(활성화 `_policy`, forward 고정값 비교)는 그대로. `_import_slots_active` 삭제.
 - 이름 붙은 점: globals-disjoint가 꺼져도 사설 프레임 읽기는 상수 주소 쓰기를 버린다(may_alias) -- 그 몫은
   entry-values-do-not-address-the-new-frame 라벨로 기록된다(꺼지면 거부; 테스트로 양방향 고정).
-- 조회의 부수 효과: 함수 장부에 `step()`을 청구하고(소진 = 그 함수 단독 실패, 실행 소진 = 1라운드 게시 -- globals-disjoint
-  켬일 때와 같은 소비자 규칙), `tracking.proofs`(진단)를 남길 수 있다. `used`, `IMAGE_BASE_TRACKING.found`, 정규화 결과는
-  바꾸지 않는다(테스트).
+- 조회의 부수 효과(일반 보장이 아니라 확인한 범위): 함수 장부에 `step()`을 청구하고(소진 = 그 함수 단독 실패, 실행 소진 =
+  1라운드 게시 -- globals-disjoint 켬일 때와 같은 소비자 규칙, 테스트), `tracking.proofs`(진단)를 남길 수 있다.
+  `_note_fact`를 거쳐 `IMAGE_BASE_TRACKING.found`에 닿을 수 있는 경로는 코드상 남아 있다 -- 시험한 경우(`used`, `found`,
+  정규화 결과 불변)와 아래 실측에서는 변화 0.
 - 남은 것: 자동 링크(`linking.py`)의 `import_slots &= globals_disjoint`(링크된 DLL 템플릿에서 결과를 잃을 뿐, I-ID2);
   칸 읽기 자체의 may-alias 빚을 import-slots로 덮는 것(지금은 거부); 정규화의 (A)/(C).
-- Mulp 실측: 이 변경만으로 새로 묶이는 호출 0(정체성이 나오는 81곳 모두 레지스터 clobber 빚) -- I2a(레지스터 보존 증명
-  템플릿)의 전제 조건.
+- 실측(2026-11-13, main 7c3cc4c 대비): 게이트 iid1 PASS(스냅샷 차이 0, UE 템플릿 OK, 오라클 26 동일); 코드 전용
+  kernel32 템플릿 12개 재유도 동일(`ENGINE_SEMANTICS_VERSION` 49 유지); Mulp 코드 전용 L 실행 -- 함수 405, 새 실패 0,
+  결합 변화 0, 실패 사유 변화 0, 루트 529와 지표 전부 동일, 조회 403회 중 결합 0(정체성이 나오는 81곳 모두 레지스터
+  clobber 빚). I2a(레지스터 보존 증명 템플릿)의 전제 조건.
