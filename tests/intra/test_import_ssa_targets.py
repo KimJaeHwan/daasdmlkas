@@ -181,10 +181,12 @@ def test_model_assumption_refusal_is_not_bypassed_by_ssa_binding(monkeypatch, of
     info = ImageInfo("synthetic", (), (
         ImportedSymbol("CRT", "malloc", None, ((1, SLOT),), ()),), (), ())
     monkeypatch.setattr(__import__(__name__), "INFO", info)
+    # (``call keep`` between the load and the call: no static chain, the SSA path)
     caller = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), ram(SLOT)))
-              .ins(copy(reg(RCX), const(0))).call_indirect(RBX).add_rsp(0x28).ret())
+              .ins(copy(reg(RCX), const(0))).call(KEEP).call_indirect(RBX).add_rsp(0x28).ret())
     options = {"disabled_model_assumptions": ("allocator-results-are-fresh",)} if off else {}
-    item, _ = _analyze(monkeypatch, caller, **options)
+    item, _ = _analyze(monkeypatch, caller, FunctionBuilder(entry=KEEP).ret(), **options)
+    assert import_call_sites(item.unit, info) == {}
     assert bool(item.declared) is not off
     if off:
         assert any("switched off" in reason for reason in item.refused_models.values())
@@ -232,18 +234,20 @@ def test_derived_target_model_still_passes_existing_template_admission(monkeypat
     models = load_external_models([*MODELS, hand, path], *WIN64)
     monkeypatch.setenv("TDO_V2_FORWARD", "1")
     info = ImageInfo("synthetic", (), (ImportedSymbol(LIBRARY, "F", MANGLED, ((1, SLOT),), ()),), (), ())
+    # (``call keep`` between the load and the call: no static chain, the SSA path)
     caller = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), ram(SLOT)))
-              .ins(copy(reg(RCX), reg(RSI))).call_indirect(RBX)
+              .ins(copy(reg(RCX), reg(RSI))).call(KEEP).call_indirect(RBX)
               .ins(copy(reg(RDX), reg(RAX))).add_rsp(0x28).ret())
-    item = analyze_units(program_units(caller), image_info=info, external_models=models,
-                         assume_import_slots_hold_exports=True,
+    item = analyze_units(program_units(caller, FunctionBuilder(entry=KEEP).ret()), image_info=info,
+                         external_models=models, assume_import_slots_hold_exports=True,
                          assume_globals_disjoint_from_stack=True)["1:1000"]
+    assert import_call_sites(item.unit, info) == {}
     if stale:
         assert not item.declared and item.refused_models
     else:
         assert len(item.declared) == 1 and next(iter(item.declared.values())).startswith("derived-model:")
         assert "derived-model-runtime-matches" in run_assumptions({item.key: item})
-        view = slice_op(item.normalized, "COPY", 4)
+        view = slice_op(item.normalized, "COPY", 5)
         assert view.is_complete and set(range(RSI, RSI + 8)) <= view.register_bytes
 
 

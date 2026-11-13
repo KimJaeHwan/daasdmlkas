@@ -6404,3 +6404,25 @@ Core 모델은 같은 원 DLL Bundle에서 own version 33으로 다시 도출하
 - 그래프의 원 연산 노드 coverage는 모든 메모리 간선과 실행 경로의 의미적 완성을 뜻하지 않는다.
 - 정방향 OFF/ON의 단위 회귀는 각각 6,407 통과·73 skip·실패 0. 별도 corpus 432개는 필요한 Bundle 경로가 없어
   모두 skip이며 통과로 세지 않는다. 실제 바이너리 전후 비교는 이 skip과 별개로 수행한다.
+
+### 25.98 IAT 칸을 레지스터로 부르는 호출 -- 함수 전체 포기 없이 호출 단위로 (S-R, 2026-11-13)
+
+설계 `.census6/design_slot_register_r3.md`(r3.1 포함; Astra r1-r3 승인, Fable 5.2 r1-r3 수정 후 승인; 코드 리뷰
+Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나가 풀 수 있는 부분을 버리게 하지 않고, 지점으로 표시한다.
+
+- `_slot_loaded_register`(`mov R, [__imp_X]; ...; call R`)는 함수 안에 BRANCHIND가 하나라도 있으면 함수 전체를
+  거부했다 -- U2a 뒤 src에 남은 유일한 함수 전체 거부. 이제 함수를 거부하지 않는다. 인식기는 면제와 무관하고(재귀 없음),
+  호출에서 거꾸로 한 줄짜리 평범한 fall-through 명령(`_plain_into` 전부; 하나의 선행 블록; 진입 블록을 넘지 않음 --
+  진입 명령 안의 load는 된다)을 따라 최대 16개, R과 겹치는 가장 가까운 쓰기가 칸 load(`_static_slot_symbol`)일 때만 묶는다.
+  대상이 있는 BRANCHIND(switch)는 관찰 간선이라 사슬 블록에 두 번째 선행이 생기면 묶지 않는다.
+- "모든 실행이 load를 지난다"는 관찰 그래프에 대한 주장이다. 대상 없는 BRANCHIND가 있는 함수에서는 그 결합이 그 위치들에
+  기댄다: `analyze_units`가 결합 효과의 `control_sites`에 이번 라운드의 자기 frontier(`own_frontier`: 풀린 장애는 빠지고,
+  철회되면 다시 들어온다)와 그 함수의 import-tail 위치(frontier에서는 면제, 그래도 export가 사슬로 재진입할 수 있다 --
+  결합의 재진입 의무)를 합친다. 정적 결합과 이후 라운드의 칸 정체성 CALLIND 수용 모두; `jmp [slot]` 꼬리 자체와 명령 안의
+  `call [slot]`은 앞 경로 주장이 없어 표시하지 않는다. 표시가 있는 결합은 noreturn 잘림을 하지 않는다(D.3).
+- 보고: `EngineRun.control_sites`의 새 종류 `import-tail-reentry` -- 같은 키가 `control_exemptions`(frontier 면제)와
+  맥락(결합의 의무)에 함께 있을 수 있다. 템플릿은 이 키를 unknown-transfer로 보고 내보내지 않는다(거부, 조용히 버리지 않음).
+- 남은 것(변경 없음): 다른 opaque `call`의 재진입(연속 규칙의 범위), 예외 디렉터리 scope 대상의 사슬 진입,
+  `_indirect_targets` / `_forward_targets` 해석의 꼬리 재진입 의무, 다른 호출 너머로 유지된 레지스터(I2a).
+- Mulp 실측(L run): 바로 부르는 `call reg` 23곳 중 인식 2곳 -> 놓친 21곳 = UD2 12, import 꼬리 4, 둘 다 2,
+  UD2+다른 점프 2, 4명령 앞 load 1.

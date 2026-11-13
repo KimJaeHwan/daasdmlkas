@@ -1303,7 +1303,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 if own_frontier(key) or key in static_writers() or dependencies \
                         or any(effect.control_sites for effect in proven.values()):
                     # (design S-R r3: a predecessor-dependent binding with support
-                    # takes no cut either -- its identity rests on those sites)
+                    # takes no cut either -- its identity rests on those sites. A
+                    # later-round admission is in ``round_resolved`` and so is vetoed
+                    # here even with empty support -- the pre-existing D.3 rule for
+                    # every resolution; its static twin with empty support is cut)
                     for call_key in sorted(set(round_resolved.get(key, ())) | (dependent if support else set())):
                         effect = proven.get(call_key)
                         if effect is None or not effect.noreturn:
@@ -2338,11 +2341,10 @@ def _slot_loaded_register(unit, image_info) -> dict:
 def _slot_chain_load(graph, rows, predecessors, block, register):
     """The COPY loading all of ``register`` from an import slot that every
     execution of ``block`` comes through (``_slot_loaded_register``), or None."""
-    current, seen = block, set()
+    current = block
     for _ in range(_SLOT_CHAIN_LIMIT):
-        if current.key == graph.entry or current.key in seen:
+        if current.key == graph.entry:
             return None   # (walking past the entry: the callers' values reach it too)
-        seen.add(current.key)
         into = predecessors.get(current.key, [])
         if len(into) != 1 or into[0].key == current.key:
             return None

@@ -140,7 +140,11 @@ class EngineRun:
     # recognized fault site (``AnalyzedFunction.fault_decisions``)
     fault_report: tuple = ()
     # B' (docs 25.96): one row per own control key of the run -- (key, kind
-    # "unknown-transfer" | "memory-writes" | "vetoed-noreturn" | "unavailable",
+    # "unknown-transfer" | "memory-writes" | "vetoed-noreturn" | "unavailable" |
+    # "model" | "import-tail-reentry" (an import-tail site, exempt from the
+    # frontier, carried by a predecessor-dependent slot-register binding as a
+    # re-entry obligation: the same key is then in ``control_exemptions`` and
+    # in a context -- docs 25.98),
     # function, detail: the instruction; for vetoed-noreturn (instruction,
     # callees, model labels); for memory-writes the writer operation keys with
     # their RAM / WILD class) -- what a later link or trace must name to settle it
