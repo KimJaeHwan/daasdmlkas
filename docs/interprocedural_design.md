@@ -6426,3 +6426,29 @@ Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나�
   `_indirect_targets` / `_forward_targets` 해석의 꼬리 재진입 의무, 다른 호출 너머로 유지된 레지스터(I2a).
 - Mulp 실측(L run): 바로 부르는 `call reg` 23곳 중 인식 2곳 -> 놓친 21곳 = UD2 12, import 꼬리 4, 둘 다 2,
   UD2+다른 점프 2, 4명령 앞 load 1.
+
+### 25.99 IAT 칸 값 정체성 조회 -- 전역·스택 가정 없이 (I-ID, 2026-11-13)
+
+설계 `.census6/design_import_identity_r1.md`(r2 포함; Astra r1-r2, Fable 5.2 r1-r2 수정 후 승인).
+원칙: 각 주장은 그 주장이 필요로 하는 가정에만 기댄다.
+
+- 이전: `ImportSlots.active` = globals-disjoint-from-stack. `import_values`와 `_import_indirect_targets`가 이 값을 요구해서,
+  코드 전용 프로필(import-slots 켬, globals-disjoint 끔)과 스택 전환 프로그램(globals-disjoint 철회)에서 SSA 정체성
+  조회(`mov rbx,[__imp_X]; ...; call rbx`, 사이에 호출/갈림길/합류)가 한 번도 돌지 않았다.
+- 주장별 근거: (A) 칸의 ENTRY 값 = 이름 붙은 import 원자 -- import-slots. (B) 그 주소의 1바이트는 스택이 아님
+  (`_relative_object`) -- import-slots + globals-disjoint. (C) 칸 값 위의 객체 고정(`import_object_ids`) -- import-slots.
+  (D) CALLIND 대상 = import X -- (A) + 호출자 정규화의 빚 없는 역방향 slice(그 정규화가 기록한 전제, 예:
+  entry-values-do-not-address-the-new-frame) + 모델 수용(`_external_sites`, 이번 실행의 꺼진 가정).
+- 변경: 조회(D)만 import-slots 스위치로 연다. `ImportSlots.atom(..., identity=True)`와 조회용 projector의
+  `_import_identity`로 (A)를 얻고, `_import_atoms` 등록(주장 B의 유일한 입구)은 `active`일 때만 한다. 정규화의 (A)/(C)는
+  그대로 `active` 게이트(바꾸면 정규화 전체가 바뀜 -- 나중 단계, `normalization_context`에 별도 고정 비트 필요).
+  `active`의 의미(활성화 `_policy`, forward 고정값 비교)는 그대로. `_import_slots_active` 삭제.
+- 이름 붙은 점: globals-disjoint가 꺼져도 사설 프레임 읽기는 상수 주소 쓰기를 버린다(may_alias) -- 그 몫은
+  entry-values-do-not-address-the-new-frame 라벨로 기록된다(꺼지면 거부; 테스트로 양방향 고정).
+- 조회의 부수 효과: 함수 장부에 `step()`을 청구하고(소진 = 그 함수 단독 실패, 실행 소진 = 1라운드 게시 -- globals-disjoint
+  켬일 때와 같은 소비자 규칙), `tracking.proofs`(진단)를 남길 수 있다. `used`, `IMAGE_BASE_TRACKING.found`, 정규화 결과는
+  바꾸지 않는다(테스트).
+- 남은 것: 자동 링크(`linking.py`)의 `import_slots &= globals_disjoint`(링크된 DLL 템플릿에서 결과를 잃을 뿐, I-ID2);
+  칸 읽기 자체의 may-alias 빚을 import-slots로 덮는 것(지금은 거부); 정규화의 (A)/(C).
+- Mulp 실측: 이 변경만으로 새로 묶이는 호출 0(정체성이 나오는 81곳 모두 레지스터 clobber 빚) -- I2a(레지스터 보존 증명
+  템플릿)의 전제 조건.

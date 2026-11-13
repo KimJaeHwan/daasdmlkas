@@ -172,12 +172,6 @@ def _import_slots_switched_on() -> bool:
     return IMPORT_SLOTS.get() is not None
 
 
-def _import_slots_active() -> bool:
-    from .relative_memory import IMPORT_SLOTS
-
-    return IMPORT_SLOTS.get() is not None and IMPORT_SLOTS.get().active
-
-
 def function_key(coordinate) -> str:
     return f"{coordinate.space_id:x}:{coordinate.byte_offset:x}"
 
@@ -238,8 +232,10 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
                   **options) -> dict[str, "AnalyzedFunction"]:
     """``_analyze_units`` (below) under the named assumption
     import-slots-hold-their-exports when ``assume_import_slots_hold_exports``
-    and ``image_info`` are given (``relative_memory.IMPORT_SLOTS``; it takes
-    effect only where globals-disjoint-from-stack holds for the run), and
+    and ``image_info`` are given (``relative_memory.IMPORT_SLOTS``; its
+    normalization atoms and non-stack claim take effect only where
+    globals-disjoint-from-stack holds for the run -- the static recognizers
+    and the SSA identity query need only the switch, docs 25.99), and
     entry-values-do-not-address-the-new-frame as ``assume_entry_values_not_frame``
     (``may_alias.ENTRY_VALUES_NOT_FRAME``, reset after the run), and
     opaque-callees-leave-no-stack-addresses likewise
@@ -616,7 +612,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     from .relative_memory import IMPORT_SLOTS
 
     if IMPORT_SLOTS.get() is not None:
-        # an import's address is only worth "not the stack" under this assumption
+        # normalization's import atoms and "an import's address is not the
+        # stack" need this assumption; the SSA identity query
+        # (``_import_indirect_targets``) does not (docs 25.99)
         IMPORT_SLOTS.get().active = assume_globals_disjoint_from_stack
     from .assumptions import MODEL_SWITCHABLE
     from .assumptions import disabled as switched_off
@@ -638,7 +636,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         traps=assume_debug_break_traps_do_not_return,
         # (the switch alone: binding a model at an import slot needs the slot to
         # hold the export's address, not globals-disjoint-from-stack -- the
-        # non-stack inference keeps its own stronger gate, ``_import_slots_active``)
+        # non-stack inference keeps its own stronger gate, ``ImportSlots.active``)
         import_slots=_import_slots_switched_on(), same_result=assume_same_result_functions,
         accessor_separate=assume_accessor_result_separate, accessor_private_state=assume_accessor_private_state,
         registered_handlers=assume_registered_handlers_not_observed,
@@ -2866,7 +2864,9 @@ def _import_indirect_targets(item, image_info, excluded=()) -> dict:
     from .pcode_blocks import has_internal_flow
     from .relative_memory import import_values
 
-    if not _import_slots_active():
+    if not _import_slots_switched_on():
+        # (the identity needs import-slots-hold-their-exports alone, not
+        # globals-disjoint-from-stack -- docs 25.99)
         return {}
     sites = []
     for instruction in item.unit.observation.instructions:

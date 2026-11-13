@@ -74,6 +74,9 @@ IMAGE_BASE_TRACKING: ContextVar = ContextVar("IMAGE_BASE_TRACKING", default=None
 # read. A one-byte access AT that address (displacement 0, independent of the
 # image base) is in image-backed static storage of a loaded module: never the
 # stack (with globals-disjoint-from-stack, ``active``), never a private frame.
+# Normalization's import atoms and that non-stack claim need ``active``; the
+# candidate query ``import_values`` (the identity alone) needs only the switch
+# (docs 25.99).
 # No claim about wider accesses or other displacements (no extent evidence),
 # fresh blocks, or other imports.
 IMPORT_SLOTS: ContextVar = ContextVar("IMPORT_SLOTS", default=None)
@@ -81,8 +84,10 @@ IMPORT_SLOTS: ContextVar = ContextVar("IMPORT_SLOTS", default=None)
 
 class ImportSlots:
     """``image_info``'s import slots for one ``analyze_units`` run.
-    ``active``: the run also takes globals-disjoint-from-stack (else the
-    property gives nothing and is not used). ``used``: function scopes whose
+    ``active``: the run also takes globals-disjoint-from-stack -- the gate of
+    normalization's import atoms and of the non-stack claim (without it they
+    give nothing and are not used); ``atom(..., identity=True)``: the identity
+    alone, for the candidate query ``import_values`` (docs 25.99). ``used``: function scopes whose
     analysis read an import slot this way (reported; recorded when the value
     is evaluated, so a provisional evaluation may over-report -- never under).
     Only an ENTRY definition qualifies: a write the function makes to the slot
@@ -102,8 +107,9 @@ class ImportSlots:
         self.active = False
         self.used: set = set()
 
-    def atom(self, space_id: int, offset: int) -> int | None:
-        symbol = self.slots.get((space_id, offset)) if self.active else None
+    def atom(self, space_id: int, offset: int, *, identity: bool = False) -> int | None:
+        """``identity``: the slot-value identity alone (needs only the switch)."""
+        symbol = self.slots.get((space_id, offset)) if self.active or identity else None
         if symbol is None:
             return None
         return _digest_ints(b"import-slot-value-v1", tuple(
@@ -923,16 +929,19 @@ def import_values(normalized, observation, requests, image_info) -> dict:
     Reuse the projector's whole-slot atoms; no numeric address, candidate,
     partial pointer or nonzero offset is an import identity. The consumer
     MUST check the snapshot's source debts, as for ``constant_values``.
-    This intentionally retains ImportSlots' existing active gate.
+    The identity rests on import-slots-hold-their-exports alone: it is asked
+    without globals-disjoint-from-stack (``ImportSlots.active``), whose
+    non-stack claim this query never makes -- its projector registers no
+    import atom for it (docs 25.99).
     """
     imports = IMPORT_SLOTS.get()
     language = normalized.scopes.program.evidence.translation_namespace.language_id.split(":")
-    if imports is None or not imports.active or language[1:2] != ["LE"]:
+    if imports is None or language[1:2] != ["LE"]:
         return {}
     symbols, ambiguous = {}, set()
     for symbol in image_info.imports:
         for space, offset in symbol.slots:
-            atom = imports.atom(space, offset)
+            atom = imports.atom(space, offset, identity=True)
             if atom is None:
                 continue
             previous = symbols.get(atom)
@@ -943,6 +952,7 @@ def import_values(normalized, observation, requests, image_info) -> dict:
     if not symbols:
         return {}
     projector = _final_projector(normalized, observation)
+    projector._import_identity = True   # (the identity alone: docs 25.99)
     from ._call_value_ports import scalar_call_rows
     projector._pointer_rows = {key: port.row for key, port in scalar_call_rows(normalized).items()}
     found = {}
@@ -1189,6 +1199,9 @@ class _Projector:
         self.used_reads: dict | None = None
         self._nonstack_atoms: set[int] = set()
         self._import_atoms: set[int] = set()   # import-slots-hold-their-exports (``IMPORT_SLOTS``)
+        # the candidate query's projector (``import_values``): import atoms
+        # without ``active`` -- the identity alone, never the non-stack claim
+        self._import_identity = False
         # (the stack pointer's entry atom, entry atoms overlapping its register, its span)
         self._stack_atoms: tuple = (None, frozenset(), None, None)
         self._stale: frozenset | None = None   # (``_stale_definitions``, once)
@@ -2215,10 +2228,15 @@ class _Projector:
         if imports is not None and definition.kind is MemoryDefinitionKind.ENTRY \
                 and requested_span.object_id.kind is StorageObjectKind.ADDRESS_SPACE \
                 and space is not None and requested_span.size * 8 == space.address_size_bits:
-            import_atom = imports.atom(requested_span.object_id.space_key, requested_span.start)
+            import_atom = imports.atom(requested_span.object_id.space_key, requested_span.start,
+                                       identity=self._import_identity)
         if import_atom is not None:
             # the whole slot's entry value: the address its import resolves to
-            self._import_atoms.add(import_atom)
+            if imports.active:
+                # (the non-stack claim, ``_relative_object``, needs
+                # globals-disjoint-from-stack: an identity-only atom is not
+                # registered for it -- docs 25.99)
+                self._import_atoms.add(import_atom)
             imports.used.add(self._ssa.function_scope)
             result = _AddressExpression(((import_atom, 1),), 0, requested_span.size)
             self._active.discard(cache_key)

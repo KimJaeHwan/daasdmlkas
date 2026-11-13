@@ -25,18 +25,30 @@ def engines(monkeypatch, request):
     monkeypatch.setenv("TDO_V2_DATAFLOW_ENGINE", request.param)
 
 
+GLOBALS_DISJOINT = [True]
+
+
+@pytest.fixture(params=(True, False), ids=("gd-on", "gd-off"), autouse=True)
+def globals_disjoint(request):
+    # (design I-ID, docs 25.99: every SSA identity case also without globals-disjoint-from-stack)
+    GLOBALS_DISJOINT[0] = request.param
+    yield request.param
+    GLOBALS_DISJOINT[0] = True
+
+
 def _caller(*middle):
     return (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), ram(SLOT)))
             .ins(*middle).call(KEEP).call_indirect(RBX).add_rsp(0x28).ret())
 
 
-def _analyze(monkeypatch, caller, callee=None, *, forward=True, imports=True, **options):
+def _analyze(monkeypatch, caller, callee=None, *, forward=True, imports=True, globals_disjoint=None, **options):
     monkeypatch.setenv("TDO_V2_FORWARD", "1" if forward else "0")
     units = program_units(caller, *((callee,) if callee is not None else ()))
     models = load_external_models(MODELS, "x86:LE:64:default", "win64")
     results = analyze_units(units, image_info=INFO, external_models=models,
                             assume_import_slots_hold_exports=imports,
-                            assume_globals_disjoint_from_stack=True, **options)
+                            assume_globals_disjoint_from_stack=GLOBALS_DISJOINT[0] if globals_disjoint is None
+                            else globals_disjoint, **options)
     return results["1:1000"], results
 
 
@@ -240,7 +252,7 @@ def test_derived_target_model_still_passes_existing_template_admission(monkeypat
               .ins(copy(reg(RDX), reg(RAX))).add_rsp(0x28).ret())
     item = analyze_units(program_units(caller, FunctionBuilder(entry=KEEP).ret()), image_info=info,
                          external_models=models, assume_import_slots_hold_exports=True,
-                         assume_globals_disjoint_from_stack=True)["1:1000"]
+                         assume_globals_disjoint_from_stack=GLOBALS_DISJOINT[0])["1:1000"]
     assert import_call_sites(item.unit, info) == {}
     if stale:
         assert not item.declared and item.refused_models
@@ -251,8 +263,9 @@ def test_derived_target_model_still_passes_existing_template_admission(monkeypat
         assert view.is_complete and set(range(RSI, RSI + 8)) <= view.register_bytes
 
 
+@pytest.mark.parametrize("active", (True, False))
 @pytest.mark.parametrize("already_used", (False, True))
-def test_candidate_query_preserves_the_original_assumption_use_record(monkeypatch, already_used):
+def test_candidate_query_preserves_the_original_assumption_use_record(monkeypatch, already_used, active):
     from tdo_v2.relative_memory import IMPORT_SLOTS, ImportSlots, import_values
 
     item, _ = _analyze(monkeypatch, _caller(), FunctionBuilder(entry=KEEP).ret())
@@ -260,7 +273,7 @@ def test_candidate_query_preserves_the_original_assumption_use_record(monkeypatc
     request = (f"1:{instruction.address.byte_offset:x}:0:COPY", instruction.operations[0].inputs[0])
     scope = item.normalized.memory_ssa.function_scope
     slots = ImportSlots(INFO)
-    slots.active = True
+    slots.active = active   # (the query's identity needs only the switch -- docs 25.99)
     if already_used:
         slots.used.add(scope)
     original = set(slots.used)
@@ -272,7 +285,8 @@ def test_candidate_query_preserves_the_original_assumption_use_record(monkeypatc
         IMPORT_SLOTS.reset(token)
 
 
-def test_failed_candidate_query_also_preserves_assumption_uses(monkeypatch):
+@pytest.mark.parametrize("active", (True, False))
+def test_failed_candidate_query_also_preserves_assumption_uses(monkeypatch, active):
     from tdo_v2 import relative_memory as memory
 
     item, _ = _analyze(monkeypatch, _caller(), FunctionBuilder(entry=KEEP).ret())
@@ -280,7 +294,7 @@ def test_failed_candidate_query_also_preserves_assumption_uses(monkeypatch):
     request = (f"1:{instruction.address.byte_offset:x}:0:COPY", instruction.operations[0].inputs[0])
     scope = item.normalized.memory_ssa.function_scope
     slots = memory.ImportSlots(INFO)
-    slots.active = True
+    slots.active = active
 
     class Broken:
         def _expression_for_input(self, *args):
@@ -504,3 +518,230 @@ def test_static_import_needs_the_whole_slot(monkeypatch, shape):
         row.ops = [op("CALLIND", [reg(RBX, 4)])]
     item, _ = _analyze(monkeypatch, built, forward=False)
     assert not item.declared
+
+
+# ---- design I-ID (docs 25.99): the identity needs import-slots alone, not globals-disjoint ----
+
+def _labels(item, results):
+    return (dict(item.declared), sorted(item.proven), tuple(sorted(map(repr, item.normalized.premise_uses))),
+            tuple(sorted(run_assumptions(results))))
+
+
+@pytest.mark.parametrize("switch", (False, True))
+def test_ssa_identity_rests_on_import_slots_alone(monkeypatch, switch):
+    # globals-disjoint asked OFF, or asked ON and withdrawn by a stack switch in the program
+    import tdo_v2.interprocedural as ip
+
+    if switch:
+        monkeypatch.setattr(ip, "program_switches_stack", lambda *args, **kwargs: {"1:1000": ("switch",)})
+    caller = _caller(copy(reg(RCX), const(DATA_BASE + 0x200)))
+    item, results = _analyze(monkeypatch, caller, FunctionBuilder(entry=KEEP).ret(), globals_disjoint=switch)
+    call = next(key for key in item.declared if key.endswith(":CALLIND"))
+    assert item.declared[call] == "external-model:crt-win64/strlen@v8" and call in item.proven
+    assumptions = run_assumptions(results)
+    assert "import-slots-hold-their-exports" in assumptions
+    assert "globals-disjoint-from-stack" not in assumptions
+    assert ("import-slots-hold-their-exports", "resolution", call) in item.normalized.premise_uses
+    assert not any("globals-disjoint-from-stack" in use for use in item.normalized.premise_uses)
+    # (no normalization use: the identity was a candidate query)
+    assert not item.normalized.assumes_import_slots_hold_exports
+
+
+def test_withdrawn_globals_disjoint_equals_a_run_without_it(monkeypatch):
+    import tdo_v2.interprocedural as ip
+
+    callee = FunctionBuilder(entry=KEEP).ret()
+    caller = _caller(copy(reg(RCX), const(DATA_BASE + 0x200)))
+    off = _labels(*_analyze(monkeypatch, caller, callee, globals_disjoint=False))
+    _analyze(monkeypatch, caller, callee, globals_disjoint=True)             # (warm: on, then off again)
+    assert _labels(*_analyze(monkeypatch, caller, callee, globals_disjoint=False)) == off
+    _analyze(monkeypatch, caller, callee, imports=False, globals_disjoint=False)
+    assert _labels(*_analyze(monkeypatch, caller, callee, globals_disjoint=False)) == off
+    with monkeypatch.context() as patched:
+        patched.setattr(ip, "program_switches_stack", lambda *args, **kwargs: {"1:1000": ("switch",)})
+        withdrawn = _labels(*_analyze(monkeypatch, caller, callee, globals_disjoint=True))
+        assert withdrawn == _labels(*_analyze(monkeypatch, caller, callee, globals_disjoint=False))
+
+
+@pytest.mark.parametrize("on", (False, True))
+def test_a_model_resting_on_globals_disjoint_is_refused_without_it(monkeypatch, on):
+    from dataclasses import replace
+
+    from tdo_v2.summary_store import ExternalModels
+
+    original = ExternalModels.lookup
+
+    def lookup(self, symbol):
+        found = original(self, symbol)
+        if found is None or not found[1].label.endswith("strlen@v8"):
+            return found
+        return found[0], replace(found[1], inherited=(*found[1].inherited, "globals-disjoint-from-stack"))
+
+    monkeypatch.setattr(ExternalModels, "lookup", lookup)
+    item, _ = _analyze(monkeypatch, _caller(), FunctionBuilder(entry=KEEP).ret(), globals_disjoint=on)
+    assert bool(item.declared) is on
+    if not on:
+        assert any("globals-disjoint-from-stack" in reason for reason in item.refused_models.values())
+
+
+@pytest.mark.parametrize("frame", (True, False))
+def test_spill_and_global_store_rest_on_the_new_frame_premise(monkeypatch, frame):
+    # globals-disjoint OFF: a private-frame reload drops the constant-address writer only under
+    # entry-values-do-not-address-the-new-frame -- recorded, never silent (Fable r1 finding 1)
+    spill, reload_at = tmp(0x700), tmp(0x708)
+    caller = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), ram(SLOT)))
+              .ins(add(spill, reg(RSP), const(0x20)), store(spill, reg(RBX)))
+              .ins(store(const(DATA_BASE + 0x200), reg(RDX)))
+              .ins(add(reload_at, reg(RSP), const(0x20)), load(reg(RBX), reload_at))
+              .call_indirect(RBX).add_rsp(0x28).ret())
+    item, results = _analyze(monkeypatch, caller, globals_disjoint=False, assume_entry_values_not_frame=frame)
+    assert import_call_sites(item.unit, INFO) == {}
+    assert bool(item.declared) is frame
+    if frame:
+        assert "entry-values-do-not-address-the-new-frame" in run_assumptions(results)
+        assert "globals-disjoint-from-stack" not in run_assumptions(results)
+
+
+@pytest.mark.parametrize("on", (True, False))
+@pytest.mark.parametrize("write", ("caller-frame", "unknown"))
+def test_a_store_that_may_reach_the_slot_before_its_read_refuses(monkeypatch, write, on):
+    # a write the analysis cannot keep off the slot: above the new frame (the caller's), or through
+    # an unknown pointer -- the slot read is no longer the debt-free entry value
+    if write == "unknown":
+        before = (store(reg(RDX), reg(RCX)),)
+    else:
+        at = tmp(0x700)
+        before = (add(at, reg(RSP), const(0x30)), store(at, reg(RCX)))
+    caller = (FunctionBuilder().sub_rsp(0x28).ins(*before).ins(copy(reg(RBX), ram(SLOT)))
+              .call(KEEP).call_indirect(RBX).add_rsp(0x28).ret())
+    item, _ = _analyze(monkeypatch, caller, FunctionBuilder(entry=KEEP).ret(), globals_disjoint=on)
+    if write == "unknown" or not on:
+        assert not item.declared
+    else:
+        assert list(item.declared.values()) == ["external-model:crt-win64/strlen@v8"]
+
+
+@pytest.mark.parametrize("active", (False, True))
+def test_identity_query_registers_no_import_atom_without_active(monkeypatch, active):
+    from tdo_v2 import relative_memory as memory
+
+    item, _ = _analyze(monkeypatch, _caller(), FunctionBuilder(entry=KEEP).ret())
+    instruction = item.unit.observation.instructions[4]
+    request = (f"1:{instruction.address.byte_offset:x}:0:COPY", instruction.operations[0].inputs[0])
+    slots = memory.ImportSlots(INFO)
+    slots.active = active
+    assert (slots.atom(1, SLOT) is None) is not active               # normalization's gate: unchanged
+    assert slots.atom(1, SLOT, identity=True) is not None             # the identity alone
+    built = []
+    original = memory._final_projector
+
+    def capture(*args):
+        built.append(original(*args))
+        return built[-1]
+
+    monkeypatch.setattr(memory, "_final_projector", capture)
+    token = memory.IMPORT_SLOTS.set(slots)
+    try:
+        assert memory.import_values(item.normalized, item.unit.observation, [request], INFO)[request].name == "strlen"
+    finally:
+        memory.IMPORT_SLOTS.reset(token)
+    projector, = built
+    assert projector._import_identity
+    # (the non-stack claim's registry: only with globals-disjoint-from-stack)
+    assert bool(projector._import_atoms) is active
+
+
+def test_captured_policy_without_globals_disjoint_refuses_a_changed_policy(monkeypatch):
+    # (Astra r2 P2-1) a gd-OFF run's retained evidence pins ``active`` False: flipping it is refused
+    # by activation and changes the forward verification pin; restoring it verifies again
+    from tdo_v2._call_activation import _policy
+    from tdo_v2._forward_memory import RefinementRefused, _verification_source_pin, verification_session
+
+    item, results = _analyze(monkeypatch, _caller(), FunctionBuilder(entry=KEEP).ret(), globals_disjoint=False)
+    assert item.declared
+    callee = results[f"1:{KEEP:x}"]
+    slots = callee.normalization_context[2]
+    assert slots is not None and slots.active is False and callee.normalization_context[3] is False
+    with verification_session():
+        with _policy(callee):
+            pass
+        pin = _verification_source_pin(item)
+        slots.active = True
+        try:
+            with pytest.raises(RefinementRefused, match="policies changed"):
+                with _policy(callee):
+                    pass
+            assert _verification_source_pin(item) != pin
+        finally:
+            slots.active = False
+        with _policy(callee):
+            pass
+        assert _verification_source_pin(item) == pin
+
+
+@pytest.mark.parametrize("on", (True, False))
+def test_import_slots_off_binds_nothing_under_either_globals_setting(monkeypatch, on):
+    item, results = _analyze(monkeypatch, _caller(), FunctionBuilder(entry=KEEP).ret(), imports=False,
+                             globals_disjoint=on)
+    assert not item.declared and "import-slots-hold-their-exports" not in run_assumptions(results)
+
+
+@pytest.mark.parametrize("fails", (False, True))
+def test_identity_query_keeps_tracking_and_normalization_state(monkeypatch, fails):
+    # (Astra r2 P2-2) success and failure: ``used`` membership, ``IMAGE_BASE_TRACKING.found`` and the
+    # normalized function are what they were (``tracking.proofs`` is a diagnostic, docs 25.99)
+    from tdo_v2 import relative_memory as memory
+
+    item, _ = _analyze(monkeypatch, _caller(), FunctionBuilder(entry=KEEP).ret(), globals_disjoint=False)
+    instruction = item.unit.observation.instructions[4]
+    request = (f"1:{instruction.address.byte_offset:x}:0:COPY", instruction.operations[0].inputs[0])
+    scope = item.normalized.memory_ssa.function_scope
+    slots = memory.ImportSlots(INFO)
+    slots.used.add("other")
+    tracking = memory.ImageBaseTracking(((0x1000, 0x2fff),))
+    before = (repr(item.normalized.memory_ssa), item.normalized.premise_uses, item.normalized.assumes_import_slots_hold_exports)
+    if fails:
+        original = memory._Projector._expression_for_input
+
+        def broken(self, *args):
+            original(self, *args)
+            raise RuntimeError("candidate query failed")
+
+        monkeypatch.setattr(memory._Projector, "_expression_for_input", broken)
+    tokens = [(memory.IMPORT_SLOTS, memory.IMPORT_SLOTS.set(slots)),
+              (memory.IMAGE_BASE_TRACKING, memory.IMAGE_BASE_TRACKING.set(tracking))]
+    try:
+        if fails:
+            with pytest.raises(RuntimeError, match="candidate query failed"):
+                memory.import_values(item.normalized, item.unit.observation, [request], INFO)
+        else:
+            assert memory.import_values(item.normalized, item.unit.observation, [request], INFO)[request].name == "strlen"
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
+    assert slots.used == {"other"} and scope not in slots.used and slots.active is False
+    assert not tracking.found
+    assert (repr(item.normalized.memory_ssa), item.normalized.premise_uses,
+            item.normalized.assumes_import_slots_hold_exports) == before
+
+
+@pytest.mark.parametrize("scope", ("function", "run"))
+def test_an_exhausted_identity_query_without_globals_disjoint(monkeypatch, scope):
+    # (Astra r2 P2-2) the query is a consumer step of the round (as with globals-disjoint on): a
+    # function budget fails that function alone (sticky -- its callers see an opaque call); a run
+    # budget finalizes the run with the round-1 publication (no SSA admission)
+    import tdo_v2.relative_memory as memory
+    from tdo_v2.normalize import NormalizedFunction
+    from tdo_v2.resource_limits import AnalysisBudgetExceeded
+
+    def exhausted(*args, **kwargs):
+        raise AnalysisBudgetExceeded("work", "injected", scope=scope)
+
+    monkeypatch.setattr(memory, "import_values", exhausted)
+    item, results = _analyze(monkeypatch, _caller(), FunctionBuilder(entry=KEEP).ret(), globals_disjoint=False)
+    assert not item.declared
+    if scope == "function":
+        assert type(item.normalized) is not NormalizedFunction and item.failure_detail
+    else:
+        assert type(item.normalized) is NormalizedFunction
+        assert "import-slots-hold-their-exports" not in run_assumptions(results)

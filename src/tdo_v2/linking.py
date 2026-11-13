@@ -365,8 +365,9 @@ class Linker:
                 if not load_stack_evidence(evidence).clean:
                     # the run will withdraw the assumption: no template may rest on it
                     switches["globals_disjoint"] = False
-        # import-slots-hold-their-exports only acts with globals-disjoint-from-stack:
-        # the profile and the derivation state what is actually used
+        # (the linked-DLL profile's remaining coupling: the main run's SSA identity
+        # query and static recognizers need only import-slots-hold-their-exports,
+        # docs 25.99; a derivation with fewer premises stays admissible -- I-ID2)
         switches["import_slots"] = switches["import_slots"] and switches["globals_disjoint"]
         for target, exports, imported in checked:
             evidence = evidences[target]
