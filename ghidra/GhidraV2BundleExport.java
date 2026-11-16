@@ -84,7 +84,8 @@ public class GhidraV2BundleExport extends GhidraScript {
     // disabled (GhidraV2DisableNoReturn.java as -preScript), verified per call
     // in callContinuations; never for a prepared project (-noanalysis)
     private static final String[] NON_RETURNING_ANALYZERS = {
-        "Non-Returning Functions - Discovered", "Non-Returning Functions - Known", "Call-Fixup Installer"};
+        "Non-Returning Functions - Discovered", "Non-Returning Functions - Known", "Call-Fixup Installer",
+        "DWARF.Import Functions"};
     private boolean callFallthroughIsa;
     // contract violations of every exported function, reported together
     private final List<String> fallthroughViolations = new ArrayList<>();

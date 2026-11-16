@@ -6466,7 +6466,10 @@ Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나�
 - 내보내기: 새 분석(가져오기)에는 `-preScript GhidraV2DisableNoReturn.java`로 두 분석기와 "Call-Fixup Installer"를
   끈다(코드 리뷰 r1 뒤 측정: dfbench win32의 `call [longjmp 썽크]`에 컴파일러 사양의 이름 목록 call fixup이 CALL_RETURN
   덮어쓰기를 붙여 다음 줄을 지웠다 -- 이것도 이름 관례. 끄면 그 Bundle은 함수 79개 그대로 `int3` 한 줄만 늘고, ntdll ·
-  zlib는 p-code 한 줄도 바뀌지 않는다). 준비된 프로젝트
+  zlib는 p-code 한 줄도 바뀌지 않는다). 디버그 정보가 있는 ELF(직접 만든 `gcc -g` 시험 프로그램)에서는 DWARF의 함수
+  서명이 소스의 noreturn 선언으로 `call die`에 CALL_RETURN을 붙여 내보내기가 실패했다 -- 소유자 결정(2026-11-16)으로
+  "DWARF.Import Functions"도 끈다(자료형은 그대로 가져온다; 엔진은 그 서명을 사실로 쓰지 않는다). 그러면 `call die; nop`
+  뒤 채움이 다음 함수로 이어지는 종류 2 이탈이 되고, 예전의 다음 줄 없는 호출처럼 꼬리 출구(UNKNOWN)다. 준비된 프로젝트
   (`-noanalysis`)는 그대로이고 아래 표시를 받지 않는다. `GhidraV2BundleExport.java`는 두 분석기가 꺼진 새 분석일 때만,
   함수마다 모든 native 호출(CALL / CALLIND, CALLOTHER 없음 -- Ghidra의 `INT n`은 제외)이 흐름 덮어쓰기 없이
   `getFallThrough() == getDefaultFallThrough()`인지 확인하고 `call_fallthrough: "isa"`를 쓴다(어기면 내보내기 실패,
@@ -6494,8 +6497,7 @@ Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나�
   Bundle에는 0곳; 많아지면 다시 본다). 내보내기 대상 묶음도 종류 2-3의 함수를 따라간다.
 - 받아들인 한계: ISA 기본 다음 줄 자체가 없는 native 호출(한 명령 안의 CALL 뒤 RETURN)은 내보내기 실패로 남긴다;
   다음 줄 없는 줄에 나열된 종류 4는 대상 주소를 엔진이 다시 확인하지 않는다(내보내기는 매핑 밖일 때만 쓴다); DWARF /
-  자료형 아카이브 / PDB 같은 다른 돌아오지-않음 · 흐름 덮어쓰기 출처는 내보내기 실패로 드러난다(꺼진 분석기 세 개
-  밖의 것) -- ELF + DWARF 측정은 남은 일. 위반은 프로그램 전체를 모아 한 번에 실패시키고,
+  자료형 아카이브 / PDB 같은 다른 돌아오지-않음 · 흐름 덮어쓰기 출처는 내보내기 실패로 드러난다(끈 네 가지 밖의 것). 위반은 프로그램 전체를 모아 한 번에 실패시키고,
   분석기가 꺼지지 않은 새 내보내기는 실패한다(등록되지 않은 분석기는 꺼진 것으로 본다). 상태는 지금처럼 꼬리 출구(UNKNOWN, 템플릿
   거부); 합성(composition)은 하지 않는다. 함수가 돌아오지 않는지는 엔진의 증명만(`summary_noreturn`).
 - 실측(M8, 측정 사본 내보내기 + S1 내보내기): ntdll 묶음 다음 줄 없는 CALL 246 -> 0, native 호출 7180개 다음 줄 전부

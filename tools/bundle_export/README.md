@@ -177,8 +177,9 @@ Compare against the manifest instead.
 ## CALL fallthrough (S1, docs 25.100)
 
 A fresh export (import + analysis) runs `ghidra/GhidraV2DisableNoReturn.java` as `-preScript`: Ghidra's
-"Non-Returning Functions - Discovered", "- Known" and "Call-Fixup Installer" analyzers (guesses and name
-lists that change a call's flow) are disabled, so every CALL keeps the fallthrough the ISA defines. The exporter then verifies every native call of every exported function
+"Non-Returning Functions - Discovered", "- Known" and "Call-Fixup Installer" analyzers and the
+"DWARF.Import Functions" option (guesses, name lists and debug-info declarations that change a call's
+flow; DWARF data types are still imported) are disabled, so every CALL keeps the fallthrough the ISA defines. The exporter then verifies every native call of every exported function
 (`getFallThrough() == getDefaultFallThrough()`, no flow override) and writes `call_fallthrough: "isa"`,
 `fallthrough_exits` (rows whose fallthrough leaves the function or reaches another function's entry) and an instruction
 `length`; a violation fails the export with the offending calls listed. A prepared project
