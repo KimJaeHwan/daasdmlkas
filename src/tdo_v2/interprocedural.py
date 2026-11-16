@@ -487,9 +487,11 @@ def _with_fault_references(results) -> dict:
 
 def _fallthrough_references(observation) -> dict:
     """(S1, docs 25.100) {site key: {function key}} of the observation's
-    fallthrough exits into another function (kinds 2-3): reported like a call
-    reference at the row's last operation (ordinal 0 for a row without p-code),
-    with a FALLTHROUGH suffix so it is never read as the row's call."""
+    fallthrough exits into another function (kinds 2-3): reported at the row's
+    FIRST operation (ordinal 0, also for a row without p-code) -- every path
+    taking the fallthrough passes the row's first p-code block, whose guard is
+    then a sound (possibly wider) condition even when a relative branch splits
+    the row -- with a FALLTHROUGH suffix so it is never read as the row's call."""
     found: dict = {}
     if observation is None:
         return found
@@ -498,8 +500,7 @@ def _fallthrough_references(observation) -> dict:
         row = by_address.get(exit_row.source)
         if exit_row.function is None or row is None:
             continue
-        last = max(len(row.operations) - 1, 0)
-        site = f"{exit_row.source.space_id:x}:{exit_row.source.byte_offset:x}:{last}:FALLTHROUGH"
+        site = f"{exit_row.source.space_id:x}:{exit_row.source.byte_offset:x}:0:FALLTHROUGH"
         found.setdefault(site, set()).add(function_key(exit_row.function))
     return found
 

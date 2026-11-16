@@ -326,8 +326,11 @@ def test_fault_reference_sites_of_exits():
     assert _fallthrough_references(unit.observation) == {f"1:{PAD:x}:0:FALLTHROUGH": {f"{RAM:x}:{OTHER:x}"}}
     call = _unit(_branchy(Patched(exits=[_exit(CALL, OTHER, CONTINUATION_FUNCTION_ENTRY, OTHER)],
                                   edit=_fall_into(OTHER, row=1))), _callee(), _other())
-    (site,) = _fallthrough_references(call.observation)
-    assert site.startswith(f"1:{CALL:x}:") and site.endswith(":FALLTHROUGH")
+    # (at the row's first operation: its block's guard holds on every path taking the fallthrough)
+    assert set(_fallthrough_references(call.observation)) == {f"1:{CALL:x}:0:FALLTHROUGH"}
+    split = _unit(_caller(Patched(exits=[_exit(0x1000, 0x1004, CONTINUATION_FUNCTION_ENTRY, 0x1004)],
+                                  edit=_relative_skip)), _callee())
+    assert set(_fallthrough_references(split.observation)) == {"1:1000:0:FALLTHROUGH"}
     assert _fallthrough_references(_unit(_caller(Patched()), _callee()).observation) == {}
 
 
