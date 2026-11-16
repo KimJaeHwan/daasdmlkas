@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ._scope_contracts import (
     AddressCoordinate,
-    CallContinuation,
+    FallthroughExit,
     InstructionDataReference,
     InstructionFlowEvidence,
     MAX_CALL_CONTEXT_TARGET_REFERENCES,
@@ -45,6 +45,9 @@ class _ObservationDefects:
     data_reference_count: int = 0
     call_count: int = 0
     call_context_target_references: int = 0
+    # (S1) rows whose fallthrough is not program memory: admitted only as a
+    # listed kind-4 exit of an ``isa`` observation (row address -> target)
+    unmapped_fallthroughs: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,10 +117,13 @@ def _validate_function_candidate(
             addresses = tuple(item.address for item in instructions)
             if len(set(addresses)) != len(addresses):
                 defects.conflicting = True
-            isa, continuations = _call_fallthrough_contract(raw, defects)
+            isa, exits = _call_fallthrough_contract(raw, entry, defects)
+            for source, target in defects.unmapped_fallthroughs.items():
+                if not any(item.source == source and item.target == target and item.kind == 4 for item in exits):
+                    defects.invalid = True   # (as before S1: a fallthrough outside program memory)
             if not any((defects.duplicate, defects.invalid, defects.incomplete, defects.conflicting)):
                 try:
-                    observation = ValidatedFunctionObservation(instructions, isa, continuations)
+                    observation = ValidatedFunctionObservation(instructions, isa, exits)
                 except (TypeError, ValueError):
                     # (S1) e.g. a native call without fallthrough in an observation
                     # under the ISA call-fallthrough contract: malformed, refused
@@ -163,7 +169,10 @@ def _parse_instruction(
     address = _coordinate_field(raw, "address", defects)
     if address is not None and not index.memory_coordinate(address):
         defects.invalid = True
-    fallthrough = _optional_coordinate(raw, "fallthrough_present", "fallthrough", index, defects)
+    unmapped: list = []
+    fallthrough = _optional_coordinate(raw, "fallthrough_present", "fallthrough", index, defects, unmapped)
+    if unmapped and address is not None:
+        defects.unmapped_fallthroughs[address] = unmapped[0]
     data_references = _data_references(raw, index, defects)
     flow = _instruction_flow(raw, defects)
     length = _instruction_length(raw, defects)
@@ -239,15 +248,17 @@ def _instruction_length(raw: RawObject, defects: _ObservationDefects) -> int | N
 
 
 def _call_fallthrough_contract(
-    raw: RawObject, defects: _ObservationDefects
-) -> tuple[bool, tuple[CallContinuation, ...]]:
+    raw: RawObject, entry: AddressCoordinate | None, defects: _ObservationDefects
+) -> tuple[bool, tuple[FallthroughExit, ...]]:
     """(S1) ``call_fallthrough`` ("isa": the exporter verified every native
-    call keeps its ISA fallthrough) and ``call_continuations`` (the native
-    calls whose continuation is not an instruction of this function); both
-    absent in older Bundles. Consistency with the rows is checked by
-    ``ValidatedFunctionObservation``."""
+    call keeps its ISA fallthrough) and ``fallthrough_exits`` (rows whose
+    fallthrough leaves the function or reaches another function's entry);
+    both absent in older Bundles. Consistency with the rows is checked by
+    ``ValidatedFunctionObservation``; a kind 2-3 exit never names the function
+    itself."""
+    entry_point = entry
     flag = _field(raw, "call_fallthrough")
-    rows = _field(raw, "call_continuations")
+    rows = _field(raw, "fallthrough_exits")
     if _FieldState.DUPLICATE in (flag.state, rows.state):
         defects.duplicate = True
         return False, ()
@@ -261,29 +272,32 @@ def _call_fallthrough_contract(
     if rows.state is _FieldState.MISSING:
         defects.incomplete = True
         return True, ()
-    if type(rows.value) is not tuple:
+    if type(rows.value) is not tuple or len(rows.value) > MAX_FUNCTION_INSTRUCTIONS:
         defects.invalid = True
         return True, ()
     found = []
     for item in rows.value:
-        if type(item) is not RawObject or _has_duplicate(item, ("call", "target", "kind", "function")):
+        if type(item) is not RawObject or _has_duplicate(item, ("source", "target", "kind", "function")):
             defects.invalid = True
             continue
-        call = _coordinate_field(item, "call", defects)
+        call = _coordinate_field(item, "source", defects)
         target = _coordinate_field(item, "target", defects)
         kind = _field(item, "kind")
         function = _field(item, "function")
         if kind.state is not _FieldState.PRESENT or function.state is not _FieldState.PRESENT:
             defects.incomplete = True
             continue
-        entry = None if function.value is None else _observation_coordinate(function.value, defects)
-        if call is None or target is None or (function.value is not None and entry is None):
+        function_entry = None if function.value is None else _observation_coordinate(function.value, defects)
+        if call is None or target is None or (function.value is not None and function_entry is None):
+            continue
+        if function_entry is not None and entry_point is not None and function_entry == entry_point:
+            defects.invalid = True   # (a kind 2-3 exit into the function itself)
             continue
         try:
-            found.append(CallContinuation(call, target, kind.value, entry))
+            found.append(FallthroughExit(call, target, kind.value, function_entry))
         except (TypeError, ValueError):
             defects.invalid = True
-    if len({item.call for item in found}) != len(found):
+    if len({item.source for item in found}) != len(found):
         defects.conflicting = True
         return True, ()
     return True, tuple(sorted(found))
@@ -414,7 +428,10 @@ def _optional_coordinate(
     value_name: str,
     index: _AddressSpaceIndex,
     defects: _ObservationDefects,
+    unmapped: list | None = None,
 ) -> AddressCoordinate | None:
+    """``unmapped``: when given, a coordinate outside program memory is
+    appended there (and None returned) instead of invalidating the row."""
     marker = _field(raw, marker_name)
     value = _field(raw, value_name)
     if value.state is _FieldState.PRESENT and value.value is not None:
@@ -442,6 +459,9 @@ def _optional_coordinate(
     if coordinate is None:
         return None
     if not index.memory_coordinate(coordinate):
+        if unmapped is not None:
+            unmapped.append(coordinate)
+            return None
         defects.invalid = True
     return coordinate
 

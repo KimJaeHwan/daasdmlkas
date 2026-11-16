@@ -484,37 +484,55 @@ class ValidatedInstruction:
             raise ValueError("data references must be sorted and unique")
 
 
+def is_interrupt_shape(instruction: "ValidatedInstruction") -> bool:
+    """Ghidra's interrupt lifting, exactly: ``v = CALLOTHER(constants...);
+    CALLIND v`` and optionally ``RETURN constant`` (INT3) -- the same shape as
+    the exporter's ``isInterruptShape``."""
+    operations = instruction.operations
+    if len(operations) not in (2, 3) or operations[0].opcode != "CALLOTHER" or operations[1].opcode != "CALLIND":
+        return False
+    other, call = operations[0], operations[1]
+    if other.output is None or not call.inputs or call.inputs[0] != other.output:
+        return False
+    if any(item.kind is not VarnodeKindCode.CONSTANT for item in other.inputs):
+        return False
+    return len(operations) == 2 or (operations[2].opcode == "RETURN" and bool(operations[2].inputs)
+                                    and operations[2].inputs[0].kind is VarnodeKindCode.CONSTANT)
+
+
 def is_native_call(instruction: "ValidatedInstruction") -> bool:
-    """A CALL / CALLIND row that is not a translator user-op transfer (an
-    instruction whose p-code holds a CALLOTHER -- e.g. Ghidra's ``INT n`` --
-    is not a native call for the CALL fallthrough contract)."""
-    opcodes = {operation.opcode for operation in instruction.operations}
-    return bool(opcodes & {"CALL", "CALLIND"}) and "CALLOTHER" not in opcodes
+    """A row holding a CALL / CALLIND that is not Ghidra's interrupt lifting
+    (``is_interrupt_shape``): the calls the ISA fallthrough contract is about."""
+    if is_interrupt_shape(instruction):
+        return False
+    return any(operation.opcode in ("CALL", "CALLIND") for operation in instruction.operations)
 
 
-# continuation kinds of a native call whose ISA continuation is not an
-# instruction of the calling function (exporter classes, r10 section 2)
+# kinds of a fallthrough leaving the function, or reaching another function's
+# entry inside it (exporter classes, r10 section 2)
 CONTINUATION_FUNCTION_ENTRY = 2
 CONTINUATION_FOREIGN_INTERIOR = 3
 CONTINUATION_BOUNDARY = 4
 
 
 @dataclass(frozen=True, order=True, slots=True)
-class CallContinuation:
-    """The ISA continuation of a native call that is not an instruction of
-    the calling function: the entry of a function (2), an instruction inside
-    another function (3, ``function`` = its entry), or nothing analysable
-    (4: unmapped, undecodable, or in no function). Read as a tail exit
+class FallthroughExit:
+    """A row whose fallthrough leaves the function -- a call's ISA
+    continuation, or any row falling out of the body -- or reaches the entry of
+    another function inside it (shared code): the entry of a function (2), an
+    instruction inside another function (3, ``function`` = its entry), or
+    nothing analysable (4: unmapped -- the row then keeps no fallthrough --,
+    undecodable, or in no function). A non-local one reads as a tail exit
     (UNKNOWN state); kinds 2-3 are reachability edges to ``function``."""
 
-    call: AddressCoordinate
+    source: AddressCoordinate
     target: AddressCoordinate
     kind: int
     function: AddressCoordinate | None = None
 
     def __post_init__(self) -> None:
-        require_exact(self.call, AddressCoordinate, "continuation call")
-        require_exact(self.target, AddressCoordinate, "continuation target")
+        require_exact(self.source, AddressCoordinate, "fallthrough exit source")
+        require_exact(self.target, AddressCoordinate, "fallthrough exit target")
         if type(self.kind) is not int:
             raise TypeError("continuation kind must be an exact int")
         if self.kind not in (CONTINUATION_FUNCTION_ENTRY, CONTINUATION_FOREIGN_INTERIOR, CONTINUATION_BOUNDARY):
@@ -533,10 +551,10 @@ class ValidatedFunctionObservation:
     instructions: tuple[ValidatedInstruction, ...]
     # (S1) the exporter verified that every native call keeps its ISA
     # fallthrough (Ghidra's non-returning analyzers off, no flow override);
-    # ``call_continuations`` lists the native calls whose continuation is not
-    # an instruction of this function. False in older Bundles.
+    # ``fallthrough_exits`` lists every row whose fallthrough leaves the
+    # function or reaches another function's entry. False in older Bundles.
     call_fallthrough_isa: bool = False
-    call_continuations: tuple[CallContinuation, ...] = ()
+    fallthrough_exits: tuple[FallthroughExit, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.instructions) is not tuple or any(
@@ -547,34 +565,41 @@ class ValidatedFunctionObservation:
         if len(addresses) != len(set(addresses)):
             raise ValueError("instruction addresses must be unique")
         require_bool(self.call_fallthrough_isa, "call fallthrough flag")
-        if type(self.call_continuations) is not tuple or any(
-            type(item) is not CallContinuation for item in self.call_continuations
+        if type(self.fallthrough_exits) is not tuple or any(
+            type(item) is not FallthroughExit for item in self.fallthrough_exits
         ):
-            raise TypeError("call continuations must be an exact tuple")
-        if tuple(sorted(set(self.call_continuations))) != self.call_continuations or len(
-            {item.call for item in self.call_continuations}
-        ) != len(self.call_continuations):
-            raise ValueError("call continuations must be sorted, one per call")
+            raise TypeError("fallthrough exits must be an exact tuple")
+        if tuple(sorted(set(self.fallthrough_exits))) != self.fallthrough_exits or len(
+            {item.source for item in self.fallthrough_exits}
+        ) != len(self.fallthrough_exits):
+            raise ValueError("fallthrough exits must be sorted, one per row")
         if not self.call_fallthrough_isa:
-            if self.call_continuations:
-                raise ValueError("call continuations need the ISA fallthrough contract")
+            if self.fallthrough_exits:
+                raise ValueError("fallthrough exits need the ISA fallthrough contract")
             return
-        # every native call has its fallthrough; it is either an instruction of
-        # this function or listed, never both (total classification)
+        # total classification: a row's fallthrough is local and not another
+        # function's entry, or listed; a native call always has one (an
+        # unmapped one is a kind-4 exit with no fallthrough kept on the row)
         local = set(addresses)
-        listed = {item.call: item for item in self.call_continuations}
+        listed = {item.source: item for item in self.fallthrough_exits}
         rows = {item.address: item for item in self.instructions}
-        for call, item in listed.items():
-            row = rows.get(call)
-            if row is None or not is_native_call(row) or row.fallthrough != item.target:
-                raise ValueError("a call continuation must name a native call and its fallthrough")
-        for row in self.instructions:
-            if not is_native_call(row):
-                continue
+        for source, item in listed.items():
+            row = rows.get(source)
+            if row is None:
+                raise ValueError("a fallthrough exit must name a row of the function")
             if row.fallthrough is None:
-                raise ValueError("a native call without fallthrough under the ISA fallthrough contract")
-            if (row.fallthrough in local) == (row.address in listed):
-                raise ValueError("a native call continuation is local or listed, exactly one")
+                if item.kind != CONTINUATION_BOUNDARY:
+                    raise ValueError("only an unmapped boundary exit keeps no fallthrough on its row")
+            elif row.fallthrough != item.target:
+                raise ValueError("a fallthrough exit's target is its row's fallthrough")
+            elif row.fallthrough in local and item.kind != CONTINUATION_FUNCTION_ENTRY:
+                raise ValueError("a local fallthrough is listed only as another function's entry")
+        for row in self.instructions:
+            if row.fallthrough is None:
+                if is_native_call(row) and row.address not in listed:
+                    raise ValueError("a native call without fallthrough under the ISA fallthrough contract")
+            elif row.fallthrough not in local and row.address not in listed:
+                raise ValueError("a fallthrough leaving the function must be listed")
 
 
 def require_exact(value: object, expected: type, label: str) -> None:

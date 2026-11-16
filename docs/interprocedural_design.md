@@ -6463,18 +6463,32 @@ Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나�
   둘 다 `ret`으로 돌아온다. Ghidra "Non-Returning Functions - Discovered"가 호출 바로 뒤의 의도된 `int3`(출력 뒤
   `__debugbreak`) 9곳을 채움 바이트로 읽고 돌아오지 않는다고 추정했다. 그 다음 코드는 205곳에서 Bundle에 아예 없었다
   (엔진만 고쳐서는 되찾을 수 없음). "Known"은 이름 목록 -- 둘 다 관례이지 사실이 아니다.
-- 내보내기: 새 분석(가져오기)에는 `-preScript GhidraV2DisableNoReturn.java`로 두 분석기를 끈다. 준비된 프로젝트
+- 내보내기: 새 분석(가져오기)에는 `-preScript GhidraV2DisableNoReturn.java`로 두 분석기와 "Call-Fixup Installer"를
+  끈다(코드 리뷰 r1 뒤 측정: dfbench win32의 `call [longjmp 썽크]`에 컴파일러 사양의 이름 목록 call fixup이 CALL_RETURN
+  덮어쓰기를 붙여 다음 줄을 지웠다 -- 이것도 이름 관례. 끄면 그 Bundle은 함수 79개 그대로 `int3` 한 줄만 늘고, ntdll ·
+  zlib는 p-code 한 줄도 바뀌지 않는다). 준비된 프로젝트
   (`-noanalysis`)는 그대로이고 아래 표시를 받지 않는다. `GhidraV2BundleExport.java`는 두 분석기가 꺼진 새 분석일 때만,
   함수마다 모든 native 호출(CALL / CALLIND, CALLOTHER 없음 -- Ghidra의 `INT n`은 제외)이 흐름 덮어쓰기 없이
   `getFallThrough() == getDefaultFallThrough()`인지 확인하고 `call_fallthrough: "isa"`를 쓴다(어기면 내보내기 실패,
-  위반 목록). 다음 줄이 그 함수의 명령이 아니면 `call_continuations`에 분류(2 함수 입구, 3 다른 함수 안의 명령,
+  위반 목록). 다음 줄이 그 함수의 명령이 아니면 `fallthrough_exits`에 분류(2 함수 입구, 3 다른 함수 안의 명령,
   4 분석할 것 없음)를 싣고, 다음 줄이 다른 명령 한가운데면 실패. 명령마다 `length`(정확한 길이)를 싣는다.
-- 엔진: 세 필드는 관찰 데이터(`ValidatedFunctionObservation.call_fallthrough_isa / call_continuations`,
+- 엔진: 세 필드는 관찰 데이터(`ValidatedFunctionObservation.call_fallthrough_isa / fallthrough_exits`,
   `ValidatedInstruction.length`)로 받고 관찰 다이제스트에 조건부로 들어간다(없으면 예전 다이제스트 그대로 -- 고정 테스트).
-  관찰에 넣었으므로 캐시 · 템플릿 원본 식별에 자동으로 묶인다(설계의 "manifest 필드" 대신; 리뷰 확인 사항).
+  관찰에 넣었으므로 관찰 다이제스트를 쓰는 실행 안의 식별(스코프, 정규화 재사용)에 묶인다(설계의 "manifest 필드"
+  대신, 리뷰 승인). 영구 식별은 따로: 링크 캐시 프로필은 내보내기 소스 해시(`link_provider.identity`)로 갈리고 링크용
+  준비된 프로젝트 내보내기는 표시를 받지 않는다; 템플릿 `source`는 분석한 관찰이 모두 `isa`면 `call_fallthrough:
+  "isa"`, 일부면 `"mixed"`를 싣는다(없으면 필드 없음 -- 예전 템플릿 그대로). `length`는 모든 새 내보내기(준비된
+  프로젝트 포함)에 실리므로 재내보내기한 Bundle은 다이제스트가 달라진다.
+  native 호출 = CALL / CALLIND를 가진 줄 중 Ghidra 인터럽트 모양(`v = CALLOTHER(상수...); CALLIND v [; RETURN 상수]`,
+  def-use 확인)이 아닌 것(`is_interrupt_shape`, 내보내기의 `isInterruptShape`와 같은 규칙). `fallthrough_exits`는 호출만이
+  아니라 다음 줄이 함수를 떠나는 모든 줄(돌아오지 않는 호출 뒤 채움이 다음 함수로 넘어가는 경우)과, 함수 안의 다음 줄이
+  다른 함수의 입구인 경우(공유 코드, 종류 2 -- 그대로 함수 안에서 분석하고 도달성 간선만 더한다)를 싣는다. 매핑 밖
+  주소로 가는 다음 줄은 종류 4로 나열될 때만 받아들이고 그 줄에는 다음 줄을 두지 않는다(예전처럼 나열 없으면 거부).
   `isa` 관찰에서 다음 줄 없는 native 호출, 목록과 어긋나는 다음 줄은 잘못된 관찰 -- 함수 거부. 다음 줄이 다른 함수
-  (2-3)면 호출 간선과 별개인 "이어짐" 간선: control context 닫힘과 F1 관찰 그래프(`fault_premise.observed_calls` --
-  `site_reach`, H3, 해제, 철회가 같이 쓴다)에 들어간다. 4는 F1 와일드카드. 상태는 지금처럼 꼬리 출구(UNKNOWN, 템플릿
+  (2-3)면 호출 간선과 별개인 "이어짐" 간선: control context 닫힘, F1 관찰 그래프(`fault_premise.observed_calls` --
+  `site_reach`, H3, 해제, 철회가 같이 쓴다), F1 결과 보고(`_with_fault_references`)에 들어간다. 4나 분석 집합 밖 함수는
+  F1 와일드카드. 내보내기 대상 묶음도 종류 2-3의 함수를 따라간다. 위반은 프로그램 전체를 모아 한 번에 실패시키고,
+  분석기가 꺼지지 않은 새 내보내기는 실패한다(등록되지 않은 분석기는 꺼진 것으로 본다). 상태는 지금처럼 꼬리 출구(UNKNOWN, 템플릿
   거부); 합성(composition)은 하지 않는다. 함수가 돌아오지 않는지는 엔진의 증명만(`summary_noreturn`).
 - 실측(M8, 측정 사본 내보내기 + S1 내보내기): ntdll 묶음 다음 줄 없는 CALL 246 -> 0, native 호출 7180개 다음 줄 전부
   같은 함수, 겹친 디코딩 0, 함수 1506 -> 1570, 명령 +4.7%; UE Core 16 -> 0, 18332개 전부 같은 함수, 명령 +18.

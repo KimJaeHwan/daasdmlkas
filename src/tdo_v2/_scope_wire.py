@@ -266,9 +266,9 @@ def _validated_instruction_preimage(value: ValidatedInstruction) -> bytes:
     return b"".join(pieces)
 
 
-def _call_continuation_preimage(value) -> bytes:
+def _fallthrough_exit_preimage(value) -> bytes:
     return b"".join((
-        _coordinate(value.call),
+        _coordinate(value.source),
         _coordinate(value.target),
         _u64(value.kind),
         b"\x00" if value.function is None else b"\x01" + _coordinate(value.function),
@@ -282,8 +282,8 @@ def _call_fallthrough_preimage(value: ValidatedFunctionObservation) -> bytes:
         return b""
     return b"".join((
         _text("tdo-v2-call-fallthrough-isa-v1"),
-        _u64(len(value.call_continuations)),
-        *(_call_continuation_preimage(item) for item in value.call_continuations),
+        _u64(len(value.fallthrough_exits)),
+        *(_fallthrough_exit_preimage(item) for item in value.fallthrough_exits),
     ))
 
 

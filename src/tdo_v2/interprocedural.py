@@ -429,6 +429,19 @@ def _with_fault_references(results) -> dict:
         for source in (item.multi_calls, getattr(item, "multi_candidates", {})):
             for call, members in source.items():
                 rows.setdefault(call, set()).update(members)
+        # (S1) a fallthrough into another function (exit kinds 2-3): a reference
+        # at the row's last operation, never a call edge for summaries
+        observation = getattr(item.unit, "observation", None)
+        if observation is not None:
+            by_address = {row.address: row for row in observation.instructions}
+            for exit_row in observation.fallthrough_exits:
+                row = by_address.get(exit_row.source)
+                if exit_row.function is None or row is None or not row.operations:
+                    continue
+                last = len(row.operations) - 1
+                site = (f"{exit_row.source.space_id:x}:{exit_row.source.byte_offset:x}:{last}:"
+                        f"{row.operations[last].opcode}")
+                rows.setdefault(site, set()).add(function_key(exit_row.function))
         return rows
 
     edges: dict = {}   # function key -> callees over every instance of it

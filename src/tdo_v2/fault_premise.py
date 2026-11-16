@@ -151,13 +151,13 @@ def observed_calls(unit, keys) -> tuple[dict, bool]:
                                 and any(operation.opcode in ("CALL", "CALLIND")
                                         for operation in instruction.operations)):
                 found.setdefault(key, set()).add(instruction.address.byte_offset)
-    # (S1) a native call whose ISA continuation lies in another function (the
-    # exporter's continuation kinds 2-3) falls into it: an edge like a tail; a
-    # continuation into code no function holds (kind 4) is a wildcard
-    for item in getattr(observation, "call_continuations", ()):
+    # (S1) a fallthrough into another function (exit kinds 2-3, shared entries
+    # included) falls into it: an edge like a tail; a fallthrough into code no
+    # function holds (kind 4), or a function outside ``keys``, is a wildcard
+    for item in getattr(observation, "fallthrough_exits", ()):   # (test doubles carry rows only)
         key = None if item.function is None else _function_key(item.function)
         if key in keys:
-            found.setdefault(key, set()).add(item.call.byte_offset)
+            found.setdefault(key, set()).add(item.source.byte_offset)
         else:
             wildcard = True
     return {key: tuple(sorted(sites)) for key, sites in found.items()}, wildcard

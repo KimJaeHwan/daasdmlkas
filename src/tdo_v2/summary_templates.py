@@ -1005,6 +1005,12 @@ def build_file(results, exports, *, file_id, version, library, external_models, 
         "assumptions": list(run_assumptions(results, home_space=private_frame_above, traps=traps,
                                             pcodeop_models=pcodeop_models)),
     }
+    # (S1, docs 25.100) the observations' CALL fallthrough contract: absent for
+    # Bundles exported before it (the source -- and the template -- unchanged)
+    isa = [bool(getattr(getattr(item.unit, "observation", None), "call_fallthrough_isa", False))
+           for item in results.values()]
+    if any(isa):
+        source["call_fallthrough"] = "isa" if all(isa) else "mixed"
     if code_only is not None:
         from .code_only_profile import ProfiledResults, label_allowed, switch_vector
 
