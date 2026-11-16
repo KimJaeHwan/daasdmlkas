@@ -314,6 +314,9 @@ def main() -> int:
         "-scriptPath", str(GHIDRA_DIR),
         "-log", str(logs / f"{generation}.ghidra.log"),
         "-scriptlog", str(logs / f"{generation}.script.log"),
+        # (S1) a fresh analysis runs with Ghidra's non-returning analyzers off; a
+        # prepared project keeps its own analysis and never gets call_fallthrough
+        *(() if args.ghidra_project is not None else ("-preScript", "GhidraV2DisableNoReturn.java")),
         "-postScript", "GhidraV2BundleExport.java", *script_args,
     ]
     env = dict(os.environ)

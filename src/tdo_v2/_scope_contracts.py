@@ -423,6 +423,10 @@ class ValidatedOperation:
             raise TypeError("operation output must be an exact varnode or None")
 
 
+# x86 instructions are at most 15 bytes; a generous bound for every language
+MAX_INSTRUCTION_LENGTH = 64
+
+
 @dataclass(frozen=True, order=True, slots=True)
 class InstructionDataReference:
     coordinate: AddressCoordinate
@@ -450,9 +454,17 @@ class ValidatedInstruction:
     operations: tuple[ValidatedOperation, ...]
     flow: InstructionFlowEvidence
     data_references: tuple[InstructionDataReference, ...] = ()
+    # exact instruction length in bytes, when the exporter recorded it (S1,
+    # design_scc_conditions r10 section 2); None in older Bundles
+    length: int | None = None
 
     def __post_init__(self) -> None:
         require_exact(self.address, AddressCoordinate, "instruction address")
+        if self.length is not None:
+            if type(self.length) is not int:
+                raise TypeError("instruction length must be an exact int")
+            if not 1 <= self.length <= MAX_INSTRUCTION_LENGTH:
+                raise ValueError("instruction length is out of range")
         if self.fallthrough is not None:
             require_exact(self.fallthrough, AddressCoordinate, "fallthrough")
         if type(self.flow_targets) is not tuple or any(
@@ -472,9 +484,59 @@ class ValidatedInstruction:
             raise ValueError("data references must be sorted and unique")
 
 
+def is_native_call(instruction: "ValidatedInstruction") -> bool:
+    """A CALL / CALLIND row that is not a translator user-op transfer (an
+    instruction whose p-code holds a CALLOTHER -- e.g. Ghidra's ``INT n`` --
+    is not a native call for the CALL fallthrough contract)."""
+    opcodes = {operation.opcode for operation in instruction.operations}
+    return bool(opcodes & {"CALL", "CALLIND"}) and "CALLOTHER" not in opcodes
+
+
+# continuation kinds of a native call whose ISA continuation is not an
+# instruction of the calling function (exporter classes, r10 section 2)
+CONTINUATION_FUNCTION_ENTRY = 2
+CONTINUATION_FOREIGN_INTERIOR = 3
+CONTINUATION_BOUNDARY = 4
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class CallContinuation:
+    """The ISA continuation of a native call that is not an instruction of
+    the calling function: the entry of a function (2), an instruction inside
+    another function (3, ``function`` = its entry), or nothing analysable
+    (4: unmapped, undecodable, or in no function). Read as a tail exit
+    (UNKNOWN state); kinds 2-3 are reachability edges to ``function``."""
+
+    call: AddressCoordinate
+    target: AddressCoordinate
+    kind: int
+    function: AddressCoordinate | None = None
+
+    def __post_init__(self) -> None:
+        require_exact(self.call, AddressCoordinate, "continuation call")
+        require_exact(self.target, AddressCoordinate, "continuation target")
+        if type(self.kind) is not int:
+            raise TypeError("continuation kind must be an exact int")
+        if self.kind not in (CONTINUATION_FUNCTION_ENTRY, CONTINUATION_FOREIGN_INTERIOR, CONTINUATION_BOUNDARY):
+            raise ValueError("continuation kind is unknown")
+        if self.kind == CONTINUATION_BOUNDARY:
+            if self.function is not None:
+                raise ValueError("a boundary continuation names no function")
+            return
+        require_exact(self.function, AddressCoordinate, "continuation function")
+        if (self.kind == CONTINUATION_FUNCTION_ENTRY) != (self.function == self.target):
+            raise ValueError("a function-entry continuation is the function's entry, an interior one is not")
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatedFunctionObservation:
     instructions: tuple[ValidatedInstruction, ...]
+    # (S1) the exporter verified that every native call keeps its ISA
+    # fallthrough (Ghidra's non-returning analyzers off, no flow override);
+    # ``call_continuations`` lists the native calls whose continuation is not
+    # an instruction of this function. False in older Bundles.
+    call_fallthrough_isa: bool = False
+    call_continuations: tuple[CallContinuation, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.instructions) is not tuple or any(
@@ -484,6 +546,35 @@ class ValidatedFunctionObservation:
         addresses = tuple(item.address for item in self.instructions)
         if len(addresses) != len(set(addresses)):
             raise ValueError("instruction addresses must be unique")
+        require_bool(self.call_fallthrough_isa, "call fallthrough flag")
+        if type(self.call_continuations) is not tuple or any(
+            type(item) is not CallContinuation for item in self.call_continuations
+        ):
+            raise TypeError("call continuations must be an exact tuple")
+        if tuple(sorted(set(self.call_continuations))) != self.call_continuations or len(
+            {item.call for item in self.call_continuations}
+        ) != len(self.call_continuations):
+            raise ValueError("call continuations must be sorted, one per call")
+        if not self.call_fallthrough_isa:
+            if self.call_continuations:
+                raise ValueError("call continuations need the ISA fallthrough contract")
+            return
+        # every native call has its fallthrough; it is either an instruction of
+        # this function or listed, never both (total classification)
+        local = set(addresses)
+        listed = {item.call: item for item in self.call_continuations}
+        rows = {item.address: item for item in self.instructions}
+        for call, item in listed.items():
+            row = rows.get(call)
+            if row is None or not is_native_call(row) or row.fallthrough != item.target:
+                raise ValueError("a call continuation must name a native call and its fallthrough")
+        for row in self.instructions:
+            if not is_native_call(row):
+                continue
+            if row.fallthrough is None:
+                raise ValueError("a native call without fallthrough under the ISA fallthrough contract")
+            if (row.fallthrough in local) == (row.address in listed):
+                raise ValueError("a native call continuation is local or listed, exactly one")
 
 
 def require_exact(value: object, expected: type, label: str) -> None:

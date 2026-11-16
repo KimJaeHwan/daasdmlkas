@@ -261,7 +261,30 @@ def _validated_instruction_preimage(value: ValidatedInstruction) -> bytes:
                 ),
             )
         )
+    if value.length is not None:
+        pieces.extend((_text("tdo-v2-instruction-length-v1"), _u64(value.length)))
     return b"".join(pieces)
+
+
+def _call_continuation_preimage(value) -> bytes:
+    return b"".join((
+        _coordinate(value.call),
+        _coordinate(value.target),
+        _u64(value.kind),
+        b"\x00" if value.function is None else b"\x01" + _coordinate(value.function),
+    ))
+
+
+def _call_fallthrough_preimage(value: ValidatedFunctionObservation) -> bytes:
+    """(S1) the ISA call-fallthrough contract of an observation: empty for
+    older observations, so their digests are unchanged."""
+    if not value.call_fallthrough_isa:
+        return b""
+    return b"".join((
+        _text("tdo-v2-call-fallthrough-isa-v1"),
+        _u64(len(value.call_continuations)),
+        *(_call_continuation_preimage(item) for item in value.call_continuations),
+    ))
 
 
 def _observation_preimage(value: ValidatedFunctionObservation) -> bytes:
@@ -271,6 +294,7 @@ def _observation_preimage(value: ValidatedFunctionObservation) -> bytes:
             _text("tdo-v2-function-observation-v2"),
             _u64(len(value.instructions)),
             *(_validated_instruction_preimage(item) for item in value.instructions),
+            _call_fallthrough_preimage(value),
         )
     )
 
@@ -315,6 +339,10 @@ def _stream_observation(
             update(_u64(len(instruction.data_references)))
             for reference in instruction.data_references:
                 update(_instruction_data_reference_preimage(reference))
+        if instruction.length is not None:
+            update(_text("tdo-v2-instruction-length-v1"))
+            update(_u64(instruction.length))
+    update(_call_fallthrough_preimage(value))
 
 
 def _validated_flow_preimage(value) -> bytes:

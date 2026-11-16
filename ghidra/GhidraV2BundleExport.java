@@ -42,7 +42,9 @@ import ghidra.app.plugin.exceptionhandlers.gcc.sections.EhFrameSection;
 import ghidra.app.plugin.exceptionhandlers.gcc.structures.gccexcepttable.LSDACallSiteRecord;
 import ghidra.app.plugin.exceptionhandlers.gcc.structures.gccexcepttable.LSDACallSiteTable;
 import ghidra.app.plugin.exceptionhandlers.gcc.structures.gccexcepttable.LSDATable;
+import ghidra.program.model.listing.FlowOverride;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
@@ -77,6 +79,13 @@ public class GhidraV2BundleExport extends GhidraScript {
         .serializeNulls()
         .create();
     private List<ExceptionRegion> exceptionRegions = List.of();
+    // (S1) every native call of every exported function keeps its ISA
+    // fallthrough: a fresh analysis with Ghidra's two non-returning analyzers
+    // disabled (GhidraV2DisableNoReturn.java as -preScript), verified per call
+    // in callContinuations; never for a prepared project (-noanalysis)
+    private static final String[] NON_RETURNING_ANALYZERS = {
+        "Non-Returning Functions - Discovered", "Non-Returning Functions - Known"};
+    private boolean callFallthroughIsa;
     private final AddressSet recoveredExceptionCode = new AddressSet();
 
     private static final class Entry implements Comparable<Entry> {
@@ -169,6 +178,7 @@ public class GhidraV2BundleExport extends GhidraScript {
             throw new IllegalStateException(
                 "the program is not analyzed: analyze it in the Ghidra project first");
         }
+        callFallthroughIsa = !options.requireAnalyzed && nonReturningAnalyzersOff();
         exceptionRegions = captureExceptionRegions();
         if (options.requireAnalyzed && !recoveredExceptionCode.isEmpty()) {
             throw new IllegalStateException("exception landing pads need disassembly and analysis the " +
@@ -1201,6 +1211,93 @@ public class GhidraV2BundleExport extends GhidraScript {
         return new ObservedFunction(body, exceptionalTargets);
     }
 
+    private boolean nonReturningAnalyzersOff() {
+        Map<String, String> values = getCurrentAnalysisOptionsAndValues(currentProgram);
+        for (String name : NON_RETURNING_ANALYZERS) {
+            if (!"false".equals(values.get(name))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // a CALL / CALLIND that is not a translator user-op transfer (Ghidra's INT n
+    // holds a CALLOTHER): the calls the ISA fallthrough contract is about
+    private static boolean isNativeCall(Instruction instruction) {
+        boolean call = false;
+        for (PcodeOp operation : instruction.getPcode()) {
+            if (operation.getOpcode() == PcodeOp.CALLOTHER) {
+                return false;
+            }
+            call |= operation.getOpcode() == PcodeOp.CALL || operation.getOpcode() == PcodeOp.CALLIND;
+        }
+        return call;
+    }
+
+    // (S1) the native calls of one function whose continuation is not one of its
+    // instructions, classified: 2 the entry of a function, 3 an instruction inside
+    // another function, 4 nothing analysable. Fails on a call whose fallthrough is
+    // not its ISA one and on a continuation decoded across another instruction.
+    private List<Map<String, Object>> callContinuations(
+            Function function, List<Instruction> rows) throws IOException {
+        Set<Address> local = new LinkedHashSet<>();
+        for (Instruction row : rows) {
+            local.add(row.getAddress());
+        }
+        FunctionManager functions = currentProgram.getFunctionManager();
+        List<String> offenders = new ArrayList<>();
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Instruction row : rows) {
+            if (!isNativeCall(row)) {
+                continue;
+            }
+            Address fallthrough = row.getFallThrough();
+            Address isa = row.getDefaultFallThrough();
+            if (row.getFlowOverride() != FlowOverride.NONE || fallthrough == null ||
+                    !fallthrough.equals(isa)) {
+                offenders.add(row.getAddress() + " (fallthrough " + fallthrough + ", ISA " + isa +
+                    ", override " + row.getFlowOverride() + ")");
+                continue;
+            }
+            if (local.contains(fallthrough)) {
+                continue;
+            }
+            Instruction cover = currentProgram.getListing().getInstructionContaining(fallthrough);
+            if (cover != null && !cover.getAddress().equals(fallthrough)) {
+                offenders.add(row.getAddress() + " (continuation " + fallthrough +
+                    " inside the instruction at " + cover.getAddress() + ")");
+                continue;
+            }
+            Function entryOf = functions.getFunctionAt(fallthrough);
+            Function owner = functions.getFunctionContaining(fallthrough);
+            int kind;
+            Address entry;
+            if (entryOf != null) {
+                kind = 2;
+                entry = fallthrough;
+            }
+            else if (owner != null && cover != null) {
+                kind = 3;
+                entry = owner.getEntryPoint();
+            }
+            else {
+                kind = 4;
+                entry = null;
+            }
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("call", coordinate(row.getAddress()));
+            item.put("target", coordinate(fallthrough));
+            item.put("kind", kind);
+            item.put("function", entry == null ? null : coordinate(entry));
+            result.add(item);
+        }
+        if (!offenders.isEmpty()) {
+            throw new IOException("call fallthrough contract violated in function " +
+                function.getEntryPoint() + ": " + String.join("; ", offenders));
+        }
+        return result;
+    }
+
     private static boolean hasCallOperation(Instruction instruction) {
         for (PcodeOp operation : instruction.getPcode()) {
             if (operation.getOpcode() == PcodeOp.CALL ||
@@ -1214,11 +1311,13 @@ public class GhidraV2BundleExport extends GhidraScript {
     private Map<String, Object> functionCandidate(
             Function function, ObservedFunction observed) throws Exception {
         List<Map<String, Object>> instructions = new ArrayList<>();
+        List<Instruction> rows = new ArrayList<>();
         InstructionIterator iterator = currentProgram.getListing()
             .getInstructions(observed.body, true);
         while (iterator.hasNext()) {
             monitor.checkCancelled();
             Instruction instruction = iterator.next();
+            rows.add(instruction);
             instructions.add(instruction(
                 instruction,
                 observed.exceptionalTargets.getOrDefault(
@@ -1227,6 +1326,10 @@ public class GhidraV2BundleExport extends GhidraScript {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("entry", coordinate(function.getEntryPoint()));
         result.put("instructions", instructions);
+        if (callFallthroughIsa) {
+            result.put("call_fallthrough", "isa");
+            result.put("call_continuations", callContinuations(function, rows));
+        }
         return result;
     }
 
@@ -1303,6 +1406,7 @@ public class GhidraV2BundleExport extends GhidraScript {
         flow.put("is_override", flowType.isOverride());
         result.put("flow_type", flow);
         result.put("operations", operations);
+        result.put("length", instruction.getLength());
         return result;
     }
 

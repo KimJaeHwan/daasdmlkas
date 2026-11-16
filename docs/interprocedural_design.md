@@ -6455,3 +6455,27 @@ Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나�
   kernel32 템플릿 12개 재유도 동일(`ENGINE_SEMANTICS_VERSION` 49 유지); Mulp 코드 전용 L 실행 -- 함수 405, 새 실패 0,
   결합 변화 0, 실패 사유 변화 0, 루트 529와 지표 전부 동일, 조회 403회 중 결합 0(정체성이 나오는 81곳 모두 레지스터
   clobber 빚). I2a(레지스터 보존 증명 템플릿)의 전제 조건.
+
+### 25.100 호출 다음 줄은 ISA대로 -- Ghidra의 "돌아오지 않음" 추정 끄기 (S1, 2026-11-16)
+
+설계 `.census6/design_scc_conditions_r10.md` 2절(r2..r9, Astra 8회 승인, Fable 8회; 통합본 r10.1 Astra 일관).
+- 원인(측정): ntdll RtlFreeHeap 묶음 Bundle에서 다음 줄이 없는 CALL 246개 중 215개가 DbgPrint / DbgPrintEx 호출 --
+  둘 다 `ret`으로 돌아온다. Ghidra "Non-Returning Functions - Discovered"가 호출 바로 뒤의 의도된 `int3`(출력 뒤
+  `__debugbreak`) 9곳을 채움 바이트로 읽고 돌아오지 않는다고 추정했다. 그 다음 코드는 205곳에서 Bundle에 아예 없었다
+  (엔진만 고쳐서는 되찾을 수 없음). "Known"은 이름 목록 -- 둘 다 관례이지 사실이 아니다.
+- 내보내기: 새 분석(가져오기)에는 `-preScript GhidraV2DisableNoReturn.java`로 두 분석기를 끈다. 준비된 프로젝트
+  (`-noanalysis`)는 그대로이고 아래 표시를 받지 않는다. `GhidraV2BundleExport.java`는 두 분석기가 꺼진 새 분석일 때만,
+  함수마다 모든 native 호출(CALL / CALLIND, CALLOTHER 없음 -- Ghidra의 `INT n`은 제외)이 흐름 덮어쓰기 없이
+  `getFallThrough() == getDefaultFallThrough()`인지 확인하고 `call_fallthrough: "isa"`를 쓴다(어기면 내보내기 실패,
+  위반 목록). 다음 줄이 그 함수의 명령이 아니면 `call_continuations`에 분류(2 함수 입구, 3 다른 함수 안의 명령,
+  4 분석할 것 없음)를 싣고, 다음 줄이 다른 명령 한가운데면 실패. 명령마다 `length`(정확한 길이)를 싣는다.
+- 엔진: 세 필드는 관찰 데이터(`ValidatedFunctionObservation.call_fallthrough_isa / call_continuations`,
+  `ValidatedInstruction.length`)로 받고 관찰 다이제스트에 조건부로 들어간다(없으면 예전 다이제스트 그대로 -- 고정 테스트).
+  관찰에 넣었으므로 캐시 · 템플릿 원본 식별에 자동으로 묶인다(설계의 "manifest 필드" 대신; 리뷰 확인 사항).
+  `isa` 관찰에서 다음 줄 없는 native 호출, 목록과 어긋나는 다음 줄은 잘못된 관찰 -- 함수 거부. 다음 줄이 다른 함수
+  (2-3)면 호출 간선과 별개인 "이어짐" 간선: control context 닫힘과 F1 관찰 그래프(`fault_premise.observed_calls` --
+  `site_reach`, H3, 해제, 철회가 같이 쓴다)에 들어간다. 4는 F1 와일드카드. 상태는 지금처럼 꼬리 출구(UNKNOWN, 템플릿
+  거부); 합성(composition)은 하지 않는다. 함수가 돌아오지 않는지는 엔진의 증명만(`summary_noreturn`).
+- 실측(M8, 측정 사본 내보내기 + S1 내보내기): ntdll 묶음 다음 줄 없는 CALL 246 -> 0, native 호출 7180개 다음 줄 전부
+  같은 함수, 겹친 디코딩 0, 함수 1506 -> 1570, 명령 +4.7%; UE Core 16 -> 0, 18332개 전부 같은 함수, 명령 +18.
+  S1 Bundle 입력 검증: ntdll 1570 중 1393 구성(전부 `isa`), 177 거부 -- 새 필드 없는 Bundle과 같은 수(기존 KUSD).

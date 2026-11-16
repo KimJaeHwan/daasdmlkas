@@ -173,3 +173,13 @@ Compare against the manifest instead.
    that calls `dfb_sink_int` is not in the observed body. The exporter only recovers landing pads from
    `.eh_frame` LSDA and ARM EHABI, and the LSDA path for SEH (via `.xdata`) does not appear to be
    covered. This has not been verified.
+
+## CALL fallthrough (S1, docs 25.100)
+
+A fresh export (import + analysis) runs `ghidra/GhidraV2DisableNoReturn.java` as `-preScript`: Ghidra's
+"Non-Returning Functions - Discovered" and "- Known" analyzers are disabled, so every CALL keeps the
+fallthrough the ISA defines. The exporter then verifies every native call of every exported function
+(`getFallThrough() == getDefaultFallThrough()`, no flow override) and writes `call_fallthrough: "isa"`,
+`call_continuations` (continuations that are not an instruction of the function) and an instruction
+`length`; a violation fails the export with the offending calls listed. A prepared project
+(`--ghidra-project`, `-noanalysis`) keeps its own analysis and never gets `call_fallthrough`.

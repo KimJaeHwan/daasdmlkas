@@ -99,6 +99,11 @@ def _edges(entry: str, item, keys) -> set:
                     key = function_key(operation.inputs[0].coordinate)
                     if key in keys:
                         found.add(key)
+        # (S1) a call whose ISA continuation is in another function falls into
+        # it (exporter continuation kinds 2-3): execution may reach its sites
+        for continuation in getattr(observation, "call_continuations", ()):
+            if continuation.function is not None and function_key(continuation.function) in keys:
+                found.add(function_key(continuation.function))
     found.update(key for key in item.calls.values() if key in keys)
     for members in (*item.multi_calls.values(), *getattr(item, "multi_candidates", {}).values()):
         found.update(key for key in members if key in keys)

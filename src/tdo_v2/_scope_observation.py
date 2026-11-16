@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from ._scope_contracts import (
     AddressCoordinate,
+    CallContinuation,
     InstructionDataReference,
     InstructionFlowEvidence,
     MAX_CALL_CONTEXT_TARGET_REFERENCES,
@@ -17,6 +18,7 @@ from ._scope_contracts import (
     MAX_FUNCTION_INSTRUCTIONS,
     MAX_FUNCTION_OPERATIONS,
     MAX_FUNCTION_VARNODES,
+    MAX_INSTRUCTION_LENGTH,
     MAX_OPCODE_ASCII_BYTES,
     MAX_OPERATION_INPUTS,
     ValidatedFunctionObservation,
@@ -112,9 +114,16 @@ def _validate_function_candidate(
             addresses = tuple(item.address for item in instructions)
             if len(set(addresses)) != len(addresses):
                 defects.conflicting = True
+            isa, continuations = _call_fallthrough_contract(raw, defects)
             if not any((defects.duplicate, defects.invalid, defects.incomplete, defects.conflicting)):
-                observation = ValidatedFunctionObservation(instructions)
-                digest = _observation_digest(observation)
+                try:
+                    observation = ValidatedFunctionObservation(instructions, isa, continuations)
+                except (TypeError, ValueError):
+                    # (S1) e.g. a native call without fallthrough in an observation
+                    # under the ISA call-fallthrough contract: malformed, refused
+                    defects.invalid = True
+                else:
+                    digest = _observation_digest(observation)
 
     return _FunctionValidation(
         duplicate_entry,
@@ -145,6 +154,7 @@ def _parse_instruction(
         "data_references",
         "flow_type",
         "operations",
+        "length",
     )
     if type(raw) is not RawObject:
         defects.invalid = True
@@ -156,6 +166,7 @@ def _parse_instruction(
     fallthrough = _optional_coordinate(raw, "fallthrough_present", "fallthrough", index, defects)
     data_references = _data_references(raw, index, defects)
     flow = _instruction_flow(raw, defects)
+    length = _instruction_length(raw, defects)
     # A call or jump through an import names a target in Ghidra's EXTERNAL
     # space (`call [__imp_X]`, `jmp [__imp_X]`, which Ghidra types as a computed
     # jump); it is not program memory and never this function's code, so it is
@@ -206,10 +217,76 @@ def _parse_instruction(
             operations,
             flow,
             data_references,
+            length,
         )
     except (TypeError, ValueError):
         defects.conflicting = True
         return None
+
+
+def _instruction_length(raw: RawObject, defects: _ObservationDefects) -> int | None:
+    """(S1) the optional exact instruction length the exporter records."""
+    field = _field(raw, "length")
+    if field.state is _FieldState.MISSING:
+        return None
+    if field.state is _FieldState.DUPLICATE:
+        defects.duplicate = True
+        return None
+    if type(field.value) is not int or not 1 <= field.value <= MAX_INSTRUCTION_LENGTH:
+        defects.invalid = True
+        return None
+    return field.value
+
+
+def _call_fallthrough_contract(
+    raw: RawObject, defects: _ObservationDefects
+) -> tuple[bool, tuple[CallContinuation, ...]]:
+    """(S1) ``call_fallthrough`` ("isa": the exporter verified every native
+    call keeps its ISA fallthrough) and ``call_continuations`` (the native
+    calls whose continuation is not an instruction of this function); both
+    absent in older Bundles. Consistency with the rows is checked by
+    ``ValidatedFunctionObservation``."""
+    flag = _field(raw, "call_fallthrough")
+    rows = _field(raw, "call_continuations")
+    if _FieldState.DUPLICATE in (flag.state, rows.state):
+        defects.duplicate = True
+        return False, ()
+    if flag.state is _FieldState.MISSING:
+        if rows.state is not _FieldState.MISSING:
+            defects.invalid = True
+        return False, ()
+    if flag.value != "isa":
+        defects.invalid = True
+        return False, ()
+    if rows.state is _FieldState.MISSING:
+        defects.incomplete = True
+        return True, ()
+    if type(rows.value) is not tuple:
+        defects.invalid = True
+        return True, ()
+    found = []
+    for item in rows.value:
+        if type(item) is not RawObject or _has_duplicate(item, ("call", "target", "kind", "function")):
+            defects.invalid = True
+            continue
+        call = _coordinate_field(item, "call", defects)
+        target = _coordinate_field(item, "target", defects)
+        kind = _field(item, "kind")
+        function = _field(item, "function")
+        if kind.state is not _FieldState.PRESENT or function.state is not _FieldState.PRESENT:
+            defects.incomplete = True
+            continue
+        entry = None if function.value is None else _observation_coordinate(function.value, defects)
+        if call is None or target is None or (function.value is not None and entry is None):
+            continue
+        try:
+            found.append(CallContinuation(call, target, kind.value, entry))
+        except (TypeError, ValueError):
+            defects.invalid = True
+    if len({item.call for item in found}) != len(found):
+        defects.conflicting = True
+        return True, ()
+    return True, tuple(sorted(found))
 
 
 def _parse_operation(
