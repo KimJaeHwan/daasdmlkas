@@ -289,6 +289,27 @@ def test_shared_entry_successor_is_a_tail_exit():
     assert any(key.startswith("1:1000") for key in _tail_exits_of(unit))
 
 
+def _relative_skip(data):
+    """Row 0 (the call) starts with a p-code-relative CBRANCH to the instruction's end: an earlier p-code block
+    takes the row's fallthrough without the CALL."""
+    row = data["instructions"][0]
+    skip = {"ordinal": 0, "opcode": "CBRANCH", "inputs": [const(len(row["operations"]) + 1, 8), reg(RAX, 1)],
+            "output_present": False, "output": None}
+    row["operations"].insert(0, skip)
+    for ordinal, operation in enumerate(row["operations"]):
+        operation["ordinal"] = ordinal
+
+
+def test_every_block_of_an_exit_row_is_a_tail_exit():
+    """A p-code-relative branch to the row's end takes the shared-entry fallthrough from an earlier block:
+    that block is a tail exit too (Astra code review r3)."""
+    unit = _unit(_caller(Patched(exits=[_exit(0x1000, 0x1004, CONTINUATION_FUNCTION_ENTRY, 0x1004)],
+                                 edit=_relative_skip)), _callee())
+    assert unit.observation is not None
+    blocks = [key for key in _tail_exits_of(unit) if key.startswith("1:1000")]
+    assert len(blocks) >= 2
+
+
 def _empty_pad(data):
     """The pad row (row 2) has no p-code (a NOP) and falls into OTHER."""
     row = data["instructions"][2]
