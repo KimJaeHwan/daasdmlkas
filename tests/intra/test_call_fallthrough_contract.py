@@ -334,6 +334,35 @@ def test_fault_reference_sites_of_exits():
     assert _fallthrough_references(_unit(_caller(Patched()), _callee()).observation) == {}
 
 
+def test_fallthrough_fault_reference_guard_covers_a_split_row():
+    """End to end (F1 on): a split row (relative skip, then COPY) falls into helper, whose discharged ud2 is a
+    fault outcome. The predecessor's FALLTHROUGH reference carries the guard of reaching the row (the outer
+    jcc), never the row's inner relative branch (Astra code review r4)."""
+    from test_fault_premise import HELPER, MAIN, ON, _analyze, _checked_helper, _key
+
+    row = MAIN + 4
+
+    def split(data):
+        target = data["instructions"][1]
+        target["operations"] = [
+            {"ordinal": 0, "opcode": "CBRANCH", "inputs": [const(2, 8), reg(RAX, 1)], "output_present": False,
+             "output": None},
+            {"ordinal": 1, "opcode": "COPY", "inputs": [const(5)], "output_present": True, "output": reg(RAX)},
+        ]
+        target["fallthrough"] = _coordinate(HELPER)
+
+    predecessor = Patched(entry=MAIN, exits=[_exit(row, HELPER, CONTINUATION_FUNCTION_ENTRY, HELPER)], edit=split)
+    predecessor.cbranch("end", reg(RAX, 1)).ins(op("COPY", [const(0)], reg(RAX))).label("end").ret()
+    results = _analyze(predecessor, _checked_helper(), **ON)
+    assert results[_key(HELPER)].summary.fault_outcomes
+    references = [item for item in results[_key(MAIN)].summary.fault_references if item.callee == _key(HELPER)]
+    assert [item.call for item in references] == [f"1:{row:x}:0:FALLTHROUGH"]
+    (reference,) = references
+    assert reference.guard is not None
+    decisions = {guard_row[0] for guard_row in reference.guard}
+    assert decisions and all(key.startswith(f"1:{MAIN:x}:") for key in decisions)
+
+
 def _drop_flag_fall_into_other(data):
     data.pop("call_fallthrough")
     _fall_into(OTHER, row=1)(data)
@@ -366,3 +395,21 @@ def test_contract_violations_are_refused(builder):
 
 # _observation_digest of _unit(_caller(FunctionBuilder()), _callee()).observation on main a3c9b52
 PINNED_OLD_DIGEST = "fb3180ec514340102f1a0dc87f5c7394742ce2dd3a8019e678be06f0fc92a3fd"
+
+
+def test_exporter_and_prescript_disable_the_same_options():
+    """The preScript's list and the exporter's check list are one list (no drift between the two files)."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "ghidra"
+
+    def names(file, constant):
+        text = (root / file).read_text(encoding="utf-8")
+        body = re.search(constant + r" = \{(.*?)\};", text, re.S).group(1)
+        return re.findall(r'"([^"]+)"', body)
+
+    prescript = names("GhidraV2DisableNoReturn.java", "NAMES")
+    assert prescript == names("GhidraV2BundleExport.java", "FLOW_GUESS_OPTIONS")
+    assert set(prescript) == {"Non-Returning Functions - Discovered", "Non-Returning Functions - Known",
+                              "Call-Fixup Installer", "DWARF.Import Functions"}

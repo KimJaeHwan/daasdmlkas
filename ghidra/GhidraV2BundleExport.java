@@ -83,7 +83,8 @@ public class GhidraV2BundleExport extends GhidraScript {
     // fallthrough: a fresh analysis with Ghidra's two non-returning analyzers
     // disabled (GhidraV2DisableNoReturn.java as -preScript), verified per call
     // in callContinuations; never for a prepared project (-noanalysis)
-    private static final String[] NON_RETURNING_ANALYZERS = {
+    // (the same list as GhidraV2DisableNoReturn.NAMES -- tests/intra/test_call_fallthrough_contract.py pins it)
+    private static final String[] FLOW_GUESS_OPTIONS = {
         "Non-Returning Functions - Discovered", "Non-Returning Functions - Known", "Call-Fixup Installer",
         "DWARF.Import Functions"};
     private boolean callFallthroughIsa;
@@ -182,7 +183,7 @@ public class GhidraV2BundleExport extends GhidraScript {
                 "the program is not analyzed: analyze it in the Ghidra project first");
         }
         callFallthroughIsa = !options.requireAnalyzed;
-        if (callFallthroughIsa && !nonReturningAnalyzersOff()) {
+        if (callFallthroughIsa && !flowGuessesOff()) {
             throw new IllegalStateException("a fresh export needs Ghidra's non-returning and call-fixup analyzers off: " +
                 "run GhidraV2DisableNoReturn.java as -preScript (tools/bundle_export/export_bundle.py does)");
         }
@@ -1236,9 +1237,9 @@ public class GhidraV2BundleExport extends GhidraScript {
         return new ObservedFunction(body, exceptionalTargets);
     }
 
-    private boolean nonReturningAnalyzersOff() {
+    private boolean flowGuessesOff() {
         Map<String, String> values = getCurrentAnalysisOptionsAndValues(currentProgram);
-        for (String name : NON_RETURNING_ANALYZERS) {
+        for (String name : FLOW_GUESS_OPTIONS) {
             // (an analyzer not registered for this program's format never runs)
             if (values.containsKey(name) && !"false".equals(values.get(name))) {
                 return false;
