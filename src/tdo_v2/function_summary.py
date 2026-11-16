@@ -624,8 +624,17 @@ def _tail_exits(normalized, observation, noreturn_jumps=frozenset()) -> tuple[st
     composed = {key for key, effect in normalized.proven_call_effects if effect.tail_stack}
     graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
     instructions = {row.address: row for row in observation.instructions}
+    # (S1, docs 25.100) a row whose fallthrough is a listed exit -- leaving the
+    # function (kinds 2-4, an unmapped one included) or reaching another
+    # function's entry inside it (shared code) -- ends a tail exit even when the
+    # block has local successors too (a landing pad, a branch target): state
+    # leaving there is UNKNOWN to a caller and the template is refused
+    exit_rows = {item.source for item in getattr(observation, "fallthrough_exits", ())}
     found = []
     for block in graph.blocks:
+        if block.instruction in exit_rows and block.stop == len(instructions[block.instruction].operations):
+            found.append(block.key)
+            continue
         if not block.exits:
             continue
         row = instructions[block.instruction]

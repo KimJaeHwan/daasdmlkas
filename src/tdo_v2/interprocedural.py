@@ -429,19 +429,8 @@ def _with_fault_references(results) -> dict:
         for source in (item.multi_calls, getattr(item, "multi_candidates", {})):
             for call, members in source.items():
                 rows.setdefault(call, set()).update(members)
-        # (S1) a fallthrough into another function (exit kinds 2-3): a reference
-        # at the row's last operation, never a call edge for summaries
-        observation = getattr(item.unit, "observation", None)
-        if observation is not None:
-            by_address = {row.address: row for row in observation.instructions}
-            for exit_row in observation.fallthrough_exits:
-                row = by_address.get(exit_row.source)
-                if exit_row.function is None or row is None or not row.operations:
-                    continue
-                last = len(row.operations) - 1
-                site = (f"{exit_row.source.space_id:x}:{exit_row.source.byte_offset:x}:{last}:"
-                        f"{row.operations[last].opcode}")
-                rows.setdefault(site, set()).add(function_key(exit_row.function))
+        for site, callees in _fallthrough_references(getattr(item.unit, "observation", None)).items():
+            rows.setdefault(site, set()).update(callees)
         return rows
 
     edges: dict = {}   # function key -> callees over every instance of it
@@ -474,6 +463,10 @@ def _with_fault_references(results) -> dict:
                                 if f"{row.address.space_id:x}:{row.address.byte_offset:x}" == f"{space}:{offset}"),
                                None)
                 block = None if address is None else graph.block_of(address, int(ordinal.split("~")[0]))
+                if block is None and address is not None:
+                    # (S1) a row without p-code (a fallthrough exit's padding row)
+                    block = next((item for item in graph.blocks if item.instruction == address
+                                  and item.start == item.stop == 0), None)
                 found = None if block is None else guard_rows(rows, block.key)
         except DiagnosticExhausted:
             found = None
@@ -490,6 +483,25 @@ def _with_fault_references(results) -> dict:
             if item.summary.fault_references != references:
                 item.summary = replace(item.summary, fault_references=references)
     return results
+
+
+def _fallthrough_references(observation) -> dict:
+    """(S1, docs 25.100) {site key: {function key}} of the observation's
+    fallthrough exits into another function (kinds 2-3): reported like a call
+    reference at the row's last operation (ordinal 0 for a row without p-code),
+    with a FALLTHROUGH suffix so it is never read as the row's call."""
+    found: dict = {}
+    if observation is None:
+        return found
+    by_address = {row.address: row for row in observation.instructions}
+    for exit_row in getattr(observation, "fallthrough_exits", ()):
+        row = by_address.get(exit_row.source)
+        if exit_row.function is None or row is None:
+            continue
+        last = max(len(row.operations) - 1, 0)
+        site = f"{exit_row.source.space_id:x}:{exit_row.source.byte_offset:x}:{last}:FALLTHROUGH"
+        found.setdefault(site, set()).add(function_key(exit_row.function))
+    return found
 
 
 def _without_revoked_faults(published, plan, discharged, functions, calls, revoked_reasons=None) -> dict:

@@ -24,7 +24,7 @@ from tdo_v2._scope_wire import _observation_digest, _observation_preimage
 from tdo_v2.control_context import _edges
 from tdo_v2.fault_premise import observed_calls
 from tdo_v2.function_summary import _tail_exits
-from tdo_v2.interprocedural import function_key
+from tdo_v2.interprocedural import _fallthrough_references, function_key
 from tdo_v2.normalize import FunctionNormalizer, NormalizedFunction
 
 CALLEE = 0x1800
@@ -262,6 +262,52 @@ def test_shared_entry_inside_the_function_is_kind_2():
     # a local successor listed with another kind is refused
     wrong = Patched(exits=[_exit(CALL, shared, CONTINUATION_BOUNDARY, None)])
     assert _unit(_branchy(wrong), _callee()).observation is None
+
+
+def _tail_exits_of(unit):
+    normalized = FunctionNormalizer().normalize(unit)
+    assert type(normalized) is NormalizedFunction
+    return _tail_exits(normalized, unit.observation)
+
+
+def test_unmapped_exit_beside_a_local_successor_is_a_tail_exit():
+    """A conditional jump whose fallthrough is unmapped (kind 4) keeps its local branch target: the block is
+    still a tail exit (UNKNOWN to callers, template refused) -- not only blocks without local successors."""
+    def jump_on(builder):   # ``jcc body`` whose fallthrough is edited away; ``body: call CALLEE; ret``
+        return builder.cbranch("body", reg(RAX, 1)).label("body").call(CALLEE).ret()
+
+    builder = Patched(exits=[_exit(0x1000, UNMAPPED, CONTINUATION_BOUNDARY, None)], edit=_fall_into(UNMAPPED))
+    unit = _unit(jump_on(builder), _callee())
+    assert unit.observation is not None and unit.observation.instructions[0].fallthrough is None
+    assert any(key.startswith("1:1000") for key in _tail_exits_of(unit))
+    assert _tail_exits_of(_unit(jump_on(Patched()), _callee())) == ()
+
+
+def test_shared_entry_successor_is_a_tail_exit():
+    """Shared code: the local successor is another function's entry -- analysed inline, and still a tail exit."""
+    unit = _unit(_caller(Patched(exits=[_exit(0x1000, 0x1004, CONTINUATION_FUNCTION_ENTRY, 0x1004)])), _callee())
+    assert any(key.startswith("1:1000") for key in _tail_exits_of(unit))
+
+
+def _empty_pad(data):
+    """The pad row (row 2) has no p-code (a NOP) and falls into OTHER."""
+    row = data["instructions"][2]
+    row["operations"] = []
+    row["fallthrough"] = _coordinate(OTHER)
+
+
+def test_fault_reference_sites_of_exits():
+    """Exits into another function are reported at an instruction-level site with a FALLTHROUGH suffix --
+    a row without p-code (a NOP falling out) included."""
+    unit = _unit(_padded(Patched(exits=[_exit(PAD, OTHER, CONTINUATION_FUNCTION_ENTRY, OTHER)], edit=_empty_pad)),
+                 _callee(), _other())
+    assert unit.observation is not None
+    assert _fallthrough_references(unit.observation) == {f"1:{PAD:x}:0:FALLTHROUGH": {f"{RAM:x}:{OTHER:x}"}}
+    call = _unit(_branchy(Patched(exits=[_exit(CALL, OTHER, CONTINUATION_FUNCTION_ENTRY, OTHER)],
+                                  edit=_fall_into(OTHER, row=1))), _callee(), _other())
+    (site,) = _fallthrough_references(call.observation)
+    assert site.startswith(f"1:{CALL:x}:") and site.endswith(":FALLTHROUGH")
+    assert _fallthrough_references(_unit(_caller(Patched()), _callee()).observation) == {}
 
 
 def _drop_flag_fall_into_other(data):
