@@ -12,11 +12,18 @@ even when the observed flow omits it.
 import pathlib
 import re
 
+import dataclasses
+
 from synthetic import (
-    CODE_BASE, RAX, RCX, ZF, FunctionBuilder, const, copy, normalize_with_observation, ram, reg,
+    CODE_BASE, RAX, RCX, RSP, ZF, FunctionBuilder, analyze_summaries, boundary, const, copy,
+    normalize_with_observation, program_units, ram, reg,
 )
 from tdo_v2.function_summary import summarize_function
-from tdo_v2.pcode_blocks import build_pcode_block_graph, outcome_of, terminator
+from tdo_v2.interprocedural import analyze_units
+from tdo_v2.model import StorageObjectId
+from tdo_v2.pcode_blocks import build_pcode_block_graph, escaping_branches, outcome_of, terminator
+from tdo_v2.register_delta_proofs import derive_register_delta_proof
+from tdo_v2.span_geometry import ByteSpan, StorageObjectKind
 
 OUTSIDE = CODE_BASE + 0x800   # an address outside the function
 
@@ -77,8 +84,7 @@ def test_uncomposed_edge_is_a_tail_exit_without_exit_state():
 def test_observed_flow_without_the_target_still_exits():
     """An empty flow-target list used to make the escape vanish (the block's
     exits came from the observed targets only): the p-code target forces an
-    unknown exit at the jump's own block. (A CBRANCH flagged as a call does
-    not pass observation validation, so that shape never reaches the graph.)"""
+    unknown exit at the jump's own block."""
     graph, observation = _graph(_escaping(flow_targets=False))
     assert not any(block.edge is not None for block in graph.blocks)
     (site,) = graph.unmaterialized
@@ -163,6 +169,68 @@ def test_legacy_conditional_noreturn_cut_lands_on_the_edge_block():
     assert edge.key == "1:1008>0t"
     assert helper.summary.tail_exits == () and len(helper.summary.exits) == 1
     assert edge.key not in helper.summary.dead_exits
+
+
+def _leave(builder, index):
+    """Rewrite the CBRANCH of instruction ``index`` to jump to OUTSIDE (and list
+    OUTSIDE as its only observed flow target)."""
+    raw = builder.to_json()
+    row = raw["instructions"][index]
+    (branch,) = [item for item in row["operations"] if item["opcode"] == "CBRANCH"]
+    branch["inputs"][0] = ram(OUTSIDE)
+    row["flow_targets"] = [{"space_id": branch["inputs"][0]["space_id"], "byte_offset": OUTSIDE}]
+    builder.to_json = lambda raw=raw: raw
+    return builder
+
+
+def test_escaping_branches_name_each_ineligible_shape():
+    """The inventory's reason per shape (review r1): only the eligible shape
+    has no reason; flow override, S1 continuation evidence, a fallthrough that
+    is not local and a disagreeing observed flow each name themselves."""
+    _, observation = _graph(_escaping())
+    local = {row.address for row in observation.instructions}
+    row = observation.instructions[1]
+    ((ordinal, target, reason),) = escaping_branches(row, local, frozenset())
+    assert (ordinal, target.byte_offset, reason) == (len(row.operations) - 1, OUTSIDE, None)
+    stray = dataclasses.replace(row.flow_targets[0], byte_offset=OUTSIDE + 0x40)
+    shapes = (
+        (dataclasses.replace(row, flow=dataclasses.replace(row.flow, is_override=True)), frozenset(), "flow override"),
+        (row, frozenset({row.address}), "S1 continuation evidence"),
+        (dataclasses.replace(row, fallthrough=None), frozenset(), "fallthrough not local"),
+        (dataclasses.replace(row, flow_targets=(*row.flow_targets, stray)), frozenset(), "observed flow disagrees"),
+    )
+    for shaped, exit_rows, expected in shapes:
+        assert [item[2] for item in escaping_branches(shaped, local, exit_rows)] == [expected]
+
+
+def test_root_diagnostics_list_escaping_branches():
+    """The diagnostic row per escaping jump: its edge block, or why there is none."""
+    empty = boundary({}, {})
+    run = analyze_summaries([_escaping()], empty, root_diagnostics=True)
+    (row,) = run.diagnostics["functions"]["1:1000"]["escaping_branches"]
+    assert row["edge"] == "1:1004>0t" and row["reason"] is None and row["site"] == "1:1004:0:CBRANCH"
+    run = analyze_summaries([_split_escape()[0]], empty, root_diagnostics=True)
+    (row,) = run.diagnostics["functions"]["1:1000"]["escaping_branches"]
+    assert row["edge"] is None and row["site"] == "1:1004:0:CBRANCH"
+    assert row["reason"] == "escaping-branch-not-materialized:not the last operation"
+
+
+def _framed(*, escape):
+    builder = (FunctionBuilder(entry=CODE_BASE).sub_rsp(0x20)
+               .cbranch("done", reg(ZF, 1))
+               .ins(copy(reg(RCX, 4), const(2, 4)))
+               .label("done").add_rsp(0x20).ret())
+    return _leave(builder, 1) if escape else builder
+
+
+def test_register_delta_proof_refuses_an_uncomposed_edge():
+    """An edge block carries no exit state: the independent SP proof refuses,
+    as it refused the escaping jump's own block before G1."""
+    for escape in (False, True):
+        unit = analyze_units(program_units(_framed(escape=escape)))["1:1000"].unit
+        span = ByteSpan(StorageObjectId(StorageObjectKind.REGISTER_FILE, unit.scopes.program.scope, 0), RSP, 8)
+        proof = derive_register_delta_proof(unit, span, {}, {})
+        assert (proof is None) == escape
 
 
 # lint (design r4 section 6): terminator interpretation -- reading
