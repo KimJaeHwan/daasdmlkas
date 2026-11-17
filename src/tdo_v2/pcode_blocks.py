@@ -199,18 +199,28 @@ def outcome_of(graph: PcodeBlockGraph, source: str, successor: str, rows) -> str
 
 
 def _leaving(operation, local) -> bool:
-    """A BRANCH / CBRANCH whose ADDRESS target is not a local instruction."""
-    return operation.opcode in ("BRANCH", "CBRANCH") and bool(operation.inputs) \
-        and operation.inputs[0].kind is VarnodeKindCode.ADDRESS and operation.inputs[0].coordinate not in local
+    """A BRANCH / CBRANCH whose destination is no local instruction: an
+    ADDRESS outside the function, or any other non-CONSTANT destination (read
+    as absolute, as ``_split`` reads it; p-code gives a direct branch a CONSTANT
+    or an ADDRESS destination, and nothing in validation pins that, so any
+    other kind fails safe to leaving). A CONSTANT destination is relative,
+    inside the instruction."""
+    if operation.opcode not in ("BRANCH", "CBRANCH") or not operation.inputs:
+        return False
+    destination = operation.inputs[0]
+    if destination.kind is VarnodeKindCode.CONSTANT:
+        return False
+    return destination.kind is not VarnodeKindCode.ADDRESS or destination.coordinate not in local
 
 
 def escaping_branches(row, local, fallthrough_exit_rows) -> tuple:
-    """Every CBRANCH of the row whose ADDRESS target leaves the function, as
-    (ordinal, target, failed condition or None); the condition is None only
-    for the one shape that gets a taken-outcome edge block: the last operation
-    of an instruction without internal flow and without a flow override, a
-    local fallthrough, no S1 continuation evidence, and observed flow listing
-    the target and nothing but the fallthrough besides."""
+    """Every CBRANCH of the row whose destination leaves the function
+    (``_leaving``), as (ordinal, target, failed condition or None); the
+    condition is None only for the one shape that gets a taken-outcome edge
+    block: an ADDRESS destination, the last operation of an instruction
+    without internal flow and without a flow override, a local fallthrough, no
+    S1 continuation evidence, and observed flow listing the target and nothing
+    but the fallthrough besides."""
     operations = row.operations
     found = []
     for ordinal, operation in enumerate(operations):
@@ -218,7 +228,9 @@ def escaping_branches(row, local, fallthrough_exit_rows) -> tuple:
             continue
         target = operation.inputs[0].coordinate
         listed = set(row.flow_targets)
-        if ordinal != len(operations) - 1:
+        if operation.inputs[0].kind is not VarnodeKindCode.ADDRESS:
+            reason = "destination not an address"
+        elif ordinal != len(operations) - 1:
             reason = "not the last operation"
         elif has_internal_flow(row):
             reason = "internal flow"
@@ -244,7 +256,7 @@ def escaping_branch(row, local, fallthrough_exit_rows):
 
 
 def _leaves_by_pcode(row, local) -> bool:
-    """A branch of the row whose ADDRESS target is not a local instruction."""
+    """A branch of the row whose destination is no local instruction (``_leaving``)."""
     return any(_leaving(operation, local) for operation in row.operations)
 
 
