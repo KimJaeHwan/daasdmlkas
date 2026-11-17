@@ -22,7 +22,7 @@ from hashlib import sha256
 from ._sparse_dataflow import DominatorGraph
 from .call_seeds import _operation_key
 from .memory_contracts import MemoryDefinitionKind, MemoryFlowEdge
-from .pcode_blocks import build_pcode_block_graph
+from .pcode_blocks import build_pcode_block_graph, terminator
 from .resource_limits import step
 from .span_geometry import ByteSpan
 
@@ -144,7 +144,8 @@ class RecurrenceIndex:
             for key in component:
                 block = self.blocks[key]
                 row = self.instructions[block.instruction]
-                if not block.stop or row.operations[block.stop - 1].opcode != 'CBRANCH':
+                end = terminator(block, row)
+                if end is None or end[1].opcode != 'CBRANCH':
                     continue
                 match, reason = self._condition(block)
                 if reason is not None:
@@ -200,7 +201,10 @@ class RecurrenceIndex:
         # Reuse exactly the existing p-code relative/address polarity decoder.
         from ._record_conditions import ConditionIndex
 
-        operation = self.instructions[block.instruction].operations[block.stop - 1]
+        end = terminator(block, self.instructions[block.instruction])
+        if end is None:
+            return None, 'unresolved original loop condition'
+        operation = end[1]
         yes = ConditionIndex._target(self, block, operation)
         no = ConditionIndex._fallthrough(self, block)
         if len(operation.inputs) != 2 or yes is None or no is None or yes == no \

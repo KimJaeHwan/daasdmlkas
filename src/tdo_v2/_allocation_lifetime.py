@@ -706,7 +706,11 @@ class AllocationAnalysis:
                     if predicate is not None and predicate[0] == ref:
                         destination = last.inputs[0]
                         if destination.kind is VarnodeKindCode.ADDRESS:
-                            true = self.blocks[successor].instruction == destination.coordinate
+                            target = self.blocks[successor]
+                            # (G-T G1) an outcome edge block states its direction;
+                            # it shares its source's instruction address
+                            true = target.edge.outcome == "taken" if target.edge is not None \
+                                else target.instruction == destination.coordinate
                             live = true == predicate[1]
                             outgoing = state - ({"not-created"} if live else {"live", "ended"})
                     if not outgoing:

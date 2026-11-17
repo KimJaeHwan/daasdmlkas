@@ -24,6 +24,23 @@ edge); a split instruction that is a call with such targets or carries a flow
 override; a split instruction whose observed successors its reachable
 sub-blocks do not all reach, or whose flow targets are not all destinations of
 its reachable branches.
+
+(G-T G1, docs 25.101) A conditional jump leaving the function gets an
+**outcome edge block** for its taken outcome when the shape is one the graph
+can state completely (``escaping_branch``): the jump is the last operation of
+an instruction without internal flow, its target an absolute address outside
+the function, its fallthrough local, the row carries no S1 continuation
+evidence (``fallthrough_exits``), and the observed flow agrees with the p-code
+(the target listed, nothing else but the fallthrough). The edge block
+``<instruction key>>{ordinal}t`` has no operations (``start == stop ==
+ordinal + 1``), no successors, ``exits``, and ``edge`` naming its origin; the
+jump's block then has the fallthrough and the edge block as successors and no
+longer ``exits`` itself. Any other branch of a straight row whose absolute
+target leaves the function forces ``exits`` from the p-code fact -- an
+unknown exit at that site, never a silently missing transfer
+(``unmaterialized`` lists the conditional ones with the failed condition).
+Read a block's terminator through ``terminator`` and an edge's direction
+through ``outcome_of``: an edge block has no operations.
 """
 
 from __future__ import annotations
@@ -38,6 +55,17 @@ _CALLS = ("CALL", "CALLIND")
 
 
 @dataclass(frozen=True, slots=True)
+class EdgeOrigin:
+    """Where an outcome edge block comes from: the block ending in the jump,
+    the jump's operation ordinal in its instruction, the outcome ("taken"),
+    and the jump's target."""
+    source: str
+    ordinal: int
+    outcome: str
+    target: AddressCoordinate
+
+
+@dataclass(frozen=True, slots=True)
 class PcodeBlock:
     key: str
     instruction: AddressCoordinate
@@ -45,6 +73,7 @@ class PcodeBlock:
     stop: int
     successors: tuple[str, ...]
     exits: bool = False  # control may leave the function here (return, tail jump)
+    edge: EdgeOrigin | None = None   # an outcome edge block (no operations)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +81,9 @@ class PcodeBlockGraph:
     entry: str
     blocks: tuple[PcodeBlock, ...]          # reachable blocks in address/ordinal order
     unsupported: str | None = None
+    # (G1) conditional jumps leaving the function without an edge block:
+    # (instruction address, operation ordinal, failed condition), sorted
+    unmaterialized: tuple = ()
 
     def block_of(self, address: AddressCoordinate, ordinal: int) -> PcodeBlock | None:
         for block in self.blocks:
@@ -119,6 +151,83 @@ def has_internal_flow(instruction) -> bool:
     return False
 
 
+def edge_key(source_instruction_key: str, ordinal: int, outcome: str = "taken") -> str:
+    """Key of an outcome edge block: ``>`` never occurs in a segment key."""
+    return f"{source_instruction_key}>{ordinal}{outcome[0]}"
+
+
+def terminator(block: PcodeBlock, row):
+    """(ordinal, operation) ending a real block; None for an edge block or a
+    block without operations. The one way to read a block's terminator."""
+    if block.edge is not None or block.stop <= block.start:
+        return None
+    return block.stop - 1, row.operations[block.stop - 1]
+
+
+def edge_origin(block: PcodeBlock) -> EdgeOrigin | None:
+    return block.edge
+
+
+def outcome_of(graph: PcodeBlockGraph, source: str, successor: str, rows) -> str | None:
+    """Direction of the edge ``source -> successor`` when ``source`` ends in a
+    CBRANCH with an absolute target: "taken" or "fallthrough", from the graph's
+    edge identity (an edge block's origin; else the jump's local target / the
+    instruction's fallthrough); None when it cannot be told (both directions
+    reach the same block, a relative jump, or no CBRANCH ends ``source``).
+    ``rows``: address -> instruction."""
+    blocks = {block.key: block for block in graph.blocks}
+    block, target = blocks.get(source), blocks.get(successor)
+    if block is None or target is None:
+        return None
+    if target.edge is not None:
+        return target.edge.outcome if target.edge.source == source else None
+    row = rows.get(block.instruction)
+    end = terminator(block, row) if row is not None else None
+    if end is None or end[1].opcode != "CBRANCH" or not end[1].inputs:
+        return None
+    destination = end[1].inputs[0]
+    if destination.kind is VarnodeKindCode.CONSTANT:
+        return None
+    taken = target.instruction == destination.coordinate and target.start == 0
+    falls = target.instruction == row.fallthrough and target.start == 0
+    if taken == falls:
+        return None
+    return "taken" if taken else "fallthrough"
+
+
+def escaping_branch(row, local, fallthrough_exit_rows):
+    """(ordinal, target, failed condition or None) for a row ending in a
+    CBRANCH whose absolute target leaves the function; None for any other
+    row. The condition is None when the row gets a taken-outcome edge block."""
+    operations = row.operations
+    if not operations or operations[-1].opcode != "CBRANCH" or not operations[-1].inputs:
+        return None
+    destination = operations[-1].inputs[0]
+    if destination.kind is VarnodeKindCode.CONSTANT or destination.coordinate in local:
+        return None
+    ordinal, target = len(operations) - 1, destination.coordinate
+    if has_internal_flow(row):
+        return ordinal, target, "internal flow"
+    if row.fallthrough is None or row.fallthrough not in local:
+        return ordinal, target, "fallthrough not local"
+    if row.address in fallthrough_exit_rows:
+        return ordinal, target, "S1 continuation evidence"
+    listed = set(row.flow_targets)
+    if target not in listed or not listed <= {target, row.fallthrough}:
+        return ordinal, target, "observed flow disagrees"
+    return ordinal, target, None
+
+
+def _leaves_by_pcode(row, local) -> bool:
+    """A branch of the row whose absolute target is not a local instruction."""
+    return any(
+        operation.opcode in ("BRANCH", "CBRANCH") and operation.inputs
+        and operation.inputs[0].kind is not VarnodeKindCode.CONSTANT
+        and operation.inputs[0].coordinate not in local
+        for operation in row.operations
+    )
+
+
 def build_pcode_block_graph(
     observation: ValidatedFunctionObservation, entry: AddressCoordinate,
     straight: frozenset = frozenset(),
@@ -127,7 +236,9 @@ def build_pcode_block_graph(
     one block (recognized ``rep`` string instructions, ``rep_strings``)."""
     instructions = {row.address: row for row in observation.instructions}
     local = set(instructions)
+    exit_rows = frozenset(item.source for item in getattr(observation, "fallthrough_exits", ()))
     blocks: dict[str, PcodeBlock] = {}
+    unmaterialized = []
     for address in sorted(instructions):
         row = instructions[address]
         key = instruction_key(address)
@@ -142,9 +253,25 @@ def build_pcode_block_graph(
             ):
                 return PcodeBlockGraph(instruction_key(entry), (), "a call with landing pads that does not end in its call")
             successors = tuple(instruction_key(target) for target in raw if target in local)
+            escaping = escaping_branch(row, local, exit_rows)
+            if escaping is not None and escaping[2] is None and address not in straight:
+                ordinal, target, _ = escaping
+                edge = edge_key(key, ordinal)
+                blocks[edge] = PcodeBlock(edge, address, ordinal + 1, ordinal + 1, (), True,
+                                          EdgeOrigin(key, ordinal, "taken", target))
+                blocks[key] = PcodeBlock(
+                    key, address, 0, len(row.operations), tuple(sorted({*successors, edge})), False,
+                )
+                continue
+            if escaping is not None:
+                unmaterialized.append((address, escaping[0], "straight internal flow" if address in straight
+                                       else escaping[2]))
+            # (G1) a branch whose absolute target leaves the function is an
+            # exit, whatever the observed flow lists (an is_call flag drops a
+            # non-local target; an empty flow_targets list omits it)
             blocks[key] = PcodeBlock(
                 key, address, 0, len(row.operations), tuple(sorted(set(successors))),
-                exits=not successors or len(successors) != len(raw),
+                exits=not successors or len(successors) != len(raw) or _leaves_by_pcode(row, local),
             )
             continue
         split = _split(row, local, entry)
@@ -161,9 +288,10 @@ def build_pcode_block_graph(
         reachable.add(key)
         pending.extend(blocks[key].successors)
     ordered = tuple(
-        blocks[key] for key in sorted(reachable, key=lambda k: (blocks[k].instruction, blocks[k].start))
+        blocks[key] for key in sorted(reachable, key=lambda k: (blocks[k].instruction, blocks[k].start, k))
     )
-    return PcodeBlockGraph(entry_key, ordered)
+    return PcodeBlockGraph(entry_key, ordered, unmaterialized=tuple(sorted(
+        item for item in unmaterialized if instruction_key(item[0]) in reachable)))
 
 
 def _split(row, local, entry):
@@ -287,4 +415,5 @@ def _landing_pads(row, local, entry) -> tuple:
     return tuple(target for target in row.flow_targets if target in local and target != entry)
 
 
-__all__ = ("PcodeBlock", "PcodeBlockGraph", "build_pcode_block_graph", "has_internal_flow", "instruction_key")
+__all__ = ("EdgeOrigin", "PcodeBlock", "PcodeBlockGraph", "build_pcode_block_graph", "edge_key", "edge_origin",
+           "escaping_branch", "has_internal_flow", "instruction_key", "outcome_of", "terminator")

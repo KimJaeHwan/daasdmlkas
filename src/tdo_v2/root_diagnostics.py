@@ -308,6 +308,22 @@ class _Builder:
         for row in record["calls"]:   # (inner caps on kept entries only)
             if row["target"] is not None and "members" in row["target"]:
                 self.cap(row["target"], "members", row["target"]["members"], "functions.calls.members")
+        # (G-T G1) conditional jumps leaving the function: the taken outcome's
+        # edge block, or why the graph keeps the jump's own block as an
+        # unknown exit (listed only when the function has such a jump)
+        if observation is not None:
+            from .pcode_blocks import build_pcode_block_graph
+
+            graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
+            self.charge(len(graph.blocks))
+            escaping = [{"site": f"{block.instruction.space_id:x}:{block.instruction.byte_offset:x}:"
+                                 f"{block.edge.ordinal}:CBRANCH", "edge": block.key, "reason": None}
+                        for block in graph.blocks if block.edge is not None]
+            escaping += [{"site": f"{address.space_id:x}:{address.byte_offset:x}:{ordinal}:CBRANCH",
+                          "edge": None, "reason": f"escaping-branch-not-materialized:{reason}"}
+                         for address, ordinal, reason in graph.unmaterialized]
+            if escaping:
+                record["escaping_branches"] = sorted(escaping, key=lambda row: _operation_order(row["site"]))
 
     def cap_kept(self, record: dict, name: str, rows: list, where: str, inner: tuple) -> None:
         """Cap ``rows`` into ``record[name]``, then each kept row's ``inner``

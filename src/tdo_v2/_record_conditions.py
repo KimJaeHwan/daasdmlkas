@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from ._scope_contracts import VarnodeKindCode
 from .call_seeds import _operation_key
 from .memory_contracts import MemoryDefinitionKind
-from .pcode_blocks import build_pcode_block_graph, instruction_key
+from .pcode_blocks import build_pcode_block_graph, instruction_key, terminator
 from .resource_limits import step
 
 _CALLS = frozenset({"CALL", "CALLIND", "CALLOTHER"})
@@ -165,10 +165,13 @@ class ConditionIndex:
             for (address, ordinal), key in self._segments.items()
             for row in (self.instructions[address],)
         }
+        # (G-T G1) the taken outcome edge block of a jump leaving the function
+        self._edge_blocks = {block.edge.source: block.key for block in cfg.blocks if block.edge is not None}
         for block in cfg.blocks:
             step()
             row = self.instructions[block.instruction]
-            if not block.stop or row.operations[block.stop - 1].opcode != "CBRANCH":
+            end = terminator(block, row)
+            if end is None or end[1].opcode != "CBRANCH":
                 continue
             diamond = self._diamond(block)
             if diamond is None:
@@ -240,7 +243,8 @@ class ConditionIndex:
                 step()
                 block = self.blocks[key]
                 row = self.instructions[block.instruction]
-                operation = row.operations[block.stop - 1] if block.stop else None
+                end = terminator(block, row)
+                operation = end[1] if end is not None else None
                 if operation is not None and operation.opcode == "CBRANCH":
                     if len(operation.inputs) != 2:
                         raise _UnsupportedGuard("invalid cbranch")
@@ -544,7 +548,15 @@ class ConditionIndex:
                 # segment. Its false edge may instead enter that segment.
                 return instruction_key(row.fallthrough) if row.fallthrough in self.instructions else None
             return self._segments.get((block.instruction, ordinal))
-        return instruction_key(destination.coordinate) if destination.coordinate in self.instructions else None
+        if destination.coordinate in self.instructions:
+            return instruction_key(destination.coordinate)
+        # (G-T G1) leaving the function: its taken outcome edge block, if any
+        # (the recurrence / transition readers reuse this decoder on their own
+        # block maps)
+        edges = getattr(self, "_edge_blocks", None)
+        if edges is None:
+            edges = {item.edge.source: item.key for item in self.blocks.values() if item.edge is not None}
+        return edges.get(block.key)
 
     def _fallthrough(self, block):
         row = self.instructions[block.instruction]
@@ -556,7 +568,8 @@ class ConditionIndex:
         if block.exits or len(block.successors) != 1:
             return False
         row = self.instructions[block.instruction]
-        last = row.operations[block.stop - 1] if block.stop else None
+        end = terminator(block, row)
+        last = end[1] if end is not None else None
         if last is not None and last.opcode == "BRANCH":
             target = self._target(block, last)
         elif last is not None and last.opcode in ("CBRANCH", "BRANCHIND", "RETURN"):
@@ -580,7 +593,10 @@ class ConditionIndex:
         if block.exits or len(block.successors) != 2:
             return None
         row = self.instructions[block.instruction]
-        operation = row.operations[block.stop - 1]
+        end = terminator(block, row)
+        if end is None:
+            return None
+        operation = end[1]
         if len(operation.inputs) != 2:
             return None
         true, false = self._target(block, operation), self._fallthrough(block)

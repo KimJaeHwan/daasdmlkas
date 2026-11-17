@@ -311,7 +311,10 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     exits = []
     nodes = ssa.state_nodes
     dead_exits = []
+    edge_blocks = _cached("edges", observation, lambda: _edge_blocks(normalized, observation))
     for state in ssa.exit_states:
+        if state.block_key in edge_blocks:
+            continue   # (G-T G1) an outcome edge block: tail exit or dead edge, no exit state
         if state.block_key not in frontier and dead_exit(state.block_key):
             dead_exits.append(state.block_key)
             continue
@@ -507,19 +510,28 @@ def _fault_blocks(normalized, observation) -> dict:
 
 
 def _block_ends(normalized, observation) -> dict:
-    """Block key -> the operation key ending it (every block of the graph)."""
+    """Block key -> the operation key ending it (every block of the graph;
+    an outcome edge block ends in none of its own)."""
     from .call_seeds import _operation_key
-    from .pcode_blocks import build_pcode_block_graph
+    from .pcode_blocks import build_pcode_block_graph, terminator
 
     graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
     instructions = {row.address: row for row in observation.instructions}
     found = {}
     for block in graph.blocks:
-        if block.stop == 0:
+        end = terminator(block, instructions[block.instruction])
+        if end is None:
             continue
-        row = instructions[block.instruction]
-        found[block.key] = _operation_key(row.address, block.stop - 1, row.operations[block.stop - 1].opcode)
+        found[block.key] = _operation_key(block.instruction, end[0], end[1].opcode)
     return found
+
+
+def _edge_blocks(normalized, observation) -> frozenset:
+    """Keys of the outcome edge blocks of the function's block graph (G-T G1)."""
+    from .pcode_blocks import build_pcode_block_graph
+
+    graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
+    return frozenset(block.key for block in graph.blocks if block.edge is not None)
 
 
 def _fault_outcomes(normalized, observation, fault_blocks, fault_states) -> tuple:
@@ -619,7 +631,7 @@ def _tail_exits(normalized, observation, noreturn_jumps=frozenset()) -> tuple[st
     successor ending in a jump to a function that never returns
     (``noreturn_jumps``: that jump was their only way out)."""
     from .call_seeds import _operation_key
-    from .pcode_blocks import build_pcode_block_graph
+    from .pcode_blocks import build_pcode_block_graph, terminator
 
     composed = {key for key, effect in normalized.proven_call_effects if effect.tail_stack}
     graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
@@ -634,17 +646,26 @@ def _tail_exits(normalized, observation, noreturn_jumps=frozenset()) -> tuple[st
     exit_rows = {item.source for item in getattr(observation, "fallthrough_exits", ())}
     found = []
     for block in graph.blocks:
+        if block.edge is not None:
+            # (G-T G1) the taken outcome of a conditional jump leaving the
+            # function: dead under a noreturn jump (the edge was its only way
+            # out), composed with the target's summary (G3), else unknown
+            key = _operation_key(block.instruction, block.edge.ordinal, "CBRANCH")
+            if key not in noreturn_jumps and key not in composed:
+                found.append(block.key)
+            continue
         if block.instruction in exit_rows:
             found.append(block.key)
             continue
         if not block.exits:
             continue
         row = instructions[block.instruction]
-        if block.stop == 0:   # an instruction without p-code falling out of the function
+        end = terminator(block, row)
+        if end is None:   # an instruction without p-code falling out of the function
             found.append(block.key)
             continue
-        last = row.operations[block.stop - 1]
-        last_key = _operation_key(row.address, block.stop - 1, last.opcode)
+        last = end[1]
+        last_key = _operation_key(row.address, end[0], last.opcode)
         if last_key in noreturn_jumps and block.successors:
             continue
         if last.opcode != "RETURN" and last_key not in composed:
@@ -657,6 +678,8 @@ def _composed_tail_deltas(normalized, observation) -> dict:
     from .call_seeds import _operation_key
     from .pcode_blocks import build_pcode_block_graph
 
+    from .pcode_blocks import terminator
+
     composed = {key: effect for key, effect in normalized.proven_call_effects if effect.tail_stack}
     if not composed:
         return {}
@@ -664,10 +687,11 @@ def _composed_tail_deltas(normalized, observation) -> dict:
     instructions = {row.address: row for row in observation.instructions}
     found = {}
     for block in graph.blocks:
-        if not block.exits or block.stop == 0:
+        end = terminator(block, instructions[block.instruction])
+        if not block.exits or end is None:
             continue
         row = instructions[block.instruction]
-        effect = composed.get(_operation_key(row.address, block.stop - 1, row.operations[block.stop - 1].opcode))
+        effect = composed.get(_operation_key(row.address, end[0], end[1].opcode))
         if effect is not None:
             found[block.key] = {(span.start, span.size): effect.tail_stack_delta for span in effect.tail_stack}
     return found
@@ -1259,6 +1283,9 @@ def _dead_region(normalized, observation, dead_ops):
     by_key = {instruction_key(row.address): row for row in observation.instructions}
 
     def dead_exit(block_key: str) -> bool:
+        block = blocks.get(block_key)
+        if block is not None and block.edge is not None:
+            return False   # (G-T G1) an edge block: dead edges are kept apart (``_tail_exits``)
         base, _, start = block_key.partition("#")
         row = by_key.get(base)
         if row is None or not row.operations:

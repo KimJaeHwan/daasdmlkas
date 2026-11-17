@@ -239,8 +239,8 @@ def derive_register_delta_proof(unit, register_span, proven_call_effects, intrin
                 adjustment = constant.coordinate.byte_offset * (1 if opcode == "INT_ADD" else -1)
                 delta = signed(delta + adjustment)
         if block.exits:
-            if block.successors or not block.stop:
-                return None
+            if block.successors or not block.stop or block.edge is not None:
+                return None   # (G-T G1) an uncomposed outcome edge block: unknown, as its source was
             last = instruction.operations[block.stop - 1].opcode
             if last not in ("RETURN", "BRANCH"):
                 return None
