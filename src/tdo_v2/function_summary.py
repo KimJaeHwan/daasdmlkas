@@ -1285,7 +1285,10 @@ def _dead_region(normalized, observation, dead_ops):
     def dead_exit(block_key: str) -> bool:
         block = blocks.get(block_key)
         if block is not None and block.edge is not None:
-            return False   # (G-T G1) an edge block: dead edges are kept apart (``_tail_exits``)
+            # (G-T G1) an outcome edge block is dead when no path reaches it
+            # past a cut (its source cut or unreached); it never borrows its
+            # source's jump as a terminator of its own
+            return block_key not in reached
         base, _, start = block_key.partition("#")
         row = by_key.get(base)
         if row is None or not row.operations:

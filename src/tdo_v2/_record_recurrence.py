@@ -103,6 +103,8 @@ class RecurrenceIndex:
         graph = build_pcode_block_graph(unit.observation, unit.scopes.function.entry)
         self.entry = graph.entry
         self.blocks = {block.key: block for block in graph.blocks}
+        # (G-T G1) taken outcome edge blocks by source (``ConditionIndex._target``)
+        self._edge_blocks = {block.edge.source: block.key for block in graph.blocks if block.edge is not None}
         if graph.unsupported is not None or not self.blocks:
             self._reason = 'unsupported original cfg'
             return

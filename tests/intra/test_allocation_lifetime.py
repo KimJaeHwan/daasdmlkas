@@ -525,3 +525,39 @@ def test_different_readonly_image_reader_is_refused(models):
     item, _ = _run(_finish(builder), models, _contracts(models))
     with pytest.raises(RefinementRefused, match="lifecycle input policy"):
         AllocationAnalysis(item, readonly_image=object())
+
+
+def test_guard_jumping_out_of_the_function_keeps_its_polarity(models):
+    """(G-T G1) a second null check ``je outside`` after the in-function
+    guard: the taken edge is an outcome edge block sharing the jump's
+    instruction address, so its direction comes from the edge, never from an
+    address comparison (which reads both successors as the fallthrough). On
+    the guarded path the allocation is live, so the taken (null) edge is
+    infeasible and adds no unknown exit state; the writer stays live."""
+    from synthetic import ram
+
+    builder, allocation = _begin()
+    _guard(builder)
+    builder.ins(copy(reg(RDI), reg(RBX)))
+    writer = _writer(builder, displacement=None)
+    _guard(builder)
+    builder = _finish(builder)
+    raw = builder.to_json()
+    outside = builder._address(len(builder._rows)) + 0x800
+    jumps = [row for row in raw["instructions"]
+             if any(operation["opcode"] == "CBRANCH" for operation in row["operations"])]
+    assert len(jumps) == 2
+    for operation in jumps[1]["operations"]:
+        if operation["opcode"] == "CBRANCH":
+            operation["inputs"][0] = ram(outside)
+            jumps[1]["flow_targets"] = [{"space_id": operation["inputs"][0]["space_id"], "byte_offset": outside}]
+    builder.to_json = lambda raw=raw: raw
+    _, analysis = _run(builder, models, _contracts(models))
+    graph_edges = [block for block in analysis.graph.blocks if block.edge is not None]
+    assert len(graph_edges) == 1 and graph_edges[0].edge.outcome == "taken"
+    assert allocation in analysis.contracts
+    pointer = analysis.input(writer, analysis.ops[writer].inputs[1])
+    evidence = analysis.lifetime(pointer, writer)
+    assert evidence.live and evidence.reason == "live"
+    exits = analysis.lifetime(pointer, None)
+    assert exits.states and all("unknown" not in states for _, states in exits.states)

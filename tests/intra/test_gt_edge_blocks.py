@@ -21,8 +21,10 @@ from tdo_v2.pcode_blocks import build_pcode_block_graph, outcome_of, terminator
 OUTSIDE = CODE_BASE + 0x800   # an address outside the function
 
 
-def _escaping(*, flow_targets=True, is_call=False):
-    """ECX = 1; jcc OUTSIDE (ZF); ECX = 2; ret -- the jcc rewritten to leave."""
+def _escaping(*, flow_targets=True, is_call=False, listed_fallthrough=False):
+    """ECX = 1; jcc OUTSIDE (ZF); ECX = 2; ret -- the jcc rewritten to leave.
+    ``is_call``: Ghidra's call flag on the jcc (and no jump flag);
+    ``listed_fallthrough``: the fallthrough listed as a flow target too."""
     builder = (FunctionBuilder(entry=CODE_BASE)
                .ins(copy(reg(RCX, 4), const(1, 4)))
                .cbranch("done", reg(ZF, 1))
@@ -88,6 +90,81 @@ def test_observed_flow_without_the_target_still_exits():
     assert summary.tail_exits == (source.key,)
 
 
+def test_call_flagged_escape_is_materialized_before_the_landing_pad_check():
+    """A jcc Ghidra flags as a call (not a jump), its fallthrough listed as a
+    flow target: that "landing pad" is the fallthrough itself -- the row gets
+    its edge block before the call landing-pad refusal (review r1, Astra). The
+    synthetic provider's call evidence cannot carry a call-flagged jcc, so the
+    flag is set on the validated observation directly."""
+    import dataclasses
+
+    function, observation = normalize_with_observation(_escaping(listed_fallthrough=True))
+    row = observation.instructions[1]
+    flagged = dataclasses.replace(row, flow=dataclasses.replace(row.flow, is_call=True, is_jump=False))
+    rows = (*observation.instructions[:1], flagged, *observation.instructions[2:])
+    for instructions in (observation.instructions, rows):
+        graph = build_pcode_block_graph(dataclasses.replace(observation, instructions=instructions),
+                                        function.scopes.function.entry)
+        assert graph.unsupported is None
+        assert sum(block.edge is not None for block in graph.blocks) == 1
+
+
+def test_an_edge_behind_a_cut_is_dead_not_a_tail_exit():
+    """A cut (a noreturn call, a trap) before the jcc: its edge block is never
+    reached -- no tail exit, as the jcc's block was not before (review r1)."""
+    builder = _escaping()
+    function, observation = normalize_with_observation(builder)
+    first = observation.instructions[0]
+    cut = f"{first.address.space_id:x}:{first.address.byte_offset:x}:0:{first.operations[0].opcode}"
+    summary = summarize_function(function, observation, dead_ops=frozenset({cut}))
+    assert summary.tail_exits == () and summary.exits == ()
+
+
+def _split_escape():
+    """One instruction: CBRANCH OUTSIDE (ZF); ECX = 3 -- an escaping jump that is
+    not the instruction's last operation (internal flow: no edge block)."""
+    builder = (FunctionBuilder(entry=CODE_BASE)
+               .ins(copy(reg(RCX, 4), const(1, 4)))
+               .ins(copy(reg(RCX, 4), const(2, 4)), copy(reg(RCX, 4), const(3, 4)))
+               .ret())
+    raw = builder.to_json()
+    row = raw["instructions"][1]
+    first = row["operations"][0]
+    row["operations"][0] = {"ordinal": 0, "opcode": "CBRANCH", "inputs": [ram(OUTSIDE), reg(ZF, 1)],
+                            "output_present": False, "output": None}
+    row["flow_targets"] = [{"space_id": ram(OUTSIDE)["space_id"], "byte_offset": OUTSIDE}]
+    row["flow_type"] = {**row["flow_type"], "is_flow": True, "is_jump": True, "is_conditional": True}
+    builder.to_json = lambda raw=raw: raw
+    return builder, first
+
+
+def test_a_split_escape_is_listed_and_keeps_its_unknown_exit():
+    builder, _ = _split_escape()
+    graph, observation = _graph(builder)
+    rows = {row.address: row for row in observation.instructions}
+    assert not any(block.edge is not None for block in graph.blocks)
+    (site,) = graph.unmaterialized
+    assert site[1:] == (0, "not the last operation")
+    source = next(block for block in graph.blocks if block.instruction == site[0] and block.start == 0)
+    assert source.exits
+    (next_segment,) = [key for key in source.successors if key.endswith("#1")]
+    assert outcome_of(graph, source.key, next_segment, rows) == "fallthrough"
+
+
+def test_legacy_conditional_noreturn_cut_lands_on_the_edge_block():
+    """The abort-model conditional jump (test_noreturn_models) is an eligible
+    row: its edge block is the dead edge, the summary is the old one."""
+    from test_noreturn_models import _caller, _guarded, _analyze
+
+    results = _analyze(_guarded(), _caller())
+    helper = results["1:1000"]
+    graph = build_pcode_block_graph(helper.unit.observation, helper.unit.scopes.function.entry)
+    (edge,) = [block for block in graph.blocks if block.edge is not None]
+    assert edge.key == "1:1008>0t"
+    assert helper.summary.tail_exits == () and len(helper.summary.exits) == 1
+    assert edge.key not in helper.summary.dead_exits
+
+
 # lint (design r4 section 6): terminator interpretation -- reading
 # ``operations[block.stop - 1]`` as what ends a block -- goes through
 # ``pcode_blocks.terminator``; the reads left are allowed by name, each
@@ -97,7 +174,6 @@ _ALLOWED_STOP_READS = {
     "_record_conditions.py": 3,      # relative-target arithmetic + decision keys of real CBRANCH blocks
     "_record_recurrence.py": 1,      # decision key of a real CBRANCH block (after terminator())
     "_record_transitions.py": 1,     # decision key after reading the block's own operation slice
-    "relative_memory.py": 2,         # BRANCHIND exits only (an edge block's borrowed op is a CBRANCH)
     "register_delta_proofs.py": 2,   # tail BRANCH inside the operation loop; exit check after the edge test
     "_guarded_image_reads.py": 1,    # dominator ancestors (an edge block dominates nothing)
     "_guarded_ranges.py": 1,         # predecessor arithmetic, instructions with internal flow only

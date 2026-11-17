@@ -23,6 +23,8 @@ class CycleIndex(SsaCycleIndex):
         self.normalized, self.unit, self.index = normalized, unit, index
         super().__init__(normalized.memory_unit, index.ssa, unit.observation,
                          unit.scopes.function.entry)
+        # (G-T G1) taken outcome edge blocks by source (``ConditionIndex._target``)
+        self._edge_blocks = {block.edge.source: key for key, block in self.blocks.items() if block.edge is not None}
 
     def seeds(self):
         """Full existing expression inputs for this function, not new SSA."""

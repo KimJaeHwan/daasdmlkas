@@ -566,10 +566,13 @@ def single_execution_keys(observation, block_graph, straight=frozenset(), *, con
         return frozenset()
     instructions = {row.address: row for row in observation.instructions}
     blocks = {block.key: block for block in block_graph.blocks}
+    from .pcode_blocks import terminator
+
     for block in blocks.values():
-        last = instructions[block.instruction].operations[block.stop - 1] if block.stop else None
+        end = terminator(block, instructions[block.instruction])
+        last = end[1] if end is not None else None
         if last is not None and last.opcode == "BRANCHIND" and block.exits:
-            key = _operation_key(block.instruction, block.stop - 1, last)
+            key = _operation_key(block.instruction, end[0], last)
             if key not in certified:
                 return frozenset()
     cyclic = _cyclic_blocks({key: [item for item in block.successors if item in blocks]

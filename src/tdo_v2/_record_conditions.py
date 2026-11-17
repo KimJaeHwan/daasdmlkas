@@ -551,12 +551,9 @@ class ConditionIndex:
         if destination.coordinate in self.instructions:
             return instruction_key(destination.coordinate)
         # (G-T G1) leaving the function: its taken outcome edge block, if any
-        # (the recurrence / transition readers reuse this decoder on their own
-        # block maps)
-        edges = getattr(self, "_edge_blocks", None)
-        if edges is None:
-            edges = {item.edge.source: item.key for item in self.blocks.values() if item.edge is not None}
-        return edges.get(block.key)
+        # (the recurrence / transition readers reuse this decoder; each builds
+        # ``_edge_blocks`` from its own block map)
+        return self._edge_blocks.get(block.key)
 
     def _fallthrough(self, block):
         row = self.instructions[block.instruction]

@@ -33,6 +33,9 @@ class _StepConditions(ConditionIndex):
         self.graph, self.instructions = index.normalized.dependencies, index.instructions
         self.entry, = region['entry_points']
         self.blocks = {key: index.blocks[key] for key in region['blocks']}
+        # (G-T G1) edge blocks of this region (a cyclic region holds none: an
+        # edge block has no successors, so its jump keeps today's refusal)
+        self._edge_blocks = {block.edge.source: key for key, block in self.blocks.items() if block.edge is not None}
         self._segments, self._raw_blocks = index._segments, index.locations
         self.actions = {row.operation_key: i for i, row in enumerate(self.ssa.actions)}
         self._locations = {}
