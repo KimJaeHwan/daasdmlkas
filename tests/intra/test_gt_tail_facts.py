@@ -143,7 +143,9 @@ def test_a_branch_ending_a_split_segment_is_a_tail_jump():
     """``CBRANCH +2 (relative); BRANCH callee; COPY`` in one instruction: the
     BRANCH ends a reachable sub-block that leaves by it -- a tail jump at its
     own ordinal (not the instruction's last operation; the old rule wanted
-    the last), keyed by that ordinal."""
+    the last), keyed by that ordinal. (The trailing COPY segment dangles: the
+    row has no fallthrough. A real row with trailing operations has one and
+    is refused by the no-fallthrough fact -- conservative.)"""
     from synthetic import ZF, ram
     from tdo_v2._scope_contracts import VarnodeKindCode
 
@@ -206,7 +208,7 @@ def test_an_unsupported_graph_gives_no_tail_jump():
     from synthetic import RDX
     from tdo_v2._scope_contracts import ValidatedOperation
 
-    unit = _main_unit(_thunk(_main()))
+    unit = _main_unit(_thunk(_main(), call=True, terminal=True))
     row = unit.observation.instructions[0]
     first = row.operations[0]
     indirect = ValidatedOperation("BRANCHIND", (first.output,), None)
@@ -263,4 +265,5 @@ def test_push_then_jump_into_the_next_function_is_composed_soundly():
         item = results[key]
         report = check_program(item.normalized, item.unit.observation, program, seeds=range(6),
                                register_pools=pools, havoc_calls=(REG, RSP, 8))
-        assert report.silent == [], key
+        assert report.silent == [] and report.covered_by_debt == [], key
+        assert (report.runs, report.unsupported) == (6, 0) and report.checked, key

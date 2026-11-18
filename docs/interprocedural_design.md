@@ -6571,4 +6571,7 @@ Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나�
   않는 미지 출구(게이트에 없음). Ghidra 호출 표시를 읽는 소비자 -- `return_relations`의 꼬리 판정(썽크는 CLOSED가 안
   됨), `_record_memory`의 호출 메모리 경계, `root_diagnostics`의 `calls` 행 -- 는 사실로 잡힌 썽크 꼬리를 아직 모른다
   (보수적; G3에서 정리). `import_call_sites` / `_noreturn_jumps`는 각자 마지막 연산 규칙을 따로 가진다(G3에서 하나로).
+- UE 템플릿은 G2 이전 exporter가 만든 Bundle(`8d18...`)에서 다시 유도했다(버전이 붙는 것은 엔진). G2 exporter로 UE
+  Core를 다시 내보내면 내부 썽크가 남아 Bundle 다이제스트와 항목이 달라질 수 있다 -- 그때는 템플릿 차이가 엔진이 아니라
+  입력 Bundle 때문이다(G3에서 다시 내보내기).
 - 다음(G3): 조건 꼬리 호출을 간선 블록에서 대상 요약과 합성(memset의 `jae`).
