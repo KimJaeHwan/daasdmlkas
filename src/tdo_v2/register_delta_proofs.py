@@ -291,12 +291,44 @@ def verify_register_delta_proof(proof, unit, register_span, proven_call_effects,
         unit, register_span, proven_call_effects, intrinsic_refinements, assumed_call_effects=assumed_call_effects)
 
 
-def _edge_exit_of(site: str) -> str:
+def _edge_exit_of(site) -> str | None:
     """The outcome edge block key of a conditional-tail site
     ``space:offset:k:CBRANCH`` (``pcode_blocks.edge_key``): the one exit block
-    its fact may apply to (G-T G3a)."""
-    space, offset, ordinal, _ = site.split(":")
-    return f"{space}:{offset}>{ordinal}t"
+    its fact may apply to (G-T G3a); None for a malformed key."""
+    if type(site) is not str:
+        return None
+    parts = site.split(":")
+    if len(parts) != 4 or parts[3] != "CBRANCH" or not parts[2].isdigit():
+        return None
+    try:
+        int(parts[0], 16), int(parts[1], 16)
+    except ValueError:
+        return None
+    return f"{parts[0]}:{parts[1]}>{parts[2]}t"
+
+
+def _edge_facts_hold(facts, blocks, exits, size) -> bool:
+    """Every CBRANCH tail fact names a well-formed site whose edge block is an
+    exit, its delta is that block's own (exit - entry, signed at the register
+    width), and every edge exit block has exactly one such fact."""
+    by_key = {b.key: b for b in blocks}
+    bits = 8 * size
+    seen = {}
+    for f in facts:
+        if f.kind != "tail" or not f.operation_key.endswith(":CBRANCH"):
+            continue
+        edge = _edge_exit_of(f.operation_key)
+        block = by_key.get(edge)
+        if edge is None or edge not in exits or block is None:
+            return False
+        change = (block.exit_delta - block.entry_delta) % (1 << bits)
+        if change >= 1 << (bits - 1):
+            change -= 1 << bits
+        if change != f.delta:
+            return False
+        seen[edge] = seen.get(edge, 0) + 1
+    edges = [key for key in exits if ">" in key]
+    return all(seen.get(key) == 1 for key in edges) and set(seen) <= set(edges)
 
 
 def validate_proof_record(record):
@@ -371,8 +403,7 @@ def validate_proof_record(record):
                                          or not f.operation_key.endswith(":CALL")) for f in facts) \
             or any(f.kind == "link-call" and (f.delta != 0 or not f.operation_key.endswith(":CALL")) for f in facts) \
             or any(f.kind == "tail" and not f.operation_key.endswith((":BRANCH", ":CBRANCH")) for f in facts) \
-            or any(f.kind == "tail" and f.operation_key.endswith(":CBRANCH")
-                   and _edge_exit_of(f.operation_key) not in record["exits"] for f in facts) \
+            or not _edge_facts_hold(facts, blocks, record["exits"], record["register"][1]) \
             or any(key not in record["operation_keys"] or not key.endswith(":CALLOTHER")
                    for key, _ in (*intrinsics, *assumed)):
         return None

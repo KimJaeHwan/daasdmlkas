@@ -18,9 +18,12 @@ CALLER, MIDDLE, TARGET = CODE_BASE, CODE_BASE + 0x600, CODE_BASE + 0x800
 
 
 def _to(builder, index, target):
-    """Rewrite the CBRANCH of instruction ``index`` to jump to ``target``
-    (its only observed flow target)."""
+    """Rewrite the CBRANCH of instruction ``index`` (None: the first CBRANCH)
+    to jump to ``target`` (its only observed flow target)."""
     raw = builder.to_json()
+    if index is None:
+        index = next(number for number, row in enumerate(raw["instructions"])
+                     if any(item["opcode"] == "CBRANCH" for item in row["operations"]))
     row = raw["instructions"][index]
     (branch,) = [item for item in row["operations"] if item["opcode"] == "CBRANCH"]
     branch["inputs"][0] = ram(target)
@@ -61,7 +64,6 @@ def test_a_conditional_tail_is_composed_on_its_edge_block():
     middle = results[function_key_of(1, MIDDLE)]
     site = _site(units[1])
     assert site in middle.proven and middle.proven[site].tail_stack
-    edge = site.rsplit(":", 2)[0].rsplit(":", 0)[0]
     summary = middle.summary
     assert summary.tail_exits == ()
     exit_keys = sorted(item.block_key for item in summary.exits)
@@ -297,7 +299,8 @@ def test_integration_orders_the_edge_rows_after_the_raw_operations():
     site = _site(evidence.unit)
     edge = _edge_of(site)
     rows = [key for key, block in view.operation_blocks.items() if block == edge]
-    assert rows and rows[-1] == f"{site}~edge" or f"{site}~edge" in rows
+    in_order = sorted(rows, key=view.position)
+    assert in_order and in_order[-1] == f"{site}~edge"
     last_raw = max(position for position, _ in view.operations.values())
     assert all(view.position(key) > last_raw for key in rows)
     assert all(view.operation(key) is None for key in rows)
@@ -306,3 +309,250 @@ def test_integration_orders_the_edge_rows_after_the_raw_operations():
     assert view.definitely_precedes(first, staged) and not view.definitely_precedes(staged, first)
     facts = _BarrierFacts(view)
     assert all(facts.place[key][0] == edge for key in rows)
+
+
+# -- review r1 pins ---------------------------------------------------------------
+
+SINK, OPAQUE = CODE_BASE + 0xA00, CODE_BASE + 0xC00
+
+
+def _with_sinks(monkeypatch, *functions):
+    """analyze_summaries with a TEST-ONLY register sink ``sink(rcx)``: the run
+    and the AnalyzedFunctions it published."""
+    from synthetic import analyze_summaries, boundary
+    from tdo_v2 import summary_engine
+
+    captured = {}
+    original = summary_engine.analyze_units
+
+    def capture(*args, **kwargs):
+        captured["results"] = original(*args, **kwargs)
+        return captured["results"]
+
+    monkeypatch.setattr(summary_engine, "analyze_units", capture)
+    run = analyze_summaries([*functions, FunctionBuilder(entry=SINK).ret()], boundary({}, {"sink": 8}),
+                            names={SINK: "sink"})
+    return run, captured["results"]
+
+
+def _sink_target():
+    """rcx = rdi; call sink; ret -- a sink reached only through the tail."""
+    return FunctionBuilder(entry=TARGET).sub_rsp(0x28).ins(copy(reg(RCX), reg(RDI))).call(SINK).add_rsp(0x28).ret()
+
+
+def test_a_sink_reached_through_the_tail_depends_on_the_taken_edge(monkeypatch):
+    """The staged sink row in E depends on the CBRANCH decision (its taken
+    outcome) in the dependency graph -- exactly once."""
+    from tdo_v2.graph import CONTROL_DEPENDENCE_EDGE
+
+    _, results = _with_sinks(monkeypatch, _caller(), _middle(), _sink_target())
+    middle = results[function_key_of(1, MIDDLE)]
+    site = _site(middle.unit)
+    graph = middle.normalized.dependencies
+    decision = graph.node_for_key(f"op:{site}")
+    rows = [key for block in middle.normalized.memory_unit.blocks for key in
+            (action.operation_key for action in block.actions) if key.startswith(site + "~sink")]
+    assert rows, "the target's sink is staged in E"
+    edges = graph.weighted_edges()
+    for row in rows:
+        node = graph.node_for_key(f"op:{row}")
+        found = [edge for edge in edges if edge[0] == decision and edge[1] == node
+                 and getattr(edge[2].kind, "value", edge[2].kind) == CONTROL_DEPENDENCE_EDGE]
+        assert len(found) == 1, (row, found)
+
+
+def test_the_memset_loop_adds_no_duplicate_taken_edge():
+    """In a loop the decision may already govern itself (its rows inherit
+    it): the taken-edge dependence is not added a second time."""
+    from synthetic import CF, RDX
+    from tdo_v2.graph import CONTROL_DEPENDENCE_EDGE
+
+    builder = _to(FunctionBuilder(entry=MIDDLE).ins(copy(reg(RDI), reg(RSI)))
+                  .label("top").cbranch("out", reg(CF, 1)).ins(add(reg(RDX), reg(RDX), const(1)))
+                  .cbranch("top", reg(ZF, 1)).label("out").ins(copy(reg(RAX), const(7))).ret(), 1, TARGET)
+    units = program_units(_caller(), builder, _target())
+    middle = analyze_units(units)[function_key_of(1, MIDDLE)]
+    site = _site(units[1])
+    graph = middle.normalized.dependencies
+    decision = graph.node_for_key(f"op:{site}")
+    pairs = [(edge[0], edge[1]) for edge in graph.weighted_edges()
+             if edge[0] == decision and getattr(edge[2].kind, "value", edge[2].kind) == CONTROL_DEPENDENCE_EDGE]
+    assert len(pairs) == len(set(pairs))
+
+
+def _sink_only_target():
+    """rcx = rdi; call sink; jmp rax -- its sink binds, but it leaves through an
+    unknown transfer: a sink-only effect (no tail_stack)."""
+    return (FunctionBuilder(entry=TARGET).sub_rsp(0x28).ins(copy(reg(RCX), reg(RDI))).call(SINK)
+            .add_rsp(0x28).jump_indirect(reg(RAX)))
+
+
+def test_a_sink_only_target_is_placed_but_not_composed(monkeypatch):
+    """Placed, not composed: the sink row sits in E, E stays a tail exit, no
+    exit state there, stack_values_out unchanged."""
+    _, results = _with_sinks(monkeypatch, _caller(), _middle(), _sink_only_target())
+    middle = results[function_key_of(1, MIDDLE)]
+    site = _site(middle.unit)
+    effect = middle.proven[site]
+    assert not effect.tail_stack and effect.sink_demands
+    edge = _edge_of(site)
+    assert edge in middle.summary.tail_exits
+    assert edge not in {item.block_key for item in middle.summary.exits}
+    blocks = {block.key: [action.operation_key for action in block.actions]
+              for block in middle.normalized.memory_unit.blocks}
+    assert blocks[edge][-1] == f"{site}~edge"
+
+
+def test_a_zero_row_target_places_exactly_one_crossing():
+    """A target with no effect of its own (``ret``): E holds exactly one
+    ``s~edge`` crossing row, last."""
+    target = FunctionBuilder(entry=TARGET).ret()
+    units = program_units(_caller(), _middle(), target)
+    middle = analyze_units(units)[function_key_of(1, MIDDLE)]
+    site = _site(units[1])
+    blocks = {block.key: [action.operation_key for action in block.actions]
+              for block in middle.normalized.memory_unit.blocks}
+    rows = blocks[_edge_of(site)]
+    assert [key for key in rows if key.endswith("~edge")] == [f"{site}~edge"] and rows[-1] == f"{site}~edge"
+
+
+def test_a_composed_edge_behind_an_earlier_cut_is_dead():
+    """``int3`` (debug-break traps do not return) before ``jz TARGET``: E is
+    unreached -- dead before composed: no exit state, no tail exit."""
+    from test_conditional_summaries import _analyze_traps, _int3
+
+    builder = _to(FunctionBuilder(entry=MIDDLE).ins(_int3())
+                  .cbranch("done", reg(ZF, 1)).ins(copy(reg(RAX), const(7))).label("done").ret(), 1, TARGET)
+    results = _analyze_traps(_caller(), builder, _target())
+    summary = results[function_key_of(1, MIDDLE)].summary
+    edge = _edge_of(_site(program_units(builder, _target())[0]))
+    assert edge not in summary.tail_exits
+    assert edge not in {item.block_key for item in summary.exits}
+    assert edge not in summary.dead_exits   # (unreached edges stay out, as in G1)
+
+
+def test_a_loop_whose_only_way_out_never_returns_is_noreturn():
+    """The loop leaves only through ``jz F`` and F traps: E is a
+    Bundle-derived dead exit, the function is provably noreturn, and its
+    caller takes the noreturn effect."""
+    from test_conditional_summaries import _analyze_traps, _int3
+    from tdo_v2.call_summary_effects import summary_noreturn
+
+    builder = _to(FunctionBuilder(entry=MIDDLE).label("top").ins(copy(reg(RDI), reg(RSI)))
+                  .cbranch("top", reg(ZF, 1)).branch("top"), 1, TARGET)
+    target = FunctionBuilder(entry=TARGET).ins(_int3()).ret()
+    results = _analyze_traps(_caller(), builder, target)
+    summary = results[function_key_of(1, MIDDLE)].summary
+    assert summary.exits == () and summary.tail_exits == ()
+    assert summary.dead_exits == (_edge_of(_site(program_units(builder, target)[0])),)
+    assert summary_noreturn(summary)
+    assert any(effect.noreturn for effect in results[function_key_of(1, CALLER)].proven.values())
+
+
+def test_conditional_tail_rows_are_ram_writers():
+    """A conditional tail's staged rows write RAM (as a BRANCH tail's), not WILD."""
+    from tdo_v2.write_classes import RAM, WriterClasses
+
+    units = program_units(_caller(), _middle(), _rcx_target())
+    middle = analyze_units(units)[function_key_of(1, MIDDLE)]
+    site = _site(units[1])
+    classes = WriterClasses(middle.unit.scopes, middle.unit.observation)
+    staged = [action.operation_key for block in middle.normalized.memory_unit.blocks for action in block.actions
+              if action.operation_key.startswith(site + "~")]
+    assert staged and all(classes.classify(key) == RAM for key in staged)
+
+
+def test_the_conditional_tail_proof_record_is_validated_strictly():
+    """A CBRANCH tail fact must name a well-formed site whose edge block is an
+    exit with exactly that delta, one fact per edge exit: a malformed key, a
+    changed delta or a missing fact is refused (None), never an exception."""
+    import dataclasses
+    from synthetic import op
+    from tdo_v2 import register_delta_proofs as rdp
+    from tdo_v2.model import StorageObjectId
+    from tdo_v2.span_geometry import ByteSpan, StorageObjectKind
+
+    builder = (FunctionBuilder(entry=MIDDLE).ins(copy(reg(RDI), reg(RSI)))
+               .ins(add(reg(RSP), reg(RSP), const(16)), op("CBRANCH", [ram(TARGET), reg(ZF, 1)]))
+               .ins(copy(reg(RAX), const(7))).ret())
+    raw = builder.to_json()
+    row = raw["instructions"][1]
+    row["flow_targets"] = [{"space_id": row["operations"][-1]["inputs"][0]["space_id"], "byte_offset": TARGET}]
+    row["flow_type"] = {**row["flow_type"], "is_flow": True, "is_jump": True, "is_conditional": True}
+    builder.to_json = lambda raw=raw: raw
+    item = analyze_units(program_units(_caller(), builder, _target()))[function_key_of(1, MIDDLE)]
+    span = ByteSpan(StorageObjectId(StorageObjectKind.REGISTER_FILE, item.unit.scopes.program.scope, 0), RSP, 8)
+    proof = rdp.derive_register_delta_proof(item.unit, span, dict(item.normalized.proven_call_effects), {})
+    assert rdp.validate_proof_record(proof.record()) == proof
+
+    def resealed(record):
+        payload = {key: value for key, value in record.items() if key != "content_sha256"}
+        return {**record, "content_sha256": rdp._digest(payload)}
+
+    record = proof.record()
+    (fact,) = [index for index, row in enumerate(record["call_facts"])
+               if row["operation_key"].endswith(":CBRANCH")]
+    for change in ("x:CBRANCH", "zz:1:0:CBRANCH", None):
+        changed = dict(record)
+        facts = [dict(row) for row in record["call_facts"]]
+        if change is None:
+            facts[fact]["delta"] = facts[fact]["delta"] + 8      # another delta
+        else:
+            facts[fact]["operation_key"] = change                # a malformed / other site
+        changed["call_facts"] = facts
+        assert rdp.validate_proof_record(resealed(changed)) is None, change
+    missing = dict(record)
+    missing["call_facts"] = [row for index, row in enumerate(record["call_facts"]) if index != fact]
+    assert rdp.validate_proof_record(resealed(missing)) is None
+
+
+def test_a_records_stitch_never_crosses_a_conditional_tail():
+    """The ordinary records view cuts per row at a conditional-tail site
+    (reason ``conditional-tail``), whatever its effect."""
+    from tdo_v2.operation_records import StitchContext, root_record
+
+    table: dict = {}
+    builders = (_caller(), _middle(), _target())   # (a caller: the program's call shape gives its stack pointer)
+    results = analyze_units(program_units(*builders), record_provenance=table)
+    middle = results[function_key_of(1, MIDDLE)]
+    edge = _edge_of(_site(middle.unit))
+    (exit_summary,) = [item for item in middle.summary.exits if item.block_key == edge]
+    run = next(run for run in exit_summary.runs
+               if run.span.object_id.kind.value == "register_file" and run.span.start == RAX)
+    nodes = [middle.normalized.memory_graph.definition_nodes[item] for item in run.definitions]
+    record = root_record(middle.normalized, middle.unit, [(nodes[0], (run.span,))], declared=middle.declared,
+                         provenance=table[id(middle)][1], stitch=StitchContext(table))
+    calls = [node for node in record["nodes"] if node["kind"] == "call"]
+    assert calls and all(node.get("stitch_cut") == "conditional-tail" for node in calls), calls
+
+
+def test_integration_sees_the_edge_overwrite_of_an_earlier_event():
+    """(Astra r7 P1) An earlier opaque call's write to a global survives to no
+    exit when the conditional tail's staged row in the sole terminal E
+    overwrites it: both survival predicates say so."""
+    from synthetic import DATA_BASE, store, summary_inputs
+    from tdo_v2.integration.configured_function_view import _FunctionView
+    from tdo_v2.integration.configured_interprocedural_contracts import ConfiguredFunctionAnalysis
+    from tdo_v2.integration.configured_interprocedural_records import WriteEvent
+    from tdo_v2.model import StorageObjectId
+    from tdo_v2.observed_boundary_projection import EMPTY_OBSERVED_BOUNDARIES
+    from tdo_v2.span_geometry import ByteSpan, StorageObjectKind
+
+    middle = _to(FunctionBuilder(entry=MIDDLE).sub_rsp(0x28).call(OPAQUE).add_rsp(0x28)
+                 .label("top").ins(copy(reg(RDI), reg(RSI))).cbranch("top", reg(ZF, 1)).branch("top"), None, TARGET)
+    target = FunctionBuilder(entry=TARGET).ins(store(const(DATA_BASE), const(7, 8))).ret()
+    builders = (_caller(), middle, target)
+    results = analyze_units(program_units(*builders))
+    normalized = results[function_key_of(1, MIDDLE)].normalized
+    evidence = next(item for item in summary_inputs(list(builders), image=False).evidences
+                    if item.unit.scopes.function.entry.byte_offset == MIDDLE)
+    view = _FunctionView(ConfiguredFunctionAnalysis(evidence, normalized, EMPTY_OBSERVED_BOUNDARIES, ()))
+    call = next(key for key, (_, operation) in view.operations.items() if operation.opcode == "CALL")
+    scope = evidence.unit.scopes.program.scope
+    space = next(row.space_id for row in evidence.unit.scopes.program.evidence.address_spaces
+                 if row.is_memory_space and row.is_loaded_memory_space)
+    target_span = ByteSpan(StorageObjectId(StorageObjectKind.ADDRESS_SPACE, scope, space), DATA_BASE, 8)
+    event = WriteEvent(evidence.unit.scopes.function.scope.digest, view.position(call), call,
+                       evidence.unit.scopes.function.entry, b"\0" * 32, "callee:write", target_span, 0, ())
+    assert not view.event_reaches_every_exit(event, (event,))
+    assert not view.event_reaches_an_exit(event, (event,))

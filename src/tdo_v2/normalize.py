@@ -969,9 +969,10 @@ def _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, o
     if len(loaded) == 1:
         spaces |= loaded & {
             operation.inputs[0].coordinate.space_id
-            for instruction in observation.instructions for operation in instruction.operations
-            if operation.opcode in ("BRANCH", "CALL") and operation.inputs
-            and operation.inputs[0].kind is VarnodeKindCode.ADDRESS
+            for instruction in observation.instructions for ordinal, operation in enumerate(instruction.operations)
+            if (operation.opcode in ("BRANCH", "CALL")
+                or (operation.opcode == "CBRANCH" and f"{_coordinate_key(instruction.address)}:{ordinal}:CBRANCH" in keys))
+            and operation.inputs and operation.inputs[0].kind is VarnodeKindCode.ADDRESS
         }
     touched = {
         evidence.span.object_id

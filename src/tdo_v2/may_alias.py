@@ -1093,7 +1093,8 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
     def transfer(block, state, escapes, switches):
         row = instructions[block.instruction]
         tainted, held = state
-        if returning is not None and escapes is not None and block.key in tail_edges                 and bool(tainted & ~stack_mask & register_mask):
+        if returning is not None and escapes is not None and block.key in tail_edges \
+                and bool(tainted & ~stack_mask & register_mask):
             # (G-T G3a) a composed conditional tail leaves through its edge
             # block like a RETURN: a register holding a stack-derived value there
             returning.add(block.key)
@@ -1310,7 +1311,8 @@ def stack_leaks(normalized, observation) -> tuple | None:
             varnode = operation.inputs[0]
         if kind == "store" and varnode is not None:
             expression = projector._expression_for_input(key, varnode)
-            if expression is not None and stack_atom is not None and expression.atoms == ((stack_atom, 1),)                     and expression.image == 0:
+            if expression is not None and stack_atom is not None and expression.atoms == ((stack_atom, 1),) \
+                    and expression.image == 0:
                 value = _signed_wrap(expression.displacement, expression.byte_size)
         leaks.append((key, kind, value))
     leaks.extend((key, "return", None) for key in sorted(returning))

@@ -1466,7 +1466,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         complete = demand.complete and not fails
                         projected.append((call, index, demand.label, nodes, complete and not remaining))
                         roots.append((demand.label, nodes, complete, remaining))
-            jumps = noreturn_jumps[key]
+            # (G-T G3a) a Bundle callee wins over a legacy noreturn import cut at a
+            # conditional tail -- the legacy cut is the fallback when the site has
+            # no proven effect (refused, no single stack pointer, vetoed)
+            jumps = {jump: model for jump, model in noreturn_jumps[key].items()
+                     if not (jump.endswith(":CBRANCH") and jump in proven)}
             traps = (trap_operations(unit, pcodeop_models)
                      if assume_debug_break_traps_do_not_return and pcodeop_models else frozenset())
             dead_ops = frozenset(traps) | {jump for jump in jumps if jump.endswith(":BRANCH")}
@@ -2193,8 +2197,8 @@ def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset
         if target.kind is not VarnodeKindCode.ADDRESS or target.coordinate in local:
             continue
         key = _operation_key(row.address, ordinal, operation.opcode)
-        if key in calls:
-            continue
+        if key in calls and operation.opcode != "CBRANCH":
+            continue   # (a conditional tail: kept as the fallback, applied only when it composes nothing)
         if operation.opcode == "BRANCH" and (
                 row.fallthrough is not None or any(item != target.coordinate for item in row.flow_targets)):
             continue
@@ -3070,7 +3074,8 @@ def _relative_anchors(unit, normalized) -> dict:
     spaces, registers = set(), set()
     for instruction in observation.instructions:
         for operation in instruction.operations:
-            if operation.opcode in ("LOAD", "STORE") and operation.inputs                     and operation.inputs[0].kind is VarnodeKindCode.CONSTANT:
+            if operation.opcode in ("LOAD", "STORE") and operation.inputs \
+                    and operation.inputs[0].kind is VarnodeKindCode.CONSTANT:
                 spaces.add(operation.inputs[0].coordinate.byte_offset)
             for varnode in (*operation.inputs, operation.output):
                 if varnode is not None and varnode.kind is VarnodeKindCode.REGISTER                         and varnode.byte_size in (4, 8):

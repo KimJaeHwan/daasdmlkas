@@ -322,7 +322,8 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
             kind = _edge_kind(edge_blocks[state.block_key], proven_effects, dead_exit)
             if kind == "dead":
                 site = edge_blocks[state.block_key].site
-                if site not in noreturn_jumps and not dead_exit(state.block_key)                         and getattr(proven_effects.get(site), "noreturn", False):
+                if site not in noreturn_jumps and not dead_exit(state.block_key) \
+                        and getattr(proven_effects.get(site), "noreturn", False):
                     dead_exits.append(state.block_key)
                 continue
             if kind != "composed":
