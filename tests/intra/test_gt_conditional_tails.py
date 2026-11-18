@@ -389,7 +389,8 @@ def _sink_only_target():
 
 def test_a_sink_only_target_is_placed_but_not_composed(monkeypatch):
     """Placed, not composed: the sink row sits in E, E stays a tail exit, no
-    exit state there, stack_values_out unchanged."""
+    exit state there, and E is no way out for stack_values_out (only a
+    composed edge counts -- design r9 pin)."""
     _, results = _with_sinks(monkeypatch, _caller(), _middle(), _sink_only_target())
     middle = results[function_key_of(1, MIDDLE)]
     site = _site(middle.unit)
@@ -401,6 +402,14 @@ def test_a_sink_only_target_is_placed_but_not_composed(monkeypatch):
     blocks = {block.key: [action.operation_key for action in block.actions]
               for block in middle.normalized.memory_unit.blocks}
     assert blocks[edge][-1] == f"{site}~edge"
+    # rax = rsp + 8 reaches E: with the sink-only target E is no way out (no
+    # stack_values_out); with a composing target the same shape is (test above)
+    tainted = _to(FunctionBuilder(entry=MIDDLE).ins(add(reg(RAX), reg(RSP), const(8)))
+                  .cbranch("done", reg(ZF, 1)).ins(copy(reg(RAX), const(7))).label("done").ret(), None, TARGET)
+    _, results = _with_sinks(monkeypatch, _caller(), tainted, _sink_only_target())
+    item = results[function_key_of(1, MIDDLE)]
+    assert not item.proven[_site(item.unit)].tail_stack
+    assert not item.summary.stack_values_out
 
 
 def test_a_zero_row_target_places_exactly_one_crossing():
@@ -492,14 +501,20 @@ def test_the_conditional_tail_proof_record_is_validated_strictly():
     record = proof.record()
     (fact,) = [index for index, row in enumerate(record["call_facts"])
                if row["operation_key"].endswith(":CBRANCH")]
-    for change in ("x:CBRANCH", "zz:1:0:CBRANCH", None):
+    site = record["call_facts"][fact]["operation_key"]
+    space, offset, ordinal, _ = site.split(":")
+    other_site = f"{space}:{offset}:{int(ordinal) + 1}:CBRANCH"   # well-formed, its edge is no exit
+    for change in ("x:CBRANCH", "zz:1:0:CBRANCH", other_site, None):
         changed = dict(record)
         facts = [dict(row) for row in record["call_facts"]]
+        keys = list(record["operation_keys"])
         if change is None:
             facts[fact]["delta"] = facts[fact]["delta"] + 8      # another delta
         else:
-            facts[fact]["operation_key"] = change                # a malformed / other site
-        changed["call_facts"] = facts
+            facts[fact]["operation_key"] = change                # a malformed / other site, also listed
+            keys = sorted(set(keys) | {change})
+        changed["call_facts"] = sorted(facts, key=lambda row: row["operation_key"])
+        changed["operation_keys"] = keys
         assert rdp.validate_proof_record(resealed(changed)) is None, change
     missing = dict(record)
     missing["call_facts"] = [row for index, row in enumerate(record["call_facts"]) if index != fact]
@@ -556,3 +571,103 @@ def test_integration_sees_the_edge_overwrite_of_an_earlier_event():
                        evidence.unit.scopes.function.entry, b"\0" * 32, "callee:write", target_span, 0, ())
     assert not view.event_reaches_every_exit(event, (event,))
     assert not view.event_reaches_an_exit(event, (event,))
+
+
+# -- review r2 pins ---------------------------------------------------------------
+
+
+def _legacy_case(thunk_body):
+    """``jz ABORT`` where ABORT is the abort import thunk's address (a noreturn
+    model) and ``thunk_body`` the Bundle function there."""
+    from test_import_tail_jumps import ABORT, MODELS
+    from tdo_v2.image_info import ImageInfo, ImportedSymbol
+    from tdo_v2.summary_store import load_external_models
+
+    image = ImageInfo("synthetic", (), (ImportedSymbol("CRT", "abort", None, (), ((1, ABORT),)),), (), ())
+    middle = _to(FunctionBuilder(entry=MIDDLE).sub_rsp(0x28).cbranch("done", reg(ZF, 1))
+                 .ins(copy(reg(RAX), const(7))).label("done").add_rsp(0x28).ret(), None, ABORT)
+    units = program_units(_caller(), middle, thunk_body)
+    results = analyze_units(units, image_info=image,
+                            external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))
+    return results[function_key_of(1, MIDDLE)], _site(units[1])
+
+
+def test_a_bundle_thunk_that_composes_wins_over_the_legacy_noreturn_cut():
+    """The thunk address holds a returning Bundle function: the conditional
+    tail composes it -- E is an exit state, and no legacy abort cut or label is
+    taken at the site."""
+    from test_import_tail_jumps import ABORT
+
+    middle, site = _legacy_case(FunctionBuilder(entry=ABORT).ret())
+    assert middle.proven[site].tail_stack
+    assert _edge_of(site) in {item.block_key for item in middle.summary.exits}
+    assert site not in middle.declared
+    assert not any(label.startswith("external-model:crt-win64/abort@") for label in middle.declared.values())
+    assert site not in middle.refused_models
+
+
+def test_the_legacy_noreturn_cut_is_the_fallback_when_the_bundle_thunk_composes_nothing():
+    """The Bundle function at the thunk address leaves through an unknown tail
+    of its own: no effect at the site -- the legacy abort cut applies as
+    before G3a (a dead edge: no tail exit, no exit state, not a Bundle dead
+    exit) and its model label is declared."""
+    from test_import_tail_jumps import ABORT
+
+    middle, site = _legacy_case(FunctionBuilder(entry=ABORT).tail_call(CODE_BASE + 0x900))
+    assert site not in middle.proven
+    edge = _edge_of(site)
+    summary = middle.summary
+    assert edge not in summary.tail_exits and edge not in summary.dead_exits
+    assert edge not in {item.block_key for item in summary.exits}
+    assert middle.declared.get(site, "").startswith("external-model:crt-win64/abort@")
+
+
+def test_the_state_barrier_keeps_the_fallthrough_lookup(monkeypatch=None):
+    """(design r9 K) A global stored before the loop and overwritten only by
+    the conditional tail's staged rows in E -- exactly, through an unresolved
+    pointer, or by an uncertain writer -- is still the stored definition
+    inside the loop body: E's rows are anchored in E, never at the CBRANCH."""
+    from synthetic import CF, DATA_BASE, RBX, RDX, store, summary_inputs
+    from tdo_v2.integration.configured_function_view import _FunctionView
+    from tdo_v2.integration.configured_interprocedural_contracts import ConfiguredFunctionAnalysis
+    from tdo_v2.model import StorageObjectId
+    from tdo_v2.observed_boundary_projection import EMPTY_OBSERVED_BOUNDARIES
+    from tdo_v2.span_geometry import ByteSpan, StorageObjectKind
+
+    for write in (store(const(DATA_BASE), const(7, 8)), store(reg(RDI), const(7, 8))):
+        middle = _to(FunctionBuilder(entry=MIDDLE).ins(store(const(DATA_BASE), reg(RBX)))
+                     .label("top").cbranch("out", reg(CF, 1)).ins(add(reg(RDX), reg(RDX), const(1)))
+                     .cbranch("top", reg(ZF, 1)).label("out").ret(), None, TARGET)
+        target = FunctionBuilder(entry=TARGET).ins(write).ret()
+        builders = (_caller(), middle, target)
+        results = analyze_units(program_units(*builders))
+        normalized = results[function_key_of(1, MIDDLE)].normalized
+        evidence = next(item for item in summary_inputs(list(builders), image=False).evidences
+                        if item.unit.scopes.function.entry.byte_offset == MIDDLE)
+        view = _FunctionView(ConfiguredFunctionAnalysis(evidence, normalized, EMPTY_OBSERVED_BOUNDARIES, ()))
+        scope = evidence.unit.scopes.program.scope
+        space = next(row.space_id for row in evidence.unit.scopes.program.evidence.address_spaces
+                     if row.is_memory_space and row.is_loaded_memory_space)
+        span = ByteSpan(StorageObjectId(StorageObjectKind.ADDRESS_SPACE, scope, space), DATA_BASE, 8)
+        stored = next(index for index, definition in enumerate(normalized.memory_ssa.definitions)
+                      if definition.operation_key is not None and definition.operation_key.endswith(":STORE")
+                      and not definition.operation_key.startswith(_site(evidence.unit))
+                      and definition.span.overlaps(span))
+        body = next(key for key, (_, operation) in view.operations.items() if operation.opcode == "INT_ADD")
+        assert view.state_definition(span, view.position(body)) == stored, write
+
+
+def test_a_physical_call_context_refuses_a_callee_with_a_conditional_tail():
+    """(design r9 final fixes) A physical context builds its callee's exits
+    from RETURN blocks only: a callee with a register-only conditional tail is
+    refused, never given a context missing the edge exit."""
+    from test_physical_call_records import _caller as _physical_caller, _case, _record
+
+    callee = _to(FunctionBuilder(entry=0x1800).cbranch("done", reg(ZF, 1)).ins(copy(reg(RAX), const(7)))
+                 .label("done").ret(), None, 0x1a00)
+    target = FunctionBuilder(entry=0x1a00).ins(add(reg(RAX), reg(RDI), const(1))).ret()
+    case = _case(_physical_caller(), callee, target)
+    assert any(key.endswith(":CBRANCH") for key in case["callee"].proven)
+    result = _record(case)
+    cuts = result.get("physical_call_cuts", {})
+    assert any(reason == "physical callee has a conditional tail" for reason in cuts.values()), cuts

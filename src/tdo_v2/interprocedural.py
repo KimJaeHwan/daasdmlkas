@@ -1467,10 +1467,18 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         projected.append((call, index, demand.label, nodes, complete and not remaining))
                         roots.append((demand.label, nodes, complete, remaining))
             # (G-T G3a) a Bundle callee wins over a legacy noreturn import cut at a
-            # conditional tail -- the legacy cut is the fallback when the site has
-            # no proven effect (refused, no single stack pointer, vetoed)
+            # conditional tail when it composes the tail or proves it never returns;
+            # the legacy cut is the fallback otherwise (no effect: refused, no single
+            # stack pointer, vetoed -- or a sink-only effect, whose rows stay placed)
+            def bundle_wins(jump):
+                effect = proven.get(jump)
+                return effect is not None and bool(effect.tail_stack or effect.noreturn)
+
             jumps = {jump: model for jump, model in noreturn_jumps[key].items()
-                     if not (jump.endswith(":CBRANCH") and jump in proven)}
+                     if not (jump.endswith(":CBRANCH") and bundle_wins(jump))}
+            for jump in [jump for jump in refused_sites.get(key, {})
+                         if jump.endswith(":CBRANCH") and bundle_wins(jump)]:
+                del refused_sites[key][jump]   # (a composed site names no refused model)
             traps = (trap_operations(unit, pcodeop_models)
                      if assume_debug_break_traps_do_not_return and pcodeop_models else frozenset())
             dead_ops = frozenset(traps) | {jump for jump in jumps if jump.endswith(":BRANCH")}
