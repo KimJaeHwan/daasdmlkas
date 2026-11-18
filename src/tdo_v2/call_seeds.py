@@ -35,9 +35,12 @@ __all__ = ("seed_function_calls", "seed_tail_calls")
 def seed_tail_calls(unit: ScopedFunctionUnit, /) -> tuple[TailCallSeed, ...]:
     """BRANCH/CBRANCH/BRANCHIND in an instruction Ghidra flags as a call.
 
-    Ghidra's flow type is the only non-guessing criterion: a jump to code
-    outside the function body that Ghidra does not flag as a call (shared
-    code, jump tables) is not a tail call. Must match the naming exporter.
+    Ghidra's flow type is the seed contract shared with the naming exporter:
+    a jump to code outside the function body that Ghidra does not flag as a
+    call (shared code, jump tables) gets no seed. It is not the engine's tail
+    criterion -- composition takes unconditional tail jumps by code facts
+    (``interprocedural._tail_jumps``, G-T G2, docs 25.102). Must match the
+    naming exporter.
     """
     if type(unit) is not ScopedFunctionUnit or unit.observation is None:
         return ()

@@ -2669,25 +2669,67 @@ def function_key_of(space_id: int, byte_offset: int) -> str:
 
 
 def _direct_calls(unit, functions) -> dict[str, str]:
+    """Operation key -> callee key for every direct CALL to a function of
+    ``functions`` and every unconditional tail jump to one (``_tail_jumps``)."""
     found = {}
     observation = unit.observation
     if observation is None:
         return found
+    tails = None
     for instruction in observation.instructions:
         for ordinal, operation in enumerate(instruction.operations):
-            tail = (  # an unconditional tail jump: the last operation of a terminal instruction
-                operation.opcode == "BRANCH" and instruction.flow.is_terminal
-                and ordinal == len(instruction.operations) - 1
-            )
-            if (operation.opcode != "CALL" and not tail) or not operation.inputs:
+            if operation.opcode not in ("CALL", "BRANCH") or not operation.inputs:
                 continue
             target = operation.inputs[0]
             if target.kind is not VarnodeKindCode.ADDRESS:
                 continue
             callee = function_key(target.coordinate)
-            if callee in functions:
-                found[_operation_key(instruction.address, ordinal, operation.opcode)] = callee
+            if callee not in functions:
+                continue
+            key = _operation_key(instruction.address, ordinal, operation.opcode)
+            if operation.opcode == "BRANCH":
+                if tails is None:
+                    tails = _tail_jumps(unit)
+                if key not in tails:
+                    continue
+            found[key] = callee
     return found
+
+
+def _tail_jumps(unit) -> frozenset:
+    """(G-T G2, docs 25.102) Keys of the BRANCH operations that are
+    unconditional tail jumps by code facts -- never Ghidra's ``is_terminal``
+    flag, which a ``jmp other_function`` inside a thunk lacks: the BRANCH ends
+    a block of the admitted reachable p-code graph that exits by it, its
+    target is an ADDRESS that is no instruction of the function, and its
+    instruction has no fallthrough, no S1 continuation evidence and no
+    observed flow target but that one. (``_direct_calls`` also requires the
+    target to be a Bundle function's entry.) A graph the p-code block
+    builder refuses gives none."""
+    from .pcode_blocks import build_pcode_block_graph, terminator
+
+    observation = unit.observation
+    graph = build_pcode_block_graph(observation, unit.scopes.function.entry)
+    if graph.unsupported is not None:
+        return frozenset()
+    rows = {row.address: row for row in observation.instructions}
+    exit_rows = {item.source for item in getattr(observation, "fallthrough_exits", ())}
+    found = set()
+    for block in graph.blocks:
+        if not block.exits:
+            continue
+        row = rows[block.instruction]
+        end = terminator(block, row)
+        if end is None or end[1].opcode != "BRANCH" or not end[1].inputs:
+            continue
+        target = end[1].inputs[0]
+        if target.kind is not VarnodeKindCode.ADDRESS or target.coordinate in rows:
+            continue
+        if row.fallthrough is not None or row.address in exit_rows \
+                or any(item != target.coordinate for item in row.flow_targets):
+            continue
+        found.add(_operation_key(row.address, end[0], "BRANCH"))
+    return frozenset(found)
 
 
 def _callee_first_components(calls: dict[str, dict[str, str]]) -> list[set[str]]:

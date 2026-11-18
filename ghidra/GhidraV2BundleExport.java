@@ -814,7 +814,7 @@ public class GhidraV2BundleExport extends GhidraScript {
                     continue;
                 }
                 Function function = currentProgram.getFunctionManager().getFunctionAt(from);
-                if (function != null && function.isThunk()) {
+                if (function != null && importThunk(function)) {
                     thunks.add(coordinate(from));
                 }
                 else if (currentProgram.getListing().getInstructionAt(from) == null) {
@@ -822,9 +822,11 @@ public class GhidraV2BundleExport extends GhidraScript {
                 }
             }
             for (Function thunk : currentProgram.getFunctionManager().getFunctions(true)) {
-                Function target = thunk.isThunk() ? thunk.getThunkedFunction(true) : null;
-                if (target != null && target.isExternal()
-                        && target.getEntryPoint().equals(symbol.getAddress())) {
+                if (!importThunk(thunk)) {
+                    continue;
+                }
+                Function target = thunk.getThunkedFunction(true);
+                if (target.getEntryPoint().equals(symbol.getAddress())) {
                     Map<String, Object> entry = coordinate(thunk.getEntryPoint());
                     if (!thunks.contains(entry)) {
                         thunks.add(entry);
@@ -1097,8 +1099,11 @@ public class GhidraV2BundleExport extends GhidraScript {
                     }
                 }
                 List<Function> closure = new ArrayList<>(closureSet);
+                // (G-T G2) an import thunk stays out (image facts map its address
+                // to the import, ``imports[].thunks``); a thunk into internal code
+                // is an ordinary Bundle function, so a call to it has a target
                 closure.removeIf(function ->
-                    function.isExternal() || function.isThunk() ||
+                    function.isExternal() || importThunk(function) ||
                     !hasObservedInstructions(function));
                 closure.sort(Comparator
                     .comparing((Function function) ->
@@ -1117,6 +1122,21 @@ public class GhidraV2BundleExport extends GhidraScript {
             }
         }
         return result;
+    }
+
+    /**
+     * (G-T G2) The one "import thunk" classification: a thunk whose final
+     * target ({@code getThunkedFunction(true)}) is external. Both the image
+     * facts' {@code imports[].thunks} and the closure filter use it, so the
+     * thunks listed for an import and the thunks left out of the Bundle are
+     * the same set.
+     */
+    private static boolean importThunk(Function function) {
+        if (!function.isThunk()) {
+            return false;
+        }
+        Function target = function.getThunkedFunction(true);
+        return target != null && target.isExternal();
     }
 
     private Function resolvedThunkTerminal(Function start) throws Exception {
