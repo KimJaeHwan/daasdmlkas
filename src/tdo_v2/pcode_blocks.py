@@ -204,7 +204,9 @@ def _leaving(operation, local) -> bool:
     as absolute, as ``_split`` reads it; p-code gives a direct branch a CONSTANT
     or an ADDRESS destination, and nothing in validation pins that, so any
     other kind fails safe to leaving). A CONSTANT destination is relative,
-    inside the instruction."""
+    inside the instruction. (``_split`` decides a non-CONSTANT destination by
+    its coordinate alone; the two disagree only for a varnode whose kind
+    contradicts its space -- not producible by p-code.)"""
     if operation.opcode not in ("BRANCH", "CBRANCH") or not operation.inputs:
         return False
     destination = operation.inputs[0]

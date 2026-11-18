@@ -356,13 +356,15 @@ def test_a_branch_to_a_non_address_destination_fails_safe_to_an_unknown_exit():
                                                                      byte_offset=0x10))
     shaped = dataclasses.replace(row, operations=(*row.operations[:-1],
                                                   dataclasses.replace(branch, inputs=(destination, *branch.inputs[1:]))))
-    instructions = (*observation.instructions[:1], shaped, *observation.instructions[2:])
-    graph = build_pcode_block_graph(dataclasses.replace(observation, instructions=instructions),
-                                    function.scopes.function.entry)
-    assert not any(block.edge is not None for block in graph.blocks)
-    source = next(block for block in graph.blocks if block.instruction == row.address)
-    assert source.exits
-    assert graph.unmaterialized == ((row.address, len(row.operations) - 1, "destination not an address"),)
+    # (review r3) also with no observed flow target: only the p-code reading keeps the exit
+    for listed in (shaped, dataclasses.replace(shaped, flow_targets=())):
+        instructions = (*observation.instructions[:1], listed, *observation.instructions[2:])
+        graph = build_pcode_block_graph(dataclasses.replace(observation, instructions=instructions),
+                                        function.scopes.function.entry)
+        assert not any(block.edge is not None for block in graph.blocks)
+        source = next(block for block in graph.blocks if block.instruction == row.address)
+        assert source.exits
+        assert graph.unmaterialized == ((row.address, len(row.operations) - 1, "destination not an address"),)
 
 # lint (design r4 section 6): terminator interpretation -- reading
 # ``operations[block.stop - 1]`` as what ends a block -- goes through
