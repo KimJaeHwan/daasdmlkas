@@ -146,7 +146,11 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # 49: a declared model's unlisted register bytes are unknown up to the program's
 # register limit (the limit its call effect is derived with), not the calling
 # function's own; only fewer bytes are kept (design r6 I-1).
-ENGINE_SEMANTICS_VERSION = 49
+# 50: (G-T G1) a conditional jump leaving the function gets a taken-outcome
+# edge block (tail exits keyed by it); (G-T G2) unconditional tail jumps are
+# taken by code facts, not Ghidra's is_terminal flag -- a thunk's jmp composes
+# its target, a jump the observation disagrees with stays an unknown exit.
+ENGINE_SEMANTICS_VERSION = 50
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

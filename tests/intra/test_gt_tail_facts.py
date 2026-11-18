@@ -130,3 +130,137 @@ def test_a_call_is_unchanged():
     unit = _main_unit(builder)
     (key,) = _direct_calls(unit, {CALLEE_KEY: None})
     assert key.endswith(":CALL")
+
+
+def _with_row(unit, index, row):
+    rows = list(unit.observation.instructions)
+    rows[index] = row
+    return SimpleNamespace(observation=dataclasses.replace(unit.observation, instructions=tuple(rows)),
+                           scopes=unit.scopes)
+
+
+def test_a_branch_ending_a_split_segment_is_a_tail_jump():
+    """``CBRANCH +2 (relative); BRANCH callee; COPY`` in one instruction: the
+    BRANCH ends a reachable sub-block that leaves by it -- a tail jump at its
+    own ordinal (not the instruction's last operation; the old rule wanted
+    the last), keyed by that ordinal."""
+    from synthetic import ZF, ram
+    from tdo_v2._scope_contracts import VarnodeKindCode
+
+    unit = _main_unit(_thunk(_main()))
+    row = unit.observation.instructions[-1]
+    (branch,) = row.operations
+    skip = dataclasses.replace(branch, opcode="CBRANCH", inputs=(
+        dataclasses.replace(branch.inputs[0], kind=VarnodeKindCode.CONSTANT,
+                            coordinate=dataclasses.replace(branch.inputs[0].coordinate, space_id=0, byte_offset=2)),
+        unit.observation.instructions[0].operations[0].output))
+    tail = branch
+    after = unit.observation.instructions[0].operations[0]
+    shaped = dataclasses.replace(row, operations=(skip, tail, after))
+    found = _direct_calls(_with_row(unit, -1, shaped), {CALLEE_KEY: None})
+    key = f"{row.address.space_id:x}:{row.address.byte_offset:x}:1:BRANCH"
+    assert found == {key: CALLEE_KEY}
+
+
+def test_a_branch_in_an_unreachable_split_segment_is_no_tail_call():
+    """``BRANCH +2 (relative); BRANCH callee; COPY``: the relative branch
+    skips the second operation, whose segment no path reaches -- not a tail
+    jump (the instruction is reachable; its segment is not)."""
+    from tdo_v2._scope_contracts import VarnodeKindCode
+
+    unit = _main_unit(_thunk(_main()))
+    row = unit.observation.instructions[-1]
+    (branch,) = row.operations
+    skip = dataclasses.replace(branch, inputs=(
+        dataclasses.replace(branch.inputs[0], kind=VarnodeKindCode.CONSTANT,
+                            coordinate=dataclasses.replace(branch.inputs[0].coordinate, space_id=0, byte_offset=2)),))
+    after = unit.observation.instructions[0].operations[0]
+    shaped = dataclasses.replace(row, operations=(skip, branch, after))
+    observed = _with_row(unit, -1, shaped)
+    from tdo_v2.pcode_blocks import build_pcode_block_graph
+
+    graph = build_pcode_block_graph(observed.observation, unit.scopes.function.entry)
+    assert graph.unsupported is None
+    assert not any(block.instruction == row.address and block.start == 1 for block in graph.blocks)
+    assert _direct_calls(observed, {CALLEE_KEY: None}) == {}
+
+
+def test_a_jump_into_the_function_or_to_its_own_entry_is_no_tail_call():
+    """A call-flagged ``jmp`` to an instruction of the function (its own
+    entry included) leaves no block by its target: never a tail call, even
+    when that address is a Bundle function entry (the function's own)."""
+    unit = _main_unit(_thunk(_main(), call=True, terminal=True))
+    row = unit.observation.instructions[-1]
+    entry = unit.observation.instructions[0].address
+    (branch,) = row.operations
+    own = dataclasses.replace(branch, inputs=(dataclasses.replace(branch.inputs[0], coordinate=entry),))
+    shaped = dataclasses.replace(row, operations=(own,), flow_targets=(entry,))
+    own_key = function_key_of(entry.space_id, entry.byte_offset)
+    assert _direct_calls(_with_row(unit, -1, shaped), {own_key: None, CALLEE_KEY: None}) == {}
+
+
+def test_an_unsupported_graph_gives_no_tail_jump():
+    """The p-code block builder refuses the graph (an indirect branch inside
+    an instruction): no tail jump is taken from it -- the exit stays
+    unknown, as the function stays unresolved."""
+    from synthetic import RDX
+    from tdo_v2._scope_contracts import ValidatedOperation
+
+    unit = _main_unit(_thunk(_main()))
+    row = unit.observation.instructions[0]
+    first = row.operations[0]
+    indirect = ValidatedOperation("BRANCHIND", (first.output,), None)
+    shaped = dataclasses.replace(row, operations=(indirect, first))
+    from tdo_v2.pcode_blocks import build_pcode_block_graph
+
+    observed = _with_row(unit, 0, shaped)
+    assert build_pcode_block_graph(observed.observation, unit.scopes.function.entry).unsupported is not None
+    assert _direct_calls(observed, {CALLEE_KEY: None}) == {}
+
+
+def test_a_jump_with_a_flow_override_is_no_tail_call():
+    """A flow override on the instruction (Ghidra's analyst override of its
+    flow) is refused, as ``escaping_branches`` and ``_split`` refuse it."""
+    for terminal in (False, True):
+        unit = _main_unit(_thunk(_main(), terminal=terminal))
+        row = unit.observation.instructions[-1]
+        shaped = dataclasses.replace(row, flow=dataclasses.replace(row.flow, is_override=True))
+        assert _direct_calls(_with_row(unit, -1, shaped), {CALLEE_KEY: None}) == {}
+
+
+def test_a_jump_to_a_non_entry_is_no_tail_call():
+    """The target must be a Bundle function's entry: a jump into the middle
+    of another function (or to no function) stays an unknown exit."""
+    unit = _main_unit(_thunk(_main()))
+    assert _direct_calls(unit, {function_key_of(1, CALLEE + 4): None}) == {}
+    assert _direct_calls(unit, {}) == {}
+
+
+def test_push_then_jump_into_the_next_function_is_composed_soundly():
+    """``call $+5`` as Ghidra lifts it when it splits the target off as its
+    own function (gate: clang-x86-O2 ``11ad0``): ``middle`` pushes a constant
+    and jumps (no call, no terminal flag) to ``leaf: pop rbx; ret``. The leaf
+    reads the slot middle wrote; composed, the caller gets rbx = that constant
+    and the stack pointer back -- checked by the program oracle."""
+    import test_graph_fidelity as fidelity
+    from program_oracle import check_program
+    from synthetic import REG, RBX, RSP, store, sub
+
+    leaf_entry, middle_entry = CODE_BASE + 0x800, CODE_BASE + 0x600
+    leaf = FunctionBuilder(entry=leaf_entry).pop(RBX).ret()
+    middle = FunctionBuilder(entry=middle_entry).ins(
+        sub(reg(RSP), reg(RSP), const(8)), store(reg(RSP), const(leaf_entry))).tail_call(leaf_entry)
+    middle = _thunk(middle)
+    caller = FunctionBuilder().call(middle_entry).ins(copy(reg(R9), reg(RBX))).ret()
+    units = program_units(caller, middle, leaf)
+    results = analyze_units(units)
+    analyzed = results[function_key_of(1, middle_entry)]
+    assert analyzed.summary.tail_exits == ()
+    assert dict(analyzed.summary.register_deltas)[(RSP, 8)] == 8
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
+    pools = lambda seed: {**fidelity._register_inputs(seed), RSP: 0x7000_0000}
+    for key in ("1:1000", function_key_of(1, middle_entry)):
+        item = results[key]
+        report = check_program(item.normalized, item.unit.observation, program, seeds=range(6),
+                               register_pools=pools, havoc_calls=(REG, RSP, 8))
+        assert report.silent == [], key

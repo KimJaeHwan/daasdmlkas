@@ -2702,7 +2702,8 @@ def _tail_jumps(unit) -> frozenset:
     flag, which a ``jmp other_function`` inside a thunk lacks: the BRANCH ends
     a block of the admitted reachable p-code graph that exits by it, its
     target is an ADDRESS that is no instruction of the function, and its
-    instruction has no fallthrough, no S1 continuation evidence and no
+    instruction has no fallthrough, no S1 continuation evidence, no flow
+    override (as ``pcode_blocks.escaping_branches`` refuses it) and no
     observed flow target but that one. (``_direct_calls`` also requires the
     target to be a Bundle function's entry.) A graph the p-code block
     builder refuses gives none."""
@@ -2725,7 +2726,7 @@ def _tail_jumps(unit) -> frozenset:
         target = end[1].inputs[0]
         if target.kind is not VarnodeKindCode.ADDRESS or target.coordinate in rows:
             continue
-        if row.fallthrough is not None or row.address in exit_rows \
+        if row.fallthrough is not None or row.address in exit_rows or row.flow.is_override \
                 or any(item != target.coordinate for item in row.flow_targets):
             continue
         found.add(_operation_key(row.address, end[0], "BRANCH"))

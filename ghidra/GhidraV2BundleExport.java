@@ -1002,8 +1002,9 @@ public class GhidraV2BundleExport extends GhidraScript {
                 if (function == null) {
                     continue;
                 }
-                // a thunk export (jmp to the body): the closure walk replaces thunks
-                // by their terminal, so the boundary is the terminal
+                // a thunk export (jmp to the body): the boundary is its terminal (G-T
+                // G2: an internal thunk is itself exported and walked -- its only
+                // callee is that terminal, which the walk does not enter)
                 Function terminal = function.isThunk() ? resolvedThunkTerminal(function) : function;
                 if (terminal == null) {
                     throw new IllegalArgumentException("stop-at " + name + ": unresolved thunk");
