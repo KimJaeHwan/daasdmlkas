@@ -622,28 +622,41 @@ def test_the_legacy_noreturn_cut_is_the_fallback_when_the_bundle_thunk_composes_
     assert middle.declared.get(site, "").startswith("external-model:crt-win64/abort@")
 
 
-def test_the_state_barrier_keeps_the_fallthrough_lookup(monkeypatch=None):
+def test_the_state_barrier_keeps_the_fallthrough_lookup():
     """(design r9 K) A global stored before the loop and overwritten only by
-    the conditional tail's staged rows in E -- exactly, through an unresolved
-    pointer, or by an uncertain writer -- is still the stored definition
-    inside the loop body: E's rows are anchored in E, never at the CBRANCH."""
-    from synthetic import CF, DATA_BASE, RBX, RDX, store, summary_inputs
+    the conditional tail's staged rows in E -- exactly, through the entry
+    pointer, as an unresolved write (an indexed address) or as an uncertain
+    writer (through a loaded pointer) -- is still the stored definition inside
+    the loop body: E's rows are anchored in E, never at the CBRANCH."""
+    from synthetic import CF, DATA_BASE, RBX, RDX, load, store, summary_inputs
     from tdo_v2.integration.configured_function_view import _FunctionView
     from tdo_v2.integration.configured_interprocedural_contracts import ConfiguredFunctionAnalysis
     from tdo_v2.model import StorageObjectId
     from tdo_v2.observed_boundary_projection import EMPTY_OBSERVED_BOUNDARIES
     from tdo_v2.span_geometry import ByteSpan, StorageObjectKind
 
-    for write in (store(const(DATA_BASE), const(7, 8)), store(reg(RDI), const(7, 8))):
+    shapes = (
+        ("exact", (store(const(DATA_BASE), const(7, 8)),)),
+        ("entry pointer", (store(reg(RDI), const(7, 8)),)),
+        ("unresolved", (add(reg(RAX), reg(RDI), reg(RDX)), store(reg(RAX), const(7, 8)))),
+        ("uncertain", (load(reg(RAX), reg(RDI)), store(reg(RAX), const(7, 8)))),
+    )
+    for write, body in shapes:
         middle = _to(FunctionBuilder(entry=MIDDLE).ins(store(const(DATA_BASE), reg(RBX)))
                      .label("top").cbranch("out", reg(CF, 1)).ins(add(reg(RDX), reg(RDX), const(1)))
                      .cbranch("top", reg(ZF, 1)).label("out").ret(), None, TARGET)
-        target = FunctionBuilder(entry=TARGET).ins(write).ret()
+        target = FunctionBuilder(entry=TARGET).ins(*body).ret()
         builders = (_caller(), middle, target)
         results = analyze_units(program_units(*builders))
         normalized = results[function_key_of(1, MIDDLE)].normalized
         evidence = next(item for item in summary_inputs(list(builders), image=False).evidences
                         if item.unit.scopes.function.entry.byte_offset == MIDDLE)
+        site = _site(evidence.unit)
+        if write == "unresolved":
+            assert any(normalized.memory_ssa.actions[item.action_id].operation_key.startswith(site + "~")
+                       for item in normalized.memory_ssa.unresolved_writes)
+        if write == "uncertain":
+            assert any(key.startswith(site + "~") for key, _ in normalized.uncertain_writers)
         view = _FunctionView(ConfiguredFunctionAnalysis(evidence, normalized, EMPTY_OBSERVED_BOUNDARIES, ()))
         scope = evidence.unit.scopes.program.scope
         space = next(row.space_id for row in evidence.unit.scopes.program.evidence.address_spaces
@@ -671,3 +684,82 @@ def test_a_physical_call_context_refuses_a_callee_with_a_conditional_tail():
     result = _record(case)
     cuts = result.get("physical_call_cuts", {})
     assert any(reason == "physical callee has a conditional tail" for reason in cuts.values()), cuts
+
+
+
+def _legacy_case_with_sinks(monkeypatch, thunk_body):
+    """``_legacy_case`` with the TEST-ONLY register sink available to the thunk body."""
+    from synthetic import analyze_summaries, boundary
+    from test_import_tail_jumps import ABORT, MODELS
+    from tdo_v2 import summary_engine
+    from tdo_v2.image_info import ImportedSymbol
+    from tdo_v2.summary_store import load_external_models
+
+    captured = {}
+    original = summary_engine.analyze_units
+
+    def capture(*args, **kwargs):
+        captured["results"] = original(*args, **kwargs)
+        return captured["results"]
+
+    monkeypatch.setattr(summary_engine, "analyze_units", capture)
+    middle = _to(FunctionBuilder(entry=MIDDLE).sub_rsp(0x28).cbranch("done", reg(ZF, 1))
+                 .ins(copy(reg(RAX), const(7))).label("done").add_rsp(0x28).ret(), None, ABORT)
+    analyze_summaries([_caller(), middle, thunk_body, FunctionBuilder(entry=SINK).ret()], boundary({}, {"sink": 8}),
+                      names={SINK: "sink"}, image=True,
+                      imports=(ImportedSymbol("CRT", "abort", None, (), ((1, ABORT),)),),
+                      external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))
+    results = captured["results"]
+    item = results[function_key_of(1, MIDDLE)]
+    return item, _site(item.unit)
+
+
+def test_a_sink_only_bundle_thunk_keeps_the_legacy_noreturn_cut(monkeypatch):
+    """(review r3, Fable P2-1) The Bundle function at the abort thunk address
+    binds a sink and then leaves through an unknown transfer: a sink-only
+    effect -- neither composed nor noreturn -- so the legacy abort cut stays
+    (E no tail exit, no exit state, no dead exit; abort label declared) and
+    the sink row stays placed."""
+    from test_import_tail_jumps import ABORT
+
+    thunk = (FunctionBuilder(entry=ABORT).sub_rsp(0x28).ins(copy(reg(RCX), reg(RDI))).call(SINK)
+             .add_rsp(0x28).jump_indirect(reg(RAX)))
+    middle, site = _legacy_case_with_sinks(monkeypatch, thunk)
+    effect = middle.proven[site]
+    assert not effect.tail_stack and not effect.noreturn and effect.sink_demands
+    edge = _edge_of(site)
+    summary = middle.summary
+    assert edge not in summary.tail_exits and edge not in summary.dead_exits
+    assert edge not in {item.block_key for item in summary.exits}
+    assert middle.declared.get(site, "").startswith("external-model:crt-win64/abort@")
+    blocks = {block.key: [action.operation_key for action in block.actions]
+              for block in middle.normalized.memory_unit.blocks}
+    assert any(key.startswith(site + "~sink") for key in blocks[edge])
+
+
+def test_a_noreturn_bundle_thunk_wins_over_the_legacy_cut():
+    """The Bundle function at the abort thunk address traps (debug-break
+    traps do not return): the Bundle-derived dead edge wins -- E is a dead
+    exit and no abort label is taken at the site."""
+    from test_conditional_summaries import _int3
+    from test_import_tail_jumps import ABORT, MODELS
+    from tdo_v2.image_info import ImageInfo, ImportedSymbol
+    from tdo_v2.pcodeop_models import PcodeOpModel
+    from tdo_v2.summary_store import load_external_models
+
+    image = ImageInfo("synthetic", (), (ImportedSymbol("CRT", "abort", None, (), ((1, ABORT),)),), (), ())
+    middle = _to(FunctionBuilder(entry=MIDDLE).sub_rsp(0x28).cbranch("done", reg(ZF, 1))
+                 .ins(copy(reg(RAX), const(7))).label("done").add_rsp(0x28).ret(), None, ABORT)
+    units = program_units(_caller(), middle, FunctionBuilder(entry=ABORT).ins(_int3()).ret())
+    namespace = units[0].scopes.program.evidence.translation_namespace
+    model = PcodeOpModel("x86-markers", 1, frozenset({(namespace.language_id, namespace.major_version,
+                                                        namespace.minor_version)}), {}, {16: frozenset({3})})
+    results = analyze_units(units, image_info=image, pcodeop_models=(model,),
+                            assume_debug_break_traps_do_not_return=True,
+                            external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))
+    item = results[function_key_of(1, MIDDLE)]
+    site = _site(units[1])
+    assert item.proven[site].noreturn
+    assert item.summary.dead_exits == (_edge_of(site),)
+    assert site not in item.declared
+    assert not any(label.startswith("external-model:crt-win64/abort@") for label in item.declared.values())

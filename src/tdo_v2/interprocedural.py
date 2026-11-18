@@ -1476,9 +1476,6 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
 
             jumps = {jump: model for jump, model in noreturn_jumps[key].items()
                      if not (jump.endswith(":CBRANCH") and bundle_wins(jump))}
-            for jump in [jump for jump in refused_sites.get(key, {})
-                         if jump.endswith(":CBRANCH") and bundle_wins(jump)]:
-                del refused_sites[key][jump]   # (a composed site names no refused model)
             traps = (trap_operations(unit, pcodeop_models)
                      if assume_debug_break_traps_do_not_return and pcodeop_models else frozenset())
             dead_ops = frozenset(traps) | {jump for jump in jumps if jump.endswith(":BRANCH")}
@@ -1527,7 +1524,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                                     | {label for _, entry in jumps.values() for label in entry.inherited}
                                     | _same_result_labels(normalized)
                                     | getattr(normalized, "nonstack_labels", frozenset()),
-                                    refused_models=dict(refused_sites.get(key, {})),
+                                    # (G-T G3a) a site the Bundle wins names no refused model
+                                    refused_models={jump: reason for jump, reason in refused_sites.get(key, {}).items()
+                                                    if not (jump.endswith(":CBRANCH") and bundle_wins(jump))},
                                     bound_calls={call: bound[callee][2] for call, callee in _direct_calls(
                                         unit, bound).items() if call in proven},
                                     test_only_inputs=bool((assumed_call_effects or {}).get(key))
