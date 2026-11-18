@@ -1811,6 +1811,8 @@ class _Builder:
             return "accessor write-back"
         if run.conditions or effect.writer_conditions:
             return "conditions"
+        if base.endswith(":CBRANCH"):
+            return "conditional-tail"   # (G-T G3a, design r9 I) a per-row cut by site identity
         if effect.tail_stack or any(done.summary.tail_exits for done in members):
             return "tail"
         if not any(done.summary.exits for done in members):

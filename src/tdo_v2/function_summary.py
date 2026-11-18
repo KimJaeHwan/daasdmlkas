@@ -312,10 +312,22 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     nodes = ssa.state_nodes
     dead_exits = []
     edge_blocks = _cached("edges", observation, lambda: _edge_blocks(normalized, observation))
+    proven_effects = dict(normalized.proven_call_effects)
     for state in ssa.exit_states:
         if state.block_key in edge_blocks:
-            continue   # (G-T G1) an outcome edge block: tail exit or dead edge, no exit state
-        if state.block_key not in frontier and dead_exit(state.block_key):
+            # (G-T G1 / G3a, docs 25.103) an outcome edge block: an exit state
+            # when its conditional tail is composed; a Bundle-derived dead edge
+            # (the composed target never returns) is a dead exit; otherwise a
+            # tail exit or a legacy / unreached dead edge -- no exit state
+            kind = _edge_kind(edge_blocks[state.block_key], proven_effects, dead_exit)
+            if kind == "dead":
+                site = edge_blocks[state.block_key].site
+                if site not in noreturn_jumps and not dead_exit(state.block_key)                         and getattr(proven_effects.get(site), "noreturn", False):
+                    dead_exits.append(state.block_key)
+                continue
+            if kind != "composed":
+                continue
+        elif state.block_key not in frontier and dead_exit(state.block_key):
             dead_exits.append(state.block_key)
             continue
         runs = []
@@ -526,12 +538,30 @@ def _block_ends(normalized, observation) -> dict:
     return found
 
 
-def _edge_blocks(normalized, observation) -> frozenset:
-    """Keys of the outcome edge blocks of the function's block graph (G-T G1)."""
-    from .pcode_blocks import build_pcode_block_graph
+class _Edge:
+    """An outcome edge block and its conditional-tail site key (G-T G3a)."""
+
+    __slots__ = ("block", "site")
+
+    def __init__(self, block, site):
+        self.block, self.site = block, site
+
+
+def _edge_blocks(normalized, observation) -> dict:
+    """Outcome edge block key -> ``_Edge`` for the function's block graph
+    (G-T G1; the site key since G3a)."""
+    from .pcode_blocks import build_pcode_block_graph, edge_site
 
     graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
-    return frozenset(block.key for block in graph.blocks if block.edge is not None)
+    return {block.key: _Edge(block, edge_site(block)) for block in graph.blocks if block.edge is not None}
+
+
+def _edge_kind(edge, proven_effects, dead_exit) -> str:
+    """``pcode_blocks.edge_exit_kind`` of one edge block for this summary:
+    reached unless the dead region leaves it unreached (G1 ``dead_exit``)."""
+    from .pcode_blocks import edge_exit_kind
+
+    return edge_exit_kind(edge.block, reached=not dead_exit(edge.block.key), effect=proven_effects.get(edge.site))
 
 
 def _fault_outcomes(normalized, observation, fault_blocks, fault_states) -> tuple:
@@ -634,6 +664,9 @@ def _tail_exits(normalized, observation, noreturn_jumps=frozenset()) -> tuple[st
     from .pcode_blocks import build_pcode_block_graph, terminator
 
     composed = {key for key, effect in normalized.proven_call_effects if effect.tail_stack}
+    # (G-T G3a) a conditional tail whose composed target never returns: a dead edge
+    dead_tails = {key for key, effect in normalized.proven_call_effects
+                  if key.endswith(":CBRANCH") and getattr(effect, "noreturn", False)}
     graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
     instructions = {row.address: row for row in observation.instructions}
     # (S1, docs 25.100) a row whose fallthrough is a listed exit -- leaving the
@@ -651,7 +684,7 @@ def _tail_exits(normalized, observation, noreturn_jumps=frozenset()) -> tuple[st
             # function: dead under a noreturn jump (the edge was its only way
             # out), composed with the target's summary (G3), else unknown
             key = _operation_key(block.instruction, block.edge.ordinal, "CBRANCH")
-            if key not in noreturn_jumps and key not in composed:
+            if key not in noreturn_jumps and key not in composed and key not in dead_tails:
                 found.append(block.key)
             continue
         if block.instruction in exit_rows:
@@ -685,8 +718,16 @@ def _composed_tail_deltas(normalized, observation) -> dict:
         return {}
     graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
     instructions = {row.address: row for row in observation.instructions}
+    from .pcode_blocks import edge_site
+
     found = {}
     for block in graph.blocks:
+        if block.edge is not None:
+            # (G-T G3a) a composed conditional tail: its edge block's delta
+            effect = composed.get(edge_site(block))
+            if effect is not None:
+                found[block.key] = {(span.start, span.size): effect.tail_stack_delta for span in effect.tail_stack}
+            continue
         end = terminator(block, instructions[block.instruction])
         if not block.exits or end is None:
             continue
@@ -1246,8 +1287,10 @@ def _dead_region(normalized, observation, dead_ops):
     from .call_seeds import _operation_key
     from .pcode_blocks import build_pcode_block_graph, instruction_key
 
+    # (G-T G3a) a noreturn conditional tail is a dead edge (its edge block),
+    # never a cut of its source block and live fallthrough
     cuts = set(dead_ops) | {key for key, effect in normalized.proven_call_effects
-                            if getattr(effect, "noreturn", False)}
+                            if getattr(effect, "noreturn", False) and not key.endswith(":CBRANCH")}
     if not cuts:
         return frozenset(), lambda block_key: False
     graph = build_pcode_block_graph(observation, normalized.scopes.function.entry)
@@ -1702,8 +1745,12 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
             key = effect.operation_key
             if key.split("~", 1)[0] in dead_keys:
                 continue  # never executed on a path to an exit (``_dead_region``)
-            if key in exemptions.calls or key in tails:
+            if key in exemptions.calls or (key in tails and not key.endswith(":CBRANCH")):
                 calls.append((block_key, position, key))
+            elif key.endswith("~edge") and key[:-5] in tails:
+                # (G-T G3a) a conditional tail crosses in its edge block, after
+                # its staged rows -- labelled by the canonical site
+                calls.append((block_key, position, key[:-5]))
             for index, evidence in enumerate(effect.writes):
                 if type(evidence) is ResolvedStorage:
                     span = evidence.span

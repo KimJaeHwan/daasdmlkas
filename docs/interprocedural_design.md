@@ -6575,3 +6575,34 @@ Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나�
   Core를 다시 내보내면 내부 썽크가 남아 Bundle 다이제스트와 항목이 달라질 수 있다 -- 그때는 템플릿 차이가 엔진이 아니라
   입력 Bundle 때문이다(G3에서 다시 내보내기).
 - 다음(G3): 조건 꼬리 호출을 간선 블록에서 대상 요약과 합성(memset의 `jae`).
+
+### 25.103 조건 꼬리 점프를 간선 블록에서 합성 (G-T G3a, 2026-11-18)
+
+설계 `.census6/design_gt_r7.md` 2절 + `design_gt_r8.md`(A-D, F-H, J) + `design_gt_r9.md`(E, I, K, 핀, 최종 고침)
+(Astra r7 REJECT -> r8 REJECT -> r9 APPROVE; Fable r7-r9 APPROVE WITH FIXES).
+- 원인: memset(ntdll)의 `jae 0x180167ac0`(별도 Bundle 함수) 같은 조건 꼬리 점프는 G1에서 간선 블록 `E`가 되었지만
+  합성되지 않아 미지 출구였다 -> memset 요약에 `tail_exits` -> 호출 224곳이 불투명.
+- 받아들임: `E`가 있는(G1 적격) CBRANCH이고 대상이 Bundle 함수 시작(또는 잘라낸 모델 함수)이면 호출 자리
+  (`_tail_jumps`, `_direct_calls`, `_is_tail`). 효과는 BRANCH 꼬리와 같이 만든다(`tail=True`).
+- 놓기: 합성 행(`s~ld`, `s~in`, `s~0` ...)은 `S`가 아니라 `E`에, CBRANCH 뒤에, 마지막에 접근 없는 건너감 행
+  `s~edge`. 날 CBRANCH는 그냥 분기다. 건너감은 요약(`_exit_crossings`)에서만 `s~edge` 위치에 적용된다(BRANCH 꼬리처럼
+  clobber 엔진의 `calls`에는 들어가지 않는다 -- `~` 행은 절대 호출 경계가 아니다).
+- 출구 종류(`pcode_blocks.edge_exit_kind`): 도달 안 함 -> DEAD, 대상이 돌아오지 않음 -> DEAD(Bundle에서 나온 죽은
+  간선은 `dead_exits`에, 옛 수입 잘림은 아님), `tail_stack`이 있으면 COMPOSED(`E`에 출구 상태, 레지스터 변화가 `E`를
+  거쳐 감), 그 밖(싱크만, 거절) -> ESCAPE(꼬리 출구로 남음). 돌아오지 않는 조건 꼬리는 `S`를 자르지 않는다
+  (`_dead_region`에서 제외 -- 다음 줄 경로는 산다), `_unplaced_noreturn`은 {대상, 다음 줄}을 둔다.
+- 제어 의존: `E`의 행은 CBRANCH 결정에도 의존한다(한 번만, 루프에서 이미 있으면 다시 넣지 않음); 표시된 행
+  `(s, S, E, E)`는 `E`가 `S`를 후지배할 때(루프의 유일한 출구)에도 넣는다. 오류 참조의 가드는 `E`에서 찾는다.
+- SP 증명: `E`의 들어오는 값(= `S`의 나가는 값, 같은 명령의 조정 포함)에 대상의 변화량; 검증기는 CBRANCH 꼬리 사실을
+  그 하나의 간선 출구에 묶는다(`PROOF_VERSION` 3).
+- 통합: `E`의 행은 모든 날 연산 뒤의 위치를 받는다(따로 둔 지도; `operations`는 날 연산만) -- `E`의 덮어쓰기가
+  보인다; 상태 장벽은 그 행을 `E`에 둔다. `stack_values_out`은 합성된 `E`에 닿는 스택 유래 레지스터를 센다.
+- 알려진 손실(게이트에서 센다): 탈출은 G3a에서 날 자리 `s`(`S`)에 둔다(모든 호출처럼) -> 다음 줄 경로도 탈출 뒤
+  (합성 / 싱크만 / 죽은 자리 모두); 물리 메모리 기록은 메모리를 쓰는 합성 행이 있으면 함수 전체가 거절(BRANCH 꼬리와
+  같음); 일반 기록은 자리 단위로 자른다(`conditional-tail`); 물리 호출 문맥은 조건 꼬리가 있는 피호출자를 거절.
+  G3b가 탈출 옮기기, MemoryIndex 경계, 꼬리 규칙 하나로 묶기를 맡는다.
+- `ENGINE_SEMANTICS_VERSION` 50 -> 51, UE 템플릿 다시 유도(항목 같음).
+- 고정 테스트 `tests/intra/test_gt_conditional_tails.py`(13): 놓기, 두 결과 오라클, memset 모양, 유일 출구, 돌아오지 않는
+  대상, SP 증명(같은 명령 조정), `stack_values_out`, 가드 행(두 모양), `~` 행이 호출 경계가 아님, 다음 줄이 건너지
+  않음, 통합 순서 / 장벽. 돌연변이 4개(행을 `S`에, 건너감을 날 자리에, 돌아오지 않음이 `S`를 자름, 가드 행 없음)는
+  각각 실패한다.

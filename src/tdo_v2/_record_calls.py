@@ -291,6 +291,11 @@ def _context(builder, base, identity, *, done=None, shared=None):
         raise _StitchCut("physical call projection unavailable")
     if type(done.normalized).__name__ != "NormalizedFunction" or done.summary is None:
         raise _StitchCut("physical call body unavailable")
+    if any(key.endswith(":CBRANCH") for key in done.proven):
+        # (G-T G3a, design r9 final fixes) the callee's returns / exits phi
+        # below come from RETURN blocks only: a composed conditional tail's
+        # edge exit would be left out
+        raise _StitchCut("physical callee has a conditional tail")
     effect = builder.proven.get(base)
     if effect is None:
         raise _StitchCut("physical call effect unavailable")

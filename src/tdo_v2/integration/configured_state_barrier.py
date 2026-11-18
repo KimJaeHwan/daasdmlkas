@@ -49,6 +49,19 @@ class _BarrierFacts:
                           for other in view.instruction_operation_keys.get(key, ())} - {None}
                 block = next(iter(blocks)) if len(blocks) == 1 else None
             self.place[key] = None if block is None else (block, position)
+        # (G-T G3a, design r9 K) a conditional tail's rows run in its outcome
+        # edge block: anchored there (their own place), never at the raw
+        # CBRANCH whose fallthrough they do not run on
+        edge_positions = getattr(view, "edge_positions", {})
+        for key, position in edge_positions.items():
+            block = view.operation_blocks.get(key)
+            self.place[key] = None if block is None else (block, position)
+
+        def anchor_of(key):
+            if key in edge_positions:
+                return key
+            raw = _raw_key(key)
+            return raw if raw in view.operations else None
         # the calls that may change state, and what each leaves unchanged: the
         # exemption contract the reads' call-clobber rows used (a call with an
         # assumed effect is its rows; a callee's proven bytes; the stack
@@ -71,16 +84,13 @@ class _BarrierFacts:
         for definition_id, definition in enumerate(view.memory.definitions):
             if definition.kind not in _WRITES:
                 continue
-            anchor = _raw_key(definition.operation_key)
             spans = view.definition_access_spans(definition) or (definition.span,)
-            rows.append((definition_id, spans, anchor if anchor in view.operations else None))
+            rows.append((definition_id, spans, anchor_of(definition.operation_key)))
         for item in view.memory.unresolved_writes:
             key = view.memory.actions[item.action_id].operation_key
-            anchor = _raw_key(key)
-            rows.append((None, None, anchor if anchor in view.operations else None))
+            rows.append((None, None, anchor_of(key)))
         for key, _ in getattr(view.normalized, "uncertain_writers", ()):
-            anchor = _raw_key(key) if type(key) is str else None
-            rows.append((None, None, anchor if anchor in view.operations else None))
+            rows.append((None, None, anchor_of(key) if type(key) is str else None))
         self.writes = tuple(rows)
         # an indirect branch whose targets Ghidra did not resolve leaves the
         # successor graph incomplete: no path claim is a proof

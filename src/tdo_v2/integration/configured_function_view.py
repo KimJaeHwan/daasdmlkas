@@ -145,6 +145,19 @@ class _FunctionView(
                     )
                     target[key] = span
                 position += 1
+        # (G-T G3a, design r8 A) the actions of an outcome edge block (a
+        # conditional tail's staged rows and crossing) have no raw operation:
+        # they get positions after every raw one, in their memory-unit order
+        # (the block has no successor), so a staged write there is ordered
+        # like any later write; ``operations`` keeps raw operations only
+        self.edge_positions: dict[str, int] = {}
+        for block in analysis.normalized.memory_unit.blocks:
+            if ">" not in block.key:
+                continue
+            for action in block.actions:
+                if action.operation_key not in self.operations:
+                    self.edge_positions[action.operation_key] = position
+                    position += 1
         self.action_ids = {
             action.operation_key: action_id
             for action_id, action in enumerate(self.memory.actions)
@@ -215,7 +228,7 @@ class _FunctionView(
 
     def position(self, operation_key: str) -> int | None:
         row = self.operations.get(operation_key)
-        return None if row is None else row[0]
+        return self.edge_positions.get(operation_key) if row is None else row[0]
 
     def operation(self, operation_key: str) -> ValidatedOperation | None:
         row = self.operations.get(operation_key)

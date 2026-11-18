@@ -25,7 +25,7 @@ from .span_geometry import ByteSpan, StorageObjectKind
 from .storage import _resolve_validated_storage
 
 
-PROOF_VERSION = 2   # 2: AArch64 link calls (kind "link-call", delta 0)
+PROOF_VERSION = 3   # 2: AArch64 link calls (kind "link-call", delta 0); 3: conditional tails (G-T G3a)
 _EXPLICIT = frozenset({"COPY", "LOAD", "STORE", "INT_ADD", "INT_SUB", "INT_MULT", "INT_DIV", "INT_REM",
     "INT_SDIV", "INT_SREM", "INT_AND", "INT_OR", "INT_XOR", "INT_NEGATE", "INT_2COMP", "INT_LEFT",
     "INT_RIGHT", "INT_SRIGHT", "INT_ZEXT", "INT_SEXT", "INT_EQUAL", "INT_NOTEQUAL", "INT_LESS",
@@ -238,9 +238,26 @@ def derive_register_delta_proof(unit, register_span, proven_call_effects, intrin
                     return None
                 adjustment = constant.coordinate.byte_offset * (1 if opcode == "INT_ADD" else -1)
                 delta = signed(delta + adjustment)
-        if block.exits:
-            if block.successors or not block.stop or block.edge is not None:
-                return None   # (G-T G1) an uncomposed outcome edge block: unknown, as its source was
+        if block.edge is not None:
+            # (G-T G3a, docs 25.103) an outcome edge block exits through its
+            # conditional tail: composed with the target's delta from E's
+            # incoming value (S's outgoing, after S's own adjustments), with
+            # the tail guards; an uncomposed one is unknown, as its source was
+            site = f"{block.instruction.space_id:x}:{block.instruction.byte_offset:x}:{block.edge.ordinal}:CBRANCH"
+            target = block.edge.target
+            callee = f"{target.space_id:x}:{target.byte_offset:x}"
+            effect = calls.get(site)
+            if block.successors or type(effect) is not ProvenCallEffect or effect.callee != callee \
+                    or type(effect.writer_conditions) is not tuple or effect.writer_conditions \
+                    or effect.noreturn is not False or effect.tail_stack != (register_span,) \
+                    or type(effect.tail_stack_delta) is not int:
+                return None
+            delta = signed(delta + effect.tail_stack_delta)
+            call_facts[site] = RegisterDeltaCallFact(site, callee, "tail", signed(effect.tail_stack_delta), None,
+                                                     _call_fingerprint(effect, register))
+        elif block.exits:
+            if block.successors or not block.stop:
+                return None
             last = instruction.operations[block.stop - 1].opcode
             if last not in ("RETURN", "BRANCH"):
                 return None
@@ -272,6 +289,14 @@ def verify_register_delta_proof(proof, unit, register_span, proven_call_effects,
     """Recompute against current admitted evidence; parsing a receipt is insufficient."""
     return type(proof) is RegisterDeltaProof and proof == derive_register_delta_proof(
         unit, register_span, proven_call_effects, intrinsic_refinements, assumed_call_effects=assumed_call_effects)
+
+
+def _edge_exit_of(site: str) -> str:
+    """The outcome edge block key of a conditional-tail site
+    ``space:offset:k:CBRANCH`` (``pcode_blocks.edge_key``): the one exit block
+    its fact may apply to (G-T G3a)."""
+    space, offset, ordinal, _ = site.split(":")
+    return f"{space}:{offset}>{ordinal}t"
 
 
 def validate_proof_record(record):
@@ -345,7 +370,9 @@ def validate_proof_record(record):
                                          or f.delta != record["register"][1]
                                          or not f.operation_key.endswith(":CALL")) for f in facts) \
             or any(f.kind == "link-call" and (f.delta != 0 or not f.operation_key.endswith(":CALL")) for f in facts) \
-            or any(f.kind == "tail" and not f.operation_key.endswith(":BRANCH") for f in facts) \
+            or any(f.kind == "tail" and not f.operation_key.endswith((":BRANCH", ":CBRANCH")) for f in facts) \
+            or any(f.kind == "tail" and f.operation_key.endswith(":CBRANCH")
+                   and _edge_exit_of(f.operation_key) not in record["exits"] for f in facts) \
             or any(key not in record["operation_keys"] or not key.endswith(":CALLOTHER")
                    for key, _ in (*intrinsics, *assumed)):
         return None

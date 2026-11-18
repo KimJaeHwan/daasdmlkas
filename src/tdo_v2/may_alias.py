@@ -979,7 +979,7 @@ def _register_space_id(observation) -> int | None:
 def _stack_taint(observation, register_space: int, offset: int, size: int,
                  assumed_calls=frozenset(), entry_key: str | None = None, observed_calls=None,
                  escaping_calls=frozenset(), returning: set | None = None, pops: list | None = None,
-                 frame=None, tainted_loads: set | None = None):
+                 frame=None, tainted_loads: set | None = None, tail_edges=frozenset()):
     """Forward over the p-code block graph (``pcode_blocks``), tracking which
     register and temporary bytes hold a stack-derived value at each point.
 
@@ -1093,6 +1093,10 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
     def transfer(block, state, escapes, switches):
         row = instructions[block.instruction]
         tainted, held = state
+        if returning is not None and escapes is not None and block.key in tail_edges                 and bool(tainted & ~stack_mask & register_mask):
+            # (G-T G3a) a composed conditional tail leaves through its edge
+            # block like a RETURN: a register holding a stack-derived value there
+            returning.add(block.key)
         for ordinal in range(block.start, block.stop):
             operation = row.operations[ordinal]
             touches = lambda varnode: varnode is not None and bool(mask_of(varnode) & tainted)
@@ -1254,8 +1258,13 @@ def stack_values_out(normalized, observation) -> bool:
         return True
     _, _, register_space, offset, size = found
     returning: set = set()
+    from .pcode_blocks import edge_key
+
+    tail_edges = frozenset(
+        edge_key(key.rsplit(":", 2)[0], int(key.split(":")[2]))
+        for key, effect in normalized.proven_call_effects if key.endswith(":CBRANCH") and effect.tail_stack)
     taint = _stack_taint(observation, register_space, offset, size, entry_key=stub.entry_block_key,
-                         returning=returning)
+                         returning=returning, tail_edges=tail_edges)
     return taint is None or bool(taint[2]) or bool(returning)
 
 

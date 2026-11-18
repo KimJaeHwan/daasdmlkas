@@ -168,6 +168,43 @@ def edge_origin(block: PcodeBlock) -> EdgeOrigin | None:
     return block.edge
 
 
+def edge_site(block: PcodeBlock) -> str | None:
+    """(G-T G3a) The conditional-tail site key ``space:offset:k:CBRANCH`` of
+    an outcome edge block (the CBRANCH whose taken outcome it is); None for a
+    real block."""
+    if block.edge is None:
+        return None
+    return f"{block.instruction.space_id:x}:{block.instruction.byte_offset:x}:{block.edge.ordinal}:CBRANCH"
+
+
+def conditional_tail_edges(graph: PcodeBlockGraph) -> dict:
+    """(G-T G3a) Conditional-tail site key -> its edge block key, for every
+    reachable outcome edge block of the graph (the graph keeps reachable
+    blocks only); empty for an unsupported graph."""
+    if graph.unsupported is not None:
+        return {}
+    return {edge_site(block): block.key for block in graph.blocks if block.edge is not None}
+
+
+EDGE_COMPOSED, EDGE_ESCAPE, EDGE_DEAD = "composed", "escape", "dead"
+
+
+def edge_exit_kind(block: PcodeBlock, *, reached: bool, effect) -> str:
+    """(G-T G3a, design r8 B) What an outcome edge block is for a summary:
+    DEAD when no path reaches it (behind a cut) or its site's effect never
+    returns; COMPOSED when the site's effect composes the tail (a non-empty
+    ``tail_stack``); else ESCAPE -- no effect, a sink-only or refused one: an
+    unknown continuation (a tail exit). ``effect``: the site's proven call
+    effect or None."""
+    if block.edge is None:
+        raise ValueError("not an edge block")
+    if not reached or (effect is not None and getattr(effect, "noreturn", False)):
+        return EDGE_DEAD
+    if effect is not None and effect.tail_stack:
+        return EDGE_COMPOSED
+    return EDGE_ESCAPE
+
+
 def outcome_of(graph: PcodeBlockGraph, source: str, successor: str, rows) -> str | None:
     """Direction of the edge ``source -> successor`` when ``source`` ends in a
     CBRANCH with an absolute target: "taken" or "fallthrough", from the graph's
@@ -457,6 +494,7 @@ def _landing_pads(row, local, entry) -> tuple:
     return tuple(target for target in row.flow_targets if target in local and target != entry)
 
 
-__all__ = ("EdgeOrigin", "PcodeBlock", "PcodeBlockGraph", "build_pcode_block_graph", "edge_key", "edge_origin",
-           "escaping_branch", "escaping_branches", "has_internal_flow", "instruction_key", "outcome_of",
+__all__ = ("EDGE_COMPOSED", "EDGE_DEAD", "EDGE_ESCAPE", "EdgeOrigin", "PcodeBlock", "PcodeBlockGraph",
+           "build_pcode_block_graph", "conditional_tail_edges", "edge_exit_kind", "edge_key", "edge_origin",
+           "edge_site", "escaping_branch", "escaping_branches", "has_internal_flow", "instruction_key", "outcome_of",
            "terminator")

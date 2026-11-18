@@ -143,6 +143,15 @@ def labelled_control_dependences(observation, entry) -> tuple:
                 step()
                 rows.add((decision, key, label, node))
                 node = immediate[node]
+    # (G-T G3a, design r9 G) an outcome edge block runs on its CBRANCH's taken
+    # outcome only: its labelled row is kept even when the block postdominates
+    # its source (the sole way out of a loop), where the walk above stops
+    for block in graph.blocks:
+        if block.edge is not None and block.edge.source in blocks:
+            source = blocks[block.edge.source]
+            row = instructions[source.instruction]
+            decision = _operation_key(row.address, block.edge.ordinal, "CBRANCH")
+            rows.add((decision, source.key, block.key, block.key))
     return tuple(sorted(rows))
 
 

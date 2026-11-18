@@ -463,6 +463,12 @@ def _with_fault_references(results) -> dict:
                                 if f"{row.address.space_id:x}:{row.address.byte_offset:x}" == f"{space}:{offset}"),
                                None)
                 block = None if address is None else graph.block_of(address, int(ordinal.split("~")[0]))
+                if call.endswith(":CBRANCH"):
+                    # (G-T G3a) a conditional tail runs in its outcome edge block
+                    from .pcode_blocks import conditional_tail_edges
+
+                    edge = conditional_tail_edges(graph).get(call)
+                    block = None if edge is None else next(item for item in graph.blocks if item.key == edge)
                 if block is None and address is not None:
                     # (S1) a row without p-code (a fallthrough exit's padding row)
                     block = next((item for item in graph.blocks if item.instruction == address
@@ -917,8 +923,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             from .function_summary import FUNCTION_SUMMARY_VERSION, ExitSummary, SummaryKind, SummaryRun
 
             register_object, _, _, shapes = site(key)
-            if register_object is None:
-                return None
+            if register_object is None or call_key.endswith(":CBRANCH"):
+                return None   # (G-T G3a) never at a conditional tail: it would act in S
 
             def span(row):
                 return ByteSpan(register_object, row.byte_offset, row.byte_size)
@@ -2141,6 +2147,10 @@ def _unplaced_noreturn(unit, proven) -> list:
             kept.add(operation.inputs[0].coordinate)  # its own destination (an indirect one names a slot)
         if opcode in ("CALL", "CALLIND"):
             kept.add(row.fallthrough)  # the edge a call that never returns cuts
+        if opcode == "CBRANCH" and operation.inputs and operation.inputs[0].kind is VarnodeKindCode.ADDRESS:
+            # (G-T G3a) a conditional tail's dead edge cuts its taken outcome
+            # only (its edge block); the fallthrough stays live
+            kept.update((operation.inputs[0].coordinate, row.fallthrough))
         observed = set(row.flow_targets) | set(
             control_successor_coordinates(row, local_addresses=local, function_entry=entry))
         if observed - kept:
@@ -2494,9 +2504,10 @@ def _without_disabled_windows(effect, disabled):
 
 
 def _is_tail(call_key: str) -> bool:
-    """A tail jump site: ``BRANCH`` to a function, or ``BRANCHIND`` through an
-    import slot (``_external_sites``)."""
-    return call_key.endswith(":BRANCH") or call_key.endswith(":BRANCHIND")
+    """A tail jump site: ``BRANCH`` to a function, ``BRANCHIND`` through an
+    import slot (``_external_sites``), or (G-T G3a) a conditional tail -- a
+    CBRANCH key reaches a call map only through ``_tail_jumps``."""
+    return call_key.endswith((":BRANCH", ":BRANCHIND", ":CBRANCH"))
 
 
 def _link_call_shapes(unit) -> dict:
@@ -2670,7 +2681,9 @@ def function_key_of(space_id: int, byte_offset: int) -> str:
 
 def _direct_calls(unit, functions) -> dict[str, str]:
     """Operation key -> callee key for every direct CALL to a function of
-    ``functions`` and every unconditional tail jump to one (``_tail_jumps``)."""
+    ``functions`` and every tail jump to one (``_tail_jumps``: unconditional
+    BRANCH tails and, G-T G3a, conditional tails -- the CBRANCH of an edge
+    block)."""
     found = {}
     observation = unit.observation
     if observation is None:
@@ -2678,7 +2691,7 @@ def _direct_calls(unit, functions) -> dict[str, str]:
     tails = None
     for instruction in observation.instructions:
         for ordinal, operation in enumerate(instruction.operations):
-            if operation.opcode not in ("CALL", "BRANCH") or not operation.inputs:
+            if operation.opcode not in ("CALL", "BRANCH", "CBRANCH") or not operation.inputs:
                 continue
             target = operation.inputs[0]
             if target.kind is not VarnodeKindCode.ADDRESS:
@@ -2687,7 +2700,7 @@ def _direct_calls(unit, functions) -> dict[str, str]:
             if callee not in functions:
                 continue
             key = _operation_key(instruction.address, ordinal, operation.opcode)
-            if operation.opcode == "BRANCH":
+            if operation.opcode != "CALL":
                 if tails is None:
                     tails = _tail_jumps(unit)
                 if key not in tails:
@@ -2706,8 +2719,14 @@ def _tail_jumps(unit) -> frozenset:
     override (as ``pcode_blocks.escaping_branches`` refuses it) and no
     observed flow target but that one. (``_direct_calls`` also requires the
     target to be a Bundle function's entry.) A graph the p-code block
-    builder refuses gives none."""
-    from .pcode_blocks import build_pcode_block_graph, terminator
+    builder refuses gives none.
+
+    (G-T G3a, docs 25.103) Also the CBRANCH of every reachable outcome edge
+    block (G1 eligibility: the last operation of an instruction without
+    internal flow or flow override, a local fallthrough, no S1 evidence,
+    observed flow agreeing): a conditional tail, composed on its edge
+    block only (``pcode_blocks.conditional_tail_edges``)."""
+    from .pcode_blocks import build_pcode_block_graph, conditional_tail_edges, terminator
 
     observation = unit.observation
     graph = build_pcode_block_graph(observation, unit.scopes.function.entry)
@@ -2730,6 +2749,7 @@ def _tail_jumps(unit) -> frozenset:
                 or any(item != target.coordinate for item in row.flow_targets):
             continue
         found.add(_operation_key(row.address, end[0], "BRANCH"))
+    found.update(conditional_tail_edges(graph))
     return frozenset(found)
 
 

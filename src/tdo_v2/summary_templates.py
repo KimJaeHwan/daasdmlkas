@@ -150,7 +150,10 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # edge block (tail exits keyed by it); (G-T G2) unconditional tail jumps are
 # taken by code facts, not Ghidra's is_terminal flag -- a thunk's jmp composes
 # its target, a jump the observation disagrees with stays an unknown exit.
-ENGINE_SEMANTICS_VERSION = 50
+# 51: (G-T G3a) a conditional tail jump to a Bundle function (or cut model)
+# is composed on its outcome edge block only: an exit state there, register
+# deltas through it, a dead edge when the target never returns.
+ENGINE_SEMANTICS_VERSION = 51
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

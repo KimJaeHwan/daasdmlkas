@@ -26,7 +26,7 @@ from ._scope_contracts import VarnodeKindCode
 
 RAM = "ram"
 WILD = "wild"
-_CALL_OPCODES = frozenset({"CALL", "CALLIND", "BRANCH", "BRANCHIND"})
+_CALL_OPCODES = frozenset({"CALL", "CALLIND", "BRANCH", "BRANCHIND", "CBRANCH"})   # CBRANCH: a conditional tail (G-T G3a)
 
 
 def memory_space_ids(scopes) -> frozenset:

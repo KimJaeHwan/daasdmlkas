@@ -25,7 +25,7 @@ from .control_dependence import (
     ControlDependence,
     derive_control_dependences,
 )
-from .pcode_blocks import build_pcode_block_graph
+from .pcode_blocks import build_pcode_block_graph, conditional_tail_edges
 from .rep_strings import MAX_REP_BYTES, rep_sites
 from .may_alias import (
     ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME, EscapeMemo, MayAliasRead,
@@ -1026,7 +1026,7 @@ _CALL_EFFECT_LABELS = {
     "": "CALL_EFFECT", "in": "CALL_EFFECT_INPUT", "ld": "CALL_EFFECT_LOAD", "sink": "CALL_EFFECT_SINK",
     "ck": "CALL_EFFECT_CHECK", "cr": "CALL_EFFECT_CHECK", "cw": "CALL_EFFECT_CHECK", "sp": "CALL_EFFECT_CHECK",
     "ext": "CALL_EFFECT_CHECK", "u": "CALL_EFFECT", "iu": "CALL_EFFECT_INPUT", "sr": "CALL_EFFECT_CHECK",
-    "push": "CALL_EFFECT", "ov": "CALL_EFFECT",
+    "push": "CALL_EFFECT", "ov": "CALL_EFFECT", "edge": "CALL_EFFECT_CROSSING",
 }
 
 
@@ -1871,6 +1871,12 @@ class _ScopedNormalizer:
                 for block in block_graph.blocks
                 for ordinal in range(block.start, block.stop)
             }
+            # (G-T G3a, docs 25.103) a conditional tail's staged rows run in its
+            # outcome edge block only, after the CBRANCH, then its crossing row
+            tail_edges = conditional_tail_edges(block_graph)
+            for key in proven_call_effects:
+                if key.endswith(":CBRANCH") and key not in tail_edges:
+                    raise AssertionError(f"conditional tail {key} has no edge block in the normalization graph")
             once_keys = single_execution_keys(observation, block_graph, frozenset(sites), control=_once_control)
             once_blocks = single_execution_blocks(observation, block_graph, frozenset(sites), control=_once_control)
             accessor_states = _accessor_states(observation, block_graph, _coordinate_key(function.entry),
@@ -1952,13 +1958,17 @@ class _ScopedNormalizer:
                             f"op:{push.operation_key}", NodeKind.OPERATION, _CALL_EFFECT_LABELS["push"]))
                         effects.append(push)
                         anchored_call_accesses[push.operation_key] = anchored
+                    edge_rows = []
                     if block_key is not None and operation_key in proven_call_effects:
                         from .function_summary import _pointer_size
                         # the callee's proven effects, placed just before the CALL so
                         # their writes survive it (the call preserves them, see
-                        # call_clobber); every run reads the values at the call
+                        # call_clobber); every run reads the values at the call --
+                        # a conditional tail's in its edge block, after the CBRANCH
+                        edge_block = tail_edges.get(operation_key)
                         rows, anchored = _proven_call_rows(
-                            operation_key, proven_call_effects[operation_key], block_key,
+                            operation_key, proven_call_effects[operation_key],
+                            block_key if edge_block is None else edge_block,
                             function.scope, _register_space_id(observation) or _program_register_space(unit),
                             call_transitions, staged_temporaries, context,
                             _call_stack_span(operation_key, proven_call_effects[operation_key],
@@ -1967,15 +1977,19 @@ class _ScopedNormalizer:
                             opaque_rows=_opaque_rows,
                             pointer_width=_pointer_size(unit),
                         )
+                        if edge_block is not None:
+                            rows = [*rows, ObservedEffect(f"{operation_key}~edge", EffectKind.BRANCH,
+                                                          block_key=edge_block)]
                         for row in rows:
                             operation_nodes[row.operation_key] = dependencies.add_node(NodeRecord(
                                 f"op:{row.operation_key}", NodeKind.OPERATION,
                                 _CALL_EFFECT_LABELS[row.operation_key.rsplit("~", 1)[1].rstrip("0123456789")],
                             ))
-                            effects.append(row)
+                            (effects if edge_block is None else edge_rows).append(row)
                         anchored_call_accesses.update(anchored)
                     if block_key is not None:
                         effects.append(effect)  # operations in unreachable sub-blocks never run
+                    effects.extend(edge_rows)
                     site = sites.get(instruction.address)
                     if block_key is not None and site is not None and operation_key == site.store_key \
                             and instruction.address in rep_plan:
@@ -2458,13 +2472,24 @@ class _ScopedNormalizer:
             base, separator, _ = key.partition("~")
             if separator:
                 rows_of.setdefault(base, []).append(key)
+        added = set()
         for row in control_dependences:
             for dependent in (row.dependent, *rows_of.get(row.dependent, ())):
+                added.add((row.decision, dependent))
                 dependencies.add_edge(
                     operation_nodes[row.decision],
                     operation_nodes[dependent],
                     EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=row.decision),
                 )
+        # (G-T G3a, docs 25.103) a conditional tail's rows run on its taken
+        # outcome only: they also depend on the CBRANCH decision itself (once:
+        # in a loop the decision may already govern itself, the rows inherit it)
+        for site in sorted(tail_edges):
+            for dependent in rows_of.get(site, ()):
+                if (site, dependent) not in added and site in operation_nodes:
+                    added.add((site, dependent))
+                    dependencies.add_edge(operation_nodes[site], operation_nodes[dependent],
+                                          EdgeRecord(CONTROL_DEPENDENCE_EDGE, operation=site))
         limit("graph_nodes", dependencies.node_count)
         limit("graph_edges", dependencies.edge_count)
         limit("memory_definitions", len(memory_ssa.definitions) if memory_ssa is not None else 0)
