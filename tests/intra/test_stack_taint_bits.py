@@ -148,16 +148,19 @@ def compared(monkeypatch):
     def both(*args, returning=None, pops=None, frame=None, tainted_loads=None, **kwargs):
         # (the sets oracle has no held frame slots, docs 25.78: it is compared
         # with the bits run without ``frame``; the caller gets the real run)
+        # (G-T G3a: the sets oracle has no composed-edge rule either -- it is
+        # compared without ``tail_edges``; the caller gets the real run)
+        tail_edges = kwargs.pop("tail_edges", frozenset())
         old_returning, new_returning = set(), set()
         old_pops, new_pops = [0], [0]
         expected = _old_stack_taint(*args, returning=old_returning, pops=old_pops, **kwargs)
         found = new(*args, returning=new_returning, pops=new_pops, **kwargs)
         assert found == expected
         assert new_returning == old_returning and new_pops == old_pops
-        if frame is not None:
+        if frame is not None or tail_edges:
             new_returning, new_pops = set(), [0]
             found = new(*args, returning=new_returning, pops=new_pops, frame=frame, tainted_loads=tainted_loads,
-                        **kwargs)
+                        tail_edges=tail_edges, **kwargs)
         calls.append(new_pops[0])
         if returning is not None:
             returning |= new_returning
