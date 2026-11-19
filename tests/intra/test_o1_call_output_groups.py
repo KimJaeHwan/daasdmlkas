@@ -351,16 +351,28 @@ def test_the_stable_key_separates_enum_types_and_value_payloads():
 # -- review r2 pins (Astra P2: identities by row content, more shapes) -------------------
 
 
-def _row_content(item):
-    """Staged / raw operation key -> what its row writes: sorted (object kind,
-    start, size) of resolved writes, plus ("unresolved", size) for a memory
-    write with an unknown address -- a label-free identity of the row."""
+def _row_content(item, space_keys=True):
+    """Staged / raw operation key -> what its row writes and reads: sorted
+    (object kind, space key, start, size) of resolved accesses (temporaries by
+    size only), plus the unresolved memory accesses -- a label-free identity of
+    the row. ``space_keys`` False: relative objects' space keys left out (they
+    carry the function scope digest -- a named limitation, docs 25.105)."""
     found = {}
     for effect in item.normalized.effects:
-        writes = [(evidence.span.object_id.kind.value, evidence.span.start, evidence.span.size)
-                  for evidence in effect.writes if type(evidence) is ResolvedStorage]
-        if effect.memory_write is not None:
-            writes.append(("unresolved", effect.memory_write.size))
+        writes = []
+        for field, evidences in (("w", effect.writes), ("r", effect.reads)):
+            for evidence in evidences:
+                if type(evidence) is not ResolvedStorage:
+                    continue
+                span = evidence.span
+                if span.object_id.kind is StorageObjectKind.FUNCTION_UNIQUE:
+                    writes.append((field, "unique", span.size))   # (a temporary: its offset is a name)
+                else:
+                    writes.append((field, span.object_id.kind.value, span.object_id.space_key if space_keys else None,
+                                   span.start, span.size))
+        for field, access in (("mw", effect.memory_write), ("mr", effect.memory_read)):
+            if access is not None:
+                writes.append((field, "unresolved", access.size))
         found[effect.operation_key] = tuple(sorted(writes, key=repr))
     return found
 
@@ -377,16 +389,16 @@ def _identity(label, content):
     return prefix + output_call(label) + "~" + repr(content.get(label))
 
 
-def _load_identities(item, units, index=-2):
+def _load_identities(item, units, index=-2, space_keys=True):
     row = units[0].observation.instructions[index]
     site = f"{row.address.space_id:x}:{row.address.byte_offset:x}:"
-    content = _row_content(item)
+    content = _row_content(item, space_keys)
     return sorted(_identity(writer, content) for read in item.normalized.may_alias_reads
                   if read.operation_key.startswith(site) for writer in read.writers)
 
 
-def _exit_identities(item):
-    content = _row_content(item)
+def _exit_identities(item, space_keys=True):
+    content = _row_content(item, space_keys)
     return sorted((exit_.block_key, run.span.object_id.kind.value, run.span.start, run.span.size,
                    tuple(sorted(_identity(label, content) for label in getattr(run, "crossed", ()))))
                   for exit_ in item.summary.exits for run in exit_.runs
@@ -459,7 +471,8 @@ def test_the_callers_results_are_digest_independent_with_overlap_rows():
         units = program_units(_overlap_caller(), _overlapping_callee(), registers=registers)
         item = analyze_units(units, assume_entry_values_not_frame=False)[function_key_of(1, CODE_BASE)]
         assert any(key.endswith(("~ov0",)) for key in _row_content(item)), sorted(_row_content(item))
-        found.append((_load_identities(item, units), _exit_identities(item), units[0].scopes.program.scope))
+        found.append((_load_identities(item, units, space_keys=False), _exit_identities(item, space_keys=False),
+                      units[0].scopes.program.scope))
     assert found[0][2] != found[1][2]
     assert found[0][:2] == found[1][:2]
 
