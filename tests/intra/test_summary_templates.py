@@ -419,16 +419,16 @@ def test_a_template_file_records_the_call_fallthrough_contract(tmp_path):
 
     shipped = Path(__file__).resolve().parents[2] / "models" / "derived" / "ue_core_win64_fstring.json"
     raw = json.loads(shipped.read_text(encoding="utf-8"))
-    assert raw["source"].get("call_fallthrough") == "isa"
-    for value in ("isa", "mixed", None, "yes"):
+    absent = object()
+    for number, value in enumerate(("isa", "mixed", absent, "yes", None, 1, ["isa"])):
         data = json.loads(json.dumps(raw))
-        if value is None:
-            data["source"].pop("call_fallthrough")
+        if value is absent:
+            data["source"].pop("call_fallthrough", None)
         else:
             data["source"]["call_fallthrough"] = value
-        path = tmp_path / f"t_{value}.json"
+        path = tmp_path / f"t_{number}.json"
         path.write_text(json.dumps(data), encoding="utf-8")
-        if value == "yes":
+        if value not in ("isa", "mixed") and value is not absent:
             with pytest.raises(ModelError, match="call_fallthrough"):
                 load_model_file(path)
         else:

@@ -6716,12 +6716,25 @@ G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 �
 exporter(내부 썽크 유지, S1 호출 다음 줄 계약)로 다시 내보냈다: generation `0ad2baf7...`(이전 `8d181999...`; 같은
 5 진입점, 로컬 전용, 공개하지 않음). 이 Bundle에서 semantics 53으로 다시 만든 템플릿 v40을 배포 템플릿으로 바꾼다.
 
-- 의미 비교: 세 항목(FString 생성자 / 소멸자 / AppendChar) 모두 객체 번호, 실행 목록 순서, 실행의 `sources` 순서를
-  빼면 같다. O-1 전에 보였던 AppendChar 쓰기 조건 차이(477 -> 460)는 O-1로 사라졌다(25.105).
-- 남은 차이(순서만, 의미 없음): 템플릿 객체 번호와 실행 순서, AppendChar 실행 6개의 `sources` 순서
-  (`function_summary`가 `sources`를 `ByteSpan.canonical_key`로 정렬하고 그 키에 스코프 다이제스트가 있다 -- 바이트가
-  바뀐 Bundle에서 상대 객체 둘의 순서가 바뀜). `sources`는 집합이라 결과에 쓰이지 않는다. 이름 붙은 한계: 템플릿의
-  글자 그대로의 순서는 Bundle 바이트에 따라 바뀔 수 있다(다이제스트 없는 템플릿 순서는 따로 단계).
-- 머리말: `source.producer.bundle`이 새 generation, `source.call_fallthrough: isa`가 기록됨(S1 계약이 있는 Bundle).
+- 의미 비교(`.census6/cob/g3b0_bijection.py`, 결과 `.census6/g3b0_bijection.txt`): 항목마다 객체 번호의 모든 일대일
+  대응을 찾아 비교(실행 / `writer_objects` 목록은 정렬, 중복 개수 유지, 다른 칸은 모두 그대로). 생성자 / 소멸자: 대응
+  하나(`0->1, 1->0, 2->2`)로 글자까지 같다. AppendChar: 대응 하나(`0->0, 1->4, 2->2, 3->1, 4->3, 5->5`)로, 정확히 실행
+  6개의 `sources` 순서만 다르다(조건, 독립 증명, 제어, 내부 호출 등 다른 칸은 같다). O-1 전에 보였던 AppendChar 쓰기
+  조건 차이(477 -> 460)는 O-1로 사라졌다(25.105).
+- 원인: `function_summary`가 `sources`를 `ByteSpan.canonical_key`로 정렬하고 그 키에 스코프 다이제스트가 있다 -- 바이트가
+  바뀐 Bundle에서 상대 객체 둘의 순서가 바뀐다. `sources`의 **순서**는 결과에 쓰이지 않는다: 템플릿 불러오기
+  (`summary_templates.instantiate`)는 파일 순서를 그대로 두지만 의미를 쓰는 곳은 순서와 무관한 검사(`all` / `any`,
+  `frozenset`, `call_summary_effects`)뿐이다. 순서가 보이는 곳: 진단 출력(`operation_records._frontier_run`이 실행의
+  `sources`를 그 순서로 기록) -- 기록 글자가 Bundle 다이제스트에 따라 바뀔 수 있다(예전부터, 겉모양만). 이름 붙은 한계:
+  템플릿과 진단 기록의 글자 그대로의 순서는 Bundle 바이트에 따라 바뀔 수 있다(다이제스트 없는 순서는 따로 단계).
+- 머리말: `version` 40, `notes`, `source.producer`(새 generation `0ad2baf7...`, `engine_revision` = 템플릿을 만든 엔진
+  main `67b5fd7`), `source.call_fallthrough: isa`(S1 계약이 있는 Bundle). 배포 파일은 게이트의 다시 만들기와 글자까지
+  같다(UETEMPLATE OK) -- 증거 파일 `.census6/g3b0_rederive53.txt`의 `rev unknown`은 WSL 쪽에 git이 없어서이고 배포
+  파일엔 엔진 커밋을 적었다.
+- 재현 기록(설계 r12): exporter 소스는 커밋 `12e48a7`(`67b5fd7`과 exporter 파일 같음)의 것, 파일별 SHA-256은
+  `.census6/g3b0_exporter_sha256.txt`(git 내용 기준); Bundle의 `call-effects-*`에 `exporter_source_sha256 907c3fd2...`.
+  게이트 g3b0a(o1b 대비): 두 모드 7093 통과, 스냅샷 차이 0, 프로그램 오라클 같음, UETEMPLATE OK.
 - 게이트의 UE 템플릿 검사는 템플릿이 이름 붙인 Bundle을 찾아 다시 만든다(`tools/gate/check_ue_template.py`와 같은 규칙).
-- 함께 고친 기존 결함(S1 때부터): `build_file`은 S1 계약이 있는 Bundle에서 `source.call_fallthrough`를 쓰는데 모델 로더(`summary_store._load_summary_file`)는 그 칸을 모르는 source 칸으로 거절했다 -- S1 Bundle에서 만든 템플릿은 불러올 수 없었다(이번이 첫 경우). 이제 선택 칸으로 받고 값은 "isa" / "mixed"만(기록만, 결과에 쓰지 않음). 고정 테스트 `test_a_template_file_records_the_call_fallthrough_contract`(돌연변이 2개 각각 실패).
+- 함께 고친 기존 결함(S1 때부터): `build_file`은 S1 계약이 있는 Bundle에서 `source.call_fallthrough`를 쓰는데 모델 로더(`summary_store._load_summary_file`)는 그 칸을 모르는 source 칸으로 거절했다 -- S1 Bundle에서 만든 템플릿은 불러올 수 없었다(이번이 첫 경우). 이제 선택 칸으로 받고 값은 "isa" / "mixed"만(기록만, 결과에 쓰지 않음; 항목은
+  관찰마다 그 관찰의 계약으로 계산된다). "mixed"나 칸 없음을 ISA 검증으로 읽지 않는다 -- 칸 없음은 S1 전 Bundle이거나
+  isa 관찰이 하나도 없는 경우(`build_file`은 둘을 구별하지 않는다). 고정 테스트 `test_a_template_file_records_the_call_fallthrough_contract`(돌연변이 2개 각각 실패).
