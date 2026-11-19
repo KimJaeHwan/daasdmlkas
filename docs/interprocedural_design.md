@@ -6718,7 +6718,7 @@ exporter(내부 썽크 유지, S1 호출 다음 줄 계약)로 다시 내보냈�
 
 - 의미 비교(`.census6/cob/g3b0_bijection.py`, 결과 `.census6/g3b0_bijection.txt`): 항목마다 객체 번호의 모든 일대일
   대응을 찾아 비교(실행 / `writer_objects` 목록은 정렬, 중복 개수 유지, 다른 칸은 모두 그대로). 생성자 / 소멸자: 대응
-  하나(`0->1, 1->0, 2->2`)로 글자까지 같다. AppendChar: 대응 하나(`0->0, 1->4, 2->2, 3->1, 4->3, 5->5`)로, 정확히 실행
+  하나(`0->1, 1->0, 2->2`, 양방향 같음)로 글자까지 같다. AppendChar: 대응 하나(옛 -> 새 `0->0, 1->4, 2->2, 3->1, 4->3, 5->5`; 증거 파일은 새 -> 옛 `(0,3,2,4,1,5)`)로, 정확히 실행
   6개의 `sources` 순서만 다르다(조건, 독립 증명, 제어, 내부 호출 등 다른 칸은 같다). O-1 전에 보였던 AppendChar 쓰기
   조건 차이(477 -> 460)는 O-1로 사라졌다(25.105).
 - 원인: `function_summary`가 `sources`를 `ByteSpan.canonical_key`로 정렬하고 그 키에 스코프 다이제스트가 있다 -- 바이트가
@@ -6728,8 +6728,8 @@ exporter(내부 썽크 유지, S1 호출 다음 줄 계약)로 다시 내보냈�
   `sources`를 그 순서로 기록) -- 기록 글자가 Bundle 다이제스트에 따라 바뀔 수 있다(예전부터, 겉모양만). 이름 붙은 한계:
   템플릿과 진단 기록의 글자 그대로의 순서는 Bundle 바이트에 따라 바뀔 수 있다(다이제스트 없는 순서는 따로 단계).
 - 머리말: `version` 40, `notes`, `source.producer`(새 generation `0ad2baf7...`, `engine_revision` = 템플릿을 만든 엔진
-  main `67b5fd7`), `source.call_fallthrough: isa`(S1 계약이 있는 Bundle). 배포 파일은 게이트의 다시 만들기와 글자까지
-  같다(UETEMPLATE OK) -- 증거 파일 `.census6/g3b0_rederive53.txt`의 `rev unknown`은 WSL 쪽에 git이 없어서이고 배포
+  main `67b5fd7`), `source.call_fallthrough: isa`(S1 계약이 있는 Bundle). 게이트의 다시 만들기(UETEMPLATE OK)와 항목, 그리고 `producer` 밖의 source 칸이 정확히 같다(`producer`는 기록만,
+  검사하지 않음) -- 증거 파일 `.census6/g3b0_rederive53.txt`의 `rev unknown`은 도구가 그 실행에서 엔진 커밋을 찾지 못한 것이고 배포
   파일엔 엔진 커밋을 적었다.
 - 재현 기록(설계 r12): exporter 소스는 커밋 `12e48a7`(`67b5fd7`과 exporter 파일 같음)의 것, 파일별 SHA-256은
   `.census6/g3b0_exporter_sha256.txt`(git 내용 기준); Bundle의 `call-effects-*`에 `exporter_source_sha256 907c3fd2...`.
