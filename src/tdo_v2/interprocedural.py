@@ -2573,8 +2573,10 @@ def _without_disabled_windows(effect, disabled):
             return replace(run, value=("nonstack",))
         return run
 
-    return replace(effect, runs=tuple(plain(run) for run in effect.runs),
-                   memory_runs=tuple(plain(run) for run in effect.memory_runs))
+    from ._effect_order import canonical_effect
+
+    return canonical_effect(replace(effect, runs=tuple(plain(run) for run in effect.runs),
+                                    memory_runs=tuple(plain(run) for run in effect.memory_runs)))
 
 
 def _is_tail(call_key: str) -> bool:
@@ -2652,7 +2654,9 @@ def _recursive_hypothesis(derive, stack, notes=None):
             row.complete and demand.complete,
             tuple(sorted(set(row.conditions) | set(demand.conditions), key=repr)),
         )
-    return replace(effect, sink_demands=tuple(merged[label] for label in sorted(merged)))
+    from ._effect_order import canonical_effect
+
+    return canonical_effect(replace(effect, sink_demands=tuple(merged[label] for label in sorted(merged))))
 
 
 @measured("program_checks")

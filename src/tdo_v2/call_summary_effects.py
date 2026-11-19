@@ -374,12 +374,15 @@ def derive_proven_call_effect(summary: FunctionSummary, *args, **kwargs) -> Prov
     """``_derive_proven_call_effect`` (below), every effect it returns -- the
     noreturn and sink-only shapes included -- carrying the summary's
     ``control_support`` as ``control_sites`` (U2b, docs 25.95)."""
+    from ._effect_order import canonical_effect
+
     effect = _derive_proven_call_effect(summary, *args, **kwargs)
     if effect is not None and summary.control_support:
         from dataclasses import replace as _replace
 
         effect = _replace(effect, control_sites=tuple(summary.control_support))
-    return effect
+    # (O-1, docs 25.105) row lists in a digest-free order: labels stable
+    return canonical_effect(effect)
 
 
 def _derive_proven_call_effect(
@@ -918,7 +921,11 @@ def _compose_fixed_memory(effect, member_effects, memory_sources=None):
                            literal=run.literal if access == run.write else None)
                    for run in effect.memory_runs for access in remaining(run.write)]
     unknown_memory = tuple(access for item in effect.unknown_memory for access in remaining(item))
-    return replace(effect, memory_runs=tuple(memory_runs + synthesized), unknown_memory=unknown_memory)
+    from ._effect_order import canonical_effect
+
+    # (O-1) the composed lists re-ordered (and split spans deduplicated)
+    return canonical_effect(replace(effect, memory_runs=tuple(memory_runs + synthesized),
+                                    unknown_memory=unknown_memory))
 
 
 def _observed_registers(runs, memory_runs, unknown_memory, writer_pairs, sink_demands, skip) -> tuple:

@@ -158,7 +158,10 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # (a closure without call shapes composes tails); dead edge blocks' staged rows
 # are dead for exit facts; a call-like row with landing pads must end in its call
 # whatever the call flag says.
-ENGINE_SEMANTICS_VERSION = 52
+# 53: (O-1) a summarized call's output rows are one simultaneous final state --
+# no row kills a sibling's may-alias candidate (dense / sparse / exit crossings);
+# the effect's row lists are ordered digest-free (labels stable across Bundles).
+ENGINE_SEMANTICS_VERSION = 53
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

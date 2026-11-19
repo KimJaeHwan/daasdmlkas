@@ -623,8 +623,14 @@ def _meet(left: dict, right: dict) -> dict:
 
 
 def _transfer(block, state: dict, objects, policy: _Policy, rows, intern=None) -> dict:
+    from ._call_groups import call_output_groups
+
     deferred: dict = {}   # CALL key -> its push's (span, writer): reaches other objects at the CALL
-    for effect in block.effects:
+    # (O-1, docs 25.105) a call's output rows are one simultaneous final state:
+    # the kills of a group's members happen at its first member (after that
+    # member's reads), their gens where they are
+    groups = call_output_groups(block.effects)
+    for position, effect in enumerate(block.effects):
         if rows is not None:
             spans, writers = [], set()
             for evidence in effect.reads:
@@ -652,6 +658,10 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows, intern=None) -
             # (after the CALL's reads, before its writes: the sparse engine's
             # event order -- position of the CALL, order 0)
             state = _written(state, span, writer, objects, policy, "call")
+        group = groups.get(effect.operation_key, False)
+        if group and position == group[0]:
+            for member in group[1]:
+                state = _hoisted_kill(state, block.effects[member], policy)
         for evidence in effect.writes:
             if type(evidence) is not ResolvedStorage or evidence.span.object_id not in state:
                 continue
@@ -659,7 +669,7 @@ def _transfer(block, state: dict, objects, policy: _Policy, rows, intern=None) -
             if call is not None:
                 deferred.setdefault(call, []).append((evidence.span, effect.operation_key))
             state = _written(state, evidence.span, effect.operation_key, objects, policy,
-                             "" if call is None else "entry")
+                             "" if call is None else "entry", kill=group is False)
             state[_ANY_WRITE] = state[_ANY_WRITE] | {effect.operation_key}
         if _unknown_write(effect):
             state = _written_anywhere(state, effect.operation_key, objects)
@@ -733,20 +743,42 @@ def _written_anywhere(state: dict, writer: str, objects) -> dict:
     return updated
 
 
-def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy, phase: str = "") -> dict:
+def _cleared(state: dict, span: ByteSpan) -> dict:
+    """``state`` with ``span``'s bytes of its own object cleared (a kill)."""
+    updated = dict(state)
+    own = state[span.object_id]
+    cleared = dict(own.bytes)
+    for offset in range(span.start, span.end):
+        if own.default:
+            cleared[offset] = frozenset()
+        else:
+            cleared.pop(offset, None)
+    updated[span.object_id] = _ObjectState(own.default, cleared)
+    return updated
+
+
+def _hoisted_kill(state: dict, effect, policy: _Policy) -> dict:
+    """(O-1) The kills of one output row of a call group, applied at the
+    group's first member: every resolved write span it would kill with
+    (``_written``'s rule: not a ``no_kill_writers`` writer; a deferred push's
+    "entry" phase kills too)."""
+    if effect.operation_key in policy.no_kill_writers:
+        return state
+    for evidence in effect.writes:
+        if type(evidence) is ResolvedStorage and evidence.span.object_id in state:
+            state = _cleared(state, evidence.span)
+    return state
+
+
+def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy, phase: str = "",
+             kill: bool = True) -> dict:
     """``phase`` for a deferred push (``_Policy.push_deferred``): "entry" --
     the write itself, reaching only wild objects; "call" -- at the CALL, the
-    rest of the ordinary gen (no kill, wild objects already reached)."""
+    rest of the ordinary gen (no kill, wild objects already reached).
+    ``kill`` False: a member of a call group (O-1) -- its kill was hoisted."""
     updated = dict(state)
-    if writer not in policy.no_kill_writers and phase != "call":
-        own = state[span.object_id]
-        cleared = dict(own.bytes)
-        for offset in range(span.start, span.end):
-            if own.default:
-                cleared[offset] = frozenset()
-            else:
-                cleared.pop(offset, None)
-        updated[span.object_id] = _ObjectState(own.default, cleared)
+    if kill and writer not in policy.no_kill_writers and phase != "call":
+        updated = _cleared(state, span)
     private = phase == "entry" or all(policy.is_private(span.object_id, offset, writer, write=True)
                                       for offset in range(span.start, span.end))
     for other in objects:

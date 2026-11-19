@@ -6677,3 +6677,31 @@ G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 �
   후보 점프가 있을 때만 계산. r1의 "쓰기 조건 걸러냄은 관찰로 구별되지 않는다"는 틀렸다: 조건부 집합(`writer_conditions`)은
   요약과 실행 조건에 따로 들어가므로 죽은 간선의 단계 쓰기 행의 조건을 거기서 빼야 한다(고정 테스트로 핀). 불확실
   집합의 걸러냄은 건너감 걸러냄과 겹친다. 고정 테스트 26개, 돌연변이 17개 각각 실패.
+
+### 25.105 한 호출의 출력 행은 동시 상태 -- 서로 지우지 않음, 다이제스트 없는 순서 (O-1, 2026-11-19)
+
+설계 `.census6/design_o1_r1.md` -> r4(리뷰 Astra / Fable). G3b-0(UE 예제 다시 내보내기)에서 같은 코드인데 AppendChar
+템플릿의 별칭 조건이 바뀐 원인: (1) 호출 효과의 행 목록(`unknown_memory`, `memory_runs`)을 객체 ID의 `repr`(스코프
+다이제스트 포함)로 정렬해 번들 바이트가 바뀌면 `~u0` / `~u1` 순서가 바뀌고, (2) may-alias 전이가 한 호출의 단계
+행을 차례대로 쓰기로 보아 뒤 행의 정확한 쓰기가 앞 행의 "겹칠 수 있는 쓰기 후보"를 지웠다. 두 결과 모두 그 경우엔
+틀리지 않았지만, 피호출 함수 안에서 지워진 쓰기가 나중에 일어났을 수 있으므로 일반적으로는 과소 근사다
+(`call_summary_effects`가 내보낸 쓰기의 겹침을 호출자 may-alias에 맡기는 것과도 어긋남).
+
+- 출력 행: `c~<n>`(레지스터 / 메모리 출력, 접근자 결과), `c~u<n>`, `c~ov<n>` (`_call_groups.output_call`). `~push`,
+  `~ld`, `~in`, `~cr`, `~iu`, `~edge`, `~sink`, `~e<n>`는 아님.
+- 규칙 하나(`_call_groups.call_output_groups`, 블록마다 한 번): 한 호출의 출력 행 묶음이 지우는 일은 묶음의 첫 행
+  위치(순서 0, 첫 행의 읽기 뒤)로 옮기고, 덧붙임(gen)은 제자리. 조밀(`may_alias._transfer` / `_hoisted_kill`),
+  희소(`_may_alias_sparse`의 `write_spans`), 출구 건너감(`function_summary._exit_crossings`)이 같은 규칙을 쓴다. 그래서
+  같은 호출의 행끼리는 어떤 표시든(`?` 미지 쓰기, `alias:` / `unknown:`) 서로 지우지 않고, 호출 전 쓰기와 지연되지
+  않은 `~push`는 예전처럼 지워진다. 안전장치: 한 블록에서 호출의 출력 행이 연속이 아니거나, 첫 행이 아닌 행이 추적
+  메모리를 읽으면 그 행들은 아무것도 지우지 않는다(과대 근사, `o1_group_failsafe_*` 카운터).
+- 순서(`_effect_order.canonical_effect`, 모든 `ProvenCallEffect` 생성 / 변환 뒤): `memory_runs`, `unknown_memory`,
+  행 안의 `loads` / 조건(짝 방향 유지), `writer_conditions`를 위치 그대로의 다이제스트 없는 인코딩(`_stable`)으로
+  정렬하고 같은 항목을 뺀다. 레지스터 파일 / 주소 공간 객체만 정확(그 밖이 섞인 목록은 지금 순서 유지). 이름 붙은
+  한계(이름표만): `~ov` 순서(상대 객체 `space_key`에 스코프 다이제스트), `sink_demands` 순서(`sink<i>` 거절 표시가
+  위치를 씀).
+- 의미 보장: 한 호출의 보통 출력 행(`~<n>`, `~u<n>`)의 어떤 순서에서도 결과가 같다(`~ov`는 메모리 SSA 때문에 마지막).
+- `ENGINE_SEMANTICS_VERSION` 52 -> 53, UE 템플릿 v39: AppendChar 출구의 한 실행에 같은 호출 행의 `alias:` 건너감
+  (`CALL~2`, `CALL~u0`)이 더해짐(이전엔 같은 호출의 뒤 행이 지웠다) -- 보수적 방향.
+- 고정 테스트 `tests/intra/test_o1_call_output_groups.py`(9; 두 엔진 교차 확인), 돌연변이 8개(`.census6/cob/o1_mutants.sh`)
+  각각 실패.

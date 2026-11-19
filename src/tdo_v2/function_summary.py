@@ -1763,7 +1763,11 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     calls, unknown, writes = [], [], {}       # gen sources / kills
     memory_writes = []                        # (block, position, order, object, key)
     unknown_writers = set()
+    from ._call_groups import call_output_groups
+
     for block_key, effects in effects_by_block.items():
+        # (O-1, docs 25.105) a call group's kills sit at its first member
+        groups = call_output_groups(effects)
         for position, effect in enumerate(effects):
             key = effect.operation_key
             if staged_dead(key, dead_keys, dead_edge_sites):
@@ -1777,8 +1781,10 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
             for index, evidence in enumerate(effect.writes):
                 if type(evidence) is ResolvedStorage:
                     span = evidence.span
-                    writes.setdefault(span.object_id, []).append(
-                        (span.start, span.end, (block_key, position, 1 + index)))
+                    group = groups.get(key, False)
+                    if group is not None:   # (a fail-safe member kills nothing)
+                        at = (block_key, position, 1 + index) if group is False else (block_key, group[0], 0)
+                        writes.setdefault(span.object_id, []).append((span.start, span.end, at))
                     if span.object_id.kind in _MEMORY_KINDS:
                         memory_writes.append((block_key, position, 1 + index, span.object_id, key))
                         if key in uncertain:  # may land anywhere, after its own write

@@ -50,8 +50,12 @@ def derive_sparse(unit, objects, policy):
             if policy.may_alias(other, span.object_id) and not private and other not in policy.wild_objects:
                 object_gens[other].append(event)
 
+    from ._call_groups import call_output_groups
+
     for block in blocks:
         deferred: dict = {}   # CALL key -> its push's (span, writer)
+        # (O-1, docs 25.105) a call group's kills sit at its first member, order 0
+        groups = call_output_groups(block.effects)
         for position, effect in enumerate(block.effects):
             for span, writer in deferred.pop(effect.operation_key, ()):
                 push_at_call(block.key, position, span, writer)
@@ -67,9 +71,10 @@ def derive_sparse(unit, objects, policy):
                     continue
                 span = evidence.span
                 order = 1 + index
-                if writer not in policy.no_kill_writers:  # an uncertain destination kills nothing
-                    write_spans.setdefault(span.object_id, []).append(
-                        (span.start, span.end, (block.key, position, order)))
+                group = groups.get(writer, False)
+                if writer not in policy.no_kill_writers and group is not None:  # an uncertain destination kills nothing
+                    at = (block.key, position, order) if group is False else (block.key, group[0], 0)
+                    write_spans.setdefault(span.object_id, []).append((span.start, span.end, at))
                 call = policy.push_deferred(writer, span)
                 if call is not None:
                     deferred.setdefault(call, []).append((span, writer))
