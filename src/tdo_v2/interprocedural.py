@@ -2232,16 +2232,18 @@ def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset
 
 def _refused_import_tails(unit, image_info, external_models, local_functions=frozenset()) -> dict:
     """(G-T G3b-1, docs 25.104) Site -> reason for every jump leaving to an
-    import with a model -- a BRANCH / CBRANCH to an import thunk that is no
-    Bundle function, a BRANCHIND through an import slot -- that the one tail
-    fact (``pcode_blocks.tail_transfers``) does not admit: no model is bound
-    there (an unknown exit), and the reason names the code fact that failed."""
+    import with a model -- a BRANCH to an import thunk that is no Bundle
+    function, a CBRANCH to a noreturn import thunk (a Bundle function there too:
+    the legacy cut is the fallback), a BRANCHIND through an import slot -- that
+    the one tail fact (``pcode_blocks.tail_transfers``) does not admit: no model
+    is bound there (an unknown exit), and the reason names the code fact that
+    failed, in the fact's own order."""
     from .pcode_blocks import build_pcode_block_graph
 
     observation = getattr(unit, "observation", None)
     if observation is None:
         return {}
-    facts = _tail_facts(unit)
+    facts = None
     rows = {row.address for row in observation.instructions}
     exit_rows = {item.source for item in getattr(observation, "fallthrough_exits", ())}
     graph = None
@@ -2251,16 +2253,18 @@ def _refused_import_tails(unit, image_info, external_models, local_functions=fro
             if operation.opcode not in ("BRANCH", "CBRANCH", "BRANCHIND") or not operation.inputs:
                 continue
             key = _operation_key(row.address, ordinal, operation.opcode)
-            if key in facts:
-                continue
             target = operation.inputs[0]
             if target.kind is not VarnodeKindCode.ADDRESS:
                 continue
+            if facts is None:
+                facts = _tail_facts(unit)   # (lazily: only for a candidate jump)
+            if key in facts:
+                continue
             if operation.opcode == "BRANCHIND":
                 symbol = _static_slot_symbol(unit, image_info, target)
-            elif target.coordinate in rows \
-                    or (target.coordinate.space_id, target.coordinate.byte_offset) in local_functions:
-                continue
+            elif target.coordinate in rows or operation.opcode == "BRANCH" \
+                    and (target.coordinate.space_id, target.coordinate.byte_offset) in local_functions:
+                continue   # (a BRANCH to a Bundle function composes its body, never a model)
             else:
                 symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
             model = external_models.lookup(symbol) if symbol is not None else None
@@ -2272,17 +2276,17 @@ def _refused_import_tails(unit, image_info, external_models, local_functions=fro
                 why = f"p-code graph unsupported ({graph.unsupported})"
             elif graph.block_of(row.address, ordinal) is None:
                 why = "not reachable"
+            elif operation.opcode != "CBRANCH" and row.fallthrough is not None:
+                why = "the instruction has a fallthrough"
             elif row.address in exit_rows:
                 why = "S1 continuation evidence"
             elif row.flow.is_override:
                 why = "flow override"
-            elif operation.opcode != "CBRANCH" and row.fallthrough is not None:
-                why = "the instruction has a fallthrough"
             elif any(item in rows for item in row.flow_targets) and operation.opcode == "BRANCHIND":
                 why = "an observed flow target in the function"
             else:
                 why = "observed flow or block shape disagrees"
-            found[key] = f"{symbol.name}: tail jump not admitted by code facts ({why})"
+            found[key] = f"{model[1].label}: tail jump not admitted by code facts ({why})"
     return found
 
 

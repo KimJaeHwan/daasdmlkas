@@ -6660,7 +6660,7 @@ G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 �
   `is_override`(거절만)를 읽는다 -- 후계를 지우거나 그래프를 거절할 뿐(G3b-7). 수출기의 호출 표시 꼬리 씨앗
   (`evidence.tails`)은 그대로(표시 없는 꼬리는 거기서 꼬리 경계를 얻지 않는다). `return_relations`는 G3b-5.
 - `ENGINE_SEMANTICS_VERSION` 51 -> 52, UE 템플릿 다시 유도.
-- 고정 테스트 `tests/intra/test_gt_b1_tail_fact.py`(14). 돌연변이 9개(`.census6/cob/g3b1_mutants.sh`: 착지 패드 방아쇠가
+- 처음 고정 테스트 `tests/intra/test_gt_b1_tail_fact.py`(14). 돌연변이 9개(`.census6/cob/g3b1_mutants.sh`: 착지 패드 방아쇠가
   표시만, 패드에서 다음 줄 제외, 이른 거절 없음, branchind의 안쪽 대상 검사 없음, terminal 표시 요구, 반환 모양 스택
   없음, 죽은 간선 무시, SP 증명 거절 없음, CBRANCH만 물리 거절) 각각 실패.
 - 코드 리뷰 r1 고침(Astra / Fable APPROVE WITH FIXES): 죽은 간선 판단은 하나 -- 출구 반복에서도 `dead_edge_sites`의
@@ -6669,6 +6669,11 @@ G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 �
   code facts (...)", `interprocedural._refused_import_tails`). `root_diagnostics`는 이미 있는 행에 사실의 종류만 붙인다
   (행을 더하지 않음). 고정 테스트 24개 + `_chi_shadow` 캐시 키 테스트; 돌연변이 15개 각각 실패(옛 수입 BRANCH /
   BRANCHIND 규칙, 꼬리 출구 건너뜀 되살림, 출구 반복의 자기 판단, 아무 타입이나 캐시, 거절 이유 없음 추가). 같은 결과인
-  돌연변이: 죽은 간선 자리를 옛 잘림만으로(Bundle noreturn 간선엔 단계 행이 없고 종류로 이미 죽음, 도달 안 한 간선의
-  자리는 이미 `dead_keys`). 쓰기 조건 두 곳(`function_summary` 불확실 / 조건부 집합)의 걸러냄은 건너감 걸러냄
-  (`_exit_crossings`)이 같은 행을 먼저 막아 관찰로 구별되지 않는다(심층 방어).
+  돌연변이: 죽은 간선 자리를 옛 잘림만으로(Bundle noreturn 간선의 단계 행은 `s~edge`와 싱크 행뿐 -- `~edge`는
+  합성된 자리에서만 건너가고 싱크 행은 쓰지 않는다 -- 그리고 종류로 이미 죽음; 도달 안 한 간선의 자리는 이미
+  `dead_keys`).
+- 코드 리뷰 r2 고침(Fable APPROVE, Astra APPROVE WITH FIXES): Bundle 함수가 있는 썽크로 가는 조건 noreturn 점프도
+  거절 이유를 남긴다(Bundle 함수 제외는 BRANCH만); 이유는 사실의 순서(다음 줄, S1, 덮어쓰기)와 모델 이름표로; 사실은
+  후보 점프가 있을 때만 계산. r1의 "쓰기 조건 걸러냄은 관찰로 구별되지 않는다"는 틀렸다: 조건부 집합(`writer_conditions`)은
+  요약과 실행 조건에 따로 들어가므로 죽은 간선의 단계 쓰기 행의 조건을 거기서 빼야 한다(고정 테스트로 핀). 불확실
+  집합의 걸러냄은 건너감 걸러냄과 겹친다. 고정 테스트 26개, 돌연변이 17개 각각 실패.

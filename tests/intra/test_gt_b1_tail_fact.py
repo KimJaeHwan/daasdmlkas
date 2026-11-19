@@ -336,7 +336,7 @@ def test_an_override_marked_import_tail_is_refused_with_a_reason():
                          external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))["1:1000"]
     assert not item.proven and item.summary.tail_exits
     ((site, reason),) = item.refused_models.items()
-    assert site.endswith(":BRANCH") and "flow override" in reason and reason.startswith("free:")
+    assert site.endswith(":BRANCH") and "flow override" in reason and "/free@" in reason.split(":")[1]
 
 
 def test_an_import_tail_on_an_unreachable_row_is_not_bound():
@@ -450,9 +450,10 @@ def test_disagreeing_call_and_return_shapes_give_no_program_stack():
         load(reg(RIP), reg(RBP)), add(reg(RBP), reg(RBP), const(8)), op("RETURN", [reg(RIP)]))
     units = program_units(middle, target)
     item = analyze_units(units)[function_key_of(1, MIDDLE)]
-    effect = item.proven.get(_site(units[0]))
+    site = _site(units[0])
+    effect = item.proven.get(site)
     assert effect is None or not effect.tail_stack
-    assert item.summary is None or item.summary.tail_exits
+    assert item.summary is not None and _edge_of(site) in item.summary.tail_exits
 
 
 def test_a_mutual_tail_recursion_without_call_shapes_composes():
@@ -469,3 +470,44 @@ def test_a_mutual_tail_recursion_without_call_shapes_composes():
         tails = [effect for key, effect in item.proven.items() if key.endswith(":BRANCH")]
         assert tails and all(effect.tail_stack for effect in tails), entry
         assert item.summary is not None and item.summary.tail_exits == (), entry
+
+
+def test_a_refused_conditional_noreturn_import_keeps_its_reason_with_a_bundle_body_there():
+    """(review r2 Astra P2) ``jz abort`` flagged as a flow override (no edge
+    block, no fact): the legacy cut is not taken and the site keeps a reason --
+    also when a Bundle function sits at the thunk address."""
+    from test_import_tail_jumps import ABORT, MODELS
+    from tdo_v2.summary_store import load_external_models
+
+    def override(raw, row):
+        row["flow_type"]["is_override"] = True
+
+    for body in (None, FunctionBuilder(entry=ABORT).ret()):
+        middle = _row(_to(FunctionBuilder(entry=MIDDLE).sub_rsp(0x28).cbranch("done", reg(ZF, 1))
+                          .ins(copy(reg(RAX), const(7))).label("done").add_rsp(0x28).ret(), None, ABORT), 1, override)
+        units = program_units(middle, *((body,) if body is not None else ()))
+        item = analyze_units(units, image_info=_free_image(),
+                             external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))[
+            function_key_of(1, MIDDLE)]
+        site = _site(units[0])
+        assert site not in item.proven and site not in item.declared, body
+        assert "flow override" in item.refused_models.get(site, ""), (body, item.refused_models)
+
+
+def test_a_dead_edge_drops_its_staged_writers_conditions():
+    """(review r2 Astra P3) ``*rdi = rdx; jz T; ret`` where T stores through a
+    pointer it loads (``rcx = *rsi; *rcx = 7``): the staged writer's alias
+    conditions are writer conditions while the edge is live, and none once the
+    edge is dead -- the conditional-set filter is observable."""
+    from synthetic import RDX, RSI, load
+    from tdo_v2.function_summary import summarize_function
+
+    middle = _to(FunctionBuilder(entry=MIDDLE).ins(store(reg(RDI), reg(RDX))).cbranch("done", reg(ZF, 1))
+                 .label("done").ret(), None, TARGET)
+    target = FunctionBuilder(entry=TARGET).ins(load(reg(RCX), reg(RSI))).ins(store(reg(RCX), const(7, 8))).ret()
+    units = program_units(middle, target)
+    item = analyze_units(units)[function_key_of(1, MIDDLE)]
+    site = _site(units[0])
+    assert item.proven[site].tail_stack
+    dead = summarize_function(item.normalized, units[0].observation, noreturn_jumps=frozenset({site}))
+    assert dead.writer_conditions == ()
