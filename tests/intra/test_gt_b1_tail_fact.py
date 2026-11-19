@@ -286,3 +286,186 @@ def test_a_physical_call_context_refuses_a_callee_with_a_branch_tail():
     assert any(key.endswith(":BRANCH") for key in case["callee"].proven)
     cuts = _record(case).get("physical_call_cuts", {})
     assert any(reason == "physical callee has a tail" for reason in cuts.values()), cuts
+
+
+# -- review r1 pins -------------------------------------------------------------------
+
+
+def _row(builder, index, change):
+    """Instruction ``index`` of ``builder``'s JSON passed through ``change``."""
+    original = builder.to_json
+
+    def to_json():
+        raw = original()
+        change(raw, raw["instructions"][index])
+        return raw
+
+    builder.to_json = to_json
+    return builder
+
+
+def _free_image():
+    from test_import_tail_jumps import ABORT, FREE
+    from tdo_v2.image_info import ImageInfo, ImportedSymbol
+
+    return ImageInfo("synthetic", (), (ImportedSymbol("CRT", "free", None, (), ((1, FREE),)),
+                                       ImportedSymbol("CRT", "abort", None, (), ((1, ABORT),)),
+                                       ImportedSymbol("LIB.DLL", "f", None, ((1, SLOT),), ())), (), ())
+
+
+def _imports(builder):
+    from tdo_v2.interprocedural import import_call_sites
+
+    (unit,) = program_units(builder)
+    return {key: symbol.name for key, symbol in import_call_sites(unit, _free_image()).items()}
+
+
+def test_an_override_marked_import_tail_is_refused_with_a_reason():
+    """``jmp free`` flagged as a flow override: the fact refuses it -- no model,
+    an unknown tail exit, and a per-site reason (review r1 Astra P2)."""
+    from test_import_tail_jumps import FREE, MODELS
+    from tdo_v2.summary_store import load_external_models
+
+    def override(raw, row):
+        row["flow_type"]["is_override"] = True
+
+    jump = _row(FunctionBuilder().sub_rsp(0x28).add_rsp(0x28).tail_call(FREE), -1, override)
+    assert _imports(jump) == {}
+    other = FunctionBuilder(entry=CODE_BASE + 0x400).sub_rsp(0x28).call(CODE_BASE + 0x800).add_rsp(0x28).ret()
+    item = analyze_units(program_units(jump, other), image_info=_free_image(),
+                         external_models=load_external_models(MODELS, "x86:LE:64:default", "win64"))["1:1000"]
+    assert not item.proven and item.summary.tail_exits
+    ((site, reason),) = item.refused_models.items()
+    assert site.endswith(":BRANCH") and "flow override" in reason and reason.startswith("free:")
+
+
+def test_an_import_tail_on_an_unreachable_row_is_not_bound():
+    from test_import_tail_jumps import FREE
+
+    assert _imports(FunctionBuilder().ret().tail_call(FREE)) == {}
+
+
+def test_a_non_final_branch_to_an_import_thunk_is_now_bound():
+    """``CBRANCH +2; BRANCH free; BRANCH free``: the first BRANCH ends a split
+    segment that leaves -- a "branch" fact the old last-operation rule missed
+    (gate class 6 gain)."""
+    from test_import_tail_jumps import FREE
+
+    flag = tmp(0x300, 1)
+    builder = FunctionBuilder().tail_call(FREE)
+    builder._rows[-1].ops[:0] = [op("INT_NOTEQUAL", [reg(RCX), const(0)], flag), op("CBRANCH", [const(2, 4), flag]),
+                                 op("BRANCH", [ram(FREE)])]
+    assert set(_imports(builder)) == {f"1:{CODE_BASE:x}:2:BRANCH", f"1:{CODE_BASE:x}:3:BRANCH"}
+
+
+def test_a_slot_tail_with_a_local_observed_target_is_not_bound():
+    plain = FunctionBuilder().ins(copy(reg(RCX), const(1))).jump_indirect(ram(SLOT))
+    assert list(_imports(plain).values()) == ["f"]
+
+    def local(raw, row):
+        row["flow_targets"] = [dict(raw["instructions"][0]["address"])]
+
+    assert _imports(_row(FunctionBuilder().ins(copy(reg(RCX), const(1))).jump_indirect(ram(SLOT)), -1, local)) == {}
+
+
+def test_a_successor_bearing_conditional_jump_without_an_edge_block_is_a_tail_exit():
+    """``jz T`` flagged as a flow override has no edge block (never a tail
+    fact); handed to the summary as a noreturn jump anyway, its block stays a
+    tail exit -- the old successor-bearing skip is gone (r15 final fixes)."""
+    from tdo_v2.function_summary import summarize_function
+
+    def override(raw, row):
+        row["flow_type"]["is_override"] = True
+
+    middle = _row(_to(FunctionBuilder(entry=MIDDLE).cbranch("done", reg(ZF, 1)).ins(copy(reg(RAX), const(7)))
+                      .label("done").ret(), None, TARGET), 0, override)
+    units = program_units(middle, _target())
+    site = _site(units[0])
+    assert site not in tail_transfers(units[0].observation, units[0].scopes.function.entry)
+    item = analyze_units(units)[function_key_of(1, MIDDLE)]
+    block = f"1:{MIDDLE:x}"
+    assert block in item.summary.tail_exits
+    assert block in summarize_function(item.normalized, units[0].observation,
+                                       noreturn_jumps=frozenset({site})).tail_exits
+
+
+def test_a_dead_edge_site_is_dead_in_the_exit_loop_too():
+    """(review r1 Fable P2-1) one decision: an edge whose site is a dead edge
+    site has no exit state, even when its effect composes -- never a composed
+    exit with its rows dropped."""
+    from tdo_v2.function_summary import summarize_function
+
+    middle = _to(FunctionBuilder(entry=MIDDLE).cbranch("done", reg(ZF, 1)).ins(copy(reg(RAX), const(7)))
+                 .label("done").ret(), None, TARGET)
+    units = program_units(middle, _target())
+    item = analyze_units(units)[function_key_of(1, MIDDLE)]
+    site = _site(units[0])
+    assert _edge_of(site) in {state.block_key for state in item.summary.exits}
+    dead = summarize_function(item.normalized, units[0].observation, noreturn_jumps=frozenset({site}))
+    assert _edge_of(site) not in {state.block_key for state in dead.exits}
+    assert _edge_of(site) not in dead.tail_exits
+
+
+def test_a_bundle_noreturn_edge_has_no_exit_state():
+    from test_conditional_summaries import _int3
+    from tdo_v2.pcodeop_models import PcodeOpModel
+
+    middle = _to(FunctionBuilder(entry=MIDDLE).cbranch("done", reg(ZF, 1)).ins(copy(reg(RAX), const(7)))
+                 .label("done").ret(), None, TARGET)
+    units = program_units(middle, FunctionBuilder(entry=TARGET).ins(_int3()).ret())
+    namespace = units[0].scopes.program.evidence.translation_namespace
+    model = PcodeOpModel("x86-markers", 1, frozenset({(namespace.language_id, namespace.major_version,
+                                                        namespace.minor_version)}), {}, {16: frozenset({3})})
+    item = analyze_units(units, pcodeop_models=(model,), assume_debug_break_traps_do_not_return=True)[
+        function_key_of(1, MIDDLE)]
+    site = _site(units[0])
+    assert item.proven[site].noreturn
+    assert item.summary.dead_exits == (_edge_of(site),)
+    assert _edge_of(site) not in {state.block_key for state in item.summary.exits}
+    assert site not in {row[0] for row in item.summary.inner_calls}
+
+
+def test_the_tail_fact_cache_is_by_identity_and_skips_test_doubles():
+    from types import SimpleNamespace
+
+    (unit,) = program_units(FunctionBuilder().ins(copy(reg(RAX), const(1))).tail_call(CODE_BASE + 0x900))
+    entry = unit.scopes.function.entry
+    first = tail_transfers(unit.observation, entry)
+    assert tail_transfers(unit.observation, entry) is first and len(first) == 1
+    double = SimpleNamespace(instructions=list(unit.observation.instructions), fallthrough_exits=())
+    assert len(tail_transfers(double, entry)) == 1
+    double.instructions[-1] = unit.observation.instructions[0]   # (mutated in place: no jump left)
+    assert tail_transfers(double, entry) == {}
+
+
+def test_disagreeing_call_and_return_shapes_give_no_program_stack():
+    """The tail target returns through rbp (``rip = *(rbp); rbp += 8;
+    RETURN rip``), the source through rsp: two stack pointers -- none is
+    taken, the conditional tail is not composed."""
+    from synthetic import RBP, RIP, load
+
+    middle = _to(FunctionBuilder(entry=MIDDLE).cbranch("done", reg(ZF, 1)).ins(copy(reg(RAX), const(7)))
+                 .label("done").ret(), None, TARGET)
+    target = FunctionBuilder(entry=TARGET).ins(add(reg(RAX), reg(RDI), const(1))).ins(
+        load(reg(RIP), reg(RBP)), add(reg(RBP), reg(RBP), const(8)), op("RETURN", [reg(RIP)]))
+    units = program_units(middle, target)
+    item = analyze_units(units)[function_key_of(1, MIDDLE)]
+    effect = item.proven.get(_site(units[0]))
+    assert effect is None or not effect.tail_stack
+    assert item.summary is None or item.summary.tail_exits
+
+
+def test_a_mutual_tail_recursion_without_call_shapes_composes():
+    """``f: jz out; rcx += 1; jmp g; out: ret`` and ``g: jmp f`` -- an SCC
+    through tail jumps, RET shapes only: the program stack pointer gives the
+    bottom hypothesis and both tails compose (review r1: a real SCC)."""
+    f_entry, g_entry = CODE_BASE + 0x400, CODE_BASE + 0x600
+    f = (FunctionBuilder(entry=f_entry).cbranch("out", reg(ZF, 1)).ins(add(reg(RCX), reg(RCX), const(1)))
+         .tail_call(g_entry).label("out").ret())
+    g = FunctionBuilder(entry=g_entry).tail_call(f_entry)
+    results = analyze_units(program_units(f, g))
+    for entry in (f_entry, g_entry):
+        item = results[function_key_of(1, entry)]
+        tails = [effect for key, effect in item.proven.items() if key.endswith(":BRANCH")]
+        assert tails and all(effect.tail_stack for effect in tails), entry
+        assert item.summary is not None and item.summary.tail_exits == (), entry

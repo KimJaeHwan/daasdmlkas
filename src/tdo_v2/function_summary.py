@@ -326,10 +326,13 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
             # (G-T G1 / G3a, docs 25.103) an outcome edge block: an exit state
             # when its conditional tail is composed; a Bundle-derived dead edge
             # (the composed target never returns) is a dead exit; otherwise a
-            # tail exit or a legacy / unreached dead edge -- no exit state
-            kind = _edge_kind(edge_blocks[state.block_key], proven_effects, dead_exit)
+            # tail exit or a legacy / unreached dead edge -- no exit state.
+            # (G-T G3b-1, review r1 Fable P2-1) one decision: an edge whose site is
+            # a dead edge site (its staged rows dropped above) is dead here too
+            site = edge_blocks[state.block_key].site
+            kind = "dead" if site in dead_edge_sites \
+                else _edge_kind(edge_blocks[state.block_key], proven_effects, dead_exit)
             if kind == "dead":
-                site = edge_blocks[state.block_key].site
                 if site not in noreturn_jumps and not dead_exit(state.block_key) \
                         and getattr(proven_effects.get(site), "noreturn", False):
                     dead_exits.append(state.block_key)

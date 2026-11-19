@@ -679,14 +679,17 @@ def _compare_terminals(scope, shadow, crossed, dead_keys, limit, lazy=None, dead
             got = set(mine.get(offset, ()))
             for item in sorted(got ^ expected):
                 if item in got:
-                    # (a dead conditional tail's crossing is labelled by its site)
-                    kind = "dead" if staged_dead(item, dead_keys, dead_edge_sites) or item in dead_edge_sites                         else "other"
+                    # (a dead conditional tail's crossing is labelled by its site --
+                    # the crossing is dead, the raw CBRANCH itself stays live)
+                    dead_crossing = staged_dead(item, dead_keys, dead_edge_sites) or item in dead_edge_sites
+                    kind = "dead" if dead_crossing else "other"
                 elif not item.endswith(("CALL", "CALLIND", "CALLOTHER")):
                     kind = "tail"
                 else:   # masked in the SSA by a dead region's effects (Astra r1's diamond: S2c),
                     # proven per call: present again with the dead effects transparent
-                    kind = "dead-masked" if lazy is not None and (dead_keys or dead_edge_sites) and item in lazy.live_crossed(
-                        block, object_id, offset, frozenset(dead_keys), frozenset(dead_edge_sites)) else "other"
+                    masked = lazy is not None and bool(dead_keys or dead_edge_sites) and item in lazy.live_crossed(
+                        block, object_id, offset, frozenset(dead_keys), frozenset(dead_edge_sites))
+                    kind = "dead-masked" if masked else "other"
                 kinds[kind] = kinds.get(kind, 0) + 1
                 if len(found) < limit:
                     found.append((block, object_id.kind.value, offset, kind, item, sorted(expected), sorted(got)))

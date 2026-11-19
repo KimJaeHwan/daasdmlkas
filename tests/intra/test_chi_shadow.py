@@ -202,6 +202,33 @@ def test_the_live_closure_drops_exactly_the_dead_effects(shadow, monkeypatch):
     assert seen
 
 
+
+def test_the_live_closure_keys_its_cache_on_dead_edge_sites(shadow, monkeypatch):
+    """(G-T G3b-1) ``live_crossed`` with no dead keys but the calls named as
+    dead edge sites drops their staged effects too, and its memo is keyed on
+    both sets: asking again with nothing dead gives the full closure back."""
+    if shadow == "1":
+        return
+    seen = []
+    original = _chi_shadow.compare_terminals
+
+    def spy(scope, crossed, dead_keys=frozenset(), limit=20, *, dead_edge_sites=frozenset()):
+        lazy = _chi_shadow.LAZY[scope]
+        calls = frozenset(key[:-len("~chi")] for key in (lazy.definitions[item].operation_key
+                                                          for item in lazy.chi_at))
+        for (block, object_id), offsets in _chi_shadow.TERMINALS[scope].items():
+            for offset, found in offsets.items():
+                assert lazy.live_crossed(block, object_id, offset, frozenset()) == found
+                assert not lazy.live_crossed(block, object_id, offset, frozenset(), calls)
+                assert lazy.live_crossed(block, object_id, offset, frozenset()) == found
+                seen.append(offset)
+        return original(scope, crossed, dead_keys, limit)
+
+    monkeypatch.setattr(_chi_shadow, "compare_terminals", spy)
+    builder = _frame(FunctionBuilder().sub_rsp(0x48), 0x10, reg(RSI)).call(OPAQUE_A).call(OPAQUE_B)
+    _checked(builder.add_rsp(0x48).ret())
+    assert seen
+
 class _Labels:
     def __init__(self, codes):
         self.codes = codes

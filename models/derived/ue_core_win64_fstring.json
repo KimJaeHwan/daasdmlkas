@@ -55,7 +55,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "12e48a7248d3dcd4a894e945eedb476cedc7bf47+dirty",
+   "engine_revision": "05a70327aa30822cc7b8fb902b1225376e1b73e6",
    "bundle": "8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50",
    "index_addresses": true,
    "stack_evidence": [

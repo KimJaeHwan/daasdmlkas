@@ -259,9 +259,10 @@ class _Builder:
         tails = tuple(getattr(evidence, "tails", ()) or ())
         self.charge(len(tails))
         tail_keys = {seed.operation_key for seed in tails}
-        # (G-T G3b-1, docs 25.104) beside the exporter's call-flag seeds, the
-        # engine's one tail fact (``pcode_blocks.tail_transfers``): its kind per
-        # site, so a flag / fact disagreement is visible
+        # (G-T G3b-1, docs 25.104) the engine's one tail fact
+        # (``pcode_blocks.tail_transfers``): its kind annotates a listed row (a
+        # call-flag seed or a call), so a flag / fact disagreement is visible;
+        # it adds no rows
         facts = {}
         if observation is not None and getattr(item.unit, "scopes", None) is not None:
             from .pcode_blocks import tail_transfers
@@ -269,7 +270,7 @@ class _Builder:
             facts = {site: fact.kind for site, fact in
                      tail_transfers(observation, item.unit.scopes.function.entry).items()}
         self.charge(len(facts))
-        keys = set(tail_keys) | set(facts)
+        keys = set(tail_keys)
         for row in instructions:
             for ordinal, operation in enumerate(row.operations):
                 if operation.opcode in _CALL_OPCODES:

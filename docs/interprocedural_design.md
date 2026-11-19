@@ -6637,7 +6637,8 @@ G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 �
   덮어쓰기 없음, 관찰된 흐름 대상 중 함수 안의 것이 없음 -- 행에서 직접 읽는다: 호출 표시가 지운 시작 주소 대상이
   사실을 만들지 않게). 소비자가 각자 대상 조건을 더한다. 관찰 객체의 정체성으로 캐시(검증된 관찰만).
 - 소비자: `_direct_calls`(Bundle 함수 시작), `import_call_sites`(BRANCH: 수입 썽크, BRANCHIND: 슬롯 기호 -- 연결 /
-  `control_exempt` / `static_writers` / `refused_models`도 따라감), `_noreturn_jumps`(branch / cbranch + noreturn 모델),
+  `control_exempt` / `refused_models`도 따라감; `static_writers`는 바뀌지 않음 -- 떠나는 BRANCH / BRANCHIND는
+  이미 와일드카드), `_noreturn_jumps`(branch / cbranch + noreturn 모델),
   SP 증명(나가는 BRANCH는 "branch" 사실이고 검증된 효과가 있어야 증명; 아니면 증명 없음), `root_diagnostics`(사실의
   종류를 호출 표시 씨앗 옆에 기록). `function_summary`의 "다음 줄이 있는 noreturn CBRANCH 블록은 건너뜀"은 지웠다
   (사실은 간선 블록 없는 조건 noreturn 점프를 받지 않는다 -- 그런 블록은 꼬리 출구).
@@ -6662,3 +6663,12 @@ G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 �
 - 고정 테스트 `tests/intra/test_gt_b1_tail_fact.py`(14). 돌연변이 9개(`.census6/cob/g3b1_mutants.sh`: 착지 패드 방아쇠가
   표시만, 패드에서 다음 줄 제외, 이른 거절 없음, branchind의 안쪽 대상 검사 없음, terminal 표시 요구, 반환 모양 스택
   없음, 죽은 간선 무시, SP 증명 거절 없음, CBRANCH만 물리 거절) 각각 실패.
+- 코드 리뷰 r1 고침(Astra / Fable APPROVE WITH FIXES): 죽은 간선 판단은 하나 -- 출구 반복에서도 `dead_edge_sites`의
+  자리는 죽은 간선(합성 효과여도 출구 상태 없음; 행만 빼고 출구로 내놓는 일 없음). 사실이 받지 않는 수입 꼬리 점프
+  (BRANCH / BRANCHIND, noreturn 모델의 CBRANCH)는 자리마다 이유를 남긴다(`refused_models`: "tail jump not admitted by
+  code facts (...)", `interprocedural._refused_import_tails`). `root_diagnostics`는 이미 있는 행에 사실의 종류만 붙인다
+  (행을 더하지 않음). 고정 테스트 24개 + `_chi_shadow` 캐시 키 테스트; 돌연변이 15개 각각 실패(옛 수입 BRANCH /
+  BRANCHIND 규칙, 꼬리 출구 건너뜀 되살림, 출구 반복의 자기 판단, 아무 타입이나 캐시, 거절 이유 없음 추가). 같은 결과인
+  돌연변이: 죽은 간선 자리를 옛 잘림만으로(Bundle noreturn 간선엔 단계 행이 없고 종류로 이미 죽음, 도달 안 한 간선의
+  자리는 이미 `dead_keys`). 쓰기 조건 두 곳(`function_summary` 불확실 / 조건부 집합)의 걸러냄은 건너감 걸러냄
+  (`_exit_crossings`)이 같은 행을 먼저 막아 관찰로 구별되지 않는다(심층 방어).

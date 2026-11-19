@@ -809,6 +809,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         if image_info and external_models else {}
         for key, unit in functions.items()
     }
+    if image_info and external_models:
+        # (G-T G3b-1, review r1 Astra P2) an import tail shape the one tail fact
+        # refuses keeps a per-site reason (it stays an unknown exit)
+        for key, unit in functions.items():
+            for site, reason in _refused_import_tails(unit, image_info, external_models, local_entries).items():
+                refused_sites.setdefault(key, {}).setdefault(site, reason)
     memory_space = _program_memory_space(next(iter(functions.values()))) if functions else None
     files = [_register_file(unit.observation, unit.scopes.resolution_context) for unit in program.values()]
     program_registers = (
@@ -2221,6 +2227,62 @@ def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset
                 refused[key] = f"{model[1].label}: {reason}"
             continue
         found[key] = model
+    return found
+
+
+def _refused_import_tails(unit, image_info, external_models, local_functions=frozenset()) -> dict:
+    """(G-T G3b-1, docs 25.104) Site -> reason for every jump leaving to an
+    import with a model -- a BRANCH / CBRANCH to an import thunk that is no
+    Bundle function, a BRANCHIND through an import slot -- that the one tail
+    fact (``pcode_blocks.tail_transfers``) does not admit: no model is bound
+    there (an unknown exit), and the reason names the code fact that failed."""
+    from .pcode_blocks import build_pcode_block_graph
+
+    observation = getattr(unit, "observation", None)
+    if observation is None:
+        return {}
+    facts = _tail_facts(unit)
+    rows = {row.address for row in observation.instructions}
+    exit_rows = {item.source for item in getattr(observation, "fallthrough_exits", ())}
+    graph = None
+    found = {}
+    for row in observation.instructions:
+        for ordinal, operation in enumerate(row.operations):
+            if operation.opcode not in ("BRANCH", "CBRANCH", "BRANCHIND") or not operation.inputs:
+                continue
+            key = _operation_key(row.address, ordinal, operation.opcode)
+            if key in facts:
+                continue
+            target = operation.inputs[0]
+            if target.kind is not VarnodeKindCode.ADDRESS:
+                continue
+            if operation.opcode == "BRANCHIND":
+                symbol = _static_slot_symbol(unit, image_info, target)
+            elif target.coordinate in rows \
+                    or (target.coordinate.space_id, target.coordinate.byte_offset) in local_functions:
+                continue
+            else:
+                symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
+            model = external_models.lookup(symbol) if symbol is not None else None
+            if model is None or operation.opcode == "CBRANCH" and not model[1].noreturn:
+                continue   # (a conditional jump binds only a noreturn model, as before)
+            if graph is None:
+                graph = build_pcode_block_graph(observation, unit.scopes.function.entry)
+            if graph.unsupported is not None:
+                why = f"p-code graph unsupported ({graph.unsupported})"
+            elif graph.block_of(row.address, ordinal) is None:
+                why = "not reachable"
+            elif row.address in exit_rows:
+                why = "S1 continuation evidence"
+            elif row.flow.is_override:
+                why = "flow override"
+            elif operation.opcode != "CBRANCH" and row.fallthrough is not None:
+                why = "the instruction has a fallthrough"
+            elif any(item in rows for item in row.flow_targets) and operation.opcode == "BRANCHIND":
+                why = "an observed flow target in the function"
+            else:
+                why = "observed flow or block shape disagrees"
+            found[key] = f"{symbol.name}: tail jump not admitted by code facts ({why})"
     return found
 
 
