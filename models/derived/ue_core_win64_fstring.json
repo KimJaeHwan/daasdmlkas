@@ -2,7 +2,7 @@
  "format_version": 1,
  "kind": "summary",
  "id": "ue-core-win64-derived",
- "version": 38,
+ "version": 39,
  "language_id": "x86:LE:64:default",
  "abi_tag": "win64",
  "libraries": [
@@ -21,7 +21,7 @@
   "engine": {
    "summary_version": 2,
    "template_version": 7,
-   "semantics_version": 52
+   "semantics_version": 53
   },
   "parameters": {
    "private_frame_above": 0
@@ -55,7 +55,7 @@
   ],
   "producer": {
    "tool": "tools/derive_models",
-   "engine_revision": "05a70327aa30822cc7b8fb902b1225376e1b73e6",
+   "engine_revision": "646403c241785fe08952e413c3e0e1c6b0e54a42",
    "bundle": "8d181999bc5c71e3bcbd7e3ccb00f858c651ea3c6ec9a54cf708dbdce48d7b50",
    "index_addresses": true,
    "stack_evidence": [
@@ -1999,6 +1999,8 @@
         ],
         "crossed": [
          "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~2",
+         "alias:dll:1b1:1800f5019:2:CALL~u0",
          "alias:dll:1b1:1800f5078:3:STORE",
          "alias:dll:1b1:1800f50d6:3:STORE",
          "call:dll:1b1:1800f5019:2:CALL",
@@ -2037,6 +2039,8 @@
         ],
         "crossed": [
          "alias:dll:1b1:1800f500b:2:STORE",
+         "alias:dll:1b1:1800f5019:2:CALL~2",
+         "alias:dll:1b1:1800f5019:2:CALL~u0",
          "alias:dll:1b1:1800f5078:3:STORE",
          "alias:dll:1b1:1800f50d6:3:STORE",
          "call:dll:1b1:1800f5019:2:CALL",
