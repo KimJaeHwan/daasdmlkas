@@ -410,6 +410,33 @@ def test_shipped_derived_models_match_this_engine():
         assert model.entries and all(entry.template is not None and entry.refusal is None for entry in model.entries)
 
 
+def test_a_template_file_records_the_call_fallthrough_contract(tmp_path):
+    """(G3b-0, docs 25.106) ``source.call_fallthrough`` -- written by
+    ``build_file`` for a Bundle with the S1 contract -- loads when "isa" /
+    "mixed" or absent; any other value is a malformed file (it was rejected as
+    an unknown source key before: an S1 Bundle's template could not load)."""
+    from tdo_v2.summary_store import ModelError, load_model_file
+
+    shipped = Path(__file__).resolve().parents[2] / "models" / "derived" / "ue_core_win64_fstring.json"
+    raw = json.loads(shipped.read_text(encoding="utf-8"))
+    assert raw["source"].get("call_fallthrough") == "isa"
+    for value in ("isa", "mixed", None, "yes"):
+        data = json.loads(json.dumps(raw))
+        if value is None:
+            data["source"].pop("call_fallthrough")
+        else:
+            data["source"]["call_fallthrough"] = value
+        path = tmp_path / f"t_{value}.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        if value == "yes":
+            with pytest.raises(ModelError, match="call_fallthrough"):
+                load_model_file(path)
+        else:
+            model = load_model_file(path)
+            assert model.entries and all(entry.template is not None and entry.refusal is None
+                                         for entry in model.entries)
+
+
 def test_image_provenance_reads_the_encoding():
     """lea rax, [rip+0x2000] at 0x180001000 (48 8D 05 00 20 00 00, 7 bytes) ->
     0x180003007 proven; mov rax, imm64 at 0x180001010: proven with a

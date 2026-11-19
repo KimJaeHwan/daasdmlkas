@@ -6709,3 +6709,19 @@ G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 �
   no-kill 행, `?` 미지 쓰기, `~ov` 행, 루프, 불러온 포인터 형제, 조건 꼬리, 호출자 다이제스트 독립), 돌연변이 15개
   (`.census6/cob/o1_mutants.sh`) 각각 실패. 게이트 증거: 안전장치 0회(모든 게이트 Bundle), 묶음 수백~수천;
   지움만 바꾼 변형과 O-1 전체의 구조 비교(`.census6/cob/o1_structural.py`, 이름표를 행 내용으로) 차이 0.
+
+### 25.106 UE 예제를 현재 exporter로 다시 내보냄 (G-T G3b-0, 2026-11-20)
+
+설계 `.census6/design_gt_r11.md` / r12(통과 규칙: 템플릿 항목이 같으면 끝, 다르면 차이마다 원인). UE Core 예제를 G2
+exporter(내부 썽크 유지, S1 호출 다음 줄 계약)로 다시 내보냈다: generation `0ad2baf7...`(이전 `8d181999...`; 같은
+5 진입점, 로컬 전용, 공개하지 않음). 이 Bundle에서 semantics 53으로 다시 만든 템플릿 v40을 배포 템플릿으로 바꾼다.
+
+- 의미 비교: 세 항목(FString 생성자 / 소멸자 / AppendChar) 모두 객체 번호, 실행 목록 순서, 실행의 `sources` 순서를
+  빼면 같다. O-1 전에 보였던 AppendChar 쓰기 조건 차이(477 -> 460)는 O-1로 사라졌다(25.105).
+- 남은 차이(순서만, 의미 없음): 템플릿 객체 번호와 실행 순서, AppendChar 실행 6개의 `sources` 순서
+  (`function_summary`가 `sources`를 `ByteSpan.canonical_key`로 정렬하고 그 키에 스코프 다이제스트가 있다 -- 바이트가
+  바뀐 Bundle에서 상대 객체 둘의 순서가 바뀜). `sources`는 집합이라 결과에 쓰이지 않는다. 이름 붙은 한계: 템플릿의
+  글자 그대로의 순서는 Bundle 바이트에 따라 바뀔 수 있다(다이제스트 없는 템플릿 순서는 따로 단계).
+- 머리말: `source.producer.bundle`이 새 generation, `source.call_fallthrough: isa`가 기록됨(S1 계약이 있는 Bundle).
+- 게이트의 UE 템플릿 검사는 템플릿이 이름 붙인 Bundle을 찾아 다시 만든다(`tools/gate/check_ue_template.py`와 같은 규칙).
+- 함께 고친 기존 결함(S1 때부터): `build_file`은 S1 계약이 있는 Bundle에서 `source.call_fallthrough`를 쓰는데 모델 로더(`summary_store._load_summary_file`)는 그 칸을 모르는 source 칸으로 거절했다 -- S1 Bundle에서 만든 템플릿은 불러올 수 없었다(이번이 첫 경우). 이제 선택 칸으로 받고 값은 "isa" / "mixed"만(기록만, 결과에 쓰지 않음). 고정 테스트 `test_a_template_file_records_the_call_fallthrough_contract`(돌연변이 2개 각각 실패).

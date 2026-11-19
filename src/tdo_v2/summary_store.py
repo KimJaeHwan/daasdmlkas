@@ -704,8 +704,13 @@ def _load_summary_file(raw, path) -> ModelFile:
         raise ModelError(f"{path}: unsupported model format")
     _file_id(raw, path)
     source = _source(raw, path, recorded=True)
-    if source["kind"] != "derived"             or set(source) - {"producer", "declarations", "code_only_switches"} != DERIVED_SOURCE_KEYS:
+    optional = {"producer", "declarations", "code_only_switches", "call_fallthrough"}
+    if source["kind"] != "derived" or set(source) - optional != DERIVED_SOURCE_KEYS:
         raise ModelError(f"{path}: a summary file's source is derived with {sorted(DERIVED_SOURCE_KEYS)}")
+    # (S1, docs 25.100 / 25.106) the derivation's observations' CALL fallthrough
+    # contract, written by ``summary_templates.build_file`` -- recorded only
+    if source.get("call_fallthrough", "isa") not in ("isa", "mixed"):
+        raise ModelError(f"{path}: source.call_fallthrough is \"isa\" or \"mixed\"")
     switches = source.get("code_only_switches", {})
     if type(switches) is not dict or any(type(name) is not str or type(on) is not bool
                                          for name, on in switches.items()):
