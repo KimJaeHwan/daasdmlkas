@@ -346,3 +346,184 @@ def test_the_stable_key_separates_enum_types_and_value_payloads():
     assert _stable(A.X) != _stable(B.X)
     assert _stable(("nonstack", 8, True, ("a",))) != _stable(("nonstack", 8, False, ("a",)))
     assert _stable(("nonstack", 8, True, ("a",))) != _stable(("nonstack", 16, True, ("a",)))
+
+
+# -- review r2 pins (Astra P2: identities by row content, more shapes) -------------------
+
+
+def _row_content(item):
+    """Staged / raw operation key -> what its row writes: sorted (object kind,
+    start, size) of resolved writes, plus ("unresolved", size) for a memory
+    write with an unknown address -- a label-free identity of the row."""
+    found = {}
+    for effect in item.normalized.effects:
+        writes = [(evidence.span.object_id.kind.value, evidence.span.start, evidence.span.size)
+                  for evidence in effect.writes if type(evidence) is ResolvedStorage]
+        if effect.memory_write is not None:
+            writes.append(("unresolved", effect.memory_write.size))
+        found[effect.operation_key] = tuple(sorted(writes, key=repr))
+    return found
+
+
+def _identity(label, content):
+    """A writer / crossing label with a staged call label replaced by its
+    row's content (``?`` and ``alias:`` / ``unknown:`` prefixes kept)."""
+    prefix = ""
+    for head in ("alias:", "unknown:", "call:", "?"):
+        if label.startswith(head):
+            prefix, label = prefix + head, label[len(head):]
+    if output_call(label) is None:
+        return prefix + label
+    return prefix + output_call(label) + "~" + repr(content.get(label))
+
+
+def _load_identities(item, units, index=-2):
+    row = units[0].observation.instructions[index]
+    site = f"{row.address.space_id:x}:{row.address.byte_offset:x}:"
+    content = _row_content(item)
+    return sorted(_identity(writer, content) for read in item.normalized.may_alias_reads
+                  if read.operation_key.startswith(site) for writer in read.writers)
+
+
+def _exit_identities(item):
+    content = _row_content(item)
+    return sorted((exit_.block_key, run.span.object_id.kind.value, run.span.start, run.span.size,
+                   tuple(sorted(_identity(label, content) for label in getattr(run, "crossed", ()))))
+                  for exit_ in item.summary.exits for run in exit_.runs
+                  if run.span.object_id.kind is not StorageObjectKind.FUNCTION_UNIQUE)
+
+
+def _in_both_orders(monkeypatch, build, key=CODE_BASE, **options):
+    """(item, units) of ``build()`` analysed with the effect's lists in the
+    canonical order and reversed."""
+    original = _effect_order._ordered
+    found = []
+    for reverse in (False, True):
+        monkeypatch.setattr(_effect_order, "_ordered",
+                            lambda items, reverse=reverse: tuple(reversed(original(items))) if reverse
+                            else original(items))
+        units = build()
+        found.append((analyze_units(units, assume_entry_values_not_frame=False, **options)[function_key_of(1, key)],
+                      units))
+    monkeypatch.setattr(_effect_order, "_ordered", original)
+    return found
+
+
+def test_the_no_kill_members_uncertain_gens_reach_the_read(monkeypatch):
+    """With the call's relative-object members uncertain no-kill writers, the
+    rcx member -- the LOAD's own object, so no may-alias writer otherwise --
+    reaches the read through its ``?`` gen, beside the stack member."""
+    plain = _final_load_writers(monkeypatch)
+    assert len([writer for writer in plain if "~" in writer and not writer.endswith("~push")]) == 1, plain
+    writers = _final_load_writers(monkeypatch, no_kill=True)
+    assert len([writer for writer in writers if "~" in writer and not writer.endswith("~push")]) == 2, writers
+
+
+def test_the_exit_crossings_name_the_same_rows_in_either_order(monkeypatch):
+    """The caller's exit crossings with each staged label mapped to its row's
+    content: identical in both orders, and the stack row crosses."""
+    (first, _), (second, _) = _in_both_orders(monkeypatch, lambda: program_units(_caller(), _callee()))
+    assert _exit_identities(first) == _exit_identities(second)
+    assert any("FUNCTION_RELATIVE" in label or "function_relative" in label
+               for run in _exit_identities(first) for label in run[4] if label.startswith("alias:")), \
+        _exit_identities(first)
+
+
+def _overlapping_callee():
+    """[rcx+8] = rdx * rsi; [rdx+8] = rsi; [rsp+8] = rax; ret -- two rows the
+    caller (which passes rdx = rcx) resolves to the same bytes: a ``~ov``
+    row."""
+    a, b, c = tmp(0x400), tmp(0x408), tmp(0x410)
+    return (FunctionBuilder(entry=CALLEE).ins(op("INT_MULT", [reg(RDX), reg(RSI)], reg(RAX)))
+            .ins(add(a, reg(RCX), const(8)), store(a, reg(RAX)))
+            .ins(add(c, reg(RDX), const(8)), store(c, reg(RSI)))
+            .ins(add(b, reg(RSP), const(8)), store(b, reg(RAX))).ret())
+
+
+def _overlap_caller():
+    """rbx = rcx; rdx = rcx; call; rax = [rbx+8]; ret."""
+    t = tmp(0x500)
+    builder = (FunctionBuilder().ins(copy(reg(RBX), reg(RCX))).ins(copy(reg(RDX), reg(RCX))).sub_rsp(0x28)
+               .call(CALLEE).add_rsp(0x28))
+    return builder.ins(add(t, reg(RBX), const(8)), load(reg(RAX), t)).ret()
+
+
+def test_the_callers_results_are_digest_independent_with_overlap_rows():
+    """Caller-level: the same caller / callee (with a ``~ov`` row) under two
+    program digests gives the same read writers and exit crossings, by row
+    content (review r2: caller results, relative overlap rows)."""
+    from synthetic import X64, register_evidence
+
+    found = []
+    for registers in (None, register_evidence(X64)):
+        units = program_units(_overlap_caller(), _overlapping_callee(), registers=registers)
+        item = analyze_units(units, assume_entry_values_not_frame=False)[function_key_of(1, CODE_BASE)]
+        assert any(key.endswith(("~ov0",)) for key in _row_content(item)), sorted(_row_content(item))
+        found.append((_load_identities(item, units), _exit_identities(item), units[0].scopes.program.scope))
+    assert found[0][2] != found[1][2]
+    assert found[0][:2] == found[1][:2]
+
+
+def test_overlap_rows_keep_their_siblings_in_either_order(monkeypatch):
+    (first, units), (second, _) = _in_both_orders(monkeypatch,
+                                                  lambda: program_units(_overlap_caller(), _overlapping_callee()))
+    assert _load_identities(first, units) == _load_identities(second, units)
+    assert _exit_identities(first) == _exit_identities(second)
+
+
+def test_a_loop_around_the_call_keeps_every_sibling(monkeypatch):
+    """``top: call; jnz top; rax = [rbx+8]``: the group's kill runs every
+    iteration and the siblings arrive again from the loop -- both orders,
+    both engines, same read writers by row content."""
+    from synthetic import ZF
+
+    def build():
+        t = tmp(0x500)
+        caller = (FunctionBuilder().ins(copy(reg(RBX), reg(RCX))).sub_rsp(0x28).label("top").call(CALLEE)
+                  .cbranch("top", reg(ZF, 1)).add_rsp(0x28)
+                  .ins(add(t, reg(RBX), const(8)), load(reg(RAX), t)).ret())
+        return program_units(caller, _callee())
+
+    for engine, check in ENGINES:
+        _engine(monkeypatch, engine, check)
+        (first, units), (second, _) = _in_both_orders(monkeypatch, build)
+        assert _load_identities(first, units) == _load_identities(second, units)
+        assert any("~" in label for label in _load_identities(first, units))
+
+
+def test_a_loaded_pointer_sibling_keeps_its_candidate(monkeypatch):
+    """The callee also writes through a pointer it loads (``[[rcx]]``): the
+    caller stages that row behind an entry load (``~ld``) and resolves it to
+    the pointee's own object; whatever the order, the final read names both
+    the pointee row and the stack row (neither killed by the exact rcx
+    row)."""
+    def build():
+        a, b, p = tmp(0x400), tmp(0x408), tmp(0x418)
+        callee = (FunctionBuilder(entry=CALLEE).ins(load(p, reg(RCX)))
+                  .ins(store(p, reg(RSI)))
+                  .ins(add(a, reg(RCX), const(8)), store(a, reg(RDX)))
+                  .ins(add(b, reg(RSP), const(8)), store(b, reg(RDX))).ret())
+        return program_units(_caller(), callee)
+
+    (first, units), (second, _) = _in_both_orders(monkeypatch, build)
+    one, two = _load_identities(first, units), _load_identities(second, units)
+    assert one == two
+    assert len([label for label in one if "~(" in label]) == 2, one
+
+
+def test_a_conditional_tail_group_crosses_the_same_rows_in_either_order(monkeypatch):
+    """The staged rows of a composed conditional tail sit in its edge block:
+    the middle function's exit crossings, by row content, do not depend on
+    their order."""
+    from synthetic import ZF
+    from test_gt_conditional_tails import MIDDLE, _to
+
+    def build():
+        middle = _to(FunctionBuilder(entry=MIDDLE).ins(copy(reg(RBX), reg(RCX))).cbranch("done", reg(ZF, 1))
+                     .ins(copy(reg(RAX), const(7))).label("done").ret(), None, CALLEE)
+        return program_units(middle, _callee())
+
+    (first, _), (second, _) = _in_both_orders(monkeypatch, build, key=MIDDLE)
+    assert _exit_identities(first) == _exit_identities(second)
+    assert any(label.startswith("alias:") for run in _exit_identities(first) for label in run[4]), \
+        _exit_identities(first)

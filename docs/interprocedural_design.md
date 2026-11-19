@@ -6705,5 +6705,7 @@ G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 �
 - 의미 보장: 한 호출의 보통 출력 행(`~<n>`, `~u<n>`)의 어떤 순서에서도 결과가 같다(`~ov`는 메모리 SSA 때문에 마지막).
 - `ENGINE_SEMANTICS_VERSION` 52 -> 53, UE 템플릿 v39: AppendChar 출구의 한 실행에 같은 호출 행의 `alias:` 건너감
   (`CALL~2`, `CALL~u0`)이 더해짐(이전엔 같은 호출의 뒤 행이 지웠다) -- 보수적 방향.
-- 고정 테스트 `tests/intra/test_o1_call_output_groups.py`(9; 두 엔진 교차 확인), 돌연변이 8개(`.census6/cob/o1_mutants.sh`)
-  각각 실패.
+- 고정 테스트 `tests/intra/test_o1_call_output_groups.py`(25; 두 엔진 교차 확인, 행 내용으로 비교: 호출 전 쓰기 지움,
+  no-kill 행, `?` 미지 쓰기, `~ov` 행, 루프, 불러온 포인터 형제, 조건 꼬리, 호출자 다이제스트 독립), 돌연변이 15개
+  (`.census6/cob/o1_mutants.sh`) 각각 실패. 게이트 증거: 안전장치 0회(모든 게이트 Bundle), 묶음 수백~수천;
+  지움만 바꾼 변형과 O-1 전체의 구조 비교(`.census6/cob/o1_structural.py`, 이름표를 행 내용으로) 차이 0.
