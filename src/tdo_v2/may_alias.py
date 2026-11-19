@@ -159,10 +159,21 @@ class _Escape:
     # LOADs whose value may be a held stack address (docs 25.78): never a
     # pre-escape value (pre-escape-values-do-not-address-the-new-frame)
     tainted_loads: frozenset[str] = frozenset()
+    # (G-T G3b-2, docs 25.107) the conditional-tail sites whose outcome edge
+    # block the run reached: their taken transfer executes at ``site~edge``
+    # (the edge block's one operation), not at the raw CBRANCH
+    edge_sites: frozenset[str] = frozenset()
 
-    @staticmethod
-    def _base(key: str) -> str:
-        return key.split("~", 1)[0]  # a summarized call effect runs at its call
+    def _base(self, key: str) -> str:
+        """The operation a key's effect executes at: a summarized call's rows
+        at its call; a conditional-tail site's rows (and ``site~edge``) at
+        ``site~edge``; the raw CBRANCH is a plain branch of its block."""
+        if key.endswith("~edge"):
+            return key
+        base = key.split("~", 1)[0]
+        if base != key and base in self.edge_sites:
+            return base + "~edge"
+        return base
 
     def private_read(self, key: str) -> bool:
         base = self._base(key)
@@ -1041,8 +1052,14 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
     (``tainted_loads``), and every call but a TEST-ONLY boundary call, every
     user op, indirect branch and jump out of the function is an escape (a
     callee reads its caller's frame through its own stack pointer).
+
+    (G-T G3b-2, docs 25.107) A conditional tail with an outcome edge block
+    ``E`` (``conditional_tail_edges``) escapes at ``site~edge`` -- ``E``'s one
+    operation key -- when ``E`` is entered with a held slot or the site is
+    one of ``escaping_calls``; its raw CBRANCH does not escape. A CBRANCH
+    leaving the function without an edge block escapes at itself as before.
     """
-    from .pcode_blocks import build_pcode_block_graph, instruction_key
+    from .pcode_blocks import build_pcode_block_graph, conditional_tail_edges, edge_site, instruction_key
 
     instructions = {row.address: row for row in observation.instructions}
     if not instructions:
@@ -1056,6 +1073,10 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
     if graph.unsupported is not None:
         return None
     blocks = {block.key: block for block in graph.blocks}
+    # (G-T G3b-2, docs 25.107) a conditional-tail site with an outcome edge
+    # block escapes there (``site~edge``), not at its raw CBRANCH: the taken
+    # transfer runs only on the edge, never on the fallthrough
+    edge_sites = frozenset(conditional_tail_edges(graph))
 
     # the tainted bytes as one int per state over the (space, byte) pairs the
     # graph's varnodes touch (docs 25.31 B0-6; were frozensets of pairs, one
@@ -1132,6 +1153,11 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
             # (G-T G3a) a composed conditional tail leaves through its edge
             # block like a RETURN: a register holding a stack-derived value there
             returning.add(block.key)
+        if block.edge is not None and escapes is not None and edge_site(block) in edge_sites:
+            # (G-T G3b-2) the taken transfer of a conditional tail executes here
+            site = edge_site(block)
+            if site in escaping_calls or held:
+                escapes.add(site + "~edge")
         for ordinal in range(block.start, block.stop):
             operation = row.operations[ordinal]
             touches = lambda varnode: varnode is not None and bool(mask_of(varnode) & tainted)
@@ -1145,12 +1171,12 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
                 or (operation.opcode in ("BRANCH", "CBRANCH") and operation.inputs
                     and operation.inputs[0].kind is not VarnodeKindCode.CONSTANT
                     and (operation.inputs[0].coordinate.space_id, operation.inputs[0].coordinate.byte_offset)
-                    not in addresses)):
+                    not in addresses and key not in edge_sites)):
                 escapes.add(key)   # (a held slot: a callee reads its caller's frame through its own SP)
             elif escapes is not None and (
                 (operation.opcode == "STORE" and len(operation.inputs) == 3 and touches(operation.inputs[2]))
                 or (operation.opcode == "CALLOTHER" and any(touches(item) for item in operation.inputs))
-                or key in escaping_calls
+                or (key in escaping_calls and key not in edge_sites)
                 # a direct memory output (``COPY ram[x], rsp``) is a store too
                 or (operation.output is not None
                     and operation.output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE)
@@ -1215,7 +1241,9 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
         transfer(blocks[key], state, escapes, switches)
     keys = {}
     for block in graph.blocks:
-        if block.key in in_states:
+        if block.key in in_states and block.edge is not None and edge_site(block) in edge_sites:
+            keys[block.key] = [edge_site(block) + "~edge"]   # (G-T G3b-2: the taken transfer's point)
+        elif block.key in in_states:
             row = instructions[block.instruction]
             keys[block.key] = [
                 _operation_key(row.address, ordinal, row.operations[ordinal].opcode)
@@ -1275,6 +1303,8 @@ def _stack_escape(observation, register_space: int, offset: int, size: int,
         frozenset(_flagged(keys, predecessors, escapes, reverse=True)),
         frozenset(_flagged(keys, successors, escapes, reverse=False, strict=True)),
         frozenset(tainted_loads),
+        # (G-T G3b-2) the sites whose edge block this run reached (its own graph)
+        frozenset(key[:-len("~edge")] for key in known if key.endswith("~edge")),
     )
 
 

@@ -40,7 +40,7 @@ def _old_stack_taint(observation, register_space: int, offset: int, size: int,
     stores the caller's RBP, not a stack address. A switch writes the stack
     pointer with a value not derived from it (``mov rsp, [x]``).
     """
-    from tdo_v2.pcode_blocks import build_pcode_block_graph, instruction_key
+    from tdo_v2.pcode_blocks import build_pcode_block_graph, conditional_tail_edges, edge_site, instruction_key
 
     instructions = {row.address: row for row in observation.instructions}
     if not instructions:
@@ -54,6 +54,8 @@ def _old_stack_taint(observation, register_space: int, offset: int, size: int,
     if graph.unsupported is not None:
         return None
     blocks = {block.key: block for block in graph.blocks}
+    # (G-T G3b-2, docs 25.107) a conditional tail with an edge block escapes there
+    edge_sites = frozenset(conditional_tail_edges(graph))
 
     def bytes_of(varnode):
         return {
@@ -64,6 +66,8 @@ def _old_stack_taint(observation, register_space: int, offset: int, size: int,
     def transfer(block, state, escapes, switches):
         row = instructions[block.instruction]
         tainted = set(state)
+        if block.edge is not None and escapes is not None and edge_site(block) in escaping_calls:
+            escapes.add(edge_site(block) + "~edge")
         for ordinal in range(block.start, block.stop):
             operation = row.operations[ordinal]
             touches = lambda varnode: varnode is not None and bool(bytes_of(varnode) & tainted)
@@ -71,7 +75,7 @@ def _old_stack_taint(observation, register_space: int, offset: int, size: int,
             if escapes is not None and (
                 (operation.opcode == "STORE" and len(operation.inputs) == 3 and touches(operation.inputs[2]))
                 or (operation.opcode == "CALLOTHER" and any(touches(item) for item in operation.inputs))
-                or key in escaping_calls
+                or (key in escaping_calls and key not in edge_sites)
                 # a direct memory output (``COPY ram[x], rsp``) is a store too
                 or (operation.output is not None
                     and operation.output.kind not in (VarnodeKindCode.REGISTER, VarnodeKindCode.UNIQUE)
@@ -128,7 +132,9 @@ def _old_stack_taint(observation, register_space: int, offset: int, size: int,
         transfer(blocks[key], state, escapes, switches)
     keys = {}
     for block in graph.blocks:
-        if block.key in in_states:
+        if block.key in in_states and block.edge is not None:
+            keys[block.key] = [edge_site(block) + "~edge"]
+        elif block.key in in_states:
             row = instructions[block.instruction]
             keys[block.key] = [
                 _operation_key(row.address, ordinal, row.operations[ordinal].opcode)

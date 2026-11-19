@@ -161,7 +161,10 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # 53: (O-1) a summarized call's output rows are one simultaneous final state --
 # no row kills a sibling's may-alias candidate (dense / sparse / exit crossings);
 # the effect's row lists are ordered digest-free (labels stable across Bundles).
-ENGINE_SEMANTICS_VERSION = 53
+# 54: (G-T G3b-2) a conditional tail with an outcome edge block escapes at
+# ``site~edge`` (its edge block), not at the raw CBRANCH: the fallthrough path
+# regains private-frame reads.
+ENGINE_SEMANTICS_VERSION = 54
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

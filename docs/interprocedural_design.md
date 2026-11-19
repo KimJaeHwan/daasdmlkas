@@ -6738,3 +6738,25 @@ exporter(내부 썽크 유지, S1 호출 다음 줄 계약)로 다시 내보냈�
 - 함께 고친 기존 결함(S1 때부터): `build_file`은 S1 계약이 있는 Bundle에서 `source.call_fallthrough`를 쓰는데 모델 로더(`summary_store._load_summary_file`)는 그 칸을 모르는 source 칸으로 거절했다 -- S1 Bundle에서 만든 템플릿은 불러올 수 없었다(이번이 첫 경우). 이제 선택 칸으로 받고 값은 "isa" / "mixed"만(기록만, 결과에 쓰지 않음; 항목은
   관찰마다 그 관찰의 계약으로 계산된다). "mixed"나 칸 없음을 ISA 검증으로 읽지 않는다 -- 칸 없음은 S1 전 Bundle이거나
   isa 관찰이 하나도 없는 경우(`build_file`은 둘을 구별하지 않는다). 고정 테스트 `test_a_template_file_records_the_call_fallthrough_contract`(돌연변이 2개 각각 실패).
+
+### 25.107 조건 꼬리 점프의 스택 탈출은 간선 블록에서 (G-T G3b-2, 2026-11-20)
+
+설계 `.census6/design_gt_r10.md` 2장 -> r11 2장 -> r12(고침) -> r15(수렴). 지금까지 조건 꼬리 점프(`jcc 다른_함수`, 다음
+줄은 함수 안)의 스택 탈출은 날 CBRANCH `s`(블록 `S`의 끝)에서 일어났다: 보관 슬롯이 있을 때 함수 밖으로 가는 CBRANCH
+규칙(25.78)과 `escaping_calls`의 사이트 키. 그래서 점프하지 않는 경로의 연산도 "탈출 뒤"가 되어 `private_read` /
+`private_before`를 잃었다. 그런데 넘어가는 일은 점프한 쪽(G3a의 결과 간선 블록 `E`)에서만 일어난다.
+
+- `_stack_taint`: 간선 블록이 있는 사이트(`conditional_tail_edges`, 탈출 실행 자신의 그래프)는 날 CBRANCH에서 탈출하지
+  않는다(보관 슬롯 규칙도, `escaping_calls`도). `E`에 들어갈 때 사이트가 `escaping_calls`에 있거나 보관 슬롯이 있으면
+  `site~edge`에서 탈출한다. 목록: `keys[E] = [site~edge]`, `E`는 다음 블록이 없다. 간선 블록이 없는 CBRANCH(G1 조건
+  불충족)는 예전처럼 날 사이트에서 탈출한다. `escaping_calls`는 사이트 키 그대로(`forward`, 탈출 메모 키, 불투명 호출
+  빼기 변화 없음).
+- `_Escape.edge_sites`(그 실행이 `E`에 도달한 사이트): `_base`가 사이트의 단계 행 `s~N`(무엇이든)과 `s~edge`를
+  `s~edge`로, 날 `s`는 그대로(그 블록의 보통 분기), 다른 호출의 행은 호출로. 두 탈출 실행(불투명 가정 켜고 / 끄고)과
+  보관 슬롯 없는 실행(`reaches`)이 같은 규칙을 쓴다.
+- 효과: `S`의 분기 앞 연산은 그대로(`E`에 닿음). 점프하지 않는 경로는 `E`를 지나지 않으므로 `private_read` /
+  `private_before`를 되찾는다(루프로 `S`에 돌아오는 memset 모양도). `private_write`는 바뀌지 않는다: 뒤로 닿음은 `S`의 끝과
+  그 다음 블록 `E`에서 같은 집합(고정 테스트가 예전 규칙과 비교). `stack_leaks` / `stack_values_out`은 `escaping_calls`와
+  보관 슬롯 없이 부르므로 변화 없음.
+- `ENGINE_SEMANTICS_VERSION` 53 -> 54, UE 템플릿 v41(항목은 v40과 같음). 집합 기준 비교(`test_stack_taint_bits`의 옛
+  구현)에도 같은 규칙. 고정 테스트 `tests/intra/test_gt_b2_edge_escape.py`.
