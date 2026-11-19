@@ -385,6 +385,11 @@ def derive_proven_call_effect(summary: FunctionSummary, *args, **kwargs) -> Prov
     return canonical_effect(effect)
 
 
+# (O-1, docs 25.105) the ``key=repr`` sorts in this module now only decide the
+# order within an effect before ``_effect_order.canonical_effect`` re-orders its
+# row lists by a digest-free key (they still order lists it keeps: inexact ones)
+
+
 def _derive_proven_call_effect(
     summary: FunctionSummary,
     callee: str,

@@ -40,7 +40,7 @@ def _stable(value):
     if type(value) is str:
         return (3, value)
     if isinstance(value, Enum):
-        return (4, str(value.value))
+        return (4, type(value).__name__, str(value.value))
     if type(value) is ByteSpan:
         object_id = value.object_id
         if object_id.kind not in _EXACT_KINDS:
@@ -64,13 +64,16 @@ def _ordered(items) -> tuple:
         keyed = sorted(((_stable(item), index) for index, item in enumerate(items)), key=lambda pair: pair)
     except _Inexact:
         keyed = [(None, index) for index in range(len(items))]
-    found = []
+    found, seen = [], set()
     for _, index in keyed:
         item = items[index]
-        if found and found[-1] == item:
-            continue
-        if item in found:
-            continue
+        try:
+            if item in seen:
+                continue
+            seen.add(item)
+        except TypeError:   # (an unhashable item: compared by equality)
+            if item in found:
+                continue
         found.append(item)
     return tuple(found)
 

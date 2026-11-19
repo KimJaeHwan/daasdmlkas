@@ -4,9 +4,10 @@ final state.
 The callee writes ``[rcx+8]`` and ``[rsp+8]`` (the caller's home slot); with
 entry-values-not-frame off the caller's ``rbx`` object may alias its stack, so
 a LOAD of ``[rbx+8]`` after the call may see the stack row too. Whatever order
-the two output rows are staged in, neither kills the other's candidate; a later
-ordinary write still kills both. The effect's row lists are ordered by a
-digest-free key (labels stable across Bundles).
+the two output rows are staged in, neither kills the other's candidate, and a
+pre-call writer on a member's bytes is still killed (at the group's start). The
+effect's row lists are ordered by a digest-free key (labels stable across
+Bundles).
 """
 
 from dataclasses import replace
@@ -104,7 +105,6 @@ def test_output_rows_by_their_tags():
 
 
 def _span(kind=StorageObjectKind.FUNCTION_RELATIVE, start=0, size=8, space=1):
-    scope = SimpleNamespace(kind=SimpleNamespace(value="function"), digest=b"x")
     return ByteSpan(StorageObjectId(kind, _scope(), space), start, size)
 
 
@@ -182,3 +182,167 @@ def test_the_canonicaliser_leaves_stand_ins_alone():
     stand_in = SimpleNamespace(runs=(), memory_runs=())
     assert canonical_effect(stand_in) is stand_in
     assert canonical_effect(None) is None
+
+
+# -- review r1 pins ----------------------------------------------------------------------
+
+
+ENGINES = [("sparse", "dense"), ("dense", "sparse")]
+
+
+def _engine(monkeypatch, engine, check):
+    from tdo_v2._sparse_dataflow import DATAFLOW_CROSSCHECK_ENV, DATAFLOW_ENGINE_ENV
+
+    monkeypatch.setenv(DATAFLOW_ENGINE_ENV, engine)
+    monkeypatch.setenv(DATAFLOW_CROSSCHECK_ENV, check)
+
+
+def _caller_with_pre_call_store():
+    """rbx = rcx; sub rsp; [rsp] = 1 (the bytes the callee's stack row writes);
+    call; add rsp; rax = [rbx+8]; ret."""
+    t = tmp(0x500)
+    builder = (FunctionBuilder().ins(copy(reg(RBX), reg(RCX))).sub_rsp(0x28)
+               .ins(store(reg(RSP), const(1, 8))).call(CALLEE).add_rsp(0x28))
+    return builder.ins(add(t, reg(RBX), const(8)), load(reg(RAX), t)).ret()
+
+
+def _final_load_writers(monkeypatch, no_kill=False):
+    """Writers of the ``[rbx+8]`` LOAD of ``_caller_with_pre_call_store``;
+    ``no_kill``: the call's relative-object members are uncertain, no-kill
+    writers."""
+    from tdo_v2 import normalize
+
+    if no_kill:
+        original = normalize.derive_may_alias_reads
+
+        def derive(*args, **kwargs):
+            members = {effect.operation_key for block in args[0].blocks for effect in block.effects
+                       if output_call(effect.operation_key) is not None
+                       and any(type(item) is ResolvedStorage and item.span.object_id.kind
+                               is StorageObjectKind.FUNCTION_RELATIVE for item in effect.writes)}
+            kwargs["uncertain_writers"] = frozenset(kwargs.get("uncertain_writers", ())) | members
+            kwargs["no_kill_writers"] = frozenset(kwargs.get("no_kill_writers", ())) | members
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(normalize, "derive_may_alias_reads", derive)
+    units = program_units(_caller_with_pre_call_store(), _callee())
+    item = analyze_units(units, assume_entry_values_not_frame=False)[function_key_of(1, CODE_BASE)]
+    row = units[0].observation.instructions[-2]
+    site = f"{row.address.space_id:x}:{row.address.byte_offset:x}:"
+    return sorted(writer for read in item.normalized.may_alias_reads if read.operation_key.startswith(site)
+                  for writer in read.writers)
+
+
+@pytest.mark.parametrize("engine,check", ENGINES)
+def test_a_pre_call_writer_on_a_members_bytes_is_killed(monkeypatch, engine, check):
+    """The pre-call store to the callee's stack-row bytes reaches the rbx
+    object only until the call's rows: the group's hoisted kill removes it,
+    the stack row's own candidate stays (both engines; all-kills-off or a
+    dropped hoist leaves the store)."""
+    _engine(monkeypatch, engine, check)
+    writers = _final_load_writers(monkeypatch)
+    assert not any(writer.endswith(":STORE") for writer in writers), writers
+    assert any("~" in writer and not writer.endswith("~push") for writer in writers), writers
+
+
+@pytest.mark.parametrize("engine,check", ENGINES)
+def test_a_no_kill_member_kills_nothing_and_keeps_its_uncertain_gen(monkeypatch, engine, check):
+    """The call's relative-object members are uncertain, no-kill writers:
+    their hoisted kills are filtered like ``_written``'s (dense and sparse),
+    so the pre-call store survives (it is killed when they kill)."""
+    _engine(monkeypatch, engine, check)
+    writers = _final_load_writers(monkeypatch, no_kill=True)
+    assert any(writer.endswith(":STORE") for writer in writers), writers
+
+
+def _normalised_crossings(item):
+    import re
+
+    label = re.compile(r"(CALL|BRANCH|CBRANCH)~(?:\d+|u\d+|ov\d+|ld\d+)")
+    return sorted((exit_.block_key, run.span.object_id.kind.value, run.span.start, run.span.size,
+                   tuple(sorted(label.sub(r"\1~*", crossed) for crossed in getattr(run, "crossed", ()))))
+                  for exit_ in item.summary.exits for run in exit_.runs
+                  if run.span.object_id.kind is not StorageObjectKind.FUNCTION_UNIQUE)
+
+
+def test_the_exit_crossings_are_the_same_set_in_either_order(monkeypatch):
+    """Per exit run, the crossing labels (staged labels normalised) are equal
+    in both staging orders, and the call's rows cross (review r1)."""
+    found = []
+    for reverse in (False, True):
+        item, _ = _call_writers(monkeypatch, reverse)
+        found.append(_normalised_crossings(item))
+    assert found[0] == found[1]
+    assert any(any(label.startswith("alias:") and "CALL~*" in label for label in run[4]) for run in found[0])
+
+
+def _run(anchor_start, space=1):
+    from tdo_v2.call_summary_effects import AnchoredSpan, ProvenMemoryRun
+
+    return ProvenMemoryRun(AnchoredSpan(_register(anchor_start), 8, 8, space), (), (), False)
+
+
+def test_the_wrapper_canonicalises_every_returned_effect(monkeypatch):
+    """Sink-only and noreturn shapes return early inside the derivation: the
+    public wrapper orders their lists too (review r1)."""
+    from tdo_v2 import call_summary_effects
+    from tdo_v2.call_summary_effects import AnchoredSpan, ProvenCallEffect, ProvenSinkDemand
+
+    late, early = AnchoredSpan(_register(32), 0, 8, 1), AnchoredSpan(_register(8), 0, 8, 1)
+    demand = ProvenSinkDemand("sink0", (), (late, early), (), True)
+    effect = ProvenCallEffect("1:1800", (), (), sink_demands=(demand,), noreturn=True, escapes_stack=True)
+    monkeypatch.setattr(call_summary_effects, "_derive_proven_call_effect", lambda *a, **k: effect)
+    summary = SimpleNamespace(control_support=())
+    result = call_summary_effects.derive_proven_call_effect(summary)
+    assert result.sink_demands[0].loads == (early, late)
+
+
+def test_the_composed_lists_are_canonicalised():
+    """``_compose_fixed_memory`` re-lists the runs: the result is ordered
+    again (review r1: the canonicaliser after each transformation)."""
+    from tdo_v2.call_summary_effects import ProvenCallEffect, _compose_fixed_memory
+
+    from tdo_v2.call_summary_effects import AnchoredSpan, ProvenMemoryRun
+
+    effect = ProvenCallEffect("1:1800", (), (), memory_runs=(_run(32), _run(8)))
+    fixed = ProvenMemoryRun(AnchoredSpan(_register(8), 0, 8, 1), (), (), False)
+    member = ProvenCallEffect("1:1900", (), (), memory_runs=(fixed,), preserves_memory=True)
+    composed = _compose_fixed_memory(effect, ((0, member), (1, member)))
+    assert [(run.write.anchor.start, run.write.displacement) for run in composed.memory_runs] ==         [(8, 0), (8, 8), (32, 8)]
+
+
+def test_a_real_effect_lists_its_runs_in_the_digest_free_order():
+    """The callee's two memory runs (rsp-anchored, rcx-anchored) come out
+    anchor-ascending, and another program record (other scope digests)
+    changes neither their order nor their encoding."""
+    from tdo_v2._effect_order import _stable
+
+    from synthetic import X64, register_evidence
+
+    effects, scopes = [], []
+    for registers in (None, register_evidence(X64)):   # (another program record: other digests)
+        units = program_units(_caller(), _callee(), registers=registers)
+        item = analyze_units(units, assume_entry_values_not_frame=False)[function_key_of(1, CODE_BASE)]
+        (effect,) = item.proven.values()
+        effects.append(effect)
+        scopes.append(units[0].scopes.program.scope)
+    starts = [run.write.anchor.start for run in effects[0].memory_runs]
+    assert starts == sorted(starts) and len(starts) == 2
+    assert [_stable(run) for run in effects[0].memory_runs] == [_stable(run) for run in effects[1].memory_runs]
+    assert scopes[0] != scopes[1]
+
+
+def test_the_stable_key_separates_enum_types_and_value_payloads():
+    from enum import Enum
+
+    from tdo_v2._effect_order import _stable
+
+    class A(Enum):
+        X = "x"
+
+    class B(Enum):
+        X = "x"
+
+    assert _stable(A.X) != _stable(B.X)
+    assert _stable(("nonstack", 8, True, ("a",))) != _stable(("nonstack", 8, False, ("a",)))
+    assert _stable(("nonstack", 8, True, ("a",))) != _stable(("nonstack", 16, True, ("a",)))

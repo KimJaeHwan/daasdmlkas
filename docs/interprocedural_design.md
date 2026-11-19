@@ -6694,7 +6694,9 @@ G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 �
   희소(`_may_alias_sparse`의 `write_spans`), 출구 건너감(`function_summary._exit_crossings`)이 같은 규칙을 쓴다. 그래서
   같은 호출의 행끼리는 어떤 표시든(`?` 미지 쓰기, `alias:` / `unknown:`) 서로 지우지 않고, 호출 전 쓰기와 지연되지
   않은 `~push`는 예전처럼 지워진다. 안전장치: 한 블록에서 호출의 출력 행이 연속이 아니거나, 첫 행이 아닌 행이 추적
-  메모리를 읽으면 그 행들은 아무것도 지우지 않는다(과대 근사, `o1_group_failsafe_*` 카운터).
+  메모리를 읽으면 그 행들은 아무것도 지우지 않는다(과대 근사, `o1_group_failsafe_*` 카운터 -- 0이 아니면 "있음").
+  O-1 이전부터의 차이(O-1 탓 아님): 출구 건너감은 불확실 주소 쓰기도 지우게 둔다(may-alias의 `no_kill_writers`와 다름);
+  O-1은 그 지움도 묶음 시작으로 옮길 뿐.
 - 순서(`_effect_order.canonical_effect`, 모든 `ProvenCallEffect` 생성 / 변환 뒤): `memory_runs`, `unknown_memory`,
   행 안의 `loads` / 조건(짝 방향 유지), `writer_conditions`를 위치 그대로의 다이제스트 없는 인코딩(`_stable`)으로
   정렬하고 같은 항목을 뺀다. 레지스터 파일 / 주소 공간 객체만 정확(그 밖이 섞인 목록은 지금 순서 유지). 이름 붙은

@@ -13,7 +13,10 @@ gen where it is (``design_o1_r2.md`` .. ``r4``).
 Fail-safes -- the members kill nothing (an over-approximation): the call's
 output rows in a block are not one contiguous run, or a member other than the
 first reads tracked memory (a read there would see pre-call writers the hoisted
-kill already removed). Both are counted (``o1_group_failsafe_*``)."""
+kill already removed). Both are counted (``o1_group_failsafe_*``) when a block's
+groups are computed -- per engine and per memo miss, so a non-zero count means
+"present", not how often. Groups are per block: a call's output rows are
+emitted into one block (``normalize``: one ``block_key`` per call / tail site)."""
 
 from __future__ import annotations
 
@@ -49,8 +52,9 @@ def call_output_groups(effects) -> dict:
     for a member of a valid group of two or more rows, or None for a member
     of a call whose rows fail a fail-safe (it kills nothing). Keys absent:
     ordinary effects (and single-row groups, whose kill stays in place)."""
+    memo = type(effects) is tuple   # (a list is a fresh object each call: never memoised)
     effects = tuple(effects)
-    hit = _CACHE.get(id(effects))
+    hit = _CACHE.get(id(effects)) if memo else None
     if hit is not None and hit[0] is effects:
         return hit[1]
     runs: dict = {}
@@ -72,7 +76,8 @@ def call_output_groups(effects) -> dict:
         else:
             group = (positions[0], tuple(positions))
             groups.update(dict.fromkeys(keys, group))
-    if len(_CACHE) >= _CACHE_LIMIT:
-        _CACHE.clear()
-    _CACHE[id(effects)] = (effects, groups)
+    if memo:
+        if len(_CACHE) >= _CACHE_LIMIT:
+            _CACHE.clear()
+        _CACHE[id(effects)] = (effects, groups)
     return groups
