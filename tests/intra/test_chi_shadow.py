@@ -185,7 +185,7 @@ def test_the_live_closure_drops_exactly_the_dead_effects(shadow, monkeypatch):
     seen = []
     original = _chi_shadow.compare_terminals
 
-    def spy(scope, crossed, dead_keys=frozenset(), limit=20):
+    def spy(scope, crossed, dead_keys=frozenset(), limit=20, *, dead_edge_sites=frozenset()):
         lazy = _chi_shadow.LAZY[scope]
         calls = frozenset(key[:-len("~chi")] for key in (lazy.definitions[item].operation_key
                                                           for item in lazy.chi_at))
@@ -223,7 +223,7 @@ def test_terminal_differences_are_classified_one_call_at_a_time():
     _chi_shadow.TERMINALS["f"] = shadow
 
     class _Live:   # the dead-transparent closure: only `call` reappears (at byte 31 and 32)
-        def live_crossed(self, block, object_id, offset, dead):
+        def live_crossed(self, block, object_id, offset, dead, dead_edge_sites=frozenset()):
             return frozenset((call,)) if offset in (31, 32) else frozenset()
 
     shadow[("exit", frame)][32] = frozenset((dead,))

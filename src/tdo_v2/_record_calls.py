@@ -296,6 +296,10 @@ def _context(builder, base, identity, *, done=None, shared=None):
         # below come from RETURN blocks only: a composed conditional tail's
         # edge exit would be left out
         raise _StitchCut("physical callee has a conditional tail")
+    if any(key.endswith((":BRANCH", ":BRANCHIND")) for key in done.proven):
+        # (G-T G3b-1, design r11 1.6) the same for a composed / bound BRANCH or
+        # BRANCHIND tail -- its exit is no RETURN block (G3b-4 lifts both)
+        raise _StitchCut("physical callee has a tail")
     effect = builder.proven.get(base)
     if effect is None:
         raise _StitchCut("physical call effect unavailable")

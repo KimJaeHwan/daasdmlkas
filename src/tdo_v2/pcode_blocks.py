@@ -186,6 +186,88 @@ def conditional_tail_edges(graph: PcodeBlockGraph) -> dict:
     return {edge_site(block): block.key for block in graph.blocks if block.edge is not None}
 
 
+@dataclass(frozen=True, slots=True)
+class TailTransfer:
+    """(G-T G3b-1, docs 25.104) A jump that leaves the function by code facts.
+    ``kind``: "branch" / "cbranch" / "branchind"; ``target``: the ADDRESS
+    destination (None for "branchind": the slot decides); ``edge``: the
+    outcome edge block key of a "cbranch" (else None). Each consumer adds its
+    own target condition (a Bundle entry, an import thunk, a noreturn model, a
+    slot symbol)."""
+
+    kind: str
+    target: AddressCoordinate | None
+    edge: str | None = None
+
+
+_TAIL_CACHE: dict = {}   # (id(observation), entry) -> (observation, mapping); identity-checked
+_TAIL_CACHE_LIMIT = 4096
+
+
+def tail_transfers(observation, entry):
+    """(G-T G3b-1, design r11 1.1 / r12-r15) Operation key -> ``TailTransfer``
+    for every jump that leaves the function, from the plain p-code block graph
+    (``straight`` empty -- its edge blocks are a superset of the
+    normalization's, whose ``straight`` rows are never edge-eligible):
+
+    * "branch": a BRANCH ending a reachable block that exits, its destination
+      an ADDRESS that is no instruction of the function, its instruction
+      without fallthrough, S1 continuation evidence or flow override, and no
+      observed flow target but that destination;
+    * "cbranch": the CBRANCH of every reachable outcome edge block (G1
+      eligibility);
+    * "branchind": a BRANCHIND ending a reachable block that exits, its
+      instruction without fallthrough, S1 evidence or flow override, and no
+      observed flow target that is an instruction of the function (read from
+      the row: a call flag that drops a local target never makes one, design
+      r14 B). An unrecovered jump table is one too -- a consumer binds only a
+      slot symbol.
+
+    An unsupported graph gives none. Cached per observation identity (only for
+    validated observations; a test double may be mutated in place)."""
+    from types import MappingProxyType
+
+    cacheable = type(observation) is ValidatedFunctionObservation
+    key = (id(observation), entry)
+    if cacheable:
+        hit = _TAIL_CACHE.get(key)
+        if hit is not None and hit[0] is observation:
+            return hit[1]
+    graph = build_pcode_block_graph(observation, entry)
+    found: dict = {}
+    if graph.unsupported is None:
+        rows = {row.address: row for row in observation.instructions}
+        exit_rows = {item.source for item in getattr(observation, "fallthrough_exits", ())}
+        for block in graph.blocks:
+            if block.edge is not None:
+                found[edge_site(block)] = TailTransfer("cbranch", block.edge.target, block.key)
+                continue
+            if not block.exits:
+                continue
+            row = rows[block.instruction]
+            end = terminator(block, row)
+            if end is None or not end[1].inputs or end[1].opcode not in ("BRANCH", "BRANCHIND"):
+                continue
+            if row.fallthrough is not None or row.address in exit_rows or row.flow.is_override:
+                continue
+            ordinal, operation = end
+            operation_key = f"{row.address.space_id:x}:{row.address.byte_offset:x}:{ordinal}:{operation.opcode}"
+            if operation.opcode == "BRANCH":
+                target = operation.inputs[0]
+                if target.kind is not VarnodeKindCode.ADDRESS or target.coordinate in rows \
+                        or any(item != target.coordinate for item in row.flow_targets):
+                    continue
+                found[operation_key] = TailTransfer("branch", target.coordinate)
+            elif not any(item in rows for item in row.flow_targets):
+                found[operation_key] = TailTransfer("branchind", None)
+    result = MappingProxyType(found)
+    if cacheable:
+        if len(_TAIL_CACHE) >= _TAIL_CACHE_LIMIT:
+            _TAIL_CACHE.clear()
+        _TAIL_CACHE[key] = (observation, result)
+    return result
+
+
 EDGE_COMPOSED, EDGE_ESCAPE, EDGE_DEAD = "composed", "escape", "dead"
 
 
@@ -321,6 +403,12 @@ def build_pcode_block_graph(
             operations = row.operations
             eligible = next((item for item in escaping if item[2] is None), None) \
                 if address not in straight else None
+            bad_pads = bool(_landing_pads(row, local, entry)) and not _sole_terminal_call(operations)
+            if bad_pads and _call_like(row):
+                # (G-T G3b-1, r15 final fixes) a call-like row with landing pads
+                # is refused before any edge block; a flag-only row (no call-like
+                # operation) keeps the edge bypass below
+                return PcodeBlockGraph(instruction_key(entry), (), "a call with landing pads that does not end in its call")
             if eligible is not None:
                 # (G1) the taken outcome's edge block; the fallthrough is the
                 # only local successor (checked against the observed flow, so a
@@ -333,10 +421,7 @@ def build_pcode_block_graph(
                     key, address, 0, len(row.operations), tuple(sorted({instruction_key(row.fallthrough), edge})), False,
                 )
                 continue
-            if _landing_pads(row, local, entry) and not (
-                operations and operations[-1].opcode in _CALLS
-                and not any(item.opcode in _CALLS + ("CALLOTHER",) for item in operations[:-1])
-            ):
+            if bad_pads:
                 return PcodeBlockGraph(instruction_key(entry), (), "a call with landing pads that does not end in its call")
             successors = tuple(instruction_key(target) for target in raw if target in local)
             unmaterialized.extend((address, ordinal, "straight internal flow" if address in straight else reason)
@@ -486,15 +571,31 @@ def _split(row, local, entry):
     return rows
 
 
+def _call_like(row) -> bool:
+    """(G-T G3b-1, design r15 A) The row's p-code holds a CALL / CALLIND /
+    CALLOTHER (a user op may transfer too): a call row by code facts, whatever
+    the exporter's call flag says."""
+    return any(operation.opcode in _CALLS + ("CALLOTHER",) for operation in row.operations)
+
+
 def _landing_pads(row, local, entry) -> tuple:
     """A call instruction's local flow targets (``control_successor_coordinates``
-    adds them; the fallthrough too when listed)."""
-    if not row.flow.is_call:
+    adds them; the fallthrough too when listed). (G-T G3b-1) The trigger is
+    the call flag **or** a call-like operation (``_call_like``), so the
+    sole-terminal-call checks of both the non-split and the split path run for
+    an unflagged call row as well (they can only refuse a graph)."""
+    if not (row.flow.is_call or _call_like(row)):
         return ()
     return tuple(target for target in row.flow_targets if target in local and target != entry)
+
+
+def _sole_terminal_call(operations) -> bool:
+    """The instruction ends in its call and holds no other call-like operation."""
+    return bool(operations) and operations[-1].opcode in _CALLS \
+        and not any(item.opcode in _CALLS + ("CALLOTHER",) for item in operations[:-1])
 
 
 __all__ = ("EDGE_COMPOSED", "EDGE_DEAD", "EDGE_ESCAPE", "EdgeOrigin", "PcodeBlock", "PcodeBlockGraph",
            "build_pcode_block_graph", "conditional_tail_edges", "edge_exit_kind", "edge_key", "edge_origin",
            "edge_site", "escaping_branch", "escaping_branches", "has_internal_flow", "instruction_key", "outcome_of",
-           "terminator")
+           "tail_transfers", "TailTransfer", "terminator")

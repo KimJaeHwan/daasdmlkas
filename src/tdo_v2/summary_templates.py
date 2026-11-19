@@ -153,7 +153,12 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # 51: (G-T G3a) a conditional tail jump to a Bundle function (or cut model)
 # is composed on its outcome edge block only: an exit state there, register
 # deltas through it, a dead edge when the target never returns.
-ENGINE_SEMANTICS_VERSION = 51
+# 52: (G-T G3b-1) one tail fact (``pcode_blocks.tail_transfers``) for tail,
+# import and noreturn jumps; the program stack pointer also from return shapes
+# (a closure without call shapes composes tails); dead edge blocks' staged rows
+# are dead for exit facts; a call-like row with landing pads must end in its call
+# whatever the call flag says.
+ENGINE_SEMANTICS_VERSION = 52
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

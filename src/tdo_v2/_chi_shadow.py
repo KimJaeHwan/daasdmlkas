@@ -322,23 +322,27 @@ class LazySparse:
             found = self.crossed_memo[(key, item)] = self._crossed(self.value_before(block, index, item), item)
         return found
 
-    def live_crossed(self, block, object_id, offset, dead) -> frozenset:
+    def live_crossed(self, block, object_id, offset, dead, dead_edge_sites=frozenset()) -> frozenset:
         """The calls crossed at exit ``block``'s byte with every effect of
         ``dead`` (operation keys of dead regions: calls and stores alike)
         transparent -- ``_exit_crossings``' event view of that byte, for the
-        "dead-masked" proof (no read demand; memoized per class)."""
+        "dead-masked" proof (no read demand; memoized per class).
+        (G-T G3b-1) ``dead_edge_sites``: conditional tails whose edge block is
+        dead -- their staged rows are transparent too (``staged_dead``)."""
         from bisect import bisect_right
+
+        from .function_summary import staged_dead
 
         atoms = self.partition.by_object[object_id]
         item = self.class_of_atom[atoms.offset + bisect_right(atoms.starts, offset) - 1]
         cache = getattr(self, "_live", None)
-        if cache is None or cache[0] != dead:
-            cache = self._live = (dead, {})
+        if cache is None or cache[0] != (dead, dead_edge_sites):
+            cache = self._live = ((dead, dead_edge_sites), {})
         if item not in cache[1]:
             last, written = {}, set()
             for key, rows in self.actions.items():
                 for operation, _, writes in rows:
-                    if operation.split("~", 1)[0] in dead:
+                    if staged_dead(operation, dead, dead_edge_sites):
                         continue
                     for definition, covered in writes:
                         if item in covered:
@@ -351,7 +355,7 @@ class LazySparse:
         def before(key, index):
             value = cache[1][item][key]
             for operation, _, writes in self.actions[key][:index]:
-                if operation.split("~", 1)[0] in dead:
+                if staged_dead(operation, dead, dead_edge_sites):
                     continue
                 for definition, covered in writes:
                     if item in covered:
@@ -632,7 +636,7 @@ def check(memory_unit, memory_ssa, effect_unit, calls, preserved, memory_keeping
     return exits_and_records()
 
 
-def compare_terminals(scope, crossed, dead_keys=frozenset(), limit: int = 20) -> None:
+def compare_terminals(scope, crossed, dead_keys=frozenset(), limit: int = 20, *, dead_edge_sites=frozenset()) -> None:
     """Check (c): ``_exit_crossings``' "call:" labels per exit byte against
     the shadow's (``TERMINALS``), every byte and every differing call
     classified on its own, by direction: "dead" (only the shadow has it and it
@@ -650,13 +654,15 @@ def compare_terminals(scope, crossed, dead_keys=frozenset(), limit: int = 20) ->
         return
     try:
         with diagnostic(WORK):
-            _compare_terminals(scope, shadow, crossed, dead_keys, limit, lazy)
+            _compare_terminals(scope, shadow, crossed, dead_keys, limit, lazy, dead_edge_sites)
     except DiagnosticExhausted:
         TERMINAL_MISMATCHES[scope] = [("exhausted",)]
         TERMINAL_KINDS[scope] = {"exhausted": 1}
 
 
-def _compare_terminals(scope, shadow, crossed, dead_keys, limit, lazy=None) -> None:
+def _compare_terminals(scope, shadow, crossed, dead_keys, limit, lazy=None, dead_edge_sites=frozenset()) -> None:
+    from .function_summary import staged_dead
+
     universe = crossed.get("label_universe")
     found, kinds = [], {}
     keys = {key for key in crossed if type(key) is tuple} | set(shadow)
@@ -673,13 +679,14 @@ def _compare_terminals(scope, shadow, crossed, dead_keys, limit, lazy=None) -> N
             got = set(mine.get(offset, ()))
             for item in sorted(got ^ expected):
                 if item in got:
-                    kind = "dead" if item.split("~", 1)[0] in dead_keys else "other"
+                    # (a dead conditional tail's crossing is labelled by its site)
+                    kind = "dead" if staged_dead(item, dead_keys, dead_edge_sites) or item in dead_edge_sites                         else "other"
                 elif not item.endswith(("CALL", "CALLIND", "CALLOTHER")):
                     kind = "tail"
                 else:   # masked in the SSA by a dead region's effects (Astra r1's diamond: S2c),
                     # proven per call: present again with the dead effects transparent
-                    kind = "dead-masked" if lazy is not None and dead_keys and item in lazy.live_crossed(
-                        block, object_id, offset, frozenset(dead_keys)) else "other"
+                    kind = "dead-masked" if lazy is not None and (dead_keys or dead_edge_sites) and item in lazy.live_crossed(
+                        block, object_id, offset, frozenset(dead_keys), frozenset(dead_edge_sites)) else "other"
                 kinds[kind] = kinds.get(kind, 0) + 1
                 if len(found) < limit:
                     found.append((block, object_id.kind.value, offset, kind, item, sorted(expected), sorted(got)))

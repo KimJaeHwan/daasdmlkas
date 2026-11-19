@@ -942,9 +942,11 @@ def _stack_pointer(unit, observation, context, address_spaces):
 
 
 def _return_shape(instruction):
-    """``r' = *(r); r = r + size; RETURN r'`` -> ((r offset, r size), space id)."""
+    """``r' = *(r); r = r + size; RETURN r'`` -> ((r offset, r size), space id).
+    (G-T G3b-1) The RETURN operation is the fact; the exporter's terminal flag
+    is not read."""
     operations = instruction.operations
-    if len(operations) != 3 or not instruction.flow.is_terminal:
+    if len(operations) != 3:
         return None
     load, restore, ret = operations
     if (

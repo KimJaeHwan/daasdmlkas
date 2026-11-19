@@ -6624,3 +6624,41 @@ Astra / Fable 5.2 r1 P1 없음). 소유자 원칙(25.93): 모르는 곳 하나�
   죽은 키에 넣는다). 고정 테스트 27개(옛 잘림 대체 / Bundle 우선,
   상태 장벽의 루프 본문 조회, 물리 호출 문맥 거절, 검증기 키 모양, 싱크만 대상의 `stack_values_out`), 돌연변이 13개
   각각 실패.
+
+### 25.104 꼬리 점프 사실 하나 (G-T G3b-1, 2026-11-19)
+
+설계 `.census6/design_gt_r10.md` -> r15(리뷰 Astra / Fable). G3b는 단계로 나눈다: G3b-0(UE 예제 다시 내보내기),
+G3b-1(이 절), G3b-2(조건 꼬리의 스택 탈출을 `E`로), G3b-3(꼬리 자리를 물리 메모리 사건으로), G3b-4(꼬리를 지나는 물리
+호출 문맥), G3b-5(`return_relations`를 사실로), G3b-6(통합에서 단계 행의 순서), G3b-7(그래프의 호출 분류를 p-code로).
+
+- 사실 하나: `pcode_blocks.tail_transfers(observation, entry)` -- 함수를 떠나는 점프를 코드 사실로(평범한 그래프,
+  `straight` 없음). "branch"(나가는 블록의 BRANCH, 주소 목적지가 함수 밖, 다음 줄 / S1 증거 / 흐름 덮어쓰기 없음, 관찰된
+  흐름 대상이 그 목적지뿐), "cbranch"(도달하는 간선 블록마다), "branchind"(나가는 블록의 BRANCHIND, 다음 줄 / S1 /
+  덮어쓰기 없음, 관찰된 흐름 대상 중 함수 안의 것이 없음 -- 행에서 직접 읽는다: 호출 표시가 지운 시작 주소 대상이
+  사실을 만들지 않게). 소비자가 각자 대상 조건을 더한다. 관찰 객체의 정체성으로 캐시(검증된 관찰만).
+- 소비자: `_direct_calls`(Bundle 함수 시작), `import_call_sites`(BRANCH: 수입 썽크, BRANCHIND: 슬롯 기호 -- 연결 /
+  `control_exempt` / `static_writers` / `refused_models`도 따라감), `_noreturn_jumps`(branch / cbranch + noreturn 모델),
+  SP 증명(나가는 BRANCH는 "branch" 사실이고 검증된 효과가 있어야 증명; 아니면 증명 없음), `root_diagnostics`(사실의
+  종류를 호출 표시 씨앗 옆에 기록). `function_summary`의 "다음 줄이 있는 noreturn CBRANCH 블록은 건너뜀"은 지웠다
+  (사실은 간선 블록 없는 조건 noreturn 점프를 받지 않는다 -- 그런 블록은 꼬리 출구).
+- 프로그램 스택 포인터: 호출 모양의 기준 레지스터에 더해 반환 모양(`r' = *(r); r = r + size; RETURN r'`)이 꺼내는
+  레지스터(`call_clobber._return_stack_pointers`). `may_alias._return_shape`는 Ghidra의 terminal 표시를 읽지 않는다
+  (RETURN 연산이 사실). 하나뿐이어야 쓴다. 그래서 호출 모양이 없는 닫힘(memset만 따로)도 꼬리를 합성하고, 그런 닫힘의
+  SCC 꼬리도 바닥 가설을 얻는다.
+- 죽은 간선 자리(`dead_edge_sites`): 옛 수입 noreturn 잘림이 쓰인 자리, Bundle에서 나온 noreturn 효과, 도달하지 않는
+  간선 블록. 그 자리의 단계 행(`s~...`, 날 CBRANCH는 아님)은 출구 사실에서 죽은 것(`function_summary.staged_dead` 하나로
+  `function_summary`의 세 곳과 `_chi_shadow` 진단에서). 싱크 요구는 남는다. 죽은 간선의 건너감(`s~edge`)도 빠진다
+  (`inner_calls` / `call:` 표시에서).
+- 착지 패드: `_landing_pads`의 방아쇠는 호출 표시 **또는** p-code의 CALL / CALLIND / CALLOTHER. 비분할 / 분할 두
+  검사("호출로 끝나야 함")가 표시와 상관없이 돈다(그래프를 거절할 수만 있다). 호출 같은 행은 간선 블록 전에 거절하고,
+  표시만 있는 행(호출 연산 없는 CBRANCH)은 간선 블록 우회를 그대로 둔다. 이전엔 표시 없는 `CALL; COPY` + 착지 패드가
+  받아져 COPY가 예외 간선 앞에 놓였다(이전부터의 구멍).
+- 물리 호출 문맥: 꼬리(BRANCH / BRANCHIND) 키가 있는 피호출자도 거절("physical callee has a tail") -- 반환 블록만으로
+  문맥을 만들기 때문(G3b-4가 푼다).
+- 이름 붙은 한계: 그래프는 여전히 `is_call`(`control_successor_coordinates`, `_landing_pads` 방아쇠의 한쪽)과
+  `is_override`(거절만)를 읽는다 -- 후계를 지우거나 그래프를 거절할 뿐(G3b-7). 수출기의 호출 표시 꼬리 씨앗
+  (`evidence.tails`)은 그대로(표시 없는 꼬리는 거기서 꼬리 경계를 얻지 않는다). `return_relations`는 G3b-5.
+- `ENGINE_SEMANTICS_VERSION` 51 -> 52, UE 템플릿 다시 유도.
+- 고정 테스트 `tests/intra/test_gt_b1_tail_fact.py`(14). 돌연변이 9개(`.census6/cob/g3b1_mutants.sh`: 착지 패드 방아쇠가
+  표시만, 패드에서 다음 줄 제외, 이른 거절 없음, branchind의 안쪽 대상 검사 없음, terminal 표시 요구, 반환 모양 스택
+  없음, 죽은 간선 무시, SP 증명 거절 없음, CBRANCH만 물리 거절) 각각 실패.

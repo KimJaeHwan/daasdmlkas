@@ -259,7 +259,17 @@ class _Builder:
         tails = tuple(getattr(evidence, "tails", ()) or ())
         self.charge(len(tails))
         tail_keys = {seed.operation_key for seed in tails}
-        keys = set(tail_keys)
+        # (G-T G3b-1, docs 25.104) beside the exporter's call-flag seeds, the
+        # engine's one tail fact (``pcode_blocks.tail_transfers``): its kind per
+        # site, so a flag / fact disagreement is visible
+        facts = {}
+        if observation is not None and getattr(item.unit, "scopes", None) is not None:
+            from .pcode_blocks import tail_transfers
+
+            facts = {site: fact.kind for site, fact in
+                     tail_transfers(observation, item.unit.scopes.function.entry).items()}
+        self.charge(len(facts))
+        keys = set(tail_keys) | set(facts)
         for row in instructions:
             for ordinal, operation in enumerate(row.operations):
                 if operation.opcode in _CALL_OPCODES:
@@ -276,6 +286,8 @@ class _Builder:
             row: dict = {"call": call, "target": self.target(item, call)}
             if call in tail_keys:
                 row["tail"] = True
+            if call in facts:
+                row["tail_fact"] = facts[call]
             if call in item.refused_models:
                 row["refused_model"] = str(item.refused_models[call])
             if call in item.vetoed_models:   # (a declined noreturn cut: its proven effect was dropped)

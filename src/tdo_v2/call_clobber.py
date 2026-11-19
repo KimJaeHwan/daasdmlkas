@@ -443,6 +443,30 @@ def _preserved_stack_pointers(observation, context) -> dict[str, tuple[ByteSpan,
     return preserved
 
 
+def _return_stack_pointers(observation, context) -> frozenset:
+    """(G-T G3b-1, docs 25.104) The register every return shape of the
+    function pops its return address through (``may_alias._return_shape``:
+    ``r' = *(r); r = r + size; RETURN r'`` -- a fact of the instruction's own
+    p-code), resolved as ``_preserved_stack_pointers`` resolves a call shape's
+    base register."""
+    from .may_alias import _return_shape
+
+    space_id = _register_space_id(observation)
+    if space_id is None:
+        return frozenset()
+    found = set()
+    for instruction in observation.instructions:
+        shape = _return_shape(instruction)
+        if shape is None:
+            continue
+        offset, size = shape[0]
+        resolved = _resolve_validated_storage(
+            StorageRef(VarnodeKind.REGISTER, "", offset, size, space_id=space_id), context)
+        if type(resolved) is ResolvedStorage:
+            found.add(resolved.span)
+    return frozenset(found)
+
+
 def _register_space_id(observation) -> int | None:
     spaces = {
         varnode.coordinate.space_id

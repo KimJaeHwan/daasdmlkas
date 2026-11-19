@@ -815,11 +815,19 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         next((object_id for object_id, _ in files if object_id is not None), None),
         max((limit for _, limit in files), default=0),
     )
-    # the program's stack pointer (the call shapes' base register), for tail jumps
+    # the program's stack pointer (the call shapes' base register), for tail jumps;
+    # (G-T G3b-1, docs 25.104) also the register return shapes pop from, so a
+    # closure without call shapes (memset and its tail target) has one too --
+    # exactly one span, or none
+    from .call_clobber import _return_stack_pointers
+
     program_stack = {
         span for unit in program.values()
         for spans in _preserved_stack_pointers(unit.observation, unit.scopes.resolution_context).values()
         for span in spans
+    } | {
+        span for unit in program.values()
+        for span in _return_stack_pointers(unit.observation, unit.scopes.resolution_context)
     }
 
     # function key -> (NormalizationFailureReason, detail) of a resource
@@ -2172,48 +2180,33 @@ def _unplaced_noreturn(unit, proven) -> list:
 def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset(), usable=None,
                     refused=None) -> dict:
     """Jump key -> (model file, entry) for a jump to an import thunk whose
-    model never returns (``noreturn``, e.g. ``je abort``). Only shapes where
-    the jump is the instruction's only way out of the function:
-    - ``BRANCH``: the last operation of an instruction without internal flow,
-      without a fall-through and whose observed flow targets are the thunk
-      only, not a tail call to a Bundle function (``calls``, which composes
-      the thunk's own summary) -- ``summarize_function`` cuts the path at it
-      (``dead_ops``);
-    - ``CBRANCH``: the last operation of an instruction without internal
-      flow whose fall-through is in the function and whose observed flow
-      targets are the thunk or in the function -- only its taken edge leaves,
-      and never comes back (``summarize_function``'s ``noreturn_jumps``: not a
-      tail exit; the fall-through path stays).
+    model never returns (``noreturn``, e.g. ``je abort``). (G-T G3b-1, docs
+    25.104) The shapes are the one tail fact's (``pcode_blocks.tail_transfers``):
+    - "branch": a BRANCH leaving the function by code facts, not a tail call
+      to a Bundle function (``calls``, which composes the thunk's own summary)
+      -- ``summarize_function`` cuts the path at it (``dead_ops``);
+    - "cbranch": a conditional tail with an outcome edge block -- only its
+      taken edge leaves, and never comes back (``summarize_function``'s
+      ``noreturn_jumps``: not a tail exit; the fall-through path stays); kept
+      as the fallback when the Bundle composes nothing there.
     The checks of ``_external_sites`` apply (switched-off assumptions,
     ``usable``)."""
-    from .pcode_blocks import has_internal_flow
-
     observation = unit.observation
     if observation is None:
         return {}
-    local = {row.address for row in observation.instructions}
     found = {}
-    for row in observation.instructions:
-        if not row.operations or has_internal_flow(row):
+
+    def place(item):   # (instruction order: space, offset, ordinal)
+        space, offset, ordinal, _ = item[0].split(":")
+        return int(space, 16), int(offset, 16), int(ordinal)
+
+    for key, fact in sorted(_tail_facts(unit).items(), key=place):
+        if fact.kind not in ("branch", "cbranch") or fact.target is None:
             continue
-        ordinal = len(row.operations) - 1
-        operation = row.operations[ordinal]
-        if operation.opcode not in ("BRANCH", "CBRANCH") or not operation.inputs:
-            continue
-        target = operation.inputs[0]
-        if target.kind is not VarnodeKindCode.ADDRESS or target.coordinate in local:
-            continue
-        key = _operation_key(row.address, ordinal, operation.opcode)
-        if key in calls and operation.opcode != "CBRANCH":
+        if key in calls and fact.kind != "cbranch":
             continue   # (a conditional tail: kept as the fallback, applied only when it composes nothing)
-        if operation.opcode == "BRANCH" and (
-                row.fallthrough is not None or any(item != target.coordinate for item in row.flow_targets)):
-            continue
-        if operation.opcode == "CBRANCH" and (
-                row.fallthrough not in local
-                or any(item != target.coordinate and item not in local for item in row.flow_targets)):
-            continue
-        symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
+        target = fact.target
+        symbol = image_info.import_at_thunk(target.space_id, target.byte_offset)
         model = external_models.lookup(symbol) if symbol is not None else None
         if model is None or not model[1].noreturn:
             continue
@@ -2233,10 +2226,12 @@ def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset
 
 def import_call_sites(unit, image_info, local_functions=frozenset(), register_keys=None) -> dict:
     """Call key -> imported symbol for the import call shapes the engine binds
-    to models: ``CALL`` of an import thunk, a terminal ``BRANCH`` to one (``jmp
-    free``: a tail call), ``CALLIND`` of a value copied from
+    to models: ``CALL`` of an import thunk, a tail ``BRANCH`` to one (``jmp
+    free``), ``CALLIND`` of a value copied from
     an import slot within the call instruction (``call [__imp_X]``), a
-    terminal ``BRANCHIND`` through an import slot (``jmp [__imp_X]``), and a
+    tail ``BRANCHIND`` through an import slot (``jmp [__imp_X]``) -- the tail
+    shapes are the one tail fact's "branch" / "branchind" keys
+    (``pcode_blocks.tail_transfers``, G-T G3b-1) -- and a
     ``CALLIND`` of a register an import slot was loaded into on the only way
     into the call (``mov rax, [__imp_X]; call rax``, ``_slot_loaded_register``).
     ``local_functions``: entries (space id, offset) of the program's functions
@@ -2247,6 +2242,7 @@ def import_call_sites(unit, image_info, local_functions=frozenset(), register_ke
     is about the observed graph (the return shape stays key -> symbol)."""
     found = {}
     loaded = _slot_loaded_register(unit, image_info)
+    tails = None
     for instruction in unit.observation.instructions:
         operations = instruction.operations
         for ordinal, operation in enumerate(operations):
@@ -2255,17 +2251,18 @@ def import_call_sites(unit, image_info, local_functions=frozenset(), register_ke
             symbol = None
             target = operation.inputs[0]
             key = _operation_key(instruction.address, ordinal, operation.opcode)
+            if operation.opcode in ("BRANCH", "BRANCHIND") and tails is None:
+                tails = _tail_facts(unit)   # (G-T G3b-1) the one tail fact
             if operation.opcode == "CALL" and target.kind is VarnodeKindCode.ADDRESS:
                 symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
             elif operation.opcode == "BRANCH" and target.kind is VarnodeKindCode.ADDRESS \
-                    and instruction.fallthrough is None and ordinal == len(operations) - 1 \
-                    and all(item == target.coordinate for item in instruction.flow_targets) \
+                    and getattr(tails.get(key), "kind", None) == "branch" \
                     and (target.coordinate.space_id, target.coordinate.byte_offset) not in local_functions:
-                # a terminal jmp to an import thunk outside the Bundle (a tail call;
-                # a thunk that is a Bundle function is composed as its own summary)
+                # a tail jmp to an import thunk outside the Bundle (a thunk that is
+                # a Bundle function is composed as its own summary)
                 symbol = image_info.import_at_thunk(target.coordinate.space_id, target.coordinate.byte_offset)
             elif operation.opcode == "BRANCHIND" and target.kind is VarnodeKindCode.ADDRESS \
-                    and instruction.fallthrough is None and ordinal == len(operations) - 1:
+                    and getattr(tails.get(key), "kind", None) == "branchind":
                 symbol = _static_slot_symbol(unit, image_info, target)
             elif operation.opcode == "CALLIND":
                 copy = _final_target_write(instruction, ordinal)
@@ -2736,32 +2733,22 @@ def _tail_jumps(unit) -> frozenset:
     block (G1 eligibility: the last operation of an instruction without
     internal flow or flow override, a local fallthrough, no S1 evidence,
     observed flow agreeing): a conditional tail, composed on its edge
-    block only (``pcode_blocks.conditional_tail_edges``)."""
-    from .pcode_blocks import build_pcode_block_graph, conditional_tail_edges, terminator
+    block only (``pcode_blocks.conditional_tail_edges``).
 
-    observation = unit.observation
-    graph = build_pcode_block_graph(observation, unit.scopes.function.entry)
-    if graph.unsupported is not None:
-        return frozenset()
-    rows = {row.address: row for row in observation.instructions}
-    exit_rows = {item.source for item in getattr(observation, "fallthrough_exits", ())}
-    found = set()
-    for block in graph.blocks:
-        if not block.exits:
-            continue
-        row = rows[block.instruction]
-        end = terminator(block, row)
-        if end is None or end[1].opcode != "BRANCH" or not end[1].inputs:
-            continue
-        target = end[1].inputs[0]
-        if target.kind is not VarnodeKindCode.ADDRESS or target.coordinate in rows:
-            continue
-        if row.fallthrough is not None or row.address in exit_rows or row.flow.is_override \
-                or any(item != target.coordinate for item in row.flow_targets):
-            continue
-        found.add(_operation_key(row.address, end[0], "BRANCH"))
-    found.update(conditional_tail_edges(graph))
-    return frozenset(found)
+    (G-T G3b-1, docs 25.104) The "branch" / "cbranch" keys of the one tail
+    fact ``pcode_blocks.tail_transfers``."""
+    return frozenset(key for key, item in _tail_facts(unit).items() if item.kind in ("branch", "cbranch"))
+
+
+def _tail_facts(unit):
+    """(G-T G3b-1) ``pcode_blocks.tail_transfers`` of the unit ({} without an
+    observation)."""
+    from .pcode_blocks import tail_transfers
+
+    observation = getattr(unit, "observation", None)
+    if observation is None:
+        return {}
+    return tail_transfers(observation, unit.scopes.function.entry)
 
 
 def _callee_first_components(calls: dict[str, dict[str, str]]) -> list[set[str]]:

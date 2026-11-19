@@ -127,6 +127,8 @@ def derive_register_delta_proof(unit, register_span, proven_call_effects, intrin
         return None
     blocks = {b.key: b for b in graph.blocks}
     instructions = {row.address: row for row in unit.observation.instructions}
+    from .pcode_blocks import tail_transfers   # (G-T G3b-1: built from the same plain graph)
+    tail_facts = tail_transfers(unit.observation, unit.scopes.function.entry)
     calls = dict(proven_call_effects)
     supplied_intrinsics = dict(intrinsic_refinements)
     assumed = dict(assumed_call_effects)
@@ -174,6 +176,11 @@ def derive_register_delta_proof(unit, register_span, proven_call_effects, intrin
                     assumed_facts[opkey] = declared.label
                 continue
             tail = opcode == "BRANCH" and block.exits
+            if tail and getattr(tail_facts.get(opkey), "kind", None) != "branch":
+                # (G-T G3b-1, design r12 1.2b) an exiting BRANCH proves a delta
+                # only as an admitted tail transfer with its validated effect;
+                # a jump the tail fact refuses gets no proof
+                return None
             if opcode == "CALL" or tail:
                 if operation.output is not None or len(operation.inputs) != 1 \
                         or operation.inputs[0].kind is not VarnodeKindCode.ADDRESS:

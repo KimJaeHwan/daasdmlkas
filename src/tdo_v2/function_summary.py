@@ -284,21 +284,31 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     # a discharged fault's CALLOTHER (F1) ends its path: no call, no crossing
     # (its block stays a terminal, kept apart as a fault outcome below)
     dead_keys = dead_keys | frozenset(row[1] for row in getattr(normalized, "fault_cuts", ()))
+    edge_blocks = _cached("edges", observation, lambda: _edge_blocks(normalized, observation))
+    proven_effects = dict(normalized.proven_call_effects)
+    # (G-T G3b-1, docs 25.104) conditional tails whose edge block is dead: the
+    # legacy import noreturn cut applied, a Bundle-derived noreturn effect, or
+    # the edge unreached -- their staged rows (never the raw CBRANCH, live in
+    # its source block) are dead for exit facts; sinks stay
+    dead_edge_sites = frozenset(
+        edge.site for block_key, edge in edge_blocks.items()
+        if edge.site in noreturn_jumps or getattr(proven_effects.get(edge.site), "noreturn", False)
+        or dead_exit(block_key))
     # a writer only on dead paths never writes: its conditions are not needed
     conditional = {key: pairs for key, pairs in uncertain_conditions.items()
-                   if pairs is not None and key.split("~", 1)[0] not in dead_keys}
+                   if pairs is not None and not staged_dead(key, dead_keys, dead_edge_sites)}
     uncertain = {key for key in uncertain_conditions
-                 if key not in conditional and key.split("~", 1)[0] not in dead_keys}
+                 if key not in conditional and not staged_dead(key, dead_keys, dead_edge_sites)}
     writer_conditions = frozenset().union(*conditional.values()) if conditional else frozenset()
     tracer = _CopyTracer(normalized, observation, context, operation_of, conditions_of)
     crossed = _exit_crossings(normalized, observation, context, _preserved_stack_pointers, uncertain,
-                              writer_conditions, dead_keys)
+                              writer_conditions, dead_keys, dead_edge_sites)
     from .normalize import _chi_shadow_on
 
     if _chi_shadow_on():   # (a measurement only: docs 25.83 check (c))
         from ._chi_shadow import compare_terminals
 
-        compare_terminals(normalized.memory_ssa.function_scope, crossed, dead_keys)
+        compare_terminals(normalized.memory_ssa.function_scope, crossed, dead_keys, dead_edge_sites=dead_edge_sites)
     inner_calls = crossed.pop("inner_calls", ())
     crossing_labels = crossed.pop("label_universe")
     summary_uses = crossed.pop("premise_uses", set())
@@ -311,8 +321,6 @@ def summarize_function(normalized, observation, origin_labels=None, sink_roots=(
     exits = []
     nodes = ssa.state_nodes
     dead_exits = []
-    edge_blocks = _cached("edges", observation, lambda: _edge_blocks(normalized, observation))
-    proven_effects = dict(normalized.proven_call_effects)
     for state in ssa.exit_states:
         if state.block_key in edge_blocks:
             # (G-T G1 / G3a, docs 25.103) an outcome edge block: an exit state
@@ -700,8 +708,9 @@ def _tail_exits(normalized, observation, noreturn_jumps=frozenset()) -> tuple[st
             continue
         last = end[1]
         last_key = _operation_key(row.address, end[0], last.opcode)
-        if last_key in noreturn_jumps and block.successors:
-            continue
+        # (G-T G3b-1) a conditional noreturn jump always has an edge block (the
+        # tail fact admits no other); a successor-bearing block whose last
+        # operation leaves is a tail exit
         if last.opcode != "RETURN" and last_key not in composed:
             found.append(block.key)
     return tuple(sorted(found))
@@ -1698,8 +1707,18 @@ def _live_gens_at_exit(graph, events, exit_block: str) -> int:
     return found
 
 
+def staged_dead(key: str, dead_keys, dead_edge_sites=frozenset()) -> bool:
+    """(G-T G3b-1, docs 25.104) The one dead-row test: the operation (or the
+    call / tail site of a staged row) is in ``dead_keys``, or ``key`` is a
+    staged row (``s~...``) of a conditional tail whose edge block is dead
+    (``dead_edge_sites``). The raw CBRANCH itself is never dead by its site --
+    it is a live branch of its source block."""
+    base = key.split("~", 1)[0]
+    return base in dead_keys or ("~" in key and base in dead_edge_sites)
+
+
 def _exit_crossings(normalized, observation, context, preserved_stack_pointers, uncertain,
-                    writer_conditions=frozenset(), dead_keys=frozenset()):
+                    writer_conditions=frozenset(), dead_keys=frozenset(), dead_edge_sites=frozenset()):
     """(terminal block, object) -> {offset: crossed labels at the block exit}."""
     from .call_clobber import call_exemptions
 
@@ -1744,8 +1763,8 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     for block_key, effects in effects_by_block.items():
         for position, effect in enumerate(effects):
             key = effect.operation_key
-            if key.split("~", 1)[0] in dead_keys:
-                continue  # never executed on a path to an exit (``_dead_region``)
+            if staged_dead(key, dead_keys, dead_edge_sites):
+                continue  # never executed on a path to an exit (``_dead_region``, dead edges)
             if key in exemptions.calls or (key in tails and not key.endswith(":CBRANCH")):
                 calls.append((block_key, position, key))
             elif key.endswith("~edge") and key[:-5] in tails:
