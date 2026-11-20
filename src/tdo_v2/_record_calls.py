@@ -268,13 +268,16 @@ def _context(builder, base, identity, *, done=None, shared=None):
     from ._record_memory import MemoryIndex
     from .call_summary_effects import call_load_keys
     from .operation_records import _Binding, _Builder, _StitchCut
-    from .pcode_blocks import control_exits, tail_transfers
+    from .pcode_blocks import tail_transfers
 
     # (first: whatever else is missing, a tail is never expanded -- r17 section 2)
     if base in tail_transfers(builder.unit.observation, builder.unit.scopes.function.entry):
-        # (G-T G3b-3, docs 25.108) expanding a tail needs its callee's
-        # post-crossing state and continuation contract (G3b-4)
-        raise _StitchCut("physical context through a tail (G3b-4)")
+        # (G-T G3b-4, docs 25.110) a composed branch / cbranch tail of a callee is
+        # expanded by its enclosing call context (``_tail_context``, registered
+        # before its events are built); here only the root's own tails (no
+        # enclosing continuation) and unsupported tails (branchind) remain
+        raise _StitchCut("physical context through a tail at the root" if builder.binding is None
+                         else "physical context through an unsupported tail")
     if builder.stitch is None or builder.provenance is None:
         raise _StitchCut("physical call context unavailable")
     if len(builder.path) >= builder.limits.call_depth:
@@ -297,13 +300,7 @@ def _context(builder, base, identity, *, done=None, shared=None):
         raise _StitchCut("physical call projection unavailable")
     if type(done.normalized).__name__ != "NormalizedFunction" or done.summary is None:
         raise _StitchCut("physical call body unavailable")
-    exits = control_exits(done.unit.observation, done.unit.scopes.function.entry)
-    if exits is None or exits.non_return_exits or exits.may_leave:
-        # (G-T G3a / G3b-1 / G3b-3, design r18) the callee's returns / exits phi
-        # below come from RETURN blocks only: an edge block (a conditional tail,
-        # an escape edge), any other exit that is no RETURN, or a row that may
-        # leave would be left out -- by the graph, not by proven effects (G3b-4)
-        raise _StitchCut("physical callee has a non-RETURN exit")
+    tails = _admitted_tails(done)
     effect = builder.proven.get(base)
     if effect is None:
         raise _StitchCut("physical call effect unavailable")
@@ -329,7 +326,7 @@ def _context(builder, base, identity, *, done=None, shared=None):
     if conditions._reason is not None:
         raise _StitchCut("physical callee requires an acyclic complete CFG")
     returns = [(key, _raw(child, key)) for key in conditions._raw_blocks if key.endswith(":RETURN")]
-    if not returns:
+    if not returns and not tails:
         raise _StitchCut("physical callee has no original RETURN")
     child.memory_index = MemoryIndex(child.normalized, child.unit, child.index, conditions)
     body, reason = child.memory_index.inventory()
@@ -372,7 +369,71 @@ def _context(builder, base, identity, *, done=None, shared=None):
                        and span.start <= binding.stack[0] < span.end), None)
     if stack_span is None:
         raise _StitchCut("physical terminal SP unavailable")
-    returned_records, terminals = [], []
+    expected_stack = {"width": stack_size, "parts": before}
+    returned_records, terminals = _return_rows(child, conditions, returns, stack_span, binding.stack,
+                                               instruction.fallthrough.byte_offset, expected_stack)
+    for site, fact, block in tails:
+        # (G-T G3b-4) a composed tail: a nested context whose RETURN must continue
+        # this call -- the same expected target and stack, checked on the run
+        row, terminal = _tail_context(child, site, fact, block, identity, binding.stack,
+                                      instruction.fallthrough.byte_offset, expected_stack)
+        returned_records.append(row)
+        terminals.append(terminal)
+    result = {"id": identity, "call": base, "function": done.key, "guard": guard,
+              "parent_context": builder.physical_context,
+              "scope": child.ssa.function_scope.digest.hex(), "unit": child.ssa.unit_digest.hex(),
+              "projection": {"transient": list(projection.transient_operation_keys),
+                             "stack_offset": binding.stack[0], "stack_size": stack_size,
+                             "delta": binding.delta},
+              "prefix": builder._physical_events(prefix) if shared is None else shared["prefix"],
+              "push": push,
+              "events": child._physical_events(body), "outputs": [], "returns": returned_records}
+    if len(returned_records) == 1 and "tail_context" not in returned_records[0]:
+        result["return"] = returned_records[0]  # singular v6 reader compatibility
+    return result, child, tuple(terminals), None
+
+
+def _admitted_tails(done):
+    """(G-T G3b-4, docs 25.110) The callee's composed branch / cbranch tails
+    as terminals: [(site, fact, block key)]. Any other non-RETURN exit (an
+    escape edge, an unbound or branchind tail, a block leaving otherwise) or
+    a row that may leave refuses the callee, by the graph."""
+    from .operation_records import _StitchCut
+    from .pcode_blocks import build_pcode_block_graph, control_exits, tail_transfers
+
+    entry = done.unit.scopes.function.entry
+    exits = control_exits(done.unit.observation, entry)
+    if exits is None or exits.may_leave:
+        raise _StitchCut("physical callee has a non-RETURN exit")
+    proven = dict(done.normalized.proven_call_effects)
+    tails, blocks = [], None
+    for site, fact in sorted(tail_transfers(done.unit.observation, entry).items()):
+        effect = proven.get(site)
+        if fact.kind not in ("branch", "cbranch") or effect is None or not effect.tail_stack:
+            continue
+        if fact.kind == "cbranch":
+            block = fact.edge
+        else:
+            if blocks is None:
+                blocks = build_pcode_block_graph(done.unit.observation, entry).blocks
+            space, offset, ordinal, _ = site.split(":")
+            block = next((item.key for item in blocks if item.edge is None
+                          and f"{item.instruction.space_id:x}:{item.instruction.byte_offset:x}" == f"{space}:{offset}"
+                          and item.start <= int(ordinal) < item.stop), None)
+        if block is not None:
+            tails.append((site, fact, block))
+    if exits.non_return_exits - {block for _, _, block in tails}:
+        raise _StitchCut("physical callee has a non-RETURN exit")
+    return tails
+
+
+def _return_rows(child, conditions, returns, stack_span, stack, expected_target, expected_stack):
+    """The RETURN rows of a physical context (its continuation check) and
+    their terminals (block, RETURN key)."""
+    from .operation_records import _StitchCut
+
+    offset, stack_size = stack
+    rows, terminals = [], []
     for return_key, returned in returns:
         if returned is None or returned[2].output is not None or len(returned[2].inputs) != 1:
             raise _StitchCut("unsupported physical RETURN")
@@ -384,28 +445,104 @@ def _context(builder, base, identity, *, done=None, shared=None):
         operand = next((item for item in record.get("operands", ()) if item["index"] == 0), None)
         if operand is None:
             raise _StitchCut("physical RETURN operand unavailable")
-        stack_part = terminal_register(child, ByteSpan(stack_span.object_id, binding.stack[0], stack_size),
-                                       block, return_key)
+        stack_part = terminal_register(child, ByteSpan(stack_span.object_id, offset, stack_size), block, return_key)
         return_guard, reason = conditions.reach_guard(return_key)
         if return_guard is None:
             raise _StitchCut(reason or "physical RETURN reach unavailable")
-        returned_records.append({"key": return_key, "guard": child._guard_ref(return_guard), "operand": operand,
-                                 "stack": {"width": stack_size, "parts": [stack_part]},
-                                 "expected_target": instruction.fallthrough.byte_offset,
-                                 "expected_stack": {"width": stack_size, "parts": before}})
+        rows.append({"key": return_key, "guard": child._guard_ref(return_guard), "operand": operand,
+                     "stack": {"width": stack_size, "parts": [stack_part]},
+                     "expected_target": expected_target, "expected_stack": expected_stack})
         terminals.append((block, return_key))
-    result = {"id": identity, "call": base, "function": done.key, "guard": guard,
-              "parent_context": builder.physical_context,
+    return rows, terminals
+
+
+def _tail_context(parent, site, fact, block, parent_identity, stack, expected_target, expected_stack):
+    """(G-T G3b-4, docs 25.110) A composed tail of ``parent``'s function
+    expanded as a nested ``kind: "tail"`` context: the target's analyzed body
+    bound at the tail (no push; entry = the parent's entry view plus its events
+    before the tail), its RETURNs checked against the enclosing call's
+    continuation. Registered before the parent's events are built, so the
+    parent's tail event maps to it. Returns (the parent's terminal row, its
+    terminal (block, row key, tail context id))."""
+    from ._record_memory import MemoryIndex
+    from .call_summary_effects import call_load_keys
+    from .operation_records import _Binding, _Builder, _StitchCut
+
+    identity = _identity(parent, site)
+    if len(parent.path) >= parent.limits.call_depth:
+        raise _StitchCut("physical call depth")
+    source = parent.provenance.sources.get(site) if parent.provenance is not None else None
+    if source is None or source[0] != "summary":
+        raise _StitchCut("physical tail requires one analyzed body")
+    done = source[1]
+    target = fact.target
+    if target is None or done.key != f"{target.space_id:x}:{target.byte_offset:x}" \
+            or done.key == parent.function_key or any(done.key == key for key, _ in parent.path):
+        raise _StitchCut("physical tail target mismatch or recursion")
+    if type(done.normalized).__name__ != "NormalizedFunction" or done.summary is None:
+        raise _StitchCut("physical tail body unavailable")
+    tails = _admitted_tails(done)
+    effect = parent.proven.get(site)
+    if effect is None or not effect.tail_stack:
+        raise _StitchCut("physical tail effect unavailable")
+    reads = []
+    for action in parent.ssa.actions:
+        key, _, tag = action.operation_key.partition("~")
+        if key == site and tag.rstrip("0123456789") in ("in", "sp", "ld", "iu", "sr"):
+            reads.extend(read for read in parent._staged_reads(action.operation_key) if read not in reads)
+    binding = _Binding(parent, tuple(reads), stack, 0, done.anchors, call_load_keys(site, effect), call=site,
+                       effect=effect, relations=dict(done.summary.address_relations))
+    binding.physical_context = identity
+    child = _Builder(done.normalized, done.unit, origins=done.origins, declared=done.declared,
+                     limits=parent.limits, provenance=parent.stitch.provenance(done), stitch=parent.stitch,
+                     records=parent.records, ledger=parent.ledger, parent=parent, binding=binding,
+                     path=(*parent.path, (parent.function_key, site)),
+                     index=parent.stitch.index(done.normalized, done.unit), physical_memory=True)
+    child.physical_context, child.building_physical = identity, True
+    child.terminal_exits = {exit_.block_key: exit_ for exit_ in done.summary.exits}
+    conditions = child._condition_index()
+    if conditions._reason is not None:
+        raise _StitchCut("physical tail target requires an acyclic complete CFG")
+    returns = [(key, _raw(child, key)) for key in conditions._raw_blocks if key.endswith(":RETURN")]
+    if not returns and not tails:
+        raise _StitchCut("physical tail target has no terminal")
+    child.memory_index = MemoryIndex(child.normalized, child.unit, child.index, conditions)
+    body, reason = child.memory_index.inventory()
+    if body is None:
+        raise _StitchCut(reason or "physical tail target has an opaque effect")
+    event_key = f"{site}~edge" if fact.kind == "cbranch" else site
+    prefix, reason = parent.memory_index.prefix(event_key)
+    if prefix is None:
+        raise _StitchCut(reason or "physical tail prefix unavailable")
+    guard, reason = parent._condition_index().reach_guard(block)
+    if guard is None:
+        raise _StitchCut(reason or "physical tail reach unavailable")
+    guard = parent._guard_ref(guard)
+    stack_span = next((span for span in child.ssa.atomic_spans
+                       if span.object_id.kind is StorageObjectKind.REGISTER_FILE
+                       and span.start <= stack[0] < span.end), None)
+    if stack_span is None:
+        raise _StitchCut("physical terminal SP unavailable")
+    rows, terminals = _return_rows(child, conditions, returns, stack_span, stack, expected_target, expected_stack)
+    for inner_site, inner_fact, inner_block in tails:
+        row, terminal = _tail_context(child, inner_site, inner_fact, inner_block, identity, stack, expected_target,
+                                      expected_stack)
+        rows.append(row)
+        terminals.append(terminal)
+    result = {"id": identity, "kind": "tail", "call": site, "function": done.key, "guard": guard,
+              "parent_context": parent_identity,
               "scope": child.ssa.function_scope.digest.hex(), "unit": child.ssa.unit_digest.hex(),
-              "projection": {"transient": list(projection.transient_operation_keys),
-                             "stack_offset": binding.stack[0], "stack_size": stack_size,
-                             "delta": binding.delta},
-              "prefix": builder._physical_events(prefix) if shared is None else shared["prefix"],
-              "push": push,
-              "events": child._physical_events(body), "outputs": [], "returns": returned_records}
-    if len(returned_records) == 1:
-        result["return"] = returned_records[0]  # singular v6 reader compatibility
-    return result, child, tuple(terminals), None
+              "prefix": parent._physical_events(prefix), "push": None,
+              "events": child._physical_events(body), "outputs": [], "returns": rows}
+    if len(rows) == 1 and "tail_context" not in rows[0]:
+        result["return"] = rows[0]
+    child._control_record()
+    if child.truncated:
+        raise _StitchCut("limit")
+    parent.physical_calls[identity] = result
+    parent.physical_call_builders[identity] = child, tuple(terminals), None
+    return ({"key": event_key, "guard": guard, "tail_context": identity,
+             "expected_target": expected_target, "expected_stack": expected_stack}, (block, event_key, identity))
 
 
 def terminal_register(builder, span, block, return_key):
@@ -515,12 +652,26 @@ def output_part(builder, found, span):
     for item, _ in physical_flags:
         item.building_physical = True
     try:
-        if len(terminals) == 1:
+        def tail_part(terminal):
+            # (G-T G3b-4) a tail terminal exports its nested context's value,
+            # wrapped in this function's own guard for that exit (never this
+            # function's exit state at the tail: it holds the composed summary)
+            block, _, tail = terminal
+            inner = output_part(child, builder.physical_calls[tail], span)
+            if inner is None:
+                raise _StitchCut(f"physical tail output unavailable at {block}")
+            return child._exit_part(inner, block, span.size)
+
+        if len(terminals) == 1 and len(terminals[0]) == 2:
             block, return_key = terminals[0]
             part = terminal_register(child, span, block, return_key)
+        elif len(terminals) == 1:
+            part = tail_part(terminals[0])
         else:
-            alternatives = [child._exit_part(terminal_register(child, span, block, return_key), block, span.size)
-                            for block, return_key in terminals]
+            alternatives = [tail_part(terminal) if len(terminal) == 3
+                            else child._exit_part(terminal_register(child, span, terminal[0], terminal[1]),
+                                                  terminal[0], span.size)
+                            for terminal in terminals]
             phi = child._new(None, {"kind": "phi", "reason": "callee exits", "instance": found["id"],
                                     "size": span.size, "alternatives": alternatives})
             child._done(phi)
@@ -566,7 +717,7 @@ def physical_event(builder, event):
     found = context(builder, base)
     if found is None:
         return None
-    if event.key == found["push"]["key"]:
+    if found.get("push") is not None and event.key == found["push"]["key"]:
         return dict(found["push"])
     if event.kind == "call":
         return {"key": base, "kind": "call", "guard": found["guard"], "context": found["id"]}

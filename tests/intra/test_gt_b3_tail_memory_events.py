@@ -597,7 +597,7 @@ def test_a_staged_tail_root_records_the_g3b4_cut():
             if action.operation_key.startswith(site + "~") and action.write_definition_ids]
     assert keys, [action.operation_key for action in case["item"].normalized.memory_ssa.actions]
     record = _record(case, keys[0])
-    assert "physical context through a tail (G3b-4)" in record.get("physical_call_cuts", {}).values(), \
+    assert "physical context through a tail at the root" in record.get("physical_call_cuts", {}).values(), \
         record.get("physical_call_cuts")
     assert any(event.get("key") == f"{site}~edge" for event in record.get("physical_root_events", ()))
 

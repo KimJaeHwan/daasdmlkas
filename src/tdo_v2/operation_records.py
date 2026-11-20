@@ -81,7 +81,7 @@ from .memory_contracts import MemoryDefinitionKind
 from .span_geometry import StorageObjectKind
 from . import _record_read_sources as _read_source_records
 
-RECORD_VERSION = 18  # 18: weak loop addresses retain exact invariant-base SSA identities
+RECORD_VERSION = 19  # 19: physical tail contexts (kind "tail", no push) and tail terminal rows (G-T G3b-4); 18: weak loop addresses retain exact invariant-base SSA identities
 _MEMORY_OBJECTS = (StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE)
 _DEBT_EDGES = frozenset({EdgeKind.UNRESOLVED_READ.value, EdgeKind.CALL_CLOBBER_READ.value,
                          EdgeKind.MAY_ALIAS_READ.value})

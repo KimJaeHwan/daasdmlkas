@@ -471,7 +471,11 @@ def evaluate_physical(record, entry, *, max_steps=200000):
             for name in ("prefix", "events"):
                 if not isinstance(context.get(name), (tuple, list)):
                     raise Ineligible("incomplete physical call context")
-            if not isinstance(context.get("push"), dict):
+            if context.get("kind") == "tail":
+                # (G-T G3b-4) a tail transfer pushes nothing; it continues its parent
+                if context.get("push") is not None or context.get("parent_context") is None:
+                    raise Ineligible("incomplete physical tail context")
+            elif not isinstance(context.get("push"), dict):
                 raise Ineligible("incomplete physical call context")
             if context.get("kind") != "target_selection":
                 self.return_rows(context)
@@ -577,27 +581,40 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 for event in body:
                     self.store_pointer(event)
                 push = context["push"]
-                if push.get("kind") != "store" or not self.physical_guard(push.get("guard")):
-                    raise Ineligible("missing physical call push")
-                self.store_pointer(push)
+                tail = context.get("kind") == "tail"
+                if not tail:
+                    if push.get("kind") != "store" or not self.physical_guard(push.get("guard")):
+                        raise Ineligible("missing physical call push")
+                    self.store_pointer(push)
                 reached = [item for item in self.return_rows(context) if self.physical_guard(item.get("guard"))]
                 if len(reached) != 1:
                     raise Ineligible("physical call has no unique reached RETURN")
                 returned, = reached
-                operand = returned["operand"]
                 expected = returned["expected_target"]
                 if type(expected) is not int or expected < 0:
                     raise Ineligible("invalid physical return target")
-                target = self.full_operand(operand)
-                if expected >= 1 << (8 * operand["width"]) or target != expected:
-                    raise Ineligible("physical return target mismatch")
-                push_value = self.value(push["node"])
-                if push_value != expected:
-                    raise Ineligible("physical push target mismatch")
-                stack, expected_stack = returned["stack"], returned["expected_stack"]
-                if stack.get("width") != expected_stack.get("width") \
-                        or self.full_operand(stack) != self.full_operand(expected_stack):
-                    raise Ineligible("physical return stack mismatch")
+                if returned.get("tail_context") is not None:
+                    # (G-T G3b-4) this function left through a composed tail: its
+                    # nested context (already validated as a body event on this
+                    # run) returned for it, checked against the same continuation
+                    child = returned["tail_context"]
+                    if child not in self.context_values or self.context(child).get("parent_context") != identifier:
+                        raise Ineligible("physical tail terminal not validated")
+                    target = expected
+                else:
+                    operand = returned["operand"]
+                    target = self.full_operand(operand)
+                    if expected >= 1 << (8 * operand["width"]) or target != expected:
+                        raise Ineligible("physical return target mismatch")
+                if not tail:
+                    push_value = self.value(push["node"])
+                    if push_value != expected:
+                        raise Ineligible("physical push target mismatch")
+                if returned.get("tail_context") is None:
+                    stack, expected_stack = returned["stack"], returned["expected_stack"]
+                    if stack.get("width") != expected_stack.get("width") \
+                            or self.full_operand(stack) != self.full_operand(expected_stack):
+                        raise Ineligible("physical return stack mismatch")
                 # A body transaction is complete only when every executed
                 # STORE's value is known, including writes the result/RETURN
                 # does not read. Inactive stores remain unevaluated.
@@ -701,7 +718,8 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     raise Ineligible("physical call entry unreached")
                 self.entry_active.add(identity)
                 try:
-                    events = (*context["prefix"], context["push"])
+                    events = (*context["prefix"],) if context.get("kind") == "tail" \
+                        else (*context["prefix"], context["push"])
                     prior = self.active_stores(events, space, bits)
                     return self.memory_byte(prior, space, address, bits, context.get("parent_context"))
                 finally:
@@ -1248,10 +1266,11 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 context = self.context(identifier)
                 guard(context.get("guard"))
                 events(context["prefix"], context.get("parent_context"))
-                events((context["push"],), context.get("parent_context"))
-                if self.nodes.get(context["push"].get("node"), {}).get("physical_call_push") != context.get("selected_by", identifier) \
-                        or context["push"].get("guard") != context.get("guard"):
-                    raise Ineligible("physical push has a different owner")
+                if context.get("kind") != "tail":
+                    events((context["push"],), context.get("parent_context"))
+                    if self.nodes.get(context["push"].get("node"), {}).get("physical_call_push") != context.get("selected_by", identifier) \
+                            or context["push"].get("guard") != context.get("guard"):
+                        raise Ineligible("physical push has a different owner")
                 events(context["events"], identifier)
                 if context.get("kind") == "target_selection":
                     continue
@@ -1260,6 +1279,29 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                 for returned in returned_rows:
                     self.tick()
                     key = returned.get("key")
+                    if returned.get("expected_target") != returned_rows[0].get("expected_target") \
+                            or returned.get("expected_stack") != returned_rows[0].get("expected_stack"):
+                        raise Ineligible("inconsistent physical RETURN continuation")
+                    if returned.get("tail_context") is not None:
+                        # (G-T G3b-4) a tail terminal: its context continues this one,
+                        # with the same continuation, from this row's site and guard
+                        child = self.contexts.get(returned["tail_context"])
+                        if type(key) is not str or key in keys or not isinstance(child, dict) \
+                                or child.get("kind") != "tail" or child.get("parent_context") != identifier \
+                                or child.get("call") != key.removesuffix("~edge") \
+                                or child.get("guard") != returned.get("guard") \
+                                or any(row.get("expected_target") != returned.get("expected_target")
+                                       or row.get("expected_stack") != returned.get("expected_stack")
+                                       for row in self.return_rows(child)) \
+                                or sum(item.get("tail_context") == returned["tail_context"]
+                                       for item in returned_rows) != 1 \
+                                or sum(event.get("context") == returned["tail_context"]
+                                       for event in context["events"]) != 1:
+                            raise Ineligible("physical tail terminal correspondence")
+                        keys.add(key)
+                        guard(returned.get("guard"))
+                        operand(returned["expected_stack"], key, identifier, returned.get("guard"))
+                        continue
                     if type(key) is not str or not key.endswith(":RETURN") or key in keys:
                         raise Ineligible("invalid physical RETURN identity")
                     keys.add(key)
