@@ -6809,3 +6809,10 @@ CALLOTHER / BRANCH OUT 뒤의 행 등 9가지)이 경계 없이 완전한 계획
   인증 안 된 BRANCHIND, `_runs_once`, 사실 없는 BRANCH는 플래그와 무관하게 경계 아님). 피호출 함수 거절 메시지가 바뀐
   기존 테스트 2개. 돌연변이 17개 중 16개 실패(`.census6/cob/g3b3_mutants.py`); 남은 M4(이벤트 없이 단계 쓰기 받기)는 같은
   결과 -- 그래프에 있는 꼬리 사실 자리는 언제나 이벤트를 받는다(방어용 검사).
+- 코드 리뷰 r1 고침(Astra / Fable APPROVE WITH FIXES): `single_execution_blocks`의 바뀐 반환을 쓰던 테스트 3곳(조용히
+  `(blocks, reason)` 짝을 `once_blocks`로 넘기거나 짝의 참거짓을 단언) 고침, `_configured_projector`가 집합 아닌 `once_blocks`를
+  거절; 꼬리 자르기 이유를 `_context` 맨 앞에서(요약 출처가 없어도 "physical context through a tail (G3b-4)"); 통합 고정 --
+  정규화가 루프의 꼬리 행을 투영기에 한 번으로 넘김(`tail_sites`, 간선 블록, 원래 키 비어도 원자 켬)과 꼬리 행의 정의 원자,
+  메모리 쓰는 꼬리 옆 다음 줄 LOAD의 물리 계획과 raw-pcode 실행 값 일치, 단계 행 뿌리의 G3b-4 자르기 기록. may-leave 행의 첫
+  블록은 가장 낮은 시작(닫힌 쪽으로 실패), 그래프 밖이면 거절. 돌연변이 24개 중 23개 실패(M4 같은 결과). 게이트 g3b3a(g3b2a
+  대비): 두 모드 7142 통과, 스냅샷 차이 0, 오라클 같음, UETEMPLATE OK -- 물리 기록은 스냅샷에 없다.

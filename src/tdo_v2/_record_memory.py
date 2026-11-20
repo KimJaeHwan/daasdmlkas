@@ -59,6 +59,7 @@ class MemoryIndex:
         self._direct_plans = {}
         self._prefixes, self._block_points = {}, {}
         self._problem = None
+        self._facts = {}   # (G-T G3b-3) tail facts, set below
         self.address_bits = {row.space_id: row.address_size_bits
                              for row in unit.scopes.program.evidence.address_spaces if row.is_memory_space}
         self.little = index.little
@@ -119,6 +120,9 @@ class MemoryIndex:
         leaving: dict = {}      # first block of a may-leave row -> its row keys
         leave_ops: dict = {}    # operation key -> the may-leave row holding it
         for row_key, (first, keys) in exits.may_leave.items():
+            if first not in graph:
+                self._problem = "may-leave row outside the physical cfg"   # (one graph: never, fails closed)
+                return
             leaving.setdefault(first, []).append(row_key)
             for item in keys:
                 leave_ops[item] = row_key
@@ -189,7 +193,9 @@ class MemoryIndex:
             last = terminator(block, row)
             if last is not None and block.successors and (
                     block.exits or last[1].opcode == "BRANCHIND" and row.fallthrough is not None):
-                # control may leave and come back (design r13-r14 clauses a / b)
+                # control may leave and come back (design r13-r14 clauses a / b);
+                # a 3-tuple point: right after the last operation, before the
+                # block point (rank, stop) -- never unpacked as (rank, ordinal)
                 point = (rank, last[0], 1)
                 self._points[f"{key}~exit"] = point
                 if not emit(point, f"{key}~exit", "call", "control may leave and return", key):
@@ -286,7 +292,7 @@ class MemoryIndex:
                 base, separator, tag = operation_or_block.partition("~")
                 effect = self.proven.get(base)
                 operation = self.operations.get(base)
-                fact = getattr(self, "_facts", {}).get(base)
+                fact = self._facts.get(base)
                 if separator and tag.isdigit() and effect is not None and base in self._points \
                         and operation is not None and (operation.opcode in ("CALL", "CALLIND")
                                                        or fact is not None and fact.kind != "cbranch"):

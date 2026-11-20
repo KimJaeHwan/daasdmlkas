@@ -56,7 +56,8 @@ def test_only_the_issued_fault_cut_recovers_once_keys_and_blocks():
     assert not single_execution_keys(unit.observation, cfg)
     keys = single_execution_keys(unit.observation, cfg, control=receipt)
     assert any(key.endswith(":CALL") for key in keys)
-    assert single_execution_blocks(unit.observation, cfg, control=receipt)
+    blocks, reason = single_execution_blocks(unit.observation, cfg, control=receipt)
+    assert blocks and reason is None
     assert receipt.verify(unit, receipt.cuts)
 
 

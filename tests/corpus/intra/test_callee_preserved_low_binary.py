@@ -95,7 +95,7 @@ def _projector(item):
     projector = _configured_projector(
         inputs.effect_unit, observation, inputs.context, inputs.address_spaces, normalized.memory_ssa,
         operations, item.unit.scopes.program.evidence.translation_namespace.language_id,
-        once_keys=single_execution_keys(observation, graph), once_blocks=single_execution_blocks(observation, graph),
+        once_keys=single_execution_keys(observation, graph), once_blocks=single_execution_blocks(observation, graph)[0],
         fresh_keys=normalized.fresh_rows, same_object={key: (reader, argument)
                                                      for key, reader, argument in normalized.same_object_rows},
         pointer_rows=dict(normalized.pointer_rows))

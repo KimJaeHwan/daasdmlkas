@@ -803,6 +803,8 @@ def _configured_projector(unit, observation, context, address_spaces, ssa, opera
         same_object,
         pointer_rows,
     )
+    if once_blocks is not None and not isinstance(once_blocks, (frozenset, set)):
+        raise TypeError("once_blocks is a set of block keys (single_execution_blocks returns (blocks, reason))")
     # (G-T G3b-3) kept when no raw operation runs once: edge blocks may
     projector._once_blocks = (once_blocks or frozenset()) if DEFINITION_ATOMS and once_keys is not None else frozenset()
     projector._tail_sites = frozenset(tail_sites)
@@ -1638,9 +1640,11 @@ class _Projector:
 
     def _runs_once(self, key: str) -> bool:
         """Whether the operation ``key`` (or the call / tail site whose row it
-        is) runs at most once per activation: its raw base is single-execution,
-        or -- G-T G3b-3, docs 25.108 -- it is a row of a conditional tail site
-        whose edge block is (the raw CBRANCH itself may sit in a loop)."""
+        is) runs at most once per activation: its raw base is single-execution
+        (a branch / branchind tail's rows: its block has no successors, so its
+        raw BRANCH is once unless the whole function is refused), or -- G-T
+        G3b-3, docs 25.108 -- it is a row of a conditional tail site whose edge
+        block is (the raw CBRANCH itself may sit in a loop)."""
         base, separator, _ = key.partition("~")
         if base in self._once:
             return True

@@ -268,7 +268,13 @@ def _context(builder, base, identity, *, done=None, shared=None):
     from ._record_memory import MemoryIndex
     from .call_summary_effects import call_load_keys
     from .operation_records import _Binding, _Builder, _StitchCut
+    from .pcode_blocks import control_exits, tail_transfers
 
+    # (first: whatever else is missing, a tail is never expanded -- r17 section 2)
+    if base in tail_transfers(builder.unit.observation, builder.unit.scopes.function.entry):
+        # (G-T G3b-3, docs 25.108) expanding a tail needs its callee's
+        # post-crossing state and continuation contract (G3b-4)
+        raise _StitchCut("physical context through a tail (G3b-4)")
     if builder.stitch is None or builder.provenance is None:
         raise _StitchCut("physical call context unavailable")
     if len(builder.path) >= builder.limits.call_depth:
@@ -278,12 +284,6 @@ def _context(builder, base, identity, *, done=None, shared=None):
         if source is None or source[0] != "summary":
             raise _StitchCut("physical call requires one analyzed body")
         done = source[1]
-    from .pcode_blocks import control_exits, tail_transfers
-
-    if base in tail_transfers(builder.unit.observation, builder.unit.scopes.function.entry):
-        # (G-T G3b-3, docs 25.108) expanding a tail needs its callee's
-        # post-crossing state and continuation contract (G3b-4)
-        raise _StitchCut("physical context through a tail (G3b-4)")
     raw = _raw(builder, base)
     if raw is None or raw[2].opcode not in ("CALL", "CALLIND") or not raw[2].inputs:
         raise _StitchCut("physical call requires an observed CALL")

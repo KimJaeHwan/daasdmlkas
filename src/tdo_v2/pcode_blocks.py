@@ -333,8 +333,10 @@ def control_exits(observation, entry) -> ControlExits | None:
                     elif operation.inputs and operation.inputs[0].kind is VarnodeKindCode.ADDRESS and (
                             operation.opcode == "CALL" or _leaving(operation, local)):
                         explained.add(operation.inputs[0].coordinate)
-            first = next((block for block in blocks if block.start == 0), None)
-            if not everything and listed - explained and first is not None:
+            # the row's first reached block (its ordinal-0 segment: every other
+            # segment is entered through it; the lowest start fails closed)
+            first = min(blocks, key=lambda block: (block.start, block.key))
+            if not everything and listed - explained:
                 may_leave[instruction_key(address)] = (first.key, tuple(keys))
         result = ControlExits(MappingProxyType(may_leave), frozenset(exits))
     if cacheable:

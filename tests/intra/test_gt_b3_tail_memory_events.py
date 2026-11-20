@@ -521,3 +521,82 @@ def test_a_branch_without_a_fact_is_no_boundary_whatever_its_flag(flagged):
         built = _edit(built, 2, lambda row, raw: row["flow_type"].update(is_call=True, is_jump=False))
     _, memory, _ = _index(built)
     assert _events(memory.inventory()) == [("call", "1:1008~leave")]
+
+
+# -- review r1 (Astra P2-2, Fable P2-3): integration pins ------------------------------
+
+
+def test_normalize_hands_a_loops_tail_rows_to_the_projector_as_once(monkeypatch):
+    """memset shape ``top: jz TARGET; ...; jmp top`` (no raw operation runs
+    once): normalize passes ``tail_sites`` and the edge block in
+    ``once_blocks`` with ``once_keys`` set (atoms on), the projector keeps the
+    edge block, and the staged row's definition is an atom while the raw
+    CBRANCH is not once."""
+    from tdo_v2 import relative_memory
+
+    captured = []
+    original = relative_memory._configured_projector
+
+    def spy(*args, **kwargs):
+        projector = original(*args, **kwargs)
+        captured.append((kwargs, projector))
+        return projector
+    monkeypatch.setattr(relative_memory, "_configured_projector", spy)
+    middle = (FunctionBuilder(entry=MIDDLE).label("top").cbranch("x", reg(ZF, 1))
+              .ins(add(reg(RDX), reg(RDX), const(1))).ins(store(reg(RDX), reg(RCX))).label("x").branch("top"))
+    target = FunctionBuilder(entry=TARGET).ins(load(reg(RAX), reg(RCX))).ret()
+    analyze_units(program_units(_to(middle, 0, TARGET), target))
+    site, edge = "1:1000:0:CBRANCH", "1:1000>0t"
+    found = [(kwargs, projector) for kwargs, projector in captured
+             if site in kwargs.get("tail_sites", ()) and kwargs.get("once_keys") is not None]
+    assert found, [sorted(kwargs) for kwargs, _ in captured]
+    kwargs, projector = found[-1]
+    assert kwargs["once_keys"] == frozenset() and edge in kwargs["once_blocks"]
+    assert edge in projector._once_blocks
+    assert projector._runs_once(f"{site}~0") and not projector._runs_once(site)
+    (definition,) = [row for row in projector._ssa.definitions
+                     if row.operation_key == f"{site}~0" and row.span.start == RAX and row.span.size == 8]
+    assert projector._definition_atom(definition, definition.span) is not None
+
+
+def _physical_middle():
+    """At 0x1000: [rcx] = rdx; jz 0x1800 (composed: [rdi] = rsi); rax = [rcx] + 5; ret."""
+    builder = (FunctionBuilder().sub_rsp(0x28).ins(store(reg(RCX), reg(RDX))).cbranch("x", reg(ZF, 1))
+               .ins(load(reg(RAX), reg(RCX)), add(reg(RAX), reg(RAX), const(5))).label("x").add_rsp(0x28).ret())
+    return _to(builder, 2, 0x1800)
+
+
+def test_a_fallthrough_root_beside_a_memory_writing_tail_gets_a_physical_plan_and_evaluates():
+    """End to end (was: "unrepresented memory event" fallback): the
+    fallthrough LOAD's physical plan holds the earlier STORE only (the edge
+    ranks last) and the record evaluates to the raw-pcode run's value."""
+    from record_oracle import entry_reader, final_register
+    from test_physical_call_records import _case, _execute, _record
+
+    from tdo_v2._record_memory import evaluate_physical
+
+    callee = FunctionBuilder(entry=0x1800).ins(store(reg(RDI), reg(RSI))).add_rsp(0x28).ret()
+    case = _case(_physical_middle(), callee)
+    record = _record(case, "1:100c:1:INT_ADD")
+    loads = [node for node in record["nodes"] if node.get("physical_memory") is not None]
+    assert loads and not any(node.get("physical_memory_fallback") for node in record["nodes"])
+    vm = _execute(case, registers=((ZF, 0),))
+    assert evaluate_physical(record, entry_reader(vm)).value == final_register(vm, RAX, 8)
+
+
+def test_a_staged_tail_root_records_the_g3b4_cut():
+    """A root on the tail's staged row: its prefix holds the ``site~edge``
+    event, whose context is cut with the G3b-4 reason (checked first)."""
+    from test_physical_call_records import _case, _record
+
+    callee = FunctionBuilder(entry=0x1800).ins(store(reg(RDI), reg(RSI))).add_rsp(0x28).ret()
+    case = _case(_physical_middle(), callee)
+    site = "1:1008:0:CBRANCH"
+    assert site in case["item"].proven
+    keys = [action.operation_key for action in case["item"].normalized.memory_ssa.actions
+            if action.operation_key.startswith(site + "~") and action.write_definition_ids]
+    assert keys, [action.operation_key for action in case["item"].normalized.memory_ssa.actions]
+    record = _record(case, keys[0])
+    assert "physical context through a tail (G3b-4)" in record.get("physical_call_cuts", {}).values(), \
+        record.get("physical_call_cuts")
+    assert any(event.get("key") == f"{site}~edge" for event in record.get("physical_root_events", ()))
