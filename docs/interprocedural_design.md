@@ -6806,4 +6806,6 @@ CALLOTHER / BRANCH OUT 뒤의 행 등 9가지)이 경계 없이 완전한 계획
 - `ENGINE_SEMANTICS_VERSION` 54 -> 55, UE 템플릿 v42(항목은 v41과 같음).
 - 고정 테스트 `tests/intra/test_gt_b3_tail_memory_events.py`(측정표의 모든 모양, 간선 순위, 단계 행 접두사, 효과 없는 간선,
   행 안 LOAD, 대상별 설명, 행 안 CALL 거절, `physical_event`, may-leave 피호출 함수 거절, 루프의 간선 블록 한 번,
-  인증 안 된 BRANCHIND, `_runs_once`). 피호출 함수 거절 메시지가 바뀐 기존 테스트 2개.
+  인증 안 된 BRANCHIND, `_runs_once`, 사실 없는 BRANCH는 플래그와 무관하게 경계 아님). 피호출 함수 거절 메시지가 바뀐
+  기존 테스트 2개. 돌연변이 17개 중 16개 실패(`.census6/cob/g3b3_mutants.py`); 남은 M4(이벤트 없이 단계 쓰기 받기)는 같은
+  결과 -- 그래프에 있는 꼬리 사실 자리는 언제나 이벤트를 받는다(방어용 검사).

@@ -509,3 +509,15 @@ def test_a_tail_row_runs_once_by_its_execution_block():
     projector._tail_sites = frozenset()
     projector._once_blocks = frozenset({"1:1000>0t"})
     assert not projector._runs_once("1:1000:0:CBRANCH~0")         # (not a tail site: no edge identity)
+
+
+@pytest.mark.parametrize("flagged", [False, True])
+def test_a_branch_without_a_fact_is_no_boundary_whatever_its_flag(flagged):
+    """``BRANCH OUT`` listing OUT and OUT2 (no fact: an extra listed target):
+    the call flag adds no boundary at the BRANCH (design r12-r13: graph facts
+    only) -- the row is may-leave, its only event the ``~leave`` boundary."""
+    built = _row_leaving([OUT, OUT + 0x40], OUT)
+    if flagged:
+        built = _edit(built, 2, lambda row, raw: row["flow_type"].update(is_call=True, is_jump=False))
+    _, memory, _ = _index(built)
+    assert _events(memory.inventory()) == [("call", "1:1008~leave")]
