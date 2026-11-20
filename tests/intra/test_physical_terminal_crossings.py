@@ -84,6 +84,8 @@ def test_an_entry_register_the_inner_call_writes_is_cut(reads, reason):
     case = _case(_caller(R8), middle, _unknown_into(R8))
     record = _record(case, "1:1008:0:INT_ADD")
     assert any(reason in row for row in _cuts(record)), record.get("physical_output_cuts")
+    with pytest.raises(Ineligible):
+        evaluate_physical(record, entry_reader(_run(case, registers=((R8, 0x99),))))
 
 
 def test_an_exported_inner_write_is_trusted():
@@ -204,3 +206,95 @@ def test_the_terminal_stack_pointer_gets_the_same_rule():
     builder = _builder((_span(RSP, 8), ("call:1:1808:2:CALL",)))
     with pytest.raises(_StitchCut, match="crosses a call"):
         terminal_register(builder, _span(RSP, 8), "1:1810", "1:1810:1:RETURN")
+
+
+# -- code review r1 (Fable P2-c, Astra P2 / P3) ---------------------------------------------
+
+
+def test_a_cut_export_leaves_the_contexts_other_exports_usable():
+    """``rax = 0; call H; r8 = rdx + 3; ret`` (H leaves rax unknown): rax is
+    cut (crossed), r8 (written after the call) still exports from the same
+    context; the record renders the cut, and its rows round-trip through JSON."""
+    from tdo_v2.operation_records import render
+
+    caller = FunctionBuilder().sub_rsp(0x28).call(0x1800).ins(add(reg(RAX), reg(RAX), reg(R8))).add_rsp(0x28).ret()
+    middle = (FunctionBuilder(entry=0x1800).sub_rsp(0x28).ins(copy(reg(RAX), const(0))).call(INNER)
+              .ins(add(reg(R8), reg(RDX), const(3))).add_rsp(0x28).ret())
+    case = _case(caller, middle, _unknown_into(RAX))
+    record = json.loads(json.dumps(_record(case, "1:1008:0:INT_ADD")))
+    (row,) = record["physical_output_cuts"]
+    assert row["offset"] == RAX and row["size"] == 8 and "crosses a call" in row["reason"]
+    outputs = {(item["offset"], item["size"]) for item in record["physical_calls"][row["context"]]["outputs"]}
+    assert outputs == {(R8, 8)}, outputs
+    assert f"at 0x{RAX:x}+8 not exported" in render(record)
+
+
+def test_an_indirect_candidate_whose_own_exit_crosses_cuts_the_selection(monkeypatch):
+    """Candidate B: ``rax = 0; call H; ret`` (H leaves rax unknown); A is
+    plain: the selection's rax export is cut, with the member's own reason
+    and the selection's, by its own exits (``terminal_exits`` per member)."""
+    from test_indirect_physical_calls import A, B, _callee, _case as _indirect_case, _final
+
+    member = FunctionBuilder(entry=B).sub_rsp(0x28).ins(copy(reg(RAX), const(0))).call(INNER).add_rsp(0x28).ret()
+    case = _indirect_case(monkeypatch, a=_callee(A, 1), b=member, extra=(_unknown_into(RAX),))
+    record = _final(case)
+    reasons = _cuts(record)
+    assert any("crosses a call" in reason for reason in reasons), record.get("physical_output_cuts")
+    assert "physical target output unavailable" in reasons, reasons
+
+
+def test_a_crossed_terminal_stack_pointer_cuts_the_whole_context():
+    """(Fable P1-a, integration) The SP the RETURN check reads goes through the
+    rule inside ``_context``: a crossed SP run cuts the context itself --
+    its reason in ``physical_call_cuts``. (Built by marking the callee's own
+    exit SP run crossed: an RET's ``rsp += 8`` follows every call, so a real
+    crossed terminal SP needs no call between that write and the exit.)"""
+    from dataclasses import replace
+
+    middle = FunctionBuilder(entry=0x1800).sub_rsp(0x28).ins(copy(reg(RAX), const(7))).add_rsp(0x28).ret()
+    case = _case(_caller(), middle)
+    done = case["callee"]
+    exits = tuple(replace(exit_, runs=tuple(replace(run, crossed=("call:1:1800:0:CALL",))
+                                             if run.span.start <= RSP < run.span.end else run for run in exit_.runs))
+                  for exit_ in done.summary.exits)
+    object.__setattr__(done, "summary", replace(done.summary, exits=exits))
+    record = _record(case, "1:1008:0:INT_ADD")
+    assert any("crosses a call" in reason for reason in record.get("physical_call_cuts", {}).values()), \
+        record.get("physical_call_cuts")
+
+
+@pytest.mark.parametrize("skips", [True, False])
+def test_a_user_op_on_one_path_refuses_only_where_it_runs(skips):
+    """``rax = 7; if rcx == 0 goto skip; CALLOTHER pause; skip: ret`` (rcx: no
+    instruction of the caller writes it -- flags would be): the path that
+    skips the user op evaluates to the run's value; the one through it refuses."""
+    from test_physical_call_records import OPTIONS
+
+    from tdo_v2.interprocedural import analyze_units
+    from tdo_v2.pcodeop_models import PcodeOpModel
+    from synthetic import program_units
+
+    middle = (FunctionBuilder(entry=0x1800).sub_rsp(0x28).ins(copy(reg(RAX), const(7)))
+              .cbranch("skip", tmp(0x320, 1), op("INT_EQUAL", [reg(RCX), const(0)], tmp(0x320, 1)))
+              .ins(op("CALLOTHER", [const(0x77, 4)])).label("skip").add_rsp(0x28).ret())
+    units = program_units(_caller(), middle)
+    namespace = units[0].scopes.program.evidence.translation_namespace
+    pause = PcodeOpModel("pause-model", 1, frozenset({(namespace.language_id, namespace.major_version,
+                                                        namespace.minor_version)}), {0x77: "pause"})
+    provenance = {}
+    results = analyze_units(units, record_provenance=provenance, pcodeop_models=(pause,), **OPTIONS)
+    case = dict(item=results["1:1000"], callee=results["1:1800"], results=results, provenance=provenance,
+                program={(unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset):
+                         unit.observation for unit in units})
+    record = _record(case, "1:1008:0:INT_ADD")
+    vm = Interpreter(case["item"].unit.observation, constant_space=CONST, seed=0, program=case["program"],
+                     resume_unvalidated_returns=True, no_effect_userops=frozenset({0x77}))
+    for offset, contents in ((RSP, STACK), (RCX, 0 if skips else POINTER), (RDX, 0x40)):
+        vm.preset(REG, offset, 8, contents)
+    vm.preset(RAM, STACK, 8, 0x2000)
+    assert vm.run().completed and final_register(vm, RAX, 8) == 12
+    if skips:
+        assert evaluate_physical(record, entry_reader(vm)).value == 12
+    else:
+        with pytest.raises(Ineligible, match="unknown physical call"):
+            evaluate_physical(record, entry_reader(vm))

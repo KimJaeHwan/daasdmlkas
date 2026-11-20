@@ -480,7 +480,7 @@ def _output_cut(builder, found, span, error):
     from .operation_records import _StitchCut
 
     reason = str(error) if isinstance(error, _StitchCut) else "limit"
-    builder.physical_output_cuts.setdefault((found["id"], span.start, span.size), reason)
+    builder.physical_output_cuts[(found["id"], span.start, span.size)] = reason
 
 
 def output_part(builder, found, span):
@@ -503,6 +503,7 @@ def output_part(builder, found, span):
             builder._done(node)
             part = {"node": node["id"], "bytes": [0, span.size], "at": [0, span.size]}
             found["outputs"].append({"offset": span.start, "size": span.size, "part": part})
+            builder.physical_output_cuts.pop((found["id"], span.start, span.size), None)   # (a retry succeeded)
             return part
         except (_StitchCut, _Truncated, RecursionError) as error:
             _restore(builder, checkpoint)
@@ -535,6 +536,7 @@ def output_part(builder, found, span):
         for item, value in physical_flags:
             item.building_physical = value
     found["outputs"].append({"offset": span.start, "size": span.size, "part": part})
+    builder.physical_output_cuts.pop((found["id"], span.start, span.size), None)   # (a retry succeeded)
     for node in builder.records[checkpoint[0]:]:
         node.setdefault("physical_only", True)
         if node.get("physical_context") == found["id"]:

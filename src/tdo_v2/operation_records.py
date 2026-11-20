@@ -730,6 +730,7 @@ class _Builder:
         self.physical_call_cuts = parent.physical_call_cuts if parent is not None else {}
         # (P-fix) (context id, register offset, size) -> why that export was cut
         self.physical_output_cuts = parent.physical_output_cuts if parent is not None else {}
+        self.terminal_exits = None   # (P-fix) a physical callee's exits by block, set by ``_context``
         self.physical_call_builders = parent.physical_call_builders if parent is not None else {}
 
     # -- nodes ---------------------------------------------------------------
@@ -2493,10 +2494,12 @@ def _build(normalized, unit, seeds, metadata, *, origins=None, declared=None, li
         record["physical_unit"] = builder.ssa.unit_digest.hex()
         if builder.physical_call_cuts:
             record["physical_call_cuts"] = dict(builder.physical_call_cuts)
-        if builder.physical_output_cuts:
-            record["physical_output_cuts"] = [
-                {"context": context, "offset": offset, "size": size, "reason": reason}
-                for (context, offset, size), reason in sorted(builder.physical_output_cuts.items(), key=repr)]
+        # (only contexts the record still holds: an outer rollback can drop one)
+        output_cuts = [{"context": context, "offset": offset, "size": size, "reason": reason}
+                       for (context, offset, size), reason in sorted(builder.physical_output_cuts.items())
+                       if context in builder.physical_calls or context in builder.target_selectors]
+        if output_cuts:
+            record["physical_output_cuts"] = output_cuts
     if control is not None:
         record["control"] = control
         if root_guard is not None:
@@ -2672,7 +2675,8 @@ def render(record) -> str:
     for call, reason in record.get("physical_call_cuts", {}).items():
         lines.append(f"physical call {call} not connected: {reason}")
     for row in record.get("physical_output_cuts", ()):
-        lines.append(f"physical output {row['context']} @{row['offset']}+{row['size']} not exported: {row['reason']}")
+        lines.append(f"physical output of {row['context']} at 0x{row['offset']:x}+{row['size']} not exported: "
+                     f"{row['reason']}")
     if "cycle_graph" in record:
         from ._record_cycles import render_cycle_graph
 
