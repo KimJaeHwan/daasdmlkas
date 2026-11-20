@@ -600,3 +600,28 @@ def test_a_staged_tail_root_records_the_g3b4_cut():
     assert "physical context through a tail (G3b-4)" in record.get("physical_call_cuts", {}).values(), \
         record.get("physical_call_cuts")
     assert any(event.get("key") == f"{site}~edge" for event in record.get("physical_root_events", ()))
+
+
+def test_an_active_tail_boundary_refuses_evaluation():
+    """(review r2, Astra P3) The staged tail root's record on a run that took
+    the tail is refused. Today the first refusal is the root's own reach -- a
+    staged row has no physical root guard ("physical root unreached or
+    unknown"); behind it, its ``site~edge`` root event carries no context (the
+    evaluator's "active or unknown physical root memory event" check)."""
+    from record_oracle import entry_reader
+    from test_physical_call_records import _case, _execute, _record
+
+    from tdo_v2._record_memory import evaluate_physical
+    from tdo_v2.operation_records import Ineligible
+
+    callee = FunctionBuilder(entry=0x1800).ins(store(reg(RDI), reg(RSI))).add_rsp(0x28).ret()
+    case = _case(_physical_middle(), callee)
+    site = "1:1008:0:CBRANCH"
+    key = next(action.operation_key for action in case["item"].normalized.memory_ssa.actions
+               if action.operation_key.startswith(site + "~") and action.write_definition_ids)
+    record = _record(case, key)
+    (event,) = [item for item in record["physical_root_events"] if item.get("key") == f"{site}~edge"]
+    assert event["kind"] == "call" and event.get("context") is None
+    vm = _execute(case, registers=((ZF, 1),))
+    with pytest.raises(Ineligible, match="physical root unreached or unknown"):
+        evaluate_physical(record, entry_reader(vm))
