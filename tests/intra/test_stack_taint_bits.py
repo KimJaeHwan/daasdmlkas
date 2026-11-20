@@ -66,7 +66,9 @@ def _old_stack_taint(observation, register_space: int, offset: int, size: int,
     def transfer(block, state, escapes, switches):
         row = instructions[block.instruction]
         tainted = set(state)
-        if block.edge is not None and escapes is not None and edge_site(block) in escaping_calls:
+        # (the engine's rule, moved in the same commit: the differential test does
+        # not check it -- tests/intra/test_gt_b2_edge_escape.py does)
+        if block.edge is not None and escapes is not None and edge_site(block) in edge_sites                 and edge_site(block) in escaping_calls:
             escapes.add(edge_site(block) + "~edge")
         for ordinal in range(block.start, block.stop):
             operation = row.operations[ordinal]
@@ -132,7 +134,7 @@ def _old_stack_taint(observation, register_space: int, offset: int, size: int,
         transfer(blocks[key], state, escapes, switches)
     keys = {}
     for block in graph.blocks:
-        if block.key in in_states and block.edge is not None:
+        if block.key in in_states and block.edge is not None and edge_site(block) in edge_sites:
             keys[block.key] = [edge_site(block) + "~edge"]
         elif block.key in in_states:
             row = instructions[block.instruction]

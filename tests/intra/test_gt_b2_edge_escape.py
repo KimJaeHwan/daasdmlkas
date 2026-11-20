@@ -12,7 +12,8 @@ escape.
 
 import pytest
 from synthetic import (
-    CODE_BASE, R9, RCX, RDI, RDX, RSP, ZF, FunctionBuilder, add, const, load, program_units, reg, store, tmp,
+    CODE_BASE, R9, RCX, RDI, RDX, RSP, ZF, FunctionBuilder, add, const, copy, load, program_units, reg, store,
+    tmp,
 )
 from test_gt_conditional_tails import _to
 from test_held_frame_slots import T2, _analyze, _key, _spill
@@ -84,14 +85,17 @@ def test_an_acyclic_fallthrough_regains_its_private_frame(tmp_path, monkeypatch)
     assert not _writes_reach(analyzed, write, read)
 
 
-def test_a_loop_fallthrough_reads_private_but_writes_still_reach_the_edge(tmp_path, monkeypatch):
+def test_a_loop_fallthrough_with_a_held_slot_reads_private(tmp_path, monkeypatch):
     """memset shape with a held slot: no path to the loop body or the read
-    passes ``E`` (``private_read`` / ``private_before`` true -- were false)."""
+    passes ``E`` (``private_read`` / ``private_before`` true -- were false).
+    ``private_write`` comes from the run without held slots (docs 25.78):
+    true, as before."""
     builder = _held(loop=True)
     site, write, read = _keys(builder, loop=True)
     analyzed, escape, _ = _escape(tmp_path, monkeypatch, builder)
     assert escape.private_read(write) and escape.private_before(write)
     assert escape.private_read(read) and escape.private_before(read)
+    assert escape.private_write(write) and escape.private_write(read)
     assert not _writes_reach(analyzed, write, read)
 
 
@@ -188,6 +192,8 @@ def test_the_escape_maps_a_sites_rows_to_its_edge():
     assert escape._base(f"{call}~0") == call
     plain = may_alias._Escape(frozenset({site}), frozenset(), frozenset())
     assert plain._base(f"{site}~0") == site   # (no edge block reached: the site itself)
+    # (review r1, Fable P3-1) ``site~edge`` without its edge block is unknown -- never the raw site's privacy
+    assert plain._base(f"{site}~edge") == f"{site}~edge" and not plain.private_read(f"{site}~edge")
 
 
 @pytest.mark.parametrize("loop", [False, True])
@@ -236,3 +242,95 @@ def test_private_write_is_the_same_set_with_the_escape_at_the_edge(monkeypatch, 
     assert raw.edge_sites == frozenset() and not raw.private_read(body)
     original = {key for key in escape.known if not key.endswith("~edge")}
     assert {key for key in original if escape.private_write(key)} == {key for key in original if raw.private_write(key)}
+
+
+def test_a_sites_staged_rows_write_privately_after_a_fallthrough_escape(monkeypatch):
+    """(review r1, Astra P3) ``S -> E`` runs a non-escaping tail, ``S -> F``
+    stores a stack address: a staged row of the site (``s~0``) now executes at
+    the terminal ``E`` -- ``private_write`` true (was false: mapped to ``s``,
+    which reaches ``F``'s store); the raw CBRANCH keeps reaching it."""
+    from tdo_v2 import pcode_blocks
+
+    t = tmp(0x100)
+    builder = (FunctionBuilder().cbranch("out", reg(ZF, 1))
+               .ins(add(t, reg(RSP), const(8)), store(reg(RDX), t)).label("out").ret())
+    builder = _to(builder, 0, TARGET)
+    site = _key(builder, 0, 0, "CBRANCH")
+    observation = program_units(builder)[0].observation
+    space = may_alias._register_space_id(observation)
+    escape = may_alias._stack_escape(observation, space, RSP, 8)
+    assert escape.private_write(f"{site}~0") and escape.private_write(f"{site}~edge")
+    assert not escape.private_write(site)
+    monkeypatch.setattr(pcode_blocks, "conditional_tail_edges", lambda graph: {})
+    raw = may_alias._stack_escape(observation, space, RSP, 8)
+    assert not raw.private_write(f"{site}~0")
+
+
+def test_two_conditional_tails_each_escape_at_their_own_edge(tmp_path, monkeypatch):
+    """Two eligible ``jz TARGET`` in one function with a held slot: both sites
+    have an edge, each escapes there; the read after both stays private."""
+    builder = FunctionBuilder().sub_rsp(0x28)
+    builder = _spill(builder)
+    builder.cbranch("out", reg(ZF, 1)).ins(store(reg(RCX), reg(RDI))).cbranch("out", reg(ZF, 1))
+    builder.ins(add(T2, reg(RSP), const(0x18)), load(reg(R9), T2)).label("out").add_rsp(0x28).ret()
+    builder = _to(_to(builder, 2, TARGET), 4, TARGET)
+    first, second = _key(builder, 2, 0, "CBRANCH"), _key(builder, 4, 0, "CBRANCH")
+    read = _key(builder, 5, 1, "LOAD")
+    analyzed, escape, _ = _escape(tmp_path, monkeypatch, builder)
+    assert {first, second} <= escape.edge_sites
+    assert {f"{first}~edge", f"{second}~edge"} <= escape.escaped
+    assert escape.private_read(read)
+    assert not _writes_reach(analyzed, _key(builder, 3, 0, "STORE"), read)
+
+
+def test_the_run_without_the_opaque_assumption_uses_the_edge_too(tmp_path, monkeypatch):
+    """Assumption on with an opaque call after the read: the second escape run
+    (``without``: the opaque call escapes) has the same edge sites and the
+    read before the call is private in it as well."""
+    builder = FunctionBuilder().sub_rsp(0x28)
+    builder = _spill(builder)
+    builder.cbranch("out", reg(ZF, 1)).ins(store(reg(RCX), reg(RDI)))
+    builder.ins(add(T2, reg(RSP), const(0x18)), load(reg(R9), T2)).call(CODE_BASE + 0xA00)
+    builder.label("out").add_rsp(0x28).ret()
+    builder = _to(builder, 2, TARGET)
+    site, _, read = _keys(builder)
+    _, escape, without = _escape(tmp_path, monkeypatch, builder)
+    assert without is not None
+    assert site in escape.edge_sites and site in without.edge_sites
+    assert escape.private_read(read) and without.private_read(read)
+    call = _key(builder, 5, 2, "CALL")
+    assert not without.private_read(call)   # (the opaque call escapes in that run)
+
+
+def test_a_composed_escaping_tail_escapes_only_on_its_edge(monkeypatch):
+    """End to end: ``jz TARGET`` with TARGET returning ``rsp + 8`` (a proven
+    effect that escapes the stack) composes on ``E``; the normalization's
+    escape puts it at ``site~edge`` -- the staged rows are post-escape, the
+    fallthrough's operations are not."""
+    from synthetic import RAX
+
+    from tdo_v2.interprocedural import analyze_units, function_key_of
+    from tdo_v2.may_alias import _stack_escapes
+
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    middle = (FunctionBuilder().ins(copy(reg(RCX), reg(RDX))).cbranch("out", reg(ZF, 1))
+              .ins(add(reg(RCX), reg(RCX), const(1))).label("out").ret())
+    middle = _to(middle, 1, TARGET)
+    target = FunctionBuilder(entry=TARGET).ins(add(reg(RAX), reg(RSP), const(8))).ret()
+    units = program_units(middle, target)
+    analyzed = analyze_units(units)[function_key_of(1, CODE_BASE)]
+    site = _key(middle, 1, 0, "CBRANCH")
+    assert site in analyzed.proven and analyzed.proven[site].escapes_stack
+    inputs = analyzed.normalized.forward_inputs
+    assert site in inputs.escaping_calls
+    _, escape, _, _, _ = _stack_escapes(
+        inputs.effect_unit, inputs.observation, inputs.context, inputs.address_spaces, inputs.quiet_calls,
+        dict(inputs.observed_calls), inputs.escaping_calls, inputs.opaque_calls)
+    staged = [action.operation_key for block in analyzed.normalized.memory_unit.blocks for action in block.actions
+              if action.operation_key.startswith(site + "~")]
+    assert f"{site}~edge" in staged and len(staged) > 1, staged   # (the target's rows + the crossing, all on E)
+    assert f"{site}~edge" in escape.escaped and site not in escape.escaped
+    for key in staged:
+        assert not escape.private_read(key)
+    fallthrough = _key(middle, 2, 0, "INT_ADD")
+    assert escape.private_read(fallthrough) and escape.private_before(fallthrough)

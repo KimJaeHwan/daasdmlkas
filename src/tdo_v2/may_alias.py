@@ -1075,7 +1075,10 @@ def _stack_taint(observation, register_space: int, offset: int, size: int,
     blocks = {block.key: block for block in graph.blocks}
     # (G-T G3b-2, docs 25.107) a conditional-tail site with an outcome edge
     # block escapes there (``site~edge``), not at its raw CBRANCH: the taken
-    # transfer runs only on the edge, never on the fallthrough
+    # transfer runs only on the edge, never on the fallthrough. Every edge
+    # block of this graph is in it -- the one source the raw-CBRANCH skip,
+    # the edge producer and the edge key all read (a test empties it to
+    # restore the raw-site rule as a baseline)
     edge_sites = frozenset(conditional_tail_edges(graph))
 
     # the tainted bytes as one int per state over the (space, byte) pairs the
