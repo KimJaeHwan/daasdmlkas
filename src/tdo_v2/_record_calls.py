@@ -323,6 +323,8 @@ def _context(builder, base, identity, *, done=None, shared=None):
                            f"{base}@{done.key}" if operation.opcode == "CALLIND" else base)),
                      index=builder.stitch.index(done.normalized, done.unit), physical_memory=True)
     child.physical_context, child.building_physical = identity, True
+    # (P-fix) the callee's own exits, by block: what a terminal may export
+    child.terminal_exits = {exit_.block_key: exit_ for exit_ in done.summary.exits}
     conditions = child._condition_index()
     if conditions._reason is not None:
         raise _StitchCut("physical callee requires an acyclic complete CFG")
@@ -407,9 +409,35 @@ def _context(builder, base, identity, *, done=None, shared=None):
 
 
 def terminal_register(builder, span, block, return_key):
-    """Requested terminal register bytes from the existing raw run-tree only."""
+    """Requested terminal register bytes from the existing raw run-tree only.
+
+    (P-fix, docs 25.109) Only bytes the callee's own exit summary at ``block``
+    covers with runs that cross nothing: a definition reaching the exit across
+    an inner call that may write those bytes (an unexported register write --
+    no run, no SSA definition) is stale. A crossed run, a byte without a run or
+    a block without an exit summary cuts the whole requested span."""
     from .operation_records import _StitchCut
 
+    exits = getattr(builder, "terminal_exits", None)
+    if exits is None:
+        raise _StitchCut("physical terminal facts unavailable")
+    summary = exits.get(block)
+    if summary is None:
+        raise _StitchCut(f"physical terminal exit summary unavailable at {block}")
+    covered = []
+    for run in summary.runs:
+        if run.span.object_id != span.object_id or not run.span.overlaps(span):
+            continue
+        if run.crossed:
+            raise _StitchCut(f"physical terminal register crosses a call at {block}")
+        covered.append((max(run.span.start, span.start), min(run.span.end, span.end)))
+    cursor = span.start
+    for low, high in sorted(covered):
+        if low > cursor:
+            break
+        cursor = max(cursor, high)
+    if cursor < span.end:
+        raise _StitchCut(f"physical terminal register has no exit run at {block}")
     states = [state for state in builder.ssa.exit_states if state.block_key == block]
     if len(states) != 1 or states[0].root_node_id is None:
         raise _StitchCut("physical terminal state unavailable")
@@ -446,6 +474,15 @@ def terminal_register(builder, span, block, return_key):
     return builder._whole(pieces, span.size)
 
 
+def _output_cut(builder, found, span, error):
+    """(P-fix) Why a context's export of ``span`` was cut -- the context stays
+    usable for its other exports (written after the checkpoint restore)."""
+    from .operation_records import _StitchCut
+
+    reason = str(error) if isinstance(error, _StitchCut) else "limit"
+    builder.physical_output_cuts.setdefault((found["id"], span.start, span.size), reason)
+
+
 def output_part(builder, found, span):
     from .operation_records import _StitchCut, _Truncated
 
@@ -467,8 +504,9 @@ def output_part(builder, found, span):
             part = {"node": node["id"], "bytes": [0, span.size], "at": [0, span.size]}
             found["outputs"].append({"offset": span.start, "size": span.size, "part": part})
             return part
-        except (_StitchCut, _Truncated, RecursionError):
+        except (_StitchCut, _Truncated, RecursionError) as error:
             _restore(builder, checkpoint)
+            _output_cut(builder, found, span, error)
             return None
     child, terminals, _ = builder.physical_call_builders[found["id"]]
     checkpoint = _checkpoint(child)
@@ -489,8 +527,9 @@ def output_part(builder, found, span):
         child._control_record()
         if child.truncated:
             raise _StitchCut("limit")
-    except (_StitchCut, _Truncated, RecursionError):
+    except (_StitchCut, _Truncated, RecursionError) as error:
         _restore(child, checkpoint)
+        _output_cut(builder, found, span, error)
         return None
     finally:
         for item, value in physical_flags:
