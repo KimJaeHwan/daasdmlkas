@@ -362,11 +362,15 @@ def test_a_call_in_f_before_the_tail_never_leaks_its_stale_input(reads):
     case = _case(_caller(), middle, target.ret(), inner)
     record = _record(case, ROOT_KEY)
     vm = _run(case)
-    try:
-        value = evaluate_physical(record, entry_reader(vm)).value
-    except Ineligible:
-        return
-    assert value == final_register(vm, RAX, 8)
+    # stage 1 (pinned so stage 2's binding visibly changes it): T reading rax
+    # finds no bound input; passing it through, T has no exit run for it
+    if reads:
+        with pytest.raises(Ineligible, match="unknown physical inputs"):
+            evaluate_physical(record, entry_reader(vm))
+    else:
+        assert any("has no exit run" in row["reason"] for row in record.get("physical_output_cuts", ())),             record.get("physical_output_cuts")
+        with pytest.raises(Ineligible):
+            evaluate_physical(record, entry_reader(vm))
 
 
 def test_a_nested_call_context_flipped_to_a_tail_refuses():

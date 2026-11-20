@@ -671,9 +671,9 @@ def test_the_state_barrier_keeps_the_fallthrough_lookup():
 
 
 def test_a_physical_call_context_expands_a_callee_with_a_conditional_tail():
-    """(design r9 final fixes) A physical context builds its callee's exits
-    from RETURN blocks only: a callee with a register-only conditional tail is
-    refused, never given a context missing the edge exit."""
+    """(G-T G3b-4, docs 25.110; was refused since design r9) A callee with a
+    composed register-only conditional tail gets both terminal kinds: its
+    RETURN row and a tail row whose nested tail context continues the call."""
     from test_physical_call_records import _caller as _physical_caller, _case, _record
 
     callee = _to(FunctionBuilder(entry=0x1800).cbranch("done", reg(ZF, 1)).ins(copy(reg(RAX), const(7)))
