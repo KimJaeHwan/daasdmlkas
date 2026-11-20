@@ -239,7 +239,8 @@ def test_an_indirect_candidate_whose_own_exit_crosses_cuts_the_selection(monkeyp
     case = _indirect_case(monkeypatch, a=_callee(A, 1), b=member, extra=(_unknown_into(RAX),))
     record = _final(case)
     reasons = _cuts(record)
-    assert any("crosses a call" in reason for reason in reasons), record.get("physical_output_cuts")
+    member = [row for row in record["physical_output_cuts"] if "crosses a call" in row["reason"]]
+    assert member and all(row["context"].endswith(f"@1:{B:x}") for row in member), record["physical_output_cuts"]
     assert "physical target output unavailable" in reasons, reasons
 
 
@@ -253,7 +254,7 @@ def test_a_crossed_terminal_stack_pointer_cuts_the_whole_context():
 
     middle = FunctionBuilder(entry=0x1800).sub_rsp(0x28).ins(copy(reg(RAX), const(7))).add_rsp(0x28).ret()
     case = _case(_caller(), middle)
-    done = case["callee"]
+    done = case["callee"]   # (``_case`` analyses afresh per call: no cached result is changed)
     exits = tuple(replace(exit_, runs=tuple(replace(run, crossed=("call:1:1800:0:CALL",))
                                              if run.span.start <= RSP < run.span.end else run for run in exit_.runs))
                   for exit_ in done.summary.exits)
