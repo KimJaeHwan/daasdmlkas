@@ -2653,11 +2653,13 @@ def render(record) -> str:
             target = f"n{event['node']}" if "node" in event else event.get("context", event["key"])
             return f"{event['kind']} {target} if g{event['guard']}"
 
-        lines.append(f"physical call {identity} -> {context['function']} [requires RETURN/SP validation]")
+        tail = context.get("kind") == "tail"
+        lines.append(f"physical {'tail' if tail else 'call'} {identity} -> {context['function']} "
+                     f"[requires RETURN/SP validation]")
         if context.get("parent_context") is not None:
             lines.append(f"  entry fallback = {context['parent_context']} ENTRY RAM (not its terminal RAM)")
         lines.append("  entry RAM = " + " -> ".join(event_text(event) for event in
-                                                    (*context["prefix"], context["push"])))
+                                                    (*context["prefix"], *(() if tail else (context["push"],)))))
         lines.append("  body writes = " + " -> ".join(event_text(event) for event in context["events"]))
         if context.get("kind") == "target_selection":
             selector = record["target_selectors"][context["target_selector"]]
@@ -2667,6 +2669,11 @@ def render(record) -> str:
                 lines.append(f"  0x{candidate['value']:x} -> {candidate['context']}")
             continue
         for returned in context.get("returns", (context.get("return"),)):
+            if returned.get("tail_context") is not None:
+                expected = "+".join(_render_parts(returned["expected_stack"]["parts"], nodes))
+                lines.append(f"  {returned['key']} if g{returned['guard']}: tail -> {returned['tail_context']} "
+                             f"(continues to 0x{returned['expected_target']:x}; SP {expected})")
+                continue
             target = "+".join(_render_parts(returned["operand"].get("parts", ()), nodes))
             stack = "+".join(_render_parts(returned["stack"]["parts"], nodes))
             expected = "+".join(_render_parts(returned["expected_stack"]["parts"], nodes))

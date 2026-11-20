@@ -469,6 +469,7 @@ def _tail_context(parent, site, fact, block, parent_identity, stack, expected_ta
     from .operation_records import _Binding, _Builder, _StitchCut
 
     identity = _identity(parent, site)
+    first_record = len(parent.records)
     if len(parent.path) >= parent.limits.call_depth:
         raise _StitchCut("physical call depth")
     source = parent.provenance.sources.get(site) if parent.provenance is not None else None
@@ -541,6 +542,10 @@ def _tail_context(parent, site, fact, block, parent_identity, stack, expected_ta
         raise _StitchCut("limit")
     parent.physical_calls[identity] = result
     parent.physical_call_builders[identity] = child, tuple(terminals), None
+    for node in parent.records[first_record:]:   # (as ``context()`` tags a call's nodes)
+        node.setdefault("physical_only", True)
+        if node.get("physical_context") == identity:
+            node.setdefault("import", identity)
     return ({"key": event_key, "guard": guard, "tail_context": identity,
              "expected_target": expected_target, "expected_stack": expected_stack}, (block, event_key, identity))
 

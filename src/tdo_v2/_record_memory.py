@@ -600,7 +600,7 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     child = returned["tail_context"]
                     if child not in self.context_values or self.context(child).get("parent_context") != identifier:
                         raise Ineligible("physical tail terminal not validated")
-                    target = expected
+                    target = None   # (the value T loaded is in the tail context's own evidence row)
                 else:
                     operand = returned["operand"]
                     target = self.full_operand(operand)
@@ -956,6 +956,21 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     or self.context_outputs.get(identifier, {}).get((offset, size)) != part:
                 raise Ineligible("physical call output is not an exported projection")
 
+        def tail_export(self, identifier, row, item, offset, size):
+            """(G-T G3b-4) A tail terminal's export of ``(offset, size)`` is the
+            parent's guard wrapper around exactly its tail context's own export
+            of the same bytes."""
+            self.tick()
+            child = self.contexts.get(row["tail_context"])
+            wrapper = self.nodes.get(item.get("node")) if isinstance(item, dict) else None
+            outputs = [output for output in (child or {}).get("outputs", ())
+                       if isinstance(output, dict) and output.get("offset") == offset and output.get("size") == size]
+            if len(outputs) != 1 or not isinstance(wrapper, dict) or wrapper.get("kind") != "assemble" \
+                    or wrapper.get("physical_context") != identifier \
+                    or wrapper.get("execution_guard") != row.get("guard") or item.get("at") != [0, size] \
+                    or wrapper.get("parts") != [{**outputs[0]["part"], "at": [0, size]}]:
+                raise Ineligible("physical tail export correspondence")
+
         def exit_phi(self, node):
             """A physical export's choices are the original RETURN guards."""
             self.tick()
@@ -1258,7 +1273,14 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                         producer = self.nodes[piece["node"]]
                         if producer.get("instance") != identifier:
                             raise Ineligible("physical export has no shared exit selection")
-                        self.exit_phi(producer)
+                        rows = self.exit_phi(producer)
+                        for alternative, row in zip(producer["alternatives"], rows, strict=True):
+                            if row.get("tail_context") is not None:
+                                self.tail_export(identifier, row, alternative, offset, size)
+                    elif context.get("kind") != "target_selection":
+                        (row,) = self.return_rows(context)
+                        if row.get("tail_context") is not None:
+                            self.tail_export(identifier, row, piece, offset, size)
                     exported[offset, size] = piece
             return_nodes = {(node.get("physical_context"), node.get("key")): node for node in self.nodes.values()
                             if node.get("kind") == "op" and node.get("opcode") == "RETURN"}
@@ -1271,6 +1293,24 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                     if self.nodes.get(context["push"].get("node"), {}).get("physical_call_push") != context.get("selected_by", identifier) \
                             or context["push"].get("guard") != context.get("guard"):
                         raise Ineligible("physical push has a different owner")
+                    if context.get("kind") != "target_selection":
+                        # (G-T G3b-4, review r1) the continuation's stack is the pre-push SP
+                        # the push address was computed from -- never a free operand
+                        address = next((item for item in self.nodes[context["push"]["node"]].get("operands", ())
+                                        if item.get("index") == 1), None)
+                        parts = (address or {}).get("parts", ())
+                        source = self.nodes.get(parts[0].get("node")) if len(parts) == 1 else None
+                        before = next((item for item in (source or {}).get("operands", ()) if item.get("index") == 0),
+                                      None)
+                        if before is None or source.get("key") != "stitch:call-shape" \
+                                or any(row.get("expected_stack") != {"width": before.get("width"), "parts": before.get("parts")}
+                                       for row in self.return_rows(context)):
+                            raise Ineligible("physical continuation stack is not the push's")
+                else:
+                    parent = self.contexts.get(context.get("parent_context"))
+                    if not isinstance(parent, dict) or sum(row.get("tail_context") == identifier
+                                                           for row in self.return_rows(parent)) != 1:
+                        raise Ineligible("physical tail terminal correspondence")
                 events(context["events"], identifier)
                 if context.get("kind") == "target_selection":
                     continue
@@ -1296,7 +1336,11 @@ def evaluate_physical(record, entry, *, max_steps=200000):
                                 or sum(item.get("tail_context") == returned["tail_context"]
                                        for item in returned_rows) != 1 \
                                 or sum(event.get("context") == returned["tail_context"]
-                                       for event in context["events"]) != 1:
+                                       for event in context["events"]) != 1 \
+                                or not any(event.get("context") == returned["tail_context"]
+                                           and event.get("kind") == "call" and event.get("key") == key.removesuffix("~edge")
+                                           and event.get("guard") == returned.get("guard")
+                                           for event in context["events"]):
                             raise Ineligible("physical tail terminal correspondence")
                         keys.add(key)
                         guard(returned.get("guard"))

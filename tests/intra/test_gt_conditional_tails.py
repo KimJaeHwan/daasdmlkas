@@ -670,7 +670,7 @@ def test_the_state_barrier_keeps_the_fallthrough_lookup():
         assert view.state_definition(span, view.position(body)) == stored, write
 
 
-def test_a_physical_call_context_refuses_a_callee_with_a_conditional_tail():
+def test_a_physical_call_context_expands_a_callee_with_a_conditional_tail():
     """(design r9 final fixes) A physical context builds its callee's exits
     from RETURN blocks only: a callee with a register-only conditional tail is
     refused, never given a context missing the edge exit."""
@@ -683,7 +683,10 @@ def test_a_physical_call_context_refuses_a_callee_with_a_conditional_tail():
     assert any(key.endswith(":CBRANCH") for key in case["callee"].proven)
     result = _record(case)
     cuts = result.get("physical_call_cuts", {})
-    assert any(reason == "physical callee has a non-RETURN exit" for reason in cuts.values()), cuts
+    # (G-T G3b-4, docs 25.110) a composed tail is now a terminal: the callee is
+    # expanded through a nested tail context instead of refused
+    assert not cuts, cuts
+    assert any(context.get("kind") == "tail" for context in result.get("physical_calls", {}).values())
 
 
 

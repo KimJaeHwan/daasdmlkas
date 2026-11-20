@@ -225,7 +225,8 @@ CORRESPONDENCE = "physical tail terminal correspondence"
     pytest.param(lambda record, tail: record["physical_calls"][tail]["returns"][0].update(expected_target=0x2222),
                  CORRESPONDENCE, id="child-continuation"),
     pytest.param(lambda record, tail: record["physical_calls"]["1:1004:2:CALL"]["returns"][0]
-                 .update(tail_context="1:1004:2:CALL"), CORRESPONDENCE, id="row-reference"),
+                 .update(tail_context="1:1004:2:CALL"), "physical tail (terminal|export) correspondence",
+                 id="row-reference"),
     pytest.param(lambda record, tail: record["physical_calls"]["1:1004:2:CALL"].update(
         events=[event for event in record["physical_calls"]["1:1004:2:CALL"]["events"]
                 if event.get("context") != tail]), CORRESPONDENCE, id="event-removed"),
@@ -240,4 +241,148 @@ def test_an_altered_tail_correspondence_refuses(change, reason):
     case, record = _branch_case()
     vm = _equal(case, record)
     with pytest.raises(Ineligible, match=reason):
+        evaluate_physical(_tamper(record, change), entry_reader(vm))
+
+
+# -- code review r1 (Astra REJECT P1 x2, P2) -------------------------------------------------
+
+
+def _node(record, identifier):
+    return next(node for node in record["nodes"] if node["id"] == identifier)
+
+
+def test_a_substituted_tail_export_refuses():
+    """The parent's wrapper must hold exactly the tail context's export: putting
+    F's ``rdi = rcx`` producer in it (0x45 instead of 0x46) refuses."""
+    case, record = _branch_case()
+    vm = _equal(case, record)
+
+    def change(altered, tail):
+        (output,) = altered["physical_calls"]["1:1004:2:CALL"]["outputs"]
+        wrapper = _node(altered, output["part"]["node"])
+        forged = next(node for node in altered["nodes"] if node.get("physical_context") == "1:1004:2:CALL"
+                      and str(node.get("key", "")).endswith(":COPY"))
+        wrapper["parts"][0]["node"] = forged["id"]
+    with pytest.raises(Ineligible, match="physical tail export correspondence"):
+        evaluate_physical(_tamper(record, change), entry_reader(vm))
+
+
+def test_a_forged_continuation_stack_refuses():
+    """Every inherited ``expected_stack`` replaced, consistently, by the leaf
+    RETURN's own stack operand: the call context's rows must expect the
+    pre-push SP its push was built from."""
+    middle = _jump(FunctionBuilder(entry=F).ins(sub(reg(RSP), reg(RSP), const(8)),
+                                                store(reg(RSP), const(FALLTHROUGH))).tail_call(T))
+    case = _case(_caller(), middle, _returns())
+    record = _record(case, ROOT_KEY)
+
+    def change(altered, tail):
+        forged = copy.deepcopy(altered["physical_calls"][tail]["returns"][0]["stack"])
+        for context in altered["physical_calls"].values():
+            for row in context.get("returns", ()):
+                row["expected_stack"] = forged
+            if "return" in context:
+                context["return"]["expected_stack"] = forged
+    with pytest.raises(Ineligible, match="physical continuation stack is not the push's"):
+        evaluate_physical(_tamper(record, change), entry_reader(_run(case)))
+
+
+def test_a_tail_event_that_is_no_call_refuses():
+    case, record = _branch_case()
+    vm = _equal(case, record)
+
+    def change(altered, tail):
+        for event in altered["physical_calls"]["1:1004:2:CALL"]["events"]:
+            if event.get("context") == tail:
+                event["kind"] = "write"
+    with pytest.raises(Ineligible, match="physical tail terminal correspondence"):
+        evaluate_physical(_tamper(record, change), entry_reader(vm))
+
+
+def test_an_orphan_tail_context_refuses():
+    """A ``kind: "tail"`` context no parent row names."""
+    case, record = _branch_case()
+    vm = _equal(case, record)
+
+    def change(altered, tail):
+        orphan = altered["physical_calls"][tail + "#orphan"] = copy.deepcopy(altered["physical_calls"][tail])
+        orphan["outputs"] = []   # (no exports: only the reverse correspondence can refuse it)
+    with pytest.raises(Ineligible, match="physical tail terminal correspondence"):
+        evaluate_physical(_tamper(record, change), entry_reader(vm))
+
+
+def test_a_memory_write_in_the_tail_target_is_read_back_by_the_caller():
+    """``C: call F; rax = [rdx] + 5``, ``F: jmp T``, ``T: [rdx] = rdi; ret``: the
+    caller's LOAD sees T's store through the tail context's body."""
+    caller = (FunctionBuilder().sub_rsp(0x28).call(F)
+              .ins(load(reg(RAX), reg(RDX)), add(reg(RAX), reg(RAX), const(5))).add_rsp(0x28).ret())
+    target = FunctionBuilder(entry=T).ins(store(reg(RDX), reg(RDI))).ret()
+    case = _case(caller, _jump(FunctionBuilder(entry=F).tail_call(T)), target)
+    record = _record(case, "1:1008:1:INT_ADD")
+    assert _tail_contexts(record)
+    vm = _equal(case, record)
+    assert final_register(vm, RAX, 8) == 0x35
+
+
+def test_a_neutered_tail_event_refuses():
+    """(Fable r1 P2-1) The one tail event turned into an inactive non-call event:
+    the child would never be validated -- the correspondence requires a call
+    event at the row's site and guard (M5 stays as the runtime defence)."""
+    case, record = _branch_case()
+    vm = _equal(case, record)
+
+    def change(altered, tail):
+        for event in altered["physical_calls"]["1:1004:2:CALL"]["events"]:
+            if event.get("context") == tail:
+                event.update(kind="opaque", guard=0)
+    with pytest.raises(Ineligible, match="physical tail terminal correspondence"):
+        evaluate_physical(_tamper(record, change), entry_reader(vm))
+
+
+def test_a_tail_record_renders():
+    from tdo_v2.operation_records import render
+
+    case, record = _branch_case()
+    text = render(record)
+    assert "physical tail " in text and "tail -> " in text
+
+
+@pytest.mark.parametrize("reads", [True, False])
+def test_a_call_in_f_before_the_tail_never_leaks_its_stale_input(reads):
+    """(Fable r1 P2-3) ``F: rax = 0x11; call H (rax unknown); jmp T`` with ``T``
+    reading rax (``rax += 1``) or passing it through: the record is cut or equals
+    the run -- never built from the pre-call constant."""
+    unknown = tmp(0x300)
+    inner = FunctionBuilder(entry=0x1e00).ins(op("INT_XOR", [reg(RCX), reg(RDX)], unknown),
+                                              load(reg(RAX), unknown)).ret()
+    middle = _jump(FunctionBuilder(entry=F).sub_rsp(0x28).ins(copy_op(reg(RAX), const(0x11))).call(0x1e00)
+                   .add_rsp(0x28).tail_call(T))
+    target = FunctionBuilder(entry=T).ins(add(reg(RAX), reg(RAX), const(1))) if reads \
+        else FunctionBuilder(entry=T).ins(add(reg(RDI), reg(RDI), const(1)))
+    case = _case(_caller(), middle, target.ret(), inner)
+    record = _record(case, ROOT_KEY)
+    vm = _run(case)
+    try:
+        value = evaluate_physical(record, entry_reader(vm)).value
+    except Ineligible:
+        return
+    assert value == final_register(vm, RAX, 8)
+
+
+def test_a_nested_call_context_flipped_to_a_tail_refuses():
+    """(Fable r1 P2-2) An ordinary nested call context of F relabelled
+    ``kind: "tail"`` (push dropped): no parent row names it -- refused."""
+    inner = FunctionBuilder(entry=0x1e00).ins(add(reg(RAX), reg(RDI), const(2))).ret()
+    middle = _jump(FunctionBuilder(entry=F).sub_rsp(0x28).call(0x1e00).add_rsp(0x28)
+                   .ins(copy_op(reg(RDI), reg(RAX))).tail_call(T))
+    case = _case(_caller(), middle, _returns(), inner)
+    record = _record(case, ROOT_KEY)
+    nested = [key for key, context in record["physical_calls"].items()
+              if context.get("kind") is None and context.get("parent_context") == "1:1004:2:CALL"]
+    assert nested, sorted(record["physical_calls"])
+    vm = _run(case)
+
+    def change(altered, tail):
+        altered["physical_calls"][nested[0]].update(kind="tail", push=None)
+    with pytest.raises(Ineligible, match="physical tail terminal correspondence"):
         evaluate_physical(_tamper(record, change), entry_reader(vm))

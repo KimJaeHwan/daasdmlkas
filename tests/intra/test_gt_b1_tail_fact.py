@@ -277,15 +277,19 @@ def test_an_exiting_branch_the_fact_refuses_proves_no_delta():
 # -- physical call context (design r11 1.6) ---------------------------------------------
 
 
-def test_a_physical_call_context_refuses_a_callee_with_a_branch_tail():
+def test_a_physical_call_context_expands_a_callee_with_a_branch_tail():
     from test_physical_call_records import _caller as _physical_caller, _case, _record
 
     callee = FunctionBuilder(entry=0x1800).ins(copy(reg(RCX), reg(RDI))).tail_call(0x1a00)
     target = FunctionBuilder(entry=0x1a00).ins(add(reg(RAX), reg(RCX), const(1))).ret()
     case = _case(_physical_caller(), callee, target)
     assert any(key.endswith(":BRANCH") for key in case["callee"].proven)
-    cuts = _record(case).get("physical_call_cuts", {})
-    assert any(reason == "physical callee has a non-RETURN exit" for reason in cuts.values()), cuts
+    result = _record(case)
+    cuts = result.get("physical_call_cuts", {})
+    # (G-T G3b-4, docs 25.110) a composed tail is now a terminal: the callee is
+    # expanded through a nested tail context instead of refused
+    assert not cuts, cuts
+    assert any(context.get("kind") == "tail" for context in result.get("physical_calls", {}).values())
 
 
 # -- review r1 pins -------------------------------------------------------------------
