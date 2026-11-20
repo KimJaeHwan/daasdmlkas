@@ -5,9 +5,10 @@ the outcome edge block ``E``: an escape it makes (a held frame slot while it
 leaves, or a proven effect that escapes) is recorded at ``site~edge`` -- ``E``'s
 one operation, no successor -- not at the raw CBRANCH in ``S``. The
 fallthrough path therefore regains ``private_read`` / ``private_before``;
-``private_write`` never changes (backward reachability from ``S``'s end and from
-``E`` is the same set). A CBRANCH leaving without an edge block keeps the raw
-escape.
+``private_write`` of a raw operation key never changes (backward reachability
+from ``S``'s end and from ``E`` is the same set); a site's staged rows now
+run at the terminal ``E`` and may become ``private_write`` (sound precision).
+A CBRANCH leaving without an edge block keeps the raw escape.
 """
 
 import pytest

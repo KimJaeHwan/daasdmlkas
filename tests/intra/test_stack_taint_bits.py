@@ -68,7 +68,8 @@ def _old_stack_taint(observation, register_space: int, offset: int, size: int,
         tainted = set(state)
         # (the engine's rule, moved in the same commit: the differential test does
         # not check it -- tests/intra/test_gt_b2_edge_escape.py does)
-        if block.edge is not None and escapes is not None and edge_site(block) in edge_sites                 and edge_site(block) in escaping_calls:
+        site = edge_site(block) if block.edge is not None else None
+        if site is not None and escapes is not None and site in edge_sites and site in escaping_calls:
             escapes.add(edge_site(block) + "~edge")
         for ordinal in range(block.start, block.stop):
             operation = row.operations[ordinal]

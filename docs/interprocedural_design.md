@@ -6769,3 +6769,5 @@ exporter(내부 썽크 유지, S1 호출 다음 줄 계약)로 다시 내보냈�
   켜고 두 실행, `_stack_taint` 직접, `_base`, 메모, `private_write` 예전 규칙과 비교, 단계 행 쓰기, 조건 꼬리 둘, 합성된
   탈출 꼬리 끝까지). 돌연변이 10개 각각 실패(`.census6/cob/g3b2_mutants.py`). 게이트 g3b2a(g3b0a 대비): 두 모드 7104 통과,
   스냅샷 차이 0, 오라클 같음, UETEMPLATE OK.
+  게이트 Bundle의 탐침(`.census6/cob/g3b2_edge_probe.py`): 간선 사이트는 v2 debug 142, v3 release 71(나머지 0)이지만 그 중
+  보관 슬롯이나 탈출 효과가 있는 곳은 없다(간선 탈출 0) -- 차이 0은 규칙이 보이지 않아서가 아니라 대상이 없어서.
