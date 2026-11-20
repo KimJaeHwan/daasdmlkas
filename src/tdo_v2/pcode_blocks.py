@@ -45,7 +45,9 @@ through ``outcome_of``: an edge block has no operations.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from ._scope_contracts import AddressCoordinate, ValidatedFunctionObservation, VarnodeKindCode
 from .control_projection import control_successor_coordinates
@@ -265,6 +267,80 @@ def tail_transfers(observation, entry):
         if len(_TAIL_CACHE) >= _TAIL_CACHE_LIMIT:
             _TAIL_CACHE.clear()
         _TAIL_CACHE[key] = (observation, result)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class ControlExits:
+    """(G-T G3b-3, docs 25.108; design r18) Where control may leave a
+    function other than at a RETURN, by code facts on the plain block graph.
+
+    ``may_leave``: row instruction key -> (its first block's key, the
+    operation keys of its reachable operations) for every row listing a
+    non-local flow target that no reachable operation of the row transfers
+    to (a leaving BRANCH / CBRANCH or a CALL with that ADDRESS destination;
+    a reachable BRANCHIND / CALLIND / CALLOTHER may transfer anywhere). The
+    departure point inside such a row is unknown. ``non_return_exits``:
+    reachable edge blocks and reachable real blocks that exit whose
+    terminator is not a RETURN."""
+
+    may_leave: Mapping
+    non_return_exits: frozenset
+
+
+_EXITS_CACHE: dict = {}   # (id(observation), entry) -> (observation, ControlExits | None); identity-checked
+
+
+def control_exits(observation, entry) -> ControlExits | None:
+    """``ControlExits`` of the plain graph (``straight`` empty, as the
+    physical-memory ``ConditionIndex`` builds it); None for an unsupported
+    graph. Cached per observation like ``tail_transfers``."""
+    cacheable = type(observation) is ValidatedFunctionObservation
+    key = (id(observation), entry)
+    if cacheable:
+        hit = _EXITS_CACHE.get(key)
+        if hit is not None and hit[0] is observation:
+            return hit[1]
+    graph = build_pcode_block_graph(observation, entry)
+    result = None
+    if graph.unsupported is None:
+        rows = {row.address: row for row in observation.instructions}
+        local = set(rows)
+        by_row: dict = {}
+        exits = set()
+        for block in graph.blocks:
+            if block.edge is not None:
+                exits.add(block.key)
+                continue
+            by_row.setdefault(block.instruction, []).append(block)
+            row = rows[block.instruction]
+            end = terminator(block, row)
+            if block.exits and (end is None or end[1].opcode != "RETURN"):
+                exits.add(block.key)
+        may_leave = {}
+        for address, blocks in by_row.items():
+            row = rows[address]
+            listed = {target for target in row.flow_targets if target not in local}
+            if not listed:
+                continue
+            explained, everything, keys = set(), False, []
+            for block in blocks:
+                for ordinal in range(block.start, block.stop):
+                    operation = row.operations[ordinal]
+                    keys.append(f"{address.space_id:x}:{address.byte_offset:x}:{ordinal}:{operation.opcode}")
+                    if operation.opcode in ("BRANCHIND", "CALLIND", "CALLOTHER"):
+                        everything = True
+                    elif operation.inputs and operation.inputs[0].kind is VarnodeKindCode.ADDRESS and (
+                            operation.opcode == "CALL" or _leaving(operation, local)):
+                        explained.add(operation.inputs[0].coordinate)
+            first = next((block for block in blocks if block.start == 0), None)
+            if not everything and listed - explained and first is not None:
+                may_leave[instruction_key(address)] = (first.key, tuple(keys))
+        result = ControlExits(MappingProxyType(may_leave), frozenset(exits))
+    if cacheable:
+        if len(_EXITS_CACHE) >= _TAIL_CACHE_LIMIT:
+            _EXITS_CACHE.clear()
+        _EXITS_CACHE[key] = (observation, result)
     return result
 
 

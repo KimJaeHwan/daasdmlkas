@@ -278,6 +278,12 @@ def _context(builder, base, identity, *, done=None, shared=None):
         if source is None or source[0] != "summary":
             raise _StitchCut("physical call requires one analyzed body")
         done = source[1]
+    from .pcode_blocks import control_exits, tail_transfers
+
+    if base in tail_transfers(builder.unit.observation, builder.unit.scopes.function.entry):
+        # (G-T G3b-3, docs 25.108) expanding a tail needs its callee's
+        # post-crossing state and continuation contract (G3b-4)
+        raise _StitchCut("physical context through a tail (G3b-4)")
     raw = _raw(builder, base)
     if raw is None or raw[2].opcode not in ("CALL", "CALLIND") or not raw[2].inputs:
         raise _StitchCut("physical call requires an observed CALL")
@@ -291,15 +297,13 @@ def _context(builder, base, identity, *, done=None, shared=None):
         raise _StitchCut("physical call projection unavailable")
     if type(done.normalized).__name__ != "NormalizedFunction" or done.summary is None:
         raise _StitchCut("physical call body unavailable")
-    if any(key.endswith(":CBRANCH") for key in done.proven):
-        # (G-T G3a, design r9 final fixes) the callee's returns / exits phi
-        # below come from RETURN blocks only: a composed conditional tail's
-        # edge exit would be left out
-        raise _StitchCut("physical callee has a conditional tail")
-    if any(key.endswith((":BRANCH", ":BRANCHIND")) for key in done.proven):
-        # (G-T G3b-1, design r11 1.6) the same for a composed / bound BRANCH or
-        # BRANCHIND tail -- its exit is no RETURN block (G3b-4 lifts both)
-        raise _StitchCut("physical callee has a tail")
+    exits = control_exits(done.unit.observation, done.unit.scopes.function.entry)
+    if exits is None or exits.non_return_exits or exits.may_leave:
+        # (G-T G3a / G3b-1 / G3b-3, design r18) the callee's returns / exits phi
+        # below come from RETURN blocks only: an edge block (a conditional tail,
+        # an escape edge), any other exit that is no RETURN, or a row that may
+        # leave would be left out -- by the graph, not by proven effects (G3b-4)
+        raise _StitchCut("physical callee has a non-RETURN exit")
     effect = builder.proven.get(base)
     if effect is None:
         raise _StitchCut("physical call effect unavailable")
@@ -500,7 +504,13 @@ def output_part(builder, found, span):
 
 
 def physical_event(builder, event):
+    if event.kind == "call" and event.key.endswith(("~leave", "~exit")):
+        # (G-T G3b-3) control may leave without a call to expand: the event
+        # stays a guarded boundary (the evaluator refuses it when active)
+        return None
     base = event.key if event.kind == "call" else None
+    if base is not None and base.endswith("~edge"):
+        base = base[:-len("~edge")]   # a conditional tail's event: its site
     if base is None:
         for projection in builder._projections.values() if builder._transitions is not None else ():
             if event.key in projection.transient_operation_keys and event.key.endswith(":STORE"):

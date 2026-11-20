@@ -259,6 +259,7 @@ def project_function_relative_memory(
     guarded_windows: dict | None = None,
     address_metadata: dict | None = None,
     once_blocks: frozenset | None = None,
+    tail_sites: frozenset = frozenset(),
     settle_pending: bool = True,
     blocked_reads: frozenset = frozenset(),
     used_reads: dict | None = None,
@@ -354,7 +355,7 @@ def project_function_relative_memory(
         unit, observation, context, address_spaces, first_pass, operations, translation_namespace,
         opaque_value_provider=opaque_value_provider, readonly_image=readonly_image, once_keys=once_keys,
         fresh_keys=fresh_keys, same_object=same_object, pointer_rows=pointer_rows, once_blocks=once_blocks,
-        load_identity_plan=load_identity_plan,
+        load_identity_plan=load_identity_plan, tail_sites=tail_sites,
     )
     if settle_pending:
         projector._unsettled = _unsettled_reads(unit)
@@ -552,18 +553,16 @@ def _fault_once_control(unit, plan, state):
     return receipt
 
 
-def single_execution_keys(observation, block_graph, straight=frozenset(), *, control=None) -> frozenset:
-    """Operation keys of blocks on no cycle of ``block_graph`` (the p-code
-    block graph the memory SSA uses, intra-instruction flow included): each
-    runs at most once per activation. Empty when the graph may miss an edge
-    (unsupported flow, or a BRANCHIND with targets outside the observation:
-    a jump table could close a loop). ``straight`` instructions (rep sites)
-    repeat inside one block and are excluded."""
+def _once_cycles(observation, block_graph, control=None) -> tuple:
+    """(the blocks on some cycle of ``block_graph``, None), or (None, reason)
+    when no block may be called single-execution: the graph is unsupported,
+    or an exiting BRANCHIND is not certified (a jump table could close a
+    loop) -- the whole-function refusals of ``single_execution_keys``."""
     if control is not None and type(control) is not _OnceControlReceipt:
         raise TypeError("once control requires an exact issued receipt")
     certified = control.branches_for(observation) if control is not None else frozenset()
     if block_graph.unsupported is not None:
-        return frozenset()
+        return None, "unsupported flow"
     instructions = {row.address: row for row in observation.instructions}
     blocks = {block.key: block for block in block_graph.blocks}
     from .pcode_blocks import terminator
@@ -574,9 +573,23 @@ def single_execution_keys(observation, block_graph, straight=frozenset(), *, con
         if last is not None and last.opcode == "BRANCHIND" and block.exits:
             key = _operation_key(block.instruction, end[0], last)
             if key not in certified:
-                return frozenset()
-    cyclic = _cyclic_blocks({key: [item for item in block.successors if item in blocks]
-                             for key, block in blocks.items()})
+                return None, "uncertified indirect flow"
+    return _cyclic_blocks({key: [item for item in block.successors if item in blocks]
+                           for key, block in blocks.items()}), None
+
+
+def single_execution_keys(observation, block_graph, straight=frozenset(), *, control=None) -> frozenset:
+    """Operation keys of blocks on no cycle of ``block_graph`` (the p-code
+    block graph the memory SSA uses, intra-instruction flow included): each
+    runs at most once per activation. Empty when the graph may miss an edge
+    (unsupported flow, or a BRANCHIND with targets outside the observation:
+    a jump table could close a loop). ``straight`` instructions (rep sites)
+    repeat inside one block and are excluded."""
+    cyclic, _ = _once_cycles(observation, block_graph, control)
+    if cyclic is None:
+        return frozenset()
+    instructions = {row.address: row for row in observation.instructions}
+    blocks = {block.key: block for block in block_graph.blocks}
     found = set()
     for key, block in blocks.items():
         if key in cyclic or block.instruction in straight:
@@ -623,16 +636,26 @@ def _unsettled_reads(unit):
     return unsettled
 
 
-def single_execution_blocks(observation, block_graph, straight=frozenset(), *, control=None) -> frozenset:
-    """Block keys of ``single_execution_keys`` (joins at their entries run once)."""
+def single_execution_blocks(observation, block_graph, straight=frozenset(), *, control=None) -> tuple:
+    """(block keys, reason): the blocks of ``single_execution_keys`` (joins at
+    their entries run once) and -- G-T G3b-3, docs 25.108 -- every outcome
+    edge block on no cycle (an edge block has no successors: a conditional
+    tail's taken transfer runs at most once even when its source loops).
+    reason: None, or why the set is empty -- "unsupported flow" /
+    "uncertified indirect flow" (nothing in the function is single-execution)
+    or "no once-only raw operation" (raw keys empty, edge blocks may remain)."""
+    cyclic, refused = _once_cycles(observation, block_graph, control)
+    if cyclic is None:
+        return frozenset(), refused
     keys = single_execution_keys(observation, block_graph, straight, control=control)
-    if not keys:
-        return frozenset()
     rows = {row.address: row for row in observation.instructions}
-    return frozenset(
-        block.key for block in block_graph.blocks if block.stop > block.start
-        if _operation_key(block.instruction, block.start, rows[block.instruction].operations[block.start]) in keys
+    found = frozenset(
+        block.key for block in block_graph.blocks
+        if (block.stop > block.start
+            and _operation_key(block.instruction, block.start, rows[block.instruction].operations[block.start]) in keys)
+        or (block.edge is not None and block.key not in cyclic)
     )
+    return found, (None if keys else "no once-only raw operation")
 
 
 def _cyclic_blocks(successors: dict) -> set:
@@ -762,7 +785,7 @@ def expressions_at(memory_ssa, observation, scopes, requests, overrides=None, bl
 def _configured_projector(unit, observation, context, address_spaces, ssa, operations, translation_namespace,
                           *, opaque_value_provider=None, readonly_image=None, once_keys=None,
                           fresh_keys=frozenset(), same_object=None, pointer_rows=None, once_blocks=None,
-                          load_identity_plan=None):
+                          load_identity_plan=None, tail_sites=frozenset()):
     projector = _Projector(
         context,
         address_spaces,
@@ -780,7 +803,9 @@ def _configured_projector(unit, observation, context, address_spaces, ssa, opera
         same_object,
         pointer_rows,
     )
-    projector._once_blocks = (once_blocks or frozenset()) if DEFINITION_ATOMS and once_keys else frozenset()
+    # (G-T G3b-3) kept when no raw operation runs once: edge blocks may
+    projector._once_blocks = (once_blocks or frozenset()) if DEFINITION_ATOMS and once_keys is not None else frozenset()
+    projector._tail_sites = frozenset(tail_sites)
     projector._stack_atoms = _stack_atoms(unit, observation, context, address_spaces)
     if load_identity_plan is not None:
         projector._load_identities = load_identity_plan.bindings(unit, observation, context, address_spaces, ssa)
@@ -1186,6 +1211,7 @@ class _Projector:
         # entry contents of read-only image memory are its image bytes
         self._readonly = readonly_image
         self._once = once_keys or frozenset()
+        self._tail_sites: frozenset = frozenset()   # (G-T G3b-3) composed / placed tail sites
         self._atoms_on = once_keys is not None   # definition / same-result atoms (``_configured_projector``)
         self._definition_atoms: set[int] = set()   # wild ones
         self._fresh = fresh_keys
@@ -1610,6 +1636,21 @@ class _Projector:
                 self.guarded_windows[object_id] = self._guarded_atoms[address.atoms[0][0]]
             self.nonstack_labels[object_id] = labels | (self.nonstack_labels.get(object_id) or frozenset())
 
+    def _runs_once(self, key: str) -> bool:
+        """Whether the operation ``key`` (or the call / tail site whose row it
+        is) runs at most once per activation: its raw base is single-execution,
+        or -- G-T G3b-3, docs 25.108 -- it is a row of a conditional tail site
+        whose edge block is (the raw CBRANCH itself may sit in a loop)."""
+        base, separator, _ = key.partition("~")
+        if base in self._once:
+            return True
+        if not separator or base not in self._tail_sites:
+            return False
+        from .pcode_blocks import edge_key
+
+        space, offset, ordinal, _ = base.split(":")
+        return edge_key(f"{space}:{offset}", int(ordinal)) in self._once_blocks
+
     def _definition_atom(self, definition, requested_span, fresh=False,
                          nonstack=False, eligible=False) -> _AddressExpression | None:
         """A value defined once per activation by a call (its summarized or
@@ -1628,12 +1669,12 @@ class _Projector:
         if key is None or definition.span != requested_span:
             return None
         base = key.split("~", 1)[0]
-        if base not in self._once or (requested_span.object_id.kind not in _VALUE_KINDS
-                                      and not nonstack and not fresh):
+        if not self._runs_once(key) or (requested_span.object_id.kind not in _VALUE_KINDS
+                                        and not nonstack and not fresh):
             return None
         if "~" in key:
-            if base.rsplit(":", 1)[-1] not in ("CALL", "CALLIND"):
-                return None
+            if base.rsplit(":", 1)[-1] not in ("CALL", "CALLIND") and base not in self._tail_sites:
+                return None   # (a tail site's rows by its identity, G-T G3b-3)
         else:
             operation = self._operations.get(key)
             if operation is None or operation.opcode != "LOAD":
@@ -2035,7 +2076,7 @@ class _Projector:
                 if writer is not None and self._key_parts(writer) == expect:
                     # the call's pre-state class: write-back keeps it (S2)
                     return self._slot_class(writer[6], writer[7], expect, active | {definition_id})
-            if key is None or key.split("~", 1)[0] not in self._once:
+            if key is None or not self._runs_once(key):
                 return None
             return ("def", self._stable_definition_key(definition_id), _stable_storage_key(span))
         if definition.kind is MemoryDefinitionKind.JOIN:

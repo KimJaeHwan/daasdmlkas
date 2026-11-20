@@ -164,7 +164,10 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # 54: (G-T G3b-2) a conditional tail with an outcome edge block escapes at
 # ``site~edge`` (its edge block), not at the raw CBRANCH: the fallthrough path
 # regains private-frame reads.
-ENGINE_SEMANTICS_VERSION = 54
+# 55: (G-T G3b-3) tail sites are physical-memory events; a tail site's staged
+# rows run once by their execution block (definition atoms of conditional-tail
+# rows in a loop's edge block, of BRANCH-tail rows).
+ENGINE_SEMANTICS_VERSION = 55
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

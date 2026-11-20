@@ -6771,3 +6771,39 @@ exporter(내부 썽크 유지, S1 호출 다음 줄 계약)로 다시 내보냈�
   스냅샷 차이 0, 오라클 같음, UETEMPLATE OK.
   게이트 Bundle의 탐침(`.census6/cob/g3b2_edge_probe.py`): 간선 사이트는 v2 debug 142, v3 release 71(나머지 0)이지만 그 중
   보관 슬롯이나 탈출 효과가 있는 곳은 없다(간선 탈출 0) -- 차이 0은 규칙이 보이지 않아서가 아니라 대상이 없어서.
+
+### 25.108 꼬리 점프와 함수 밖 제어 이동을 물리 메모리 이벤트로 (G-T G3b-3, 2026-11-20)
+
+설계 `.census6/design_gt_r16.md`(측정표) -> r17 -> r18(+ 마지막 고침, 수렴). 측정 도구 `.census6/cob/g3b3_probe.py`(결과
+`g3b3_probe_main.txt` / `g3b3_probe_new.txt`). 지금까지 메모리에 쓰는 합성된 꼬리(조건 꼬리, BRANCH 꼬리)가 있으면
+`MemoryIndex`가 "unrepresented memory event"로 함수 전체의 물리 기록을 거절했다. 또 측정에서, 행이 나열한 함수 밖 대상으로
+p-code가 가지 않는 모순 행(분할 행의 지역 BRANCH / CBRANCH, 상대 분기만 있는 행, 호출 플래그만 있는 연산 없는 행, 도달 못 하는
+CALLOTHER / BRANCH OUT 뒤의 행 등 9가지)이 경계 없이 완전한 계획을 받았다 -- 제어가 나갔다 돌아왔을 수 있는데 그 앞의
+메모리를 믿었다(건전성 구멍).
+
+- 이벤트(`_record_memory.MemoryIndex`, 플래그를 읽지 않음):
+  * `branch` / `branchind` 꼬리 사실 자리: 날 지점의 "call" 경계(호출 플래그 규칙 대신).
+  * **모든** 결과 간선 블록 `E`(효과가 놓였든 아니든 -- 효과 없는 탈출 간선도): 키 `site~edge`, 지점 `(rank(E), 0)`,
+    가드 `reach_guard(E)`. 간선 블록은 모든 진짜 블록 뒤에 순위(다음 블록이 없으니 위상 순서 유지) -- 진짜 블록의
+    접두사에 꼬리 이벤트가 들어가지 않는다. 단계 행 `s~N`의 접두사 지점은 `(rank(E), 1)`(조건 꼬리) / `(rank, ordinal+1)`
+    (BRANCH 꼬리). 단계 쓰기는 그 자리의 꼬리 이벤트가 실제로 있을 때만 받는다.
+  * may-leave 행(`pcode_blocks.control_exits`, 대상별, 도달 가능한 연산만): 나열된 밖 대상 중 그 행의 도달 가능한
+    떠나는 BRANCH / CBRANCH나 CALL의 ADDRESS 목적지로 설명되지 않는 것이 있으면(도달 가능한 BRANCHIND / CALLIND /
+    CALLOTHER는 전부 설명). 이벤트 키 `<행 키>~leave`, 지점 `(rank(첫 블록), -1)`(행의 모든 연산 앞 -- 0번 LOAD도 본다),
+    가드 첫 블록의 도달. 그런 행 안의 메모리 이벤트(쓰기, 호출 경계 포함)는 떠나는 지점과 순서를 정할 수 없어 인덱스
+    전체를 거절: "memory event in a row that may leave".
+  * 절 (a) / (b)(다음 블록이 있으면서 나가는 블록, 다음 줄이 있는 BRANCHIND): 키 `<블록>~exit`, 마지막 연산 뒤.
+    이런 모양은 제어 색인이 이미 거절하므로 이제 STORE가 없어도 인벤토리가 같은 이유로 거절된다(계획은 원래 거절).
+- 소비자: `physical_event`는 `~leave` / `~exit`를 펼치지 않고(가드된 경계로 남음; 평가기가 활성일 때 거절),
+  `site~edge`를 `site`로 바꿔 `context()`에 -- 꼬리 자리는 "physical context through a tail (G3b-4)"로 잘림(기록됨).
+  물리 피호출 함수 거절은 증명된 효과가 아니라 **그래프**로: 간선 블록, RETURN 아닌 나가는 블록, may-leave 행 중
+  하나라도 있으면 "physical callee has a non-RETURN exit"(이전 두 이유 "has a conditional tail" / "has a tail"을 대신).
+- 한 번 실행: 꼬리의 실행 블록은 다음 블록이 없다(`E`는 만들 때부터, branch / branchind 사실 블록은 사실의 조건으로) --
+  루프 안이라도 순환에 없다. `single_execution_blocks`가 `(블록, 이유)`를 돌려주고 순환 검사를 간선 블록에도 한다;
+  원래 키가 비어도 일찍 끝내지 않는다(이유 "no once-only raw operation"); 전체 거절(지원 안 되는 흐름, 인증 안 된
+  나가는 BRANCHIND)은 그대로 먼저. 투영기는 `_runs_once`: 원래 기준이 한 번이거나, 꼬리 자리의 행이고 그 간선 블록이
+  한 번이면 한 번(날 CBRANCH 자체는 루프면 아님). 꼬리 자리는 opcode 글자가 아니라 정체(`tail_sites`)로.
+- `ENGINE_SEMANTICS_VERSION` 54 -> 55, UE 템플릿 v42(항목은 v41과 같음).
+- 고정 테스트 `tests/intra/test_gt_b3_tail_memory_events.py`(측정표의 모든 모양, 간선 순위, 단계 행 접두사, 효과 없는 간선,
+  행 안 LOAD, 대상별 설명, 행 안 CALL 거절, `physical_event`, may-leave 피호출 함수 거절, 루프의 간선 블록 한 번,
+  인증 안 된 BRANCHIND, `_runs_once`). 피호출 함수 거절 메시지가 바뀐 기존 테스트 2개.

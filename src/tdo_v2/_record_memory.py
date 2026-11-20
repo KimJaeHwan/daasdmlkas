@@ -78,20 +78,24 @@ class MemoryIndex:
                 step()
                 successors[previous].append(key)
         degree = {key: len(values) for key, values in predecessors.items()}
+        # (G-T G3b-3, docs 25.108) edge blocks rank after every real block:
+        # they have no successors, so the order stays topological, and no
+        # real block's prefix holds a conditional tail's event
+        rank_key = lambda key: (getattr(graph[key], "edge", None) is not None, key)  # noqa: E731
         pending = []
         for key, count in degree.items():
             if count == 0:
-                heappush(pending, key)
+                heappush(pending, rank_key(key))
         order = []
         while pending:
             step()
-            key = heappop(pending)
+            _, key = heappop(pending)
             order.append(key)
             for target in successors[key]:
                 step()
                 degree[target] -= 1
                 if degree[target] == 0:
-                    heappush(pending, target)
+                    heappush(pending, rank_key(target))
         if len(order) != len(graph):
             self._problem = "cyclic physical cfg"
             return
@@ -102,10 +106,53 @@ class MemoryIndex:
             or any(getattr(write, "span", None) is not None and write.span.object_id.kind in _MEMORY
                    for write in effect.writes)
         }
+        # (G-T G3b-3, docs 25.108) control transfers out of the function by code
+        # facts: tail sites, edge blocks, rows that may leave
+        from .pcode_blocks import control_exits, edge_site, tail_transfers, terminator
+
+        entry = unit.scopes.function.entry
+        self._facts = facts = tail_transfers(unit.observation, entry)
+        exits = control_exits(unit.observation, entry)
+        if exits is None:
+            self._problem = "physical cfg unavailable"
+            return
+        leaving: dict = {}      # first block of a may-leave row -> its row keys
+        leave_ops: dict = {}    # operation key -> the may-leave row holding it
+        for row_key, (first, keys) in exits.may_leave.items():
+            leaving.setdefault(first, []).append(row_key)
+            for item in keys:
+                leave_ops[item] = row_key
+
+        def emit(point, event_key, kind, reason, block_key, width=None, space=None, address=None):
+            guard, why = conditions.reach_guard(block_key)
+            if guard is None:
+                self._problem = why or "memory event reach unavailable"
+                return False
+            node = normalized.dependencies.node_for_key(f"op:{event_key}")
+            if kind in ("store", "write") and node is None:
+                kind, reason = "opaque", "memory writer has no existing operation node"
+            self._events.append((point, MemoryEvent(event_key, kind, guard, width, space, node,
+                                                   self.actions.get(event_key), reason, address)))
+            return True
+
         for rank, key in enumerate(order):
             block = graph[key]
             self._block_points[key] = (rank, block.stop)
             row = rows[block.instruction]
+            if getattr(block, "edge", None) is not None:
+                # a conditional tail's taken transfer: a call boundary at its
+                # edge block (placed effect or not -- an escape edge too)
+                site = edge_site(block)
+                point = self._points[f"{site}~edge"] = (rank, 0)
+                if not emit(point, f"{site}~edge", "call", "conditional tail transfer", key):
+                    return
+                continue
+            for row_key in sorted(leaving.get(key, ())):
+                # a row listing a target its p-code does not reach: control may
+                # leave anywhere inside it -- a boundary before its first operation
+                point = self._points[f"{row_key}~leave"] = (rank, -1)
+                if not emit(point, f"{row_key}~leave", "call", "row lists a target its p-code does not reach", key):
+                    return
             for ordinal in range(block.start, block.stop):
                 step()
                 operation = row.operations[ordinal]
@@ -113,14 +160,17 @@ class MemoryIndex:
                 self.operations[operation_key] = operation
                 point = self._points[operation_key] = (rank, ordinal)
                 kind, width, space, reason, address = None, None, None, None, None
+                fact = facts.get(operation_key)
                 if operation.opcode == "STORE" and len(operation.inputs) == 3:
                     kind, width = "store", operation.inputs[2].byte_size
                     if operation.inputs[0].kind is VarnodeKindCode.CONSTANT:
                         space = operation.inputs[0].coordinate.byte_offset
                     else:
                         kind, reason = "opaque", "unknown memory space"
-                elif operation.opcode in _CALLS or row.flow.is_call and operation.opcode in ("BRANCH", "BRANCHIND"):
+                elif operation.opcode in _CALLS:
                     kind, reason = "call", "call memory boundary"
+                elif fact is not None and fact.kind in ("branch", "branchind"):
+                    kind, reason = "call", "tail transfer"   # (the fact, never the call flag)
                 elif operation.output is not None and (
                     operation.output.kind is VarnodeKindCode.ADDRESS
                     and operation.output.coordinate.space_id in self.address_bits
@@ -134,23 +184,38 @@ class MemoryIndex:
                 # Normalization can omit transient call setup operations from
                 # SSA actions. Their observed block still gives exact reach;
                 # the missing STORE node remains opaque if that path is taken.
-                guard, why = conditions.reach_guard(key)
-                if guard is None:
-                    self._problem = why or "memory event reach unavailable"
+                if not emit(point, operation_key, kind, reason, key, width, space, address):
                     return
-                node = normalized.dependencies.node_for_key(f"op:{operation_key}")
-                if kind in ("store", "write") and node is None:
-                    kind, reason = "opaque", "memory writer has no existing operation node"
-                self._events.append((point, MemoryEvent(operation_key, kind, guard, width, space, node,
-                                                       self.actions.get(operation_key), reason, address)))
+            last = terminator(block, row)
+            if last is not None and block.successors and (
+                    block.exits or last[1].opcode == "BRANCHIND" and row.fallthrough is not None):
+                # control may leave and come back (design r13-r14 clauses a / b)
+                point = (rank, last[0], 1)
+                self._points[f"{key}~exit"] = point
+                if not emit(point, f"{key}~exit", "call", "control may leave and return", key):
+                    return
+        # a memory event inside a may-leave row cannot be ordered against the
+        # departure (design r18)
+        for _, event in self._events:
+            step()
+            if event.key in leave_ops:
+                self._problem = "memory event in a row that may leave"
+                return
         # A modeled call's synthetic writes are covered by its raw call
-        # boundary. Any other unrepresented write prevents an exact inventory.
+        # boundary, a tail's by its tail event (only when that event exists).
+        # Any other unrepresented write prevents an exact inventory.
         for key in effect_memory:
             step()
             base = key.split("~", 1)[0]
-            if key not in self._points and (base not in self.operations or self.operations[base].opcode not in _CALLS):
-                self._problem = "unrepresented memory event"
-                return
+            if key in self._points:
+                continue
+            if base in self.operations and self.operations[base].opcode in _CALLS:
+                continue
+            fact = facts.get(base)
+            if fact is not None and (f"{base}~edge" in self._points if fact.kind == "cbranch" else base in self._points):
+                continue
+            self._problem = "unrepresented memory event"
+            return
 
     def plan(self, load_key):
         """``(MemoryPlan, None)`` or ``(None, reason)`` for one original LOAD."""
@@ -221,13 +286,24 @@ class MemoryIndex:
                 base, separator, tag = operation_or_block.partition("~")
                 effect = self.proven.get(base)
                 operation = self.operations.get(base)
+                fact = getattr(self, "_facts", {}).get(base)
                 if separator and tag.isdigit() and effect is not None and base in self._points \
-                        and operation is not None and operation.opcode in ("CALL", "CALLIND"):
+                        and operation is not None and (operation.opcode in ("CALL", "CALLIND")
+                                                       or fact is not None and fact.kind != "cbranch"):
                     from .operation_records import _output_run
 
                     if _output_run(effect, tag) is not None:
                         rank, ordinal = self._points[base]
                         point = rank, ordinal + 1
+                elif separator and tag.isdigit() and effect is not None and fact is not None \
+                        and fact.kind == "cbranch" and f"{base}~edge" in self._points:
+                    # (G-T G3b-3) a conditional tail's staged rows run in its edge
+                    # block, after its tail event
+                    from .operation_records import _output_run
+
+                    if _output_run(effect, tag) is not None:
+                        rank, _ = self._points[f"{base}~edge"]
+                        point = rank, 1
             if self._problem is not None:
                 found = None, self._problem
             elif point is None:

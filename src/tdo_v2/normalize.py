@@ -25,7 +25,7 @@ from .control_dependence import (
     ControlDependence,
     derive_control_dependences,
 )
-from .pcode_blocks import build_pcode_block_graph, conditional_tail_edges
+from .pcode_blocks import build_pcode_block_graph, conditional_tail_edges, tail_transfers
 from .rep_strings import MAX_REP_BYTES, rep_sites
 from .may_alias import (
     ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME, EscapeMemo, MayAliasRead,
@@ -1879,7 +1879,11 @@ class _ScopedNormalizer:
                 if key.endswith(":CBRANCH") and key not in tail_edges:
                     raise AssertionError(f"conditional tail {key} has no edge block in the normalization graph")
             once_keys = single_execution_keys(observation, block_graph, frozenset(sites), control=_once_control)
-            once_blocks = single_execution_blocks(observation, block_graph, frozenset(sites), control=_once_control)
+            once_blocks, _ = single_execution_blocks(observation, block_graph, frozenset(sites), control=_once_control)
+            # (G-T G3b-3, docs 25.108) tail sites with an effect: their staged
+            # rows run once by their execution block (``_Projector._runs_once``)
+            _tail_facts = tail_transfers(observation, function.entry)
+            tail_sites = frozenset(key for key in proven_call_effects if key in _tail_facts)
             accessor_states = _accessor_states(observation, block_graph, _coordinate_key(function.entry),
                                                proven_call_effects, assumed_call_effects, once_blocks)
             wild_objects: set = set()
@@ -2120,6 +2124,7 @@ class _ScopedNormalizer:
                     ineligible_atoms=ineligible_atoms,
                     fresh_windows=fresh_windows, guarded_windows=guarded_windows,
                     once_blocks=once_blocks,
+                    tail_sites=tail_sites,
                     settle_pending=settle,
                     address_metadata=address_metadata,
                     blocked_reads=_blocked_reads,
@@ -2129,7 +2134,7 @@ class _ScopedNormalizer:
                 )
                 if projected_effect_unit is effect_unit:
                     # (accessor keys need atoms on even with nothing run once)
-                    if not atoms_on and (once_keys or accessor_states):
+                    if not atoms_on and (once_keys or once_blocks or accessor_states):
                         atoms_on = True
                         continue
                     if settle:
@@ -2299,7 +2304,7 @@ class _ScopedNormalizer:
             operation_overrides=_rep_overrides(sites, rep_plan, observation),
             opaque_value_provider=opaque_value_provider, readonly_image=readonly_image,
             once_keys=once_keys, fresh_keys=fresh_rows, same_object=same_object_rows,
-            pointer_rows=pointer_rows, once_blocks=once_blocks,
+            pointer_rows=pointer_rows, once_blocks=once_blocks, tail_sites=tail_sites,
             load_identity_plan=_load_identity_plan,
         ) if any(type(key[0]) is tuple for key in used_reads) else ()
         open_nodes = _materialize_open_conditions(
@@ -2393,7 +2398,7 @@ class _ScopedNormalizer:
             operation_overrides=_rep_overrides(sites, rep_plan, observation),
             opaque_value_provider=opaque_value_provider, readonly_image=readonly_image,
             once_keys=once_keys, fresh_keys=fresh_rows, same_object=same_object_rows,
-            pointer_rows=pointer_rows, once_blocks=once_blocks,
+            pointer_rows=pointer_rows, once_blocks=once_blocks, tail_sites=tail_sites,
             load_identity_plan=_load_identity_plan,
         )
         failed |= stale_reads(

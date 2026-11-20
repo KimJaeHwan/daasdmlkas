@@ -683,7 +683,7 @@ def test_a_physical_call_context_refuses_a_callee_with_a_conditional_tail():
     assert any(key.endswith(":CBRANCH") for key in case["callee"].proven)
     result = _record(case)
     cuts = result.get("physical_call_cuts", {})
-    assert any(reason == "physical callee has a conditional tail" for reason in cuts.values()), cuts
+    assert any(reason == "physical callee has a non-RETURN exit" for reason in cuts.values()), cuts
 
 
 

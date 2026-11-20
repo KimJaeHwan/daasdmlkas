@@ -285,7 +285,7 @@ def test_a_physical_call_context_refuses_a_callee_with_a_branch_tail():
     case = _case(_physical_caller(), callee, target)
     assert any(key.endswith(":BRANCH") for key in case["callee"].proven)
     cuts = _record(case).get("physical_call_cuts", {})
-    assert any(reason == "physical callee has a tail" for reason in cuts.values()), cuts
+    assert any(reason == "physical callee has a non-RETURN exit" for reason in cuts.values()), cuts
 
 
 # -- review r1 pins -------------------------------------------------------------------
