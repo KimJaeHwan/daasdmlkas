@@ -1426,9 +1426,14 @@ public class GhidraV2BundleExport extends GhidraScript {
      *  exception directory, by a frame's PC: a row of the body (a fault) or a
      *  call's ISA return address. No entry covering such a PC names a handler
      *  (directly or through a chain), every such PC lies inside the image, no
-     *  call row carries a flow override, and no call row has a non-call flow
-     *  reference to the entry -- then the function has no landing pad and a
-     *  listed entry on its call rows is the call's own. Any doubt: no fact. */
+     *  call row carries a flow override, every call row keeps its ISA
+     *  fallthrough (``getFallThrough() == address + parsed length``: a removed
+     *  or moved fallthrough could hide the return edge into the entry), no call
+     *  row has a non-call flow reference to the entry, and the body is exactly
+     *  the exported rows (no undefined byte that could hold an unlisted call
+     *  whose return PC goes unchecked) -- then the function has no landing pad
+     *  and a listed entry on its call rows is the call's own. The return PC is
+     *  a pure PC lookup in the table. Any doubt: no fact. */
     private boolean noStaticExceptionHandler(
             Function function, ObservedFunction observed, List<Instruction> rows) {
         if (peUnwindEntries == null || !observed.exceptionalTargets.isEmpty()) {
@@ -1436,6 +1441,13 @@ public class GhidraV2BundleExport extends GhidraScript {
         }
         Address base = currentProgram.getImageBase();
         Address entry = function.getEntryPoint();
+        AddressSet listed = new AddressSet();
+        for (Instruction row : rows) {
+            listed.add(row.getAddress(), row.getMaxAddress());
+        }
+        if (!listed.equals(observed.body)) {
+            return false;
+        }
         try {
             for (AddressRange range : observed.body) {
                 long low = range.getMinAddress().subtract(base);
@@ -1458,6 +1470,10 @@ public class GhidraV2BundleExport extends GhidraScript {
                     }
                 }
                 long back = row.getAddress().subtract(base) + row.getParsedLength();
+                Address fallthrough = row.getFallThrough();
+                if (fallthrough == null || fallthrough.subtract(base) != back) {
+                    return false;
+                }
                 if (handlerIn(back, back + 1)) {
                     return false;
                 }
@@ -1512,9 +1528,12 @@ public class GhidraV2BundleExport extends GhidraScript {
                     return null;
                 }
                 long declared = u32At(base, loadConfig);
+                if (declared < 4 || loadConfig + declared > imageSize) {
+                    return null;   // (the structure's own size inside the image)
+                }
                 if (declared >= 0xC8 + 8) {
-                    if (loadConfig + 0xC8 + 8 > imageSize) {
-                        return null;
+                    if (loadConfigSize < 0xC8 + 8) {
+                        return null;   // (a directory smaller than the CHPE field it declares)
                     }
                     if (u32At(base, loadConfig + 0xC8) != 0 || u32At(base, loadConfig + 0xCC) != 0) {
                         return null;   // (CHPE metadata: an ARM64EC / ARM64X hybrid)
@@ -1546,7 +1565,7 @@ public class GhidraV2BundleExport extends GhidraScript {
             peImageSize = imageSize;
             return entries;
         }
-        catch (MemoryAccessException | IllegalArgumentException | ghidra.program.model.address.AddressOutOfBoundsException error) {
+        catch (MemoryAccessException | RuntimeException error) {   // (never an export error)
             return null;
         }
     }
