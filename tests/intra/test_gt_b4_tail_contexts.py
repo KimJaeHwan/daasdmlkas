@@ -506,5 +506,26 @@ def test_a_tail_takes_sp_from_its_snapshot_without_a_staged_sp_read(adjust, ok):
     if ok:
         assert evaluate_physical(record, entry_reader(vm)).value == final_register(vm, RAX, 8) == 23
     else:
-        with pytest.raises(Ineligible):
+        with pytest.raises(Ineligible, match="physical return stack mismatch"):
             evaluate_physical(record, entry_reader(vm))
+
+
+
+def test_a_conditional_tail_whose_taken_block_holds_only_its_edge_marker_is_cut():
+    """(stage 2; Astra r1-r3) ``F: rdi = 0; cbranch -> T`` where T only advances
+    rsp by 8 and returns to the literal caller fallthrough: the taken block
+    holds only ``CBRANCH~edge`` -- "tail boundary without staged rows"."""
+    flag = tmp(0x338, 1)
+    middle = (FunctionBuilder(entry=F).ins(copy_op(reg(RDI), const(0)))
+              .cbranch("x", flag, op("INT_EQUAL", [reg(RCX), const(0)], flag))
+              .ins(copy_op(reg(RAX), const(7))).label("x").ret())
+    target = FunctionBuilder(entry=T).ret()
+    raw = target.to_json()
+    ops = raw["instructions"][-1]["operations"]
+    ops.pop(0)
+    ops[0]["ordinal"] = 0
+    ops[1].update(ordinal=1, inputs=[const(FALLTHROUGH)])
+    target.to_json = lambda: raw
+    case = _case(_caller(), _to(middle, 1, T), target)
+    record = _record(case, ROOT_KEY)
+    assert "tail boundary without staged rows" in set((record.get("physical_call_cuts") or {}).values()),         record.get("physical_call_cuts")
