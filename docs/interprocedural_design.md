@@ -6902,3 +6902,42 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
   검증됨: 강화한 대응 검증이 같은 기록을 먼저 거절, 실행 중 방어로 유지), M7(정적 대상 확인: 합성 출처가 언제나 사실의
   목적지). 게이트 g3b4a(pfixb 대비, 10f067f): 예전 두 거절 고정만 실패(위에서 고침), 스냅샷 차이 0, 오라클 같음,
   UETEMPLATE OK.
+
+### 25.112 호출 행의 목적지를 p-code로 가린다 (G-T G3b-7, 2026-11-23)
+
+설계 `.census6/design_gt_g3b567_r2.md` -> r3 -> r4 -> r5 -> r6(리뷰: Astra 6.2 / Fable 5.2 여섯 번; G3b-7은 r6에서 둘 다
+통과). 처음 구현은 다른 에이전트(GPT)의 `25a5b3c`(검토 전, 머지 안 함)이고, 여기서 다시 짰다. 지금까지 행의 목적지
+목록(`flow_targets`)은 exporter의 호출 표시(`is_call`)가 있으면 바깥 목적지를 모두 버렸다. 이제 **p-code가** 정한다.
+
+- 하나의 후속 함수 `control_successor_coordinates(row, local_addresses, function_entry)`를 명령 그래프, 블록 그래프,
+  정규화, 관측 그래프, 출구, 스케줄러 CFG 확인이 같이 쓴다. 목록의 목적지는 그 행의 호출 연산이 설명할 때만 빠진다
+  (`call_explains`, `control_exits`도 같은 술어): 직접 CALL은 자기 주소 피연산자를, CALLIND는 행이 증명한 선택자 값
+  하나(`_row_selector`: 상수 피연산자, 또는 `final_target_index`의 마지막 쓰기가 그 varnode에 상수를 정확히 COPY -- 내부
+  흐름 없음, 사이에 호출 없음; 같은 코드 공간)를, 증명 못 한 선택자면 목록 전부를(행에 다른 이동이 없으니 호출 후보)
+  설명한다. 설명 안 함: flow override 행(목록은 덮어쓴 의미를 따른다), 피연산자 없는 호출, **함수 자신의 진입**(아래).
+- 행에 BRANCH / BRANCHIND / RETURN / CALLOTHER가 어디든 있으면 아무것도 설명하지 않는다(호출이 도달 못 할 수 있음;
+  CALLOTHER는 이동할 수 있다고 본다). CBRANCH는 막지 않는다(fallthrough가 호출에 닿음) -- 다만 행의 BRANCH / CBRANCH가
+  가리키는 주소는 호출이 설명하지 않는다(그 분기가 호출 없이 거기로 갈 수 있다).
+- 호출 표시가 붙은 순수 BRANCH는 호출이 아니다: 바깥 목적지가 명령 후속에 남는다(측정: 게이트 Bundle 13개에서 81개
+  함수 87개 행, ARM64 Bundle 8개에서 함수 3~63개씩 -- 블록 위상, 꼬리 지점, 출구는 그대로). 옛 `return_relations`의 2b
+  꼬리 검사는 그 목적지를 꼬리 자신의 목적지로 빼서 본다(G3b-5가 대체).
+- 복원된 지역 간선(목록에 없지만 분기 피연산자가 정한 지역 목적지, `unlisted_local_branch_target`; flow override 행은 복원 안
+  함 -- 덮어쓴 의미가 목적지를 정한다)은 그래프에 남는다.
+  `ConditionIndex`는 그 간선을 쓰는 증명만 거절한다(다이아몬드의 결정 / 팔, 병합 뒤 경로, 진입 앞 경로); 함수 전체의
+  가드 DAG는 하나의 구조라 거절("a recovered branch edge"). 측정: 21개 Bundle에 그런 행 0.
+- 새 그래프 거절 사유(모두 고정 있음): "a call with landing pads that does not end in its call"(표시 없는 행 / 목록에 있는
+  fallthrough도), "an opaque operation may leave before the row ends", "a call may leave before the row ends",
+  "an unreachable native call has no pre-SSA action", "an opaque operation may leave a split instruction",
+  "a call may leave a split instruction", "a reachable split branch is missing from the instruction successors".
+  21개 Bundle에서 거절로 바뀐 함수 0.
+- 알려진 한계 / 비용(이름 붙임): (1) **진입 = 호출 대상이자 착지 패드**: exporter가 착지 패드를 목록에 합치므로, 진입을
+  가리키는 재귀 호출 행의 진입은 패드일 수도 있다 -- 진입 간선을 남긴다(보수적). 21개 Bundle에서 재귀 호출 행 120개 /
+  함수 33개의 위상이 바뀐다(거절 0); 그 함수에서 호출 뒤 상태가 진입으로 흘러 스택 접근이 풀리지 않을 수 있다(정밀도 손실).
+  "함수 자신의 진입에 있는 착지 패드와 그 진입을 직접 부르는 호출을 구별하지 못한다" -- G3b-7b의 생산자 불변식(exporter가
+  자기 진입과 같은 착지 패드를 거절)이 이 귀속을 되돌릴 조건이다. (2) CALLOTHER와 바깥 목적지가 함께 있는 행은 거절
+  (21개 Bundle에서 0행; AArch64 `blraa` 류는 Stage 4 PAC 모델에서). (3) 함수 하나에 복원 간선이 있으면 가드 DAG 전체 거절.
+- 미룸(G3b-7b): exporter 변경(함수 몸체 안으로 가는 호출 표시 분기를 내보내기 거절하지 않음)과 생산자 식별(해시 등록,
+  도구의 원본 고정). 지금 exporter는 그런 분기에서 내보내기를 멈추므로 `seed_tail_calls`도 계속 거절한다("own body").
+- 엔진 의미 버전 56, UE 템플릿 v43(항목은 v42와 같음 -- 다시 유도해 비교). 고정 `tests/intra/test_gt_b7_call_graph.py`,
+  `test_record_conditions_cfg.py`(복원 간선 범위), `test_gt_b3_tail_memory_events.py` / `test_gt_b1_tail_fact.py`(표시만 있는
+  행은 이제 표시 없는 행과 같다), `test_call_projection_shape.py`(진입 간선을 둔 재귀가 이제 고정점에 닿음, 실행 확인 그대로).

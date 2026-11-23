@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from ._scope_contracts import VarnodeKindCode
 from .call_seeds import _operation_key
+from .control_projection import unlisted_local_branch_target
 from .memory_contracts import MemoryDefinitionKind
 from .pcode_blocks import build_pcode_block_graph, instruction_key, terminator
 from .resource_limits import step
@@ -80,7 +81,7 @@ class ConditionIndex:
         self.ssa, self.graph = index.ssa, normalized.dependencies
         self._cache, self._joins, self._join_reads, self._debts, self._prefixes = {}, {}, {}, {}, {}
         self._by_read, self._paths, self._writes, self._issues = {}, {}, {}, {}
-        self._reason = None
+        self._reason = self._control_reason = None
         self.guard_nodes = [False, True]
         self.decisions = {}
         self._guard_intern, self._guard_apply_cache = {}, {}
@@ -93,6 +94,15 @@ class ConditionIndex:
         if cfg.unsupported is not None or not self.blocks:
             self._reason = "unsupported cfg"
             return
+        # (G3b-7 r2, R7-5) A recovered edge (a definite local branch target
+        # the exported flow omits) keeps graph reachability conservative, but
+        # it cannot corroborate its own branch operand for an exact path
+        # proof: a diamond whose decision or arm sits in such a row has no
+        # proof; the function's other diamonds keep theirs. The general guard
+        # DAG is one function-wide structure and stays refused (``_control``).
+        self._recovered = frozenset(
+            row.address for row in unit.observation.instructions
+            if unlisted_local_branch_target(row, self.instructions) is not None)
         self.predecessors = {key: set() for key in self.blocks}
         for block in cfg.blocks:
             step()
@@ -183,7 +193,8 @@ class ConditionIndex:
                 self._by_read.setdefault(key, []).append((diamond, len(path)))
                 successors = self.blocks[key].successors
                 key = successors[0] if len(successors) == 1 and len(self.predecessors[successors[0]]) == 1 \
-                    and self._straight(self.blocks[key]) else None
+                    and self._straight(self.blocks[key]) \
+                    and self.blocks[key].instruction not in self._recovered else None   # (R7-5)
             self._paths[diamond.decision] = tuple(path)
 
     # General acyclic control correspondence. The original diamond matcher
@@ -229,7 +240,10 @@ class ConditionIndex:
         return result
 
     def _control(self):
-        if self._reach or self._reason is not None:
+        if self._reach or self._reason is not None or self._control_reason is not None:
+            return
+        if self._recovered:
+            self._control_reason = "a recovered branch edge"
             return
         from .control_dependence import _immediate_postdominators, _EXIT
 
@@ -282,8 +296,8 @@ class ConditionIndex:
         retain uncertainty. A guard reference alone is no feasibility proof.
         """
         self._control()
-        if self._reason is not None:
-            return None, self._reason
+        if (self._reason or self._control_reason) is not None:
+            return None, self._reason or self._control_reason
         key = self._locations[operation_or_block][0] if operation_or_block in self._locations \
             else self._raw_blocks.get(operation_or_block, operation_or_block)
         return (self._reach[key], None) if key in self._reach else (None, "unknown control location")
@@ -313,8 +327,8 @@ class ConditionIndex:
         does not solve a second reaching-definition problem or change SSA.
         """
         self._control()
-        if self._reason is not None:
-            return None, self._reason
+        if (self._reason or self._control_reason) is not None:
+            return None, self._reason or self._control_reason
         sources = tuple(source_ids)
         cache = span, sources, read_block, read_operation
         if cache in self._guarded:
@@ -514,7 +528,7 @@ class ConditionIndex:
                     self._prefixes[decision] = tuple(path)
                     break
                 block = self.blocks[key]
-                if not self._straight(block) \
+                if not self._straight(block) or block.instruction in self._recovered \
                         or self.predecessors[block.successors[0]] != {key}:
                     self._prefixes[decision] = None
                     break
@@ -601,6 +615,9 @@ class ConditionIndex:
             return None
         left, right = self._arm(true, block.key), self._arm(false, block.key)
         if left is None or right is None or left[0] != right[0] or left[2] == right[2]:
+            return None
+        if block.instruction in self._recovered or any(
+                self.blocks[key].instruction in self._recovered for key in (*left[1], *right[1])):
             return None
         merge = left[0]
         if self.predecessors[merge] != {left[2], right[2]}:

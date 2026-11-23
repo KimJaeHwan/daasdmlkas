@@ -154,8 +154,8 @@ def test_the_fact_names_all_three_kinds():
 
 def test_a_call_flag_never_makes_a_branchind_fact_out_of_an_entry_target():
     """``BRANCHIND`` whose only observed target is the entry (a loop back to
-    it): flagged, the entry edge is dropped and the block exits; the fact
-    reads the row's targets and admits none either way (design r14 B)."""
+    it): the entry edge remains present under either flag and the row's
+    observed local target excludes a tail fact."""
     for call in (True, False):
         builder = FunctionBuilder().ins(copy(reg(RAX), const(1))).jump_indirect(reg(RAX))
         original = builder.to_json

@@ -243,7 +243,26 @@ def test_pcode_destinations_must_exactly_match_the_existing_cfg_successors(condi
         row if index == ordinal else original for index, original in enumerate(observation.instructions)))
     unit = SimpleNamespace(observation=observation, scopes=analyzed.unit.scopes)
     conditions = ConditionIndex(analyzed.normalized, unit, lane)
-    assert conditions.for_join(_join(lane)[0]) == (None, "no simple diamond")
+    # (G3b-7 r2) the unconditional variant's operand is a recovered local
+    # edge (back to 0x1004): the graph keeps it and is no longer acyclic
+    expected = "no simple diamond" if conditional else "cyclic cfg"
+    assert conditions.for_join(_join(lane)[0]) == (None, expected)
+
+
+def test_an_unlisted_branch_keeps_both_ssa_sources_without_proving_which_source_was_taken():
+    builder = _branchy()
+    original = builder.to_json
+
+    def unlisted():
+        raw = original()
+        raw["instructions"][0]["flow_targets"] = []
+        return raw
+
+    builder.to_json = unlisted
+    _, lane, conditions = _index(builder)
+    join, _ = _join(lane)
+    assert len(lane.joins[join]) == 2
+    assert conditions.for_join(join) == (None, "no simple diamond")
 
 
 def test_a_partial_final_arm_write_cannot_use_an_earlier_full_write_as_its_source():
@@ -325,3 +344,78 @@ def test_general_guards_do_not_reinterpret_an_unknown_read_as_a_block_exit():
     definition_id, definition = _join(lane)
     assert conditions.guarded_sources(definition.span, lane.joins[definition_id], definition.block_key,
                                       'not-an-observed-read') == (None, 'read operation is not in block')
+
+
+def test_a_recovered_edge_elsewhere_keeps_an_earlier_diamond_proof():
+    """(G3b-7 r2, R7-5; Astra r1 P2) removing the listed target of a LATER
+    branch recovers that edge from p-code; the earlier diamond keeps its
+    proof. The function-wide guard DAG is refused with its own reason."""
+    def example(remove):
+        builder = _branchy()
+        builder._rows.pop()
+        builder.cbranch("late", reg(CF, 1)).ret().label("late").ret()
+        if remove:
+            original = builder.to_json
+
+            def unlisted():
+                raw = original()
+                raw["instructions"][-3]["flow_targets"] = []
+                return raw
+            builder.to_json = unlisted
+        _, lane, conditions = _index(builder)
+        return conditions, conditions.for_join(_join(lane)[0])
+
+    _, kept = example(False)
+    conditions, recovered = example(True)
+    assert kept[0] is not None and recovered[0] is not None
+    assert recovered[0].decision_key == kept[0].decision_key
+    assert conditions.reach_guard(recovered[0].decision_key) == (None, "a recovered branch edge")
+
+
+
+def _unlist(builder, row):
+    original = builder.to_json
+
+    def edit():
+        raw = original()
+        raw["instructions"][row]["flow_targets"] = []
+        return raw
+    builder.to_json = edit
+    return builder
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_a_recovered_edge_on_the_entry_prefix_refuses_the_prefix_proof(recovered):
+    """(R7-5) rax = rdi; ``BRANCH dec`` (its listing removed: a recovered edge);
+    a diamond writing rax on one arm only -- the other arm's source comes
+    through the entry prefix, which now crosses the recovered edge."""
+    flag = tmp(0x300, 1)
+    builder = FunctionBuilder().ins(copy(reg(RAX), reg(RDI))).branch("dec").label("dec")
+    builder.cbranch("other", flag, op("INT_EQUAL", [reg(RDX), const(0)], flag))
+    builder.ins(add(reg(RAX), reg(RSI), const(2))).branch("join")
+    builder.label("other").ins(copy(reg(R9), reg(RBX)))
+    builder.label("join").ins(copy(reg(R8), reg(RAX))).ret()
+    if recovered:
+        _unlist(builder, 1)
+    _, lane, conditions = _index(builder)
+    match, reason = conditions.for_join(_join(lane)[0])
+    assert (match is None) == recovered and (reason == "no straight entry prefix") == recovered
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_a_recovered_edge_after_the_merge_ends_the_proof_suffix(recovered):
+    """(R7-5) a diamond's merge, then ``BRANCH read`` (listing removed): reads
+    behind the recovered edge get no proof; the suffix up to it keeps one."""
+    flag = tmp(0x300, 1)
+    builder = FunctionBuilder().cbranch("other", flag, op("INT_EQUAL", [reg(RDX), const(0)], flag))
+    builder.ins(add(reg(RAX), reg(RDI), const(1))).branch("join")
+    builder.label("other").ins(add(reg(RAX), reg(RSI), const(2)))
+    builder.label("join").ins(copy(reg(R9), reg(RBX))).branch("read").label("read").ins(copy(reg(R8), reg(RAX))).ret()
+    if recovered:
+        _unlist(builder, 5)
+    _, lane, conditions = _index(builder)
+    definition_id, definition = _join(lane)
+    sources = lane.joins[definition_id]
+    assert conditions.for_sources(definition.span, sources, "1:1014")[0] is not None
+    behind = conditions.for_sources(definition.span, sources, "1:101c")
+    assert (behind[0] is None) == recovered

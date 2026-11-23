@@ -16,6 +16,7 @@ import z3
 
 from .._scope_contracts import AddressCoordinate, VarnodeKindCode
 from ..call_seeds import _operation_key
+from ..control_projection import control_successor_coordinates
 from .configured_finite_byte_kernel import (
     ByteDefinition, FiniteByteKernel, KernelIncomplete, KernelLimits, MemoryEvent,
     RootTokenSeed, _ForkList,
@@ -159,14 +160,8 @@ class _Scheduler:
                 node = cfg.node_for_key(f"instruction:{label}")
                 if node is None or cfg.node(node).label != label:
                     _stop(SchedulerDebtReason.EVIDENCE_MISMATCH, "raw instruction lacks normalized CFG node")
-                observed = set()
-                if instruction.fallthrough is not None:
-                    observed.add(instruction.fallthrough)
-                if not instruction.flow.is_call:
-                    observed.update(instruction.flow_targets)
-                else:
-                    observed.update(target for target in instruction.flow_targets
-                                    if target in raw and target != analysis.entry)
+                observed = control_successor_coordinates(
+                    instruction, local_addresses=raw.keys(), function_entry=analysis.entry)
                 expected = {target for target in observed if target in raw}
                 actual = {cfg.node(successor).label for successor in cfg.successors(node)}
                 if actual != {f"{target.space_id:x}:{target.byte_offset:x}" for target in expected}:

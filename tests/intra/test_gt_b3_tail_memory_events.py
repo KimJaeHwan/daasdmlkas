@@ -209,9 +209,12 @@ def k_unreachable_op(with_store, middle):
     return _edit(b, 1, change), []
 
 
-def l_first_op_load_flagged(with_store):
-    """(r17 review, Astra P2-1) a call-flagged row whose first operation is a LOAD, listing OUT."""
-    b = _start(with_store).ins(load(reg(R9), reg(RBX)), copy(reg(RAX), const(1)))
+def l_first_op_load_flagged(with_store, split=False):
+    """A row starting in a LOAD which lists OUT; the split variant can model the in-row boundary."""
+    operations = [load(reg(R9), reg(RBX))]
+    if split:
+        operations.append(op("CBRANCH", [const(2, 4), reg(ZF, 1)]))
+    b = _start(with_store).ins(*operations, copy(reg(RAX), const(1)))
     b = b.ins(copy(reg(RDX), const(2))).ret()
 
     def change(row, raw):
@@ -287,8 +290,8 @@ CASES = {
     "R-g2 split non-final CBRANCH": (lambda: g_split_cbranch_distinct(False, False), [("call", LEAVE)],
                                      [("call", LEAVE)], True),
     "R-h relative only": (lambda: h_split_relative_only(False), [("call", LEAVE)], [("call", LEAVE)], True),
-    "R-i1 flagged COPY row": (lambda: i_oplless_row_listing_out(False, True), [("call", LEAVE)],
-                              [("call", LEAVE)], True),
+    "R-i1 flagged COPY row": (lambda: i_oplless_row_listing_out(False, True), "unsupported control transfer",
+                              "unsupported control transfer", False),
     "R-k1 unreachable CALLOTHER": (lambda: k_unreachable_op(False, op("CALLOTHER", [const(0x10, 4)])),
                                    [("call", LEAVE)], [("call", LEAVE)], True),
     "R-k2 unreachable BRANCH OUT": (lambda: k_unreachable_op(False, op("BRANCH", [ram(OUT)])),
@@ -299,6 +302,8 @@ CASES = {
                                     "unsupported control transfer", False),
     "R-c leaving CBRANCH no edge": (lambda: c_leaving_cbranch_no_edge(False), "cfg branch targets differ",
                                     "cfg branch targets differ", False),
+    "R-d1 BRANCH next flagged": (lambda: d_branch_next_nonlocal_listed(False, True),
+                                 "unsupported control transfer", "unsupported control transfer", False),
     "R-d2 BRANCH next unflagged": (lambda: d_branch_next_nonlocal_listed(False, False),
                                    "unsupported control transfer", "unsupported control transfer", False),
     "R-f0 degenerate CBRANCH": (lambda: f_split_local_branch_nonlocal_listed(False, "CBRANCH"),
@@ -367,7 +372,7 @@ def test_an_escape_edge_without_an_effect_still_gets_its_event():
 
 @pytest.mark.parametrize("builder, load_key", [
     (lambda: j_split_with_inrow_load(False), "1:1004:1:LOAD"),
-    (lambda: l_first_op_load_flagged(False), "1:1004:0:LOAD"),
+    (lambda: l_first_op_load_flagged(False, split=True), "1:1004:0:LOAD"),
 ])
 def test_an_operation_inside_a_may_leave_row_sees_its_boundary(builder, load_key):
     """The leave event sits before the row's first operation: an in-row
@@ -377,6 +382,12 @@ def test_an_operation_inside_a_may_leave_row_sees_its_boundary(builder, load_key
     assert memory._points[LEAVE][1] == -1 and memory._points[LEAVE] < memory._points[load_key]
     assert _events(memory.prefix(load_key)) == [("call", LEAVE)]
     assert _events(memory.prefix(LEAVE)) == []
+
+
+def test_an_unsplit_load_row_with_a_listed_outside_target_is_refused():
+    builder, extra = l_first_op_load_flagged(False)
+    _, memory, _ = _index(builder, extra)
+    assert _events(memory.prefix("1:1004:0:LOAD")) == "unsupported control transfer"
 
 
 def _row_leaving(targets, leaves_to):
@@ -411,7 +422,7 @@ def test_a_call_in_a_may_leave_row_refuses_the_index():
         row["flow_targets"] = [_coord(TARGET), _coord(OUT + 0x40)]
     built = _edit(b, 1, change)
     _, memory, _ = _index(built, [_reg_target()])
-    assert memory.inventory() == (None, "memory event in a row that may leave")
+    assert memory.inventory() == (None, "unsupported control transfer")
 
 
 def test_rows_whose_listed_targets_are_reached_are_not_may_leave():
@@ -458,7 +469,9 @@ def test_a_callee_with_a_may_leave_row_is_refused():
     case = _case(_physical_caller(), _edit(callee, 0, change))
     assert case["callee"].proven == {} or not any("BRANCH" in key for key in case["callee"].proven)
     cuts = _record(case).get("physical_call_cuts", {})
-    assert any(reason == "physical callee has a non-RETURN exit" for reason in cuts.values()), cuts
+    assert cuts == {"1:1008:2:CALL": "physical call requires one analyzed body"}, cuts
+    unit = case["callee"].unit
+    assert control_exits(unit.observation, unit.scopes.function.entry).non_return_exits
 
 
 # -- single execution (design r17 section 3) --------------------------------------------

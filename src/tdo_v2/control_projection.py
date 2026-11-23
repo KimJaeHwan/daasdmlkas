@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 
-from ._scope_contracts import AddressCoordinate
+from ._scope_contracts import AddressCoordinate, VarnodeKindCode
 from ._scope_wire import _observation_digest
 from .control_contracts import FunctionTerminalCuts, ObservedTerminalCut
 from .graph import RustworkxDependencyGraph
@@ -140,27 +141,128 @@ def project_observed_terminal_cuts(
     )
 
 
+def call_like_instruction(instruction: ValidatedInstruction) -> bool:
+    """A user operation may transfer control too; it never proves a callee."""
+    return any(op.opcode in ("CALL", "CALLIND", "CALLOTHER") for op in instruction.operations)
+
+
+def unlisted_local_branch_target(instruction, local_addresses):
+    """One definite inter-instruction branch destination absent from exported flow.
+
+    A self re-entry belongs to the split p-code graph (e.g. REP). It does
+    not remove the exporter's terminal observation at this instruction.
+    """
+    if not instruction.operations or instruction.flow.is_override:
+        return None   # (Astra r7: an override row goes where the override says, not the raw operand)
+    branch = instruction.operations[-1]
+    if branch.opcode not in ("BRANCH", "CBRANCH") or not branch.inputs:
+        return None
+    operand = branch.inputs[0]
+    target = operand.coordinate
+    if (operand.kind is not VarnodeKindCode.ADDRESS or target == instruction.address
+            or target == instruction.fallthrough or target in instruction.flow_targets or target not in local_addresses):
+        return None
+    if any(op.opcode in ("BRANCH", "CBRANCH", "BRANCHIND", "RETURN") for op in instruction.operations[:-1]):
+        return None
+    return target
+
+
+def _row_selector(instruction, index) -> int | None:
+    """The value of operation ``index``'s (CALLIND) selector when the row proves
+    it: a constant operand, or the operand's instruction-local producer
+    (``final_target_index``: no internal flow, overlap-based last writer, no
+    call-like operation in between) is a COPY of a constant to exactly that
+    varnode. None: not proven by the row. (A constant is compared with the
+    listed targets' byte offsets; a mismatch only keeps a listed target as a
+    successor -- an extra exit, never a dropped one.)"""
+    from .pcode_blocks import final_target_index   # (pcode_blocks imports this module)
+
+    operations = instruction.operations
+    selector = operations[index].inputs[0]
+    if selector.kind is VarnodeKindCode.CONSTANT:
+        return selector.coordinate.byte_offset
+    producer = final_target_index(instruction, index)
+    if producer is None:
+        return None
+    op = operations[producer]
+    if (op.opcode == "COPY" and op.output == selector and len(op.inputs) == 1
+            and op.inputs[0].kind is VarnodeKindCode.CONSTANT):
+        return op.inputs[0].coordinate.byte_offset
+    return None
+
+
+def call_explains(instruction, index, target, function_entry=None) -> bool:
+    """(G3b-7 r3/r4) May the CALL / CALLIND at ``index`` be the transfer that
+    reaches the listed ``target``? One predicate for the successor function
+    and ``control_exits``. On a flow override row the listing follows the
+    overridden semantics, not the raw p-code: nothing is explained (Astra r3
+    P1: a direct CALL too). An operand-less call explains nothing. A direct
+    CALL explains its address operand. A CALLIND explains exactly a row-proven
+    selector (in the row's own code space); an unproven selector explains any
+    listed target -- the caller's gate leaves no other transfer -- except the
+    function's entry, which the exporter may have merged as a landing pad
+    (Astra r3 P2): that evidence stays a successor."""
+    operation = instruction.operations[index]
+    if len(operation.inputs) != 1 or instruction.flow.is_override:
+        return False
+    if function_entry is not None and target == function_entry:
+        # (r6; Astra r4 P2 / r5 Q2) the exporter merges landing pads into the
+        # listing: the entry may be a pad as well as a recursive callee, and
+        # the merged listing cannot tell -- the edge stays (conservative)
+        return False
+    if operation.opcode == "CALL":
+        return operation.inputs[0].kind is VarnodeKindCode.ADDRESS and operation.inputs[0].coordinate == target
+    if operation.opcode != "CALLIND":
+        return False
+    value = _row_selector(instruction, index)
+    if value is None:
+        return True
+    return target.byte_offset == value and target.space_id == instruction.address.space_id
+
+
 def control_successor_coordinates(
     instruction: ValidatedInstruction,
     *,
-    local_addresses: set[AddressCoordinate] | None = None,
+    local_addresses: Collection[AddressCoordinate] | None = None,
     function_entry: AddressCoordinate | None = None,
 ) -> tuple[AddressCoordinate, ...]:
-    targets = set()
+    """Separate listed call targets from instruction-level control successors.
+
+    A direct CALL explains its own destination. A CALLIND explains the one
+    address its row proves for the selector (``_row_selector``), else any
+    listed target (a callee candidate: the row has no other transfer).
+    Local non-entry targets remain possible landing pads. In a row holding a
+    BRANCH / BRANCHIND / RETURN / CALLOTHER we cannot assign an observed
+    target exclusively to a call (an unconditional or opaque transfer can
+    make the call unreachable). A CBRANCH never does -- its fallthrough
+    reaches the call -- but an address a BRANCH / CBRANCH of the row names is
+    never explained by a call: the branch may leave there without calling
+    (G3b-7 r2, R7-2 / R7-3). Kept successors include a branch to entry.
+    """
+    targets = set(instruction.flow_targets)
+    operations = instruction.operations
+    if targets and call_like_instruction(instruction) and not any(
+            op.opcode in ("BRANCH", "BRANCHIND", "RETURN", "CALLOTHER") for op in operations):
+        explained = {target for index, op in enumerate(operations) if op.opcode in ("CALL", "CALLIND")
+                     for target in targets if call_explains(instruction, index, target, function_entry)}
+        explained -= {op.inputs[0].coordinate for op in operations
+                      if op.opcode in ("BRANCH", "CBRANCH") and op.inputs
+                      and op.inputs[0].kind is VarnodeKindCode.ADDRESS}
+        targets = {target for target in targets
+                   if (local_addresses is not None and target in local_addresses and target != function_entry)
+                   or target not in explained}
+    # An absolute local target of an unsplit branch is control evidence in its
+    # own right. Split instructions must first establish which branches run.
+    if local_addresses is not None:
+        inferred = unlisted_local_branch_target(instruction, local_addresses)
+        if inferred is not None:
+            targets.add(inferred)
     if instruction.fallthrough is not None:
         targets.add(instruction.fallthrough)
-    if not instruction.flow.is_call:
-        targets.update(instruction.flow_targets)
-    elif local_addresses is not None:
-        targets.update(
-            target
-            for target in instruction.flow_targets
-            if target in local_addresses and target != function_entry
-        )
     return tuple(sorted(targets))
 
 
 def _coordinate_key(value) -> str:
     return f"{value.space_id:x}:{value.byte_offset:x}"
-__all__ = ("ObservedControlGraph", "control_successor_coordinates", "project_observed_control_graph",
+__all__ = ("ObservedControlGraph", "call_explains", "call_like_instruction", "control_successor_coordinates", "project_observed_control_graph",
            "project_observed_terminal_cuts")

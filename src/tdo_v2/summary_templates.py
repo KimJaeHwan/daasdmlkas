@@ -167,7 +167,10 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # 55: (G-T G3b-3) tail sites are physical-memory events; a tail site's staged
 # rows run once by their execution block (definition atoms of conditional-tail
 # rows in a loop's edge block, of BRANCH-tail rows).
-ENGINE_SEMANTICS_VERSION = 55
+# 56: (G-T G3b-7) p-code, not the exporter's call flag, classifies a call
+# row's listed targets (a call-flagged BRANCH is no call; a call explains only
+# what its operation proves; the entry stays a successor).
+ENGINE_SEMANTICS_VERSION = 56
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

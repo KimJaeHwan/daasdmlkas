@@ -286,6 +286,11 @@ def _transfer_gaps(instruction, keys, observed, tail) -> list[str]:
         else:
             implied.add(instruction.fallthrough)
     successors = set(control_successor_coordinates(instruction))
+    if tail and callees is not None:
+        # (G3b-7) a call-flagged BRANCH / BRANCHIND is no call by p-code: its
+        # destination is now an instruction successor -- for the 2b tail it
+        # is the tail's own (certified) destination, not an unclassified one
+        successors -= callees
     if successors != implied or any((target.space_id, target.byte_offset) not in observed for target in successors):
         gaps.append(f"unclassified-successor:{where}")
     return gaps

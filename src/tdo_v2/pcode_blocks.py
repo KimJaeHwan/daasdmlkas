@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from ._scope_contracts import AddressCoordinate, ValidatedFunctionObservation, VarnodeKindCode
-from .control_projection import control_successor_coordinates
+from .control_projection import call_explains, call_like_instruction, control_successor_coordinates
 
 _BRANCHES = ("BRANCH", "CBRANCH", "BRANCHIND")
 _CALLS = ("CALL", "CALLIND")
@@ -74,7 +74,9 @@ class PcodeBlock:
     start: int
     stop: int
     successors: tuple[str, ...]
-    exits: bool = False  # control may leave the function here (return, tail jump)
+    # A placed departure at block end. control_exits().may_leave separately
+    # records listed departures of unknown position, before the row's actions.
+    exits: bool = False
     edge: EdgeOrigin | None = None   # an outcome edge block (no operations)
 
 
@@ -221,8 +223,7 @@ def tail_transfers(observation, entry):
     * "branchind": a BRANCHIND ending a reachable block that exits, its
       instruction without fallthrough, S1 evidence or flow override, and no
       observed flow target that is an instruction of the function (read from
-      the row: a call flag that drops a local target never makes one, design
-      r14 B). An unrecovered jump table is one too -- a consumer binds only a
+      the row so that the fact requires independent evidence, design r14 B). An unrecovered jump table is one too -- a consumer binds only a
       slot symbol.
 
     An unsupported graph gives none. Cached per observation identity (only for
@@ -328,10 +329,13 @@ def control_exits(observation, entry) -> ControlExits | None:
                 for ordinal in range(block.start, block.stop):
                     operation = row.operations[ordinal]
                     keys.append(f"{address.space_id:x}:{address.byte_offset:x}:{ordinal}:{operation.opcode}")
-                    if operation.opcode in ("BRANCHIND", "CALLIND", "CALLOTHER"):
+                    if operation.opcode in ("CALL", "CALLIND"):
+                        # (G3b-7 r2-r4, R7-3) the successor function's predicate
+                        explained.update(target for target in listed if call_explains(row, ordinal, target, entry))
+                    elif operation.opcode in ("BRANCHIND", "CALLOTHER"):
                         everything = True
-                    elif operation.inputs and operation.inputs[0].kind is VarnodeKindCode.ADDRESS and (
-                            operation.opcode == "CALL" or _leaving(operation, local)):
+                    elif operation.inputs and operation.inputs[0].kind is VarnodeKindCode.ADDRESS \
+                            and _leaving(operation, local):
                         explained.add(operation.inputs[0].coordinate)
             # the row's first reached block (its ordinal-0 segment: every other
             # segment is entered through it; the lowest start fails closed)
@@ -481,12 +485,17 @@ def build_pcode_block_graph(
             operations = row.operations
             eligible = next((item for item in escaping if item[2] is None), None) \
                 if address not in straight else None
-            bad_pads = bool(_landing_pads(row, local, entry)) and not _sole_terminal_call(operations)
-            if bad_pads and _call_like(row):
-                # (G-T G3b-1, r15 final fixes) a call-like row with landing pads
-                # is refused before any edge block; a flag-only row (no call-like
-                # operation) keeps the edge bypass below
+            bad_pads = bool(_landing_pads(row, local, entry, raw)) and not _sole_terminal_call(operations)
+            if bad_pads:
+                # An exception can leave at the call before a following operation
+                # executes. Refuse the row before constructing any outcome edge.
                 return PcodeBlockGraph(instruction_key(entry), (), "a call with landing pads that does not end in its call")
+            if any(target not in local for target in raw) and any(
+                    op.opcode == "CALLOTHER" for op in operations[:-1]):
+                return PcodeBlockGraph(instruction_key(entry), (), "an opaque operation may leave before the row ends")
+            if row.flow_targets and any(op.opcode in _CALLS for op in operations[:-1]) \
+                    and set(raw).intersection(row.flow_targets) - local:
+                return PcodeBlockGraph(instruction_key(entry), (), "a call may leave before the row ends")
             if eligible is not None:
                 # (G1) the taken outcome's edge block; the fallthrough is the
                 # only local successor (checked against the observed flow, so a
@@ -499,14 +508,11 @@ def build_pcode_block_graph(
                     key, address, 0, len(row.operations), tuple(sorted({instruction_key(row.fallthrough), edge})), False,
                 )
                 continue
-            if bad_pads:
-                return PcodeBlockGraph(instruction_key(entry), (), "a call with landing pads that does not end in its call")
             successors = tuple(instruction_key(target) for target in raw if target in local)
             unmaterialized.extend((address, ordinal, "straight internal flow" if address in straight else reason)
                                   for ordinal, _, reason in escaping)
             # (G1) a branch whose absolute target leaves the function is an
-            # exit, whatever the observed flow lists (an is_call flag drops a
-            # non-local target; an empty flow_targets list omits it)
+            # exit even when the observed targets omit it.
             blocks[key] = PcodeBlock(
                 key, address, 0, len(row.operations), tuple(sorted(set(successors))),
                 exits=not successors or len(successors) != len(raw) or _leaves_by_pcode(row, local),
@@ -629,6 +635,11 @@ def _split(row, local, entry):
             continue
         reached.add(key)
         pending.extend(by_key[key].successors)
+    # The call-observation contract binds every native call seed to an exact
+    # pre-SSA action. Unreachable operations deliberately have no such action.
+    if any(op.opcode in _CALLS for block in rows if block.key not in reached
+           for op in operations[block.start:block.stop]):
+        return "an unreachable native call has no pre-SSA action"
     leaving = {successor for key in reached for successor in by_key[key].successors if successor not in by_key}
     leaving.update(
         instruction_key(targets[by_key[key].stop - 1][1]) for key in reached
@@ -636,35 +647,45 @@ def _split(row, local, entry):
         and targets[by_key[key].stop - 1][1] in local
     )
     observed = control_successor_coordinates(row, local_addresses=local, function_entry=entry)
+    placed = {
+        targets[block.stop - 1][1] for block in rows
+        if block.key in reached and block.stop - 1 in targets and targets[block.stop - 1][0] == "address"
+    }
+    # In a split row an opaque operation can leave on its own path. A later
+    # branch cannot stand in for that possible exit, even with the same target.
+    if any(target not in local for target in observed):
+        reached_opcodes = {op.opcode for key in reached for op in operations[by_key[key].start:by_key[key].stop]}
+        if "CALLOTHER" in reached_opcodes:
+            return "an opaque operation may leave a split instruction"
+        listed_outside = set(observed).intersection(row.flow_targets) - local
+        if listed_outside and reached_opcodes.intersection(_CALLS):
+            return "a call may leave a split instruction"
+        # A skipped CALLOTHER or BRANCHIND explains no target. control_exits()
+        # retains the unexplained departure as may_leave before the row's actions.
     if {instruction_key(target) for target in observed if target in local} - leaving:
         return "observed successors the instruction's p-code does not reach"
+    # An intra-instruction re-entry (e.g. REP) need not appear in the exported
+    # instruction CFG. All other reachable intra-function destinations must.
+    if leaving - {base} - {instruction_key(target) for target in observed}:
+        return "a reachable split branch is missing from the instruction successors"
     if operations[-1].opcode != "BRANCHIND":  # a terminal BRANCHIND takes the observed targets
-        placed = {
-            targets[block.stop - 1][1] for block in rows
-            if block.key in reached and block.stop - 1 in targets and targets[block.stop - 1][0] == "address"
-            and operations[block.stop - 1].opcode in ("BRANCH", "CBRANCH")
-        }
         if {target for target in row.flow_targets if target in local} - placed:
             return "flow targets the instruction's branches do not place"
     return rows
 
 
-def _call_like(row) -> bool:
-    """(G-T G3b-1, design r15 A) The row's p-code holds a CALL / CALLIND /
-    CALLOTHER (a user op may transfer too): a call row by code facts, whatever
-    the exporter's call flag says."""
-    return any(operation.opcode in _CALLS + ("CALLOTHER",) for operation in row.operations)
+def _landing_pads(row, local, entry, successors=None) -> tuple:
+    """Listed local successors of a call-like row, including a listed fallthrough.
 
-
-def _landing_pads(row, local, entry) -> tuple:
-    """A call instruction's local flow targets (``control_successor_coordinates``
-    adds them; the fallthrough too when listed). (G-T G3b-1) The trigger is
-    the call flag **or** a call-like operation (``_call_like``), so the
-    sole-terminal-call checks of both the non-split and the split path run for
-    an unflagged call row as well (they can only refuse a graph)."""
-    if not (row.flow.is_call or _call_like(row)):
+    A recursive callee alone is not a pad. An entry also reachable via another
+    transfer is a possible pad, with the same pre-call state requirement.
+    """
+    if not row.flow_targets or not call_like_instruction(row):
         return ()
-    return tuple(target for target in row.flow_targets if target in local and target != entry)
+    if successors is None:
+        successors = control_successor_coordinates(row, local_addresses=local, function_entry=entry)
+    entry_is_successor = entry in successors
+    return tuple(target for target in row.flow_targets if target in local and (target != entry or entry_is_successor))
 
 
 def _sole_terminal_call(operations) -> bool:

@@ -137,7 +137,11 @@ def test_a_recursive_call_with_an_unprojected_push_stays_sound():
     unprojected = recursive(copy(reg(RAX), const(1)))
     assert not observed_call_state_projections(program_units(unprojected)[0].observation)
     analyzed, report = _oracle(program_units(unprojected), pools=pools)
-    assert analyzed.recursion_unresolved   # (opaque: sound, not precise)
+    # (G3b-7 r6, R7-8) the recursive call lists the entry, which the exporter
+    # may have merged as a landing pad: the entry edge stays in the graph, and
+    # with it this shape's recursion rounds now reach their fixpoint too
+    # (base 08776bb: unresolved, opaque) -- every dependency still checks
+    assert not analyzed.recursion_unresolved
     assert report.checked and report.silent == []
     projected, _ = _oracle(program_units(recursive()), pools=pools)
     assert not projected.recursion_unresolved   # (the projected shape converges)
