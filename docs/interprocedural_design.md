@@ -6903,6 +6903,40 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
   목적지). 게이트 g3b4a(pfixb 대비, 10f067f): 예전 두 거절 고정만 실패(위에서 고침), 스냅샷 차이 0, 오라클 같음,
   UETEMPLATE OK.
 
+
+### 25.111 꼬리 경계의 레지스터 스냅샷 (G-T G3b-4 2단계, 2026-11-23)
+
+설계 `.census6/design_gt_r20.md`의 "마지막 고침"과 "구현 단계 나눔"(수렴). 1단계(25.110)는 꼬리 문맥 `T`의 진입을 꼬리
+자리의 단계 읽기(`~in` 등)로만 묶었다. 이제 꼬리 경계의 **레지스터 스냅샷**으로도 묶는다.
+
+- 스냅샷 계산(`memory_ssa.tail_register_snapshots`): 정규화가 아니라 물리 기록이 필요할 때 따로 한 번(dense) 돈다 --
+  정규화의 메모리 SSA(dense / sparse 둘 다), 요약, 템플릿, 걸음 수는 그대로. 꼬리 자리마다 실행 블록(BRANCH의 블록 /
+  조건 꼬리의 taken 간선 블록)의 첫 단계 동작 바로 앞 레지스터 상태; 원시 정의 번호를 그 SSA의 최종 번호로 옮긴다. 빌더마다
+  모든 꼬리 자리를 한 번에 계산해 둔다(`_record_calls._tail_snapshot`); 단계 동작이 없는 자리는 "tail boundary without
+  staged rows"로 자른다.
+- 꼬리 묶음(`_tail_context`): `binding.snapshot` = 그 스냅샷, `binding.tail = True`. 호출 전용 검사
+  (`observed_call_preserves_register`의 호출 표시)는 꼬리에서는 건너뛴다(BRANCH / CBRANCH는 레지스터를 쓰지 않음).
+- 경계 시작 블록(`_boundary_start`): 호출 / BRANCH 꼬리는 자기 블록, 조건 꼬리는 원시 CBRANCH가 있는 원래 블록(스냅샷
+  블록은 그 간선 블록). `_snapshot_register_safe` / `_preserved_register_entry`의 거꾸로 추적은 거기서 시작하고, 호출을
+  만나면 멈추는 규칙과 모든 덮어쓰기 검사는 그대로.
+- `_unmodified_read`: 꼬리의 단계 읽기는 원시 BRANCH / CBRANCH 위치에서 거꾸로 추적한다(CALL 투영 불필요). 그래서 `F`
+  안의 앞선 호출이 바꾼 레지스터를 `T`가 읽으면, 그 호출의 출력 값으로 묶이거나 이름 붙은 이유로 잘린다 -- 1단계의 고정
+  (거절)이 실행 값과 같은 값으로 바뀌었다(옛 상수는 절대 안 나옴).
+- 요구 seeding 변경 없음: 꼬리 문맥의 부모(`F`)는 언제나 자식 빌더라 모든 것을 요구한다(뿌리의 꼬리는 거절).
+- 스냅샷이 필요한 곳: `T`가 어떤 레지스터를 분기 조건에만 쓰면 꼬리 효과의 단계 읽기가 없다 -- 그 레지스터는 스냅샷으로만
+  묶인다(`F`가 직접 쓴 값, 또는 앞선 호출의 출력: `snapshot_parts`도 `_boundary_start`를 쓴다). SP는 단계 읽기가 없으면
+  스냅샷에서 빈 건너뛰기 집합으로(`pre_stack_parts`). 그룹은 그 자리의 실행 블록에서 `~edge` 표식이 아닌 첫 단계 동작;
+  스냅샷 계산이 실패하면 "tail snapshot unavailable"로 자른다. 조건 꼬리 자리는 `_unmodified_read`의 생산자가 될 수
+  없다(그 효과는 뒤따르는 블록이 없는 간선 블록에만 있다).
+- 남은 한계: `T`가 건드리지 않고 넘기는 레지스터는 여전히 잘린다 -- `T`에 그 바이트의 출구 실행이 없고(P-fix), 꼬리 출력
+  대응 계약은 꼬리 문맥 자신의 출력만 받는다. 꼬리 효과의 `preserved`로 경계 값을 내보내려면 검증기 계약을 넓혀야 한다
+  (다음 단계).
+- 고정 `tests/intra/test_gt_b4_tail_contexts.py`(앞선 호출의 출력이 `T`에 닿음 -- 실행과 같음; 조건 꼬리 두 결과; 분기 조건에만
+  쓰는 레지스터가 스냅샷으로 묶임 -- 직접 쓴 값 / 앞선 호출의 출력, 두 결과 모두 실행과 같음; 넘기는 레지스터는 이름 붙은 잘림).
+  돌연변이 8개 중 5개 실패(`.census6/cob/g3b4s2_mutants.py`); 남은 셋은 방어용 -- M3(`_tail_snapshot`이 실행 블록을 다시
+  확인), M7(`~edge` 표식뿐인 그룹은 보통의 꼬리에서 안 생김), M8(조건 꼬리 생산자는 간선 블록에만). 리뷰 r1: Astra 6.2 /
+  Fable 5.2 APPROVE WITH FIXES(스냅샷 유지 여부는 Astra를 따름).
+
 ### 25.112 호출 행의 목적지를 p-code로 가린다 (G-T G3b-7, 2026-11-23)
 
 설계 `.census6/design_gt_g3b567_r2.md` -> r3 -> r4 -> r5 -> r6(리뷰: Astra 6.2 / Fable 5.2 여섯 번; G3b-7은 r6에서 둘 다

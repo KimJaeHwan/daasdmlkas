@@ -335,6 +335,73 @@ def _call_boundaries(unit):
     return found
 
 
+@dataclass(frozen=True, slots=True)
+class TailRegisterSnapshot:
+    """(G-T G3b-4 stage 2) Register state before the first staged action of a
+    tail site's group (its execution block: the BRANCH's block, or a
+    conditional tail's taken edge block). Same fields as
+    ``CallBoundaryRegisterState`` (read duck-typed by the record helpers);
+    not part of the normalization's result."""
+
+    boundary_key: str
+    block_key: str
+    first_action_key: str
+    fragments: tuple
+
+
+def tail_register_snapshots(unit: LocalMemoryUnit, ssa: LocalMemorySsaResult, boundaries) -> dict:
+    """(G-T G3b-4 stage 2, design r20 final fixes) A separate dense pass over
+    the normalization's own memory unit -- never run by normalization, whose
+    memory SSA (both engines) stays as it is -- giving, per tail site in
+    ``boundaries`` (site -> (block key, first staged action key)), the
+    tracked register state before that action. Raw definition ids map to
+    ``ssa``'s final ids (the raw definitions are a subset of them). The work
+    is charged to the caller's limits (``step``)."""
+    if not boundaries:
+        return {}
+    partition = _build_partition(unit)
+    if partition.atoms != ssa.atomic_spans or unit.canonical_digest != ssa.unit_digest:
+        raise ValueError("tail snapshots need the memory SSA of the same unit")
+    raw_definitions = _raw_definitions(unit, partition.connected)
+    write_ids = {
+        (definition.operation_key, definition.write_ordinal): ordinal
+        for ordinal, definition in enumerate(raw_definitions)
+        if definition.operation_key is not None
+    }
+    entry_ids = {
+        definition.span: ordinal
+        for ordinal, definition in enumerate(raw_definitions)
+        if definition.kind is MemoryDefinitionKind.ENTRY
+    }
+    pool = _DefinitionSetPool()
+    in_states, _ = _dense_states(unit, partition, write_ids, _entry_state(partition, entry_ids, pool), pool)
+    final = {definition: index for index, definition in enumerate(ssa.definitions)}
+    raw_to_final = tuple(final[definition] for definition in raw_definitions)
+    registers = _register_ranges(partition)
+    blocks = {block.key: block for block in unit.blocks}
+    found = {}
+    for site, (block_key, first_action) in sorted(boundaries.items()):
+        block = blocks.get(block_key)
+        if block is None or block_key not in in_states:
+            continue
+        state = in_states[block_key]
+        for action in block.actions:
+            step()
+            if action.operation_key == first_action:
+                break
+            state = _apply_writes(state, action, partition, write_ids, pool)
+        else:
+            continue
+        fragments = []
+        for _, start, stop in registers:
+            for span, sources in _read_fragments(state, start, stop, partition.atoms):
+                step(1 + len(sources))
+                fragments.append(RegisterStateFragment(span, tuple(sorted(raw_to_final[source] for source in sources))))
+        found[site] = TailRegisterSnapshot(site, block_key, first_action,
+                                           tuple(sorted(fragments, key=lambda item: item.span.canonical_key)))
+    return found
+
+
 def _register_ranges(partition):
     """Only already-tracked, contiguous register spans; gaps stay absent."""
     found = []

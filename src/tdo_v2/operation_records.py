@@ -233,6 +233,10 @@ class _Binding:
                               if row.boundary_key == call), None)
         self._physical_stack = None
         self.physical_context = None
+        # (G3b-4 stage 2) a tail binding: ``snapshot`` is the tail site's
+        # register snapshot (``memory_ssa.tail_register_snapshots``); the
+        # BRANCH / CBRANCH itself writes no register
+        self.tail = False
 
     def _physical_staged_parts(self, read, start, end):
         if self.physical_context is None:
@@ -267,9 +271,10 @@ class _Binding:
                 return parts
             return _slice_parts(self.caller._fragments(read, None, 0), offset - read.span.start,
                                 offset + size - read.span.start)
-        projection = self.caller._projection(self.call)
-        if self.snapshot is None or projection is None:
+        projection = None if self.tail else self.caller._projection(self.call)
+        if self.snapshot is None or (projection is None and not self.tail):
             return None
+        skip = frozenset() if projection is None else frozenset(projection.transient_operation_keys)
         parts, cursor = [], offset
         for fragment in sorted(self.snapshot.fragments, key=lambda row: row.span.start):
             low, high = max(offset, fragment.span.start), min(offset + size, fragment.span.end)
@@ -278,8 +283,7 @@ class _Binding:
             if low != cursor:
                 return None
             piece = replace(fragment, span=ByteSpan(fragment.span.object_id, low, high - low))
-            if not self.caller._snapshot_register_safe(self.snapshot, piece,
-                                                      skip=frozenset(projection.transient_operation_keys)):
+            if not self.caller._snapshot_register_safe(self.snapshot, piece, skip=skip):
                 return None
             for item in self.caller._snapshot_parts(self.snapshot, piece):
                 parts.append({**item, "at": [item["at"][0] + low - offset, item["at"][1] + low - offset]})
@@ -514,8 +518,8 @@ class _Binding:
         from .observed_call_state import observed_call_preserves_register
         from .physical_state import PhysicalRegisterSlice
 
-        if not observed_call_preserves_register(self.caller.unit.observation, self.call,
-                                               PhysicalRegisterSlice(start, end - start)):
+        if not self.tail and not observed_call_preserves_register(self.caller.unit.observation, self.call,
+                                                                   PhysicalRegisterSlice(start, end - start)):
             return None
         if kind == "snapshot":
             from dataclasses import replace
@@ -1401,8 +1405,8 @@ class _Builder:
         if conditions._reason is not None:
             return False
         location = conditions._locations.get(snapshot.first_action_key)
-        if location is None or location[0] != snapshot.block_key \
-                or conditions._raw_blocks.get(snapshot.boundary_key) != snapshot.block_key:
+        start_block = _boundary_start(conditions, snapshot)
+        if location is None or location[0] != snapshot.block_key or start_block is None:
             return False
         identifiers = frozenset(fragment.definition_ids)
         span = fragment.span
@@ -1445,7 +1449,7 @@ class _Builder:
             return found
 
         _, _, ordinal = _key_parts(snapshot.boundary_key)
-        return ordinal is not None and trace(snapshot.block_key, ordinal)
+        return ordinal is not None and trace(start_block, ordinal)
 
     def _preserved_register_entry(self, snapshot, start, end):
         """A diagnostic entry leaf only after proving every prior path preserves it.
@@ -1465,7 +1469,7 @@ class _Builder:
         if conditions._reason is not None or conditions._locations.get(snapshot.first_action_key) is None:
             return None
         block_key, position = conditions._locations[snapshot.first_action_key]
-        if block_key != snapshot.block_key or conditions._raw_blocks.get(snapshot.boundary_key) != block_key:
+        if block_key != snapshot.block_key or _boundary_start(conditions, snapshot) is None:
             return None
         ancestors, pending = set(), [block_key]
         while pending:
@@ -2287,6 +2291,22 @@ def _register_space(unit):
     from .may_alias import _register_space_id
 
     return _register_space_id(unit.observation)
+
+
+def _boundary_start(conditions, snapshot):
+    """The block whose raw p-code ends right before the boundary: a CALL's (and
+    a BRANCH tail's) own block, which holds the staged group; for a
+    conditional tail (G3b-4 stage 2) the group is in the taken edge block and
+    the trace starts at the raw CBRANCH in its source block. None: the
+    snapshot's block is neither."""
+    raw = conditions._raw_blocks.get(snapshot.boundary_key)
+    if raw is None:
+        return None
+    if raw == snapshot.block_key:
+        return raw
+    if snapshot.boundary_key.endswith(":CBRANCH") and conditions._edge_blocks.get(raw) == snapshot.block_key:
+        return raw
+    return None
 
 
 def _key_parts(key):

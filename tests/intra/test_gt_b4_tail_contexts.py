@@ -362,15 +362,16 @@ def test_a_call_in_f_before_the_tail_never_leaks_its_stale_input(reads):
     case = _case(_caller(), middle, target.ret(), inner)
     record = _record(case, ROOT_KEY)
     vm = _run(case)
-    # stage 1 (pinned so stage 2's binding visibly changes it): T reading rax
-    # finds no bound input; passing it through, T has no exit run for it
-    if reads:
-        with pytest.raises(Ineligible, match="unknown physical inputs"):
-            evaluate_physical(record, entry_reader(vm))
-    else:
+    # stage 2: T's rax is bound through the tail snapshot / the unmodified
+    # staged read, whose trace stops at H's call: the run's value or a named
+    # cut -- never the pre-call constant (stage 1 pinned the cut)
+    if not reads:   # (a pass-through register has no exit run in T: P-fix)
         assert any("has no exit run" in row["reason"] for row in record.get("physical_output_cuts", ())),             record.get("physical_output_cuts")
         with pytest.raises(Ineligible):
             evaluate_physical(record, entry_reader(vm))
+        return
+    value = evaluate_physical(record, entry_reader(vm)).value
+    assert value == final_register(vm, RAX, 8) and value != 0x12
 
 
 def test_a_nested_call_context_flipped_to_a_tail_refuses():
@@ -390,3 +391,73 @@ def test_a_nested_call_context_flipped_to_a_tail_refuses():
         altered["physical_calls"][nested[0]].update(kind="tail", push=None)
     with pytest.raises(Ineligible, match="physical tail terminal correspondence"):
         evaluate_physical(_tamper(record, change), entry_reader(vm))
+
+
+
+# -- stage 2 (design r20 final fixes): tail register snapshots ----------------------------------
+
+
+def test_a_value_an_earlier_call_in_f_exports_reaches_t_through_the_tail_snapshot():
+    """(stage 2) ``F: call H (rax = rdi + 2); jmp T``, ``T: rax += 1``: T's rax
+    binds through the tail boundary (the trace stops at H's call, H's export
+    supplies it) -- equal to the run (stage 1 refused: no CALL projection)."""
+    inner = FunctionBuilder(entry=0x1e00).ins(add(reg(RAX), reg(RDI), const(2))).ret()
+    middle = _jump(FunctionBuilder(entry=F).sub_rsp(0x28).call(0x1e00).add_rsp(0x28).tail_call(T))
+    target = FunctionBuilder(entry=T).ins(add(reg(RAX), reg(RAX), const(1))).ret()
+    case = _case(_caller(), middle, target, inner)
+    record = _record(case, ROOT_KEY)
+    _equal(case, record)
+    assert not record.get("physical_output_cuts"), record.get("physical_output_cuts")
+
+
+@pytest.mark.parametrize("rcx", [0, 0x40])
+def test_a_conditional_tail_binds_through_its_edge_block_snapshot(rcx):
+    """(stage 2) a conditional tail: the group is in the taken edge block, the
+    trace starts at the raw CBRANCH in its source block -- both outcomes equal
+    the run."""
+    flag = tmp(0x320, 1)
+    inner = FunctionBuilder(entry=0x1e00).ins(add(reg(RAX), reg(RDI), const(2))).ret()
+    middle = (FunctionBuilder(entry=F).sub_rsp(0x28).call(0x1e00).add_rsp(0x28)
+              .cbranch("x", flag, op("INT_EQUAL", [reg(RCX), const(0)], flag))
+              .ins(copy_op(reg(RAX), const(7))).label("x").ret())
+    target = FunctionBuilder(entry=T).ins(add(reg(RAX), reg(RAX), const(1))).ret()
+    case = _case(_caller(), _to(middle, 3, T), target, inner)
+    record = _record(case, ROOT_KEY)
+    _equal(case, record, rcx=rcx)
+
+
+def test_a_pass_through_register_stays_cut_in_stage_2():
+    """(stage 2 limit) ``F: rax = 0x77; jmp T`` with T not touching rax: T has
+    no exit run for rax (P-fix) and the tail-export contract only accepts the
+    tail context's own export -- a named cut, never a guessed value."""
+    middle = _jump(FunctionBuilder(entry=F).ins(copy_op(reg(RAX), const(0x77))).tail_call(T))
+    case = _case(_caller(), middle, FunctionBuilder(entry=T).ins(add(reg(RDI), reg(RDI), const(1))).ret())
+    record = _record(case, ROOT_KEY)
+    assert any("has no exit run" in row["reason"] for row in record.get("physical_output_cuts", ()))
+    with pytest.raises(Ineligible):
+        evaluate_physical(record, entry_reader(_run(case)))
+
+
+
+@pytest.mark.parametrize("through_call", [False, True])
+@pytest.mark.parametrize("rcx", [0, 0x40])
+def test_a_register_t_only_branches_on_binds_through_the_tail_snapshot(through_call, rcx):
+    """(stage 2; Astra r1) T uses rdi only in its branch condition, so the tail
+    has no staged read of it: rdi binds through the tail snapshot -- F's own
+    ``rdi = 0`` or an earlier call H's ``rdi = 0`` (F wrote 1 before it).
+    Equal to the run on both outcomes of F's conditional tail."""
+    flag, zero = tmp(0x320, 1), tmp(0x328, 1)
+    inner = FunctionBuilder(entry=0x1e00).ins(copy_op(reg(RDI), const(0))).ret()
+    middle = FunctionBuilder(entry=F).sub_rsp(0x28)
+    if through_call:
+        middle.ins(copy_op(reg(RDI), const(1))).call(0x1e00)
+    else:
+        middle.ins(copy_op(reg(RDI), const(0)))
+    middle.add_rsp(0x28).cbranch("x", flag, op("INT_EQUAL", [reg(RCX), const(0)], flag))         .ins(copy_op(reg(RAX), const(7))).label("x").ret()
+    index = 4 if through_call else 3
+    target = (FunctionBuilder(entry=T).ins(copy_op(reg(RAX), const(17)))
+              .cbranch("y", zero, op("INT_EQUAL", [reg(RDI), const(0)], zero))
+              .ins(copy_op(reg(RAX), const(16))).label("y").ins(add(reg(RAX), reg(RAX), const(1))).ret())
+    case = _case(_caller(), _to(middle, index, T), target, *((inner,) if through_call else ()))
+    record = _record(case, ROOT_KEY)
+    _equal(case, record, rcx=rcx)

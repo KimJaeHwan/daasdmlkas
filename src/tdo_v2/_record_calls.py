@@ -494,6 +494,8 @@ def _tail_context(parent, site, fact, block, parent_identity, stack, expected_ta
     binding = _Binding(parent, tuple(reads), stack, 0, done.anchors, call_load_keys(site, effect), call=site,
                        effect=effect, relations=dict(done.summary.address_relations))
     binding.physical_context = identity
+    binding.tail = True
+    binding.snapshot = _tail_snapshot(parent, site, block)
     child = _Builder(done.normalized, done.unit, origins=done.origins, declared=done.declared,
                      limits=parent.limits, provenance=parent.stitch.provenance(done), stitch=parent.stitch,
                      records=parent.records, ledger=parent.ledger, parent=parent, binding=binding,
@@ -729,6 +731,47 @@ def physical_event(builder, event):
     return None
 
 
+def _tail_snapshot(builder, site, block):
+    """(G3b-4 stage 2, design r20 final fixes) The register snapshot at a tail
+    site's boundary: before the first staged action of its group, in its
+    execution block (the BRANCH's block / the conditional tail's taken edge
+    block). One separate dense pass per builder for all its tail sites
+    (``memory_ssa.tail_register_snapshots``), cached; normalization's memory
+    SSA is not touched. A site whose group has no staged action has none
+    ("tail boundary without staged rows")."""
+    cache = getattr(builder, "_tail_snapshots", None)
+    if cache is None:
+        from .memory_ssa import tail_register_snapshots
+        from .pcode_blocks import tail_transfers
+
+        # (r1 fixes, Astra P2-3) each site's group: the first staged action
+        # (never the ``~edge`` marker) in its execution block -- a conditional
+        # tail's taken edge block, a BRANCH tail's own block; none -> cut
+        conditions = builder._condition_index()
+        executing = {key: (fact.edge if fact.kind == "cbranch" else conditions._raw_blocks.get(key))
+                     for key, fact in tail_transfers(builder.unit.observation,
+                                                     builder.unit.scopes.function.entry).items()
+                     if fact.kind in ("branch", "cbranch")}
+        groups = {}
+        for unit_block in builder.normalized.memory_unit.blocks:
+            for action in unit_block.actions:
+                base, separator, tag = action.operation_key.partition("~")
+                if separator and tag != "edge" and executing.get(base) == unit_block.key and base not in groups:
+                    groups[base] = (unit_block.key, action.operation_key)
+        try:
+            computed = tail_register_snapshots(builder.normalized.memory_unit, builder.ssa, groups)
+        except (KeyError, ValueError):
+            computed = None   # (Fable P2-2: a named cut, never a crash)
+        cache = builder._tail_snapshots = (computed, executing)
+    computed, executing = cache
+    if computed is None:
+        raise _StitchCut("tail snapshot unavailable")
+    found = computed.get(site)
+    if found is None or executing.get(site) != block:
+        raise _StitchCut("tail boundary without staged rows")
+    return found
+
+
 def _unmodified_read(builder, base, read, span):
     """Validate a known producer's dominance and absence of later writes.
 
@@ -736,7 +779,10 @@ def _unmodified_read(builder, base, read, span):
     that an existing post-call SSA write really follows that call.
     """
     conditions = builder._condition_index()
-    if conditions._reason is not None:
+    if conditions._reason is not None or base.endswith(":CBRANCH"):
+        # (G3b-4 stage 2, Fable r1 P3-1) a conditional tail's effect runs only
+        # in its taken edge block, which no later read follows: reaching the
+        # raw CBRANCH means its fallthrough, where that effect never ran
         return False
     original_read = read.partition("~")[0]
     location = conditions._raw_blocks.get(original_read)
@@ -745,7 +791,9 @@ def _unmodified_read(builder, base, read, span):
     from .operation_records import _key_parts
 
     _, _, ordinal = _key_parts(original_read)
-    if read != original_read:
+    if read != original_read and original_read.rsplit(":", 1)[-1] not in ("BRANCH", "CBRANCH"):
+        # (G3b-4 stage 2) a tail's staged rows follow everything F does before
+        # the transfer: the trace starts at the raw BRANCH / CBRANCH itself
         projection = builder._projection(original_read)
         if projection is None:
             return False
@@ -1041,10 +1089,11 @@ def snapshot_parts(builder, snapshot, start, end):
     call with no later overwrite; obtain the bytes from that body's existing
     terminal state instead. No new read or SSA definition is introduced.
     """
+    from .operation_records import _boundary_start
+
     conditions = builder._condition_index()
     location = conditions._locations.get(snapshot.first_action_key)
-    if location is None or location[0] != snapshot.block_key \
-            or conditions._raw_blocks.get(snapshot.boundary_key) != snapshot.block_key:
+    if location is None or location[0] != snapshot.block_key or _boundary_start(conditions, snapshot) is None:
         return None
     objects = {span.object_id for span in builder.ssa.atomic_spans
                if span.object_id.kind is StorageObjectKind.REGISTER_FILE}
