@@ -1466,9 +1466,10 @@ public class GhidraV2BundleExport extends GhidraScript {
                 }
             }
             for (Instruction row : rows) {
-                if (landsOffRowStart(row, observed.body)) {
-                    return false;
+                if (unresolvedComputedJump(row)) {
+                    return false;   // (Astra r6: it may land off a row start and run an unchecked call)
                 }
+                // (an x86 CALL mnemonic: condition (a) established an x86-64 image)
                 if (!hasCallOperation(row) && !row.getMnemonicString().toUpperCase().startsWith("CALL")) {
                     continue;
                 }
@@ -1482,20 +1483,62 @@ public class GhidraV2BundleExport extends GhidraScript {
                     }
                 }
                 long back = row.getAddress().subtract(base) + row.getParsedLength();
-                Address fallthrough = row.getFallThrough();
-                if (fallthrough == null || !fallthrough.equals(row.getAddress().add(row.getParsedLength()))) {
-                    return false;
-                }
-                if (row.getLength() != row.getParsedLength()) {
-                    return false;   // (a listing length override: the exported length is not the ISA one)
+                if (!transfersOtherwise(row)) {
+                    // (a row whose call may explain a listed target: its ISA
+                    // fallthrough and length must be exported as they are; a
+                    // row holding BRANCH / BRANCHIND / RETURN / CALLOTHER never
+                    // explains one -- e.g. INT3 -- so it is not required)
+                    Address fallthrough = row.getFallThrough();
+                    if (fallthrough == null || !fallthrough.equals(row.getAddress().add(row.getParsedLength()))) {
+                        return false;
+                    }
+                    if (row.getLength() != row.getParsedLength()) {
+                        return false;   // (a listing length override: the exported length is not the ISA one)
+                    }
                 }
                 if (handlerIn(back, back + 1)) {
+                    return false;
+                }
+            }
+            for (Instruction row : rows) {   // (last: the p-code is read again per row)
+                if (landsOffRowStart(row, observed.body)) {
                     return false;
                 }
             }
         }
         catch (RuntimeException error) {   // (an address outside the image's space)
             return false;
+        }
+        return true;
+    }
+
+    /** The row holds BRANCH / BRANCHIND / RETURN / CALLOTHER: the engine's call
+     *  gate (``call_explained_targets``) never lets its call explain a target. */
+    private static boolean transfersOtherwise(Instruction row) {
+        for (PcodeOp operation : row.getPcode()) {
+            int opcode = operation.getOpcode();
+            if (opcode == PcodeOp.BRANCH || opcode == PcodeOp.BRANCHIND || opcode == PcodeOp.RETURN ||
+                    opcode == PcodeOp.CALLOTHER) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A BRANCHIND row without any flow reference: its destinations are not
+     *  known, so it could reach a byte off a row start. */
+    private static boolean unresolvedComputedJump(Instruction row) {
+        boolean computed = false;
+        for (PcodeOp operation : row.getPcode()) {
+            computed |= operation.getOpcode() == PcodeOp.BRANCHIND;
+        }
+        if (!computed) {
+            return false;
+        }
+        for (Reference reference : row.getReferencesFrom()) {
+            if (reference.getReferenceType().isFlow()) {
+                return false;
+            }
         }
         return true;
     }

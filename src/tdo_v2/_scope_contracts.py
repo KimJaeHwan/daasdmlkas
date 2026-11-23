@@ -592,20 +592,25 @@ class ValidatedFunctionObservation:
             raise ValueError("instruction addresses must be unique")
         require_bool(self.call_fallthrough_isa, "call fallthrough flag")
         require_bool(self.exception_handlers_none, "exception handlers flag")
-        unmapped = {item.source for item in self.fallthrough_exits if item.kind == CONTINUATION_BOUNDARY}
+        unmapped = {item.source: item.target for item in self.fallthrough_exits if item.kind == CONTINUATION_BOUNDARY}
         for row in self.instructions:
             expected = () if self.exception_handlers_none and holds_call(row) else None
             if row.exception_targets != expected or type(row.exception_targets) is not type(expected):
                 raise ValueError("a call row's exception targets follow the function's exception handlers fact")
-            if expected is not None:
-                # (G3b-7b r5) the exporter proved the fact with every call row
-                # keeping its ISA fallthrough: a missing or moved one contradicts it
-                if row.fallthrough is None:
-                    if row.address not in unmapped:
-                        raise ValueError("a call row under the exception handlers fact keeps its fallthrough")
-                elif row.length is not None and (
-                        row.fallthrough.space_id != row.address.space_id
-                        or row.fallthrough.byte_offset != row.address.byte_offset + row.length):
+            if expected is not None and not any(
+                    item.opcode in ("BRANCH", "BRANCHIND", "RETURN", "CALLOTHER") for item in row.operations):
+                # (G3b-7b r5 / r6) the exporter proved the fact with every call
+                # row whose call may explain a target keeping its ISA length and
+                # fallthrough: a missing length, or a missing / moved
+                # continuation (fallthrough, or an S1 kind-4 exit's target),
+                # contradicts it. (A row the call gate excludes explains nothing.)
+                if row.length is None:
+                    raise ValueError("a call row under the exception handlers fact records its length")
+                continuation = row.fallthrough if row.fallthrough is not None else unmapped.get(row.address)
+                if continuation is None:
+                    raise ValueError("a call row under the exception handlers fact keeps its fallthrough")
+                if (continuation.space_id != row.address.space_id
+                        or continuation.byte_offset != row.address.byte_offset + row.length):
                     raise ValueError("a call row under the exception handlers fact falls through to its ISA return PC")
         if type(self.fallthrough_exits) is not tuple or any(
             type(item) is not FallthroughExit for item in self.fallthrough_exits

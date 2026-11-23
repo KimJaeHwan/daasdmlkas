@@ -28,12 +28,15 @@ OUT = CODE_BASE + 0x800
 
 
 def _with(builder, value="none", edit=None):
-    """``builder`` whose function JSON carries ``exception_handlers: value``."""
+    """``builder`` whose function JSON carries ``exception_handlers: value``
+    and, as the exporter writes with it, every row's ISA ``length``."""
     original = builder.to_json
 
     def to_json():
         raw = original()
         raw["exception_handlers"] = value
+        for row in raw["instructions"]:
+            row.setdefault("length", builder.stride)
         if edit is not None:
             edit(raw)
         return raw
@@ -304,12 +307,58 @@ def test_a_call_row_without_its_isa_fallthrough_contradicts_the_fact(edit):
     assert unit.observation is None
 
 
-def test_an_unmapped_boundary_call_keeps_the_fact():
-    """An S1 kind-4 exit (the call's continuation is outside program memory, the
-    row keeps no fallthrough) is the listed exception to the rule."""
+def test_a_kind_4_exit_must_name_the_isa_return_pc():
+    """(Astra r6 P1) an S1 kind-4 exit stands for the call's ISA continuation:
+    one naming another address contradicts the fact (the call at 0x1004
+    returns to 0x1008, not to the unmapped 0x900000)."""
     from test_call_fallthrough_contract import CALL, UNMAPPED, Patched, _branchy, _exit, _fall_into
     from tdo_v2._scope_contracts import CONTINUATION_BOUNDARY
-    builder = _with(Patched(exits=[_exit(CALL, UNMAPPED, CONTINUATION_BOUNDARY, None)], edit=_fall_into(UNMAPPED, row=1)))
-    unit = _unit(_branchy(builder), _callee())
+    def builder():
+        return Patched(exits=[_exit(CALL, UNMAPPED, CONTINUATION_BOUNDARY, None)], edit=_fall_into(UNMAPPED, row=1))
+    assert _unit(_branchy(builder()), _callee()).observation is not None   # (without the fact: S1 as before)
+    assert _unit(_branchy(_with(builder())), _callee()).observation is None
+
+
+def test_a_kind_4_exit_at_the_isa_return_pc_keeps_the_fact():
+    """A call ending the code block: its ISA continuation 0x2000 is outside
+    program memory, an S1 kind-4 exit, and the fact stands."""
+    from test_call_fallthrough_contract import Patched, _exit
+    from tdo_v2._scope_contracts import CONTINUATION_BOUNDARY
+    end = CODE_BASE + 0x1000
+
+    def edit(raw):
+        raw["instructions"].pop()   # (the ret past the block)
+        call = raw["instructions"][-1]
+        call["fallthrough"] = {**call["fallthrough"], "byte_offset": end}
+    builder = Patched(entry=end - 12, exits=[_exit(end - 4, end, CONTINUATION_BOUNDARY, None)], edit=edit)
+    builder.cbranch("c", reg(RCX, 1)).ret().label("c").call(OUT).ret()
+    unit = _unit(_with(builder), _callee(OUT))
     assert unit.observation is not None and unit.observation.exception_handlers_none
-    assert unit.observation.instructions[1].fallthrough is None
+    assert unit.observation.instructions[-1].fallthrough is None
+
+
+def test_a_call_row_without_a_length_contradicts_the_fact():
+    """(Astra r6 P2) the exporter writes every row's length with the fact."""
+    def edit(raw):
+        raw["instructions"][1].pop("length")
+    assert program_units(_with(_recursive(), edit=edit))[0].observation is None
+    (unit,) = program_units(_with(_recursive()))
+    rows = list(unit.observation.instructions)
+    rows[1] = replace(rows[1], length=None)
+    with pytest.raises(ValueError, match="records its length"):
+        ValidatedFunctionObservation(tuple(rows), exception_handlers_none=True)
+
+
+def test_a_row_the_call_gate_excludes_needs_no_fallthrough():
+    """(Fable r6 P2) a call row also holding RETURN (Ghidra's INT3 shape) never
+    explains a target: no fallthrough is required of it under the fact."""
+    b = FunctionBuilder().ins(copy(reg(RAX), const(1))).call(OUT).ret()
+    b._rows[1].ops[:] = [op("CALLOTHER", [const(3, 4)], tmp(0x400, 8)), op("CALLIND", [tmp(0x400, 8)]),
+                         op("RETURN", [const(0, 8)])]
+
+    def edit(raw):
+        row = raw["instructions"][1]
+        row["fallthrough_present"], row["fallthrough"], row["flow_targets"] = False, None, []
+        raw["instructions"].pop()
+    (unit,) = program_units(_with(b, edit=edit))
+    assert unit.observation is not None and unit.observation.exception_handlers_none
