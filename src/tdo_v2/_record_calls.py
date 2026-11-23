@@ -739,6 +739,8 @@ def _tail_snapshot(builder, site, block):
     (``memory_ssa.tail_register_snapshots``), cached; normalization's memory
     SSA is not touched. A site whose group has no staged action has none
     ("tail boundary without staged rows")."""
+    from .operation_records import _StitchCut
+
     cache = getattr(builder, "_tail_snapshots", None)
     if cache is None:
         from .memory_ssa import tail_register_snapshots

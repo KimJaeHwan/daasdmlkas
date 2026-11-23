@@ -6933,9 +6933,11 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
   (다음 단계).
 - 고정 `tests/intra/test_gt_b4_tail_contexts.py`(앞선 호출의 출력이 `T`에 닿음 -- 실행과 같음; 조건 꼬리 두 결과; 분기 조건에만
   쓰는 레지스터가 스냅샷으로 묶임 -- 직접 쓴 값 / 앞선 호출의 출력, 두 결과 모두 실행과 같음; 넘기는 레지스터는 이름 붙은 잘림).
-  돌연변이 8개 중 5개 실패(`.census6/cob/g3b4s2_mutants.py`); 남은 셋은 방어용 -- M3(`_tail_snapshot`이 실행 블록을 다시
-  확인), M7(`~edge` 표식뿐인 그룹은 보통의 꼬리에서 안 생김), M8(조건 꼬리 생산자는 간선 블록에만). 리뷰 r1: Astra 6.2 /
-  Fable 5.2 APPROVE WITH FIXES(스냅샷 유지 여부는 Astra를 따름).
+  돌연변이 9개 중 6개 실패(`.census6/cob/g3b4s2_mutants.py`); 남은 셋은 방어용, 닿는 사례를 찾지 못함 -- M3(`_tail_snapshot`이
+  실행 블록을 다시 확인), M7(`~edge` 표식뿐인 그룹: 합성 픽스처로 재현 못 함 -- 그 경로의 이름 붙은 잘림은 주입으로 고정),
+  M8(조건 꼬리 생산자는 간선 블록에만). SP는 단계 읽기가 없으면 스냅샷에서(고정: `[rsp]`를 rdx로 옮기고 꼬리 -> 실행과 같음,
+  틀린 SP 조정은 복귀 검사에서 거절). 리뷰: r1 Astra 6.2 / Fable 5.2 APPROVE WITH FIXES(스냅샷은 Astra를 따라 유지),
+  r2 Astra REJECT(`_tail_snapshot`의 `_StitchCut` 미import -> 고침), Fable APPROVE WITH FIXES.
 
 ### 25.112 호출 행의 목적지를 p-code로 가린다 (G-T G3b-7, 2026-11-23)
 

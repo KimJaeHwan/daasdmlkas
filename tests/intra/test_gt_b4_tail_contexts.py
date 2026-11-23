@@ -461,3 +461,50 @@ def test_a_register_t_only_branches_on_binds_through_the_tail_snapshot(through_c
     case = _case(_caller(), _to(middle, index, T), target, *((inner,) if through_call else ()))
     record = _record(case, ROOT_KEY)
     _equal(case, record, rcx=rcx)
+
+
+
+@pytest.mark.parametrize("failure, reason", [
+    ("empty", "tail boundary without staged rows"),
+    ("error", "tail snapshot unavailable"),
+])
+def test_a_missing_tail_snapshot_is_a_named_cut(monkeypatch, failure, reason):
+    """(stage 2; Astra r2 P1) no group for the site (e.g. a taken block holding
+    only its ``~edge`` marker) or a failing snapshot pass: the tail context is
+    cut with a named reason -- never a crash (r2: an unimported ``_StitchCut``)."""
+    import tdo_v2.memory_ssa as memory_ssa
+
+    def broken(unit, ssa, groups):
+        if failure == "error":
+            raise KeyError("raw definition missing")
+        return {}
+    monkeypatch.setattr(memory_ssa, "tail_register_snapshots", broken)
+    middle = _jump(FunctionBuilder(entry=F).ins(copy_op(reg(RDI), reg(RCX))).tail_call(T))
+    case = _case(_caller(), middle, _returns())
+    record = _record(case, ROOT_KEY)
+    assert reason in set((record.get("physical_call_cuts") or {}).values()), record.get("physical_call_cuts")
+
+
+@pytest.mark.parametrize("adjust, ok", [(8, True), (16, False)])
+def test_a_tail_takes_sp_from_its_snapshot_without_a_staged_sp_read(adjust, ok):
+    """(stage 2; Astra r1 P2-2 / r2 P3) F saves [rsp] in rdx and jumps to T; T
+    sets rax = 18, advances rsp and returns through rdx. No staged SP read:
+    SP comes from the tail snapshot (empty skip set) -- equal to the run; a
+    wrong SP adjustment is refused at the return check."""
+    target = FunctionBuilder(entry=T).ins(copy_op(reg(RAX), const(18))).ret()
+    raw = target.to_json()
+    ops = raw["instructions"][-1]["operations"]
+    ops[0].update(opcode="COPY", inputs=[reg(RDX)])
+    for item in ops:
+        if item["opcode"] == "INT_ADD" and item["inputs"][1].get("kind_code") == 1:   # (the constant 8)
+            item["inputs"][1]["byte_offset"] = adjust
+    target.to_json = lambda: raw
+    middle = _jump(FunctionBuilder(entry=F).ins(load(reg(RDX), reg(RSP))).tail_call(T))
+    case = _case(_caller(), middle, target)
+    record = _record(case, ROOT_KEY)
+    vm = _run(case)
+    if ok:
+        assert evaluate_physical(record, entry_reader(vm)).value == final_register(vm, RAX, 8) == 23
+    else:
+        with pytest.raises(Ineligible):
+            evaluate_physical(record, entry_reader(vm))
