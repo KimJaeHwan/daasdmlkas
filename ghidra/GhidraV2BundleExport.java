@@ -1433,7 +1433,13 @@ public class GhidraV2BundleExport extends GhidraScript {
      *  the exported rows (no undefined byte that could hold an unlisted call
      *  whose return PC goes unchecked) -- then the function has no landing pad
      *  and a listed entry on its call rows is the call's own. The return PC is
-     *  a pure PC lookup in the table. Any doubt: no fact. */
+     *  a pure PC lookup in the table. A call row is any row with a CALL /
+     *  CALLIND p-code operation or an x86 CALL instruction (Ghidra lifts
+     *  ``call $+5`` as a push and a BRANCH, yet it stores a return PC). No
+     *  branch or flow reference of a row may land inside the body but off a
+     *  row start (a call decoded there would have an unchecked return PC).
+     *  Body and fallthroughs are compared in the image's own address space
+     *  (never an overlay). Any doubt: no fact. */
     private boolean noStaticExceptionHandler(
             Function function, ObservedFunction observed, List<Instruction> rows) {
         if (peUnwindEntries == null || !observed.exceptionalTargets.isEmpty()) {
@@ -1450,6 +1456,9 @@ public class GhidraV2BundleExport extends GhidraScript {
         }
         try {
             for (AddressRange range : observed.body) {
+                if (!range.getAddressSpace().equals(base.getAddressSpace())) {
+                    return false;
+                }
                 long low = range.getMinAddress().subtract(base);
                 long high = range.getMaxAddress().subtract(base) + 1;
                 if (handlerIn(low, high)) {
@@ -1457,7 +1466,10 @@ public class GhidraV2BundleExport extends GhidraScript {
                 }
             }
             for (Instruction row : rows) {
-                if (!hasCallOperation(row)) {
+                if (landsOffRowStart(row, observed.body)) {
+                    return false;
+                }
+                if (!hasCallOperation(row) && !row.getMnemonicString().toUpperCase().startsWith("CALL")) {
                     continue;
                 }
                 if (row.getFlowOverride() != FlowOverride.NONE) {
@@ -1471,18 +1483,47 @@ public class GhidraV2BundleExport extends GhidraScript {
                 }
                 long back = row.getAddress().subtract(base) + row.getParsedLength();
                 Address fallthrough = row.getFallThrough();
-                if (fallthrough == null || fallthrough.subtract(base) != back) {
+                if (fallthrough == null || !fallthrough.equals(row.getAddress().add(row.getParsedLength()))) {
                     return false;
+                }
+                if (row.getLength() != row.getParsedLength()) {
+                    return false;   // (a listing length override: the exported length is not the ISA one)
                 }
                 if (handlerIn(back, back + 1)) {
                     return false;
                 }
             }
         }
-        catch (IllegalArgumentException error) {   // (an address outside the image's space)
+        catch (RuntimeException error) {   // (an address outside the image's space)
             return false;
         }
         return true;
+    }
+
+    /** A flow reference or an address-operand p-code branch / call of the row
+     *  that lands inside the body but not on an instruction start. */
+    private boolean landsOffRowStart(Instruction row, AddressSetView body) {
+        List<Address> targets = new ArrayList<>();
+        for (Reference reference : row.getReferencesFrom()) {
+            if (reference.getReferenceType().isFlow()) {
+                targets.add(reference.getToAddress());
+            }
+        }
+        targets.addAll(Arrays.asList(row.getFlows()));
+        for (PcodeOp operation : row.getPcode()) {
+            int opcode = operation.getOpcode();
+            if ((opcode == PcodeOp.BRANCH || opcode == PcodeOp.CBRANCH || opcode == PcodeOp.CALL) &&
+                    operation.getNumInputs() > 0 && operation.getInput(0).isAddress()) {
+                targets.add(operation.getInput(0).getAddress());
+            }
+        }
+        for (Address target : targets) {
+            if (target != null && body.contains(target) &&
+                    currentProgram.getListing().getInstructionAt(target) == null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** True when [low, high) is not provably handler-free: outside the image,

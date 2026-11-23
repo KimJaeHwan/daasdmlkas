@@ -274,3 +274,42 @@ def test_a_split_row_still_places_every_other_listed_local_target():
         (unit,) = program_units(b)
         graph = build_pcode_block_graph(unit.observation, unit.scopes.function.entry)
         assert graph.unsupported == "flow targets the instruction's branches do not place"
+
+
+# -- the fact contradicts a call row without its ISA fallthrough (r5) ---------------------------------------
+
+def _drop_fallthrough(raw):
+    row = raw["instructions"][1]
+    row["fallthrough_present"], row["fallthrough"] = False, None
+
+
+def _move_fallthrough(raw):
+    row = raw["instructions"][1]
+    row["length"] = 4
+    row["fallthrough"] = {**row["fallthrough"], "byte_offset": row["fallthrough"]["byte_offset"] + 4}
+
+
+@pytest.mark.parametrize("edit", [_drop_fallthrough, _move_fallthrough])
+def test_a_call_row_without_its_isa_fallthrough_contradicts_the_fact(edit):
+    """(Astra r5 P2) the exporter proves the fact only with every call row
+    keeping its ISA return PC as fallthrough: a Bundle claiming the fact with
+    a missing or moved fallthrough is refused (without the fact: admitted)."""
+    plain = _recursive().ins(copy(reg(RAX), const(0))).ret()
+    original = plain.to_json
+    plain.to_json = lambda: (lambda raw: (edit(raw), raw)[1])(original())
+    (unit,) = program_units(plain)
+    assert unit.observation is not None
+    built = _with(_recursive().ins(copy(reg(RAX), const(0))).ret(), edit=edit)
+    (unit,) = program_units(built)
+    assert unit.observation is None
+
+
+def test_an_unmapped_boundary_call_keeps_the_fact():
+    """An S1 kind-4 exit (the call's continuation is outside program memory, the
+    row keeps no fallthrough) is the listed exception to the rule."""
+    from test_call_fallthrough_contract import CALL, UNMAPPED, Patched, _branchy, _exit, _fall_into
+    from tdo_v2._scope_contracts import CONTINUATION_BOUNDARY
+    builder = _with(Patched(exits=[_exit(CALL, UNMAPPED, CONTINUATION_BOUNDARY, None)], edit=_fall_into(UNMAPPED, row=1)))
+    unit = _unit(_branchy(builder), _callee())
+    assert unit.observation is not None and unit.observation.exception_handlers_none
+    assert unit.observation.instructions[1].fallthrough is None
