@@ -500,6 +500,12 @@ class ValidatedInstruction:
                 raise ValueError("exception targets belong to a call row")
 
 
+# (G3b-7b) a row holding any of these never explains a target by its call
+# (the call gate of ``control_projection.call_explained_targets``; the
+# exporter's ``transfersOtherwise`` spells the same set)
+CALL_GATE_EXCLUDING_OPCODES = frozenset({"BRANCH", "BRANCHIND", "RETURN", "CALLOTHER"})
+
+
 def holds_call(instruction: "ValidatedInstruction") -> bool:
     """(G3b-7b) the row holds a CALL / CALLIND p-code operation -- the rows the
     exporter attaches landing pads to."""
@@ -592,13 +598,21 @@ class ValidatedFunctionObservation:
             raise ValueError("instruction addresses must be unique")
         require_bool(self.call_fallthrough_isa, "call fallthrough flag")
         require_bool(self.exception_handlers_none, "exception handlers flag")
+        if type(self.fallthrough_exits) is not tuple or any(
+            type(item) is not FallthroughExit for item in self.fallthrough_exits
+        ):
+            raise TypeError("fallthrough exits must be an exact tuple")
         unmapped = {item.source: item.target for item in self.fallthrough_exits if item.kind == CONTINUATION_BOUNDARY}
         for row in self.instructions:
+            if self.exception_handlers_none and any(item.opcode == "BRANCHIND" for item in row.operations):
+                # (Astra r7) the exporter gives no fact to a function with a
+                # computed jump: its listed targets need not be all of them
+                raise ValueError("a computed jump contradicts the exception handlers fact")
             expected = () if self.exception_handlers_none and holds_call(row) else None
             if row.exception_targets != expected or type(row.exception_targets) is not type(expected):
                 raise ValueError("a call row's exception targets follow the function's exception handlers fact")
             if expected is not None and not any(
-                    item.opcode in ("BRANCH", "BRANCHIND", "RETURN", "CALLOTHER") for item in row.operations):
+                    item.opcode in CALL_GATE_EXCLUDING_OPCODES for item in row.operations):
                 # (G3b-7b r5 / r6) the exporter proved the fact with every call
                 # row whose call may explain a target keeping its ISA length and
                 # fallthrough: a missing length, or a missing / moved
@@ -609,13 +623,14 @@ class ValidatedFunctionObservation:
                 continuation = row.fallthrough if row.fallthrough is not None else unmapped.get(row.address)
                 if continuation is None:
                     raise ValueError("a call row under the exception handlers fact keeps its fallthrough")
+                if row.fallthrough is None and continuation in addresses:
+                    # (Fable / Astra r7) a kind-4 exit stands for a continuation
+                    # outside the function: one naming a row of it would hide
+                    # that row's return edge behind the fact
+                    raise ValueError("a call row under the exception handlers fact keeps a local fallthrough")
                 if (continuation.space_id != row.address.space_id
                         or continuation.byte_offset != row.address.byte_offset + row.length):
                     raise ValueError("a call row under the exception handlers fact falls through to its ISA return PC")
-        if type(self.fallthrough_exits) is not tuple or any(
-            type(item) is not FallthroughExit for item in self.fallthrough_exits
-        ):
-            raise TypeError("fallthrough exits must be an exact tuple")
         if tuple(sorted(set(self.fallthrough_exits))) != self.fallthrough_exits or len(
             {item.source for item in self.fallthrough_exits}
         ) != len(self.fallthrough_exits):

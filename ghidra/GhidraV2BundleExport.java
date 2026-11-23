@@ -1466,8 +1466,8 @@ public class GhidraV2BundleExport extends GhidraScript {
                 }
             }
             for (Instruction row : rows) {
-                if (unresolvedComputedJump(row)) {
-                    return false;   // (Astra r6: it may land off a row start and run an unchecked call)
+                if (computedJump(row)) {
+                    return false;   // (Astra r6 / r7: it may land off a row start and run an unchecked call)
                 }
                 // (an x86 CALL mnemonic: condition (a) established an x86-64 image)
                 if (!hasCallOperation(row) && !row.getMnemonicString().toUpperCase().startsWith("CALL")) {
@@ -1525,22 +1525,16 @@ public class GhidraV2BundleExport extends GhidraScript {
         return false;
     }
 
-    /** A BRANCHIND row without any flow reference: its destinations are not
-     *  known, so it could reach a byte off a row start. */
-    private static boolean unresolvedComputedJump(Instruction row) {
-        boolean computed = false;
+    /** A BRANCHIND row: its flow references need not list every destination
+     *  (none, or a partly recovered table), so one could reach a byte off a
+     *  row start and run an unchecked call. */
+    private static boolean computedJump(Instruction row) {
         for (PcodeOp operation : row.getPcode()) {
-            computed |= operation.getOpcode() == PcodeOp.BRANCHIND;
-        }
-        if (!computed) {
-            return false;
-        }
-        for (Reference reference : row.getReferencesFrom()) {
-            if (reference.getReferenceType().isFlow()) {
-                return false;
+            if (operation.getOpcode() == PcodeOp.BRANCHIND) {
+                return true;
             }
         }
-        return true;
+        return false;
     }
 
     /** A flow reference or an address-operand p-code branch / call of the row

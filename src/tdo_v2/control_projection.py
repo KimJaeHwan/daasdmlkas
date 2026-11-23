@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from dataclasses import dataclass
 
-from ._scope_contracts import AddressCoordinate, VarnodeKindCode
+from ._scope_contracts import CALL_GATE_EXCLUDING_OPCODES, AddressCoordinate, VarnodeKindCode
 from ._scope_wire import _observation_digest
 from .control_contracts import FunctionTerminalCuts, ObservedTerminalCut
 from .graph import RustworkxDependencyGraph
@@ -231,7 +231,7 @@ def call_explained_targets(instruction, function_entry=None) -> frozenset:
     targets = instruction.flow_targets
     operations = instruction.operations
     if not targets or not call_like_instruction(instruction) or any(
-            op.opcode in ("BRANCH", "BRANCHIND", "RETURN", "CALLOTHER") for op in operations):
+            op.opcode in CALL_GATE_EXCLUDING_OPCODES for op in operations):
         return frozenset()
     explained = {target for index, op in enumerate(operations) if op.opcode in ("CALL", "CALLIND")
                  for target in targets if call_explains(instruction, index, target, function_entry)}

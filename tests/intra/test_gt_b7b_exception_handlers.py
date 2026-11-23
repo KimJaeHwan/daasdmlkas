@@ -319,6 +319,38 @@ def test_a_kind_4_exit_must_name_the_isa_return_pc():
     assert _unit(_branchy(_with(builder())), _callee()).observation is None
 
 
+def test_a_kind_4_exit_naming_a_row_of_the_function_contradicts_the_fact():
+    """(Fable / Astra r7 P1) a kind-4 exit at the ISA return PC that is a row
+    of the function (0x1008, the ret) with no fallthrough kept on the call
+    row: that row's return edge would hide behind the fact."""
+    from test_call_fallthrough_contract import CALL, Patched, _branchy, _exit
+    from tdo_v2._scope_contracts import CONTINUATION_BOUNDARY
+
+    def drop(raw):
+        row = raw["instructions"][1]
+        row["fallthrough_present"], row["fallthrough"] = False, None
+
+    def builder():
+        return Patched(exits=[_exit(CALL, CALL + 4, CONTINUATION_BOUNDARY, None)], edit=drop)
+    assert _unit(_branchy(_with(builder())), _callee()).observation is None
+
+
+def test_a_computed_jump_contradicts_the_fact():
+    """(Astra r7 P1) the exporter never proves the fact for a function with a
+    BRANCHIND row: one under it is refused."""
+    b = FunctionBuilder().ins(copy(reg(RAX), const(1))).call(OUT).ret()
+    b._rows[2].ops[:] = [op("BRANCHIND", [reg(RAX)])]
+    assert program_units(b)[0].observation is not None   # (without the fact)
+    assert program_units(_with(b))[0].observation is None
+
+
+def test_exit_element_types_are_checked_first():
+    """(Astra r7 P3) a malformed exit element is a TypeError, not an AttributeError."""
+    (unit,) = program_units(_with(_recursive()))
+    with pytest.raises(TypeError, match="exact tuple"):
+        ValidatedFunctionObservation(unit.observation.instructions, True, (object(),), True)
+
+
 def test_a_kind_4_exit_at_the_isa_return_pc_keeps_the_fact():
     """A call ending the code block: its ISA continuation 0x2000 is outside
     program memory, an S1 kind-4 exit, and the fact stands."""
