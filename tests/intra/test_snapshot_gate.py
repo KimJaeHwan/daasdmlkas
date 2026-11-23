@@ -154,5 +154,6 @@ def test_a_bad_manifest_is_incomplete(tmp_path, capsys):
 
 def test_the_repository_manifest_parses():
     expected = read_manifest(REPO / "tools" / "graph_fidelity" / "snapshot_expected.txt")
-    assert expected["v2-win-debug-full.legacy"] == 1
-    assert sum(1 for code in expected.values() if code == 0) == 35
+    # (docs 25.114) the v2 legacy run completes since G3b-7: no declared failure left
+    assert expected["v2-win-debug-full.legacy"] == 0
+    assert sum(1 for code in expected.values() if code == 0) == 36 == len(expected)

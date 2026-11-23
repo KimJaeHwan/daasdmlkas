@@ -23,9 +23,10 @@ corpus-clang-x86-O0.default
 corpus-clang-x86-O2.default
 corpus-gcc-x64-O2-rep.default
 corpus-gcc-x64-O3.default
-# legacy (pre-sparse) configuration: its interprocedural write-event fixed point does not
-# stabilize on this Bundle (known since A-5)
-v2-win-debug-full.legacy rc=1
+# legacy (pre-sparse) configuration: its interprocedural write-event fixed point did not
+# stabilize on this Bundle from A-5 until G3b-7 (call classification by p-code); it completes
+# since (identical artifacts in four gates)
+v2-win-debug-full.legacy
 v3-win-release-full.legacy
 corpus-clang-x64-O0.legacy
 corpus-clang-x64-O2.legacy
