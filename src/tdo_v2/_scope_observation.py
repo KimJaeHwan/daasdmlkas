@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ._scope_contracts import (
     AddressCoordinate,
@@ -27,6 +27,7 @@ from ._scope_contracts import (
     ValidatedVarnode,
     VarnodeKindCode,
     _is_valid_opcode,
+    holds_call,
 )
 from ._scope_program import _AddressSpaceIndex, _parse_coordinate
 from ._scope_raw import RawObject, _FieldState, _field, _has_duplicate
@@ -118,12 +119,18 @@ def _validate_function_candidate(
             if len(set(addresses)) != len(addresses):
                 defects.conflicting = True
             isa, exits = _call_fallthrough_contract(raw, entry, defects)
+            no_handlers = _exception_handlers_none(raw, defects)
+            if no_handlers:
+                # (G3b-7b) no handler covers the function: every call row's
+                # landing-pad set is exactly empty
+                instructions = tuple(replace(item, exception_targets=()) if holds_call(item) else item
+                                     for item in instructions)
             for source, target in defects.unmapped_fallthroughs.items():
                 if not any(item.source == source and item.target == target and item.kind == 4 for item in exits):
                     defects.invalid = True   # (as before S1: a fallthrough outside program memory)
             if not any((defects.duplicate, defects.invalid, defects.incomplete, defects.conflicting)):
                 try:
-                    observation = ValidatedFunctionObservation(instructions, isa, exits)
+                    observation = ValidatedFunctionObservation(instructions, isa, exits, no_handlers)
                 except (TypeError, ValueError):
                     # (S1) e.g. a native call without fallthrough in an observation
                     # under the ISA call-fallthrough contract: malformed, refused
@@ -245,6 +252,23 @@ def _instruction_length(raw: RawObject, defects: _ObservationDefects) -> int | N
         defects.invalid = True
         return None
     return field.value
+
+
+def _exception_handlers_none(raw: RawObject, defects: _ObservationDefects) -> bool:
+    """(G3b-7b) ``exception_handlers: "none"`` -- the exporter proved from the
+    x64 PE exception directory that no static handler covers any frame PC of
+    the function; absent in older Bundles and wherever it is not proved. Any
+    other value is malformed."""
+    field = _field(raw, "exception_handlers")
+    if field.state is _FieldState.MISSING:
+        return False
+    if field.state is _FieldState.DUPLICATE:
+        defects.duplicate = True
+        return False
+    if type(field.value) is not str or field.value != "none":
+        defects.invalid = True
+        return False
+    return True
 
 
 def _call_fallthrough_contract(

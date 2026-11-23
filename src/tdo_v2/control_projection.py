@@ -205,10 +205,13 @@ def call_explains(instruction, index, target, function_entry=None) -> bool:
     operation = instruction.operations[index]
     if len(operation.inputs) != 1 or instruction.flow.is_override:
         return False
-    if function_entry is not None and target == function_entry:
+    pads = getattr(instruction, "exception_targets", None)   # (test doubles carry rows only)
+    if function_entry is not None and target == function_entry and (pads is None or target in pads):
         # (r6; Astra r4 P2 / r5 Q2) the exporter merges landing pads into the
         # listing: the entry may be a pad as well as a recursive callee, and
-        # the merged listing cannot tell -- the edge stays (conservative)
+        # the merged listing cannot tell -- the edge stays (conservative).
+        # (G3b-7b) a row whose pad set the exporter proved (no static
+        # exception handler: ``()``) decides by the ordinary rule below.
         return False
     if operation.opcode == "CALL":
         return operation.inputs[0].kind is VarnodeKindCode.ADDRESS and operation.inputs[0].coordinate == target
@@ -218,6 +221,24 @@ def call_explains(instruction, index, target, function_entry=None) -> bool:
     if value is None:
         return True
     return target.byte_offset == value and target.space_id == instruction.address.space_id
+
+
+def call_explained_targets(instruction, function_entry=None) -> frozenset:
+    """The listed targets a call of the row explains (the row gate: no BRANCH /
+    BRANCHIND / RETURN / CALLOTHER anywhere; never an address a BRANCH /
+    CBRANCH of the row names). Shared by the successor function and the split
+    placement check (G3b-7b)."""
+    targets = instruction.flow_targets
+    operations = instruction.operations
+    if not targets or not call_like_instruction(instruction) or any(
+            op.opcode in ("BRANCH", "BRANCHIND", "RETURN", "CALLOTHER") for op in operations):
+        return frozenset()
+    explained = {target for index, op in enumerate(operations) if op.opcode in ("CALL", "CALLIND")
+                 for target in targets if call_explains(instruction, index, target, function_entry)}
+    explained -= {op.inputs[0].coordinate for op in operations
+                  if op.opcode in ("BRANCH", "CBRANCH") and op.inputs
+                  and op.inputs[0].kind is VarnodeKindCode.ADDRESS}
+    return frozenset(explained)
 
 
 def control_successor_coordinates(
@@ -240,14 +261,8 @@ def control_successor_coordinates(
     (G3b-7 r2, R7-2 / R7-3). Kept successors include a branch to entry.
     """
     targets = set(instruction.flow_targets)
-    operations = instruction.operations
-    if targets and call_like_instruction(instruction) and not any(
-            op.opcode in ("BRANCH", "BRANCHIND", "RETURN", "CALLOTHER") for op in operations):
-        explained = {target for index, op in enumerate(operations) if op.opcode in ("CALL", "CALLIND")
-                     for target in targets if call_explains(instruction, index, target, function_entry)}
-        explained -= {op.inputs[0].coordinate for op in operations
-                      if op.opcode in ("BRANCH", "CBRANCH") and op.inputs
-                      and op.inputs[0].kind is VarnodeKindCode.ADDRESS}
+    explained = call_explained_targets(instruction, function_entry)
+    if explained:
         targets = {target for target in targets
                    if (local_addresses is not None and target in local_addresses and target != function_entry)
                    or target not in explained}

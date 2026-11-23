@@ -287,6 +287,13 @@ def _call_fallthrough_preimage(value: ValidatedFunctionObservation) -> bytes:
     ))
 
 
+def _exception_handlers_preimage(value: ValidatedFunctionObservation) -> bytes:
+    """(G3b-7b) the exporter's "no static exception handler" fact: empty when
+    absent, so older digests are unchanged. The call rows' ``()`` pad sets are
+    derived from it (checked by the contract) and add nothing."""
+    return _text("tdo-v2-exception-handlers-none-v1") if value.exception_handlers_none else b""
+
+
 def _observation_preimage(value: ValidatedFunctionObservation) -> bytes:
     require_exact(value, ValidatedFunctionObservation, "validated observation")
     return b"".join(
@@ -295,6 +302,7 @@ def _observation_preimage(value: ValidatedFunctionObservation) -> bytes:
             _u64(len(value.instructions)),
             *(_validated_instruction_preimage(item) for item in value.instructions),
             _call_fallthrough_preimage(value),
+            _exception_handlers_preimage(value),
         )
     )
 
@@ -343,6 +351,7 @@ def _stream_observation(
             update(_text("tdo-v2-instruction-length-v1"))
             update(_u64(instruction.length))
     update(_call_fallthrough_preimage(value))
+    update(_exception_handlers_preimage(value))
 
 
 def _validated_flow_preimage(value) -> bytes:

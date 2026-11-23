@@ -170,7 +170,9 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # 56: (G-T G3b-7) p-code, not the exporter's call flag, classifies a call
 # row's listed targets (a call-flagged BRANCH is no call; a call explains only
 # what its operation proves; the entry stays a successor).
-ENGINE_SEMANTICS_VERSION = 56
+# 57: (G-T G3b-7b) where the exporter proves no static exception handler
+# (x64 PE), a call row's listed entry is decided by the ordinary call rule.
+ENGINE_SEMANTICS_VERSION = 57
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

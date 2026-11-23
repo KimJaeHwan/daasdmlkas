@@ -23,6 +23,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.HashSet;
+import java.util.TreeMap;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -50,6 +52,7 @@ import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.lang.RegisterValue;
+import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.mem.MemoryBlockType;
 import ghidra.program.model.pcode.PcodeOp;
@@ -91,6 +94,12 @@ public class GhidraV2BundleExport extends GhidraScript {
     // contract violations of every exported function, reported together
     private final List<String> fallthroughViolations = new ArrayList<>();
     private final AddressSet recoveredExceptionCode = new AddressSet();
+    // (G3b-7b-1) the x64 PE exception directory: RUNTIME_FUNCTION begin RVA ->
+    // {end RVA, 1 when its unwind info or a chained one names a handler};
+    // null when the image is not a plain AMD64 PE32+ whose directory reads
+    // completely (then no function gets the "no exception handler" fact)
+    private TreeMap<Long, long[]> peUnwindEntries;
+    private long peImageSize;
 
     private static final class Entry implements Comparable<Entry> {
         final BigInteger spaceId;
@@ -193,6 +202,7 @@ public class GhidraV2BundleExport extends GhidraScript {
                 "prepared project lacks: analyze them in the project, or export by import");
         }
         analyzeRecoveredExceptionCode();
+        peUnwindEntries = capturePeUnwindEntries();
         // Keep exact metadata-directed analysis in this transient read-only
         // program view, then freeze it for publication. Headless discards the
         // view after the export because the project itself remains read-only.
@@ -1406,7 +1416,196 @@ public class GhidraV2BundleExport extends GhidraScript {
             result.put("call_fallthrough", "isa");
             result.put("fallthrough_exits", fallthroughExits(function, rows));
         }
+        if (noStaticExceptionHandler(function, observed, rows)) {
+            result.put("exception_handlers", "none");
+        }
         return result;
+    }
+
+    /** (G3b-7b-1) x64 unwinding finds a handler only through the image's
+     *  exception directory, by a frame's PC: a row of the body (a fault) or a
+     *  call's ISA return address. No entry covering such a PC names a handler
+     *  (directly or through a chain), every such PC lies inside the image, no
+     *  call row carries a flow override, and no call row has a non-call flow
+     *  reference to the entry -- then the function has no landing pad and a
+     *  listed entry on its call rows is the call's own. Any doubt: no fact. */
+    private boolean noStaticExceptionHandler(
+            Function function, ObservedFunction observed, List<Instruction> rows) {
+        if (peUnwindEntries == null || !observed.exceptionalTargets.isEmpty()) {
+            return false;
+        }
+        Address base = currentProgram.getImageBase();
+        Address entry = function.getEntryPoint();
+        try {
+            for (AddressRange range : observed.body) {
+                long low = range.getMinAddress().subtract(base);
+                long high = range.getMaxAddress().subtract(base) + 1;
+                if (handlerIn(low, high)) {
+                    return false;
+                }
+            }
+            for (Instruction row : rows) {
+                if (!hasCallOperation(row)) {
+                    continue;
+                }
+                if (row.getFlowOverride() != FlowOverride.NONE) {
+                    return false;
+                }
+                for (Reference reference : row.getReferencesFrom()) {
+                    if (reference.getReferenceType().isFlow() && !reference.getReferenceType().isCall() &&
+                            entry.equals(reference.getToAddress())) {
+                        return false;
+                    }
+                }
+                long back = row.getAddress().subtract(base) + row.getParsedLength();
+                if (handlerIn(back, back + 1)) {
+                    return false;
+                }
+            }
+        }
+        catch (IllegalArgumentException error) {   // (an address outside the image's space)
+            return false;
+        }
+        return true;
+    }
+
+    /** True when [low, high) is not provably handler-free: outside the image,
+     *  or overlapping a RUNTIME_FUNCTION whose chain names a handler. */
+    private boolean handlerIn(long low, long high) {
+        if (low < 0 || high <= low || high > peImageSize) {
+            return true;
+        }
+        Long start = peUnwindEntries.floorKey(low);
+        for (long[] entry : peUnwindEntries.subMap(start == null ? low : start, true, high, false).values()) {
+            if (entry[0] > low && entry[1] == 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private TreeMap<Long, long[]> capturePeUnwindEntries() throws Exception {
+        try {
+            Address base = currentProgram.getImageBase();
+            if (!"Portable Executable (PE)".equals(currentProgram.getExecutableFormat()) ||
+                    !"x86".equals(currentProgram.getLanguage().getProcessor().toString()) ||
+                    currentProgram.getLanguage().getLanguageDescription().getSize() != 64 ||
+                    u16At(base, 0) != 0x5A4D) {
+                return null;
+            }
+            long header = u32At(base, 0x3C);
+            if (u32At(base, header) != 0x4550L || u16At(base, header + 4) != 0x8664) {
+                return null;   // (PE signature; COFF machine AMD64 -- not ARM64 / IA64)
+            }
+            long optional = header + 24;
+            long optionalSize = u16At(base, header + 20);
+            long directories = u32At(base, optional + 108);
+            if (u16At(base, optional) != 0x20B || directories < 11 || directories > 16 ||
+                    optionalSize < 112 + 8 * directories) {
+                return null;   // (PE32+, data directories through the load config)
+            }
+            long imageSize = u32At(base, optional + 56);
+            long loadConfig = u32At(base, optional + 112 + 10 * 8);
+            long loadConfigSize = u32At(base, optional + 112 + 10 * 8 + 4);
+            if (loadConfig != 0 || loadConfigSize != 0) {
+                if (loadConfig == 0 || loadConfigSize < 4 || loadConfig + loadConfigSize > imageSize) {
+                    return null;
+                }
+                long declared = u32At(base, loadConfig);
+                if (declared >= 0xC8 + 8) {
+                    if (loadConfig + 0xC8 + 8 > imageSize) {
+                        return null;
+                    }
+                    if (u32At(base, loadConfig + 0xC8) != 0 || u32At(base, loadConfig + 0xCC) != 0) {
+                        return null;   // (CHPE metadata: an ARM64EC / ARM64X hybrid)
+                    }
+                }
+            }
+            long table = u32At(base, optional + 112 + 3 * 8);
+            long size = u32At(base, optional + 112 + 3 * 8 + 4);
+            if (table == 0 || size == 0 || size % 12 != 0 || table % 4 != 0 || table + size > imageSize) {
+                return null;   // (no or malformed directory: no fact -- an absent one is a later precision item)
+            }
+            TreeMap<Long, long[]> entries = new TreeMap<>();
+            long previousEnd = 0;
+            for (long offset = table; offset < table + size; offset += 12) {
+                monitor.checkCancelled();
+                long begin = u32At(base, offset);
+                long end = u32At(base, offset + 4);
+                long unwind = u32At(base, offset + 8);
+                if (begin >= end || end > imageSize || begin < previousEnd) {
+                    return null;   // (sorted, disjoint, inside the image)
+                }
+                previousEnd = end;
+                Boolean handler = chainHasHandler(base, unwind, imageSize);
+                if (handler == null) {
+                    return null;
+                }
+                entries.put(begin, new long[] {end, handler ? 1 : 0});
+            }
+            peImageSize = imageSize;
+            return entries;
+        }
+        catch (MemoryAccessException | IllegalArgumentException | ghidra.program.model.address.AddressOutOfBoundsException error) {
+            return null;
+        }
+    }
+
+    /** True when the unwind info at ``unwind`` or a chained one names a
+     *  handler (UNW_FLAG_EHANDLER / UHANDLER); null when it is not readable as
+     *  x64 unwind info: an indirect entry, misalignment, a version other than
+     *  1 / 2, undefined flag bits, CHAININFO together with a handler flag, a
+     *  record (codes, handler RVA or chained entry) outside the image or not in
+     *  initialized memory, a cycle, more than 32 links. */
+    private Boolean chainHasHandler(Address base, long unwind, long imageSize) throws MemoryAccessException {
+        Set<Long> seen = new HashSet<>();
+        boolean handler = false;
+        long current = unwind;
+        while (true) {
+            if (current % 4 != 0 || current + 4 > imageSize || !seen.add(current) || seen.size() > 32) {
+                return null;
+            }
+            int head = u8At(base, current);
+            int version = head & 7;
+            int flags = head >> 3;
+            if ((version != 1 && version != 2) || (flags & ~7) != 0 || ((flags & 4) != 0 && (flags & 3) != 0)) {
+                return null;
+            }
+            int codes = u8At(base, current + 2);
+            long tail = current + 4 + 2L * (codes + (codes & 1));
+            long length = (tail - current) + ((flags & 3) != 0 ? 4 : 0) + ((flags & 4) != 0 ? 12 : 0);
+            if (current + length > imageSize) {
+                return null;
+            }
+            byte[] record = new byte[(int) length];
+            if (currentProgram.getMemory().getBytes(base.add(current), record) != record.length) {
+                return null;   // (every declared byte in initialized memory)
+            }
+            if ((flags & 3) != 0) {
+                handler = true;
+            }
+            if ((flags & 4) == 0) {
+                return handler;
+            }
+            long chainedBegin = u32At(base, tail);
+            long chainedEnd = u32At(base, tail + 4);
+            if (chainedBegin >= chainedEnd || chainedEnd > imageSize) {
+                return null;
+            }
+            current = u32At(base, tail + 8);
+        }
+    }
+
+    private long u32At(Address base, long rva) throws MemoryAccessException {
+        return currentProgram.getMemory().getInt(base.add(rva), false) & 0xFFFFFFFFL;
+    }
+
+    private int u16At(Address base, long rva) throws MemoryAccessException {
+        return currentProgram.getMemory().getShort(base.add(rva), false) & 0xFFFF;
+    }
+
+    private int u8At(Address base, long rva) throws MemoryAccessException {
+        return currentProgram.getMemory().getByte(base.add(rva)) & 0xFF;
     }
 
     private Map<String, Object> instruction(

@@ -457,6 +457,11 @@ class ValidatedInstruction:
     # exact instruction length in bytes, when the exporter recorded it (S1,
     # design_scc_conditions r10 section 2); None in older Bundles
     length: int | None = None
+    # (G3b-7b) the call row's landing pads when the exporter proved them:
+    # ``()`` on every CALL / CALLIND row of a function the exporter proved has
+    # no static exception handler (``exception_handlers: "none"``, derived
+    # here, checked by ``ValidatedFunctionObservation``); None otherwise
+    exception_targets: tuple[AddressCoordinate, ...] | None = None
 
     def __post_init__(self) -> None:
         require_exact(self.address, AddressCoordinate, "instruction address")
@@ -482,6 +487,23 @@ class ValidatedInstruction:
             raise TypeError("data references must be an exact reference tuple")
         if tuple(sorted(set(self.data_references))) != self.data_references:
             raise ValueError("data references must be sorted and unique")
+        if self.exception_targets is not None:
+            if type(self.exception_targets) is not tuple or any(
+                type(item) is not AddressCoordinate for item in self.exception_targets
+            ):
+                raise TypeError("exception targets must be an exact coordinate tuple")
+            if tuple(sorted(set(self.exception_targets))) != self.exception_targets:
+                raise ValueError("exception targets must be sorted and unique")
+            if not set(self.exception_targets) <= set(self.flow_targets):
+                raise ValueError("exception targets must be listed flow targets")
+            if not holds_call(self):
+                raise ValueError("exception targets belong to a call row")
+
+
+def holds_call(instruction: "ValidatedInstruction") -> bool:
+    """(G3b-7b) the row holds a CALL / CALLIND p-code operation -- the rows the
+    exporter attaches landing pads to."""
+    return any(item.opcode in ("CALL", "CALLIND") for item in instruction.operations)
 
 
 def is_interrupt_shape(instruction: "ValidatedInstruction") -> bool:
@@ -555,6 +577,10 @@ class ValidatedFunctionObservation:
     # function or reaches another function's entry. False in older Bundles.
     call_fallthrough_isa: bool = False
     fallthrough_exits: tuple[FallthroughExit, ...] = ()
+    # (G3b-7b) the exporter proved that no static exception handler covers any
+    # frame PC of the function (x64 PE exception directory): every call row's
+    # pad set is exactly ``()``. False in older Bundles and other formats.
+    exception_handlers_none: bool = False
 
     def __post_init__(self) -> None:
         if type(self.instructions) is not tuple or any(
@@ -565,6 +591,11 @@ class ValidatedFunctionObservation:
         if len(addresses) != len(set(addresses)):
             raise ValueError("instruction addresses must be unique")
         require_bool(self.call_fallthrough_isa, "call fallthrough flag")
+        require_bool(self.exception_handlers_none, "exception handlers flag")
+        for row in self.instructions:
+            expected = () if self.exception_handlers_none and holds_call(row) else None
+            if row.exception_targets != expected or type(row.exception_targets) is not type(expected):
+                raise ValueError("a call row's exception targets follow the function's exception handlers fact")
         if type(self.fallthrough_exits) is not tuple or any(
             type(item) is not FallthroughExit for item in self.fallthrough_exits
         ):

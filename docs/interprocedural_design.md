@@ -7010,3 +7010,42 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
   고정점을 돌게 했던 것으로 본다.
 - `tools/graph_fidelity/snapshot_expected.txt`에서 `rc=1`을 지워 정상 실행으로 기대한다. 이제 이 실행도 단면 비교에
   들어간다(g3b6a 대 g3b4s2a: `status=0 differences=0 incomplete=0`). 다시 실패하면 게이트가 RC 차이로 알린다.
+
+### 25.115 정적 예외 처리기가 없다는 사실 (G-T G3b-7b-1, 2026-11-23)
+
+설계 `.census6/design_g3b7b_r0.md` -> r1 -> r2 -> r3(리뷰: Astra 6.2 / Fable 5.2). 25.112의 알려진 한계 (1) -- exporter가
+착지 패드를 목적지 목록에 합치므로 재귀 호출 행이 가리키는 진입은 패드일 수도 있어 진입 간선을 남긴다(R7-8) -- 를, 패드가
+**없다는 것을 코드 사실로 증명한 함수에서만** 되돌린다. r0의 "행마다 패드 목록(`[]`)"은 거절됐다(Astra): `[]`는 exporter가
+복구한 것만 말할 뿐(PE `.xdata`는 읽지 않음, LSDA 일부 건너뜀) 패드가 없다는 증명이 아니다.
+
+- **exporter**(`GhidraV2BundleExport.noStaticExceptionHandler`): x64 PE에서 함수의 모든 프레임 PC(관측 몸체의 모든 구간,
+  CALL / CALLIND 행마다 `주소 + getParsedLength()`의 ISA 복귀 PC)가 이미지의 예외 디렉터리에서 처리기 없는 항목에만
+  덮이거나(체인 끝까지 UNW_FLAG_EHANDLER / UHANDLER 없음) 어느 항목에도 덮이지 않을 때(잎 함수: 처리기 없음) 함수에
+  `exception_handlers: "none"`을 쓴다. 조건 하나라도 의심스러우면 필드가 없다(오류 아님): `MZ` / `PE` / Machine 0x8664 /
+  PE32+ / 디렉터리 수와 선택 헤더 크기 / ARM64EC·ARM64X(로드 설정의 CHPE 포인터) / 예외 디렉터리 정렬·크기·이미지 안 /
+  항목 정렬·겹침 / 간접 항목(`UnwindData & 1`) / 버전 1·2 외 / 정의 안 된 플래그 비트 / CHAININFO와 처리기 플래그 동시 /
+  선언된 바이트가 초기화된 메모리 밖 / 체인 순환 또는 32개 초과 / PC가 SizeOfImage 밖 / CALL·CALLIND 행의 flow override /
+  CALL·CALLIND 행에서 진입으로 가는 호출 아닌 흐름 참조(`getFlows()`는 참조 종류를 지운다) / 복구된 패드가 있음.
+- **엔진**: `ValidatedFunctionObservation.exception_handlers_none`, 행마다 파생된 `ValidatedInstruction.exception_targets`
+  (사실이 있으면 CALL / CALLIND 행은 `()`, 나머지는 None -- 계약이 양방향으로 검사, S1 조기 반환 앞). 관측 digest는 사실이
+  있을 때만 태그를 더한다(없으면 그대로 -- 고정). `call_explains`: 진입은 패드 집합이 증명되고 진입이 그 안에 없을 때만
+  보통 규칙(직접 CALL의 피연산자 / 증명된 CALLIND 선택자 / 미증명 CALLIND의 목록)으로 설명된다. `call_explained_targets`
+  하나를 후속 함수와 분할 행 배치 검사가 같이 쓴다: 분할 행에서 호출이 설명한 진입은 배치할 분기 목적지가 아니다(진입이
+  fallthrough여도). `_landing_pads`: 패드 집합이 증명된 행에서 진입은 그 집합에 있을 때만 패드(이 단계에서는 없음).
+- 실측(X1, `dfbench_win_core.exe`를 새 exporter로 다시 내보냄, main 엔진 대 새 엔진 같은 Bundle): 134개 함수 모두 사실을
+  받음(처리기 있는 `.pdata` 항목 2개는 내보낸 함수 밖); 재귀 함수 4개의 직접 CALL 행 5개에서 진입 간선이 빠짐; 위상이
+  바뀐 함수 4개, 거절 전환 0; oracle `through_calls` 1692 -> 1716(전방 켬 1704 -> 1728, G3b-7 이전 값), `checked` 그대로,
+  missing / unexplained 0. X2(C++ ELF -O0 / -O2, 실제 LSDA 패드): 필드 없음, 그래프 main과 같음. 실제 Java 경로 검증
+  (`cob/g3b7b_variants.py`): 바이트를 고친 사본 / 준비된 프로젝트 편집 21개 변형(대조 2; 처리기 주 항목, 두 번째 항목,
+  복귀 PC 뒤 몸체 구간만, 복귀 PC 항목, 목록 길이 재정의, 홀수 코드 체인 끝 처리기, 처리기 없는 체인, 간접 항목 두 가지,
+  버전 3, 순환, 잘린 레코드, Machine, CHPE, 작은 로드 설정, BRANCH / CALL_RETURN override, 점프 참조)이 모두 기대와 같고,
+  독립 판독기(바이트에서 (a)-(c), 변형의 편집에서 (d)-(f))와 함수마다 일치. 엔진 돌연변이 12/12(`cob/g3b7b_mutants.py`),
+  exporter 돌연변이 11/11(`cob/g3b7b_java_mutants.py`: 진입 항목만, 체인 첫 고리만, 복귀 PC 없음, 목록 길이, Machine,
+  CHPE, 버전, override, 참조 출처, 간접 / 정렬, 초기화 바이트).
+- 알려진 한계(이름 붙임): 벡터 처리기 / 처리되지 않은 예외 필터 / 동적 함수 테이블은 실행 상태라 모델 밖(기존과 같음) --
+  "none"은 "이미지의 예외 디렉터리에 이 함수 프레임 PC의 정적 처리기가 없다"는 뜻. x86 PE(동적 SEH 등록), ELF, ARM,
+  ARM64 PE, 예외 디렉터리가 없는 이미지, 간접 항목은 사실 없음(R7-8 그대로). 실제 export에서는 (e) 때문에
+  `CBRANCH entry` + `CALL entry` 행에 사실이 붙지 않는다(엔진 처리는 손으로 만든 고정으로만). 게이트 Bundle은 다시 내보내지
+  않았다(필드 없음 -> 결과 그대로). 미룸: G3b-7b-2(ELF / ARM의 LSDA·EHABI 완전성과 행별 패드, `_unplaced_noreturn`의 패드
+  중첩), G3b-7c(함수 몸체 안으로 가는 호출 표시 분기), 일반 `is_override`가 Ghidra FlowOverride를 놓치는 문제(별도 검토).
+- 엔진 의미 버전 57, UE 템플릿 v44(항목은 v43과 같음 -- 다시 유도해 비교). 고정 `tests/intra/test_gt_b7b_exception_handlers.py`.

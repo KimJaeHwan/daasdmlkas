@@ -50,7 +50,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from ._scope_contracts import AddressCoordinate, ValidatedFunctionObservation, VarnodeKindCode
-from .control_projection import call_explains, call_like_instruction, control_successor_coordinates
+from .control_projection import (call_explained_targets, call_explains, call_like_instruction,
+                                 control_successor_coordinates)
 
 _BRANCHES = ("BRANCH", "CBRANCH", "BRANCHIND")
 _CALLS = ("CALL", "CALLIND")
@@ -668,8 +669,11 @@ def _split(row, local, entry):
     # instruction CFG. All other reachable intra-function destinations must.
     if leaving - {base} - {instruction_key(target) for target in observed}:
         return "a reachable split branch is missing from the instruction successors"
+    # (G3b-7b) the entry a call of the row explains (only with a proved pad
+    # set: ``call_explains``) is the call's own destination, not a branch to place
+    called_entry = {entry} & call_explained_targets(row, entry)
     if operations[-1].opcode != "BRANCHIND":  # a terminal BRANCHIND takes the observed targets
-        if {target for target in row.flow_targets if target in local} - placed:
+        if {target for target in row.flow_targets if target in local} - placed - called_entry:
             return "flow targets the instruction's branches do not place"
     return rows
 
@@ -684,8 +688,9 @@ def _landing_pads(row, local, entry, successors=None) -> tuple:
         return ()
     if successors is None:
         successors = control_successor_coordinates(row, local_addresses=local, function_entry=entry)
-    entry_is_successor = entry in successors
-    return tuple(target for target in row.flow_targets if target in local and (target != entry or entry_is_successor))
+    pads = getattr(row, "exception_targets", None)   # (test doubles carry rows only)
+    entry_is_pad = entry in successors if pads is None else entry in pads
+    return tuple(target for target in row.flow_targets if target in local and (target != entry or entry_is_pad))
 
 
 def _sole_terminal_call(operations) -> bool:
