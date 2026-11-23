@@ -110,17 +110,14 @@ def code_reader(readonly_image, results):
 
 
 def certificates_of(results: dict, reader=None) -> dict:
-    from tdo_v2.call_seeds import _operation_key
     from tdo_v2.return_relations import PAC_SPEC_12_0_4, program_certificates
 
     functions = {}
     for key, item in results.items():
-        targets = dict(item.calls)
-        for instruction in item.unit.observation.instructions if item.unit.observation is not None else ():
-            for index, operation in enumerate(instruction.operations):
-                if operation.opcode in ("CALL", "CALLIND", "BRANCH", "BRANCHIND") and instruction.flow.is_call:
-                    targets.setdefault(_operation_key(instruction.address, index, operation.opcode), None)
-        functions[key] = (item.normalized, item.unit.observation, item.unit.scopes, targets, item.summary,
+        # (G3b-5) only a resolved target supplies a certificate; the certifier
+        # finds every call / tail site itself (by p-code and the tail fact),
+        # an unresolved one is opaque -- no call-flag scan here
+        functions[key] = (item.normalized, item.unit.observation, item.unit.scopes, dict(item.calls), item.summary,
                           item.inherited_assumptions)
     # (the Bundles are exported by Ghidra 12.0.4: its pinned PAC table)
     return program_certificates(functions, code_reader=reader, pac_spec=PAC_SPEC_12_0_4)

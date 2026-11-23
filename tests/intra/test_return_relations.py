@@ -8,6 +8,7 @@ from synthetic import (
     AARCH64, CODE_BASE, RAX, RSP, X0, X1, X29, X30, X64, ZF, FunctionBuilder, _Instruction, add, const, copy,
     op, program_units, ram, reg, register_evidence, store,
 )
+from tdo_v2.call_seeds import _operation_key
 from tdo_v2.interprocedural import analyze_units
 from tdo_v2.return_relations import PAC_SPEC_12_0_4, program_certificates
 
@@ -28,14 +29,13 @@ def _certs(*builders, words=None, pac=PAC_SPEC_12_0_4, readable=True, registers=
     functions = {}
     for key, item in results.items():
         targets = dict(item.calls)
-        for instruction in item.unit.observation.instructions:
-            from tdo_v2.call_seeds import _operation_key
-            for index, operation in enumerate(instruction.operations):
-                if operation.opcode in ("CALL", "CALLIND", "BRANCH", "BRANCHIND") and instruction.flow.is_call:
-                    targets.setdefault(_operation_key(instruction.address, index, operation.opcode), None)
-        for call, entry in (resolved or {}).items():
-            if call in targets:
-                targets[call] = next(other for other in results if int(other.split(":")[1], 16) == entry)
+        if resolved:
+            for row in item.unit.observation.instructions:
+                for index, operation in enumerate(row.operations):
+                    site = _operation_key(row.address, index, operation.opcode)
+                    if site in resolved:
+                        entry = resolved[site]
+                        targets[site] = next(other for other in results if int(other.split(":")[1], 16) == entry)
         functions[key] = (item.normalized, item.unit.observation, item.unit.scopes, targets, item.summary,
                           item.inherited_assumptions)
     words = dict(words or {})
@@ -194,6 +194,118 @@ def _unclosed(certificate, prefix):
     assert certificate.status == "unknown" and not certificate.closed, certificate
     assert any(culprit.startswith(prefix) for culprit in certificate.culprits) \
         or any(row.kind == "unresolved" for row in certificate.exits), certificate
+
+
+def _conditional_tail(builder, target=CALLEE):
+    builder._labels["callee"] = (target - builder.entry) // builder.stride
+    return builder.cbranch("callee", reg(ZF, 1))
+
+
+@pytest.mark.parametrize("opcode", ["CALL", "CALLIND"])
+@pytest.mark.parametrize("flag", ["is_call", "is_jump"])
+def test_s1_unmapped_call_continuation_is_not_a_legacy_tail(opcode, flag):
+    from test_call_fallthrough_contract import Patched, _exit
+    from tdo_v2._scope_contracts import CONTINUATION_BOUNDARY
+
+    site = f"1:{MAIN:x}:0:{opcode}"
+    for sealed in (False, True):
+        builder = (Patched(entry=MAIN, arch=AARCH64,
+                           exits=[_exit(MAIN, MAIN + 4, CONTINUATION_BOUNDARY, None)])
+                   if sealed else _a64())
+        main = builder.tail_call(CALLEE)
+        main._rows[0].ops = [op(opcode, [ram(CALLEE) if opcode == "CALL" else _reg(X0)])]
+        _patched(main, 0, flow=("is_flow", flag, "is_terminal", "is_unconditional"))
+        known = _of(_certs(main, _leaf(), resolved={site: CALLEE}))
+        if not sealed:
+            assert known.status == "proven" and known.exits[0].kind == "tail"
+            continue
+        assert known.status == "unknown" and not known.closed
+        assert [(row.kind, row.reason) for row in known.exits] == [("unresolved", "unmapped-call-continuation")]
+        assert f"call:{site}" in known.dependencies
+        missing = _of(_certs(main))
+        assert missing.status == "unknown" and missing.exits[0].kind == "unresolved"
+        loop = _a64(CALLEE).label("loop").ins(copy(_reg(X1), const(1))).branch("loop")
+        nonreturning = _of(_certs(main, loop, resolved={site: CALLEE}))
+        assert nonreturning.status == "noreturn" and nonreturning.exits == ()
+        wrong = _of(_certs(main, _a64(OTHER).label("loop").ins(copy(_reg(X1), const(1))).branch("loop"),
+                           resolved={site: OTHER}))
+        assert wrong.status == "unknown" and wrong.exits[0].kind == "unresolved"
+
+
+@pytest.mark.parametrize("flag", ["is_call", "is_jump"])
+def test_a_conditional_tail_keeps_both_exits_and_callee_dependencies(flag):
+    main = _conditional_tail(_a64()).ret()
+    _patched(main, 0, flow=("is_flow", flag, "is_conditional", "has_fallthrough"),
+             flow_targets=lambda data: _with(data, 0, MAIN + 4))
+    certificates = _certs(main, _leaf())
+    certificate = _of(certificates)
+    assert certificate.status == "proven", certificate
+    assert [(row.kind, row.proven) for row in certificate.exits] == [("tail", True), ("return", True)]
+    tail = certificate.exits[0]
+    assert tail.key == f"1:{MAIN:x}:0:CBRANCH"
+    assert tail.dependencies == _of(certificates, CALLEE).dependencies
+    assert f"tail:{tail.key}" in certificate.dependencies
+
+
+@pytest.mark.parametrize("target", ["returning", "missing", "recursive", "noreturn"])
+def test_a_conditional_tails_only_exit_is_checked_when_the_fallthrough_loops(target):
+    main = _conditional_tail(_a64()).label("loop").ins(copy(_reg(X1), const(1))).branch("loop")
+    functions = [main]
+    if target == "returning":
+        functions.append(_leaf())
+    elif target == "recursive":
+        functions.append(_a64(CALLEE).tail_call(MAIN))
+    elif target == "noreturn":
+        functions.append(_a64(CALLEE).label("loop").ins(copy(_reg(X1), const(1))).branch("loop"))
+    certificate = _of(_certs(*functions))
+    expected = {"returning": "proven", "missing": "unknown", "recursive": "unknown", "noreturn": "noreturn"}
+    assert certificate.status == expected[target], certificate
+    assert [row.kind for row in certificate.exits] == ([] if target == "noreturn" else ["tail"])
+
+
+def test_a_conditional_tails_link_must_be_intact_before_transfer_even_if_fallthrough_restores_it():
+    main = _a64().ins(copy(_reg(X1), _reg(X30))).ins(copy(_reg(X30), const(0x2000)))
+    _conditional_tail(main).ins(copy(_reg(X30), _reg(X1))).ret()
+    certificate = _of(_certs(main, _leaf()))
+    assert certificate.status == "unknown", certificate
+    assert [(row.kind, row.proven) for row in certificate.exits] == [("tail", False), ("return", True)]
+
+
+def test_a_conditional_tail_rejects_a_certificate_for_a_different_callee():
+    main = _conditional_tail(_a64()).ret()
+    key = f"1:{MAIN:x}:0:CBRANCH"
+    certificate = _of(_certs(main, _leaf(), _leaf(OTHER), resolved={key: OTHER}))
+    assert not certificate.closed and certificate.status == "unknown"
+    assert f"uncertified-call-target:{key}" in certificate.culprits
+    assert certificate.exits[0].key == key and not certificate.exits[0].proven
+
+
+def test_x86_conditional_tail_keeps_the_return_link_limitation():
+    certificate = _of(_certs(_conditional_tail(FunctionBuilder(entry=MAIN)).ret(),
+                             FunctionBuilder(entry=CALLEE).ret()))
+    assert certificate.status == "unknown"
+    assert certificate.exits[0].reason == "x86-tail-not-in-2b"
+
+
+def test_a_split_tail_uses_its_own_ordinal_and_the_other_dangling_path_prevents_closure():
+    main = _a64()
+    skip = op("CBRANCH", [const(2), reg(ZF, 1)])
+    main._rows.append(_Instruction([skip, op("BRANCH", [ram(CALLEE)]), copy(_reg(X1), const(1))], "return"))
+    _patched(main, 0, flow=JUMP, flow_targets=lambda data: _with(data, 0, CALLEE))
+    certificate = _of(_certs(main, _leaf()))
+    assert certificate.status == "unknown" and not certificate.closed, certificate
+    assert [(row.kind, row.key.split(":")[-2:]) for row in certificate.exits] == [
+        ("tail", ["1", "BRANCH"]), ("unresolved", ["2", "COPY"])]
+
+
+@pytest.mark.parametrize("target,expected", [(None, "unknown"), (CALLEE, "proven"), (OTHER, "unknown")])
+def test_an_indirect_tail_needs_an_independent_resolution_covering_the_exported_target(target, expected):
+    main = _a64().ins(copy(_reg(X0), const(CALLEE))).jump_indirect(_reg(X0))
+    _patched(main, 1, flow_targets=lambda data: _with(data, 1, CALLEE))
+    key = f"1:{MAIN + 4:x}:0:BRANCHIND"
+    certificate = _of(_certs(main, _leaf(), _leaf(OTHER), resolved={key: target} if target else {}))
+    assert certificate.status == expected, certificate
+    assert certificate.exits[0].key == key and certificate.exits[0].kind == "tail"
 
 
 @pytest.mark.parametrize("shape", ["call", "tail"])
@@ -507,3 +619,144 @@ def test_inherited_labels_reach_the_certificate():
     certificate = program_certificates(functions, code_reader=lambda a, s: NOP.to_bytes(4, "little"),
                                        pac_spec=PAC_SPEC_12_0_4)[key]
     assert "inherited:forward:resolved-by-fact-1" in certificate.dependencies
+
+
+# -- design r3 (.census6/design_gt_g3b567_r3.md) ------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["entry"])   # (admission refuses a local coordinate for the other kinds)
+def test_an_s1_fallthrough_exit_with_a_local_coordinate_is_an_unresolved_exit(kind):
+    """(R5-1; Astra r1 P1-2) S1 lists row 0's fallthrough as leaving the function
+    although the next row is in this function's body (shared code): never
+    ``proven, closed`` with only the local RETURN."""
+    from test_call_fallthrough_contract import Patched, _exit
+    from tdo_v2._scope_contracts import (CONTINUATION_BOUNDARY, CONTINUATION_FOREIGN_INTERIOR,
+                                         CONTINUATION_FUNCTION_ENTRY)
+    code = {"entry": CONTINUATION_FUNCTION_ENTRY, "interior": CONTINUATION_FOREIGN_INTERIOR,
+            "boundary": CONTINUATION_BOUNDARY}[kind]
+    function = None if kind == "boundary" else MAIN + 4
+    main = Patched(entry=MAIN, arch=AARCH64, exits=[_exit(MAIN, MAIN + 4, code, function)]) \
+        .ins(copy(_reg(X1), const(7))).ret()
+    certificate = _of(_certs(main))
+    assert certificate.status == "unknown" and not certificate.closed
+    assert ("1:1000:0:COPY", "unresolved", "s1-continuation-exit") in [
+        (row.key, row.kind, row.reason) for row in certificate.exits]
+
+
+def test_an_s1_row_ending_in_a_call_to_a_proven_noreturn_callee_is_no_exit():
+    """(R5-1, Fable r2 P2-C) a covered exact-entry ``noreturn`` callee never
+    reaches the row's end: no S1 exit; a returning callee does."""
+    from test_call_fallthrough_contract import Patched, _exit
+    from tdo_v2._scope_contracts import CONTINUATION_FUNCTION_ENTRY
+
+    site = f"1:{MAIN:x}:0:CALL"
+
+    def main():
+        builder = Patched(entry=MAIN, arch=AARCH64, exits=[_exit(MAIN, MAIN + 4, CONTINUATION_FUNCTION_ENTRY, MAIN + 4)])
+        return builder.call(CALLEE).ret()
+    loop = _a64(CALLEE).label("loop").ins(copy(_reg(X1), const(1))).branch("loop")
+    nonreturning = _of(_certs(main(), loop, resolved={site: CALLEE}))
+    assert not any(row.reason == "s1-continuation-exit" for row in nonreturning.exits)
+    returning = _of(_certs(main(), _leaf(), resolved={site: CALLEE}))
+    assert any(row.reason == "s1-continuation-exit" for row in returning.exits)
+
+
+def test_mutual_tail_recursion_certificates_do_not_depend_on_the_dict_order():
+    """(R5-2; Astra r1 P2) both orders give identical certificates."""
+    from synthetic import register_evidence
+
+    results = analyze_units(program_units(_a64().tail_call(CALLEE), _a64(CALLEE).tail_call(MAIN),
+                                          registers=register_evidence(AARCH64)))
+    functions = {key: (item.normalized, item.unit.observation, item.unit.scopes, item.calls, item.summary,
+                       item.inherited_assumptions) for key, item in results.items()}
+    reader = lambda address, size: NOP.to_bytes(4, "little")  # noqa: E731
+    forward, backward = (program_certificates(dict(items), code_reader=reader, pac_spec=PAC_SPEC_12_0_4)
+                         for items in (list(functions.items()), list(reversed(functions.items()))))
+    assert forward == backward and list(forward) == list(functions)
+
+
+def test_an_s1_row_ending_in_an_address_form_cbranch_reaches_its_end():
+    """(R5-1, Fable r3) its fallthrough reaches the row end: the S1 exit stands."""
+    from test_call_fallthrough_contract import Patched, _exit
+    from tdo_v2._scope_contracts import CONTINUATION_FUNCTION_ENTRY
+
+    main = Patched(entry=MAIN, arch=AARCH64, exits=[_exit(MAIN, MAIN + 4, CONTINUATION_FUNCTION_ENTRY, MAIN + 4)])         .cbranch("next", reg(ZF, 1)).label("next").ret()
+    certificate = _of(_certs(main))
+    assert any(row.reason == "s1-continuation-exit" for row in certificate.exits) and not certificate.closed
+
+
+def test_an_unmapped_s1_row_whose_branch_skips_a_noreturn_call_still_records_its_exit():
+    """(R5-1, Astra r3 Q3) ``CBRANCH +2; CALL noreturn`` without a fallthrough
+    coordinate: the taken path reaches the row end without the call -- one
+    S1 record."""
+    from test_call_fallthrough_contract import Patched, _exit
+    from tdo_v2._scope_contracts import CONTINUATION_BOUNDARY
+
+    site = f"1:{MAIN:x}:1:CALL"
+    main = Patched(entry=MAIN, arch=AARCH64, exits=[_exit(MAIN, MAIN + 4, CONTINUATION_BOUNDARY, None)]).tail_call(CALLEE)
+    main._rows[0].ops = [op("CBRANCH", [const(2, 4), reg(ZF, 1)]), op("CALL", [ram(CALLEE)])]
+    _patched(main, 0, flow=("is_flow", "is_call", "is_terminal", "is_unconditional"))
+    loop = _a64(CALLEE).label("loop").ins(copy(_reg(X1), const(1))).branch("loop")
+    certificate = _of(_certs(main, loop, resolved={site: CALLEE}))
+    records = [(row.kind, row.reason) for row in certificate.exits]
+    assert records == [("unresolved", "unmapped-call-continuation")], records
+
+
+
+def test_an_override_rows_raw_noreturn_call_never_cuts_its_s1_exit():
+    """(r5; Astra r4 P1) a flow-override row whose raw CALL targets a certified
+    infinite loop, its fallthrough an S1 FUNCTION_ENTRY boundary: the
+    override's behaviour is unproved -- never ``noreturn, closed``."""
+    from test_call_fallthrough_contract import Patched, _exit
+    from tdo_v2._scope_contracts import CONTINUATION_FUNCTION_ENTRY
+
+    site = f"1:{MAIN:x}:0:CALL"
+    main = Patched(entry=MAIN, arch=AARCH64, exits=[_exit(MAIN, MAIN + 4, CONTINUATION_FUNCTION_ENTRY, MAIN + 4)])         .call(CALLEE).label("spin").branch("spin")
+    original = main.to_json
+
+    def overridden():
+        raw = original()
+        raw["instructions"][0]["flow_type"] = {**raw["instructions"][0]["flow_type"], "is_override": True}
+        return raw
+    main.to_json = overridden
+    loop = _a64(CALLEE).label("loop").ins(copy(_reg(X1), const(1))).branch("loop")
+    certificate = _of(_certs(main, loop, resolved={site: CALLEE}))
+    assert certificate.status != "noreturn"
+    assert any(row.reason == "s1-continuation-exit" for row in certificate.exits)
+
+
+
+def test_a_terminal_override_row_is_never_a_noreturn_proof():
+    """(r6; Astra r5 P1) no S1 metadata, a terminal override row with no
+    fall-through and a raw CALL to a certified infinite loop: unproved."""
+    site = f"1:{MAIN:x}:0:CALL"
+    main = _a64().tail_call(CALLEE)
+    main._rows[0].ops = [op("CALL", [ram(CALLEE)])]
+    original = main.to_json
+
+    def overridden():
+        raw = original()
+        raw["instructions"][0]["flow_type"] = {**raw["instructions"][0]["flow_type"], "is_override": True}
+        return raw
+    main.to_json = overridden
+    loop = _a64(CALLEE).label("loop").ins(copy(_reg(X1), const(1))).branch("loop")
+    certificate = _of(_certs(main, loop, resolved={site: CALLEE}))
+    assert certificate.status == "unknown" and not certificate.closed
+    assert any(culprit.startswith("flow-override:") for culprit in certificate.culprits)
+
+
+
+def test_any_flow_override_row_is_a_culprit():
+    """(r7; Astra r6 P1) a computed-call override row whose raw p-code is a
+    plain COPY falling through to RET: the override's behaviour is unproved."""
+    main = _a64().ins(copy(_reg(X1), const(7))).ret()
+    original = main.to_json
+
+    def overridden():
+        raw = original()
+        raw["instructions"][0]["flow_type"] = {**raw["instructions"][0]["flow_type"], "is_override": True}
+        return raw
+    main.to_json = overridden
+    certificate = _of(_certs(main))
+    assert certificate.status == "unknown" and not certificate.closed
+    assert any(culprit.startswith("flow-override:") for culprit in certificate.culprits)

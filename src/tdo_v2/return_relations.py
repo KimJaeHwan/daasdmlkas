@@ -28,6 +28,7 @@ from .integration.configured_value_domain import storage_ref
 from .isa_identity import link_register, stack_register
 from .memory_contracts import MemoryDefinitionKind
 from .model import ByteSpan, ResolvedStorage, StorageObjectId, StorageObjectKind
+from .pcode_blocks import tail_transfers
 from .premises import POLICY_FIELDS as _POLICY_FIELDS  # (the normalization's policy switches, docs 25.91)
 from .relative_memory import _function_relative_object_id
 from .storage import _resolve_validated_storage
@@ -122,26 +123,64 @@ def function_certificate(normalized, observation, scopes, callee_certificates: d
     if mechanism == "link":
         dependencies.append(f"pac:{pac_spec}")
         culprits.extend(_pac_scan(observation, code_reader, pac_spec))
-    observed = {(row.address.space_id, row.address.byte_offset) for row in observation.instructions}
+    observed = {row.address for row in observation.instructions}
+    # S1 records the ISA continuation even when its destination is unmapped
+    # and the instruction itself carries no fallthrough coordinate.
+    continuation_exits = {row.source for row in getattr(observation, "fallthrough_exits", ())}
+    facts = tail_transfers(observation, entry)
     sp_delta, proof_digest = _exit_delta(normalized, observation, scopes, sp)
     if proof_digest is not None:
         dependencies.append(f"register-delta-proof:{proof_digest}")
     relations = call_relations(observation, scopes)
     for instruction in observation.instructions:
         keys = [_operation_key(instruction.address, index, op.opcode) for index, op in enumerate(instruction.operations)]
-        flow = instruction.flow
-        tail = flow.is_call and not flow.has_fallthrough
+        if instruction.flow.is_override:
+            # (G3b-5 r6/r7; Astra r5-r6 P1, Fable r5 P3-1) a flow override's
+            # behaviour, not the raw p-code (even a plain COPY), decides where
+            # this row goes: unproved
+            culprits.append(f"flow-override:{keys[-1] if keys else _instruction_key(instruction)}")
+        unmapped_continuation = instruction.fallthrough is None and instruction.address in continuation_exits
         # every outgoing transfer is classified (or the function is not CLOSED)
-        culprits.extend(_transfer_gaps(instruction, keys, observed, tail))
+        culprits.extend(_transfer_gaps(instruction, keys, observed, entry, facts))
         for key, operation in zip(keys, instruction.operations):
-            if operation.opcode == "BRANCHIND" and not tail:
+            # A terminal CALL / CALLIND without a continuation retains its 2b
+            # tail semantics. A branch is a tail only at its exact graph site,
+            # which can be the end of a split block inside the instruction.
+            terminal_call = (operation.opcode in _CALLS and key == keys[-1]
+                             and instruction.fallthrough is None and not unmapped_continuation)
+            fact = facts.get(key)
+            if fact is not None or terminal_call:
+                certificate = callee_certificates.get(key, UNKNOWN_CALLEE)
+                covered = _covers(certificate, instruction, operation, fact)
+                dependencies.append(f"tail:{key}")
+                dependencies.extend(certificate.dependencies)
+                if not covered:
+                    reason, path = "uncertified-call-target", ()
+                    culprits.append(f"{reason}:{key}")
+                elif certificate.status == "noreturn":
+                    # Only this outcome cannot return. A CBRANCH's local
+                    # fallthrough and its possible exits are still checked.
+                    continue
+                elif certificate.status != "proven":
+                    reason, path = "tail-target-" + certificate.status, ()
+                    culprits.append(f"tail:{key}")
+                elif mechanism == "push":
+                    reason, path = "x86-tail-not-in-2b", ()
+                else:
+                    # For a conditional tail the raw operation ends the
+                    # source block, before the taken edge's staged effects.
+                    reason, path = witness.link_intact_at(key, fact.edge if fact is not None else None)
+                exits.append(ExitRecord(key, "tail", reason == "", reason, "unknown", path, None,
+                                        tuple(certificate.dependencies)))
+            elif operation.opcode == "BRANCHIND":
                 # a listed target set (a recovered jump table) is what the
                 # exporter found, not proof that the value can take no other:
                 # no evidence of exhaustiveness exists yet [forward]
                 culprits.append(key)
-            elif operation.opcode in _CALLS and not tail:
+            elif operation.opcode in _CALLS:
                 certificate = callee_certificates.get(key, UNKNOWN_CALLEE)
-                if not _covers(certificate, instruction, operation):
+                covered = _covers(certificate, instruction, operation)
+                if not covered:
                     culprits.append(f"uncertified-call-target:{key}")
                 dependencies.append(f"call:{key}")
                 dependencies.extend(certificate.dependencies)
@@ -160,31 +199,26 @@ def function_certificate(normalized, observation, scopes, callee_certificates: d
         if last is not None and last.opcode == "RETURN":
             reason, path = witness.returns_entry_link(key, last)
             exits.append(ExitRecord(key, "return", reason == "", reason, "unknown", path, sp_delta, None))
-        elif tail and last is not None and last.opcode in ("BRANCH", "BRANCHIND", "CALL", "CALLIND"):
-            certificate = callee_certificates.get(key, UNKNOWN_CALLEE)
-            if not _covers(certificate, instruction, last):
-                culprits.append(f"uncertified-call-target:{key}")
-            dependencies.append(f"tail:{key}")
-            dependencies.extend(certificate.dependencies)
-            if certificate.status == "noreturn":
-                continue
-            path: tuple = ()
-            if certificate.status != "proven":
-                reason = "tail-target-" + certificate.status
-                culprits.append(f"tail:{key}")
-            elif mechanism == "push":
-                reason = "x86-tail-not-in-2b"
-            else:
-                reason, path = witness.link_intact_at(key)
-            exits.append(ExitRecord(key, "tail", reason == "", reason, "unknown", path, None,
-                                    tuple(certificate.dependencies)))
-        elif instruction.fallthrough is None and not (
-                last is not None and last.opcode in ("BRANCH", "BRANCHIND")):
+        elif instruction.fallthrough is None and instruction.address not in continuation_exits and not (
+                last is not None and last.opcode in ("BRANCH", "BRANCHIND", *_CALLS)):
             # control leaves the instruction neither to the next one nor by a
             # classified transfer (BRANCH: _transfer_gaps checks its target)
             exits.append(ExitRecord(key, "unresolved", False,
                                     f"terminal-{last.opcode.lower() if last is not None else 'empty'}", "unknown",
                                     (), None, ()))
+        if instruction.address in continuation_exits and _reaches_end(instruction, keys, callee_certificates):
+            # (G3b-5 r3/r4, R5-1; Astra r1 P1-2, r3 Q3) S1 lists this row's
+            # fallthrough as leaving the function -- to an unmapped place,
+            # another function's entry or interior (shared code) -- even when
+            # the coordinate is local: control reaching the row's end (over its
+            # reachable p-code paths, a covered noreturn call cutting only the
+            # paths through it) may continue there, whose return to our caller
+            # nothing proves (``function_summary`` treats the same rows as
+            # exits). One record per row; a RETURN on another path keeps its own.
+            unmapped_call = instruction.fallthrough is None and last is not None and last.opcode in _CALLS
+            exits.append(ExitRecord(key, "unresolved", False,
+                                    "unmapped-call-continuation" if unmapped_call else "s1-continuation-exit",
+                                    "unknown", (), None, ()))
     closed = not culprits and not any(record.kind == "unresolved" for record in exits)
     if closed and not exits:
         status = "noreturn"
@@ -200,23 +234,64 @@ def function_certificate(normalized, observation, scopes, callee_certificates: d
     return ContinuationCertificate(status, closed, tuple(exits), tuple(culprits), dependencies, entry)
 
 
+def _reaches_end(instruction, keys, callee_certificates) -> bool:
+    """(R5-1) Some reachable p-code path of the row reaches its end (the
+    operation count): relative branches followed (a target at or past the
+    end reaches it), an address-form CBRANCH also falls through, BRANCH /
+    BRANCHIND / RETURN stop a path, a CALL / CALLIND stops it only when its
+    covered callee certificate is ``noreturn`` (r1's exact-entry exemption)."""
+    operations = instruction.operations
+    if instruction.flow.is_override:
+        return True   # (r5; Astra r4: the override's behaviour, not the raw p-code, decides)
+    pending, seen = [0], set()
+    while pending:
+        index = pending.pop()
+        if index >= len(operations) or index < 0:
+            return True   # (a negative target is malformed: fail toward an exit)
+        if index in seen:
+            continue
+        seen.add(index)
+        operation = operations[index]
+        destination = operation.inputs[0] if operation.inputs else None
+        if operation.opcode in ("BRANCH", "CBRANCH") and destination is not None \
+                and destination.kind is VarnodeKindCode.CONSTANT:
+            pending.append(index + _relative(destination))
+            if operation.opcode == "CBRANCH":
+                pending.append(index + 1)
+        elif operation.opcode == "CBRANCH":
+            pending.append(index + 1)
+        elif operation.opcode in ("BRANCH", "BRANCHIND", "RETURN"):
+            continue
+        elif operation.opcode in _CALLS:
+            certificate = callee_certificates.get(keys[index], UNKNOWN_CALLEE)
+            if not (certificate.status == "noreturn" and _covers(certificate, instruction, operation)):
+                pending.append(index + 1)
+        else:
+            pending.append(index + 1)
+    return False
+
+
 def _continues(relation, mechanism, instruction) -> bool:
     """The call writes its fallthrough as the callee's entry link, by the
     language's mechanism (a CallRelation of that kind)."""
     return relation is not None and relation.kind == mechanism and relation.continuation == instruction.fallthrough
 
 
-def _covers(certificate, instruction, operation) -> bool:
-    """The certificate is the exported destination's: every exported target
-    of the instruction, and a direct operand, is its function's entry (an
-    indirect call with no exported target rests on the caller's resolution)."""
+def _covers(certificate, instruction, operation, fact=None) -> bool:
+    """The direct operand and every reported callee destination are covered by
+    this certificate. A conditional tail may also list its local fallthrough.
+    An indirect site with no listed destination needs the caller's resolution."""
     if certificate.entry is None:
-        return True   # no function: UNKNOWN, a culprit anyway
+        return certificate.status == "unknown"   # an opaque target is already a culprit
     destination = operation.inputs[0] if operation.inputs else None
-    if operation.opcode in ("CALL", "BRANCH") and destination is not None \
-            and destination.kind is VarnodeKindCode.ADDRESS and destination.coordinate != certificate.entry:
-        return False
-    return all(target == certificate.entry for target in instruction.flow_targets)
+    if operation.opcode in ("CALL", "BRANCH", "CBRANCH"):
+        if destination is None or destination.kind is not VarnodeKindCode.ADDRESS \
+                or destination.coordinate != certificate.entry:
+            return False
+    allowed = {certificate.entry}
+    if fact is not None and fact.kind == "cbranch":
+        allowed.add(instruction.fallthrough)
+    return set(instruction.flow_targets) <= allowed
 
 
 def _instruction_key(instruction) -> str:
@@ -230,7 +305,7 @@ def _relative(varnode) -> int:
     return value - (1 << bits) if value >> (bits - 1) else value
 
 
-def _transfer_gaps(instruction, keys, observed, tail) -> list[str]:
+def _transfer_gaps(instruction, keys, observed, entry, facts) -> list[str]:
     """Why one instruction's outgoing transfers are not all classified (Astra
     2b r1-r4) -- an allow-list: BRANCH / CBRANCH to an address or to a p-code
     relative position inside the instruction, and RETURN / CALL / CALLIND /
@@ -248,11 +323,12 @@ def _transfer_gaps(instruction, keys, observed, tail) -> list[str]:
     if (instruction.fallthrough is not None) != flow.has_fallthrough:
         gaps.append(f"inconsistent-fallthrough:{where}")
     implied: set = set()
-    callees = None
+    tail_destinations = set()
     reaches_end = not operations or operations[-1].opcode not in ("BRANCH", "RETURN", "BRANCHIND", *_CALLS) \
-        or (operations[-1].opcode in _CALLS and not tail)
+        or (operations[-1].opcode in _CALLS and instruction.fallthrough is not None)
     for index, operation in enumerate(operations):
         last = index == len(operations) - 1
+        fact = facts.get(keys[index])
         if operation.opcode in ("BRANCH", "CBRANCH"):
             destination = operation.inputs[0] if operation.inputs else None
             if destination is None or len(operation.inputs) != (2 if operation.opcode == "CBRANCH" else 1):
@@ -265,33 +341,37 @@ def _transfer_gaps(instruction, keys, observed, tail) -> list[str]:
                     reaches_end = True
             elif destination.kind is not VarnodeKindCode.ADDRESS:
                 gaps.append(f"unsupported-branch:{keys[index]}")
-            elif tail and last and operation.opcode == "BRANCH":
-                callees = {destination.coordinate}
+            elif fact is not None:
+                tail_destinations.add(fact.target)
             elif destination.coordinate != instruction.address:
                 implied.add(destination.coordinate)
+                if destination.coordinate in observed and destination.coordinate != instruction.fallthrough \
+                        and destination.coordinate not in instruction.flow_targets:
+                    # The graph can retain the operand's definite local edge.
+                    # Closure independently requires the reported flow to agree.
+                    gaps.append(f"unclassified-successor:{keys[index]}")
+                if operation.opcode == "BRANCH" and destination.coordinate not in observed \
+                        and set(instruction.flow_targets) - {destination.coordinate}:
+                    gaps.append(f"uncertified-call-target:{keys[index]}")
         elif operation.opcode in ("RETURN", "BRANCHIND", *_CALLS):
             if not last:
                 gaps.append(f"mid-instruction-transfer:{keys[index]}")
-            elif operation.opcode in _CALLS or (tail and operation.opcode == "BRANCHIND"):
+            if operation.opcode in _CALLS or (fact is not None and fact.kind == "branchind"):
                 direct = operation.opcode == "CALL" and operation.inputs \
                     and operation.inputs[0].kind is VarnodeKindCode.ADDRESS
                 callees = {operation.inputs[0].coordinate} if direct else set(instruction.flow_targets)
-    if flow.is_call != (callees is not None):
-        gaps.append(f"inconsistent-call:{where}")
-    elif callees is not None and (len(callees) > 1 or not set(instruction.flow_targets) <= callees):
-        gaps.append(f"uncertified-call-target:{where}")
+                if len(operation.inputs) != 1 or len(callees) > 1 or not set(instruction.flow_targets) <= callees:
+                    gaps.append(f"uncertified-call-target:{keys[index]}")
+                if fact is not None:
+                    tail_destinations.update(callees)
     if reaches_end:
         if instruction.fallthrough is None:
             gaps.append(f"no-fallthrough:{where}")
         else:
             implied.add(instruction.fallthrough)
-    successors = set(control_successor_coordinates(instruction))
-    if tail and callees is not None:
-        # (G3b-7) a call-flagged BRANCH / BRANCHIND is no call by p-code: its
-        # destination is now an instruction successor -- for the 2b tail it
-        # is the tail's own (certified) destination, not an unclassified one
-        successors -= callees
-    if successors != implied or any((target.space_id, target.byte_offset) not in observed for target in successors):
+    successors = set(control_successor_coordinates(instruction, local_addresses=observed, function_entry=entry))
+    successors -= tail_destinations
+    if successors != implied or not successors <= observed:
         gaps.append(f"unclassified-successor:{where}")
     return gaps
 
@@ -365,16 +445,19 @@ def program_certificates(functions: dict, *, code_reader=None, pac_spec=None) ->
         normalized, observation, scopes, targets, *rest = functions[key]
         summary = rest[0] if rest else None
         inherited = rest[1] if len(rest) > 1 else ()
-        callees = {call: certify(target) for call, target in targets.items() if target is not None}
+        # (R5-2) callees in operation-key order, functions in key order: the
+        # UNKNOWN cut inside a recursive component is at the member reached
+        # first from the lowest key, whatever order the caller's dict has
+        callees = {call: certify(targets[call]) for call in sorted(targets) if targets[call] is not None}
         active.discard(key)
         done[key] = function_certificate(normalized, observation, scopes, callees,
                                          code_reader=code_reader, pac_spec=pac_spec,
                                          summary=summary, inherited=inherited)
         return done[key]
 
-    for key in functions:
+    for key in sorted(functions):
         certify(key)
-    return done
+    return {key: done[key] for key in functions if key in done}
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,20 +687,30 @@ class _Witness:
         reason = self._value_at(key, operation.inputs[0])
         return reason, tuple(self.path)
 
-    def link_intact_at(self, key) -> tuple[str, tuple]:
+    def link_intact_at(self, key, edge) -> tuple[str, tuple]:
         self.path = [key]
-        reason = self._link_intact_at(key)
+        reason = self._link_intact_at(key, edge)
         return reason, tuple(self.path)
 
-    def _link_intact_at(self, key) -> str:
-        """The link register's value at a tail jump is the entry link: the jump
-        reads nothing, so the value is the SSA's terminal state of the jump's
-        block (the jump ends it), every definition held there proven."""
-        blocks = {action.operation_key: block.key for block in self.normalized.memory_unit.blocks
-                  for action in block.actions}
-        block = blocks.get(key)
+    def _link_intact_at(self, key, edge) -> str:
+        """Prove the incoming link at the transfer, before any staged tail writes.
+        For a conditional tail only the taken edge has a terminal state. Its
+        exit carries its source's link exactly when no action on the edge
+        overwrites any byte of the link."""
+        unit = self.normalized.memory_unit
+        block = next((block for block in unit.blocks if any(action.operation_key == key for action in block.actions)),
+                     None)
         if block is None:
             return "no-block"
+        if edge is not None:
+            taken = next((item for item in unit.blocks if item.key == edge), None)
+            if taken is None or taken.predecessors != (block.key,):
+                return "no-taken-edge-state"
+            block = taken
+        for action in block.actions:
+            if edge is not None or action.operation_key.startswith(key + "~"):
+                if any(span.overlaps(self.entry) for span in action.writes):
+                    return "tail-staged-link-write"
         tracked = any(span.object_id == self.entry.object_id and span.overlaps(self.entry)
                       for span in self.ssa.atomic_spans)
         if not tracked:
@@ -628,7 +721,7 @@ class _Witness:
                                  for row in self.ssa.definitions
                                  if row.kind is not MemoryDefinitionKind.ENTRY) else "link-untracked-but-written"
         states = [state for state in self.ssa.exit_states
-                  if state.block_key == block and state.root_node_id is not None]
+                  if state.block_key == block.key and state.root_node_id is not None]
         if len(states) != 1:
             return "no-terminal-state"
         held = self._state(states[0].root_node_id)

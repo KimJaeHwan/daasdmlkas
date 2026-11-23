@@ -6941,3 +6941,27 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
 - 엔진 의미 버전 56, UE 템플릿 v43(항목은 v42와 같음 -- 다시 유도해 비교). 고정 `tests/intra/test_gt_b7_call_graph.py`,
   `test_record_conditions_cfg.py`(복원 간선 범위), `test_gt_b3_tail_memory_events.py` / `test_gt_b1_tail_fact.py`(표시만 있는
   행은 이제 표시 없는 행과 같다), `test_call_projection_shape.py`(진입 간선을 둔 재귀가 이제 고정점에 닿음, 실행 확인 그대로).
+
+
+### 25.113 복귀 증명서를 꼬리 사실로 (G-T G3b-5, 2026-11-23)
+
+설계 `.census6/design_gt_g3b567_r2.md` -> r7(리뷰 Astra 6.2 / Fable 5.2; G3b-5는 r7에서 둘 다 통과). `return_relations`의
+증명서(분석 요약과 따로 계산하는 "이 함수는 호출자의 다음 줄로 돌아온다" 증명)가 exporter의 호출 표시 대신 G3b-1의
+꼬리 사실(`tail_transfers`)을 쓴다.
+
+- 꼬리 출구는 사실의 연산 키(분할 블록의 끝도)에서 정한다. 조건 꼬리: taken은 꼬리 출구, fallthrough는 함수 안 경로로
+  계속 검사; `_covers`는 직접 피연산자 = 꼬리 대상 = 대상 증명서의 진입, 목록은 그 진입(+조건 꼬리의 fallthrough)만.
+  대상 증명서 없음 / 재귀 -> UNKNOWN; 대상이 정확한 진입의 `noreturn`이면 그 결과만 비복귀. ARM64 복귀형 꼬리는 전이
+  시점 x30 = 진입 값(조건 꼬리는 taken 간선 블록의 유일한 선행 블록과 그 블록의 단계 쓰기 검사); x86은
+  `x86-tail-not-in-2b` 그대로.
+- S1 출구(Astra P1): `fallthrough_exits`에 있는 행이 자기 p-code 경로로 끝에 닿으면(상대 분기 따라감, 주소형 CBRANCH의
+  fallthrough, 덮인 정확한 진입 `noreturn` 호출은 그 경로만 끊음) 출구 기록 하나 -- 좌표가 없고 CALL / CALLIND로 끝나면
+  "unmapped-call-continuation", 그 밖(좌표가 지역인 공유 코드 포함) "s1-continuation-exit". 닫힘 / proven이 될 수 없다.
+- flow override 행은 무엇이든 culprit `flow-override:<키>`(덮어쓴 의미는 증명 안 됨).
+- 순서: 함수는 키 순서로, 피호출은 연산 키 순서로 증명 -- 재귀 묶음 안에서 UNKNOWN으로 끊는 자리는 "가장 작은 키에서
+  먼저 닿는 구성원"(정의; 사전 순서와 무관).
+- `tools/graph_fidelity/premise_acceptance.certificates_of`는 호출 표시로 자리를 채우지 않는다(증명기가 스스로 찾음).
+- 관찰용(증명서, 전제 수용)만 바뀐다 -- 요약 / 템플릿 / 의미 버전 그대로. 고정 `tests/intra/test_return_relations.py`.
+- 돌연변이 10개 중 8개 실패(`.census6/cob/g3b5_mutants.py`); 남은 둘은 방어용 -- M9(taken 간선 블록의 선행 블록 하나:
+  간선 블록은 만들 때부터 원래 블록 하나만 선행), M8(꼬리 자리의 단계 쓰기가 링크를 덮으면 거절: 그 쓰기는 이동 뒤
+  피호출 안의 효과라 보수적 추가 검사).
