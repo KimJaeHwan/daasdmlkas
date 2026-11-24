@@ -201,7 +201,12 @@ def rows(diagnosis, generation, options) -> list[Row]:
     claims = [claim for claim in diagnosis.claims if claim.evidence is not None]
     for claim in claims:
         out.extend(stack_rows(claim))
-    if options.get("lint_normalize"):
+    if options.get("lint_normalize") and not diagnosis.image_info.get("ok"):
+        # the summary stops before its context exists when image-info fails to load
+        # (summary_engine.py:205): no standalone run under another condition (Astra impl r3 P2)
+        out.append(Row("features", "standalone_context", "program", "not_reached", None, "lint",
+                       {"why": "image-info failed to load", "error": diagnosis.image_info.get("error")}))
+    elif options.get("lint_normalize"):
         image_info = diagnosis.image_info_value
         image = readonly_image(generation, image_info, options)
         last = {}   # the context: one member per entry, the last, as the summary keeps it (summary_engine.py:412)
@@ -213,10 +218,12 @@ def rows(diagnosis, generation, options) -> list[Row]:
             out.append(Row("features", "standalone_context", "program", "evaluated", "applied", "lint",
                            {**context.header(), "readonly_image": image is not None}))
             for claim in claims:   # (every member is normalised: Astra impl r2 P2)
-                out.extend(normalize_rows(claim, image, context))
-                if last[claim.entry] is not claim:
-                    out[-1] = Row(out[-1].layer, out[-1].check, out[-1].key, out[-1].run_state, out[-1].verdict,
-                                  out[-1].source, {**out[-1].detail, "superseded_by_duplicate_entry": True})
+                produced = normalize_rows(claim, image, context)
+                if last[claim.entry] is not claim:   # (the mark goes on the normalize row itself)
+                    produced = [Row(row.layer, row.check, row.key, row.run_state, row.verdict, row.source,
+                                    {**row.detail, "superseded_by_duplicate_entry": True})
+                                if row.check == "standalone_normalize" else row for row in produced]
+                out.extend(produced)
     return out
 
 

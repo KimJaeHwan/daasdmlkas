@@ -111,7 +111,9 @@ def _lint_rows(sealed, bundle):
     _sealed, root = sealed
     gen = _sealed.write(root, bundle)
     header, rows, diag = lint.run(gen, _sealed.NAMING_SOURCE, timeout=300, summary=True, options={})
-    return {row.ident(): row for row in rows}, header, diag
+    found = {row.ident(): row for row in rows}
+    assert len(found) == len(rows), "duplicate report rows"   # (Astra impl r3: never mask duplicates)
+    return found, header, diag
 
 
 def _f1(_sealed):
@@ -157,7 +159,7 @@ def test_f2_invalid_image_info_stops_both_summaries_before_functions_base_graph_
 def test_writable_block_turns_readonly_folding_off(sealed):
     _sealed = sealed[0]
     rows, _, _ = _lint_rows(sealed, _sealed.two_function_bundle(blocks=[_sealed.Block(write=True)]))
-    assert rows[("transport", "readonly_block", "1:1000")].verdict == "not_applicable"
+    assert rows[("transport", "readonly_block", "#0/1:1000")].verdict == "not_applicable"
 
 
 def test_a_mismatched_stop_is_an_error_not_a_verdict():
@@ -249,7 +251,9 @@ def _run_lint(sealed, bundle, name="g", **kw):
     options = kw.pop("options", {})
     header, rows, diag = lint.run(gen, _sealed.NAMING_SOURCE, timeout=300, summary=kw.pop("summary", True),
                                   options=options)
-    return {row.ident(): row for row in rows}, header
+    found = {row.ident(): row for row in rows}
+    assert len(found) == len(rows), "duplicate report rows"
+    return found, header
 
 
 def _slot_bundle(_sealed, *, write=False, imported=False):
@@ -730,8 +734,7 @@ def test_branchind_unknown_transfer_follows_the_engine_predicate(sealed):
     f = s.Function("F", s.observation(0x1000, [first, second, s.ret(0x1004)]))
     rows, _ = _run_lint(sealed, s.Bundle([f]), "branchind", summary=False)
     found = {ident: row for ident, row in rows.items() if ident[1] == "branchind"}
-    if rows[("transport", "function_scope", "function-000000")].verdict != "applied":
-        pytest.skip("the observation shape is refused by the scope reader")
+    assert rows[("transport", "function_scope", "function-000000")].verdict == "applied"
     assert len(found) == 2, found
     assert all(row.verdict == "withheld" and row.detail["unknown_transfer"] for row in found.values())
 
@@ -811,3 +814,127 @@ LANGUAGE_LITERAL_FILES = (
     "may_alias.py", "operation_records.py", "return_relations.py", "summary_engine.py", "summary_store.py",
     "summary_templates.py",
 )
+
+
+
+# -- implementation review r3 fixtures (Astra / Fable) ------------------------------------
+
+@posix
+def test_drop_pad_refuses_when_the_pad_code_would_become_unreachable(sealed):
+    import mutate
+
+    s, root = sealed
+    a = s.Function("A", s.observation(0x1000, [
+        s.call(0x1000, 0x1800, targets=[0x1800, 0x1010]),
+        s.ret(0x1005),
+        s.plain(0x1010, 4, ("COPY", [s.reg(s.RCX)], s.reg(s.RAX))),
+        s.row(0x1014, 2, s.ops(("BRANCH", [s.ram(0x1010)], None)),
+              s.flow(is_flow=True, is_jump=True, is_unconditional=True), None, [0x1010])]))
+    b = s.Function("B", s.observation(0x1800, [s.ret(0x1800)]))
+    base = root / "base"
+    base.mkdir(mode=0o755)
+    source = s.write(base, s.Bundle([a, b]))
+    out = root / "out"
+    out.mkdir(mode=0o755)
+    for _ in range(2):   # (a second failure gets a fresh name; nothing is deleted)
+        with pytest.raises(mutate.VariantError, match="unreachable"):
+            mutate.mutate(source, out, "drop-pad", function_id="function-000000", site="1:1000:2:CALL")
+    assert sorted(path.name[len(source.name):] for path in out.iterdir()) == [".failed", ".failed.1"]
+
+
+def _aarch64_bundle(s, *, pc=True):
+    pc_off, sp_off, x30 = 0x0, 0x8, 0x4000 + 8 * 30
+    registers = (("sp", sp_off), ("x30", x30)) + ((("pc", pc_off),) if pc else ())
+    program = s.program(registers=registers, language=("AARCH64:LE:64:v8A", 1, 6))
+    call_flow = s.CALL_FLOW
+    push = s.row(0x1000, 4, s.ops(("INT_SUB", [s.reg(sp_off), s.const(8)], s.reg(sp_off)),
+                                  ("STORE", [s.const(s.RAM), s.reg(sp_off), s.const(0x1004)], None),
+                                  ("CALL", [s.ram(0x1800)], None)), call_flow, 0x1004, [0x1800])
+    bl = s.row(0x1004, 4, s.ops(("INT_ADD", [s.const(0x1004), s.const(4)], s.reg(x30)),
+                                ("CALL", [s.ram(0x1800)], None)), call_flow, 0x1008, [0x1800])
+    ret = s.row(0x1008, 4, s.ops(("COPY", [s.reg(x30)], s.reg(pc_off)), ("RETURN", [s.reg(pc_off)], None)),
+                s.RET_FLOW)
+    b = s.Function("B", s.observation(0x1800, [s.row(0x1800, 4, s.ops(("RETURN", [s.reg(x30)], None)),
+                                                     s.RET_FLOW)]))
+    return s.Bundle([s.Function("A", s.observation(0x1000, [push, bl, ret])), b], program=program)
+
+
+@posix
+def test_aarch64_push_is_reported_and_link_needs_its_evidence(sealed):
+    s = sealed[0]
+    rows, _ = _run_lint(sealed, _aarch64_bundle(s), "a64", summary=False)
+    assert rows[("transport", "function_scope", "function-000000")].verdict == "applied"
+    push_key, bl_key = "function-000000/1:1000:2:CALL", "function-000000/1:1004:1:CALL"
+    assert rows[("operations", "push_projection", push_key)].verdict == "applied"   # (never hidden)
+    assert rows[("operations", "push_projection", bl_key)].verdict == "not_applicable"   # (no flood)
+    assert rows[("operations", "plain_push", push_key)].verdict == "not_applicable"   # (x86-64 literal shape)
+    assert rows[("operations", "link_relation", bl_key)].verdict == "applied"
+    no_pc, _ = _run_lint(sealed, _aarch64_bundle(s, pc=False), "a64nopc", summary=False)
+    assert no_pc[("operations", "link_relation", bl_key)].verdict == "withheld"
+
+
+@posix
+def test_duplicate_image_info_rows_get_distinct_keys(sealed):
+    s = sealed[0]
+    bundle = s.two_function_bundle(blocks=[s.Block(start=0x1000), s.Block(start=0x2000, data=b"\0" * 0x100)])
+    row = {"block_id": "block-000000", "name": ".text", "read": True, "write": False, "execute": True,
+           "volatile": False}
+    bundle.image_info = {"schema": "tdo-v2-image-info-1", "executable_format": "Raw Binary",
+                         "block_permissions": [row, dict(row)], "imports": [], "exports": [], "relocations": []}
+    rows, _ = _run_lint(sealed, bundle, "dupinfo", summary=False)
+    assert rows[("transport", "image_info", "bundle")].verdict == "applied"
+    assert ("transport", "readonly_block", "#0/1:1000") in rows and ("transport", "readonly_block", "#1/1:1000") in rows
+
+
+@posix
+def test_branchind_through_an_import_slot_is_exempted_in_the_final_column(sealed):
+    s = sealed[0]
+    jump = s.row(0x1000, 6, s.ops(("BRANCHIND", [s.ram(0x1F00)], None)),
+                 s.flow(is_flow=True, is_jump=True, is_computed=True, is_terminal=True, is_unconditional=True))
+    bundle = s.Bundle([s.Function("F", s.observation(0x1000, [jump]))])
+    bundle.image_info = {"schema": "tdo-v2-image-info-1", "executable_format": "Raw Binary",
+                         "block_permissions": [{"block_id": "block-000000", "name": ".text", "read": True,
+                                                "write": False, "execute": True, "volatile": False}],
+                         "imports": [{"library": "KERNEL32.DLL", "name": "ExitProcess", "original_name": None,
+                                      "slots": [s.coord(0x1F00)], "thunks": []}],
+                         "exports": [], "relocations": []}
+    rows, _ = _run_lint(sealed, bundle, "imptail")
+    key = "function-000000/control:1:1000:1:1000"
+    assert rows[("operations", "branchind", key)].verdict == "withheld"
+    final = rows[("pipeline", "branchind_final", key)]
+    assert final.detail["final"] == "exempted" and final.detail["exemptions"], final
+
+
+@posix
+def test_f2_standalone_is_not_reached_like_the_summaries(sealed):
+    s = sealed[0]
+    rows, _ = _run_lint(sealed, s.two_function_bundle(overrides={"image-info": b'{"schema":"bad"}'}), "f2n",
+                        summary=False, options={"lint_normalize": True})
+    assert rows[("features", "standalone_context", "program")].run_state == "not_reached"
+    assert not any(ident[1] == "standalone_normalize" for ident in rows)
+
+
+@posix
+def test_exit_kind4_refuses_an_exit_without_a_reach_edge(sealed):
+    import mutate
+
+    s = sealed[0]
+    bundle = _layer2_bundle(s)
+    bundle.functions = [bundle.functions[0], bundle.functions[1]]   # (B dropped: the exit's function is absent)
+    bundle.functions[0].observation["instructions"][0]["flow_targets"] = [s.coord(0x1800)]
+    with pytest.raises(mutate.VariantError):
+        _variant(sealed, "exit-kind4", bundle=bundle, function_id="function-000001", index=0)
+
+
+def test_superseded_mark_lands_on_the_normalize_row():
+    import feature_layer
+    import report as r
+
+    rows = [r.Row("features", "standalone_normalize", "f", "evaluated", "applied", "engine"),
+            r.Row("features", "readonly_use", "f/1:1f00", "evaluated", "applied", "engine")]
+    marked = [r.Row(row.layer, row.check, row.key, row.run_state, row.verdict, row.source,
+                    {**row.detail, "superseded_by_duplicate_entry": True})
+              if row.check == "standalone_normalize" else row for row in rows]
+    assert marked[0].detail and not marked[1].detail
+    assert "if row.check == \"standalone_normalize\" else row for row in produced" in \
+        Path(feature_layer.__file__).read_text(encoding="utf-8")

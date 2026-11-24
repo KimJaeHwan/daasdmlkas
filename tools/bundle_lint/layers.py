@@ -46,12 +46,13 @@ def transport_rows(diagnosis) -> list[Row]:
         rows.append(Row("transport", "image_info", "bundle", "evaluated", "not_applicable", "engine"))
     else:
         rows.append(Row("transport", "image_info", "bundle", "evaluated", "applied", "engine"))
-        for block in diagnosis.image_info_value.blocks:
+        for index, block in enumerate(diagnosis.image_info_value.blocks):
             # ReadOnlyImage.value's block condition (image_info.py:154, pinned by a
             # guard test); import slots inside a folding block are excluded per
             # address by value() itself -- readonly_use rows show actual uses
             folds = block.initialized and block.read and not block.write and not block.volatile
-            rows.append(Row("transport", "readonly_block", f"{block.space_id}:{block.start:x}", "evaluated",
+            # (keyed by the image-info row: two rows may describe one block, image_info.py:202)
+            rows.append(Row("transport", "readonly_block", f"#{index}/{block.space_id:x}:{block.start:x}", "evaluated",
                             "applied" if folds else "not_applicable", "lint",
                             {"name": block.name, "size": block.size, "read": block.read, "write": block.write,
                              "volatile": block.volatile, "initialized": block.initialized,

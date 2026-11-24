@@ -164,8 +164,14 @@ def call_rows(claim, function_keys) -> list[Row]:
     relations = call_relations(observation, unit.scopes)
     from tdo_v2 import isa_identity
 
-    parts = tuple(unit.scopes.program.evidence.translation_namespace.language_id.split(":"))[:3]
-    pushes = parts not in isa_identity._LINK_REGISTERS
+    evidence_program = unit.scopes.program.evidence
+    parts = tuple(evidence_program.translation_namespace.language_id.split(":"))[:3]
+    isa = "link" if parts in isa_identity._LINK_REGISTERS else \
+        "push" if parts in isa_identity._STACK_REGISTERS else "unknown"
+    x86_64 = parts == ("x86", "LE", "64")
+    sp = isa_identity.stack_register(evidence_program)
+    link_evidence = isa_identity.link_register(evidence_program) is not None \
+        and isa_identity.program_counter(evidence_program) is not None and sp is not None
     rows = []
     for seed, naming in zip(evidence.seeds.callsites, evidence.naming.rows, strict=True):
         key = operation_row_key(claim.function_id, seed.operation_key)
@@ -185,31 +191,46 @@ def call_rows(claim, function_keys) -> list[Row]:
             "local_successors": sorted(_coord(item) for item in successors if item in local),
             "landing_pads": sorted(_coord(item) for item in pads),
         }))
-        # the recognisers as verdict rows (Fable impl r1 P1-2). Criteria (Astra impl r2
-        # P1, Fable impl r2 P2-1): on an ISA whose calls push the continuation (no
-        # link register in isa_identity's table) the projection and the push relation
-        # apply to every native call (CALL / CALLIND), _plain_push_call to a direct
-        # CALL; on a link-register ISA the push rows are not_applicable and the link
-        # relation applies to every native call.
+        # the recognisers as verdict rows. Criteria (Fable impl r1 P1-2 / r2 P2-1 / r3 P3-1,
+        # Astra impl r2 P1 / r3 P1): never hide an engine recognition, never flood.
+        # - unknown ISA (in neither isa_identity table): not_applicable, why unknown ISA
+        # - push_projection / push_relation on every native call: applied when the engine
+        #   recognises it; otherwise unrecognized on a push ISA, not_applicable on a
+        #   link-register ISA (no push expected there); push_relation without stack
+        #   register evidence: withheld (call_relations returns nothing then)
+        # - plain_push: the engine's x86-64 literal shape (interprocedural._plain_push_call)
+        #   on a direct CALL of x86-64; elsewhere not_applicable
+        # - link_relation on every native call of a link-register ISA: withheld without the
+        #   link / pc evidence the recogniser needs (call_relations.py:95-99)
         relation = relations.get(seed.operation_key)
-        if pushes:
-            checks = (
-                ("push_projection", True, seed.operation_key in projected),
-                ("plain_push", opcode == "CALL", bool(memory_space is not None and opcode == "CALL"
-                                                      and _plain_push_call(unit, seed.operation_key, memory_space))),
-                ("push_relation", True, relation is not None and relation.kind == "push"),
-            )
+        held_push = relation is not None and relation.kind == "push"
+        held_link = relation is not None and relation.kind == "link"
+        checks = []
+        if isa == "unknown":
+            for check in ("push_projection", "plain_push", "push_relation", "link_relation"):
+                rows.append(Row("operations", check, key, "evaluated", "not_applicable", "lint",
+                                {"why": "unknown ISA"}))
         else:
-            checks = (("push_projection", False, False), ("plain_push", False, False),
-                      ("push_relation", False, False),
-                      ("link_relation", True, relation is not None and relation.kind == "link"))
-        for check, applies, held in checks:
-            if not applies:
-                rows.append(Row("operations", check, key, "evaluated", "not_applicable", "lint"))
+            miss = "unrecognized" if isa == "push" else "not_applicable"
+            checks.append(("push_projection", "applied" if seed.operation_key in projected else miss))
+            if sp is None:
+                checks.append(("push_relation", "applied" if held_push else "withheld"))
             else:
-                # (plain_push is recognition only: the callee state proof is separate, interprocedural.py:1224)
-                rows.append(Row("operations", check, key, "evaluated", "applied" if held else "unrecognized",
-                                "engine"))
+                checks.append(("push_relation", "applied" if held_push else miss))
+            if x86_64 and opcode == "CALL":
+                plain = memory_space is not None and _plain_push_call(unit, seed.operation_key, memory_space)
+                # (recognition only: the callee state proof is separate, interprocedural.py:1224)
+                checks.append(("plain_push", "applied" if plain else "unrecognized"))
+            else:
+                checks.append(("plain_push", "not_applicable"))
+            if isa == "link":
+                checks.append(("link_relation", "applied" if held_link else
+                               "withheld" if link_evidence is False else "unrecognized"))
+            else:
+                checks.append(("link_relation", "not_applicable"))
+            for check, verdict in checks:
+                rows.append(Row("operations", check, key, "evaluated", verdict,
+                                "engine" if verdict in ("applied", "unrecognized", "withheld") else "lint"))
     return rows
 
 
@@ -380,20 +401,20 @@ def rows(diagnosis, generation, options) -> list[Row]:
         if claim.evidence is not None:
             last[claim.entry] = claim
     for claim in diagnosis.claims:
+        mine = []
         try:
             raw = _raw_observation(generation, claim)
             if claim.scope != "constructed":
-                out.extend(source_rows(claim, raw))
-                continue
-            if claim.evidence is None:
-                continue
-            out.extend(call_rows(claim, function_keys))
-            out.extend(tail_rows(claim, function_keys))
-            out.extend(exit_rows(claim, raw, function_keys, superseded=last.get(claim.entry) is not claim))
-            out.extend(branchind_rows(claim, raw))
-            out.extend(rep_rows(claim))
-            out.extend(callother_rows(claim, models))
-        except Exception as error:   # (one function's rows never stop the report)
-            out.append(Row("operations", "layer_error", claim.function_id or f"#{claim.index}", "error", None,
-                           "lint", {"class": type(error).__qualname__, "message": str(error)}))
+                mine.extend(source_rows(claim, raw))
+            elif claim.evidence is not None:
+                mine.extend(call_rows(claim, function_keys))
+                mine.extend(tail_rows(claim, function_keys))
+                mine.extend(exit_rows(claim, raw, function_keys, superseded=last.get(claim.entry) is not claim))
+                mine.extend(branchind_rows(claim, raw))
+                mine.extend(rep_rows(claim))
+                mine.extend(callother_rows(claim, models))
+        except Exception as error:   # (one function's rows never stop the report; its partial rows are dropped)
+            mine = [Row("operations", "layer_error", claim.function_id or f"#{claim.index}", "error", None,
+                        "lint", {"class": type(error).__qualname__, "message": str(error)})]
+        out.extend(mine)
     return out

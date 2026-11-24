@@ -31,6 +31,9 @@ from report import Row, compare, dumps  # noqa: E402
 TOOL_REVISION = 1
 
 
+RESOURCE_CLASSES = ("MemoryError", "RecursionError", "AnalysisBudgetExceeded")   # (resource_limits.RESOURCE_FAILURES)
+
+
 def _admitted(claims) -> tuple[int, set]:
     members = [claim for claim in claims if claim.get("scope") == "constructed" and claim.get("naming") == "ok"]
     return len(members), {claim["entry"] for claim in members}
@@ -95,10 +98,16 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
             for name in ("stop", "pending", "failures", "graphs", "entry_links_finished", "admission_failures"):
                 if name in child:
                     stopped[name] = child[name]
-            if verdict == "applied":
+            resource = (child.get("exception") or {}).get("class", "").rsplit(".", 1)[-1] in RESOURCE_CLASSES
+            if verdict == "applied" and not resource:
                 rows.append(Row("pipeline", "completion", path, "evaluated", "refused", "engine", stopped))
-            else:
+            else:   # (a resource failure or an unpredicted stop is no verdict on the Bundle)
                 rows.append(Row("pipeline", "completion", path, "error", None, "lint", stopped))
+            continue
+        if diagnosis.get("failed"):
+            # admitted keys are unknown without the diagnosis: no completion verdict (Astra r3 P2, Fable r3 P3-4)
+            rows.append(Row("pipeline", "completion", path, "error", None, "lint",
+                            {"why": "diagnosis failed: admitted function keys unknown"}))
             continue
         if path != "base_graph" and child["supports_count"] != len(child["supported_functions"]):
             rows.append(Row("pipeline", "completion", path, "error", None, "lint",
@@ -114,13 +123,44 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
     return rows
 
 
+def branchind_final_rows(rows, results: dict) -> list[Row]:
+    """Per BRANCHIND site (r2 s2; Fable impl r2 P2-3, Astra impl r3 P2): candidate
+    (the engine's unknown_transfer_sites), exemption (the summary run's
+    control_exemptions for that site), final: ``exempted`` / ``unknown`` /
+    ``known`` -- or ``not_run`` / the summary's run_state when no run says."""
+    summary = results.get("summary")
+    exemptions = {}
+    if summary is not None and summary.get("run_state") == "evaluated" and summary.get("completed"):
+        for site, assumption in summary["control_exemptions"]:
+            exemptions.setdefault(site, []).append(assumption)
+    out = []
+    for row in rows:
+        if row.check != "branchind":
+            continue
+        site = row.key.split("/", 1)[1]
+        candidate = bool(row.detail.get("unknown_transfer"))
+        if summary is None:
+            out.append(Row("pipeline", "branchind_final", row.key, "not_run"))
+        elif summary.get("run_state") != "evaluated" or not summary.get("completed"):
+            out.append(Row("pipeline", "branchind_final", row.key,
+                           summary.get("run_state") if summary.get("run_state") in ("timeout", "error")
+                           else "not_reached"))
+        else:
+            final = "exempted" if candidate and site in exemptions else "unknown" if candidate else "known"
+            verdict = {"exempted": "applied", "unknown": "withheld", "known": "not_applicable"}[final]
+            out.append(Row("pipeline", "branchind_final", row.key, "evaluated", verdict, "engine",
+                           {"candidate": candidate, "exemptions": sorted(exemptions.get(site, [])),
+                            "final": final}))
+    return out
+
+
 def run(generation: Path, naming_source: Path, *, timeout: float, summary: bool, options: dict) -> tuple:
     diag = children.spawn(_HERE / "diagnose.py",
                           [generation, naming_source] + ([json.dumps(options, sort_keys=True)] if options else []),
                           timeout=timeout)
     diagnosis_failed = diag.get("run_state") != "evaluated"
     if diagnosis_failed:   # (the pipelines still run; the report says the diagnosis failed)
-        diag = {**diag, "rows": [], "diagnosis": {"claims": []}, "predictions": {}}
+        diag = {**diag, "rows": [], "diagnosis": {"claims": [], "failed": True}, "predictions": {}}
     results = {}
     for path in children.PATHS:
         if path != "base_graph" and not summary:
@@ -134,6 +174,7 @@ def run(generation: Path, naming_source: Path, *, timeout: float, summary: bool,
     rows.extend(pipeline_rows(diag["diagnosis"], diag["predictions"], results))
     rows.extend(feature_layer.trap_application_rows(rows, {**results, "_predictions": diag["predictions"]},
                                                     options))
+    rows.extend(branchind_final_rows(rows, results))
     header = {
         "tool": "bundle_lint", "revision": TOOL_REVISION, "generation": generation.name,
         "naming_source_sha256": sha256(naming_source.read_bytes()).hexdigest(),

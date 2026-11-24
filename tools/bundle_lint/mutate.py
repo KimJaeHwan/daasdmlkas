@@ -187,6 +187,25 @@ def _renumber(row: dict) -> None:
         op["ordinal"] = index
 
 
+def _reachable(observation: dict) -> frozenset:
+    """Instruction addresses reachable from the entry over fallthroughs and local
+    flow targets (the member's own rows: a fact of the variant, not a verdict)."""
+    rows = {}
+    for item in observation["instructions"]:
+        rows[(item["address"]["space_id"], item["address"]["byte_offset"])] = item
+    entry = (observation["entry"]["space_id"], observation["entry"]["byte_offset"])
+    seen, todo = set(), [entry]
+    while todo:
+        place = todo.pop()
+        if place in seen or place not in rows:
+            continue
+        seen.add(place)
+        item = rows[place]
+        for target in [*item["flow_targets"], *([item["fallthrough"]] if item["fallthrough"] else [])]:
+            todo.append((target["space_id"], target["byte_offset"]))
+    return frozenset(seen)
+
+
 def unique_space(program: dict) -> int:
     """The program's unique space id (never a fixture constant: Fable / Astra impl r1)."""
     spaces = [row["space_id"] for row in program.get("address_spaces", []) if row.get("is_unique_space")]
@@ -241,7 +260,12 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
                 and (target["space_id"], target["byte_offset"]) in reached]
         if not pads:
             raise VariantError("the call row lists no local landing pad reached by another instruction")
+        before = _reachable(observation)
         row["flow_targets"] = [target for target in row["flow_targets"] if target != pads[0]]
+        if _reachable(observation) != before:
+            # the pad's code must stay reachable from the entry another way, else the
+            # function's graph changes beyond the exception path (Astra impl r3 P1)
+            raise VariantError("dropping the pad leaves code unreachable from the entry")
         return {"moved": None, "dropped": pads[0]}
     adjust, store, call = _push_call(row)
     if variant == "call-pattern":
@@ -286,6 +310,9 @@ def _survey(generation: Path, naming_source=None) -> dict:
                     rows[(row.check, row.key)] = row.verdict
                     if row.check == "call":
                         pads[row.key] = tuple(row.detail["landing_pads"])
+                raw = ops_layer._raw_observation(generation, claim)
+                for row in ops_layer.exit_rows(claim, raw, keys):
+                    pads[row.key] = bool(row.detail.get("reach_edge"))
             found[claim.function_id] = (claim.scope, claim.seeds, claim.naming, claim.observation_sha256, rows, pads)
 
     diagnose.diagnose(generation, naming_source or _sealed.NAMING_SOURCE, keep=keep)
@@ -307,7 +334,7 @@ def precheck(survey: dict, function_id: str, site: str, variant: str) -> None:
             raise VariantError(f"source row is not a recognised direct push call: {wanted}")
 
 
-def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: str | None) -> None:
+def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: str | None, index: int = 0) -> None:
     """One condition changed: every other function is unchanged; the target is
     still admitted with its names (call-ordinal: only its names refused); the
     target's call rows other than the site's are unchanged; drop-pad: the
@@ -332,14 +359,17 @@ def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: s
         key = f"{function_id}/{site}"
         if not set(target[5].get(key, ())) < set(before[5].get(key, ())):
             raise VariantError("the validated landing pads did not shrink")
+    if variant == "exit-kind4":
+        key = f"{function_id}/#{index}"
+        if before[5].get(key) is not True or target[5].get(key) is not False:
+            # the variant must remove a reach edge that existed (Astra impl r3 P2)
+            raise VariantError("the S1 exit had no reach edge to remove")
 
 
 # -- driver ---------------------------------------------------------------------------------
 
 def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "function-000000",
            site: str | None = None, index: int = 0, naming_source=None) -> dict:
-    import shutil
-
     if variant not in VARIANTS:
         raise VariantError(f"unknown variant {variant!r}")
     survey = None
@@ -357,12 +387,15 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
     try:
         result = _mutate_copy(generation, variant, function_id, site, index)
         if survey is not None:
-            postcheck(survey, _survey(generation, naming_source), variant, function_id, site)
+            postcheck(survey, _survey(generation, naming_source), variant, function_id, site, index)
         return result
     except BaseException:
+        # a fresh name: an existing result is never deleted (Astra impl r3 P1)
         failed = generation.with_name(generation.name + ".failed")
-        if failed.exists():
-            shutil.rmtree(failed)
+        serial = 1
+        while failed.exists():
+            failed = generation.with_name(f"{generation.name}.failed.{serial}")
+            serial += 1
         generation.rename(failed)
         raise
 

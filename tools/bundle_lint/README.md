@@ -37,7 +37,12 @@ refused function) `<function id>/#<index>`.
 | transport | admission, program, image_info, readonly_block, function_scope, seeds, naming, scoped_iterator |
 | operations | language, stack / link / pc register, fixed_register (engine literals), pcodeop_language, call, push_projection, plain_push, push_relation (push ISAs), link_relation (link-register ISAs), tail_call, s1_exit, branchind (engine `unknown_transfer_sites`), rep_site, callother_model_match, source_row(s), layer_error |
 | features | stack_pointer, standalone_context / standalone_normalize / readonly_use / standalone_rep (`--normalize`), trap_application, rep_application |
-| pipeline | stop, completion (applied only when nothing was lost), run_columns (assumptions, control exemptions, fault report, control sites) |
+| pipeline | stop, completion (applied only when nothing was lost; error for resource failures, unpredicted stops or a failed diagnosis), run_columns (assumptions, control exemptions, fault report, control sites), branchind_final (candidate / exemption / final per BRANCHIND site) |
+
+Recognisers: `push_projection` / `push_relation` on every native call (unrecognized on a push ISA, not_applicable on a
+link-register ISA unless the engine recognises a push; `push_relation` withheld without stack-register evidence);
+`plain_push` only on an x86-64 direct CALL (the engine's literal shape); `link_relation` on a link-register ISA
+(withheld without link / pc / sp evidence); an ISA in neither `isa_identity` table: all not_applicable.
 
 `--expect`: rows by `(layer, check, key)`; `run_state`, `verdict`, `source` and every listed `detail` key (a missing
 key is a difference); `"exhaustive": true` also fails on rows not listed.
