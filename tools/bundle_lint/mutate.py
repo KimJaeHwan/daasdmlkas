@@ -187,25 +187,6 @@ def _renumber(row: dict) -> None:
         op["ordinal"] = index
 
 
-def _reachable(observation: dict) -> frozenset:
-    """Instruction addresses reachable from the entry over fallthroughs and local
-    flow targets (the member's own rows: a fact of the variant, not a verdict)."""
-    rows = {}
-    for item in observation["instructions"]:
-        rows[(item["address"]["space_id"], item["address"]["byte_offset"])] = item
-    entry = (observation["entry"]["space_id"], observation["entry"]["byte_offset"])
-    seen, todo = set(), [entry]
-    while todo:
-        place = todo.pop()
-        if place in seen or place not in rows:
-            continue
-        seen.add(place)
-        item = rows[place]
-        for target in [*item["flow_targets"], *([item["fallthrough"]] if item["fallthrough"] else [])]:
-            todo.append((target["space_id"], target["byte_offset"]))
-    return frozenset(seen)
-
-
 def unique_space(program: dict) -> int:
     """The program's unique space id (never a fixture constant: Fable / Astra impl r1)."""
     spaces = [row["space_id"] for row in program.get("address_spaces", []) if row.get("is_unique_space")]
@@ -242,30 +223,24 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
         raise VariantError(f"{variant} needs --site")
     row = _instruction(observation, site)
     if variant == "drop-pad":
-        # a direct CALL at the named ordinal, and a pad another instruction also
-        # reaches (so only the exception path is lost: r6 s3; Astra impl r1 P2)
+        # the instruction's only CALL-family operation is the named direct CALL (a pad
+        # belongs to the instruction: another CALL in it would lose it too); whether
+        # the function stays the same apart from the exception path is the
+        # engine-based post-check's (Astra impl r4 P1)
         parts = site.split(":")
         ordinal = int(parts[2]) if len(parts) >= 4 else -1
         ops = row["operations"]
-        if not (0 <= ordinal < len(ops)) or ops[ordinal]["opcode"] != "CALL" or parts[3] != "CALL" \
+        calls = [index for index, op in enumerate(ops) if op["opcode"] in ("CALL", "CALLIND")]
+        if calls != [ordinal] or ops[ordinal]["opcode"] != "CALL" or parts[3] != "CALL" \
                 or not ops[ordinal]["inputs"] or ops[ordinal]["inputs"][0]["kind_code"] != 4:
-            raise VariantError("drop-pad needs a direct CALL at the named ordinal")
+            raise VariantError("drop-pad needs an instruction whose only call is the named direct CALL")
         fallthrough = row["fallthrough"]
         local = {(item["address"]["space_id"], item["address"]["byte_offset"]) for item in observation["instructions"]}
-        others = [item for item in observation["instructions"] if item is not row]
-        reached = {(t["space_id"], t["byte_offset"]) for item in others
-                   for t in [*item["flow_targets"], *([item["fallthrough"]] if item["fallthrough"] else [])]}
         pads = [target for target in row["flow_targets"]
-                if (target["space_id"], target["byte_offset"]) in local and target != fallthrough
-                and (target["space_id"], target["byte_offset"]) in reached]
+                if (target["space_id"], target["byte_offset"]) in local and target != fallthrough]
         if not pads:
-            raise VariantError("the call row lists no local landing pad reached by another instruction")
-        before = _reachable(observation)
+            raise VariantError("the call row lists no local landing pad")
         row["flow_targets"] = [target for target in row["flow_targets"] if target != pads[0]]
-        if _reachable(observation) != before:
-            # the pad's code must stay reachable from the entry another way, else the
-            # function's graph changes beyond the exception path (Astra impl r3 P1)
-            raise VariantError("dropping the pad leaves code unreachable from the entry")
         return {"moved": None, "dropped": pads[0]}
     adjust, store, call = _push_call(row)
     if variant == "call-pattern":
@@ -293,27 +268,72 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
 
 # -- source-row check (r3 s4) ---------------------------------------------------------------
 
-def _survey(generation: Path, naming_source=None) -> dict:
+def _survey(generation: Path, naming_source=None, target=None) -> dict:
     """{function id: (scope, seeds, naming, observation sha256, {(check, row key): verdict},
-    {call row key: landing pads})}."""
+    {call row key: landing pads; S1 exit key: reach edge}, target extras | None)}.
+
+    Target extras (engine functions, Astra impl r4): the entry-reachable
+    instruction set over ``control_successor_coordinates``, whether a default
+    ``FunctionNormalizer.normalize`` gives a ``NormalizedFunction``, the reach
+    edges of ``control_context._edges``, the S1 exit tuples and the
+    stack-pointer row. Reach edges and exits come from the member the summary
+    keeps (the last one of an entry)."""
     import diagnose
+    import feature_layer
     import ops_layer
 
     found = {}
 
     def keep(diagnosis):
+        from types import SimpleNamespace
+
+        from tdo_v2.control_context import _edges
+        from tdo_v2.control_projection import control_successor_coordinates
+        from tdo_v2.normalize import FunctionNormalizer, NormalizedFunction
+
         keys = {claim.entry for claim in diagnosis.claims if claim.entry}
+        last = {}
         for claim in diagnosis.claims:
-            rows, pads = {}, {}
             if claim.evidence is not None:
+                last[claim.entry] = claim
+        for claim in diagnosis.claims:
+            rows, pads, extras = {}, {}, None
+            if claim.evidence is not None:
+                superseded = last.get(claim.entry) is not claim
                 for row in ops_layer.call_rows(claim, keys):
-                    rows[(row.check, row.key)] = row.verdict
+                    rows[(row.check, row.key)] = (row.verdict, row.detail.get("landing_pads"))
                     if row.check == "call":
                         pads[row.key] = tuple(row.detail["landing_pads"])
                 raw = ops_layer._raw_observation(generation, claim)
-                for row in ops_layer.exit_rows(claim, raw, keys):
+                exits = ops_layer.exit_rows(claim, raw, keys, superseded=superseded)
+                for row in exits:
                     pads[row.key] = bool(row.detail.get("reach_edge"))
-            found[claim.function_id] = (claim.scope, claim.seeds, claim.naming, claim.observation_sha256, rows, pads)
+                if claim.function_id == target:
+                    observation = claim.unit.observation
+                    entry = claim.unit.scopes.function.entry
+                    local = {row.address for row in observation.instructions}
+                    by_address = {row.address: row for row in observation.instructions}
+                    seen, todo = set(), [entry]
+                    while todo:
+                        place = todo.pop()
+                        if place in seen or place not in by_address:
+                            continue
+                        seen.add(place)
+                        todo.extend(control_successor_coordinates(by_address[place], local_addresses=local,
+                                                                  function_entry=entry))
+                    normalized = FunctionNormalizer().normalize(claim.unit)
+                    stack = feature_layer.stack_rows(claim)[0]
+                    extras = {
+                        "reach": frozenset(seen),
+                        "normalized": type(normalized) is NormalizedFunction,
+                        "edges": frozenset() if superseded else frozenset(
+                            _edges(claim.entry, SimpleNamespace(unit=claim.unit, calls={}, multi_calls={}), keys)),
+                        "exits": {row.key: (row.detail.get("kind"), row.detail.get("function")) for row in exits},
+                        "stack": (stack.verdict, stack.detail),
+                        "superseded": superseded,
+                    }
+            found[claim.function_id] = (claim.scope, claim.seeds, claim.naming, claim.observation_sha256, rows, pads,
+                                        extras)
 
     diagnose.diagnose(generation, naming_source or _sealed.NAMING_SOURCE, keep=keep)
     return found
@@ -329,7 +349,8 @@ def precheck(survey: dict, function_id: str, site: str, variant: str) -> None:
         raise VariantError(f"the source function is not admitted with its names: {None if target is None else target[:3]}")
     if variant in ("call-pattern", "call-reshape", "call-swap"):
         key = f"{function_id}/{site}"
-        wanted = {check: target[4].get((check, key)) for check in ("push_projection", "plain_push", "push_relation")}
+        wanted = {check: (target[4].get((check, key)) or (None,))[0]
+                  for check in ("push_projection", "plain_push", "push_relation")}
         if any(verdict != "applied" for verdict in wanted.values()):
             raise VariantError(f"source row is not a recognised direct push call: {wanted}")
 
@@ -350,20 +371,45 @@ def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: s
         raise VariantError(f"the target function is {target[:3]}, expected {expected}")
     if variant == "call-ordinal":
         return
+    if variant == "drop-pad":
+        # only the named operation's pads change, by exactly the dropped coordinate;
+        # the entry-reachable set and the normalisation outcome stay (Astra impl r4 P1)
+        key = f"{function_id}/{site}"
+        exclude = {("call", key), ("push_projection", key), ("plain_push", key), ("push_relation", key),
+                   ("link_relation", key)}
+        if {k: v for k, v in target[4].items() if k not in exclude} != \
+                {k: v for k, v in before[4].items() if k not in exclude}:
+            raise VariantError("the variant changed other call rows of the target function")
+        lost = set(before[5].get(key, ())) - set(target[5].get(key, ()))
+        if len(lost) != 1 or set(target[5].get(key, ())) - set(before[5].get(key, ())):
+            raise VariantError("the validated landing pads did not lose exactly one coordinate")
+        if target[6]["reach"] != before[6]["reach"]:
+            raise VariantError("dropping the pad changes what is reachable from the entry")
+        if not (before[6]["normalized"] and target[6]["normalized"]):
+            raise VariantError("the target function does not normalise on both sides")
+        return
     prefix = None if site is None else f"{function_id}/" + ":".join(site.split(":")[:2]) + ":"
     def others(rows):
         return {key: value for key, value in rows.items() if prefix is None or not key[1].startswith(prefix)}
     if others(target[4]) != others(before[4]):
         raise VariantError("the variant changed other call rows of the target function")
-    if variant == "drop-pad":
-        key = f"{function_id}/{site}"
-        if not set(target[5].get(key, ())) < set(before[5].get(key, ())):
-            raise VariantError("the validated landing pads did not shrink")
+    if variant in ("call-pattern", "call-reshape", "call-swap"):
+        # the stack identification must survive (an independent SP evidence in the
+        # same function, r5 s2; Astra impl r4 P2)
+        if not (before[6]["stack"][0] == target[6]["stack"][0] == "applied"
+                and before[6]["stack"][1] == target[6]["stack"][1]):
+            raise VariantError(f"the variant changed the stack identification: {before[6]['stack']} -> "
+                               f"{target[6]['stack']}")
     if variant == "exit-kind4":
         key = f"{function_id}/#{index}"
-        if before[5].get(key) is not True or target[5].get(key) is not False:
-            # the variant must remove a reach edge that existed (Astra impl r3 P2)
-            raise VariantError("the S1 exit had no reach edge to remove")
+        if before[6]["superseded"]:
+            raise VariantError("the S1 exit's member is replaced by a later member of its entry")
+        old, new = before[6]["exits"].get(key), target[6]["exits"].get(key)
+        if old is None or old[0] != 2 or new != (4, None):
+            raise VariantError(f"the S1 exit did not change (2, B) -> (4, null): {old} -> {new}")
+        if old[1] not in before[6]["edges"] or old[1] in target[6]["edges"]:
+            # the engine's reach edge to B must exist before and be gone after (Astra impl r4 P2)
+            raise VariantError("the variant does not remove the engine's reach edge to the exit's function")
 
 
 # -- driver ---------------------------------------------------------------------------------
@@ -374,7 +420,7 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
         raise VariantError(f"unknown variant {variant!r}")
     survey = None
     if variant != "seal":
-        survey = _survey(source, naming_source)
+        survey = _survey(source, naming_source, target=function_id)
         precheck(survey, function_id, site, variant)
         if variant == "call-reshape":
             manifest = _json(source / "manifest.json")
@@ -387,7 +433,8 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
     try:
         result = _mutate_copy(generation, variant, function_id, site, index)
         if survey is not None:
-            postcheck(survey, _survey(generation, naming_source), variant, function_id, site, index)
+            postcheck(survey, _survey(generation, naming_source, target=function_id), variant, function_id, site,
+                      index)
         return result
     except BaseException:
         # a fresh name: an existing result is never deleted (Astra impl r3 P1)

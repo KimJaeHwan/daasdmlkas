@@ -31,9 +31,6 @@ from report import Row, compare, dumps  # noqa: E402
 TOOL_REVISION = 1
 
 
-RESOURCE_CLASSES = ("MemoryError", "RecursionError", "AnalysisBudgetExceeded")   # (resource_limits.RESOURCE_FAILURES)
-
-
 def _admitted(claims) -> tuple[int, set]:
     members = [claim for claim in claims if claim.get("scope") == "constructed" and claim.get("naming") == "ok"]
     return len(members), {claim["entry"] for claim in members}
@@ -83,6 +80,8 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
             continue
         prediction = predictions.get(path)
         state, verdict, detail = diagnose.check_stop(prediction, child)
+        if (child.get("exception") or {}).get("resource"):
+            state, verdict = "error", None   # (a resource failure is no stop verdict)
         rows.append(Row("pipeline", "stop", path, state, verdict, "lint", detail))
         if child.get("run_state") != "evaluated":
             rows.append(Row("pipeline", "completion", path, child.get("run_state", "error"), None, "lint",
@@ -98,7 +97,7 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
             for name in ("stop", "pending", "failures", "graphs", "entry_links_finished", "admission_failures"):
                 if name in child:
                     stopped[name] = child[name]
-            resource = (child.get("exception") or {}).get("class", "").rsplit(".", 1)[-1] in RESOURCE_CLASSES
+            resource = bool((child.get("exception") or {}).get("resource"))   # (isinstance in the child)
             if verdict == "applied" and not resource:
                 rows.append(Row("pipeline", "completion", path, "evaluated", "refused", "engine", stopped))
             else:   # (a resource failure or an unpredicted stop is no verdict on the Bundle)
@@ -124,15 +123,24 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
 
 
 def branchind_final_rows(rows, results: dict) -> list[Row]:
-    """Per BRANCHIND site (r2 s2; Fable impl r2 P2-3, Astra impl r3 P2): candidate
-    (the engine's unknown_transfer_sites), exemption (the summary run's
-    control_exemptions for that site), final: ``exempted`` / ``unknown`` /
-    ``known`` -- or ``not_run`` / the summary's run_state when no run says."""
+    """Per BRANCHIND site of the member the summary analyses (Astra impl r4 P1):
+    a member replaced by a later one of the same entry -> not_reached; the
+    adopted member's site: ``control_sites`` kind ``unknown-transfer`` ->
+    unknown / withheld, ``import-tail-reentry`` -> import-tail-reentry /
+    withheld, else exempted (``control_exemptions``) -> applied, else no
+    candidate -> known / not_applicable, else a candidate the run published
+    nowhere -> unobserved. The exemption and fault-report rows of the key are
+    kept in the detail."""
     summary = results.get("summary")
-    exemptions = {}
-    if summary is not None and summary.get("run_state") == "evaluated" and summary.get("completed"):
+    ok = summary is not None and summary.get("run_state") == "evaluated" and summary.get("completed")
+    exemptions, kinds, faults = {}, {}, {}
+    if ok:
         for site, assumption in summary["control_exemptions"]:
             exemptions.setdefault(site, []).append(assumption)
+        for row in summary["control_sites"]:
+            kinds.setdefault(row[0], set()).add(row[1])
+        for row in summary["fault_report"]:
+            faults.setdefault(row[0], []).append(list(row[1:]))
     out = []
     for row in rows:
         if row.check != "branchind":
@@ -141,16 +149,30 @@ def branchind_final_rows(rows, results: dict) -> list[Row]:
         candidate = bool(row.detail.get("unknown_transfer"))
         if summary is None:
             out.append(Row("pipeline", "branchind_final", row.key, "not_run"))
-        elif summary.get("run_state") != "evaluated" or not summary.get("completed"):
+            continue
+        if not ok:
             out.append(Row("pipeline", "branchind_final", row.key,
                            summary.get("run_state") if summary.get("run_state") in ("timeout", "error")
                            else "not_reached"))
+            continue
+        if row.detail.get("superseded_by_duplicate_entry"):
+            out.append(Row("pipeline", "branchind_final", row.key, "not_reached", None, "lint",
+                           {"why": "a later member of the same entry is the one the summary analyses"}))
+            continue
+        detail = {"candidate": candidate, "exemptions": sorted(exemptions.get(site, [])),
+                  "control_site_kinds": sorted(kinds.get(site, ())), "fault_report": faults.get(site, [])}
+        if "unknown-transfer" in kinds.get(site, ()):
+            final, verdict, state = "unknown", "withheld", "evaluated"
+        elif "import-tail-reentry" in kinds.get(site, ()):
+            final, verdict, state = "import-tail-reentry", "withheld", "evaluated"
+        elif site in exemptions:
+            final, verdict, state = "exempted", "applied", "evaluated"
+        elif not candidate:
+            final, verdict, state = "known", "not_applicable", "evaluated"
         else:
-            final = "exempted" if candidate and site in exemptions else "unknown" if candidate else "known"
-            verdict = {"exempted": "applied", "unknown": "withheld", "known": "not_applicable"}[final]
-            out.append(Row("pipeline", "branchind_final", row.key, "evaluated", verdict, "engine",
-                           {"candidate": candidate, "exemptions": sorted(exemptions.get(site, [])),
-                            "final": final}))
+            final, verdict, state = "unpublished", None, "unobserved"
+        out.append(Row("pipeline", "branchind_final", row.key, state, verdict,
+                       "engine" if verdict else "lint", {**detail, "final": final}))
     return out
 
 
@@ -201,6 +223,9 @@ def main(argv=None) -> int:
     parser.add_argument("--pcodeop-models", type=Path, action="append",
                         help="p-code op model files for a summary run with them (hash in the header)")
     args = parser.parse_args(argv)
+    if not args.naming_source.is_file() or not args.generation.is_dir():
+        print("bundle_lint: the generation directory and the naming source must exist", file=sys.stderr)
+        return 2
     options = json.loads(args.options.read_text()) if args.options else {}
     if args.normalize:
         options["lint_normalize"] = True

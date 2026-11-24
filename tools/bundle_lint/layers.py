@@ -39,7 +39,9 @@ def transport_rows(diagnosis) -> list[Row]:
         rows.append(Row("transport", "program", "bundle", "evaluated", "refused", "engine",
                         {"stage": program["stage"], "reason": program["reason"]}))
     image = diagnosis.image_info
-    if not image.get("ok"):
+    if not image.get("ok") and image.get("resource"):
+        rows.append(Row("transport", "image_info", "bundle", "error", None, "lint", {"error": image["error"]}))
+    elif not image.get("ok"):
         rows.append(Row("transport", "image_info", "bundle", "evaluated", "refused", "engine",
                         {"error": image["error"]}))
     elif not image["present"]:
@@ -73,6 +75,8 @@ def transport_rows(diagnosis) -> list[Row]:
         if claim.scope == "constructed":
             if claim.seeds == "ok":
                 rows.append(Row("transport", "seeds", key, "evaluated", "applied", "engine"))
+            elif (claim.seeds_error or {}).get("resource"):
+                rows.append(Row("transport", "seeds", key, "error", None, "lint", {"error": claim.seeds_error}))
             else:
                 rows.append(Row("transport", "seeds", key, "evaluated", "refused", "engine",
                                 {"error": claim.seeds_error}))
@@ -80,12 +84,16 @@ def transport_rows(diagnosis) -> list[Row]:
             rows.append(Row("transport", "seeds", key, "not_reached"))
         if claim.naming == "ok":
             rows.append(Row("transport", "naming", key, "evaluated", "applied", "engine"))
+        elif claim.naming == "error" and claim.naming_error.get("resource"):
+            rows.append(Row("transport", "naming", key, "error", None, "lint", {"error": claim.naming_error}))
         elif claim.naming == "error":
             rows.append(Row("transport", "naming", key, "evaluated", "refused", "engine",
                             {"error": claim.naming_error}))
         else:
             rows.append(Row("transport", "naming", key, "not_reached"))
-    if diagnosis.fatal is not None:
+    if diagnosis.fatal is not None and diagnosis.fatal.get("resource"):
+        rows.append(Row("transport", "scoped_iterator", "bundle", "error", None, "lint", diagnosis.fatal))
+    elif diagnosis.fatal is not None:
         rows.append(Row("transport", "scoped_iterator", "bundle", "evaluated", "refused", "engine",
                         diagnosis.fatal))
     return rows

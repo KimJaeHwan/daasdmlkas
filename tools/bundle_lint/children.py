@@ -36,7 +36,10 @@ def worker_state() -> dict:
 
 
 def _error(error: BaseException) -> dict:
-    return {"class": f"{type(error).__module__}.{type(error).__qualname__}", "message": str(error)}
+    from tdo_v2.resource_limits import RESOURCE_FAILURES
+
+    return {"class": f"{type(error).__module__}.{type(error).__qualname__}", "message": str(error),
+            "resource": isinstance(error, RESOURCE_FAILURES)}
 
 
 def summary_options(options: dict) -> dict:

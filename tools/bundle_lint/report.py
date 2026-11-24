@@ -86,6 +86,17 @@ class Row:
                    data.get("verdict"), data.get("source", "lint"), data.get("detail", {}))
 
 
+def _finite(value):
+    """Non-finite floats (a member's 1e400) become null: the report is strict JSON."""
+    if isinstance(value, float) and value != value or value in (float("inf"), float("-inf")):
+        return None
+    if isinstance(value, dict):
+        return {key: _finite(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(item) for item in value]
+    return value
+
+
 def dumps(header: dict, rows) -> str:
     rows = sorted(rows, key=Row.ident)
     seen = set()
@@ -93,8 +104,8 @@ def dumps(header: dict, rows) -> str:
         if row.ident() in seen:
             raise ValueError(f"duplicate report row {row.ident()!r}")
         seen.add(row.ident())
-    return json.dumps({"header": header, "rows": [row.as_json() for row in rows]},
-                      indent=1, sort_keys=True) + "\n"
+    return json.dumps(_finite({"header": header, "rows": [row.as_json() for row in rows]}),
+                      indent=1, sort_keys=True, allow_nan=False) + "\n"
 
 
 def compare(expect: dict, actual: dict) -> list[str]:

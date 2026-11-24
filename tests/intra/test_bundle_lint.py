@@ -795,25 +795,25 @@ def test_guard_session_step_order_and_helpers():
 
 
 def test_guard_engine_language_literals_are_inventoried():
-    """Convention keys (r1 s5): files of the engine that compare language-id
-    literals. A new one fails here until it is modelled (ops_layer
+    """Convention keys (r1 s5): language-id literals in the engine, counted per
+    file. A new literal (or file) fails here until it is modelled (ops_layer
     FIXED_OFFSETS / convention rows) or listed in the README."""
     import re
 
     pattern = re.compile(r"[\"'](x86|AARCH64|ARM)[:\"']")
     src = REPO / "src" / "tdo_v2"
-    found = sorted(str(path.relative_to(src)).replace("\\", "/") for path in src.rglob("*.py")
-                   if pattern.search(path.read_text(encoding="utf-8")))
-    assert found == sorted(LANGUAGE_LITERAL_FILES), found
+    found = {path.relative_to(src).as_posix(): len(pattern.findall(path.read_text(encoding="utf-8")))
+             for path in src.rglob("*.py")}
+    assert {name: count for name, count in found.items() if count} == LANGUAGE_LITERALS
 
 
-LANGUAGE_LITERAL_FILES = (
-    "code_only_profile.py", "fault_premise.py", "integration/configured_dynamic_alias_explanation.py",
-    "integration/configured_finite_byte_kernel.py", "integration/configured_finite_context_scheduler.py",
-    "interprocedural.py", "intrinsic_refinements.py", "intrinsic_semantics.py", "isa_identity.py", "linking.py",
-    "may_alias.py", "operation_records.py", "return_relations.py", "summary_engine.py", "summary_store.py",
-    "summary_templates.py",
-)
+LANGUAGE_LITERALS = {
+    "code_only_profile.py": 2, "fault_premise.py": 2, "integration/configured_dynamic_alias_explanation.py": 1,
+    "integration/configured_finite_byte_kernel.py": 1, "integration/configured_finite_context_scheduler.py": 1,
+    "interprocedural.py": 1, "intrinsic_refinements.py": 2, "intrinsic_semantics.py": 1, "isa_identity.py": 7,
+    "linking.py": 2, "may_alias.py": 2, "operation_records.py": 1, "return_relations.py": 3, "summary_engine.py": 1,
+    "summary_store.py": 1, "summary_templates.py": 1,
+}
 
 
 
@@ -837,7 +837,7 @@ def test_drop_pad_refuses_when_the_pad_code_would_become_unreachable(sealed):
     out = root / "out"
     out.mkdir(mode=0o755)
     for _ in range(2):   # (a second failure gets a fresh name; nothing is deleted)
-        with pytest.raises(mutate.VariantError, match="unreachable"):
+        with pytest.raises(mutate.VariantError, match="reachable from the entry"):
             mutate.mutate(source, out, "drop-pad", function_id="function-000000", site="1:1000:2:CALL")
     assert sorted(path.name[len(source.name):] for path in out.iterdir()) == [".failed", ".failed.1"]
 
@@ -926,15 +926,184 @@ def test_exit_kind4_refuses_an_exit_without_a_reach_edge(sealed):
         _variant(sealed, "exit-kind4", bundle=bundle, function_id="function-000001", index=0)
 
 
-def test_superseded_mark_lands_on_the_normalize_row():
-    import feature_layer
-    import report as r
+@posix
+def test_superseded_mark_lands_on_the_normalize_row(sealed):
+    """Through feature_layer.rows(): a replaced member with a read-only use gets the
+    mark on its standalone_normalize row only (Fable r3 P2-1, Astra r4 P3)."""
+    s = sealed[0]
+    first = _slot_bundle(s).functions[0]
+    second = s.Function("F2", s.observation(0x1000, [s.ret(0x1000)]))
+    bundle = _slot_bundle(s)
+    bundle.functions = [first, second]
+    rows, _ = _run_lint(sealed, bundle, "mark", summary=False, options={"lint_normalize": True})
+    assert rows[("features", "standalone_normalize", "function-000000")].detail.get("superseded_by_duplicate_entry")
+    assert not rows[("features", "readonly_use", "function-000000/1:1f00")].detail
+    assert "superseded_by_duplicate_entry" not in rows[("features", "standalone_normalize", "function-000001")].detail
 
-    rows = [r.Row("features", "standalone_normalize", "f", "evaluated", "applied", "engine"),
-            r.Row("features", "readonly_use", "f/1:1f00", "evaluated", "applied", "engine")]
-    marked = [r.Row(row.layer, row.check, row.key, row.run_state, row.verdict, row.source,
-                    {**row.detail, "superseded_by_duplicate_entry": True})
-              if row.check == "standalone_normalize" else row for row in rows]
-    assert marked[0].detail and not marked[1].detail
-    assert "if row.check == \"standalone_normalize\" else row for row in produced" in \
-        Path(feature_layer.__file__).read_text(encoding="utf-8")
+
+
+# -- implementation review r4 (Astra fix specs adopted) ------------------------------------
+
+@posix
+def test_drop_pad_refuses_an_instruction_with_two_calls(sealed):
+    import mutate
+
+    s = sealed[0]
+    two = s.row(0x1000, 5, s.ops(("INT_SUB", [s.reg(s.RSP), s.const(8)], s.reg(s.RSP)),
+                                 ("STORE", [s.const(s.RAM), s.reg(s.RSP), s.const(0x1005)], None),
+                                 ("CALL", [s.ram(0x1800)], None), ("CALL", [s.ram(0x1800)], None)),
+                s.CALL_FLOW, 0x1005, [0x1800, 0x100A])
+    jump = s.row(0x1005, 5, s.ops(("BRANCH", [s.ram(0x100A)], None)),
+                 s.flow(is_flow=True, is_jump=True, is_unconditional=True), None, [0x100A])
+    bundle = s.Bundle([s.Function("A", s.observation(0x1000, [two, jump, s.ret(0x100A)])),
+                       s.Function("B", s.observation(0x1800, [s.ret(0x1800)]))])
+    with pytest.raises(mutate.VariantError, match="only call"):
+        _variant(sealed, "drop-pad", bundle=bundle, function_id="function-000000", site="1:1000:2:CALL")
+
+
+@posix
+def test_drop_pad_accepts_a_pad_reached_by_a_branch_operand_only(sealed):
+    s = sealed[0]
+    bundle = _layer2_bundle(s)
+    bundle.functions[0].observation["instructions"][1]["flow_targets"] = []   # (BRANCH lists no target)
+    rows, base, _ = _variant(sealed, "drop-pad", bundle=bundle, function_id="function-000000",
+                             site="1:1000:2:CALL")
+    call = ("operations", "call", "function-000000/1:1000:2:CALL")
+    assert base[call].detail["landing_pads"] == ["1:100a"] and rows[call].detail["landing_pads"] == []
+
+
+@posix
+def test_branchind_final_of_a_replaced_member_is_not_reached(sealed):
+    s = sealed[0]
+    jump = s.flow(is_flow=True, is_jump=True, is_computed=True, is_terminal=True, is_unconditional=True)
+    first = s.Function("F1", s.observation(0x1000, [s.row(0x1000, 2, s.ops(("BRANCHIND", [s.reg(s.RAX)], None)),
+                                                          jump)]))
+    last = s.Function("F2", s.observation(0x1000, [s.ret(0x1000)]))
+    rows, _ = _run_lint(sealed, s.Bundle([first, last]), "dupbi")
+    key = "function-000000/control:1:1000:1:1000"
+    assert rows[("operations", "branchind", key)].verdict == "withheld"
+    final = rows[("pipeline", "branchind_final", key)]
+    assert final.run_state == "not_reached", final
+
+
+@posix
+def test_a_non_finite_number_in_a_refused_member_keeps_the_report_strict_json(sealed, tmp_path):
+    import lint
+
+    s, root = sealed
+    bad = s.observation(0x1800, [s.ret(0x1800)])
+    data = s.dumps(bad).replace(b'"opcode":"RETURN"', b'"opcode":1e400')
+    bundle = s.Bundle([s.Function("A", s.observation(0x1000, [s.ret(0x1000)])), s.Function("B", bad)],
+                      overrides={"function-000001": data})
+    sub = root / "nan"
+    sub.mkdir(mode=0o755)
+    gen = s.write(sub, bundle)
+    out = tmp_path / "r.json"
+    assert lint.main([str(gen), "--no-summary", "--out", str(out)]) == 0
+
+    def refuse(name):
+        raise ValueError(name)
+
+    report_json = json.loads(out.read_text(), parse_constant=refuse)
+    rows = {(r["layer"], r["check"], r["key"]): r for r in report_json["rows"]}
+    assert rows[("transport", "function_scope", "function-000001")]["verdict"] == "refused"
+    assert rows[("operations", "source_row", "function-000001/#0")]["detail"]["opcodes"][2] is None
+
+
+@posix
+def test_exit_kind4_refuses_a_replaced_member_and_a_remaining_direct_call(sealed):
+    import mutate
+
+    s = sealed[0]
+    dup = _layer2_bundle(s)
+    dup.functions.insert(2, s.Function("E2", s.observation(0x17F0, [s.ret(0x17F0)])))   # (replaces E)
+    with pytest.raises(mutate.VariantError):
+        _variant(sealed, "exit-kind4", bundle=dup, function_id="function-000001", index=0)
+
+
+@posix
+def test_exit_kind4_refuses_when_a_direct_call_keeps_the_edge(sealed):
+    import mutate
+
+    s = sealed[0]
+    bundle = _layer2_bundle(s)
+    e = bundle.functions[1].observation
+    e["instructions"][0] = s.call(0x17F0, 0x1800, length=3)
+    e["instructions"][0]["fallthrough"] = s.coord(0x17F3)
+    e["instructions"][0]["operations"][1]["inputs"][2] = s.const(0x17F3)
+    with pytest.raises(mutate.VariantError):
+        _variant(sealed, "exit-kind4", bundle=bundle, function_id="function-000001", index=0)
+
+
+@posix
+@pytest.mark.parametrize("variant", ["call-pattern", "call-reshape", "call-swap"])
+def test_call_variants_refuse_when_the_push_is_the_only_sp_evidence(sealed, variant):
+    import mutate
+
+    s = sealed[0]
+    bare_ret = s.row(0x100C, 1, s.ops(("RETURN", [s.reg(s.RIP)], None)), s.RET_FLOW)
+    a = s.Function("A", s.observation(0x1000, [s.plain(0x1000, 7, ("COPY", [s.const(23)], s.reg(s.RCX))),
+                                               s.call(0x1007, 0x1800), bare_ret]))
+    bundle = s.Bundle([a, s.Function("B", s.observation(0x1800, [s.ret(0x1800)]))])
+    with pytest.raises(mutate.VariantError, match="stack identification"):
+        _variant(sealed, variant, bundle=bundle, function_id="function-000000", site=SITE)
+
+
+@posix
+def test_unknown_isa_push_projection_and_return_shape_rows(sealed):
+    s = sealed[0]
+    bundle = s.two_function_bundle(program=s.program(language=("custom:LE:64:test", 1, 0)))
+    rows, _ = _run_lint(sealed, bundle, "custom", summary=False)
+    if rows[("transport", "program", "bundle")].verdict != "applied":
+        pytest.fail("the custom language program is refused")
+    assert rows[("operations", "push_projection", "function-000000/" + SITE)].verdict == "applied"
+    ref, _ = _run_lint(sealed, s.two_function_bundle(), "rets", summary=False)
+    assert ref[("operations", "return_shape", "function-000000/1:100c:2:RETURN")].verdict == "applied"
+    bare = s.two_function_bundle()
+    bare.functions[1].observation["instructions"][1] = s.row(0x1803, 1, s.ops(("RETURN", [s.reg(s.RIP)], None)),
+                                                             s.RET_FLOW)
+    rows_bare, _ = _run_lint(sealed, bare, "bare", summary=False)
+    assert rows_bare[("operations", "return_shape", "function-000001/1:1803:0:RETURN")].verdict == "unrecognized"
+
+
+@posix
+def test_resource_failures_are_errors(sealed, monkeypatch):
+    import children
+    import diagnose
+    import layers
+    import lint
+    from tdo_v2 import image_info
+    from tdo_v2.resource_limits import BoundExceeded
+
+    s, root = sealed
+    gen = s.write(root, s.two_function_bundle())
+
+    def boom(path):
+        raise MemoryError("synthetic")
+
+    monkeypatch.setattr(image_info, "load_image_info", boom)
+    found = diagnose.diagnose(gen, s.NAMING_SOURCE)
+    row = next(r for r in layers.transport_rows(found) if r.check == "image_info")
+    assert (row.run_state, row.verdict) == ("error", None)
+    error = children._error(BoundExceeded("synthetic"))
+    assert error["resource"] is True
+    child = {"run_state": "evaluated", "completed": False, "exception": error}
+    rows = {r.ident(): r for r in lint.pipeline_rows({"claims": []}, {"summary": None}, {"summary": child})}
+    assert rows[("pipeline", "completion", "summary")].run_state == "error"
+    assert rows[("pipeline", "stop", "summary")].run_state == "error"
+
+
+@posix
+def test_standalone_not_reached_when_the_program_is_refused(sealed):
+    s = sealed[0]
+    bundle = s.two_function_bundle(program=s.program(image_base=0x1004))
+    rows, _ = _run_lint(sealed, bundle, "noprog", summary=False, options={"lint_normalize": True})
+    assert rows[("transport", "program", "bundle")].verdict == "refused"
+    assert rows[("features", "standalone_context", "program")].run_state == "not_reached"
+
+
+def test_cli_refuses_a_missing_naming_source(tmp_path):
+    import lint
+
+    assert lint.main([str(tmp_path), "--naming-source", str(tmp_path / "missing.java"),
+                      "--out", str(tmp_path / "r.json")]) == 2

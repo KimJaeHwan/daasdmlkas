@@ -131,8 +131,8 @@ def source_rows(claim, raw) -> list[Row]:
         ops = item.get("operations") if isinstance(item, dict) else None
         rows.append(Row("operations", "source_row", source_row_key(claim.function_id, index), "not_reached", None,
                         "lint", {"address": _raw_coord(address) if isinstance(address, dict) else None,
-                                 "opcodes": [op.get("opcode") for op in ops if isinstance(op, dict)]
-                                 if isinstance(ops, list) else None}))
+                                 "opcodes": [op.get("opcode") if isinstance(op, dict) and isinstance(op.get("opcode"), str)
+                                             else None for op in ops] if isinstance(ops, list) else None}))
     return rows
 
 
@@ -207,8 +207,15 @@ def call_rows(claim, function_keys) -> list[Row]:
         held_link = relation is not None and relation.kind == "link"
         checks = []
         if isa == "unknown":
-            for check in ("push_projection", "plain_push", "push_relation", "link_relation"):
-                rows.append(Row("operations", check, key, "evaluated", "not_applicable", "lint",
+            # (an engine recognition is never hidden, even on an unknown ISA: Astra impl r4 P2)
+            rows.append(Row("operations", "push_projection", key, "evaluated", "applied", "engine")
+                        if seed.operation_key in projected else
+                        Row("operations", "push_projection", key, "evaluated", "not_applicable", "lint",
+                            {"why": "unknown ISA"}))
+            for check in ("plain_push", "push_relation", "link_relation"):
+                held = check == "push_relation" and held_push or check == "link_relation" and held_link
+                rows.append(Row("operations", check, key, "evaluated", "applied", "engine") if held else
+                            Row("operations", check, key, "evaluated", "not_applicable", "lint",
                                 {"why": "unknown ISA"}))
         else:
             miss = "unrecognized" if isa == "push" else "not_applicable"
@@ -283,7 +290,7 @@ def exit_rows(claim, raw, function_keys, superseded=False) -> list[Row]:
     return rows
 
 
-def branchind_rows(claim, raw) -> list[Row]:
+def branchind_rows(claim, raw, superseded=False) -> list[Row]:
     """Every row with a BRANCHIND (any ordinal): the member's own target list,
     the validated ``flow_targets`` and the engine's local successors (facts);
     the verdict is the engine's own predicate ``unknown_transfer_sites``
@@ -310,10 +317,28 @@ def branchind_rows(claim, raw) -> list[Row]:
         rows.append(Row("operations", "branchind", f"{claim.function_id}/{site}", "evaluated",
                         "withheld" if site in unknown else "applied", "engine", {
                             "unknown_transfer": site in unknown,
+                            **({"superseded_by_duplicate_entry": True} if superseded else {}),
                             "raw_targets": sorted(str(_raw_coord(t)) for t in item.get("flow_targets", [])
                                                   if isinstance(t, dict)),
                             "flow_targets": sorted(_coord(t) for t in instruction.flow_targets),
                             "local_successors": sorted(_coord(t) for t in successors if t in local)}))
+    return rows
+
+
+def return_rows(claim) -> list[Row]:
+    """Every instruction with a RETURN: the engine's return-shape recogniser
+    (``may_alias._return_shape``, an SP evidence of the stack identification)."""
+    from tdo_v2.call_seeds import _operation_key
+    from tdo_v2.may_alias import _return_shape
+
+    rows = []
+    for instruction in claim.unit.observation.instructions:
+        for ordinal, operation in enumerate(instruction.operations):
+            if operation.opcode != "RETURN":
+                continue
+            key = operation_row_key(claim.function_id, _operation_key(instruction.address, ordinal, "RETURN"))
+            rows.append(Row("operations", "return_shape", key, "evaluated",
+                            "applied" if _return_shape(instruction) is not None else "unrecognized", "engine"))
     return rows
 
 
@@ -410,8 +435,9 @@ def rows(diagnosis, generation, options) -> list[Row]:
                 mine.extend(call_rows(claim, function_keys))
                 mine.extend(tail_rows(claim, function_keys))
                 mine.extend(exit_rows(claim, raw, function_keys, superseded=last.get(claim.entry) is not claim))
-                mine.extend(branchind_rows(claim, raw))
+                mine.extend(branchind_rows(claim, raw, superseded=last.get(claim.entry) is not claim))
                 mine.extend(rep_rows(claim))
+                mine.extend(return_rows(claim))
                 mine.extend(callother_rows(claim, models))
         except Exception as error:   # (one function's rows never stop the report; its partial rows are dropped)
             mine = [Row("operations", "layer_error", claim.function_id or f"#{claim.index}", "error", None,

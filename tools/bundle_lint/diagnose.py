@@ -114,7 +114,8 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
             result.image_info_value = load_image_info(generation)
             result.image_info = {"ok": True, "present": result.image_info_value is not None}
         except Exception as error:
-            result.image_info = {"ok": False, "error": _error(error)}
+            result.image_info = {"ok": False, "error": _error(error),
+                                 "resource": isinstance(error, RESOURCE_FAILURES)}
         if type(program) is not ConstructedProgramScope:
             # (the envelope captures no function roles then; every path stops at
             # the program -- Astra impl r1 P2)
@@ -132,12 +133,12 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
             except StopIteration:
                 break
             except Exception as error:
-                result.fatal = {"index": index, "error": _error(error)}
+                result.fatal = {"index": index, "error": _error(error), "resource": isinstance(error, RESOURCE_FAILURES)}
                 break
             try:
                 captured = adapter.collect_function_roles()
             except Exception as error:
-                result.fatal = {"index": index, "error": _error(error)}
+                result.fatal = {"index": index, "error": _error(error), "resource": isinstance(error, RESOURCE_FAILURES)}
                 break
             identity = captured.transport_identity
             member = identity.observation_member
@@ -159,14 +160,14 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
                     claim.seeds = "ok"
                 except Exception as error:
                     claim.seeds = "error"
-                    claim.seeds_error = _error(error)
+                    claim.seeds_error = {**_error(error), "resource": isinstance(error, RESOURCE_FAILURES)}
                 if claim.seeds == "ok":
                     try:
                         claim.evidence = session._decode_function(unit, captured)
                         claim.naming = "ok"
                     except Exception as error:
                         claim.naming = "error"
-                        claim.naming_error = _error(error)
+                        claim.naming_error = {**_error(error), "resource": isinstance(error, RESOURCE_FAILURES)}
             else:
                 claim.scope = "unresolved"
                 claim.scope_reason = function.reason.value
@@ -203,19 +204,19 @@ def _predict(diagnosis: Diagnosis, path: str):
     if not diagnosis.program.get("ok"):
         return {"stage": "program", "class": "builtins.ValueError", "message": PROGRAM_MESSAGE}
     if path != "base_graph" and not diagnosis.image_info.get("ok"):
-        return {"stage": "image_info", **diagnosis.image_info["error"]}
+        return {"stage": "image_info", **diagnosis.image_info["error"]}   # (class, message)
     for claim in diagnosis.claims:
         if claim.scope == "unresolved" and path == "summary":
             return {"stage": "function", "index": claim.index, "function_id": claim.function_id,
                     "class": "builtins.ValueError", "message": STRICT_SCOPE_MESSAGE}
         if claim.seeds == "error":
             return {"stage": "function", "index": claim.index, "function_id": claim.function_id,
-                    **claim.seeds_error}
+                    "class": claim.seeds_error["class"], "message": claim.seeds_error["message"]}
         if claim.naming == "error":
             return {"stage": "function", "index": claim.index, "function_id": claim.function_id,
-                    **claim.naming_error}
+                    "class": claim.naming_error["class"], "message": claim.naming_error["message"]}
     if diagnosis.fatal is not None:
-        return {"stage": "transport", "index": diagnosis.fatal["index"], **diagnosis.fatal["error"]}
+        return {"stage": "transport", "index": diagnosis.fatal["index"], **diagnosis.fatal["error"]}   # (class, message)
     if path == "base_graph":
         # BaseGraphPublication refuses two admitted members with one entry
         # (base_graph.py:175); the summary keeps the last one silently

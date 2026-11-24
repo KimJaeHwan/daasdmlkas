@@ -126,6 +126,7 @@ def readonly_image(generation, image_info, options):
 
 def normalize_rows(claim, image, context) -> list[Row]:
     from tdo_v2.interprocedural import ANALYSIS_FAILURES, _failure_reason
+    from tdo_v2.resource_limits import RESOURCE_FAILURES
     from tdo_v2.normalize import FunctionNormalizer, NormalizedFunction
     from tdo_v2.rep_strings import rep_sites
 
@@ -136,9 +137,10 @@ def normalize_rows(claim, image, context) -> list[Row]:
             claim.unit, assume_globals_disjoint_from_stack=o["assume_globals_disjoint_from_stack"],
             readonly_image=image, assume_direction_flag_clear=o["assume_direction_flag_clear"],
             private_frame_above=context.home_space)
-    except ANALYSIS_FAILURES as error:
-        return [Row("features", "standalone_normalize", key, "evaluated", "refused", "engine",
-                    {"reason": _failure_reason(error).value, "detail": str(error)})]
+    except RESOURCE_FAILURES as error:   # (a resource failure is no verdict: Astra impl r4 P2)
+        reason = _failure_reason(error).value if isinstance(error, ANALYSIS_FAILURES) else type(error).__name__
+        return [Row("features", "standalone_normalize", key, "error", None, "lint",
+                    {"reason": reason, "detail": str(error)})]
     if type(result) is not NormalizedFunction:
         return [Row("features", "standalone_normalize", key, "evaluated", "refused", "engine",
                     {"reason": getattr(result.reason, "value", str(result.reason)),
@@ -201,7 +203,11 @@ def rows(diagnosis, generation, options) -> list[Row]:
     claims = [claim for claim in diagnosis.claims if claim.evidence is not None]
     for claim in claims:
         out.extend(stack_rows(claim))
-    if options.get("lint_normalize") and not diagnosis.image_info.get("ok"):
+    if options.get("lint_normalize") and not diagnosis.program.get("ok"):
+        # the summary stops at the program check (Astra impl r4 P2)
+        out.append(Row("features", "standalone_context", "program", "not_reached", None, "lint",
+                       {"why": "program scope refused", "program": diagnosis.program}))
+    elif options.get("lint_normalize") and not diagnosis.image_info.get("ok"):
         # the summary stops before its context exists when image-info fails to load
         # (summary_engine.py:205): no standalone run under another condition (Astra impl r3 P2)
         out.append(Row("features", "standalone_context", "program", "not_reached", None, "lint",
