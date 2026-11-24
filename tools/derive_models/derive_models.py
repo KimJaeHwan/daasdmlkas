@@ -210,6 +210,9 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                 continue
             reach.add(key)
             pending.extend(ip._direct_calls(kept[key], by_key).values())
+            # (PE-b) every identified transfer (listed / conditional / S1 targets) joins the closure
+            pending.extend(target for target in ip._static_transfers(kept[key], by_key, frozenset())[0]
+                           if target in by_key)
         if not per_export:
             reached_cuts = set(cuts)   # as before (the one shipped file)
         selected = [by_key[key] for key in sorted(reach | reached_cuts)]

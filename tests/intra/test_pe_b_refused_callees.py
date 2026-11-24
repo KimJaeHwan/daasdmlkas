@@ -272,7 +272,7 @@ def test_a_mixed_forward_set_keeps_the_healthy_members_support(monkeypatch):
     units = _units(main, leaf)
     monkeypatch.setattr(ip, "_forward_switched_on", lambda: True)
 
-    def forward(item, functions, readonly_image):
+    def forward(item, functions, readonly_image, refused=frozenset()):
         if item.unit.scopes.function.entry.byte_offset != MAIN:
             return {}, {}
         key = next(call for call, _, _ in ip._callind_sites(item.unit))
@@ -286,3 +286,153 @@ def test_a_mixed_forward_set_keeps_the_healthy_members_support(monkeypatch):
     # the leaf's own obligations, or (not yet summarized when the caller derives) the leaf as unavailable
     assert leaf_sites and (leaf_sites <= set(support) or unavailable_key(_key(WRAPPER)) in support)
     assert any(_key(WRAPPER) in members for members in results[_key(MAIN)].multi_candidates.values())
+
+
+# -- code review r3 (Astra): overlapping / listed targets, kind-4 exits, fallbacks, import models, contexts --
+
+def _double(entry, rows, exits=()):
+    from types import SimpleNamespace as NS
+
+    return NS(scopes=NS(function=NS(entry=NS(space_id=RAM, byte_offset=entry))),
+              observation=NS(instructions=rows, fallthrough_exits=exits))
+
+
+def _drow(address, opcodes=(), targets=()):
+    from types import SimpleNamespace as NS
+
+    return NS(address=NS(space_id=RAM, byte_offset=address),
+              operations=[NS(opcode=opcode, inputs=()) for opcode in opcodes],
+              flow_targets=tuple(NS(space_id=RAM, byte_offset=t) for t in targets))
+
+
+def test_a_listed_target_equal_to_a_refused_entry_is_a_transfer_even_inside_the_row_range():
+    from tdo_v2.interprocedural import _static_transfers
+
+    # (the refused entry is also one of the caller's own row addresses: overlapping code)
+    unit = _double(MAIN, [_drow(MAIN, ("CALLIND",), targets=(MAIN + 4,)), _drow(MAIN + 4)])
+    targets, _, _ = _static_transfers(unit, {_key(MAIN): unit}, frozenset({_key(MAIN + 4)}))
+    assert _key(MAIN + 4) in targets
+
+
+def test_a_kind_4_exit_naming_a_refused_entry_is_a_transfer():
+    from types import SimpleNamespace as NS
+
+    from tdo_v2.interprocedural import _static_transfers
+
+    exit_row = NS(source=NS(space_id=RAM, byte_offset=MAIN), target=NS(space_id=RAM, byte_offset=REFUSED),
+                  kind=4, function=None)
+    unit = _double(MAIN, [_drow(MAIN, ("CALL",))], exits=(exit_row,))
+    targets, _, _ = _static_transfers(unit, {_key(MAIN): unit}, frozenset({_key(REFUSED)}))
+    assert _key(REFUSED) in targets
+
+
+def test_a_late_refused_resolution_fails_the_round_1_publication():
+    """A fallback publishes round 1, where the transfer later resolved to a
+    refused function is still unresolved: its owner and callers fail
+    (``refused:late-resolution``), never a complete result."""
+    from tdo_v2.interprocedural import _without_late_refusals, analyze_units
+
+    units = _units(_main(WRAPPER), FunctionBuilder(entry=WRAPPER).ret(), FunctionBuilder(entry=SINK).ret())
+    published = analyze_units(units)
+    functions = {f"{RAM:x}:{u.scopes.function.entry.byte_offset:x}": u for u in units}
+    found = _without_late_refusals(published, {_key(WRAPPER)}, functions, {})
+    assert found[_key(WRAPPER)].failure_detail == "refused:late-resolution"
+    assert found[_key(MAIN)].failure_detail == "refused:late-resolution"   # (a caller)
+    assert found[_key(SINK)] is published[_key(SINK)]                       # (unrelated)
+    assert _without_late_refusals(published, (), functions, {}) is published
+
+
+def test_no_import_model_at_a_transfer_to_a_refused_entry():
+    from tdo_v2.interprocedural import _transfers_to
+
+    unit = _units(_main(REFUSED))[0]
+    keys = _transfers_to(unit, frozenset({_key(REFUSED)}))
+    assert len(keys) == 1 and next(iter(keys)).endswith(":CALL")
+    assert _transfers_to(unit, frozenset({_key(OTHER)})) == frozenset()
+
+
+def test_contexts_follow_jumps_and_conditional_jumps_to_entries():
+    from types import SimpleNamespace as NS
+
+    from tdo_v2._scope_contracts import VarnodeKindCode
+    from tdo_v2.control_context import control_contexts
+
+    def jump(opcode, target):
+        return NS(opcode=opcode, inputs=(NS(kind=VarnodeKindCode.ADDRESS,
+                                            coordinate=NS(space_id=RAM, byte_offset=target)),))
+
+    row = NS(address=NS(space_id=RAM, byte_offset=MAIN), flow_targets=(), operations=[jump("CBRANCH", REFUSED)])
+    item = NS(unit=NS(observation=NS(instructions=[row])), calls={}, multi_calls={}, multi_candidates={})
+    found = control_contexts({_key(MAIN): item}, {_key(REFUSED): ("admission",)})
+    assert unavailable_key(_key(REFUSED)) in found[_key(MAIN)]
+
+
+def test_a_resolved_target_that_is_a_cut_wrapper_carries_the_wrappers_static_reach(tmp_path):
+    """main: rax = &helper; call rax -- helper is cut by an internal model
+    (never analysed: the model is applied) and its body calls a refused
+    function. The resolution names helper: main carries helper's static reach."""
+    import json
+    from pathlib import Path
+
+    from synthetic import NO_CALLBACKS, program_units
+    from tdo_v2.image_info import ExportedSymbol, ImageInfo
+    from tdo_v2.interprocedural import analyze_units
+    from tdo_v2.summary_store import load_external_models
+
+    helper_entry, mangled = CODE_BASE + 0x800, "?Helper@@YA_K_K@Z"
+    entry = {"name": "Helper", "original_names": [mangled], "registers": [{"write": [0, 8], "from": [[8, 8]]}],
+             "memory": [], **NO_CALLBACKS, "other_memory": "preserved", "internal": True}
+    raw = {"format_version": 1, "kind": "declared", "id": "synth", "version": 1,
+           "language_id": "x86:LE:64:default", "abi_tag": "win64", "libraries": ["SYNTH.DLL"],
+           "stack_pointer": [32, 8], "stack_delta": 8, "preserved": [[24, 8], [40, 8], [48, 8], [56, 8]],
+           "entries": [entry]}
+    path = Path(tmp_path) / "synth.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    models = load_external_models([path], "x86:LE:64:default", "win64")
+    info = ImageInfo("synthetic", (), (), (ExportedSymbol(1, helper_entry, mangled, True),), ())
+    helper = FunctionBuilder(entry=helper_entry).sub_rsp(0x28).call(REFUSED).add_rsp(0x28).ret()
+    main = (FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(copy(reg(RAX), const(helper_entry))).call_indirect(RAX)
+            .add_rsp(0x28).ret())
+    results = analyze_units(program_units(main, helper), image_info=info, external_models=models,
+                            own_library="SYNTH.DLL", unavailable_entries=frozenset({_key(REFUSED)}))
+    assert _key(helper_entry) not in results   # (cut)
+    assert unavailable_key(_key(REFUSED)) in results[_key(MAIN)].summary.control_support
+
+
+def test_no_import_model_is_bound_at_a_call_to_a_refused_entry():
+    from types import SimpleNamespace as NS
+
+    from tdo_v2.interprocedural import _external_sites
+
+    unit = _units(_main(REFUSED))[0]
+    call = next(iter(__import__("tdo_v2.interprocedural", fromlist=["_transfers_to"])._transfers_to(
+        unit, frozenset({_key(REFUSED)}))))
+    model = (NS(), NS(noreturn=True, inherited=(), label="abort"))
+    models = NS(lookup=lambda symbol: model)
+    refused = {}
+    assert _external_sites(unit, None, models, sites={call: "abort"}) == {call: model}   # (control)
+    assert _external_sites(unit, None, models, refused=refused, sites={call: "abort"},
+                           refused_entries=frozenset({_key(REFUSED)})) == {}
+    assert "refused at admission" in refused[call]
+
+
+def test_a_forward_set_naming_a_refused_function_is_kept_whatever_else_it_names(monkeypatch):
+    """{refused, an address that is no function}: the all-members filter
+    used to drop the whole set (and the refused member with it)."""
+    from dataclasses import replace
+    from types import SimpleNamespace as NS
+
+    import tdo_v2.forward as forward_module
+    import tdo_v2.interprocedural as ip
+
+    unit = _units(FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(copy(reg(RAX), reg(RCX))).call_indirect(RAX)
+                  .add_rsp(0x28).ret())[0]
+    normalized = replace(ip.analyze_units([unit])[_key(MAIN)].normalized, forward_inputs=object())
+    call = next(c for c, _, _ in ip._callind_sites(unit))
+    interval = NS(lo=CODE_BASE + 0x800, hi=REFUSED, stride=REFUSED - (CODE_BASE + 0x800))
+    fact = NS(operation=call, claim=NS(is_top=False, items=[(("abs",), interval)]), requires=())
+    monkeypatch.setattr(forward_module, "forward_facts", lambda *a, **k: [fact])
+    item = NS(normalized=normalized, unit=unit)
+    assert ip._forward_targets(item, {_key(MAIN)}, None) == ({}, {})   # (control: dropped)
+    found, _ = ip._forward_targets(item, {_key(MAIN)}, None, refused=frozenset({_key(REFUSED)}))
+    assert found == {call: tuple(sorted((_key(REFUSED), _key(CODE_BASE + 0x800))))}
