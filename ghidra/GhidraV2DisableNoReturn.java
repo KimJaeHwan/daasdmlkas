@@ -15,9 +15,13 @@
 // skipped (it never runs).
 import java.util.Map;
 
-import ghidra.app.script.GhidraScript;
+import ghidra.app.util.headless.HeadlessScript;
+import ghidra.program.model.listing.Program;
 
-public class GhidraV2DisableNoReturn extends GhidraScript {
+public class GhidraV2DisableNoReturn extends HeadlessScript {
+    // (G3b-7b r9) the headless-session key GhidraV2BundleExport.freshImportAttested reads
+    // (tests/intra/test_gt_b7b_exception_handlers.py pins both files)
+    private static final String FRESH_IMPORT_KEY = "tdo_v2.fresh_import";
     private static final String[] NAMES = {
         "Non-Returning Functions - Discovered", "Non-Returning Functions - Known", "Call-Fixup Installer",
         "DWARF.Import Functions"};
@@ -41,5 +45,31 @@ public class GhidraV2DisableNoReturn extends GhidraScript {
             }
             println("[GhidraV2DisableNoReturn] " + name + ": " + before.get(name) + " -> " + after.get(name));
         }
+        // (G3b-7b r9; proof-inputs review Astra r1 P1-1 / r2 P1-1, Fable r2 P2-1)
+        // attest a fresh import: this headless run is in -import mode with
+        // analysis on, and the program is not analyzed (loaders may create
+        // functions -- ELF entry, PE delay-load proxies -- and disassemble --
+        // the ELF .plt: Astra r9 P1). A -process run (a prepared project,
+        // whose memory and listing are editable database state) never gets
+        // the token, and with it no proof facts; a Ghidra database restored by
+        // -import (GZF) of another file fails the exporter's SHA-256 check
+        // against the configured original. A guard against mistakes (a wrong
+        // mode, a prepared project, a direct exporter call), not against a
+        // producer who builds the program state by hand -- that producer can
+        // write any Bundle (the Bundle is the trust boundary).
+        boolean analyzed = currentProgram.getOptions(Program.PROGRAM_INFO)
+            .getBoolean(Program.ANALYZED_OPTION_NAME, false);
+        if (isImporting() && isHeadlessAnalysisEnabled() && !analyzed) {
+            storeHeadlessValue(FRESH_IMPORT_KEY, freshImportToken());
+            println("[GhidraV2DisableNoReturn] fresh import attested");
+        }
+        else {
+            storeHeadlessValue(FRESH_IMPORT_KEY, null);   // (no stale token: Fable r9 P3)
+            println("[GhidraV2DisableNoReturn] not a fresh import: no token");
+        }
+    }
+
+    private String freshImportToken() {
+        return currentProgram.getDomainFile().getPathname() + "#" + System.identityHashCode(currentProgram);
     }
 }

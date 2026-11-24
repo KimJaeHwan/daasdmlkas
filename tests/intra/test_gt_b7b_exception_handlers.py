@@ -35,6 +35,9 @@ def _with(builder, value="none", edit=None):
     def to_json():
         raw = original()
         raw["exception_handlers"] = value
+        raw.setdefault("call_fallthrough", "isa")   # (r9: the fact comes with the fresh-import S1 contract)
+        raw.setdefault("fallthrough_exits", [])
+        raw.setdefault("proof_input", "attested-fresh-import-v1")
         for row in raw["instructions"]:
             row.setdefault("length", builder.stride)
         if edit is not None:
@@ -84,7 +87,7 @@ def test_a_duplicate_key_is_refused():
 def test_the_row_pad_sets_follow_the_function_fact_both_ways():
     (unit,) = program_units(_with(_recursive()))
     observation = unit.observation
-    assert not observation.call_fallthrough_isa   # (checked before the S1 early return)
+    assert observation.call_fallthrough_isa   # (r9: the fact comes with the S1 contract)
     with pytest.raises(ValueError, match="exception handlers fact"):
         replace(observation, exception_handlers_none=False)
     (plain,) = program_units(_recursive())
@@ -95,7 +98,7 @@ def test_the_row_pad_sets_follow_the_function_fact_both_ways():
     rows = list(observation.instructions)
     rows[1] = replace(rows[1], exception_targets=None)
     with pytest.raises(ValueError, match="exception handlers fact"):
-        ValidatedFunctionObservation(tuple(rows), exception_handlers_none=True)
+        ValidatedFunctionObservation(tuple(rows), True, observation.fallthrough_exits, True)
 
 
 def test_a_row_pad_set_is_checked_on_its_own():
@@ -351,6 +354,55 @@ def test_exit_element_types_are_checked_first():
         ValidatedFunctionObservation(unit.observation.instructions, True, (object(),), True)
 
 
+def test_the_fact_without_the_isa_contract_is_refused():
+    """(G3b-7b r9) a prepared project's export (no call_fallthrough) carrying
+    the fact is refused before the fact is used."""
+    def edit(raw):
+        raw.pop("call_fallthrough")
+        raw.pop("fallthrough_exits")
+    assert program_units(_with(_recursive(), edit=edit))[0].observation is None
+    (unit,) = program_units(_with(_recursive()))
+    with pytest.raises(ValueError, match="needs the ISA call-fallthrough contract"):
+        ValidatedFunctionObservation(unit.observation.instructions, False, (), True)
+
+
+def test_an_unattested_export_keeps_r7_8():
+    """(G3b-7b r9, Astra proof-inputs r3 P1-2) both S1 fields and the fact
+    but no ``proof_input`` (an r8 exporter called directly): the fact is
+    ignored, the call keeps its listed entry (R7-8); a malformed value refuses."""
+    def drop(raw):
+        raw.pop("proof_input")
+    (unit,) = program_units(_with(_recursive(), edit=drop))
+    assert unit.observation is not None and not unit.observation.exception_handlers_none
+    assert unit.observation.instructions[1].exception_targets is None
+
+    def odd(raw):
+        raw["proof_input"] = "fresh"
+    assert program_units(_with(_recursive(), edit=odd))[0].observation is None
+
+
+def test_the_fresh_import_token_is_one_token_in_both_scripts():
+    """(G3b-7b r9) the -preScript stores, and the exporter consumes, the same
+    headless-session key for the same program object; the token needs -import
+    mode; the exception-handlers fact is written only on that attested path."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "ghidra"
+    texts = [(root / name).read_text(encoding="utf-8")
+             for name in ("GhidraV2DisableNoReturn.java", "GhidraV2BundleExport.java")]
+    for text in texts:
+        assert 'FRESH_IMPORT_KEY = "tdo_v2.fresh_import";' in text
+        assert 'currentProgram.getDomainFile().getPathname() + "#" + System.identityHashCode(currentProgram)' in text
+        assert "extends HeadlessScript" in text
+    assert "if (isImporting() && isHeadlessAnalysisEnabled() && !analyzed) {" in texts[0]
+    assert "getNumInstructions" not in texts[0]   # (Astra r9: ELF loaders disassemble the .plt)
+    assert "if (isa && noStaticExceptionHandler(function, observed, rows))" in texts[1]
+    assert "boolean isa = callFallthroughIsa && (!LONG_MODE.equals(currentProgram.getLanguageID().getIdAsString())" in texts[1]
+    assert 'LONG_MODE = "x86:LE:64:default";' in texts[1]
+    from tdo_v2._scope_observation import PROOF_INPUT_FRESH
+    assert f'result.put("proof_input", "{PROOF_INPUT_FRESH}");' in texts[1]
+
+
 def test_a_kind_4_exit_at_the_isa_return_pc_keeps_the_fact():
     """A call ending the code block: its ISA continuation 0x2000 is outside
     program memory, an S1 kind-4 exit, and the fact stands."""
@@ -378,7 +430,7 @@ def test_a_call_row_without_a_length_contradicts_the_fact():
     rows = list(unit.observation.instructions)
     rows[1] = replace(rows[1], length=None)
     with pytest.raises(ValueError, match="records its length"):
-        ValidatedFunctionObservation(tuple(rows), exception_handlers_none=True)
+        ValidatedFunctionObservation(tuple(rows), True, unit.observation.fallthrough_exits, True)
 
 
 def test_a_row_the_call_gate_excludes_needs_no_fallthrough():

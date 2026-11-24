@@ -7018,6 +7018,26 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
 **없다는 것을 코드 사실로 증명한 함수에서만** 되돌린다. r0의 "행마다 패드 목록(`[]`)"은 거절됐다(Astra): `[]`는 exporter가
 복구한 것만 말할 뿐(PE `.xdata`는 읽지 않음, LSDA 일부 건너뜀) 패드가 없다는 증명이 아니다.
 
+- **입력(r9)**: 사실은 이번 실행이 바이너리를 직접 import하고 정해진 설정으로 분석한 경우에만 쓴다(S1과 같은 조건).
+  -preScript(`GhidraV2DisableNoReturn`, HeadlessScript)는 headless가 `-import` 모드이고 분석이 켜져 있으며 프로그램이
+  분석 전일 때만 headless 세션 저장소에 그 프로그램 객체의 토큰을 남긴다(로더는 함수를 만들고 디스어셈블도 한다 -- ELF 진입,
+  PE delay-load 프록시, ELF `.plt`(Astra r9) -- 그래서 명령·함수 수는 조건이 아니다). 실수를 막는 장치다: 잘못된 모드, 준비된
+  프로젝트, exporter 직접 호출. 프로그램 상태를 손으로 만드는 생산자(편집한 DB를 GZF로 import하고 원본을 인수로 주는 경우,
+  같은 JVM의 다른 스크립트)는 막지 않는다 -- 그런 생산자는 어떤 Bundle이든 쓸 수 있다(Bundle이 신뢰 경계 -- 소유자 결정
+  2026-11-24, Astra r9 P1-2를 범위 밖으로).
+  exporter는 토큰을 한 번 소비하고, 없으면 fresh 내보내기를 거부한다(`--require-analyzed` 없이 준비된 프로젝트를 fresh처럼
+  부르는 경우, 분석 안 된 프로젝트를 `-process`로 분석하는 경우); Ghidra가 기록한 실행 파일 SHA-256이 설정된 원본과 다르면
+  거부한다(`-import`가 복원하는 Ghidra DB(GZF)); 분석 시간 초과면 두 사실(S1, 이 사실)을 모두 쓰지 않고 경고한다. fresh
+  함수에는 `proof_input: "attested-fresh-import-v1"`을 쓰고, 엔진은 이 사실을 그 표시와 함께일 때만 쓴다(없으면 무시 -- R7-8
+  그대로; r8 exporter를 직접 부른 Bundle; Astra proof-inputs r3 P1-2), S1 계약(`call_fallthrough: "isa"`) 없이 사실이
+  오면 관측을 거절한다(`proof_input` 없이 사실만 있는 구형 Bundle은 거절하지 않고 사실만 무시 -- R7-8 그대로; Astra r9 P3).
+  fresh 경로에서 일반 호출 행(S1이 검사하는 native call)의 override / fallthrough 검사는 S1 검사와 겹치는 방어용 중복이다:
+  S1이 먼저 내보내기 전체를 거절한다(목록 길이 검사는 중복이 아니다 -- ISA fallthrough를 둔 채 길이만 줄이면 S1은 통과하고 이
+  검사만 사실을 보류한다, V12d; Astra r10 P3). 그래서 이 사실의 호출 행 검사는 S1이 건너뛰는 행(INT3 모양)으로만 따로 관찰된다
+  (변형 V33); 나중에 S1을 바꿀 때 이 검사가 유일한 방어가 되지 않는지 확인할 것(Fable r9 P2-2). 준비된
+  프로젝트(`--ghidra-project`)는 사실을 받지 않는다: 그 메모리(`.pdata` / `.xdata` / 코드 바이트)와 목록은 편집할 수 있는
+  DB 상태다(패치, 다른 설정의 이전 분석, 편집 -- proof-inputs 설계 리뷰 Astra P1-1 / P1-2, Fable P1-3). 준비된 프로젝트에서
+  되찾는 길(도구가 만든 고정 스냅샷, 원본 파일 대조)은 `design_proof_inputs`의 후속 단계.
 - **exporter**(`GhidraV2BundleExport.noStaticExceptionHandler`): x64 PE에서 함수의 모든 프레임 PC(관측 몸체의 모든 구간,
   CALL / CALLIND 행마다 `주소 + getParsedLength()`의 ISA 복귀 PC)가 이미지의 예외 디렉터리에서 처리기 없는 항목에만
   덮이거나(체인 끝까지 UNW_FLAG_EHANDLER / UHANDLER 없음) 어느 항목에도 덮이지 않을 때(잎 함수: 처리기 없음) 함수에
@@ -7030,6 +7050,21 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
   ISA 길이와 다름 / 명령 자신의 흐름(prototype, override 무시)이 fallthrough를 갖는 행의 기록된 fallthrough가 ISA 다음 PC
   (`주소 + getParsedLength()`, 같은 주소 공간)가 아님(지워지거나 옮겨진 fallthrough는 진입으로 돌아오는 간선이나 행 중간의
   다음 PC를 숨길 수 있다; Astra r5 / r8 -- JMP / RET / INT3처럼 ISA가 끝내는 행은 해당 없음) /
+  operand-size(66) 접두사가 붙은 제어 이동 행(CALL / JMP / Jcc / RET p-code를 가진 행 -- 64비트 모드에서 Intel은 접두사를
+  무시하고 Ghidra의 x86-64 명세는 16비트 형태로 해독한다: 길이와 다음 / 복귀 PC가 CPU에 달림; Astra r10 / r11. 그런 행이 있는
+  함수는 S1과 `proof_input`도 받지 않는다 -- 준비된 프로젝트처럼 내보낸다; `66 90` 같은 다른 행은 해당 없음; 이 판정은
+  `x86:LE:64:default`에서만 한다 -- 다른 언어(ARM64, x86-32 등)는 첫 바이트가 0x66이어도 S1 그대로, Fable r11; 같은 접두사가
+  두 번 나오는 제어 이동 행(`67 67 FF 15` -- 해독기마다 반복의 뜻이 다름, Astra r12)도 같은 처리; 제어 이동은 명령 자신의
+  흐름으로 판정 -- 16비트 CMOVcc의 내부 CBRANCH는 해당 없음; 로드 설정의 dynamic value relocation 표처럼 base relocation
+  밖에서 로드 때 코드를 고치는 것은 다루지 않는다 -- 알려진 한계, Fable r13) / 증명이 읽은 이미지 바이트(헤더, 로드 설정, 예외 디렉터리,
+  unwind 레코드)에 base relocation의 쓰기 범위가 겹침(다른 주소에 로드되면 로더가 그 값을 고쳐 표가 다른 레코드를 가리킨다;
+  Astra r13 / r14 -- 쓰기 범위는 이미지 자신의 `.reloc`에서 타입별로 읽는다: HIGH / LOW 2, HIGHLOW 4, HIGHADJ 2, DIR64 8,
+  ABSOLUTE 없음, 그 밖 8; Ghidra의 재배치 표는 PE base relocation을 길이 0으로 기록해 쓰지 않는다; 표는 정확히 끝까지 읽혀야
+  하고, 표 자신이나 그 디렉터리 항목에 쓰는 재배치도 사실 없음) / 로더가 쓰는 다른 이미지 바이트(TLS `AddressOfIndex`, IAT
+  디렉터리와 import마다 FirstThunk 배열 -- 슬롯 수는 조회 표(OriginalFirstThunk) 기준, delay-load IAT와 모듈 핸들 자리
+  -- RVA 기반 표시가 없으면 사실 없음, 로드 설정 구조 안에서 이미지 안 VA를 담은 8바이트 필드가 가리키는 자리 전부)가
+  증명이 읽은 바이트와 겹침(Astra r15 / r16, Fable r15); `.reloc` 블록 본문은 2바이트 항목으로 정확히 나뉘어야 함 / 언어가
+  정확히 `x86:LE:64:default`가 아님(`compat32`는 프로세서·크기가 같지만 longMode 0으로 해독한다; Astra r11) /
   BRANCHIND 행(계산 분기의 흐름 참조는 목적지 전부라는 보장이 없다 -- 참조가 없거나 일부만 복원된 점프 테이블이면 행 시작이
   아닌 곳에 닿아 검사 안 된 호출을 돌릴 수 있다; Astra r6 / r7) /
   호출 행에서 진입으로 가는 호출 아닌 흐름 참조
@@ -7065,10 +7100,35 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
   피호출자가 저장된 복귀 주소를 바꾼 뒤 예외를 내면 unwinder는 바뀐 PC로 처리기를 찾는다(Astra r8). 이것은 보통 복귀의
   fallthrough 간선과 같은 전제(복귀 슬롯 보존)이고 그래프 층이 아니라 데이터 흐름 층(불투명 호출의 이어짐은 모름, RP --
   RETURN 목적지 증명)이 다룬다; 사실이 없어도 바뀐 PC의 처리기가 보내는 곳은 그래프에 없다(진입과 우연히 같을 때만 R7-8이
-  남기던 간선). RETURN도 목적지를 모르는 이동(`push X; ret`)이지만 엔진은 어디서나 함수 출구로 본다(Fable r8, 같은 전제). overlay 주소 공간은 코드 검토로만(변형 없음).
+  남기던 간선). 로드 이미지 전제(소유자 결정 2026-11-24, Astra r14): 엔진 전체가 실행되는 코드 = 파일의 코드(기본 주소
+  기준)에 기댄다 -- 로드된 이미지는 위에 열거한 로더 쓰기만큼만 파일과 다르다고 보고(그 밖 -- dynamic value relocation,
+  실행 중 패치 -- 은 알려진 한계; 앞선 재배치가 로더의 메타데이터(import 디렉터리 RVA, FirstThunk, TLS 디렉터리 등)를 고쳐
+  쓰기 목적지가 옮겨지는 2차 효과도 이 전제에 포함 -- 로더는 파일에 적힌 메타데이터 그대로 쓴다고 본다, 소유자 결정
+  2026-11-24), base relocation은 주소 필드만 고친다고 보고, 명령 바이트(옵코드 등)를 고치도록 만든 재배치는 자기 수정
+  코드와 같은 알려진 한계다(증명이 읽는 표 / 헤더 바이트에 걸린 재배치만 막는다). ISA 해독 전제(소유자 결정 2026-11-24, Astra r10-r12): 엔진 전체가 Ghidra SLEIGH 해독 = CPU 동작에 기댄다.
+  해독기마다 / CPU마다 갈리는 인코딩은 이름 붙은 알려진 한계이고, 싼 방어만 둔다: fresh 내보내기는 원본 파일의 기계 필드와
+  해독 모드가 맞아야 S1 / 이 사실을 쓴다(AMD64 PE / x86-64 ELF = `x86:LE:64:default`, i386 = `x86:LE:32:default`; 다른
+  기계는 검사 없음; 사실 자체의 `x86:LE:64:default` 검사는 이 S1 검사와 겹치는 방어용 중복 -- Fable r12), x86-64의 66 /
+  반복 접두사 제어 이동 행은 함수 단위로 보류(x86-64 ELF TLS의 `66 66 48 E8`도 보류된다 -- REX.W 예외는 측정 뒤 후속). 독립 해독기(XED / iced-x86 등)로 모든 행
+  길이를 교차 확인하는 것은 후속(proof-inputs 설계의 class 1 해독). 소유자 결정(2026-11-24, Astra r8 / r9 P1): 이름 붙은 알려진 한계로 유지하고 RP(RETURN 목적지 증명)에서
+  복귀 슬롯 보존을 증명한다. RETURN도 목적지를 모르는 이동(`push X; ret`)이지만 엔진은 어디서나 함수 출구로 본다(Fable r8, 같은 전제). overlay 주소 공간은 코드 검토로만(변형 없음).
   엄격한 조건(몸체 = 행, ISA fallthrough, 로드 설정 크기)이 큰 실제 PE에서 사실을 얼마나 빼는지는 아직 재지 않았다(정밀도만,
   건전성은 그대로 -- 후속 측정). 실제 export에서는 (e) 때문에
   `CBRANCH entry` + `CALL entry` 행에 사실이 붙지 않는다(엔진 처리는 손으로 만든 고정으로만). 게이트 Bundle은 다시 내보내지
   않았다(필드 없음 -> 결과 그대로). 미룸: G3b-7b-2(ELF / ARM의 LSDA·EHABI 완전성과 행별 패드, `_unplaced_noreturn`의 패드
   중첩), G3b-7c(함수 몸체 안으로 가는 호출 표시 분기), 일반 `is_override`가 Ghidra FlowOverride를 놓치는 문제(별도 검토).
+- 마무리와 남은 알려진 한계(소유자 결정 2026-11-24: 로더 경로별 검사를 더 늘리지 않고 이 상태로 닫는다; 반례 모음은 저장소
+  밖 `g3b7b_astra_counterexamples/README.md`, 리뷰 `.census6/g3b7b_astra*.md`):
+  1. **증명 바이트 위의 로더 쓰기**(Astra r13-r17): base relocation(타입별 폭, 표 자신 / 디렉터리 항목, 홀수 / 남는 바이트),
+     TLS index, IAT 디렉터리와 FirstThunk(조회 표 길이), delay-load IAT와 모듈 핸들, 로드 설정의 VA 필드는 막는다. 남은 것:
+     delay unload 도우미가 IAT 자신의 길이로 쓰는 경우(r17 P1 -- 지금은 조회 표 길이만 센다), 선언 크기가 디렉터리 크기보다
+     큰 로드 설정의 바깥 필드(Fable r16), 앞선 재배치가 로더 메타데이터를 고치는 2차 효과(소유자 결정: 전제), dynamic value
+     relocation과 실행 중 패치(전제). 정상 컴파일러 출력에서는 예외 표가 로더 쓰기 자리에 놓이지 않는다. 대안(제안만): 예외 표
+     (.pdata + 참조된 .xdata)가 쓰기 불가 섹션에 있고 로더 쓰기 디렉터리와 겹치지 않을 때만 사실 -- 경로별 검사 대신 규칙 하나.
+  2. **Ghidra 해독과 실제 CPU의 차이**(Astra r10-r12): x86-64의 66 / 반복 접두사 제어 이동(`66 E8`, `67 67 FF 15`)과 해독 모드
+     불일치는 막는다; 알려지지 않은 해독기 차이는 ISA 해독 전제. 독립 해독기(XED / Zydis / iced-x86) 교차 확인은 S1 / RP /
+     pass-through 공통 후속. x86-64 ELF TLS `66 66 48 E8`의 S1 보류는 측정 뒤 REX.W 예외 검토(Fable r12).
+  3. **복귀 슬롯 전제**(Astra r8 / r9): 피호출자가 저장된 복귀 주소를 바꾼 뒤 예외를 내는 경우 -- RP에서 증명.
+  4. **하네스 공백**(Astra r16 / r17): delay IAT 길이 / 모듈 핸들 / CFG 슬롯을 각각 떼는 변형이 없고, 독립 판독기는 선언된
+     디렉터리 개수를 넘는 디렉터리를 읽으며 delay IAT를 exporter와 같은 방식으로 센다.
 - 엔진 의미 버전 57, UE 템플릿 v44(항목은 v43과 같음 -- 다시 유도해 비교). 고정 `tests/intra/test_gt_b7b_exception_handlers.py`.

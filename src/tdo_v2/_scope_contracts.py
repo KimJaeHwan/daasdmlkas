@@ -598,6 +598,11 @@ class ValidatedFunctionObservation:
             raise ValueError("instruction addresses must be unique")
         require_bool(self.call_fallthrough_isa, "call fallthrough flag")
         require_bool(self.exception_handlers_none, "exception handlers flag")
+        if self.exception_handlers_none and not self.call_fallthrough_isa:
+            # (G3b-7b r9, Astra proof-inputs r2 P1-3) both are fresh-import facts:
+            # a Bundle with the exception fact but no ISA call-fallthrough contract
+            # (e.g. a prepared project's r8 export) is refused before the fact is used
+            raise ValueError("the exception handlers fact needs the ISA call-fallthrough contract")
         if type(self.fallthrough_exits) is not tuple or any(
             type(item) is not FallthroughExit for item in self.fallthrough_exits
         ):

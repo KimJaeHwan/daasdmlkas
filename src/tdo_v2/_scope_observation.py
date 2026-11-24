@@ -119,7 +119,8 @@ def _validate_function_candidate(
             if len(set(addresses)) != len(addresses):
                 defects.conflicting = True
             isa, exits = _call_fallthrough_contract(raw, entry, defects)
-            no_handlers = _exception_handlers_none(raw, defects)
+            attested = _attested_fresh_import(raw, defects)
+            no_handlers = _exception_handlers_none(raw, defects) and attested
             if no_handlers:
                 # (G3b-7b) no handler covers the function: every call row's
                 # landing-pad set is exactly empty
@@ -266,6 +267,29 @@ def _exception_handlers_none(raw: RawObject, defects: _ObservationDefects) -> bo
         defects.duplicate = True
         return False
     if type(field.value) is not str or field.value != "none":
+        defects.invalid = True
+        return False
+    return True
+
+
+PROOF_INPUT_FRESH = "attested-fresh-import-v1"
+
+
+def _attested_fresh_import(raw: RawObject, defects: _ObservationDefects) -> bool:
+    """(G3b-7b r9, Astra proof-inputs r3 P1-2) ``proof_input:
+    "attested-fresh-import-v1"`` -- the exporter imported and analyzed the
+    binary in its own run (the -preScript's token, the original's SHA-256, no
+    analysis timeout). The exception-handlers fact is used only with it: an
+    older or unattested export carrying the fact (e.g. an r8 exporter called
+    directly) keeps R7-8 -- the fact is ignored, conservatively. Any other
+    value is malformed."""
+    field = _field(raw, "proof_input")
+    if field.state is _FieldState.MISSING:
+        return False
+    if field.state is _FieldState.DUPLICATE:
+        defects.duplicate = True
+        return False
+    if type(field.value) is not str or field.value != PROOF_INPUT_FRESH:
         defects.invalid = True
         return False
     return True

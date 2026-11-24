@@ -31,7 +31,7 @@ import com.google.gson.GsonBuilder;
 
 import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
-import ghidra.app.script.GhidraScript;
+import ghidra.app.util.headless.HeadlessScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.address.AddressRange;
@@ -66,7 +66,7 @@ import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolTable;
 import ghidra.program.model.address.AddressIterator;
 
-public class GhidraV2BundleExport extends GhidraScript {
+public class GhidraV2BundleExport extends HeadlessScript {
     private static final int FORMAT_VERSION = 2;
     private static final String MANIFEST_SCHEMA_ID =
         "tdo-v2-configured-bundle-manifest-v2";
@@ -91,6 +91,12 @@ public class GhidraV2BundleExport extends GhidraScript {
         "Non-Returning Functions - Discovered", "Non-Returning Functions - Known", "Call-Fixup Installer",
         "DWARF.Import Functions"};
     private boolean callFallthroughIsa;
+    // (G3b-7b r9) the -preScript's fresh-import key (GhidraV2DisableNoReturn.FRESH_IMPORT_KEY)
+    private static final String FRESH_IMPORT_KEY = "tdo_v2.fresh_import";
+    // (G3b-7b r9e / r9f) the x86-64 long-mode decode: the only language where a
+    // 66 prefix on a near transfer is read differently by Intel and AMD, and the
+    // one the exception-handlers fact requires
+    private static final String LONG_MODE = "x86:LE:64:default";
     // contract violations of every exported function, reported together
     private final List<String> fallthroughViolations = new ArrayList<>();
     private final AddressSet recoveredExceptionCode = new AddressSet();
@@ -192,6 +198,31 @@ public class GhidraV2BundleExport extends GhidraScript {
                 "the program is not analyzed: analyze it in the Ghidra project first");
         }
         callFallthroughIsa = !options.requireAnalyzed;
+        if (callFallthroughIsa && !freshImportAttested()) {
+            throw new IllegalStateException("a fresh export imports the binary and analyzes it in this run " +
+                "(GhidraV2DisableNoReturn.java as -preScript attests it; tools/bundle_export/export_bundle.py " +
+                "does): export a prepared project with --require-analyzed");
+        }
+        String recorded = currentProgram.getExecutableSHA256();
+        if (callFallthroughIsa && (recorded == null || !recorded.trim().toLowerCase().equals(options.originalSha256))) {
+            // (Fable proof-inputs r3 P2-1) -import also loads containers holding a
+            // Ghidra database (e.g. a packed program): a fresh import is the
+            // configured original file itself, as Ghidra recorded it
+            throw new IllegalStateException("a fresh import records the configured original's SHA-256 " +
+                "(Ghidra: " + recorded + ")");
+        }
+        if (callFallthroughIsa && analysisTimeoutOccurred()) {
+            // (Astra proof-inputs r2 P1-1) an unfinished analysis proves nothing: no proof facts
+            printerr("[GhidraV2BundleExport] WARNING: analysis timed out: no call_fallthrough / exception_handlers facts");
+            callFallthroughIsa = false;
+        }
+        if (callFallthroughIsa && !decodeModeMatchesFile(options)) {
+            // (Astra r12) a decode mode other than the file's machine (e.g. an AMD64
+            // image imported as x86:LE:64:compat32) gives other lengths: no proof facts
+            printerr("[GhidraV2BundleExport] WARNING: decode mode " + currentProgram.getLanguageID() +
+                " does not match the file's machine: no call_fallthrough / exception_handlers facts");
+            callFallthroughIsa = false;
+        }
         if (callFallthroughIsa && !flowGuessesOff()) {
             throw new IllegalStateException("a fresh export needs Ghidra's non-returning and call-fixup analyzers off: " +
                 "run GhidraV2DisableNoReturn.java as -preScript (tools/bundle_export/export_bundle.py does)");
@@ -1268,6 +1299,58 @@ public class GhidraV2BundleExport extends GhidraScript {
         return new ObservedFunction(body, exceptionalTargets);
     }
 
+    // (G3b-7b r9; proof-inputs review: Astra r1 P1-1 / P1-2, r2 P1-1, Fable r1
+    // P1-3) proof facts (S1, the exception-handlers fact) read Ghidra memory
+    // and listing, which a prepared project may have changed (patched bytes,
+    // earlier analysis with other settings, edits): they need this run's own
+    // import, attested by the -preScript's headless-session token for this
+    // program object. The token is consumed: one export per attestation.
+    private boolean freshImportAttested() throws Exception {
+        String token = currentProgram.getDomainFile().getPathname() + "#" + System.identityHashCode(currentProgram);
+        boolean attested = token.equals(getStoredHeadlessValue(FRESH_IMPORT_KEY));
+        storeHeadlessValue(FRESH_IMPORT_KEY, null);
+        return attested;
+    }
+
+    /** (G3b-7b r9g, Astra r12) the decode mode is the one the original file's
+     *  own machine field names -- read from the configured original, not the
+     *  database: an AMD64 PE / x86-64 ELF decodes as x86:LE:64:default, an i386
+     *  PE / ELF as x86:LE:32:default. Other machines are not checked here (the
+     *  ISA-decode premise, docs 25.115). Unreadable header: doubt. */
+    private boolean decodeModeMatchesFile(Options options) {
+        int machine;
+        boolean pe;
+        try (FileChannel channel = FileChannel.open(options.original, java.nio.file.StandardOpenOption.READ)) {
+            java.nio.ByteBuffer head = java.nio.ByteBuffer.allocate(0x40).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            int count = Math.max(channel.read(head, 0), 0);
+            if (count >= 0x40 && head.get(0) == 'M' && head.get(1) == 'Z') {
+                // (Astra r13 P2) e_lfanew anywhere in the file, not only in its first 4 KiB
+                long header = head.getInt(0x3C) & 0xffffffffL;
+                java.nio.ByteBuffer signature = java.nio.ByteBuffer.allocate(6).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                if (channel.read(signature, header) != 6 || signature.getInt(0) != 0x4550) {
+                    return false;
+                }
+                machine = signature.getShort(4) & 0xffff;
+                pe = true;
+            }
+            else if (count >= 20 && head.get(0) == 0x7f && head.get(1) == 'E' && head.get(2) == 'L' &&
+                    head.get(3) == 'F' && head.get(5) == 1) {
+                // (the ELF class is not checked: an x32 image with EM_X86_64 also decodes in long mode)
+                machine = head.getShort(18) & 0xffff;
+                pe = false;
+            }
+            else {
+                return true;
+            }
+        }
+        catch (IOException error) {
+            return false;
+        }
+        String expected = pe ? (machine == 0x8664 ? LONG_MODE : machine == 0x14c ? "x86:LE:32:default" : null)
+            : (machine == 62 ? LONG_MODE : machine == 3 ? "x86:LE:32:default" : null);
+        return expected == null || expected.equals(currentProgram.getLanguageID().getIdAsString());
+    }
+
     private boolean flowGuessesOff() {
         Map<String, String> values = getCurrentAnalysisOptionsAndValues(currentProgram);
         for (String name : FLOW_GUESS_OPTIONS) {
@@ -1412,11 +1495,20 @@ public class GhidraV2BundleExport extends GhidraScript {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("entry", coordinate(function.getEntryPoint()));
         result.put("instructions", instructions);
-        if (callFallthroughIsa) {
+        // (G3b-7b r9e, Astra r10 / r11) a row whose length the CPU, not Ghidra's
+        // decode, fixes (a 66-prefixed near control transfer) makes Ghidra's
+        // fallthrough / return PC no ISA fact: the function gets neither S1 nor
+        // the exception fact (it exports as from a prepared project)
+        boolean isa = callFallthroughIsa && (!LONG_MODE.equals(currentProgram.getLanguageID().getIdAsString())
+            || rows.stream().noneMatch(GhidraV2BundleExport::cpuDependentLength));   // (Fable r11: x86-64 only)
+        if (isa) {
             result.put("call_fallthrough", "isa");
+            // (G3b-7b r9, Astra proof-inputs r3 P1-2) the attested fresh import:
+            // the engine uses the exception fact only with this
+            result.put("proof_input", "attested-fresh-import-v1");
             result.put("fallthrough_exits", fallthroughExits(function, rows));
         }
-        if (noStaticExceptionHandler(function, observed, rows)) {
+        if (isa && noStaticExceptionHandler(function, observed, rows)) {   // (r9: fresh import only)
             result.put("exception_handlers", "none");
         }
         return result;
@@ -1519,6 +1611,45 @@ public class GhidraV2BundleExport extends GhidraScript {
         return row.getPrototype().getFlowType(row.getInstructionContext()).hasFallthrough();
     }
 
+    /** An x86 control transfer (a row holding BRANCH / CBRANCH / BRANCHIND /
+     *  CALL / CALLIND / RETURN p-code) with an operand-size (66) prefix: in
+     *  64-bit mode Intel ignores it for near CALL / JMP / Jcc / RET while
+     *  Ghidra's x86-64 spec decodes the 16-bit form (as AMD does), so the
+     *  row's length -- and its return / next PC -- depends on the CPU. Other
+     *  66-prefixed rows (``66 90``) keep their length. Function-local: a row of
+     *  another function never changes this function's frame PCs. Unreadable
+     *  bytes count as doubt. */
+    private static boolean cpuDependentLength(Instruction row) {
+        // (Astra r12 P2) the instruction's own flow, not its p-code: a 16-bit
+        // CMOVcc lifts its condition as an internal CBRANCH but transfers nothing
+        FlowType flow = row.getPrototype().getFlowType(row.getInstructionContext());
+        if (!flow.isJump() && !flow.isCall() && !flow.isTerminal() && !hasCallOperation(row)) {
+            return false;
+        }
+        byte[] bytes;
+        try {
+            bytes = row.getBytes();
+        }
+        catch (MemoryAccessException error) {
+            return true;
+        }
+        Set<Integer> seen = new java.util.HashSet<>();
+        for (byte value : bytes) {
+            int b = value & 0xff;
+            boolean prefix = b == 0x66 || b == 0xF0 || b == 0x67 || b == 0xF2 || b == 0xF3 || b == 0x2E || b == 0x3E ||
+                b == 0x26 || b == 0x36 || b == 0x64 || b == 0x65 || (b >= 0x40 && b <= 0x4F);
+            if (!prefix) {
+                return false;
+            }
+            // (Astra r10 / r12) 66: Intel and AMD differ; a repeated prefix (67 67):
+            // decoders differ on what the repeat selects
+            if (b == 0x66 || !seen.add(b)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** A BRANCHIND row: its flow references need not list every destination
      *  (none, or a partly recovered table), so one could reach a byte off a
      *  row start and run an unchecked call. */
@@ -1572,12 +1703,18 @@ public class GhidraV2BundleExport extends GhidraScript {
         return false;
     }
 
+    // (G3b-7b r9h) every image byte capturePeUnwindEntries reads (headers, load
+    // config, exception directory, unwind records); null outside it
+    private AddressSet proofReads;
+
     private TreeMap<Long, long[]> capturePeUnwindEntries() throws Exception {
+        proofReads = new AddressSet();
         try {
             Address base = currentProgram.getImageBase();
             if (!"Portable Executable (PE)".equals(currentProgram.getExecutableFormat()) ||
-                    !"x86".equals(currentProgram.getLanguage().getProcessor().toString()) ||
-                    currentProgram.getLanguage().getLanguageDescription().getSize() != 64 ||
+                    // (Astra r11) the 64-bit decode mode exactly: x86:LE:64:compat32 shares
+                    // processor and address size but decodes with longMode 0
+                    !LONG_MODE.equals(currentProgram.getLanguageID().getIdAsString()) ||
                     u16At(base, 0) != 0x5A4D) {
                 return null;
             }
@@ -1634,12 +1771,238 @@ public class GhidraV2BundleExport extends GhidraScript {
                 }
                 entries.put(begin, new long[] {end, handler ? 1 : 0});
             }
+            AddressSet writes = loaderWrites(base, optional, directories, imageSize, loadConfig, loadConfigSize);
+            if (writes == null || writes.intersects(proofReads)) {
+                // (Astra r13 / r14) a base relocation writing a byte the proof read
+                // (e.g. an UnwindData RVA): loaded at another base, the loader
+                // rewrites it and the table answers for other records -- no fact
+                // for the image (image-level, not per function)
+                return null;
+            }
             peImageSize = imageSize;
             return entries;
         }
         catch (MemoryAccessException | RuntimeException error) {   // (never an export error)
             return null;
         }
+        finally {
+            proofReads = null;
+        }
+    }
+
+    /** (Astra r13 / r14, Fable r13) the bytes the image's base relocations
+     *  write, parsed from its own .reloc directory (not Ghidra's relocation
+     *  table, which records PE base relocations as skipped, length 0): HIGH /
+     *  LOW 2 bytes, HIGHLOW 4, HIGHADJ 2 (its parameter slot consumed), DIR64
+     *  8, ABSOLUTE none (padding), any other type 8 (doubt). These reads are
+     *  not proof reads. Null when the directory is malformed. */
+    private AddressSet relocationWrites(Address base, long optional, long directories, long imageSize) {
+        AddressSet writes = new AddressSet();
+        if (directories <= 5) {
+            return writes;
+        }
+        ghidra.program.model.mem.Memory memory = currentProgram.getMemory();
+        try {
+            long rva = memory.getInt(base.add(optional + 112 + 5 * 8), false) & 0xFFFFFFFFL;
+            long size = memory.getInt(base.add(optional + 112 + 5 * 8 + 4), false) & 0xFFFFFFFFL;
+            if (rva == 0 || size == 0) {
+                return writes;
+            }
+            if (rva + size > imageSize) {
+                return null;
+            }
+            long at = rva;
+            while (at + 8 <= rva + size) {
+                long page = memory.getInt(base.add(at), false) & 0xFFFFFFFFL;
+                long block = memory.getInt(base.add(at + 4), false) & 0xFFFFFFFFL;
+                if (block < 8 || (block - 8) % 2 != 0 || at + block > rva + size) {
+                    return null;   // (Astra r16: the body splits into whole 2-byte entries)
+                }
+                for (long k = 8; k + 2 <= block; k += 2) {
+                    int entry = memory.getShort(base.add(at + k), false) & 0xFFFF;
+                    int type = entry >>> 12;
+                    long target = page + (entry & 0xFFF);
+                    int width = switch (type) {
+                        case 0 -> 0;
+                        case 1, 2 -> 2;
+                        case 3 -> 4;
+                        case 4 -> 2;
+                        case 10 -> 8;
+                        default -> 8;
+                    };
+                    if (type == 4) {
+                        if (k + 4 > block) {
+                            return null;   // (HIGHADJ without its parameter slot)
+                        }
+                        k += 2;   // (HIGHADJ: the next slot is its parameter)
+                    }
+                    if (width > 0) {
+                        writes.add(base.add(target), base.add(target + width - 1));
+                    }
+                }
+                at += block;
+            }
+            if (at != rva + size) {
+                return null;   // (Astra r15 / Fable r14: trailing bytes -- the directory is consumed exactly)
+            }
+            // (Fable r14 / Astra r15) the loader applies blocks in order: a write into
+            // the table itself or its data-directory entry changes what it applies next
+            if (writes.intersects(base.add(rva), base.add(rva + size - 1)) ||
+                    writes.intersects(base.add(optional + 112 + 5 * 8), base.add(optional + 112 + 5 * 8 + 7))) {
+                return null;
+            }
+            return writes;
+        }
+        catch (MemoryAccessException | RuntimeException error) {
+            return null;
+        }
+    }
+
+    /** (G3b-7b r9j, Astra r15) every image byte the Windows loader (or the
+     *  delay-load helper) writes, as far as the image declares them: base
+     *  relocations, the TLS AddressOfIndex slot, the IAT directory and each
+     *  import's FirstThunk array, each delay-load IAT, the security cookie and
+     *  the CFG check / dispatch function pointer slots. Other load-time writes
+     *  (dynamic value relocations, runtime patching) are the named load-image
+     *  premise (docs 25.115), as is a write whose destination an earlier
+     *  relocation rewrote (owner decision 2026-11-24: the loader is read at
+     *  face value -- first-order writes only). These reads bypass proofReads on
+     *  purpose. Null when any of them is malformed. */
+    private AddressSet loaderWrites(Address base, long optional, long directories, long imageSize,
+            long loadConfig, long loadConfigSize) {
+        AddressSet writes = relocationWrites(base, optional, directories, imageSize);
+        if (writes == null) {
+            return null;
+        }
+        ghidra.program.model.mem.Memory memory = currentProgram.getMemory();
+        try {
+            long preferred = memory.getLong(base.add(optional + 24), false);
+            // TLS: the loader stores the module's TLS index at AddressOfIndex (a VA)
+            if (directories > 9) {
+                long tls = memory.getInt(base.add(optional + 112 + 9 * 8), false) & 0xFFFFFFFFL;
+                if (tls != 0) {
+                    if (!slot(writes, base, memory.getLong(base.add(tls + 0x10), false), preferred, imageSize, 4)) {
+                        return null;
+                    }
+                }
+            }
+            // IAT directory, and every import descriptor's FirstThunk array
+            if (directories > 12) {
+                long iat = memory.getInt(base.add(optional + 112 + 12 * 8), false) & 0xFFFFFFFFL;
+                long iatSize = memory.getInt(base.add(optional + 112 + 12 * 8 + 4), false) & 0xFFFFFFFFL;
+                if (iat != 0 && iatSize != 0) {
+                    if (iat + iatSize > imageSize) {
+                        return null;
+                    }
+                    writes.add(base.add(iat), base.add(iat + iatSize - 1));
+                }
+            }
+            if (directories > 1) {
+                long imports = memory.getInt(base.add(optional + 112 + 8), false) & 0xFFFFFFFFL;
+                for (long at = imports; imports != 0; at += 20) {
+                    if (at + 20 > imageSize) {
+                        return null;
+                    }
+                    long lookup = memory.getInt(base.add(at), false) & 0xFFFFFFFFL;
+                    long first = memory.getInt(base.add(at + 16), false) & 0xFFFFFFFFL;
+                    long name = memory.getInt(base.add(at + 12), false) & 0xFFFFFFFFL;
+                    if (first == 0 && name == 0 && lookup == 0) {
+                        break;
+                    }
+                    if (!thunks(writes, base, first, lookup, imageSize)) {
+                        return null;
+                    }
+                }
+            }
+            // delay-load IATs (written by the delay-load helper at first call)
+            if (directories > 13) {
+                long delay = memory.getInt(base.add(optional + 112 + 13 * 8), false) & 0xFFFFFFFFL;
+                for (long at = delay; delay != 0; at += 32) {
+                    if (at + 32 > imageSize) {
+                        return null;
+                    }
+                    long attributes = memory.getInt(base.add(at), false) & 0xFFFFFFFFL;
+                    long name = memory.getInt(base.add(at + 4), false) & 0xFFFFFFFFL;
+                    long handle = memory.getInt(base.add(at + 8), false) & 0xFFFFFFFFL;
+                    long table = memory.getInt(base.add(at + 12), false) & 0xFFFFFFFFL;
+                    long names = memory.getInt(base.add(at + 16), false) & 0xFFFFFFFFL;
+                    if (attributes == 0 && name == 0 && table == 0) {
+                        break;
+                    }
+                    if ((attributes & 1) == 0 || !thunks(writes, base, table, names, imageSize)) {
+                        return null;   // (fields not marked RVA-based: the old VA layout -- doubt)
+                    }
+                    if (handle != 0) {   // (Fable r15: the helper stores the module handle there)
+                        if (handle + 8 > imageSize) {
+                            return null;
+                        }
+                        writes.add(base.add(handle), base.add(handle + 7));
+                    }
+                }
+            }
+            // load config (Fable r15): any 8-byte field of the declared structure whose
+            // value is a VA inside the image may be a slot the loader fills (security
+            // cookie, CFG / XFG / RFG / cast-guard pointers ...) -- counted as an
+            // 8-byte write, whatever the structure version
+            if (loadConfig != 0) {
+                long declared = memory.getInt(base.add(loadConfig), false) & 0xFFFFFFFFL;
+                long limit = Math.min(declared, loadConfigSize);
+                for (long offset = 0; offset + 8 <= limit; offset += 8) {
+                    long va = memory.getLong(base.add(loadConfig + offset), false);
+                    long rva = va - preferred;
+                    if (Long.compareUnsigned(va, preferred) >= 0 && Long.compareUnsigned(rva, imageSize) < 0) {
+                        writes.add(base.add(rva), base.add(Math.min(rva + 7, imageSize - 1)));
+                    }
+                }
+            }
+            return writes;
+        }
+        catch (MemoryAccessException | RuntimeException error) {
+            return null;
+        }
+    }
+
+    /** Add the ``length`` bytes at the VA ``va`` (an RVA after the preferred
+     *  base); false when it lies outside the image. */
+    private static boolean slot(AddressSet writes, Address base, long va, long preferred, long imageSize, int length) {
+        long rva = va - preferred;
+        if (va == 0) {
+            return true;
+        }
+        if (rva < 0 || rva + length > imageSize) {
+            return false;
+        }
+        writes.add(base.add(rva), base.add(rva + length - 1));
+        return true;
+    }
+
+    /** (Astra r16) the loader fills one 8-byte IAT slot per entry of the lookup
+     *  table (OriginalFirstThunk / the delay import name table) up to its zero
+     *  terminator -- of the IAT itself when there is no separate lookup table:
+     *  add that many slots at ``iat``, the terminator's slot included. False when
+     *  an array leaves the image, has more than 65536 entries, or a lookup table
+     *  comes without an IAT. */
+    private boolean thunks(AddressSet writes, Address base, long iat, long lookup, long imageSize)
+            throws MemoryAccessException {
+        if (iat == 0) {
+            return lookup == 0;
+        }
+        long table = lookup != 0 ? lookup : iat;
+        for (int k = 0; k < 65536; k++) {
+            long at = table + 8L * k;
+            if (at + 8 > imageSize) {
+                return false;
+            }
+            if (currentProgram.getMemory().getLong(base.add(at), false) == 0) {
+                long end = iat + 8L * (k + 1);
+                if (end > imageSize) {
+                    return false;
+                }
+                writes.add(base.add(iat), base.add(end - 1));
+                return true;
+            }
+        }
+        return false;
     }
 
     /** True when the unwind info at ``unwind`` or a chained one names a
@@ -1669,6 +2032,7 @@ public class GhidraV2BundleExport extends GhidraScript {
                 return null;
             }
             byte[] record = new byte[(int) length];
+            proofReads.add(base.add(current), base.add(current + length - 1));
             if (currentProgram.getMemory().getBytes(base.add(current), record) != record.length) {
                 return null;   // (every declared byte in initialized memory)
             }
@@ -1688,15 +2052,24 @@ public class GhidraV2BundleExport extends GhidraScript {
     }
 
     private long u32At(Address base, long rva) throws MemoryAccessException {
+        read(base, rva, 4);
         return currentProgram.getMemory().getInt(base.add(rva), false) & 0xFFFFFFFFL;
     }
 
     private int u16At(Address base, long rva) throws MemoryAccessException {
+        read(base, rva, 2);
         return currentProgram.getMemory().getShort(base.add(rva), false) & 0xFFFF;
     }
 
     private int u8At(Address base, long rva) throws MemoryAccessException {
+        read(base, rva, 1);
         return currentProgram.getMemory().getByte(base.add(rva)) & 0xFF;
+    }
+
+    private void read(Address base, long rva, int length) {
+        if (proofReads != null) {
+            proofReads.add(base.add(rva), base.add(rva + length - 1));
+        }
     }
 
     private Map<String, Object> instruction(
