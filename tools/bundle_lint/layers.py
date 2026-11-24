@@ -24,8 +24,11 @@ def transport_rows(diagnosis) -> list[Row]:
     rows = []
     admission = diagnosis.admission
     if not admission.get("ok"):
-        rows.append(Row("transport", "admission", "bundle", "evaluated", "refused", "engine",
-                        {"error": admission["error"]}))
+        if admission.get("resource"):
+            rows.append(Row("transport", "admission", "bundle", "error", None, "lint", {"error": admission["error"]}))
+        else:
+            rows.append(Row("transport", "admission", "bundle", "evaluated", "refused", "engine",
+                            {"error": admission["error"]}))
         return rows
     rows.append(Row("transport", "admission", "bundle", "evaluated", "applied", "engine"))
     program = diagnosis.program

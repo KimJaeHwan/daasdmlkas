@@ -10,8 +10,10 @@ PYTHONPATH=src python3 tools/bundle_lint/lint.py <generation> --out report.json 
 PYTHONPATH=src python3 tools/bundle_lint/mutate.py <generation> <out_root> <variant> [--function ID] [--site KEY]
 ```
 
-The tool calls engine code and never re-implements an engine decision; the private engine helpers it drives are pinned
-by guard tests (`tests/intra/test_bundle_lint.py`, `test_guard_*`).
+The tool calls engine code for its decisions. Where it must restate an engine rule to report it (the read-only block
+condition, the S1 reach rule, the Win64 home-space rule, the fixed register offsets, the summary's context variables),
+the engine's own source line is pinned by a guard test, as are the private helpers it drives
+(`tests/intra/test_bundle_lint.py`, `test_guard_*`).
 
 ## Processes
 
@@ -33,8 +35,8 @@ refused function) `<function id>/#<index>`.
 | layer | checks |
 |---|---|
 | transport | admission, program, image_info, readonly_block, function_scope, seeds, naming, scoped_iterator |
-| operations | language, stack / link / pc register, fixed_register (engine literals), pcodeop_language, call, push_projection, plain_push, push_relation, tail_call, s1_exit, branchind, callother_model_match, source_row(s) |
-| features | stack_pointer, standalone_context / standalone_normalize / readonly_use / standalone_rep (`--normalize`), trap_application |
+| operations | language, stack / link / pc register, fixed_register (engine literals), pcodeop_language, call, push_projection, plain_push, push_relation (push ISAs), link_relation (link-register ISAs), tail_call, s1_exit, branchind (engine `unknown_transfer_sites`), rep_site, callother_model_match, source_row(s), layer_error |
+| features | stack_pointer, standalone_context / standalone_normalize / readonly_use / standalone_rep (`--normalize`), trap_application, rep_application |
 | pipeline | stop, completion (applied only when nothing was lost), run_columns (assumptions, control exemptions, fault report, control sites) |
 
 `--expect`: rows by `(layer, check, key)`; `run_state`, `verdict`, `source` and every listed `detail` key (a missing
@@ -46,15 +48,24 @@ key is a difference); `"exhaustive": true` also fails on rows not listed.
   what the engine ignores needs the engine to expose the key sets it reads; re-listing them here would re-implement the
   reader. Deferred until the reader exposes them.
 - **Per-site application inside the summary run** (traps, rep): not public in `EngineRun` -> `unobserved` rows.
+- **Convention keys beyond RSP / RIP** (design r1 s5): the engine files that compare language-id literals are
+  inventoried by `test_guard_engine_language_literals_are_inventoried` (a new file fails it); individually reported
+  in G0 are only the x86-64 RSP / RIP offsets and the p-code op model language. Not yet rows: the x86 flag offsets
+  (`interprocedural._X64_FLAGS`), `may_alias.CALL_PRESERVED`, the language-id string checks (summary_engine,
+  operation_records, configured_finite_byte_kernel, ...), the user-op tables (code_only_profile, fault_premise).
 - **The standalone `--normalize`** has no proven call effects: its rows are labelled `standalone`, never the summary's
   result. `stack_evidence` is not modelled (the summary's default is none).
 
 ## Variant tool limits
 
-- `call-reshape` on a Bundle with a real call-effects sidecar is refused: moving the CALL ordinal changes that sidecar's
-  row and content digests, and no engine decoder exists to rebuild them; the tool never writes an inconsistent
-  sidecar. On the synthetic fixtures (placeholder call-effects) it runs.
-- Every variant admits its source first, copies only listed members, and post-checks that only the target function
-  changed (target still admitted with its names; `call-ordinal`: only its names refused).
+- `call-reshape` on a Bundle with a real call-effects sidecar is refused before anything is written: moving the CALL
+  ordinal changes that sidecar's row and content digests; the engine has the encoders (`effect_row_digest`,
+  `effect_content_digest`) but no JSON-to-row decoder, and the tool never writes an inconsistent sidecar. So 3b is
+  tested on the synthetic fixtures only.
+- Every variant admits its source first (its target function must be admitted with its names), copies only listed
+  members, and post-checks that only the target changed: other functions identical, the target's other call rows
+  identical, the target still admitted with its names (`call-ordinal`: only its names refused), `drop-pad`: the
+  validated pad set shrank. A failed variant is renamed `<generation>.failed`. `--naming-source` for other exporter
+  revisions.
 
 Synthetic fixtures only in tests (`_sealed.py`); never commit a real Bundle, binary or report of one.

@@ -3,7 +3,7 @@
 condition, then re-seal (member size / sha256, manifest, seal). POSIX / WSL.
 
     PYTHONPATH=src python3 tools/bundle_lint/mutate.py <generation> <out_root> <variant>
-        [--function function-000000] [--site 1:1007:2:CALL] [--index 0]
+        [--function function-000000] [--site 1:1007:2:CALL] [--index 0] [--naming-source FILE]
 
 The copy keeps the generation id (sidecar transports stay valid), is written
 without hard links (nlink 1), files 0644, directory 0755.
@@ -19,9 +19,15 @@ Variants (r1 s6, r2 s7, r3 s4, r6 s2-3):
 
 Observation changes update the observation member and the observation sha256
 in the naming transport and, when the call-effects member is a real sidecar,
-in its transport. The engine never decodes call-effects; when a variant moves
-an ordinal, its call-effects rows are moved too but their digests are not
-re-derived -- the result says so (``call_effects``).
+in its transport (not part of its content digest). ``call-reshape`` moves the
+CALL ordinal, which would change a real call-effects sidecar's row digests; no
+engine decoder exists to rebuild them, so it is refused on such a Bundle
+before anything is written (it runs on the synthetic fixtures).
+
+The source must be admissible (it is admitted first); after the change a
+post-check confirms only the target changed (other functions identical; the
+target's other call rows identical; drop-pad: the validated pad set shrank).
+A failed variant's directory is renamed ``<generation>.failed``.
 """
 
 from __future__ import annotations
@@ -235,7 +241,7 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
                 and (target["space_id"], target["byte_offset"]) in reached]
         if not pads:
             raise VariantError("the call row lists no local landing pad reached by another instruction")
-        row["flow_targets"].remove(pads[0])
+        row["flow_targets"] = [target for target in row["flow_targets"] if target != pads[0]]
         return {"moved": None, "dropped": pads[0]}
     adjust, store, call = _push_call(row)
     if variant == "call-pattern":
@@ -263,8 +269,9 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
 
 # -- source-row check (r3 s4) ---------------------------------------------------------------
 
-def _survey(generation: Path) -> dict:
-    """{function id: (scope, seeds, naming, observation sha256, {(check, row key): verdict})}."""
+def _survey(generation: Path, naming_source=None) -> dict:
+    """{function id: (scope, seeds, naming, observation sha256, {(check, row key): verdict},
+    {call row key: landing pads})}."""
     import diagnose
     import ops_layer
 
@@ -273,57 +280,94 @@ def _survey(generation: Path) -> dict:
     def keep(diagnosis):
         keys = {claim.entry for claim in diagnosis.claims if claim.entry}
         for claim in diagnosis.claims:
-            rows = {}
+            rows, pads = {}, {}
             if claim.evidence is not None:
-                rows = {(row.check, row.key): row.verdict for row in ops_layer.call_rows(claim, keys)}
-            found[claim.function_id] = (claim.scope, claim.seeds, claim.naming, claim.observation_sha256, rows)
+                for row in ops_layer.call_rows(claim, keys):
+                    rows[(row.check, row.key)] = row.verdict
+                    if row.check == "call":
+                        pads[row.key] = tuple(row.detail["landing_pads"])
+            found[claim.function_id] = (claim.scope, claim.seeds, claim.naming, claim.observation_sha256, rows, pads)
 
-    diagnose.diagnose(generation, _sealed.NAMING_SOURCE, keep=keep)
+    diagnose.diagnose(generation, naming_source or _sealed.NAMING_SOURCE, keep=keep)
     return found
 
 
-def precheck(source: Path, function_id: str, site: str) -> dict:
-    """The source row must be a recognised push call before a call-* variant:
-    call-state projection, ``_plain_push_call`` and the push relation all hold
-    (recognition only -- not the callee state-preservation proof)."""
-    survey = _survey(source)
-    rows = survey.get(function_id, (None, None, None, None, {}))[4]
-    key = f"{function_id}/{site}"
-    wanted = {check: rows.get((check, key)) for check in ("push_projection", "plain_push", "push_relation")}
-    if any(verdict != "applied" for verdict in wanted.values()):
-        raise VariantError(f"source row is not a recognised direct push call: {wanted}")
-    return survey
+def precheck(survey: dict, function_id: str, site: str, variant: str) -> None:
+    """Source conditions: the target function is admitted with its names; a
+    call-* variant needs a recognised direct push call (projection,
+    ``_plain_push_call``, push relation -- recognition only, not the callee
+    state proof)."""
+    target = survey.get(function_id)
+    if target is None or target[:3] != ("constructed", "ok", "ok"):
+        raise VariantError(f"the source function is not admitted with its names: {None if target is None else target[:3]}")
+    if variant in ("call-pattern", "call-reshape", "call-swap"):
+        key = f"{function_id}/{site}"
+        wanted = {check: target[4].get((check, key)) for check in ("push_projection", "plain_push", "push_relation")}
+        if any(verdict != "applied" for verdict in wanted.values()):
+            raise VariantError(f"source row is not a recognised direct push call: {wanted}")
 
 
-def postcheck(survey: dict, generation: Path, variant: str, function_id: str) -> None:
+def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: str | None) -> None:
     """One condition changed: every other function is unchanged; the target is
-    still admitted with its names (call-ordinal: only its names refused)."""
-    after = _survey(generation)
+    still admitted with its names (call-ordinal: only its names refused); the
+    target's call rows other than the site's are unchanged; drop-pad: the
+    validated pad set of the site shrank (Astra impl r2 P2, Fable impl r2 P3)."""
     if set(after) != set(survey):
         raise VariantError("the variant changed the function set")
     for key, before in survey.items():
-        if key == function_id:
-            continue
-        if after[key][:4] != before[:4]:
+        if key != function_id and after[key][:4] != before[:4]:
             raise VariantError(f"the variant changed another function: {key}")
-    target = after[function_id]
+    target, before = after[function_id], survey[function_id]
     expected = ("constructed", "ok", "error") if variant == "call-ordinal" else ("constructed", "ok", "ok")
     if target[:3] != expected:
         raise VariantError(f"the target function is {target[:3]}, expected {expected}")
+    if variant == "call-ordinal":
+        return
+    prefix = None if site is None else f"{function_id}/" + ":".join(site.split(":")[:2]) + ":"
+    def others(rows):
+        return {key: value for key, value in rows.items() if prefix is None or not key[1].startswith(prefix)}
+    if others(target[4]) != others(before[4]):
+        raise VariantError("the variant changed other call rows of the target function")
+    if variant == "drop-pad":
+        key = f"{function_id}/{site}"
+        if not set(target[5].get(key, ())) < set(before[5].get(key, ())):
+            raise VariantError("the validated landing pads did not shrink")
 
 
 # -- driver ---------------------------------------------------------------------------------
 
 def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "function-000000",
-           site: str | None = None, index: int = 0) -> dict:
+           site: str | None = None, index: int = 0, naming_source=None) -> dict:
+    import shutil
+
     if variant not in VARIANTS:
         raise VariantError(f"unknown variant {variant!r}")
     survey = None
-    if variant in ("call-pattern", "call-reshape", "call-swap"):
-        survey = precheck(source, function_id, site)
-    elif variant != "seal":
-        survey = _survey(source)
+    if variant != "seal":
+        survey = _survey(source, naming_source)
+        precheck(survey, function_id, site, variant)
+        if variant == "call-reshape":
+            manifest = _json(source / "manifest.json")
+            effects = _json(_member_path(source, manifest, _function_row(manifest, function_id)["call_effects_member"]))
+            if isinstance(effects.get("transport"), dict):
+                # its rows' digests cannot be re-derived without a call-effects decoder
+                # (none exists in the engine): refused before anything is written
+                raise VariantError("call-reshape on a Bundle with a real call-effects sidecar is not supported")
     generation = copy_bundle(source, out_root)
+    try:
+        result = _mutate_copy(generation, variant, function_id, site, index)
+        if survey is not None:
+            postcheck(survey, _survey(generation, naming_source), variant, function_id, site)
+        return result
+    except BaseException:
+        failed = generation.with_name(generation.name + ".failed")
+        if failed.exists():
+            shutil.rmtree(failed)
+        generation.rename(failed)
+        raise
+
+
+def _mutate_copy(generation: Path, variant: str, function_id: str, site, index: int) -> dict:
     result = {"variant": variant, "generation": str(generation), "function": function_id, "site": site}
     if variant == "seal":
         seal = _json(generation / "seal.json")
@@ -352,17 +396,14 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
         chosen["operation_ordinal"] = new
         _write_member(generation, manifest, function["call_names_member"], _sealed.dumps(rederive_naming(naming)))
         reseal(generation, manifest)
-        postcheck(survey, generation, variant, function_id)
         return result
     observation_path = _member_path(generation, manifest, function["observation_member"])
     observation = _json(observation_path)
-    program = _json(_member_path(generation, manifest, manifest["program_member_id"]))
     effects = _json(_member_path(generation, manifest, function["call_effects_member"]))
-    if variant == "call-reshape" and isinstance(effects.get("transport"), dict):
-        # its rows' digests cannot be re-derived without a call-effects decoder
-        # (none exists in the engine): never write an inconsistent sidecar (Astra impl r1 P1)
-        raise VariantError("call-reshape on a Bundle with a real call-effects sidecar is not supported")
-    edit = edit_observation(observation, variant, site, index, unique_space(program))
+    unique = None
+    if variant == "call-reshape":   # (only this variant needs the unique space: Astra impl r2 P2)
+        unique = unique_space(_json(_member_path(generation, manifest, manifest["program_member_id"])))
+    edit = edit_observation(observation, variant, site, index, unique)
     result.update({key: value for key, value in edit.items() if key != "moved"})
     data = _sealed.dumps(observation)
     _write_member(generation, manifest, function["observation_member"], data)
@@ -385,7 +426,6 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
     else:
         result["call_effects"] = "placeholder (not a call-effect sidecar)"
     reseal(generation, manifest)
-    postcheck(survey, generation, variant, function_id)
     return result
 
 
@@ -397,9 +437,11 @@ def main(argv=None) -> int:
     parser.add_argument("--function", default="function-000000")
     parser.add_argument("--site")
     parser.add_argument("--index", type=int, default=0)
+    parser.add_argument("--naming-source", type=Path)
     args = parser.parse_args(argv)
     print(json.dumps(mutate(args.generation, args.out_root, args.variant, function_id=args.function,
-                            site=args.site, index=args.index), sort_keys=True))
+                            site=args.site, index=args.index, naming_source=args.naming_source),
+                     sort_keys=True))
     return 0
 
 

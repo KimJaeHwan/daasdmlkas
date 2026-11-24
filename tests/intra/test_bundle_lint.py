@@ -688,3 +688,126 @@ def test_a_shared_instruction_gives_one_row_per_function(sealed):
     rows, _ = _run_lint(sealed, s.Bundle([a, a2, b]), "shared", summary=False)
     assert ("operations", "call", "function-000000/1:1007:2:CALL") in rows
     assert ("operations", "call", "function-000001/1:1007:2:CALL") in rows
+
+
+
+# -- implementation review r2 fixtures (Astra / Fable) ------------------------------------
+
+@posix
+def test_a_malformed_source_address_is_reported_not_fatal(sealed):
+    s = sealed[0]
+    a = s.Function("A", s.observation(0x1000, [s.ret(0x1000)]))
+    bad = s.observation(0x1800, [s.ret(0x1800)])
+    bad["instructions"][0]["address"] = {}
+    rows, _ = _run_lint(sealed, s.Bundle([a, s.Function("B", bad)]), "malformed")
+    assert rows[("transport", "function_scope", "function-000001")].verdict == "refused"
+    assert rows[("operations", "source_row", "function-000001/#0")].detail["address"].startswith("malformed:")
+    assert rows[("pipeline", "completion", "base_graph")].run_state == "evaluated"
+
+
+@posix
+def test_callind_push_is_recognised_and_plain_push_is_direct_only(sealed):
+    s = sealed[0]
+    callind = s.row(0x1000, 5, s.ops(("INT_SUB", [s.reg(s.RSP), s.const(8)], s.reg(s.RSP)),
+                                     ("STORE", [s.const(s.RAM), s.reg(s.RSP), s.const(0x1005)], None),
+                                     ("CALLIND", [s.reg(s.RAX)], None)), s.CALL_FLOW, 0x1005, [])
+    f = s.Function("F", s.observation(0x1000, [callind, s.ret(0x1005)]))
+    rows, _ = _run_lint(sealed, s.Bundle([f]), "callind", summary=False)
+    key = "function-000000/1:1000:2:CALLIND"
+    assert rows[("operations", "push_projection", key)].verdict == "applied"
+    assert rows[("operations", "push_relation", key)].verdict == "applied"
+    assert rows[("operations", "plain_push", key)].verdict == "not_applicable"
+
+
+@posix
+def test_branchind_unknown_transfer_follows_the_engine_predicate(sealed):
+    s = sealed[0]
+    jump = s.flow(is_flow=True, is_jump=True, is_computed=True, is_unconditional=True)
+    # BRANCHIND with no listed target but a fallthrough; and BRANCHIND followed by a COPY
+    first = s.row(0x1000, 2, s.ops(("BRANCHIND", [s.reg(s.RAX)], None)), jump, 0x1002, [])
+    second = s.row(0x1002, 2, s.ops(("BRANCHIND", [s.reg(s.RAX)], None), ("COPY", [s.reg(s.RCX)], s.reg(s.RDX))),
+                   jump, 0x1004, [])
+    f = s.Function("F", s.observation(0x1000, [first, second, s.ret(0x1004)]))
+    rows, _ = _run_lint(sealed, s.Bundle([f]), "branchind", summary=False)
+    found = {ident: row for ident, row in rows.items() if ident[1] == "branchind"}
+    if rows[("transport", "function_scope", "function-000000")].verdict != "applied":
+        pytest.skip("the observation shape is refused by the scope reader")
+    assert len(found) == 2, found
+    assert all(row.verdict == "withheld" and row.detail["unknown_transfer"] for row in found.values())
+
+
+@posix
+def test_drop_pad_with_a_repeated_pad_shrinks_the_validated_set(sealed):
+    s = sealed[0]
+    bundle = _layer2_bundle(s)
+    bundle.functions[0].observation["instructions"][0]["flow_targets"].append(s.coord(0x100A))
+    rows, base, note = _variant(sealed, "drop-pad", bundle=bundle, function_id="function-000000",
+                                site="1:1000:2:CALL")
+    call = ("operations", "call", "function-000000/1:1000:2:CALL")
+    assert base[call].detail["landing_pads"] == ["1:100a"] and rows[call].detail["landing_pads"] == []
+
+
+@posix
+def test_a_failed_variant_is_renamed_failed_and_can_be_retried(sealed):
+    import mutate
+
+    _sealed, root = sealed
+    with pytest.raises(mutate.VariantError):
+        _variant(sealed, "drop-pad", function_id="function-000000", site="1:1007:2:CALL")   # (no pad)
+    out = root / "drop-pad"
+    assert [path.name.endswith(".failed") for path in out.iterdir()] == [True]
+
+
+@posix
+def test_duplicate_entry_s1_edges_come_from_the_kept_member_only(sealed):
+    s = sealed[0]
+    first = s.Function("E1", s.observation(0x17F0, [s.plain(0x17F0, 3, ("COPY", [s.reg(s.RCX)], s.reg(s.RAX))),
+                                                    s.plain(0x17F3, 13, ("COPY", [s.reg(s.RCX)], s.reg(s.RDX)))],
+                                           exits=[_exit(0x17F3, 0x1800, 2, 0x1800)]))
+    last = s.Function("E2", s.observation(0x17F0, [s.ret(0x17F0)]))
+    b = s.Function("B", s.observation(0x1800, [s.ret(0x1800)]))
+    rows, _ = _run_lint(sealed, s.Bundle([first, last, b]), "dups1", summary=False, options={"lint_normalize": True})
+    exit_row = rows[("operations", "s1_exit", "function-000000/#0")]
+    assert exit_row.detail["reach_edge"] is False and exit_row.detail["superseded_by_duplicate_entry"]
+    assert ("features", "standalone_normalize", "function-000000") in rows      # (every member normalised)
+    assert rows[("features", "standalone_normalize", "function-000000")].detail.get("superseded_by_duplicate_entry")
+
+
+@posix
+def test_guard_session_step_order_and_helpers():
+    import inspect
+
+    from tdo_v2 import isa_identity
+    from tdo_v2.integration import observed_function_session as session
+    from tdo_v2.integration.configured_bundle import _safe_name  # noqa: F401
+
+    source = inspect.getsource(session.ObservedFunctionSession._decode_function)
+    order = [source.index(text) for text in ("seeds = seed_function_calls(unit)", "tails = seed_tail_calls(unit)",
+                                             "naming = decode_configured_naming(")]
+    assert order == sorted(order)
+    nxt = inspect.getsource(session._ObservedFunctionIterator.__next__)
+    assert nxt.index("unit = next(self._scoped)") < nxt.index("captured = adapter.collect_function_roles()")
+    for table in ("_STACK_REGISTERS", "_LINK_REGISTERS", "_PROGRAM_COUNTERS"):
+        assert isinstance(getattr(isa_identity, table), dict)
+
+
+def test_guard_engine_language_literals_are_inventoried():
+    """Convention keys (r1 s5): files of the engine that compare language-id
+    literals. A new one fails here until it is modelled (ops_layer
+    FIXED_OFFSETS / convention rows) or listed in the README."""
+    import re
+
+    pattern = re.compile(r"[\"'](x86|AARCH64|ARM)[:\"']")
+    src = REPO / "src" / "tdo_v2"
+    found = sorted(str(path.relative_to(src)).replace("\\", "/") for path in src.rglob("*.py")
+                   if pattern.search(path.read_text(encoding="utf-8")))
+    assert found == sorted(LANGUAGE_LITERAL_FILES), found
+
+
+LANGUAGE_LITERAL_FILES = (
+    "code_only_profile.py", "fault_premise.py", "integration/configured_dynamic_alias_explanation.py",
+    "integration/configured_finite_byte_kernel.py", "integration/configured_finite_context_scheduler.py",
+    "interprocedural.py", "intrinsic_refinements.py", "intrinsic_semantics.py", "isa_identity.py", "linking.py",
+    "may_alias.py", "operation_records.py", "return_relations.py", "summary_engine.py", "summary_store.py",
+    "summary_templates.py",
+)

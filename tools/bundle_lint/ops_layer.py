@@ -26,7 +26,13 @@ def _coord(value) -> str | None:
 
 
 def _raw_coord(value) -> str | None:
-    return None if value is None else f"{value['space_id']:x}:{value['byte_offset']:x}"
+    """A member's own coordinate, as far as it is well formed (Astra impl r2 P1)."""
+    if not isinstance(value, dict):
+        return None
+    space, offset = value.get("space_id"), value.get("byte_offset")
+    if type(space) is int and type(offset) is int and space >= 0 and offset >= 0:
+        return f"{space:x}:{offset:x}"
+    return f"malformed:{json.dumps(value, sort_keys=True)[:120]}"
 
 
 # -- program-level -------------------------------------------------------------------------
@@ -156,6 +162,10 @@ def call_rows(claim, function_keys) -> list[Row]:
     memory_space = _program_memory_space(unit)
     projected = {row.call_operation_key for row in observed_call_state_projections(observation)}
     relations = call_relations(observation, unit.scopes)
+    from tdo_v2 import isa_identity
+
+    parts = tuple(unit.scopes.program.evidence.translation_namespace.language_id.split(":"))[:3]
+    pushes = parts not in isa_identity._LINK_REGISTERS
     rows = []
     for seed, naming in zip(evidence.seeds.callsites, evidence.naming.rows, strict=True):
         key = operation_row_key(claim.function_id, seed.operation_key)
@@ -175,17 +185,26 @@ def call_rows(claim, function_keys) -> list[Row]:
             "local_successors": sorted(_coord(item) for item in successors if item in local),
             "landing_pads": sorted(_coord(item) for item in pads),
         }))
-        # the recognisers as verdict rows (Fable impl r1 P1-2): a direct CALL is the
-        # independent criterion; anything else is not_applicable
-        direct = opcode == "CALL"
-        checks = (
-            ("push_projection", seed.operation_key in projected),
-            ("plain_push", bool(direct and memory_space is not None
-                                and _plain_push_call(unit, seed.operation_key, memory_space))),
-            ("push_relation", seed.operation_key in relations and relations[seed.operation_key].kind == "push"),
-        )
-        for check, held in checks:
-            if not direct:
+        # the recognisers as verdict rows (Fable impl r1 P1-2). Criteria (Astra impl r2
+        # P1, Fable impl r2 P2-1): on an ISA whose calls push the continuation (no
+        # link register in isa_identity's table) the projection and the push relation
+        # apply to every native call (CALL / CALLIND), _plain_push_call to a direct
+        # CALL; on a link-register ISA the push rows are not_applicable and the link
+        # relation applies to every native call.
+        relation = relations.get(seed.operation_key)
+        if pushes:
+            checks = (
+                ("push_projection", True, seed.operation_key in projected),
+                ("plain_push", opcode == "CALL", bool(memory_space is not None and opcode == "CALL"
+                                                      and _plain_push_call(unit, seed.operation_key, memory_space))),
+                ("push_relation", True, relation is not None and relation.kind == "push"),
+            )
+        else:
+            checks = (("push_projection", False, False), ("plain_push", False, False),
+                      ("push_relation", False, False),
+                      ("link_relation", True, relation is not None and relation.kind == "link"))
+        for check, applies, held in checks:
+            if not applies:
                 rows.append(Row("operations", check, key, "evaluated", "not_applicable", "lint"))
             else:
                 # (plain_push is recognition only: the callee state proof is separate, interprocedural.py:1224)
@@ -210,7 +229,7 @@ def tail_rows(claim, function_keys) -> list[Row]:
     return rows
 
 
-def exit_rows(claim, raw, function_keys) -> list[Row]:
+def exit_rows(claim, raw, function_keys, superseded=False) -> list[Row]:
     """S1 fallthrough exits as ``(source, target, kind, function)`` keyed by the
     member's own array index; ``reach_edge`` applies the engine's rule
     (control_context.py:104, pinned by a guard) to the functions this Bundle
@@ -232,44 +251,58 @@ def exit_rows(claim, raw, function_keys) -> list[Row]:
                             {"raw": item if isinstance(item, dict) else None}))
             continue
         source, target, kind, function = value
-        reach = function is not None and function in function_keys
+        # (a member another member of the same entry replaces is never the one the
+        # summary analyses, summary_engine.py:412: no edge from it -- Astra impl r2 P2)
+        reach = function is not None and function in function_keys and not superseded
+        detail = {"source": source, "target": target, "kind": kind, "function": function, "reach_edge": reach}
+        if superseded:
+            detail["superseded_by_duplicate_entry"] = True
         rows.append(Row("operations", "s1_exit", key, "evaluated", "applied" if reach else "not_applicable",
-                        "lint", {"source": source, "target": target, "kind": kind, "function": function,
-                                 "reach_edge": reach}))
+                        "lint", detail))
     return rows
 
 
 def branchind_rows(claim, raw) -> list[Row]:
-    """A terminal BRANCHIND: the member's own target list, the validated
-    ``flow_targets`` and the engine's local successors (r2 s4). No target left =
-    an unknown transfer (``withheld``)."""
-    from tdo_v2.call_seeds import _operation_key
+    """Every row with a BRANCHIND (any ordinal): the member's own target list,
+    the validated ``flow_targets`` and the engine's local successors (facts);
+    the verdict is the engine's own predicate ``unknown_transfer_sites``
+    (control_context.py:62): an unknown transfer -> ``withheld`` (Astra impl r2 P1)."""
+    from tdo_v2.control_context import site_key, unknown_transfer_sites
     from tdo_v2.control_projection import control_successor_coordinates
 
     unit = claim.unit
+    entry = claim.entry
+    unknown = unknown_transfer_sites(entry, unit.observation)
     local = {row.address for row in unit.observation.instructions}
     raw_rows = {}
     for item in (raw.get("instructions", []) if isinstance(raw, dict) else []):
-        try:
-            raw_rows[(item["address"]["space_id"], item["address"]["byte_offset"])] = item
-        except (KeyError, TypeError):
-            continue
+        if isinstance(item, dict):
+            raw_rows.setdefault(_raw_coord(item.get("address")), item)
     rows = []
     for instruction in unit.observation.instructions:
-        if not instruction.operations or instruction.operations[-1].opcode != "BRANCHIND":
+        if not any(operation.opcode == "BRANCHIND" for operation in instruction.operations):
             continue
-        ordinal = len(instruction.operations) - 1
-        key = operation_row_key(claim.function_id, _operation_key(instruction.address, ordinal, "BRANCHIND"))
-        item = raw_rows.get((instruction.address.space_id, instruction.address.byte_offset), {})
+        site = site_key(entry, instruction.address)
+        item = raw_rows.get(_coord(instruction.address), {})
         successors = control_successor_coordinates(instruction, local_addresses=local,
                                                    function_entry=unit.scopes.function.entry)
-        rows.append(Row("operations", "branchind", key, "evaluated",
-                        "applied" if successors else "withheld", "lint", {
-                            "raw_targets": sorted(_raw_coord(t) for t in item.get("flow_targets", [])
+        rows.append(Row("operations", "branchind", f"{claim.function_id}/{site}", "evaluated",
+                        "withheld" if site in unknown else "applied", "engine", {
+                            "unknown_transfer": site in unknown,
+                            "raw_targets": sorted(str(_raw_coord(t)) for t in item.get("flow_targets", [])
                                                   if isinstance(t, dict)),
                             "flow_targets": sorted(_coord(t) for t in instruction.flow_targets),
                             "local_successors": sorted(_coord(t) for t in successors if t in local)}))
     return rows
+
+
+def rep_rows(claim) -> list[Row]:
+    """rep string sites the engine recognises (``rep_strings.rep_sites``): their
+    proof inside the summary run is not public -> application rows in layer 3."""
+    from tdo_v2.rep_strings import rep_sites
+
+    return [Row("operations", "rep_site", f"{claim.function_id}/{_coord(address)}", "evaluated", "applied", "engine")
+            for address in sorted(rep_sites(claim.unit.observation), key=lambda a: (a.space_id, a.byte_offset))]
 
 
 def callother_rows(claim, models) -> list[Row]:
@@ -342,16 +375,25 @@ def rows(diagnosis, generation, options) -> list[Row]:
     models = load_pcodeop_models(paths)
     out = register_rows(program) + convention_rows(program, models, paths)
     function_keys = {claim.entry for claim in diagnosis.claims if claim.entry}
+    last = {}
     for claim in diagnosis.claims:
-        raw = _raw_observation(generation, claim)
-        if claim.scope != "constructed":
-            out.extend(source_rows(claim, raw))
-            continue
-        if claim.evidence is None:
-            continue
-        out.extend(call_rows(claim, function_keys))
-        out.extend(tail_rows(claim, function_keys))
-        out.extend(exit_rows(claim, raw, function_keys))
-        out.extend(branchind_rows(claim, raw))
-        out.extend(callother_rows(claim, models))
+        if claim.evidence is not None:
+            last[claim.entry] = claim
+    for claim in diagnosis.claims:
+        try:
+            raw = _raw_observation(generation, claim)
+            if claim.scope != "constructed":
+                out.extend(source_rows(claim, raw))
+                continue
+            if claim.evidence is None:
+                continue
+            out.extend(call_rows(claim, function_keys))
+            out.extend(tail_rows(claim, function_keys))
+            out.extend(exit_rows(claim, raw, function_keys, superseded=last.get(claim.entry) is not claim))
+            out.extend(branchind_rows(claim, raw))
+            out.extend(rep_rows(claim))
+            out.extend(callother_rows(claim, models))
+        except Exception as error:   # (one function's rows never stop the report)
+            out.append(Row("operations", "layer_error", claim.function_id or f"#{claim.index}", "error", None,
+                           "lint", {"class": type(error).__qualname__, "message": str(error)}))
     return out

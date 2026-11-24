@@ -182,6 +182,8 @@ def _naming(generation, observation_id, observation_sha, data, entries, naming_s
     rows = []
     for instruction in data["instructions"]:
         address = instruction["address"]
+        if not isinstance(address, dict) or not {"space_id", "byte_offset"} <= set(address):
+            continue   # (a deliberately malformed fixture row: the scope reader refuses it)
         place = AddressCoordinate(address["space_id"], address["byte_offset"])
         for operation in instruction["operations"]:
             if operation["opcode"] not in ("CALL", "CALLIND"):

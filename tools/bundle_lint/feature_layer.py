@@ -174,11 +174,15 @@ def trap_application_rows(op_rows, results: dict, options: dict) -> list[Row]:
     import diagnose
 
     models = options.get("pcodeop_models")
-    on = options.get("assume_debug_break_traps_do_not_return", True) and bool(models)
+    traps_on = options.get("assume_debug_break_traps_do_not_return", True) and bool(models)
     out = []
     summary = results.get("summary")
     for row in op_rows:
-        if row.check != "callother_model_match" or not row.detail.get("trap_match"):
+        if row.check == "callother_model_match" and row.detail.get("trap_match"):
+            check, on = "trap_application", traps_on
+        elif row.check == "rep_site":
+            check, on = "rep_application", True   # (rep sites are proved in every summary run)
+        else:
             continue
         if summary is None or not on:
             state = "not_run"
@@ -188,7 +192,7 @@ def trap_application_rows(op_rows, results: dict, options: dict) -> list[Row]:
             state = "not_reached" if diagnose.pre_analysis(results.get("_predictions", {}).get("summary"))                 else "unobserved"
         else:
             state = "unobserved"
-        out.append(Row("features", "trap_application", row.key, state))
+        out.append(Row("features", check, row.key, state))
     return out
 
 
@@ -200,7 +204,7 @@ def rows(diagnosis, generation, options) -> list[Row]:
     if options.get("lint_normalize"):
         image_info = diagnosis.image_info_value
         image = readonly_image(generation, image_info, options)
-        last = {}   # one member per entry, the last one, as the summary keeps it (summary_engine.py:412)
+        last = {}   # the context: one member per entry, the last, as the summary keeps it (summary_engine.py:412)
         for claim in claims:
             last[claim.entry] = claim
         unique = list(last.values())
@@ -208,8 +212,11 @@ def rows(diagnosis, generation, options) -> list[Row]:
                                [claim.evidence for claim in unique]) as context:
             out.append(Row("features", "standalone_context", "program", "evaluated", "applied", "lint",
                            {**context.header(), "readonly_image": image is not None}))
-            for claim in unique:
+            for claim in claims:   # (every member is normalised: Astra impl r2 P2)
                 out.extend(normalize_rows(claim, image, context))
+                if last[claim.entry] is not claim:
+                    out[-1] = Row(out[-1].layer, out[-1].check, out[-1].key, out[-1].run_state, out[-1].verdict,
+                                  out[-1].source, {**out[-1].detail, "superseded_by_duplicate_entry": True})
     return out
 
 

@@ -90,10 +90,15 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
 
     result = Diagnosis()
     binding = NamingBindingExpectation(sha256(naming_source.read_bytes()).digest(), CALL_NAMING_GHIDRA_VERSION)
+    from tdo_v2.resource_limits import RESOURCE_FAILURES
+
     try:
         snapshot = admit_frozen_bundle(generation)
         session = open_observed_function_session(snapshot, naming_binding=binding)
         session.__enter__()
+    except RESOURCE_FAILURES as error:   # (a resource failure is no verdict on the Bundle: Astra impl r2 P2)
+        result.admission = {"ok": False, "resource": True, "error": _error(error)}
+        return result
     except Exception as error:
         result.admission = {"ok": False, "error": _error(error)}
         return result

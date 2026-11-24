@@ -87,13 +87,18 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
             continue
         if not child.get("completed"):
             # 0 analysed only when the stop is known to come before analysis; a
-            # later exception keeps what the child recovered (base_graph snapshot)
+            # later exception keeps what the child recovered (base_graph snapshot).
+            # An engine refusal is a stop the diagnosis predicted; anything else
+            # (a resource or execution error) is run_state error (Astra impl r2 P2)
             known = verdict == "applied" and diagnose.pre_analysis(prediction)
             stopped = {"exception": child.get("exception"), "analysed": 0 if known else None}
             for name in ("stop", "pending", "failures", "graphs", "entry_links_finished", "admission_failures"):
                 if name in child:
                     stopped[name] = child[name]
-            rows.append(Row("pipeline", "completion", path, "evaluated", "refused", "engine", stopped))
+            if verdict == "applied":
+                rows.append(Row("pipeline", "completion", path, "evaluated", "refused", "engine", stopped))
+            else:
+                rows.append(Row("pipeline", "completion", path, "error", None, "lint", stopped))
             continue
         if path != "base_graph" and child["supports_count"] != len(child["supported_functions"]):
             rows.append(Row("pipeline", "completion", path, "error", None, "lint",
@@ -113,8 +118,9 @@ def run(generation: Path, naming_source: Path, *, timeout: float, summary: bool,
     diag = children.spawn(_HERE / "diagnose.py",
                           [generation, naming_source] + ([json.dumps(options, sort_keys=True)] if options else []),
                           timeout=timeout)
-    if diag.get("run_state") != "evaluated":
-        raise RuntimeError(f"diagnosis pass failed: {json.dumps(diag)[:4000]}")
+    diagnosis_failed = diag.get("run_state") != "evaluated"
+    if diagnosis_failed:   # (the pipelines still run; the report says the diagnosis failed)
+        diag = {**diag, "rows": [], "diagnosis": {"claims": []}, "predictions": {}}
     results = {}
     for path in children.PATHS:
         if path != "base_graph" and not summary:
@@ -122,6 +128,9 @@ def run(generation: Path, naming_source: Path, *, timeout: float, summary: bool,
         results[path] = children.run_path(path, generation, naming_source, timeout=timeout,
                                           options=options if path != "base_graph" else None)
     rows = [Row.from_json(row) for row in diag["rows"]]
+    if diagnosis_failed:
+        rows.append(Row("transport", "diagnosis", "bundle", diag.get("run_state", "error"), None, "lint",
+                        {key: diag.get(key) for key in ("returncode", "stderr", "elapsed")}))
     rows.extend(pipeline_rows(diag["diagnosis"], diag["predictions"], results))
     rows.extend(feature_layer.trap_application_rows(rows, {**results, "_predictions": diag["predictions"]},
                                                     options))
