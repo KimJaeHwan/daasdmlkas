@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """G1 ``decode_check``: original-file mapping (L7) + independent-decoder cross-check
-(L2) of one sealed Bundle (design .census6/design_g1_decode_check_r0..r4.md).
+(L2) of one sealed Bundle whose original is PE32+ (AMD64) or ELF64 (x86-64)
+(design .census6/design_g1_decode_check_r0..r4.md; ELF: elf_map.RULES).
 POSIX / WSL; decoders from build_decoders.sh ($G1_DECODERS).
 
     PYTHONPATH=src python3 tools/decode_check/decode_check.py <generation> --out report.json
@@ -28,10 +29,9 @@ sys.path.insert(0, str(_HERE.parent / "bundle_lint"))
 import check  # noqa: E402
 import decoders  # noqa: E402
 import lifting  # noqa: E402
-import pe_map  # noqa: E402
 from report import Row, dumps  # noqa: E402
 
-REVISION = 1
+REVISION = 2
 SCOPE = ("only Ghidra-listed rows are checked (L5); 64-bit long mode only (no compatibility-mode switches); "
          "decoder agreement is not a proof of CPU behaviour (premise decoder-matches-cpu); vendor agreement covers "
          "only what the decoders model; instruction meaning beyond the compared attributes (mnemonic, data effects, "
@@ -76,7 +76,7 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     manifest = json.loads((generation / "manifest.json").read_bytes())
     original_path = next(row["path"] for row in manifest["members"] if row["id"] == manifest["original_member_id"])
     original = (generation / original_path).read_bytes()
-    pe = pe_map.parse(original)
+    mapping = check.parse_original(original)
     header = {"tool": "decode_check", "revision": REVISION, "generation": generation.name,
               "premises": ["decoder-matches-cpu"] + ([lifting.TRANSLATION_PREMISE] if premise else []),
               "lift_table": {k: v for k, v in lifting.TABLE.items() if k != "allowed_prefix"} | {
@@ -91,12 +91,14 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     if base is None:
         return header, [Row("mapping", "original", "bundle", "unobserved", None, "lint",
                             {"reason": "the program scope is not constructed"})]
-    image = check.Image(generation, pe, base, original)
+    image = check.Image(generation, mapping, base, original)
     rows = check.mapping_rows(image)
-    reason = check.global_reason(pe, base, facts["language"] or "")
+    reason = check.global_reason(mapping, base, facts["language"] or "")
     rows.extend(check.decode_rows(image, facts["functions"], premise, reason, full))
     rows.extend(check.suspect_rows(rows))
-    header["mapping_id"] = pe.mapping_id
+    header["mapping"] = {"format": mapping.format, "rules": mapping.rules, "mapping_id": mapping.mapping_id,
+                         "load_bias": base - mapping.image_base}
+    header["mapping_id"] = mapping.mapping_id
     header["global_reason"] = reason
     return header, rows
 

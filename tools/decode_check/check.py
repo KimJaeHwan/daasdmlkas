@@ -1,13 +1,14 @@
 """G1 decode_check driver: one Bundle -> mapping rows and decode rows (design r0-r4).
 
 The engine is reached only through G0's diagnosis pass (``diagnose.diagnose``,
-engine_api); the rest is tool code: the file mapping (pe_map), the decode
-window built from verified bytes only, the three voters, the pure core
+engine_api); the rest is tool code: the file mapping (pe_map / elf_map), the
+decode window built from verified bytes only, the three voters, the pure core
 (compare.compare_row).
 """
 
 from __future__ import annotations
 
+from bisect import bisect_right
 import json
 from pathlib import Path
 import sys
@@ -18,6 +19,7 @@ sys.path.insert(0, str(_HERE.parent / "bundle_lint"))
 
 import compare  # noqa: E402
 import decoders  # noqa: E402
+import elf_map  # noqa: E402
 import lifting  # noqa: E402
 import pe_map  # noqa: E402
 from report import Row  # noqa: E402
@@ -25,20 +27,66 @@ from report import Row  # noqa: E402
 LANGUAGE = "x86:LE:64:default"
 
 
+def parse_original(data: bytes):
+    """The original's file mapping by its own magic: PE32+ (pe_map) or ELF64 (elf_map).
+    Both expose ok / why / format / rules / image_base / fixed_base / ranges / at(offset) /
+    header_fields / relocations / written / mapping_id, offsets counted from image_base."""
+    if data[:2] == b"MZ":
+        return pe_map.parse(data)
+    if data[:4] == b"\x7fELF":
+        return elf_map.parse(data)
+    return pe_map.parse(b"")   # (not an MZ image: ok False, an indeterminate mapping)
+
+
+class Intervals:
+    """Disjoint sorted [start, end) pieces of labelled ranges that may overlap (labels joined)."""
+
+    def __init__(self, ranges) -> None:
+        bounds = sorted({point for start, end, _ in ranges for point in (start, end)})
+        by_start = sorted(ranges)
+        pieces = []
+        active = []
+        cursor = 0
+        for left, right in zip(bounds, bounds[1:]):
+            while cursor < len(by_start) and by_start[cursor][0] <= left:
+                active.append(by_start[cursor])
+                cursor += 1
+            active = [item for item in active if item[1] > left]
+            labels = sorted({item[2] for item in active})
+            if not labels:
+                continue
+            if pieces and pieces[-1][1] == left and pieces[-1][2] == labels:
+                pieces[-1][1] = right
+            else:
+                pieces.append([left, right, labels])
+        self.pieces = pieces
+        self.starts = [piece[0] for piece in pieces]
+
+    def find(self, point: int):
+        index = bisect_right(self.starts, point) - 1
+        if index >= 0 and point < self.pieces[index][1]:
+            return self.pieces[index]
+        return None
+
+    def next_start(self, point: int) -> float:
+        index = bisect_right(self.starts, point)
+        return self.starts[index] if index < len(self.starts) else float("inf")
+
+
 class Image:
     """The Bundle's sealed blocks and the original's file mapping, byte by byte."""
 
-    def __init__(self, generation: Path, pe: pe_map.PeImage, base: int, original: bytes) -> None:
+    def __init__(self, generation: Path, mapping, base: int, original: bytes) -> None:
         manifest = json.loads((generation / "manifest.json").read_bytes())
         paths = {row["id"]: row["path"] for row in manifest["members"]}
         self.blocks = []
         for row in manifest["blocks"]:
             data = None if row["member_id"] is None else (generation / paths[row["member_id"]]).read_bytes()
             self.blocks.append((row, data))
-        self.pe, self.base, self.original = pe, base, original
-        written = pe.written.ranges if pe.written else []
-        self.written = [(base + start, base + end, label) for start, end, label in written]
-        relocations = pe.relocations.ranges if pe.relocations else []
+        self.mapping, self.base, self.original = mapping, base, original
+        written = mapping.written.ranges if mapping.written else []
+        self.written = Intervals([(base + start, base + end, label) for start, end, label in written])
+        relocations = mapping.relocations.ranges if mapping.relocations else []
         self.relocations = [(base + start, base + end, label) for start, end, label in relocations]
 
     def sealed(self, va: int):
@@ -52,10 +100,10 @@ class Image:
         sealed = self.sealed(va)
         if sealed is None:
             return None, "no sealed byte"
-        for start, end, label in self.written:
-            if start <= va < end:
-                return None, f"loader / runtime written range ({label})"
-        mapped = self.pe.at(va - self.base)
+        written = self.written.find(va)
+        if written is not None:
+            return None, f"loader / runtime written range ({', '.join(written[2])})"
+        mapped = self.mapping.at(va - self.base) if self.mapping.ok else None
         if mapped is None:
             return None, "outside the file mapping"
         if mapped.kind == "ambiguous":
@@ -79,13 +127,67 @@ class Image:
         return {"bytes": bytes(data), "verified": len(data), "stop": reason, "relocations": relocations}
 
 
+def _next_range_start(mapping, offset: int) -> float:
+    return min((item.start for item in mapping.ranges if item.start > offset), default=float("inf"))
+
+
+def compare_block(image: Image, row: dict, data: bytes) -> dict:
+    """Byte counts of one sealed block against the mapping, range by range
+    (written bytes are the loader's: counted, not compared)."""
+    counts = {"equal": 0, "differs": 0, "zero_mismatch": 0, "ambiguous": 0, "outside": 0, "written": 0}
+    first_difference = None
+    mapping, base = image.mapping, image.base
+    start, end = row["byte_start"], row["byte_start"] + row["byte_size"]
+    cursor = start
+    while cursor < end:
+        written = image.written.find(cursor)
+        if written is not None:
+            take = min(written[1], end) - cursor
+            counts["written"] += take
+            cursor += take
+            continue
+        limit = min(end, image.written.next_start(cursor))
+        mapped = mapping.at(cursor - base) if mapping.ok else None
+        if mapped is None:
+            following = _next_range_start(mapping, cursor - base) + base if mapping.ok else float("inf")
+            take = int(min(limit, following)) - cursor
+            counts["outside"] += take
+            cursor += take
+            continue
+        take = int(min(limit, base + mapped.end)) - cursor
+        sealed = data[cursor - start:cursor - start + take]
+        if mapped.kind == "ambiguous":
+            counts["ambiguous"] += take
+        elif mapped.kind == "zero":
+            zeros = sealed.count(0)
+            counts["equal"] += zeros
+            counts["zero_mismatch"] += take - zeros
+        else:
+            offset = mapped.file_offset + (cursor - base - mapped.start)
+            file_bytes = image.original[offset:offset + take]
+            if file_bytes == sealed:
+                counts["equal"] += take
+            else:
+                for index, (a, b) in enumerate(zip(file_bytes.ljust(take, b"\0"), sealed)):
+                    if a == b:
+                        counts["equal"] += 1
+                    else:
+                        counts["differs"] += 1
+                        first_difference = first_difference or cursor + index
+        cursor += take
+    return {**counts, "first_difference": first_difference}
+
+
 def mapping_rows(image: Image) -> list[Row]:
     rows = []
-    pe = image.pe
-    detail = {"rules": pe_map.RULES, "mapping_id": pe.mapping_id, "fields": pe.header_fields,
-              "relocations": pe.relocations.state, "written": pe.written.state}
-    rows.append(Row("mapping", "original", "bundle", "evaluated", "applied" if pe.ok else "unsupported", "lint",
-                    {**detail, "why": pe.why} if not pe.ok else detail))
+    mapping = image.mapping
+    detail = {"format": mapping.format, "rules": mapping.rules, "mapping_id": mapping.mapping_id,
+              "fields": mapping.header_fields, "relocations": mapping.relocations.state,
+              "written": mapping.written.state, "load_bias": image.base - mapping.image_base}
+    if mapping.written.why:
+        detail["written_why"] = mapping.written.why
+    rows.append(Row("mapping", "original", "bundle", "evaluated", "applied" if mapping.ok else "unsupported", "lint",
+                    {**detail, "why": mapping.why} if not mapping.ok else detail))
     for index, (row, data) in enumerate(image.blocks):
         key = f"#{index}/{row['space_id']:x}:{row['byte_start']:x}"
         excluded = row["is_external"] or row["is_overlay"] or not row["is_initialized"] or row["is_mapped"] \
@@ -93,48 +195,29 @@ def mapping_rows(image: Image) -> list[Row]:
         if excluded:
             rows.append(Row("mapping", "block", key, "evaluated", "not_applicable", "lint", {"block": row["id"]}))
             continue
-        counts = {"equal": 0, "differs": 0, "zero_mismatch": 0, "ambiguous": 0, "outside": 0}
-        first_difference = None
-        for offset in range(row["byte_size"]):
-            va = row["byte_start"] + offset
-            mapped = pe.at(va - image.base) if pe.ok else None
-            if mapped is None:
-                counts["outside"] += 1
-            elif mapped.kind == "ambiguous":
-                counts["ambiguous"] += 1
-            elif mapped.kind == "zero":
-                if data[offset] == 0:
-                    counts["equal"] += 1
-                else:
-                    counts["zero_mismatch"] += 1
-            else:
-                file_byte = image.original[mapped.file_offset + (va - image.base - mapped.start)]
-                if file_byte == data[offset]:
-                    counts["equal"] += 1
-                else:
-                    counts["differs"] += 1
-                    first_difference = first_difference or va
-        detail = {"block": row["id"], **counts, "first_difference": first_difference}
+        counts = compare_block(image, row, data)
+        detail = {"block": row["id"], **counts}
         if counts["differs"] or counts["zero_mismatch"] or counts["outside"]:
             rows.append(Row("mapping", "block", key, "evaluated", "unrecognized", "lint", detail))
-        elif counts["ambiguous"]:
+        elif counts["ambiguous"] or not counts["equal"]:
             rows.append(Row("mapping", "block", key, "unobserved", None, "lint", detail))
         else:
             rows.append(Row("mapping", "block", key, "evaluated", "applied", "lint", detail))
     return rows
 
 
-def global_reason(pe: pe_map.PeImage, base: int, language: str) -> str | None:
+def global_reason(mapping, base: int, language: str) -> str | None:
     if language != LANGUAGE:
         return f"language {language} is not {LANGUAGE}"
-    if not pe.ok:
-        return f"no usable file mapping ({pe.why})"
-    if pe.image_base != base:
-        return f"Bundle image base {base:#x} != file ImageBase {pe.image_base:#x}: not at the preferred base"
-    if pe.relocations.state == "indeterminate":
-        return f"relocation ranges indeterminate ({pe.relocations.why})"
-    if pe.written.state == "indeterminate":
-        return f"loader-written ranges indeterminate ({pe.written.why})"
+    if not mapping.ok:
+        return f"no usable file mapping ({mapping.why})"
+    if mapping.fixed_base and mapping.image_base != base:
+        which = "preferred" if mapping.format == "pe" else "linked (ET_EXEC)"
+        return f"Bundle image base {base:#x} != file image base {mapping.image_base:#x}: not at the {which} base"
+    if mapping.relocations.state == "indeterminate":
+        return f"relocation ranges indeterminate ({mapping.relocations.why})"
+    if mapping.written.state == "indeterminate":
+        return f"loader-written ranges indeterminate ({mapping.written.why})"
     return None
 
 

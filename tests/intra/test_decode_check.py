@@ -1,5 +1,6 @@
 """G1 ``tools/decode_check``: mapping and decoder cross-check on synthetic sealed
-Bundles whose `original` is a synthetic PE32+ (tools/decode_check/_pe_fixture.py).
+Bundles whose `original` is a synthetic PE32+ (tools/decode_check/_pe_fixture.py)
+or ELF64 (_elf_fixture.py). The ELF mapping unit tests at the end need neither.
 
 POSIX (admission) and the built decoders ($G1_DECODERS, build_decoders.sh) are
 required; the tests skip otherwise.
@@ -37,8 +38,9 @@ def _bundle(tmp_path, functions, code: bytes, *, code_raw=None, image_base=BASE,
     return s.write(tmp_path, bundle)
 
 
-def _pair(s, call_bytes=b"\xE8\x0B\x00\x00\x00", call_length=None):
+def _pair(s, call_bytes=b"\xE8\x0B\x00\x00\x00", call_length=None, code=CODE):
     """A at CODE: call B (CODE + 0x10), ret; B: mov rax, rcx; ret."""
+    CODE = code  # noqa: N806
     length = call_length or len(call_bytes)
     after = CODE + len(call_bytes)
     a = s.Function("A", s.observation(CODE, [s.call(CODE, CODE + 0x10, length=length), s.ret(after)]))
@@ -151,3 +153,126 @@ def test_a_bundle_not_at_the_preferred_base_is_not_compared(tmp_path):
     assert "preferred base" in header["global_reason"]
     decode = [row for ident, row in rows.items() if ident[:2] == ("decode", "row")]
     assert decode and all(row.run_state == "unobserved" for row in decode)
+
+
+# -- ELF64 x86-64 (elf_map, elf-loader-rules-1)
+
+GHIDRA_PIE_BASE = 0x100000           # (Ghidra's base for an ET_DYN whose lowest PT_LOAD is at 0)
+ELF_CODE = GHIDRA_PIE_BASE + 0x1000
+
+
+def _elf_bundle(tmp_path, functions, elf, *, bias=GHIDRA_PIE_BASE, program_base=None):
+    import _sealed as s
+
+    blocks = [s.Block(start=bias + va, data=data, name=f"segment@{va:x}") for va, data in elf.loads]
+    bundle = s.Bundle(functions, blocks=blocks, program=s.program(image_base=program_base or bias),
+                      overrides={"original": elf.data})
+    os.chmod(tmp_path, 0o755)
+    return s.write(tmp_path, bundle)
+
+
+@needs
+def test_elf_pie_rows_are_applied_at_the_ghidra_load_bias(tmp_path):
+    import _elf_fixture as ef
+    import _sealed as s
+
+    functions, code = _pair(s, code=ELF_CODE)
+    header, rows = _run(_elf_bundle(tmp_path, functions, ef.make_elf([ef.Segment(0x1000, code)])))
+    assert header["global_reason"] is None
+    assert header["mapping"]["format"] == "elf" and header["mapping"]["load_bias"] == GHIDRA_PIE_BASE
+    assert rows[("mapping", "original", "bundle")].verdict == "applied"
+    for key in ("function-000000/1:101000", "function-000000/1:101005", "function-000001/1:101010",
+                "function-000001/1:101013"):
+        row = rows[("decode", "row", key)]
+        assert (row.run_state, row.verdict) == ("evaluated", "applied"), (key, row.detail)
+
+
+@needs
+def test_elf_relocation_over_code_is_a_loader_written_range(tmp_path):
+    """A text relocation (R_X86_64_RELATIVE) over B's first bytes: the loader rewrites them."""
+    import _elf_fixture as ef
+    import _sealed as s
+
+    functions, code = _pair(s, code=ELF_CODE)
+    elf = ef.make_elf([ef.Segment(0x1000, code)], relocations=[ef.Reloc(0x1010, 8, addend=0)])
+    _, rows = _run(_elf_bundle(tmp_path, functions, elf))
+    row = rows[("decode", "row", "function-000001/1:101010")]
+    assert row.run_state == "unobserved" and "R_X86_64_RELATIVE" in row.detail["reason"], row.detail
+    assert rows[("decode", "row", "function-000000/1:101000")].verdict == "applied"
+    block = next(r for ident, r in rows.items() if ident[1] == "block" and ident[2].endswith(":101000"))
+    assert block.detail["written"] == 8 and block.verdict == "applied"
+
+
+@needs
+def test_elf_exec_not_at_its_linked_base_is_not_compared(tmp_path):
+    import _elf_fixture as ef
+    import _sealed as s
+
+    functions, code = _pair(s, code=0x501000)
+    elf = ef.make_elf([ef.Segment(0x401000, code)], e_type=2, link_base=0x400000)
+    header, _ = _run(_elf_bundle(tmp_path, functions, elf, bias=0x100000, program_base=0x500000))
+    assert "linked (ET_EXEC)" in header["global_reason"]
+
+
+def _elf(*args, **kwargs):
+    import _elf_fixture as ef
+    import elf_map
+
+    return elf_map.parse(ef.make_elf(*args, **kwargs).data)
+
+
+def test_elf_map_basic_ranges_and_zero_fill():
+    import _elf_fixture as ef
+
+    image = _elf([ef.Segment(0x1000, b"\x90" * 0x10, memsz=0x40, flags=6)])
+    assert image.ok and image.image_base == 0 and not image.fixed_base
+    assert image.at(0x1000).kind == "file" and image.at(0x1010).kind == "zero" and image.at(0x1040) is None
+    assert image.written.state == "complete"
+
+
+def test_elf_map_incongruent_or_oversized_segments_are_ambiguous():
+    import _elf_fixture as ef
+
+    assert _elf([ef.Segment(0x1000, b"\x90" * 8, offset=0x1100)]).at(0x1000).kind == "ambiguous"
+    assert _elf([ef.Segment(0x1000, b"\x90" * 8, memsz=4)]).at(0x1000).kind == "ambiguous"
+
+
+def test_elf_map_pages_two_segments_share_are_ambiguous():
+    import _elf_fixture as ef
+
+    image = _elf([ef.Segment(0x1000, b"\x90" * 0x100), ef.Segment(0x1800, b"\xCC" * 0x100, offset=0x2800)])
+    assert image.at(0x1000).kind == "ambiguous" and image.at(0x1800).kind == "ambiguous"
+
+
+def test_elf_map_relocation_widths_relr_and_copy():
+    import _elf_fixture as ef
+
+    image = _elf([ef.Segment(0x1000, b"\x90" * 0x100)],
+                 relocations=[ef.Reloc(0x1000, 2), ef.Reloc(0x1020, 5, symbol=1), ef.Reloc(0x1040, 99),
+                              ef.Reloc(0x1060, 0)],
+                 relr=[0x2000, (0b101 << 1) | 1], symbol_sizes=[0, 12], pltgot=0x3000)
+    targets = {(start, end, label) for start, end, label in image.written.ranges}
+    assert image.written.state == "complete"
+    assert (0x1000, 0x1004, "R_X86_64_PC32") in targets
+    assert (0x1020, 0x102C, "R_X86_64_COPY") in targets
+    assert (0x1040, 0x1050, "R_X86_64_99-unknown-width") in targets
+    assert not any(start == 0x1060 for start, _, _ in targets)           # R_X86_64_NONE writes nothing
+    assert {(0x2000, 0x2008), (0x2008, 0x2010), (0x2018, 0x2020)} <= {(a, b) for a, b, l in targets if l == "RELR"}
+    assert (0x3008, 0x3018, "got-plt-reserved") in targets
+    assert any(label == "dynamic" for _, _, label in targets)
+
+
+def test_elf_map_android_packed_or_static_without_sections_is_indeterminate():
+    import _elf_fixture as ef
+
+    android = _elf([ef.Segment(0x1000, b"\x90")], extra_dynamic=[(0x6000000F, 0x2000), (0x60000010, 8)])
+    assert android.written.state == "indeterminate" and "Android packed" in android.written.why
+    static = _elf([ef.Segment(0x1000, b"\x90")], dynamic=False)
+    assert static.written.state == "indeterminate" and "static image" in static.written.why
+
+
+def test_elf_map_rejects_other_machines_and_types():
+    import _elf_fixture as ef
+
+    assert not _elf([ef.Segment(0x1000, b"\x90")], machine=183).ok          # EM_AARCH64: later
+    assert not _elf([ef.Segment(0x1000, b"\x90")], e_type=1).ok             # ET_REL

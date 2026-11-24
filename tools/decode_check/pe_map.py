@@ -40,6 +40,9 @@ class Parsed:
 class PeImage:
     ok: bool
     why: str = ""
+    format: str = "pe"
+    rules: str = RULES
+    fixed_base: bool = True          # (base relocations change code bytes away from the preferred base)
     image_base: int = 0
     section_alignment: int = 0
     file_alignment: int = 0
