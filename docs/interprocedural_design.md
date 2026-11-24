@@ -7146,3 +7146,31 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
     로드 설정 VA 필드 방어에 가려져 살아남았다 -- CHPE 검사만 막는 변형 V7d로 바꿔 잡음), X1 제거 간선 5개 그대로,
     게이트 g3b7b6 oracle = g3b4s2a.
 - 엔진 의미 버전 57, UE 템플릿 v44(항목은 v43과 같음 -- 다시 유도해 비교). 고정 `tests/intra/test_gt_b7b_exception_handlers.py`.
+
+### 25.116 입력에서 거부된 함수도 프로그램의 함수다 (PE-b, 2026-11-24)
+
+설계 `.census6/design_s3_r18.md` 수정 3(보존된 실패 부분) + 9(F1의 거부된 호출자), PRE-EXISTING. 리뷰 코드 r1-r2
+(Astra `peb_code_astra1..2.md`, Fable `peb_code_fable1..2.md`). 소유자 결정(2026-11-24): 풀리지 않은 간접 이동은
+이름 붙은 한계 2c를 따른다.
+- 구멍: `retain_admission_failures`(선택) 실행에서 입력이 거부된 함수는 호출 탐색 전에 사라져, 그 함수를 부르는 호출이
+  "분석 집합 밖 호출"(키 없음)로 읽혔다 -- 호출자의 root가 완전할 수 있었다(25.93은 `control:unavailable`을 약속).
+- 거부된 함수의 진입: 관찰 단계 거부(`FUNCTION_OBSERVATION`)는 검증된 진입을 `UnresolvedFunctionScope.entry`에 남긴다;
+  좌표 단계 거부는 진입이 없다("unidentified").
+- 정적 도달 집합(`interprocedural._refused_reach`, 1라운드 전 고정, 호출자 쪽으로 닫힘): 관찰된 모든 함수(cut 포함)의
+  확인된 이동 -- 직접 CALL / BRANCH / CBRANCH 피연산자, 나열된 흐름 대상, S1 fallthrough 출구 -- 가 거부된 진입이면
+  `control:unavailable:<진입>`, 프로그램 밖 주소면 unidentified 거부가 있을 때 `control:unavailable:unidentified`.
+  `derive`가 매 라운드 의존성에 넣는다 -> 요약 지지, 호출 효과, D.3 veto, SCC 재유도, activation, 1라운드 fallback이
+  모두 같은 키를 본다.
+- 풀린 간접 이동: 상수 대상(`_indirect_targets`)이나 정방향 후보 집합이 거부된 함수를 가리키면 그 호출은 불투명으로
+  두고(라운드 상태 `opaque_sets`, 고정점 비교에 포함) 거부된 구성원의 키와 받아들여진 구성원의 지지(또는 아직 요약이
+  없으면 그 구성원의 unavailable 키)와 해석 전제 표지를 남긴다; 받아들여진 구성원은 `multi_candidates`에 남는다.
+- 풀리지 않은 간접 이동은 키를 내지 않는다 -- 2c(25.93: 해석 안 된 간접 호출과 분석 집합 밖 호출은 키를 내지 않는다,
+  대상이 분석된 함수여도 마찬가지)와 같은 규칙. 넓게(간접 이동을 가진 모든 함수에 모든 거부 키) 하면 UE DLL의 거부 함수
+  하나(주소 0 쓰기)로 UE 템플릿 3개 중 2개가 내보내지지 않았다(측정 2026-11-24) -- 그 구멍은 2c 몫(정방향 분석).
+- `analyze_units`에 넘긴 거부된 단위는 버려지지 않는다(그 진입이 `unavailable_entries`에 합쳐진다); 받아들여진 함수와
+  거부된 구성원이 진입을 공유하면 `ValueError`; 거부된 진입을 가리키는 모델 binding은 적용하지 않고 기록한다(전에는
+  `ModelError`로 실행 중단); 템플릿 도출 도구(`tools/derive_models`)도 거부를 넘긴다.
+- F1: 거부된 함수는 코드를 모르는 H3 호출자 -- 그런 실행에서는 장애 위치를 풀지 않는다(`H3:<진입>:unobserved`).
+- 알려진 그대로: 이미지의 import 정보로 모델이 붙는 thunk 주소가 거부된 진입이면 모델이 적용된다(호출자는 키를 가지므로
+  완전하지 않다); strict 입력(기본)은 여전히 실행 전체를 중단한다.
+- 엔진 의미 버전 58, UE 템플릿 v45. 고정 `tests/intra/test_pe_b_refused_callees.py`, 돌연변이 `cob/peb_mutants.py`.

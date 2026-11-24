@@ -175,17 +175,16 @@ def test_a_cut_wrapper_still_carries_the_key_to_its_callers():
     assert _key(OTHER) not in reach
 
 
-def test_a_wildcard_holder_may_reach_every_refused_function():
-    """Any CALLIND may resolve later (an indirect round, a replayed activation,
-    a forward set): its holder owns every refused key from round 1 -- a
-    fallback to round 1 publishes it too."""
+def test_an_unresolved_indirect_transfer_follows_the_2c_limit():
+    """Owner 2026-11-24: an UNRESOLVED CALLIND emits no refused key (the named
+    limit 2c: an unresolved indirect call emits no key whatever it may reach);
+    a resolved one does (``test_a_resolved_indirect_call_...``)."""
     from tdo_v2.interprocedural import _refused_reach
 
     holder = FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(copy(reg(RAX), reg(RCX))).call_indirect(RAX).add_rsp(0x28).ret()
     units = {_key(MAIN): _units(holder)[0]}
-    refused = frozenset({_key(REFUSED), _key(OTHER)})
-    assert _refused_reach(units, refused, False)[_key(MAIN)] == {unavailable_key(k) for k in refused}
-    assert unavailable_key("unidentified") in _refused_reach(units, frozenset(), True)[_key(MAIN)]
+    assert _refused_reach(units, frozenset({_key(REFUSED)}), False) == {}
+    assert _refused_reach(units, frozenset(), True) == {}
 
 
 def test_an_admitted_and_a_refused_member_sharing_an_entry_is_rejected():
@@ -200,3 +199,90 @@ def test_no_refusal_no_change():
 
     units = {_key(MAIN): _units(_main(REFUSED))[0]}
     assert _refused_reach(units, frozenset(), False) == {}
+
+
+# -- code review r2 (Astra): conditional tails, implicit refusals, bindings, mixed forward sets --
+
+def test_a_conditional_tail_into_a_refused_entry_is_a_transfer():
+    """``if (zf) goto refused`` as an absolute CBRANCH with no listed target:
+    the static set still sees it (Astra r2 P1-1)."""
+    from synthetic import ZF, op
+    from tdo_v2.interprocedural import _refused_reach
+
+    main = (FunctionBuilder(entry=MAIN).ins(copy(reg(RAX), reg(RCX)))
+            .ins(op("CBRANCH", [ram(REFUSED), reg(ZF, 1)])).ret())
+    units = {_key(MAIN): _units(main)[0]}
+    assert _refused_reach(units, frozenset({_key(REFUSED)}), False)[_key(MAIN)] == {unavailable_key(_key(REFUSED))}
+
+
+def test_a_conditional_jump_out_of_the_program_is_an_outside_transfer():
+    from synthetic import ZF, op
+    from tdo_v2.interprocedural import _refused_reach
+
+    main = (FunctionBuilder(entry=MAIN).ins(copy(reg(RAX), reg(RCX)))
+            .ins(op("CBRANCH", [ram(CODE_BASE + 0x800), reg(ZF, 1)])).ret())   # (committed code, no function)
+    units = {_key(MAIN): _units(main)[0]}
+    assert unavailable_key("unidentified") in _refused_reach(units, frozenset(), True)[_key(MAIN)]
+
+
+def test_a_refused_unit_passed_to_analyze_units_is_never_dropped():
+    """The public ``analyze_units`` with an admitted caller and a refused unit
+    and no ``unavailable_entries``: the refusal is taken from the unit itself
+    (Astra r2 P1-4) -- the caller's summary carries the key."""
+    from tdo_v2.interprocedural import analyze_units
+
+    with open_configured_extraction(_Provider([_main(REFUSED), FunctionBuilder(entry=SINK).ret(), _refused()]),
+                                    _mint_orchestrator_capability()) as envelope:
+        units = list(envelope.iter_scoped_functions())
+    assert any(type(unit.scopes.function) is UnresolvedFunctionScope for unit in units)
+    results = analyze_units(units)
+    assert unavailable_key(_key(REFUSED)) in results[_key(MAIN)].summary.control_support
+
+
+def test_a_binding_naming_a_refused_entry_is_refused_not_an_abort():
+    """Astra r2 P1-2: a model binding at a refused member's rva raised
+    ``ModelError`` and aborted the run; it is now recorded and not applied."""
+    from types import SimpleNamespace
+
+    from tdo_v2.interprocedural import _bound_cuts
+
+    unit = _units(_main())[0]
+    evidence = unit.scopes.program.evidence
+    binding = SimpleNamespace(
+        executable_sha256=evidence.executable_sha256.hex(), language_id=evidence.translation_namespace.language_id,
+        abi_tag="abi", binding_id="b", rows=[(REFUSED - evidence.image_base.byte_offset, "m", None)],
+        entry=lambda model_id: (_ for _ in ()).throw(AssertionError("a refused entry is never looked up")))
+    models = SimpleNamespace(files=[SimpleNamespace(abi_tag="abi")])
+    refusals = {}
+    found = _bound_cuts({_key(MAIN): unit}, [binding], frozenset(), models, refusals, frozenset({_key(REFUSED)}))
+    assert found == {}
+    assert "refused at admission" in next(iter(refusals[_key(REFUSED)].values()))
+
+
+def test_a_mixed_forward_set_keeps_the_healthy_members_support(monkeypatch):
+    """A forward set {refused, leaf}: the call stays opaque, but the leaf's
+    support (its unknown-transfer site) and the refused key both reach the
+    caller's summary, and the leaf stays a published candidate (Astra r2 P1-3)."""
+    import tdo_v2.interprocedural as ip
+    from tdo_v2.control_context import site_key
+
+    leaf = FunctionBuilder(entry=WRAPPER).jump_indirect(reg(RAX))   # (a targetless BRANCHIND: a site)
+    main = (FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(copy(reg(RAX), reg(RCX))).call_indirect(RAX)
+            .add_rsp(0x28).ret())
+    units = _units(main, leaf)
+    monkeypatch.setattr(ip, "_forward_switched_on", lambda: True)
+
+    def forward(item, functions, readonly_image):
+        if item.unit.scopes.function.entry.byte_offset != MAIN:
+            return {}, {}
+        key = next(call for call, _, _ in ip._callind_sites(item.unit))
+        return {key: (_key(REFUSED), _key(WRAPPER))}, {key: frozenset()}
+
+    monkeypatch.setattr(ip, "_forward_targets", forward)
+    results = ip.analyze_units(units, unavailable_entries=frozenset({_key(REFUSED)}))
+    support = results[_key(MAIN)].summary.control_support
+    assert unavailable_key(_key(REFUSED)) in support
+    leaf_sites = {site for site in results[_key(WRAPPER)].summary.control_support if site.startswith("control:")}
+    # the leaf's own obligations, or (not yet summarized when the caller derives) the leaf as unavailable
+    assert leaf_sites and (leaf_sites <= set(support) or unavailable_key(_key(WRAPPER)) in support)
+    assert any(_key(WRAPPER) in members for members in results[_key(MAIN)].multi_candidates.values())

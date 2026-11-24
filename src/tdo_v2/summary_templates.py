@@ -172,7 +172,7 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # what its operation proves; the entry stays a successor).
 # 57: (G-T G3b-7b) where the exporter proves no static exception handler
 # (x64 PE), a call row's listed entry is decided by the ordinary call rule.
-ENGINE_SEMANTICS_VERSION = 57
+ENGINE_SEMANTICS_VERSION = 58
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 
