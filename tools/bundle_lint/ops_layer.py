@@ -41,6 +41,7 @@ def register_rows(program) -> list[Row]:
 
 
 def call_rows(claim, function_keys) -> list[Row]:
+    from tdo_v2.call_relations import call_relations
     from tdo_v2.control_projection import call_like_instruction, control_successor_coordinates
     from tdo_v2.integration.configured_target_resolution import _selected_resolved_target
     from tdo_v2.interprocedural import _plain_push_call, _program_memory_space
@@ -54,6 +55,7 @@ def call_rows(claim, function_keys) -> list[Row]:
     by_address = {row.address: row for row in observation.instructions}
     memory_space = _program_memory_space(unit)
     projected = {row.call_operation_key for row in observed_call_state_projections(observation)}
+    relations = call_relations(observation, unit.scopes)
     rows = []
     for seed, naming in zip(evidence.seeds.callsites, evidence.naming.rows, strict=True):
         key = operation_row_key(claim.function_id, seed.operation_key)
@@ -73,6 +75,8 @@ def call_rows(claim, function_keys) -> list[Row]:
             "push_projection": seed.operation_key in projected,
             "plain_push": bool(memory_space is not None and seed.operation_key.endswith(":CALL")
                                and _plain_push_call(unit, seed.operation_key, memory_space)),
+            "relation": None if seed.operation_key not in relations else relations[seed.operation_key].kind,
+            # (recognition only: the callee state-preservation proof is separate, interprocedural.py:1224)
             "flow_targets": sorted(_coord(item) for item in instruction.flow_targets),
             "local_successors": sorted(_coord(item) for item in successors),
             "landing_pads": sorted(_coord(item) for item in pads),

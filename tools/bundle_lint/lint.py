@@ -25,6 +25,7 @@ sys.path.insert(0, str(_HERE))
 
 import children  # noqa: E402
 import diagnose  # noqa: E402
+import feature_layer  # noqa: E402
 from report import Row, compare, dumps  # noqa: E402
 
 TOOL_REVISION = 1
@@ -83,6 +84,7 @@ def run(generation: Path, naming_source: Path, *, timeout: float, summary: bool,
                                           options=options if path != "base_graph" else None)
     rows = [Row.from_json(row) for row in diag["rows"]]
     rows.extend(pipeline_rows(diag["diagnosis"], diag["predictions"], results))
+    rows.extend(feature_layer.trap_application_rows(rows, results, options))
     header = {
         "tool": "bundle_lint", "revision": TOOL_REVISION, "generation": generation.name,
         "naming_source_sha256": sha256(naming_source.read_bytes()).hexdigest(),
@@ -104,8 +106,18 @@ def main(argv=None) -> int:
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--no-summary", action="store_true")
     parser.add_argument("--options", type=Path, help="JSON object of summary-entry keyword options")
+    parser.add_argument("--normalize", action="store_true",
+                        help="standalone FunctionNormalizer run per function (labelled standalone)")
+    parser.add_argument("--pcodeop-models", type=Path, action="append",
+                        help="p-code op model files for a summary run with them (hash in the header)")
     args = parser.parse_args(argv)
     options = json.loads(args.options.read_text()) if args.options else {}
+    if args.normalize:
+        options["lint_normalize"] = True
+    if args.pcodeop_models:
+        options["pcodeop_models"] = [str(path) for path in args.pcodeop_models]
+        options["lint_pcodeop_models_sha256"] = {str(path): sha256(path.read_bytes()).hexdigest()
+                                                 for path in args.pcodeop_models}
     header, rows, _ = run(args.generation, args.naming_source, timeout=args.timeout,
                           summary=not args.no_summary, options=options)
     text = dumps(header, rows)

@@ -232,3 +232,272 @@ def test_variant5_kind4_exit_loses_the_reach_edge_and_variant6_drops_a_pad(seale
     assert (exit_row.detail["kind"], exit_row.detail["function"], exit_row.detail["reach_edge"]) == (4, None, False)
     call = rows["nopad"][("operations", "call", "function-000000/1:1000:2:CALL")]
     assert call.detail["landing_pads"] == [] and call.verdict == "applied" and call.detail["plain_push"]
+
+
+# -- layer 3: features ----------------------------------------------------------------
+
+def _run_lint(sealed, bundle, name="g", **kw):
+    import lint
+
+    _sealed, root = sealed
+    sub = root / name
+    sub.mkdir(mode=0o755)
+    gen = _sealed.write(sub, bundle)
+    options = kw.pop("options", {})
+    header, rows, diag = lint.run(gen, _sealed.NAMING_SOURCE, timeout=300, summary=kw.pop("summary", True),
+                                  options=options)
+    return {row.ident(): row for row in rows}, header
+
+
+def _slot_bundle(_sealed, *, write=False, imported=False):
+    """F reads the pointer slot at 0x1f00 and loads through it."""
+    s = _sealed
+    data = bytearray(b"\xcc" * 0x1000)
+    data[0xF00:0xF08] = (0x1E00).to_bytes(8, "little")
+    f = s.Function("F", s.observation(0x1000, [
+        s.plain(0x1000, 7, ("COPY", [s.ram(0x1F00)], s.reg(s.RAX))),
+        s.plain(0x1007, 3, ("LOAD", [s.const(s.RAM), s.reg(s.RAX)], s.reg(s.RCX))),
+        s.ret(0x100A)]))
+    bundle = s.Bundle([f], blocks=[s.Block(data=bytes(data), write=write)])
+    if imported:
+        bundle.image_info = {"schema": "tdo-v2-image-info-1", "executable_format": "Raw Binary",
+                             "block_permissions": [{"block_id": "block-000000", "name": ".text", "read": True,
+                                                    "write": write, "execute": True, "volatile": False}],
+                             "imports": [{"library": "KERNEL32.DLL", "name": "Sleep", "original_name": None,
+                                          "slots": [s.coord(0x1F00)], "thunks": []}],
+                             "exports": [], "relocations": []}
+    return bundle
+
+
+@posix
+def test_readonly_slot_use_is_recorded_per_address_and_disappears_on_a_writable_block(sealed):
+    _sealed = sealed[0]
+    ro, _ = _run_lint(sealed, _slot_bundle(_sealed), "ro", summary=False, options={"lint_normalize": True})
+    rw, _ = _run_lint(sealed, _slot_bundle(_sealed, write=True), "rw", summary=False,
+                      options={"lint_normalize": True})
+    assert ro[("features", "standalone_normalize", "function-000000")].verdict == "applied"
+    assert ("features", "readonly_use", "function-000000/1:1f00") in ro
+    assert not any(ident[1] == "readonly_use" for ident in rw)
+
+
+@posix
+def test_standalone_import_slot_context_is_set_and_used(sealed):
+    _sealed = sealed[0]
+    on, _ = _run_lint(sealed, _slot_bundle(_sealed, imported=True), "on", summary=False,
+                      options={"lint_normalize": True})
+    off, _ = _run_lint(sealed, _slot_bundle(_sealed, imported=True), "off", summary=False,
+                       options={"lint_normalize": True, "assume_import_slots_hold_exports": False})
+    assert on[("features", "standalone_context", "program")].detail["import_slots_context"] is True
+    assert off[("features", "standalone_context", "program")].detail["import_slots_context"] is False
+    assert on[("features", "standalone_normalize", "function-000000")].detail["import_slots"] is True
+    assert off[("features", "standalone_normalize", "function-000000")].detail["import_slots"] is False
+
+
+@posix
+def test_stack_identification_is_compared_by_register_not_object_id(sealed):
+    _sealed = sealed[0]
+    ref, _ = _run_lint(sealed, _sealed.two_function_bundle(), "ref", summary=False)
+    row = ref[("features", "stack_pointer", "function-000000")]
+    assert row.verdict == "applied"
+    assert (row.detail["register_offset"], row.detail["register_size"]) == (_sealed.RSP, 8)
+    assert "object" not in json.dumps(row.detail)
+
+
+@posix
+def test_trap_application_is_unobserved_with_models_and_not_run_without(sealed):
+    _sealed = sealed[0]
+    models = [str(REPO / "models" / "pcodeops" / "x86.json")]
+    with_models, _ = _run_lint(sealed, _layer2_bundle(_sealed), "m", options={"pcodeop_models": models})
+    without, _ = _run_lint(sealed, _layer2_bundle(_sealed), "n")
+    key = ("features", "trap_application", "function-000002/1:1800:0:CALLOTHER")
+    assert with_models[key].run_state == "unobserved"
+    assert without[key].run_state == "not_run"
+
+
+@posix
+def test_deep_chain_lint_child_matches_the_public_entry(sealed):
+    """r6 s1: the child keeps the engine's worker -- no analysis_depth failure
+    that the public entry would not have."""
+    import children
+    from tdo_v2.boundary import NullBoundaryProvider
+    from tdo_v2.summary_engine import analyze_frozen_bundle_with_summaries
+
+    s, root = sealed
+    depth = 1500
+    rows = [s.plain(0x1000, 7, ("COPY", [s.ram(0x1F00)], s.reg(s.RAX)))]
+    for index in range(depth):
+        rows.append(s.plain(0x1007 + 4 * index, 4, ("INT_ADD", [s.reg(s.RAX), s.const(8)], s.reg(s.RAX))))
+    end = 0x1007 + 4 * depth
+    rows.append(s.plain(end, 3, ("LOAD", [s.const(s.RAM), s.reg(s.RAX)], s.reg(s.RCX))))
+    rows.append(s.ret(end + 3))
+    bundle = s.Bundle([s.Function("D", s.observation(0x1000, rows))],
+                      blocks=[s.Block(start=0x1000, data=b"\xcc" * 0x3000)])
+    bundle.blocks[0].data = bytes(0x0F00) + (0x1E00).to_bytes(8, "little") + bytes(0x3000 - 0x0F08)
+    gen = s.write(root, bundle)
+    child = children.run_path("summary", gen, s.NAMING_SOURCE, timeout=600)
+    direct = analyze_frozen_bundle_with_summaries(gen, naming_exporter_source=s.NAMING_SOURCE,
+                                                  boundary_provider=NullBoundaryProvider())
+    assert child["completed"], child
+    assert child["failed_functions"] == [list(row) for row in direct.failed_functions]
+
+
+# -- variants (mutate.py) -------------------------------------------------------------
+
+def _variant(sealed, variant, bundle=None, **kw):
+    import lint
+    import mutate
+
+    _sealed, root = sealed
+    base = root / "base"
+    if not base.exists():
+        base.mkdir(mode=0o755)
+        _sealed.write(base, bundle or _sealed.two_function_bundle())
+    source = next(base.iterdir())
+    out = root / variant
+    out.mkdir(mode=0o755)
+    note = mutate.mutate(source, out, variant, **kw)
+    rows = lint.run(Path(note["generation"]), _sealed.NAMING_SOURCE, timeout=300, summary=kw.pop("summary", True),
+                    options={})[1]
+    base_rows = lint.run(source, _sealed.NAMING_SOURCE, timeout=300, summary=False, options={})[1]
+    return {row.ident(): row for row in rows}, {row.ident(): row for row in base_rows}, note
+
+
+SITE = "1:1007:2:CALL"
+CALL_KEY = ("operations", "call", "function-000000/" + SITE)
+
+
+@posix
+def test_variant1_seal_digit_refuses_admission_only(sealed):
+    rows, _, _ = _variant(sealed, "seal")
+    assert rows[("transport", "admission", "bundle")].verdict == "refused"
+    assert not any(ident[0] == "operations" for ident in rows)
+
+
+@posix
+def test_variant2_call_ordinal_refuses_the_function_names_and_stops_the_pipeline(sealed):
+    rows, _, _ = _variant(sealed, "call-ordinal", function_id="function-000000")
+    assert rows[("transport", "naming", "function-000000")].verdict == "refused"
+    assert rows[("transport", "naming", "function-000001")].verdict == "applied"
+    for path in ("summary", "summary-retain", "base_graph"):
+        stop = rows[("pipeline", "stop", path)]
+        assert stop.verdict == "applied" and stop.detail["predicted"]["index"] == 0, stop
+
+
+@posix
+@pytest.mark.parametrize("variant", ["call-pattern", "call-swap"])
+def test_variants3_and_4_lose_both_recognisers_and_the_relation_but_keep_names(sealed, variant):
+    rows, base, note = _variant(sealed, variant, function_id="function-000000", site=SITE)
+    before, after = base[CALL_KEY].detail, rows[CALL_KEY].detail
+    assert (before["push_projection"], before["plain_push"], before["relation"]) == (True, True, "push")
+    assert (after["push_projection"], after["plain_push"], after["relation"]) == (False, False, None)
+    assert rows[CALL_KEY].verdict == "applied" and after["aliases"] == ["B"]
+    assert rows[("transport", "naming", "function-000000")].verdict == "applied"
+    # independent SP evidence in the same function (its RET): identification unchanged (r5 s2, r6 s6)
+    stack = ("features", "stack_pointer", "function-000000")
+    assert rows[stack].verdict == base[stack].verdict == "applied" and rows[stack].detail == base[stack].detail
+    assert note.get("meaning_change", False) is (variant == "call-swap")
+
+
+@posix
+def test_variant3b_reshape_moves_the_call_key_and_names_follow(sealed):
+    rows, base, note = _variant(sealed, "call-reshape", function_id="function-000000", site=SITE)
+    moved = ("operations", "call", "function-000000/1:1007:3:CALL")
+    assert CALL_KEY in base and CALL_KEY not in rows and moved in rows
+    detail = rows[moved].detail
+    assert (detail["push_projection"], detail["plain_push"], detail["relation"]) == (False, False, None)
+    assert rows[moved].verdict == "applied" and detail["aliases"] == ["B"]
+
+
+@posix
+def test_variant_refuses_a_source_row_that_is_not_a_push_call(sealed):
+    import mutate
+
+    with pytest.raises(mutate.VariantError):
+        _variant(sealed, "call-pattern", function_id="function-000001", site="1:1800:0:COPY")
+
+
+@posix
+def test_mutate_exit_kind4_and_drop_pad_match_the_fixture_variants(sealed):
+    _sealed = sealed[0]
+    rows, base, _ = _variant(sealed, "exit-kind4", bundle=_layer2_bundle(_sealed), function_id="function-000001",
+                             index=0)
+    key = ("operations", "s1_exit", "function-000001/#0")
+    assert (base[key].detail["kind"], base[key].detail["reach_edge"]) == (2, True)
+    assert (rows[key].detail["kind"], rows[key].detail["function"], rows[key].detail["reach_edge"]) == (4, None, False)
+    rows, base, note = _variant(sealed, "drop-pad", function_id="function-000000", site="1:1000:2:CALL")
+    call = ("operations", "call", "function-000000/1:1000:2:CALL")
+    assert base[call].detail["landing_pads"] == ["1:100a"] and rows[call].detail["landing_pads"] == []
+
+
+@posix
+def test_expect_catches_legal_name_loss(sealed, tmp_path):
+    """r2 (Astra P3): RESOLVED_NAMED -> RESOLVED_UNNAMED and a lost alias pass the
+    decoder; only the detail comparison of --expect shows them."""
+    import lint
+
+    _sealed, root = sealed
+    reports = {}
+    for name, named in (("named", True), ("unnamed", False)):
+        bundle = _sealed.two_function_bundle()
+        bundle.functions[1].named = named
+        sub = root / name
+        sub.mkdir(mode=0o755)
+        gen = _sealed.write(sub, bundle)
+        out = tmp_path / f"{name}.json"
+        lint.main([str(gen), "--no-summary", "--out", str(out)])
+        reports[name] = json.loads(out.read_text())
+    expect = {"rows": [row for row in reports["named"]["rows"] if row["check"] == "call"]}
+    diffs = report.compare(expect, reports["unnamed"])
+    assert any("detail.aliases ['B'] != []" in line for line in diffs), diffs
+    assert any("detail.resolution 'RESOLVED_NAMED' != 'RESOLVED_UNNAMED'" in line for line in diffs), diffs
+    assert report.compare(expect, reports["named"]) == []
+
+
+# -- guard tests: the engine internals bundle_lint drives (diagnose / layers) ----------
+
+@posix
+def test_guard_session_internals_used_by_the_diagnosis_pass():
+    import inspect
+
+    from tdo_v2.integration import observed_function_session as session
+
+    slots = session.ObservedFunctionSession.__slots__
+    for name in ("_provider_adapter", "_envelope", "_iterator_claimed", "_generation_id"):
+        assert name in slots, name
+    assert callable(session.ObservedFunctionSession._decode_function)
+    assert callable(session._ObservedScopeProvider.collect_function_roles)
+    source = inspect.getsource(session._ObservedFunctionIterator.__next__)
+    # strict iteration decodes every unit; outcomes keep scope refusals -- the stop rules diagnose.predict mirrors
+    assert "self._outcomes and type(unit.scopes.program) is ConstructedProgramScope" in source
+    assert 'raise ValueError("observed function scope could not be constructed")' in \
+        inspect.getsource(session.ObservedFunctionSession._decode_function)
+
+
+@posix
+def test_guard_standalone_context_matches_the_summary_run():
+    """r6 s4: StandaloneContext sets the context variables analyze_units sets
+    (EFFECTIVE_OFF is the code-only profile's, not a normalisation input) and
+    activates import slots as _analyze_units does."""
+    import inspect
+    import re
+
+    from tdo_v2 import interprocedural, summary_engine
+
+    source = inspect.getsource(interprocedural.analyze_units)
+    assert set(re.findall(r"(\w+)\.set\(", source)) == {
+        "IMPORT_SLOTS", "ENTRY_VALUES_NOT_FRAME", "OPAQUE_NO_STACK_ADDRESSES", "PRE_ESCAPE_NOT_FRAME",
+        "OPAQUE_RESTORES_SP", "EFFECTIVE_OFF"}
+    inner = inspect.getsource(interprocedural._analyze_units)
+    assert "IMPORT_SLOTS.get().active = assume_globals_disjoint_from_stack" in inner
+    assert "if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):" in inner
+    entry = inspect.getsource(summary_engine.analyze_frozen_bundle_with_summaries)
+    assert "ReadOnlyImage(generation_path, image_info)" in entry
+    assert "if assume_readonly_image_constant and image_info is not None else None" in entry
+
+
+@posix
+def test_guard_layer_helpers_exist():
+    from tdo_v2.integration.configured_target_resolution import _selected_resolved_target  # noqa: F401
+    from tdo_v2.interprocedural import _plain_push_call, _program_memory_space  # noqa: F401
+    from tdo_v2.may_alias import _stack_pointer, _unit_stub  # noqa: F401
+    from tdo_v2.pcode_blocks import _landing_pads  # noqa: F401

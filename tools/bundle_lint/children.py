@@ -44,7 +44,11 @@ def summary_options(options: dict) -> dict:
     the rest as given; unknown option names are rejected by the entry itself)."""
     from tdo_v2.boundary import NullBoundaryProvider
 
-    kwargs = dict(options)
+    kwargs = {name: value for name, value in options.items() if not name.startswith("lint_")}
+    if kwargs.get("pcodeop_models") is not None:   # (paths in the JSON options -> loaded models)
+        from tdo_v2.pcodeop_models import load_pcodeop_models
+
+        kwargs["pcodeop_models"] = load_pcodeop_models(kwargs["pcodeop_models"])
     kwargs["boundary_provider"] = NullBoundaryProvider()
     return kwargs
 
