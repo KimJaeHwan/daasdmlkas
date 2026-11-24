@@ -704,3 +704,19 @@ def test_the_report_lists_registration_imports():
     imports = (ImportedSymbol("KERNEL32.DLL", "AddVectoredExceptionHandler", None, ((RAM, 0x4100),), ()),)
     run = _run(_caller(), _checked_helper(), image=True, imports=imports, **ON)
     assert ("registration-import", "AddVectoredExceptionHandler", "KERNEL32.DLL") in run.fault_report
+
+
+def test_a_refused_function_is_an_unobserved_h3_caller():
+    """PE-b (amendment 9): a function refused at admission may call the
+    faulting helper from under a handler -- its code is unknown -- so with
+    such a refusal in the run nothing is discharged; the hazard names it."""
+    from tdo_v2.fault_premise import plan_faults
+
+    units = {f"{RAM:x}:{unit.scopes.function.entry.byte_offset:x}": unit for unit in _units(_checked_helper())}
+    directory = _pe([])
+    assert plan_faults(units, directory, CODE_BASE).discharged   # (control: no caller, no hazard)
+    plan = plan_faults(units, directory, CODE_BASE, unobserved_callers=("1b1:dead",))
+    assert not plan.discharged
+    assert all("H3:1b1:dead:unobserved" in found for found in plan.hazards.values())
+    plan = plan_faults(units, directory, CODE_BASE, unobserved_callers=("unidentified",))
+    assert not plan.discharged

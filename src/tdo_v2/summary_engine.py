@@ -410,6 +410,13 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         raise ValueError("admission failure belongs to a different program result")
     evidences = [item for item in evidences if type(item) is not ObservedFunctionAdmissionFailure]
     by_key = {function_key(item.unit.scopes.function.entry): item for item in evidences}
+    # (PE-b) refused members: their validated entries (callers carry
+    # control:unavailable:<entry>); one without an entry is "unidentified"
+    refused_entries = frozenset(
+        function_key(item.unit.scopes.function.entry) for item in admission_failures
+        if getattr(item.unit.scopes.function, "entry", None) is not None) - set(by_key)
+    unidentified_refusals = any(getattr(item.unit.scopes.function, "entry", None) is None
+                                for item in admission_failures)
     assumed = {
         key: assumed_boundary_effects(item, boundary_provider)
         for key, item in by_key.items()
@@ -539,6 +546,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     record_provenance: dict | None = {} if operation_records else None
     results = analyze_units(
         [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
+        unavailable_entries=refused_entries, unidentified_refusals=unidentified_refusals,
         assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
         sink_roots=sink_roots,
         # the image facts serve models and the import-slot assumption
@@ -764,9 +772,11 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         # context (U2a, docs 25.93; reporting only -- no analysis reads it)
         exempt = frozenset().union(*(exempt_sites(key, item.unit) for key, item in sorted(results.items())))
         faults = frozenset().union(*(fault_exempt(key) for key in sorted(results)))
-        contexts = control_contexts(results, failed, exempt | faults)
+        # (PE-b) refused members are unavailable functions of the context graph
+        context_failed = {**failed, **{key: ("admission",) for key in refused_entries if key not in failed}}
+        contexts = control_contexts(results, context_failed, exempt | faults)
         checkpoint()
-        _check_control_support(results, failed, contexts)
+        _check_control_support(results, context_failed, contexts)
         found = _with_control_contexts(found, contexts)
         # an exemption is a use of its premise (r6; an unmodeled import's jump
         # records it nowhere else)

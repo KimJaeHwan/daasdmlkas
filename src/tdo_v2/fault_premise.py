@@ -197,11 +197,16 @@ def _caller_graph(callers: dict) -> tuple[dict, dict]:
             {key: transactional(unit) for key, unit in callers.items()})
 
 
-def plan_faults(units: dict, directory, image_base: int | None, callers: dict | None = None) -> FaultPlan:
+def plan_faults(units: dict, directory, image_base: int | None, callers: dict | None = None,
+                unobserved_callers: tuple = ()) -> FaultPlan:
     """D0 over the observation call graph and the static ``may_reach_fault``
     (both premises on: the caller checks the switches). ``units``: the
     analysed functions (sites, may-reach); ``callers``: every observed
-    function of the program (H3), default ``units``."""
+    function of the program (H3), default ``units``; ``unobserved_callers``
+    (PE-b): functions of the program whose code was refused at admission --
+    their calls and hazards are unknown, so each is a possible H3 caller of
+    every site (``H3:<entry>:unobserved``; ``"unidentified"`` for a refusal
+    without a validated entry)."""
     keys = frozenset(units)
     sites = {key: fault_sites(unit) for key, unit in units.items()}
     sites = {key: rows for key, rows in sites.items() if rows}
@@ -225,6 +230,7 @@ def plan_faults(units: dict, directory, image_base: int | None, callers: dict | 
             if tsx[key]:
                 found.append("H2")
             found.extend(f"H3:{item}" for item in contextual)
+            found.extend(f"H3:{caller}:unobserved" for caller in unobserved_callers)
             hazards[site.key] = tuple(found)
             entry = None if directory is None or image_base is None else directory.entry_range(site.address - base)
             evidence[site.key] = (
@@ -232,7 +238,8 @@ def plan_faults(units: dict, directory, image_base: int | None, callers: dict | 
                 ("image", None if directory is None else directory.image_digest),
                 ("exception_entry", None if entry is None else f"{entry[0]:x}-{entry[1]:x}"),
                 ("h1", own), ("h2", "transactional" if tsx[key] else "none"),
-                ("h3", ",".join(contextual) or "none"), ("reader", "exception_directory/1"),
+                ("h3", ",".join([*contextual, *(f"{caller}:unobserved" for caller in unobserved_callers)])
+                 or "none"), ("reader", "exception_directory/1"),
             )
     discharged = frozenset(site for site, found in hazards.items() if not found)
     return FaultPlan(sites, discharged, hazards, may_reach(keys, calls, wildcard, sites, discharged),

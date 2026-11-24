@@ -569,7 +569,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   assume_registered_handlers_not_observed=True, lifecycle_contracts=(),
                   disabled_model_assumptions=(), assumption_declarations=(),
                   assume_faults_end_execution=False, assume_stock_ghidra_translator=False,
-                  exception_directory=None, code_only_profile=None) -> dict[str, AnalyzedFunction]:
+                  exception_directory=None, code_only_profile=None,
+                  unavailable_entries=frozenset(), unidentified_refusals=False) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -716,6 +717,19 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     program = dict(functions)   # every function of the program, cut ones included (program-wide facts)
     functions = {key: unit for key, unit in functions.items() if key not in cuts}
     calls = {key: _direct_calls(unit, functions) for key, unit in functions.items()}
+    # (PE-b) admission-refused functions of this program: every call, tail or
+    # resolved target reaching one carries ``control:unavailable:<entry>`` in
+    # the caller's support (the call itself stays opaque, as any call outside
+    # the analysed set); ``unidentified_refusals``: a refusal without a
+    # validated entry -- every direct transfer to an address that is no
+    # function of the program (nor an import thunk) may be it
+    unavailable_entries = frozenset(unavailable_entries) - set(program)
+    import_thunks = frozenset(
+        f"{thunk.space_id:x}:{thunk.byte_offset:x}" for row in getattr(image_info, "imports", ()) or ()
+        for thunk in getattr(row, "thunks", ()) or ()) if unidentified_refusals else frozenset()
+    refused_calls = {key: _refused_transfers(unit, program, unavailable_entries, unidentified_refusals, import_thunks)
+                     for key, unit in functions.items()}
+    refused_resolved: dict = {}   # (round state: resolved indirect targets that are refused functions)
     # the fault premise (F1, docs 25.94): recognized sites, hazards, the
     # discharged set D (round state: it only shrinks) and the static
     # may-reach-fault set, decided before the first round
@@ -724,7 +738,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     fault_on = bool(assume_faults_end_execution and assume_stock_ghidra_translator)
     image_base = next(iter(functions.values())).scopes.program.evidence.image_base.byte_offset \
         if functions else None
-    fault_plan = plan_faults(functions, exception_directory, image_base, program) \
+    fault_plan = plan_faults(functions, exception_directory, image_base, program,
+                             unobserved_callers=(*sorted(unavailable_entries),
+                                                 *(("unidentified",) if unidentified_refusals else ()))) \
         if fault_on and functions else EMPTY_PLAN
     fault_state = {"discharged": fault_plan.discharged, "revoked": {}}
     # conditional summaries (U2b, docs 25.95): the import-slot tails that are
@@ -1178,6 +1194,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             def derive(failed):
                 proven = {}
                 dependencies.clear()
+                # (PE-b) refused callees: unavailable, whatever the call's effect
+                for callee in (*refused_calls.get(key, {}).values(),
+                               *(member for members in refused_resolved.get(key, {}).values() for member in members)):
+                    dependencies.add(f"control:unavailable:{callee}")
                 vetoed_models.clear()
                 sources.clear()
                 rejections.clear()
@@ -1730,17 +1750,28 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 first = results
             found, found_cuts, found_multi, requires, call_requires = {}, {}, {}, {}, {}
             found_imports = {}
+            found_refused: dict = {}
+            targetable = set(program) | unavailable_entries
             newly_failed = False
             for key, item in results.items():
                 if key in resource_failures or type(item.normalized) is not NormalizedFunction:
                     continue   # (failed / refused: no targets; each function adds at most one round)
                 try:
                     with activation(_ledger_key(item.unit)):
-                        targets = _indirect_targets(item, program)
+                        targets = _indirect_targets(item, targetable)
+                        if refused := {call: (target,) for call, target in targets.items()
+                                       if target in unavailable_entries}:
+                            found_refused.setdefault(key, {}).update(refused)
+                            targets = {call: target for call, target in targets.items() if call not in refused}
                         if forward:
-                            several, labels = _forward_targets(item, functions, readonly_image)
+                            several, labels = _forward_targets(item, set(functions) | unavailable_entries,
+                                                               readonly_image)
                             for call, members in several.items():
                                 if call in targets:
+                                    continue
+                                if refused_members := tuple(m for m in members if m in unavailable_entries):
+                                    # (PE-b) a candidate set naming a refused function: opaque, keyed
+                                    found_refused.setdefault(key, {})[call] = refused_members
                                     continue
                                 if len(members) == 1:
                                     targets[call] = members[0]
@@ -1803,7 +1834,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             else:
                 kept = discharged
             if found == resolved and found_cuts == resolved_cuts and found_multi == resolved_multi \
-                    and not newly_failed and kept == discharged:
+                    and found_refused == refused_resolved and not newly_failed and kept == discharged:
                 # (the resolutions recomputed on these results: their facts' labels too)
                 for key, labels in requires.items():
                     results[key].inherited_assumptions = results[key].inherited_assumptions | frozenset(labels)
@@ -1817,6 +1848,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                 rounds += 1   # (one more round for the revoked faults; D only shrinks)
                 fault_state["discharged"] = kept
             resolved, resolved_cuts, resolved_multi = found, found_cuts, found_multi
+            refused_resolved.clear()
+            refused_resolved.update(found_refused)
             # (design S-R r3) the slot-identity CALLIND admissions the next round binds
             slot_admissions.clear()
             slot_admissions.update({key: {call for call in rows if call.endswith(":CALLIND")}
@@ -2776,6 +2809,40 @@ def _direct_calls(unit, functions) -> dict[str, str]:
                 continue
             callee = function_key(target.coordinate)
             if callee not in functions:
+                continue
+            key = _operation_key(instruction.address, ordinal, operation.opcode)
+            if operation.opcode != "CALL":
+                if tails is None:
+                    tails = _tail_jumps(unit)
+                if key not in tails:
+                    continue
+            found[key] = callee
+    return found
+
+
+def _refused_transfers(unit, program, refused, unidentified, import_thunks) -> dict[str, str]:
+    """(PE-b) Operation key -> refused function for every direct CALL and
+    tail jump (``_tail_jumps``) of ``unit`` to an entry in ``refused``; with
+    ``unidentified`` also to any address that is no function of ``program``
+    and no import thunk (a refusal without a validated entry may be there)."""
+    if not refused and not unidentified:
+        return {}
+    found = {}
+    observation = unit.observation
+    if observation is None:
+        return found
+    tails = None
+    for instruction in observation.instructions:
+        for ordinal, operation in enumerate(instruction.operations):
+            if operation.opcode not in ("CALL", "BRANCH", "CBRANCH") or not operation.inputs:
+                continue
+            target = operation.inputs[0]
+            if target.kind is not VarnodeKindCode.ADDRESS:
+                continue
+            callee = function_key(target.coordinate)
+            if callee in program:
+                continue
+            if callee not in refused and not (unidentified and callee not in import_thunks):
                 continue
             key = _operation_key(instruction.address, ordinal, operation.opcode)
             if operation.opcode != "CALL":

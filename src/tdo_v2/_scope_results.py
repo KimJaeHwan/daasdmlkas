@@ -164,10 +164,17 @@ class UnresolvedFunctionScope:
     stage: ScopeConstructionStage
     reason: ScopeConstructionReason
     validated_observation_digest: bytes | None = None
+    # (PE-b) the function's validated entry when only its observation was
+    # refused: callers reaching it then carry ``control:unavailable:<entry>``
+    entry: AddressCoordinate | None = None
 
     def __post_init__(self) -> None:
         require_exact(self.stage, ScopeConstructionStage, "function failure stage")
         require_exact(self.reason, ScopeConstructionReason, "function failure reason")
+        if self.entry is not None:
+            require_exact(self.entry, AddressCoordinate, "refused function entry")
+            if self.stage is not ScopeConstructionStage.FUNCTION_OBSERVATION:
+                raise ValueError("only an observation refusal retains a validated entry")
         if self.stage not in (
             ScopeConstructionStage.FUNCTION_COORDINATE,
             ScopeConstructionStage.FUNCTION_OBSERVATION,
