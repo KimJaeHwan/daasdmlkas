@@ -91,7 +91,8 @@ int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc
     default:
         if (insn.meta.category == ZYDIS_CATEGORY_COND_BR) {
             out->flow = DC_FLOW_JCC;
-        } else if (insn.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
+        } else if (insn.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
+            /* (not ZYDIS_ATTRIB_IS_RELATIVE: it is also set for RIP-relative memory operands) */
             out->flow = DC_FLOW_OTHER;
         } else {
             out->flow = DC_FLOW_NONE;

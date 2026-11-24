@@ -58,7 +58,7 @@ def _run(gen, premise=True):
     import _sealed as s
     import decode_check
 
-    header, rows = decode_check.run(gen, s.NAMING_SOURCE, premise)
+    header, rows = decode_check.run(gen, s.NAMING_SOURCE, premise, full=True)
     found = {row.ident(): row for row in rows}
     assert len(found) == len(rows)
     return header, found

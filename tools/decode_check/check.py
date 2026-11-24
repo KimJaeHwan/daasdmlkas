@@ -142,7 +142,7 @@ STATE_TO_ROW = {"applied": ("evaluated", "applied"), "not_applicable": ("evaluat
                 "unobserved": ("unobserved", None)}
 
 
-def decode_rows(image: Image, functions: list, premise: bool, reason: str | None) -> list[Row]:
+def decode_rows(image: Image, functions: list, premise: bool, reason: str | None, full: bool = False) -> list[Row]:
     rows = []
     for function in functions:
         for facts in function["rows"]:
@@ -160,9 +160,12 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
             result = compare.compare_row(facts, lift, window, ballot, s1=function["s1"],
                                          native_call=facts["native_call"], premise=premise)
             state = result["state"]
-            detail = {"window": result["window"], "lift": None if lift is None else lift.pattern,
-                      "attributes": result.get("attributes", {}), "s1": function["s1"],
-                      "votes": {mode: [d.as_json() for d in ballot[mode]] for mode in ("intel", "amd")}}
+            detail = {"window": result["window"], "lift": None if lift is None else lift.pattern, "s1": function["s1"]}
+            if full or state != "applied":
+                # (an applied row keeps only its window and lift: every attribute agreed; the report of a
+                # large DLL would otherwise be gigabytes)
+                detail["attributes"] = result.get("attributes", {})
+                detail["votes"] = {mode: [d.as_json() for d in ballot[mode]] for mode in ("intel", "amd")}
             if "reason" in result:
                 detail["reason"] = result["reason"]
             if "suspect_pattern" in result:

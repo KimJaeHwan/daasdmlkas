@@ -71,7 +71,7 @@ def collect(generation: Path, naming_source: Path) -> dict:
     return found
 
 
-def run(generation: Path, naming_source: Path, premise: bool) -> tuple[dict, list]:
+def run(generation: Path, naming_source: Path, premise: bool, full: bool = False) -> tuple[dict, list]:
     facts = collect(generation, naming_source)
     manifest = json.loads((generation / "manifest.json").read_bytes())
     original_path = next(row["path"] for row in manifest["members"] if row["id"] == manifest["original_member_id"])
@@ -94,7 +94,7 @@ def run(generation: Path, naming_source: Path, premise: bool) -> tuple[dict, lis
     image = check.Image(generation, pe, base, original)
     rows = check.mapping_rows(image)
     reason = check.global_reason(pe, base, facts["language"] or "")
-    rows.extend(check.decode_rows(image, facts["functions"], premise, reason))
+    rows.extend(check.decode_rows(image, facts["functions"], premise, reason, full))
     rows.extend(check.suspect_rows(rows))
     header["mapping_id"] = pe.mapping_id
     header["global_reason"] = reason
@@ -109,11 +109,12 @@ def main(argv=None) -> int:
                         default=_HERE.parents[1] / "ghidra" / "GhidraV2CallNaming.java")
     parser.add_argument("--assume-stock-ghidra-translator", action="store_true",
                         help="named premise: the Bundle's p-code comes from the stock Ghidra 12.0.4 translator")
+    parser.add_argument("--full", action="store_true", help="keep every attribute and vote of applied rows too")
     args = parser.parse_args(argv)
     if not args.generation.is_dir() or not args.naming_source.is_file():
         print("decode_check: the generation directory and the naming source must exist", file=sys.stderr)
         return 2
-    header, rows = run(args.generation, args.naming_source, args.assume_stock_ghidra_translator)
+    header, rows = run(args.generation, args.naming_source, args.assume_stock_ghidra_translator, args.full)
     args.out.write_text(dumps(header, rows), encoding="utf-8")
     return 0
 

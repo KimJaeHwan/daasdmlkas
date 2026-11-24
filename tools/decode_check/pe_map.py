@@ -81,9 +81,10 @@ def _align_up(value, alignment):
 
 def parse(data: bytes) -> PeImage:
     try:
-        return _parse(data)
+        image = _parse(data)
     except (struct.error, IndexError, ValueError) as error:
-        return PeImage(False, f"header parse failed: {error}")
+        image = PeImage(False, f"header parse failed: {error}")
+    return image if image.mapping_id else _finish(image)
 
 
 def _parse(data: bytes) -> PeImage:
