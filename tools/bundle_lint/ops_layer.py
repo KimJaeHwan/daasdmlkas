@@ -41,11 +41,13 @@ def register_rows(program) -> list[Row]:
     """stack / link / program counter as ``isa_identity`` reads them (r4 s6):
     ``not_applicable`` where the ISA table has no such register (x86 link),
     ``withheld`` where the ISA has one and the evidence lacks it."""
-    from tdo_v2 import isa_identity
+    from engine_api import isa_identity
 
     evidence = program.evidence
     namespace = evidence.translation_namespace
-    parts = tuple(namespace.language_id.split(":"))[:3]
+    full = tuple(namespace.language_id.split(":"))
+    # (isa_identity._named looks a language up only in its 4-part form: Astra impl r6 P3)
+    parts = full[:3] if len(full) >= 4 else None
     rows = [Row("operations", "language", "program", "evaluated", "applied", "engine",
                 {"language_id": namespace.language_id, "major": namespace.major_version,
                  "minor": namespace.minor_version})]
@@ -58,9 +60,10 @@ def register_rows(program) -> list[Row]:
             rows.append(Row("operations", name, "program", "evaluated", "applied", "engine",
                             {"name": found.name, "space_id": found.space_id, "byte_offset": found.byte_offset,
                              "byte_size": found.byte_size}))
-        elif parts not in table:
+        elif parts is None or parts not in table:
             rows.append(Row("operations", name, "program", "evaluated", "not_applicable", "lint",
-                            {"why": "the ISA table has no such register"}))
+                            {"why": "the ISA table has no such register" if parts else
+                             "the language id is not in the 4-part form the ISA lookup reads"}))
         else:
             rows.append(Row("operations", name, "program", "evaluated", "withheld", "engine",
                             {"wanted": list(table[parts])}))
@@ -137,7 +140,7 @@ def source_rows(claim, raw) -> list[Row]:
 
 
 def _resolution(naming):
-    from tdo_v2.integration.configured_target_resolution import _selected_resolved_target
+    from engine_api import _selected_resolved_target
 
     target = _selected_resolved_target(naming)
     aliases = sorted({alias.value for alias in (() if target is None else target.aliases) if alias.policy_admissible})
@@ -148,11 +151,11 @@ def _resolution(naming):
 
 
 def call_rows(claim, function_keys) -> list[Row]:
-    from tdo_v2.call_relations import call_relations
-    from tdo_v2.control_projection import call_like_instruction, control_successor_coordinates
-    from tdo_v2.interprocedural import _plain_push_call, _program_memory_space
-    from tdo_v2.observed_call_state import observed_call_state_projections
-    from tdo_v2.pcode_blocks import _landing_pads
+    from engine_api import call_relations
+    from engine_api import call_like_instruction, control_successor_coordinates
+    from engine_api import _plain_push_call, _program_memory_space
+    from engine_api import observed_call_state_projections
+    from engine_api import _landing_pads
 
     evidence, unit = claim.evidence, claim.unit
     observation = unit.observation
@@ -162,10 +165,11 @@ def call_rows(claim, function_keys) -> list[Row]:
     memory_space = _program_memory_space(unit)
     projected = {row.call_operation_key for row in observed_call_state_projections(observation)}
     relations = call_relations(observation, unit.scopes)
-    from tdo_v2 import isa_identity
+    from engine_api import isa_identity
 
     evidence_program = unit.scopes.program.evidence
-    parts = tuple(evidence_program.translation_namespace.language_id.split(":"))[:3]
+    full = tuple(evidence_program.translation_namespace.language_id.split(":"))
+    parts = full[:3] if len(full) >= 4 else None
     isa = "link" if parts in isa_identity._LINK_REGISTERS else \
         "push" if parts in isa_identity._STACK_REGISTERS else "unknown"
     x86_64 = parts == ("x86", "LE", "64")
@@ -295,8 +299,8 @@ def branchind_rows(claim, raw, superseded=False) -> list[Row]:
     the validated ``flow_targets`` and the engine's local successors (facts);
     the verdict is the engine's own predicate ``unknown_transfer_sites``
     (control_context.py:62): an unknown transfer -> ``withheld`` (Astra impl r2 P1)."""
-    from tdo_v2.control_context import site_key, unknown_transfer_sites
-    from tdo_v2.control_projection import control_successor_coordinates
+    from engine_api import site_key, unknown_transfer_sites
+    from engine_api import control_successor_coordinates
 
     unit = claim.unit
     entry = claim.entry
@@ -328,8 +332,8 @@ def branchind_rows(claim, raw, superseded=False) -> list[Row]:
 def return_rows(claim) -> list[Row]:
     """Every instruction with a RETURN: the engine's return-shape recogniser
     (``may_alias._return_shape``, an SP evidence of the stack identification)."""
-    from tdo_v2.call_seeds import _operation_key
-    from tdo_v2.may_alias import _return_shape
+    from engine_api import _operation_key
+    from engine_api import _return_shape
 
     rows = []
     for instruction in claim.unit.observation.instructions:
@@ -345,7 +349,7 @@ def return_rows(claim) -> list[Row]:
 def rep_rows(claim, superseded=False) -> list[Row]:
     """rep string sites the engine recognises (``rep_strings.rep_sites``): their
     proof inside the summary run is not public -> application rows in layer 3."""
-    from tdo_v2.rep_strings import rep_sites
+    from engine_api import rep_sites
 
     detail = {"superseded_by_duplicate_entry": True} if superseded else {}
     return [Row("operations", "rep_site", f"{claim.function_id}/{_coord(address)}", "evaluated", "applied", "engine",
@@ -362,10 +366,10 @@ def callother_rows(claim, models, superseded=False) -> list[Row]:
     but whose shape or operand does not match -> unrecognized (no-effect) /
     not_applicable (trap index, other operand); an index no model lists ->
     not_applicable (``no_model``); no model for the language -> unsupported."""
-    from tdo_v2._scope_contracts import VarnodeKindCode
-    from tdo_v2.call_seeds import _operation_key
-    from tdo_v2.intrinsic_refinements import refinements_for
-    from tdo_v2.pcodeop_models import no_effect_calls, trap_operations
+    from engine_api import VarnodeKindCode
+    from engine_api import _operation_key
+    from engine_api import refinements_for
+    from engine_api import no_effect_calls, trap_operations
 
     unit = claim.unit
     namespace = unit.scopes.program.evidence.translation_namespace
@@ -415,8 +419,8 @@ def model_paths(options) -> list[str]:
 
 
 def rows(diagnosis, generation, options) -> list[Row]:
-    from tdo_v2._scope_results import ConstructedProgramScope
-    from tdo_v2.pcodeop_models import load_pcodeop_models
+    from engine_api import ConstructedProgramScope
+    from engine_api import load_pcodeop_models
 
     program = diagnosis.program_value
     if type(program) is not ConstructedProgramScope:

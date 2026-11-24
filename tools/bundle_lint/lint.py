@@ -86,8 +86,16 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
             rows.append(Row("pipeline", "stop", path, "not_run"))
             rows.append(Row("pipeline", "completion", path, "not_run"))
             continue
+        if child.get("run_state") == "evaluated" and child.get("completed") and path != "base_graph":
+            # the run's final columns, read from EngineRun (r2 s2), before anything that
+            # depends on the diagnosis (Astra impl r6 P2)
+            rows.append(Row("pipeline", "run_columns", path, "evaluated", "applied", "engine",
+                            {name: child[name] for name in ("assumptions", "control_exemptions", "fault_report",
+                                                            "control_sites")}))
         prediction = predictions.get(path)
         state, verdict, detail = diagnose.check_stop(prediction, child)
+        if path not in predictions:   # (no diagnosis prediction at all -- distinct from a predicted None)
+            state, verdict, detail = "error", None, {"why": "no stop prediction (diagnosis failed)", **detail}
         if (child.get("exception") or {}).get("resource"):
             state, verdict = "error", None   # (a resource failure is no stop verdict)
         rows.append(Row("pipeline", "stop", path, state, verdict, "lint", detail))
@@ -124,11 +132,6 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
             continue
         verdict, detail = _completion(path, child, claims)
         rows.append(Row("pipeline", "completion", path, "evaluated", verdict, "lint", detail))
-        if path != "base_graph":
-            # the run's final columns, read from EngineRun (r2 s2): --expect compares them
-            rows.append(Row("pipeline", "run_columns", path, "evaluated", "applied", "engine",
-                            {name: child[name] for name in ("assumptions", "control_exemptions", "fault_report",
-                                                            "control_sites")}))
     return rows
 
 
@@ -201,9 +204,9 @@ def run(generation: Path, naming_source: Path, *, timeout: float, summary: bool,
         rows.append(Row("transport", "diagnosis", "bundle", diag.get("run_state", "error"), None, "lint",
                         {key: diag.get(key) for key in ("returncode", "stderr", "elapsed")}))
     rows.extend(pipeline_rows(diag["diagnosis"], diag["predictions"], results))
-    rows.extend(feature_layer.trap_application_rows(rows, {**results, "_predictions": diag["predictions"]},
-                                                    options))
-    rows.extend(branchind_final_rows(rows, results))
+    site_results = {**results, "_predictions": diag["predictions"]}
+    rows.extend(feature_layer.trap_application_rows(rows, site_results, options))
+    rows.extend(branchind_final_rows(rows, site_results))
     header = {
         "tool": "bundle_lint", "revision": TOOL_REVISION, "generation": generation.name,
         "naming_source_sha256": sha256(naming_source.read_bytes()).hexdigest(),

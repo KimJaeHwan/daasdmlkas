@@ -145,6 +145,7 @@ class Block:
     name: str = ".text"
     write: bool = False
     execute: bool = True
+    external: bool = False   # (loaded + initialized + external, no sealed member: a valid descriptor)
 
 
 @dataclass
@@ -167,17 +168,9 @@ class Bundle:
 # -- naming ----------------------------------------------------------------------------
 
 def _naming(generation, observation_id, observation_sha, data, entries, naming_sha):
-    from tdo_v2._scope_contracts import AddressCoordinate, ValidatedVarnode, VarnodeKindCode
-    from tdo_v2.configured_naming_contracts import (
-        CALL_NAMING_EXPORTER_REVISION, CALL_NAMING_GHIDRA_VERSION, CALL_NAMING_INVENTORY_COMPLETENESS,
-        CALL_NAMING_SCHEMA_ID, CALL_NAMING_SCHEMA_VERSION, CapturedNamingAlias, CapturedNamingResolution,
-        CapturedNamingRow, CapturedNamingTarget, NamingAliasKind, NamingOpcode, NamingResolutionState,
-        NamingSourceQuality, NamingUnresolvedReason, naming_content_digest, naming_row_digest,
-        naming_target_digest,
-    )
-    from tdo_v2.configured_profile_contracts import (
-        CONFIGURED_BUNDLE_MANIFEST_SCHEMA_ID, CONFIGURED_BUNDLE_SEAL_SCHEMA_ID,
-    )
+    from engine_api import AddressCoordinate, ValidatedVarnode, VarnodeKindCode
+    from engine_api import (CALL_NAMING_EXPORTER_REVISION, CALL_NAMING_GHIDRA_VERSION, CALL_NAMING_INVENTORY_COMPLETENESS, CALL_NAMING_SCHEMA_ID, CALL_NAMING_SCHEMA_VERSION, CapturedNamingAlias, CapturedNamingResolution, CapturedNamingRow, CapturedNamingTarget, NamingAliasKind, NamingOpcode, NamingResolutionState, NamingSourceQuality, NamingUnresolvedReason, naming_content_digest, naming_row_digest, naming_target_digest)
+    from engine_api import CONFIGURED_BUNDLE_MANIFEST_SCHEMA_ID, CONFIGURED_BUNDLE_SEAL_SCHEMA_ID
 
     rows = []
     for instruction in data["instructions"]:
@@ -289,16 +282,17 @@ def write(root, bundle: Bundle) -> Path:
         return members[-1]
 
     blocks = sorted(bundle.blocks, key=lambda block: block.start)
-    member("original", "original.bin", b"".join(block.data for block in blocks) or b"\0")
+    member("original", "original.bin", b"".join(block.data for block in blocks if not block.external) or b"\0")
     member("program", "program.json", dumps(bundle.program))
     member("call-interface-profile", "call-interface-profile.json", dumps(PLACEHOLDER))
     block_rows = []
     for index, block in enumerate(blocks):
-        member(f"memory-{index:06d}", f"memory-{index:06d}.bin", block.data)
+        if not block.external:
+            member(f"memory-{index:06d}", f"memory-{index:06d}.bin", block.data)
         block_rows.append({"id": f"block-{index:06d}", "space_id": RAM, "byte_start": block.start,
                            "byte_size": len(block.data), "is_loaded": True, "is_initialized": True,
-                           "is_overlay": False, "is_external": False, "is_mapped": False,
-                           "member_id": f"memory-{index:06d}"})
+                           "is_overlay": False, "is_external": block.external, "is_mapped": False,
+                           "member_id": None if block.external else f"memory-{index:06d}"})
     image_info = bundle.image_info
     if image_info == "default":
         image_info = {"schema": "tdo-v2-image-info-1", "executable_format": "Raw Binary",

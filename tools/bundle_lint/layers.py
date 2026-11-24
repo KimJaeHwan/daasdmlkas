@@ -20,7 +20,7 @@ def _function_key(claim) -> str:
     return claim.function_id if claim.function_id else source_row_key("unknown", claim.index)
 
 
-def transport_rows(diagnosis) -> list[Row]:
+def transport_rows(diagnosis, generation=None) -> list[Row]:
     rows = []
     admission = diagnosis.admission
     if not admission.get("ok"):
@@ -49,9 +49,17 @@ def transport_rows(diagnosis) -> list[Row]:
     else:
         rows.append(Row("transport", "image_info", "bundle", "evaluated", "applied", "engine"))
         info = diagnosis.image_info_value
+        members = {}
+        if generation is not None:
+            import json
+
+            manifest = json.loads((Path(generation) / "manifest.json").read_bytes())
+            # (ReadOnlyImage's own lookup: (space id, byte start) -> member id, image_info.py:136)
+            members = {(row["space_id"], row["byte_start"]): row["member_id"] for row in manifest["blocks"]}
         for index, block in enumerate(info.blocks):
             chosen = info.block_at(block.space_id, block.start, block.size)
-            chosen_index = next((i for i, item in enumerate(info.blocks) if item is chosen), None)
+            # (the first row equal to the selected one: block_at returns the first match; no object identity)
+            chosen_index = next((i for i, item in enumerate(info.blocks) if item == chosen), None)
             if chosen_index != index:
                 # ReadOnlyImage.value consults block_at, which picks the first row wholly
                 # containing the range: this row is never the one the engine reads
@@ -62,6 +70,12 @@ def transport_rows(diagnosis) -> list[Row]:
             # guard test); import slots inside a folding block are excluded per
             # address by value() itself -- readonly_use rows show actual uses
             folds = block.initialized and block.read and not block.write and not block.volatile
+            if folds and generation is not None and members.get((block.space_id, block.start)) is None:
+                # no sealed bytes for the block: ReadOnlyImage.value gives nothing (image_info.py:159)
+                rows.append(Row("transport", "readonly_block", f"#{index}/{block.space_id:x}:{block.start:x}",
+                                "evaluated", "not_applicable", "lint",
+                                {"name": block.name, "why": "no sealed member for the block"}))
+                continue
             # (keyed by the image-info row: two rows may describe one block, image_info.py:202)
             rows.append(Row("transport", "readonly_block", f"#{index}/{block.space_id:x}:{block.start:x}", "evaluated",
                             "applied" if folds else "not_applicable", "lint",
@@ -112,7 +126,7 @@ def rows(diagnosis, generation: Path, options: dict) -> list[Row]:
     import feature_layer
     import ops_layer
 
-    out = transport_rows(diagnosis)
+    out = transport_rows(diagnosis, generation)
     if diagnosis.admission.get("ok"):
         # design checks G0 leaves out (README "Not in G0"): visible, never silently absent
         out.append(Row("operations", "excluded", "ignored_keys_and_proof_fields", "not_run", None, "lint",

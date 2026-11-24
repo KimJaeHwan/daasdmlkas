@@ -74,23 +74,23 @@ class Diagnosis:
 def diagnose(generation, naming_source, *, keep=None) -> Diagnosis:
     """The whole pass on the analysis worker. ``keep(diagnosis)`` runs inside the
     open session (layers 2-3 read the evidences there)."""
-    from tdo_v2.resource_limits import run_analysis
+    from engine_api import run_analysis
 
     return run_analysis(_diagnose, Path(generation), Path(naming_source), keep)
 
 
 def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
-    from tdo_v2._scope_results import ConstructedFunctionScope, ConstructedProgramScope
-    from tdo_v2.call_contracts import FunctionCallSeedUnit
-    from tdo_v2.call_seeds import seed_function_calls, seed_tail_calls
-    from tdo_v2.configured_naming_contracts import CALL_NAMING_GHIDRA_VERSION, NamingBindingExpectation
-    from tdo_v2.image_info import load_image_info
-    from tdo_v2.integration.configured_bundle import admit_frozen_bundle
-    from tdo_v2.integration.observed_function_session import open_observed_function_session
+    from engine_api import ConstructedFunctionScope, ConstructedProgramScope
+    from engine_api import FunctionCallSeedUnit
+    from engine_api import seed_function_calls, seed_tail_calls
+    from engine_api import CALL_NAMING_GHIDRA_VERSION, NamingBindingExpectation
+    from engine_api import load_image_info
+    from engine_api import admit_frozen_bundle
+    from engine_api import open_observed_function_session
 
     result = Diagnosis()
     binding = NamingBindingExpectation(sha256(naming_source.read_bytes()).digest(), CALL_NAMING_GHIDRA_VERSION)
-    from tdo_v2.resource_limits import RESOURCE_FAILURES
+    from engine_api import RESOURCE_FAILURES
 
     try:
         snapshot = admit_frozen_bundle(generation)
@@ -122,9 +122,9 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
             if keep is not None:
                 keep(result)
             return result
-        adapter = session._provider_adapter
-        scoped = session._envelope.iter_scoped_functions()
-        session._iterator_claimed = True   # (the session's own iterator is not used after this)
+        import engine_api
+
+        adapter, scoped = engine_api.scoped_functions(session)
         index = 0
         while True:
             claim = FunctionClaim(index)
@@ -163,7 +163,7 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
                     claim.seeds_error = {**_error(error), "resource": isinstance(error, RESOURCE_FAILURES)}
                 if claim.seeds == "ok":
                     try:
-                        claim.evidence = session._decode_function(unit, captured)
+                        claim.evidence = engine_api.decode_function(session, unit, captured)
                         claim.naming = "ok"
                     except Exception as error:
                         claim.naming = "error"

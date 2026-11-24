@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tdo-v2-bundle-lint-report-1",
+  "title": "bundle_lint report, revision 1 (language-neutral contract: a Rust or other implementation emits / reads the same)",
+  "type": "object",
+  "required": ["header", "rows"],
+  "properties": {
+    "header": {
+      "type": "object",
+      "required": ["tool", "revision", "generation", "naming_source_sha256", "options", "summary", "PYTHONHASHSEED"],
+      "properties": {
+        "tool": {"const": "bundle_lint"},
+        "revision": {"type": "integer"},
+        "generation": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "naming_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "options": {"type": "object"},
+        "summary": {"type": "boolean"},
+        "timeout": {"type": "number"},
+        "workers": {"type": "object"},
+        "elapsed": {"type": "object"},
+        "PYTHONHASHSEED": {"const": "0"}
+      }
+    },
+    "rows": {"type": "array", "items": {"$ref": "#/$defs/row"}}
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "required": ["layer", "check", "key", "run_state", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "layer": {"enum": ["transport", "operations", "features", "pipeline"]},
+        "check": {"type": "string"},
+        "key": {
+          "type": "string",
+          "description": "validated operation: <function id>/<space:offset:ordinal:opcode>; a member's own array row: <function id>/#<index>; program-level: program / bundle / a path name"
+        },
+        "run_state": {"enum": ["evaluated", "not_reached", "not_run", "unobserved", "timeout", "error"]},
+        "verdict": {"enum": ["applied", "not_applicable", "unrecognized", "withheld", "refused", "unsupported", "error"]},
+        "source": {"enum": ["engine", "lint"]},
+        "detail": {"type": "object", "description": "strict JSON only (non-finite numbers are null)"}
+      },
+      "allOf": [
+        {"if": {"properties": {"run_state": {"const": "evaluated"}}}, "then": {"required": ["verdict"]},
+         "else": {"not": {"required": ["verdict"]}}},
+        {"if": {"properties": {"verdict": {"const": "refused"}}, "required": ["verdict"]},
+         "then": {"properties": {"source": {"const": "engine"}}}}
+      ]
+    }
+  }
+}

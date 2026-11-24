@@ -29,7 +29,7 @@ DEFAULTS = {
 
 
 def stack_rows(claim) -> list[Row]:
-    from tdo_v2.may_alias import _stack_pointer, _unit_stub
+    from engine_api import _stack_pointer, _unit_stub
 
     scopes = claim.unit.scopes
     found = _stack_pointer(_unit_stub(scopes), claim.unit.observation, scopes.resolution_context,
@@ -37,7 +37,7 @@ def stack_rows(claim) -> list[Row]:
     if found is None:
         return [Row("features", "stack_pointer", claim.function_id, "evaluated", "withheld", "engine")]
     _, bias, register_space, offset, size = found
-    from tdo_v2._scope_contracts import VarnodeKindCode
+    from engine_api import VarnodeKindCode
 
     spaces = sorted({operation.inputs[0].coordinate.byte_offset for instruction in claim.unit.observation.instructions
                      for operation in instruction.operations
@@ -65,12 +65,12 @@ class StandaloneContext:
     def __enter__(self):
         import sys
 
-        from tdo_v2.call_clobber import OPAQUE_RESTORES_SP
-        from tdo_v2.interprocedural import ANALYSIS_RECURSION_LIMIT
-        from tdo_v2.may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
-        from tdo_v2.relative_memory import IMPORT_SLOTS, ImportSlots
+        from engine_api import OPAQUE_RESTORES_SP
+        from engine_api import ANALYSIS_RECURSION_LIMIT
+        from engine_api import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
+        from engine_api import IMPORT_SLOTS, ImportSlots
 
-        from tdo_v2.interprocedural import program_switches_stack
+        from engine_api import program_switches_stack
 
         o = self.options
         # interprocedural.py:641-650: a stack switch anywhere withdraws
@@ -82,7 +82,7 @@ class StandaloneContext:
         if slots is not None:
             slots.active = o["assume_globals_disjoint_from_stack"]
         # win64-home-space-callee-private: summary_engine.py:503 (Astra impl r1 P2)
-        from tdo_v2.summary_engine import _x86_64
+        from engine_api import _x86_64
 
         info = self.image_info
         self.home_space = 0x28 if o["assume_win64_home_space_private"] and o["assume_entry_values_not_frame"]             and info is not None and info.executable_format.startswith("Portable Executable")             and _x86_64(self.evidences) else 0
@@ -107,7 +107,7 @@ class StandaloneContext:
         self._tokens = []
 
     def header(self) -> dict:
-        from tdo_v2.relative_memory import IMPORT_SLOTS
+        from engine_api import IMPORT_SLOTS
 
         slots = IMPORT_SLOTS.get()
         return {**self.options, "import_slots_context": slots is not None,
@@ -118,17 +118,17 @@ class StandaloneContext:
 
 def readonly_image(generation, image_info, options):
     """Exactly as summary_engine.py:206-210 (Fable r6 P3-1)."""
-    from tdo_v2.image_info import ReadOnlyImage
+    from engine_api import ReadOnlyImage
 
     assume = options.get("assume_readonly_image_constant", DEFAULTS["assume_readonly_image_constant"])
     return ReadOnlyImage(generation, image_info) if assume and image_info is not None else None
 
 
 def normalize_rows(claim, image, context) -> list[Row]:
-    from tdo_v2.interprocedural import ANALYSIS_FAILURES, _failure_reason
-    from tdo_v2.resource_limits import RESOURCE_FAILURES
-    from tdo_v2.normalize import FunctionNormalizer, NormalizedFunction
-    from tdo_v2.rep_strings import rep_sites
+    from engine_api import ANALYSIS_FAILURES, _failure_reason
+    from engine_api import RESOURCE_FAILURES
+    from engine_api import FunctionNormalizer, NormalizedFunction
+    from engine_api import rep_sites
 
     o = context.options
     key = claim.function_id
@@ -152,7 +152,7 @@ def normalize_rows(claim, image, context) -> list[Row]:
     for name, _, where in uses:
         if name == "readonly-image-data-is-constant":
             rows.append(Row("features", "readonly_use", f"{key}/{where}", "evaluated", "applied", "engine"))
-    from tdo_v2.normalize import _coordinate_key
+    from engine_api import _coordinate_key
 
     proven = {item[0]: item for item in result.rep_blocks}
     for address in sorted(rep_sites(claim.unit.observation), key=lambda a: (a.space_id, a.byte_offset)):

@@ -58,7 +58,7 @@ def copy_bundle(source: Path, out_root: Path) -> Path:
     """Copy an admissible Bundle: the source is admitted first (the engine's own
     checks: flat safe member names, hashes, no unlisted entries), then only the
     listed members and the two control files are copied (Astra impl r1 P1)."""
-    from tdo_v2.integration.configured_bundle import _safe_name, admit_frozen_bundle
+    from engine_api import _safe_name, admit_frozen_bundle
 
     admit_frozen_bundle(source)
     manifest = _json(source / "manifest.json")
@@ -77,7 +77,7 @@ def _json(path: Path):
 
 
 def _write_member(generation: Path, manifest: dict, member_id: str, data: bytes) -> None:
-    from tdo_v2.integration.configured_bundle import _safe_name
+    from engine_api import _safe_name
 
     row = next(row for row in manifest["members"] if row["id"] == member_id)
     name = _safe_name(row["path"])
@@ -104,7 +104,7 @@ def _function_row(manifest: dict, function_id: str) -> dict:
 
 
 def _member_path(generation: Path, manifest: dict, member_id: str) -> Path:
-    from tdo_v2.integration.configured_bundle import _safe_name
+    from engine_api import _safe_name
 
     return generation / _safe_name(next(row["path"] for row in manifest["members"] if row["id"] == member_id))
 
@@ -112,11 +112,8 @@ def _member_path(generation: Path, manifest: dict, member_id: str) -> Path:
 # -- naming re-derivation (the engine's own encoders) ------------------------------------
 
 def _typed_naming_row(raw):
-    from tdo_v2._scope_contracts import AddressCoordinate, ValidatedVarnode, VarnodeKindCode
-    from tdo_v2.configured_naming_contracts import (
-        CapturedNamingAlias, CapturedNamingResolution, CapturedNamingTarget, NamingAliasKind, NamingOpcode,
-        NamingResolutionState, NamingSourceQuality, NamingUnresolvedReason,
-    )
+    from engine_api import AddressCoordinate, ValidatedVarnode, VarnodeKindCode
+    from engine_api import (CapturedNamingAlias, CapturedNamingResolution, CapturedNamingTarget, NamingAliasKind, NamingOpcode, NamingResolutionState, NamingSourceQuality, NamingUnresolvedReason)
 
     def coordinate(value):
         return AddressCoordinate(value["space_id"], value["byte_offset"])
@@ -145,9 +142,7 @@ def _typed_naming_row(raw):
 
 def rederive_naming(naming: dict) -> dict:
     """Recompute every row digest and the content digest of a call-names sidecar."""
-    from tdo_v2.configured_naming_contracts import (
-        CapturedNamingRow, naming_content_digest, naming_row_digest,
-    )
+    from engine_api import CapturedNamingRow, naming_content_digest, naming_row_digest
 
     def rows(raw_rows):
         typed = []
@@ -276,30 +271,18 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
 def _run_edges(generation: Path, naming_source, entry: str):
     """The inter-function reach edges of ``entry`` as the summary run computes
     them: ``control_context._edges`` over the very ``results`` / ``failed``
-    the run passes to ``control_contexts`` (summary_engine.py:767; Astra impl
-    r5 P2). None when the run publishes no result for ``entry``."""
-    from tdo_v2 import summary_engine
-    from tdo_v2.boundary import NullBoundaryProvider
-    from tdo_v2.control_context import _edges
+    the run passes to ``control_contexts`` (engine_api.run_control_context_inputs;
+    Astra impl r5 P2). None when the run raises or publishes no result for
+    ``entry`` (the caller refuses the variant: Astra impl r6 P3)."""
+    import engine_api
 
-    captured = {}
-    original = summary_engine.control_contexts
-
-    def capture(results, failed, *args, **kwargs):
-        captured["results"], captured["failed"] = results, failed
-        return original(results, failed, *args, **kwargs)
-
-    summary_engine.control_contexts = capture
-    try:
-        summary_engine.analyze_frozen_bundle_with_summaries(
-            generation, naming_exporter_source=naming_source or _sealed.NAMING_SOURCE,
-            boundary_provider=NullBoundaryProvider())
-    finally:
-        summary_engine.control_contexts = original
-    results, failed = captured.get("results"), captured.get("failed")
-    if results is None or entry not in results:
+    captured = engine_api.run_control_context_inputs(generation, naming_source or _sealed.NAMING_SOURCE)
+    if captured is None:
         return None
-    return frozenset(_edges(entry, results[entry], set(results) | set(failed)))
+    results, failed = captured
+    if entry not in results:
+        return None
+    return frozenset(engine_api._edges(entry, results[entry], set(results) | set(failed)))
 
 
 def _survey(generation: Path, naming_source=None, target=None, edges=False) -> dict:
@@ -319,8 +302,8 @@ def _survey(generation: Path, naming_source=None, target=None, edges=False) -> d
     found = {}
 
     def keep(diagnosis):
-        from tdo_v2.control_projection import control_successor_coordinates
-        from tdo_v2.normalize import FunctionNormalizer, NormalizedFunction
+        from engine_api import control_successor_coordinates
+        from engine_api import FunctionNormalizer, NormalizedFunction
 
         keys = {claim.entry for claim in diagnosis.claims if claim.entry}
         last = {}
@@ -384,7 +367,9 @@ def precheck(survey: dict, function_id: str, site: str, variant: str) -> None:
         stops = survey["__predictions__"]
         index = _claim_index(survey, function_id)
         for path, stop in stops.items():
-            if stop is not None and (stop.get("index") is None or stop["index"] <= index):
+            if stop is None or stop.get("stage") == "publication":
+                continue   # (publication comes after every naming step: the target was reached; Astra impl r6 P2)
+            if stop.get("index") is None or stop["index"] <= index:
                 raise VariantError(f"the {path} path stops before the target function: {stop}")
     if target is None or target[:3] != ("constructed", "ok", "ok"):
         raise VariantError(f"the source function is not admitted with its names: {None if target is None else target[:3]}")
@@ -419,7 +404,8 @@ def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: s
     if target[:3] != expected:
         raise VariantError(f"the target function is {target[:3]}, expected {expected}")
     if variant == "call-ordinal":
-        # every path's first stop is now the target's naming refusal (Astra impl r5 P2)
+        # every path's first stop is now the target's naming refusal, and each real
+        # child raises exactly the coverage refusal, not a resource failure (Astra impl r5 / r6 P2)
         position = _claim_index(after, function_id)
         for path, stop in after["__predictions__"].items():
             if stop is None or stop.get("index") != position or stop.get("function_id") != function_id:
@@ -471,6 +457,23 @@ def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: s
             raise VariantError("the variant does not remove exactly the engine's reach edge to the exit's function")
 
 
+NAMING_COVERAGE_REFUSAL = ("builtins.ValueError", "naming row does not match its exact call occurrence")
+
+
+def _check_children_refuse_names(generation: Path, naming_source) -> None:
+    """call-ordinal: the three pipeline children each stop with the naming
+    coverage refusal and no resource failure; any other exception, a normal
+    completion or a timeout refuses the variant (Astra impl r6 P2)."""
+    import children
+
+    for path in children.PATHS:
+        child = children.run_path(path, generation, naming_source or _sealed.NAMING_SOURCE, timeout=600)
+        exception = child.get("exception") or {}
+        if child.get("run_state") != "evaluated" or child.get("completed") or exception.get("resource") \
+                or (exception.get("class"), exception.get("message")) != NAMING_COVERAGE_REFUSAL:
+            raise VariantError(f"the {path} child does not stop with the naming coverage refusal: {child}")
+
+
 # -- driver ---------------------------------------------------------------------------------
 
 def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "function-000000",
@@ -504,6 +507,8 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
     generation = copy_bundle(source, out_root)
     try:
         result = _mutate_copy(generation, variant, function_id, site, index, selected)
+        if variant == "call-ordinal":
+            _check_children_refuse_names(generation, naming_source)
         if survey is not None:
             postcheck(survey, _survey(generation, naming_source, target=function_id, edges=needs_edges), variant,
                       function_id, site, index, selected)

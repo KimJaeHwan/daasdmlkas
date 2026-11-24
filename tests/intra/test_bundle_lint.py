@@ -1119,7 +1119,7 @@ def test_drop_pad_never_picks_the_fallthrough_even_with_an_extra_field(sealed):
     s = sealed[0]
     bundle = _layer2_bundle(s)
     targets = bundle.functions[0].observation["instructions"][0]["flow_targets"]
-    targets.append({**s.coord(0x1005), "ignored": 1})   # (the fallthrough, listed with an ignored key)
+    targets.insert(0, {**s.coord(0x1005), "ignored": 1})   # (the fallthrough first, with an ignored key)
     rows, base, note = _variant(sealed, "drop-pad", bundle=bundle, function_id="function-000000",
                                 site="1:1000:2:CALL")
     assert note["dropped"] == "1:100a"
@@ -1242,6 +1242,7 @@ def test_site_rows_read_retain_when_strict_stopped(sealed):
     rows, _ = _run_lint(sealed, s.Bundle([a, b, c]), "retainsite")
     final = rows[("pipeline", "branchind_final", "function-000002/control:1:1800:1:1800")]
     assert final.run_state == "evaluated" and final.detail["run"] == "summary-retain", final
+    assert (final.verdict, final.detail["final"]) == ("withheld", "unknown"), final
 
 
 @posix
@@ -1257,3 +1258,102 @@ def test_readonly_block_rows_follow_the_row_the_engine_selects(sealed, first_wri
     first, second = rows[("transport", "readonly_block", "#0/1:1000")], rows[("transport", "readonly_block", "#1/1:1000")]
     assert first.verdict == ("not_applicable" if first_writable else "applied")
     assert (second.run_state, second.detail["selected_row"]) == ("not_reached", 0)
+
+
+
+# -- implementation review r6 (final round) and the Rust-port surface ------------------------
+
+@posix
+def test_branchind_final_is_not_reached_when_both_summaries_stop_before_analysis(sealed):
+    s = sealed[0]
+    jump = s.flow(is_flow=True, is_jump=True, is_computed=True, is_terminal=True, is_unconditional=True)
+    a = s.Function("A", s.observation(0x1000, [s.row(0x1000, 2, s.ops(("BRANCHIND", [s.reg(s.RAX)], None)), jump)]))
+    b = s.Function("B", s.observation(0x1800, [s.ret(0x1800)]))
+    rows, _ = _run_lint(sealed, s.Bundle([a, b], overrides={"call-names-000001": b"{"}), "prestop")
+    for path in ("summary", "summary-retain"):
+        assert rows[("pipeline", "completion", path)].detail["analysed"] == 0
+    final = rows[("pipeline", "branchind_final", "function-000000/control:1:1000:1:1000")]
+    assert (final.run_state, final.verdict) == ("not_reached", None) and "final" not in final.detail, final
+
+
+@posix
+def test_call_ordinal_accepts_a_source_whose_base_graph_stops_at_publication(sealed):
+    s = sealed[0]
+    bundle = s.two_function_bundle()
+    bundle.functions.append(s.Function("B2", s.observation(0x1800, [s.ret(0x1800)])))   # (duplicate entry of B)
+    rows, _, note = _variant(sealed, "call-ordinal", bundle=bundle, function_id="function-000000")
+    assert rows[("transport", "naming", "function-000000")].verdict == "refused"
+
+
+@posix
+def test_readonly_block_without_sealed_bytes_is_not_applicable(sealed):
+    s = sealed[0]
+    bundle = s.two_function_bundle(blocks=[s.Block(start=0x1000), s.Block(start=0x3000, data=bytes(0x100),
+                                                                           external=True)])
+    rows, _ = _run_lint(sealed, bundle, "extblock", summary=False)
+    assert rows[("transport", "readonly_block", "#0/1:1000")].verdict == "applied"
+    assert rows[("transport", "readonly_block", "#1/1:3000")].verdict == "not_applicable"
+
+
+def test_a_failed_diagnosis_keeps_run_columns_and_errors_stop_and_completion():
+    import lint
+
+    child = {"run_state": "evaluated", "completed": True, "supports_count": 1, "supported_functions": ["1:1000"],
+             "succeeded": ["1:1000"], "failed_functions": [], "admission_failures": [], "assumptions": ["a"],
+             "control_exemptions": [], "fault_report": [], "control_sites": []}
+    rows = {r.ident(): r for r in lint.pipeline_rows({"claims": [], "failed": True}, {}, {"summary": child})}
+    assert rows[("pipeline", "stop", "summary")].run_state == "error"
+    assert rows[("pipeline", "completion", "summary")].run_state == "error"
+    columns = rows[("pipeline", "run_columns", "summary")]
+    assert (columns.run_state, columns.verdict, columns.detail["assumptions"]) == ("evaluated", "applied", ["a"])
+
+
+@posix
+def test_a_three_part_language_id_is_outside_the_isa_lookup(sealed):
+    s = sealed[0]
+    bundle = _aarch64_bundle(s)
+    bundle.program["translation_namespace"]["language_id"] = "AARCH64:LE:64"
+    rows, _ = _run_lint(sealed, bundle, "a64short", summary=False)
+    for name in ("stack_register", "link_register", "program_counter"):
+        assert rows[("operations", name, "program")].verdict == "not_applicable"
+
+
+def test_guard_only_engine_api_imports_the_engine():
+    """Rust-port surface: every engine name goes through engine_api.SURFACE."""
+    import re
+
+    folder = REPO / "tools" / "bundle_lint"
+    offenders = [path.name for path in folder.glob("*.py") if path.name != "engine_api.py"
+                 and re.search(r"^\s*(from|import) tdo_v2", path.read_text(encoding="utf-8"), re.M)]
+    assert offenders == []
+    import engine_api
+
+    assert all(role in engine_api.ROLES for _, _, role in engine_api.SURFACE.values())
+    used = set()
+    for path in folder.glob("*.py"):
+        for match in re.finditer(r"from engine_api import \(?([^)\n]+)", path.read_text(encoding="utf-8")):
+            used |= {name.strip() for name in match.group(1).split(",") if name.strip()}
+        used |= set(re.findall(r"engine_api\.(\w+)", path.read_text(encoding="utf-8")))
+    helpers = {"SURFACE", "ROLES", "scoped_functions", "decode_function", "run_control_context_inputs"}
+    assert used - helpers <= set(engine_api.SURFACE), sorted(used - helpers - set(engine_api.SURFACE))
+
+
+@posix
+def test_guard_engine_api_surface_resolves_and_its_run_hook_line_exists():
+    import inspect
+
+    import engine_api
+    from tdo_v2 import summary_engine
+
+    for name in engine_api.SURFACE:
+        getattr(engine_api, name)
+    assert "contexts = control_contexts(results, failed, exempt | faults)" in inspect.getsource(summary_engine)
+
+
+def test_report_schema_matches_the_closed_sets():
+    schema = json.loads((REPO / "tools" / "bundle_lint" / "report_schema.json").read_text(encoding="utf-8"))
+    row = schema["$defs"]["row"]["properties"]
+    assert tuple(row["run_state"]["enum"]) == report.RUN_STATES
+    assert tuple(row["verdict"]["enum"]) == report.VERDICTS
+    assert tuple(row["source"]["enum"]) == report.SOURCES
+    assert tuple(row["layer"]["enum"]) == report.LAYERS

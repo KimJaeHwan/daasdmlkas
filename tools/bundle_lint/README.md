@@ -79,4 +79,19 @@ key is a difference); `"exhaustive": true` also fails on rows not listed.
   on both sides). A source refused by its conditions writes nothing; a failure after the copy is renamed
   `<generation>.failed[.N]` (nothing is deleted). `--naming-source` for other exporter revisions.
 
+## Rust port (owner 2026-11-24: the engine will be ported; keep the tool port-aware)
+
+- **One engine surface.** Only `engine_api.py` imports `tdo_v2`; `engine_api.SURFACE` lists every engine name the tool
+  uses with its role (`entry`, `contract`, `fact`, `context`, `internal`). That table is what a Rust engine (PyO3
+  kernels behind per-module switches, .census6/rust_port_plan_final.md) must keep callable or export as facts. A guard
+  test fails on any engine import outside it.
+- **Internal access is listed, not scattered.** Session internals (the diagnosis claims every function itself) and the
+  run hook that reads the results the summary passes to `control_contexts` live in `engine_api.py` only, guard-pinned;
+  both should become public engine outputs in the port (per-function claims; per-function run results).
+- **The report is a contract.** `report_schema.json` (revision 1) fixes the row shape, closed sets and key forms; a test
+  ties it to `report.py`. A Rust lint or a cross-check run (Python vs Rust kernel switches on one Bundle, compared with
+  `--expect`) emits / reads the same JSON.
+- **No Python-object identity** in verdicts (selection by row index and equality); the variant tool works on the Bundle
+  JSON and the engine's answers only.
+
 Synthetic fixtures only in tests (`_sealed.py`); never commit a real Bundle, binary or report of one.

@@ -27,7 +27,7 @@ _REPO = _HERE.parents[1]
 
 
 def worker_state() -> dict:
-    from tdo_v2 import resource_limits
+    from engine_api import resource_limits
 
     return {"worker_supported": resource_limits.worker_supported(),
             "stack_megabytes": resource_limits.stack_megabytes(),
@@ -36,7 +36,7 @@ def worker_state() -> dict:
 
 
 def _error(error: BaseException) -> dict:
-    from tdo_v2.resource_limits import RESOURCE_FAILURES
+    from engine_api import RESOURCE_FAILURES
 
     return {"class": f"{type(error).__module__}.{type(error).__qualname__}", "message": str(error),
             "resource": isinstance(error, RESOURCE_FAILURES)}
@@ -45,11 +45,11 @@ def _error(error: BaseException) -> dict:
 def summary_options(options: dict) -> dict:
     """The summary entry's keyword options for a lint run (NullBoundaryProvider,
     the rest as given; unknown option names are rejected by the entry itself)."""
-    from tdo_v2.boundary import NullBoundaryProvider
+    from engine_api import NullBoundaryProvider
 
     kwargs = {name: value for name, value in options.items() if not name.startswith("lint_")}
     if kwargs.get("pcodeop_models") is not None:   # (paths in the JSON options -> loaded models)
-        from tdo_v2.pcodeop_models import load_pcodeop_models
+        from engine_api import load_pcodeop_models
 
         kwargs["pcodeop_models"] = load_pcodeop_models(kwargs["pcodeop_models"])
     kwargs["boundary_provider"] = NullBoundaryProvider()
@@ -57,7 +57,7 @@ def summary_options(options: dict) -> dict:
 
 
 def run_summary(generation: str, naming_source: str, *, retain: bool, options: dict) -> dict:
-    from tdo_v2.summary_engine import analyze_frozen_bundle_with_summaries
+    from engine_api import analyze_frozen_bundle_with_summaries
 
     out = {"path": "summary-retain" if retain else "summary", "worker": worker_state()}
     try:
@@ -68,7 +68,7 @@ def run_summary(generation: str, naming_source: str, *, retain: bool, options: d
         out["completed"] = False
         out["exception"] = _error(error)
         return out
-    from tdo_v2.resource_limits import last_run
+    from engine_api import last_run
 
     finished = last_run()
     out["work"] = None if finished is None else finished.work
@@ -93,7 +93,7 @@ def run_summary(generation: str, naming_source: str, *, retain: bool, options: d
 
 
 def run_base_graph(generation: str, naming_source: str) -> dict:
-    from tdo_v2.base_graph import build_frozen_bundle_graphs
+    from engine_api import build_frozen_bundle_graphs
 
     out = {"path": "base_graph", "worker": worker_state()}
     handle = {}
