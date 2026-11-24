@@ -1469,6 +1469,20 @@ public class GhidraV2BundleExport extends GhidraScript {
                 if (computedJump(row)) {
                     return false;   // (Astra r6 / r7: it may land off a row start and run an unchecked call)
                 }
+                if (row.getLength() != row.getParsedLength()) {
+                    return false;   // (a listing length override: the exported length is not the ISA one)
+                }
+                if (isaFallsThrough(row)) {
+                    // (Astra r5 / r8) every row the ISA lets fall through keeps
+                    // that fallthrough as it is: a removed or moved one could
+                    // hide the CPU's next PC (an entry edge, or a byte off a
+                    // row start running an unchecked call). A row the ISA ends
+                    // (JMP, RET, INT3) has none to keep.
+                    Address fallthrough = row.getFallThrough();
+                    if (fallthrough == null || !fallthrough.equals(row.getAddress().add(row.getParsedLength()))) {
+                        return false;
+                    }
+                }
                 // (an x86 CALL mnemonic: condition (a) established an x86-64 image)
                 if (!hasCallOperation(row) && !row.getMnemonicString().toUpperCase().startsWith("CALL")) {
                     continue;
@@ -1483,19 +1497,6 @@ public class GhidraV2BundleExport extends GhidraScript {
                     }
                 }
                 long back = row.getAddress().subtract(base) + row.getParsedLength();
-                if (!transfersOtherwise(row)) {
-                    // (a row whose call may explain a listed target: its ISA
-                    // fallthrough and length must be exported as they are; a
-                    // row holding BRANCH / BRANCHIND / RETURN / CALLOTHER never
-                    // explains one -- e.g. INT3 -- so it is not required)
-                    Address fallthrough = row.getFallThrough();
-                    if (fallthrough == null || !fallthrough.equals(row.getAddress().add(row.getParsedLength()))) {
-                        return false;
-                    }
-                    if (row.getLength() != row.getParsedLength()) {
-                        return false;   // (a listing length override: the exported length is not the ISA one)
-                    }
-                }
                 if (handlerIn(back, back + 1)) {
                     return false;
                 }
@@ -1512,17 +1513,10 @@ public class GhidraV2BundleExport extends GhidraScript {
         return true;
     }
 
-    /** The row holds BRANCH / BRANCHIND / RETURN / CALLOTHER: the engine's call
-     *  gate (``call_explained_targets``) never lets its call explain a target. */
-    private static boolean transfersOtherwise(Instruction row) {
-        for (PcodeOp operation : row.getPcode()) {
-            int opcode = operation.getOpcode();
-            if (opcode == PcodeOp.BRANCH || opcode == PcodeOp.BRANCHIND || opcode == PcodeOp.RETURN ||
-                    opcode == PcodeOp.CALLOTHER) {
-                return true;
-            }
-        }
-        return false;
+    /** The instruction's own (prototype) flow falls through, whatever the
+     *  listing's overrides say. */
+    private static boolean isaFallsThrough(Instruction row) {
+        return row.getPrototype().getFlowType(row.getInstructionContext()).hasFallthrough();
     }
 
     /** A BRANCHIND row: its flow references need not list every destination

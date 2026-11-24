@@ -501,8 +501,7 @@ class ValidatedInstruction:
 
 
 # (G3b-7b) a row holding any of these never explains a target by its call
-# (the call gate of ``control_projection.call_explained_targets``; the
-# exporter's ``transfersOtherwise`` spells the same set)
+# (the call gate of ``control_projection.call_explained_targets``)
 CALL_GATE_EXCLUDING_OPCODES = frozenset({"BRANCH", "BRANCHIND", "RETURN", "CALLOTHER"})
 
 
@@ -594,7 +593,8 @@ class ValidatedFunctionObservation:
         ):
             raise TypeError("instructions must be an exact instruction tuple")
         addresses = tuple(item.address for item in self.instructions)
-        if len(addresses) != len(set(addresses)):
+        row_addresses = frozenset(addresses)
+        if len(addresses) != len(row_addresses):
             raise ValueError("instruction addresses must be unique")
         require_bool(self.call_fallthrough_isa, "call fallthrough flag")
         require_bool(self.exception_handlers_none, "exception handlers flag")
@@ -623,7 +623,7 @@ class ValidatedFunctionObservation:
                 continuation = row.fallthrough if row.fallthrough is not None else unmapped.get(row.address)
                 if continuation is None:
                     raise ValueError("a call row under the exception handlers fact keeps its fallthrough")
-                if row.fallthrough is None and continuation in addresses:
+                if row.fallthrough is None and continuation in row_addresses:
                     # (Fable / Astra r7) a kind-4 exit stands for a continuation
                     # outside the function: one naming a row of it would hide
                     # that row's return edge behind the fact

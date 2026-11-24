@@ -7026,10 +7026,10 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
   항목 정렬·겹침 / 간접 항목(`UnwindData & 1`) / 버전 1·2 외 / 정의 안 된 플래그 비트 / CHAININFO와 처리기 플래그 동시 /
   선언된 바이트가 초기화된 메모리 밖 / 체인 순환 또는 32개 초과 / 로드 설정의 자기 크기가 이미지 밖이거나 디렉터리가 CHPE
   필드보다 작음 / 몸체가 이미지의 주소 공간이 아님(overlay) / PC가 SizeOfImage 밖 / 호출 행(p-code의 CALL·CALLIND, 또는 x86
-  CALL 명령 -- Ghidra는 `call $+5`를 push와 BRANCH로 옮기지만 복귀 PC는 쌓인다)의 flow override / 호출이 목적지를 설명할 수
-  있는 호출 행(BRANCH / BRANCHIND / RETURN / CALLOTHER가 없는 행 -- 엔진의 호출 관문과 같음; INT3 모양 행은 아무것도
-  설명하지 않으니 요구하지 않음)의 기록된 fallthrough가 ISA 복귀 PC(`주소 + getParsedLength()`, 같은 주소 공간)가 아님
-  (지워지거나 옮겨진 fallthrough는 진입으로 돌아오는 간선을 숨길 수 있다) 또는 그 행의 목록 길이가 ISA 길이와 다름 /
+  CALL 명령 -- Ghidra는 `call $+5`를 push와 BRANCH로 옮기지만 복귀 PC는 쌓인다)의 flow override / 어떤 행이든 목록 길이가
+  ISA 길이와 다름 / 명령 자신의 흐름(prototype, override 무시)이 fallthrough를 갖는 행의 기록된 fallthrough가 ISA 다음 PC
+  (`주소 + getParsedLength()`, 같은 주소 공간)가 아님(지워지거나 옮겨진 fallthrough는 진입으로 돌아오는 간선이나 행 중간의
+  다음 PC를 숨길 수 있다; Astra r5 / r8 -- JMP / RET / INT3처럼 ISA가 끝내는 행은 해당 없음) /
   BRANCHIND 행(계산 분기의 흐름 참조는 목적지 전부라는 보장이 없다 -- 참조가 없거나 일부만 복원된 점프 테이블이면 행 시작이
   아닌 곳에 닿아 검사 안 된 호출을 돌릴 수 있다; Astra r6 / r7) /
   호출 행에서 진입으로 가는 호출 아닌 흐름 참조
@@ -7045,23 +7045,27 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
   보통 규칙(직접 CALL의 피연산자 / 증명된 CALLIND 선택자 / 미증명 CALLIND의 목록)으로 설명된다. `call_explained_targets`
   하나를 후속 함수와 분할 행 배치 검사가 같이 쓴다: 분할 행에서 호출이 설명한 진입은 배치할 분기 목적지가 아니다(진입이
   fallthrough여도). `_landing_pads`: 패드 집합이 증명된 행에서 진입은 그 집합에 있을 때만 패드(이 단계에서는 없음).
-- 실측(X1, `dfbench_win_core.exe`를 새 exporter로 다시 내보냄, main 엔진 대 새 엔진 같은 Bundle): 134개 함수 모두 사실을
-  받음(처리기 있는 `.pdata` 항목 2개는 내보낸 함수 밖); 재귀 함수 4개의 직접 CALL 행 5개에서 진입 간선이 빠짐; 위상이
+- 실측(X1, `dfbench_win_core.exe`를 새 exporter로 다시 내보냄, main 엔진 대 새 엔진 같은 Bundle): 134개 함수 중 132개가 사실을
+  받음(처리기 있는 `.pdata` 항목 2개는 내보낸 함수 밖; 빠진 2개는 BRANCHIND 행이 있는 함수 -- switch 하나, 참조 하나); 재귀 함수 4개의 직접 CALL 행 5개에서 진입 간선이 빠짐; 위상이
   바뀐 함수 4개, 거절 전환 0; oracle `through_calls` 1692 -> 1716(전방 켬 1704 -> 1728, G3b-7 이전 값), `checked` 그대로,
   missing / unexplained 0. X1의 제거 간선은 모두 직접 CALL 행이다 -- 증명된 / 미증명 CALLIND의 진입은 단위 고정으로만
   확인. X2(C++ ELF -O0 / -O2, 실제 LSDA 패드): 필드 없음, 그래프 main과 같음. 실제 Java 경로 검증
-  (`cob/g3b7b_variants.py`): 바이트를 고친 사본 / 준비된 프로젝트 편집 39개 변형(대조 2와 양성 대조; 처리기 주
+  (`cob/g3b7b_variants.py`): 바이트를 고친 사본 / 준비된 프로젝트 편집 41개 변형(대조 2와 양성 대조; 처리기 주
   항목, 두 번째 항목, 복귀 PC 뒤 몸체 구간만, 복귀 PC 항목, 목록 길이 재정의, 홀수 코드 체인 끝 처리기, 처리기 없는 체인,
   간접 항목 두 가지, 버전 3, 정의 안 된 플래그, CHAININFO+처리기, 정렬 안 된 표, 순환, 잘린 레코드, Machine, CHPE, 작은 /
   큰 / 디렉터리보다 큰 로드 설정, 빈 예외 디렉터리, 빈 체인 항목, BRANCH / CALL / CALL_RETURN override, 지운 / 옮긴 fallthrough,
-  목록 길이만 바꾼 호출, `call $+5`, INT3로 끝나는 함수(양성), 풀리지 않은 `jmp rax`, 복원된 점프 테이블(B0의 switch 함수), 정의 안 된 몸체 바이트, 행 중간으로 가는
+  목록 길이만 바꾼 호출, 호출 아닌 행의 목록 길이 / 옮긴 fallthrough, `call $+5`, INT3로 끝나는 함수(양성), 풀리지 않은 `jmp rax`, 복원된 점프 테이블(B0의 switch 함수), 정의 안 된 몸체 바이트, 행 중간으로 가는
   분기, 이미지 밖 함수,
   점프 참조)이 모두 기대와 같고, 독립 판독기(바이트에서 (a)-(c), 변형의 편집에서 (d)-(f))와 함수마다 일치. 엔진 돌연변이
-  17/17(`cob/g3b7b_mutants.py`), exporter 돌연변이 24/24(`cob/g3b7b_java_mutants.py`; 각 검사를 따로 떼는 변형에 대해
+  19/19(`cob/g3b7b_mutants.py`), exporter 돌연변이 27/27(`cob/g3b7b_java_mutants.py`; 각 검사를 따로 떼는 변형에 대해
   돌림, 내보내기가 끝나고 판정이 바뀐 경우만 검출로 셈).
 - 알려진 한계(이름 붙임): 벡터 처리기 / 처리되지 않은 예외 필터 / 동적 함수 테이블은 실행 상태라 모델 밖(기존과 같음) --
   "none"은 "이미지의 예외 디렉터리에 이 함수 프레임 PC의 정적 처리기가 없다"는 뜻. x86 PE(동적 SEH 등록), ELF, ARM,
-  ARM64 PE, 예외 디렉터리가 없는 이미지, 간접 항목은 사실 없음(R7-8 그대로). overlay 주소 공간은 코드 검토로만(변형 없음).
+  ARM64 PE, 예외 디렉터리가 없는 이미지, 간접 항목은 사실 없음(R7-8 그대로). 프레임 PC는 호출의 ISA 복귀 PC라고 본다:
+  피호출자가 저장된 복귀 주소를 바꾼 뒤 예외를 내면 unwinder는 바뀐 PC로 처리기를 찾는다(Astra r8). 이것은 보통 복귀의
+  fallthrough 간선과 같은 전제(복귀 슬롯 보존)이고 그래프 층이 아니라 데이터 흐름 층(불투명 호출의 이어짐은 모름, RP --
+  RETURN 목적지 증명)이 다룬다; 사실이 없어도 바뀐 PC의 처리기가 보내는 곳은 그래프에 없다(진입과 우연히 같을 때만 R7-8이
+  남기던 간선). RETURN도 목적지를 모르는 이동(`push X; ret`)이지만 엔진은 어디서나 함수 출구로 본다(Fable r8, 같은 전제). overlay 주소 공간은 코드 검토로만(변형 없음).
   엄격한 조건(몸체 = 행, ISA fallthrough, 로드 설정 크기)이 큰 실제 PE에서 사실을 얼마나 빼는지는 아직 재지 않았다(정밀도만,
   건전성은 그대로 -- 후속 측정). 실제 export에서는 (e) 때문에
   `CBRANCH entry` + `CALL entry` 행에 사실이 붙지 않는다(엔진 처리는 손으로 만든 고정으로만). 게이트 Bundle은 다시 내보내지
