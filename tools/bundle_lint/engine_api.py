@@ -87,6 +87,7 @@ SURFACE = {
     "no_effect_calls": ("tdo_v2.pcodeop_models", "no_effect_calls", "fact"),
     "trap_operations": ("tdo_v2.pcodeop_models", "trap_operations", "fact"),
     "rep_sites": ("tdo_v2.rep_strings", "rep_sites", "fact"),
+    "is_native_call": ("tdo_v2._scope_contracts", "is_native_call", "fact"),
     # -- context (the summary's execution context: interprocedural.py:282-288)
     "IMPORT_SLOTS": ("tdo_v2.relative_memory", "IMPORT_SLOTS", "context"),
     "ImportSlots": ("tdo_v2.relative_memory", "ImportSlots", "context"),
