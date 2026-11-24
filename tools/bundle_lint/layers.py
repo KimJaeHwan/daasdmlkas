@@ -44,13 +44,18 @@ def transport_rows(diagnosis) -> list[Row]:
     else:
         rows.append(Row("transport", "image_info", "bundle", "evaluated", "applied", "engine"))
         for block in diagnosis.image_info_value.blocks:
-            # ReadOnlyImage.value gives nothing for a writable / volatile / unreadable /
-            # uninitialized block (image_info.py:154): read-only folding is off there
+            # ReadOnlyImage.value's block condition (image_info.py:154, pinned by a
+            # guard test); import slots inside a folding block are excluded per
+            # address by value() itself -- readonly_use rows show actual uses
             folds = block.initialized and block.read and not block.write and not block.volatile
             rows.append(Row("transport", "readonly_block", f"{block.space_id}:{block.start:x}", "evaluated",
                             "applied" if folds else "not_applicable", "lint",
                             {"name": block.name, "size": block.size, "read": block.read, "write": block.write,
-                             "volatile": block.volatile, "initialized": block.initialized}))
+                             "volatile": block.volatile, "initialized": block.initialized,
+                             "import_slots": sum(1 for row in diagnosis.image_info_value.imports
+                                                 for space, offset in row.slots
+                                                 if space == block.space_id
+                                                 and block.start <= offset < block.start + block.size)}))
     for claim in diagnosis.claims:
         key = _function_key(claim)
         detail = {"index": claim.index, "observation_member": claim.observation_member,
@@ -61,6 +66,14 @@ def transport_rows(diagnosis) -> list[Row]:
         else:
             rows.append(Row("transport", "function_scope", key, "evaluated", "refused", "engine",
                             {**detail, "reason": claim.scope_reason}))
+        if claim.scope == "constructed":
+            if claim.seeds == "ok":
+                rows.append(Row("transport", "seeds", key, "evaluated", "applied", "engine"))
+            else:
+                rows.append(Row("transport", "seeds", key, "evaluated", "refused", "engine",
+                                {"error": claim.seeds_error}))
+        else:
+            rows.append(Row("transport", "seeds", key, "not_reached"))
         if claim.naming == "ok":
             rows.append(Row("transport", "naming", key, "evaluated", "applied", "engine"))
         elif claim.naming == "error":
@@ -80,6 +93,9 @@ def rows(diagnosis, generation: Path, options: dict) -> list[Row]:
 
     out = transport_rows(diagnosis)
     if diagnosis.admission.get("ok"):
+        # design checks G0 leaves out (README "Not in G0"): visible, never silently absent
+        out.append(Row("operations", "excluded", "ignored_keys_and_proof_fields", "not_run", None, "lint",
+                       {"why": "needs the engine to expose the observation key sets it reads (design r0 s5-6, r1 s4)"}))
         out.extend(ops_layer.rows(diagnosis, generation, options))
         out.extend(feature_layer.rows(diagnosis, generation, options))
     return out

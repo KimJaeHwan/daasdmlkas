@@ -39,6 +39,8 @@ class FunctionClaim:
     scope: str = "unknown"                 # constructed | unresolved | not_claimed
     scope_reason: str | None = None
     entry: str | None = None
+    seeds: str = "not_run"                # ok | error | not_run (call / tail seeds, before naming)
+    seeds_error: dict | None = None
     naming: str = "not_run"               # ok | error | not_run
     naming_error: dict | None = None
     unit: object = None                   # (in-process only)
@@ -47,7 +49,7 @@ class FunctionClaim:
     def as_json(self) -> dict:
         out = {name: getattr(self, name) for name in (
             "index", "function_id", "observation_member", "observation_sha256", "scope", "scope_reason",
-            "entry", "naming", "naming_error")}
+            "entry", "seeds", "seeds_error", "naming", "naming_error")}
         return {key: value for key, value in out.items() if value is not None}
 
 
@@ -79,6 +81,8 @@ def diagnose(generation, naming_source, *, keep=None) -> Diagnosis:
 
 def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
     from tdo_v2._scope_results import ConstructedFunctionScope, ConstructedProgramScope
+    from tdo_v2.call_contracts import FunctionCallSeedUnit
+    from tdo_v2.call_seeds import seed_function_calls, seed_tail_calls
     from tdo_v2.configured_naming_contracts import CALL_NAMING_GHIDRA_VERSION, NamingBindingExpectation
     from tdo_v2.image_info import load_image_info
     from tdo_v2.integration.configured_bundle import admit_frozen_bundle
@@ -106,6 +110,12 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
             result.image_info = {"ok": True, "present": result.image_info_value is not None}
         except Exception as error:
             result.image_info = {"ok": False, "error": _error(error)}
+        if type(program) is not ConstructedProgramScope:
+            # (the envelope captures no function roles then; every path stops at
+            # the program -- Astra impl r1 P2)
+            if keep is not None:
+                keep(result)
+            return result
         adapter = session._provider_adapter
         scoped = session._envelope.iter_scoped_functions()
         session._iterator_claimed = True   # (the session's own iterator is not used after this)
@@ -134,12 +144,24 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
             if type(function) is ConstructedFunctionScope:
                 claim.scope = "constructed"
                 claim.entry = f"{function.entry.space_id:x}:{function.entry.byte_offset:x}"   # (function_key)
+                # the steps of _decode_function, the seeds first: a seed failure is
+                # not a naming failure (Fable / Astra impl r1 P2)
                 try:
-                    claim.evidence = session._decode_function(unit, captured)
-                    claim.naming = "ok"
+                    seeds = seed_function_calls(unit)
+                    if type(seeds) is not FunctionCallSeedUnit:
+                        raise ValueError("observed function call seeds could not be constructed")
+                    seed_tail_calls(unit)
+                    claim.seeds = "ok"
                 except Exception as error:
-                    claim.naming = "error"
-                    claim.naming_error = _error(error)
+                    claim.seeds = "error"
+                    claim.seeds_error = _error(error)
+                if claim.seeds == "ok":
+                    try:
+                        claim.evidence = session._decode_function(unit, captured)
+                        claim.naming = "ok"
+                    except Exception as error:
+                        claim.naming = "error"
+                        claim.naming_error = _error(error)
             else:
                 claim.scope = "unresolved"
                 claim.scope_reason = function.reason.value
@@ -167,6 +189,9 @@ def predict(diagnosis: Diagnosis) -> dict:
     return out
 
 
+DUPLICATE_MESSAGE = "duplicate base graph function key"
+
+
 def _predict(diagnosis: Diagnosis, path: str):
     if not diagnosis.admission.get("ok"):
         return {"stage": "admission", **diagnosis.admission["error"]}
@@ -178,12 +203,27 @@ def _predict(diagnosis: Diagnosis, path: str):
         if claim.scope == "unresolved" and path == "summary":
             return {"stage": "function", "index": claim.index, "function_id": claim.function_id,
                     "class": "builtins.ValueError", "message": STRICT_SCOPE_MESSAGE}
+        if claim.seeds == "error":
+            return {"stage": "function", "index": claim.index, "function_id": claim.function_id,
+                    **claim.seeds_error}
         if claim.naming == "error":
             return {"stage": "function", "index": claim.index, "function_id": claim.function_id,
                     **claim.naming_error}
     if diagnosis.fatal is not None:
         return {"stage": "transport", "index": diagnosis.fatal["index"], **diagnosis.fatal["error"]}
+    if path == "base_graph":
+        # BaseGraphPublication refuses two admitted members with one entry
+        # (base_graph.py:175); the summary keeps the last one silently
+        entries = [claim.entry for claim in diagnosis.claims if claim.evidence is not None]
+        if len(set(entries)) != len(entries):
+            return {"stage": "publication", "class": "builtins.ValueError", "message": DUPLICATE_MESSAGE}
     return None
+
+
+def pre_analysis(prediction) -> bool:
+    """Whether a predicted stop comes before any function is analysed."""
+    return prediction is not None and prediction["stage"] in (
+        "admission", "program", "image_info", "function", "transport", "publication")
 
 
 def check_stop(prediction, child: dict) -> tuple[str, str | None, dict]:

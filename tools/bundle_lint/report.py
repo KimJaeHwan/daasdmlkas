@@ -116,10 +116,12 @@ def compare(expect: dict, actual: dict) -> list[str]:
         for name in ("run_state", "verdict", "source"):
             if raw.get(name) != other.get(name) and (name != "source" or "source" in raw):
                 diffs.append(f"{row.ident()!r}: {name} {raw.get(name)!r} != {other.get(name)!r}")
+        actual_detail = other.get("detail", {})
         for name, value in raw.get("detail", {}).items():
-            if other.get("detail", {}).get(name) != value:
-                diffs.append(f"{row.ident()!r}: detail.{name} {value!r} != "
-                             f"{other.get('detail', {}).get(name)!r}")
+            if name not in actual_detail:     # (a missing key is not a null: Astra impl r1 P3)
+                diffs.append(f"{row.ident()!r}: detail.{name} {value!r} missing")
+            elif actual_detail[name] != value:
+                diffs.append(f"{row.ident()!r}: detail.{name} {value!r} != {actual_detail[name]!r}")
     if expect.get("exhaustive"):
         for ident in sorted(set(got) - wanted):
             diffs.append(f"unexpected row {ident!r}")

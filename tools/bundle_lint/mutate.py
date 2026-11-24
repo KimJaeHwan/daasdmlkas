@@ -49,13 +49,20 @@ class VariantError(ValueError):
 # -- copy / reseal ------------------------------------------------------------------------
 
 def copy_bundle(source: Path, out_root: Path) -> Path:
+    """Copy an admissible Bundle: the source is admitted first (the engine's own
+    checks: flat safe member names, hashes, no unlisted entries), then only the
+    listed members and the two control files are copied (Astra impl r1 P1)."""
+    from tdo_v2.integration.configured_bundle import _safe_name, admit_frozen_bundle
+
+    admit_frozen_bundle(source)
+    manifest = _json(source / "manifest.json")
+    names = [_safe_name(row["path"]) for row in manifest["members"]] + ["manifest.json", "seal.json"]
     target = out_root / source.name
     target.mkdir(mode=0o755)
     os.chmod(target, 0o755)
-    for path in sorted(source.iterdir()):
-        data = path.read_bytes()
-        (target / path.name).write_bytes(data)
-        os.chmod(target / path.name, 0o644)
+    for name in names:
+        (target / name).write_bytes((source / name).read_bytes())
+        os.chmod(target / name, 0o644)
     return target
 
 
@@ -64,9 +71,12 @@ def _json(path: Path):
 
 
 def _write_member(generation: Path, manifest: dict, member_id: str, data: bytes) -> None:
+    from tdo_v2.integration.configured_bundle import _safe_name
+
     row = next(row for row in manifest["members"] if row["id"] == member_id)
-    (generation / row["path"]).write_bytes(data)
-    os.chmod(generation / row["path"], 0o644)
+    name = _safe_name(row["path"])
+    (generation / name).write_bytes(data)
+    os.chmod(generation / name, 0o644)
     row["size"] = len(data)
     row["sha256"] = hashlib.sha256(data).hexdigest()
 
@@ -88,7 +98,9 @@ def _function_row(manifest: dict, function_id: str) -> dict:
 
 
 def _member_path(generation: Path, manifest: dict, member_id: str) -> Path:
-    return generation / next(row["path"] for row in manifest["members"] if row["id"] == member_id)
+    from tdo_v2.integration.configured_bundle import _safe_name
+
+    return generation / _safe_name(next(row["path"] for row in manifest["members"] if row["id"] == member_id))
 
 
 # -- naming re-derivation (the engine's own encoders) ------------------------------------
@@ -169,6 +181,14 @@ def _renumber(row: dict) -> None:
         op["ordinal"] = index
 
 
+def unique_space(program: dict) -> int:
+    """The program's unique space id (never a fixture constant: Fable / Astra impl r1)."""
+    spaces = [row["space_id"] for row in program.get("address_spaces", []) if row.get("is_unique_space")]
+    if len(spaces) != 1:
+        raise VariantError("the program has no single unique space")
+    return spaces[0]
+
+
 def _unused_unique(observation: dict, size=8) -> int:
     used = []
     for row in observation["instructions"]:
@@ -182,7 +202,7 @@ def _unused_unique(observation: dict, size=8) -> int:
     return candidate
 
 
-def edit_observation(observation: dict, variant: str, site: str | None, index: int) -> dict:
+def edit_observation(observation: dict, variant: str, site: str | None, index: int, unique=None) -> dict:
     """In-place edit; returns ``{"moved": (old ordinal, new ordinal) | None}``."""
     if variant in ("exit-kind4",):
         exits = observation.get("fallthrough_exits", [])
@@ -197,12 +217,24 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
         raise VariantError(f"{variant} needs --site")
     row = _instruction(observation, site)
     if variant == "drop-pad":
+        # a direct CALL at the named ordinal, and a pad another instruction also
+        # reaches (so only the exception path is lost: r6 s3; Astra impl r1 P2)
+        parts = site.split(":")
+        ordinal = int(parts[2]) if len(parts) >= 4 else -1
+        ops = row["operations"]
+        if not (0 <= ordinal < len(ops)) or ops[ordinal]["opcode"] != "CALL" or parts[3] != "CALL" \
+                or not ops[ordinal]["inputs"] or ops[ordinal]["inputs"][0]["kind_code"] != 4:
+            raise VariantError("drop-pad needs a direct CALL at the named ordinal")
         fallthrough = row["fallthrough"]
         local = {(item["address"]["space_id"], item["address"]["byte_offset"]) for item in observation["instructions"]}
+        others = [item for item in observation["instructions"] if item is not row]
+        reached = {(t["space_id"], t["byte_offset"]) for item in others
+                   for t in [*item["flow_targets"], *([item["fallthrough"]] if item["fallthrough"] else [])]}
         pads = [target for target in row["flow_targets"]
-                if (target["space_id"], target["byte_offset"]) in local and target != fallthrough]
+                if (target["space_id"], target["byte_offset"]) in local and target != fallthrough
+                and (target["space_id"], target["byte_offset"]) in reached]
         if not pads:
-            raise VariantError("the call row lists no local landing pad")
+            raise VariantError("the call row lists no local landing pad reached by another instruction")
         row["flow_targets"].remove(pads[0])
         return {"moved": None, "dropped": pads[0]}
     adjust, store, call = _push_call(row)
@@ -213,7 +245,7 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
         adjust["inputs"][1] = {**adjust["inputs"][1], "byte_offset": WRAP_MINUS_8, "byte_size": 8}
         return {"moved": None}
     if variant == "call-reshape":
-        temp = {"kind_code": 3, "space_id": _sealed.UNIQUE, "byte_offset": _unused_unique(observation),
+        temp = {"kind_code": 3, "space_id": unique, "byte_offset": _unused_unique(observation),
                 "byte_size": adjust["output"]["byte_size"]}
         rsp = adjust["output"]
         new_adjust = {**adjust, "output": temp}
@@ -231,10 +263,8 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
 
 # -- source-row check (r3 s4) ---------------------------------------------------------------
 
-def precheck(source: Path, function_id: str, site: str) -> dict:
-    """The source row must be a recognised push call before a call-* variant:
-    call-state projection, ``_plain_push_call`` and the push relation all hold
-    (recognition only -- not the callee state-preservation proof)."""
+def _survey(generation: Path) -> dict:
+    """{function id: (scope, seeds, naming, observation sha256, {(check, row key): verdict})}."""
     import diagnose
     import ops_layer
 
@@ -243,18 +273,43 @@ def precheck(source: Path, function_id: str, site: str) -> dict:
     def keep(diagnosis):
         keys = {claim.entry for claim in diagnosis.claims if claim.entry}
         for claim in diagnosis.claims:
-            if claim.function_id == function_id and claim.evidence is not None:
-                for row in ops_layer.call_rows(claim, keys):
-                    found[row.key] = row.detail
+            rows = {}
+            if claim.evidence is not None:
+                rows = {(row.check, row.key): row.verdict for row in ops_layer.call_rows(claim, keys)}
+            found[claim.function_id] = (claim.scope, claim.seeds, claim.naming, claim.observation_sha256, rows)
 
-    diagnose.diagnose(source, _sealed.NAMING_SOURCE, keep=keep)
-    detail = found.get(f"{function_id}/{site}")
-    if detail is None:
-        raise VariantError(f"no call row {function_id}/{site}")
-    if not (detail["push_projection"] and detail["plain_push"] and detail["relation"] == "push"
-            and detail["opcode"] == "CALL"):
-        raise VariantError(f"source row is not a recognised direct push call: {detail}")
-    return detail
+    diagnose.diagnose(generation, _sealed.NAMING_SOURCE, keep=keep)
+    return found
+
+
+def precheck(source: Path, function_id: str, site: str) -> dict:
+    """The source row must be a recognised push call before a call-* variant:
+    call-state projection, ``_plain_push_call`` and the push relation all hold
+    (recognition only -- not the callee state-preservation proof)."""
+    survey = _survey(source)
+    rows = survey.get(function_id, (None, None, None, None, {}))[4]
+    key = f"{function_id}/{site}"
+    wanted = {check: rows.get((check, key)) for check in ("push_projection", "plain_push", "push_relation")}
+    if any(verdict != "applied" for verdict in wanted.values()):
+        raise VariantError(f"source row is not a recognised direct push call: {wanted}")
+    return survey
+
+
+def postcheck(survey: dict, generation: Path, variant: str, function_id: str) -> None:
+    """One condition changed: every other function is unchanged; the target is
+    still admitted with its names (call-ordinal: only its names refused)."""
+    after = _survey(generation)
+    if set(after) != set(survey):
+        raise VariantError("the variant changed the function set")
+    for key, before in survey.items():
+        if key == function_id:
+            continue
+        if after[key][:4] != before[:4]:
+            raise VariantError(f"the variant changed another function: {key}")
+    target = after[function_id]
+    expected = ("constructed", "ok", "error") if variant == "call-ordinal" else ("constructed", "ok", "ok")
+    if target[:3] != expected:
+        raise VariantError(f"the target function is {target[:3]}, expected {expected}")
 
 
 # -- driver ---------------------------------------------------------------------------------
@@ -263,8 +318,11 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
            site: str | None = None, index: int = 0) -> dict:
     if variant not in VARIANTS:
         raise VariantError(f"unknown variant {variant!r}")
+    survey = None
     if variant in ("call-pattern", "call-reshape", "call-swap"):
-        precheck(source, function_id, site)
+        survey = precheck(source, function_id, site)
+    elif variant != "seal":
+        survey = _survey(source)
     generation = copy_bundle(source, out_root)
     result = {"variant": variant, "generation": str(generation), "function": function_id, "site": site}
     if variant == "seal":
@@ -294,10 +352,17 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
         chosen["operation_ordinal"] = new
         _write_member(generation, manifest, function["call_names_member"], _sealed.dumps(rederive_naming(naming)))
         reseal(generation, manifest)
+        postcheck(survey, generation, variant, function_id)
         return result
     observation_path = _member_path(generation, manifest, function["observation_member"])
     observation = _json(observation_path)
-    edit = edit_observation(observation, variant, site, index)
+    program = _json(_member_path(generation, manifest, manifest["program_member_id"]))
+    effects = _json(_member_path(generation, manifest, function["call_effects_member"]))
+    if variant == "call-reshape" and isinstance(effects.get("transport"), dict):
+        # its rows' digests cannot be re-derived without a call-effects decoder
+        # (none exists in the engine): never write an inconsistent sidecar (Astra impl r1 P1)
+        raise VariantError("call-reshape on a Bundle with a real call-effects sidecar is not supported")
+    edit = edit_observation(observation, variant, site, index, unique_space(program))
     result.update({key: value for key, value in edit.items() if key != "moved"})
     data = _sealed.dumps(observation)
     _write_member(generation, manifest, function["observation_member"], data)
@@ -312,21 +377,15 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
                 row["operation_ordinal"] = moved[1]
         rederive_naming(naming)
     _write_member(generation, manifest, function["call_names_member"], _sealed.dumps(naming))
-    effects = _json(_member_path(generation, manifest, function["call_effects_member"]))
     if isinstance(effects.get("transport"), dict):
+        # (the transport is not in the content digest; no effect row moves here)
         effects["transport"]["observation_member_sha256"] = observation_sha
-        if moved is not None:
-            for row in effects.get("calls", []):
-                if (row["instruction"]["space_id"], row["instruction"]["byte_offset"]) == address \
-                        and row["operation_ordinal"] == moved[0]:
-                    row["operation_ordinal"] = moved[1]
-            result["call_effects"] = "transport updated; moved rows' digests not re-derived (engine does not read it)"
-        else:
-            result["call_effects"] = "transport updated"
+        result["call_effects"] = "transport updated"
         _write_member(generation, manifest, function["call_effects_member"], _sealed.dumps(effects))
     else:
         result["call_effects"] = "placeholder (not a call-effect sidecar)"
     reseal(generation, manifest)
+    postcheck(survey, generation, variant, function_id)
     return result
 
 

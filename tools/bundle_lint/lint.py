@@ -31,6 +31,44 @@ from report import Row, compare, dumps  # noqa: E402
 TOOL_REVISION = 1
 
 
+def _admitted(claims) -> tuple[int, set]:
+    members = [claim for claim in claims if claim.get("scope") == "constructed" and claim.get("naming") == "ok"]
+    return len(members), {claim["entry"] for claim in members}
+
+
+def _completion(path: str, child: dict, claims) -> tuple[str, dict]:
+    """(verdict, detail) of a completed path: ``applied`` only when nothing was
+    lost -- no failed function, no admission refusal, every admitted member
+    analysed once (duplicate entries collapse in the summary). Fable / Astra
+    impl r1 P1."""
+    members, keys = _admitted(claims)
+    why = []
+    if path == "base_graph":
+        detail = {name: child[name] for name in ("stop", "pending", "failures", "entry_links_finished",
+                                                 "local_pass_finished", "graphs", "admission_failures")}
+        if child["stop"] != "finished" or child["pending"] or not child["entry_links_finished"]:
+            why.append("not finished")
+        if child["failures"]:
+            why.append("failed functions")
+        if set(child["graphs"]) != keys:
+            why.append("graphs differ from the admitted function keys")
+    else:
+        detail = {"admitted_members": members, "admitted_keys": len(keys), "succeeded": len(child["succeeded"]),
+                  "failed": child["failed_functions"], "supports_count": child["supports_count"]}
+        if child["failed_functions"]:
+            why.append("failed functions")
+        if set(child["succeeded"]) != keys - {row[0] for row in child["failed_functions"]}:
+            why.append("analysed keys differ from the admitted function keys")
+    detail["admission_failures"] = child["admission_failures"]
+    if child["admission_failures"]:
+        why.append("admission refusals")
+    if members != len(keys):
+        why.append("duplicate entries")
+    if why:
+        detail["why"] = why
+    return ("withheld" if why else "applied"), detail
+
+
 def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row]:
     rows = []
     claims = diagnosis.get("claims", [])
@@ -40,33 +78,34 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
             rows.append(Row("pipeline", "stop", path, "not_run"))
             rows.append(Row("pipeline", "completion", path, "not_run"))
             continue
-        state, verdict, detail = diagnose.check_stop(predictions.get(path), child)
+        prediction = predictions.get(path)
+        state, verdict, detail = diagnose.check_stop(prediction, child)
         rows.append(Row("pipeline", "stop", path, state, verdict, "lint", detail))
         if child.get("run_state") != "evaluated":
             rows.append(Row("pipeline", "completion", path, child.get("run_state", "error"), None, "lint",
                             {"child": child}))
             continue
         if not child.get("completed"):
-            rows.append(Row("pipeline", "completion", path, "evaluated", "refused", "engine",
-                            {"exception": child.get("exception"), "analysed": 0}))
+            # 0 analysed only when the stop is known to come before analysis; a
+            # later exception keeps what the child recovered (base_graph snapshot)
+            known = verdict == "applied" and diagnose.pre_analysis(prediction)
+            stopped = {"exception": child.get("exception"), "analysed": 0 if known else None}
+            for name in ("stop", "pending", "failures", "graphs", "entry_links_finished", "admission_failures"):
+                if name in child:
+                    stopped[name] = child[name]
+            rows.append(Row("pipeline", "completion", path, "evaluated", "refused", "engine", stopped))
             continue
-        if path == "base_graph":
-            detail = {name: child[name] for name in ("stop", "pending", "failures", "entry_links_finished",
-                                                     "local_pass_finished", "graphs", "admission_failures")}
-            complete = child["stop"] == "finished" and not child["pending"] and child["entry_links_finished"]
-        else:
-            admitted = sum(1 for claim in claims if claim.get("scope") == "constructed"
-                           and claim.get("naming") == "ok")
-            detail = {"admitted": admitted, "succeeded": len(child["succeeded"]),
-                      "failed": child["failed_functions"], "admission_failures": child["admission_failures"],
-                      "supports_count": child["supports_count"]}
-            if child["supports_count"] != len(child["supported_functions"]):
-                rows.append(Row("pipeline", "completion", path, "error", None, "lint",
-                                {**detail, "why": "supports are not one row per function"}))
-                continue
-            complete = not child["failed_functions"]
-        rows.append(Row("pipeline", "completion", path, "evaluated",
-                        "applied" if complete else "withheld", "engine", detail))
+        if path != "base_graph" and child["supports_count"] != len(child["supported_functions"]):
+            rows.append(Row("pipeline", "completion", path, "error", None, "lint",
+                            {"why": "supports are not one row per function"}))
+            continue
+        verdict, detail = _completion(path, child, claims)
+        rows.append(Row("pipeline", "completion", path, "evaluated", verdict, "lint", detail))
+        if path != "base_graph":
+            # the run's final columns, read from EngineRun (r2 s2): --expect compares them
+            rows.append(Row("pipeline", "run_columns", path, "evaluated", "applied", "engine",
+                            {name: child[name] for name in ("assumptions", "control_exemptions", "fault_report",
+                                                            "control_sites")}))
     return rows
 
 
@@ -84,7 +123,8 @@ def run(generation: Path, naming_source: Path, *, timeout: float, summary: bool,
                                           options=options if path != "base_graph" else None)
     rows = [Row.from_json(row) for row in diag["rows"]]
     rows.extend(pipeline_rows(diag["diagnosis"], diag["predictions"], results))
-    rows.extend(feature_layer.trap_application_rows(rows, results, options))
+    rows.extend(feature_layer.trap_application_rows(rows, {**results, "_predictions": diag["predictions"]},
+                                                    options))
     header = {
         "tool": "bundle_lint", "revision": TOOL_REVISION, "generation": generation.name,
         "naming_source_sha256": sha256(naming_source.read_bytes()).hexdigest(),

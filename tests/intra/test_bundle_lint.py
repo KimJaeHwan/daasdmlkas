@@ -205,14 +205,16 @@ def test_layer2_registers_calls_pads_exits_and_callother(sealed):
     _sealed = sealed[0]
     rows, _, _ = _lint_rows(sealed, _layer2_bundle(_sealed))
     assert rows[("operations", "stack_register", "program")].detail["name"] == "RSP"
-    assert rows[("operations", "link_register", "program")].verdict == "withheld"   # (x86: none)
+    assert rows[("operations", "link_register", "program")].verdict == "not_applicable"   # (x86: none)
     call = rows[("operations", "call", "function-000000/1:1000:2:CALL")]
     assert call.verdict == "applied" and call.detail["aliases"] == ["B"]
-    assert call.detail["push_projection"] and call.detail["plain_push"]
+    for check in ("push_projection", "plain_push", "push_relation"):
+        assert rows[("operations", check, "function-000000/1:1000:2:CALL")].verdict == "applied"
     assert call.detail["landing_pads"] == ["1:100a"]
+    assert rows[("operations", "fixed_register", "RSP@interprocedural._plain_push_call")].verdict == "applied"
     exit_row = rows[("operations", "s1_exit", "function-000001/#0")]
     assert (exit_row.detail["kind"], exit_row.detail["function"], exit_row.detail["reach_edge"]) == (2, "1:1800", True)
-    trap = rows[("operations", "callother", "function-000002/1:1800:0:CALLOTHER")]
+    trap = rows[("operations", "callother_model_match", "function-000002/1:1800:0:CALLOTHER")]
     assert trap.verdict == "applied" and trap.detail["trap_match"] and trap.detail["index"] == 16
 
 
@@ -231,7 +233,8 @@ def test_variant5_kind4_exit_loses_the_reach_edge_and_variant6_drops_a_pad(seale
     exit_row = rows["k4"][("operations", "s1_exit", "function-000001/#0")]
     assert (exit_row.detail["kind"], exit_row.detail["function"], exit_row.detail["reach_edge"]) == (4, None, False)
     call = rows["nopad"][("operations", "call", "function-000000/1:1000:2:CALL")]
-    assert call.detail["landing_pads"] == [] and call.verdict == "applied" and call.detail["plain_push"]
+    assert call.detail["landing_pads"] == [] and call.verdict == "applied"
+    assert rows["nopad"][("operations", "plain_push", "function-000000/1:1000:2:CALL")].verdict == "applied"
 
 
 # -- layer 3: features ----------------------------------------------------------------
@@ -338,7 +341,8 @@ def test_deep_chain_lint_child_matches_the_public_entry(sealed):
     direct = analyze_frozen_bundle_with_summaries(gen, naming_exporter_source=s.NAMING_SOURCE,
                                                   boundary_provider=NullBoundaryProvider())
     assert child["completed"], child
-    assert child["failed_functions"] == [list(row) for row in direct.failed_functions]
+    assert direct.failed_functions == () and child["failed_functions"] == []   # (no analysis_depth on either side)
+    assert child["succeeded"] == ["1:1000"]
 
 
 # -- variants (mutate.py) -------------------------------------------------------------
@@ -387,10 +391,10 @@ def test_variant2_call_ordinal_refuses_the_function_names_and_stops_the_pipeline
 @pytest.mark.parametrize("variant", ["call-pattern", "call-swap"])
 def test_variants3_and_4_lose_both_recognisers_and_the_relation_but_keep_names(sealed, variant):
     rows, base, note = _variant(sealed, variant, function_id="function-000000", site=SITE)
-    before, after = base[CALL_KEY].detail, rows[CALL_KEY].detail
-    assert (before["push_projection"], before["plain_push"], before["relation"]) == (True, True, "push")
-    assert (after["push_projection"], after["plain_push"], after["relation"]) == (False, False, None)
-    assert rows[CALL_KEY].verdict == "applied" and after["aliases"] == ["B"]
+    for check in ("push_projection", "plain_push", "push_relation"):
+        assert base[("operations", check, CALL_KEY[2])].verdict == "applied"
+        assert rows[("operations", check, CALL_KEY[2])].verdict == "unrecognized"   # (r1 s2 / r2 s7)
+    assert rows[CALL_KEY].verdict == "applied" and rows[CALL_KEY].detail["aliases"] == ["B"]
     assert rows[("transport", "naming", "function-000000")].verdict == "applied"
     # independent SP evidence in the same function (its RET): identification unchanged (r5 s2, r6 s6)
     stack = ("features", "stack_pointer", "function-000000")
@@ -403,9 +407,10 @@ def test_variant3b_reshape_moves_the_call_key_and_names_follow(sealed):
     rows, base, note = _variant(sealed, "call-reshape", function_id="function-000000", site=SITE)
     moved = ("operations", "call", "function-000000/1:1007:3:CALL")
     assert CALL_KEY in base and CALL_KEY not in rows and moved in rows
-    detail = rows[moved].detail
-    assert (detail["push_projection"], detail["plain_push"], detail["relation"]) == (False, False, None)
-    assert rows[moved].verdict == "applied" and detail["aliases"] == ["B"]
+    for check in ("push_projection", "plain_push", "push_relation"):
+        assert rows[("operations", check, moved[2])].verdict == "unrecognized"
+        assert ("operations", check, CALL_KEY[2]) not in rows
+    assert rows[moved].verdict == "applied" and rows[moved].detail["aliases"] == ["B"]
 
 
 @posix
@@ -522,11 +527,164 @@ def test_partial_completion_under_a_fixed_run_budget_is_counted_on_both_summary_
     env = dict(os.environ, TDO_V2_RUN_WORK=str(full["work"] // 2))
     results = [children.run_path(path, gen, s.NAMING_SOURCE, timeout=300, env=env)
                for path in ("summary", "summary-retain", "summary")]
+    keys = sorted(f"1:{0x1000 + 0x100 * index:x}" for index in range(6))
+    assert full["supported_functions"] == keys and full["succeeded"] == keys
     for out in results:
         assert out["completed"], out
+        assert out["supported_functions"] == keys   # (independent of supports: the fixture's own keys)
         assert out["supports_count"] == len(out["supported_functions"])
         failed = {key for key, _, _ in out["failed_functions"]}
         assert {reason for _, reason, _ in out["failed_functions"]} == {"analysis_run_budget"}
         assert out["succeeded"] == sorted(set(out["supported_functions"]) - failed)
         assert failed   # (how many fail depends on where the budget runs out; the count identity is the check)
     assert results[0]["failed_functions"] == results[1]["failed_functions"] == results[2]["failed_functions"]
+
+
+
+# -- implementation review r1 fixtures (Fable / Astra) ------------------------------------
+
+@posix
+def test_retain_with_a_scope_refusal_is_withheld_not_applied(sealed):
+    s = sealed[0]
+    a = s.Function("A", s.observation(0x1000, [s.ret(0x1000)]))
+    b = s.Function("B", s.observation(0x9000, [s.ret(0x9000)]))     # (scope refusal)
+    c = s.Function("C", s.observation(0x1800, [s.ret(0x1800)]))
+    rows, _ = _run_lint(sealed, s.Bundle([a, b, c]), "refusal")
+    retain = rows[("pipeline", "completion", "summary-retain")]
+    assert retain.verdict == "withheld" and "admission refusals" in retain.detail["why"]
+    graph = rows[("pipeline", "completion", "base_graph")]
+    assert graph.verdict == "withheld" and "admission refusals" in graph.detail["why"]
+    assert rows[("pipeline", "stop", "summary")].verdict == "applied"
+    # the refused function's own rows, keyed by array index
+    assert rows[("operations", "source_row", "function-000001/#0")].detail["address"] == "1:9000"
+
+
+@posix
+def test_base_graph_function_failure_is_withheld(sealed, monkeypatch):
+    s = sealed[0]
+    monkeypatch.setenv("TDO_V2_FUNCTION_WORK", "1")
+    rows, _ = _run_lint(sealed, s.two_function_bundle(), "budget", summary=False)
+    graph = rows[("pipeline", "completion", "base_graph")]
+    assert graph.detail["failures"] and graph.verdict == "withheld", graph
+    assert "failed functions" in graph.detail["why"]
+
+
+@posix
+def test_duplicate_entries_stop_base_graph_and_withhold_the_summaries(sealed):
+    s = sealed[0]
+    a1 = s.Function("A", s.observation(0x1000, [s.ret(0x1000)]))
+    a2 = s.Function("A2", s.observation(0x1000, [s.plain(0x1000, 3, ("COPY", [s.reg(s.RCX)], s.reg(s.RAX))),
+                                                 s.ret(0x1003)]))
+    rows, _ = _run_lint(sealed, s.Bundle([a1, a2]), "dup")
+    stop = rows[("pipeline", "stop", "base_graph")]
+    assert stop.verdict == "applied" and stop.detail["predicted"]["stage"] == "publication"
+    for path in ("summary", "summary-retain"):
+        completion = rows[("pipeline", "completion", path)]
+        assert completion.verdict == "withheld" and "duplicate entries" in completion.detail["why"], completion
+
+
+@posix
+def test_call_ordinal_variant_digests_are_exact(sealed):
+    """r3 s4: the re-sealed sidecar's row and content digests are the engine's own."""
+    import mutate
+    from tdo_v2.configured_naming_contracts import CapturedNamingRow, CapturedNamingSidecar
+
+    rows, _, note = _variant(sealed, "call-ordinal", function_id="function-000000")
+    generation = Path(note["generation"])
+    manifest = json.loads((generation / "manifest.json").read_bytes())
+    naming = json.loads((generation / "call-names-000000.json").read_bytes())
+    assert naming["calls"][0]["operation_ordinal"] == 3
+    typed = tuple(CapturedNamingRow(*mutate._typed_naming_row(raw), bytes.fromhex(raw["row_digest"]))
+                  for raw in naming["calls"])   # (raises on a wrong row digest)
+    CapturedNamingSidecar(bytes.fromhex(naming["exporter_source_sha256"]), typed,
+                          bytes.fromhex(naming["semantic_content_digest"]))   # (raises on a wrong content digest)
+    member = next(row for row in manifest["members"] if row["id"] == "call-names-000000")
+    import hashlib
+    assert member["sha256"] == hashlib.sha256((generation / "call-names-000000.json").read_bytes()).hexdigest()
+
+
+@posix
+def test_trap_index_with_another_operand_is_not_applicable(sealed):
+    s = sealed[0]
+    f = s.Function("F", s.observation(0x1000, [s.plain(0x1000, 2, ("CALLOTHER", [s.const(16, 4), s.const(0x80, 4)],
+                                                                   None)), s.ret(0x1002)]))
+    rows, _ = _run_lint(sealed, s.Bundle([f]), "int80", summary=False)
+    row = rows[("operations", "callother_model_match", "function-000000/1:1000:0:CALLOTHER")]
+    assert row.verdict == "not_applicable" and not row.detail["trap_match"] and "no_model" not in row.detail
+
+
+@posix
+def test_standalone_home_space_follows_the_summary_rule(sealed):
+    s = sealed[0]
+    pe = s.two_function_bundle()
+    pe.image_info = {"schema": "tdo-v2-image-info-1", "executable_format": "Portable Executable (PE)",
+                     "block_permissions": [{"block_id": "block-000000", "name": ".text", "read": True,
+                                            "write": False, "execute": True, "volatile": False}],
+                     "imports": [], "exports": [], "relocations": []}
+    rows_pe, _ = _run_lint(sealed, pe, "pe", summary=False, options={"lint_normalize": True})
+    rows_raw, _ = _run_lint(sealed, s.two_function_bundle(), "raw", summary=False, options={"lint_normalize": True})
+    assert rows_pe[("features", "standalone_context", "program")].detail["private_frame_above"] == 0x28
+    assert rows_raw[("features", "standalone_context", "program")].detail["private_frame_above"] == 0
+
+
+def test_expect_reports_a_missing_detail_key_even_when_null_is_expected():
+    expected = report.Row("operations", "s1_exit", "f/#0", "evaluated", "not_applicable", "lint", {"function": None})
+    actual = report.Row("operations", "s1_exit", "f/#0", "evaluated", "not_applicable", "lint", {"kind": 4})
+    diffs = report.compare({"rows": [expected.as_json()]}, json.loads(report.dumps({}, [actual])))
+    assert diffs == ["('operations', 's1_exit', 'f/#0'): detail.function None missing"]
+
+
+@posix
+def test_drop_pad_refuses_a_plain_branch_target(sealed):
+    import mutate
+
+    with pytest.raises(mutate.VariantError):
+        _variant(sealed, "drop-pad", bundle=_layer2_bundle(sealed[0]), function_id="function-000000",
+                 site="1:1005:0:BRANCH")
+
+
+@posix
+def test_guard_engine_rules_the_lint_mirrors():
+    import inspect
+
+    from tdo_v2 import control_context, image_info, interprocedural, summary_engine
+
+    assert "0x28 if assume_win64_home_space_private and assume_entry_values_not_frame" in \
+        inspect.getsource(summary_engine._analyze_session)
+    assert "if block is None or not block.initialized or block.write or block.volatile or not block.read:" in \
+        inspect.getsource(image_info.ReadOnlyImage.value)
+    assert "if exit_row.function is not None and function_key(exit_row.function) in keys:" in \
+        inspect.getsource(control_context)
+    assert "(rsp.coordinate.byte_offset, rsp.byte_size) == (0x20, 8)" in inspect.getsource(interprocedural._plain_push_call)
+    assert interprocedural._X64_RIP[0] == 0x288
+
+
+@posix
+def test_observation_parse_failure_is_reported_apart_from_a_scope_refusal(sealed):
+    """r3 s2: an unparsable observation is a transport failure that stops every
+    path (role capture), not a per-function scope refusal; later functions are
+    never claimed."""
+    s = sealed[0]
+    a = s.Function("A", s.observation(0x1000, [s.ret(0x1000)]))
+    b = s.Function("B", s.observation(0x1800, [s.ret(0x1800)]))
+    c = s.Function("C", s.observation(0x9000, [s.ret(0x9000)]))     # (would be a scope refusal)
+    rows, _ = _run_lint(sealed, s.Bundle([a, b, c], overrides={"function-000001": b"{"}), "parse")
+    fatal = rows[("transport", "scoped_iterator", "bundle")]
+    assert fatal.verdict == "refused" and fatal.detail["index"] == 1
+    assert ("transport", "function_scope", "function-000001") not in rows
+    assert ("transport", "function_scope", "function-000002") not in rows
+    for path in ("summary", "summary-retain", "base_graph"):
+        stop = rows[("pipeline", "stop", path)]
+        assert stop.verdict == "applied" and stop.detail["predicted"]["stage"] == "transport"
+
+
+@posix
+def test_a_shared_instruction_gives_one_row_per_function(sealed):
+    s = sealed[0]
+    shared = [s.plain(0x1004, 3, ("COPY", [s.reg(s.RCX)], s.reg(s.RAX))), s.call(0x1007, 0x1800), s.ret(0x100C)]
+    a = s.Function("A", s.observation(0x1000, [s.plain(0x1000, 4, ("COPY", [s.const(1)], s.reg(s.RCX))), *shared]))
+    a2 = s.Function("A2", s.observation(0x1004, shared))
+    b = s.Function("B", s.observation(0x1800, [s.ret(0x1800)]))
+    rows, _ = _run_lint(sealed, s.Bundle([a, a2, b]), "shared", summary=False)
+    assert ("operations", "call", "function-000000/1:1007:2:CALL") in rows
+    assert ("operations", "call", "function-000001/1:1007:2:CALL") in rows

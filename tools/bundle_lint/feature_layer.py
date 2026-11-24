@@ -24,6 +24,7 @@ DEFAULTS = {
     "assume_opaque_callees_leave_no_stack_addresses": True,
     "assume_pre_escape_values_not_frame": True,
     "assume_opaque_callees_restore_stack_pointer": True,
+    "assume_win64_home_space_private": True,
 }
 
 
@@ -36,19 +37,28 @@ def stack_rows(claim) -> list[Row]:
     if found is None:
         return [Row("features", "stack_pointer", claim.function_id, "evaluated", "withheld", "engine")]
     _, bias, register_space, offset, size = found
+    from tdo_v2._scope_contracts import VarnodeKindCode
+
+    spaces = sorted({operation.inputs[0].coordinate.byte_offset for instruction in claim.unit.observation.instructions
+                     for operation in instruction.operations
+                     if operation.opcode in ("LOAD", "STORE") and operation.inputs
+                     and operation.inputs[0].kind is VarnodeKindCode.CONSTANT})
+    # (the object id is never compared: it changes with the observation digest, r6 s6)
     return [Row("features", "stack_pointer", claim.function_id, "evaluated", "applied", "engine",
                 {"register_space": register_space, "register_offset": offset, "register_size": size,
-                 "address_bits": bias.bit_length() - 1})]
+                 "address_bits": bias.bit_length() - 1, "memory_spaces": spaces})]
 
 
 class StandaloneContext:
     """The context variables the summary sets around its run
     (interprocedural.py:282-288), set / reset here for standalone runs."""
 
-    def __init__(self, options: dict, image_info, units=()) -> None:
+    def __init__(self, options: dict, image_info, units=(), evidences=()) -> None:
         self.options = {name: options.get(name, value) for name, value in DEFAULTS.items()}
         self.image_info = image_info
-        self.units = tuple(units)
+        self.units = tuple(units)        # one per entry, the last member (summary_engine.py:412)
+        self.evidences = tuple(evidences)
+        self.home_space = 0
         self.switches_stack = False
         self._tokens = []
 
@@ -71,6 +81,11 @@ class StandaloneContext:
         slots = ImportSlots(self.image_info) if o["assume_import_slots_hold_exports"] and self.image_info else None
         if slots is not None:
             slots.active = o["assume_globals_disjoint_from_stack"]
+        # win64-home-space-callee-private: summary_engine.py:503 (Astra impl r1 P2)
+        from tdo_v2.summary_engine import _x86_64
+
+        info = self.image_info
+        self.home_space = 0x28 if o["assume_win64_home_space_private"] and o["assume_entry_values_not_frame"]             and info is not None and info.executable_format.startswith("Portable Executable")             and _x86_64(self.evidences) else 0
         self._tokens = [
             (IMPORT_SLOTS, IMPORT_SLOTS.set(slots)),
             (ENTRY_VALUES_NOT_FRAME, ENTRY_VALUES_NOT_FRAME.set(bool(o["assume_entry_values_not_frame"]))),
@@ -97,7 +112,8 @@ class StandaloneContext:
         slots = IMPORT_SLOTS.get()
         return {**self.options, "import_slots_context": slots is not None,
                 "import_slots_active": slots is not None and slots.active,
-                "stack_switch_withdrew_globals": self.switches_stack}
+                "stack_switch_withdrew_globals": self.switches_stack, "private_frame_above": self.home_space,
+                "stack_evidence": "none (the summary's stack_evidence default)"}
 
 
 def readonly_image(generation, image_info, options):
@@ -118,7 +134,8 @@ def normalize_rows(claim, image, context) -> list[Row]:
     try:
         result = FunctionNormalizer().normalize(
             claim.unit, assume_globals_disjoint_from_stack=o["assume_globals_disjoint_from_stack"],
-            readonly_image=image, assume_direction_flag_clear=o["assume_direction_flag_clear"])
+            readonly_image=image, assume_direction_flag_clear=o["assume_direction_flag_clear"],
+            private_frame_above=context.home_space)
     except ANALYSIS_FAILURES as error:
         return [Row("features", "standalone_normalize", key, "evaluated", "refused", "engine",
                     {"reason": _failure_reason(error).value, "detail": str(error)})]
@@ -148,19 +165,27 @@ def normalize_rows(claim, image, context) -> list[Row]:
 
 
 def trap_application_rows(op_rows, results: dict, options: dict) -> list[Row]:
-    """Per trap site (a layer-2 ``callother`` row with ``trap_match``): whether the
-    summary run applied the cut is not public (r5 s1) -> ``unobserved``; option
-    off or summary not run -> ``not_run``; summary stopped -> ``not_reached``."""
-    on = options.get("assume_debug_break_traps_do_not_return", True) and options.get("pcodeop_models") is not None
+    """Per trap site (a ``callother_model_match`` row with ``trap_match``):
+    whether the summary run applied the cut is not public (r5 s1) ->
+    ``unobserved``; option off, no or empty model list (the engine skips the
+    trap step) or summary not run -> ``not_run``; the summary child timed out /
+    failed -> ``timeout`` / ``error``; stopped by an exception -> ``not_reached``
+    only when the stop comes before analysis, else ``unobserved``."""
+    import diagnose
+
+    models = options.get("pcodeop_models")
+    on = options.get("assume_debug_break_traps_do_not_return", True) and bool(models)
     out = []
     summary = results.get("summary")
     for row in op_rows:
-        if row.check != "callother" or not row.detail.get("trap_match"):
+        if row.check != "callother_model_match" or not row.detail.get("trap_match"):
             continue
         if summary is None or not on:
             state = "not_run"
-        elif summary.get("run_state") != "evaluated" or not summary.get("completed"):
-            state = "not_reached"
+        elif summary.get("run_state") in ("timeout", "error"):
+            state = summary["run_state"]
+        elif not summary.get("completed"):
+            state = "not_reached" if diagnose.pre_analysis(results.get("_predictions", {}).get("summary"))                 else "unobserved"
         else:
             state = "unobserved"
         out.append(Row("features", "trap_application", row.key, state))
@@ -175,10 +200,15 @@ def rows(diagnosis, generation, options) -> list[Row]:
     if options.get("lint_normalize"):
         image_info = diagnosis.image_info_value
         image = readonly_image(generation, image_info, options)
-        with StandaloneContext(options, image_info, [claim.unit for claim in claims]) as context:
+        last = {}   # one member per entry, the last one, as the summary keeps it (summary_engine.py:412)
+        for claim in claims:
+            last[claim.entry] = claim
+        unique = list(last.values())
+        with StandaloneContext(options, image_info, [claim.unit for claim in unique],
+                               [claim.evidence for claim in unique]) as context:
             out.append(Row("features", "standalone_context", "program", "evaluated", "applied", "lint",
                            {**context.header(), "readonly_image": image is not None}))
-            for claim in claims:
+            for claim in unique:
                 out.extend(normalize_rows(claim, image, context))
     return out
 
