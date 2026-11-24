@@ -501,3 +501,32 @@ def test_guard_layer_helpers_exist():
     from tdo_v2.interprocedural import _plain_push_call, _program_memory_space  # noqa: F401
     from tdo_v2.may_alias import _stack_pointer, _unit_stub  # noqa: F401
     from tdo_v2.pcode_blocks import _landing_pads  # noqa: F401
+
+
+@posix
+def test_partial_completion_under_a_fixed_run_budget_is_counted_on_both_summary_paths(sealed):
+    """r5 s5: success = unique supports.function keys minus failed_functions keys;
+    strict and retain report the same (key, reason, detail) under PYTHONHASHSEED=0."""
+    import children
+
+    s, root = sealed
+    functions = []
+    for index in range(6):
+        entry = 0x1000 + 0x100 * index
+        rows = [s.plain(entry + 3 * k, 3, ("INT_ADD", [s.reg(s.RAX), s.reg(s.RCX)], s.reg(s.RAX))) for k in range(20)]
+        rows.append(s.ret(entry + 60))
+        functions.append(s.Function(f"F{index}", s.observation(entry, rows)))
+    gen = s.write(root, s.Bundle(functions))
+    full = children.run_path("summary", gen, s.NAMING_SOURCE, timeout=300)
+    assert full["completed"] and full["failed_functions"] == [] and full["work"] > 0
+    env = dict(os.environ, TDO_V2_RUN_WORK=str(full["work"] // 2))
+    results = [children.run_path(path, gen, s.NAMING_SOURCE, timeout=300, env=env)
+               for path in ("summary", "summary-retain", "summary")]
+    for out in results:
+        assert out["completed"], out
+        assert out["supports_count"] == len(out["supported_functions"])
+        failed = {key for key, _, _ in out["failed_functions"]}
+        assert {reason for _, reason, _ in out["failed_functions"]} == {"analysis_run_budget"}
+        assert out["succeeded"] == sorted(set(out["supported_functions"]) - failed)
+        assert failed   # (how many fail depends on where the budget runs out; the count identity is the check)
+    assert results[0]["failed_functions"] == results[1]["failed_functions"] == results[2]["failed_functions"]

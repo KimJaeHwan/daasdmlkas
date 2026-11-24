@@ -65,6 +65,10 @@ def run_summary(generation: str, naming_source: str, *, retain: bool, options: d
         out["completed"] = False
         out["exception"] = _error(error)
         return out
+    from tdo_v2.resource_limits import last_run
+
+    finished = last_run()
+    out["work"] = None if finished is None else finished.work
     supports = tuple(run.supports)
     keys = sorted({row.function for row in supports})
     failed = [list(row) for row in run.failed_functions]
