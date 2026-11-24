@@ -114,16 +114,17 @@ def test_without_the_refused_member_the_call_is_outside_the_set_as_before():
     assert unavailable_key(_key(REFUSED)) not in root.effective_completeness.control_obligations
 
 
-def test_a_refusal_without_entry_marks_every_call_outside_the_program():
+def test_a_refusal_without_entry_marks_every_wildcard_holder():
     """A member refused before its entry was validated (FUNCTION_COORDINATE)
-    has no known entry: any direct call to an address that is no function of
-    the program may reach it -- unavailable under the called address."""
+    has no known entry: a function holding a wildcard transfer (here a call to
+    an address that is no function of the program) may reach it --
+    ``control:unavailable:unidentified``."""
     unknown = FunctionBuilder(entry=0x10).ret()   # (entry outside committed memory)
     run = _run([_main(REFUSED), FunctionBuilder(entry=SINK).ret(), unknown])
     assert len(run.admission_failures) == 1
     assert run.admission_failures[0].unit.scopes.function.entry is None
     root = _root(run)
-    assert unavailable_key(_key(REFUSED)) in root.effective_completeness.control_obligations
+    assert unavailable_key("unidentified") in root.effective_completeness.control_obligations
     assert not root.is_effectively_complete
 
 
@@ -135,3 +136,67 @@ def test_a_resolved_indirect_call_to_a_refused_function_marks_the_caller():
     run = _run([main, FunctionBuilder(entry=SINK).ret(), _refused()])
     root = _root(run)
     assert unavailable_key(_key(REFUSED)) in root.effective_completeness.control_obligations
+
+
+# -- the static may-reach set (PE-b r2: one set before round 1, not per channel) --
+
+def _units(*bodies):
+    with open_configured_extraction(_Provider(list(bodies)), _mint_orchestrator_capability()) as envelope:
+        return [unit for unit in envelope.iter_scoped_functions()
+                if type(unit.scopes.function) is not UnresolvedFunctionScope]
+
+
+def test_summary_support_holds_the_key_through_a_register_free_tail_chain():
+    """a: tail -> b; b: tail -> refused. Neither touches a register: the key
+    must be in each SUMMARY's support (not only in the report-time context)."""
+    from tdo_v2.interprocedural import analyze_units
+
+    a = FunctionBuilder(entry=MAIN).tail_call(WRAPPER)
+    b = FunctionBuilder(entry=WRAPPER).tail_call(REFUSED)
+    results = analyze_units(_units(a, b), unavailable_entries=frozenset({_key(REFUSED)}))
+    for entry in (MAIN, WRAPPER):
+        summary = results[_key(entry)].summary
+        assert summary is not None and unavailable_key(_key(REFUSED)) in summary.control_support
+
+
+def test_a_cut_wrapper_still_carries_the_key_to_its_callers():
+    """The set runs over every observed function, cut ones included: a caller
+    of a (model- or binding-) cut wrapper that calls a refused function is
+    marked even though the wrapper is never analysed."""
+    from tdo_v2.interprocedural import _refused_reach
+
+    units = {f"{RAM:x}:{u.scopes.function.entry.byte_offset:x}": u for u in _units(
+        FunctionBuilder(entry=MAIN).sub_rsp(0x28).call(WRAPPER).add_rsp(0x28).ret(),
+        FunctionBuilder(entry=WRAPPER).sub_rsp(0x28).call(REFUSED).add_rsp(0x28).ret(),
+        FunctionBuilder(entry=OTHER).ret())}
+    reach = _refused_reach(units, frozenset({_key(REFUSED)}), False)
+    assert reach[_key(WRAPPER)] == {unavailable_key(_key(REFUSED))}
+    assert reach[_key(MAIN)] == {unavailable_key(_key(REFUSED))}   # (through the cut wrapper's body)
+    assert _key(OTHER) not in reach
+
+
+def test_a_wildcard_holder_may_reach_every_refused_function():
+    """Any CALLIND may resolve later (an indirect round, a replayed activation,
+    a forward set): its holder owns every refused key from round 1 -- a
+    fallback to round 1 publishes it too."""
+    from tdo_v2.interprocedural import _refused_reach
+
+    holder = FunctionBuilder(entry=MAIN).sub_rsp(0x28).ins(copy(reg(RAX), reg(RCX))).call_indirect(RAX).add_rsp(0x28).ret()
+    units = {_key(MAIN): _units(holder)[0]}
+    refused = frozenset({_key(REFUSED), _key(OTHER)})
+    assert _refused_reach(units, refused, False)[_key(MAIN)] == {unavailable_key(k) for k in refused}
+    assert unavailable_key("unidentified") in _refused_reach(units, frozenset(), True)[_key(MAIN)]
+
+
+def test_an_admitted_and_a_refused_member_sharing_an_entry_is_rejected():
+    from tdo_v2.interprocedural import analyze_units
+
+    with pytest.raises(ValueError, match="share an entry"):
+        analyze_units(_units(_main()), unavailable_entries=frozenset({_key(MAIN)}))
+
+
+def test_no_refusal_no_change():
+    from tdo_v2.interprocedural import _refused_reach
+
+    units = {_key(MAIN): _units(_main(REFUSED))[0]}
+    assert _refused_reach(units, frozenset(), False) == {}

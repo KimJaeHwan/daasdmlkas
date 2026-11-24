@@ -140,6 +140,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
     binding = NamingBindingExpectation(sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
                                        CALL_NAMING_GHIDRA_VERSION)
     units, failures = [], collections.Counter()
+    refused_entries, unidentified_refusals = set(), False   # (PE-b: callers of a refused member carry its key)
     with open_observed_function_session(admit_frozen_bundle(generation), naming_binding=binding) as session:
         adapter = session._provider_adapter
         for unit in session._envelope.iter_scoped_functions():
@@ -148,6 +149,11 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                 units.append(unit)
             else:
                 failures[unit.scopes.function.stage.name] += 1
+                entry = getattr(unit.scopes.function, "entry", None)
+                if entry is None:
+                    unidentified_refusals = True
+                else:
+                    refused_entries.add(f"{entry.space_id:x}:{entry.byte_offset:x}")
     info = load_image_info(generation)
     if models is None:
         models = code_only_profile.load_models(model_dirs) if code_only_profile is not None             else run_dfbench.external_models(generation, model_dirs)
@@ -211,6 +217,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
         tracking = ImageBaseTracking(ranges, relocates)
         with tracking as found:
             results = ip.analyze_units(selected, image_info=info, external_models=models, pcodeop_models=pcodeops,
+                                       unavailable_entries=frozenset(refused_entries),
+                                       unidentified_refusals=unidentified_refusals,
                                        private_frame_above=private_frame_above,
                                        assume_debug_break_traps_do_not_return=traps,
                                        assume_direction_flag_clear=direction_flag,

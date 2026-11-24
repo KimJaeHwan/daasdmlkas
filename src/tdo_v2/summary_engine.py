@@ -414,7 +414,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     # control:unavailable:<entry>); one without an entry is "unidentified"
     refused_entries = frozenset(
         function_key(item.unit.scopes.function.entry) for item in admission_failures
-        if getattr(item.unit.scopes.function, "entry", None) is not None) - set(by_key)
+        if getattr(item.unit.scopes.function, "entry", None) is not None)
     unidentified_refusals = any(getattr(item.unit.scopes.function, "entry", None) is None
                                 for item in admission_failures)
     assumed = {
