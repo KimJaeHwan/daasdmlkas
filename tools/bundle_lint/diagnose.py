@@ -133,7 +133,7 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
             function = unit.scopes.function
             if type(function) is ConstructedFunctionScope:
                 claim.scope = "constructed"
-                claim.entry = f"{function.entry.space_id}:{function.entry.byte_offset:x}"
+                claim.entry = f"{function.entry.space_id:x}:{function.entry.byte_offset:x}"   # (function_key)
                 try:
                     claim.evidence = session._decode_function(unit, captured)
                     claim.naming = "ok"

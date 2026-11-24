@@ -169,3 +169,66 @@ def test_a_mismatched_stop_is_an_error_not_a_verdict():
     assert diagnose.check_stop(predicted, child)[:2] == ("error", None)
     assert diagnose.check_stop(None, child)[:2] == ("error", None)
     assert diagnose.check_stop(None, {"run_state": "timeout"})[:2] == ("timeout", None)
+
+
+# -- layer 2: operations ------------------------------------------------------------
+
+def _exit(source, target, kind, function):
+    import _sealed as s
+
+    return {"source": s.coord(source), "target": s.coord(target), "kind": kind,
+            "function": None if function is None else s.coord(function)}
+
+
+def _layer2_bundle(_sealed, *, exit_kind=2, pads=True):
+    s = _sealed
+    # A: call B with a listed local landing pad (0x100a, also reached by the jump at 0x1005)
+    call_targets = [0x1800, 0x100A] if pads else [0x1800]
+    a = s.Function("A", s.observation(0x1000, [
+        s.call(0x1000, 0x1800, targets=call_targets),
+        s.row(0x1005, 5, s.ops(("BRANCH", [s.ram(0x100A)], None)),
+              s.flow(is_flow=True, is_jump=True, is_unconditional=True), None, [0x100A]),
+        s.ret(0x100A)]))
+    b = s.Function("B", s.observation(0x1800, [
+        s.plain(0x1800, 2, ("CALLOTHER", [s.const(16, 4), s.const(3, 4)], None)),   # int3 (x86.json trap)
+        s.ret(0x1802)]))
+    function = 0x1800 if exit_kind == 2 else None
+    # E falls through into B's entry (S1 exit kind 2, function B)
+    e = s.Function("E", s.observation(0x17F0, [s.plain(0x17F0, 3, ("COPY", [s.reg(s.RCX)], s.reg(s.RAX))),
+                                               s.plain(0x17F3, 13, ("COPY", [s.reg(s.RCX)], s.reg(s.RDX)))],
+                                      exits=[_exit(0x17F3, 0x1800, exit_kind, function)]))
+    return s.Bundle([a, e, b])
+
+
+@posix
+def test_layer2_registers_calls_pads_exits_and_callother(sealed):
+    _sealed = sealed[0]
+    rows, _, _ = _lint_rows(sealed, _layer2_bundle(_sealed))
+    assert rows[("operations", "stack_register", "program")].detail["name"] == "RSP"
+    assert rows[("operations", "link_register", "program")].verdict == "withheld"   # (x86: none)
+    call = rows[("operations", "call", "function-000000/1:1000:2:CALL")]
+    assert call.verdict == "applied" and call.detail["aliases"] == ["B"]
+    assert call.detail["push_projection"] and call.detail["plain_push"]
+    assert call.detail["landing_pads"] == ["1:100a"]
+    exit_row = rows[("operations", "s1_exit", "function-000001/#0")]
+    assert (exit_row.detail["kind"], exit_row.detail["function"], exit_row.detail["reach_edge"]) == (2, "1:1800", True)
+    trap = rows[("operations", "callother", "function-000002/1:1800:0:CALLOTHER")]
+    assert trap.verdict == "applied" and trap.detail["trap_match"] and trap.detail["index"] == 16
+
+
+@posix
+def test_variant5_kind4_exit_loses_the_reach_edge_and_variant6_drops_a_pad(sealed):
+    _sealed, root = sealed
+    import lint
+
+    rows = {}
+    for name, bundle in (("k4", _layer2_bundle(_sealed, exit_kind=4)), ("nopad", _layer2_bundle(_sealed, pads=False))):
+        sub = root / name
+        sub.mkdir(mode=0o755)
+        gen = _sealed.write(sub, bundle)
+        rows[name] = {row.ident(): row for row in lint.run(gen, _sealed.NAMING_SOURCE, timeout=300, summary=False,
+                                                            options={})[1]}
+    exit_row = rows["k4"][("operations", "s1_exit", "function-000001/#0")]
+    assert (exit_row.detail["kind"], exit_row.detail["function"], exit_row.detail["reach_edge"]) == (4, None, False)
+    call = rows["nopad"][("operations", "call", "function-000000/1:1000:2:CALL")]
+    assert call.detail["landing_pads"] == [] and call.verdict == "applied" and call.detail["plain_push"]
