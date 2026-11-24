@@ -751,14 +751,15 @@ def test_drop_pad_with_a_repeated_pad_shrinks_the_validated_set(sealed):
 
 
 @posix
-def test_a_failed_variant_is_renamed_failed_and_can_be_retried(sealed):
+def test_a_variant_refused_by_its_source_conditions_writes_nothing(sealed):
+    """No validated pad besides the fallthrough: refused before the copy (a
+    failure after the copy is renamed .failed[.N]: see the unreachable test)."""
     import mutate
 
     _sealed, root = sealed
-    with pytest.raises(mutate.VariantError):
+    with pytest.raises(mutate.VariantError, match="no validated landing pad"):
         _variant(sealed, "drop-pad", function_id="function-000000", site="1:1007:2:CALL")   # (no pad)
-    out = root / "drop-pad"
-    assert [path.name.endswith(".failed") for path in out.iterdir()] == [True]
+    assert list((root / "drop-pad").iterdir()) == []
 
 
 @posix
@@ -902,7 +903,8 @@ def test_branchind_through_an_import_slot_is_exempted_in_the_final_column(sealed
     key = "function-000000/control:1:1000:1:1000"
     assert rows[("operations", "branchind", key)].verdict == "withheld"
     final = rows[("pipeline", "branchind_final", key)]
-    assert final.detail["final"] == "exempted" and final.detail["exemptions"], final
+    assert (final.run_state, final.verdict, final.detail["final"]) == ("evaluated", "applied", "exempted"), final
+    assert final.detail["exemptions"]
 
 
 @posix
@@ -983,7 +985,7 @@ def test_branchind_final_of_a_replaced_member_is_not_reached(sealed):
     key = "function-000000/control:1:1000:1:1000"
     assert rows[("operations", "branchind", key)].verdict == "withheld"
     final = rows[("pipeline", "branchind_final", key)]
-    assert final.run_state == "not_reached", final
+    assert (final.run_state, final.verdict) == ("not_reached", None) and "final" not in final.detail, final
 
 
 @posix
@@ -1107,3 +1109,151 @@ def test_cli_refuses_a_missing_naming_source(tmp_path):
 
     assert lint.main([str(tmp_path), "--naming-source", str(tmp_path / "missing.java"),
                       "--out", str(tmp_path / "r.json")]) == 2
+
+
+
+# -- implementation review r5 (Astra fix specs adopted; Fable r4) ------------------------
+
+@posix
+def test_drop_pad_never_picks_the_fallthrough_even_with_an_extra_field(sealed):
+    s = sealed[0]
+    bundle = _layer2_bundle(s)
+    targets = bundle.functions[0].observation["instructions"][0]["flow_targets"]
+    targets.append({**s.coord(0x1005), "ignored": 1})   # (the fallthrough, listed with an ignored key)
+    rows, base, note = _variant(sealed, "drop-pad", bundle=bundle, function_id="function-000000",
+                                site="1:1000:2:CALL")
+    assert note["dropped"] == "1:100a"
+    call = ("operations", "call", "function-000000/1:1000:2:CALL")
+    assert "1:1005" in rows[call].detail["flow_targets"]
+
+
+@posix
+def test_drop_pad_refuses_a_pad_that_is_another_functions_entry(sealed):
+    import mutate
+
+    s = sealed[0]
+    bundle = _layer2_bundle(s)
+    bundle.functions[0].observation["instructions"][1]["flow_targets"] = []   # (pad reached by the operand only)
+    bundle.functions.append(s.Function("C", s.observation(0x100A, [s.ret(0x100A)])))
+    with pytest.raises(mutate.VariantError, match="inter-function"):
+        _variant(sealed, "drop-pad", bundle=bundle, function_id="function-000000", site="1:1000:2:CALL")
+
+
+@posix
+def test_call_pattern_keeps_the_constant_width_and_refuses_a_narrow_one(sealed):
+    import mutate
+
+    s = sealed[0]
+    rows, base, note = _variant(sealed, "call-pattern", function_id="function-000000", site=SITE)
+    observation = json.loads((Path(note["generation"]) / "function-000000.json").read_bytes())
+    constant = observation["instructions"][1]["operations"][0]["inputs"][1]
+    assert (constant["byte_offset"], constant["byte_size"]) == ((1 << 64) - 8, 8)
+    narrow = s.two_function_bundle()
+    narrow.functions[0].observation["instructions"][1]["operations"][0]["inputs"][1] = s.const(8, 1)
+    sealed[1].joinpath("narrow").mkdir(mode=0o755)
+    source = s.write(sealed[1] / "narrow", narrow)
+    out = sealed[1] / "narrow_out"
+    out.mkdir(mode=0o755)
+    with pytest.raises(mutate.VariantError):
+        mutate.mutate(source, out, "call-pattern", function_id="function-000000", site=SITE)
+
+
+@posix
+def test_call_ordinal_refuses_when_a_path_stops_before_the_target(sealed):
+    import mutate
+
+    s = sealed[0]
+    bundle = s.two_function_bundle(overrides={"call-names-000000": b"{"})
+    bundle.functions[1].observation["instructions"].insert(0, s.call(0x17F0, 0x1000, length=5))
+    bundle.functions[1].observation["entry"] = s.coord(0x17F0)
+    bundle.functions[1].observation["instructions"][1] = s.plain(0x17F5, 3, ("COPY", [s.reg(s.RCX)], s.reg(s.RAX)))
+    bundle.functions[1].observation["instructions"][0]["fallthrough"] = s.coord(0x17F5)
+    bundle.functions[1].observation["instructions"][0]["operations"][1]["inputs"][2] = s.const(0x17F5)
+    bundle.functions[1].observation["instructions"][2] = s.ret(0x17F8)
+    root = sealed[1]
+    (root / "co").mkdir(mode=0o755)
+    source = s.write(root / "co", bundle)
+    (root / "co_out").mkdir(mode=0o755)
+    with pytest.raises(mutate.VariantError):
+        mutate.mutate(source, root / "co_out", "call-ordinal", function_id="function-000001")
+
+
+@posix
+def test_exit_kind4_refuses_when_a_resolved_callind_keeps_the_edge(sealed):
+    import mutate
+
+    s = sealed[0]
+    # (Ghidra's ``call rax``: the target copied first, then the push and CALLIND of the copy)
+    callind = s.row(0x17E7, 5, s.ops(("COPY", [s.reg(s.RAX)], s.unique(0x100)),
+                                     ("INT_SUB", [s.reg(s.RSP), s.const(8)], s.reg(s.RSP)),
+                                     ("STORE", [s.const(s.RAM), s.reg(s.RSP), s.const(0x17EC)], None),
+                                     ("CALLIND", [s.unique(0x100)], None)), s.CALL_FLOW, 0x17EC, [])
+    e = s.Function("E", s.observation(0x17E0, [s.plain(0x17E0, 7, ("COPY", [s.const(0x1800)], s.reg(s.RAX))),
+                                               callind, s.plain(0x17EC, 20, ("COPY", [s.reg(s.RCX)], s.reg(s.RDX)))],
+                                      exits=[_exit(0x17EC, 0x1800, 2, 0x1800)]))
+    b = s.Function("B", s.observation(0x1800, [s.ret(0x1800)]))
+    with pytest.raises(mutate.VariantError):
+        _variant(sealed, "exit-kind4", bundle=s.Bundle([e, b]), function_id="function-000000", index=0)
+
+
+def test_a_diagnosis_resource_failure_makes_completion_an_error_and_keeps_the_childs_keys():
+    import lint
+
+    diagnosis = {"claims": [{"scope": "constructed", "naming": "error", "entry": "1:1000",
+                             "naming_error": {"class": "builtins.MemoryError", "message": "", "resource": True}}]}
+    child = {"run_state": "evaluated", "completed": True, "supports_count": 1, "supported_functions": ["1:1000"],
+             "succeeded": ["1:1000"], "failed_functions": [], "admission_failures": [], "assumptions": [],
+             "control_exemptions": [], "fault_report": [], "control_sites": []}
+    rows = {r.ident(): r for r in lint.pipeline_rows(diagnosis, {"summary": None}, {"summary": child})}
+    completion = rows[("pipeline", "completion", "summary")]
+    assert (completion.run_state, completion.verdict) == ("error", None)
+    assert completion.detail["succeeded"] == ["1:1000"]
+
+
+def test_site_states_follow_reach_not_a_blanket_rule():
+    import feature_layer
+    import lint
+    import report as r
+
+    done = {"run_state": "evaluated", "completed": True, "failed_functions": [], "control_exemptions": [],
+            "control_sites": [["control:1:1000:1:1000", "import-tail-reentry", "1:1000", "()"]], "fault_report": []}
+    rep_row = r.Row("operations", "rep_site", "f/1:1000", "evaluated", "applied", "engine",
+                    {"superseded_by_duplicate_entry": True})
+    (row,) = feature_layer.trap_application_rows([rep_row], {"summary": done}, {})
+    assert row.run_state == "not_reached"
+    boom = {"run_state": "evaluated", "completed": False,
+            "exception": {"class": "tdo_v2.resource_limits.BoundExceeded", "message": "x", "resource": True}}
+    assert feature_layer.site_state({"summary": boom}, False)[0] == "error"
+    branch = r.Row("operations", "branchind", "f/control:1:1000:1:1000", "evaluated", "withheld", "engine",
+                   {"unknown_transfer": True})
+    (final,) = lint.branchind_final_rows([branch], {"summary": done})
+    assert (final.run_state, final.verdict, final.detail["final"]) == ("evaluated", "withheld", "import-tail-reentry")
+    (error,) = lint.branchind_final_rows([branch], {"summary": boom})
+    assert (error.run_state, error.verdict) == ("error", None)
+
+
+@posix
+def test_site_rows_read_retain_when_strict_stopped(sealed):
+    s = sealed[0]
+    jump = s.flow(is_flow=True, is_jump=True, is_computed=True, is_terminal=True, is_unconditional=True)
+    a = s.Function("A", s.observation(0x1000, [s.ret(0x1000)]))
+    b = s.Function("B", s.observation(0x9000, [s.ret(0x9000)]))   # (scope refusal: strict stops)
+    c = s.Function("C", s.observation(0x1800, [s.row(0x1800, 2, s.ops(("BRANCHIND", [s.reg(s.RAX)], None)), jump)]))
+    rows, _ = _run_lint(sealed, s.Bundle([a, b, c]), "retainsite")
+    final = rows[("pipeline", "branchind_final", "function-000002/control:1:1800:1:1800")]
+    assert final.run_state == "evaluated" and final.detail["run"] == "summary-retain", final
+
+
+@posix
+@pytest.mark.parametrize("first_writable", [True, False])
+def test_readonly_block_rows_follow_the_row_the_engine_selects(sealed, first_writable):
+    s = sealed[0]
+    bundle = s.two_function_bundle(blocks=[s.Block(start=0x1000), s.Block(start=0x2000, data=bytes(0x100))])
+    rows_info = [{"block_id": "block-000000", "name": ".text", "read": True, "write": write, "execute": True,
+                  "volatile": False} for write in (first_writable, not first_writable)]
+    bundle.image_info = {"schema": "tdo-v2-image-info-1", "executable_format": "Raw Binary",
+                         "block_permissions": rows_info, "imports": [], "exports": [], "relocations": []}
+    rows, _ = _run_lint(sealed, bundle, f"sel{first_writable}", summary=False)
+    first, second = rows[("transport", "readonly_block", "#0/1:1000")], rows[("transport", "readonly_block", "#1/1:1000")]
+    assert first.verdict == ("not_applicable" if first_writable else "applied")
+    assert (second.run_state, second.detail["selected_row"]) == ("not_reached", 0)

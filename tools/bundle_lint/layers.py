@@ -48,7 +48,16 @@ def transport_rows(diagnosis) -> list[Row]:
         rows.append(Row("transport", "image_info", "bundle", "evaluated", "not_applicable", "engine"))
     else:
         rows.append(Row("transport", "image_info", "bundle", "evaluated", "applied", "engine"))
-        for index, block in enumerate(diagnosis.image_info_value.blocks):
+        info = diagnosis.image_info_value
+        for index, block in enumerate(info.blocks):
+            chosen = info.block_at(block.space_id, block.start, block.size)
+            chosen_index = next((i for i, item in enumerate(info.blocks) if item is chosen), None)
+            if chosen_index != index:
+                # ReadOnlyImage.value consults block_at, which picks the first row wholly
+                # containing the range: this row is never the one the engine reads
+                rows.append(Row("transport", "readonly_block", f"#{index}/{block.space_id:x}:{block.start:x}",
+                                "not_reached", None, "lint", {"selected_row": chosen_index}))
+                continue
             # ReadOnlyImage.value's block condition (image_info.py:154, pinned by a
             # guard test); import slots inside a folding block are excluded per
             # address by value() itself -- readonly_use rows show actual uses

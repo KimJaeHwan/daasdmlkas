@@ -166,19 +166,50 @@ def normalize_rows(claim, image, context) -> list[Row]:
     return rows
 
 
-def trap_application_rows(op_rows, results: dict, options: dict) -> list[Row]:
-    """Per trap site (a ``callother_model_match`` row with ``trap_match``):
-    whether the summary run applied the cut is not public (r5 s1) ->
-    ``unobserved``; option off, no or empty model list (the engine skips the
-    trap step) or summary not run -> ``not_run``; the summary child timed out /
-    failed -> ``timeout`` / ``error``; stopped by an exception -> ``not_reached``
-    only when the stop comes before analysis, else ``unobserved``."""
+def summary_run(results: dict):
+    """The summary run whose final columns the site rows read: strict when it
+    completed, else retain when it completed (Fable impl r4 P2) -- (name, child)
+    or (None, the strict child or None)."""
+    for name in ("summary", "summary-retain"):
+        child = results.get(name)
+        if child is not None and child.get("run_state") == "evaluated" and child.get("completed"):
+            return name, child
+    return None, results.get("summary")
+
+
+def site_state(results: dict, superseded: bool, on: bool = True) -> tuple[str, str | None]:
+    """(run_state, run name) of a per-site row (Astra impl r5 P2): path or option
+    not run -> not_run; child timeout -> timeout; resource exception -> error; a
+    pre-analysis stop the diagnosis predicted and the child matched -> not_reached;
+    a completed run whose member was replaced by a later one of its entry ->
+    not_reached; otherwise a completed run -> evaluated (the caller decides) and
+    anything else -> unobserved."""
     import diagnose
 
+    name, child = summary_run(results)
+    if child is None or not on:
+        return "not_run", None
+    if name is not None:
+        return ("not_reached" if superseded else "evaluated"), name
+    if child.get("run_state") == "timeout":
+        return "timeout", None
+    if child.get("run_state") != "evaluated" or (child.get("exception") or {}).get("resource"):
+        return "error", None
+    prediction = results.get("_predictions", {}).get("summary")
+    state, verdict, _ = diagnose.check_stop(prediction, child)
+    if verdict == "applied" and diagnose.pre_analysis(prediction):
+        return "not_reached", None
+    return "unobserved", None
+
+
+def trap_application_rows(op_rows, results: dict, options: dict) -> list[Row]:
+    """Per trap site (a ``callother_model_match`` row with ``trap_match``) and rep
+    site: whether the summary run applied the cut / proved the rep site is not
+    public (r5 s1), so a completed run gives ``unobserved``; the other states by
+    ``site_state``."""
     models = options.get("pcodeop_models")
     traps_on = options.get("assume_debug_break_traps_do_not_return", True) and bool(models)
     out = []
-    summary = results.get("summary")
     for row in op_rows:
         if row.check == "callother_model_match" and row.detail.get("trap_match"):
             check, on = "trap_application", traps_on
@@ -186,15 +217,11 @@ def trap_application_rows(op_rows, results: dict, options: dict) -> list[Row]:
             check, on = "rep_application", True   # (rep sites are proved in every summary run)
         else:
             continue
-        if summary is None or not on:
-            state = "not_run"
-        elif summary.get("run_state") in ("timeout", "error"):
-            state = summary["run_state"]
-        elif not summary.get("completed"):
-            state = "not_reached" if diagnose.pre_analysis(results.get("_predictions", {}).get("summary"))                 else "unobserved"
-        else:
+        superseded = bool(row.detail.get("superseded_by_duplicate_entry"))
+        state, name = site_state(results, superseded, on)
+        if state == "evaluated":
             state = "unobserved"
-        out.append(Row("features", check, row.key, state))
+        out.append(Row("features", check, row.key, state, None, "lint", {"run": name} if name else {}))
     return out
 
 

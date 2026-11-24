@@ -39,6 +39,10 @@ refused function) `<function id>/#<index>`.
 | features | stack_pointer, standalone_context / standalone_normalize / readonly_use / standalone_rep (`--normalize`), trap_application, rep_application |
 | pipeline | stop, completion (applied only when nothing was lost; error for resource failures, unpredicted stops or a failed diagnosis), run_columns (assumptions, control exemptions, fault report, control sites), branchind_final (candidate / exemption / final per BRANCHIND site) |
 
+Per-site rows (trap_application, rep_application, branchind_final) read the strict summary when it completed, else
+the retain summary (`detail.run`); not_run (path / option off), timeout, error (resource), not_reached (a predicted
+pre-analysis stop, or a member replaced by a later one of its entry), unobserved (anything else not public).
+
 Recognisers: `push_projection` / `push_relation` on every native call (unrecognized on a push ISA, not_applicable on a
 link-register ISA unless the engine recognises a push; `push_relation` withheld without stack-register evidence);
 `plain_push` only on an x86-64 direct CALL (the engine's literal shape); `link_relation` on a link-register ISA
@@ -70,7 +74,9 @@ key is a difference); `"exhaustive": true` also fails on rows not listed.
 - Every variant admits its source first (its target function must be admitted with its names), copies only listed
   members, and post-checks that only the target changed: other functions identical, the target's other call rows
   identical, the target still admitted with its names (`call-ordinal`: only its names refused), `drop-pad`: the
-  validated pad set shrank. A failed variant is renamed `<generation>.failed`. `--naming-source` for other exporter
-  revisions.
+  validated pad set lost exactly the selected pad. `drop-pad` and `exit-kind4` also compare the target's
+  inter-function reach edges over the results a real summary run passes to `control_contexts` (so they run the summary
+  on both sides). A source refused by its conditions writes nothing; a failure after the copy is renamed
+  `<generation>.failed[.N]` (nothing is deleted). `--naming-source` for other exporter revisions.
 
 Synthetic fixtures only in tests (`_sealed.py`); never commit a real Bundle, binary or report of one.

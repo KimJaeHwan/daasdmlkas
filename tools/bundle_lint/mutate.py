@@ -208,7 +208,8 @@ def _unused_unique(observation: dict, size=8) -> int:
     return candidate
 
 
-def edit_observation(observation: dict, variant: str, site: str | None, index: int, unique=None) -> dict:
+def edit_observation(observation: dict, variant: str, site: str | None, index: int, unique=None,
+                     selected=None) -> dict:
     """In-place edit; returns ``{"moved": (old ordinal, new ordinal) | None}``."""
     if variant in ("exit-kind4",):
         exits = observation.get("fallthrough_exits", [])
@@ -234,20 +235,24 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
         if calls != [ordinal] or ops[ordinal]["opcode"] != "CALL" or parts[3] != "CALL" \
                 or not ops[ordinal]["inputs"] or ops[ordinal]["inputs"][0]["kind_code"] != 4:
             raise VariantError("drop-pad needs an instruction whose only call is the named direct CALL")
-        fallthrough = row["fallthrough"]
-        local = {(item["address"]["space_id"], item["address"]["byte_offset"]) for item in observation["instructions"]}
-        pads = [target for target in row["flow_targets"]
-                if (target["space_id"], target["byte_offset"]) in local and target != fallthrough]
-        if not pads:
-            raise VariantError("the call row lists no local landing pad")
-        row["flow_targets"] = [target for target in row["flow_targets"] if target != pads[0]]
-        return {"moved": None, "dropped": pads[0]}
+        # (the pad comes from the engine's validated pads minus the validated
+        # fallthrough, chosen by the driver; every copy of that coordinate goes --
+        # compared by coordinate, not by row dict: Astra impl r5 P1)
+        space, offset = (int(part, 16) for part in selected.split(":"))
+        kept = [target for target in row["flow_targets"]
+                if (target.get("space_id"), target.get("byte_offset")) != (space, offset)]
+        if len(kept) == len(row["flow_targets"]):
+            raise VariantError("the selected pad is not listed by the call row")
+        row["flow_targets"] = kept
+        return {"moved": None, "dropped": selected}
+
     adjust, store, call = _push_call(row)
     if variant == "call-pattern":
-        if adjust["inputs"][1]["byte_offset"] != 8:
-            raise VariantError("adjustment is not RSP - 8")
+        constant = adjust["inputs"][1]
+        if (constant.get("byte_offset"), constant.get("byte_size")) != (8, 8):
+            raise VariantError("the adjustment is not RSP - 8 with an 8-byte constant")
         adjust["opcode"] = "INT_ADD"
-        adjust["inputs"][1] = {**adjust["inputs"][1], "byte_offset": WRAP_MINUS_8, "byte_size": 8}
+        adjust["inputs"][1] = {**constant, "byte_offset": WRAP_MINUS_8}   # (width kept)
         return {"moved": None}
     if variant == "call-reshape":
         temp = {"kind_code": 3, "space_id": unique, "byte_offset": _unused_unique(observation),
@@ -268,7 +273,36 @@ def edit_observation(observation: dict, variant: str, site: str | None, index: i
 
 # -- source-row check (r3 s4) ---------------------------------------------------------------
 
-def _survey(generation: Path, naming_source=None, target=None) -> dict:
+def _run_edges(generation: Path, naming_source, entry: str):
+    """The inter-function reach edges of ``entry`` as the summary run computes
+    them: ``control_context._edges`` over the very ``results`` / ``failed``
+    the run passes to ``control_contexts`` (summary_engine.py:767; Astra impl
+    r5 P2). None when the run publishes no result for ``entry``."""
+    from tdo_v2 import summary_engine
+    from tdo_v2.boundary import NullBoundaryProvider
+    from tdo_v2.control_context import _edges
+
+    captured = {}
+    original = summary_engine.control_contexts
+
+    def capture(results, failed, *args, **kwargs):
+        captured["results"], captured["failed"] = results, failed
+        return original(results, failed, *args, **kwargs)
+
+    summary_engine.control_contexts = capture
+    try:
+        summary_engine.analyze_frozen_bundle_with_summaries(
+            generation, naming_exporter_source=naming_source or _sealed.NAMING_SOURCE,
+            boundary_provider=NullBoundaryProvider())
+    finally:
+        summary_engine.control_contexts = original
+    results, failed = captured.get("results"), captured.get("failed")
+    if results is None or entry not in results:
+        return None
+    return frozenset(_edges(entry, results[entry], set(results) | set(failed)))
+
+
+def _survey(generation: Path, naming_source=None, target=None, edges=False) -> dict:
     """{function id: (scope, seeds, naming, observation sha256, {(check, row key): verdict},
     {call row key: landing pads; S1 exit key: reach edge}, target extras | None)}.
 
@@ -285,9 +319,6 @@ def _survey(generation: Path, naming_source=None, target=None) -> dict:
     found = {}
 
     def keep(diagnosis):
-        from types import SimpleNamespace
-
-        from tdo_v2.control_context import _edges
         from tdo_v2.control_projection import control_successor_coordinates
         from tdo_v2.normalize import FunctionNormalizer, NormalizedFunction
 
@@ -326,8 +357,7 @@ def _survey(generation: Path, naming_source=None, target=None) -> dict:
                     extras = {
                         "reach": frozenset(seen),
                         "normalized": type(normalized) is NormalizedFunction,
-                        "edges": frozenset() if superseded else frozenset(
-                            _edges(claim.entry, SimpleNamespace(unit=claim.unit, calls={}, multi_calls={}), keys)),
+                        "entry": claim.entry,
                         "exits": {row.key: (row.detail.get("kind"), row.detail.get("function")) for row in exits},
                         "stack": (stack.verdict, stack.detail),
                         "superseded": superseded,
@@ -335,7 +365,11 @@ def _survey(generation: Path, naming_source=None, target=None) -> dict:
             found[claim.function_id] = (claim.scope, claim.seeds, claim.naming, claim.observation_sha256, rows, pads,
                                         extras)
 
-    diagnose.diagnose(generation, naming_source or _sealed.NAMING_SOURCE, keep=keep)
+    diagnosis = diagnose.diagnose(generation, naming_source or _sealed.NAMING_SOURCE, keep=keep)
+    found["__predictions__"] = diagnose.predict(diagnosis)
+    if edges and target in found and found[target][6] is not None:
+        extras = found[target][6]
+        extras["edges"] = None if extras["superseded"] else _run_edges(generation, naming_source, extras["entry"])
     return found
 
 
@@ -345,6 +379,13 @@ def precheck(survey: dict, function_id: str, site: str, variant: str) -> None:
     ``_plain_push_call``, push relation -- recognition only, not the callee
     state proof)."""
     target = survey.get(function_id)
+    if variant == "call-ordinal":
+        # every path must reach the target's naming step in the source (Astra impl r5 P2)
+        stops = survey["__predictions__"]
+        index = _claim_index(survey, function_id)
+        for path, stop in stops.items():
+            if stop is not None and (stop.get("index") is None or stop["index"] <= index):
+                raise VariantError(f"the {path} path stops before the target function: {stop}")
     if target is None or target[:3] != ("constructed", "ok", "ok"):
         raise VariantError(f"the source function is not admitted with its names: {None if target is None else target[:3]}")
     if variant in ("call-pattern", "call-reshape", "call-swap"):
@@ -355,7 +396,13 @@ def precheck(survey: dict, function_id: str, site: str, variant: str) -> None:
             raise VariantError(f"source row is not a recognised direct push call: {wanted}")
 
 
-def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: str | None, index: int = 0) -> None:
+def _claim_index(survey: dict, function_id: str) -> int:
+    names = [key for key in survey if key != "__predictions__"]
+    return names.index(function_id)
+
+
+def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: str | None, index: int = 0,
+              selected=None) -> None:
     """One condition changed: every other function is unchanged; the target is
     still admitted with its names (call-ordinal: only its names refused); the
     target's call rows other than the site's are unchanged; drop-pad: the
@@ -363,6 +410,8 @@ def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: s
     if set(after) != set(survey):
         raise VariantError("the variant changed the function set")
     for key, before in survey.items():
+        if key == "__predictions__":
+            continue
         if key != function_id and after[key][:4] != before[:4]:
             raise VariantError(f"the variant changed another function: {key}")
     target, before = after[function_id], survey[function_id]
@@ -370,6 +419,11 @@ def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: s
     if target[:3] != expected:
         raise VariantError(f"the target function is {target[:3]}, expected {expected}")
     if variant == "call-ordinal":
+        # every path's first stop is now the target's naming refusal (Astra impl r5 P2)
+        position = _claim_index(after, function_id)
+        for path, stop in after["__predictions__"].items():
+            if stop is None or stop.get("index") != position or stop.get("function_id") != function_id:
+                raise VariantError(f"the {path} path does not stop at the target's names: {stop}")
         return
     if variant == "drop-pad":
         # only the named operation's pads change, by exactly the dropped coordinate;
@@ -380,9 +434,11 @@ def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: s
         if {k: v for k, v in target[4].items() if k not in exclude} != \
                 {k: v for k, v in before[4].items() if k not in exclude}:
             raise VariantError("the variant changed other call rows of the target function")
-        lost = set(before[5].get(key, ())) - set(target[5].get(key, ()))
-        if len(lost) != 1 or set(target[5].get(key, ())) - set(before[5].get(key, ())):
-            raise VariantError("the validated landing pads did not lose exactly one coordinate")
+        if set(target[5].get(key, ())) != set(before[5].get(key, ())) - {selected}:
+            raise VariantError("the validated landing pads did not lose exactly the selected coordinate")
+        if before[6]["edges"] is None or before[6]["edges"] != target[6]["edges"]:
+            # the inter-function reach edges stay (a pad may be another function's entry)
+            raise VariantError("dropping the pad changes the function's inter-function reach edges")
         if target[6]["reach"] != before[6]["reach"]:
             raise VariantError("dropping the pad changes what is reachable from the entry")
         if not (before[6]["normalized"] and target[6]["normalized"]):
@@ -407,9 +463,12 @@ def postcheck(survey: dict, after: dict, variant: str, function_id: str, site: s
         old, new = before[6]["exits"].get(key), target[6]["exits"].get(key)
         if old is None or old[0] != 2 or new != (4, None):
             raise VariantError(f"the S1 exit did not change (2, B) -> (4, null): {old} -> {new}")
-        if old[1] not in before[6]["edges"] or old[1] in target[6]["edges"]:
-            # the engine's reach edge to B must exist before and be gone after (Astra impl r4 P2)
-            raise VariantError("the variant does not remove the engine's reach edge to the exit's function")
+        if before[6]["edges"] is None or target[6]["edges"] is None:
+            raise VariantError("no summary result to read the reach edges from")
+        if old[1] not in before[6]["edges"] or target[6]["edges"] != before[6]["edges"] - {old[1]}:
+            # the engine's reach edge to B (over the run's own results, CALLIND
+            # resolutions included) must exist before and be the only one gone after
+            raise VariantError("the variant does not remove exactly the engine's reach edge to the exit's function")
 
 
 # -- driver ---------------------------------------------------------------------------------
@@ -419,9 +478,22 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
     if variant not in VARIANTS:
         raise VariantError(f"unknown variant {variant!r}")
     survey = None
+    selected = None
+    needs_edges = variant in ("drop-pad", "exit-kind4")
     if variant != "seal":
-        survey = _survey(source, naming_source, target=function_id)
+        survey = _survey(source, naming_source, target=function_id, edges=needs_edges)
         precheck(survey, function_id, site, variant)
+        if variant == "drop-pad":
+            manifest = _json(source / "manifest.json")
+            observation = _json(_member_path(source, manifest, _function_row(manifest, function_id)["observation_member"]))
+            row = _instruction(observation, site)
+            fallthrough = row.get("fallthrough")
+            fallthrough = None if not isinstance(fallthrough, dict) else \
+                f"{fallthrough.get('space_id', -1):x}:{fallthrough.get('byte_offset', -1):x}"
+            pads = sorted(set(survey[function_id][5].get(f"{function_id}/{site}", ())) - {fallthrough})
+            if not pads:
+                raise VariantError("the call row has no validated landing pad besides its fallthrough")
+            selected = pads[0]
         if variant == "call-reshape":
             manifest = _json(source / "manifest.json")
             effects = _json(_member_path(source, manifest, _function_row(manifest, function_id)["call_effects_member"]))
@@ -431,10 +503,10 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
                 raise VariantError("call-reshape on a Bundle with a real call-effects sidecar is not supported")
     generation = copy_bundle(source, out_root)
     try:
-        result = _mutate_copy(generation, variant, function_id, site, index)
+        result = _mutate_copy(generation, variant, function_id, site, index, selected)
         if survey is not None:
-            postcheck(survey, _survey(generation, naming_source, target=function_id), variant, function_id, site,
-                      index)
+            postcheck(survey, _survey(generation, naming_source, target=function_id, edges=needs_edges), variant,
+                      function_id, site, index, selected)
         return result
     except BaseException:
         # a fresh name: an existing result is never deleted (Astra impl r3 P1)
@@ -447,7 +519,7 @@ def mutate(source: Path, out_root: Path, variant: str, *, function_id: str = "fu
         raise
 
 
-def _mutate_copy(generation: Path, variant: str, function_id: str, site, index: int) -> dict:
+def _mutate_copy(generation: Path, variant: str, function_id: str, site, index: int, selected=None) -> dict:
     result = {"variant": variant, "generation": str(generation), "function": function_id, "site": site}
     if variant == "seal":
         seal = _json(generation / "seal.json")
@@ -483,7 +555,7 @@ def _mutate_copy(generation: Path, variant: str, function_id: str, site, index: 
     unique = None
     if variant == "call-reshape":   # (only this variant needs the unique space: Astra impl r2 P2)
         unique = unique_space(_json(_member_path(generation, manifest, manifest["program_member_id"])))
-    edit = edit_observation(observation, variant, site, index, unique)
+    edit = edit_observation(observation, variant, site, index, unique, selected)
     result.update({key: value for key, value in edit.items() if key != "moved"})
     data = _sealed.dumps(observation)
     _write_member(generation, manifest, function["observation_member"], data)

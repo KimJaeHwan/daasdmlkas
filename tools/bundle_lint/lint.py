@@ -31,6 +31,14 @@ from report import Row, compare, dumps  # noqa: E402
 TOOL_REVISION = 1
 
 
+def _diagnosis_resource(diagnosis: dict) -> bool:
+    """A resource failure in the diagnosis leaves the admitted set unknown (Astra impl r5 P2)."""
+    if diagnosis.get("admission", {}).get("resource") or (diagnosis.get("fatal") or {}).get("resource"):
+        return True
+    return any((claim.get(name) or {}).get("resource") for claim in diagnosis.get("claims", [])
+               for name in ("seeds_error", "naming_error"))
+
+
 def _admitted(claims) -> tuple[int, set]:
     members = [claim for claim in claims if claim.get("scope") == "constructed" and claim.get("naming") == "ok"]
     return len(members), {claim["entry"] for claim in members}
@@ -103,10 +111,12 @@ def pipeline_rows(diagnosis: dict, predictions: dict, results: dict) -> list[Row
             else:   # (a resource failure or an unpredicted stop is no verdict on the Bundle)
                 rows.append(Row("pipeline", "completion", path, "error", None, "lint", stopped))
             continue
-        if diagnosis.get("failed"):
+        if diagnosis.get("failed") or _diagnosis_resource(diagnosis):
             # admitted keys are unknown without the diagnosis: no completion verdict (Astra r3 P2, Fable r3 P3-4)
+            kept = {name: child[name] for name in ("succeeded", "failed_functions", "graphs", "failures")
+                    if name in child}
             rows.append(Row("pipeline", "completion", path, "error", None, "lint",
-                            {"why": "diagnosis failed: admitted function keys unknown"}))
+                            {"why": "diagnosis failed: admitted function keys unknown", **kept}))
             continue
         if path != "base_graph" and child["supports_count"] != len(child["supported_functions"]):
             rows.append(Row("pipeline", "completion", path, "error", None, "lint",
@@ -131,10 +141,10 @@ def branchind_final_rows(rows, results: dict) -> list[Row]:
     candidate -> known / not_applicable, else a candidate the run published
     nowhere -> unobserved. The exemption and fault-report rows of the key are
     kept in the detail."""
-    summary = results.get("summary")
-    ok = summary is not None and summary.get("run_state") == "evaluated" and summary.get("completed")
-    exemptions, kinds, faults = {}, {}, {}
-    if ok:
+    name, summary = feature_layer.summary_run(results)
+    exemptions, kinds, faults, failed = {}, {}, {}, set()
+    if name is not None:
+        failed = {row[0] for row in summary["failed_functions"]}
         for site, assumption in summary["control_exemptions"]:
             exemptions.setdefault(site, []).append(assumption)
         for row in summary["control_sites"]:
@@ -147,20 +157,17 @@ def branchind_final_rows(rows, results: dict) -> list[Row]:
             continue
         site = row.key.split("/", 1)[1]
         candidate = bool(row.detail.get("unknown_transfer"))
-        if summary is None:
-            out.append(Row("pipeline", "branchind_final", row.key, "not_run"))
+        superseded = bool(row.detail.get("superseded_by_duplicate_entry"))
+        state, _ = feature_layer.site_state(results, superseded)
+        if state != "evaluated":
+            out.append(Row("pipeline", "branchind_final", row.key, state, None, "lint",
+                           {"why": "a later member of the same entry is the one the summary analyses"}
+                           if superseded and state == "not_reached" else {}))
             continue
-        if not ok:
-            out.append(Row("pipeline", "branchind_final", row.key,
-                           summary.get("run_state") if summary.get("run_state") in ("timeout", "error")
-                           else "not_reached"))
-            continue
-        if row.detail.get("superseded_by_duplicate_entry"):
-            out.append(Row("pipeline", "branchind_final", row.key, "not_reached", None, "lint",
-                           {"why": "a later member of the same entry is the one the summary analyses"}))
-            continue
-        detail = {"candidate": candidate, "exemptions": sorted(exemptions.get(site, [])),
-                  "control_site_kinds": sorted(kinds.get(site, ())), "fault_report": faults.get(site, [])}
+        function = ":".join(site.split(":")[1:3])
+        detail = {"run": name, "candidate": candidate, "exemptions": sorted(exemptions.get(site, [])),
+                  "control_site_kinds": sorted(kinds.get(site, ())), "fault_report": faults.get(site, []),
+                  "function_failed": function in failed}
         if "unknown-transfer" in kinds.get(site, ()):
             final, verdict, state = "unknown", "withheld", "evaluated"
         elif "import-tail-reentry" in kinds.get(site, ()):

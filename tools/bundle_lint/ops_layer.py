@@ -342,16 +342,18 @@ def return_rows(claim) -> list[Row]:
     return rows
 
 
-def rep_rows(claim) -> list[Row]:
+def rep_rows(claim, superseded=False) -> list[Row]:
     """rep string sites the engine recognises (``rep_strings.rep_sites``): their
     proof inside the summary run is not public -> application rows in layer 3."""
     from tdo_v2.rep_strings import rep_sites
 
-    return [Row("operations", "rep_site", f"{claim.function_id}/{_coord(address)}", "evaluated", "applied", "engine")
+    detail = {"superseded_by_duplicate_entry": True} if superseded else {}
+    return [Row("operations", "rep_site", f"{claim.function_id}/{_coord(address)}", "evaluated", "applied", "engine",
+                dict(detail))
             for address in sorted(rep_sites(claim.unit.observation), key=lambda a: (a.space_id, a.byte_offset))]
 
 
-def callother_rows(claim, models) -> list[Row]:
+def callother_rows(claim, models, superseded=False) -> list[Row]:
     """Every CALLOTHER (``callother_model_match``, a lint diagnostic -- the
     summary applies a model only when it is given one, layer 3):
     no-effect / trap model match via the engine (``no_effect_calls`` /
@@ -386,6 +388,8 @@ def callother_rows(claim, models) -> list[Row]:
             detail = {"index": index, "operands": constants[1:], "models": [m.file_id for m in applicable],
                       "no_effect": op_key in no_effect, "trap_match": op_key in traps,
                       "refinement": op_key in refined, "output": operation.output is not None}
+            if superseded:
+                detail["superseded_by_duplicate_entry"] = True
             if not applicable:
                 verdict = "unsupported"
             elif op_key in no_effect or op_key in traps:
@@ -436,9 +440,9 @@ def rows(diagnosis, generation, options) -> list[Row]:
                 mine.extend(tail_rows(claim, function_keys))
                 mine.extend(exit_rows(claim, raw, function_keys, superseded=last.get(claim.entry) is not claim))
                 mine.extend(branchind_rows(claim, raw, superseded=last.get(claim.entry) is not claim))
-                mine.extend(rep_rows(claim))
+                mine.extend(rep_rows(claim, superseded=last.get(claim.entry) is not claim))
                 mine.extend(return_rows(claim))
-                mine.extend(callother_rows(claim, models))
+                mine.extend(callother_rows(claim, models, superseded=last.get(claim.entry) is not claim))
         except Exception as error:   # (one function's rows never stop the report; its partial rows are dropped)
             mine = [Row("operations", "layer_error", claim.function_id or f"#{claim.index}", "error", None,
                         "lint", {"class": type(error).__qualname__, "message": str(error)})]
