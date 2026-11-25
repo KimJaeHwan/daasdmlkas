@@ -1524,6 +1524,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     assume_direction_flag_clear=assume_direction_flag_clear,
                     private_frame_above=private_frame_above,
                     open_conditions=opened,
+                    # (PE-a1) the calls whose return direction-flag-clear covers
+                    covered_call_returns=_covered_call_returns(
+                        unit, frozenset(program) | unavailable_entries, calls[key], multi.get(key, {}),
+                        opaque_sets.get(key, {}), externals[key]),
                 )
                 fault_cuts = fault_plan.cuts_of(key, fault_state["discharged"])
                 if fault_cuts:
@@ -2943,6 +2947,38 @@ def _cut_sites(unit, cuts) -> dict:
 
 def function_key_of(space_id: int, byte_offset: int) -> str:
     return f"{space_id:x}:{byte_offset:x}"
+
+
+def _covered_call_returns(unit, in_program, calls, multi, opaque_sets, externals) -> frozenset:
+    """(PE-a1, S3 design r18 amendment 1) CALL / CALLIND keys of ``unit``
+    whose return the direction-flag-clear premise covers: a call with no
+    analysed in-program target -- a direct CALL to an address that is no
+    function of the program (``in_program``: every observed function, cut and
+    refused ones included), or an indirect one resolved to none -- and no
+    derived template (an analysed body). Calls to analysed code (internal
+    targets, multi-target sets, forward sets, templates) are not listed: their
+    body decides DF, and PE-a1 carries no body record yet. A CALLOTHER is never
+    a call return. Fail closed: a key not listed is uncovered."""
+    found = set()
+    observation = unit.observation
+    if observation is None:
+        return frozenset()
+    for instruction in observation.instructions:
+        for ordinal, operation in enumerate(instruction.operations):
+            if operation.opcode not in ("CALL", "CALLIND") or not operation.inputs:
+                continue
+            key = _operation_key(instruction.address, ordinal, operation.opcode)
+            if key in calls or key in multi or key in opaque_sets:
+                continue
+            external = externals.get(key)
+            if external is not None and external[1].template is not None:
+                continue
+            target = operation.inputs[0]
+            if operation.opcode == "CALL" and (target.kind is not VarnodeKindCode.ADDRESS
+                                               or function_key(target.coordinate) in in_program):
+                continue
+            found.add(key)
+    return frozenset(found)
 
 
 def _direct_calls(unit, functions) -> dict[str, str]:

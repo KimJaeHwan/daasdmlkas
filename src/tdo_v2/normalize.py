@@ -1593,6 +1593,7 @@ class FunctionNormalizer:
         assume_direction_flag_clear: bool = False,
         private_frame_above: int = 0,
         open_conditions: dict | None = None,
+        covered_call_returns: frozenset = frozenset(),
         fault_cuts: tuple = (),
         fault_reachable: bool = False,
         control_exempt: tuple = (),
@@ -1611,7 +1612,11 @@ class FunctionNormalizer:
         ``proven_call_effects``: call operation key -> effect proven from the
         callee's summary (``tdo_v2.call_summary_effects``).
         ``assume_globals_disjoint_from_stack``: named opt-in assumption, see
-        ``tdo_v2.may_alias``."""
+        ``tdo_v2.may_alias``.
+        ``covered_call_returns``: CALL / CALLIND keys whose return
+        direction-flag-clear covers -- calls with no analysed in-program target
+        (``interprocedural._covered_call_returns``); a call not listed is
+        uncovered (PE-a1, S3 design r18 amendment 1)."""
         if type(value) is not ScopedFunctionUnit:
             raise TypeError("normalization requires an exact ScopedFunctionUnit")
         if value.observation is None:
@@ -1646,6 +1651,7 @@ class FunctionNormalizer:
             assume_direction_flag_clear=assume_direction_flag_clear,
             private_frame_above=private_frame_above,
             open_conditions=open_conditions or {},
+            covered_call_returns=frozenset(covered_call_returns),
         )
         if _once_control is not None:
             options["_once_control"] = _once_control
@@ -1795,6 +1801,7 @@ class _ScopedNormalizer:
         _uncertain: dict | None = None,
         _opaque_rows: frozenset = frozenset(),
         open_conditions: dict | None = None,
+        covered_call_returns: frozenset = frozenset(),
         _forward_memory_plan=None,
         _load_identity_plan=None,
         _once_control=None,
@@ -2437,14 +2444,28 @@ class _ScopedNormalizer:
             elif debts:
                 # direction-flag-clear: DF is 0 when a call returns -- the flag
                 # is then 0 (forward) at the site only if every debt is a call
-                # possibly changing DF itself (nothing assigned after it)
+                # possibly changing DF itself (nothing assigned after it).
+                # (PE-a1, S3 design r18 amendment 1) and only a return the
+                # premise covers, read by the site itself: the debt's reader is
+                # the site's own direction read (a value computed from DF after
+                # the call -- DF ^= 1 -- is no covered origin), its call a raw
+                # CALL / CALLIND (a CALLOTHER -- syscall, int -- returns from
+                # no call) listed in ``covered_call_returns`` (no analysed
+                # in-program target: the body, not the premise, decides those;
+                # an unlisted call is uncovered)
                 flag = _resolve_validated_storage(_storage_ref(site.direction), context)
-                from .call_clobber import spans_by_debt
+                from .call_clobber import debt_calls, rows_by_debt
 
-                spans = spans_by_debt(call_clobber_reads, call_clobber_debts)
+                rows = rows_by_debt(call_clobber_reads, call_clobber_debts)
+                producers = debt_calls(call_clobber_reads, call_clobber_debts)
                 if assume_direction_flag_clear and rep_plan[address][1] == 1 \
                         and type(flag) is ResolvedStorage and all(
-                            debt in spans and all(flag.span.contains(span) for span in spans[debt])
+                            debt in rows and all(
+                                row.operation_key == site.direction_key
+                                and all(flag.span.contains(span) for span in row.spans)
+                                for row in rows[debt])
+                            and producers.get(debt, "").rsplit(":", 1)[-1] in ("CALL", "CALLIND")
+                            and producers[debt] in covered_call_returns
                             for debt in debts):
                     direction_assumed = True
                 else:

@@ -7308,3 +7308,26 @@ Fable AWF -> r2; r2: Astra AWF / Fable AWF(P1 없음) -> r3 반영 후 닫음. �
   `stack-switch-check-exceptions` 자체는 바꾸지 않는다(Fable r18 P2-2).
 - 고정 `tests/intra/test_call_clobber_discharge.py`(가정 있음 / 없음), `test_stack_call_preservation.py`(출력 누락),
   `test_pe_b_refused_callees.py`(거부 + 증거); 돌연변이 `cob/pec_mutants.py`.
+
+### 25.119 방향 플래그는 출처로 판정한다 -- 1단계: 호출자 지역 규칙 (PE-a1, 2026-11-25)
+
+설계 `.census6/design_s3_r18.md` 수정 1(PRE-EXISTING; S3 전제). 구현 설계는 Astra가 쓴 `.census6/design_pea_r1.md`,
+Fable r1(`pea_r1_fable.md`)의 제안대로 세 단계로 나눈다: PE-a1 호출자 지역 규칙(형식 변경 없음), PE-a2 한 프로그램
+안에서 요약 / 효과로 출처 전달, PE-a3 템플릿. 각 단계는 혼자서 건전하다(기록이 없으면 "덮이지 않음").
+- 구멍(main 1fd15f1에서 재현): rep 지점 DF의 호출 덮어쓰기 빚을 `direction-flag-clear`가 호출 종류를 보지 않고
+  덮었다 -- 호출 연산에 CALLOTHER가 들어 있어 `cld; syscall; rep stosb`가 "앞으로"가 되었고, 한쪽 갈래만 `cld`인 합류,
+  `syscall; ret` 감싸기 함수를 부른 뒤도 같았다.
+- 규칙(`normalize.py` 최종 rep 검사): DF 빚은 세 조건이 모두 맞을 때만 가정으로 덮는다 -- (1) 빚의 읽는 쪽이 지점 자신의
+  방향 읽기다(호출 뒤 DF로 계산한 값, 예 `DF ^= 1`, 은 덮인 출처가 아니다); (2) 빚을 만든 호출이 원시 `CALL` /
+  `CALLIND`다(CALLOTHER는 호출 복귀가 아니다); (3) 그 호출이 정규화 입력 `covered_call_returns`에 있다. 그 목록은
+  `interprocedural._covered_call_returns`가 만든다: 분석된 프로그램 안 대상이 없는 호출(프로그램 함수가 아닌 주소로의
+  직접 CALL, 아무것도로 풀리지 않은 간접 호출; 손 모델 포함), 파생 템플릿 제외. 목록에 없으면 덮이지 않는다(fail
+  closed; 단독 정규화는 빈 목록). 목록은 봉인된 정규화 / 재실행 입력에 들어간다.
+- 비용(PE-a2가 되찾을 정밀도): 분석된 함수 호출 뒤 그 함수가 DF를 지킨다고 증명하지 못하면 rep를 거절한다(분석된
+  비단말 함수는 거의 다 그렇다). 그 대상의 몸체가 결정하지만 PE-a1은 몸체 기록이 없다.
+- S3에 대해: 허용된 커널 지점은 증명된 효과를 가진 호출이므로 (3)에 걸려 이 필드 없이도 덮이지 않는다.
+- 레지스트리 문장 갱신(덮는 것 / 덮지 않는 것, 실패 모드에 호출 아닌 진입 추가), `docs/assumptions.md` 재생성.
+- 의미 버전 62.
+- 고정 `tests/intra/test_pe_a_direction_origin.py`(커널 복귀, 뒤따르는 cld / std, 합류, 감싸기, 불투명 / 미해결 간접
+  호출, DF로 계산한 값, 분석된 단말, 거부된 프로그램 함수, 분석된 대상으로 풀린 간접 호출, 단독 정규화);
+  `test_stale_projection_alias.py`의 기존 DF 시험은 목록을 명시. 돌연변이 `cob/pea1_mutants.py`(M4는 중복 가드).
