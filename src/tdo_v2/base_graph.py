@@ -212,6 +212,13 @@ class BaseGraphPublication:
                     # (PE-c) a refused member is code the stack-switch check never saw
                     self._policy = replace(self._policy, assume_globals_disjoint_from_stack=False)
                 normalizer = FunctionNormalizer()
+                # (PE-a1, Astra r4 P2) the program-wide DF coordinate, as the proof pass
+                inferred_flag = None
+                if self._policy.assume_direction_flag_clear:
+                    from .isa_identity import inferred_direction_flag
+
+                    inferred_flag = inferred_direction_flag(
+                        [*self._units, *(item.unit for item in self._admission_failures)])
                 for key, unit in zip(self._keys, self._units):
                     try:
                         # Separate from the proof function's cumulative ledger;
@@ -219,7 +226,8 @@ class BaseGraphPublication:
                         with activation(("base-graph", unit.scopes.function.scope)):
                             normalized = normalizer.normalize(unit,
                                 assume_globals_disjoint_from_stack=self._policy.assume_globals_disjoint_from_stack,
-                                assume_direction_flag_clear=self._policy.assume_direction_flag_clear)
+                                assume_direction_flag_clear=self._policy.assume_direction_flag_clear,
+                                **({"inferred_direction_flag": inferred_flag} if inferred_flag is not None else {}))
                             checkpoint()
                             if type(normalized) is NormalizedFunction:
                                 self._graphs[key] = BaseFunctionGraph(key, unit, normalized, self._policy)

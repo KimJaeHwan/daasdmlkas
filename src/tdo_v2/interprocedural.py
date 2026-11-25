@@ -619,7 +619,7 @@ def _without_late_refusals(published, owners, functions, calls, late_edges=None,
 
 
 @measured("analyze_units")
-def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
+def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None, retained_observations=(),
                   assume_globals_disjoint_from_stack=False, sink_roots=None,
                   image_info=None, external_models=None, readonly_image=None,
                   declared_boundaries=None, assume_direction_flag_clear=False,
@@ -878,7 +878,10 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # row of the program names (decoder-matches-cpu), once per program
     from .isa_identity import inferred_direction_flag
 
-    direction_flag_inferred = inferred_direction_flag(program.values()) if assume_direction_flag_clear else None
+    # (Astra r4 P1-1: every retained observation -- the units passed, admitted
+    # or not, cut ones, and refusals the caller retained)
+    direction_flag_inferred = inferred_direction_flag(
+        [*units, *program.values(), *retained_observations]) if assume_direction_flag_clear else None
     externals = {
         key: {**(_external_sites(unit, image_info, external_models, disabled, usable,
                                  refused_sites.setdefault(key, {}), local_entries,

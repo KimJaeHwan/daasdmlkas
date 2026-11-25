@@ -773,12 +773,13 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
     from .isa_identity import is_direction_flag
     from .relative_memory import expressions_at
 
-    # (PE-a1) the premise is about the architectural DF only: the register
-    # table's DF row, else the program-wide inferred coordinate
-    flag_register = _direction_flag_of(scopes.program.evidence, inferred_flag)
     pending = {address: site for address, site in sites.items() if address not in plan}
     if not pending:
         return {}
+    # (PE-a1) the premise is about the architectural DF only: the register
+    # table's DF row, else the program-wide inferred coordinate (looked up
+    # only when a site may use it)
+    flag_register = _direction_flag_of(scopes, inferred_flag) if assume_clear else None
     requests = []
     for site in pending.values():
         requests.append((site.count_key, site.count))
@@ -807,19 +808,24 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
     return found
 
 
-def _direction_flag_of(evidence, inferred_flag):
+def _direction_flag_of(scopes, inferred_flag):
     """(PE-a1) DF for the premise: the exported register table's DF row when
     the program has a table (precedence: no row, no certificate), else the
-    sealed program-wide inferred coordinate (``inferred_direction_flag``)."""
-    from .isa_identity import RegisterCoordinate, direction_flag
+    sealed program-wide inferred coordinate (``inferred_direction_flag``) --
+    only for the snapshot it was inferred from (Astra r4 P1-2)."""
+    from .isa_identity import _DIRECTION_FLAGS, InferredDirectionFlag, direction_flag
 
+    evidence = scopes.program.evidence
     if evidence.register_evidence is not None:
         return direction_flag(evidence)
     if inferred_flag is None:
         return None
-    if type(inferred_flag) is not RegisterCoordinate:
-        raise TypeError("inferred_direction_flag requires an exact RegisterCoordinate")
-    return inferred_flag
+    if type(inferred_flag) is not InferredDirectionFlag:
+        raise TypeError("inferred_direction_flag requires an exact InferredDirectionFlag")
+    parts = tuple(evidence.translation_namespace.language_id.split(":"))
+    if inferred_flag.program != scopes.program.scope or parts[:3] not in _DIRECTION_FLAGS:
+        return None
+    return inferred_flag.flag
 
 
 def _rep_element_rows(site, proven, block_key, scope, context, temporaries):
@@ -2448,9 +2454,9 @@ class _ScopedNormalizer:
         failed -= _blocked_reads
         # a rep expansion has no condition to carry: its count and direction
         # must reach no debt on the final graph (memory, call clobber,
-        # unresolved -- also through registers a call may have changed); a
-        # call-clobber debt on the direction flag alone is covered by
-        # direction-flag-clear (DF clear when a call returns), reported as used
+        # unresolved -- also through registers a call may have changed); no
+        # debt on the direction flag is waived (PE-a1: direction-flag-clear
+        # covers the entry value only, at ``_prove_rep_sites``)
         failed_sites = set()
         for address in rep_plan:
             site = sites[address]

@@ -210,15 +210,16 @@ def test_agreeing_rep_rows_in_two_functions_give_the_coordinate(monkeypatch):
 
 def test_an_inferred_coordinate_never_overrides_a_table():
     """Normalization with a table lacking DF ignores a passed coordinate."""
-    from tdo_v2.isa_identity import RegisterCoordinate
+    from tdo_v2.isa_identity import inferred_direction_flag, InferredDirectionFlag
 
     table = {**REGISTERS, "registers": [row for row in REGISTERS["registers"] if row["name"] != "DF"]}
     builder, _ = _function()
-    (unit,) = program_units(builder, registers=table)
-    inferred = RegisterCoordinate("DF", 2, DF, 1)
-    assert not FunctionNormalizer().normalize(unit, assume_direction_flag_clear=True,
-                                              inferred_direction_flag=inferred).rep_blocks
     (bare,) = program_units(builder)
+    inferred = inferred_direction_flag([bare])
+    (unit,) = program_units(builder, registers=table)
+    forged = InferredDirectionFlag(unit.scopes.program.scope, inferred.flag)
+    assert not FunctionNormalizer().normalize(unit, assume_direction_flag_clear=True,
+                                              inferred_direction_flag=forged).rep_blocks
     assert FunctionNormalizer().normalize(bare, assume_direction_flag_clear=True,
                                           inferred_direction_flag=inferred).rep_blocks   # (control)
 
@@ -238,3 +239,87 @@ def test_the_inference_is_x86_and_table_free_only():
     assert inferred_direction_flag(program_units(builder, registers=REGISTERS)) is None   # (the table rule)
     arm, _ = _function(arch=AARCH64)   # (the same rep p-code in another language)
     assert inferred_direction_flag(program_units(arm)) is None
+
+
+
+def test_a_refused_members_observation_joins_the_unanimity(monkeypatch):
+    """Astra r4 P1-1: a body refused at admission whose observation was
+    retained, and whose rep names another byte, breaks the unanimity."""
+    from dataclasses import replace
+
+    import test_rep_strings
+    from tdo_v2._scope_results import ScopeConstructionReason, ScopeConstructionStage, UnresolvedFunctionScope
+    from tdo_v2.interprocedural import analyze_units
+    from tdo_v2.isa_identity import inferred_direction_flag
+
+    monkeypatch.setattr(test_rep_strings, "DF", RDX)   # (main's rep reads DL)
+    main, _ = _function()
+    monkeypatch.setattr(test_rep_strings, "DF", DF)
+    monkeypatch.setattr(test_rep_strings, "CODE_BASE", WRAPPER)
+    other, _ = _function(entry=WRAPPER)                # (its rep reads DF)
+    monkeypatch.setattr(test_rep_strings, "CODE_BASE", CODE_BASE)
+    first, second = program_units(main, other)
+    from tdo_v2._scope_results import _observation_digest
+
+    refused = replace(second, scopes=replace(second.scopes, function=UnresolvedFunctionScope(
+        ScopeConstructionStage.FUNCTION_COORDINATE, ScopeConstructionReason.INVALID_FUNCTION_ENTRY,
+        validated_observation_digest=_observation_digest(second.observation))))
+    assert refused.observation is not None
+    assert inferred_direction_flag([first]) is not None            # (alone: main's DL is unanimous)
+    assert inferred_direction_flag([first, refused]) is None
+    results = analyze_units([first, refused], assume_direction_flag_clear=True)
+    assert not results["1:1000"].normalized.rep_blocks
+
+
+def test_an_inferred_coordinate_is_bound_to_its_snapshot():
+    """Astra r4 P1-2: units of several program snapshots infer nothing, and a
+    coordinate is a certificate only in the snapshot it was inferred from."""
+    from synthetic import AARCH64
+    from tdo_v2.isa_identity import InferredDirectionFlag, inferred_direction_flag
+
+    builder, _ = _function()
+    (x86,) = program_units(builder)
+    (arm,) = program_units(_function(arch=AARCH64)[0])
+    assert x86.scopes.program.scope != arm.scopes.program.scope
+    assert inferred_direction_flag([x86, arm]) is None and inferred_direction_flag([arm, x86]) is None
+    inferred = inferred_direction_flag([x86])
+    elsewhere = InferredDirectionFlag(arm.scopes.program.scope, inferred.flag)
+    assert not FunctionNormalizer().normalize(x86, assume_direction_flag_clear=True,
+                                              inferred_direction_flag=elsewhere).rep_blocks
+    assert FunctionNormalizer().normalize(x86, assume_direction_flag_clear=True,
+                                          inferred_direction_flag=inferred).rep_blocks   # (control)
+
+
+def test_a_coordinate_from_an_x86_program_is_no_certificate_for_another_language():
+    from synthetic import AARCH64
+    from tdo_v2.isa_identity import InferredDirectionFlag, inferred_direction_flag
+
+    builder, _ = _function()
+    inferred = inferred_direction_flag(program_units(builder))
+    arm, _ = _function(arch=AARCH64)
+    (unit,) = program_units(arm)
+    forged = InferredDirectionFlag(unit.scopes.program.scope, inferred.flag)
+    result = FunctionNormalizer().normalize(unit, assume_direction_flag_clear=True, inferred_direction_flag=forged)
+    assert not getattr(result, "rep_blocks", ())
+
+
+def test_a_near_match_row_does_not_abort_the_recognizer():
+    """Astra r4 P2: a one-input INT_SUB in the decrement position is declined."""
+    from tdo_v2.rep_strings import recognize
+
+    builder, index = _function()
+    rows = builder._rows[index].ops
+    builder._rows[index].ops = [*rows[:2], op("INT_SUB", [reg(RCX)], reg(RCX)), *rows[3:]]
+    (unit,) = program_units(builder)
+    assert all(recognize(row) is None for row in unit.observation.instructions)
+
+
+def test_base_graphs_take_the_program_wide_coordinate():
+    """Astra r4 P2: the base-graph pass expands as the proof pass does."""
+    from tdo_v2.base_graph import BaseGraphPolicy, BaseGraphPublication
+
+    builder, _ = _function()
+    units = program_units(builder)
+    result = BaseGraphPublication(units, policy=BaseGraphPolicy(assume_direction_flag_clear=True)).build()
+    (graph,) = result.graphs.values()
+    assert graph.normalized.rep_blocks

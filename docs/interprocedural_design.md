@@ -7331,9 +7331,15 @@ PE-a3(템플릿). 각 단계는 혼자서 건전하다(기록이 없으면 "덮�
   decoder-matches-cpu(P-0)에 기댄다). 추론 좌표는 `interprocedural`이 프로그램마다 한 번 만들어 정규화 옵션
   `inferred_direction_flag`로 넘긴다(재실행 옵션에 봉인; 있을 때만). 단독 정규화는 표가 없으면 증명 없음. 게이트 Bundle은
   표가 없다(ue-core-probe만 있다): 추론으로 정밀도를 지킨다.
+  r4(Astra r4 REJECT 2 P1 + 3 P2): 만장일치는 남아 있는 모든 관찰을 본다 -- 넘겨받은 단위(수용되지 않은 것 포함), 잘린 것,
+  호출자가 보존한 입장 거부 구성원(요약 엔진이 `retained_observations`로 넘긴다); 여러 프로그램 스냅숏의 단위가 섞이면
+  추론 없음; 결과는 그 스냅숏(프로그램 scope id)에 묶이고(`InferredDirectionFlag`), 소비할 때 같은 스냅숏과 x86 언어를 다시
+  확인한다; 기본 그래프 패스도 같은 좌표를 쓴다; 인식기는 인덱싱 전에 입력 개수를 본다(근접 행이 실행을 멈추지 않게); 표 /
+  추론 조회는 지점이 쓸 때만.
 - 비용(PE-a2가 되찾을 정밀도): 호출 뒤 확정 쓰기 없이 DF를 읽는 rep는 거절된다(가져오기 호출 뒤 포함).
 - S3에 대해: 허용된 커널 지점은 호출이므로 이 단계에서 이미 덮이지 않는다.
 - 레지스트리 문장 갱신(입구만; 덮지 않는 것; DF의 정의), `docs/assumptions.md` 재생성. 의미 버전 62.
 - 고정 `tests/intra/test_pe_a_direction_origin.py`(입구, 확정 쓰기, 커널 복귀와 뒤따르는 cld / std, 합류 두 가지, 감싸기,
   가져오기 / 바깥 / 간접 / 분석된 단말 호출, DF로 계산한 값, DL 피연산자, 표 없음: 단독 / 추론 / 불일치 두 방향 / 일치, 표 우선,
-  x86 전용); `test_stale_projection_alias.py` / `test_rep_strings.py`의 기존 DF 시험 갱신. 돌연변이 `cob/pea1_mutants.py` 7/7.
+  x86 전용, 보존된 거부 관찰, 스냅숏 묶음, 근접 행, 기본 그래프); `test_stale_projection_alias.py` / `test_rep_strings.py`의
+  기존 DF 시험 갱신. 돌연변이 `cob/pea1_mutants.py` 13/13.

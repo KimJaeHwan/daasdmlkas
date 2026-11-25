@@ -559,6 +559,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
         unavailable_entries=refused_entries, unidentified_refusals=unidentified_refusals,
         refusals_covered_by_evidence=refusals_covered,
+        # (PE-a1) refused members' observations join the DF inference
+        retained_observations=tuple(item.unit for item in admission_failures),
         assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
         sink_roots=sink_roots,
         # the image facts serve models and the import-slot assumption

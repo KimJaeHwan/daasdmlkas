@@ -57,7 +57,16 @@ def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordin
     return _named(evidence, _DIRECTION_FLAGS)
 
 
-def inferred_direction_flag(units) -> RegisterCoordinate | None:
+@dataclass(frozen=True, slots=True)
+class InferredDirectionFlag:
+    """(PE-a1) The program-wide DF coordinate, bound to the program snapshot
+    it was inferred from (``program``: its program scope id)."""
+
+    program: object
+    flag: RegisterCoordinate
+
+
+def inferred_direction_flag(units) -> InferredDirectionFlag | None:
     """(PE-a1; owner 2026-11-25, Astra / Fable r2 P2-2) Without an exported
     register table: the one-byte direction operand every recognised ``rep
     movs`` / ``rep stos`` row of the program names (``rep_strings.recognize``:
@@ -66,11 +75,17 @@ def inferred_direction_flag(units) -> RegisterCoordinate | None:
     The identification rests on the base premise decoder-matches-cpu (P-0):
     in that lifting the byte deciding the direction is DF by ISA. A program
     with a register table, another language, no rep row or disagreeing rows:
-    None (the table rule, or no certificate)."""
+    None (the table rule, or no certificate). ``units``: every retained
+    observation of ONE program snapshot -- admitted, cut and refused-at-
+    admission bodies alike (Astra r4 P1-1); units of several snapshots: None
+    (Astra r4 P1-2). The result is bound to that snapshot."""
     from .rep_strings import recognize
 
     units = [unit for unit in units if unit.observation is not None]
     if not units:
+        return None
+    program = units[0].scopes.program.scope
+    if any(unit.scopes.program.scope != program for unit in units):
         return None
     evidence = units[0].scopes.program.evidence
     parts = tuple(evidence.translation_namespace.language_id.split(":"))
@@ -86,7 +101,7 @@ def inferred_direction_flag(units) -> RegisterCoordinate | None:
     if len(found) != 1:
         return None
     ((space_id, offset, size),) = found
-    return RegisterCoordinate("DF", space_id, offset, size) if size == 1 else None
+    return InferredDirectionFlag(program, RegisterCoordinate("DF", space_id, offset, size)) if size == 1 else None
 
 
 def is_direction_flag(varnode, flag: RegisterCoordinate | None) -> bool:

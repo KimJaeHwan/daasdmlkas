@@ -131,7 +131,8 @@ def recognize(instruction) -> RepSite | None:
             and (exit_target.coordinate.space_id, exit_target.coordinate.byte_offset)
             == (instruction.fallthrough.space_id, instruction.fallthrough.byte_offset)):
         return None
-    if not (decrement.opcode == "INT_SUB" and decrement.inputs == (count, decrement.inputs[1])
+    if not (decrement.opcode == "INT_SUB" and len(decrement.inputs) == 2
+            and decrement.inputs == (count, decrement.inputs[1])
             and _const(decrement.inputs[1], 1) and decrement.output == count):
         return None
     back = ops[-1]
