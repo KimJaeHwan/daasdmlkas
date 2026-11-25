@@ -344,6 +344,8 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
                     for key, items in sorted(normalized.items()) for index, item in enumerate(items)}
         sections.update({f"root:{index}": encode(root, f"roots[{index}]") for index, root in enumerate(run.roots)})
         sections["run:assumptions"] = encode(run.assumptions, "assumptions")
+        if getattr(run, "base_premises", ()):
+            sections["run:base_premises"] = encode(run.base_premises, "base_premises")
         meta = {"snapshot_version": SNAPSHOT_VERSION, "generation": generation.name, "config": config,
                 "bindings": [], "options": None, "models": None, "python": sys.version.split()[0],
                 "seconds": round(time.time() - started, 1)}
@@ -359,8 +361,8 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
     roots = [encode(root, f"roots[{index}]") for index, root in enumerate(run.roots)]
     run_level = {
         "assumptions": encode(run.assumptions, "assumptions"),
-        **({"producer_premises": encode(run.producer_premises, "producer_premises")}
-           if getattr(run, "producer_premises", ()) else {}),
+        **({"base_premises": encode(run.base_premises, "base_premises")}
+           if getattr(run, "base_premises", ()) else {}),
         "failed_functions": encode(getattr(run, "failed_functions", ()), "failed_functions"),
         # Scope refusals have no admitted entry/summary; do not lose their
         # sealed member identity when functions/roots happen to be empty.

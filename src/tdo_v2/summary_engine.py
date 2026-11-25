@@ -785,7 +785,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         run = EngineRun(
             program.scope.digest.hex(), program.evidence.executable_sha256.hex(), tuple(found),
             labels, tuple((key, failed[key][0].value, failed[key][1]) for key in sorted(failed)),
-            producer_premises=PRODUCER_PREMISES,
+            base_premises=BASE_PREMISES,
             supports=_function_supports(results, labels, external_models, model_bindings, pcodeop_models,
                                         lifecycle_contracts),
             control_contexts=tuple((key, tuple(sorted(keys))) for key, keys in sorted(contexts.items()) if keys),
@@ -1251,7 +1251,7 @@ def _lane_origin_labels(analysis, unit, rows, label, occurrence, node_labels, in
     return found
 
 
-from .assumptions import PRODUCER_PREMISES
+from .assumptions import BASE_PREMISES
 
 
 def run_assumptions(results, *, readonly_image=None, home_space=0, traps=False, pcodeop_models=None,

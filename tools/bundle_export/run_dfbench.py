@@ -284,7 +284,6 @@ def main() -> int:
                    if item.parameter != "external_models"},
             )
             print(f"[run] assumptions applied: {list(run.assumptions) or 'none'}")
-            print(f"[run] producer premises: {list(getattr(run, 'producer_premises', ())) or 'none'}")
             from tdo_v2.summary_store import ExternalModels, assumption_catalog
 
             # what each assumption a model file declares states (registry ones: docs/assumptions.md)
@@ -326,6 +325,7 @@ def main() -> int:
                 include_explanations=False,
                 assume_boundary_call_effects=args.assume_boundary_effects,
             )
+        print(f"[run] base premises (docs/assumptions.md): {list(getattr(run, 'base_premises', ())) or 'none'}")
     except Exception as exc:  # noqa: BLE001
         print("".join(traceback.format_exception(exc)), file=sys.stderr)
         return 2

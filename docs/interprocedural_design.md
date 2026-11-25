@@ -7215,18 +7215,23 @@ PE-b는 코드 리뷰 r4에서 Astra REJECT(P1 5개), Fable APPROVE WITH FIXES�
 별도 설계로 미뤘다(`.census6/design_k0_s3_r13..15.md`, 아직 구현 없음) -- **[ASTRA-OPEN K0]**. S3 설계(r18)는 Astra가
 "이 변경이면 승인"으로 낸 목록을 그대로 넣고 Fable 승인으로 닫았다(Astra 미해결 아님).
 
-### 25.117 생산자 전제를 모든 실행에 이름으로 남긴다 (P-0, 2026-11-25)
+### 25.117 기본 전제를 모든 실행에 이름으로 남긴다 (P-0, 2026-11-25)
 
 소유자 결정(2026-11-24: 해독 = CPU, 로드 이미지 = 파일, Bundle = 신뢰 경계)과 방향(2026-11-25: Ghidra 의존 해제 작업
-TBR이 멈추거나 "TBR 담당인 줄 알았다"는 틈이 생겨도 TDO 결과가 어디에 기대는지 보여야 한다). 그 셋은 문서 본문에만
-있었다 -- 이제 레지스트리(`assumptions.py`, kind `producer`, 항상 켜짐, 스위치 없음)와 모든 실행의
-`EngineRun.producer_premises`(요약 엔진과 legacy 엔진; `run_dfbench` 출력, `analyze_query` JSON, 의미 스냅샷의 run 층)에
-나온다. `EngineRun.assumptions`(결과가 기대는 선택 가정)와 따로 둔다 -- 템플릿 / 분석 결과는 바뀌지 않는다.
-- `decoder-matches-cpu`: 행의 시작 / 길이 / 피연산자 / 흐름 / p-code가 CPU가 실행하는 것과 같다(싼 방어: S1의 66 / 반복
-  접두사 보류). 검사: TBR G1 해독기 교차 확인(진단, 아직 엔진이 소비하지 않음 -- 엔진 연결은 TDO 단계).
-- `bundle-image-matches-file`: 블록 바이트 = 기본 주소에 올린 파일 바이트(+ exporter가 모델링하는 로더 쓰기; 2차 효과 포함).
-  검사: TBR G1 매핑(진단).
-- `producer-function-bodies-complete`: 생산자가 놓친 코드가 없다(함수 몸체, 닿는 함수). 점프 테이블 완전성은 이 전제가
-  아니다(TDO 안의 국소 증명 몫).
-- 경계 표와 안전장치(TBR 항목마다 TDO 전제 / 연결 단계 / TBR 없이 하는 대안, 머지마다 점검):
-  `.census6/tbr_tdo_boundary.md`.
+TBR이 멈추거나 "TBR 담당인 줄 알았다"는 틈이 생겨도 TDO 결과가 어디에 기대는지 보여야 한다). 문서 본문에만 있던 전제를
+레지스트리(`assumptions.py`)에 이름으로 두고(kind `producer` 다섯, `runtime` 하나; 항상 켜짐, 스위치 없음, 모델 / 템플릿의
+자기 표지로는 받지 않는다), 모든 실행의 `EngineRun.base_premises`(키워드 전용, 마지막 필드; 요약 / legacy 엔진,
+`run_dfbench` 두 경로, `analyze_query` JSON, 의미 스냅샷 run 층 / legacy 절)에 나온다. `EngineRun.assumptions`(결과가 기대는
+선택 가정)와 분석 결과 / 템플릿은 바뀌지 않는다. 리뷰 r1: Astra REJECT(P1 모델 표지로 들어감) / Fable AWF -> r2 반영.
+- `decoder-matches-cpu`: 행의 시작 / 길이 / 피연산자 / 흐름 / p-code = CPU 실행(싼 방어: exporter가 66 / 반복 접두사 이동
+  행이 있는 함수 전체의 S1과 예외 처리기 사실을 보류). TBR G1(진단).
+- `bundle-image-matches-file`: 블록 바이트 = 기본 주소에 올린 파일 바이트(로더가 쓰는 곳 제외; exporter는 1차 쓰기 범위를
+  예외 처리기 사실 거부에만 쓴다; 2차 효과는 이 전제 안). TBR G1 매핑(진단).
+- `producer-program-facts-accurate`: 메모리 지도(committed / 초기화 / 권한), 이미지 사실(import 슬롯 / thunk, export, 재배치),
+  함수 목록 / 진입, 레지스터 증거, exporter 증명(S1, 정적 예외 처리기 없음, fresh import).
+- `producer-function-bodies-complete`: 생산자가 놓친 코드가 없다.
+- `producer-listed-targets-complete`: 간접 이동에 생산자가 준 비어 있지 않은 목적지 목록은 전부다(점프 테이블 등; TDO에
+  국소 완전성 증명은 아직 없다; 목적지 없는 간접 이동은 U2a 위치).
+- `image-code-unmodified-at-runtime` (runtime): 분석한 코드가 실행되는 코드다(언패킹 / 자기 수정 / 후킹 없음). 데이터
+  바이트는 별도 스위치 readonly-image-data-is-constant.
+- 경계 표와 안전장치: `.census6/tbr_tdo_boundary.md`. 스냅샷 run 층에 `base_premises`가 새로 생겨 게이트 기준을 다시 잡는다.

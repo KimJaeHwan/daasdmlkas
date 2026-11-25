@@ -31,8 +31,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class Assumption:
-    name: str               # the label reported in EngineRun.assumptions (producer: EngineRun.producer_premises)
-    kind: str               # switch | reported | model | test-only | producer
+    name: str               # the label reported in EngineRun.assumptions (producer / runtime: base_premises)
+    kind: str               # switch | reported | model | test-only | producer | runtime
     default: bool
     statement: str          # what is assumed
     fails_when: str         # when it does not hold
@@ -43,35 +43,61 @@ class Assumption:
 
 
 REGISTRY: tuple[Assumption, ...] = (
-    # (P-0, owner 2026-11-24 / 2026-11-25) what every Bundle run rests on about the Bundle's PRODUCER:
-    # always on, no switch, listed in every run (``EngineRun.producer_premises``); checked outside the
-    # engine by the Ghidra-independence work (TBR G1 / G2, diagnostic) -- docs/interprocedural_design.md 25.117
+    # (P-0, owner 2026-11-24 / 2026-11-25) what every Bundle run rests on about the Bundle's PRODUCER (kind
+    # "producer") and about the run time (kind "runtime"): always on, no switch, never a model / template label,
+    # listed in every run (``EngineRun.base_premises``); the producer ones are checked outside the engine by the
+    # Ghidra-independence work (TBR, diagnostic) -- docs/interprocedural_design.md 25.117, .census6/tbr_tdo_boundary.md
     Assumption(
         "decoder-matches-cpu", "producer", True,
         "Every instruction row of the Bundle -- its start, length, operands, flow and p-code -- is what the "
         "processor executes at that address: the producer's decoder (Ghidra 12.0.4 SLEIGH) agrees with the CPU. "
-        "Cheap guards only: S1 withholds rows with a 66 / repeat prefix on a transfer (docs 25.115); TBR G1 "
-        "cross-checks rows with independent decoders (diagnostic, not consumed yet).",
-        "A decoder bug; an encoding that differs between CPU vendors (66 E8 on AMD vs Intel); undocumented or "
-        "newer instructions; a lifting whose p-code effect differs from the instruction's.",
+        "Cheap guard only: the exporter withholds S1 and the exception-handler fact for a whole function with an "
+        "x86-64 transfer row carrying a 66 or a repeated prefix (docs 25.115); TBR G1 cross-checks rows with "
+        "independent decoders (diagnostic, not consumed by the engine yet).",
+        "A decoder bug; an encoding that differs between CPU vendors (66 E8 on AMD vs Intel); undocumented or newer "
+        "instructions; a lifting whose p-code effect differs from the instruction's.",
         "every reader of instruction rows (normalization, S1, the exception-handler fact, call shapes)"),
     Assumption(
         "bundle-image-matches-file", "producer", True,
-        "The Bundle's committed block bytes are the original file's bytes mapped at its preferred image base, "
-        "changed only by the loader writes the exporter models (relocations, import / delay-import slots, the TLS "
-        "index, load-config pointers); second-order loader effects are included in this premise. TBR G1 compares "
-        "blocks with the file (diagnostic, not consumed yet).",
-        "A packed or self-modifying image; run-time patching; a producer that edited or re-based the bytes; a "
-        "loader write the exporter does not model.",
+        "The Bundle's committed block bytes are the original file's bytes mapped at its preferred image base, except "
+        "where the loader writes (relocations, import / delay-import slots, the TLS index, load-config pointers). The "
+        "exporter computes those first-order write ranges only to veto the exception-handler fact; second-order "
+        "effects (a relocation that redirects a later loader write) are inside this premise. TBR G1 compares blocks "
+        "with the file (diagnostic).",
+        "A producer that edited or re-based the bytes; a loader write the exporter does not model; a relocation "
+        "rewriting loader metadata.",
         "every reader of image bytes (read-only image values, the exception directory, call shapes, recognizers)"),
     Assumption(
+        "producer-program-facts-accurate", "producer", True,
+        "The producer's program facts the engine takes as given are accurate: the memory map (committed runs, "
+        "initialised and loaded flags, block permissions), image facts (import slots and thunks, exports, the "
+        "relocation list), the function inventory and entries, register evidence, and the exporter's attestations "
+        "(S1 call fallthrough, the no-static-exception-handler fact, the fresh-import attestation).",
+        "A writable block marked read-only; an import slot or thunk missing or misattributed; a wrong entry; a "
+        "register-evidence error; an exporter attestation produced from a state it does not describe.",
+        "admission, read-only image values, import models and slots, the exception-handler fact, S1"),
+    Assumption(
         "producer-function-bodies-complete", "producer", True,
-        "Each function's listed instructions are all the code that executes inside it, and the program's "
-        "functions cover the code its analysed functions reach: no code the producer failed to find (Bundle = "
-        "trust boundary, owner 2026-11-24). Jump-table completeness is NOT this premise (a local proof in TDO).",
-        "Code the producer did not disassemble (data-looking code, overlapping or obfuscated instructions), "
-        "run-time generated code, a function the producer split or merged wrongly.",
+        "Each function's listed instructions are all the code that executes inside it, and the program's functions "
+        "cover the code its analysed functions reach: no code the producer failed to find (Bundle = trust boundary, "
+        "owner 2026-11-24).",
+        "Code the producer did not disassemble (data-looking code, overlapping or obfuscated instructions), run-time "
+        "generated code, a function the producer split or merged wrongly.",
         "function summaries, control contexts (a missed site is a missed key), the exception-handler fact (frame PCs)"),
+    Assumption(
+        "producer-listed-targets-complete", "producer", True,
+        "A non-empty list of targets the producer gives for an indirect transfer (a jump table, a listed BRANCHIND / "
+        "CALLIND destination) is exhaustive: the transfer goes nowhere else. TDO has no local proof of table "
+        "completeness today; a targetless indirect transfer stays an unknown-transfer site (U2a).",
+        "A jump table whose bound the producer misread; a computed jump with one destination listed and others not.",
+        "pcode_blocks successors, the state barrier's successor completeness, control_context unknown-transfer sites"),
+    Assumption(
+        "image-code-unmodified-at-runtime", "runtime", True,
+        "The analysed code is the code that runs: the image's code bytes are not changed after loading (no unpacking, "
+        "self-modification, hooking or run-time patching of code). Data bytes are the separate switch "
+        "readonly-image-data-is-constant.",
+        "Packed or self-modifying binaries, inline hooks / detours, JIT-patched code, anti-tamper rewriting.",
+        "every analysis of instruction rows"),
     Assumption(
         "globals-disjoint-from-stack", "switch", True,
         "A constant address never falls in the stack (the function's frame or its callers' frames); nor "
@@ -429,8 +455,8 @@ def by_name(name: str) -> Assumption:
     raise KeyError(name)
 
 
-PRODUCER_PREMISES: tuple[str, ...] = ("decoder-matches-cpu", "bundle-image-matches-file",
-                                       "producer-function-bodies-complete")
+BASE_KINDS = ("producer", "runtime")
+BASE_PREMISES: tuple[str, ...] = tuple(item.name for item in REGISTRY if item.kind in BASE_KINDS)
 
 
 def switches() -> tuple[Assumption, ...]:
@@ -443,8 +469,8 @@ def render_markdown() -> str:
         "# Named assumptions",
         "",
         "Generated from `src/tdo_v2/assumptions.py` (`render_markdown`); edit the registry, not this file.",
-        "A result that relies on an assumption lists its label in `EngineRun.assumptions`; the `producer`",
-        "premises hold for every Bundle run and are listed in `EngineRun.producer_premises`.",
+        "A result that relies on an assumption lists its label in `EngineRun.assumptions`; the `producer` and",
+        "`runtime` premises hold for every Bundle run, are listed in `EngineRun.base_premises` and are never model labels.",
         "",
         "| Name | Kind | Default | Switch | Assumes | Fails when | Applied in |",
         "|---|---|---|---|---|---|---|",

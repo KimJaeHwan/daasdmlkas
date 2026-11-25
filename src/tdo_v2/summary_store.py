@@ -295,9 +295,11 @@ def _file_id(raw, path) -> str:
 
 def _label_problem(label) -> str | None:
     """None for a registry name, a provenance label or ``<file id>:<id>``."""
-    from .assumptions import PROVENANCE_PREFIXES, REGISTRY
+    from .assumptions import BASE_KINDS, PROVENANCE_PREFIXES, REGISTRY
 
-    if label in {item.name for item in REGISTRY} or label.startswith(PROVENANCE_PREFIXES):
+    # (P-0) the base premises hold for every run: never a model's or a template's own label
+    if label in {item.name for item in REGISTRY if item.kind not in BASE_KINDS} \
+            or label.startswith(PROVENANCE_PREFIXES):
         return None
     namespace, separator, name = label.partition(":")
     if separator and _WORD.match(namespace) and _WORD.match(name):
