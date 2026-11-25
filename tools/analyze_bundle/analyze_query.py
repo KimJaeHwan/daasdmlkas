@@ -141,7 +141,10 @@ class RecordingProvider:
 
 def _base_index(snapshot):
     """Small publication metadata, never a claim that pending graphs exist."""
+    from tdo_v2.assumptions import BASE_PREMISES
+
     return {"format": "tdo-base-graphs-v1", "program_scope": snapshot.program.scope.digest.hex(),
+        "base_premises": list(BASE_PREMISES),
         "executable_sha256": snapshot.program.evidence.executable_sha256.hex(),
         "policy": asdict(snapshot.policy), "policy_digest": snapshot.policy.digest,
         "requested_policy": asdict(snapshot.requested_policy),

@@ -63,3 +63,16 @@ def test_the_field_is_keyword_only_and_last():
     assert last.name == "base_premises" and last.kw_only
     with pytest.raises(TypeError):
         EngineRun("d", "s", (), (), (), (), (), (), (), (), (), (), None, BASE_PREMISES)
+
+
+def test_a_base_premise_is_never_a_resolvable_result_premise():
+    """Astra P-0 r2: the support resolver must neither resolve the base
+    premises nor fold them into its identity (report-only)."""
+    from tdo_v2.premises import PremiseResolver, UnknownPremise, registry_premise
+
+    for name in BASE_PREMISES:
+        with pytest.raises(UnknownPremise):
+            registry_premise(name)
+    resolver = PremiseResolver()
+    assert not set(BASE_PREMISES) & set(resolver._registry)
+    registry_premise("globals-disjoint-from-stack")   # (control)

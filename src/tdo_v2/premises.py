@@ -161,10 +161,11 @@ POLICY_FIELDS = {
 def registry_premise(name: str) -> PremiseRef:
     """A registry-backed assumption: digest = its registry row + the engine
     semantics version (a redefinition under the same name is another premise)."""
-    from .assumptions import REGISTRY
+    from .assumptions import BASE_KINDS, REGISTRY
     from .summary_templates import ENGINE_SEMANTICS_VERSION
 
-    rows = [row for row in REGISTRY if row.name == name]
+    # (P-0) the base premises hold for every run: never a resolvable premise of a result
+    rows = [row for row in REGISTRY if row.name == name and row.kind not in BASE_KINDS]
     if len(rows) != 1:
         raise UnknownPremise(name)
     return PremiseRef(PremiseKind.ASSUMPTION, name, _digest([asdict(rows[0]), ENGINE_SEMANTICS_VERSION]))
@@ -196,9 +197,9 @@ def resolve_label(label: str, *, catalog: dict | None = None, file_digests: dict
                   model_digests: dict | None = None) -> PremiseRef:
     """The premise a reported label names, or ``UnknownPremise``. ``model_digests``:
     model label -> its file digest (the run's loaded models)."""
-    from .assumptions import REGISTRY
+    from .assumptions import BASE_KINDS, REGISTRY
 
-    if any(row.name == label for row in REGISTRY):
+    if any(row.name == label and row.kind not in BASE_KINDS for row in REGISTRY):
         return registry_premise(label)
     if model_digests is not None and label in model_digests:
         return model_premise(label, model_digests[label])
@@ -239,12 +240,13 @@ class PremiseResolver:
     _WRAPPER = "accessor-state-preserved-by:"
 
     def __init__(self, *, model_sets=(), bindings=(), pcodeop_models=(), lifecycle_contracts=()) -> None:
-        from .assumptions import REGISTRY
+        from .assumptions import BASE_KINDS, REGISTRY
 
         # (iterables materialized once: each is read more than once below)
         model_sets, bindings = tuple(model_sets), tuple(bindings)
         pcodeop_models, lifecycle_contracts = tuple(pcodeop_models), tuple(lifecycle_contracts)
-        self._registry = {row.name: registry_premise(row.name) for row in REGISTRY}
+        self._registry = {row.name: registry_premise(row.name) for row in REGISTRY
+                          if row.kind not in BASE_KINDS}   # (P-0: base premises are not result premises)
         self._models: dict = {}
         self._files: dict = {}
         self._declarations: dict = {}

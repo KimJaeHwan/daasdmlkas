@@ -7222,7 +7222,9 @@ TBR이 멈추거나 "TBR 담당인 줄 알았다"는 틈이 생겨도 TDO 결과
 레지스트리(`assumptions.py`)에 이름으로 두고(kind `producer` 다섯, `runtime` 하나; 항상 켜짐, 스위치 없음, 모델 / 템플릿의
 자기 표지로는 받지 않는다), 모든 실행의 `EngineRun.base_premises`(키워드 전용, 마지막 필드; 요약 / legacy 엔진,
 `run_dfbench` 두 경로, `analyze_query` JSON, 의미 스냅샷 run 층 / legacy 절)에 나온다. `EngineRun.assumptions`(결과가 기대는
-선택 가정)와 분석 결과 / 템플릿은 바뀌지 않는다. 리뷰 r1: Astra REJECT(P1 모델 표지로 들어감) / Fable AWF -> r2 반영.
+선택 가정)와 분석 결과 / 템플릿은 바뀌지 않는다; 지지 해석기(premises)도 기본 전제를 결과의 전제로 풀지 않고 정체성에
+넣지 않는다. `analyze_query --base-graphs-only`의 색인 JSON에도 나온다. 리뷰 r1: Astra REJECT(P1 모델 표지로 들어감) /
+Fable AWF -> r2; r2: Astra AWF / Fable AWF(P1 없음) -> r3 반영 후 닫음. 런타임 전제는 실행 시점 의존의 완전한 목록이 아니다.
 - `decoder-matches-cpu`: 행의 시작 / 길이 / 피연산자 / 흐름 / p-code = CPU 실행(싼 방어: exporter가 66 / 반복 접두사 이동
   행이 있는 함수 전체의 S1과 예외 처리기 사실을 보류). TBR G1(진단).
 - `bundle-image-matches-file`: 블록 바이트 = 기본 주소에 올린 파일 바이트(로더가 쓰는 곳 제외; exporter는 1차 쓰기 범위를

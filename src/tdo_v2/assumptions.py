@@ -72,10 +72,14 @@ REGISTRY: tuple[Assumption, ...] = (
         "The producer's program facts the engine takes as given are accurate: the memory map (committed runs, "
         "initialised and loaded flags, block permissions), image facts (import slots and thunks, exports, the "
         "relocation list), the function inventory and entries, register evidence, and the exporter's attestations "
-        "(S1 call fallthrough, the no-static-exception-handler fact, the fresh-import attestation).",
+        "(S1 call fallthrough, the no-static-exception-handler fact, the fresh-import attestation), the "
+        "per-instruction data references (a typed reference becomes the exact span of its LOAD / STORE) and the "
+        "call-naming sidecar (which calls are named imports, sources and sinks).",
         "A writable block marked read-only; an import slot or thunk missing or misattributed; a wrong entry; a "
-        "register-evidence error; an exporter attestation produced from a state it does not describe.",
-        "admission, read-only image values, import models and slots, the exception-handler fact, S1"),
+        "register-evidence error; an exporter attestation produced from a state it does not describe; a wrong or "
+        "stale data reference; a misnamed call.",
+        "admission, read-only image values, import models and slots, the exception-handler fact, S1, "
+        "configured_function_view (reference spans), call naming"),
     Assumption(
         "producer-function-bodies-complete", "producer", True,
         "Each function's listed instructions are all the code that executes inside it, and the program's functions "
@@ -86,18 +90,22 @@ REGISTRY: tuple[Assumption, ...] = (
         "function summaries, control contexts (a missed site is a missed key), the exception-handler fact (frame PCs)"),
     Assumption(
         "producer-listed-targets-complete", "producer", True,
-        "A non-empty list of targets the producer gives for an indirect transfer (a jump table, a listed BRANCHIND / "
-        "CALLIND destination) is exhaustive: the transfer goes nowhere else. TDO has no local proof of table "
-        "completeness today; a targetless indirect transfer stays an unknown-transfer site (U2a).",
+        "A non-empty list of targets the producer gives for an indirect jump (a jump table, a listed BRANCHIND "
+        "destination) is exhaustive: the jump goes nowhere else. TDO has no local proof of table completeness today. "
+        "A targetless BRANCHIND is an unknown-transfer site (U2a; exempt import tails and discharged faults aside); a "
+        "CALLIND's listed targets are edges, not an exhaustive set, and an unresolved CALLIND is an opaque call.",
         "A jump table whose bound the producer misread; a computed jump with one destination listed and others not.",
         "pcode_blocks successors, the state barrier's successor completeness, control_context unknown-transfer sites"),
     Assumption(
         "image-code-unmodified-at-runtime", "runtime", True,
-        "The analysed code is the code that runs: the image's code bytes are not changed after loading (no unpacking, "
-        "self-modification, hooking or run-time patching of code). Data bytes are the separate switch "
-        "readonly-image-data-is-constant.",
-        "Packed or self-modifying binaries, inline hooks / detours, JIT-patched code, anti-tamper rewriting.",
-        "every analysis of instruction rows"),
+        "The analysed code is the code that runs: the image's code bytes, and the static unwind / exception metadata "
+        "(.pdata / .xdata) the exception-handler fact reads, are not changed after loading (no unpacking, "
+        "self-modification, hooking or run-time patching of code or of that metadata). Other data bytes are the "
+        "separate switch readonly-image-data-is-constant (on or off, this premise stays). Not a complete list of "
+        "run-time reliance (e.g. other threads changing analysed memory are not named here).",
+        "Packed or self-modifying binaries, inline hooks / detours, JIT-patched code, anti-tamper rewriting, a "
+        "program rewriting its own .pdata / .xdata.",
+        "every analysis of instruction rows; the exception-handler fact (landing-pad edges)"),
     Assumption(
         "globals-disjoint-from-stack", "switch", True,
         "A constant address never falls in the stack (the function's frame or its callers' frames); nor "
