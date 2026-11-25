@@ -291,6 +291,13 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
             if getattr(scope, "refused_entry", None) is not None)
         expected_unidentified = bool(options.get("unidentified_refusals", False)) or any(
             getattr(scope, "refused_entry", None) is None for scope in carried)
+        if options.get("assume_direction_flag_clear"):
+            # (PE-a1, Astra r5 P1-1) both passes infer DF from one observation set
+            from .isa_identity import inferred_direction_flag
+
+            if inferred_direction_flag([*base_graphs._units, *(item.unit for item in published)]) != \
+                    inferred_direction_flag([*units, *options.get("retained_observations", ())]):
+                raise ValueError("base graph publication and proof pass disagree on the direction flag's observations")
         if refused != expected or unidentified != expected_unidentified:
             raise ValueError("base graph publication and proof pass disagree on admission refusals "
                              "(unavailable_entries / unidentified_refusals or refused units)")
@@ -879,7 +886,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None, reta
     from .isa_identity import inferred_direction_flag
 
     # (Astra r4 P1-1: every retained observation -- the units passed, admitted
-    # or not, cut ones, and refusals the caller retained)
+    # or not, cut ones, and refusals the caller retained; the caller passes
+    # every observation of the snapshot it holds: ``retained_observations``)
     direction_flag_inferred = inferred_direction_flag(
         [*units, *program.values(), *retained_observations]) if assume_direction_flag_clear else None
     externals = {

@@ -139,7 +139,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
         private_frame_above = 0   # the home-space extension is inactive without its base assumption
     binding = NamingBindingExpectation(sha256((REPO / "ghidra" / "GhidraV2CallNaming.java").read_bytes()).digest(),
                                        CALL_NAMING_GHIDRA_VERSION)
-    units, failures = [], collections.Counter()
+    units, failures, refused_units = [], collections.Counter(), []
     refused_entries, unidentified_refusals = set(), False   # (PE-b: callers of a refused member carry its key)
     with open_observed_function_session(admit_frozen_bundle(generation), naming_binding=binding) as session:
         adapter = session._provider_adapter
@@ -149,6 +149,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                 units.append(unit)
             else:
                 failures[unit.scopes.function.stage.name] += 1
+                refused_units.append(unit)   # (PE-a1: its observation, if retained, joins the DF inference)
                 entry = getattr(unit.scopes.function, "refused_entry", None)
                 if entry is None:
                     unidentified_refusals = True
@@ -220,6 +221,10 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
         tracking = ImageBaseTracking(ranges, relocates)
         with tracking as found:
             results = ip.analyze_units(selected, image_info=info, external_models=models, pcodeop_models=pcodeops,
+                                       # (PE-a1, Fable r4 P2-1) every other observation of the library
+                                       retained_observations=(*(unit for unit in units
+                                                                if id(unit) not in {id(item) for item in selected}),
+                                                              *refused_units),
                                        unavailable_entries=frozenset(refused_entries),
                                        unidentified_refusals=unidentified_refusals,
                                        private_frame_above=private_frame_above,

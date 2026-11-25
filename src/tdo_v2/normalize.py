@@ -777,9 +777,9 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
     if not pending:
         return {}
     # (PE-a1) the premise is about the architectural DF only: the register
-    # table's DF row, else the program-wide inferred coordinate (looked up
-    # only when a site may use it)
-    flag_register = _direction_flag_of(scopes, inferred_flag) if assume_clear else None
+    # table's DF row, else the program-wide inferred coordinate -- looked up
+    # once, when an entry value first needs it
+    flag_register = []
     requests = []
     for site in pending.values():
         requests.append((site.count_key, site.count))
@@ -797,7 +797,8 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
         assumed = False
         if not atoms and value in (0, 1):
             direction = 1 if value == 0 else -1
-        elif entry and assume_clear and is_direction_flag(site.direction, flag_register):
+        elif entry and assume_clear and _entry_direction(memory_ssa, scopes, site, observation, inferred_flag,
+                                                         flag_register):
             direction, assumed = 1, True
         else:
             continue
@@ -808,22 +809,44 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
     return found
 
 
-def _direction_flag_of(scopes, inferred_flag):
+def _entry_direction(memory_ssa, scopes, site, observation, inferred_flag, cache) -> bool:
+    """(PE-a1) The site's direction operand is the architectural DF and its
+    every reaching definition is the function's ENTRY definition itself -- not
+    a value an expression only simplifies to it (Astra r5 P2: ``DF = DF + 0``)."""
+    from .isa_identity import is_direction_flag
+
+    if not cache:
+        cache.append(_direction_flag_of(scopes, inferred_flag, observation))
+    if not is_direction_flag(site.direction, cache[0]):
+        return False
+    resolved = _resolve_validated_storage(_storage_ref(site.direction), scopes.resolution_context)
+    if type(resolved) is not ResolvedStorage:
+        return False
+    actions = {index for index, action in enumerate(memory_ssa.actions) if action.operation_key == site.direction_key}
+    reads = [read for read in memory_ssa.reads if read.action_id in actions and read.span.overlaps(resolved.span)]
+    return bool(reads) and all(
+        memory_ssa.definitions[definition].kind is MemoryDefinitionKind.ENTRY
+        for read in reads for fragment in read.fragments for definition in fragment.definition_ids)
+
+
+def _direction_flag_of(scopes, inferred_flag, observation=None):
     """(PE-a1) DF for the premise: the exported register table's DF row when
     the program has a table (precedence: no row, no certificate), else the
     sealed program-wide inferred coordinate (``inferred_direction_flag``) --
-    only for the snapshot it was inferred from (Astra r4 P1-2)."""
-    from .isa_identity import _DIRECTION_FLAGS, InferredDirectionFlag, direction_flag
+    only for the snapshot it was inferred from (Astra r4 P1-2) and for an
+    observation its unanimity covered (Astra r5 P1-2)."""
+    from ._scope_results import _observation_digest
+    from .isa_identity import InferredDirectionFlag, direction_flag, x86_language
 
     evidence = scopes.program.evidence
     if evidence.register_evidence is not None:
         return direction_flag(evidence)
-    if inferred_flag is None:
+    if inferred_flag is None or observation is None:
         return None
     if type(inferred_flag) is not InferredDirectionFlag:
         raise TypeError("inferred_direction_flag requires an exact InferredDirectionFlag")
-    parts = tuple(evidence.translation_namespace.language_id.split(":"))
-    if inferred_flag.program != scopes.program.scope or parts[:3] not in _DIRECTION_FLAGS:
+    if inferred_flag.program != scopes.program.scope or not x86_language(evidence) \
+            or _observation_digest(observation) not in inferred_flag.observations:
         return None
     return inferred_flag.flag
 

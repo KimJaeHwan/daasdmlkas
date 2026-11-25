@@ -51,6 +51,13 @@ _DIRECTION_FLAGS = {
 }
 
 
+def x86_language(evidence) -> bool:
+    """(PE-a1) The one language rule of both DF identity paths (``_named``'s:
+    a full language id whose first three parts name x86)."""
+    parts = tuple(evidence.translation_namespace.language_id.split(":"))
+    return len(parts) >= 4 and parts[:3] in _DIRECTION_FLAGS
+
+
 def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordinate | None:
     """The x86 direction flag as the exported register evidence places it;
     None for another language or without exact evidence (no certificate)."""
@@ -64,6 +71,9 @@ class InferredDirectionFlag:
 
     program: object
     flag: RegisterCoordinate
+    # (Astra r5 P1-2) the observations the unanimity covered: the certificate
+    # is used only for one of them (``normalize._direction_flag_of``)
+    observations: frozenset = frozenset()
 
 
 def inferred_direction_flag(units) -> InferredDirectionFlag | None:
@@ -79,21 +89,29 @@ def inferred_direction_flag(units) -> InferredDirectionFlag | None:
     observation of ONE program snapshot -- admitted, cut and refused-at-
     admission bodies alike (Astra r4 P1-1); units of several snapshots: None
     (Astra r4 P1-2). The result is bound to that snapshot."""
+    from ._scope_results import _observation_digest
     from .rep_strings import recognize
 
-    units = [unit for unit in units if unit.observation is not None]
-    if not units:
+    supplied = list(units)
+    if not supplied:
         return None
-    program = units[0].scopes.program.scope
-    if any(unit.scopes.program.scope != program for unit in units):
+    # (Astra r5 P2) every supplied unit's snapshot -- an observation-free
+    # refusal of another snapshot included -- before any observation is read
+    program = supplied[0].scopes.program.scope
+    if any(unit.scopes.program.scope != program for unit in supplied):
         return None
-    evidence = units[0].scopes.program.evidence
-    parts = tuple(evidence.translation_namespace.language_id.split(":"))
-    if parts[:3] not in _DIRECTION_FLAGS or evidence.register_evidence is not None:
+    observations = {}
+    for unit in supplied:   # (each observation once: a unit may be passed twice)
+        if unit.observation is not None:
+            observations.setdefault(_observation_digest(unit.observation), unit.observation)
+    if not observations:
+        return None
+    evidence = supplied[0].scopes.program.evidence
+    if not x86_language(evidence) or evidence.register_evidence is not None:
         return None
     found = set()
-    for unit in units:
-        for instruction in unit.observation.instructions:
+    for observation in observations.values():
+        for instruction in observation.instructions:
             site = recognize(instruction)
             if site is not None:
                 operand = site.direction
@@ -101,7 +119,9 @@ def inferred_direction_flag(units) -> InferredDirectionFlag | None:
     if len(found) != 1:
         return None
     ((space_id, offset, size),) = found
-    return InferredDirectionFlag(program, RegisterCoordinate("DF", space_id, offset, size)) if size == 1 else None
+    if size != 1:
+        return None
+    return InferredDirectionFlag(program, RegisterCoordinate("DF", space_id, offset, size), frozenset(observations))
 
 
 def is_direction_flag(varnode, flag: RegisterCoordinate | None) -> bool:
