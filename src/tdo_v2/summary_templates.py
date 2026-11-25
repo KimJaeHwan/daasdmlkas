@@ -176,8 +176,8 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # constant-address bytes and a below-bound call keeps none; a frame proof
 # treats an uncertain-destination write as unresolved; a saved copy's
 # address slice must be debt-free.
-# 62: (PE-a1) direction-flag-clear covers a DF debt only at the rep site's own
-# direction read, from a CALL / CALLIND with no analysed in-program target.
+# 62: (PE-a1) direction-flag-clear covers the entry value of the architectural DF
+# only (register table, else the program-wide rep operand); no call return.
 ENGINE_SEMANTICS_VERSION = 62
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")

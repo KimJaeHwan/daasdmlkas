@@ -374,13 +374,10 @@ def test_a_rep_direction_a_call_may_change_needs_the_assumption():
     assert not without.rep_blocks
     reload = slice_from(without, operation_node_at(without, index + 1, 1))
     assert not reload.is_complete or RBX + 1 in reload.register_bytes
-    # (PE-a1) the premise covers the call's return only when the call is listed as
-    # one with no analysed target (an opaque or hand-modelled callee): fail closed
-    unlisted = FunctionNormalizer().normalize(unit, proven_call_effects=effect, assume_direction_flag_clear=True)
-    assert not unlisted.rep_blocks
-    assumed = FunctionNormalizer().normalize(unit, proven_call_effects=effect, assume_direction_flag_clear=True,
-                                             covered_call_returns=frozenset({call}))
-    assert assumed.rep_blocks and assumed.assumed_direction_flag_clear
+    # (PE-a1, owner 2026-11-25) the premise covers the function's entry value only:
+    # a call's return (here a summarized callee that may change DF) is PE-a2's
+    assumed = FunctionNormalizer().normalize(unit, proven_call_effects=effect, assume_direction_flag_clear=True)
+    assert not assumed.rep_blocks
 
 
 # -- review round 2 (Astra) ------------------------------------------------------------

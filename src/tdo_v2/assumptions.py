@@ -156,14 +156,12 @@ REGISTRY: tuple[Assumption, ...] = (
         "TDO_V2_ASSUME_IMPORT_SLOTS"),
     Assumption(
         "direction-flag-clear", "switch", True,
-        "The x86 direction flag (DF, as the exported register table names it) is clear at function entry "
-        "and when an identified import call (a call of an import thunk, or through an import slot under "
-        "import-slots-hold-their-exports) returns normally (both x86-64 ABIs require it); used for rep string "
-        "instructions: the entry value of DF in a function that never sets it, and DF at the rep site read "
-        "straight from such a call's return. Not covered (PE-a1): a kernel or user-op return (syscall, int, "
-        "any CALLOTHER), an exceptional (landing-pad) edge, a call to analysed code of the program (direct, "
-        "resolved or listed: its body decides, no body record yet), any other call, a value computed from "
-        "DF after a call, an unidentified origin, a program without a register table.",
+        "The x86 direction flag (DF: the exported register table's DF row, or without a table the one "
+        "byte every recognised rep row of the program names -- decoder-matches-cpu) is clear at function "
+        "entry (both x86-64 ABIs require it); used for rep string instructions: the entry value of DF in a "
+        "function that never sets it. Not covered (PE-a1; call returns are PE-a2's): any call's return -- "
+        "an ordinary or import call, a kernel or user-op return (syscall, int, any CALLOTHER), a landing "
+        "pad -- a value computed from DF, an unidentified origin.",
         "Hand-written code calling or returning with DF set; a function entered other than by a call "
         "(an exception or signal handler, a thread start, a callback the kernel enters).",
         "rep_strings / normalize._prove_rep_sites",

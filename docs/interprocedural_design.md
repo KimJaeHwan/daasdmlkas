@@ -7309,35 +7309,31 @@ Fable AWF -> r2; r2: Astra AWF / Fable AWF(P1 없음) -> r3 반영 후 닫음. �
 - 고정 `tests/intra/test_call_clobber_discharge.py`(가정 있음 / 없음), `test_stack_call_preservation.py`(출력 누락),
   `test_pe_b_refused_callees.py`(거부 + 증거); 돌연변이 `cob/pec_mutants.py`.
 
-### 25.119 방향 플래그는 출처로 판정한다 -- 1단계: 호출자 지역 규칙 (PE-a1, 2026-11-25)
+### 25.119 방향 플래그는 출처로 판정한다 -- 1단계: 입구 값만 (PE-a1, 2026-11-25)
 
-설계 `.census6/design_s3_r18.md` 수정 1(PRE-EXISTING; S3 전제). 구현 설계는 Astra가 쓴 `.census6/design_pea_r1.md`,
-Fable r1(`pea_r1_fable.md`)의 제안대로 세 단계로 나눈다: PE-a1 호출자 지역 규칙(형식 변경 없음), PE-a2 한 프로그램
-안에서 요약 / 효과로 출처 전달, PE-a3 템플릿. 각 단계는 혼자서 건전하다(기록이 없으면 "덮이지 않음").
-- 구멍(main 1fd15f1에서 재현): rep 지점 DF의 호출 덮어쓰기 빚을 `direction-flag-clear`가 호출 종류를 보지 않고
-  덮었다 -- 호출 연산에 CALLOTHER가 들어 있어 `cld; syscall; rep stosb`가 "앞으로"가 되었고, 한쪽 갈래만 `cld`인 합류,
-  `syscall; ret` 감싸기 함수를 부른 뒤도 같았다.
-- 규칙(`normalize.py` 최종 rep 검사; r2 = Astra r1 REJECT 5 P1 / Fable r1 반영): DF 빚은 네 조건이 모두 맞을 때만 가정으로
-  덮는다 -- (0) rep의 방향 피연산자가 구조상의 DF다: 내보낸 레지스터 표(`isa_identity.direction_flag`, x86 "DF" 1바이트)와
-  좌표가 같다 -- 표가 없으면(옛 Bundle) 증명 없음, 입구 값에도 가정을 쓰지 않는다(추측 대신 거절, Fable r1 P3; X-1 재내보내기
-  뒤 회복); (1) 빚의 읽는 쪽이 지점 자신의 방향 읽기다(호출 뒤 DF로 계산한 값, 예 `DF ^= 1`, 은 덮인 출처가 아니다);
-  (2) 빚을 만든 호출이 원시 `CALL` / `CALLIND`다(CALLOTHER는 호출 복귀가 아니다); (3) 그 호출이 정규화 입력
-  `covered_call_returns`에 있다. 그 목록은 `interprocedural._covered_call_returns`가 함수마다 한 번(정적) 만든다 --
-  **적극적으로 확인된 것만**: 가져오기 호출(`import_call_sites`: 가져오기 thunk의 CALL, 가져오기 슬롯을 통한 CALLIND --
-  후자는 import-slots-hold-their-exports가 켜졌을 때만, 그 사용을 기록), 효과가 손 모델이거나 없음, 파생 템플릿 아님, 거부된
-  구성원 아님(PE-b), 호출 행에 지역 흐름 대상(예외 landing pad, 나열된 후속) 없음(가정은 정상 복귀만 덮는다). 그 밖 --
-  풀리지 않은 간접 호출, 프로그램 주소나 어떤 함수도 갖지 않은 주소로의 직접 호출(함수 중간 포함), 풀리거나 나열된 프로그램 안
-  대상, 혼합 후보 집합 -- 은 목록에 없다(fail closed). r1의 "분석된 대상이 없는 호출" 규칙은 Astra가 다섯 경로(landing pad,
-  혼합 forward 집합, 예산 대체 라운드, 함수 중간 / 미식별 거부, DL 피연산자)로 깨뜨렸다; 정적 가져오기 정체성은 라운드와
-  무관하므로 예산 대체 경로도 닫힌다. 목록은 비어 있지 않을 때만 정규화 옵션에 넣는다(재실행 계획이 같은 옵션을 봉인한다).
-- 비용(PE-a2가 되찾을 정밀도): 분석된 함수 호출 뒤 그 함수가 DF를 지킨다고 증명하지 못하면 rep를 거절한다(분석된
-  비단말 함수는 거의 다 그렇다); 풀리지 않은 간접 호출과 가져오기로 확인되지 않은 바깥 호출 뒤도 거절; 레지스터 표 없는
-  Bundle(게이트 Bundle 전부 -- ue-core-probe만 표가 있다)에서는 입구 값 가정도 쓰지 않는다.
-- S3에 대해: 허용된 커널 지점은 증명된 효과를 가진 호출이므로 (3)에 걸려 이 필드 없이도 덮이지 않는다.
-- 레지스트리 문장 갱신(덮는 것 / 덮지 않는 것, 실패 모드에 호출 아닌 진입 추가), `docs/assumptions.md` 재생성.
-- 의미 버전 62.
-- 고정 `tests/intra/test_pe_a_direction_origin.py`(커널 복귀, 뒤따르는 cld / std, 합류, 감싸기, 불투명 / 미해결 간접
-  호출, DF로 계산한 값, 분석된 단말, 거부된 프로그램 함수, 분석된 대상으로 풀린 간접 호출, 단독 정규화);
-  `test_stale_projection_alias.py` / `test_rep_strings.py`의 기존 DF 시험은 레지스터 표와 목록을 명시; r2: 가져오기 호출만
-  덮음, 슬롯 가정 꺼짐, landing pad, DL 피연산자(입구 / 최종 검사), 레지스터 표 없음, 파생 템플릿. 돌연변이
-  `cob/pea1_mutants.py` 9/10(M4는 중복 가드: CALLOTHER는 목록에 들어갈 수 없다).
+설계 `.census6/design_s3_r18.md` 수정 1(PRE-EXISTING; S3 전제). 구현 설계는 Astra가 쓴 `.census6/design_pea_r1.md`;
+Fable r1(`pea_r1_fable.md`)이 세 단계로 나눴다 -- PE-a1(이것), PE-a2(호출 복귀: 한 프로그램 안의 몸체 기록과 호출 정체성),
+PE-a3(템플릿). 각 단계는 혼자서 건전하다(기록이 없으면 "덮이지 않음").
+- 구멍(main 1fd15f1에서 재현): rep 지점 DF의 호출 덮어쓰기 빚을 `direction-flag-clear`가 호출 종류를 보지 않고 덮었다 --
+  호출 연산에 CALLOTHER가 들어 있어 `cld; syscall; rep stosb`가 "앞으로"가 되었고, 한쪽 갈래만 `cld`인 합류, `syscall; ret`
+  감싸기 함수를 부른 뒤도 같았다.
+- 규칙(소유자 결정 2026-11-25, Astra r3 완전 목록 뒤): PE-a1에서 이 가정은 **함수 입구의 DF 값만** 덮는다. DF에 걸린 빚은 --
+  어떤 호출의 복귀든(일반, 가져오기, 커널 / CALLOTHER, landing pad), DF로 계산한 값이든 -- 여기서 덮지 않는다(`normalize.py`
+  최종 rep 검사: 빚이 있으면 그 지점은 실패). 뒤따르는 확정 DF 쓰기(`cld` / `std`)는 그 경로에서 이긴다(빚이 없다).
+  r1(분석된 대상이 없는 호출을 덮음)과 r2(확인된 가져오기 호출만 덮음)는 Astra가 각각 다섯, 네 경로로 깨뜨렸다(landing pad,
+  혼합 forward 집합, 예산 대체 라운드, 함수 중간 / 미식별 거부, DL 피연산자; 덮어쓴 가져오기 슬롯, thunk와 분석된 몸체의
+  충돌, 프로그램 다른 곳의 나열된 대상, 레지스터 적재 가져오기의 재진입 의무). 가져오기 호출을 건전하게 덮으려면 호출 시점
+  슬롯 증명, 라운드마다의 취소와 대체 경로 전파가 필요하다 -- 그것은 몸체 기록과 함께 PE-a2에서 한다.
+- DF 정체성(Astra r1 P1-5; Fable r2 P2-2 / Astra r3, 소유자 결정 2026-11-25 "기본 전제로 인정"): 가정은 rep의 방향 피연산자가
+  구조상의 DF일 때만 쓴다 -- 내보낸 레지스터 표가 있으면 그 DF 행(행이 없으면 증명 없음; 표가 우선), 표가 없으면 프로그램 전체
+  추론 좌표(`isa_identity.inferred_direction_flag`: x86 언어에서, 관찰된 모든 몸체(잘린 것 포함)의 인식된 `rep movs` /
+  `rep stos` 행이 모두 같은 1바이트를 가리킬 때; 그 lifting에서 방향을 정하는 바이트는 ISA상 DF -- 기본 전제
+  decoder-matches-cpu(P-0)에 기댄다). 추론 좌표는 `interprocedural`이 프로그램마다 한 번 만들어 정규화 옵션
+  `inferred_direction_flag`로 넘긴다(재실행 옵션에 봉인; 있을 때만). 단독 정규화는 표가 없으면 증명 없음. 게이트 Bundle은
+  표가 없다(ue-core-probe만 있다): 추론으로 정밀도를 지킨다.
+- 비용(PE-a2가 되찾을 정밀도): 호출 뒤 확정 쓰기 없이 DF를 읽는 rep는 거절된다(가져오기 호출 뒤 포함).
+- S3에 대해: 허용된 커널 지점은 호출이므로 이 단계에서 이미 덮이지 않는다.
+- 레지스트리 문장 갱신(입구만; 덮지 않는 것; DF의 정의), `docs/assumptions.md` 재생성. 의미 버전 62.
+- 고정 `tests/intra/test_pe_a_direction_origin.py`(입구, 확정 쓰기, 커널 복귀와 뒤따르는 cld / std, 합류 두 가지, 감싸기,
+  가져오기 / 바깥 / 간접 / 분석된 단말 호출, DF로 계산한 값, DL 피연산자, 표 없음: 단독 / 추론 / 불일치 두 방향 / 일치, 표 우선,
+  x86 전용); `test_stale_projection_alias.py` / `test_rep_strings.py`의 기존 DF 시험 갱신. 돌연변이 `cob/pea1_mutants.py` 7/7.

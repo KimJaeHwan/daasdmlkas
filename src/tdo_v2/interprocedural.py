@@ -874,7 +874,11 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     local_entries = frozenset((unit.scopes.function.entry.space_id, unit.scopes.function.entry.byte_offset)
                               for unit in program.values())
     slot_register: dict = {}   # (design S-R) key -> calls bound only through ``_slot_loaded_register``
-    covered_returns: dict = {}   # (PE-a1) key -> ``_covered_call_returns`` (static, filled on first use)
+    # (PE-a1) without a register table: the DF coordinate every recognised rep
+    # row of the program names (decoder-matches-cpu), once per program
+    from .isa_identity import inferred_direction_flag
+
+    direction_flag_inferred = inferred_direction_flag(program.values()) if assume_direction_flag_clear else None
     externals = {
         key: {**(_external_sites(unit, image_info, external_models, disabled, usable,
                                  refused_sites.setdefault(key, {}), local_entries,
@@ -1526,15 +1530,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                     private_frame_above=private_frame_above,
                     open_conditions=opened,
                 )
-                if assume_direction_flag_clear:
-                    # (PE-a1) the calls whose return direction-flag-clear covers:
-                    # static per function (import identity), only when set
-                    if key not in covered_returns:
-                        covered_returns[key] = _covered_call_returns(
-                            unit, image_info, local_entries, externals[key], unavailable_entries,
-                            _IMPORT_SLOTS.get() is not None)
-                    if covered_returns[key]:
-                        normalization_options["covered_call_returns"] = covered_returns[key]
+                if direction_flag_inferred is not None:
+                    # (PE-a1) the program-wide DF coordinate (no register table)
+                    normalization_options["inferred_direction_flag"] = direction_flag_inferred
                 fault_cuts = fault_plan.cuts_of(key, fault_state["discharged"])
                 if fault_cuts:
                     normalization_options["fault_cuts"] = fault_cuts
@@ -2953,45 +2951,6 @@ def _cut_sites(unit, cuts) -> dict:
 
 def function_key_of(space_id: int, byte_offset: int) -> str:
     return f"{space_id:x}:{byte_offset:x}"
-
-
-def _covered_call_returns(unit, image_info, local_functions, externals, refused_entries, import_slots) -> frozenset:
-    """(PE-a1, S3 design r18 amendment 1) CALL / CALLIND keys of ``unit``
-    whose return the direction-flag-clear premise covers -- positively
-    identified only: an import call (``import_call_sites``: a call of an
-    import thunk, or a CALLIND through an import slot -- the latter only with
-    ``import_slots`` on, its identity resting on import-slots-hold-their-exports)
-    whose effect is a hand model or none, never a derived template (an analysed
-    body), never at a refused member (PE-b), and never a call row with a listed
-    local flow target (an exception landing pad or any listed successor: the
-    premise covers the normal return only). Anything else -- an unresolved
-    indirect call, a direct call to an address of the program or to one no
-    function owns, a resolved or listed in-program target -- is not listed:
-    fail closed, a call not listed is uncovered."""
-    observation = unit.observation
-    if observation is None or image_info is None:
-        return frozenset()
-    rows = {}
-    for instruction in observation.instructions:
-        for ordinal, operation in enumerate(instruction.operations):
-            if operation.opcode in ("CALL", "CALLIND"):
-                rows[_operation_key(instruction.address, ordinal, operation.opcode)] = instruction
-    local = {instruction.address for instruction in observation.instructions}
-    at_refused = _transfers_to(unit, refused_entries) if refused_entries else frozenset()
-    found = set()
-    for key in import_call_sites(unit, image_info, local_functions):
-        row = rows.get(key)
-        if row is None or key in at_refused:
-            continue   # (a tail shape, or a refused target)
-        if key.endswith(":CALLIND") and not import_slots:
-            continue
-        external = externals.get(key)
-        if external is not None and external[1].template is not None:
-            continue
-        if any(target in local for target in (row.flow_targets or ())):
-            continue
-        found.add(key)
-    return frozenset(found)
 
 
 def _direct_calls(unit, functions) -> dict[str, str]:

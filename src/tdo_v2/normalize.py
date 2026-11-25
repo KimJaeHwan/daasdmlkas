@@ -767,14 +767,15 @@ def _debt_labels(graph, node, varnode, context, clobbers=None):
 
 
 def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, assume_clear,
-                     blocked=frozenset(), used=None) -> dict:
+                     blocked=frozenset(), used=None, inferred_flag=None) -> dict:
     """Sites whose count (at the instruction start) and direction become
     proven on the current SSA: address -> (n, direction, used the assumption)."""
-    from .isa_identity import direction_flag, is_direction_flag
+    from .isa_identity import is_direction_flag
     from .relative_memory import expressions_at
 
-    # (PE-a1) the premise is about the architectural DF only
-    flag_register = direction_flag(scopes.program.evidence)
+    # (PE-a1) the premise is about the architectural DF only: the register
+    # table's DF row, else the program-wide inferred coordinate
+    flag_register = _direction_flag_of(scopes.program.evidence, inferred_flag)
     pending = {address: site for address, site in sites.items() if address not in plan}
     if not pending:
         return {}
@@ -804,6 +805,21 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
             continue
         found[address] = (n, direction, assumed)
     return found
+
+
+def _direction_flag_of(evidence, inferred_flag):
+    """(PE-a1) DF for the premise: the exported register table's DF row when
+    the program has a table (precedence: no row, no certificate), else the
+    sealed program-wide inferred coordinate (``inferred_direction_flag``)."""
+    from .isa_identity import RegisterCoordinate, direction_flag
+
+    if evidence.register_evidence is not None:
+        return direction_flag(evidence)
+    if inferred_flag is None:
+        return None
+    if type(inferred_flag) is not RegisterCoordinate:
+        raise TypeError("inferred_direction_flag requires an exact RegisterCoordinate")
+    return inferred_flag
 
 
 def _rep_element_rows(site, proven, block_key, scope, context, temporaries):
@@ -1596,7 +1612,7 @@ class FunctionNormalizer:
         assume_direction_flag_clear: bool = False,
         private_frame_above: int = 0,
         open_conditions: dict | None = None,
-        covered_call_returns: frozenset = frozenset(),
+        inferred_direction_flag=None,
         fault_cuts: tuple = (),
         fault_reachable: bool = False,
         control_exempt: tuple = (),
@@ -1616,10 +1632,9 @@ class FunctionNormalizer:
         callee's summary (``tdo_v2.call_summary_effects``).
         ``assume_globals_disjoint_from_stack``: named opt-in assumption, see
         ``tdo_v2.may_alias``.
-        ``covered_call_returns``: CALL / CALLIND keys whose return
-        direction-flag-clear covers -- positively identified import calls
-        (``interprocedural._covered_call_returns``); a call not listed is
-        uncovered (PE-a1, S3 design r18 amendment 1)."""
+        ``inferred_direction_flag``: the program-wide DF coordinate
+        (``isa_identity.inferred_direction_flag``) for a program without a
+        register table; None: the table, or no certificate (PE-a1)."""
         if type(value) is not ScopedFunctionUnit:
             raise TypeError("normalization requires an exact ScopedFunctionUnit")
         if value.observation is None:
@@ -1655,8 +1670,8 @@ class FunctionNormalizer:
             private_frame_above=private_frame_above,
             open_conditions=open_conditions or {},
         )
-        if covered_call_returns:   # (as given when set: a replay plan seals the same options)
-            options["covered_call_returns"] = frozenset(covered_call_returns)
+        if inferred_direction_flag is not None:   # (as given when set: a replay plan seals the same options)
+            options["inferred_direction_flag"] = inferred_direction_flag
         if _once_control is not None:
             options["_once_control"] = _once_control
         # a replay plan was sealed over every normalization input the analysis
@@ -1805,7 +1820,7 @@ class _ScopedNormalizer:
         _uncertain: dict | None = None,
         _opaque_rows: frozenset = frozenset(),
         open_conditions: dict | None = None,
-        covered_call_returns: frozenset = frozenset(),
+        inferred_direction_flag=None,
         _forward_memory_plan=None,
         _load_identity_plan=None,
         _once_control=None,
@@ -1865,7 +1880,6 @@ class _ScopedNormalizer:
         rep_plan: dict = {}
         rep_used: dict = {}  # memory values the rep proofs used (validated at the end)
         direction_assumed = False
-        slot_direction = False   # (PE-a1) a covered return through an import slot was used
         while True:
             step()   # (budget: docs 25.30 K1c)
             dependencies = RustworkxDependencyGraph()
@@ -2179,7 +2193,8 @@ class _ScopedNormalizer:
             proven = _prove_rep_sites({address: site for address, site in sites.items()
                                        if address not in _blocked_sites},
                                       rep_plan, memory_ssa, observation, unit.scopes, overrides_now,
-                                      assume_direction_flag_clear, _blocked_reads, rep_used)
+                                      assume_direction_flag_clear, _blocked_reads, rep_used,
+                                      inferred_direction_flag)
             if not proven:
                 break
             for address, (count, direction, assumed) in proven.items():
@@ -2447,40 +2462,13 @@ class _ScopedNormalizer:
             if debts is None:
                 failed_sites.add(address)
             elif debts:
-                # direction-flag-clear: DF is 0 when a call returns -- the flag
-                # is then 0 (forward) at the site only if every debt is a call
-                # possibly changing DF itself (nothing assigned after it).
-                # (PE-a1, S3 design r18 amendment 1) and only a return the
-                # premise covers, read by the site itself: the operand is the
-                # architectural DF (register evidence); the debt's reader is
-                # the site's own direction read (a value computed from DF after
-                # the call -- DF ^= 1 -- is no covered origin), its call a raw
-                # CALL / CALLIND (a CALLOTHER -- syscall, int -- returns from
-                # no call) listed in ``covered_call_returns`` (positively
-                # identified import calls; an unlisted call is uncovered)
-                flag = _resolve_validated_storage(_storage_ref(site.direction), context)
-                from .call_clobber import debt_calls, rows_by_debt
-                from .isa_identity import direction_flag, is_direction_flag
-
-                rows = rows_by_debt(call_clobber_reads, call_clobber_debts)
-                producers = debt_calls(call_clobber_reads, call_clobber_debts)
-                if assume_direction_flag_clear and rep_plan[address][1] == 1 \
-                        and is_direction_flag(site.direction, direction_flag(unit.scopes.program.evidence)) \
-                        and type(flag) is ResolvedStorage and all(
-                            debt in rows and all(
-                                row.operation_key == site.direction_key
-                                and all(flag.span.contains(span) for span in row.spans)
-                                for row in rows[debt])
-                            and producers.get(debt, "").rsplit(":", 1)[-1] in ("CALL", "CALLIND")
-                            and producers[debt] in covered_call_returns
-                            for debt in debts):
-                    direction_assumed = True
-                    # (a CALLIND bound through an import slot: the slot holding
-                    # the export rests on import-slots-hold-their-exports)
-                    slot_direction = slot_direction or any(
-                        producers[debt].endswith(":CALLIND") for debt in debts)
-                else:
-                    failed_sites.add(address)
+                # (PE-a1, S3 design r18 amendment 1; owner 2026-11-25) a debt
+                # on the direction flag is never waived: in this step
+                # direction-flag-clear covers the function's entry value only.
+                # A call's return -- which call (an import? an analysed body? a
+                # kernel return?), which edge (normal or a landing pad) -- is
+                # PE-a2's, with body records; any debt fails the site here
+                failed_sites.add(address)
         failed_sites = frozenset(failed_sites)
         # a call's below-stack bound rests on its stack pointer at the call
         # (``~sp`` row): with debt there, that bound may be another
@@ -2587,8 +2575,7 @@ class _ScopedNormalizer:
             intrinsic_refinements=tuple(sorted(intrinsic_refinements.items())),
             assumed_direction_flag_clear=direction_assumed,
             premise_uses=_premise_uses(unit, policy_uses, frame_uses, opaque_uses, pre_uses, image_uses,
-                                       direction_assumed, _import_slots_used(memory_ssa) or slot_direction,
-                                       sp_uses),
+                                       direction_assumed, _import_slots_used(memory_ssa), sp_uses),
             assumes_opaque_callees_restore_stack_pointer=_opaque_restores_sp(),
             private_frame_writes=private_writes,
             wild_objects=frozenset(wild_objects),

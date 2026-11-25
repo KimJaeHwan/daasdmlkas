@@ -57,6 +57,38 @@ def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordin
     return _named(evidence, _DIRECTION_FLAGS)
 
 
+def inferred_direction_flag(units) -> RegisterCoordinate | None:
+    """(PE-a1; owner 2026-11-25, Astra / Fable r2 P2-2) Without an exported
+    register table: the one-byte direction operand every recognised ``rep
+    movs`` / ``rep stos`` row of the program names (``rep_strings.recognize``:
+    the exact string-instruction lifting), when the language is x86 and that
+    coordinate is unanimous across every observed body (cut ones included).
+    The identification rests on the base premise decoder-matches-cpu (P-0):
+    in that lifting the byte deciding the direction is DF by ISA. A program
+    with a register table, another language, no rep row or disagreeing rows:
+    None (the table rule, or no certificate)."""
+    from .rep_strings import recognize
+
+    units = [unit for unit in units if unit.observation is not None]
+    if not units:
+        return None
+    evidence = units[0].scopes.program.evidence
+    parts = tuple(evidence.translation_namespace.language_id.split(":"))
+    if parts[:3] not in _DIRECTION_FLAGS or evidence.register_evidence is not None:
+        return None
+    found = set()
+    for unit in units:
+        for instruction in unit.observation.instructions:
+            site = recognize(instruction)
+            if site is not None:
+                operand = site.direction
+                found.add((operand.coordinate.space_id, operand.coordinate.byte_offset, operand.byte_size))
+    if len(found) != 1:
+        return None
+    ((space_id, offset, size),) = found
+    return RegisterCoordinate("DF", space_id, offset, size) if size == 1 else None
+
+
 def is_direction_flag(varnode, flag: RegisterCoordinate | None) -> bool:
     """``varnode`` is exactly the direction flag (``direction_flag``)."""
     return flag is not None and varnode.byte_size == flag.byte_size \
