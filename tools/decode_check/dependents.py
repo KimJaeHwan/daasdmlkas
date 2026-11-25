@@ -82,6 +82,9 @@ def attribute_states(result: dict | None) -> dict:
         return {"*": "unobserved"}
     out = {name: item["state"] for name, item in result["attributes"].items() if item["state"] not in OK}
     out["+"] = frozenset(name for name, item in result["attributes"].items() if item["state"] in OK)
+    # (``~``: the kinds of the non-confirmed attributes, for the evidence file's ``state:kind``)
+    out["~"] = {name: item["kind"] for name, item in result["attributes"].items()
+                if item["state"] not in OK and "kind" in item}
     return out
 
 

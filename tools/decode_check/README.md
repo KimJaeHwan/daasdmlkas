@@ -119,6 +119,23 @@ report of the reference pair, the `66 E8` pair (withheld row, guard true, blocke
 ELF PIE with a text relocation, minus the host's decoder build manifest. They are the
 parity reference for a Rust port. `G1_REGEN_GOLDEN=1` rewrites them after a reviewed change.
 
+## Engine evidence file
+
+`decode_check.py ... --evidence-out <path>` also writes `g1-decode-evidence-1`, the file the TDO engine reads to
+replace its premise "Ghidra decode = CPU" row by row (design `.census6/design_g1_engine_evidence_r3.md`, closed:
+Astra final specification `g1_evidence_astra4.md`, Fable APPROVE `g1_evidence_fable4.md`). It lives outside the
+Bundle (admission refuses unlisted entries) and is passed by explicit path.
+
+- Header: Bundle binding (generation id, the seal's `manifest_sha256`, the original's sha256), the producer
+  tuple an engine allowlists, premises (`decoder-matches-cpu` always; `stock-ghidra-translator` when the table
+  applied), compared / mode-constant attribute sets, `consumers-2` (500 canonical bytes, SHA-256 pinned in
+  `evidence.CONSUMERS_DIGEST`), `global_reason`.
+- Body: per function `observation_sha256`, `rows_total`, `rows_digest` (every processed row) and only the
+  exception rows (`state:kind` per non-confirmed attribute; `*` for a never-compared row).
+- `evidence.py` also holds a reference reader (`parse`, `accept`, `Evidence.read`, `decide`, `coverage`):
+  the six-step read, level A / B decisions and premise attachment exactly as the design states. The engine's
+  reader is TDO work; this one is its executable specification.
+
 ## Open items
 
 - **PE load-config code rewriting (owner, 2026-11-25).** Today a non-zero DynamicValueRelocTable /

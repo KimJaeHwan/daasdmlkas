@@ -1,0 +1,81 @@
+{
+ "bundle": {
+  "generation_id": "abababababababababababababababababababababababababababababababab",
+  "manifest_sha256": "cbe36b1505a3a472f91fa19ef34486ac3a2489ea2803a0c7502169cdd796052a",
+  "original_sha256": "f644e83ac790bacfd73d0110d1aa12f0bd4354c5ebcdfcaeef56cc8627108ab4"
+ },
+ "compared_attributes": [
+  "a1",
+  "a2",
+  "a3",
+  "a4",
+  "a5",
+  "a6",
+  "a7",
+  "a8",
+  "a9",
+  "a10",
+  "a11a",
+  "a11b",
+  "a11c",
+  "a12",
+  "target_operand_bits",
+  "F.has_fallthrough",
+  "F.is_call",
+  "F.is_jump",
+  "F.is_terminal",
+  "F.is_computed",
+  "F.is_conditional",
+  "F.is_flow",
+  "F.is_unconditional"
+ ],
+ "consumers": {
+  "digest": "5374e29006ccee4fd463f258e368e45c248cee659679e31c0ddc5e2c8cfe2d9e",
+  "version": "consumers-2"
+ },
+ "functions": [
+  {
+   "exceptions": [
+    {
+     "attributes": {
+      "a11b": "withheld:vendor",
+      "a2": "withheld:vendor",
+      "a4": "withheld:vendor",
+      "a5": "withheld:amd-disagreement",
+      "a7": "withheld:vendor"
+     },
+     "offset": "140001000",
+     "space": 1
+    }
+   ],
+   "function_id": "function-000000",
+   "observation_sha256": "148ed13edfd57eeb1ea636ec352575cf8b4d6aaa9562dddf548a3f36d66e950a",
+   "rows_digest": "07db2ca665d12a179ac8cac0113313d7974dc8bff5791cd091d17fd96ee5fb34",
+   "rows_total": 2
+  },
+  {
+   "exceptions": [],
+   "function_id": "function-000001",
+   "observation_sha256": "ec178a3cb80b45e4690e27a09f4e306f883d8b0cc19a22bf4095470f0164ec1c",
+   "rows_digest": "1215f014c6858051476cc59185a2ab1e4f73a01e9ff61167a600b9ea9328622c",
+   "rows_total": 2
+  }
+ ],
+ "global_reason": null,
+ "mapping": {
+  "format": "pe",
+  "mapping_id": "e1d66ed77e55bddb63afadc8de3e9b2e1e92681fbe18593bb2bb7963c8de0097"
+ },
+ "mode_constant": [
+  "a11a",
+  "F.is_flow"
+ ],
+ "premises": [
+  "decoder-matches-cpu",
+  "stock-ghidra-translator"
+ ],
+ "schema": "g1-decode-evidence-1",
+ "translation": {
+  "table_applied": true
+ }
+}

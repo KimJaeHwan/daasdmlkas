@@ -1333,6 +1333,327 @@ def test_r4_s5_first_and_third_pt_load_share_a_page():
     assert image.at(0x1800).kind == "file"
 
 
+# -- engine evidence file g1-decode-evidence-1 (design .census6/design_g1_engine_evidence_r3.md, s8 vectors)
+
+EV_BUNDLE = {"generation_id": "g" * 64, "manifest_sha256": "m" * 64, "original_sha256": "o" * 64}
+EV_PRODUCER = {"decode_check_revision": 2, "tool_digest": "t" * 64, "decoders": {"zydis": "x"},
+               "voters": {"intel": ["iced", "zydis", "xed"], "amd": ["iced", "zydis"]}, "rules": "pe-loader-rules-5",
+               "lift_table": "x86-64-lift-table-4", "diagnosis_engine": {"source_digest": "e" * 64},
+               "naming_source_sha256": "n" * 64}
+
+
+def _ev_function(fid, rows, states=None, observation="s" * 64):
+    return {"function_id": fid, "observation_sha256": observation, "rows": rows, "states": states or {}}
+
+
+def _ev_confirmed():
+    import compare
+
+    return {"+": frozenset(compare.COMPARED)}
+
+
+def _ev_doc(functions, *, table_applied=True, premises=None, global_reason=None):
+    import evidence
+
+    if premises is None:
+        premises = ["decoder-matches-cpu"] + (["stock-ghidra-translator"] if table_applied else [])
+    return evidence.build(bundle=dict(EV_BUNDLE), producer=dict(EV_PRODUCER),
+                          mapping={"format": "pe", "mapping_id": "p" * 64}, premises=premises,
+                          table_applied=table_applied, global_reason=global_reason, functions=functions)
+
+
+def _ev_view(functions, kept=None):
+    """The engine's own Bundle view (here equal to what G1 processed)."""
+    view = dict(EV_BUNDLE)
+    view["functions"] = {f["function_id"]: {"observation_sha256": f["observation_sha256"], "rows": set(f["rows"]),
+                                            "kept": (kept or {}).get(f["function_id"], True)} for f in functions}
+    return view
+
+
+def _ev_accept(document, view, allowlist=None):
+    import evidence
+
+    allowlist = [evidence.allowlist_entry(document)] if allowlist is None else allowlist
+    return evidence.accept(evidence.parse(evidence.dumps(document)), view, allowlist)
+
+
+def test_evidence_consumers_2_bytes_and_digest():
+    import copy
+    import hashlib
+
+    import evidence
+
+    data = evidence.consumers_bytes()
+    assert len(data) == 500 and hashlib.sha256(data).hexdigest() == evidence.CONSUMERS_DIGEST
+    reordered = dict(reversed(list(evidence.CONSUMERS_2.items())))
+    assert evidence.consumers_bytes(reordered) == data
+    variants = []
+    dropped = copy.deepcopy(evidence.CONSUMERS_2)
+    del dropped["push_relation"]
+    variants.append(evidence.consumers_digest(dropped))
+    flipped = copy.deepcopy(evidence.CONSUMERS_2)
+    flipped["s1"]["s1_exit_source"] = ["a4", "a1"]
+    variants.append(evidence.consumers_digest(flipped))
+    variants.append(hashlib.sha256(data + b"\n").hexdigest())
+    functions = [_ev_function("function-000000", [(1, 0x10)], {(1, 0x10): _ev_confirmed()})]
+    for digest in variants:
+        assert digest != evidence.CONSUMERS_DIGEST
+        document = _ev_doc(functions)
+        document["consumers"]["digest"] = digest
+        with pytest.raises(evidence.Rejected, match="consumers"):
+            _ev_accept(document, _ev_view(functions))
+
+
+def test_evidence_rows_digest_sorts_by_integer_pair():
+    import hashlib
+
+    import evidence
+
+    assert evidence.rows_digest([(1, 0x100), (1, 0xFF), (1, 0xFF)]) == \
+        hashlib.sha256(b"1:ff\n1:100\n").hexdigest()
+
+
+def test_evidence_producer_completeness_and_kinds():
+    import compare
+    import evidence
+
+    states = {"a2": "unrecognized", "~": {"a2": "ghidra-decode-suspect"},
+              "+": frozenset(compare.COMPARED) - {"a2", "a5"}}
+    assert evidence.exception_of(states) == {"a2": "unrecognized:ghidra-decode-suspect", "a5": "unobserved"}
+    assert evidence.exception_of({"*": "unobserved"}) == {"*": "unobserved"}
+    assert evidence.exception_of(_ev_confirmed()) is None
+
+
+@pytest.mark.parametrize("table_applied, premises, accepted, expected", [
+    (False, [], False, None),
+    (False, ["decoder-matches-cpu"], True, {"decoder-matches-cpu", "g1-evidence-from-allowlisted-build"}),
+    (True, ["decoder-matches-cpu"], False, None),
+    (True, ["stock-ghidra-translator"], False, None),
+    (True, ["decoder-matches-cpu", "stock-ghidra-translator"], True,
+     {"decoder-matches-cpu", "stock-ghidra-translator", "g1-evidence-from-allowlisted-build"}),
+])
+def test_evidence_required_premises(table_applied, premises, accepted, expected):
+    import evidence
+
+    functions = [_ev_function("function-000000", [(1, 0x10)], {(1, 0x10): _ev_confirmed()})]
+    document = _ev_doc(functions, table_applied=table_applied, premises=premises)
+    if not accepted:
+        with pytest.raises(evidence.Rejected, match="premise"):
+            _ev_accept(document, _ev_view(functions))
+        return
+    assert _ev_accept(document, _ev_view(functions)).premises == expected
+
+
+def test_evidence_s5_order_with_table_not_applied():
+    """Item 1: explicit disagreement survives table_applied = false; unexcepted table attributes unobserved."""
+    import evidence
+
+    reads = evidence.CONSUMERS_2["push_projection"]["call_op"]
+    vendor = {"a3": "withheld", "~": {"a3": "vendor"}, "+": frozenset(evidence.compare.COMPARED) - {"a3"}}
+    functions = [_ev_function("function-000000", [(1, 0x10)], {(1, 0x10): vendor})]
+    ev = _ev_accept(_ev_doc(functions, table_applied=False), _ev_view(functions))
+    results = [ev.read("function-000000", 1, 0x10, name) for name in reads]
+    assert ev.read("function-000000", 1, 0x10, "a3") == "withheld:vendor"
+    assert ev.read("function-000000", 1, 0x10, "F.is_call") == "unobserved"
+    assert ev.read("function-000000", 1, 0x10, "a1") == "confirmed"
+    for level in ("A", "B"):
+        assert evidence.decide(results, level, ev.premises)["keep"] is False
+    plain = [_ev_function("function-000000", [(1, 0x10)], {(1, 0x10): _ev_confirmed()})]
+    ev = _ev_accept(_ev_doc(plain, table_applied=False), _ev_view(plain))
+    results = [ev.read("function-000000", 1, 0x10, name) for name in reads]
+    assert ev.read("function-000000", 1, 0x10, "a3") == "unobserved"
+    kept = evidence.decide(results, "A", ev.premises)
+    assert kept["keep"] and "TBR-G1-decode" in kept["premises"]
+    assert evidence.decide(results, "B", ev.premises)["keep"] is False
+
+
+def test_evidence_membership_and_premises_per_fact():
+    """Item 2."""
+    import evidence
+
+    s1 = evidence.CONSUMERS_2["s1"]
+    functions = [_ev_function("f", [(1, 0x20)], {(1, 0x20): _ev_confirmed()})]
+    ev = _ev_accept(_ev_doc(functions), _ev_view(functions))
+    outside = [ev.read("f", 2, 0x20, name) for name in s1["s1_exit_source"]]
+    assert outside == ["unobserved", "unobserved"]
+    native = [ev.read("f", 1, 0x20, name) for name in s1["native_call"]]
+    keep_a = evidence.decide(native + outside, "A", ev.premises)
+    assert keep_a["keep"] and "TBR-G1-decode" in keep_a["premises"] and not keep_a["confirmed_by_g1"]
+    assert evidence.decide(native + outside, "B", ev.premises)["keep"] is False
+    bad = _ev_doc(functions)
+    bad["functions"][0]["exceptions"] = [{"space": 2, "offset": "20", "attributes": {"a4": "unobserved"}}]
+    with pytest.raises(evidence.Rejected, match="outside"):
+        _ev_accept(bad, _ev_view(functions))
+    # native-call reads confirmed, a separate exit source row `*`
+    two = [_ev_function("f", [(1, 0x20), (1, 0x30)], {(1, 0x20): _ev_confirmed(), (1, 0x30): {"*": "unobserved"}})]
+    ev = _ev_accept(_ev_doc(two), _ev_view(two))
+    reads = [ev.read("f", 1, 0x20, n) for n in s1["native_call"]] + [ev.read("f", 1, 0x30, n)
+                                                                       for n in s1["s1_exit_source"]]
+    decision = evidence.decide(reads, "A", ev.premises)
+    assert decision["keep"] and decision["premises"] == ev.premises | {"TBR-G1-decode"}
+    assert evidence.decide(reads, "B", ev.premises)["keep"] is False
+    # only `*` / not covered / zero reads -> TBR-G1-decode only
+    only = evidence.decide([ev.read("f", 1, 0x30, "a1")], "A", ev.premises)
+    assert only["premises"] == {"TBR-G1-decode"} and evidence.decide([], "A", ev.premises)["confirmed_by_g1"] is False
+    # explicit unobserved, a known attribute outside the compared set, the unexcepted mode constant a11a
+    explicit = [_ev_function("f", [(1, 0x20)], {(1, 0x20): {"a4": "unobserved",
+                                                             "+": frozenset(evidence.compare.COMPARED) - {"a4"}}})]
+    narrow = _ev_doc(explicit)
+    narrow["compared_attributes"] = [name for name in narrow["compared_attributes"] if name != "a6"]
+    ev = _ev_accept(narrow, _ev_view(explicit))
+    assert [ev.read("f", 1, 0x20, n) for n in ("a4", "a6", "a11a")] == ["unobserved"] * 3
+    # table applied, return shape a1 / a11b confirmed -> kept at A and B, evidence premises, TBR released
+    ev = _ev_accept(_ev_doc(functions), _ev_view(functions))
+    reads = [ev.read("f", 1, 0x20, n) for n in evidence.CONSUMERS_2["return_shape"]["return_op"]]
+    for level in ("A", "B"):
+        decision = evidence.decide(reads, level, ev.premises)
+        assert decision["keep"] and "TBR-G1-decode" not in decision["premises"] and decision["confirmed_by_g1"]
+
+
+def test_evidence_coverage_accounting():
+    """Item 5: 1/6 with each reason once; a global_reason file 0/6; a reason text change decides the same."""
+    import evidence
+
+    good = _ev_confirmed()
+    produced = [_ev_function("f1", [(1, 1)], {(1, 1): good}), _ev_function("f2", [(1, 2)], {(1, 2): good}),
+                _ev_function("f4", [(1, 4)], {(1, 4): good}), _ev_function("f5", [(1, 5)], {(1, 5): good}),
+                _ev_function("f6", [(1, 6)], {(1, 6): good})]
+    view = _ev_view(produced, kept={"f2": False})
+    view["functions"]["f3"] = {"observation_sha256": "s" * 64, "rows": {(1, 3)}, "kept": True}       # absent
+    view["functions"]["f4"]["observation_sha256"] = "z" * 64                                          # observation
+    view["functions"]["f5"]["rows"] = {(1, 5), (1, 0x55)}                                              # total+digest
+    view["functions"]["f6"]["rows"] = {(1, 0x66)}                                                      # digest only
+    ev = _ev_accept(_ev_doc(produced), view)
+    assert ev.coverage() == {"covered": 1, "total": 6, "global_reason": None, "not_covered": {
+        "ignored_duplicate_entry": 1, "absent": 1, "observation_mismatch": 1, "rows_total_mismatch": 1,
+        "rows_digest_mismatch": 1}}
+    document = _ev_doc([], global_reason="not at the preferred base")
+    ev = _ev_accept(document, view)
+    assert ev.coverage() == {"covered": 0, "total": 6, "global_reason": "not at the preferred base",
+                             "not_covered": {"global": 6}}
+    with pytest.raises(evidence.Rejected, match="global_reason"):
+        bad = _ev_doc(produced, global_reason="x")
+        bad["functions"] = _ev_doc(produced)["functions"]
+        _ev_accept(bad, view)
+
+
+def test_evidence_reason_text_never_changes_decisions():
+    import evidence
+
+    states = {"a2": "unrecognized", "~": {"a2": "cause-unknown"}, "+": frozenset(evidence.compare.COMPARED) - {"a2"}}
+    functions = [_ev_function("f", [(1, 0x10)], {(1, 0x10): states})]
+    first = _ev_doc(functions)
+    second = _ev_doc(functions)
+    first["functions"][0]["exceptions"][0]["reason"] = "one wording"
+    second["functions"][0]["exceptions"][0]["reason"] = "another wording"
+    results = []
+    for document in (first, second):
+        ev = _ev_accept(document, _ev_view(functions))
+        reads = [ev.read("f", 1, 0x10, n) for n in evidence.CONSUMERS_2["s1"]["native_call"]]
+        results.append((reads, evidence.decide(reads, "A", ev.premises), ev.coverage()))
+    assert results[0] == results[1]
+    assert evidence.dumps(first) != evidence.dumps(second)
+
+
+def test_evidence_all_invalid_row_withholds_s1_through_a1():
+    import evidence
+
+    states = {"a1": "unrecognized", "~": {"a1": "ghidra-decode-suspect"},
+              "+": frozenset(evidence.compare.COMPARED) - {"a1"}}
+    functions = [_ev_function("f", [(1, 0x10)], {(1, 0x10): states})]
+    ev = _ev_accept(_ev_doc(functions), _ev_view(functions))
+    reads = [ev.read("f", 1, 0x10, n) for n in evidence.CONSUMERS_2["s1"]["native_call"]]
+    assert evidence.decide(reads, "A", ev.premises)["keep"] is False
+
+
+@pytest.mark.parametrize("name, change, match", [
+    ("manifest", lambda d: d["bundle"].update(manifest_sha256="x" * 64), "manifest_sha256"),
+    ("generation", lambda d: d["bundle"].update(generation_id="x" * 64), "generation_id"),
+    ("original", lambda d: d["bundle"].update(original_sha256="x" * 64), "original_sha256"),
+    ("schema", lambda d: d.update(schema="g1-decode-evidence-2"), "schema"),
+    ("unknown key", lambda d: d.update(extra=1), "keys"),
+    ("duplicate function", lambda d: d["functions"].append(dict(d["functions"][0])), "duplicate function_id"),
+    ("duplicate coordinate", lambda d: d["functions"][0]["exceptions"].append(
+        dict(d["functions"][0]["exceptions"][0])), "duplicate exception"),
+    ("star mixed", lambda d: d["functions"][0]["exceptions"][0]["attributes"].update({"*": "unobserved"}), "'\\*'"),
+    ("unknown kind", lambda d: d["functions"][0]["exceptions"][0]["attributes"].update(
+        a2="withheld:new-kind"), "unknown state"),
+    ("unknown attribute", lambda d: d["functions"][0]["exceptions"][0]["attributes"].update(
+        semantics="unobserved"), "unknown attribute"),
+    ("bad offset", lambda d: d["functions"][0]["exceptions"][0].update(offset="0x10"), "hex"),
+    ("leading zero", lambda d: d["functions"][0]["exceptions"][0].update(offset="010"), "hex"),
+    ("function outside the Bundle", lambda d: d["functions"][0].update(function_id="function-999999"),
+     "not in the Bundle"),
+])
+def test_evidence_rejections(name, change, match):
+    import evidence
+
+    states = {"a2": "unobserved", "+": frozenset(evidence.compare.COMPARED) - {"a2"}}
+    functions = [_ev_function("function-000000", [(1, 0x10)], {(1, 0x10): states})]
+    document = _ev_doc(functions)
+    change(document)
+    with pytest.raises(evidence.Rejected, match=match):
+        _ev_accept(document, _ev_view(functions))
+
+
+def test_evidence_strict_json_and_allowlist():
+    import evidence
+
+    functions = [_ev_function("function-000000", [(1, 0x10)], {(1, 0x10): _ev_confirmed()})]
+    document = _ev_doc(functions)
+    with pytest.raises(evidence.Rejected, match="duplicate JSON key"):
+        evidence.parse(b'{"schema": 1, "schema": 2}')
+    with pytest.raises(evidence.Rejected, match="non-finite"):
+        evidence.parse(b'{"x": NaN}')
+    other = evidence.allowlist_entry(document)
+    other = dict(other, compared_attributes=other["compared_attributes"][:-1])
+    with pytest.raises(evidence.Rejected, match="allowlist"):
+        evidence.accept(evidence.parse(evidence.dumps(document)), _ev_view(functions), [other])
+
+
+@needs
+def test_evidence_end_to_end_on_a_synthetic_bundle(tmp_path):
+    """decode_check --evidence-out on the 66 E8 pair: accepted against the engine's own view, the withheld call
+    row withholds A's S1 at level A, B's S1 is confirmed by G1. The golden pins the file minus producer fields."""
+    import json
+
+    import _sealed as s
+    import decode_check
+    import evidence
+
+    functions, code = _pair(s, call_bytes=b"\x66\xE8\x0A\x00\x00\x00")
+    generation = _bundle(tmp_path / "b", functions, code) if (tmp_path / "b").mkdir() is None else None
+    path = tmp_path / "evidence.json"
+    _, _ = decode_check.run(generation, s.NAMING_SOURCE, True, full=True, evidence_out=path)
+    raw = path.read_bytes()
+    document = evidence.parse(raw)
+    facts = decode_check.collect(generation, s.NAMING_SOURCE)
+    manifest = json.loads((generation / "manifest.json").read_bytes())
+    members = {row["id"]: row for row in manifest["members"]}
+    seal = json.loads((generation / "seal.json").read_bytes())
+    view = {"generation_id": seal["generation_id"], "manifest_sha256": seal["manifest_sha256"],
+            "original_sha256": members["original"]["sha256"],
+            "functions": {row["id"]: {"observation_sha256": members[row["observation_member"]]["sha256"],
+                                      "rows": set(), "kept": True} for row in manifest["functions"]}}
+    for function in facts["functions"]:
+        view["functions"][function["function_id"]]["rows"] = {(r["space"], r["address"]) for r in function["rows"]}
+    ev = evidence.accept(document, view, [evidence.allowlist_entry(document)])
+    assert ev.coverage()["covered"] == 2 and ev.premises >= {"decoder-matches-cpu", "stock-ghidra-translator"}
+    s1 = evidence.CONSUMERS_2["s1"]["native_call"]
+    a = [ev.read("function-000000", 1, CODE, n) for n in s1]
+    assert any(item.startswith("withheld") for item in a)
+    assert evidence.decide(a, "A", ev.premises)["keep"] is False
+    b_rows = sorted(view["functions"]["function-000001"]["rows"])
+    b = [ev.read("function-000001", space, offset, n) for space, offset in b_rows for n in ("a1", "a4")]
+    assert evidence.decide(b, "A", ev.premises)["confirmed_by_g1"] is True
+    pinned = {k: v for k, v in document.items() if k != "producer"}
+    golden = GOLDEN / "decode_check_evidence_pair_66e8.json"
+    if os.environ.get("G1_REGEN_GOLDEN"):
+        with open(golden, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(pinned, indent=1, sort_keys=True) + "\n")
+    assert json.loads(golden.read_text(encoding="utf-8")) == pinned
+
+
 def test_guard_function_condition_is_x86_64_only():
     import guards
 
