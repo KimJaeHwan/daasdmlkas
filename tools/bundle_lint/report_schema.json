@@ -82,7 +82,8 @@
             "pipeline",
             "mapping",
             "decode",
-            "dependents"
+            "dependents",
+            "semantics"
           ]
         },
         "check": {

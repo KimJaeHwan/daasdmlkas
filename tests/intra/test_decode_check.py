@@ -355,6 +355,88 @@ def test_dependents_core_counts_estimates_and_unobserved():
     assert summary["g3b7b_none_estimate"]["loss_unknown"] == 1 and summary["push_projection"]["loss"] == 1
 
 
+INTERNAL = {"kind": "CONSTANT"}   # (an intra-instruction p-code branch destination)
+RAM = {"kind": "MEMORY"}
+
+
+@pytest.mark.parametrize("data, ops, expected", [
+    (bytes.fromhex("660f44c1"), [("CBRANCH", INTERNAL), ("COPY", None)], False),   # 66 CMOVcc: internal branch only
+    (bytes.fromhex("660f7f01"), [("STORE", None)], False),                       # 66 movdqa: no transfer op
+    (bytes.fromhex("66e80a000000"), [("STORE", None), ("CALL", RAM)], True),     # 66 near CALL
+    (bytes.fromhex("6767ff10"), [("LOAD", None), ("CALLIND", None)], True),      # 67 67 indirect CALL
+    (bytes.fromhex("f366e800000000"), [("STORE", None), ("CALL", RAM)], True),   # r4 s8: 66 not the first byte
+    (bytes.fromhex("66c3"), [("LOAD", None), ("RETURN", None)], True),           # 66 ret (terminal)
+    (bytes.fromhex("66e90000"), [("BRANCH", RAM)], True),                        # 66 near jmp
+    (bytes.fromhex("e800000000"), [("STORE", None), ("CALL", RAM)], False),      # plain near CALL
+    (bytes.fromhex("4040e9"), [("BRANCH", RAM)], True),                          # repeated REX on a transfer
+    (bytes.fromhex("f3"), [("CALL", RAM)], "unobserved"),                        # (verified bytes end first)
+])
+def test_guard_row_condition_vectors(data, ops, expected):
+    import guards
+
+    facts = {"length": 6 if data == b"\xf3" else len(data),
+             "ops": [{"opcode": name, "inputs": [target]} for name, target in ops]}
+    assert guards.row_condition(facts, data) == expected
+
+
+def test_guard_intra_instruction_skips_need_the_lift_table():
+    """66 0F 47 (16-bit CMOVA) lifts CBRANCH to the next address; EB 00 (jmp $+2) lifts a
+    BRANCH to the same address and is a real jump. Only the lift table tells them apart."""
+    import guards
+    import lifting
+
+    start = 0x1000
+    nxt = {"kind": "MEMORY", "offset": start + 4, "space": 1, "size": 8}
+    cmov = {"address": start, "length": 4, "fallthrough": start + 4, "exit": None,
+            "ops": [{"opcode": "CBRANCH", "inputs": [nxt, {"kind": "UNIQUE", "offset": 0, "size": 1}]},
+                    {"opcode": "COPY", "inputs": [{"kind": "REGISTER", "offset": 0, "size": 2}],
+                     "output": {"kind": "REGISTER", "offset": 0, "size": 2}}]}
+    data = bytes.fromhex("660f47c1")
+    assert guards.row_condition(cmov, data, None) == "unobserved"                      # (no premise)
+    assert guards.row_condition(cmov, data, lifting.Lift("cmov", {}, {}, (0,))) is False
+    jump = {"address": start, "length": 3, "ops": [{"opcode": "BRANCH", "inputs": [
+        {"kind": "MEMORY", "offset": start + 3, "space": 1, "size": 8}]}]}
+    assert guards.row_condition(jump, bytes.fromhex("66eb00"), lifting.Lift("jmp", {})) is True
+
+
+def test_guard_function_condition_is_x86_64_only():
+    import guards
+
+    assert guards.function_condition("x86:LE:64:default", [False, True]) is True
+    assert guards.function_condition("x86:LE:64:default", [False, "unobserved"]) == "unobserved"
+    assert guards.function_condition("x86:LE:64:default", [False]) is False
+    assert guards.function_condition("x86:LE:32:default", [True]) is False
+
+
+@needs
+def test_s1_guard_rows_keep_recomputed_apart_from_firing(tmp_path):
+    import _sealed as s
+
+    functions, code = _pair(s, call_bytes=b"\x66\xE8\x0A\x00\x00\x00")
+    del functions[1].observation["call_fallthrough"]       # (B: a function without S1)
+    functions[1].observation.pop("fallthrough_exits", None)
+    header, rows = _run(_bundle(tmp_path, functions, code))
+    a = rows[("decode", "s1_guard", "function-000000")]
+    assert (a.run_state, a.verdict) == ("evaluated", "withheld")
+    assert a.detail["recomputed"] is True and a.detail["fired_at_production"] == "unobserved"
+    assert a.detail["s1_observed"] is True and a.detail["rows"] == ["140001000"]
+    b = rows[("decode", "s1_guard", "function-000001")]
+    assert (b.verdict, b.detail["recomputed"], b.detail["s1_observed"]) == ("applied", False, False)
+    assert header["guard"]["language_agrees"] and header["guard"]["machine"] == 0x8664
+    assert rows[("decode", "row", "function-000000/1:140001000")].detail["guard"]["recomputed"] is True
+
+
+def test_semantics_layer_is_reserved_and_never_counted():
+    import decode_check
+    from report import LAYERS, Row
+
+    assert "semantics" in LAYERS and "semantics" in decode_check.RESERVED_LAYERS
+    rows = [Row("decode", "row", "f/1:10", "evaluated", "applied", "lint"),
+            Row("semantics", "rw_sets", "f/1:10", "evaluated", "applied", "lint"),
+            Row("dependents", "s1", "f", "evaluated", "applied", "lint")]
+    assert decode_check.g1_counts(rows) == {"decode/row": {"applied": 1}}
+
+
 def test_elf_map_rejects_other_machines_and_types():
     import _elf_fixture as ef
 

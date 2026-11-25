@@ -21,6 +21,18 @@ Checks one sealed Bundle against its own `original` file, without Ghidra:
    summary counts every unit; rows are written for would-block units only unless
    `--full`.
 
+4. **S1 guard (rows `decode/s1_guard`, per function)** — the exporter's
+   `cpuDependentLength` guard (G3b-7b r9g, main 18a5f5e) recomputed from verified
+   bytes: a control-transfer row whose prefix run holds `66` or a repeated prefix
+   would withhold S1. `recomputed` is true / false / unobserved (a row without a
+   CALL op whose scan fires depends on the prototype flow, which a Bundle does not
+   carry); `fired_at_production` is always `unobserved`; the observed S1 presence
+   sits beside it and is never used to infer firing.
+
+Layers: G1 counts (`header.counts`) cover `mapping` and `decode` only;
+`dependents` is derived; `semantics` is reserved for TBR (A3 / C1 semantic
+checks, its own revision) and is never counted as G1 `applied`.
+
 Design records and reviews live in `.census6/` (local). Scope, premises, the lift
 table, the decoder manifest and the mapping identity are written into every report
 header.

@@ -14,7 +14,8 @@ import json
 RUN_STATES = ("evaluated", "not_reached", "not_run", "unobserved", "timeout", "error")
 VERDICTS = ("applied", "not_applicable", "unrecognized", "withheld", "refused", "unsupported", "error")
 SOURCES = ("engine", "lint")
-LAYERS = ("transport", "operations", "features", "pipeline", "mapping", "decode", "dependents")   # (G1: last three)
+LAYERS = ("transport", "operations", "features", "pipeline", "mapping", "decode", "dependents",
+          "semantics")   # (G1: mapping / decode / dependents; semantics reserved for TBR)
 
 
 def source_row_key(function_id: str, index: int) -> str:

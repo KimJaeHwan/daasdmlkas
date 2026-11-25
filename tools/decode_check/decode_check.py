@@ -29,10 +29,16 @@ sys.path.insert(0, str(_HERE.parent / "bundle_lint"))
 import check  # noqa: E402
 import decoders  # noqa: E402
 import dependents  # noqa: E402
+import guards  # noqa: E402
 import lifting  # noqa: E402
 from report import Row, dumps  # noqa: E402
 
 REVISION = 2
+G1_LAYERS = ("mapping", "decode")
+# (reserved for TBR part A3 / C1 -- decoder read / write sets vs p-code, execution differential:
+#  .census6/design_tbr_semantics_r2.md) its own revision; never counted as G1 applied
+RESERVED_LAYERS = {"semantics": {"revision": None, "status": "reserved (TBR A3 / C1); not produced by G1; "
+                                 "never counted in G1 counts"}}
 SCOPE = ("only Ghidra-listed rows are checked (L5); 64-bit long mode only (no compatibility-mode switches); "
          "decoder agreement is not a proof of CPU behaviour (premise decoder-matches-cpu); vendor agreement covers "
          "only what the decoders model; instruction meaning beyond the compared attributes (mnemonic, data effects, "
@@ -147,7 +153,8 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
                   "allowed_prefix": sorted(lifting.TABLE["allowed_prefix"])},
               "decoders": decoders.manifest(), "voters": {"intel": list(decoders.INTEL_VOTERS),
                                                           "amd": list(decoders.AMD_VOTERS)},
-              "scope": SCOPE, "PYTHONHASHSEED": "0"}
+              "scope": SCOPE, "PYTHONHASHSEED": "0", "layers": {"g1": list(G1_LAYERS), "derived": ["dependents"],
+                                                              "reserved": RESERVED_LAYERS}}
     if not facts["admission"].get("ok"):
         return header, [Row("mapping", "original", "bundle", "unobserved", None, "lint",
                             {"reason": "the Bundle is not admitted", "admission": facts["admission"]})]
@@ -159,14 +166,34 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     rows = check.mapping_rows(image)
     reason = check.global_reason(mapping, base, facts["language"] or "")
     states = {}
-    rows.extend(check.decode_rows(image, facts["functions"], premise, reason, full, states))
+    rows.extend(check.decode_rows(image, facts["functions"], premise, reason, full, states, facts["language"] or ""))
     rows.extend(check.suspect_rows(rows))
     rows.extend(dependents_rows(facts["functions"], states, reason, full, header))
     header["mapping"] = {"format": mapping.format, "rules": mapping.rules, "mapping_id": mapping.mapping_id,
                          "load_bias": base - mapping.image_base}
     header["mapping_id"] = mapping.mapping_id
     header["global_reason"] = reason
+    # (r3 s8) the guard inputs known once per export; firing at production is never decidable from a Bundle
+    header["guard"] = {"revision": guards.REVISION, "fired_at_production": guards.FIRED_AT_PRODUCTION,
+                       "format": mapping.format, "machine": mapping.header_fields.get("machine",
+                                                                                  mapping.header_fields.get("e_machine")),
+                       "language": facts["language"], "language_agrees": (facts["language"] or "") == check.LANGUAGE}
+    header["counts"] = g1_counts(rows)
     return header, rows
+
+
+def g1_counts(rows: list) -> dict:
+    """G1's own counts: layers ``mapping`` and ``decode`` only. ``dependents`` is
+    derived from them, and ``semantics`` (reserved, TBR) is never counted here."""
+    out = {}
+    for row in rows:
+        if row.layer not in G1_LAYERS:
+            continue
+        name = f"{row.layer}/{row.check}"
+        state = row.verdict if row.run_state == "evaluated" else row.run_state
+        out.setdefault(name, {})
+        out[name][state] = out[name].get(state, 0) + 1
+    return out
 
 
 def main(argv=None) -> int:

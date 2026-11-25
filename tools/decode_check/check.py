@@ -21,6 +21,7 @@ import compare  # noqa: E402
 import decoders  # noqa: E402
 import dependents  # noqa: E402
 import elf_map  # noqa: E402
+import guards  # noqa: E402
 import lifting  # noqa: E402
 import pe_map  # noqa: E402
 from report import Row  # noqa: E402
@@ -227,30 +228,36 @@ STATE_TO_ROW = {"applied": ("evaluated", "applied"), "not_applicable": ("evaluat
 
 
 def decode_rows(image: Image, functions: list, premise: bool, reason: str | None, full: bool = False,
-                states: dict | None = None) -> list[Row]:
+                states: dict | None = None, language: str = LANGUAGE) -> list[Row]:
     """Decode rows; ``states`` (when given) receives ``(function id, address) ->
     dependents.attribute_states(result)`` for the dependents table."""
     rows = []
     states = {} if states is None else states
     for function in functions:
+        conditions = {}
         for facts in function["rows"]:
             key = f"{function['function_id']}/{facts['space']:x}:{facts['address']:x}"
             states[(function["function_id"], facts["address"])] = {"*": "unobserved"}
+            conditions[facts["address"]] = guards.UNOBSERVED
             if reason is not None:
                 rows.append(Row("decode", "row", key, "unobserved", None, "lint", {"reason": reason}))
                 continue
             window = image.window(facts["address"])
+            lift = lifting.identify(facts) if premise else None
+            conditions[facts["address"]] = guards.row_condition(facts, window["bytes"], lift)
             if not window["bytes"]:
                 rows.append(Row("decode", "row", key, "unobserved", None, "lint",
                                 {"reason": f"no verified byte at the row start ({window['stop']})"}))
                 continue
             ballot = decoders.ballot(window["bytes"], facts["address"])
-            lift = lifting.identify(facts) if premise else None
             result = compare.compare_row(facts, lift, window, ballot, s1=function["s1"],
                                          native_call=facts["native_call"], premise=premise)
             states[(function["function_id"], facts["address"])] = dependents.attribute_states(result)
             state = result["state"]
             detail = {"window": result["window"], "lift": None if lift is None else lift.pattern, "s1": function["s1"]}
+            if conditions[facts["address"]] is not False:
+                detail["guard"] = {"recomputed": conditions[facts["address"]],
+                                   "fired_at_production": guards.FIRED_AT_PRODUCTION}
             if full or state != "applied":
                 # (an applied row keeps only its window and lift: every attribute agreed; the report of a
                 # large DLL would otherwise be gigabytes)
@@ -267,7 +274,27 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
                 run_state, verdict = "evaluated", kind_state
                 detail["kind"] = kind
             rows.append(Row("decode", "row", key, run_state, verdict, "lint", detail))
+        rows.append(guard_row(function, conditions, language))
     return rows
+
+
+def guard_row(function: dict, conditions: dict, language: str) -> Row:
+    """The function's S1 guard (r3 s8 / r4 s8): ``withheld`` when the recomputed
+    condition is true (the guard would withhold S1), ``applied`` when false,
+    ``unobserved`` when undecided. Whether it fired at production stays unobserved;
+    the observed S1 presence is reported beside it, never used to infer firing."""
+    value = guards.function_condition(language, list(conditions.values()))
+    detail = {"recomputed": value, "fired_at_production": guards.FIRED_AT_PRODUCTION,
+              "s1_observed": bool(function["s1"]), "revision": guards.REVISION}
+    rows_of = [f"{address:x}" for address, item in conditions.items() if item is not False]
+    if rows_of:
+        detail["rows"] = rows_of[:5]
+        detail["rows_count"] = len(rows_of)
+    if value is True:
+        return Row("decode", "s1_guard", function["function_id"], "evaluated", "withheld", "lint", detail)
+    if value is False:
+        return Row("decode", "s1_guard", function["function_id"], "evaluated", "applied", "lint", detail)
+    return Row("decode", "s1_guard", function["function_id"], "unobserved", None, "lint", detail)
 
 
 def suspect_rows(rows: list[Row]) -> list[Row]:
