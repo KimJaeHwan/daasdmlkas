@@ -568,3 +568,56 @@ def test_a_refused_member_withdraws_globals_disjoint_without_whole_program_evide
     other = SimpleNamespace(clean=True, executable_sha256="0" * 64, describe=lambda: "x", program="other")
     elsewhere = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()], stack_evidence=(other,))
     assert "globals-disjoint-from-stack" not in elsewhere.assumptions   # (another executable's scan)
+
+
+def _refused_failures(bodies):
+    with open_configured_extraction(_Provider(list(bodies)), _mint_orchestrator_capability()) as envelope:
+        units = list(envelope.iter_scoped_functions())
+    admitted = [unit for unit in units if type(unit.scopes.function) is not UnresolvedFunctionScope]
+    failures = tuple(ObservedFunctionAdmissionFailure(b"g" * 32, f"function-{index}", f"function-{index}",
+                                                      bytes([index + 1]) * 32, unit)
+                     for index, unit in enumerate(units) if type(unit.scopes.function) is UnresolvedFunctionScope)
+    return units, admitted, failures
+
+
+def test_analyze_units_with_a_refused_unit_withdraws_globals_disjoint_unless_covered():
+    """Astra PE-c r1 P1: the direct entry scanned admitted functions only."""
+    from tdo_v2.interprocedural import analyze_units
+
+    units, _, _ = _refused_failures([_main(), FunctionBuilder(entry=SINK).ret(), _refused()])
+    off = analyze_units(units, assume_globals_disjoint_from_stack=True)
+    assert not off[_key(MAIN)].normalized.assumes_globals_disjoint_from_stack
+    covered = analyze_units(units, assume_globals_disjoint_from_stack=True, refusals_covered_by_evidence=True)
+    assert covered[_key(MAIN)].normalized.assumes_globals_disjoint_from_stack
+
+
+def test_base_graphs_with_a_refusal_withdraw_globals_disjoint():
+    from tdo_v2.base_graph import BaseGraphPolicy, BaseGraphPublication
+
+    _, admitted, failures = _refused_failures([_main(), FunctionBuilder(entry=SINK).ret(), _refused()])
+    policy = BaseGraphPolicy(assume_globals_disjoint_from_stack=True)
+    result = BaseGraphPublication(admitted, policy=policy, admission_failures=failures).build()
+    assert result.policy.assume_globals_disjoint_from_stack is False
+    plain = BaseGraphPublication(admitted, policy=policy).build()
+    assert plain.policy.assume_globals_disjoint_from_stack is True   # (control)
+
+
+def test_the_evidence_may_be_a_one_shot_iterator():
+    """Astra PE-c r1 P2: the evidence was consumed before the executable check."""
+    from types import SimpleNamespace
+
+    probe = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()])
+    evidence = SimpleNamespace(clean=True, executable_sha256=probe.executable_sha256, describe=lambda: "x",
+                               program="p")
+    kept = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()], stack_evidence=iter((evidence,)))
+    assert "globals-disjoint-from-stack" in kept.assumptions
+
+
+def test_a_dirty_evidence_iterator_still_withdraws():
+    """The evidence is read twice (the executable match, then the dirty check):
+    as a one-shot iterator, dirty evidence must still withdraw the assumption."""
+    from types import SimpleNamespace
+
+    dirty = SimpleNamespace(clean=False, executable_sha256="0" * 64, describe=lambda: "x", program="p")
+    run = _run([_main(), FunctionBuilder(entry=SINK).ret()], stack_evidence=iter((dirty,)))
+    assert "globals-disjoint-from-stack" not in run.assumptions

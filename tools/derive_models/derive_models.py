@@ -226,6 +226,8 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                                        assume_debug_break_traps_do_not_return=traps,
                                        assume_direction_flag_clear=direction_flag,
                                        assume_globals_disjoint_from_stack=globals_disjoint,
+                                       # (PE-c) globals_disjoint here needs this library's clean evidence
+                                       refusals_covered_by_evidence=globals_disjoint,
                                        assume_import_slots_hold_exports=import_slots,
                                        assume_entry_values_not_frame=entry_values_not_frame,
                                        assume_opaque_callees_leave_no_stack_addresses=opaque_no_stack,

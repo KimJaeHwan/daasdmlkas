@@ -137,6 +137,27 @@ def test_saved_and_restored_register_discharges_call_debt():
     assert root.is_effectively_complete
 
 
+def test_a_constant_store_between_save_and_restore_needs_globals_disjoint():
+    """PE-c (Astra r1 P1, Fable P2-1): helper saves RBX on its stack, stores to
+    a constant address, restores RBX. Without globals-disjoint-from-stack the
+    store may be the saved slot (a may-alias debt on the restoring load): no
+    preservation certificate."""
+    from synthetic import DATA_BASE, R8
+
+    # (the save slot is the caller's home space [entry rsp + 8], not this frame's private bytes)
+    helper = (FunctionBuilder(entry=HELPER)
+              .ins(add(T, reg(RSP), const(8)), store(T, reg(RBX)))
+              .ins(store(const(DATA_BASE), reg(R8)))
+              .ins(add(T, reg(RSP), const(8)), load(reg(RBX), T))
+              .ret())
+    functions = {"main": _main_through_helper(), "source": _source_returning_constant(), "helper": helper,
+                 "sink": _sink()}
+    off = analyze_program(functions, PROVIDER)
+    assert not off[("main", "sink.arg0")].is_effectively_complete
+    on = analyze_program(functions, PROVIDER, normalize_options={"assume_globals_disjoint_from_stack": True})
+    assert on[("main", "sink.arg0")].is_effectively_complete
+
+
 def test_clobbered_register_is_not_discharged():
     helper = FunctionBuilder(entry=HELPER).ins(copy(reg(RBX), const(0))).ret()
     root = _root({

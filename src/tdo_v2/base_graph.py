@@ -207,7 +207,9 @@ class BaseGraphPublication:
         sys.setrecursionlimit(max(previous, ANALYSIS_RECURSION_LIMIT))
         try:
             with _policy(self._policy), phase("base_graphs"):
-                if self._policy.assume_globals_disjoint_from_stack and program_switches_stack(self._units):
+                if self._policy.assume_globals_disjoint_from_stack and (
+                        program_switches_stack(self._units) or self._admission_failures):
+                    # (PE-c) a refused member is code the stack-switch check never saw
                     self._policy = replace(self._policy, assume_globals_disjoint_from_stack=False)
                 normalizer = FunctionNormalizer()
                 for key, unit in zip(self._keys, self._units):

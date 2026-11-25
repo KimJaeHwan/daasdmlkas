@@ -620,6 +620,10 @@ def _callee_preserves(callee: _FunctionView, span: ByteSpan, read_ok) -> bool:
         # an unresolved write could overwrite a saved copy between save and restore
         return False
     clobbered = {row.operation_key for row in callee.normalized.call_clobber_reads}
+    # (PE-c, r18 amendment 8) a read another object's write may have overwritten
+    # (with globals-disjoint-from-stack off, a constant-address store may be the
+    # saved slot) restores nothing provable
+    aliased = {row.operation_key for row in getattr(callee.normalized, "may_alias_reads", ())}
     accepted: dict[str, bool] = {}
     definition_id, full = covering[0]
     active: set[tuple[int, tuple[object, ...]]] = set()
@@ -654,6 +658,8 @@ def _callee_preserves(callee: _FunctionView, span: ByteSpan, read_ok) -> bool:
                 parent = callee.definition_for_input(key, operation.inputs[2])
                 return parent is not None and trace(*parent, depth + 1)
             if operation.opcode == "LOAD" and operation.output is not None:
+                if key in aliased:
+                    return False
                 action_id = callee.action_ids.get(key)
                 reads = tuple(
                     read for read in callee.memory.reads

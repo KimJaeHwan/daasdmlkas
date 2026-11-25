@@ -609,7 +609,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                   disabled_model_assumptions=(), assumption_declarations=(),
                   assume_faults_end_execution=False, assume_stock_ghidra_translator=False,
                   exception_directory=None, code_only_profile=None,
-                  unavailable_entries=frozenset(), unidentified_refusals=False) -> dict[str, AnalyzedFunction]:
+                  unavailable_entries=frozenset(), unidentified_refusals=False,
+                  refusals_covered_by_evidence=False) -> dict[str, AnalyzedFunction]:
     """``units``: ScopedFunctionUnit per function of one program.
     ``assumed_call_effects``: optional entry key -> TEST-ONLY declared effects.
     ``extra_origins(key, unit, normalized, calls)``: graph node -> source labels
@@ -690,6 +691,12 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # program-wide facts first (every function, cut ones included): they decide
     # which assumptions hold in this run, and so which models may be applied
     if assume_globals_disjoint_from_stack and program_switches_stack(functions.values()):
+        assume_globals_disjoint_from_stack = False
+    # (PE-c, r18 amendment 4) a refused member is code the check above never saw:
+    # withdrawn unless the caller holds clean whole-program evidence for this
+    # executable (``refusals_covered_by_evidence``)
+    if assume_globals_disjoint_from_stack and (unavailable_entries or unidentified_refusals) \
+            and not refusals_covered_by_evidence:
         assume_globals_disjoint_from_stack = False
     from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
     from .relative_memory import IMPORT_SLOTS

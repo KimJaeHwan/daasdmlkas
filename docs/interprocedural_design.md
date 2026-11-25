@@ -7251,6 +7251,17 @@ Fable AWF -> r2; r2: Astra AWF / Fable AWF(P1 없음) -> r3 반영 후 닫음. �
   구간이면 모든 REGISTER 출력을 본다.
 - 거부된 구성원(PE-b, 보존 모드): 스택 전환 검사가 그 코드를 보지 못했으므로, 이 실행 파일에 대한 깨끗한 전체 프로그램 증거
   (모든 함수를 훑는다, 거부된 것 포함)가 없으면 globals-disjoint-from-stack을 철회한다.
+- 저장 사본 증명(`_callee_preserves`, 코드 리뷰 r1 Astra P1 / Fable P2-1): 복원 LOAD에 may-alias 빚이 있으면(가정이 꺼진
+  실행에서 상수 주소 쓰기가 저장 슬롯일 수 있다) 보존을 증명하지 않는다.
+- 거부된 구성원 규칙은 거부를 지닌 모든 입구에: 요약 엔진, `analyze_units` 직접 호출(`refusals_covered_by_evidence`; 요약
+  엔진과 템플릿 도출 도구가 증거로 덮일 때만 참으로 넘긴다), 기본 그래프 공개(증거를 모르므로 거부가 있으면 철회). 증거는
+  한 번 받아 두 번 읽는다(일회용 반복자도 됨). 요약 엔진 자신의 철회는 `analyze_units` 철회와 겹치는 방어(링커 경로가 이
+  설정으로 템플릿을 만든다).
+- 의미 버전 59(프레임 / 저장 사본 / 말단 판정이 바뀌어 템플릿 지문이 바뀐다), UE 템플릿 v46.
+- 남은 것(PE-c-2, 기록만): 함수 자신의 새 프레임 바이트(private frame 규칙, entry-values-do-not-address-the-new-frame)는
+  상수 주소 기반도 닿지 않는다고 본다 -- 레지스트리 문장은 "상수는 globals-disjoint-from-stack에 기댄다"인데, 가정이 꺼진
+  실행에서도 `pop`으로 복원하는 자기 프레임 슬롯에 상수 저장의 may-alias 빚이 생기지 않았다(시험 중 관찰). 같은 부류의
+  숨은 공리일 수 있다 -- 별도 확인.
 - 범위 밖(S3 단계 / TBR): 허용된 커널 지점 뒤의 레지스터, Java 스캐너의 커널 전이 인식(`[TBR-G3-scan]` -> TDO X-1),
   `stack-switch-check-exceptions` 자체는 바꾸지 않는다(Fable r18 P2-2).
 - 고정 `tests/intra/test_call_clobber_discharge.py`(가정 있음 / 없음), `test_stack_call_preservation.py`(출력 누락),

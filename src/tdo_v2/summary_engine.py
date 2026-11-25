@@ -511,6 +511,9 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
         and image_info is not None             and image_info.executable_format.startswith("Portable Executable") and _x86_64(evidences) else 0
     from .stack_evidence import assumption_allowed
 
+    stack_evidence = tuple(stack_evidence or ())   # (PE-c: read more than once below)
+    refusals_covered = any(item.clean and item.executable_sha256 == program.evidence.executable_sha256.hex()
+                           for item in stack_evidence)
     if stack_evidence:
         assume_globals_disjoint_from_stack, _ = assumption_allowed(
             stack_evidence, requested=assume_globals_disjoint_from_stack)
@@ -518,9 +521,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     # program the stack-switch check never saw: without clean whole-program
     # evidence for this executable (which scans every function, refused ones
     # included) the program may switch stacks there -- withdrawn
-    if assume_globals_disjoint_from_stack and admission_failures and not any(
-            item.clean and item.executable_sha256 == program.evidence.executable_sha256.hex()
-            for item in (stack_evidence or ())):
+    if assume_globals_disjoint_from_stack and admission_failures and not refusals_covered:
         assume_globals_disjoint_from_stack = False
     if linker is not None:
         from .interprocedural import program_switches_stack
@@ -555,6 +556,7 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     results = analyze_units(
         [item.unit for item in evidences], declared_boundaries=assumed, extra_origins=extra_origins,
         unavailable_entries=refused_entries, unidentified_refusals=unidentified_refusals,
+        refusals_covered_by_evidence=refusals_covered,
         assume_globals_disjoint_from_stack=assume_globals_disjoint_from_stack,
         sink_roots=sink_roots,
         # the image facts serve models and the import-slot assumption
