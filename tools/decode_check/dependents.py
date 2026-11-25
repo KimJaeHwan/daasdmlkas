@@ -1,0 +1,154 @@
+"""G1 dependents and loss table (design r1 s6, r2 s6, r3 s6, r4 s6): which engine
+facts read which compared attribute, and what an L2 gate (an engine that keeps a
+fact only when the decoders confirm what it reads) would block.
+
+Pure functions over plain data (Rust-port surface): the baseline facts per
+function come from G0's operation rows (reduced in decode_check.collect), the
+attribute states from compare.compare_row (reduced by ``attribute_states``).
+
+Per (consumer, unit):
+- ``confirmed``   every attribute the consumer reads is applied / not applicable;
+- ``would_block`` some read attribute is a disagreement (withheld / unrecognized)
+                  or unobserved -- an L2 gate cannot confirm it (``cause``);
+- ``loss``        1 when it would block and the baseline fact exists, 0 when the
+                  fact is already absent, "unknown" for an estimate consumer
+                  without a baseline in this engine (r4 s6). Counted once per
+                  function and consumer for function-level consumers.
+
+RP and pass-through stay undetermined: they need the PC the unwinder restores at
+each fault point, which a Bundle does not carry (r3 s6, r4 s6) -- header only.
+"""
+
+from __future__ import annotations
+
+OK = ("applied", "not_applicable")
+
+# consumer -> (unit, attributes read, status, design reference). Attribute names as in compare.compare_row.
+CALL_READS = ("a2", "a3", "a4", "a6", "a8", "F.is_call")
+CONSUMERS = {
+    "s1": ("function", "native-call rows: " + ", ".join(CALL_READS) + "; S1 exit rows: a4 (exit target = A4)",
+           "baseline", "r2 s6 S1 current contract"),
+    "s1_l2_estimate": ("function", "the s1 reads + every row: a5, a6, F.is_call (a call only the voters see)",
+                       "estimate", "r2 s6 adopted L2 acceptance"),
+    "push_projection": ("call", "F.is_call, a3, a4, a11b, a7", "baseline", "r2 s6, r4 s6"),
+    "push_relation": ("call", "the push_projection reads (relations iterate surviving projections), a4",
+                      "baseline", "r2 s6, r4 s6"),
+    "plain_push": ("call", "a6, a7 (pattern plain near call)", "baseline", "r2 s6"),
+    "call_seed": ("call", "a5, a6, a8", "baseline", "r2 s6 call seeds / naming"),
+    "return_shape": ("return", "a11b (a9 reported apart)", "baseline", "r2 s6"),
+    "unknown_transfer_site": ("branchind", "a8, a5 (U2a site; state-barrier completeness needs fault cuts, "
+                              "not exported)", "baseline", "r3 s6"),
+    "g3b7b_none_estimate": ("function", "every row: a1, a2, a3, a4, a5, a8; any BRANCHIND kept apart",
+                            "estimate", "r3 s6 (not in this branch's engine: loss unknown)"),
+}
+READS = {
+    "push_projection": ("F.is_call", "a3", "a4", "a11b", "a7"),
+    "push_relation": ("F.is_call", "a3", "a4", "a11b", "a7"),
+    "plain_push": ("a6", "a7"),
+    "call_seed": ("a5", "a6", "a8"),
+    "return_shape": ("a11b",),
+    "unknown_transfer_site": ("a8", "a5"),
+}
+G3B7B_READS = ("a1", "a2", "a3", "a4", "a5", "a8")
+L2_EXTRA = ("a5", "a6", "F.is_call")
+UNDETERMINED = {"rp": "needs the PC the unwinder restores at each fault point (not in a Bundle)",
+                "pass_through": "needs the PC the unwinder restores at each fault point (not in a Bundle)"}
+EXAMPLES = 5
+
+
+def attribute_states(result: dict | None) -> dict:
+    """The non-confirmed attributes of one compared row: {name: state}; ``*`` for a
+    row that was never compared (every attribute unobserved)."""
+    if result is None or "attributes" not in result:
+        return {"*": "unobserved"}
+    return {name: item["state"] for name, item in result["attributes"].items() if item["state"] not in OK}
+
+
+def _status(states: dict, name: str) -> str:
+    return states.get(name) or states.get("*") or "applied"
+
+
+def _judge(reads, baseline_present):
+    """reads: [(address, attribute, state)] -> (run state, verdict, detail)."""
+    blocking = [(address, name, state) for address, name, state in reads if state not in OK]
+    disagreement = [item for item in blocking if item[2] in ("withheld", "unrecognized")]
+    if not blocking:
+        return "evaluated", "applied", {"would_block": False, "baseline": baseline_present}
+    cause = "disagreement" if disagreement else "unobserved"
+    if baseline_present is None:
+        loss = "unknown"
+    else:
+        loss = 1 if baseline_present else 0
+    detail = {"would_block": True, "cause": cause, "baseline": baseline_present, "loss": loss,
+              "blocking": [[f"{address:x}", name, state] for address, name, state in
+                           (disagreement or blocking)[:EXAMPLES]], "blocking_count": len(blocking)}
+    if disagreement:
+        return "evaluated", "withheld", detail
+    return "unobserved", None, detail
+
+
+def function_rows(function: dict, states: dict) -> list[tuple]:
+    """(consumer, unit key, run state, verdict, detail) of one function.
+
+    function: {"function_id", "s1", "rows": [facts], "baseline": {"calls", "exits", "branchind", "returns"}}
+    states:   {address: attribute_states(...)} of this function's rows."""
+    fid = function["function_id"]
+    baseline = function.get("baseline") or {}
+    addresses = [facts["address"] for facts in function["rows"]]
+    native = [facts["address"] for facts in function["rows"] if facts.get("native_call")]
+    exits = sorted({item["source"] for item in baseline.get("exits", ())})
+    out = []
+
+    def reads_of(address_list, names):
+        return [(address, name, _status(states.get(address, {"*": "unobserved"}), name))
+                for address in address_list for name in names]
+
+    s1_reads = reads_of(native, CALL_READS) + reads_of(exits, ("a4",))
+    out.append(("s1", fid, *_judge(s1_reads, bool(function["s1"]))))
+    out.append(("s1_l2_estimate", fid, *_judge(s1_reads + reads_of(addresses, L2_EXTRA), bool(function["s1"]))))
+    g3b7b = _judge(reads_of(addresses, G3B7B_READS), None)
+    g3b7b[2]["branchind_rows"] = len(baseline.get("branchind", ()))
+    out.append(("g3b7b_none_estimate", fid, *g3b7b))
+    for call in baseline.get("calls", ()):
+        key = f"{fid}/{call['op']}"
+        facts = call.get("facts", {})
+        projection = _judge(reads_of([call["address"]], READS["push_projection"]),
+                            facts.get("push_projection") == "applied")
+        out.append(("push_projection", key, *projection))
+        relation = _judge(reads_of([call["address"]], READS["push_relation"]), facts.get("push_relation") == "applied")
+        out.append(("push_relation", key, *relation))
+        if facts.get("plain_push") not in (None, "not_applicable"):
+            out.append(("plain_push", key, *_judge(reads_of([call["address"]], READS["plain_push"]),
+                                                   facts.get("plain_push") == "applied")))
+        seed = _judge(reads_of([call["address"]], READS["call_seed"]), True)
+        seed[2]["naming"] = facts.get("naming")
+        out.append(("call_seed", key, *seed))
+    for item in baseline.get("returns", ()):
+        out.append(("return_shape", f"{fid}/{item['op']}",
+                    *_judge(reads_of([item["address"]], READS["return_shape"]), item["return_shape"] == "applied")))
+    for item in baseline.get("branchind", ()):
+        judged = _judge(reads_of([item["address"]], READS["unknown_transfer_site"]), True)
+        judged[2]["unknown_transfer"] = item["unknown_transfer"]
+        out.append(("unknown_transfer_site", f"{fid}/{item['site']}", *judged))
+    return out
+
+
+def summary(rows: list[tuple]) -> dict:
+    """Per consumer: units, baseline present, confirmed, would_block (by cause), loss."""
+    out = {}
+    for consumer, _, run_state, verdict, detail in rows:
+        item = out.setdefault(consumer, {"units": 0, "baseline_present": 0, "confirmed": 0,
+                                         "would_block_disagreement": 0, "would_block_unobserved": 0,
+                                         "loss": 0, "loss_unknown": 0})
+        item["units"] += 1
+        if detail.get("baseline"):
+            item["baseline_present"] += 1
+        if not detail["would_block"]:
+            item["confirmed"] += 1
+            continue
+        item["would_block_" + detail["cause"]] += 1
+        if detail["loss"] == "unknown":
+            item["loss_unknown"] += 1
+        else:
+            item["loss"] += detail["loss"]
+    return out

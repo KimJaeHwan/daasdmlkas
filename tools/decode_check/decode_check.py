@@ -28,6 +28,7 @@ sys.path.insert(0, str(_HERE.parent / "bundle_lint"))
 
 import check  # noqa: E402
 import decoders  # noqa: E402
+import dependents  # noqa: E402
 import lifting  # noqa: E402
 from report import Row, dumps  # noqa: E402
 
@@ -38,10 +39,39 @@ SCOPE = ("only Ghidra-listed rows are checked (L5); 64-bit long mode only (no co
          "registers written) is not compared; whether a producer guard fired cannot be decided from the Bundle")
 
 
+def _offset(coordinate_text: str) -> int:
+    """``space:offset[:...]`` (G0 coordinate / operation key text) -> the byte offset."""
+    return int(coordinate_text.split(":")[1], 16)
+
+
+def baseline_of(claim, raw, function_keys, superseded) -> dict:
+    """The engine facts G0 reports for one function, reduced to plain data for the
+    dependents table (r2 s6): calls (naming, push projection / relation, plain push),
+    S1 exits, BRANCHIND sites, return shapes."""
+    import ops_layer
+
+    calls = {}
+    for row in ops_layer.call_rows(claim, function_keys):
+        op = row.key.split("/", 1)[1]
+        item = calls.setdefault(op, {"op": op, "address": _offset(op), "opcode": op.rsplit(":", 1)[1], "facts": {}})
+        item["facts"]["naming" if row.check == "call" else row.check] = row.verdict
+    exits = [{"source": _offset(row.detail["source"]), "target": _offset(row.detail["target"])}
+             for row in ops_layer.exit_rows(claim, raw, function_keys, superseded) if row.verdict != "unrecognized"]
+    # (site key control:<entry>:<space>:<offset>; the entry itself contains ':')
+    branchind = [{"site": row.key.split("/", 1)[1], "address": int(row.key.rsplit(":", 1)[1], 16),
+                  "unknown_transfer": row.detail["unknown_transfer"]}
+                 for row in ops_layer.branchind_rows(claim, raw, superseded)]
+    returns = [{"op": row.key.split("/", 1)[1], "address": _offset(row.key.split("/", 1)[1]),
+                "return_shape": row.verdict} for row in ops_layer.return_rows(claim)]
+    return {"calls": list(calls.values()), "exits": exits, "branchind": branchind, "returns": returns}
+
+
 def collect(generation: Path, naming_source: Path) -> dict:
-    """The G0 diagnosis pass, reduced to plain facts (functions, language, base)."""
+    """The G0 diagnosis pass, reduced to plain facts (functions, language, base,
+    and per function the G0 baseline facts the dependents table reads)."""
     import diagnose
     import engine_api
+    import ops_layer
 
     found = {"functions": [], "language": None, "image_base": None}
 
@@ -52,6 +82,8 @@ def collect(generation: Path, naming_source: Path) -> dict:
         evidence = program.evidence
         found["language"] = evidence.translation_namespace.language_id
         found["image_base"] = evidence.image_base.byte_offset
+        function_keys = {claim.entry for claim in diagnosis.claims if claim.entry}
+        last = {claim.entry: claim for claim in diagnosis.claims if claim.evidence is not None}
         for claim in diagnosis.claims:
             if claim.evidence is None:
                 continue
@@ -62,13 +94,45 @@ def collect(generation: Path, naming_source: Path) -> dict:
                 facts = lifting.row_facts(instruction, exits.get(instruction.address))
                 facts["native_call"] = engine_api.is_native_call(instruction)
                 rows.append(facts)
+            try:
+                raw = ops_layer._raw_observation(generation, claim)
+                baseline = baseline_of(claim, raw, function_keys, last.get(claim.entry) is not claim)
+                baseline_error = None
+            except Exception as error:   # (one function's baseline never stops the report)
+                baseline, baseline_error = None, f"{type(error).__qualname__}: {error}"
             found["functions"].append({"function_id": claim.function_id, "entry": claim.entry,
                                        "s1": bool(getattr(observation, "call_fallthrough_isa", False)),
-                                       "rows": rows})
+                                       "rows": rows, "baseline": baseline, "baseline_error": baseline_error})
 
     diagnosis = diagnose.diagnose(generation, naming_source, keep=keep)
     found["admission"] = diagnosis.admission
     return found
+
+
+def dependents_rows(functions: list, states: dict, reason: str | None, full: bool, header: dict) -> list[Row]:
+    """Layer ``dependents`` (r1-r4 s6). Without --full only the would-block rows are
+    kept; the per-consumer summary in the header counts every unit."""
+    header["dependents"] = {"consumers": {name: {"unit": unit, "reads": reads, "status": status, "design": ref}
+                                          for name, (unit, reads, status, ref) in dependents.CONSUMERS.items()},
+                            "undetermined": dependents.UNDETERMINED,
+                            "rows": "every unit" if full else "would-block units only (the summary counts every unit)"}
+    if reason is not None:
+        header["dependents"]["summary"] = None
+        return [Row("dependents", "table", "program", "unobserved", None, "lint", {"reason": reason})]
+    out, judged = [], []
+    for function in functions:
+        if function["baseline"] is None:
+            out.append(Row("dependents", "baseline", function["function_id"], "error", None, "lint",
+                           {"reason": function["baseline_error"]}))
+            continue
+        mine = {facts["address"]: states.get((function["function_id"], facts["address"]), {"*": "unobserved"})
+                for facts in function["rows"]}
+        for consumer, key, run_state, verdict, detail in dependents.function_rows(function, mine):
+            judged.append((consumer, key, run_state, verdict, detail))
+            if full or detail["would_block"]:
+                out.append(Row("dependents", consumer, key, run_state, verdict, "lint", detail))
+    header["dependents"]["summary"] = dependents.summary(judged)
+    return out
 
 
 def run(generation: Path, naming_source: Path, premise: bool, full: bool = False) -> tuple[dict, list]:
@@ -94,8 +158,10 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     image = check.Image(generation, mapping, base, original)
     rows = check.mapping_rows(image)
     reason = check.global_reason(mapping, base, facts["language"] or "")
-    rows.extend(check.decode_rows(image, facts["functions"], premise, reason, full))
+    states = {}
+    rows.extend(check.decode_rows(image, facts["functions"], premise, reason, full, states))
     rows.extend(check.suspect_rows(rows))
+    rows.extend(dependents_rows(facts["functions"], states, reason, full, header))
     header["mapping"] = {"format": mapping.format, "rules": mapping.rules, "mapping_id": mapping.mapping_id,
                          "load_bias": base - mapping.image_base}
     header["mapping_id"] = mapping.mapping_id

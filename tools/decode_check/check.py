@@ -19,6 +19,7 @@ sys.path.insert(0, str(_HERE.parent / "bundle_lint"))
 
 import compare  # noqa: E402
 import decoders  # noqa: E402
+import dependents  # noqa: E402
 import elf_map  # noqa: E402
 import lifting  # noqa: E402
 import pe_map  # noqa: E402
@@ -225,11 +226,16 @@ STATE_TO_ROW = {"applied": ("evaluated", "applied"), "not_applicable": ("evaluat
                 "unobserved": ("unobserved", None)}
 
 
-def decode_rows(image: Image, functions: list, premise: bool, reason: str | None, full: bool = False) -> list[Row]:
+def decode_rows(image: Image, functions: list, premise: bool, reason: str | None, full: bool = False,
+                states: dict | None = None) -> list[Row]:
+    """Decode rows; ``states`` (when given) receives ``(function id, address) ->
+    dependents.attribute_states(result)`` for the dependents table."""
     rows = []
+    states = {} if states is None else states
     for function in functions:
         for facts in function["rows"]:
             key = f"{function['function_id']}/{facts['space']:x}:{facts['address']:x}"
+            states[(function["function_id"], facts["address"])] = {"*": "unobserved"}
             if reason is not None:
                 rows.append(Row("decode", "row", key, "unobserved", None, "lint", {"reason": reason}))
                 continue
@@ -242,6 +248,7 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
             lift = lifting.identify(facts) if premise else None
             result = compare.compare_row(facts, lift, window, ballot, s1=function["s1"],
                                          native_call=facts["native_call"], premise=premise)
+            states[(function["function_id"], facts["address"])] = dependents.attribute_states(result)
             state = result["state"]
             detail = {"window": result["window"], "lift": None if lift is None else lift.pattern, "s1": function["s1"]}
             if full or state != "applied":

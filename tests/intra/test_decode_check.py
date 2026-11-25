@@ -271,6 +271,90 @@ def test_elf_map_android_packed_or_static_without_sections_is_indeterminate():
     assert static.written.state == "indeterminate" and "static image" in static.written.why
 
 
+def _dependents(header, rows):
+    found = {}
+    for ident, row in rows.items():
+        if ident[0] == "dependents":
+            found[(ident[1], ident[2])] = row
+    return header["dependents"]["summary"], found
+
+
+@needs
+def test_dependents_of_the_reference_pair_are_all_confirmed(tmp_path):
+    import _sealed as s
+
+    functions, code = _pair(s)
+    header, rows = _run(_bundle(tmp_path, functions, code))
+    summary, found = _dependents(header, rows)
+    assert summary["s1"] == {"units": 2, "baseline_present": 2, "confirmed": 2, "would_block_disagreement": 0,
+                             "would_block_unobserved": 0, "loss": 0, "loss_unknown": 0}
+    for consumer in ("push_projection", "push_relation", "plain_push", "call_seed", "return_shape"):
+        assert summary[consumer]["confirmed"] == summary[consumer]["units"] >= 1, (consumer, summary[consumer])
+    assert all(not row.detail["would_block"] for row in found.values())   # (--full: every unit has a row)
+    assert set(header["dependents"]["undetermined"]) == {"rp", "pass_through"}
+
+
+@needs
+def test_dependents_flip_only_is_call_r4_s6(tmp_path):
+    """r4 s6 vector: a direct CALL with all three push facts, only `is_call` flipped:
+    S1 population kept (and blocked by the F.is_call disagreement), push projection
+    lost, push relation lost (relations iterate surviving projections), plain push kept."""
+    import _sealed as s
+
+    functions, code = _pair(s)
+    functions[0].observation["instructions"][0]["flow_type"] = s.flow(is_flow=True, has_fallthrough=True,
+                                                                       is_unconditional=True)
+    header, rows = _run(_bundle(tmp_path, functions, code))
+    _, found = _dependents(header, rows)
+    call = next(key for consumer, key in found if consumer == "call_seed" and key.startswith("function-000000/"))
+    s1 = found[("s1", "function-000000")]
+    assert s1.detail["would_block"] and s1.detail["loss"] == 1 and s1.detail["baseline"] is True, s1.detail
+    assert ["140001000", "F.is_call", "unrecognized"] in s1.detail["blocking"]
+    projection = found[("push_projection", call)]
+    relation = found[("push_relation", call)]
+    assert projection.detail["baseline"] is False and projection.detail["loss"] == 0, projection.detail
+    assert relation.detail["baseline"] is False and relation.detail["loss"] == 0, relation.detail
+    plain = found[("plain_push", call)]
+    assert plain.detail["baseline"] is True and not plain.detail["would_block"], plain.detail
+
+
+@needs
+def test_dependents_of_a_withheld_call_block_s1_and_the_seed(tmp_path):
+    import _sealed as s
+
+    functions, code = _pair(s, call_bytes=b"\x66\xE8\x0A\x00\x00\x00")
+    header, rows = _run(_bundle(tmp_path, functions, code))
+    summary, found = _dependents(header, rows)
+    s1 = found[("s1", "function-000000")]
+    assert (s1.run_state, s1.verdict) == ("evaluated", "withheld") and s1.detail["cause"] == "disagreement"
+    assert summary["s1"]["loss"] == 1 and summary["call_seed"]["would_block_disagreement"] == 1
+
+
+def test_dependents_core_counts_estimates_and_unobserved():
+    import dependents
+
+    function = {"function_id": "f", "s1": False,
+                "rows": [{"address": 0x10, "native_call": True}, {"address": 0x15, "native_call": False}],
+                "baseline": {"calls": [{"op": "1:10:1:CALL", "address": 0x10, "opcode": "CALL",
+                                        "facts": {"naming": "applied", "push_projection": "applied",
+                                                  "push_relation": "applied", "plain_push": "not_applicable"}}],
+                             "exits": [], "branchind": [{"site": "control:x:1:15", "address": 0x15,
+                                                         "unknown_transfer": True}], "returns": []}}
+    states = {0x10: {"a7": "withheld"}, 0x15: {"*": "unobserved"}}
+    judged = {(consumer, key): (run_state, verdict, detail)
+              for consumer, key, run_state, verdict, detail in dependents.function_rows(function, states)}
+    assert judged[("s1", "f")][2]["would_block"] is False                 # (a7 is not an S1 read)
+    assert judged[("push_projection", "f/1:10:1:CALL")][1] == "withheld"
+    assert judged[("push_projection", "f/1:10:1:CALL")][2]["loss"] == 1
+    assert ("plain_push", "f/1:10:1:CALL") not in judged                  # (not a plain-push candidate)
+    g3b7b = judged[("g3b7b_none_estimate", "f")]
+    assert g3b7b[0] == "unobserved" and g3b7b[2]["loss"] == "unknown" and g3b7b[2]["branchind_rows"] == 1
+    site = judged[("unknown_transfer_site", "f/control:x:1:15")]
+    assert site[2]["cause"] == "unobserved" and site[2]["unknown_transfer"] is True
+    summary = dependents.summary([(c, k, *v) for (c, k), v in judged.items()])
+    assert summary["g3b7b_none_estimate"]["loss_unknown"] == 1 and summary["push_projection"]["loss"] == 1
+
+
 def test_elf_map_rejects_other_machines_and_types():
     import _elf_fixture as ef
 

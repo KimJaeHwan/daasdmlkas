@@ -81,7 +81,8 @@
             "features",
             "pipeline",
             "mapping",
-            "decode"
+            "decode",
+            "dependents"
           ]
         },
         "check": {

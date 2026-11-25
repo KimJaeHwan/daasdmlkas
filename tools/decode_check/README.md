@@ -10,6 +10,17 @@ Checks one sealed Bundle against its own `original` file, without Ghidra:
    independent decoders and the attributes are compared (design
    `.census6/design_g1_decode_check_r0..r4.md`).
 
+3. **Dependents (layer `dependents`)** — which engine facts read which compared
+   attribute (`dependents.CONSUMERS`), from G0's operation rows of the same
+   function: S1, push projection / relation, plain push, call seed, return shape,
+   unknown-transfer site (baseline), and the future-L2 S1 and G3b-7b `none`
+   estimates. Per unit: `confirmed`, or `would_block` (a read attribute is a
+   disagreement or unobserved) with `loss` 1 when the engine fact exists, 0 when it
+   is already absent, `unknown` for an estimate without a baseline. RP and
+   pass-through stay undetermined (no unwind-PC evidence in a Bundle). The header
+   summary counts every unit; rows are written for would-block units only unless
+   `--full`.
+
 Design records and reviews live in `.census6/` (local). Scope, premises, the lift
 table, the decoder manifest and the mapping identity are written into every report
 header.
