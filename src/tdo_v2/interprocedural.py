@@ -269,6 +269,16 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
             raise TypeError("base_graphs requires an exact BaseGraphPublication")
         units = tuple(units)
         base_graphs.require_inputs(units)
+        # (PE-c, Astra r2 P1) both passes must hold the same admission refusals:
+        # the base pass decides its stack assumption from its own, the proof pass
+        # from ``unavailable_entries`` / ``unidentified_refusals``
+        published = getattr(base_graphs, "_admission_failures", ())
+        refused = frozenset(function_key(item.unit.scopes.function.refused_entry) for item in published
+                            if getattr(item.unit.scopes.function, "refused_entry", None) is not None)
+        unidentified = any(getattr(item.unit.scopes.function, "refused_entry", None) is None for item in published)
+        if refused != frozenset(options.get("unavailable_entries", ())) \
+                or unidentified != bool(options.get("unidentified_refusals", False)):
+            raise ValueError("base graph publication and proof pass disagree on admission refusals")
         if not base_graphs._started:
             base_graphs.build()
         snapshot = base_graphs.snapshot

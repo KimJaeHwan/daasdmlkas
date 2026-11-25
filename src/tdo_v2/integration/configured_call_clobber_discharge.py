@@ -16,8 +16,9 @@ when, for every intervening call C, the callee is an internal function and:
   The call token gives the callee's entry stack pointer in caller
   coordinates, so S becomes an interval P relative to the callee's entry SP.
   Every memory write of the callee must be either relative to its own entry
-  SP and disjoint from P, or to a constant loaded-image address (axiom: such
-  an address is never a stack byte). A write through any other base
+  SP and disjoint from P, or -- only under globals-disjoint-from-stack as the
+  callee's normalization holds it (PE-c; it was an unlabelled axiom) -- to a
+  constant loaded-image address. A write through any other base
   (pointer argument, loaded pointer, opaque value), an unresolved write,
   CALLOTHER, or a register call-clobber read in the callee (an address may
   be computed from a clobbered register) fails the proof. Nested calls are
@@ -498,7 +499,7 @@ class _Frame:
     tokens: dict[str, int]  # call key -> callee entry SP displacement
     calls: tuple[str, ...]  # every CALL/CALLIND operation key
     stack_writes: tuple[tuple[int, int], ...]
-    other_bases: tuple[object, ...]  # write bases other than the stack or constants
+    other_bases: tuple[object, ...]  # write bases other than the stack (constants too, without globals-disjoint)
     unresolved_writes: bool  # unresolved write or CALLOTHER
 
     @staticmethod

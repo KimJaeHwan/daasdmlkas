@@ -158,6 +158,22 @@ def test_a_constant_store_between_save_and_restore_needs_globals_disjoint():
     assert on[("main", "sink.arg0")].is_effectively_complete
 
 
+def test_a_constant_store_between_push_and_pop_needs_globals_disjoint():
+    """PE-c (Astra r2 P1, PE-c-2; owner 2026-11-25: fix the analysis rule): the
+    save slot is the helper's own new-frame byte (push / pop). The private-frame
+    rule kept a constant-address writer out of it even without
+    globals-disjoint-from-stack, which a constant address rests on."""
+    from synthetic import DATA_BASE, R8
+
+    helper = FunctionBuilder(entry=HELPER).push(RBX).ins(store(const(DATA_BASE), reg(R8))).pop(RBX).ret()
+    functions = {"main": _main_through_helper(), "source": _source_returning_constant(), "helper": helper,
+                 "sink": _sink()}
+    off = analyze_program(functions, PROVIDER)
+    assert not off[("main", "sink.arg0")].is_effectively_complete
+    on = analyze_program(functions, PROVIDER, normalize_options={"assume_globals_disjoint_from_stack": True})
+    assert on[("main", "sink.arg0")].is_effectively_complete
+
+
 def test_clobbered_register_is_not_discharged():
     helper = FunctionBuilder(entry=HELPER).ins(copy(reg(RBX), const(0))).ret()
     root = _root({
@@ -311,6 +327,29 @@ def test_callee_global_write_discharges_under_globals_disjoint_from_stack():
     assert on[("main", "sink.arg0")].is_effectively_complete
     off = analyze_program(functions, PROVIDER)
     assert not off[("main", "sink.arg0")].is_effectively_complete
+
+
+def test_a_stack_switch_elsewhere_withdraws_the_frame_proof_end_to_end():
+    """r18 amendment 8's own case: a function elsewhere in the program loads
+    the stack pointer from memory, so globals-disjoint-from-stack is withdrawn
+    for the run; the helper's constant-address write may then be the caller's
+    slot -- the summary-engine root is no longer complete."""
+    from synthetic import CODE_BASE, analyze_summaries
+
+    helper = FunctionBuilder(entry=HELPER).ins(store(const(DATA_BASE), reg(R8))).ret()
+    bodies = [_main_with_stack_slot(), _source_returning_constant(), helper, _sink()]
+    names = {SOURCE: "source", SINK: "sink", HELPER: "helper"}
+
+    def root(extra=()):
+        run = analyze_summaries([*bodies, *extra], PROVIDER, names=names)
+        found, = [item for item in run.roots if item.label == "sink.arg0" and item.function_byte_offset == MAIN]
+        return found, run.assumptions
+
+    plain, labels = root()
+    assert plain.is_effectively_complete and "globals-disjoint-from-stack" in labels
+    switch = FunctionBuilder(entry=CODE_BASE + 0x600).ins(load(reg(RBX), T)).ins(copy(reg(RSP), reg(RBX))).ret()
+    switched, labels = root([switch])
+    assert "globals-disjoint-from-stack" not in labels and not switched.is_effectively_complete
 
 
 def _helper_calling_inner():

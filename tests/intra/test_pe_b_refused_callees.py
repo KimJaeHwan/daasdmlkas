@@ -621,3 +621,24 @@ def test_a_dirty_evidence_iterator_still_withdraws():
     dirty = SimpleNamespace(clean=False, executable_sha256="0" * 64, describe=lambda: "x", program="p")
     run = _run([_main(), FunctionBuilder(entry=SINK).ret()], stack_evidence=iter((dirty,)))
     assert "globals-disjoint-from-stack" not in run.assumptions
+
+
+def test_the_combined_entry_rejects_disagreeing_refusals():
+    """Astra PE-c r2 P1: base graphs and the proof pass must hold the same
+    refusals (each decides its stack assumption from its own)."""
+    from tdo_v2.base_graph import BaseGraphPolicy, BaseGraphPublication
+    from tdo_v2.interprocedural import analyze_units
+
+    _, admitted, failures = _refused_failures([_main(), FunctionBuilder(entry=SINK).ret(), _refused()])
+    policy = BaseGraphPolicy(assume_globals_disjoint_from_stack=True)
+    publication = BaseGraphPublication(admitted, policy=policy, admission_failures=failures)
+    with pytest.raises(ValueError, match="disagree on admission refusals"):
+        analyze_units(admitted, base_graphs=publication, assume_globals_disjoint_from_stack=True)
+    other = BaseGraphPublication(admitted, policy=policy)
+    with pytest.raises(ValueError, match="disagree on admission refusals"):
+        analyze_units(admitted, base_graphs=other, assume_globals_disjoint_from_stack=True,
+                      unavailable_entries=frozenset({_key(REFUSED)}))
+    agreed = BaseGraphPublication(admitted, policy=policy, admission_failures=failures)
+    results = analyze_units(admitted, base_graphs=agreed, assume_globals_disjoint_from_stack=True,
+                            unavailable_entries=frozenset({_key(REFUSED)}))
+    assert not results[_key(MAIN)].normalized.assumes_globals_disjoint_from_stack

@@ -31,8 +31,8 @@
    "input": "8debfe78df52ae016c7871b882d52456925e7d9f3d5a92a285946b0c845ae847"
   },
   "globals_and_image_address": {
-   "forward_0": "b497d098bf698fbc6b77e07eda4a83f090df8c7f2a238cec7e89ba95c2e76399",
-   "forward_1": "b497d098bf698fbc6b77e07eda4a83f090df8c7f2a238cec7e89ba95c2e76399",
+   "forward_0": "89d627524cad0a4a44e3acc1d8a0c4405bc7a4c25040d26487a3d3f32ce55efc",
+   "forward_1": "89d627524cad0a4a44e3acc1d8a0c4405bc7a4c25040d26487a3d3f32ce55efc",
    "input": "e059f07a4d2886657e72895c23866b46abf07af9d1235cc7252b268c6958a29e"
   },
   "guarded_micro_loop_memory": {
@@ -107,7 +107,7 @@
   }
  },
  "versions": {
-  "semantics_version": 59,
+  "semantics_version": 60,
   "summary_version": 2,
   "template_version": 7
  }

@@ -445,7 +445,16 @@ def derive_may_alias_reads(
         for effect in block.effects
         for evidence in effect.writes
         if type(evidence) is ResolvedStorage and evidence.span.object_id in wild
-    ) | frozenset(_UNCERTAIN + key for key in uncertain)
+    ) | frozenset(_UNCERTAIN + key for key in uncertain) | (frozenset() if policy.globals_disjoint else frozenset(
+        # (PE-c, r18 amendment 8; owner 2026-11-25) the private-frame rule keeps every
+        # other base out of the new frame, but a constant address rests on
+        # globals-disjoint-from-stack (its registry text): without it a
+        # constant-address writer reaches private bytes like an unknown-address one
+        effect.operation_key
+        for block in unit.blocks
+        for effect in block.effects
+        for evidence in effect.writes
+        if type(evidence) is ResolvedStorage and evidence.span.object_id.kind is StorageObjectKind.ADDRESS_SPACE))
     policy.separations = tuple(separations)
     if read_separations:
         from ._forward_memory import exclusions_for
