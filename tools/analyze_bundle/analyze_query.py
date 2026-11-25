@@ -359,7 +359,8 @@ def main() -> int:
     result = {"generation": str(args.generation), "sha256": run.executable_sha256,
               "language_id": evidence.translation_namespace.language_id,
               "seconds": round(time.time() - started, 1), "rules": [asdict(rule) for rule in rules],
-              "assumptions": run.assumptions, "failed_functions": run.failed_functions, "roots": roots,
+              "assumptions": run.assumptions, "producer_premises": getattr(run, "producer_premises", ()),
+              "failed_functions": run.failed_functions, "roots": roots,
               "admission_failures_count": len(admission_failures), "admission_failures": admission_failures,
               "refused_control_graphs": refused_control_graphs,
               "call_targets": dict(provider.seen.most_common())}

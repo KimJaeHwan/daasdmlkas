@@ -155,6 +155,9 @@ class EngineRun:
     # (admitted function key, original control observation) for a disconnected
     # normalization refusal. These are not successful SSA/dependency graphs.
     refused_control_graphs: tuple = ()
+    # (P-0) the producer premises every result of a Bundle run rests on
+    # (``assumptions.PRODUCER_PREMISES``: always on, no switch)
+    producer_premises: tuple[str, ...] = ()
     # opt-in per-function / per-root blocker diagnostics (``root_diagnostics``;
     # summary engine ``root_diagnostics=True``): a JSON-ready dict, None when
     # off -- reporting only, never compared (no result depends on it)
@@ -238,10 +241,13 @@ def analyze_frozen_bundle(
             external_provider,
             include_explanations=include_explanations,
         )
+        from .assumptions import PRODUCER_PREMISES
+
         return EngineRun(
             program.scope.digest.hex(),
             program.evidence.executable_sha256.hex(),
             tuple(roots),
+            producer_premises=PRODUCER_PREMISES,
         )
 
 

@@ -359,6 +359,8 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
     roots = [encode(root, f"roots[{index}]") for index, root in enumerate(run.roots)]
     run_level = {
         "assumptions": encode(run.assumptions, "assumptions"),
+        **({"producer_premises": encode(run.producer_premises, "producer_premises")}
+           if getattr(run, "producer_premises", ()) else {}),
         "failed_functions": encode(getattr(run, "failed_functions", ()), "failed_functions"),
         # Scope refusals have no admitted entry/summary; do not lose their
         # sealed member identity when functions/roots happen to be empty.
