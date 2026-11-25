@@ -303,7 +303,7 @@ class ConfiguredExtractionEnvelope:
             return UnresolvedFunctionScope(
                 ScopeConstructionStage.FUNCTION_OBSERVATION,
                 observation_reason,
-                entry=value.entry,   # (PE-b: validated -- the coordinate checks passed above)
+                refused_entry=value.entry,   # (PE-b: validated -- the coordinate checks passed above)
             ), None
         assert value.entry is not None and value.observation is not None and value.observation_digest is not None
         assert self._permit is not None

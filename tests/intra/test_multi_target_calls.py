@@ -164,7 +164,7 @@ def test_a_label_an_early_resolution_rested_on_is_kept(monkeypatch):
     real = interprocedural._forward_targets
     rounds = []
 
-    def forward_targets(item, functions, readonly_image):
+    def forward_targets(item, functions, readonly_image, refused=frozenset()):
         found, labels = real(item, functions, readonly_image)
         if item.key != ROOT:
             return found, labels

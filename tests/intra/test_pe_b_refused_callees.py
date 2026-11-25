@@ -68,7 +68,8 @@ def test_an_observation_refusal_keeps_its_validated_entry():
     scope = unit.scopes.function
     assert type(scope) is UnresolvedFunctionScope
     assert scope.stage is ScopeConstructionStage.FUNCTION_OBSERVATION
-    assert (scope.entry.space_id, scope.entry.byte_offset) == (RAM, REFUSED)
+    assert (scope.refused_entry.space_id, scope.refused_entry.byte_offset) == (RAM, REFUSED)
+    assert not hasattr(scope, "entry")   # (code tells an admitted scope by ``entry``)
 
 
 def test_only_an_observation_refusal_may_retain_an_entry():
@@ -77,7 +78,7 @@ def test_only_an_observation_refusal_may_retain_an_entry():
 
     with pytest.raises(ValueError):
         UnresolvedFunctionScope(ScopeConstructionStage.FUNCTION_COORDINATE,
-                                ScopeConstructionReason.INVALID_FUNCTION_ENTRY, entry=AddressCoordinate(RAM, REFUSED))
+                                ScopeConstructionReason.INVALID_FUNCTION_ENTRY, refused_entry=AddressCoordinate(RAM, REFUSED))
 
 
 def test_a_direct_call_to_a_refused_function_marks_the_caller_unavailable():
@@ -122,7 +123,7 @@ def test_a_refusal_without_entry_marks_every_wildcard_holder():
     unknown = FunctionBuilder(entry=0x10).ret()   # (entry outside committed memory)
     run = _run([_main(REFUSED), FunctionBuilder(entry=SINK).ret(), unknown])
     assert len(run.admission_failures) == 1
-    assert run.admission_failures[0].unit.scopes.function.entry is None
+    assert run.admission_failures[0].unit.scopes.function.refused_entry is None
     root = _root(run)
     assert unavailable_key("unidentified") in root.effective_completeness.control_obligations
     assert not root.is_effectively_complete

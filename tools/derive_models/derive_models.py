@@ -149,7 +149,7 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
                 units.append(unit)
             else:
                 failures[unit.scopes.function.stage.name] += 1
-                entry = getattr(unit.scopes.function, "entry", None)
+                entry = getattr(unit.scopes.function, "refused_entry", None)
                 if entry is None:
                     unidentified_refusals = True
                 else:

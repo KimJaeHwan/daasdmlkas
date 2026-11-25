@@ -679,7 +679,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     # the run's refusals unidentified -- never silently dropped
     for unit in units:
         if type(unit.scopes.function) is not ConstructedFunctionScope or unit.observation is None:
-            entry = getattr(unit.scopes.function, "entry", None)
+            entry = getattr(unit.scopes.function, "refused_entry", None)
             if entry is None:
                 unidentified_refusals = True
             else:

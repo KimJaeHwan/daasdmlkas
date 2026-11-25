@@ -413,9 +413,9 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     # (PE-b) refused members: their validated entries (callers carry
     # control:unavailable:<entry>); one without an entry is "unidentified"
     refused_entries = frozenset(
-        function_key(item.unit.scopes.function.entry) for item in admission_failures
-        if getattr(item.unit.scopes.function, "entry", None) is not None)
-    unidentified_refusals = any(getattr(item.unit.scopes.function, "entry", None) is None
+        function_key(item.unit.scopes.function.refused_entry) for item in admission_failures
+        if getattr(item.unit.scopes.function, "refused_entry", None) is not None)
+    unidentified_refusals = any(getattr(item.unit.scopes.function, "refused_entry", None) is None
                                 for item in admission_failures)
     assumed = {
         key: assumed_boundary_effects(item, boundary_provider)
