@@ -15,7 +15,7 @@ LEAF, OPAQUE = CODE_BASE + 0x800, CODE_BASE + 0xE00
 T = tmp(0x100)
 
 
-def _run(offsets, target=LEAF, global_read=False, stored=()):
+def _run(offsets, target=LEAF, global_read=False, stored=(), **options):
     """caller: [rsp + d] = bl for each d; CALL target; r8b = [rsp + d] each
     (and a global byte); ret. -> (normalized, observation, reader keys)."""
     caller = FunctionBuilder().sub_rsp(0x40)
@@ -28,7 +28,7 @@ def _run(offsets, target=LEAF, global_read=False, stored=()):
         caller.ins(load(reg(R8, 1), const(DATA_BASE + 0x40)))
     caller.add_rsp(0x40).ret()
     leaf = FunctionBuilder(entry=LEAF).push(RDX).pop(RCX).ret()
-    item = analyze_units(program_units(caller, leaf))["1:1000"]
+    item = analyze_units(program_units(caller, leaf), **options)["1:1000"]
     return item.normalized, item.unit.observation
 
 
@@ -68,10 +68,25 @@ def test_a_below_bound_call_at_its_bound():
 
 
 def test_other_memory_is_kept_and_an_opaque_call_clobbers_all():
-    normalized, observation = _run((0x10,), global_read=True)
+    normalized, observation = _run((0x10,), global_read=True, assume_globals_disjoint_from_stack=True)
     rows, exits = _views(normalized, observation)
     assert rows[("global", DATA_BASE + 0x40)] is False   # (another memory object: kept)
     assert not any(rows.values()) and not any(exits.values())   # (the leaf keeps memory above its bound)
+    assert any(name == "globals-disjoint-from-stack" for name, _, _ in normalized.premise_uses)
+
+
+def test_a_below_bound_call_keeps_a_constant_address_only_under_globals_disjoint():
+    """PE-c (Astra r3 P1-2): without globals-disjoint-from-stack the constant
+    address may be the stack the leaf's push clobbers -- the call stays a
+    clobber of the global read, in both views; the frame slot above the bound
+    is still kept."""
+    normalized, observation = _run((0x10,), global_read=True)
+    rows, exits = _views(normalized, observation)
+    assert rows[("global", DATA_BASE + 0x40)] is True
+    assert not any(crossed for key, crossed in rows.items() if type(key) is int)
+    constant = [crossed for (kind, _), crossed in exits.items() if kind == "address_space"]
+    assert constant and all(constant)
+    assert not any(crossed for (kind, _), crossed in exits.items() if kind == "function_relative")
     normalized, observation = _run((0x10,), target=OPAQUE)
     rows, exits = _views(normalized, observation)
     assert all(rows.values()) and any(exits.values())

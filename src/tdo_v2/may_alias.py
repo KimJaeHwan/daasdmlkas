@@ -302,6 +302,15 @@ class _Policy:
             self.opaque_used = True
         return writer[: -len("~push")]
 
+    def reached_by_private(self, other: StorageObjectId) -> bool:
+        """Whether a private frame write still reaches ``other`` (when
+        ``may_alias`` lets the pair through): a wild object; or (PE-c, r18
+        amendment 8) a constant-address one -- the private-frame rule keeps
+        only entry-value bases out of the frame, a constant rests on
+        globals-disjoint-from-stack, under which ``may_alias`` already
+        excludes the pair."""
+        return other in self.wild_objects or other.kind is StorageObjectKind.ADDRESS_SPACE
+
     def may_alias(self, left: StorageObjectId, right: StorageObjectId) -> bool:
         if left == right:
             return False  # one object: the SSA is byte-exact
@@ -793,8 +802,9 @@ def _hoisted_kill(state: dict, effect, policy: _Policy) -> dict:
 def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy, phase: str = "",
              kill: bool = True) -> dict:
     """``phase`` for a deferred push (``_Policy.push_deferred``): "entry" --
-    the write itself, reaching only wild objects; "call" -- at the CALL, the
-    rest of the ordinary gen (no kill, wild objects already reached).
+    the write itself, reaching only the objects a private write reaches
+    (``_Policy.reached_by_private``); "call" -- at the CALL, the rest of the
+    ordinary gen (no kill, those objects already reached).
     ``kill`` False: a member of a call group (O-1) -- its kill was hoisted."""
     updated = dict(state)
     if kill and writer not in policy.no_kill_writers and phase != "call":
@@ -802,10 +812,11 @@ def _written(state: dict, span: ByteSpan, writer: str, objects, policy: _Policy,
     private = phase == "entry" or all(policy.is_private(span.object_id, offset, writer, write=True)
                                       for offset in range(span.start, span.end))
     for other in objects:
-        # a private frame write reaches no other object but a wild one
-        if not policy.may_alias(other, span.object_id) or (private and other not in policy.wild_objects):
+        # a private frame write reaches no other object but a wild or a
+        # constant-address one (``_Policy.reached_by_private``)
+        if not policy.may_alias(other, span.object_id) or (private and not policy.reached_by_private(other)):
             continue
-        if phase == "call" and other in policy.wild_objects:
+        if phase == "call" and policy.reached_by_private(other):
             continue   # (reached at the push)
         current = updated[other]
         excluded = policy.excluded(span, other, writer) if policy.separations else frozenset()

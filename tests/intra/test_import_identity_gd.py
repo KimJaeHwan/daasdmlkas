@@ -15,7 +15,6 @@ from tdo_v2.summary_engine import run_assumptions
 
 GD = "globals-disjoint-from-stack"
 SLOTS = "import-slots-hold-their-exports"
-FRAME = "entry-values-do-not-address-the-new-frame"
 
 
 @pytest.fixture(params=("sparse", "dense"), autouse=True)
@@ -99,22 +98,26 @@ def test_a_model_resting_on_globals_disjoint_is_refused_without_it(monkeypatch, 
         assert any(GD in reason for reason in item.refused_models.values())
 
 
+@pytest.mark.parametrize("engine", ("sparse", "dense"))
 @pytest.mark.parametrize("frame", (True, False))
-def test_spill_and_global_store_rest_on_the_new_frame_premise(monkeypatch, frame):
-    # globals-disjoint OFF: a private-frame reload drops the constant-address writer only under
-    # entry-values-do-not-address-the-new-frame -- recorded, never silent (Fable r1 finding 1)
+@pytest.mark.parametrize("gd", (True, False))
+def test_spill_and_global_store_rest_on_globals_disjoint(monkeypatch, gd, frame, engine):
+    # (PE-c, Astra r3 P2-6; owner 2026-11-25) a constant address rests on globals-disjoint-from-stack,
+    # not on entry-values-do-not-address-the-new-frame: OFF, the constant store may be the spill
+    # slot under either private-frame setting (the import is not resolved); ON, it resolves under both
+    from tdo_v2._sparse_dataflow import DATAFLOW_ENGINE_ENV
+
+    monkeypatch.setenv(DATAFLOW_ENGINE_ENV, engine)
     spill, reload_at = tmp(0x700), tmp(0x708)
     caller = (FunctionBuilder().sub_rsp(0x28).ins(copy(reg(RBX), ram(SLOT)))
               .ins(add(spill, reg(RSP), const(0x20)), store(spill, reg(RBX)))
               .ins(store(const(DATA_BASE + 0x200), reg(RDX)))
               .ins(add(reload_at, reg(RSP), const(0x20)), load(reg(RBX), reload_at))
               .call_indirect(RBX).add_rsp(0x28).ret())
-    item, results = _analyze(monkeypatch, caller, globals_disjoint=False, assume_entry_values_not_frame=frame)
+    item, results = _analyze(monkeypatch, caller, globals_disjoint=gd, assume_entry_values_not_frame=frame)
     assert import_call_sites(item.unit, INFO) == {}
-    assert bool(item.declared) is frame
-    if frame:
-        assert FRAME in run_assumptions(results)
-        assert any(FRAME in use for use in item.normalized.premise_uses)
+    assert bool(item.declared) is gd
+    if not gd:
         _no_globals_label(item, results)
 
 

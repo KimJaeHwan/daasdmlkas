@@ -997,15 +997,18 @@ def _stackless_tail_bounds(keys, proven_call_effects, effect_unit, memory_ssa, o
     return tuple(rows)
 
 
-def _memory_spans_except_below(effect_unit, object_id, bound) -> tuple:
+def _memory_spans_except_below(effect_unit, object_id, bound, *, constants: bool = False) -> tuple:
     """Every memory span the function's effects touch, minus the stack bytes
-    below ``bound``."""
+    below ``bound``; constant-address spans only when ``constants`` (PE-c,
+    Astra r3 P1-2: globals-disjoint-from-stack -- otherwise a constant
+    address may be the clobbered stack bytes)."""
     spans = set()
+    kinds = ((StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE) if constants
+             else (StorageObjectKind.FUNCTION_RELATIVE,))
     for block in effect_unit.blocks:
         for effect in block.effects:
             for evidence in (*effect.reads, *effect.writes):
-                if type(evidence) is not ResolvedStorage or evidence.span.object_id.kind not in (
-                        StorageObjectKind.ADDRESS_SPACE, StorageObjectKind.FUNCTION_RELATIVE):
+                if type(evidence) is not ResolvedStorage or evidence.span.object_id.kind not in kinds:
                     continue
                 span = evidence.span
                 if span.object_id == object_id and span.start < bound:
@@ -2226,8 +2229,9 @@ class _ScopedNormalizer:
             (effect.operation_key for block in effect_unit.blocks for effect in block.effects),
             frozenset(assumed_call_effects), proven_call_effects,
             {key: spans for key, (spans, _) in kept_memory.items()}, below_bounds,
-            intrinsic_calls=intrinsic_calls)
-        proven_preserved = exemptions.clobber_preserved(effect_unit)
+            intrinsic_calls=intrinsic_calls, globals_disjoint=assume_globals_disjoint_from_stack)
+        below_uses: list = []
+        proven_preserved = exemptions.clobber_preserved(effect_unit, below_uses)
         memory_keeping = exemptions.memory_keeping
         unrestored = exemptions.unrestored
         from ._chi_records import records as _chi_records
@@ -2270,7 +2274,7 @@ class _ScopedNormalizer:
         frame_uses: list = []
         opaque_uses: list = []
         pre_uses: list = []
-        policy_uses: list = []
+        policy_uses: list = list(below_uses)   # (a below-bound call keeping a constant address)
         # null tests of the allocations whose windows need one (docs 25.79): on
         # this pass's final unit
         if guarded_windows:

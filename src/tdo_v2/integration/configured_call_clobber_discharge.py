@@ -37,6 +37,7 @@ from ..resource_limits import RESOURCE_FAILURES
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .._scope_contracts import VarnodeKindCode
 from ..memory_contracts import MemoryDefinitionKind
 from ..model import StorageObjectKind
 from ..query import BackwardSliceQuery
@@ -500,7 +501,7 @@ class _Frame:
     calls: tuple[str, ...]  # every CALL/CALLIND operation key
     stack_writes: tuple[tuple[int, int], ...]
     other_bases: tuple[object, ...]  # write bases other than the stack (constants too, without globals-disjoint)
-    unresolved_writes: bool  # unresolved write or CALLOTHER
+    unresolved_writes: bool  # unresolved write, CALLOTHER or uncertain destination
 
     @staticmethod
     def build(view: _FunctionView) -> "_Frame | None":
@@ -529,6 +530,10 @@ class _Frame:
         unresolved = bool(normalized.memory_graph.unresolved_write_nodes) or any(
             key.endswith(":CALLOTHER") for key in keys
         )
+        # (PE-c, Astra r3 P1-4) a write whose address rests on a read with debt
+        # lands on its static object only conditionally (``uncertain_writers``;
+        # the conditions are not discharged here): it may be any byte
+        uncertain = frozenset(key for key, _ in getattr(normalized, "uncertain_writers", ()))
         writes = []
         other_bases = set()
         for definition in view.memory.definitions:
@@ -536,6 +541,9 @@ class _Frame:
                 continue
             kind = definition.span.object_id.kind
             if kind in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE):
+                continue
+            if definition.operation_key in uncertain:
+                unresolved = True
                 continue
             if kind is StorageObjectKind.ADDRESS_SPACE:
                 # (PE-c, r18 amendment 8) a constant address is never a stack byte only
@@ -628,6 +636,56 @@ def _callee_preserves(callee: _FunctionView, span: ByteSpan, read_ok) -> bool:
     accepted: dict[str, bool] = {}
     definition_id, full = covering[0]
     active: set[tuple[int, tuple[object, ...]]] = set()
+    clean: dict[int, bool] = {}
+
+    def debt_free(key: str) -> bool:
+        if key in aliased:
+            return False
+        if key in clobbered:
+            if key not in accepted:
+                accepted[key] = read_ok(key)
+            return accepted[key]
+        return True
+
+    def address_clean(key: str, varnode, depth: int) -> bool:
+        """(PE-c, Astra r3 P1-3) the address operand of a traced save or
+        restore: its whole defining slice carries no unresolved alias or
+        call-clobber debt -- a pointer reloaded across a write that may have
+        overwritten its spill slot names no provable save slot."""
+        if varnode.kind is VarnodeKindCode.CONSTANT:
+            return True
+        parent = callee.definition_for_input(key, varnode)
+        return parent is not None and defined_clean(parent[0], depth)
+
+    def defined_clean(definition_id: int, depth: int) -> bool:
+        if definition_id in clean:
+            return clean[definition_id]
+        if depth > MAX_TRACE_DEPTH:
+            return False
+        clean[definition_id] = False   # (a cycle proves nothing)
+        definition = callee.memory.definitions[definition_id]
+        if definition.kind is MemoryDefinitionKind.ENTRY:
+            clean[definition_id] = True
+            return True
+        if definition.kind is not MemoryDefinitionKind.DATA_WRITE or not debt_free(definition.operation_key):
+            return False
+        key = definition.operation_key
+        operation = callee.operation(key)
+        if operation is None:
+            return False
+        inputs = operation.inputs[1:] if operation.opcode in ("LOAD", "STORE") else operation.inputs
+        if not all(address_clean(key, item, depth + 1) for item in inputs):
+            return False
+        if operation.opcode == "LOAD":
+            action_id = callee.action_ids.get(key)
+            reads = [read for read in callee.memory.reads if read.action_id == action_id
+                     and read.span.object_id.kind in (StorageObjectKind.ADDRESS_SPACE,
+                                                      StorageObjectKind.FUNCTION_RELATIVE)]
+            if not reads or not all(defined_clean(item, depth + 1) for read in reads
+                                    for fragment in read.fragments for item in fragment.definition_ids):
+                return False
+        clean[definition_id] = True
+        return True
 
     def trace(definition_id: int, requested: ByteSpan, depth: int) -> bool:
         marker = (definition_id, requested.canonical_key)
@@ -656,10 +714,12 @@ def _callee_preserves(callee: _FunctionView, span: ByteSpan, read_ok) -> bool:
                 parent = callee.definition_for_input(key, operation.inputs[0])
                 return parent is not None and trace(*parent, depth + 1)
             if operation.opcode == "STORE" and len(operation.inputs) == 3:
+                if not address_clean(key, operation.inputs[1], depth + 1):
+                    return False
                 parent = callee.definition_for_input(key, operation.inputs[2])
                 return parent is not None and trace(*parent, depth + 1)
             if operation.opcode == "LOAD" and operation.output is not None:
-                if key in aliased:
+                if key in aliased or not address_clean(key, operation.inputs[1], depth + 1):
                     return False
                 action_id = callee.action_ids.get(key)
                 reads = tuple(

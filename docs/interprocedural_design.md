@@ -7263,7 +7263,23 @@ Fable AWF -> r2; r2: Astra AWF / Fable AWF(P1 없음) -> r3 반영 후 닫음. �
   정규화에서는 상수 주소 쓰기가 주소 모를 쓰기처럼 private 바이트에 닿는다(`may_alias` policy의 private 필터를 통과하는
   writer 집합). `push rbx; [상수] = x; pop rbx`는 가정 없이 RBX 보존이 아니다.
 - 기본 그래프 + 증명 통합 입구: 두 패스의 입력 거부가 다르면 `ValueError`(각자 자기 거부로 스택 가정을 정한다).
-- 의미 버전 60(프레임 / 저장 사본 / 말단 판정과 private-frame 규칙이 바뀌어 템플릿 지문이 바뀐다), UE 템플릿 v47(항목 동일).
+  `unavailable_entries`는 입구에서 한 번 집합으로 만든다(일회용 반복자도 검사와 분석이 같은 집합을 본다; r3 Astra P1-5).
+  비교 대상은 증명 패스가 실제로 쓸 거부(옵션 + `units`에 실린 거부 단위)이다 -- 다만 공개는 수용된 함수만 받고 증명 패스는
+  같은 입력을 요구하므로 거부 단위가 이 입구에 실릴 수는 없다(Fable r3 P3-1, 시험으로 고정).
+- 코드 리뷰 r3(Astra 완전 목록 "With these changes: APPROVE", Fable r3 P1 같은 항목) -- r4에서 반영:
+  - private-frame 규칙은 대칭이다: 가정이 없으면 자기 프레임 쓰기(지연된 push 포함)도 상수 주소 바이트에 닿는다
+    (`_Policy.reached_by_private`: wild 객체 또는 상수 주소 객체; 가정이 있으면 `may_alias`가 먼저 그 쌍을 제외하고 사용을
+    기록). dense `_written`, sparse 쌍둥이, `function_summary` 종료 교차가 같은 규칙. `[D] = rbx; push r8; rbx = [D]`는 가정
+    없이 RBX 보존이 아니다; 함수 요약의 `[D]` 종료 run에 push가 교차 writer로 보인다.
+  - 아래 경계 호출(요약된 callee가 진입 SP 아래를 덮어쓰는 호출)은 가정이 있을 때만 상수 주소 바이트를 지킨다:
+    `CallExemptions.globals_disjoint`가 정규화 / 정방향 탐침(`clobber_preserved`, 사용 기록) / 종료 교차에 같은 계약.
+  - 저장 사본 증명은 추적한 저장(STORE)과 복원(LOAD)의 주소 피연산자 정의 조각 전체에 별칭 / 호출 덮어쓰기 빚이 없어야 한다
+    (빚 있는 재적재 포인터로 복원하면 증명 없음). STORE 쪽 검사는 방어다: 그런 저장은 정규화가 이미 불확실 writer로 표시해
+    뒤 읽기에 별칭 행이 생긴다(돌연변이로 확인).
+  - 프레임 증명(`_Frame`)은 `uncertain_writers`의 쓰기를 해석되지 않은 쓰기로 본다(조건을 여기서 풀지 않는다 -- 더 엄격).
+  - 가져오기 슬롯 시험(`test_import_identity_gd`)은 새 규칙으로: 가정이 없으면 private-frame 설정과 무관하게 풀리지 않고,
+    있으면 둘 다 풀린다(두 엔진 x 네 조합).
+- 의미 버전 61(r4 규칙), UE 템플릿 v48.
 - 범위 밖(S3 단계 / TBR): 허용된 커널 지점 뒤의 레지스터, Java 스캐너의 커널 전이 인식(`[TBR-G3-scan]` -> TDO X-1),
   `stack-switch-check-exceptions` 자체는 바꾸지 않는다(Fable r18 P2-2).
 - 고정 `tests/intra/test_call_clobber_discharge.py`(가정 있음 / 없음), `test_stack_call_preservation.py`(출력 누락),

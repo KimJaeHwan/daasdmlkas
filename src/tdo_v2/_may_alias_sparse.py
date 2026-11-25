@@ -42,12 +42,13 @@ def derive_sparse(unit, objects, policy):
     unknown_read_blocks: set[str] = set()
     def push_at_call(block_key, position, span, writer):
         # a deferred push (``_Policy.push_deferred``) reaching the other
-        # objects at its CALL: what the ordinary gen adds beyond the wild ones
+        # objects at its CALL: what the ordinary gen adds beyond the objects a
+        # private write reaches (``_Policy.reached_by_private``)
         private = all(policy.is_private(span.object_id, offset, writer, write=True)
                       for offset in range(span.start, span.end))
         event = (block_key, position, 0, writer)
         for other in tracked:
-            if policy.may_alias(other, span.object_id) and not private and other not in policy.wild_objects:
+            if policy.may_alias(other, span.object_id) and not private and not policy.reached_by_private(other):
                 object_gens[other].append(event)
 
     from ._call_groups import call_output_groups
@@ -82,8 +83,8 @@ def derive_sparse(unit, objects, policy):
                                                   for offset in range(span.start, span.end))
                 # (one event tuple, shared by every list it goes to -- docs 25.31 B2-a2a)
                 event = (block.key, position, order, writer)
-                for other in tracked:  # a private frame write reaches only wild objects
-                    if policy.may_alias(other, span.object_id) and (not private or other in policy.wild_objects):
+                for other in tracked:  # a private frame write: only wild / constant-address objects
+                    if policy.may_alias(other, span.object_id) and (not private or policy.reached_by_private(other)):
                         object_gens[other].append(event)
                 any_gens.append(event)
             if _unknown_write(effect):

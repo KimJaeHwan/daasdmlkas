@@ -615,13 +615,13 @@ def register_evidence(arch: "Arch") -> dict:
         {"name": name, "space_id": REG, "byte_offset": offset, "byte_size": size} for name, offset, size in rows]}
 
 
-def normalize_with_observation(function: FunctionBuilder, layout: Layout = DEFAULT_LAYOUT):
+def normalize_with_observation(function: FunctionBuilder, layout: Layout = DEFAULT_LAYOUT, normalize_options=None):
     """Return (NormalizedFunction, ValidatedFunctionObservation) for one function."""
     with open_configured_extraction(
         _Provider([function], layout), _mint_orchestrator_capability()
     ) as envelope:
         (unit,) = envelope.iter_scoped_functions()
-    result = FunctionNormalizer().normalize(unit)
+    result = FunctionNormalizer().normalize(unit, **(normalize_options or {}))
     if type(result) is not NormalizedFunction:
         raise AssertionError(f"normalization unresolved: {result!r}")
     return result, unit.observation

@@ -252,6 +252,10 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     assumption switches are the profile's whatever was asked, only its
     pinned derived templates are models, and every selection checks it.
     """
+    if "unavailable_entries" in options:
+        # (PE-c, Astra r3 P1-5) one set for every reader below (an iterator
+        # would be consumed by the first)
+        options["unavailable_entries"] = frozenset(options["unavailable_entries"])
     if code_only_profile is not None:
         from .code_only_profile import forced_arguments
 
@@ -276,9 +280,20 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
         refused = frozenset(function_key(item.unit.scopes.function.refused_entry) for item in published
                             if getattr(item.unit.scopes.function, "refused_entry", None) is not None)
         unidentified = any(getattr(item.unit.scopes.function, "refused_entry", None) is None for item in published)
-        if refused != frozenset(options.get("unavailable_entries", ())) \
-                or unidentified != bool(options.get("unidentified_refusals", False)):
-            raise ValueError("base graph publication and proof pass disagree on admission refusals")
+        from ._scope_results import ConstructedFunctionScope
+
+        # (Fable r3 P3-1) the refusals the proof pass will use: the options and
+        # the refused units carried in ``units`` (``_analyze_units``)
+        carried = [unit.scopes.function for unit in units
+                   if type(unit.scopes.function) is not ConstructedFunctionScope or unit.observation is None]
+        expected = frozenset(options.get("unavailable_entries", ())) | frozenset(
+            function_key(scope.refused_entry) for scope in carried
+            if getattr(scope, "refused_entry", None) is not None)
+        expected_unidentified = bool(options.get("unidentified_refusals", False)) or any(
+            getattr(scope, "refused_entry", None) is None for scope in carried)
+        if refused != expected or unidentified != expected_unidentified:
+            raise ValueError("base graph publication and proof pass disagree on admission refusals "
+                             "(unavailable_entries / unidentified_refusals or refused units)")
         if not base_graphs._started:
             base_graphs.build()
         snapshot = base_graphs.snapshot

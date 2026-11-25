@@ -172,7 +172,11 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # what its operation proves; the entry stays a successor).
 # 57: (G-T G3b-7b) where the exporter proves no static exception handler
 # (x64 PE), a call row's listed entry is decided by the ordinary call rule.
-ENGINE_SEMANTICS_VERSION = 60
+# 61: (PE-c r4) without globals-disjoint-from-stack a private frame write reaches
+# constant-address bytes and a below-bound call keeps none; a frame proof
+# treats an uncertain-destination write as unresolved; a saved copy's
+# address slice must be debt-free.
+ENGINE_SEMANTICS_VERSION = 61
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

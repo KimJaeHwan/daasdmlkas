@@ -418,8 +418,8 @@ def _probe_active(normalized, load_key: str, spans) -> tuple[dict, tuple[str, ..
     exemptions = call_exemptions(
         (effect.operation_key for block in probed.blocks for effect in block.effects), inputs.assumed_calls,
         inputs.proven_call_effects, dict(inputs.kept_memory), inputs.below_bounds,
-        intrinsic_calls=inputs.intrinsic_calls)
-    preserved = exemptions.clobber_preserved(probed)
+        intrinsic_calls=inputs.intrinsic_calls, globals_disjoint=inputs.assume_globals_disjoint_from_stack)
+    preserved = exemptions.clobber_preserved(probed)   # (a use: recorded below whenever the assumption is on)
     memory_keeping, unrestored = exemptions.memory_keeping, exemptions.unrestored
     from ._chi_records import records as chi_records
 

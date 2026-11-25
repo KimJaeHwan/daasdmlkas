@@ -642,3 +642,43 @@ def test_the_combined_entry_rejects_disagreeing_refusals():
     results = analyze_units(admitted, base_graphs=agreed, assume_globals_disjoint_from_stack=True,
                             unavailable_entries=frozenset({_key(REFUSED)}))
     assert not results[_key(MAIN)].normalized.assumes_globals_disjoint_from_stack
+
+
+@pytest.mark.parametrize("refusals", (1, 0))
+def test_the_combined_entry_reads_one_shot_refusals_like_a_set(refusals):
+    """Astra PE-c r3 P1-5: ``unavailable_entries`` is materialized once at the
+    combined entry -- an iterator gives the same control support and the same
+    effective globals-disjoint-from-stack as a set."""
+    from tdo_v2.base_graph import BaseGraphPolicy, BaseGraphPublication
+    from tdo_v2.interprocedural import analyze_units
+
+    bodies = [_main(*([REFUSED] if refusals else [])), FunctionBuilder(entry=SINK).ret()]
+    _, admitted, failures = _refused_failures([*bodies, *([_refused()] if refusals else [])])
+    keys = frozenset({_key(REFUSED)}) if refusals else frozenset()
+    seen = []
+    for entries in (keys, iter(keys)):
+        policy = BaseGraphPolicy(assume_globals_disjoint_from_stack=True)
+        publication = BaseGraphPublication(admitted, policy=policy, admission_failures=failures)
+        results = analyze_units(admitted, base_graphs=publication, assume_globals_disjoint_from_stack=True,
+                                unavailable_entries=entries)
+        main = results[_key(MAIN)]
+        seen.append((frozenset(main.summary.control_support), main.normalized.assumes_globals_disjoint_from_stack))
+    assert seen[0] == seen[1]
+    assert (unavailable_key(_key(REFUSED)) in seen[0][0]) is bool(refusals)
+    assert seen[0][1] is not bool(refusals)
+
+
+def test_the_combined_entry_never_carries_refused_units():
+    """Fable PE-c r3 P3-1: refused units cannot reach the combined entry in
+    ``units`` -- a publication takes admitted functions only and the proof pass
+    must get its exact inputs; refusals come as options (checked above)."""
+    from tdo_v2.base_graph import BaseGraphPolicy, BaseGraphPublication
+    from tdo_v2.interprocedural import analyze_units
+
+    units, admitted, failures = _refused_failures([_main(REFUSED), FunctionBuilder(entry=SINK).ret(), _refused()])
+    policy = BaseGraphPolicy(assume_globals_disjoint_from_stack=True)
+    with pytest.raises(ValueError, match="admitted function"):
+        BaseGraphPublication(units, policy=policy, admission_failures=failures)
+    publication = BaseGraphPublication(admitted, policy=policy, admission_failures=failures)
+    with pytest.raises(ValueError, match="different input instances"):
+        analyze_units(units, base_graphs=publication, assume_globals_disjoint_from_stack=True)

@@ -1733,7 +1733,8 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
     exemptions = call_exemptions(
         (effect.operation_key for effect in normalized.effects), {key for key, _ in normalized.assumed_call_effects},
         normalized.proven_call_effects, dict(normalized.kept_call_memory), normalized.call_below_bounds,
-        intrinsic_calls=frozenset(key for key, _ in getattr(normalized, "intrinsic_refinements", ())))
+        intrinsic_calls=frozenset(key for key, _ in getattr(normalized, "intrinsic_refinements", ())),
+        globals_disjoint=normalized.assumes_globals_disjoint_from_stack)
     effects_by_block: dict[str, list] = {block.key: [] for block in unit.blocks}
     for effect in normalized.effects:
         if effect.block_key in effects_by_block:
@@ -1871,6 +1872,13 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                     keeping |= memory_keeping
                     keeping -= {key for key in below_calls
                                 if bounds[key][0] == object_id and offset < bounds[key][1]}
+                    if object_id.kind is StorageObjectKind.ADDRESS_SPACE and below_calls & keeping:
+                        # (PE-c, Astra r3 P1-2) a constant address may be the
+                        # stack a below-bound call clobbers, but for the assumption
+                        if exemptions.globals_disjoint:
+                            used.add("globals-disjoint-from-stack")
+                        else:
+                            keeping -= below_calls
                 # writes a writer condition (read span, write span) rules out
                 # on these bytes: decided by the caller with the whole summary
                 excused = frozenset(key for start, end, key in excused_by.get(object_id, ())
@@ -1885,9 +1893,12 @@ def _exit_crossings(normalized, observation, context, preserved_stack_pointers, 
                     if object_id.kind in _MEMORY_KINDS:
                         for write_block, position, order, other, key in memory_writes:
                             # a private frame write reaches no other object but a
-                            # wild one (``may_alias.private_frame_writes``)
+                            # wild or a constant-address one (``may_alias.private_frame_writes``,
+                            # ``_Policy.reached_by_private``: under globals-disjoint-from-stack
+                            # ``may_alias`` already excludes the constant-address pair)
                             if may_alias(other, object_id) and key not in excused and (
-                                    (key, other) not in private or object_id in wild):
+                                    (key, other) not in private or object_id in wild
+                                    or object_id.kind is StorageObjectKind.ADDRESS_SPACE):
                                 events.setdefault(write_block, []).append((position, order, alias_index[key]))
                         for write_block, position, order, key in unknown:
                             events.setdefault(write_block, []).append((position, order, unknown_index[key]))

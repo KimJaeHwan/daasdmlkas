@@ -7,6 +7,8 @@ Every test runs the real interprocedural engine path
 ``effective_completeness`` removes debt discharged by callee evidence.
 """
 
+import pytest
+
 from synthetic import (
     CODE_BASE, RAX, RBP, RBX, RCX, RDI, RDX, RSP, ZF,
     FunctionBuilder, add, analyze_program, boundary, const, copy, load, op, reg,
@@ -158,6 +160,36 @@ def test_a_constant_store_between_save_and_restore_needs_globals_disjoint():
     assert on[("main", "sink.arg0")].is_effectively_complete
 
 
+@pytest.mark.parametrize("through", ("restore", "save"))
+def test_a_restore_through_a_reloaded_pointer_needs_a_debt_free_address(through):
+    """PE-c (Astra r3 P1-3): the pointer to the save slot is spilled, a constant
+    store follows, the pointer is reloaded; RBX is saved to the slot and restored
+    through the reloaded pointer. Without globals-disjoint-from-stack the
+    constant store may have overwritten the spilled pointer: the restore's
+    address carries alias debt, so no certificate (the restoring LOAD itself
+    has no alias row). ``through`` "save": the save goes through the pointer
+    and the restore is direct."""
+    from synthetic import DATA_BASE, R8, R9
+
+    T2 = tmp(0x108)
+    helper = (FunctionBuilder(entry=HELPER).sub_rsp(0x20)
+              .ins(add(T, reg(RSP), const(8)), add(T2, reg(RSP), const(0x10)), store(T2, T))   # [rsp+16] = &slot
+              .ins(store(const(DATA_BASE), reg(R8)))
+              .ins(add(T2, reg(RSP), const(0x10)), load(reg(R9), T2))                          # r9 = [rsp+16]
+              .ins(add(T, reg(RSP), const(8))))
+    if through == "restore":
+        helper.ins(store(T, reg(RBX)), copy(reg(RBX), const(0)), load(reg(RBX), reg(R9)))   # [rsp+8]=rbx; rbx=[r9]
+    else:
+        helper.ins(store(reg(R9), reg(RBX)), copy(reg(RBX), const(0)), load(reg(RBX), T))   # [r9]=rbx; rbx=[rsp+8]
+    helper.add_rsp(0x20).ret()
+    functions = {"main": _main_through_helper(), "source": _source_returning_constant(), "helper": helper,
+                 "sink": _sink()}
+    off = analyze_program(functions, PROVIDER)
+    assert not off[("main", "sink.arg0")].is_effectively_complete
+    on = analyze_program(functions, PROVIDER, normalize_options={"assume_globals_disjoint_from_stack": True})
+    assert on[("main", "sink.arg0")].is_effectively_complete
+
+
 def test_a_constant_store_between_push_and_pop_needs_globals_disjoint():
     """PE-c (Astra r2 P1, PE-c-2; owner 2026-11-25: fix the analysis rule): the
     save slot is the helper's own new-frame byte (push / pop). The private-frame
@@ -172,6 +204,51 @@ def test_a_constant_store_between_push_and_pop_needs_globals_disjoint():
     assert not off[("main", "sink.arg0")].is_effectively_complete
     on = analyze_program(functions, PROVIDER, normalize_options={"assume_globals_disjoint_from_stack": True})
     assert on[("main", "sink.arg0")].is_effectively_complete
+
+
+@pytest.mark.parametrize("engine", ("sparse", "dense"))
+def test_a_push_between_save_and_restore_at_a_constant_address_needs_globals_disjoint(engine, monkeypatch):
+    """PE-c (Astra r3 P1-1 / Fable r3 P1-1): the private-frame rule is
+    symmetric -- without globals-disjoint-from-stack the helper's own push may
+    land on the constant-address save slot: [D] = RBX; push R8; RBX = [D]."""
+    from synthetic import DATA_BASE, R8
+    from tdo_v2._sparse_dataflow import DATAFLOW_ENGINE_ENV
+
+    monkeypatch.setenv(DATAFLOW_ENGINE_ENV, engine)
+    helper = (FunctionBuilder(entry=HELPER).ins(store(const(DATA_BASE), reg(RBX))).push(R8)
+              .ins(load(reg(RBX), const(DATA_BASE))).pop(R8).ret())
+    functions = {"main": _main_through_helper(), "source": _source_returning_constant(), "helper": helper,
+                 "sink": _sink()}
+    off = analyze_program(functions, PROVIDER)
+    assert not off[("main", "sink.arg0")].is_effectively_complete
+    on = analyze_program(functions, PROVIDER, normalize_options={"assume_globals_disjoint_from_stack": True})
+    assert on[("main", "sink.arg0")].is_effectively_complete
+
+
+@pytest.mark.parametrize("engine", ("sparse", "dense"))
+def test_a_push_crosses_a_constant_address_exit_byte_without_globals_disjoint(engine, monkeypatch):
+    """PE-c (Fable r3 P1-1): the helper's exit summary of [D] must show its
+    push as a crossing writer when globals-disjoint-from-stack is off."""
+    from synthetic import DATA_BASE, R8
+    from tdo_v2._sparse_dataflow import DATAFLOW_ENGINE_ENV
+
+    from synthetic import normalize_with_observation
+    from tdo_v2.function_summary import summarize_function
+    from tdo_v2.model import StorageObjectKind
+
+    monkeypatch.setenv(DATAFLOW_ENGINE_ENV, engine)
+    helper = FunctionBuilder(entry=HELPER).ins(store(const(DATA_BASE), reg(RBX, 4))).push(R8).pop(R8).ret()
+
+    def crossed(options):
+        function, observation = normalize_with_observation(helper, normalize_options=options)
+        (exit_summary,) = summarize_function(function, observation).exits
+        runs = [run for run in exit_summary.runs if run.span.object_id.kind is StorageObjectKind.ADDRESS_SPACE
+                and run.span.start <= DATA_BASE < run.span.end]
+        assert runs
+        return {label for run in runs for label in run.crossed if label.startswith("alias:")}
+
+    assert crossed(None)   # (the push: "alias:<its STORE>")
+    assert not crossed({"assume_globals_disjoint_from_stack": True})
 
 
 def test_clobbered_register_is_not_discharged():
@@ -327,6 +404,27 @@ def test_callee_global_write_discharges_under_globals_disjoint_from_stack():
     assert on[("main", "sink.arg0")].is_effectively_complete
     off = analyze_program(functions, PROVIDER)
     assert not off[("main", "sink.arg0")].is_effectively_complete
+
+
+@pytest.mark.parametrize("nested", (True, False))
+def test_a_store_through_a_pointer_an_inner_call_may_overwrite_is_no_fixed_write(nested):
+    """PE-c (Astra r3 P1-4, its fixture): helper sets [G] to a constant address,
+    calls inner (which overwrites [G] with RDI), then stores through the
+    reloaded [G]. Normalization marks that store uncertain; the frame proof must
+    not take it for a constant-address write, even under
+    globals-disjoint-from-stack. Control (``nested`` False): the same store with
+    no inner call -- a genuinely fixed write, discharged under the assumption."""
+    G = DATA_BASE + 0x40
+    helper = FunctionBuilder(entry=HELPER).sub_rsp(0x28).ins(store(const(G), const(DATA_BASE + 0x100)))
+    extra = {}
+    if nested:
+        helper.call(INNER)
+        extra["inner"] = FunctionBuilder(entry=INNER).ins(store(const(G), reg(RDI))).ret()
+    helper.ins(load(reg(RAX), const(G))).ins(store(reg(RAX), const(0))).add_rsp(0x28).ret()
+    functions = {"main": _main_with_stack_slot(), "source": _source_returning_constant(), "helper": helper,
+                 "sink": _sink(), **extra}
+    on = analyze_program(functions, PROVIDER, normalize_options={"assume_globals_disjoint_from_stack": True})
+    assert on[("main", "sink.arg0")].is_effectively_complete is (not nested)
 
 
 def test_a_stack_switch_elsewhere_withdraws_the_frame_proof_end_to_end():

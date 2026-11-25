@@ -521,6 +521,8 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     # program the stack-switch check never saw: without clean whole-program
     # evidence for this executable (which scans every function, refused ones
     # included) the program may switch stacks there -- withdrawn
+    # (kept although ``analyze_units`` applies the same rule -- mutant M3 survives:
+    # the linker branch below builds templates from this setting first)
     if assume_globals_disjoint_from_stack and admission_failures and not refusals_covered:
         assume_globals_disjoint_from_stack = False
     if linker is not None:

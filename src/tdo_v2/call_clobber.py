@@ -312,7 +312,10 @@ class CallExemptions:
     ``memory_keeping``: preserves memory and clobbers nothing below;
     ``below``: call -> (stack object, bound) of a below-bound call;
     ``below_keeping``: preserves memory, clobbers below, has a bound (the
-    exits' extra memory keepers, subtracted below the bound there)."""
+    exits' extra memory keepers, subtracted below the bound there);
+    ``globals_disjoint``: the normalization's globals-disjoint-from-stack --
+    (PE-c, Astra r3 P1-2) only under it does a below-bound call keep a
+    constant-address byte (otherwise the byte may be the clobbered stack)."""
 
     calls: frozenset
     proven: dict
@@ -320,24 +323,30 @@ class CallExemptions:
     memory_keeping: frozenset
     below: dict
     below_keeping: frozenset
+    globals_disjoint: bool = False
 
-    def clobber_preserved(self, unit) -> dict:
+    def clobber_preserved(self, unit, uses: list | None = None) -> dict:
         """normalize's / a probe's view: ``proven`` plus, for a below-bound
         call, every tracked memory byte of ``unit`` except its stack below
-        the bound (a union: ``_memory_spans_except_below``)."""
+        the bound (a union: ``_memory_spans_except_below``) -- constant-address
+        bytes only under globals-disjoint-from-stack (a use goes to ``uses``)."""
         from .normalize import _memory_spans_except_below
 
         preserved = {key: tuple(spans) for key, spans in self.proven.items()}
         for key, (object_id, bound) in self.below.items():
-            preserved[key] = preserved.get(key, ()) + tuple(_memory_spans_except_below(unit, object_id, bound))
+            spans = tuple(_memory_spans_except_below(unit, object_id, bound, constants=self.globals_disjoint))
+            if uses is not None and any(span.object_id.kind is StorageObjectKind.ADDRESS_SPACE for span in spans):
+                uses.append("globals-disjoint-from-stack")
+            preserved[key] = preserved.get(key, ()) + spans
         return preserved
 
 
 def call_exemptions(effect_keys, assumed_calls, proven_call_effects, kept=None, below_bounds=(),
-                    *, intrinsic_calls=frozenset()) -> CallExemptions:
+                    *, intrinsic_calls=frozenset(), globals_disjoint: bool = False) -> CallExemptions:
     """``CallExemptions`` from the parts every view already holds:
     ``proven_call_effects`` call -> its proven effect row, ``kept`` call -> a
-    model's kept memory spans, ``below_bounds`` (call, object, bound) rows."""
+    model's kept memory spans, ``below_bounds`` (call, object, bound) rows,
+    ``globals_disjoint`` the normalization's globals-disjoint-from-stack."""
     kept = kept or {}
     rows = dict(proven_call_effects)
     below = {key: (object_id, bound) for key, object_id, bound in below_bounds}
@@ -353,6 +362,7 @@ def call_exemptions(effect_keys, assumed_calls, proven_call_effects, kept=None, 
         below=below,
         below_keeping=frozenset(key for key, row in rows.items()
                                 if row.preserves_memory and row.clobbers_below and key in below),
+        globals_disjoint=bool(globals_disjoint),
     )
 
 
