@@ -155,6 +155,58 @@ def test_a_bundle_not_at_the_preferred_base_is_not_compared(tmp_path):
     assert decode and all(row.run_state == "unobserved" for row in decode)
 
 
+# -- golden vectors (r3 s9): synthetic Bundles only; the Python / Rust parity reference
+
+GOLDEN = REPO / "tests" / "intra" / "golden"
+
+
+def _golden(name, generation):
+    """The full report (every attribute and vote) minus the host's decoder build
+    manifest. G1_REGEN_GOLDEN=1 rewrites the file after a reviewed change."""
+    import json
+
+    import _sealed as s
+    import decode_check
+    from report import dumps
+
+    header, rows = decode_check.run(generation, s.NAMING_SOURCE, True, full=True)
+    data = json.loads(dumps(header, rows))
+    data["header"].pop("decoders")
+    path = GOLDEN / f"decode_check_{name}.json"
+    if os.environ.get("G1_REGEN_GOLDEN"):
+        GOLDEN.mkdir(exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(data, indent=1, sort_keys=True) + "\n")
+    assert json.loads(path.read_text(encoding="utf-8")) == data, f"golden {path.name} differs"
+
+
+@needs
+def test_golden_reference_pair(tmp_path):
+    import _sealed as s
+
+    functions, code = _pair(s)
+    _golden("pair", _bundle(tmp_path, functions, code))
+
+
+@needs
+def test_golden_66_e8_pair(tmp_path):
+    """Withheld call row, s1_guard true, S1 and the call seed blocked in dependents."""
+    import _sealed as s
+
+    functions, code = _pair(s, call_bytes=b"\x66\xE8\x0A\x00\x00\x00")
+    _golden("pair_66e8", _bundle(tmp_path, functions, code))
+
+
+@needs
+def test_golden_elf_pie_with_a_text_relocation(tmp_path):
+    import _elf_fixture as ef
+    import _sealed as s
+
+    functions, code = _pair(s, code=ELF_CODE)
+    elf = ef.make_elf([ef.Segment(0x1000, code)], relocations=[ef.Reloc(0x1010, 8)])
+    _golden("elf_pie_reloc", _elf_bundle(tmp_path, functions, elf))
+
+
 # -- PE32+ relocations, loader-written ranges and loader-rule vectors (r2-r4)
 
 IMM64 = 0x1122334455667788

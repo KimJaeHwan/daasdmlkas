@@ -1,0 +1,1340 @@
+{
+ "header": {
+  "PYTHONHASHSEED": "0",
+  "counts": {
+   "decode/row": {
+    "applied": 4
+   },
+   "decode/s1_guard": {
+    "applied": 2
+   },
+   "mapping/block": {
+    "applied": 2
+   },
+   "mapping/original": {
+    "applied": 1
+   }
+  },
+  "dependents": {
+   "consumers": {
+    "call_seed": {
+     "design": "r2 s6 call seeds / naming",
+     "reads": "a5, a6, a8",
+     "status": "baseline",
+     "unit": "call"
+    },
+    "g3b7b_none_estimate": {
+     "design": "r3 s6 (not in this branch's engine: loss unknown)",
+     "reads": "every row: a1, a2, a3, a4, a5, a8; any BRANCHIND kept apart",
+     "status": "estimate",
+     "unit": "function"
+    },
+    "plain_push": {
+     "design": "r2 s6",
+     "reads": "a6, a7 (pattern plain near call)",
+     "status": "baseline",
+     "unit": "call"
+    },
+    "push_projection": {
+     "design": "r2 s6, r4 s6",
+     "reads": "F.is_call, a3, a4, a11b, a7",
+     "status": "baseline",
+     "unit": "call"
+    },
+    "push_relation": {
+     "design": "r2 s6, r4 s6",
+     "reads": "the push_projection reads (relations iterate surviving projections), a4",
+     "status": "baseline",
+     "unit": "call"
+    },
+    "return_shape": {
+     "design": "r2 s6",
+     "reads": "a11b (a9 reported apart)",
+     "status": "baseline",
+     "unit": "return"
+    },
+    "s1": {
+     "design": "r2 s6 S1 current contract",
+     "reads": "native-call rows: a2, a3, a4, a6, a8, F.is_call; S1 exit rows: a4 (exit target = A4)",
+     "status": "baseline",
+     "unit": "function"
+    },
+    "s1_l2_estimate": {
+     "design": "r2 s6 adopted L2 acceptance",
+     "reads": "the s1 reads + every row: a5, a6, F.is_call (a call only the voters see)",
+     "status": "estimate",
+     "unit": "function"
+    },
+    "unknown_transfer_site": {
+     "design": "r3 s6",
+     "reads": "a8, a5 (U2a site; state-barrier completeness needs fault cuts, not exported)",
+     "status": "baseline",
+     "unit": "branchind"
+    }
+   },
+   "rows": "every unit",
+   "summary": {
+    "call_seed": {
+     "baseline_present": 1,
+     "confirmed": 1,
+     "loss": 0,
+     "loss_unknown": 0,
+     "units": 1,
+     "would_block_disagreement": 0,
+     "would_block_unobserved": 0
+    },
+    "g3b7b_none_estimate": {
+     "baseline_present": 0,
+     "confirmed": 2,
+     "loss": 0,
+     "loss_unknown": 0,
+     "units": 2,
+     "would_block_disagreement": 0,
+     "would_block_unobserved": 0
+    },
+    "plain_push": {
+     "baseline_present": 1,
+     "confirmed": 1,
+     "loss": 0,
+     "loss_unknown": 0,
+     "units": 1,
+     "would_block_disagreement": 0,
+     "would_block_unobserved": 0
+    },
+    "push_projection": {
+     "baseline_present": 1,
+     "confirmed": 1,
+     "loss": 0,
+     "loss_unknown": 0,
+     "units": 1,
+     "would_block_disagreement": 0,
+     "would_block_unobserved": 0
+    },
+    "push_relation": {
+     "baseline_present": 1,
+     "confirmed": 1,
+     "loss": 0,
+     "loss_unknown": 0,
+     "units": 1,
+     "would_block_disagreement": 0,
+     "would_block_unobserved": 0
+    },
+    "return_shape": {
+     "baseline_present": 2,
+     "confirmed": 2,
+     "loss": 0,
+     "loss_unknown": 0,
+     "units": 2,
+     "would_block_disagreement": 0,
+     "would_block_unobserved": 0
+    },
+    "s1": {
+     "baseline_present": 2,
+     "confirmed": 2,
+     "loss": 0,
+     "loss_unknown": 0,
+     "units": 2,
+     "would_block_disagreement": 0,
+     "would_block_unobserved": 0
+    },
+    "s1_l2_estimate": {
+     "baseline_present": 2,
+     "confirmed": 2,
+     "loss": 0,
+     "loss_unknown": 0,
+     "units": 2,
+     "would_block_disagreement": 0,
+     "would_block_unobserved": 0
+    }
+   },
+   "undetermined": {
+    "pass_through": "needs the PC the unwinder restores at each fault point (not in a Bundle)",
+    "rp": "needs the PC the unwinder restores at each fault point (not in a Bundle)"
+   }
+  },
+  "generation": "abababababababababababababababababababababababababababababababab",
+  "global_reason": null,
+  "guard": {
+   "fired_at_production": "unobserved",
+   "format": "pe",
+   "language": "x86:LE:64:default",
+   "language_agrees": true,
+   "machine": 34404,
+   "revision": "cpuDependentLength G3b-7b r9g (main 18a5f5e exporter)"
+  },
+  "layers": {
+   "derived": [
+    "dependents"
+   ],
+   "g1": [
+    "mapping",
+    "decode"
+   ],
+   "reserved": {
+    "semantics": {
+     "revision": null,
+     "status": "reserved (TBR A3 / C1); not produced by G1; never counted in G1 counts"
+    }
+   }
+  },
+  "lift_table": {
+   "allowed_prefix": [
+    "BOOL_AND",
+    "BOOL_NEGATE",
+    "BOOL_OR",
+    "BOOL_XOR",
+    "COPY",
+    "INT_2COMP",
+    "INT_ADD",
+    "INT_CARRY",
+    "INT_EQUAL",
+    "INT_LESS",
+    "INT_LESSEQUAL",
+    "INT_MULT",
+    "INT_NEGATE",
+    "INT_NOTEQUAL",
+    "INT_SBORROW",
+    "INT_SCARRY",
+    "INT_SEXT",
+    "INT_SLESS",
+    "INT_SLESSEQUAL",
+    "INT_SUB",
+    "INT_ZEXT",
+    "LOAD",
+    "PIECE",
+    "SUBPIECE"
+   ],
+   "ghidra": "12.0.4",
+   "id": "x86-64-lift-table-1",
+   "language": [
+    "x86:LE:64:default",
+    4,
+    6
+   ],
+   "sla_sha256_prefix": "d5adc314",
+   "userops": {
+    "16": "swi",
+    "77": "invalidInstructionException",
+    "84": "xabort",
+    "85": "xbegin",
+    "86": "xend",
+    "99": "xtest"
+   }
+  },
+  "mapping": {
+   "format": "pe",
+   "load_bias": 0,
+   "mapping_id": "ecd6514ee279b192ad9ceb010e18df5076bcb19b8160bdf3fc55602482a9f898",
+   "rules": "pe-loader-rules-4"
+  },
+  "mapping_id": "ecd6514ee279b192ad9ceb010e18df5076bcb19b8160bdf3fc55602482a9f898",
+  "premises": [
+   "decoder-matches-cpu",
+   "stock-ghidra-translator"
+  ],
+  "revision": 2,
+  "scope": "only Ghidra-listed rows are checked (L5); 64-bit long mode only (no compatibility-mode switches); decoder agreement is not a proof of CPU behaviour (premise decoder-matches-cpu); vendor agreement covers only what the decoders model; instruction meaning beyond the compared attributes (mnemonic, data effects, registers written) is not compared; whether a producer guard fired cannot be decided from the Bundle",
+  "tool": "decode_check",
+  "voters": {
+   "amd": [
+    "iced",
+    "zydis"
+   ],
+   "intel": [
+    "iced",
+    "zydis",
+    "xed"
+   ]
+  }
+ },
+ "rows": [
+  {
+   "check": "row",
+   "detail": {
+    "attributes": {
+     "F.has_fallthrough": {
+      "state": "applied",
+      "value": true
+     },
+     "F.is_call": {
+      "state": "applied",
+      "value": true
+     },
+     "F.is_computed": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_conditional": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_jump": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_terminal": {
+      "state": "applied",
+      "value": false
+     },
+     "a1": {
+      "state": "applied",
+      "value": true
+     },
+     "a10": {
+      "state": "applied",
+      "value": [
+       "none"
+      ]
+     },
+     "a11b": {
+      "state": "applied",
+      "value": 8
+     },
+     "a12": {
+      "state": "not_applicable"
+     },
+     "a2": {
+      "state": "applied",
+      "value": 5
+     },
+     "a3": {
+      "state": "applied",
+      "value": "call-continuation"
+     },
+     "a4": {
+      "state": "applied",
+      "value": 5368713221
+     },
+     "a5": {
+      "state": "applied",
+      "value": 5368713232
+     },
+     "a6": {
+      "state": "applied",
+      "value": "near"
+     },
+     "a7": {
+      "state": "applied",
+      "value": [
+       64,
+       5368713221
+      ]
+     },
+     "a8": {
+      "state": "applied",
+      "value": "direct"
+     },
+     "a9": {
+      "state": "applied",
+      "value": "none"
+     },
+     "target_operand_bits": {
+      "state": "not_applicable"
+     }
+    },
+    "lift": "call",
+    "s1": true,
+    "votes": {
+     "amd": [
+      {
+       "address_bits": 64,
+       "amd": true,
+       "counter": false,
+       "encoded_disp_bits": 32,
+       "flow": "call_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 5,
+       "mnemonic": "CALL",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": 5368713232,
+       "target_derivation": "decoder",
+       "target_ip_bits": 64,
+       "value_fields": [
+        [
+         1,
+         4
+        ]
+       ],
+       "version": "iced-x86 1.22.0",
+       "voter": "iced"
+      },
+      {
+       "address_bits": 64,
+       "amd": true,
+       "counter": false,
+       "encoded_disp_bits": 32,
+       "flow": "call_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 5,
+       "mnemonic": "call",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": 5368713232,
+       "target_derivation": "decoder",
+       "target_ip_bits": 64,
+       "value_fields": [
+        [
+         1,
+         4
+        ]
+       ],
+       "version": "zydis 4.1.0.0",
+       "voter": "zydis"
+      }
+     ],
+     "intel": [
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 32,
+       "flow": "call_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 5,
+       "mnemonic": "CALL",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": 5368713232,
+       "target_derivation": "decoder",
+       "target_ip_bits": 64,
+       "value_fields": [
+        [
+         1,
+         4
+        ]
+       ],
+       "version": "iced-x86 1.22.0",
+       "voter": "iced"
+      },
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 32,
+       "flow": "call_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 5,
+       "mnemonic": "call",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": 5368713232,
+       "target_derivation": "decoder",
+       "target_ip_bits": 64,
+       "value_fields": [
+        [
+         1,
+         4
+        ]
+       ],
+       "version": "zydis 4.1.0.0",
+       "voter": "zydis"
+      },
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 32,
+       "flow": "call_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 5,
+       "mnemonic": "CALL_NEAR",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": 5368713232,
+       "target_derivation": "computed: next IP + displacement at the operand width",
+       "target_ip_bits": 64,
+       "value_fields": [
+        [
+         1,
+         4
+        ]
+       ],
+       "version": "xed v2026.08.23",
+       "voter": "xed"
+      }
+     ]
+    },
+    "window": {
+     "hex": "e80b000000c3cccccccccccccccccc",
+     "relocations": [],
+     "stop": "15 bytes",
+     "verified": 15
+    }
+   },
+   "key": "function-000000/1:140001000",
+   "layer": "decode",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "row",
+   "detail": {
+    "attributes": {
+     "F.has_fallthrough": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_call": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_computed": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_conditional": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_jump": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_terminal": {
+      "state": "applied",
+      "value": true
+     },
+     "a1": {
+      "state": "applied",
+      "value": true
+     },
+     "a10": {
+      "state": "applied",
+      "value": [
+       "none"
+      ]
+     },
+     "a11b": {
+      "state": "applied",
+      "value": 8
+     },
+     "a12": {
+      "state": "not_applicable"
+     },
+     "a2": {
+      "state": "applied",
+      "value": 1
+     },
+     "a3": {
+      "state": "applied",
+      "value": "none"
+     },
+     "a4": {
+      "state": "not_applicable"
+     },
+     "a5": {
+      "state": "not_applicable"
+     },
+     "a6": {
+      "state": "applied",
+      "value": "none"
+     },
+     "a7": {
+      "state": "not_applicable"
+     },
+     "a8": {
+      "state": "applied",
+      "value": "none"
+     },
+     "a9": {
+      "state": "applied",
+      "value": "near"
+     },
+     "target_operand_bits": {
+      "state": "not_applicable"
+     }
+    },
+    "lift": "ret",
+    "s1": true,
+    "votes": {
+     "amd": [
+      {
+       "address_bits": 64,
+       "amd": true,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "RET",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "iced-x86 1.22.0",
+       "voter": "iced"
+      },
+      {
+       "address_bits": 64,
+       "amd": true,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "ret",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "zydis 4.1.0.0",
+       "voter": "zydis"
+      }
+     ],
+     "intel": [
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "RET",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "iced-x86 1.22.0",
+       "voter": "iced"
+      },
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "ret",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "zydis 4.1.0.0",
+       "voter": "zydis"
+      },
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "RET_NEAR",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "xed v2026.08.23",
+       "voter": "xed"
+      }
+     ]
+    },
+    "window": {
+     "hex": "c3cccccccccccccccccccc4889c8c3",
+     "relocations": [],
+     "stop": "15 bytes",
+     "verified": 15
+    }
+   },
+   "key": "function-000000/1:140001005",
+   "layer": "decode",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "row",
+   "detail": {
+    "attributes": {
+     "F.has_fallthrough": {
+      "state": "applied",
+      "value": true
+     },
+     "F.is_call": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_computed": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_conditional": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_jump": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_terminal": {
+      "state": "applied",
+      "value": false
+     },
+     "a1": {
+      "state": "applied",
+      "value": true
+     },
+     "a10": {
+      "state": "applied",
+      "value": [
+       "none"
+      ]
+     },
+     "a11b": {
+      "state": "not_applicable"
+     },
+     "a12": {
+      "state": "not_applicable"
+     },
+     "a2": {
+      "state": "applied",
+      "value": 3
+     },
+     "a3": {
+      "state": "applied",
+      "value": "sequential"
+     },
+     "a4": {
+      "state": "applied",
+      "value": 5368713235
+     },
+     "a5": {
+      "state": "not_applicable"
+     },
+     "a6": {
+      "state": "applied",
+      "value": "none"
+     },
+     "a7": {
+      "state": "not_applicable"
+     },
+     "a8": {
+      "state": "applied",
+      "value": "none"
+     },
+     "a9": {
+      "state": "applied",
+      "value": "none"
+     },
+     "target_operand_bits": {
+      "state": "not_applicable"
+     }
+    },
+    "lift": "plain",
+    "s1": true,
+    "votes": {
+     "amd": [
+      {
+       "address_bits": 64,
+       "amd": true,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "none",
+       "indirect": false,
+       "int_vector": null,
+       "length": 3,
+       "mnemonic": "MOV",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "iced-x86 1.22.0",
+       "voter": "iced"
+      },
+      {
+       "address_bits": 64,
+       "amd": true,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "none",
+       "indirect": false,
+       "int_vector": null,
+       "length": 3,
+       "mnemonic": "mov",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "zydis 4.1.0.0",
+       "voter": "zydis"
+      }
+     ],
+     "intel": [
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "none",
+       "indirect": false,
+       "int_vector": null,
+       "length": 3,
+       "mnemonic": "MOV",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "iced-x86 1.22.0",
+       "voter": "iced"
+      },
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "none",
+       "indirect": false,
+       "int_vector": null,
+       "length": 3,
+       "mnemonic": "mov",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "zydis 4.1.0.0",
+       "voter": "zydis"
+      },
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "none",
+       "indirect": false,
+       "int_vector": null,
+       "length": 3,
+       "mnemonic": "MOV",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "xed v2026.08.23",
+       "voter": "xed"
+      }
+     ]
+    },
+    "window": {
+     "hex": "4889c8c3cccccccccccccccccccccc",
+     "relocations": [],
+     "stop": "15 bytes",
+     "verified": 15
+    }
+   },
+   "key": "function-000001/1:140001010",
+   "layer": "decode",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "row",
+   "detail": {
+    "attributes": {
+     "F.has_fallthrough": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_call": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_computed": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_conditional": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_jump": {
+      "state": "applied",
+      "value": false
+     },
+     "F.is_terminal": {
+      "state": "applied",
+      "value": true
+     },
+     "a1": {
+      "state": "applied",
+      "value": true
+     },
+     "a10": {
+      "state": "applied",
+      "value": [
+       "none"
+      ]
+     },
+     "a11b": {
+      "state": "applied",
+      "value": 8
+     },
+     "a12": {
+      "state": "not_applicable"
+     },
+     "a2": {
+      "state": "applied",
+      "value": 1
+     },
+     "a3": {
+      "state": "applied",
+      "value": "none"
+     },
+     "a4": {
+      "state": "not_applicable"
+     },
+     "a5": {
+      "state": "not_applicable"
+     },
+     "a6": {
+      "state": "applied",
+      "value": "none"
+     },
+     "a7": {
+      "state": "not_applicable"
+     },
+     "a8": {
+      "state": "applied",
+      "value": "none"
+     },
+     "a9": {
+      "state": "applied",
+      "value": "near"
+     },
+     "target_operand_bits": {
+      "state": "not_applicable"
+     }
+    },
+    "lift": "ret",
+    "s1": true,
+    "votes": {
+     "amd": [
+      {
+       "address_bits": 64,
+       "amd": true,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "RET",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "iced-x86 1.22.0",
+       "voter": "iced"
+      },
+      {
+       "address_bits": 64,
+       "amd": true,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "ret",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "zydis 4.1.0.0",
+       "voter": "zydis"
+      }
+     ],
+     "intel": [
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "RET",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "iced-x86 1.22.0",
+       "voter": "iced"
+      },
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "ret",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "zydis 4.1.0.0",
+       "voter": "zydis"
+      },
+      {
+       "address_bits": 64,
+       "amd": false,
+       "counter": false,
+       "encoded_disp_bits": 0,
+       "flow": "ret_near",
+       "indirect": false,
+       "int_vector": null,
+       "length": 1,
+       "mnemonic": "RET_NEAR",
+       "operand_bits": 64,
+       "ret_imm": null,
+       "stack_bits": 64,
+       "status": "ok",
+       "target": null,
+       "target_derivation": "",
+       "target_ip_bits": 0,
+       "value_fields": [],
+       "version": "xed v2026.08.23",
+       "voter": "xed"
+      }
+     ]
+    },
+    "window": {
+     "hex": "c3cccccccccccccccccccccccc",
+     "relocations": [],
+     "stop": "no sealed byte",
+     "verified": 13
+    }
+   },
+   "key": "function-000001/1:140001013",
+   "layer": "decode",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "s1_guard",
+   "detail": {
+    "fired_at_production": "unobserved",
+    "recomputed": false,
+    "revision": "cpuDependentLength G3b-7b r9g (main 18a5f5e exporter)",
+    "s1_observed": true
+   },
+   "key": "function-000000",
+   "layer": "decode",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "s1_guard",
+   "detail": {
+    "fired_at_production": "unobserved",
+    "recomputed": false,
+    "revision": "cpuDependentLength G3b-7b r9g (main 18a5f5e exporter)",
+    "s1_observed": true
+   },
+   "key": "function-000001",
+   "layer": "decode",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "call_seed",
+   "detail": {
+    "baseline": true,
+    "naming": "applied",
+    "would_block": false
+   },
+   "key": "function-000000/1:140001000:2:CALL",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "g3b7b_none_estimate",
+   "detail": {
+    "baseline": null,
+    "branchind_rows": 0,
+    "would_block": false
+   },
+   "key": "function-000000",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "g3b7b_none_estimate",
+   "detail": {
+    "baseline": null,
+    "branchind_rows": 0,
+    "would_block": false
+   },
+   "key": "function-000001",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "plain_push",
+   "detail": {
+    "baseline": true,
+    "would_block": false
+   },
+   "key": "function-000000/1:140001000:2:CALL",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "push_projection",
+   "detail": {
+    "baseline": true,
+    "would_block": false
+   },
+   "key": "function-000000/1:140001000:2:CALL",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "push_relation",
+   "detail": {
+    "baseline": true,
+    "would_block": false
+   },
+   "key": "function-000000/1:140001000:2:CALL",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "return_shape",
+   "detail": {
+    "baseline": true,
+    "would_block": false
+   },
+   "key": "function-000000/1:140001005:2:RETURN",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "return_shape",
+   "detail": {
+    "baseline": true,
+    "would_block": false
+   },
+   "key": "function-000001/1:140001013:2:RETURN",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "s1",
+   "detail": {
+    "baseline": true,
+    "would_block": false
+   },
+   "key": "function-000000",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "s1",
+   "detail": {
+    "baseline": true,
+    "would_block": false
+   },
+   "key": "function-000001",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "s1_l2_estimate",
+   "detail": {
+    "baseline": true,
+    "would_block": false
+   },
+   "key": "function-000000",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "s1_l2_estimate",
+   "detail": {
+    "baseline": true,
+    "would_block": false
+   },
+   "key": "function-000001",
+   "layer": "dependents",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "block",
+   "detail": {
+    "ambiguous": 0,
+    "block": "block-000000",
+    "differs": 0,
+    "equal": 512,
+    "first_difference": null,
+    "outside": 0,
+    "written": 0,
+    "zero_mismatch": 0
+   },
+   "key": "#0/1:140000000",
+   "layer": "mapping",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "block",
+   "detail": {
+    "ambiguous": 0,
+    "block": "block-000001",
+    "differs": 0,
+    "equal": 32,
+    "first_difference": null,
+    "outside": 0,
+    "written": 0,
+    "zero_mismatch": 0
+   },
+   "key": "#1/1:140001000",
+   "layer": "mapping",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  },
+  {
+   "check": "original",
+   "detail": {
+    "fields": {
+     "file_alignment": 512,
+     "file_sha256": "92442bab380ff7d48c0394d812765502aa100bb549399835ce1e4fde92d6529c",
+     "file_size": 1024,
+     "image_base": 5368709120,
+     "machine": 34404,
+     "magic": 523,
+     "number_of_rva_and_sizes": 16,
+     "number_of_sections": 1,
+     "section_alignment": 4096,
+     "size_of_headers": 512,
+     "size_of_image": 8192,
+     "size_of_optional_header": 240
+    },
+    "format": "pe",
+    "load_bias": 0,
+    "mapping_id": "ecd6514ee279b192ad9ceb010e18df5076bcb19b8160bdf3fc55602482a9f898",
+    "relocations": "absent",
+    "rules": "pe-loader-rules-4",
+    "written": "absent"
+   },
+   "key": "bundle",
+   "layer": "mapping",
+   "run_state": "evaluated",
+   "source": "lint",
+   "verdict": "applied"
+  }
+ ]
+}

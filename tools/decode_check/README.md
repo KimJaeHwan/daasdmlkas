@@ -109,3 +109,8 @@ with a fixed `dc_decoded` struct) map one-to-one to Rust FFI or to the Rust
 (`_elf_fixture.py`) Bundles. The decoder tests need POSIX and the built decoders
 (`$G1_DECODERS`, default `/root/g1_decoders`); the ELF mapping unit tests need
 neither.
+
+Golden vectors (`tests/intra/golden/decode_check_*.json`, synthetic Bundles only): the full
+report of the reference pair, the `66 E8` pair (withheld row, guard true, blocked S1) and an
+ELF PIE with a text relocation, minus the host's decoder build manifest. They are the
+parity reference for a Rust port. `G1_REGEN_GOLDEN=1` rewrites them after a reviewed change.
