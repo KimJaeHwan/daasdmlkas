@@ -554,7 +554,8 @@ def _without_revoked_faults(published, plan, discharged, functions, calls, revok
     return found
 
 
-def _without_late_refusals(published, owners, functions, calls) -> dict:
+def _without_late_refusals(published, owners, functions, calls, late_edges=None, program=None,
+                           refused=frozenset()) -> dict:
     """(PE-b) A fallback publication (round 1) after a later round resolved a
     transfer to a refused function (``owners``: those functions): each owner
     and every function whose calls may reach it is published failed
@@ -563,12 +564,12 @@ def _without_late_refusals(published, owners, functions, calls) -> dict:
     owners = set(owners) & set(published)
     if not owners:
         return published
-    from .fault_premise import observed_calls
-
+    program = functions if program is None else program
     callers: dict = {}
-    keys = frozenset(functions)
-    for key, unit in functions.items():
-        targets = set(observed_calls(unit, keys)[0]) | set(calls.get(key, {}).values())
+    for key, unit in program.items():
+        # (every identified transfer, cut bodies included, and every target resolved in any round)
+        targets = set(_static_transfers(unit, program, refused)[0]) | set(calls.get(key, {}).values()) \
+            | set((late_edges or {}).get(key, ()))
         item = published.get(key)
         if item is not None:
             targets |= set(item.calls.values())
@@ -779,6 +780,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     refused_reach = _refused_reach(program, unavailable_entries, unidentified_refusals)
     opaque_sets: dict = {}   # (round state) key -> {CALLIND: members} of forward sets naming a refused member
     resolved_reach: dict = {}   # (round state) key -> refused keys its RESOLVED targets may reach statically
+    late_owners: set = set()   # (outlives the rounds) functions with a refused resolution found after round 1
+    late_edges: dict = {}      # (outlives the rounds) key -> every resolved target found in any round
     # the fault premise (F1, docs 25.94): recognized sites, hazards, the
     # discharged set D (round state: it only shrinks) and the static
     # may-reach-fault set, decided before the first round
@@ -871,7 +874,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         return own_frontier(key) | control_exempt.get(key, frozenset())
     noreturn_jumps = {
         key: _noreturn_jumps(unit, image_info, external_models, calls[key], disabled, usable,
-                             refused_sites.setdefault(key, {}))
+                             refused_sites.setdefault(key, {}), refused_entries=unavailable_entries)
         if image_info and external_models else {}
         for key, unit in functions.items()
     }
@@ -909,9 +912,15 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
     def analyze(calls, multi=None):
         multi = multi or {}
         # (multi-target members ordered before their callers, as callees)
+        # (PE-b) ordering only: the analysed members of the function's opaque
+        # forward sets -- their support is read in ``derive`` (never call edges)
+        hidden = {key: sorted({member for members in opaque_sets.get(key, {}).values() for member in members})
+                  for key in calls}
         order = _callee_first_components({
             key: {**calls[key], **{f"{call}~m{index}": member for call, members in multi.get(key, {}).items()
-                                   for index, member in enumerate(members)}}
+                                   for index, member in enumerate(members)},
+                  **{f"~order{index}": member for index, member in enumerate(hidden[key])
+                     if member in calls and member != key}}
             for key in calls})
         component_of = {key: index for index, component in enumerate(order) for key in component}
         recursive_keys = frozenset(key for component in order for key in component
@@ -1818,22 +1827,30 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         targets = _indirect_targets(item, set(program) | unavailable_entries)
                         for target in targets.values():   # (PE-b: a resolved target's static reach)
                             found_reach.setdefault(key, set()).update(refused_reach.get(target, ()))
+                            late_edges.setdefault(key, set()).add(target)
                         for call, target in list(targets.items()):
                             if target in unavailable_entries:   # (PE-b: resolved to a refused function)
                                 found_opaque.setdefault(key, {})[call] = (target,)
+                                late_owners.add(key)
                                 del targets[call]
                         if forward:
-                            several, labels = _forward_targets(item, set(functions) | unavailable_entries,
+                            several, labels = _forward_targets(item, set(program) | unavailable_entries,
                                                                readonly_image, refused=unavailable_entries)
                             for call, members in several.items():
                                 for member in members:
                                     found_reach.setdefault(key, set()).update(refused_reach.get(member, ()))
+                                    late_edges.setdefault(key, set()).add(member)
                                 if call in targets:
                                     continue
+                                if not any(member in unavailable_entries for member in members) and (
+                                        call.endswith(":BRANCHIND")
+                                        or not all(member in functions for member in members)):
+                                    continue   # (the resolution itself: CALLIND sets of analysed functions, as before)
                                 if any(member in unavailable_entries for member in members):
                                     # (PE-b) a set naming a refused function: the call stays
                                     # opaque; every member's support and the labels are kept
                                     found_opaque.setdefault(key, {})[call] = tuple(members)
+                                    late_owners.add(key)
                                     requires.setdefault(key, set()).update(labels[call])
                                     call_requires.setdefault(key, {}).setdefault(call, set()).update(labels[call])
                                     continue
@@ -1898,6 +1915,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
             else:
                 kept = discharged
             found_reach = {key: frozenset(keys) for key, keys in found_reach.items() if keys}
+            late_owners.update(found_reach)
             if found == resolved and found_cuts == resolved_cuts and found_multi == resolved_multi \
                     and found_opaque == opaque_sets and found_reach == resolved_reach \
                     and not newly_failed and kept == discharged:
@@ -1940,7 +1958,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         return _without_late_refusals(
             _without_revoked_faults(published, fault_plan, fault_state["discharged"], functions, calls,
                                     fault_state["revoked"]),
-            {*opaque_sets, *resolved_reach} if first is not None else (), functions, calls)
+            late_owners if first is not None else (), functions, calls, late_edges, program, unavailable_entries)
     except AnalysisBudgetExceeded as error:
         if not _is_run_exhaustion(error) or first is None:
             raise
@@ -1948,7 +1966,7 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
         return _without_late_refusals(
             _without_revoked_faults(with_failures(first), fault_plan, fault_state["discharged"], functions, calls,
                                     fault_state["revoked"]),
-            {*opaque_sets, *resolved_reach}, functions, calls)
+            late_owners, functions, calls, late_edges, program, unavailable_entries)
 
 
 MAX_RECURSION_ROUNDS = 8
@@ -2314,7 +2332,7 @@ def _unplaced_noreturn(unit, proven) -> list:
 
 
 def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset(), usable=None,
-                    refused=None) -> dict:
+                    refused=None, refused_entries=frozenset()) -> dict:
     """Jump key -> (model file, entry) for a jump to an import thunk whose
     model never returns (``noreturn``, e.g. ``je abort``). (G-T G3b-1, docs
     25.104) The shapes are the one tail fact's (``pcode_blocks.tail_transfers``):
@@ -2342,6 +2360,10 @@ def _noreturn_jumps(unit, image_info, external_models, calls, disabled=frozenset
         if key in calls and fact.kind != "cbranch":
             continue   # (a conditional tail: kept as the fallback, applied only when it composes nothing)
         target = fact.target
+        if function_key(target) in refused_entries:
+            if refused is not None:   # (PE-b) a refused member: no model at a jump to it
+                refused[key] = "the jump's target was refused at admission"
+            continue
         symbol = image_info.import_at_thunk(target.space_id, target.byte_offset)
         model = external_models.lookup(symbol) if symbol is not None else None
         if model is None or not model[1].noreturn:
@@ -3005,8 +3027,8 @@ def _static_transfers(unit, program, refused) -> tuple[set, bool, bool]:
         for target in row.flow_targets:
             leave(target)
     for item in getattr(observation, "fallthrough_exits", ()):   # (test doubles carry rows only)
-        if function_key(item.target) in refused:
-            targets.add(function_key(item.target))   # (a kind-4 exit naming a refused entry)
+        if function_key(item.target) in refused or function_key(item.target) in program:
+            targets.add(function_key(item.target))   # (an exit naming an entry: refused or admitted)
         if item.function is None:
             outside = True
         else:
@@ -3224,7 +3246,8 @@ def _forward_targets(item, functions, readonly_image, refused=frozenset()) -> tu
     space = item.unit.scopes.function.entry.space_id
     found, labels = {}, {}
     for fact in forward_facts(normalized, item.unit, readonly_image=readonly_image):
-        if not fact.operation.endswith(":CALLIND") or fact.claim.is_top:
+        if fact.claim.is_top or not (fact.operation.endswith(":CALLIND")
+                                     or refused and fact.operation.endswith(":BRANCHIND")):
             continue
         members, ok = set(), True
         for base, interval in fact.claim.items:
@@ -3235,7 +3258,8 @@ def _forward_targets(item, functions, readonly_image, refused=frozenset()) -> tu
             members.update(range(interval.lo, interval.hi + 1, interval.stride or 1))
         keys = sorted(f"{space:x}:{value:x}" for value in members)
         if ok and 0 < len(keys) <= MAX_CANDIDATES and (
-                all(key in functions for key in keys) or any(key in refused for key in keys)):
+                any(key in refused for key in keys)
+                or fact.operation.endswith(":CALLIND") and all(key in functions for key in keys)):
             # (PE-b) a set naming a refused function is kept whatever else it names (the caller keeps it opaque)
             found[fact.operation] = tuple(keys)
             labels[fact.operation] = frozenset(fact.requires)
