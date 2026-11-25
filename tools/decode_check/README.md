@@ -146,9 +146,8 @@ Bundle (admission refuses unlisted entries) and is passed by explicit path.
   2. the TBR G3 loader / LoadState model computes the post-rewrite bytes, so those rows can be decoded too;
   3. DVRT entries whose rewrite depends on the OS version or settings (e.g. retpoline enabled) need a named
      load-model premise; without it those bytes stay unobserved.
-- cmov / rep listing bits: pin them after a real-Bundle data check (as for `is_flow` /
-  `is_unconditional`) and bump the lift table; today those rows stay unobserved (likely a large share of
-  the unobserved rows of a large DLL).
+- (done, lift table -5) cmov / rep listing bits pinned to the no-transfer form after a real-Bundle data check:
+  all 2,487 cmov and 5 rep rows of the UE core probe and the ELF test Bundles export the plain rows' bits.
 - Unlisted CALLOTHER forms (cpuid, rdtsc, SIMD intrinsics) are unidentified today; a table version may
   treat them as non-flow operations.
 - Far call / far ret lift patterns (today unidentified, never a false near-call suspect).

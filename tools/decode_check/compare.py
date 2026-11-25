@@ -148,7 +148,9 @@ def ghidra_values(facts: dict, lift, s1: bool, native_call: bool,
         values[name] = value
     for name, reason in lift.unobserved.items():
         reasons[name] = reason
-    if lift.pattern in ("rep", "cmov", "branch-self", "interrupt", "fault", "transactional", "userop",
+    # (cmov / rep: pinned to the no-transfer form by a real-Bundle data check -- every cmov / rep row of the UE
+    #  core probe and the ELF test Bundles exports exactly the plain rows' bits, lift table -5)
+    if lift.pattern in ("branch-self", "interrupt", "fault", "transactional", "userop",
                         "unidentified"):
         for bit in F_BITS:
             reasons.setdefault("F." + bit, f"listing bits of the {lift.pattern} form are not pinned")

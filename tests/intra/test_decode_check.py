@@ -747,9 +747,9 @@ R4_S1_VECTORS = [
      {"a5": "unobserved", "a8": "unobserved"}, "unobserved"),
     ("EB FE", "ebfe", _row(2, [_op("BRANCH", [_a(START)])], fallthrough=False, flow=_flow("jmp_direct")),
      "branch-self", {"a5": "unobserved", "a8": "unobserved"}, "unobserved"),
-    ("48 0F 44 C1", "480f44c1", _row(4, _cmov(4)), "cmov", {"a8": "applied"}, "unobserved"),
-    ("66 0F 44 C1", "660f44c1", _row(4, _cmov(4)), "cmov", {"a8": "applied"}, "unobserved"),
-    ("F3 A4", "f3a4", _row(2, _rep(2)), "rep", {"a8": "applied"}, "unobserved"),
+    ("48 0F 44 C1", "480f44c1", _row(4, _cmov(4)), "cmov", {"a8": "applied", "F.is_jump": "applied"}, "applied"),
+    ("66 0F 44 C1", "660f44c1", _row(4, _cmov(4)), "cmov", {"a8": "applied", "F.is_jump": "applied"}, "applied"),
+    ("F3 A4", "f3a4", _row(2, _rep(2)), "rep", {"a8": "applied", "F.is_jump": "applied"}, "applied"),
 ]
 
 
@@ -758,7 +758,7 @@ R4_S1_VECTORS = [
                          ids=[v[0] for v in R4_S1_VECTORS])
 def test_r4_s1_lift_vectors(name, data, facts, pattern, expect, row_state):
     """r4 s1: intra-instruction skips by pattern ordinal, never by target identity (Fable impl r1 P1-2).
-    cmov / rep rows stay unobserved overall: their listing bits are not pinned."""
+    cmov / rep listing bits are pinned to the no-transfer form (lift table -5, real-Bundle data check)."""
     lift, result = _compare(facts, bytes.fromhex(data + PAD))
     assert lift.pattern == pattern, (name, lift)
     for attribute, wanted in expect.items():
@@ -1338,7 +1338,7 @@ def test_r4_s5_first_and_third_pt_load_share_a_page():
 EV_BUNDLE = {"generation_id": "g" * 64, "manifest_sha256": "m" * 64, "original_sha256": "o" * 64}
 EV_PRODUCER = {"decode_check_revision": 2, "tool_digest": "t" * 64, "decoders": {"zydis": "x"},
                "voters": {"intel": ["iced", "zydis", "xed"], "amd": ["iced", "zydis"]}, "rules": "pe-loader-rules-5",
-               "lift_table": "x86-64-lift-table-4", "diagnosis_engine": {"source_digest": "e" * 64},
+               "lift_table": "x86-64-lift-table-5", "diagnosis_engine": {"source_digest": "e" * 64},
                "naming_source_sha256": "n" * 64}
 
 

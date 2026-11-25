@@ -235,7 +235,7 @@
     "SUBPIECE"
    ],
    "ghidra": "12.0.4",
-   "id": "x86-64-lift-table-4",
+   "id": "x86-64-lift-table-5",
    "language": [
     "x86:LE:64:default",
     4,
@@ -273,7 +273,7 @@
    },
    "premise": true,
    "state": "missing-digest",
-   "table": "x86-64-lift-table-4",
+   "table": "x86-64-lift-table-5",
    "table_applied": true
   },
   "voters": {

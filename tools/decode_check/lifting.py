@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 # Ghidra 12.0.4, x86:LE:64:default 4.6 (x86-64.sla d5adc314, the engine's own evidence: fault_premise.py,
 # pcodeop_models x86.json): userop indices this table reads
 TABLE = {
-    "id": "x86-64-lift-table-4",
+    "id": "x86-64-lift-table-5",
     "language": ("x86:LE:64:default", 4, 6),
     "ghidra": "12.0.4",
     "sla_sha256_prefix": "d5adc314",
