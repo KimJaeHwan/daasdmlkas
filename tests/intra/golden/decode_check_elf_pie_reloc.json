@@ -237,12 +237,40 @@
     "SUBPIECE"
    ],
    "ghidra": "12.0.4",
-   "id": "x86-64-lift-table-5",
+   "id": "x86-64-lift-table-6",
    "language": [
     "x86:LE:64:default",
     4,
     6
    ],
+   "no_flow_userops": {
+    "130": "movmskpd",
+    "155": "pshufb",
+    "1623": "sha1rnds4_sha",
+    "1624": "sha1nexte_sha",
+    "1625": "sha1msg1_sha",
+    "1626": "sha1msg2_sha",
+    "163": "psraw",
+    "17": "LOCK",
+    "18": "UNLOCK",
+    "44": "cpuid",
+    "45": "cpuid_basic_info",
+    "46": "cpuid_Version_info",
+    "47": "cpuid_cache_tlb_info",
+    "48": "cpuid_serial_info",
+    "49": "cpuid_Deterministic_Cache_Parameters_info",
+    "50": "cpuid_MONITOR_MWAIT_Features_info",
+    "51": "cpuid_Thermal_Power_Management_info",
+    "52": "cpuid_Extended_Feature_Enumeration_info",
+    "53": "cpuid_Direct_Cache_Access_info",
+    "54": "cpuid_Architectural_Performance_Monitoring_info",
+    "55": "cpuid_Extended_Topology_info",
+    "56": "cpuid_Processor_Extended_States_info",
+    "57": "cpuid_Quality_of_Service_info",
+    "58": "cpuid_brand_part1_info",
+    "59": "cpuid_brand_part2_info",
+    "60": "cpuid_brand_part3_info"
+   },
    "sla_sha256_prefix": "d5adc314",
    "userops": {
     "16": "swi",
@@ -275,7 +303,7 @@
    },
    "premise": true,
    "state": "missing-digest",
-   "table": "x86-64-lift-table-5",
+   "table": "x86-64-lift-table-6",
    "table_applied": true
   },
   "voters": {

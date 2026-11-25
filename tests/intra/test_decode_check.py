@@ -1338,7 +1338,7 @@ def test_r4_s5_first_and_third_pt_load_share_a_page():
 EV_BUNDLE = {"generation_id": "g" * 64, "manifest_sha256": "m" * 64, "original_sha256": "o" * 64}
 EV_PRODUCER = {"decode_check_revision": 2, "tool_digest": "t" * 64, "decoders": {"zydis": "x"},
                "voters": {"intel": ["iced", "zydis", "xed"], "amd": ["iced", "zydis"]}, "rules": "pe-loader-rules-5",
-               "lift_table": "x86-64-lift-table-5", "diagnosis_engine": {"source_digest": "e" * 64},
+               "lift_table": "x86-64-lift-table-6", "diagnosis_engine": {"source_digest": "e" * 64},
                "naming_source_sha256": "n" * 64}
 
 
@@ -1652,6 +1652,62 @@ def test_evidence_end_to_end_on_a_synthetic_bundle(tmp_path):
         with open(golden, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(pinned, indent=1, sort_keys=True) + "\n")
     assert json.loads(golden.read_text(encoding="utf-8")) == pinned
+
+
+# -- internal rows (lift table -6): pinned no-flow userops and intra-instruction branches only
+
+def _co(index, *inputs, output=None):
+    return _op("CALLOTHER", [_c(index, 4)] + list(inputs), output)
+
+
+INTERNAL_VECTORS = [
+    # (name, bytes, ops, pattern)  -- shapes seen in the UE core probe's p-code
+    ("lock xadd [rcx], eax", "f00fc101", [_co(17), _op("LOAD", [_c(1), _r(RCX_)], _u(0x10, 4)),
+                                          _op("INT_ADD", [_u(0x10, 4), _r(RAX_, 4)], _u(0x20, 4)),
+                                          _op("STORE", [_c(1), _r(RCX_), _u(0x20, 4)]),
+                                          _op("COPY", [_u(0x10, 4)], _r(RAX_, 4)), _co(18)], "internal"),
+    ("lock cmpxchg [rcx], edx", "f00fb111", [_co(17), _op("LOAD", [_c(1), _r(RCX_)], _u(0x10, 4)),
+                                             _op("INT_EQUAL", [_r(RAX_, 4), _u(0x10, 4)], _u(0x30, 1)),
+                                             _op("CBRANCH", [_c(3), _u(0x30, 1)]),
+                                             _op("COPY", [_u(0x10, 4)], _r(RAX_, 4)), _op("BRANCH", [_c(2)]),
+                                             _op("STORE", [_c(1), _r(RCX_), _r(0x10, 4)]), _co(18)], "internal"),
+    ("bsr eax, ecx", "0fbdc1", [_op("INT_EQUAL", [_r(RCX_, 4), _c(0, 4)], _u(0x30, 1)),
+                                _op("CBRANCH", [_c(4), _u(0x30, 1)]), _op("COPY", [_c(31, 4)], _r(RAX_, 4)),
+                                _op("INT_SUB", [_r(RAX_, 4), _c(1, 4)], _r(RAX_, 4)), _op("BRANCH", [_c(-2, 4)])],
+     "internal"),
+    ("psraw xmm0, xmm1", "660fe1c1", [_co(163, _r(0x1200, 16), _r(0x1210, 16), output=_r(0x1200, 16))], "internal"),
+]
+
+
+@pytest.mark.parametrize("name, data, ops, pattern", INTERNAL_VECTORS, ids=[v[0] for v in INTERNAL_VECTORS])
+def test_internal_rows_identify(name, data, ops, pattern):
+    import lifting
+
+    facts = _row(len(bytes.fromhex(data)), ops)
+    lift = lifting.identify(facts)
+    assert lift.pattern == pattern, (name, lift)
+    assert lift.values["a8"] == "none" and lift.values["a6"] == "none"
+
+
+@needs
+@pytest.mark.parametrize("name, data, ops, pattern", INTERNAL_VECTORS, ids=[v[0] for v in INTERNAL_VECTORS])
+def test_internal_rows_against_the_voters(name, data, ops, pattern):
+    raw = bytes.fromhex(data)
+    facts = _row(len(raw), ops)
+    _, result = _compare(facts, raw + b"\xCC" * (15 - len(raw)))
+    assert result["state"] == "applied", (name, result["attributes"])
+
+
+@pytest.mark.parametrize("name, ops", [
+    ("an unpinned userop (syscall, 5)", [_co(5)]),
+    ("a marker next to a real branch", [_co(17), _op("BRANCH", [_a(START + 0x40)]), _co(18)]),
+    ("an internal branch next to a real one", [_op("CBRANCH", [_c(2), _u(0x30, 1)]),
+                                               _op("CBRANCH", [_a(START + 0x40), _u(0x30, 1)])]),
+], ids=lambda v: v if isinstance(v, str) else None)
+def test_internal_never_covers_other_flow(name, ops):
+    import lifting
+
+    assert lifting.identify(_row(4, ops)).pattern != "internal", name
 
 
 def test_guard_function_condition_is_x86_64_only():

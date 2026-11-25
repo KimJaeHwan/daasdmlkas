@@ -17,11 +17,24 @@ from dataclasses import dataclass, field
 # Ghidra 12.0.4, x86:LE:64:default 4.6 (x86-64.sla d5adc314, the engine's own evidence: fault_premise.py,
 # pcodeop_models x86.json): userop indices this table reads
 TABLE = {
-    "id": "x86-64-lift-table-5",
+    "id": "x86-64-lift-table-6",
     "language": ("x86:LE:64:default", 4, 6),
     "ghidra": "12.0.4",
     "sla_sha256_prefix": "d5adc314",
     "userops": {16: "swi", 77: "invalidInstructionException", 84: "xabort", 85: "xbegin", 86: "xend", 99: "xtest"},
+    # userops with no flow effect, pinned only from a real-Bundle data check (UE core probe, table -6): every row
+    # using them exports the plain flow bits and every voter decodes no transfer. Numbers / names from
+    # ghidra/GhidraV2ListUserOps.java on x86:LE:64:default 4.6 (Ghidra 12.0.4). LOCK / UNLOCK are the engine's own
+    # no-effect markers (models/pcodeops/x86.json).
+    "no_flow_userops": {17: "LOCK", 18: "UNLOCK", 130: "movmskpd", 155: "pshufb", 163: "psraw",
+                        1623: "sha1rnds4_sha", 1624: "sha1nexte_sha", 1625: "sha1msg1_sha", 1626: "sha1msg2_sha",
+                        44: "cpuid", 45: "cpuid_basic_info", 46: "cpuid_Version_info", 47: "cpuid_cache_tlb_info",
+                        48: "cpuid_serial_info", 49: "cpuid_Deterministic_Cache_Parameters_info",
+                        50: "cpuid_MONITOR_MWAIT_Features_info", 51: "cpuid_Thermal_Power_Management_info",
+                        52: "cpuid_Extended_Feature_Enumeration_info", 53: "cpuid_Direct_Cache_Access_info",
+                        54: "cpuid_Architectural_Performance_Monitoring_info", 55: "cpuid_Extended_Topology_info",
+                        56: "cpuid_Processor_Extended_States_info", 57: "cpuid_Quality_of_Service_info",
+                        58: "cpuid_brand_part1_info", 59: "cpuid_brand_part2_info", 60: "cpuid_brand_part3_info"},
     "allowed_prefix": frozenset({"COPY", "INT_ADD", "INT_SUB", "INT_MULT", "INT_ZEXT", "INT_SEXT", "SUBPIECE",
                                  "PIECE", "LOAD", "INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_SLESS",
                                  "INT_LESSEQUAL", "INT_SLESSEQUAL", "BOOL_NEGATE", "BOOL_AND", "BOOL_OR",
@@ -207,6 +220,17 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
 
     def lift(pattern, **values):
         return Lift(pattern, values)
+
+    # -- internal: the only flow ops are pinned no-flow userops and intra-instruction branches (a CONSTANT
+    #    destination is a p-code relative index) -> no transfer (lock xadd / cmpxchg, bsr / bsf, SIMD
+    #    intrinsics, cpuid; table -6). Any other flow op keeps the usual identification.
+    ignored = tuple(i for i in flows
+                    if (opcodes[i] == "CALLOTHER" and ops[i]["inputs"] and _is_const(ops[i]["inputs"][0])
+                        and ops[i]["inputs"][0]["offset"] in table.get("no_flow_userops", {}))
+                    or (opcodes[i] in ("BRANCH", "CBRANCH") and ops[i]["inputs"] and _is_const(ops[i]["inputs"][0])))
+    if ignored and len(ignored) == len(flows):
+        return Lift("internal", {"a3": "sequential" if continuation else "none", "a5": None, "a6": "none",
+                                 "a8": "none", "a9": "none", "a10": ("none",)}, {}, ignored)
 
     # -- trap shapes: CALLOTHER(constants) ; CALLIND [; RETURN const]  /  CALLOTHER 77 ; BRANCHIND
     if opcodes[:1] == ["CALLOTHER"] and ops[0]["inputs"] and all(_is_const(i) for i in ops[0]["inputs"]):
