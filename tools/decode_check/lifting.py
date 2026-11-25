@@ -29,6 +29,7 @@ TABLE = {
 }
 FLOW_OPS = frozenset({"BRANCH", "CBRANCH", "BRANCHIND", "CALL", "CALLIND", "RETURN", "CALLOTHER"})
 RSP, RCX = 0x20, 0x08
+RIP = 0x288   # (x86-64 SLEIGH register offset of RIP / IP: the ret shape's T, pop88)
 TRANSLATION_PREMISE = "stock-ghidra-translator"
 NA = ("n/a",)   # (the same "does not apply" value as compare.NA)
 
@@ -146,10 +147,12 @@ def _ret_shape(ops, space):
             or not _is_reg(load["inputs"][1], RSP, 8):
         return None
     target = load["output"]
-    if target is None or target["kind"] not in ("REGISTER", "UNIQUE") or target["size"] not in (2, 8) \
-            or _is_reg(target, RSP):
+    if target is None or target["size"] not in (2, 8):
         return None
     width = target["size"]
+    # (T: a UNIQUE, or the IP register of width W -- RIP / IP at 0x288; any other register is not the shape)
+    if target["kind"] != "UNIQUE" and not _is_reg(target, RIP, width):
+        return None
 
     def adjust(op, value=None):
         return op["opcode"] == "INT_ADD" and _is_reg(op["output"], RSP, 8) and len(op["inputs"]) == 2 \

@@ -1130,6 +1130,11 @@ ADD8 = _op("INT_ADD", [_r(RSP_), _c(8)], _r(RSP_))
      "unidentified"),
     ("66 C3", _ret(_op("LOAD", [_c(1), _r(RSP_)], RIP2), _op("INT_ADD", [_r(RSP_), _c(2)], _r(RSP_)),
                    _op("RETURN", [RIP2])), "ret"),
+    # (Fable final check: T is a UNIQUE or the IP register of width W, never another register)
+    ("T = RAX:8", _ret(_op("LOAD", [_c(1), _r(RSP_)], _r(RAX_)), ADD8, _op("RETURN", [_r(RAX_)])), "unidentified"),
+    ("T = AX:2", _ret(_op("LOAD", [_c(1), _r(RSP_)], _r(RAX_, 2)), _op("INT_ADD", [_r(RSP_), _c(2)], _r(RSP_)),
+                      _op("RETURN", [_r(RAX_, 2)])), "unidentified"),
+    ("T = UNIQUE:8", _ret(_op("LOAD", [_c(1), _r(RSP_)], _u(0x50)), ADD8, _op("RETURN", [_u(0x50)])), "ret"),
 ], ids=lambda v: v if isinstance(v, str) else None)
 def test_r4_s2_ret_shape_is_the_exact_sequence(name, facts, pattern):
     import lifting
