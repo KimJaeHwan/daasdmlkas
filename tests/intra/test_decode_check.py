@@ -155,6 +155,157 @@ def test_a_bundle_not_at_the_preferred_base_is_not_compared(tmp_path):
     assert decode and all(row.run_state == "unobserved" for row in decode)
 
 
+# -- PE32+ relocations, loader-written ranges and loader-rule vectors (r2-r4)
+
+IMM64 = 0x1122334455667788
+
+
+def _pe_bundle(tmp_path, functions, sections, directories=()):
+    import _pe_fixture as pf
+    import _sealed as s
+
+    original = pf.make_pe(sections, directories=directories)
+    blocks = [s.Block(start=start, data=data, name="Headers" if start == BASE else f"s@{start:x}")
+              for start, data in pf.blocks_for(sections, original)]
+    bundle = s.Bundle(functions, blocks=blocks, program=s.program(image_base=BASE), overrides={"original": original})
+    os.chmod(tmp_path, 0o755)
+    return s.write(tmp_path, bundle)
+
+
+def _mov_imm64(s):
+    """M at CODE: mov rax, imm64 (48 B8 <8>); ret."""
+    m = s.Function("M", s.observation(CODE, [s.plain(CODE, 10, ("COPY", [s.const(IMM64)], s.reg(s.RAX))),
+                                             s.ret(CODE + 10)]))
+    code = b"\x48\xB8" + IMM64.to_bytes(8, "little") + b"\xC3"
+    return [m], code
+
+
+def _reloc_section(entries):
+    """A .reloc section at RVA 0x2000: one block for page 0x1000 with the given (type, offset)."""
+    import _pe_fixture as pf
+    import struct
+
+    words = [kind << 12 | offset for kind, offset in entries]
+    if len(words) % 2:
+        words.append(0)                                   # (IMAGE_REL_BASED_ABSOLUTE padding)
+    block = struct.pack("<II", 0x1000, 8 + 2 * len(words)) + b"".join(struct.pack("<H", w) for w in words)
+    return pf.Section(".reloc", 0x2000, block, characteristics=0x42000040), pf.Directory(5, 0x2000, len(block))
+
+
+@needs
+@pytest.mark.parametrize("entries, state, reason", [
+    ([(10, 2)], ("evaluated", "applied"), None),                                        # DIR64 inside the imm64
+    ([(10, 0)], ("unobserved", None), "relocation over instruction encoding"),          # DIR64 over the opcode
+    ([(3, 2)], ("unobserved", None), "relocation type type3 over the instruction"),     # HIGHLOW in PE32+
+])
+def test_pe_relocations_over_an_instruction(tmp_path, entries, state, reason):
+    import _pe_fixture as pf
+    import _sealed as s
+
+    functions, code = _mov_imm64(s)
+    reloc, directory = _reloc_section(entries)
+    _, rows = _run(_pe_bundle(tmp_path, functions, [pf.Section(".text", 0x1000, code), reloc], [directory]))
+    row = rows[("decode", "row", "function-000000/1:140001000")]
+    assert (row.run_state, row.verdict) == state, row.detail
+    assert row.detail["window"]["relocations"], row.detail["window"]     # (the relocation is listed)
+    if reason:
+        assert row.detail["reason"] == reason
+
+
+def _data_section_with_directories():
+    """.data at RVA 0x2000 holding an import, a delay-load, a TLS and a load-config directory."""
+    import _pe_fixture as pf
+    import struct
+
+    data = bytearray(0x900)
+    struct.pack_into("<IIIII", data, 0x000, 0x2100, 0, 0, 0x2180, 0x2200)      # import descriptor
+    struct.pack_into("<QQQ", data, 0x100, 0x2190, 0x21A0, 0)                    # OriginalFirstThunk: 2 thunks
+    struct.pack_into("<QQQ", data, 0x200, 0x2190, 0x21A0, 0)                    # IAT
+    struct.pack_into("<IIIIIIII", data, 0x300, 1, 0x2180, 0x2400, 0x2410, 0x2430, 0, 0, 0)   # delay-load
+    struct.pack_into("<QQ", data, 0x430, 0x21A0, 0)                             # delay name table: 1 entry
+    struct.pack_into("<QQQQ", data, 0x500, 0, 0, BASE + 0x2600, 0)              # TLS: AddressOfIndex
+    struct.pack_into("<I", data, 0x700, 0x100)                                  # load config size
+    struct.pack_into("<Q", data, 0x700 + 0x58, BASE + 0x2800)                   # security cookie
+    struct.pack_into("<QQ", data, 0x700 + 0x70, BASE + 0x2808, BASE + 0x2810)   # CFG check / dispatch
+    directories = [pf.Directory(1, 0x2000, 40), pf.Directory(13, 0x2300, 64), pf.Directory(9, 0x2500, 40),
+                   pf.Directory(10, 0x2700, 0x100)]
+    return pf.Section(".data", 0x2000, bytes(data), characteristics=0xC0000040), directories
+
+
+def test_pe_map_loader_written_ranges():
+    import _pe_fixture as pf
+    import pe_map
+
+    data, directories = _data_section_with_directories()
+    image = pe_map.parse(pf.make_pe([pf.Section(".text", 0x1000, b"\xC3"), data], directories=directories))
+    assert image.ok and image.written.state == "complete", image.written.why
+    assert set(image.written.ranges) == {(0x2200, 0x2210, "iat"), (0x2400, 0x2408, "delay-module-handle"),
+                                         (0x2410, 0x2418, "delay-iat"), (0x2600, 0x2604, "tls-index"),
+                                         (0x2800, 0x2808, "security-cookie"), (0x2808, 0x2810, "cfg-check-pointer"),
+                                         (0x2810, 0x2818, "cfg-dispatch-pointer")}
+    assert image.relocations.state == "absent"
+
+
+def test_pe_map_unreadable_or_malformed_directories_are_indeterminate():
+    import _pe_fixture as pf
+    import check
+    import pe_map
+    import struct
+
+    text = pf.Section(".text", 0x1000, b"\xC3")
+    # an import descriptor whose thunk array points outside the image
+    data = bytearray(0x40)
+    struct.pack_into("<IIIII", data, 0, 0x9000, 0, 0, 0, 0x9000)
+    image = pe_map.parse(pf.make_pe([text, pf.Section(".data", 0x2000, bytes(data))],
+                                    directories=[pf.Directory(1, 0x2000, 40)]))
+    assert image.written.state == "indeterminate" and "import directory" in image.written.why
+    # a relocation block whose size is below its header
+    bad = pf.Section(".reloc", 0x2000, struct.pack("<II", 0x1000, 4))
+    image = pe_map.parse(pf.make_pe([text, bad], directories=[pf.Directory(5, 0x2000, 8)]))
+    assert image.relocations.state == "indeterminate"
+    assert "relocation ranges indeterminate" in check.global_reason(image, BASE, check.LANGUAGE)
+
+
+def test_pe_map_loader_rule_vectors():
+    import _pe_fixture as pf
+    import pe_map
+    import struct
+
+    text = pf.Section(".text", 0x1000, b"\xC3" * 0x10)
+    table = 0x58 + 240
+    # VirtualSize 0 is not an adopted loader behaviour (patched: the fixture reads vsize 0 as "len(data)")
+    original = bytearray(pf.make_pe([text, pf.Section(".zero", 0x2000, b"\x90" * 0x200)]))
+    struct.pack_into("<I", original, table + 40 + 8, 0)
+    image = pe_map.parse(bytes(original))
+    zero = next(item for item in image.sections if item["name"] == ".zero")
+    assert image.ok and zero["state"] == "ambiguous" and "VirtualSize == 0" in zero["why"]
+    # not AMD64 / a section table past SizeOfHeaders: the whole mapping is unusable
+    assert not pe_map.parse(pf.make_pe([text], machine=0x14C)).ok
+    many = bytearray(pf.make_pe([text]))
+    struct.pack_into("<H", many, 0x46, 12)                  # NumberOfSections 12: the table passes SizeOfHeaders
+    assert not pe_map.parse(bytes(many)).ok
+    # r4 s7: SectionAlignment = FileAlignment = 0x200, VirtualAddress 0x601, VirtualSize 0x200, no raw data
+    original = bytearray(pf.make_pe([pf.Section(".text", 0x400, b"\xC3" * 0x200),
+                                     pf.Section(".bss", 0x600, b"", vsize=0x200)],
+                                    section_alignment=0x200, file_alignment=0x200, size_of_headers=0x400))
+    struct.pack_into("<I", original, table + 40 + 12, 0x601)
+    image = pe_map.parse(bytes(original))
+    assert image.ok and image.at(0x601).kind == "ambiguous" and "not aligned" in image.at(0x601).why
+
+
+def test_an_ambiguous_range_is_unobserved_even_with_zero_sealed_bytes():
+    import check
+    import pe_map
+
+    image = check.Image.__new__(check.Image)
+    image.blocks = [({"byte_start": BASE + 0x600, "byte_size": 0x200}, bytes(0x200))]
+    image.mapping = pe_map.PeImage(True, ranges=[pe_map.Range(0x600, 0x800, "ambiguous", why="VirtualAddress not aligned")])
+    image.base, image.original, image.relocations = BASE, b"", []
+    image.written = check.Intervals([])
+    assert image.verified_byte(BASE + 0x601) == (None, "ambiguous range (VirtualAddress not aligned)")
+    assert image.window(BASE + 0x601)["verified"] == 0
+
+
 # -- ELF64 x86-64 (elf_map, elf-loader-rules-1)
 
 GHIDRA_PIE_BASE = 0x100000           # (Ghidra's base for an ET_DYN whose lowest PT_LOAD is at 0)
