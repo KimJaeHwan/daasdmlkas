@@ -7117,6 +7117,8 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
   `CBRANCH entry` + `CALL entry` 행에 사실이 붙지 않는다(엔진 처리는 손으로 만든 고정으로만). 게이트 Bundle은 다시 내보내지
   않았다(필드 없음 -> 결과 그대로). 미룸: G3b-7b-2(ELF / ARM의 LSDA·EHABI 완전성과 행별 패드, `_unplaced_noreturn`의 패드
   중첩), G3b-7c(함수 몸체 안으로 가는 호출 표시 분기), 일반 `is_override`가 Ghidra FlowOverride를 놓치는 문제(별도 검토).
+- **[ASTRA-OPEN G3b-7b]** Astra 마지막 판정(r17)은 반려인 채로 소유자 결정으로 닫았다(Fable은 r5-r16 승인). 아래 1-4와
+  `.census6/g3b7b_wrapup_and_future.md`의 L5-L7이 그때 남은 Astra 지적이다.
 - 마무리와 남은 알려진 한계(소유자 결정 2026-11-24: 로더 경로별 검사를 더 늘리지 않고 이 상태로 닫는다; 반례 모음은 저장소
   밖 `g3b7b_astra_counterexamples/README.md`, 리뷰 `.census6/g3b7b_astra*.md`):
   1. **증명 바이트 위의 로더 쓰기**(Astra r13-r17): base relocation(타입별 폭, 표 자신 / 디렉터리 항목, 홀수 / 남는 바이트),
@@ -7195,3 +7197,20 @@ RETURN 아닌 출구가 있는 피호출 함수를 거절했다("physical callee
 - strict 입력(기본)은 여전히 실행 전체를 중단한다; 풀린 대상이 activation 안에서만 드러나는 경우는 상위 그래프에서 풀리지
   않은 간접 이동이므로 2c.
 - 엔진 의미 버전 58, UE 템플릿 v45. 고정 `tests/intra/test_pe_b_refused_callees.py`, 돌연변이 `cob/peb_mutants.py`.
+
+#### 25.116a [ASTRA-OPEN PE-b] Astra 반려가 남은 채로 닫은 항목
+
+PE-b는 코드 리뷰 r4에서 Astra REJECT(P1 5개), Fable APPROVE WITH FIXES였고, 소유자 결정(2026-11-25 "고치고 닫기")으로
+그 P1을 고친 뒤 Astra 재리뷰 없이 Fable 확인(r5 CONFIRMED)으로 닫았다. 아래 항목은 Astra가 구멍으로 지적했으나 고치지
+않고 이유를 붙여 남긴 것이다 -- 다시 열 때 이 표에서 시작한다(`grep ASTRA-OPEN`).
+
+| 표지 | Astra 지적 | 지금 처리 | 이유 / 다시 열 조건 |
+|---|---|---|---|
+| ASTRA-OPEN PE-b-1 | 모델 cut 몸체 뒤의 거부 / 풀린 간접 호출(r4 P1-2, P1-4) | 보지 않는다 | 모델 cut은 몸체를 대신하고 호출자는 모델 표지를 지닌다(기존 cut 규칙). 넓히면 UE 템플릿 도출이 40분 제한 초과. 모델이 "몸체가 닿는 함수"까지 보증한다는 전제를 별도로 이름 붙일지 결정할 때 |
+| ASTRA-OPEN PE-b-2 | activation 안에서만 드러나는 풀린 간접 호출(r1 P1, r3 P1-1) | 2c(키 없음) | 공개된 호출 그래프에서는 풀리지 않은 간접 호출. 2c(정방향 분석)를 열 때 함께 |
+| ASTRA-OPEN PE-b-3 | 풀리지 않은 간접 이동 전부(r1의 넓은 규칙) | 2c(키 없음) | 소유자 결정 2026-11-24("2c와 같게"); 넓은 규칙은 거부 함수 1개로 UE 템플릿 3개 중 2개를 잃었다 |
+| ASTRA-OPEN PE-b-4 | r4 수정본(b2b342e 이후)의 Astra 재확인 없음 | Fable r5 확인만 | 소유자 결정 "고치고 닫기"; 다음 Astra 리뷰(PE-c 등) 때 PE-b 범위도 같이 보게 할 수 있다 |
+
+같은 이유로 남긴 설계 항목: K0(이미지 밖 고정 주소)는 Astra r3-r5 연속 반려 뒤 소유자 결정(2026-11-24)으로 S3에서 떼어
+별도 설계로 미뤘다(`.census6/design_k0_s3_r13..15.md`, 아직 구현 없음) -- **[ASTRA-OPEN K0]**. S3 설계(r18)는 Astra가
+"이 변경이면 승인"으로 낸 목록을 그대로 넣고 Fable 승인으로 닫았다(Astra 미해결 아님).
