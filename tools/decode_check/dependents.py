@@ -26,20 +26,23 @@ from __future__ import annotations
 OK = ("applied", "not_applicable")
 
 # consumer -> (unit, attributes read, status, design reference). Attribute names as in compare.compare_row.
-CALL_READS = ("a2", "a3", "a4", "a6", "a8", "F.is_call")
+# (every fact reads A1 of each row it reads: on an all-invalid row the other attributes are not applicable,
+#  which would otherwise read as confirmed -- Fable evidence r2 P1-1)
+CALL_READS = ("a1", "a2", "a3", "a4", "a6", "a8", "F.is_call")
+EXIT_READS = ("a1", "a4")
 CONSUMERS = {
-    "s1": ("function", "native-call rows: " + ", ".join(CALL_READS) + "; S1 exit rows: a4 (exit target = A4)",
+    "s1": ("function", "native-call rows: " + ", ".join(CALL_READS) + "; S1 exit rows: a1, a4 (exit target = A4)",
            "baseline", "r2 s6 S1 current contract"),
     "s1_l2_estimate": ("function", "the s1 reads + every row: a1, a2, a3, a4, a5, a6, a8, F.is_call; call "
                        "candidates (either side; any row where A7 was compared): a7", "estimate",
                        "r2 s6 adopted L2 acceptance, r3 s6"),
-    "push_projection": ("call", "F.is_call, a3, a4, a11b, a7", "baseline", "r2 s6, r4 s6"),
+    "push_projection": ("call", "a1, F.is_call, a3, a4, a11b, a7", "baseline", "r2 s6, r4 s6"),
     "push_relation": ("call", "the push_projection reads (relations iterate surviving projections), a4",
                       "baseline", "r2 s6, r4 s6"),
-    "plain_push": ("call", "a4, a6, a7 (pattern plain near call, linked to the listing continuation)", "baseline",
+    "plain_push": ("call", "a1, a4, a6, a7 (pattern plain near call, linked to the listing continuation)", "baseline",
                    "r2 s6"),
-    "call_seed": ("call", "a4, a5, a6, a8 (the seed's listing continuation)", "baseline", "r2 s6 call seeds / naming"),
-    "return_shape": ("return", "a11b (a9 reported apart)", "baseline", "r2 s6"),
+    "call_seed": ("call", "a1, a4, a5, a6, a8 (the seed's listing continuation)", "baseline", "r2 s6 call seeds / naming"),
+    "return_shape": ("return", "a1, a11b (a9 reported apart)", "baseline", "r2 s6"),
     "unknown_transfer_site": ("branchind", "a8, a5: the engine's existing U2a unknown-site fact (baseline: "
                               "unknown_transfer true); its loss counts that fact's inputs not confirmed -- not a "
                               "precision loss (UNKNOWN is already the most conservative state); state-barrier "
@@ -54,13 +57,13 @@ CONSUMERS = {
                             "not a measurement", "estimate", "r3 s6 (not in this branch's engine: loss unknown)"),
 }
 READS = {
-    "push_projection": ("F.is_call", "a3", "a4", "a11b", "a7"),
-    "push_relation": ("F.is_call", "a3", "a4", "a11b", "a7"),
-    "plain_push": ("a4", "a6", "a7"),
-    "call_seed": ("a4", "a5", "a6", "a8"),
-    "return_shape": ("a11b",),
-    "unknown_transfer_site": ("a8", "a5"),
-    "resolved_transfer_site": ("a8", "a5"),
+    "push_projection": ("a1", "F.is_call", "a3", "a4", "a11b", "a7"),
+    "push_relation": ("a1", "F.is_call", "a3", "a4", "a11b", "a7"),
+    "plain_push": ("a1", "a4", "a6", "a7"),
+    "call_seed": ("a1", "a4", "a5", "a6", "a8"),
+    "return_shape": ("a1", "a11b"),
+    "unknown_transfer_site": ("a1", "a8", "a5"),
+    "resolved_transfer_site": ("a1", "a8", "a5"),
 }
 G3B7B_READS = ("a1", "a2", "a3", "a4", "a5", "a8")
 L2_EXTRA = ("a1", "a2", "a3", "a4", "a5", "a6", "a8", "F.is_call")
@@ -141,7 +144,7 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
         return [(address, name, _status(states.get(address, {"*": "unobserved"}), name))
                 for address in address_list for name in names]
 
-    s1_reads = reads_of(native, CALL_READS) + reads_of(exits, ("a4",))
+    s1_reads = reads_of(native, CALL_READS) + reads_of(exits, EXIT_READS)
     out.append(("s1", fid, *_judge(s1_reads, bool(function["s1"]))))
     def compared_a7(address):
         row = states.get(address, {})

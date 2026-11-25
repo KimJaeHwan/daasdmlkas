@@ -1304,6 +1304,22 @@ def test_r4_s5_l2_blocking_names_the_attribute_and_the_cause():
         assert (s1[0], s1[1]) == ("evaluated", "applied") and not s1[2]["would_block"]
 
 
+def test_all_invalid_rows_block_every_fact_through_a1():
+    """Fable evidence r2 P1-1: when every voter says invalid encoding, the other attributes are not applicable
+    (read as confirmed); A1 is the disagreement -- every fact reads it, so S1 / push / seed are withheld."""
+    rows = [{"space": 1, "address": 0x10, "native_call": True}]
+    call = {"op": "1:10:2:CALL", "address": (1, 0x10), "opcode": "CALL",
+            "facts": {"naming": "applied", "push_projection": "applied", "push_relation": "applied",
+                      "plain_push": "applied"}}
+    judged = _judged(_fn(rows, calls=[call]),
+                     {(1, 0x10): {"a1": "unrecognized", "+": _ok("a1")}})   # (all other attributes n/a)
+    for consumer, key in (("s1", "f"), ("push_projection", "f/1:10:2:CALL"), ("call_seed", "f/1:10:2:CALL"),
+                          ("plain_push", "f/1:10:2:CALL")):
+        run_state, verdict, detail = judged[(consumer, key)]
+        assert verdict == "withheld" and detail["cause"] == "disagreement", consumer
+        assert ["1:10", "a1", "unrecognized"] in detail["blocking"], consumer
+
+
 def test_r4_s5_first_and_third_pt_load_share_a_page():
     """L1 [0x1000, 0x3800), L2 [0x2100, 0x2120), L3 [0x3400, 0x3420): 0x3200 is covered by L1 only, and its page
     is shared by L1 and L3 only -> ambiguous; 0x1800 stays file."""

@@ -19,7 +19,7 @@
    "consumers": {
     "call_seed": {
      "design": "r2 s6 call seeds / naming",
-     "reads": "a4, a5, a6, a8 (the seed's listing continuation)",
+     "reads": "a1, a4, a5, a6, a8 (the seed's listing continuation)",
      "status": "baseline",
      "unit": "call"
     },
@@ -31,13 +31,13 @@
     },
     "plain_push": {
      "design": "r2 s6",
-     "reads": "a4, a6, a7 (pattern plain near call, linked to the listing continuation)",
+     "reads": "a1, a4, a6, a7 (pattern plain near call, linked to the listing continuation)",
      "status": "baseline",
      "unit": "call"
     },
     "push_projection": {
      "design": "r2 s6, r4 s6",
-     "reads": "F.is_call, a3, a4, a11b, a7",
+     "reads": "a1, F.is_call, a3, a4, a11b, a7",
      "status": "baseline",
      "unit": "call"
     },
@@ -55,13 +55,13 @@
     },
     "return_shape": {
      "design": "r2 s6",
-     "reads": "a11b (a9 reported apart)",
+     "reads": "a1, a11b (a9 reported apart)",
      "status": "baseline",
      "unit": "return"
     },
     "s1": {
      "design": "r2 s6 S1 current contract",
-     "reads": "native-call rows: a2, a3, a4, a6, a8, F.is_call; S1 exit rows: a4 (exit target = A4)",
+     "reads": "native-call rows: a1, a2, a3, a4, a6, a8, F.is_call; S1 exit rows: a1, a4 (exit target = A4)",
      "status": "baseline",
      "unit": "function"
     },
