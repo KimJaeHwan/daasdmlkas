@@ -1827,6 +1827,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                         targets = _indirect_targets(item, set(program) | unavailable_entries)
                         for target in targets.values():   # (PE-b: a resolved target's static reach)
                             found_reach.setdefault(key, set()).update(refused_reach.get(target, ()))
+                            if refused_reach.get(target):
+                                late_owners.add(key)   # (recorded when found: a budget end may follow)
                             late_edges.setdefault(key, set()).add(target)
                         for call, target in list(targets.items()):
                             if target in unavailable_entries:   # (PE-b: resolved to a refused function)
@@ -1839,6 +1841,8 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None,
                             for call, members in several.items():
                                 for member in members:
                                     found_reach.setdefault(key, set()).update(refused_reach.get(member, ()))
+                                    if refused_reach.get(member):
+                                        late_owners.add(key)   # (recorded when found)
                                     late_edges.setdefault(key, set()).add(member)
                                 if call in targets:
                                     continue
