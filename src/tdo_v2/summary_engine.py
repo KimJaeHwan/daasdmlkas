@@ -514,6 +514,14 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     if stack_evidence:
         assume_globals_disjoint_from_stack, _ = assumption_allowed(
             stack_evidence, requested=assume_globals_disjoint_from_stack)
+    # (PE-c, r18 amendment 4) a member refused at admission is code of this
+    # program the stack-switch check never saw: without clean whole-program
+    # evidence for this executable (which scans every function, refused ones
+    # included) the program may switch stacks there -- withdrawn
+    if assume_globals_disjoint_from_stack and admission_failures and not any(
+            item.clean and item.executable_sha256 == program.evidence.executable_sha256.hex()
+            for item in (stack_evidence or ())):
+        assume_globals_disjoint_from_stack = False
     if linker is not None:
         from .interprocedural import program_switches_stack
         from .stack_evidence import load_stack_evidence

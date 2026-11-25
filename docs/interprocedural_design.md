@@ -7237,3 +7237,21 @@ Fable AWF -> r2; r2: Astra AWF / Fable AWF(P1 없음) -> r3 반영 후 닫음. �
 - `image-code-unmodified-at-runtime` (runtime): 분석한 코드가 실행되는 코드다(언패킹 / 자기 수정 / 후킹 없음). 데이터
   바이트는 별도 스위치 readonly-image-data-is-constant.
 - 경계 표와 안전장치: `.census6/tbr_tdo_boundary.md`. 스냅샷 run 층에 `base_premises`가 새로 생겨 게이트 기준을 다시 잡는다.
+
+### 25.118 고정 주소-스택 분리를 철회하면 증명도 따른다 (PE-c, 2026-11-25)
+
+설계 `.census6/design_s3_r18.md` 수정 8(PRE-EXISTING)과 수정 4 중 거부된 함수 부분. S3 이전 단계(S3가 syscall 뒤 RSP만
+보존할 때 엔진이 근거 없는 보존을 주장하지 않게).
+- 프레임 / 저장 사본 / 출력 인자 증명(`integration/configured_call_clobber_discharge.py`의 `_Frame`): 상수 주소 쓰기를 스택
+  구간 밖으로 보는 것은 그 정규화가 globals-disjoint-from-stack을 지닐 때만이다(전에는 이름 없는 공리였다 -- legacy 엔진과
+  가정이 꺼진 실행에서도 적용됐다). 아니면 그 쓰기는 호출자 스택일 수 있는 다른 기반(`other_bases`)이다.
+- 말단 보존 검사(`_stack_preservation.LeafPreservation._span`): 요약 run이 덮지 않은 바이트를 "그대로"라 하기 전에 원시 행의
+  REGISTER 출력을 본다 -- 저장소 해석은 레지스터 파일을 0으로 열쇠 삼고, 원시 출력은 프로그램의 레지스터 공간 번호(실제
+  Bundle과 합성 시험에서 0이 아님)를 가지므로, 두 번호를 비교하던 검사는 출력을 한 번도 보지 못했다; 이제 레지스터 파일
+  구간이면 모든 REGISTER 출력을 본다.
+- 거부된 구성원(PE-b, 보존 모드): 스택 전환 검사가 그 코드를 보지 못했으므로, 이 실행 파일에 대한 깨끗한 전체 프로그램 증거
+  (모든 함수를 훑는다, 거부된 것 포함)가 없으면 globals-disjoint-from-stack을 철회한다.
+- 범위 밖(S3 단계 / TBR): 허용된 커널 지점 뒤의 레지스터, Java 스캐너의 커널 전이 인식(`[TBR-G3-scan]` -> TDO X-1),
+  `stack-switch-check-exceptions` 자체는 바꾸지 않는다(Fable r18 P2-2).
+- 고정 `tests/intra/test_call_clobber_discharge.py`(가정 있음 / 없음), `test_stack_call_preservation.py`(출력 누락),
+  `test_pe_b_refused_callees.py`(거부 + 증거); 돌연변이 `cob/pec_mutants.py`.

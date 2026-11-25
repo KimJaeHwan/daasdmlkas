@@ -837,7 +837,7 @@ def boundary(sources: dict[str, int] = (), sinks: dict[str, int] = (), *,
 
 
 def analyze_program(functions: dict[str, FunctionBuilder], provider, *, layout: Layout = DEFAULT_LAYOUT,
-                    assume_boundary_call_effects: bool = False, **kwargs):
+                    assume_boundary_call_effects: bool = False, normalize_options=None, **kwargs):
     """Run ``engine.analyze_observed_functions`` on named synthetic functions."""
     from tdo_v2.call_seeds import seed_function_calls, seed_tail_calls
     from tdo_v2.engine import analyze_observed_functions, assumed_boundary_effects
@@ -862,6 +862,7 @@ def analyze_program(functions: dict[str, FunctionBuilder], provider, *, layout: 
                 assumed_boundary_effects(evidence, provider)
                 if assume_boundary_call_effects else None
             ),
+            **(normalize_options or {}),
         )
         if type(normalized) is not NormalizedFunction:
             raise AssertionError(f"normalization unresolved: {normalized!r}")

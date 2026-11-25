@@ -537,7 +537,13 @@ class _Frame:
             if kind in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE):
                 continue
             if kind is StorageObjectKind.ADDRESS_SPACE:
-                continue  # axiom: a constant loaded-image address is never a stack byte
+                # (PE-c, r18 amendment 8) a constant address is never a stack byte only
+                # under globals-disjoint-from-stack as this normalization holds it;
+                # otherwise it is a base that may be the caller's stack
+                if getattr(normalized, "assumes_globals_disjoint_from_stack", False):
+                    continue
+                other_bases.add(definition.span.object_id)
+                continue
             if definition.span.object_id != stack_object:
                 other_bases.add(definition.span.object_id)  # pointer argument or loaded pointer
                 continue

@@ -171,3 +171,25 @@ def test_memory_failure_is_never_converted_into_legacy_success(monkeypatch):
     monkeypatch.setattr(proof, "_leaf_summary", fail)
     with pytest.raises(MemoryError):
         _check(FunctionBuilder(entry=LEAF).ret())
+
+
+def test_a_register_output_missing_from_the_terminal_summary_denies_identity():
+    """PE-c (r18 amendment 8): a leaf writes RBP but its (here: stubbed)
+    terminal summary has no run for it -- the raw-output check must see the
+    REGISTER output although its raw space id (the program's, nonzero) is not
+    the register file's canonical key 0. Before PE-c it compared the two and
+    certified identity."""
+    from types import SimpleNamespace
+
+    from tdo_v2.model import StorageRef, VarnodeKind
+    from tdo_v2.storage import _resolve_validated_storage
+
+    leaf = FunctionBuilder(entry=LEAF).ins(copy(reg(RBP), const(0x40))).ret()
+    unit = program_units(leaf)[0]
+    assert REG != 0   # (the synthetic register space id, like a real Bundle's)
+    span = _resolve_validated_storage(StorageRef(VarnodeKind.REGISTER, "", RBP, 8, space_id=REG),
+                                      unit.scopes.resolution_context).span
+    summary = SimpleNamespace(writer_conditions=(), exits=(SimpleNamespace(runs=()),))
+    assert proof.LeafPreservation._span(unit, summary, span) is None
+    untouched = program_units(FunctionBuilder(entry=LEAF).ret())[0]
+    assert proof.LeafPreservation._span(untouched, summary, span) == "identity"   # (control)

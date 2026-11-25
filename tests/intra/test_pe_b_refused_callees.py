@@ -547,3 +547,24 @@ def test_a_forward_fact_on_a_jump_is_read_for_a_refused_member_only(monkeypatch)
     assert ip._forward_targets(item, {_key(MAIN), _key(REFUSED)}, None) == ({}, {})
     found, _ = ip._forward_targets(item, {_key(MAIN)}, None, refused=frozenset({_key(REFUSED)}))
     assert found == {key: (_key(REFUSED),)}
+
+
+# -- PE-c (r18 amendment 4): refused members and the stack-switch check --
+
+def test_a_refused_member_withdraws_globals_disjoint_without_whole_program_evidence():
+    """The stack-switch check never saw a refused member's code: without clean
+    whole-program evidence for this executable, globals-disjoint-from-stack is
+    withdrawn (not in the run's assumptions); clean evidence keeps it."""
+    from types import SimpleNamespace
+
+    refused_run = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()])
+    assert "globals-disjoint-from-stack" not in refused_run.assumptions
+    plain = _run([_main(), FunctionBuilder(entry=SINK).ret()])
+    assert "globals-disjoint-from-stack" in plain.assumptions   # (control)
+    evidence = SimpleNamespace(clean=True, executable_sha256=refused_run.executable_sha256, describe=lambda: "x",
+                               program="p")
+    kept = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()], stack_evidence=(evidence,))
+    assert "globals-disjoint-from-stack" in kept.assumptions
+    other = SimpleNamespace(clean=True, executable_sha256="0" * 64, describe=lambda: "x", program="other")
+    elsewhere = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()], stack_evidence=(other,))
+    assert "globals-disjoint-from-stack" not in elsewhere.assumptions   # (another executable's scan)

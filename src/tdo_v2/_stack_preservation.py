@@ -10,7 +10,7 @@ One instance, including failures, belongs to one program check only.
 
 from ._scope_contracts import VarnodeKindCode
 from .function_summary import SummaryKind, summarize_function
-from .model import ResolvedStorage, StorageRef, VarnodeKind
+from .model import ResolvedStorage, StorageObjectKind, StorageRef, VarnodeKind
 from .normalize import FunctionNormalizer, NormalizedFunction
 from .resource_limits import AnalysisBudgetExceeded, activation, charge, checkpoint, step
 from .storage import _resolve_validated_storage
@@ -112,6 +112,11 @@ class LeafPreservation:
                 identity &= run.kind is SummaryKind.IDENTITY
             # Untouched bytes are identity only if the admitted raw leaf
             # really has no register output there (not missing terminal SSA).
+            # (PE-c, r18 amendment 8) a REGISTER output is a register-file byte
+            # whatever its raw space id: storage resolution keys the register file
+            # 0, the exported space id is the program's (nonzero in real Bundles)
+            if span.object_id.kind is not StorageObjectKind.REGISTER_FILE:
+                continue
             for row in unit.observation.instructions:
                 for op in row.operations:
                     step()
@@ -119,8 +124,6 @@ class LeafPreservation:
                     if out is None or out.kind is not VarnodeKindCode.REGISTER:
                         continue
                     at = out.coordinate
-                    if at.space_id != span.object_id.space_key:
-                        continue
                     low, high = max(span.start, at.byte_offset), min(span.end, at.byte_offset + out.byte_size)
                     if any(byte not in covered for byte in range(low, high)):
                         return None

@@ -279,10 +279,17 @@ def test_callee_write_through_loaded_pointer_is_not_discharged():
     assert not root.is_effectively_complete
 
 
-def test_callee_global_write_discharges_by_axiom():
+def test_callee_global_write_discharges_under_globals_disjoint_from_stack():
+    """PE-c (r18 amendment 8): a constant-address write is kept out of the
+    caller's stack slot only under globals-disjoint-from-stack (it was an
+    unlabelled axiom); without the assumption it may be the slot."""
     helper = FunctionBuilder(entry=HELPER).ins(store(const(DATA_BASE), reg(R8))).ret()
-    root = _frame_root(helper)
-    assert root.is_effectively_complete
+    functions = {"main": _main_with_stack_slot(), "source": _source_returning_constant(), "helper": helper,
+                 "sink": _sink()}
+    on = analyze_program(functions, PROVIDER, normalize_options={"assume_globals_disjoint_from_stack": True})
+    assert on[("main", "sink.arg0")].is_effectively_complete
+    off = analyze_program(functions, PROVIDER)
+    assert not off[("main", "sink.arg0")].is_effectively_complete
 
 
 def _helper_calling_inner():
