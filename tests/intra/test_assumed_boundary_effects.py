@@ -26,9 +26,10 @@ def _program(main, extra=None):
     return functions
 
 
-def _root(main, *, assume, extra=None):
+def _root(main, *, assume, extra=None, normalize_options=None):
     provider = boundary({"source": 4}, {"sink": 4}, assume_call_effect=assume)
-    roots = analyze_program(_program(main, extra), provider, assume_boundary_call_effects=assume)
+    roots = analyze_program(_program(main, extra), provider, assume_boundary_call_effects=assume,
+                            normalize_options=normalize_options)
     return roots[("main", "sink.arg0")]
 
 
@@ -125,7 +126,9 @@ def test_declared_boundary_calls_do_not_make_the_frame_escape():
 
     With an undeclared call, the frame-pointer copy counts as an escape and the
     global write may alias the slot. Declared boundary calls observe nothing,
-    so the private slot stays private.
+    so the private slot stays private -- from every base but the constant one,
+    which rests on globals-disjoint-from-stack (PE-c, r18 amendment 8): without
+    it the global write may be the slot.
     """
     from synthetic import DATA_BASE, RBP, RSP, add, load, store, tmp
 
@@ -140,6 +143,7 @@ def test_declared_boundary_calls_do_not_make_the_frame_escape():
         .call(SINK)
         .add_rsp(0x20).pop(RBP).ret()
     )
-    root = _root(main, assume=True)
+    root = _root(main, assume=True, normalize_options={"assume_globals_disjoint_from_stack": True})
     assert root.local_origin_labels == ("source.ret",)
     assert root.is_locally_complete
+    assert not _root(main, assume=True).is_locally_complete

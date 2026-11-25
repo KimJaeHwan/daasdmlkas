@@ -847,7 +847,9 @@ def test_the_oracle_still_sees_a_caller_visible_write_of_a_havocked_value(tmp_pa
     entry = _get(omits_private_writes=True, same_result={"result": [RAX, 8], "inputs": [], "reads": [SLOT]})
     results = analyze_units(units, model_bindings=(_binding(tmp_path, units, entry=entry),),
                             external_models=_models(tmp_path), assume_same_result_functions=True,
-                            assume_accessor_private_state=True)
+                            assume_accessor_private_state=True,
+                            # (PE-c r3 P1-1: without it the call's push may be the global -- a debt, not a miss)
+                            assume_globals_disjoint_from_stack=True)
     analyzed = results["1:1000"]
     assert analyzed.proven   # the model applies (it wrongly leaves the global out)
     report = check_program(analyzed.normalized, analyzed.unit.observation, {(1, INTERNAL): units[1].observation},

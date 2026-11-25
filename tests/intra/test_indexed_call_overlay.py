@@ -325,13 +325,16 @@ def test_the_return_address_read_by_the_callee_is_the_exact_image_address():
     """The callee returns its return address (``[RSP]``); the caller reads
     ``[RAX + 0x3000]``: with the push's literal (``normalize._push_row``,
     an image address) that is exactly the bytes the caller stored RSI to --
-    complete, and not the pre-call 0x1400 / RDI (docs 25.73, item B)."""
-    analyzed, report = _checked((load(reg(RAX), reg(RSP)),))
-    assert report.checked and report.silent == [], report.silent[:4]
-    function = analyzed.normalized
-    (reader,) = [action.operation_key for action in function.memory_ssa.actions
-                 if action.operation_key.endswith(":1:LOAD")]
-    found = slice_from(function, function.dependencies.node_for_key("op:" + reader))
-    assert found.is_complete
-    assert set(range(RSI, RSI + 8)) <= found.register_bytes and not set(range(RDI, RDI + 8)) & found.register_bytes
+    complete, and not the pre-call 0x1400 / RDI (docs 25.73, item B). Complete
+    under globals-disjoint-from-stack only (PE-c r3 P1-1): without it the call's
+    own push may be those constant-address bytes."""
+    for disjoint in (True, False):
+        analyzed, report = _checked((load(reg(RAX), reg(RSP)),), assume_globals_disjoint_from_stack=disjoint)
+        assert report.checked and report.silent == [], report.silent[:4]
+        function = analyzed.normalized
+        (reader,) = [action.operation_key for action in function.memory_ssa.actions
+                     if action.operation_key.endswith(":1:LOAD")]
+        found = slice_from(function, function.dependencies.node_for_key("op:" + reader))
+        assert found.is_complete is disjoint
+        assert set(range(RSI, RSI + 8)) <= found.register_bytes             and not set(range(RDI, RDI + 8)) & found.register_bytes
 

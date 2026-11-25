@@ -7286,6 +7286,24 @@ Fable AWF -> r2; r2: Astra AWF / Fable AWF(P1 없음) -> r3 반영 후 닫음. �
   - 가져오기 슬롯 시험(`test_import_identity_gd`)은 새 규칙으로: 가정이 없으면 private-frame 설정과 무관하게 풀리지 않고,
     있으면 둘 다 풀린다(두 엔진 x 네 조합).
 - 의미 버전 61(r4 규칙), UE 템플릿 v48.
+- 측정(병합 전, 소유자 결정 2026-11-25; 기준 3713ae1 = 게이트 p0g1, 후보 67847d6 = 게이트 pec2, 같은 입력;
+  `.census6/cob/pec_count.py`, `pec_codeonly.py`; 투사 루트는 호출 지점 + callee sink로 짝지음; 해소 = summary 엔진은 증명된
+  호출 효과 수, legacy는 지역 - 실효 미해결 읽기). 모든 Bundle / 설정에서 루트 수와 실효 완전 루트 수가 같고, 사라진 루트 /
+  새 루트 / 완전<->불완전 전이는 0이다. 바뀐 것은 남은 미해결 읽기(빚)뿐이다 -- 원인별로:
+  - 가정 켬(default, accessor; 모든 실행에 걸리는 r4 항목 3 주소 조각과 항목 4 불확실 writer 포함): 해소, 미해결 읽기 모두
+    변화 0(UE debuggame / development, v2, v3, v3-win32, zlib, corpus 7개). Fable r4가 우려한 JOIN 회귀는 이 열에 없다.
+  - 가정 끔(off: 모든 가정 끔): 미해결 읽기 ue-debuggame 902 -> 934(+32), v2 342 -> 379(+37), v3 85 -> 86, v3-win32 74 -> 75,
+    ue-development / zlib 0 변화; 완전 루트는 원래 적다(6 / 2 / 0 / 0).
+  - legacy(가정 없는 엔진): v2 해소 375 -> 372(-3, 미해결 +3), v3 미해결 53 -> 59(+6); 완전 루트 변화 0.
+  - 코드 전용 프로필(주로 영향받는 설정; 두 트리 모두 모델 없이 -- Win64 모델 세트에 손 모델이 있고 UE 템플릿의 도출
+    벡터가 프로필과 달라서, 같은 조건을 위해 둘 다 뺐다): 완전 루트 v2 6, v3 2, 나머지 0으로 같음; 미해결 읽기 v2 347 -> 389
+    (+42), ue-debuggame 1238 -> 1270(+32), v3 92 -> 93, v3-win32 57 -> 58, ue-development / zlib 0 변화; 증명된 호출 효과 수 같음.
+  - 프로그램 오라클(가정 끔이 기본): missing 0 그대로; 빚으로만 설명되는 값(unexplained) v2 0 -> 96, v3-win32 0 -> 24,
+    place_failed v2 0 -> 60, through_calls v2 1692 -> 1680 -- 호출의 반환 주소 push(자기 프레임 쓰기)가 가정 없이 상수 주소
+    바이트에 닿는다는 r4 항목 1의 정밀도 비용이다. 가정을 켠 설정에는 없다.
+  - 고정 시험 8개가 옛 규칙(가정 없이 상수 주소가 자기 프레임 쓰기와 분리)을 고정하고 있었다: 가정 켬 / 끔 둘 다 보게 고쳤다
+    (`test_import_ssa_targets`, `test_record_stitching` 2개, `test_indexed_call_overlay`, `test_assumed_boundary_effects`,
+    `test_external_models`, `test_same_result_models` -- 마지막은 오라클이 '조용한 누락'을 보는 시험이라 가정 켬으로).
 - 범위 밖(S3 단계 / TBR): 허용된 커널 지점 뒤의 레지스터, Java 스캐너의 커널 전이 인식(`[TBR-G3-scan]` -> TDO X-1),
   `stack-switch-check-exceptions` 자체는 바꾸지 않는다(Fable r18 P2-2).
 - 고정 `tests/intra/test_call_clobber_discharge.py`(가정 있음 / 없음), `test_stack_call_preservation.py`(출력 누락),

@@ -444,7 +444,8 @@ def test_a_global_needs_the_named_assumption():
 
     callee = FunctionBuilder(entry=F).ins(copy(reg(RAX), ram(DATA_BASE + 0x10))).ret()
     caller = _caller(store(reg(RSP), reg(RBX)))   # (a stack store: the assumption is relied on)
-    assert _cut([caller, callee]) == "memory: overlay unproven"
+    # (PE-c r3 P1-1: without globals-disjoint-from-stack the call's return-address push may be the global)
+    assert _cut([caller, callee]) == "memory: debt"
     record = _record([caller, callee], assume_globals_disjoint_from_stack=True)
     _stitched(record)
     assert any(node.get("assumptions") == ["globals-disjoint-from-stack"] for node in _bound_memory(record))
@@ -629,7 +630,8 @@ def test_a_kept_global_needs_the_named_assumption():
               .ins(add(t, reg(RSP), const(0x20)), store(t, reg(RBX)), copy(reg(RDX), const(3)))
               .call(F)
               .ins(load(reg(RAX), const(DATA_BASE + 0x10))).add_rsp(0x28).ret())
-    assert _memory_cut([caller, callee]) == "memory: overlay unproven"
+    # (PE-c r3 P1-1: without globals-disjoint-from-stack the call's return-address push may be the global)
+    assert _memory_cut([caller, callee]) == "memory: debt"
     record = _record([caller, callee], assume_globals_disjoint_from_stack=True)
     calls = _memory_call(record)
     assert calls and calls[0].get("stitched"), [call.get("stitch_cut") for call in calls]

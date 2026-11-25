@@ -34,11 +34,12 @@ def _image():
     ), (), ())
 
 
-def _analyze(*functions, models=True):
+def _analyze(*functions, models=True, **options):
     units = program_units(*functions)
     results = analyze_units(
         units, image_info=_image(),
         external_models=load_external_models(MODELS, "x86:LE:64:default", "win64") if models else None,
+        **options,
     )
     return results
 
@@ -75,7 +76,11 @@ def _memcpy_caller(count_register_constant=True):
 
 
 def test_memcpy_with_a_constant_count_is_exact():
-    results = _analyze(_memcpy_caller())
+    # (PE-c r3 P1-1) the source is a constant address the caller wrote: only under
+    # globals-disjoint-from-stack is it out of reach of the call's own push
+    off = _analyze(_memcpy_caller())["1:1000"].normalized
+    assert not slice_from(off, operation_node_at(off, 6, 1)).is_complete
+    results = _analyze(_memcpy_caller(), assume_globals_disjoint_from_stack=True)
     item = results["1:1000"]
     ((call, label),) = item.declared.items()
     assert label == "external-model:crt-win64/memcpy@v8"

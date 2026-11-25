@@ -218,7 +218,10 @@ def test_import_effect_connects_source_memory_through_the_call_to_the_reload(mon
     assert item.declared[call] == "external-model:crt-win64/memcpy@v8"
     assert item.proven[call].memory_runs
     view = slice_op(item.normalized, "LOAD", 6)
-    assert view.is_complete and set(range(RSI, RSI + 8)) <= view.register_bytes
+    assert set(range(RSI, RSI + 8)) <= view.register_bytes
+    # (PE-c r3 P1-1) without globals-disjoint-from-stack the calls' return-address pushes
+    # (private frame writes) may land on the constant source / destination: debt remains
+    assert view.is_complete is GLOBALS_DISJOINT[0]
 
 
 def test_unresolved_callee_writer_condition_does_not_prove_register_preservation(monkeypatch):
