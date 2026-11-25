@@ -490,10 +490,15 @@ def test_dependents_of_the_reference_pair_are_all_confirmed(tmp_path):
     header, rows = _run(_bundle(tmp_path, functions, code))
     summary, found = _dependents(header, rows)
     assert summary["s1"] == {"units": 2, "baseline_present": 2, "confirmed": 2, "would_block_disagreement": 0,
-                             "would_block_unobserved": 0, "loss": 0, "loss_unknown": 0}
-    for consumer in ("push_projection", "push_relation", "plain_push", "call_seed", "return_shape"):
+                             "would_block_unobserved": 0, "would_block_refused": 0, "loss_disagreement": 0,
+                             "loss_unobserved": 0, "loss_refused": 0, "loss_unknown": 0}
+    for consumer in ("push_projection", "push_relation", "plain_push", "call_seed", "return_shape", "s1_l2_estimate"):
         assert summary[consumer]["confirmed"] == summary[consumer]["units"] >= 1, (consumer, summary[consumer])
-    assert all(not row.detail["would_block"] for row in found.values())   # (--full: every unit has a row)
+    # (r3 s6: the G3b-7b estimate needs getParsedLength / prototype flow, which no Bundle exports)
+    g3b7b = [row for (consumer, _), row in found.items() if consumer == "g3b7b_none_estimate"]
+    assert g3b7b and all(row.run_state == "unobserved" and row.detail["loss"] == "unknown" for row in g3b7b)
+    assert all(not row.detail["would_block"] for (consumer, _), row in found.items()
+               if consumer != "g3b7b_none_estimate")   # (--full: every unit has a row)
     assert set(header["dependents"]["undetermined"]) == {"rp", "pass_through"}
 
 
@@ -530,7 +535,8 @@ def test_dependents_of_a_withheld_call_block_s1_and_the_seed(tmp_path):
     summary, found = _dependents(header, rows)
     s1 = found[("s1", "function-000000")]
     assert (s1.run_state, s1.verdict) == ("evaluated", "withheld") and s1.detail["cause"] == "disagreement"
-    assert summary["s1"]["loss"] == 1 and summary["call_seed"]["would_block_disagreement"] == 1
+    assert summary["s1"]["loss_disagreement"] == 1 and summary["call_seed"]["would_block_disagreement"] == 1
+    assert summary["s1"]["loss_unobserved"] == 0
 
 
 def test_dependents_core_counts_estimates_and_unobserved():
@@ -543,7 +549,10 @@ def test_dependents_core_counts_estimates_and_unobserved():
                                                   "push_relation": "applied", "plain_push": "not_applicable"}}],
                              "exits": [], "branchind": [{"site": "control:x:1:15", "address": 0x15,
                                                          "unknown_transfer": True}], "returns": []}}
-    states = {0x10: {"a7": "withheld"}, 0x15: {"*": "unobserved"}}
+    import compare
+
+    compared = frozenset(compare.COMPARED)
+    states = {0x10: {"a7": "withheld", "+": compared - {"a7"}}, 0x15: {"*": "unobserved"}}
     judged = {(consumer, key): (run_state, verdict, detail)
               for consumer, key, run_state, verdict, detail in dependents.function_rows(function, states)}
     assert judged[("s1", "f")][2]["would_block"] is False                 # (a7 is not an S1 read)
@@ -551,55 +560,301 @@ def test_dependents_core_counts_estimates_and_unobserved():
     assert judged[("push_projection", "f/1:10:1:CALL")][2]["loss"] == 1
     assert ("plain_push", "f/1:10:1:CALL") not in judged                  # (not a plain-push candidate)
     g3b7b = judged[("g3b7b_none_estimate", "f")]
-    assert g3b7b[0] == "unobserved" and g3b7b[2]["loss"] == "unknown" and g3b7b[2]["branchind_rows"] == 1
+    assert (g3b7b[0], g3b7b[1]) == ("evaluated", "withheld") and g3b7b[2]["cause"] == "refused"   # (a BRANCHIND row)
+    from report import Row
+    Row("dependents", "g3b7b_none_estimate", "f", *g3b7b[:2], "lint", g3b7b[2])   # (a valid report row)
+    assert g3b7b[2]["loss"] == "unknown" and g3b7b[2]["branchind_rows"] == 1
     site = judged[("unknown_transfer_site", "f/control:x:1:15")]
     assert site[2]["cause"] == "unobserved" and site[2]["unknown_transfer"] is True
     summary = dependents.summary([(c, k, *v) for (c, k), v in judged.items()])
-    assert summary["g3b7b_none_estimate"]["loss_unknown"] == 1 and summary["push_projection"]["loss"] == 1
+    assert summary["g3b7b_none_estimate"]["loss_unknown"] == 1 and summary["push_projection"]["loss_disagreement"] == 1
+    # an attribute a row did not compare is never confirmed (Astra impl r1 P1-1)
+    assert dependents._status({"+": frozenset({"a2"})}, "a4") == "unobserved"
+    assert dependents._status({"*": "unobserved"}, "a2") == "unobserved"
 
 
-INTERNAL = {"kind": "CONSTANT"}   # (an intra-instruction p-code branch destination)
-RAM = {"kind": "MEMORY"}
+def test_dependents_reads_are_compared_attributes():
+    """Fable impl r1 P3: every read names an attribute compare_row produces."""
+    import compare
+    import dependents
+
+    reads = set(dependents.CALL_READS) | set(dependents.G3B7B_READS) | set(dependents.L2_EXTRA) | {"a7"}
+    for names in dependents.READS.values():
+        reads |= set(names)
+    assert reads <= set(compare.COMPARED), reads - set(compare.COMPARED)
 
 
-@pytest.mark.parametrize("data, ops, expected", [
-    (bytes.fromhex("660f44c1"), [("CBRANCH", INTERNAL), ("COPY", None)], False),   # 66 CMOVcc: internal branch only
-    (bytes.fromhex("660f7f01"), [("STORE", None)], False),                       # 66 movdqa: no transfer op
-    (bytes.fromhex("66e80a000000"), [("STORE", None), ("CALL", RAM)], True),     # 66 near CALL
-    (bytes.fromhex("6767ff10"), [("LOAD", None), ("CALLIND", None)], True),      # 67 67 indirect CALL
-    (bytes.fromhex("f366e800000000"), [("STORE", None), ("CALL", RAM)], True),   # r4 s8: 66 not the first byte
-    (bytes.fromhex("66c3"), [("LOAD", None), ("RETURN", None)], True),           # 66 ret (terminal)
-    (bytes.fromhex("66e90000"), [("BRANCH", RAM)], True),                        # 66 near jmp
-    (bytes.fromhex("e800000000"), [("STORE", None), ("CALL", RAM)], False),      # plain near CALL
-    (bytes.fromhex("4040e9"), [("BRANCH", RAM)], True),                          # repeated REX on a transfer
-    (bytes.fromhex("f3"), [("CALL", RAM)], "unobserved"),                        # (verified bytes end first)
-])
-def test_guard_row_condition_vectors(data, ops, expected):
-    import guards
+@needs
+def test_dependents_of_a_never_compared_call_are_unobserved_not_confirmed(tmp_path):
+    """Astra impl r1 P1-1: a native CALL whose bytes are not verified must not confirm S1."""
+    import _sealed as s
 
-    facts = {"length": 6 if data == b"\xf3" else len(data),
-             "ops": [{"opcode": name, "inputs": [target]} for name, target in ops]}
-    assert guards.row_condition(facts, data) == expected
+    functions, code = _pair(s)
+    raw = bytearray(code)
+    raw[1] ^= 0xFF   # (the file's call displacement differs: the window stops after one byte)
+    header, rows = _run(_bundle(tmp_path, functions, code, code_raw=bytes(raw)))
+    _, found = _dependents(header, rows)
+    s1 = found[("s1", "function-000000")]
+    assert s1.detail["would_block"] and s1.detail["cause"] == "unobserved" and s1.detail["loss"] == 1, s1.detail
 
 
-def test_guard_intra_instruction_skips_need_the_lift_table():
-    """66 0F 47 (16-bit CMOVA) lifts CBRANCH to the next address; EB 00 (jmp $+2) lifts a
-    BRANCH to the same address and is a real jump. Only the lift table tells them apart."""
+# -- realistic p-code rows (engine varnode kinds ADDRESS / CONSTANT / REGISTER / UNIQUE) for pure vectors
+START = 0x140001000
+RSP_, RAX_, RCX_, RIP_ = 0x20, 0x00, 0x08, 0x288
+
+
+def _a(offset):
+    return {"kind": "ADDRESS", "space": 1, "offset": offset, "size": 8}
+
+
+def _c(value, size=8):
+    return {"kind": "CONSTANT", "space": 0, "offset": value, "size": size}
+
+
+def _r(offset, size=8):
+    return {"kind": "REGISTER", "space": 2, "offset": offset, "size": size}
+
+
+def _u(offset, size=8):
+    return {"kind": "UNIQUE", "space": 3, "offset": offset, "size": size}
+
+
+def _op(opcode, inputs, output=None):
+    return {"opcode": opcode, "inputs": inputs, "output": output}
+
+
+def _push(value, width=8):
+    return [_op("INT_SUB", [_r(RSP_), _c(width)], _r(RSP_)), _op("STORE", [_c(1), _r(RSP_), _c(value, width)])]
+
+
+def _row(length, ops, *, fallthrough=True, flow=None):
+    nxt = None if length is None else START + length
+    return {"address": START, "space": 1, "length": length, "ops": ops, "exit": None,
+            "fallthrough": nxt if fallthrough and nxt is not None else None, "flow_targets": [],
+            "flow": flow or {"is_flow": True, "has_fallthrough": fallthrough, "is_call": False, "is_jump": False,
+                             "is_terminal": False, "is_computed": False, "is_conditional": False,
+                             "is_unconditional": True, "is_override": False}}
+
+
+def _cmov(length):
+    nxt = None if length is None else START + length
+    return [_op("BOOL_NEGATE", [_r(0x206, 1)], _u(0x100, 1)),
+            _op("CBRANCH", [_a(nxt if nxt is not None else START + 4), _u(0x100, 1)]),
+            _op("COPY", [_r(RCX_, 2)], _r(RAX_, 2))]
+
+
+def _rep(length, last_ok=True):
+    nxt = START + length
+    ops = [_op("INT_EQUAL", [_r(RCX_), _c(0)], _u(0x10, 1)), _op("CBRANCH", [_a(nxt), _u(0x10, 1)]),
+           _op("LOAD", [_c(1), _r(0x30)], _u(0x20, 2)), _op("STORE", [_c(1), _r(0x38), _u(0x20, 2)]),
+           _op("INT_SUB", [_r(RCX_), _c(1)], _r(RCX_))]
+    ops.append(_op("BRANCH", [_a(START)]) if last_ok else _op("CBRANCH", [_a(START), _u(0x10, 1)]))
+    return ops
+
+
+GUARD_VECTORS = [
+    # (name, bytes, row, pattern, expected recomputed condition)
+    ("66 CMOVcc", "660f44c1", _row(4, _cmov(4)), "cmov", False),
+    ("66 CMOVcc without length", "660f44c1", _row(None, _cmov(None), fallthrough=False), "unidentified",
+     "unobserved"),
+    ("66 movdqa", "660f7f01", _row(4, [_op("STORE", [_c(1), _r(0x10), _r(0x1200, 16)])]), "plain", False),
+    ("66 near CALL", "66e80a000000", _row(6, _push(START + 6) + [_op("CALL", [_a(START + 0x10)])]), "call", True),
+    ("67 67 indirect CALL", "6767ff10",
+     _row(4, [_op("LOAD", [_c(1), _r(RAX_)], _u(0x30))] + _push(START + 4) + [_op("CALLIND", [_u(0x30)])]),
+     "call indirect", True),
+    ("F3 66 E8 (66 not first)", "f366e800000000", _row(7, _push(START + 7) + [_op("CALL", [_a(START + 7)])]),
+     "call", True),
+    ("66 ret", "66c3", _row(2, [_op("LOAD", [_c(1), _r(RSP_)], _r(RIP_, 2)), _op("INT_ADD", [_r(RSP_), _c(2)], _r(RSP_)),
+                                _op("RETURN", [_r(RIP_, 2)])], fallthrough=False), "ret", True),
+    ("66 near jmp", "66e91000", _row(4, [_op("BRANCH", [_a(START + 0x14)])], fallthrough=False), "jmp", True),
+    ("66 jmp $+3 (a real jump to next)", "66eb00", _row(3, [_op("BRANCH", [_a(START + 3)])], fallthrough=False),
+     "jmp", True),
+    ("plain near CALL", "e800000000", _row(5, _push(START + 5) + [_op("CALL", [_a(START + 0x20)])]), "call", False),
+    ("repeated REX on a jmp", "4040e900000000", _row(7, [_op("BRANCH", [_a(START + 0x30)])], fallthrough=False),
+     "jmp", True),
+    ("66 rep movsw", "66f3a5", _row(3, _rep(3)), "rep", False),
+    ("66 rep movsw, unidentified form", "66f3a5", _row(3, _rep(3, last_ok=False)), "unidentified", "unobserved"),
+]
+
+
+@pytest.mark.parametrize("name, data, facts, pattern, expected", GUARD_VECTORS, ids=[v[0] for v in GUARD_VECTORS])
+def test_guard_row_condition_vectors(name, data, facts, pattern, expected):
+    """r3 s8 / r4 s8 guard vectors on realistic p-code through the real lift table."""
     import guards
     import lifting
 
-    start = 0x1000
-    nxt = {"kind": "MEMORY", "offset": start + 4, "space": 1, "size": 8}
-    cmov = {"address": start, "length": 4, "fallthrough": start + 4, "exit": None,
-            "ops": [{"opcode": "CBRANCH", "inputs": [nxt, {"kind": "UNIQUE", "offset": 0, "size": 1}]},
-                    {"opcode": "COPY", "inputs": [{"kind": "REGISTER", "offset": 0, "size": 2}],
-                     "output": {"kind": "REGISTER", "offset": 0, "size": 2}}]}
-    data = bytes.fromhex("660f47c1")
-    assert guards.row_condition(cmov, data, None) == "unobserved"                      # (no premise)
-    assert guards.row_condition(cmov, data, lifting.Lift("cmov", {}, {}, (0,))) is False
-    jump = {"address": start, "length": 3, "ops": [{"opcode": "BRANCH", "inputs": [
-        {"kind": "MEMORY", "offset": start + 3, "space": 1, "size": 8}]}]}
-    assert guards.row_condition(jump, bytes.fromhex("66eb00"), lifting.Lift("jmp", {})) is True
+    lift = lifting.identify(facts)
+    assert lift.pattern == pattern, (name, lift)
+    assert guards.row_condition(facts, bytes.fromhex(data), lift) == expected, name
+
+
+def test_guard_without_the_lift_table_keeps_self_or_next_branches_unobserved():
+    import guards
+
+    facts = _row(4, _cmov(4))
+    assert guards.row_condition(facts, bytes.fromhex("660f44c1"), None) == "unobserved"
+    jump = _row(4, [_op("BRANCH", [_a(START + 0x14)])], fallthrough=False)      # (target elsewhere: decidable)
+    assert guards.row_condition(jump, bytes.fromhex("66e91000"), None) is True
+    assert guards.row_condition(_row(1, [], flow={"is_call": True}), bytes.fromhex("66"), None) == "unobserved"
+    assert guards.row_condition(_row(2, [_op("CALL", [_a(START)])]), bytes.fromhex("f3"), None) == "unobserved"
+
+
+def _flow(form, **changes):
+    import lifting
+
+    bits = dict(lifting.LISTING_BITS[form]) if form else {
+        "has_fallthrough": True, "is_call": False, "is_jump": False, "is_terminal": False, "is_computed": False,
+        "is_conditional": False, "is_flow": True, "is_unconditional": True}
+    bits["is_override"] = False
+    bits.update(changes)
+    return bits
+
+
+def _compare(facts, data, *, s1=False, native_call=False):
+    import compare
+    import decoders
+    import lifting
+
+    window = {"bytes": data, "verified": len(data) if len(data) >= 15 else len(data), "stop": "test",
+              "relocations": []}
+    lift = lifting.identify(facts)
+    result = compare.compare_row(facts, lift, window, decoders.ballot(data, facts["address"]), s1=s1,
+                                 native_call=native_call, premise=True)
+    return lift, result
+
+
+def _jcc(length, target, condition_ops=None):
+    ops = condition_ops if condition_ops is not None else [_op("BOOL_NEGATE", [_r(0x206, 1)], _u(0x100, 1))]
+    return _row(length, ops + [_op("CBRANCH", [_a(target), _u(0x100, 1)])], flow=_flow("jcc"))
+
+
+LOOP = [_op("INT_SUB", [_r(RCX_), _c(1)], _r(RCX_)), _op("INT_NOTEQUAL", [_r(RCX_), _c(0)], _u(0x100, 1))]
+JRCXZ = [_op("INT_EQUAL", [_r(RCX_), _c(0)], _u(0x100, 1))]
+PAD = "cc" * 13   # (the rest of a 15-byte window: int3 bytes after the instruction)
+
+R4_S1_VECTORS = [
+    # (name, bytes, facts, pattern, {attribute: expected state / value}, row state)
+    ("75 00", "7500", _jcc(2, START + 2), "jcc", {"a5": START + 2, "a8": "applied"}, "applied"),
+    ("75 FE", "75fe", _jcc(2, START), "jcc", {"a5": START, "a8": "applied"}, "applied"),
+    ("74 00", "7400", _jcc(2, START + 2, []), "jcc", {"a5": START + 2}, "applied"),
+    ("EB 00", "eb00", _row(2, [_op("BRANCH", [_a(START + 2)])], fallthrough=False, flow=_flow("jmp_direct")),
+     "jmp", {"a5": START + 2, "a8": "applied"}, "applied"),
+    ("74 FE", "74fe", _jcc(2, START, []), "jcc", {"a5": START}, "applied"),
+    ("E2 FE", "e2fe", _jcc(2, START, LOOP), "jcc", {"a5": START, "a12": 64}, "applied"),
+    ("E3 FE", "e3fe", _jcc(2, START, JRCXZ), "jcc", {"a5": START, "a12": 64}, "applied"),
+    ("E3 00", "e300", _jcc(2, START + 2, JRCXZ), "jcc", {"a5": START + 2, "a12": 64}, "applied"),
+    ("F4", "f4", _row(1, [_op("BRANCH", [_a(START)])], fallthrough=False, flow=_flow("jmp_direct")), "branch-self",
+     {"a5": "unobserved", "a8": "unobserved"}, "unobserved"),
+    ("EB FE", "ebfe", _row(2, [_op("BRANCH", [_a(START)])], fallthrough=False, flow=_flow("jmp_direct")),
+     "branch-self", {"a5": "unobserved", "a8": "unobserved"}, "unobserved"),
+    ("48 0F 44 C1", "480f44c1", _row(4, _cmov(4)), "cmov", {"a8": "applied"}, "unobserved"),
+    ("66 0F 44 C1", "660f44c1", _row(4, _cmov(4)), "cmov", {"a8": "applied"}, "unobserved"),
+    ("F3 A4", "f3a4", _row(2, _rep(2)), "rep", {"a8": "applied"}, "unobserved"),
+]
+
+
+@needs
+@pytest.mark.parametrize("name, data, facts, pattern, expect, row_state", R4_S1_VECTORS,
+                         ids=[v[0] for v in R4_S1_VECTORS])
+def test_r4_s1_lift_vectors(name, data, facts, pattern, expect, row_state):
+    """r4 s1: intra-instruction skips by pattern ordinal, never by target identity (Fable impl r1 P1-2).
+    cmov / rep rows stay unobserved overall: their listing bits are not pinned."""
+    lift, result = _compare(facts, bytes.fromhex(data + PAD))
+    assert lift.pattern == pattern, (name, lift)
+    for attribute, wanted in expect.items():
+        item = result["attributes"][attribute]
+        if wanted in ("applied", "unobserved"):
+            assert item["state"] == wanted, (name, attribute, item)
+        else:
+            assert item["state"] == "applied" and item["value"] == wanted, (name, attribute, item)
+    assert result["state"] == row_state, (name, result["state"], result["attributes"])
+
+
+@needs
+def test_r4_s3_66_e9_high_address_is_withheld():
+    """VA 0x140001000, 66 E9 00 00 00 00: Intel 6 bytes / 0x140001006, AMD 4 bytes / 0x1004 -> withheld."""
+    facts = _row(4, [_op("BRANCH", [_a(0x1004)])], fallthrough=False, flow=_flow("jmp_direct"))
+    _, result = _compare(facts, bytes.fromhex("66e900000000" + "cc" * 9))
+    assert result["state"].startswith("withheld"), result["attributes"]
+
+
+@needs
+def test_r4_s5_length_and_listing_continuation_are_compared_apart():
+    """90, length 1, listing continuation start + 2: A2 applied, A4 unrecognized."""
+    facts = _row(1, [])
+    facts["fallthrough"] = START + 2
+    _, result = _compare(facts, bytes.fromhex("90" + PAD + "cc"))
+    assert result["attributes"]["a2"]["state"] == "applied"
+    assert result["attributes"]["a4"]["state"] == "unrecognized"
+
+
+@needs
+@pytest.mark.parametrize("data, ops, form, pattern", [
+    ("ff1500010000", [_op("LOAD", [_c(1), _c(START + 6 + 0x100)], _u(0x40))] + _push(START + 6)
+     + [_op("CALLIND", [_u(0x40)])], "call_indirect", "call indirect"),
+    ("ff2500010000", [_op("LOAD", [_c(1), _c(START + 6 + 0x100)], _u(0x40)), _op("BRANCHIND", [_u(0x40)])],
+     "jmp_indirect", "jmp indirect"),
+])
+def test_r4_s8_ff15_ff25_full_bytes(data, ops, form, pattern):
+    facts = _row(6, ops, fallthrough=form.startswith("call"), flow=_flow(form))
+    lift, result = _compare(facts, bytes.fromhex(data + "cc" * 9), native_call=form.startswith("call"))
+    assert lift.pattern == pattern
+    assert result["state"] == "applied", result["attributes"]
+
+
+@needs
+def test_r3_s2_no_length_outside_a_native_call_leaves_a2_unobserved():
+    facts = _row(None, [])
+    facts["fallthrough"] = START + 1
+    _, result = _compare(facts, bytes.fromhex("90" + PAD + "cc"), s1=True)
+    assert result["attributes"]["a2"]["state"] == "unobserved"
+
+
+@pytest.mark.parametrize("name, facts, pattern", [
+    ("E8 00000000 with length", _row(5, _push(START + 5) + [_op("CALL", [_a(START + 5)])], flow=_flow("call_direct")),
+     "call"),
+    ("push + BRANCH(next), length missing", _row(None, _push(START + 5) + [_op("BRANCH", [_a(START + 5)])],
+                                                 fallthrough=False), "unidentified"),
+    ("call $+5 lifted as push + BRANCH(next)", _row(5, _push(START + 5) + [_op("BRANCH", [_a(START + 5)])]),
+     "call $+5"),
+    ("far call FF 1C 25 (two pushes)", _row(7, [_op("LOAD", [_c(1), _c(0x2000)], _u(0x40))] + _push(0x33, 8)
+                                            + _push(START + 7) + [_op("CALLIND", [_u(0x40)])]), "unidentified"),
+    ("push with another base register", _row(5, [_op("INT_SUB", [_r(RCX_), _c(8)], _r(RSP_)),
+                                                 _op("STORE", [_c(1), _r(RSP_), _c(START + 5)]),
+                                                 _op("CALL", [_a(START + 0x40)])]), "unidentified"),
+], ids=lambda v: v if isinstance(v, str) else None)
+def test_near_call_shape_is_exact(name, facts, pattern):
+    """Astra impl r1 P1-5 / Fable P2-1: exactly allowed prefix ops ; INT_SUB RSP = RSP - c ; STORE [RSP] ; flow."""
+    import lifting
+
+    assert lifting.identify(facts).pattern == pattern, name
+
+
+@needs
+def test_translation_identity_mismatch_refuses_the_table_even_with_the_premise(tmp_path):
+    """r4 s2 (Astra impl r1 P1-4): stock / mismatched / digest-missing differ."""
+    import _pe_fixture as pf
+    import _sealed as s
+    import decode_check
+
+    functions, code = _pair(s)
+    section = pf.Section(".text", 0x1000, code)
+    original = pf.make_pe([section])
+    blocks = [s.Block(start=start, data=data, name=".text" if start != BASE else "Headers")
+              for start, data in pf.blocks_for([section], original)]
+    bundle = s.Bundle(functions, blocks=blocks, program=s.program(image_base=BASE, language=("x86:LE:64:default", 4, 5)),
+                      overrides={"original": original})
+    os.chmod(tmp_path, 0o755)
+    header, rows = decode_check.run(s.write(tmp_path, bundle), s.NAMING_SOURCE, True, full=True)
+    identity = header["translation_identity"]
+    assert identity["state"] == "mismatch" and identity["table_applied"] is False
+    call = next(row for row in rows if row.layer == "decode" and row.key == "function-000000/1:140001000")
+    assert call.detail["attributes"]["a5"]["reason"].startswith("translation identity mismatch")
+    # the stock language: the digest is missing; the premise covers it (table applied), recorded as such
+    header2, _ = _run(_bundle(tmp_path / "stock", *_pair(s)) if (tmp_path / "stock").mkdir() is None else None)
+    assert header2["translation_identity"]["state"] == "missing-digest"
+    assert header2["translation_identity"]["table_applied"] is True
+    assert header2["translation_identity"]["checks"]["sla_digest"].startswith("missing")
 
 
 def test_guard_function_condition_is_x86_64_only():
@@ -638,6 +893,72 @@ def test_semantics_layer_is_reserved_and_never_counted():
             Row("semantics", "rw_sets", "f/1:10", "evaluated", "applied", "lint"),
             Row("dependents", "s1", "f", "evaluated", "applied", "lint")]
     assert decode_check.g1_counts(rows) == {"decode/row": {"applied": 1}}
+
+
+def test_pe_map_overlapping_sections_are_ambiguous_on_both_sides():
+    """Astra impl r1 P1-2: [0x1000, 0x2010) and a section at 0x2000 -> every shared byte is ambiguous."""
+    import _pe_fixture as pf
+    import pe_map
+
+    image = pe_map.parse(pf.make_pe([pf.Section(".a", 0x1000, b"\x90" * 0x1010),
+                                     pf.Section(".b", 0x2000, b"\xCC" * 0x100)]))
+    assert image.at(0x1FFF).kind == "file"
+    assert image.at(0x2005).kind == "ambiguous"
+    starts = [item.start for item in image.ranges]
+    assert starts == sorted(starts) and all(a.end <= b.start for a, b in zip(image.ranges, image.ranges[1:]))
+
+
+@pytest.mark.parametrize("offset, width, label", [
+    (0xC0, 8, "DynamicValueRelocTable"), (0xC8, 8, "CHPEMetadataPointer"), (0xE0, 4, "DynamicValueRelocTableOffset"),
+    (0xE4, 2, "DynamicValueRelocTableSection"), (0xF0, 4, "HotPatchTableOffset"), (None, None, None)])
+def test_pe_map_load_config_code_rewriting_fields(offset, width, label):
+    """Fable impl r1 P1-1: a non-zero DVRT / CHPE / hot-patch field -> written indeterminate; 0 -> complete;
+    the other loader pointer slots are written ranges."""
+    import _pe_fixture as pf
+    import pe_map
+    import struct
+
+    data, directories = _data_section_with_directories()
+    data = bytearray(data.data)
+    struct.pack_into("<I", data, 0x700, 0x140)
+    struct.pack_into("<Q", data, 0x700 + 0xD8, BASE + 0x2880)
+    struct.pack_into("<Q", data, 0x700 + 0x138, BASE + 0x2888)
+    if offset is not None:
+        data[0x700 + offset:0x700 + offset + width] = (1).to_bytes(width, "little")
+    image = pe_map.parse(pf.make_pe([pf.Section(".text", 0x1000, b"\xC3"),
+                                     pf.Section(".data", 0x2000, bytes(data), characteristics=0xC0000040)],
+                                    directories=directories))
+    if label is None:
+        assert image.written.state == "complete", image.written.why
+        labels = {item[2] for item in image.written.ranges}
+        assert {"rf-failure-routine-pointer", "memcpy-pointer"} <= labels
+    else:
+        assert image.written.state == "indeterminate" and label in image.written.why
+
+
+def test_pe_map_marks_writable_code_sections():
+    import _pe_fixture as pf
+    import pe_map
+
+    image = pe_map.parse(pf.make_pe([pf.Section(".wx", 0x1000, b"\xC3", characteristics=0xE0000020)]))
+    assert image.header_fields["writable_code_sections"] == [".wx"]
+
+
+def test_elf_map_missing_size_duplicate_tags_and_plt_rewrite():
+    """Astra impl r1 P1-3 / Fable P2-3."""
+    import _elf_fixture as ef
+
+    seg = [ef.Segment(0x1000, b"\x90" * 0x40)]
+    missing = _elf(seg, extra_dynamic=[(7, 0x3000)])                                  # DT_RELA without DT_RELASZ
+    assert missing.written.state == "indeterminate" and "DT_RELA without DT_RELASZ" in missing.written.why
+    duplicate = _elf(seg, relocations=[ef.Reloc(0x1000, 8)], extra_dynamic=[(7, 0x3000)])   # a second DT_RELA
+    assert duplicate.written.state == "indeterminate" and "duplicated dynamic tags" in duplicate.written.why
+    plt = _elf(seg, extra_dynamic=[(0x70000000, 0x1000), (0x70000001, 0x20)])
+    assert plt.written.state == "complete" and (0x1000, 0x1020, "plt-rewrite") in plt.written.ranges
+    no_size = _elf(seg, extra_dynamic=[(0x70000000, 0x1000)])
+    assert no_size.written.state == "indeterminate"
+    wx = _elf([ef.Segment(0x1000, b"\x90", flags=7)])
+    assert wx.header_fields["writable_code_segments"] == [1]
 
 
 def test_elf_map_rejects_other_machines_and_types():

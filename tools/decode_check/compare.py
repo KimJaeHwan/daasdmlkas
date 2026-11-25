@@ -17,7 +17,8 @@ from lifting import LISTING_BITS
 
 NA = ("n/a",)   # a value meaning "the attribute does not apply to this instruction"
 TABLE_DEPENDENT = ("a3", "a5", "a6", "a7", "a8", "a9", "a10", "a11a", "a11b", "a12", "target_operand_bits")
-F_BITS = ("has_fallthrough", "is_call", "is_jump", "is_terminal", "is_computed", "is_conditional")
+F_BITS = ("has_fallthrough", "is_call", "is_jump", "is_terminal", "is_computed", "is_conditional", "is_flow",
+          "is_unconditional")
 PRECEDENCE = ("unobserved", "withheld:decoder-disagreement", "withheld:amd-disagreement", "withheld:vendor",
               "unrecognized:ghidra-internal-inconsistency", "unrecognized:ghidra-analysis-override",
               "unrecognized:cause-unknown", "unrecognized:ghidra-decode-suspect", "applied")
@@ -48,7 +49,9 @@ def voter_values(decoded, va: int) -> dict:
         "a2": decoded.length,
         "a3": role if role is not None else ("unobservable", flow),
         "a4": nxt if role in ("sequential", "call-continuation") else (NA if role == "none" else ("unobservable",)),
-        "a5": decoded.target if decoded.target is not None else None,
+        "a5": decoded.target if decoded.target is None or not decoded.target_ip_bits
+        or decoded.target_ip_bits >= 64 or decoded.target >> decoded.target_ip_bits == 0
+        else ("voter-conflict", decoded.voter, decoded.target, decoded.target_ip_bits),   # (r4 s3: no agreement)
         "a6": "near" if near_call else ("far" if flow == "call_far" else "none"),
         "a8": "direct" if decoded.target is not None else ("indirect" if decoded.indirect else "none"),
         "a9": {"ret_near": "near_imm" if decoded.ret_imm else "near", "ret_far": "far", "iret": "iret"}.get(flow,
@@ -60,8 +63,10 @@ def voter_values(decoded, va: int) -> dict:
         width = decoded.operand_bits or 64
         values["a7"] = (width, nxt & _mask(width))
         values["a11b"] = width // 8
+        values["a11a"] = decoded.stack_bits or 64
     elif flow == "ret_near":
         values["a11b"] = (decoded.operand_bits or 64) // 8
+        values["a11a"] = decoded.stack_bits or 64
     if decoded.counter:
         values["a12"] = decoded.address_bits
     if decoded.indirect and flow in ("call_near", "jmp_near"):
@@ -85,7 +90,28 @@ def voter_values(decoded, va: int) -> dict:
     return values
 
 
-def ghidra_values(facts: dict, lift, s1: bool, native_call: bool) -> tuple[dict, dict]:
+COMPARED = ("a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11a", "a11b", "a12",
+            "target_operand_bits") + tuple("F." + bit for bit in F_BITS)
+LEGACY_PREFIXES = frozenset((0x66, 0xF0, 0x67, 0xF2, 0xF3, 0x2E, 0x3E, 0x26, 0x36, 0x64, 0x65))
+
+
+def _prefix_run(data: bytes) -> bytes:
+    out = bytearray()
+    for value in data:
+        if value not in LEGACY_PREFIXES and not 0x40 <= value <= 0x4F:
+            break
+        out.append(value)
+    return bytes(out)
+
+
+def claimed_length(facts: dict, lift, s1: bool, native_call: bool):
+    """Ghidra's claimed length: the exported one, else the r3 s2 derivation via A4."""
+    values, _ = ghidra_values(facts, lift, s1, native_call)
+    return values.get("a2")
+
+
+def ghidra_values(facts: dict, lift, s1: bool, native_call: bool,
+                  unverified_reason: str | None = None) -> tuple[dict, dict]:
     """(values, unobserved reasons) of the Ghidra side. ``lift`` None: the
     translation premise is off -> table-dependent attributes unobserved."""
     start = facts["address"]
@@ -98,14 +124,14 @@ def ghidra_values(facts: dict, lift, s1: bool, native_call: bool) -> tuple[dict,
     if facts["length"] is not None:
         values["a2"] = facts["length"]
     elif s1 and native_call and lift is not None and lift.pattern in ("call", "call indirect") \
-            and facts["fallthrough"] is not None:
-        values["a2"] = facts["fallthrough"] - start
+            and continuation is not None:
+        values["a2"] = continuation - start
         values["a2_provenance"] = "via A4"
     else:
         reasons["a2"] = "no ghidra length"
     if lift is None:
         for name in TABLE_DEPENDENT + tuple("F." + bit for bit in F_BITS):
-            reasons[name] = "translation-unverified (the stock-ghidra-translator premise is off)"
+            reasons[name] = unverified_reason or "translation-unverified (the stock-ghidra-translator premise is off)"
         return values, reasons
     for name, value in lift.values.items():
         values[name] = value
@@ -133,7 +159,7 @@ def _vote(results: list, name: str):
 
 
 def compare_row(facts: dict, lift, window: dict, ballot: dict, *, s1: bool, native_call: bool,
-                premise: bool) -> dict:
+                premise: bool, unverified_reason: str | None = None) -> dict:
     """One row: {"attributes": {name: {...}}, "state": aggregate, "kind": ..., "window": ...}."""
     va = facts["address"]
     out = {"attributes": {}, "window": {**{k: v for k, v in window.items() if k != "bytes"},
@@ -150,14 +176,15 @@ def compare_row(facts: dict, lift, window: dict, ballot: dict, *, s1: bool, nati
     consumed = max([d.length for d in voters if d.status == "ok"] + [0])
     if any(d.status == "ok" and d.length > verified for d in voters):
         failures.append("a voter consumed unverified bytes")
-    if facts["length"] is not None and facts["length"] > verified:
+    claimed = claimed_length(facts, lift if premise else None, s1, native_call)
+    if claimed is not None and claimed > verified:
         failures.append("Ghidra's claimed range is not verified")
     if failures:
         out["state"], out["reason"] = "unobserved", "; ".join(failures)
         return out
     # relocations touching consumed bytes (r2 s4, r3 s5)
     for start, size, kind in window.get("relocations", ()):
-        if start >= max(consumed, facts["length"] or 0):
+        if start >= max(consumed, claimed or 0):
             continue
         if kind != "DIR64":
             out["state"], out["reason"] = "unobserved", f"relocation type {kind} over the instruction"
@@ -170,8 +197,8 @@ def compare_row(facts: dict, lift, window: dict, ballot: dict, *, s1: bool, nati
             return out
     intel_values = [voter_values(d, va) for d in intel]
     amd_values = [voter_values(d, va) for d in amd]
-    ghidra, reasons = ghidra_values(facts, lift if premise else None, s1, native_call)
-    names = ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11b", "a12", "target_operand_bits"] + \
+    ghidra, reasons = ghidra_values(facts, lift if premise else None, s1, native_call, unverified_reason)
+    names = list(COMPARED[:-len(F_BITS)]) + \
         ["F." + bit for bit in F_BITS]
     for name in names:
         out["attributes"][name] = _attribute(name, ghidra, reasons, intel_values, amd_values, facts)
@@ -180,8 +207,17 @@ def compare_row(facts: dict, lift, window: dict, ballot: dict, *, s1: bool, nati
     # length and continuation of Ghidra itself disagreeing, where a contract requires equality (r4 s5)
     if facts["length"] is not None and facts["fallthrough"] is not None and s1 and native_call \
             and va + facts["length"] != facts["fallthrough"]:
-        out["attributes"]["a2"] = {"state": "unrecognized", "kind": "ghidra-internal-inconsistency",
-                                   "ghidra": facts["length"], "fallthrough": facts["fallthrough"]}
+        inconsistency = {"state": "unrecognized", "kind": "ghidra-internal-inconsistency",
+                         "ghidra": facts["length"], "fallthrough": facts["fallthrough"]}
+        if out["attributes"]["a2"]["state"] in ("applied", "unrecognized", "not_applicable"):
+            out["attributes"]["a2"] = inconsistency
+        else:   # (a withheld / unobserved A2 outranks it: keep it, note the inconsistency, r1 s5 precedence)
+            out["attributes"]["a2"]["also"] = inconsistency
+    # A11c: under an address-size override the effective-address width is not recoverable from the final
+    # varnode (r2 s1); without 67 both sides use the mode's 64-bit addressing
+    if 0x67 in _prefix_run(window["bytes"]) and any(d.status == "ok" and d.indirect for d in voters):
+        out["attributes"]["a11c"] = {"state": "unobserved",
+                                     "reason": "address-size override: effective-address width not recoverable"}
     out["state"] = _aggregate(out["attributes"])
     return out
 

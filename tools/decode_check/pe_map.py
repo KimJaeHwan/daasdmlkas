@@ -1,5 +1,5 @@
 """PE32+ file mapping of G1 decode_check (design r1 s2, r2 s3, r3 s5, r4 s4 / s7):
-``pe-loader-rules-4``. Only the file's own headers are read (never Ghidra data).
+``pe-loader-rules-5``. Only the file's own headers are read (never Ghidra data).
 
 A range of the image is ``file`` (bytes at a file offset), ``zero`` (zero-fill),
 or ``ambiguous`` (the rules do not decide its bytes: never used). Loader- or
@@ -14,10 +14,21 @@ import hashlib
 import json
 import struct
 
-RULES = "pe-loader-rules-4"
+RULES = "pe-loader-rules-5"
 IMAGE_FILE_MACHINE_AMD64 = 0x8664
 PE32_PLUS = 0x20B
 PAGE = 0x1000
+LOAD_CONFIG_READ = 0x140
+# (offset, label) of IMAGE_LOAD_CONFIG_DIRECTORY64 VA fields whose 8-byte target the loader / CRT writes
+LOAD_CONFIG_SLOTS = ((0x58, "security-cookie"), (0x70, "cfg-check-pointer"), (0x78, "cfg-dispatch-pointer"),
+                     (0xD8, "rf-failure-routine-pointer"), (0xE8, "rf-verify-sp-pointer"),
+                     (0x118, "xfg-check-pointer"), (0x120, "xfg-dispatch-pointer"),
+                     (0x128, "xfg-table-dispatch-pointer"), (0x130, "castguard-failure-mode"),
+                     (0x138, "memcpy-pointer"))
+# (offset, width, label): non-zero -> the loader rewrites code (DVRT) / hybrid image (CHPE) / hot patching
+LOAD_CONFIG_REWRITING = ((0xC0, 8, "DynamicValueRelocTable"), (0xC8, 8, "CHPEMetadataPointer"),
+                         (0xE0, 4, "DynamicValueRelocTableOffset"), (0xE4, 2, "DynamicValueRelocTableSection"),
+                         (0xF0, 4, "HotPatchTableOffset"))
 
 
 @dataclass(frozen=True)
@@ -192,7 +203,9 @@ def _parse(data: bytes) -> PeImage:
                                 why="raw data beyond VirtualSize"))
         previous_end = va + _align_up(vsize, section_alignment)
     image.sections = sections
-    image.ranges = sorted(ranges, key=lambda item: item.start)
+    image.ranges = disjoint(ranges)
+    image.header_fields["writable_code_sections"] = [item["name"] for item in sections
+                                                     if item["characteristics"] & 0xA0000000 == 0xA0000000]
     directories = []
     count = min(rva_count, (optional_size - 112) // 8)
     for index in range(count):
@@ -200,6 +213,30 @@ def _parse(data: bytes) -> PeImage:
     image.relocations = _relocations(image, data, directories)
     image.written = _written(image, data, directories)
     return _finish(image)
+
+
+def disjoint(ranges: list) -> list:
+    """Disjoint, sorted ranges: a byte covered by two or more ranges is ambiguous ("overlapping ranges"),
+    whichever came first (rules v5). Shared by elf_map."""
+    bounds = sorted({point for item in ranges for point in (item.start, item.end)})
+    out = []
+    for left, right in zip(bounds, bounds[1:]):
+        covering = [item for item in ranges if item.start <= left and right <= item.end]
+        if not covering:
+            continue
+        if len(covering) > 1:
+            piece = Range(left, right, "ambiguous", why="overlapping ranges")
+        else:
+            item = covering[0]
+            offset = item.file_offset + (left - item.start) if item.kind == "file" else -1
+            piece = Range(left, right, item.kind, offset, item.why)
+        last = out[-1] if out else None
+        if last and last.end == left and last.kind == piece.kind and last.why == piece.why and \
+                (piece.kind != "file" or last.file_offset + (last.end - last.start) == piece.file_offset):
+            out[-1] = Range(last.start, right, last.kind, last.file_offset, last.why)
+        else:
+            out.append(piece)
+    return out
 
 
 def _finish(image: PeImage) -> PeImage:
@@ -327,21 +364,28 @@ def _written(image, data, directories) -> Parsed:
             states.append("complete")
         except _Unreadable as error:
             states.append(f"indeterminate: TLS directory: {error}")
-    # load config: the security cookie (CRT, run time) and the CFG check / dispatch pointer slots (loader)
+    # load config (IMAGE_LOAD_CONFIG_DIRECTORY64, read up to 0x140): the slots the loader / CRT write, and
+    # the fields whose presence means the loader rewrites code bytes or the image is hybrid (rules v5)
     entry = directory(10)
     if entry:
         try:
             head = _read(image, data, entry[0], 4)
             size = _u32(head, 0)
-            config = _read(image, data, entry[0], min(size, 0x100))
-            for offset, label in ((0x58, "security-cookie"), (0x70, "cfg-check-pointer"),
-                                  (0x78, "cfg-dispatch-pointer")):
+            config = _read(image, data, entry[0], min(size, LOAD_CONFIG_READ))
+            for offset, label in LOAD_CONFIG_SLOTS:
                 if offset + 8 <= len(config):
                     va = _u64(config, offset)
                     if va:
                         rva = va - image.image_base
                         ranges.append((rva, rva + 8, label))
-            states.append("complete")
+            rewriting = [label for offset, width, label in LOAD_CONFIG_REWRITING
+                         if offset + width <= len(config)
+                         and int.from_bytes(config[offset:offset + width], "little") != 0]
+            if rewriting:
+                states.append("indeterminate: load-config code rewriting / hybrid metadata not modelled ("
+                              + ", ".join(rewriting) + ")")
+            else:
+                states.append("complete")
         except _Unreadable as error:
             states.append(f"indeterminate: load config: {error}")
     if not states:

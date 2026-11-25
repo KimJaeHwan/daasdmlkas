@@ -13,9 +13,8 @@ scanned up to the first non-prefix byte. This branch's exporter (engine base
 The Bundle carries the row's p-code but not the prototype's flow (the exported
 flow type includes overrides). The prototype's jump / call / terminal flags come
 from the same constructor p-code, so "is a control transfer" is read from the
-row's p-code (``transfers``): a row without a real transfer op is ``false``; a
-transfer row is decided by the prefix scan, ``unobserved`` only when the verified
-bytes end before the scan decides. Only verified bytes are scanned.
+row's p-code where it decides (``transfers``); a transfer row is decided by the
+prefix scan. Only verified bytes are scanned.
 
 Pure functions over plain data (Rust-port surface).
 """
@@ -49,39 +48,51 @@ def prefix_scan(data: bytes, length: int | None):
     return None
 
 
-SKIP_PATTERNS = ("rep", "cmov")   # (lifting.identify: intra-instruction skips, by pattern ordinal -- r4 s1)
+SKIP_PATTERNS = ("rep", "cmov")              # (lifting.identify: intra-instruction skips, r4 s1)
+BRANCH_PATTERNS = ("jmp", "jcc", "call $+5")   # (identified real transfers whose target may be start / next)
 
 
 def transfers(facts: dict, lift=None):
-    """Whether the row's p-code holds a real control transfer: True / False / "unobserved".
+    """Whether the row is a control transfer for the prototype's flow: True / False / "unobserved".
 
     CALL / CALLIND / BRANCHIND / RETURN are transfers; BRANCH / CBRANCH to a constant
-    destination (a p-code relative index) are not. A BRANCH / CBRANCH to the row's own
-    start or next address is an intra-instruction skip in the rep / CMOVcc lifts (the
-    exporter: "a 16-bit CMOVcc ... transfers nothing") but a real jump elsewhere
-    (EB 00): with the lift table (premise stock-ghidra-translator) the rep / cmov
-    patterns transfer nothing; without it such a row is "unobserved". The prototype's
-    flow flags come from the same constructor p-code; flow overrides change a
-    transfer's kind, never whether there is one."""
+    destination (a p-code relative index) are not. A BRANCH / CBRANCH to an address is
+    a transfer only when that is decidable: the lift table (premise
+    stock-ghidra-translator) identifies a jmp / jcc / call $+5, or the target is
+    neither the row's start nor its next address (which needs the length). The rep /
+    cmov patterns transfer nothing (the exporter: "a 16-bit CMOVcc ... transfers
+    nothing"); any other case -- no lift, an unidentified or other pattern, a missing
+    length -- is "unobserved". A row without a transfer op whose exported flow bits
+    still say call / jump / terminal (a call fixup may have replaced the p-code) is
+    "unobserved" too (Fable impl r1 P3)."""
     if lift is not None and lift.pattern in SKIP_PATTERNS:
         return False
     start = facts.get("address")
     length = facts.get("length")
-    own = {start, None if length is None or start is None else start + length} - {None}
+    nxt = None if length is None or start is None else start + length
     doubt = False
+    found = False
     for op in facts.get("ops", ()):
         if op["opcode"] in ("CALL", "CALLIND", "BRANCHIND", "RETURN"):
             return True
-        if op["opcode"] in ("BRANCH", "CBRANCH"):
-            inputs = op.get("inputs") or [None]
-            target = inputs[0]
-            if target is not None and target.get("kind") == "CONSTANT":
-                continue
-            if lift is None and target is not None and target.get("offset") in own:
-                doubt = True
-                continue
+        if op["opcode"] not in ("BRANCH", "CBRANCH"):
+            continue
+        target = (op.get("inputs") or [None])[0]
+        if target is not None and target.get("kind") == "CONSTANT":
+            continue
+        found = True
+        if lift is not None and lift.pattern in BRANCH_PATTERNS:
             return True
-    return UNOBSERVED if doubt else False
+        offset = None if target is None else target.get("offset")
+        if nxt is not None and offset is not None and offset not in (start, nxt):
+            return True
+        doubt = True
+    if doubt or found:
+        return UNOBSERVED
+    flow = facts.get("flow") or {}
+    if flow.get("is_call") or flow.get("is_jump") or flow.get("is_terminal"):
+        return UNOBSERVED
+    return False
 
 
 def row_condition(facts: dict, verified: bytes, lift=None):

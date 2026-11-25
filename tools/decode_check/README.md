@@ -3,7 +3,7 @@
 Checks one sealed Bundle against its own `original` file, without Ghidra:
 
 1. **Mapping (layer `mapping`)** — the original is mapped by pinned loader rules
-   (PE32+: `pe-loader-rules-4`, ELF64: `elf-loader-rules-1`) and every sealed
+   (PE32+: `pe-loader-rules-5`, ELF64: `elf-loader-rules-2`) and every sealed
    block byte is compared with the byte the loader would place there.
 2. **Decode (layer `decode`)** — every Ghidra-listed instruction row is decoded
    again from *verified* bytes only (sealed byte == loader byte) by pinned
@@ -114,3 +114,18 @@ Golden vectors (`tests/intra/golden/decode_check_*.json`, synthetic Bundles only
 report of the reference pair, the `66 E8` pair (withheld row, guard true, blocked S1) and an
 ELF PIE with a text relocation, minus the host's decoder build manifest. They are the
 parity reference for a Rust port. `G1_REGEN_GOLDEN=1` rewrites them after a reviewed change.
+
+## Open items
+
+- **PE load-config code rewriting (owner, 2026-11-25).** Today a non-zero DynamicValueRelocTable /
+  DVRT offset / CHPEMetadataPointer / HotPatchTableOffset makes the written ranges indeterminate, so the
+  whole image is unobserved. This is temporary, not a permanent limit:
+  1. a later `pe-loader-rules` version parses the DVRT entries and marks only the rewritten bytes as
+     loader-written, so the rest of the image keeps being checked;
+  2. the TBR G3 loader / LoadState model computes the post-rewrite bytes, so those rows can be decoded too;
+  3. DVRT entries whose rewrite depends on the OS version or settings (e.g. retpoline enabled) need a named
+     load-model premise; without it those bytes stay unobserved.
+- Unlisted CALLOTHER forms (cpuid, rdtsc, SIMD intrinsics) are unidentified today; a table version may
+  treat them as non-flow operations.
+- Far call / far ret lift patterns (today unidentified, never a false near-call suspect).
+- Block rows: count the "outside" tail beyond the file mapping apart from real differences.

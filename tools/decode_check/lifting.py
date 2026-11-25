@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 # Ghidra 12.0.4, x86:LE:64:default 4.6 (x86-64.sla d5adc314, the engine's own evidence: fault_premise.py,
 # pcodeop_models x86.json): userop indices this table reads
 TABLE = {
-    "id": "x86-64-lift-table-1",
+    "id": "x86-64-lift-table-2",
     "language": ("x86:LE:64:default", 4, 6),
     "ghidra": "12.0.4",
     "sla_sha256_prefix": "d5adc314",
@@ -89,26 +89,29 @@ def _width_before_extension(ops, varnode, upto):
     return varnode["size"] * 8
 
 
-def _push(ops, upto):
-    """(push bytes, STORE width bits, STORE value or None) of the INT_SUB RSP / STORE pair before ``upto``."""
-    sub = store = None
-    for index in range(upto):
-        op = ops[index]
-        if op["opcode"] == "INT_SUB" and _is_reg(op["output"], RSP) and _is_const(op["inputs"][1]):
-            sub = index
-        elif op["opcode"] == "STORE" and sub is not None and len(op["inputs"]) == 3 \
-                and _is_reg(op["inputs"][1], RSP):
-            store = index
-    if sub is None or store is None:
+def _push(ops, upto, table=None):
+    """(push bytes, STORE width bits, STORE value or None, RSP width bits) when ``ops[:upto]`` is exactly
+    allowed prefix ops (none writing RSP) ; INT_SUB RSP = RSP - const ; STORE [RSP] -- the near-call push
+    (r2 s1). Anything else (a second RSP write: far call; another base register; ops between) -> None."""
+    table = table or TABLE
+    if upto < 2:
         return None
-    value = ops[store]["inputs"][2]
-    return (ops[sub]["inputs"][1]["offset"], value["size"] * 8, value["offset"] if _is_const(value) else None,
-            ops[sub]["output"]["size"] * 8)
+    sub_op, store_op = ops[upto - 2], ops[upto - 1]
+    if sub_op["opcode"] != "INT_SUB" or not _is_reg(sub_op["output"], RSP) or len(sub_op["inputs"]) != 2 \
+            or not _is_reg(sub_op["inputs"][0], RSP) or not _is_const(sub_op["inputs"][1]):
+        return None
+    if store_op["opcode"] != "STORE" or len(store_op["inputs"]) != 3 or not _is_reg(store_op["inputs"][1], RSP):
+        return None
+    for op in ops[:upto - 2]:
+        if op["opcode"] not in table["allowed_prefix"] or _is_reg(op["output"], RSP):
+            return None
+    value = store_op["inputs"][2]
+    return (sub_op["inputs"][1]["offset"], value["size"] * 8, value["offset"] if _is_const(value) else None,
+            sub_op["output"]["size"] * 8)
 
 
 def _prefix_ok(ops, upto, table):
-    return all(op["opcode"] in table["allowed_prefix"] or op["opcode"] in ("INT_SUB", "STORE")
-               for op in ops[:upto])
+    return all(op["opcode"] in table["allowed_prefix"] for op in ops[:upto])
 
 
 def identify(facts: dict, table: dict = TABLE) -> Lift:
@@ -144,8 +147,8 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
     # -- rep string: CBRANCH ADDRESS(next) earlier, BRANCH ADDRESS(start) last (intra-instruction skip + repeat)
     if len(flows) >= 2 and opcodes[-1] == "BRANCH" and _is_address(ops[-1]["inputs"][0]) \
             and ops[-1]["inputs"][0]["offset"] == start and nxt is not None \
-            and any(opcodes[i] == "CBRANCH" and _is_address(ops[i]["inputs"][0]) and ops[i]["inputs"][0]["offset"] == nxt
-                    for i in flows[:-1]) and all(opcodes[i] in ("CBRANCH", "BRANCH") for i in flows):
+            and all(opcodes[i] == "CBRANCH" and _is_address(ops[i]["inputs"][0]) and ops[i]["inputs"][0]["offset"] == nxt
+                    for i in flows[:-1]):
         return Lift("rep", {"a3": "sequential" if continuation else "none", "a5": None, "a6": "none", "a8": "none",
                             "a9": "none", "a10": ("none",)}, {}, tuple(flows))
     # -- CMOVcc: one CBRANCH ADDRESS(next) followed by non-flow operations (the conditional move)
@@ -163,9 +166,12 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
     op = ops[last]
     name = op["opcode"]
     target = op["inputs"][0] if op["inputs"] else None
-    if name in ("CALL", "CALLIND", "BRANCH") and _push(ops, last) is not None \
+    if name == "BRANCH" and nxt is None and _push(ops, last, table) is not None:
+        return Lift("unidentified", {}, {name_: "push + BRANCH without a known next address (no length)"
+                                         for name_ in ("a3", "a5", "a6", "a8", "a9", "a10")})
+    if name in ("CALL", "CALLIND", "BRANCH") and _push(ops, last, table) is not None \
             and (name != "BRANCH" or (_is_address(target) and target["offset"] == nxt)):
-        push = _push(ops, last)
+        push = _push(ops, last, table)
         values = {"a6": "near", "a9": "none", "a10": ("none",), "a11b": push[0], "a11a": push[3],
                   "a7": (push[1], push[2]), "a3": "call-continuation" if continuation else "none"}
         if name == "CALLIND":
@@ -173,6 +179,9 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
         else:   # CALL ADDRESS, or call $+5 lifted as push + BRANCH ADDRESS(next)
             values.update(a8="direct", a5=target["offset"])
         return Lift("call $+5" if name == "BRANCH" else ("call indirect" if name == "CALLIND" else "call"), values)
+    if name in ("CALL", "CALLIND"):
+        return Lift("unidentified", {}, {name_: "CALL / CALLIND without the exact near-call push (far call?)"
+                                         for name_ in ("a3", "a5", "a6", "a8", "a9", "a10")})
     if not _prefix_ok(ops, last, table):
         return Lift("unidentified", {}, {name_: "operation outside the allowed prefix list"
                                          for name_ in ("a3", "a5", "a6", "a8", "a9", "a10")})
@@ -220,17 +229,30 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
 # isUnConditional() is !isConditional(); forms without an independent mapping are not in the table
 LISTING_BITS = {
     "none": {"has_fallthrough": True, "is_call": False, "is_jump": False, "is_terminal": False,
-             "is_computed": False, "is_conditional": False},
+             "is_computed": False, "is_conditional": False, "is_flow": True, "is_unconditional": True},
     "call_direct": {"has_fallthrough": True, "is_call": True, "is_jump": False, "is_terminal": False,
-                    "is_computed": False, "is_conditional": False},
+                    "is_computed": False, "is_conditional": False, "is_flow": True, "is_unconditional": True},
     "call_indirect": {"has_fallthrough": True, "is_call": True, "is_jump": False, "is_terminal": False,
-                      "is_computed": True, "is_conditional": False},
+                      "is_computed": True, "is_conditional": False, "is_flow": True, "is_unconditional": True},
     "jmp_direct": {"has_fallthrough": False, "is_call": False, "is_jump": True, "is_terminal": False,
-                   "is_computed": False, "is_conditional": False},
+                   "is_computed": False, "is_conditional": False, "is_flow": True, "is_unconditional": True},
     "jmp_indirect": {"has_fallthrough": False, "is_call": False, "is_jump": True, "is_terminal": False,
-                     "is_computed": True, "is_conditional": False},
+                     "is_computed": True, "is_conditional": False, "is_flow": True, "is_unconditional": True},
     "jcc": {"has_fallthrough": True, "is_call": False, "is_jump": True, "is_terminal": False,
-            "is_computed": False, "is_conditional": True},
+            "is_computed": False, "is_conditional": True, "is_flow": True, "is_unconditional": False},
     "ret": {"has_fallthrough": False, "is_call": False, "is_jump": False, "is_terminal": True,
-            "is_computed": False, "is_conditional": False},
+            "is_computed": False, "is_conditional": False, "is_flow": True, "is_unconditional": True},
 }
+
+
+def table_identity(language_id: str, major: int, minor: int, table: dict = TABLE) -> dict:
+    """The r4 s2 identity checks a Bundle allows: language id + version from its own program evidence
+    (checked), the Ghidra version (the admitted naming sidecar is pinned to it by the engine contract),
+    and the compiled-SLEIGH digest -- which no Bundle carries today (missing: only the named premise
+    stock-ghidra-translator covers it). ``state``: matched / mismatch / missing-digest."""
+    language = (language_id, major, minor)
+    checks = {"language": "matched" if language == table["language"] else f"mismatch {language}",
+              "ghidra": "matched (admitted naming sidecar, CALL_NAMING_GHIDRA_VERSION)",
+              "sla_digest": "missing (not in the Bundle)"}
+    state = "mismatch" if language != table["language"] else "missing-digest"
+    return {"state": state, "checks": checks, "table": table["id"]}

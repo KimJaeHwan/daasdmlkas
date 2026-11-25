@@ -91,15 +91,17 @@ class Image:
         relocations = mapping.relocations.ranges if mapping.relocations else []
         self.relocations = [(base + start, base + end, label) for start, end, label in relocations]
 
-    def sealed(self, va: int):
+    def sealed(self, va: int, space=None):
+        """The sealed byte at ``va`` of the row's own address space (``space`` None: any space -- tests only)."""
         for row, data in self.blocks:
-            if data is not None and row["byte_start"] <= va < row["byte_start"] + row["byte_size"]:
+            if data is not None and (space is None or row.get("space_id") == space) \
+                    and row["byte_start"] <= va < row["byte_start"] + row["byte_size"]:
                 return data[va - row["byte_start"]]
         return None
 
-    def verified_byte(self, va: int):
+    def verified_byte(self, va: int, space=None):
         """(byte, None) when the sealed byte equals the loader's byte, else (None, reason)."""
-        sealed = self.sealed(va)
+        sealed = self.sealed(va, space)
         if sealed is None:
             return None, "no sealed byte"
         written = self.written.find(va)
@@ -115,11 +117,11 @@ class Image:
         file_byte = self.original[mapped.file_offset + (va - self.base - mapped.start)]
         return (sealed, None) if sealed == file_byte else (None, "sealed byte differs from the file")
 
-    def window(self, va: int) -> dict:
+    def window(self, va: int, space=None) -> dict:
         data = bytearray()
         reason = "15 bytes"
         for offset in range(decoders.MAX_LENGTH):
-            value, why = self.verified_byte(va + offset)
+            value, why = self.verified_byte(va + offset, space)
             if value is None:
                 reason = why
                 break
@@ -228,7 +230,7 @@ STATE_TO_ROW = {"applied": ("evaluated", "applied"), "not_applicable": ("evaluat
 
 
 def decode_rows(image: Image, functions: list, premise: bool, reason: str | None, full: bool = False,
-                states: dict | None = None, language: str = LANGUAGE) -> list[Row]:
+                states: dict | None = None, language: str = LANGUAGE, unverified_reason: str | None = None) -> list[Row]:
     """Decode rows; ``states`` (when given) receives ``(function id, address) ->
     dependents.attribute_states(result)`` for the dependents table."""
     rows = []
@@ -242,7 +244,7 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
             if reason is not None:
                 rows.append(Row("decode", "row", key, "unobserved", None, "lint", {"reason": reason}))
                 continue
-            window = image.window(facts["address"])
+            window = image.window(facts["address"], facts["space"])
             lift = lifting.identify(facts) if premise else None
             conditions[facts["address"]] = guards.row_condition(facts, window["bytes"], lift)
             if not window["bytes"]:
@@ -251,7 +253,8 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
                 continue
             ballot = decoders.ballot(window["bytes"], facts["address"])
             result = compare.compare_row(facts, lift, window, ballot, s1=function["s1"],
-                                         native_call=facts["native_call"], premise=premise)
+                                         native_call=facts["native_call"], premise=premise,
+                                         unverified_reason=unverified_reason)
             states[(function["function_id"], facts["address"])] = dependents.attribute_states(result)
             state = result["state"]
             detail = {"window": result["window"], "lift": None if lift is None else lift.pattern, "s1": function["s1"]}

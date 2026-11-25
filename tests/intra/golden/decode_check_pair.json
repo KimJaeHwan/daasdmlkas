@@ -19,19 +19,19 @@
    "consumers": {
     "call_seed": {
      "design": "r2 s6 call seeds / naming",
-     "reads": "a5, a6, a8",
+     "reads": "a4, a5, a6, a8 (the seed's listing continuation)",
      "status": "baseline",
      "unit": "call"
     },
     "g3b7b_none_estimate": {
      "design": "r3 s6 (not in this branch's engine: loss unknown)",
-     "reads": "every row: a1, a2, a3, a4, a5, a8; any BRANCHIND kept apart",
+     "reads": "every row: a1, a2, a3, a4, a5, a8; a BRANCHIND row blocks (the exporter refuses it); otherwise unobserved: getParsedLength / prototype flow not exported",
      "status": "estimate",
      "unit": "function"
     },
     "plain_push": {
      "design": "r2 s6",
-     "reads": "a6, a7 (pattern plain near call)",
+     "reads": "a4, a6, a7 (pattern plain near call, linked to the listing continuation)",
      "status": "baseline",
      "unit": "call"
     },
@@ -60,14 +60,14 @@
      "unit": "function"
     },
     "s1_l2_estimate": {
-     "design": "r2 s6 adopted L2 acceptance",
-     "reads": "the s1 reads + every row: a5, a6, F.is_call (a call only the voters see)",
+     "design": "r2 s6 adopted L2 acceptance, r3 s6",
+     "reads": "the s1 reads + every row: a2, a3, a4, a5, a6, a8, F.is_call; call candidates (either side): a7",
      "status": "estimate",
      "unit": "function"
     },
     "unknown_transfer_site": {
      "design": "r3 s6",
-     "reads": "a8, a5 (U2a site; state-barrier completeness needs fault cuts, not exported)",
+     "reads": "a8, a5 (baseline: the engine's unknown_transfer verdict; state-barrier completeness needs fault cuts, not exported)",
      "status": "baseline",
      "unit": "branchind"
     }
@@ -77,73 +77,97 @@
     "call_seed": {
      "baseline_present": 1,
      "confirmed": 1,
-     "loss": 0,
+     "loss_disagreement": 0,
+     "loss_refused": 0,
      "loss_unknown": 0,
+     "loss_unobserved": 0,
      "units": 1,
      "would_block_disagreement": 0,
+     "would_block_refused": 0,
      "would_block_unobserved": 0
     },
     "g3b7b_none_estimate": {
      "baseline_present": 0,
-     "confirmed": 2,
-     "loss": 0,
-     "loss_unknown": 0,
+     "confirmed": 0,
+     "loss_disagreement": 0,
+     "loss_refused": 0,
+     "loss_unknown": 2,
+     "loss_unobserved": 0,
      "units": 2,
      "would_block_disagreement": 0,
-     "would_block_unobserved": 0
+     "would_block_refused": 0,
+     "would_block_unobserved": 2
     },
     "plain_push": {
      "baseline_present": 1,
      "confirmed": 1,
-     "loss": 0,
+     "loss_disagreement": 0,
+     "loss_refused": 0,
      "loss_unknown": 0,
+     "loss_unobserved": 0,
      "units": 1,
      "would_block_disagreement": 0,
+     "would_block_refused": 0,
      "would_block_unobserved": 0
     },
     "push_projection": {
      "baseline_present": 1,
      "confirmed": 1,
-     "loss": 0,
+     "loss_disagreement": 0,
+     "loss_refused": 0,
      "loss_unknown": 0,
+     "loss_unobserved": 0,
      "units": 1,
      "would_block_disagreement": 0,
+     "would_block_refused": 0,
      "would_block_unobserved": 0
     },
     "push_relation": {
      "baseline_present": 1,
      "confirmed": 1,
-     "loss": 0,
+     "loss_disagreement": 0,
+     "loss_refused": 0,
      "loss_unknown": 0,
+     "loss_unobserved": 0,
      "units": 1,
      "would_block_disagreement": 0,
+     "would_block_refused": 0,
      "would_block_unobserved": 0
     },
     "return_shape": {
      "baseline_present": 2,
      "confirmed": 2,
-     "loss": 0,
+     "loss_disagreement": 0,
+     "loss_refused": 0,
      "loss_unknown": 0,
+     "loss_unobserved": 0,
      "units": 2,
      "would_block_disagreement": 0,
+     "would_block_refused": 0,
      "would_block_unobserved": 0
     },
     "s1": {
      "baseline_present": 2,
      "confirmed": 2,
-     "loss": 0,
+     "loss_disagreement": 0,
+     "loss_refused": 0,
      "loss_unknown": 0,
+     "loss_unobserved": 0,
      "units": 2,
      "would_block_disagreement": 0,
+     "would_block_refused": 0,
      "would_block_unobserved": 0
     },
     "s1_l2_estimate": {
      "baseline_present": 2,
      "confirmed": 2,
-     "loss": 0,
+     "loss_disagreement": 0,
+     "loss_refused": 0,
      "loss_unknown": 0,
+     "loss_unobserved": 0,
      "units": 2,
      "would_block_disagreement": 0,
+     "would_block_refused": 0,
      "would_block_unobserved": 0
     }
    },
@@ -205,7 +229,7 @@
     "SUBPIECE"
    ],
    "ghidra": "12.0.4",
-   "id": "x86-64-lift-table-1",
+   "id": "x86-64-lift-table-2",
    "language": [
     "x86:LE:64:default",
     4,
@@ -224,10 +248,10 @@
   "mapping": {
    "format": "pe",
    "load_bias": 0,
-   "mapping_id": "ecd6514ee279b192ad9ceb010e18df5076bcb19b8160bdf3fc55602482a9f898",
-   "rules": "pe-loader-rules-4"
+   "mapping_id": "2946e2290090aff748a7b7c0ac0dd3f862421b24acbae3efb11c4c3c83fcb1af",
+   "rules": "pe-loader-rules-5"
   },
-  "mapping_id": "ecd6514ee279b192ad9ceb010e18df5076bcb19b8160bdf3fc55602482a9f898",
+  "mapping_id": "2946e2290090aff748a7b7c0ac0dd3f862421b24acbae3efb11c4c3c83fcb1af",
   "premises": [
    "decoder-matches-cpu",
    "stock-ghidra-translator"
@@ -235,6 +259,17 @@
   "revision": 2,
   "scope": "only Ghidra-listed rows are checked (L5); 64-bit long mode only (no compatibility-mode switches); decoder agreement is not a proof of CPU behaviour (premise decoder-matches-cpu); vendor agreement covers only what the decoders model; instruction meaning beyond the compared attributes (mnemonic, data effects, registers written) is not compared; whether a producer guard fired cannot be decided from the Bundle",
   "tool": "decode_check",
+  "translation_identity": {
+   "checks": {
+    "ghidra": "matched (admitted naming sidecar, CALL_NAMING_GHIDRA_VERSION)",
+    "language": "matched",
+    "sla_digest": "missing (not in the Bundle)"
+   },
+   "premise": true,
+   "state": "missing-digest",
+   "table": "x86-64-lift-table-2",
+   "table_applied": true
+  },
   "voters": {
    "amd": [
     "iced",
@@ -268,6 +303,10 @@
       "state": "applied",
       "value": false
      },
+     "F.is_flow": {
+      "state": "applied",
+      "value": true
+     },
      "F.is_jump": {
       "state": "applied",
       "value": false
@@ -275,6 +314,10 @@
      "F.is_terminal": {
       "state": "applied",
       "value": false
+     },
+     "F.is_unconditional": {
+      "state": "applied",
+      "value": true
      },
      "a1": {
       "state": "applied",
@@ -285,6 +328,10 @@
       "value": [
        "none"
       ]
+     },
+     "a11a": {
+      "state": "applied",
+      "value": 64
      },
      "a11b": {
       "state": "applied",
@@ -503,11 +550,19 @@
       "state": "applied",
       "value": false
      },
+     "F.is_flow": {
+      "state": "applied",
+      "value": true
+     },
      "F.is_jump": {
       "state": "applied",
       "value": false
      },
      "F.is_terminal": {
+      "state": "applied",
+      "value": true
+     },
+     "F.is_unconditional": {
       "state": "applied",
       "value": true
      },
@@ -520,6 +575,10 @@
       "value": [
        "none"
       ]
+     },
+     "a11a": {
+      "state": "applied",
+      "value": 64
      },
      "a11b": {
       "state": "applied",
@@ -707,6 +766,10 @@
       "state": "applied",
       "value": false
      },
+     "F.is_flow": {
+      "state": "applied",
+      "value": true
+     },
      "F.is_jump": {
       "state": "applied",
       "value": false
@@ -714,6 +777,10 @@
      "F.is_terminal": {
       "state": "applied",
       "value": false
+     },
+     "F.is_unconditional": {
+      "state": "applied",
+      "value": true
      },
      "a1": {
       "state": "applied",
@@ -724,6 +791,9 @@
       "value": [
        "none"
       ]
+     },
+     "a11a": {
+      "state": "not_applicable"
      },
      "a11b": {
       "state": "not_applicable"
@@ -911,11 +981,19 @@
       "state": "applied",
       "value": false
      },
+     "F.is_flow": {
+      "state": "applied",
+      "value": true
+     },
      "F.is_jump": {
       "state": "applied",
       "value": false
      },
      "F.is_terminal": {
+      "state": "applied",
+      "value": true
+     },
+     "F.is_unconditional": {
       "state": "applied",
       "value": true
      },
@@ -928,6 +1006,10 @@
       "value": [
        "none"
       ]
+     },
+     "a11a": {
+      "state": "applied",
+      "value": 64
      },
      "a11b": {
       "state": "applied",
@@ -1140,27 +1222,45 @@
    "check": "g3b7b_none_estimate",
    "detail": {
     "baseline": null,
+    "blocking": [
+     [
+      "140001000",
+      "producer inputs not exported: getParsedLength, prototype flow (r3 s6)",
+      "unobserved"
+     ]
+    ],
+    "blocking_count": 1,
     "branchind_rows": 0,
-    "would_block": false
+    "cause": "unobserved",
+    "loss": "unknown",
+    "would_block": true
    },
    "key": "function-000000",
    "layer": "dependents",
-   "run_state": "evaluated",
-   "source": "lint",
-   "verdict": "applied"
+   "run_state": "unobserved",
+   "source": "lint"
   },
   {
    "check": "g3b7b_none_estimate",
    "detail": {
     "baseline": null,
+    "blocking": [
+     [
+      "140001010",
+      "producer inputs not exported: getParsedLength, prototype flow (r3 s6)",
+      "unobserved"
+     ]
+    ],
+    "blocking_count": 1,
     "branchind_rows": 0,
-    "would_block": false
+    "cause": "unobserved",
+    "loss": "unknown",
+    "would_block": true
    },
    "key": "function-000001",
    "layer": "dependents",
-   "run_state": "evaluated",
-   "source": "lint",
-   "verdict": "applied"
+   "run_state": "unobserved",
+   "source": "lint"
   },
   {
    "check": "plain_push",
@@ -1321,13 +1421,14 @@
      "section_alignment": 4096,
      "size_of_headers": 512,
      "size_of_image": 8192,
-     "size_of_optional_header": 240
+     "size_of_optional_header": 240,
+     "writable_code_sections": []
     },
     "format": "pe",
     "load_bias": 0,
-    "mapping_id": "ecd6514ee279b192ad9ceb010e18df5076bcb19b8160bdf3fc55602482a9f898",
+    "mapping_id": "2946e2290090aff748a7b7c0ac0dd3f862421b24acbae3efb11c4c3c83fcb1af",
     "relocations": "absent",
-    "rules": "pe-loader-rules-4",
+    "rules": "pe-loader-rules-5",
     "written": "absent"
    },
    "key": "bundle",

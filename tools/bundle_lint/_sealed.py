@@ -70,7 +70,7 @@ def flow(**flags):
     return {key: bool(flags.get(key, False)) for key in _FLOW_KEYS}
 
 
-PLAIN = flow(has_fallthrough=True)
+PLAIN = flow(is_flow=True, has_fallthrough=True, is_unconditional=True)   # (as Ghidra exports a plain row)
 CALL_FLOW = flow(is_flow=True, has_fallthrough=True, is_call=True, is_unconditional=True)
 RET_FLOW = flow(is_flow=True, is_terminal=True, is_unconditional=True)
 

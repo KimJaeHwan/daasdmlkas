@@ -13,7 +13,9 @@ Per (consumer, unit):
 - ``loss``        1 when it would block and the baseline fact exists, 0 when the
                   fact is already absent, "unknown" for an estimate consumer
                   without a baseline in this engine (r4 s6). Counted once per
-                  function and consumer for function-level consumers.
+                  function and consumer for function-level consumers. The
+                  summary splits it by cause: ``loss_disagreement`` (a decoder
+                  disagreement) apart from ``loss_unobserved`` (not observed).
 
 RP and pass-through stay undetermined: they need the PC the unwinder restores at
 each fault point, which a Bundle does not carry (r3 s6, r4 s6) -- header only.
@@ -28,60 +30,78 @@ CALL_READS = ("a2", "a3", "a4", "a6", "a8", "F.is_call")
 CONSUMERS = {
     "s1": ("function", "native-call rows: " + ", ".join(CALL_READS) + "; S1 exit rows: a4 (exit target = A4)",
            "baseline", "r2 s6 S1 current contract"),
-    "s1_l2_estimate": ("function", "the s1 reads + every row: a5, a6, F.is_call (a call only the voters see)",
-                       "estimate", "r2 s6 adopted L2 acceptance"),
+    "s1_l2_estimate": ("function", "the s1 reads + every row: a2, a3, a4, a5, a6, a8, F.is_call; call "
+                       "candidates (either side): a7", "estimate", "r2 s6 adopted L2 acceptance, r3 s6"),
     "push_projection": ("call", "F.is_call, a3, a4, a11b, a7", "baseline", "r2 s6, r4 s6"),
     "push_relation": ("call", "the push_projection reads (relations iterate surviving projections), a4",
                       "baseline", "r2 s6, r4 s6"),
-    "plain_push": ("call", "a6, a7 (pattern plain near call)", "baseline", "r2 s6"),
-    "call_seed": ("call", "a5, a6, a8", "baseline", "r2 s6 call seeds / naming"),
+    "plain_push": ("call", "a4, a6, a7 (pattern plain near call, linked to the listing continuation)", "baseline",
+                   "r2 s6"),
+    "call_seed": ("call", "a4, a5, a6, a8 (the seed's listing continuation)", "baseline", "r2 s6 call seeds / naming"),
     "return_shape": ("return", "a11b (a9 reported apart)", "baseline", "r2 s6"),
-    "unknown_transfer_site": ("branchind", "a8, a5 (U2a site; state-barrier completeness needs fault cuts, "
-                              "not exported)", "baseline", "r3 s6"),
-    "g3b7b_none_estimate": ("function", "every row: a1, a2, a3, a4, a5, a8; any BRANCHIND kept apart",
+    "unknown_transfer_site": ("branchind", "a8, a5 (baseline: the engine's unknown_transfer verdict; "
+                              "state-barrier completeness needs fault cuts, not exported)", "baseline", "r3 s6"),
+    "g3b7b_none_estimate": ("function", "every row: a1, a2, a3, a4, a5, a8; a BRANCHIND row blocks (the exporter "
+                            "refuses it); otherwise unobserved: getParsedLength / prototype flow not exported",
                             "estimate", "r3 s6 (not in this branch's engine: loss unknown)"),
 }
 READS = {
     "push_projection": ("F.is_call", "a3", "a4", "a11b", "a7"),
     "push_relation": ("F.is_call", "a3", "a4", "a11b", "a7"),
-    "plain_push": ("a6", "a7"),
-    "call_seed": ("a5", "a6", "a8"),
+    "plain_push": ("a4", "a6", "a7"),
+    "call_seed": ("a4", "a5", "a6", "a8"),
     "return_shape": ("a11b",),
     "unknown_transfer_site": ("a8", "a5"),
 }
 G3B7B_READS = ("a1", "a2", "a3", "a4", "a5", "a8")
-L2_EXTRA = ("a5", "a6", "F.is_call")
+L2_EXTRA = ("a2", "a3", "a4", "a5", "a6", "a8", "F.is_call")
+G3B7B_MISSING = "producer inputs not exported: getParsedLength, prototype flow (r3 s6)"
 UNDETERMINED = {"rp": "needs the PC the unwinder restores at each fault point (not in a Bundle)",
                 "pass_through": "needs the PC the unwinder restores at each fault point (not in a Bundle)"}
 EXAMPLES = 5
 
 
 def attribute_states(result: dict | None) -> dict:
-    """The non-confirmed attributes of one compared row: {name: state}; ``*`` for a
-    row that was never compared (every attribute unobserved)."""
-    if result is None or "attributes" not in result:
+    """{name: state} of the non-confirmed attributes of one compared row, plus ``+``: the
+    names it confirmed. A row never compared (no result, or an early return such as
+    unverified bytes / a relocation over the encoding: no attributes) is ``*``:
+    every read unobserved."""
+    if result is None or not result.get("attributes"):
         return {"*": "unobserved"}
-    return {name: item["state"] for name, item in result["attributes"].items() if item["state"] not in OK}
+    out = {name: item["state"] for name, item in result["attributes"].items() if item["state"] not in OK}
+    out["+"] = frozenset(name for name, item in result["attributes"].items() if item["state"] in OK)
+    return out
 
 
 def _status(states: dict, name: str) -> str:
-    return states.get(name) or states.get("*") or "applied"
+    """A read the row did not compare (absent from both sets) is unobserved, never confirmed."""
+    if name in states:
+        return states[name]
+    if "*" in states:
+        return states["*"]
+    return "applied" if name in states.get("+", ()) else "unobserved"
 
 
-def _judge(reads, baseline_present):
-    """reads: [(address, attribute, state)] -> (run state, verdict, detail)."""
+def _judge(reads, baseline_present, extra=None):
+    """reads: [(address, attribute, state)] -> (run state, verdict, detail). ``extra``: a
+    (address, reason, state) the reads cannot show (a BRANCHIND row, a missing producer input)."""
     blocking = [(address, name, state) for address, name, state in reads if state not in OK]
+    if extra is not None:
+        blocking.append(extra)
+    refused = [item for item in blocking if item[2] == "refused"]
     disagreement = [item for item in blocking if item[2] in ("withheld", "unrecognized")]
     if not blocking:
         return "evaluated", "applied", {"would_block": False, "baseline": baseline_present}
-    cause = "disagreement" if disagreement else "unobserved"
+    cause = "refused" if refused else "disagreement" if disagreement else "unobserved"
     if baseline_present is None:
         loss = "unknown"
     else:
         loss = 1 if baseline_present else 0
     detail = {"would_block": True, "cause": cause, "baseline": baseline_present, "loss": loss,
               "blocking": [[f"{address:x}", name, state] for address, name, state in
-                           (disagreement or blocking)[:EXAMPLES]], "blocking_count": len(blocking)}
+                           (refused or disagreement or blocking)[:EXAMPLES]], "blocking_count": len(blocking)}
+    if refused:   # (the report contract keeps verdict "refused" for the engine: a lint row withholds)
+        return "evaluated", "withheld", detail
     if disagreement:
         return "evaluated", "withheld", detail
     return "unobserved", None, detail
@@ -105,9 +125,16 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
 
     s1_reads = reads_of(native, CALL_READS) + reads_of(exits, ("a4",))
     out.append(("s1", fid, *_judge(s1_reads, bool(function["s1"]))))
-    out.append(("s1_l2_estimate", fid, *_judge(s1_reads + reads_of(addresses, L2_EXTRA), bool(function["s1"]))))
-    g3b7b = _judge(reads_of(addresses, G3B7B_READS), None)
-    g3b7b[2]["branchind_rows"] = len(baseline.get("branchind", ()))
+    candidates = [address for address in addresses
+                  if address in native or _status(states.get(address, {"*": "unobserved"}), "a6") != "applied"
+                  or "a7" in states.get(address, {}).get("+", ())]
+    out.append(("s1_l2_estimate", fid, *_judge(s1_reads + reads_of(addresses, L2_EXTRA)
+                                               + reads_of(candidates, ("a7",)), bool(function["s1"]))))
+    branchind = baseline.get("branchind", ())
+    extra = (branchind[0]["address"], "BRANCHIND (the exporter refuses the function)", "refused") if branchind else \
+        (addresses[0] if addresses else 0, G3B7B_MISSING, "unobserved")
+    g3b7b = _judge(reads_of(addresses, G3B7B_READS), None, extra)
+    g3b7b[2]["branchind_rows"] = len(branchind)
     out.append(("g3b7b_none_estimate", fid, *g3b7b))
     for call in baseline.get("calls", ()):
         key = f"{fid}/{call['op']}"
@@ -127,7 +154,7 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
         out.append(("return_shape", f"{fid}/{item['op']}",
                     *_judge(reads_of([item["address"]], READS["return_shape"]), item["return_shape"] == "applied")))
     for item in baseline.get("branchind", ()):
-        judged = _judge(reads_of([item["address"]], READS["unknown_transfer_site"]), True)
+        judged = _judge(reads_of([item["address"]], READS["unknown_transfer_site"]), bool(item["unknown_transfer"]))
         judged[2]["unknown_transfer"] = item["unknown_transfer"]
         out.append(("unknown_transfer_site", f"{fid}/{item['site']}", *judged))
     return out
@@ -139,7 +166,8 @@ def summary(rows: list[tuple]) -> dict:
     for consumer, _, run_state, verdict, detail in rows:
         item = out.setdefault(consumer, {"units": 0, "baseline_present": 0, "confirmed": 0,
                                          "would_block_disagreement": 0, "would_block_unobserved": 0,
-                                         "loss": 0, "loss_unknown": 0})
+                                         "would_block_refused": 0, "loss_disagreement": 0, "loss_unobserved": 0,
+                                         "loss_refused": 0, "loss_unknown": 0})
         item["units"] += 1
         if detail.get("baseline"):
             item["baseline_present"] += 1
@@ -150,5 +178,5 @@ def summary(rows: list[tuple]) -> dict:
         if detail["loss"] == "unknown":
             item["loss_unknown"] += 1
         else:
-            item["loss"] += detail["loss"]
+            item["loss_" + detail["cause"]] += detail["loss"]
     return out

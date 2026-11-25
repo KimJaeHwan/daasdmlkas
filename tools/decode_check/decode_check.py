@@ -87,6 +87,8 @@ def collect(generation: Path, naming_source: Path) -> dict:
             return
         evidence = program.evidence
         found["language"] = evidence.translation_namespace.language_id
+        found["language_version"] = (evidence.translation_namespace.major_version,
+                                     evidence.translation_namespace.minor_version)
         found["image_base"] = evidence.image_base.byte_offset
         function_keys = {claim.entry for claim in diagnosis.claims if claim.entry}
         last = {claim.entry: claim for claim in diagnosis.claims if claim.evidence is not None}
@@ -165,8 +167,19 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     image = check.Image(generation, mapping, base, original)
     rows = check.mapping_rows(image)
     reason = check.global_reason(mapping, base, facts["language"] or "")
+    # r4 s2: the table applies only when the premise is on AND the Bundle's own identity fields match it
+    identity = lifting.table_identity(facts["language"] or "", *(facts.get("language_version") or (None, None)))
+    use_table = premise and identity["state"] != "mismatch"
+    unverified = None
+    if premise and not use_table:
+        unverified = f"translation identity mismatch ({identity['checks']['language']}): the table does not apply"
+    elif not premise:
+        unverified = "translation-unverified (no compiled-SLEIGH digest in the Bundle; premise " \
+                     f"{lifting.TRANSLATION_PREMISE} off)"
+    header["translation_identity"] = {**identity, "premise": premise, "table_applied": use_table}
     states = {}
-    rows.extend(check.decode_rows(image, facts["functions"], premise, reason, full, states, facts["language"] or ""))
+    rows.extend(check.decode_rows(image, facts["functions"], use_table, reason, full, states, facts["language"] or "",
+                                  unverified))
     rows.extend(check.suspect_rows(rows))
     rows.extend(dependents_rows(facts["functions"], states, reason, full, header))
     header["mapping"] = {"format": mapping.format, "rules": mapping.rules, "mapping_id": mapping.mapping_id,
