@@ -565,3 +565,23 @@ def test_the_callee_side_judges_a_shared_row_once(monkeypatch):
                   "sink": _sink()})
     assert root.is_effectively_complete
     assert judged and max(judged.values()) == 1
+
+
+@pytest.mark.parametrize("on", (True, False))
+@pytest.mark.parametrize("arms", (2, 1))
+def test_a_push_pop_whose_stack_pointer_joins_two_arms_stays_preserved(arms, on):
+    """Fable PE-c r4 P2-1: the restore's address (the stack pointer) reaches it
+    through a JOIN of two definitions (one arm moves it and back); the
+    address-slice check accepts a JOIN of clean definitions, with or without
+    globals-disjoint-from-stack (no constant store in play). ``arms`` 1: the
+    control without a join."""
+    helper = FunctionBuilder(entry=HELPER).push(RBX)
+    if arms == 2:
+        helper.cbranch("done", reg(ZF, 1)).push(RCX).pop(RCX).label("done")
+    else:
+        helper.push(RCX).pop(RCX)
+    helper.ins(copy(reg(RBX), const(0))).pop(RBX).ret()
+    functions = {"main": _main_through_helper(), "source": _source_returning_constant(), "helper": helper,
+                 "sink": _sink()}
+    roots = analyze_program(functions, PROVIDER, normalize_options={"assume_globals_disjoint_from_stack": on})
+    assert roots[("main", "sink.arg0")].is_effectively_complete

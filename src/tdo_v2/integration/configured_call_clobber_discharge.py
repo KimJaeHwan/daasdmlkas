@@ -667,6 +667,14 @@ def _callee_preserves(callee: _FunctionView, span: ByteSpan, read_ok) -> bool:
         if definition.kind is MemoryDefinitionKind.ENTRY:
             clean[definition_id] = True
             return True
+        if definition.kind is MemoryDefinitionKind.JOIN:
+            # (Fable r4 P2-1) paths meet (a stack pointer moved on one arm):
+            # clean when every incoming definition is; a KILL stays refused
+            sources = callee._join_sources.get(definition_id, ())
+            if not sources or not all(defined_clean(source, depth + 1) for source in sources):
+                return False
+            clean[definition_id] = True
+            return True
         if definition.kind is not MemoryDefinitionKind.DATA_WRITE or not debt_free(definition.operation_key):
             return False
         key = definition.operation_key

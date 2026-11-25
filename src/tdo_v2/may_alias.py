@@ -308,7 +308,9 @@ class _Policy:
         amendment 8) a constant-address one -- the private-frame rule keeps
         only entry-value bases out of the frame, a constant rests on
         globals-disjoint-from-stack, under which ``may_alias`` already
-        excludes the pair."""
+        excludes the pair. Precondition (Fable r4 P3-2): call only after
+        ``may_alias`` let the pair through -- alone it answers True for every
+        constant-address object."""
         return other in self.wild_objects or other.kind is StorageObjectKind.ADDRESS_SPACE
 
     def may_alias(self, left: StorageObjectId, right: StorageObjectId) -> bool:
