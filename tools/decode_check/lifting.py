@@ -137,7 +137,7 @@ def _ret_shape(ops, space):
         RSP:8 = INT_ADD(RSP:8, const:8(W))
         [RSP:8 = INT_ADD(RSP:8, const:8(K))]     (once, 0 <= K <= 0xffff)
         RETURN(T:W)
-    T a REGISTER / UNIQUE of size W (8, or 2 for 66 C3), never RSP; nothing else."""
+    T a UNIQUE, or the IP register (RIP / IP at 0x288) of size W (8, or 2 for 66 C3); nothing else."""
     if len(ops) not in (3, 4):
         return None
     load, first, rest = ops[0], ops[1], ops[2:]
