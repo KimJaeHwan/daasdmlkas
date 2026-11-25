@@ -17,6 +17,7 @@ import struct
 PAGE = 0x1000
 DT_RELA, DT_RELASZ, DT_RELAENT, DT_PLTGOT, DT_SYMTAB, DT_SYMENT = 7, 8, 9, 3, 6, 11
 DT_RELR, DT_RELRSZ, DT_RELRENT = 36, 35, 37
+DT_JMPREL, DT_PLTRELSZ, DT_PLTREL = 23, 2, 20
 
 
 @dataclass
@@ -49,9 +50,9 @@ def _phdr(kind, flags, offset, vaddr, filesz, memsz, align):
 
 
 def make_elf(segments: list, *, e_type=3, link_base=0, relocations=(), relr=(), symbol_sizes=(), pltgot=None,
-             extra_dynamic=(), dynamic=True, dyn_vaddr=None, machine=62) -> Elf:
+             extra_dynamic=(), dynamic=True, dyn_vaddr=None, machine=62, jmprel=(), second_dynamic=False) -> Elf:
     segments = list(segments)
-    count = 1 + len(segments) + (2 if dynamic else 0)
+    count = 1 + len(segments) + (2 if dynamic else 0) + (1 if dynamic and second_dynamic else 0)
     header_size = 64 + 56 * count
     file = bytearray(header_size)
     loads = []
@@ -76,6 +77,10 @@ def make_elf(segments: list, *, e_type=3, link_base=0, relocations=(), relr=(), 
             tags += [(DT_RELA, dyn_vaddr + len(body)), (DT_RELASZ, 24 * len(relocations)), (DT_RELAENT, 24)]
             for item in relocations:
                 body += struct.pack("<QQq", item.offset, item.symbol << 32 | item.kind, item.addend)
+        if jmprel:
+            tags += [(DT_JMPREL, dyn_vaddr + len(body)), (DT_PLTRELSZ, 24 * len(jmprel)), (DT_PLTREL, DT_RELA)]
+            for item in jmprel:
+                body += struct.pack("<QQq", item.offset, item.symbol << 32 | item.kind, item.addend)
         if relr:
             tags += [(DT_RELR, dyn_vaddr + len(body)), (DT_RELRSZ, 8 * len(relr)), (DT_RELRENT, 8)]
             for entry in relr:
@@ -96,6 +101,8 @@ def make_elf(segments: list, *, e_type=3, link_base=0, relocations=(), relr=(), 
         phdrs.append(_phdr(1, 6, offset, dyn_vaddr, len(body), len(body), PAGE))
         phdrs.append(_phdr(2, 6, offset + dynamic_at, dyn_vaddr + dynamic_at, len(body) - dynamic_at,
                            len(body) - dynamic_at, 8))
+        if second_dynamic:
+            phdrs.append(phdrs[-1])
         loads.append((dyn_vaddr, bytes(body)))
     phdrs[0] = _phdr(1, 4, 0, link_base, header_size, header_size, PAGE)
     file[0:16] = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)

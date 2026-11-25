@@ -27,7 +27,7 @@
     },
     "g3b7b_none_estimate": {
      "design": "r3 s6 (not in this branch's engine: loss unknown)",
-     "reads": "every row: a1, a2, a3, a4, a5, a8; a BRANCHIND row blocks (the exporter refuses it); otherwise unobserved: getParsedLength / prototype flow not exported",
+     "reads": "every row: a1, a2, a3, a4, a5, a8; a BRANCHIND row blocks (the exporter refuses it); an observed disagreement blocks; otherwise unobserved: getParsedLength / prototype flow not exported -- unconfirmable by definition here, a scope marker, not a measurement",
      "status": "estimate",
      "unit": "function"
     },
@@ -49,6 +49,12 @@
      "status": "baseline",
      "unit": "call"
     },
+    "resolved_transfer_site": {
+     "design": "Fable impl r2 P2-1",
+     "reads": "a8, a5: keeping a resolved site's complete successor set (baseline: unknown_transfer false) -- the fact an L2 gate can remove at a BRANCHIND",
+     "status": "baseline",
+     "unit": "branchind"
+    },
     "return_shape": {
      "design": "r2 s6",
      "reads": "a11b (a9 reported apart)",
@@ -63,13 +69,13 @@
     },
     "s1_l2_estimate": {
      "design": "r2 s6 adopted L2 acceptance, r3 s6",
-     "reads": "the s1 reads + every row: a2, a3, a4, a5, a6, a8, F.is_call; call candidates (either side): a7",
+     "reads": "the s1 reads + every row: a1, a2, a3, a4, a5, a6, a8, F.is_call; call candidates (either side; any row where A7 was compared): a7",
      "status": "estimate",
      "unit": "function"
     },
     "unknown_transfer_site": {
      "design": "r3 s6",
-     "reads": "a8, a5 (baseline: the engine's unknown_transfer verdict; state-barrier completeness needs fault cuts, not exported)",
+     "reads": "a8, a5: the engine's U2a unknown site (baseline: unknown_transfer true); state-barrier completeness needs fault cuts, not exported",
      "status": "baseline",
      "unit": "branchind"
     }
@@ -231,7 +237,7 @@
     "SUBPIECE"
    ],
    "ghidra": "12.0.4",
-   "id": "x86-64-lift-table-2",
+   "id": "x86-64-lift-table-3",
    "language": [
     "x86:LE:64:default",
     4,
@@ -269,7 +275,7 @@
    },
    "premise": true,
    "state": "missing-digest",
-   "table": "x86-64-lift-table-2",
+   "table": "x86-64-lift-table-3",
    "table_applied": true
   },
   "voters": {
@@ -306,6 +312,7 @@
       "value": false
      },
      "F.is_flow": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": true
      },
@@ -332,6 +339,7 @@
       ]
      },
      "a11a": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": 64
      },
@@ -340,6 +348,9 @@
       "intel": "8",
       "kind": "vendor",
       "state": "withheld"
+     },
+     "a11c": {
+      "state": "not_applicable"
      },
      "a12": {
       "state": "not_applicable"
@@ -567,6 +578,7 @@
       "value": false
      },
      "F.is_flow": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": true
      },
@@ -593,12 +605,16 @@
       ]
      },
      "a11a": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": 64
      },
      "a11b": {
       "state": "applied",
       "value": 8
+     },
+     "a11c": {
+      "state": "not_applicable"
      },
      "a12": {
       "state": "not_applicable"
@@ -783,6 +799,7 @@
       "value": false
      },
      "F.is_flow": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": true
      },
@@ -812,6 +829,9 @@
       "state": "not_applicable"
      },
      "a11b": {
+      "state": "not_applicable"
+     },
+     "a11c": {
       "state": "not_applicable"
      },
      "a12": {
@@ -998,6 +1018,7 @@
       "value": false
      },
      "F.is_flow": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": true
      },
@@ -1024,12 +1045,16 @@
       ]
      },
      "a11a": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": 64
      },
      "a11b": {
       "state": "applied",
       "value": 8
+     },
+     "a11c": {
+      "state": "not_applicable"
      },
      "a12": {
       "state": "not_applicable"
@@ -1200,7 +1225,7 @@
     "recomputed": true,
     "revision": "cpuDependentLength G3b-7b r9g (main 18a5f5e exporter)",
     "rows": [
-     "140001000"
+     "1:140001000"
     ],
     "rows_count": 1,
     "s1_observed": true
@@ -1231,12 +1256,12 @@
     "baseline": true,
     "blocking": [
      [
-      "140001000",
+      "1:140001000",
       "a4",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a5",
       "withheld"
      ]
@@ -1259,17 +1284,17 @@
     "baseline": null,
     "blocking": [
      [
-      "140001000",
+      "1:140001000",
       "a2",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a4",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a5",
       "withheld"
      ]
@@ -1292,7 +1317,7 @@
     "baseline": null,
     "blocking": [
      [
-      "140001010",
+      "1:140001010",
       "producer inputs not exported: getParsedLength, prototype flow (r3 s6)",
       "unobserved"
      ]
@@ -1314,12 +1339,12 @@
     "baseline": true,
     "blocking": [
      [
-      "140001000",
+      "1:140001000",
       "a4",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a7",
       "withheld"
      ]
@@ -1341,17 +1366,17 @@
     "baseline": true,
     "blocking": [
      [
-      "140001000",
+      "1:140001000",
       "a4",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a11b",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a7",
       "withheld"
      ]
@@ -1373,17 +1398,17 @@
     "baseline": true,
     "blocking": [
      [
-      "140001000",
+      "1:140001000",
       "a4",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a11b",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a7",
       "withheld"
      ]
@@ -1429,12 +1454,12 @@
     "baseline": true,
     "blocking": [
      [
-      "140001000",
+      "1:140001000",
       "a2",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a4",
       "withheld"
      ]
@@ -1468,27 +1493,27 @@
     "baseline": true,
     "blocking": [
      [
-      "140001000",
+      "1:140001000",
       "a2",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a4",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a2",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a4",
       "withheld"
      ],
      [
-      "140001000",
+      "1:140001000",
       "a5",
       "withheld"
      ]

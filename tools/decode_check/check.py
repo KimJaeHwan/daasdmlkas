@@ -239,14 +239,15 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
         conditions = {}
         for facts in function["rows"]:
             key = f"{function['function_id']}/{facts['space']:x}:{facts['address']:x}"
-            states[(function["function_id"], facts["address"])] = {"*": "unobserved"}
-            conditions[facts["address"]] = guards.UNOBSERVED
+            where = (facts["space"], facts["address"])
+            states[(function["function_id"], *where)] = {"*": "unobserved"}
+            conditions[where] = guards.UNOBSERVED
             if reason is not None:
                 rows.append(Row("decode", "row", key, "unobserved", None, "lint", {"reason": reason}))
                 continue
             window = image.window(facts["address"], facts["space"])
             lift = lifting.identify(facts) if premise else None
-            conditions[facts["address"]] = guards.row_condition(facts, window["bytes"], lift)
+            conditions[where] = guards.row_condition(facts, window["bytes"], lift)
             if not window["bytes"]:
                 rows.append(Row("decode", "row", key, "unobserved", None, "lint",
                                 {"reason": f"no verified byte at the row start ({window['stop']})"}))
@@ -255,11 +256,11 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
             result = compare.compare_row(facts, lift, window, ballot, s1=function["s1"],
                                          native_call=facts["native_call"], premise=premise,
                                          unverified_reason=unverified_reason)
-            states[(function["function_id"], facts["address"])] = dependents.attribute_states(result)
+            states[(function["function_id"], *where)] = dependents.attribute_states(result)
             state = result["state"]
             detail = {"window": result["window"], "lift": None if lift is None else lift.pattern, "s1": function["s1"]}
-            if conditions[facts["address"]] is not False:
-                detail["guard"] = {"recomputed": conditions[facts["address"]],
+            if conditions[where] is not False:
+                detail["guard"] = {"recomputed": conditions[where],
                                    "fired_at_production": guards.FIRED_AT_PRODUCTION}
             if full or state != "applied":
                 # (an applied row keeps only its window and lift: every attribute agreed; the report of a
@@ -289,7 +290,7 @@ def guard_row(function: dict, conditions: dict, language: str) -> Row:
     value = guards.function_condition(language, list(conditions.values()))
     detail = {"recomputed": value, "fired_at_production": guards.FIRED_AT_PRODUCTION,
               "s1_observed": bool(function["s1"]), "revision": guards.REVISION}
-    rows_of = [f"{address:x}" for address, item in conditions.items() if item is not False]
+    rows_of = [f"{space:x}:{offset:x}" for (space, offset), item in conditions.items() if item is not False]
     if rows_of:
         detail["rows"] = rows_of[:5]
         detail["rows_count"] = len(rows_of)

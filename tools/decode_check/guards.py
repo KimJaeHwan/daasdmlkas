@@ -65,8 +65,11 @@ def transfers(facts: dict, lift=None):
     length -- is "unobserved". A row without a transfer op whose exported flow bits
     still say call / jump / terminal (a call fixup may have replaced the p-code) is
     "unobserved" too (Fable impl r1 P3)."""
+    flow = facts.get("flow") or {}
+    says_transfer = bool(flow.get("is_call") or flow.get("is_jump") or flow.get("is_terminal"))
     if lift is not None and lift.pattern in SKIP_PATTERNS:
-        return False
+        # (a cmov / rep row whose exported flow bits still say transfer: a fixup may have changed it)
+        return UNOBSERVED if says_transfer else False
     start = facts.get("address")
     length = facts.get("length")
     nxt = None if length is None or start is None else start + length
@@ -87,10 +90,7 @@ def transfers(facts: dict, lift=None):
         if nxt is not None and offset is not None and offset not in (start, nxt):
             return True
         doubt = True
-    if doubt or found:
-        return UNOBSERVED
-    flow = facts.get("flow") or {}
-    if flow.get("is_call") or flow.get("is_jump") or flow.get("is_terminal"):
+    if doubt or found or says_transfer:
         return UNOBSERVED
     return False
 

@@ -27,7 +27,7 @@
     },
     "g3b7b_none_estimate": {
      "design": "r3 s6 (not in this branch's engine: loss unknown)",
-     "reads": "every row: a1, a2, a3, a4, a5, a8; a BRANCHIND row blocks (the exporter refuses it); otherwise unobserved: getParsedLength / prototype flow not exported",
+     "reads": "every row: a1, a2, a3, a4, a5, a8; a BRANCHIND row blocks (the exporter refuses it); an observed disagreement blocks; otherwise unobserved: getParsedLength / prototype flow not exported -- unconfirmable by definition here, a scope marker, not a measurement",
      "status": "estimate",
      "unit": "function"
     },
@@ -49,6 +49,12 @@
      "status": "baseline",
      "unit": "call"
     },
+    "resolved_transfer_site": {
+     "design": "Fable impl r2 P2-1",
+     "reads": "a8, a5: keeping a resolved site's complete successor set (baseline: unknown_transfer false) -- the fact an L2 gate can remove at a BRANCHIND",
+     "status": "baseline",
+     "unit": "branchind"
+    },
     "return_shape": {
      "design": "r2 s6",
      "reads": "a11b (a9 reported apart)",
@@ -63,13 +69,13 @@
     },
     "s1_l2_estimate": {
      "design": "r2 s6 adopted L2 acceptance, r3 s6",
-     "reads": "the s1 reads + every row: a2, a3, a4, a5, a6, a8, F.is_call; call candidates (either side): a7",
+     "reads": "the s1 reads + every row: a1, a2, a3, a4, a5, a6, a8, F.is_call; call candidates (either side; any row where A7 was compared): a7",
      "status": "estimate",
      "unit": "function"
     },
     "unknown_transfer_site": {
      "design": "r3 s6",
-     "reads": "a8, a5 (baseline: the engine's unknown_transfer verdict; state-barrier completeness needs fault cuts, not exported)",
+     "reads": "a8, a5: the engine's U2a unknown site (baseline: unknown_transfer true); state-barrier completeness needs fault cuts, not exported",
      "status": "baseline",
      "unit": "branchind"
     }
@@ -231,7 +237,7 @@
     "SUBPIECE"
    ],
    "ghidra": "12.0.4",
-   "id": "x86-64-lift-table-2",
+   "id": "x86-64-lift-table-3",
    "language": [
     "x86:LE:64:default",
     4,
@@ -250,10 +256,10 @@
   "mapping": {
    "format": "elf",
    "load_bias": 1048576,
-   "mapping_id": "e6bb4a96f6fc40549b33e836a9154ece10db0b897252025745e0515f7428fd38",
-   "rules": "elf-loader-rules-2"
+   "mapping_id": "99c9fde950bc2a558cea8172516671a130bf4e622c762c3393d7fa838a1a2c99",
+   "rules": "elf-loader-rules-3"
   },
-  "mapping_id": "e6bb4a96f6fc40549b33e836a9154ece10db0b897252025745e0515f7428fd38",
+  "mapping_id": "99c9fde950bc2a558cea8172516671a130bf4e622c762c3393d7fa838a1a2c99",
   "premises": [
    "decoder-matches-cpu",
    "stock-ghidra-translator"
@@ -269,7 +275,7 @@
    },
    "premise": true,
    "state": "missing-digest",
-   "table": "x86-64-lift-table-2",
+   "table": "x86-64-lift-table-3",
    "table_applied": true
   },
   "voters": {
@@ -306,6 +312,7 @@
       "value": false
      },
      "F.is_flow": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": true
      },
@@ -332,12 +339,16 @@
       ]
      },
      "a11a": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": 64
      },
      "a11b": {
       "state": "applied",
       "value": 8
+     },
+     "a11c": {
+      "state": "not_applicable"
      },
      "a12": {
       "state": "not_applicable"
@@ -553,6 +564,7 @@
       "value": false
      },
      "F.is_flow": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": true
      },
@@ -579,12 +591,16 @@
       ]
      },
      "a11a": {
+      "provenance": "mode-constant",
       "state": "applied",
       "value": 64
      },
      "a11b": {
       "state": "applied",
       "value": 8
+     },
+     "a11c": {
+      "state": "not_applicable"
      },
      "a12": {
       "state": "not_applicable"
@@ -789,7 +805,7 @@
     "recomputed": "unobserved",
     "revision": "cpuDependentLength G3b-7b r9g (main 18a5f5e exporter)",
     "rows": [
-     "101013"
+     "1:101013"
     ],
     "rows_count": 1,
     "s1_observed": true
@@ -818,7 +834,7 @@
     "baseline": null,
     "blocking": [
      [
-      "101000",
+      "1:101000",
       "producer inputs not exported: getParsedLength, prototype flow (r3 s6)",
       "unobserved"
      ]
@@ -840,27 +856,27 @@
     "baseline": null,
     "blocking": [
      [
-      "101010",
+      "1:101010",
       "a1",
       "unobserved"
      ],
      [
-      "101010",
+      "1:101010",
       "a2",
       "unobserved"
      ],
      [
-      "101010",
+      "1:101010",
       "a3",
       "unobserved"
      ],
      [
-      "101010",
+      "1:101010",
       "a4",
       "unobserved"
      ],
      [
-      "101010",
+      "1:101010",
       "a5",
       "unobserved"
      ]
@@ -930,7 +946,7 @@
     "baseline": true,
     "blocking": [
      [
-      "101013",
+      "1:101013",
       "a11b",
       "unobserved"
      ]
@@ -987,32 +1003,32 @@
     "baseline": true,
     "blocking": [
      [
-      "101010",
+      "1:101010",
+      "a1",
+      "unobserved"
+     ],
+     [
+      "1:101010",
       "a2",
       "unobserved"
      ],
      [
-      "101010",
+      "1:101010",
       "a3",
       "unobserved"
      ],
      [
-      "101010",
+      "1:101010",
       "a4",
       "unobserved"
      ],
      [
-      "101010",
+      "1:101010",
       "a5",
-      "unobserved"
-     ],
-     [
-      "101010",
-      "a6",
       "unobserved"
      ]
     ],
-    "blocking_count": 16,
+    "blocking_count": 18,
     "cause": "unobserved",
     "loss": 1,
     "would_block": true
@@ -1094,9 +1110,9 @@
     },
     "format": "elf",
     "load_bias": 1048576,
-    "mapping_id": "e6bb4a96f6fc40549b33e836a9154ece10db0b897252025745e0515f7428fd38",
+    "mapping_id": "99c9fde950bc2a558cea8172516671a130bf4e622c762c3393d7fa838a1a2c99",
     "relocations": "absent",
-    "rules": "elf-loader-rules-2",
+    "rules": "elf-loader-rules-3",
     "written": "complete"
    },
    "key": "bundle",

@@ -3,7 +3,7 @@
 Checks one sealed Bundle against its own `original` file, without Ghidra:
 
 1. **Mapping (layer `mapping`)** — the original is mapped by pinned loader rules
-   (PE32+: `pe-loader-rules-5`, ELF64: `elf-loader-rules-2`) and every sealed
+   (PE32+: `pe-loader-rules-5`, ELF64: `elf-loader-rules-3`) and every sealed
    block byte is compared with the byte the loader would place there.
 2. **Decode (layer `decode`)** — every Ghidra-listed instruction row is decoded
    again from *verified* bytes only (sealed byte == loader byte) by pinned

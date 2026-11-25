@@ -1,4 +1,4 @@
-"""ELF64 x86-64 file mapping of G1 decode_check: ``elf-loader-rules-2``.
+"""ELF64 x86-64 file mapping of G1 decode_check: ``elf-loader-rules-3``.
 Only the file's own headers are read (never Ghidra data).
 
 Coordinates are offsets from ``image_base`` = the page floor of the lowest
@@ -27,7 +27,8 @@ Rules (one revision, pinned by RULES):
   type is 16 bytes (the largest x86-64 write, TLSDESC). Android packed
   relocations (DT_ANDROID_REL / DT_ANDROID_RELA) are not parsed: indeterminate.
   The PLT range glibc may rewrite (DT_X86_64_PLT / DT_X86_64_PLTSZ, -z mark-plt) is
-  written too. A table tag without its size tag, a duplicated write-affecting tag
+  written too, and so is each JUMP_SLOT's r_addend PLT entry (DT_X86_64_PLTENT bytes);
+  DT_X86_64_PLT without DT_X86_64_PLTENT is indeterminate (rules v3). A table tag without its size tag, a duplicated write-affecting tag
   (glibc keeps the last) or more than one PT_DYNAMIC is indeterminate (rules v2).
   A static image (no PT_DYNAMIC) without section headers is indeterminate: its
   startup-applied relocations cannot be located. Non-SHF_ALLOC relocation
@@ -43,7 +44,7 @@ import struct
 
 from pe_map import Parsed, Range, disjoint
 
-RULES = "elf-loader-rules-2"
+RULES = "elf-loader-rules-3"
 EM_X86_64 = 62
 ET_EXEC, ET_DYN = 2, 3
 PT_LOAD, PT_DYNAMIC = 1, 2
@@ -60,7 +61,8 @@ DT = {"PLTRELSZ": 2, "PLTGOT": 3, "SYMTAB": 6, "RELA": 7, "RELASZ": 8, "RELAENT"
 # tags whose value decides a loader-written range: a duplicate is indeterminate (glibc keeps the last value)
 WRITE_TAGS = ("RELA", "RELASZ", "RELAENT", "REL", "RELSZ", "RELENT", "JMPREL", "PLTRELSZ", "PLTREL", "RELR",
               "RELRSZ", "RELRENT", "ANDROID_REL", "ANDROID_RELSZ", "ANDROID_RELA", "ANDROID_RELASZ", "ANDROID_RELR",
-              "ANDROID_RELRSZ", "ANDROID_RELRENT", "PLTGOT", "SYMTAB", "SYMENT", "X86_64_PLT", "X86_64_PLTSZ")
+              "ANDROID_RELRSZ", "ANDROID_RELRENT", "PLTGOT", "SYMTAB", "SYMENT", "X86_64_PLT", "X86_64_PLTSZ",
+              "X86_64_PLTENT")
 
 # bytes written per R_X86_64_* type (psABI); NONE (0) and TLSDESC_CALL (35) write nothing; COPY (5) uses st_size
 WIDTHS = {1: 8, 2: 4, 3: 4, 4: 4, 6: 8, 7: 8, 8: 8, 9: 4, 10: 4, 11: 4, 12: 2, 13: 2, 14: 1, 15: 1, 16: 8, 17: 8,
@@ -167,9 +169,10 @@ def _parse(data: bytes) -> ElfImage:
     # pages two PT_LOADs share (r: the later mmap replaces the page)
     shared = []
     pages = sorted((_floor(p[3]), _ceil(p[3] + p[6])) for p in loads)
-    for (a0, a1), (b0, b1) in zip(pages, pages[1:]):
-        if b0 < a1:
-            shared.append((b0 - image_base, min(a1, b1) - image_base))
+    for index, (a0, a1) in enumerate(pages):
+        for b0, b1 in pages[index + 1:]:
+            if b0 < a1 and a0 < b1:
+                shared.append((max(a0, b0) - image_base, min(a1, b1) - image_base))
     image.ranges = disjoint(_overlay_ambiguous(ranges, shared, "PT_LOAD segments share a page"))
     image.header_fields["writable_code_segments"] = [item["index"] for item in image.segments
                                                      if item["flags"] & 3 == 3]   # (PF_X | PF_W)
@@ -317,9 +320,23 @@ def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize) -> Parsed:
                                     ("ANDROID_RELR", "ANDROID_RELRSZ"), ("X86_64_PLT", "X86_64_PLTSZ")):
             if DT[table_tag] in tags and DT[size_tag] not in tags:
                 problems.append(f"DT_{table_tag} without DT_{size_tag}")
+        if DT["X86_64_PLT"] in tags and DT["X86_64_PLTENT"] not in tags:
+            problems.append("DT_X86_64_PLT without DT_X86_64_PLTENT")
         if DT["X86_64_PLT"] in tags and DT["X86_64_PLTSZ"] in tags:
             plt = tags[DT["X86_64_PLT"]]
             ranges.append((plt, plt + tags[DT["X86_64_PLTSZ"]], "plt-rewrite"))
+            # glibc rewrites the PLT entry each JUMP_SLOT's r_addend names (dl-machine.h): written too,
+            # inside the declared range or not
+            if DT["X86_64_PLTENT"] in tags and DT["JMPREL"] in tags and DT["PLTRELSZ"] in tags:
+                try:
+                    table = _read(image, data, tags[DT["JMPREL"]], tags[DT["PLTRELSZ"]])
+                    entry = tags[DT["X86_64_PLTENT"]]
+                    for cursor in range(0, len(table) - 23, 24):
+                        _, info, addend = struct.unpack_from("<QQq", table, cursor)
+                        if info & 0xFFFFFFFF == 7:
+                            ranges.append((addend, addend + entry, "plt-rewrite-entry"))
+                except _Unreadable as error:
+                    problems.append(f"DT_JMPREL (PLT rewrite entries): {error}")
         for kind in ("ANDROID_REL", "ANDROID_RELA"):
             if DT[kind] in tags:
                 problems.append(f"DT_{kind}: Android packed relocations are not parsed")

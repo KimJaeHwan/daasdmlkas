@@ -16,7 +16,7 @@ from __future__ import annotations
 from lifting import LISTING_BITS
 
 NA = ("n/a",)   # a value meaning "the attribute does not apply to this instruction"
-TABLE_DEPENDENT = ("a3", "a5", "a6", "a7", "a8", "a9", "a10", "a11a", "a11b", "a12", "target_operand_bits")
+TABLE_DEPENDENT = ("a3", "a5", "a6", "a7", "a8", "a9", "a10", "a11a", "a11b", "a11c", "a12", "target_operand_bits")
 F_BITS = ("has_fallthrough", "is_call", "is_jump", "is_terminal", "is_computed", "is_conditional", "is_flow",
           "is_unconditional")
 PRECEDENCE = ("unobserved", "withheld:decoder-disagreement", "withheld:amd-disagreement", "withheld:vendor",
@@ -90,8 +90,11 @@ def voter_values(decoded, va: int) -> dict:
     return values
 
 
-COMPARED = ("a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11a", "a11b", "a12",
+COMPARED = ("a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11a", "a11b", "a11c", "a12",
             "target_operand_bits") + tuple("F." + bit for bit in F_BITS)
+# attributes the 64-bit mode fixes on the voter side (not read from the bytes): kept, marked, never counted as
+# observed agreement in the dependents (Fable impl r2 P3-1)
+MODE_CONSTANT = ("a11a", "F.is_flow")
 LEGACY_PREFIXES = frozenset((0x66, 0xF0, 0x67, 0xF2, 0xF3, 0x2E, 0x3E, 0x26, 0x36, 0x64, 0x65))
 
 
@@ -198,6 +201,13 @@ def compare_row(facts: dict, lift, window: dict, ballot: dict, *, s1: bool, nati
     intel_values = [voter_values(d, va) for d in intel]
     amd_values = [voter_values(d, va) for d in amd]
     ghidra, reasons = ghidra_values(facts, lift if premise else None, s1, native_call, unverified_reason)
+    if "a11c" in ghidra:
+        for decoded, values in zip(list(intel) + list(amd), intel_values + amd_values):
+            if decoded.status == "ok" and decoded.indirect:
+                values["a11c"] = decoded.address_bits
+        if 0x67 in _prefix_run(window["bytes"]) and ghidra["a11c"] == 64:
+            # (address-size override without an extension in the p-code: the width is not recoverable, r2 s1)
+            reasons["a11c"] = "address-size override: effective-address width not recoverable from the p-code"
     names = list(COMPARED[:-len(F_BITS)]) + \
         ["F." + bit for bit in F_BITS]
     for name in names:
@@ -205,19 +215,19 @@ def compare_row(facts: dict, lift, window: dict, ballot: dict, *, s1: bool, nati
     if ghidra.get("a2_provenance"):
         out["attributes"]["a2"]["provenance"] = "via A4 (counted once)"
     # length and continuation of Ghidra itself disagreeing, where a contract requires equality (r4 s5)
-    if facts["length"] is not None and facts["fallthrough"] is not None and s1 and native_call \
-            and va + facts["length"] != facts["fallthrough"]:
+    continuation = facts["fallthrough"] if facts["fallthrough"] is not None else \
+        (facts["exit"]["target"] if facts["exit"] else None)
+    if facts["length"] is not None and continuation is not None and s1 and native_call \
+            and va + facts["length"] != continuation:
         inconsistency = {"state": "unrecognized", "kind": "ghidra-internal-inconsistency",
-                         "ghidra": facts["length"], "fallthrough": facts["fallthrough"]}
+                         "ghidra": facts["length"], "continuation": continuation}
         if out["attributes"]["a2"]["state"] in ("applied", "unrecognized", "not_applicable"):
             out["attributes"]["a2"] = inconsistency
         else:   # (a withheld / unobserved A2 outranks it: keep it, note the inconsistency, r1 s5 precedence)
             out["attributes"]["a2"]["also"] = inconsistency
-    # A11c: under an address-size override the effective-address width is not recoverable from the final
-    # varnode (r2 s1); without 67 both sides use the mode's 64-bit addressing
-    if 0x67 in _prefix_run(window["bytes"]) and any(d.status == "ok" and d.indirect for d in voters):
-        out["attributes"]["a11c"] = {"state": "unobserved",
-                                     "reason": "address-size override: effective-address width not recoverable"}
+    for name in MODE_CONSTANT:
+        if out["attributes"][name]["state"] == "applied":
+            out["attributes"][name]["provenance"] = "mode-constant"
     out["state"] = _aggregate(out["attributes"])
     return out
 

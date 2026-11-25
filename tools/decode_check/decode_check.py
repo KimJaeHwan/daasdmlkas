@@ -45,9 +45,11 @@ SCOPE = ("only Ghidra-listed rows are checked (L5); 64-bit long mode only (no co
          "registers written) is not compared; whether a producer guard fired cannot be decided from the Bundle")
 
 
-def _offset(coordinate_text: str) -> int:
-    """``space:offset[:...]`` (G0 coordinate / operation key text) -> the byte offset."""
-    return int(coordinate_text.split(":")[1], 16)
+def _offset(coordinate_text: str) -> tuple:
+    """``space:offset[:...]`` (G0 coordinate / operation key text) -> ``(space, offset)``: rows of
+    different address spaces never share a key (Astra impl r2 P1-2)."""
+    space, offset = coordinate_text.split(":")[:2]
+    return int(space, 16), int(offset, 16)
 
 
 def baseline_of(claim, raw, function_keys, superseded) -> dict:
@@ -64,7 +66,7 @@ def baseline_of(claim, raw, function_keys, superseded) -> dict:
     exits = [{"source": _offset(row.detail["source"]), "target": _offset(row.detail["target"])}
              for row in ops_layer.exit_rows(claim, raw, function_keys, superseded) if row.verdict != "unrecognized"]
     # (site key control:<entry>:<space>:<offset>; the entry itself contains ':')
-    branchind = [{"site": row.key.split("/", 1)[1], "address": int(row.key.rsplit(":", 1)[1], 16),
+    branchind = [{"site": row.key.split("/", 1)[1], "address": _offset(":".join(row.key.rsplit(":", 2)[-2:])),
                   "unknown_transfer": row.detail["unknown_transfer"]}
                  for row in ops_layer.branchind_rows(claim, raw, superseded)]
     returns = [{"op": row.key.split("/", 1)[1], "address": _offset(row.key.split("/", 1)[1]),
@@ -133,7 +135,8 @@ def dependents_rows(functions: list, states: dict, reason: str | None, full: boo
             out.append(Row("dependents", "baseline", function["function_id"], "error", None, "lint",
                            {"reason": function["baseline_error"]}))
             continue
-        mine = {facts["address"]: states.get((function["function_id"], facts["address"]), {"*": "unobserved"})
+        mine = {(facts["space"], facts["address"]):
+                states.get((function["function_id"], facts["space"], facts["address"]), {"*": "unobserved"})
                 for facts in function["rows"]}
         for consumer, key, run_state, verdict, detail in dependents.function_rows(function, mine):
             judged.append((consumer, key, run_state, verdict, detail))

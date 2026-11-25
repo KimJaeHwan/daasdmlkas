@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 # Ghidra 12.0.4, x86:LE:64:default 4.6 (x86-64.sla d5adc314, the engine's own evidence: fault_premise.py,
 # pcodeop_models x86.json): userop indices this table reads
 TABLE = {
-    "id": "x86-64-lift-table-2",
+    "id": "x86-64-lift-table-3",
     "language": ("x86:LE:64:default", 4, 6),
     "ghidra": "12.0.4",
     "sla_sha256_prefix": "d5adc314",
@@ -89,18 +89,25 @@ def _width_before_extension(ops, varnode, upto):
     return varnode["size"] * 8
 
 
-def _push(ops, upto, table=None):
+def _space_ok(item, space):
+    """A LOAD / STORE space-selector constant naming the row's own address space (``space`` None: unchecked)."""
+    return _is_const(item) and (space is None or item["offset"] == space)
+
+
+def _push(ops, upto, table=None, space=None):
     """(push bytes, STORE width bits, STORE value or None, RSP width bits) when ``ops[:upto]`` is exactly
     allowed prefix ops (none writing RSP) ; INT_SUB RSP = RSP - const ; STORE [RSP] -- the near-call push
-    (r2 s1). Anything else (a second RSP write: far call; another base register; ops between) -> None."""
+    (r2 s1), RSP the full 64-bit register and the STORE into the row's own address space. Anything else
+    (a second RSP write: far call; another base register; ESP; another space; ops between) -> None."""
     table = table or TABLE
     if upto < 2:
         return None
     sub_op, store_op = ops[upto - 2], ops[upto - 1]
-    if sub_op["opcode"] != "INT_SUB" or not _is_reg(sub_op["output"], RSP) or len(sub_op["inputs"]) != 2 \
-            or not _is_reg(sub_op["inputs"][0], RSP) or not _is_const(sub_op["inputs"][1]):
+    if sub_op["opcode"] != "INT_SUB" or not _is_reg(sub_op["output"], RSP, 8) or len(sub_op["inputs"]) != 2 \
+            or not _is_reg(sub_op["inputs"][0], RSP, 8) or not _is_const(sub_op["inputs"][1]):
         return None
-    if store_op["opcode"] != "STORE" or len(store_op["inputs"]) != 3 or not _is_reg(store_op["inputs"][1], RSP):
+    if store_op["opcode"] != "STORE" or len(store_op["inputs"]) != 3 or not _is_reg(store_op["inputs"][1], RSP, 8) \
+            or not _space_ok(store_op["inputs"][0], space):
         return None
     for op in ops[:upto - 2]:
         if op["opcode"] not in table["allowed_prefix"] or _is_reg(op["output"], RSP):
@@ -114,8 +121,21 @@ def _prefix_ok(ops, upto, table):
     return all(op["opcode"] in table["allowed_prefix"] for op in ops[:upto])
 
 
+def _memory_address_bits(ops, target, upto):
+    """A11c of a memory-indirect transfer: the width of the LOAD address before extension, when a LOAD of
+    this row produces the target; None for a register target (not applicable)."""
+    for index in range(upto - 1, -1, -1):
+        op = ops[index]
+        if op["output"] == target:
+            if op["opcode"] == "LOAD" and len(op["inputs"]) == 2:
+                return _width_before_extension(ops, op["inputs"][1], index)
+            return None
+    return None
+
+
 def identify(facts: dict, table: dict = TABLE) -> Lift:
     ops = facts["ops"]
+    space = facts.get("space")
     start = facts["address"]
     length = facts["length"]
     nxt = None if length is None else start + length
@@ -166,16 +186,19 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
     op = ops[last]
     name = op["opcode"]
     target = op["inputs"][0] if op["inputs"] else None
-    if name == "BRANCH" and nxt is None and _push(ops, last, table) is not None:
+    if name == "BRANCH" and nxt is None and _push(ops, last, table, space) is not None:
         return Lift("unidentified", {}, {name_: "push + BRANCH without a known next address (no length)"
                                          for name_ in ("a3", "a5", "a6", "a8", "a9", "a10")})
-    if name in ("CALL", "CALLIND", "BRANCH") and _push(ops, last, table) is not None \
+    if name in ("CALL", "CALLIND", "BRANCH") and _push(ops, last, table, space) is not None \
             and (name != "BRANCH" or (_is_address(target) and target["offset"] == nxt)):
-        push = _push(ops, last, table)
+        push = _push(ops, last, table, space)
         values = {"a6": "near", "a9": "none", "a10": ("none",), "a11b": push[0], "a11a": push[3],
                   "a7": (push[1], push[2]), "a3": "call-continuation" if continuation else "none"}
         if name == "CALLIND":
             values.update(a8="indirect", a5=None, target_operand_bits=_width_before_extension(ops, target, last))
+            memory = _memory_address_bits(ops, target, last - 2)
+            if memory is not None:
+                values["a11c"] = memory
         else:   # CALL ADDRESS, or call $+5 lifted as push + BRANCH ADDRESS(next)
             values.update(a8="direct", a5=target["offset"])
         return Lift("call $+5" if name == "BRANCH" else ("call indirect" if name == "CALLIND" else "call"), values)
@@ -205,20 +228,25 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
                 break
         return Lift("jcc", values)
     if name == "BRANCHIND":
-        return lift("jmp indirect", a3="none" if not continuation else "sequential", a5=None, a6="none",
-                    a8="indirect", a9="none", a10=("none",),
-                    target_operand_bits=_width_before_extension(ops, target, last))
+        values = {"a3": "none" if not continuation else "sequential", "a5": None, "a6": "none", "a8": "indirect",
+                  "a9": "none", "a10": ("none",), "target_operand_bits": _width_before_extension(ops, target, last)}
+        memory = _memory_address_bits(ops, target, last)
+        if memory is not None:
+            values["a11c"] = memory
+        return Lift("jmp indirect", values)
     if name == "RETURN":
         loads = [op_ for op_ in ops[:last] if op_["opcode"] == "LOAD" and len(op_["inputs"]) == 2
-                 and _is_reg(op_["inputs"][1], RSP)]
-        adds = [op_ for op_ in ops[:last] if op_["opcode"] == "INT_ADD" and _is_reg(op_["output"], RSP)
-                and _is_const(op_["inputs"][1])]
-        if len(loads) == 1 and adds and op["inputs"] and op["inputs"][0] == loads[0]["output"]:
+                 and _is_reg(op_["inputs"][1], RSP, 8) and _space_ok(op_["inputs"][0], space)]
+        adds = [op_ for op_ in ops[:last] if op_["opcode"] == "INT_ADD" and _is_reg(op_["output"], RSP, 8)
+                and len(op_["inputs"]) == 2 and _is_reg(op_["inputs"][0], RSP, 8) and _is_const(op_["inputs"][1])]
+        writes = [op_ for op_ in ops[:last] if _is_reg(op_["output"], RSP)]
+        if len(loads) == 1 and adds and len(writes) == len(adds) and op["inputs"] \
+                and op["inputs"][0] == loads[0]["output"]:
             width = loads[0]["output"]["size"]
             released = sum(item["inputs"][1]["offset"] for item in adds)
             kind = "near" if released == width else "near_imm"
             return lift("ret", a3="none" if not continuation else "sequential", a5=None, a6="none", a8="none",
-                        a9=kind, a10=("none",), a11b=width, a11a=loads[0]["inputs"][1]["size"] * 8,
+                        a9=kind, a10=("none",), a11b=width, a11a=adds[0]["output"]["size"] * 8,
                         ret_imm=released - width if kind == "near_imm" else None)
         return Lift("unidentified", {}, {name_: "RETURN without the ret shape"
                                          for name_ in ("a3", "a5", "a6", "a8", "a9", "a10")})

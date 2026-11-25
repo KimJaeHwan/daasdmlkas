@@ -30,8 +30,9 @@ CALL_READS = ("a2", "a3", "a4", "a6", "a8", "F.is_call")
 CONSUMERS = {
     "s1": ("function", "native-call rows: " + ", ".join(CALL_READS) + "; S1 exit rows: a4 (exit target = A4)",
            "baseline", "r2 s6 S1 current contract"),
-    "s1_l2_estimate": ("function", "the s1 reads + every row: a2, a3, a4, a5, a6, a8, F.is_call; call "
-                       "candidates (either side): a7", "estimate", "r2 s6 adopted L2 acceptance, r3 s6"),
+    "s1_l2_estimate": ("function", "the s1 reads + every row: a1, a2, a3, a4, a5, a6, a8, F.is_call; call "
+                       "candidates (either side; any row where A7 was compared): a7", "estimate",
+                       "r2 s6 adopted L2 acceptance, r3 s6"),
     "push_projection": ("call", "F.is_call, a3, a4, a11b, a7", "baseline", "r2 s6, r4 s6"),
     "push_relation": ("call", "the push_projection reads (relations iterate surviving projections), a4",
                       "baseline", "r2 s6, r4 s6"),
@@ -39,11 +40,16 @@ CONSUMERS = {
                    "r2 s6"),
     "call_seed": ("call", "a4, a5, a6, a8 (the seed's listing continuation)", "baseline", "r2 s6 call seeds / naming"),
     "return_shape": ("return", "a11b (a9 reported apart)", "baseline", "r2 s6"),
-    "unknown_transfer_site": ("branchind", "a8, a5 (baseline: the engine's unknown_transfer verdict; "
-                              "state-barrier completeness needs fault cuts, not exported)", "baseline", "r3 s6"),
+    "unknown_transfer_site": ("branchind", "a8, a5: the engine's U2a unknown site (baseline: unknown_transfer "
+                              "true); state-barrier completeness needs fault cuts, not exported", "baseline",
+                              "r3 s6"),
+    "resolved_transfer_site": ("branchind", "a8, a5: keeping a resolved site's complete successor set (baseline: "
+                               "unknown_transfer false) -- the fact an L2 gate can remove at a BRANCHIND",
+                               "baseline", "Fable impl r2 P2-1"),
     "g3b7b_none_estimate": ("function", "every row: a1, a2, a3, a4, a5, a8; a BRANCHIND row blocks (the exporter "
-                            "refuses it); otherwise unobserved: getParsedLength / prototype flow not exported",
-                            "estimate", "r3 s6 (not in this branch's engine: loss unknown)"),
+                            "refuses it); an observed disagreement blocks; otherwise unobserved: getParsedLength / "
+                            "prototype flow not exported -- unconfirmable by definition here, a scope marker, "
+                            "not a measurement", "estimate", "r3 s6 (not in this branch's engine: loss unknown)"),
 }
 READS = {
     "push_projection": ("F.is_call", "a3", "a4", "a11b", "a7"),
@@ -52,9 +58,10 @@ READS = {
     "call_seed": ("a4", "a5", "a6", "a8"),
     "return_shape": ("a11b",),
     "unknown_transfer_site": ("a8", "a5"),
+    "resolved_transfer_site": ("a8", "a5"),
 }
 G3B7B_READS = ("a1", "a2", "a3", "a4", "a5", "a8")
-L2_EXTRA = ("a2", "a3", "a4", "a5", "a6", "a8", "F.is_call")
+L2_EXTRA = ("a1", "a2", "a3", "a4", "a5", "a6", "a8", "F.is_call")
 G3B7B_MISSING = "producer inputs not exported: getParsedLength, prototype flow (r3 s6)"
 UNDETERMINED = {"rp": "needs the PC the unwinder restores at each fault point (not in a Bundle)",
                 "pass_through": "needs the PC the unwinder restores at each fault point (not in a Bundle)"}
@@ -82,6 +89,13 @@ def _status(states: dict, name: str) -> str:
     return "applied" if name in states.get("+", ()) else "unobserved"
 
 
+def _where(address) -> str:
+    """``(space, offset)`` -> ``space:offset`` (hex); a bare offset (pure tests) -> hex."""
+    if isinstance(address, tuple):
+        return f"{address[0]:x}:{address[1]:x}"
+    return f"{address:x}"
+
+
 def _judge(reads, baseline_present, extra=None):
     """reads: [(address, attribute, state)] -> (run state, verdict, detail). ``extra``: a
     (address, reason, state) the reads cannot show (a BRANCHIND row, a missing producer input)."""
@@ -98,7 +112,7 @@ def _judge(reads, baseline_present, extra=None):
     else:
         loss = 1 if baseline_present else 0
     detail = {"would_block": True, "cause": cause, "baseline": baseline_present, "loss": loss,
-              "blocking": [[f"{address:x}", name, state] for address, name, state in
+              "blocking": [[_where(address), name, state] for address, name, state in
                            (refused or disagreement or blocking)[:EXAMPLES]], "blocking_count": len(blocking)}
     if refused:   # (the report contract keeps verdict "refused" for the engine: a lint row withholds)
         return "evaluated", "withheld", detail
@@ -114,8 +128,10 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
     states:   {address: attribute_states(...)} of this function's rows."""
     fid = function["function_id"]
     baseline = function.get("baseline") or {}
-    addresses = [facts["address"] for facts in function["rows"]]
-    native = [facts["address"] for facts in function["rows"] if facts.get("native_call")]
+    addresses = [(facts.get("space"), facts["address"]) if "space" in facts else facts["address"]
+                 for facts in function["rows"]]
+    native = [(facts.get("space"), facts["address"]) if "space" in facts else facts["address"]
+              for facts in function["rows"] if facts.get("native_call")]
     exits = sorted({item["source"] for item in baseline.get("exits", ())})
     out = []
 
@@ -125,9 +141,13 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
 
     s1_reads = reads_of(native, CALL_READS) + reads_of(exits, ("a4",))
     out.append(("s1", fid, *_judge(s1_reads, bool(function["s1"]))))
+    def compared_a7(address):
+        row = states.get(address, {})
+        return "a7" in row or "a7" in row.get("+", ())
+
     candidates = [address for address in addresses
                   if address in native or _status(states.get(address, {"*": "unobserved"}), "a6") != "applied"
-                  or "a7" in states.get(address, {}).get("+", ())]
+                  or compared_a7(address)]
     out.append(("s1_l2_estimate", fid, *_judge(s1_reads + reads_of(addresses, L2_EXTRA)
                                                + reads_of(candidates, ("a7",)), bool(function["s1"]))))
     branchind = baseline.get("branchind", ())
@@ -154,9 +174,11 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
         out.append(("return_shape", f"{fid}/{item['op']}",
                     *_judge(reads_of([item["address"]], READS["return_shape"]), item["return_shape"] == "applied")))
     for item in baseline.get("branchind", ()):
-        judged = _judge(reads_of([item["address"]], READS["unknown_transfer_site"]), bool(item["unknown_transfer"]))
-        judged[2]["unknown_transfer"] = item["unknown_transfer"]
-        out.append(("unknown_transfer_site", f"{fid}/{item['site']}", *judged))
+        for consumer, present in (("unknown_transfer_site", bool(item["unknown_transfer"])),
+                                  ("resolved_transfer_site", not item["unknown_transfer"])):
+            judged = _judge(reads_of([item["address"]], READS[consumer]), present)
+            judged[2]["unknown_transfer"] = item["unknown_transfer"]
+            out.append((consumer, f"{fid}/{item['site']}", *judged))
     return out
 
 

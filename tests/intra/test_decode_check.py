@@ -517,7 +517,7 @@ def test_dependents_flip_only_is_call_r4_s6(tmp_path):
     call = next(key for consumer, key in found if consumer == "call_seed" and key.startswith("function-000000/"))
     s1 = found[("s1", "function-000000")]
     assert s1.detail["would_block"] and s1.detail["loss"] == 1 and s1.detail["baseline"] is True, s1.detail
-    assert ["140001000", "F.is_call", "unrecognized"] in s1.detail["blocking"]
+    assert ["1:140001000", "F.is_call", "unrecognized"] in s1.detail["blocking"]
     projection = found[("push_projection", call)]
     relation = found[("push_relation", call)]
     assert projection.detail["baseline"] is False and projection.detail["loss"] == 0, projection.detail
@@ -857,6 +857,197 @@ def test_translation_identity_mismatch_refuses_the_table_even_with_the_premise(t
     assert header2["translation_identity"]["checks"]["sla_digest"].startswith("missing")
 
 
+# -- implementation review r2 (Astra REJECT, Fable APPROVE with P2): each test fails on the r1 behaviour
+
+def _judged(function, states):
+    import dependents
+
+    return {(consumer, key): (run_state, verdict, detail)
+            for consumer, key, run_state, verdict, detail in dependents.function_rows(function, states)}
+
+
+def _fn(rows, *, s1=True, calls=(), branchind=(), returns=(), exits=()):
+    return {"function_id": "f", "s1": s1, "rows": rows,
+            "baseline": {"calls": list(calls), "exits": list(exits), "branchind": list(branchind),
+                         "returns": list(returns)}}
+
+
+def _ok(*bad):
+    import compare
+
+    return frozenset(compare.COMPARED) - set(bad)
+
+
+def test_r2_l2_counts_a7_and_a1_disagreements_of_non_native_rows():
+    """Astra impl r2 P1-1: a call $+5 (push + BRANCH, native_call False) with only A7 wrong, and an all-invalid
+    row (A1), must block the L2 estimate; a non-call row with only A2 wrong too (P2-4)."""
+    rows = [{"space": 1, "address": 0x10, "native_call": False}]
+    for bad, state in (("a7", "unrecognized"), ("a1", "unrecognized"), ("a2", "unrecognized")):
+        judged = _judged(_fn(rows), {(1, 0x10): {bad: state, "+": _ok(bad)}})
+        assert judged[("s1_l2_estimate", "f")][2]["would_block"], bad
+        assert not judged[("s1", "f")][2]["would_block"], bad      # (not an S1 read for a non-native row)
+
+
+def test_r2_rows_of_different_spaces_never_share_a_state():
+    """Astra impl r2 P1-2: an unverified native CALL and a verified one at the same offset of another space."""
+    rows = [{"space": 1, "address": 0x10, "native_call": True}, {"space": 2, "address": 0x10, "native_call": True}]
+    judged = _judged(_fn(rows), {(1, 0x10): {"*": "unobserved"}, (2, 0x10): {"+": _ok()}})
+    s1 = judged[("s1", "f")][2]
+    assert s1["would_block"] and s1["blocking"][0][0] == "1:10"
+
+
+def test_r2_u2a_and_resolved_site_losses_point_the_right_way():
+    """Fable impl r2 P2-1 / Astra r2 P2-4: an UNKNOWN site has no U2a loss to measure as 'resolved'; a resolved
+    site whose A8 disagrees loses its complete successor set (loss 1); unknown_transfer False -> U2a loss 0."""
+    rows = [{"space": 1, "address": 0x15, "native_call": False}]
+    resolved = [{"site": "control:x:1:15", "address": (1, 0x15), "unknown_transfer": False}]
+    unknown = [{"site": "control:x:1:15", "address": (1, 0x15), "unknown_transfer": True}]
+    bad = {(1, 0x15): {"a8": "withheld", "+": _ok("a8")}}
+    judged = _judged(_fn(rows, branchind=resolved), bad)
+    assert judged[("resolved_transfer_site", "f/control:x:1:15")][2]["loss"] == 1
+    assert judged[("unknown_transfer_site", "f/control:x:1:15")][2]["loss"] == 0
+    judged = _judged(_fn(rows, branchind=unknown), bad)
+    assert judged[("resolved_transfer_site", "f/control:x:1:15")][2]["loss"] == 0
+    assert judged[("unknown_transfer_site", "f/control:x:1:15")][2]["loss"] == 1
+
+
+def test_r2_plain_push_and_call_seed_read_the_listing_continuation():
+    """Astra impl r1 P2-4 pinned (r2 P2-4): an A4-only disagreement blocks plain push and the call seed."""
+    rows = [{"space": 1, "address": 0x10, "native_call": True}]
+    call = {"op": "1:10:2:CALL", "address": (1, 0x10), "opcode": "CALL",
+            "facts": {"naming": "applied", "push_projection": "applied", "push_relation": "applied",
+                      "plain_push": "applied"}}
+    judged = _judged(_fn(rows, calls=[call]), {(1, 0x10): {"a4": "unrecognized", "+": _ok("a4")}})
+    assert judged[("plain_push", "f/1:10:2:CALL")][2]["would_block"]
+    assert judged[("call_seed", "f/1:10:2:CALL")][2]["would_block"]
+
+
+def test_r2_mode_constant_attributes_are_marked():
+    import compare
+
+    assert set(compare.MODE_CONSTANT) <= set(compare.COMPARED)
+
+
+def test_r2_lift_rejects_wrong_spaces_and_widths():
+    """Astra impl r2 P1-3: a push STORE into another space, and a ret that updates ESP, are not the shapes."""
+    import lifting
+
+    other_space = _row(5, [_op("INT_SUB", [_r(RSP_), _c(8)], _r(RSP_)), _op("STORE", [_c(7), _r(RSP_), _c(START + 5)]),
+                           _op("CALL", [_a(START + 0x40)])])
+    assert lifting.identify(other_space).pattern == "unidentified"
+    esp = _row(1, [_op("LOAD", [_c(1), _r(RSP_)], _r(RIP_)), _op("INT_ADD", [_r(RSP_, 4), _c(8)], _r(RSP_, 4)),
+                   _op("RETURN", [_r(RIP_)])], fallthrough=False)
+    assert lifting.identify(esp).pattern == "unidentified"
+    good = _row(1, [_op("LOAD", [_c(1), _r(RSP_)], _r(RIP_)), _op("INT_ADD", [_r(RSP_), _c(8)], _r(RSP_)),
+                    _op("RETURN", [_r(RIP_)])], fallthrough=False)
+    lift = lifting.identify(good)
+    assert lift.pattern == "ret" and lift.values["a11a"] == 64
+
+
+def test_r2_a11c_from_a_memory_indirect_target_only():
+    import lifting
+
+    memory = _row(6, [_op("LOAD", [_c(1), _c(START + 0x106)], _u(0x40))] + _push(START + 6)
+                  + [_op("CALLIND", [_u(0x40)])])
+    assert lifting.identify(memory).values["a11c"] == 64
+    register = _row(2, _push(START + 2) + [_op("CALLIND", [_r(RAX_)])])
+    assert "a11c" not in lifting.identify(register).values
+
+
+@needs
+def test_r2_a11c_compared_with_the_voters_and_67_register_calls_not_unobserved():
+    lift, result = _compare(_row(6, [_op("LOAD", [_c(1), _c(START + 0x106)], _u(0x40))] + _push(START + 6)
+                                 + [_op("CALLIND", [_u(0x40)])], flow=_flow("call_indirect")),
+                            bytes.fromhex("ff1500010000" + "cc" * 9), native_call=True)
+    assert result["attributes"]["a11c"]["state"] == "applied"
+    _, result = _compare(_row(3, _push(START + 3) + [_op("CALLIND", [_r(RAX_)])], flow=_flow("call_indirect")),
+                         bytes.fromhex("67ffd0" + "cc" * 12), native_call=True)
+    assert result["attributes"]["a11c"]["state"] == "not_applicable"
+
+
+@needs
+def test_r2_kind4_restored_continuation_joins_the_length_contract():
+    """Astra impl r2 P2-2: S1 native CALL, length 5, no fallthrough, exit target start + 6."""
+    facts = _row(5, _push(START + 5) + [_op("CALL", [_a(START + 0x40)])], flow=_flow("call_direct"))
+    facts["fallthrough"], facts["exit"] = None, {"target": START + 6, "kind": 4, "function": None}
+    _, result = _compare(facts, bytes.fromhex("e83b000000" + "cc" * 10), s1=True, native_call=True)
+    assert result["attributes"]["a2"]["kind"] == "ghidra-internal-inconsistency", result["attributes"]["a2"]
+
+
+@needs
+def test_r2_a2_derived_beyond_the_verified_bytes_is_unobserved():
+    """Astra impl r1 P2-2 pinned: S1 native CALL without length, continuation start + 10, 6 verified bytes."""
+    import compare
+    import decoders
+    import lifting
+
+    facts = _row(None, _push(START + 10) + [_op("CALL", [_a(START + 0x40)])], flow=_flow("call_direct"))
+    facts["fallthrough"] = START + 10
+    data = bytes.fromhex("e83b000000cc")
+    window = {"bytes": data, "verified": 6, "stop": "test", "relocations": []}
+    result = compare.compare_row(facts, lifting.identify(facts), window, decoders.ballot(data, START), s1=True,
+                                 native_call=True, premise=True)
+    assert result["state"] == "unobserved" and "claimed range" in result["reason"], result
+
+
+def test_r2_guard_cross_checks_cmov_flow_bits():
+    """Astra impl r2 P2-3: a cmov lift whose exported flow still says call -> unobserved."""
+    import guards
+    import lifting
+
+    facts = _row(4, _cmov(4), flow={"is_call": True})
+    assert lifting.identify(facts).pattern == "cmov"
+    assert guards.row_condition(facts, bytes.fromhex("660f44c1"), lifting.identify(facts)) == "unobserved"
+
+
+def test_r2_voter_conflict_never_confirms_agreement():
+    """Fable impl r2 P2-2 (r4 s3): one voter's target beyond its own IP width does not agree with a voter
+    that truncates; a target within the width is the plain value."""
+    import compare
+    import decoders
+
+    def voter(name, target, bits):
+        return decoders.Decoded(voter=name, version="t", amd=False, status="ok", length=4, flow="jmp_near",
+                                target=target, target_ip_bits=bits)
+
+    wide = compare.voter_values(voter("a", 0x140001004, 16), START)["a5"]
+    assert wide[0] == "voter-conflict"
+    assert compare.voter_values(voter("b", 0x1004, 16), START)["a5"] == 0x1004
+    ghidra = {"a5": 0x1004}
+    item = compare._attribute("a5", ghidra, {}, [compare.voter_values(voter("a", 0x140001004, 16), START),
+                                                 compare.voter_values(voter("b", 0x1004, 16), START)],
+                              [compare.voter_values(voter("b", 0x1004, 16), START)], {"flow": {"is_override": False}})
+    assert (item["state"], item["kind"]) == ("withheld", "decoder-disagreement"), item
+
+
+@needs
+def test_r2_66_e9_a5_itself_splits():
+    facts = _row(4, [_op("BRANCH", [_a(0x1004)])], fallthrough=False, flow=_flow("jmp_direct"))
+    _, result = _compare(facts, bytes.fromhex("66e900000000" + "cc" * 9))
+    assert result["attributes"]["a5"]["state"] == "withheld", result["attributes"]["a5"]
+
+
+def test_r2_elf_plt_entries_pltent_and_nested_loads():
+    """Astra impl r2 P1-4: JUMP_SLOT r_addend entries written under PLT rewrite; DT_X86_64_PLTENT required and
+    never duplicated; three nested PT_LOADs (first and third share a page); several PT_DYNAMIC."""
+    import _elf_fixture as ef
+    import elf_map
+
+    seg = [ef.Segment(0x1000, b"\x90" * 0x40)]
+    tags = [(0x70000000, 0x1000), (0x70000001, 0x10), (0x70000003, 0x10)]
+    image = _elf(seg, extra_dynamic=tags, jmprel=[ef.Reloc(0x3800, 7, addend=0x1020)])
+    assert image.written.state == "complete", image.written.why
+    assert (0x1020, 0x1030, "plt-rewrite-entry") in image.written.ranges
+    duplicate = _elf(seg, extra_dynamic=tags + [(0x70000003, 0x10)])
+    assert duplicate.written.state == "indeterminate" and "DT_X86_64_PLTENT" in duplicate.written.why
+    several = _elf(seg, second_dynamic=True)
+    assert several.written.state == "indeterminate" and "more than one PT_DYNAMIC" in several.written.why
+    nested = elf_map.parse(ef.make_elf([ef.Segment(0x1000, b"\x90" * 0x10), ef.Segment(0x1010, b"\x91" * 0x10,
+                                                                                     offset=0x2010),
+                                        ef.Segment(0x1800, b"\x92" * 0x10, offset=0x3800)]).data)
+    assert nested.at(0x1000).kind == "ambiguous" and nested.at(0x1800).kind == "ambiguous"
+
+
 def test_guard_function_condition_is_x86_64_only():
     import guards
 
@@ -877,7 +1068,7 @@ def test_s1_guard_rows_keep_recomputed_apart_from_firing(tmp_path):
     a = rows[("decode", "s1_guard", "function-000000")]
     assert (a.run_state, a.verdict) == ("evaluated", "withheld")
     assert a.detail["recomputed"] is True and a.detail["fired_at_production"] == "unobserved"
-    assert a.detail["s1_observed"] is True and a.detail["rows"] == ["140001000"]
+    assert a.detail["s1_observed"] is True and a.detail["rows"] == ["1:140001000"]
     b = rows[("decode", "s1_guard", "function-000001")]
     assert (b.verdict, b.detail["recomputed"], b.detail["s1_observed"]) == ("applied", False, False)
     assert header["guard"]["language_agrees"] and header["guard"]["machine"] == 0x8664
@@ -953,7 +1144,7 @@ def test_elf_map_missing_size_duplicate_tags_and_plt_rewrite():
     assert missing.written.state == "indeterminate" and "DT_RELA without DT_RELASZ" in missing.written.why
     duplicate = _elf(seg, relocations=[ef.Reloc(0x1000, 8)], extra_dynamic=[(7, 0x3000)])   # a second DT_RELA
     assert duplicate.written.state == "indeterminate" and "duplicated dynamic tags" in duplicate.written.why
-    plt = _elf(seg, extra_dynamic=[(0x70000000, 0x1000), (0x70000001, 0x20)])
+    plt = _elf(seg, extra_dynamic=[(0x70000000, 0x1000), (0x70000001, 0x20), (0x70000003, 0x10)])
     assert plt.written.state == "complete" and (0x1000, 0x1020, "plt-rewrite") in plt.written.ranges
     no_size = _elf(seg, extra_dynamic=[(0x70000000, 0x1000)])
     assert no_size.written.state == "indeterminate"
