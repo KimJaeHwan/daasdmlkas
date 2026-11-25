@@ -3,7 +3,7 @@
 Checks one sealed Bundle against its own `original` file, without Ghidra:
 
 1. **Mapping (layer `mapping`)** — the original is mapped by pinned loader rules
-   (PE32+: `pe-loader-rules-5`, ELF64: `elf-loader-rules-3`) and every sealed
+   (PE32+: `pe-loader-rules-5`, ELF64: `elf-loader-rules-4`) and every sealed
    block byte is compared with the byte the loader would place there.
 2. **Decode (layer `decode`)** — every Ghidra-listed instruction row is decoded
    again from *verified* bytes only (sealed byte == loader byte) by pinned
@@ -28,6 +28,10 @@ Checks one sealed Bundle against its own `original` file, without Ghidra:
    CALL op whose scan fires depends on the prototype flow, which a Bundle does not
    carry); `fired_at_production` is always `unobserved`; the observed S1 presence
    sits beside it and is never used to infer firing.
+
+Mode constants: A11a and `F.is_flow` are fixed by the 64-bit mode on the voter side; their applied
+attributes carry `provenance: mode-constant`. They still count in a row's aggregate and in
+`header.counts`; no dependents read uses them.
 
 Layers: G1 counts (`header.counts`) cover `mapping` and `decode` only;
 `dependents` is derived; `semantics` is reserved for TBR (A3 / C1 semantic
@@ -125,6 +129,9 @@ parity reference for a Rust port. `G1_REGEN_GOLDEN=1` rewrites them after a revi
   2. the TBR G3 loader / LoadState model computes the post-rewrite bytes, so those rows can be decoded too;
   3. DVRT entries whose rewrite depends on the OS version or settings (e.g. retpoline enabled) need a named
      load-model premise; without it those bytes stay unobserved.
+- cmov / rep listing bits: pin them after a real-Bundle data check (as for `is_flow` /
+  `is_unconditional`) and bump the lift table; today those rows stay unobserved (likely a large share of
+  the unobserved rows of a large DLL).
 - Unlisted CALLOTHER forms (cpuid, rdtsc, SIMD intrinsics) are unidentified today; a table version may
   treat them as non-flow operations.
 - Far call / far ret lift patterns (today unidentified, never a false near-call suspect).

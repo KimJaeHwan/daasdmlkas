@@ -10,9 +10,12 @@ static void reset(dc_decoded *out) {
     out->disp_offset = -1;
     out->imm_offset[0] = out->imm_offset[1] = -1;
     out->int_vector = -1;
+    out->target_kind = DC_TARGET_UNKNOWN;
 }
 
 int dc_struct_size(void) { return (int)sizeof(dc_decoded); }
+
+int dc_layout_revision(void) { return DC_LAYOUT_REVISION; }
 
 const char *dc_version(void) {
     static char text[64];
@@ -121,6 +124,22 @@ int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc
         } else if (op0->type == ZYDIS_OPERAND_TYPE_REGISTER || op0->type == ZYDIS_OPERAND_TYPE_MEMORY) {
             out->indirect = 1;
         }
+    }
+    if (out->flow == DC_FLOW_CALL_NEAR || out->flow == DC_FLOW_JMP_NEAR) {
+        /* the first visible operand is the explicit target (implicit stack operands are hidden) */
+        if (!op0) {
+            out->target_kind = DC_TARGET_UNKNOWN;
+        } else if (op0->type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            out->target_kind = DC_TARGET_MEMORY;
+        } else if (op0->type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            out->target_kind = DC_TARGET_REGISTER;
+        } else if (op0->type == ZYDIS_OPERAND_TYPE_IMMEDIATE && op0->imm.is_relative) {
+            out->target_kind = DC_TARGET_DIRECT;
+        } else {
+            out->target_kind = DC_TARGET_UNKNOWN;
+        }
+    } else {
+        out->target_kind = DC_TARGET_NONE;
     }
     if ((out->flow == DC_FLOW_CALL_FAR || out->flow == DC_FLOW_JMP_FAR) && op0
             && (op0->type == ZYDIS_OPERAND_TYPE_REGISTER || op0->type == ZYDIS_OPERAND_TYPE_MEMORY)) {

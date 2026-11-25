@@ -40,12 +40,14 @@ CONSUMERS = {
                    "r2 s6"),
     "call_seed": ("call", "a4, a5, a6, a8 (the seed's listing continuation)", "baseline", "r2 s6 call seeds / naming"),
     "return_shape": ("return", "a11b (a9 reported apart)", "baseline", "r2 s6"),
-    "unknown_transfer_site": ("branchind", "a8, a5: the engine's U2a unknown site (baseline: unknown_transfer "
-                              "true); state-barrier completeness needs fault cuts, not exported", "baseline",
-                              "r3 s6"),
-    "resolved_transfer_site": ("branchind", "a8, a5: keeping a resolved site's complete successor set (baseline: "
-                               "unknown_transfer false) -- the fact an L2 gate can remove at a BRANCHIND",
-                               "baseline", "Fable impl r2 P2-1"),
+    "unknown_transfer_site": ("branchind", "a8, a5: the engine's existing U2a unknown-site fact (baseline: "
+                              "unknown_transfer true); its loss counts that fact's inputs not confirmed -- not a "
+                              "precision loss (UNKNOWN is already the most conservative state); state-barrier "
+                              "completeness needs fault cuts, not exported", "baseline", "r3 s6"),
+    "resolved_transfer_site": ("branchind", "a8, a5: BRANCHIND with non-empty flow_targets (baseline "
+                               "unknown_transfer=False; control_context.unknown_transfer_sites checks "
+                               "not row.flow_targets) -- the fact an L2 gate can remove at a BRANCHIND",
+                               "baseline", "Fable impl r2 P2-1, Astra impl r4 s6"),
     "g3b7b_none_estimate": ("function", "every row: a1, a2, a3, a4, a5, a8; a BRANCHIND row blocks (the exporter "
                             "refuses it); an observed disagreement blocks; otherwise unobserved: getParsedLength / "
                             "prototype flow not exported -- unconfirmable by definition here, a scope marker, "

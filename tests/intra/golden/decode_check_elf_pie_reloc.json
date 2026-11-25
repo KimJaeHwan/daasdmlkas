@@ -50,8 +50,8 @@
      "unit": "call"
     },
     "resolved_transfer_site": {
-     "design": "Fable impl r2 P2-1",
-     "reads": "a8, a5: keeping a resolved site's complete successor set (baseline: unknown_transfer false) -- the fact an L2 gate can remove at a BRANCHIND",
+     "design": "Fable impl r2 P2-1, Astra impl r4 s6",
+     "reads": "a8, a5: BRANCHIND with non-empty flow_targets (baseline unknown_transfer=False; control_context.unknown_transfer_sites checks not row.flow_targets) -- the fact an L2 gate can remove at a BRANCHIND",
      "status": "baseline",
      "unit": "branchind"
     },
@@ -75,7 +75,7 @@
     },
     "unknown_transfer_site": {
      "design": "r3 s6",
-     "reads": "a8, a5: the engine's U2a unknown site (baseline: unknown_transfer true); state-barrier completeness needs fault cuts, not exported",
+     "reads": "a8, a5: the engine's existing U2a unknown-site fact (baseline: unknown_transfer true); its loss counts that fact's inputs not confirmed -- not a precision loss (UNKNOWN is already the most conservative state); state-barrier completeness needs fault cuts, not exported",
      "status": "baseline",
      "unit": "branchind"
     }
@@ -237,7 +237,7 @@
     "SUBPIECE"
    ],
    "ghidra": "12.0.4",
-   "id": "x86-64-lift-table-3",
+   "id": "x86-64-lift-table-4",
    "language": [
     "x86:LE:64:default",
     4,
@@ -256,10 +256,10 @@
   "mapping": {
    "format": "elf",
    "load_bias": 1048576,
-   "mapping_id": "99c9fde950bc2a558cea8172516671a130bf4e622c762c3393d7fa838a1a2c99",
-   "rules": "elf-loader-rules-3"
+   "mapping_id": "241add7d3b57dfed0fb2160ac7309df34262d0462f6e3a4f0b77c39acbd9f587",
+   "rules": "elf-loader-rules-4"
   },
-  "mapping_id": "99c9fde950bc2a558cea8172516671a130bf4e622c762c3393d7fa838a1a2c99",
+  "mapping_id": "241add7d3b57dfed0fb2160ac7309df34262d0462f6e3a4f0b77c39acbd9f587",
   "premises": [
    "decoder-matches-cpu",
    "stock-ghidra-translator"
@@ -275,7 +275,7 @@
    },
    "premise": true,
    "state": "missing-digest",
-   "table": "x86-64-lift-table-3",
+   "table": "x86-64-lift-table-4",
    "table_applied": true
   },
   "voters": {
@@ -413,6 +413,7 @@
        "target": 1052688,
        "target_derivation": "decoder",
        "target_ip_bits": 64,
+       "target_kind": "direct",
        "value_fields": [
         [
          1,
@@ -439,6 +440,7 @@
        "target": 1052688,
        "target_derivation": "decoder",
        "target_ip_bits": 64,
+       "target_kind": "direct",
        "value_fields": [
         [
          1,
@@ -467,6 +469,7 @@
        "target": 1052688,
        "target_derivation": "decoder",
        "target_ip_bits": 64,
+       "target_kind": "direct",
        "value_fields": [
         [
          1,
@@ -493,6 +496,7 @@
        "target": 1052688,
        "target_derivation": "decoder",
        "target_ip_bits": 64,
+       "target_kind": "direct",
        "value_fields": [
         [
          1,
@@ -519,6 +523,7 @@
        "target": 1052688,
        "target_derivation": "computed: next IP + displacement at the operand width",
        "target_ip_bits": 64,
+       "target_kind": "direct",
        "value_fields": [
         [
          1,
@@ -659,6 +664,7 @@
        "target": null,
        "target_derivation": "",
        "target_ip_bits": 0,
+       "target_kind": "none",
        "value_fields": [],
        "version": "iced-x86 1.22.0",
        "voter": "iced"
@@ -680,6 +686,7 @@
        "target": null,
        "target_derivation": "",
        "target_ip_bits": 0,
+       "target_kind": "none",
        "value_fields": [],
        "version": "zydis 4.1.0.0",
        "voter": "zydis"
@@ -703,6 +710,7 @@
        "target": null,
        "target_derivation": "",
        "target_ip_bits": 0,
+       "target_kind": "none",
        "value_fields": [],
        "version": "iced-x86 1.22.0",
        "voter": "iced"
@@ -724,6 +732,7 @@
        "target": null,
        "target_derivation": "",
        "target_ip_bits": 0,
+       "target_kind": "none",
        "value_fields": [],
        "version": "zydis 4.1.0.0",
        "voter": "zydis"
@@ -745,6 +754,7 @@
        "target": null,
        "target_derivation": "",
        "target_ip_bits": 0,
+       "target_kind": "none",
        "value_fields": [],
        "version": "xed v2026.08.23",
        "voter": "xed"
@@ -1110,9 +1120,9 @@
     },
     "format": "elf",
     "load_bias": 1048576,
-    "mapping_id": "99c9fde950bc2a558cea8172516671a130bf4e622c762c3393d7fa838a1a2c99",
+    "mapping_id": "241add7d3b57dfed0fb2160ac7309df34262d0462f6e3a4f0b77c39acbd9f587",
     "relocations": "absent",
-    "rules": "elf-loader-rules-3",
+    "rules": "elf-loader-rules-4",
     "written": "complete"
    },
    "key": "bundle",

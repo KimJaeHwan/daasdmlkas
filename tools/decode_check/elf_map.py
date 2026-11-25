@@ -1,4 +1,4 @@
-"""ELF64 x86-64 file mapping of G1 decode_check: ``elf-loader-rules-3``.
+"""ELF64 x86-64 file mapping of G1 decode_check: ``elf-loader-rules-4``.
 Only the file's own headers are read (never Ghidra data).
 
 Coordinates are offsets from ``image_base`` = the page floor of the lowest
@@ -27,8 +27,10 @@ Rules (one revision, pinned by RULES):
   type is 16 bytes (the largest x86-64 write, TLSDESC). Android packed
   relocations (DT_ANDROID_REL / DT_ANDROID_RELA) are not parsed: indeterminate.
   The PLT range glibc may rewrite (DT_X86_64_PLT / DT_X86_64_PLTSZ, -z mark-plt) is
-  written too, and so is each JUMP_SLOT's r_addend PLT entry (DT_X86_64_PLTENT bytes);
-  DT_X86_64_PLT without DT_X86_64_PLTENT is indeterminate (rules v3). A table tag without its size tag, a duplicated write-affecting tag
+  written too, and so is each JUMP_SLOT's PLT entry [align_down(r_addend, PLTENT), +PLTENT)
+  (glibc-2.39-288-gce65d944e3 dl-machine.h 578-678: the union of IBT off / on); DT_X86_64_PLT
+  without DT_X86_64_PLTENT, an unsupported PLTENT, a PLTSZ that is not a multiple of it, REL
+  relocations and a truncated table are indeterminate (rules v4). A table tag without its size tag, a duplicated write-affecting tag
   (glibc keeps the last) or more than one PT_DYNAMIC is indeterminate (rules v2).
   A static image (no PT_DYNAMIC) without section headers is indeterminate: its
   startup-applied relocations cannot be located. Non-SHF_ALLOC relocation
@@ -44,7 +46,7 @@ import struct
 
 from pe_map import Parsed, Range, disjoint
 
-RULES = "elf-loader-rules-3"
+RULES = "elf-loader-rules-4"
 EM_X86_64 = 62
 ET_EXEC, ET_DYN = 2, 3
 PT_LOAD, PT_DYNAMIC = 1, 2
@@ -284,6 +286,41 @@ def _relr_targets(table: bytes, entsize: int, label: str) -> list:
     return out
 
 
+def _plt_entries(image, data, tags, plt_size, ranges) -> list:
+    """The PLT entry bytes glibc may rewrite per JUMP_SLOT (Astra impl r4 s1; glibc-2.39-288-gce65d944e3
+    sysdeps/x86_64/dl-machine.h 578-678, same start / end in 2.41): with E = DT_X86_64_PLTENT and
+    A = load_bias + r_addend, IBT off writes [align_down(A, E), +E), IBT on [A, +E); runtime IBT is not
+    known here, so the union [align_down(A, E), +E) is written. Only R_X86_64_JUMP_SLOT; written means "may
+    be written" (glibc may skip an entry). The load bias is page aligned, so aligning the link VA is the same
+    when E <= the page. Returns the problems (-> indeterminate)."""
+    entry = tags[DT["X86_64_PLTENT"]]
+    if entry < 16 or not _pow2(entry) or entry > PAGE:
+        return [f"DT_X86_64_PLTENT {entry} is not a supported power of two (16 .. page)"]
+    if plt_size < entry or plt_size % entry:
+        return [f"DT_X86_64_PLTSZ {plt_size} is not a positive multiple of DT_X86_64_PLTENT {entry}"]
+    if DT["JMPREL"] not in tags:
+        return []                      # (no JUMP_SLOT table: the declared range only)
+    if DT["PLTRELSZ"] not in tags:
+        return []                      # (reported by the table / size rule)
+    if tags.get(DT["PLTREL"], DT["RELA"]) != DT["RELA"]:
+        return ["PLT rewrite with DT_PLTREL REL: the JUMP_SLOT addends are not determinable"]
+    try:
+        table = _read(image, data, tags[DT["JMPREL"]], tags[DT["PLTRELSZ"]])
+    except _Unreadable as error:
+        return [f"DT_JMPREL (PLT rewrite entries): {error}"]
+    if len(table) % 24:
+        return ["DT_JMPREL (PLT rewrite entries): truncated RELA table"]
+    for cursor in range(0, len(table), 24):
+        _, info, addend = struct.unpack_from("<QQq", table, cursor)
+        if info & 0xFFFFFFFF != 7:     # (R_X86_64_JUMP_SLOT only: not IRELATIVE)
+            continue
+        start = addend // entry * entry
+        if addend < 0 or start + entry > 1 << 64:
+            return [f"PLT rewrite entry address {addend:#x} out of range"]
+        ranges.append((start, start + entry, "plt-rewrite-entry"))
+    return []
+
+
 def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize) -> Parsed:
     ranges = []
     problems = []
@@ -323,20 +360,10 @@ def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize) -> Parsed:
         if DT["X86_64_PLT"] in tags and DT["X86_64_PLTENT"] not in tags:
             problems.append("DT_X86_64_PLT without DT_X86_64_PLTENT")
         if DT["X86_64_PLT"] in tags and DT["X86_64_PLTSZ"] in tags:
-            plt = tags[DT["X86_64_PLT"]]
-            ranges.append((plt, plt + tags[DT["X86_64_PLTSZ"]], "plt-rewrite"))
-            # glibc rewrites the PLT entry each JUMP_SLOT's r_addend names (dl-machine.h): written too,
-            # inside the declared range or not
-            if DT["X86_64_PLTENT"] in tags and DT["JMPREL"] in tags and DT["PLTRELSZ"] in tags:
-                try:
-                    table = _read(image, data, tags[DT["JMPREL"]], tags[DT["PLTRELSZ"]])
-                    entry = tags[DT["X86_64_PLTENT"]]
-                    for cursor in range(0, len(table) - 23, 24):
-                        _, info, addend = struct.unpack_from("<QQq", table, cursor)
-                        if info & 0xFFFFFFFF == 7:
-                            ranges.append((addend, addend + entry, "plt-rewrite-entry"))
-                except _Unreadable as error:
-                    problems.append(f"DT_JMPREL (PLT rewrite entries): {error}")
+            plt, plt_size = tags[DT["X86_64_PLT"]], tags[DT["X86_64_PLTSZ"]]
+            ranges.append((plt, plt + plt_size, "plt-rewrite"))
+            if DT["X86_64_PLTENT"] in tags:
+                problems.extend(_plt_entries(image, data, tags, plt_size, ranges))
         for kind in ("ANDROID_REL", "ANDROID_RELA"):
             if DT[kind] in tags:
                 problems.append(f"DT_{kind}: Android packed relocations are not parsed")

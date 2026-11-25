@@ -13,7 +13,7 @@ States: ``applied``, ``unobserved`` (no verdict), ``not_applicable``,
 
 from __future__ import annotations
 
-from lifting import LISTING_BITS
+from lifting import LISTING_BITS, continuation as _continuation
 
 NA = ("n/a",)   # a value meaning "the attribute does not apply to this instruction"
 TABLE_DEPENDENT = ("a3", "a5", "a6", "a7", "a8", "a9", "a10", "a11a", "a11b", "a11c", "a12", "target_operand_bits")
@@ -54,7 +54,8 @@ def voter_values(decoded, va: int) -> dict:
         else ("voter-conflict", decoded.voter, decoded.target, decoded.target_ip_bits),   # (r4 s3: no agreement)
         "a6": "near" if near_call else ("far" if flow == "call_far" else "none"),
         "a8": "direct" if decoded.target is not None else ("indirect" if decoded.indirect else "none"),
-        "a9": {"ret_near": "near_imm" if decoded.ret_imm else "near", "ret_far": "far", "iret": "iret"}.get(flow,
+        "a9": {"ret_near": "near_imm" if decoded.ret_imm is not None else "near", "ret_far": "far",
+               "iret": "iret"}.get(flow,
                                                                                                           "none"),
         "a10": {"int3": ("int", 3), "int_n": ("int", decoded.int_vector), "int1": ("int1",), "into": ("into",),
                 "ud": ("invalid-opcode",), "syscall": ("syscall",), "sysenter": ("sysenter",)}.get(flow, ("none",)),
@@ -69,6 +70,12 @@ def voter_values(decoded, va: int) -> dict:
         values["a11a"] = decoded.stack_bits or 64
     if decoded.counter:
         values["a12"] = decoded.address_bits
+    if flow in ("call_near", "jmp_near"):
+        # A11c (Astra impl r4 s3): memory -> its effective-address width; register / direct -> not applicable;
+        # a voter that cannot tell -> not observable
+        kind = getattr(decoded, "target_kind", "unknown")
+        values["a11c"] = decoded.address_bits if kind == "memory" else NA if kind in ("register", "direct") \
+            else ("unobservable", "target operand kind unknown")
     if decoded.indirect and flow in ("call_near", "jmp_near"):
         values["target_operand_bits"] = decoded.target_ip_bits
     form = None
@@ -119,10 +126,11 @@ def ghidra_values(facts: dict, lift, s1: bool, native_call: bool,
     translation premise is off -> table-dependent attributes unobserved."""
     start = facts["address"]
     values, reasons = {"a1": True}, {}
-    continuation = facts["fallthrough"] if facts["fallthrough"] is not None else \
-        (facts["exit"]["target"] if facts["exit"] else None)
-    # A4: the listing continuation (or the S1 exit target)
-    values["a4"] = continuation if continuation is not None else NA
+    where = _continuation(facts)
+    own = where is not None and where[0] == facts.get("space")
+    continuation = where[1] if own else None
+    # A4: the listing continuation (or the S1 exit target) in the row's own space; another space never agrees
+    values["a4"] = NA if where is None else continuation if own else ("other-space", where[0], where[1])
     # A2: the exported length; else via A4 only for a native call in an S1 function (r3 s2)
     if facts["length"] is not None:
         values["a2"] = facts["length"]
@@ -201,10 +209,7 @@ def compare_row(facts: dict, lift, window: dict, ballot: dict, *, s1: bool, nati
     intel_values = [voter_values(d, va) for d in intel]
     amd_values = [voter_values(d, va) for d in amd]
     ghidra, reasons = ghidra_values(facts, lift if premise else None, s1, native_call, unverified_reason)
-    if "a11c" in ghidra:
-        for decoded, values in zip(list(intel) + list(amd), intel_values + amd_values):
-            if decoded.status == "ok" and decoded.indirect:
-                values["a11c"] = decoded.address_bits
+    if ghidra.get("a11c") not in (None, NA):
         if 0x67 in _prefix_run(window["bytes"]) and ghidra["a11c"] == 64:
             # (address-size override without an extension in the p-code: the width is not recoverable, r2 s1)
             reasons["a11c"] = "address-size override: effective-address width not recoverable from the p-code"
@@ -215,12 +220,11 @@ def compare_row(facts: dict, lift, window: dict, ballot: dict, *, s1: bool, nati
     if ghidra.get("a2_provenance"):
         out["attributes"]["a2"]["provenance"] = "via A4 (counted once)"
     # length and continuation of Ghidra itself disagreeing, where a contract requires equality (r4 s5)
-    continuation = facts["fallthrough"] if facts["fallthrough"] is not None else \
-        (facts["exit"]["target"] if facts["exit"] else None)
-    if facts["length"] is not None and continuation is not None and s1 and native_call \
-            and va + facts["length"] != continuation:
+    where = _continuation(facts)
+    expected = (facts.get("space"), va + facts["length"]) if facts["length"] is not None else None
+    if expected is not None and where is not None and s1 and native_call and where != expected:
         inconsistency = {"state": "unrecognized", "kind": "ghidra-internal-inconsistency",
-                         "ghidra": facts["length"], "continuation": continuation}
+                         "ghidra": facts["length"], "expected": list(expected), "continuation": list(where)}
         if out["attributes"]["a2"]["state"] in ("applied", "unrecognized", "not_applicable"):
             out["attributes"]["a2"] = inconsistency
         else:   # (a withheld / unobserved A2 outranks it: keep it, note the inconsistency, r1 s5 precedence)

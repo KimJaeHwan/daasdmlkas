@@ -23,7 +23,9 @@ LOAD_CONFIG_READ = 0x140
 LOAD_CONFIG_SLOTS = ((0x58, "security-cookie"), (0x70, "cfg-check-pointer"), (0x78, "cfg-dispatch-pointer"),
                      (0xD8, "rf-failure-routine-pointer"), (0xE8, "rf-verify-sp-pointer"),
                      (0x118, "xfg-check-pointer"), (0x120, "xfg-dispatch-pointer"),
-                     (0x128, "xfg-table-dispatch-pointer"), (0x130, "castguard-failure-mode"),
+                     (0x128, "xfg-table-dispatch-pointer"),
+                     # (winnt.h IMAGE_LOAD_CONFIG_DIRECTORY64.CastGuardOsDeterminedFailureMode: a VA the OS fills)
+                     (0x130, "castguard-failure-mode"),
                      (0x138, "memcpy-pointer"))
 # (offset, width, label): non-zero -> the loader rewrites code (DVRT) / hybrid image (CHPE) / hot patching
 LOAD_CONFIG_REWRITING = ((0xC0, 8, "DynamicValueRelocTable"), (0xC8, 8, "CHPEMetadataPointer"),

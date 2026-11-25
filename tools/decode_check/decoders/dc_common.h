@@ -39,6 +39,15 @@ enum dc_flow {
     DC_FLOW_OTHER = 21        /* any other control transfer the shim does not classify */
 };
 
+/* the explicit target operand of a near CALL / JMP (Astra impl r4 s3: each voter reports it itself) */
+enum dc_target_kind {
+    DC_TARGET_UNKNOWN = 0,   /* the decoder could not tell */
+    DC_TARGET_NONE = 1,      /* not a near CALL / JMP */
+    DC_TARGET_DIRECT = 2,    /* relative branch target */
+    DC_TARGET_REGISTER = 3,
+    DC_TARGET_MEMORY = 4     /* its effective-address width is address_bits */
+};
+
 typedef struct {
     int32_t status;
     int32_t length;
@@ -59,11 +68,15 @@ typedef struct {
     int32_t disp_offset, disp_size;     /* memory or branch displacement field, -1 / 0 if none */
     int32_t imm_offset[2], imm_size[2]; /* immediate fields, -1 / 0 if none */
     char mnemonic[32];
+    int32_t target_kind;       /* enum dc_target_kind (layout revision 2) */
 } dc_decoded;
 
 /* amd: 0 Intel behaviour, 1 AMD behaviour (where the decoder models it) */
 int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc_decoded *out);
 const char *dc_version(void);
 int dc_struct_size(void);
+/* the layout revision: target_kind fits in the old struct padding, so the size alone cannot tell (2) */
+#define DC_LAYOUT_REVISION 2
+int dc_layout_revision(void);
 
 #endif

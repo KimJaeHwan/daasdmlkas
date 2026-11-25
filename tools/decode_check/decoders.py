@@ -20,6 +20,8 @@ DECODERS = Path(os.environ.get("G1_DECODERS", "/root/g1_decoders"))
 FLOWS = ("none", "call_near", "call_far", "jmp_near", "jmp_far", "jcc", "ret_near", "ret_far", "iret", "int3",
          "int_n", "int1", "into", "ud", "syscall", "sysenter", "sysret", "hlt", "xbegin", "xabort", "xend", "other")
 STATUSES = ("ok", "invalid", "no_more_data", "error")
+TARGET_KINDS = ("unknown", "none", "direct", "register", "memory")   # (enum dc_target_kind)
+LAYOUT_REVISION = 2
 MAX_LENGTH = 15
 
 
@@ -44,13 +46,14 @@ class Decoded:
     value_fields: tuple = ()          # ((offset, size), ...) of displacement / immediate fields
     mnemonic: str = ""
     target_derivation: str = ""       # "decoder" | "computed: next IP + displacement at the operand width"
+    target_kind: str = "unknown"      # near CALL / JMP explicit target: memory / register / direct / none / unknown
     extra: dict = field(default_factory=dict, compare=False)
 
     def as_json(self) -> dict:
         out = {name: getattr(self, name) for name in (
             "voter", "version", "amd", "status", "length", "flow", "indirect", "target", "counter", "target_ip_bits",
             "encoded_disp_bits", "operand_bits", "address_bits", "stack_bits", "ret_imm", "int_vector",
-            "mnemonic", "target_derivation")}
+            "mnemonic", "target_derivation", "target_kind")}
         out["value_fields"] = [list(item) for item in self.value_fields]
         return out
 
@@ -66,6 +69,7 @@ class DcDecoded(ctypes.Structure):
         ("ret_imm", ctypes.c_int32), ("ret_imm_value", ctypes.c_int32), ("int_vector", ctypes.c_int32),
         ("prefix_count", ctypes.c_int32), ("disp_offset", ctypes.c_int32), ("disp_size", ctypes.c_int32),
         ("imm_offset", ctypes.c_int32 * 2), ("imm_size", ctypes.c_int32 * 2), ("mnemonic", ctypes.c_char * 32),
+        ("target_kind", ctypes.c_int32),   # (layout revision 2: an older library fails the size check)
     ]
 
 
@@ -80,6 +84,10 @@ class _Shim:
         self.lib.dc_struct_size.restype = ctypes.c_int
         if self.lib.dc_struct_size() != ctypes.sizeof(DcDecoded):
             raise RuntimeError(f"{name}: dc_decoded layout differs from decoders.DcDecoded")
+        revision = getattr(self.lib, "dc_layout_revision", None)
+        if revision is None or revision() != LAYOUT_REVISION:
+            raise RuntimeError(f"{name}: dc_decoded layout revision is not {LAYOUT_REVISION} (rebuild the shims: "
+                               "build_decoders.sh)")
         self.version = self.lib.dc_version().decode()
         self.derivation = derivation
 
@@ -101,7 +109,8 @@ class _Shim:
             out.encoded_disp_bits, out.operand_bits, out.address_bits, out.stack_bits,
             out.ret_imm_value if out.ret_imm else None, out.int_vector if out.int_vector >= 0 else None,
             tuple(sorted(set(fields))), out.mnemonic.decode(errors="replace"),
-            self.derivation if out.has_target else "")
+            self.derivation if out.has_target else "",
+            target_kind=TARGET_KINDS[out.target_kind] if 0 <= out.target_kind < len(TARGET_KINDS) else "unknown")
 
 
 # -- iced-x86 --------------------------------------------------------------------------------
@@ -161,6 +170,10 @@ class _Iced:
                 flow = "other"
         k = self.op_kinds
         target, ip_bits, indirect = None, 0, False
+        target_kind = "none"
+        if flow in ("call_near", "jmp_near"):
+            target_kind = {k.MEMORY: "memory", k.REGISTER: "register", k.NEAR_BRANCH16: "direct",
+                           k.NEAR_BRANCH32: "direct", k.NEAR_BRANCH64: "direct"}.get(instr.op0_kind, "unknown")
         if flow in ("call_near", "jmp_near", "jcc", "xbegin"):
             kind = instr.op0_kind
             if kind in (k.NEAR_BRANCH16, k.NEAR_BRANCH32, k.NEAR_BRANCH64):
@@ -198,7 +211,7 @@ class _Iced:
         stack = 64   # (long mode: the stack width; push / pop sizes follow the operand size)
         return Decoded(self.name, self.version, amd, "ok", instr.len, flow, indirect, target, counter, ip_bits,
                        disp_bits, operand_bits, address_bits, stack, ret_imm, vector, tuple(sorted(set(fields))),
-                       name, "decoder" if target is not None else "")
+                       name, "decoder" if target is not None else "", target_kind=target_kind)
 
 
 _VOTERS = {}

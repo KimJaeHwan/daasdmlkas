@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 # Ghidra 12.0.4, x86:LE:64:default 4.6 (x86-64.sla d5adc314, the engine's own evidence: fault_premise.py,
 # pcodeop_models x86.json): userop indices this table reads
 TABLE = {
-    "id": "x86-64-lift-table-3",
+    "id": "x86-64-lift-table-4",
     "language": ("x86:LE:64:default", 4, 6),
     "ghidra": "12.0.4",
     "sla_sha256_prefix": "d5adc314",
@@ -30,6 +30,7 @@ TABLE = {
 FLOW_OPS = frozenset({"BRANCH", "CBRANCH", "BRANCHIND", "CALL", "CALLIND", "RETURN", "CALLOTHER"})
 RSP, RCX = 0x20, 0x08
 TRANSLATION_PREMISE = "stock-ghidra-translator"
+NA = ("n/a",)   # (the same "does not apply" value as compare.NA)
 
 
 def row_facts(instruction, exit_row=None, register_space=None) -> dict:
@@ -46,16 +47,28 @@ def row_facts(instruction, exit_row=None, register_space=None) -> dict:
         "space": instruction.address.space_id,
         "length": instruction.length,
         "fallthrough": None if instruction.fallthrough is None else instruction.fallthrough.byte_offset,
+        "fallthrough_space": None if instruction.fallthrough is None else instruction.fallthrough.space_id,
         "flow_targets": sorted(target.byte_offset for target in instruction.flow_targets),
         "flow": {name: getattr(flow, name) for name in ("is_flow", "has_fallthrough", "is_call", "is_jump",
                                                          "is_terminal", "is_computed", "is_conditional",
                                                          "is_unconditional", "is_override")},
         "ops": [{"opcode": op.opcode, "inputs": [varnode(item) for item in op.inputs], "output": varnode(op.output)}
                 for op in instruction.operations],
-        "exit": None if exit_row is None else {"target": exit_row.target.byte_offset, "kind": exit_row.kind,
+        "exit": None if exit_row is None else {"target": exit_row.target.byte_offset,
+                                               "target_space": exit_row.target.space_id, "kind": exit_row.kind,
                                                "function": None if exit_row.function is None
                                                else exit_row.function.byte_offset},
     }
+
+
+def continuation(facts: dict):
+    """(space, offset) of the row's continuation: the listing fallthrough, else the S1 exit target (the
+    kind-4 restoration, for comparison only); a missing space means the row's own (test facts)."""
+    if facts.get("fallthrough") is not None:
+        return facts.get("fallthrough_space", facts.get("space")), facts["fallthrough"]
+    if facts.get("exit"):
+        return facts["exit"].get("target_space", facts.get("space")), facts["exit"]["target"]
+    return None
 
 
 @dataclass
@@ -117,20 +130,66 @@ def _push(ops, upto, table=None, space=None):
             sub_op["output"]["size"] * 8)
 
 
+def _ret_shape(ops, space):
+    """(W, K or None) when ``ops`` is exactly (Astra impl r4 s2; Ghidra 12.0.4 ia.sinc pop88 / RET imm16):
+        T:W = LOAD(const(row space), RSP:8)
+        RSP:8 = INT_ADD(RSP:8, const:8(W))
+        [RSP:8 = INT_ADD(RSP:8, const:8(K))]     (once, 0 <= K <= 0xffff)
+        RETURN(T:W)
+    T a REGISTER / UNIQUE of size W (8, or 2 for 66 C3), never RSP; nothing else."""
+    if len(ops) not in (3, 4):
+        return None
+    load, first, rest = ops[0], ops[1], ops[2:]
+    ret = rest[-1]
+    second = rest[0] if len(rest) == 2 else None
+    if load["opcode"] != "LOAD" or len(load["inputs"]) != 2 or not _space_ok(load["inputs"][0], space) \
+            or not _is_reg(load["inputs"][1], RSP, 8):
+        return None
+    target = load["output"]
+    if target is None or target["kind"] not in ("REGISTER", "UNIQUE") or target["size"] not in (2, 8) \
+            or _is_reg(target, RSP):
+        return None
+    width = target["size"]
+
+    def adjust(op, value=None):
+        return op["opcode"] == "INT_ADD" and _is_reg(op["output"], RSP, 8) and len(op["inputs"]) == 2 \
+            and _is_reg(op["inputs"][0], RSP, 8) and _is_const(op["inputs"][1]) and op["inputs"][1]["size"] == 8 \
+            and (value is None or op["inputs"][1]["offset"] == value)
+
+    if not adjust(first, width):
+        return None
+    immediate = None
+    if second is not None:
+        if not adjust(second) or not 0 <= second["inputs"][1]["offset"] <= 0xFFFF:
+            return None
+        immediate = second["inputs"][1]["offset"]
+    if ret["opcode"] != "RETURN" or len(ret["inputs"]) != 1 or ret["inputs"][0] != target:
+        return None
+    return width, immediate
+
+
 def _prefix_ok(ops, upto, table):
     return all(op["opcode"] in table["allowed_prefix"] for op in ops[:upto])
 
 
 def _memory_address_bits(ops, target, upto):
-    """A11c of a memory-indirect transfer: the width of the LOAD address before extension, when a LOAD of
-    this row produces the target; None for a register target (not applicable)."""
+    """A11c of an indirect transfer (Astra impl r4 s3): the LOAD address width before extension when a LOAD
+    of this row produces the target -- directly or through same-size COPYs (Ghidra: LOAD -> COPY -> CALLIND);
+    64 when the target is itself a memory (ADDRESS) varnode (Ghidra: BRANCHIND [ram slot] for jmp [rip+x]:
+    the slot address is fixed, no computation in the row); NA for a register target the row does not write;
+    None when the origin is not recoverable (unobserved)."""
+    if target is not None and target["kind"] == "ADDRESS":
+        return 64
     for index in range(upto - 1, -1, -1):
         op = ops[index]
         if op["output"] == target:
             if op["opcode"] == "LOAD" and len(op["inputs"]) == 2:
                 return _width_before_extension(ops, op["inputs"][1], index)
+            if op["opcode"] == "COPY" and len(op["inputs"]) == 1 and op["inputs"][0] is not None \
+                    and op["inputs"][0]["size"] == target["size"]:
+                return _memory_address_bits(ops, op["inputs"][0], index)
             return None
-    return None
+    return NA if target is not None and target["kind"] == "REGISTER" else None
 
 
 def identify(facts: dict, table: dict = TABLE) -> Lift:
@@ -199,8 +258,10 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
             memory = _memory_address_bits(ops, target, last - 2)
             if memory is not None:
                 values["a11c"] = memory
+            unobserved = {} if memory is not None else {"a11c": "indirect target origin not recoverable"}
+            return Lift("call indirect", values, unobserved)
         else:   # CALL ADDRESS, or call $+5 lifted as push + BRANCH ADDRESS(next)
-            values.update(a8="direct", a5=target["offset"])
+            values.update(a8="direct", a5=target["offset"], a11c=NA)
         return Lift("call $+5" if name == "BRANCH" else ("call indirect" if name == "CALLIND" else "call"), values)
     if name in ("CALL", "CALLIND"):
         return Lift("unidentified", {}, {name_: "CALL / CALLIND without the exact near-call push (far call?)"
@@ -214,7 +275,7 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
             return Lift("branch-self", {"a6": "none", "a9": "none"},
                         {"a5": "origin not decidable from the Ghidra evidence", "a8": "origin not decidable",
                          "a3": "origin not decidable", "a10": "origin not decidable"})
-        return lift("jmp", a3="none" if not continuation else "sequential", a5=target["offset"], a6="none",
+        return lift("jmp", a11c=NA, a3="none" if not continuation else "sequential", a5=target["offset"], a6="none",
                     a8="direct", a9="none", a10=("none",))
     if name == "CBRANCH" and _is_address(target):
         values = {"a3": "sequential" if continuation else "none", "a5": target["offset"], "a6": "none",
@@ -233,22 +294,16 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
         memory = _memory_address_bits(ops, target, last)
         if memory is not None:
             values["a11c"] = memory
-        return Lift("jmp indirect", values)
+        return Lift("jmp indirect", values, {} if memory is not None else
+                    {"a11c": "indirect target origin not recoverable"})
     if name == "RETURN":
-        loads = [op_ for op_ in ops[:last] if op_["opcode"] == "LOAD" and len(op_["inputs"]) == 2
-                 and _is_reg(op_["inputs"][1], RSP, 8) and _space_ok(op_["inputs"][0], space)]
-        adds = [op_ for op_ in ops[:last] if op_["opcode"] == "INT_ADD" and _is_reg(op_["output"], RSP, 8)
-                and len(op_["inputs"]) == 2 and _is_reg(op_["inputs"][0], RSP, 8) and _is_const(op_["inputs"][1])]
-        writes = [op_ for op_ in ops[:last] if _is_reg(op_["output"], RSP)]
-        if len(loads) == 1 and adds and len(writes) == len(adds) and op["inputs"] \
-                and op["inputs"][0] == loads[0]["output"]:
-            width = loads[0]["output"]["size"]
-            released = sum(item["inputs"][1]["offset"] for item in adds)
-            kind = "near" if released == width else "near_imm"
+        shape = _ret_shape(ops, space)
+        if shape is not None:
+            width, immediate = shape
             return lift("ret", a3="none" if not continuation else "sequential", a5=None, a6="none", a8="none",
-                        a9=kind, a10=("none",), a11b=width, a11a=adds[0]["output"]["size"] * 8,
-                        ret_imm=released - width if kind == "near_imm" else None)
-        return Lift("unidentified", {}, {name_: "RETURN without the ret shape"
+                        a9="near_imm" if immediate is not None else "near", a10=("none",), a11b=width, a11a=64,
+                        ret_imm=immediate)
+        return Lift("unidentified", {}, {name_: "RETURN without the exact ret shape"
                                          for name_ in ("a3", "a5", "a6", "a8", "a9", "a10")})
     return Lift("unidentified", {}, {name_: "unidentified lift" for name_ in ("a3", "a5", "a6", "a8", "a9", "a10")})
 

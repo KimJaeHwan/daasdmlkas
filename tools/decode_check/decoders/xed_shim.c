@@ -14,12 +14,34 @@ static void reset(dc_decoded *out) {
     out->int_vector = -1;
 }
 
+int dc_layout_revision(void) { return DC_LAYOUT_REVISION; }
+
 int dc_struct_size(void) { return (int)sizeof(dc_decoded); }
 
 const char *dc_version(void) {
     static char text[96];
     snprintf(text, sizeof(text), "xed %s", xed_get_version());
     return text;
+}
+
+/* the first EXPLICIT operand of a near CALL / JMP: MEM0 memory, REG0 register, RELBR direct
+ * (implicit stack / IP operands are skipped) */
+static int32_t explicit_target_kind(const xed_decoded_inst_t *x) {
+    const xed_inst_t *inst = xed_decoded_inst_inst(x);
+    unsigned int count = xed_inst_noperands(inst);
+    for (unsigned int i = 0; i < count; i++) {
+        const xed_operand_t *operand = xed_inst_operand(inst, i);
+        if (xed_operand_operand_visibility(operand) != XED_OPVIS_EXPLICIT) {
+            continue;
+        }
+        switch (xed_operand_name(operand)) {
+        case XED_OPERAND_MEM0: return DC_TARGET_MEMORY;
+        case XED_OPERAND_REG0: return DC_TARGET_REGISTER;
+        case XED_OPERAND_RELBR: return DC_TARGET_DIRECT;
+        default: return DC_TARGET_UNKNOWN;
+        }
+    }
+    return DC_TARGET_UNKNOWN;
 }
 
 static int first_operand_name(const xed_decoded_inst_t *x) {
@@ -145,6 +167,8 @@ int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc
             out->indirect = 1;
         }
     }
+    out->target_kind = (out->flow == DC_FLOW_CALL_NEAR || out->flow == DC_FLOW_JMP_NEAR)
+                       ? explicit_target_kind(&x) : DC_TARGET_NONE;
     if ((out->flow == DC_FLOW_CALL_FAR || out->flow == DC_FLOW_JMP_FAR) && op0 != XED_OPERAND_PTR) {
         out->indirect = 1;
     }

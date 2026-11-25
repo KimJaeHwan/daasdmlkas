@@ -951,7 +951,7 @@ def test_r2_a11c_from_a_memory_indirect_target_only():
                   + [_op("CALLIND", [_u(0x40)])])
     assert lifting.identify(memory).values["a11c"] == 64
     register = _row(2, _push(START + 2) + [_op("CALLIND", [_r(RAX_)])])
-    assert "a11c" not in lifting.identify(register).values
+    assert lifting.identify(register).values["a11c"] == lifting.NA   # (register target: not applicable)
 
 
 @needs
@@ -1046,6 +1046,270 @@ def test_r2_elf_plt_entries_pltent_and_nested_loads():
                                                                                      offset=0x2010),
                                         ef.Segment(0x1800, b"\x92" * 0x10, offset=0x3800)]).data)
     assert nested.at(0x1000).kind == "ambiguous" and nested.at(0x1800).kind == "ambiguous"
+
+
+# -- Astra impl r4 final specification (.census6/g1_impl_astra4.md): the acceptance vectors
+
+PLT_TAGS = [(0x70000000, 0x1000), (0x70000001, 0x10), (0x70000003, 0x10)]   # declared [0x1000, 0x1010), E 16
+
+
+def test_r4_s1_plt_rewrite_entry_is_aligned_down_to_pltent():
+    import _elf_fixture as ef
+    import check
+
+    seg = [ef.Segment(0x1000, b"\x90" * 0x40)]
+    image = _elf(seg, extra_dynamic=PLT_TAGS, jmprel=[ef.Reloc(0x3800, 7, addend=0x1024)])
+    assert image.written.state == "complete", image.written.why
+    entries = [item for item in image.written.ranges if item[2] == "plt-rewrite-entry"]
+    assert entries == [(0x1020, 0x1030, "plt-rewrite-entry")]
+    written = check.Intervals(image.written.ranges)
+    assert all(written.find(point) for point in (0x1020, 0x1023, 0x102F)) and written.find(0x1030) is None
+    aligned = _elf(seg, extra_dynamic=PLT_TAGS, jmprel=[ef.Reloc(0x3800, 7, addend=0x1020)])
+    assert [item for item in aligned.written.ranges if item[2] == "plt-rewrite-entry"] == entries
+    irelative = _elf(seg, extra_dynamic=PLT_TAGS, jmprel=[ef.Reloc(0x3800, 37, addend=0x1024)])
+    assert not [item for item in irelative.written.ranges if item[2] == "plt-rewrite-entry"]
+
+
+@pytest.mark.parametrize("tags, why", [
+    (PLT_TAGS[:2], "DT_X86_64_PLTENT"),                                       # PLTENT missing
+    (PLT_TAGS + [(0x70000003, 0x10)], "DT_X86_64_PLTENT"),                   # duplicated
+    (PLT_TAGS[:2] + [(0x70000003, 0)], "supported power of two"),            # E = 0
+    (PLT_TAGS[:2] + [(0x70000003, 24)], "supported power of two"),           # E = 24
+    ([(0x70000000, 0x1000), (0x70000001, 0x18), (0x70000003, 0x10)], "multiple"),   # PLTSZ % E
+])
+def test_r4_s1_plt_rewrite_indeterminate_cases(tags, why):
+    import _elf_fixture as ef
+
+    image = _elf([ef.Segment(0x1000, b"\x90" * 0x40)], extra_dynamic=tags, jmprel=[ef.Reloc(0x3800, 7, addend=0x1024)])
+    assert image.written.state == "indeterminate" and why in image.written.why, image.written.why
+
+
+def test_r4_s1_truncated_jmprel_table_is_indeterminate():
+    import _elf_fixture as ef
+
+    image = _elf([ef.Segment(0x1000, b"\x90" * 0x40)],
+                 extra_dynamic=PLT_TAGS + [(23, 0x3000), (2, 0x20), (20, 7)])   # JMPREL with PLTRELSZ 0x20
+    assert image.written.state == "indeterminate"
+
+
+@needs
+def test_r4_s1_a_row_inside_a_rewritable_plt_entry_is_unobserved(tmp_path):
+    import _elf_fixture as ef
+    import _sealed as s
+
+    functions, code = _pair(s, code=ELF_CODE)
+    tags = [(0x70000000, 0x1040), (0x70000001, 0x10), (0x70000003, 0x10)]
+    elf = ef.make_elf([ef.Segment(0x1000, code + b"\xCC" * 0x40)], extra_dynamic=tags,
+                      jmprel=[ef.Reloc(0x3800, 7, addend=0x1014)])     # (entry [0x1010, 0x1020): B's rows)
+    _, rows = _run(_elf_bundle(tmp_path, functions, elf))
+    row = rows[("decode", "row", "function-000001/1:101010")]
+    assert row.run_state == "unobserved" and "plt-rewrite-entry" in row.detail["reason"], row.detail
+    assert rows[("decode", "row", "function-000000/1:101000")].verdict == "applied"
+
+
+def _ret(*ops):
+    return _row(len(ops), list(ops), fallthrough=False, flow=_flow("ret"))
+
+
+RIP8, RIP2 = _r(RIP_), _r(RIP_, 2)
+LOAD8 = _op("LOAD", [_c(1), _r(RSP_)], RIP8)
+ADD8 = _op("INT_ADD", [_r(RSP_), _c(8)], _r(RSP_))
+
+
+@pytest.mark.parametrize("name, facts, pattern", [
+    ("ADD before LOAD", _ret(ADD8, LOAD8, _op("RETURN", [RIP8])), "unidentified"),
+    ("T overwritten", _ret(LOAD8, ADD8, _op("COPY", [_r(RAX_)], RIP8), _op("RETURN", [RIP8])), "unidentified"),
+    ("T partly overwritten", _ret(LOAD8, ADD8, _op("COPY", [_r(RAX_, 2)], RIP2), _op("RETURN", [RIP8])),
+     "unidentified"),
+    ("another T returned", _ret(LOAD8, ADD8, _op("RETURN", [_r(RAX_)])), "unidentified"),
+    ("ESP adjust", _ret(LOAD8, _op("INT_ADD", [_r(RSP_, 4), _c(8)], _r(RSP_, 4)), _op("RETURN", [RIP8])),
+     "unidentified"),
+    ("LOAD from another space", _ret(_op("LOAD", [_c(7), _r(RSP_)], RIP8), ADD8, _op("RETURN", [RIP8])),
+     "unidentified"),
+    ("extra stack write", _ret(LOAD8, ADD8, _op("INT_SUB", [_r(RSP_), _c(8)], _r(RSP_)), _op("RETURN", [RIP8])),
+     "unidentified"),
+    ("66 C3", _ret(_op("LOAD", [_c(1), _r(RSP_)], RIP2), _op("INT_ADD", [_r(RSP_), _c(2)], _r(RSP_)),
+                   _op("RETURN", [RIP2])), "ret"),
+], ids=lambda v: v if isinstance(v, str) else None)
+def test_r4_s2_ret_shape_is_the_exact_sequence(name, facts, pattern):
+    import lifting
+
+    lift = lifting.identify(facts)
+    assert lift.pattern == pattern, (name, lift)
+    if name == "66 C3":
+        assert lift.values["a11a"] == 64 and lift.values["a11b"] == 2 and lift.values["a9"] == "near"
+
+
+@needs
+@pytest.mark.parametrize("data, facts, a9", [
+    ("c3", _ret(LOAD8, ADD8, _op("RETURN", [RIP8])), "near"),
+    ("c21000", _ret(LOAD8, ADD8, _op("INT_ADD", [_r(RSP_), _c(16)], _r(RSP_)), _op("RETURN", [RIP8])), "near_imm"),
+    ("c20000", _ret(LOAD8, ADD8, _op("INT_ADD", [_r(RSP_), _c(0)], _r(RSP_)), _op("RETURN", [RIP8])), "near_imm"),
+])
+def test_r4_s2_ret_vectors_against_the_voters(data, facts, a9):
+    facts["length"] = len(bytes.fromhex(data))
+    _, result = _compare(facts, bytes.fromhex(data + "cc" * (15 - len(bytes.fromhex(data)))))
+    attributes = result["attributes"]
+    assert attributes["a9"]["state"] == "applied" and attributes["a9"]["value"] == a9, attributes["a9"]
+    assert attributes["a11b"]["state"] == "applied" and attributes["a11b"]["value"] == 8
+    if data == "c3":
+        assert attributes["a11a"]["value"] == 64 and result["state"] == "applied", result
+    # a wrong shape with the same votes: A9 and the row are unobserved
+    wrong = _ret(ADD8, LOAD8, _op("RETURN", [RIP8]))
+    wrong["length"] = facts["length"]
+    _, result = _compare(wrong, bytes.fromhex(data + "cc" * (15 - len(bytes.fromhex(data)))))
+    assert result["attributes"]["a9"]["state"] == "unobserved" and result["state"] == "unobserved"
+
+
+MEMORY_CALL = [_op("LOAD", [_c(1), _c(START + 0x106)], _u(0x40))] + _push(START + 6) + [_op("CALLIND", [_u(0x40)])]
+
+
+@needs
+@pytest.mark.parametrize("name, data, ops, expected", [
+    ("FF 15 memory lift", "ff1500010000", MEMORY_CALL, ("applied", 64)),
+    ("FF D0 register lift", "ffd0", _push(START + 2) + [_op("CALLIND", [_r(RAX_)])], ("not_applicable", None)),
+    ("67 FF D0 register lift", "67ffd0", _push(START + 3) + [_op("CALLIND", [_r(RAX_)])], ("not_applicable", None)),
+    ("FF D0 with a memory lift", "ffd0", [_op("LOAD", [_c(1), _r(RAX_)], _u(0x40))] + _push(START + 2)
+     + [_op("CALLIND", [_u(0x40)])], ("unrecognized", None)),
+    ("FF 15 with a register lift", "ff1500010000", _push(START + 6) + [_op("CALLIND", [_r(RAX_)])],
+     ("unrecognized", None)),
+    ("67 FF 10 memory lift, 32-bit extension", "67ff10", [_op("INT_ZEXT", [_r(RAX_, 4)], _u(0x30)),
+                                                       _op("LOAD", [_c(1), _u(0x30)], _u(0x40))] + _push(START + 3)
+     + [_op("CALLIND", [_u(0x40)])], ("applied", 32)),
+], ids=lambda v: v if isinstance(v, str) else None)
+def test_r4_s3_a11c_vectors(name, data, ops, expected):
+    raw = bytes.fromhex(data)
+    facts = _row(len(raw), ops, flow=_flow("call_indirect"))
+    _, result = _compare(facts, raw + b"\xCC" * (15 - len(raw)), native_call=True)
+    item = result["attributes"]["a11c"]
+    assert item["state"] == expected[0], (name, item)
+    if expected[1] is not None:
+        assert item["value"] == expected[1]
+    if expected[0] == "unrecognized":
+        assert item["kind"] == "ghidra-decode-suspect"
+
+
+@needs
+@pytest.mark.parametrize("name, data, ops, form", [
+    # (shapes seen in a real Ghidra 12.0.4 Bundle: LOAD -> COPY -> CALLIND, and BRANCHIND of a ram slot)
+    ("FF 50 30 call [rax+0x30]: LOAD then COPY", "ff5030",
+     [_op("INT_ADD", [_r(RAX_), _c(0x30)], _u(0x10)), _op("LOAD", [_c(1), _u(0x10)], _u(0x20)),
+      _op("COPY", [_u(0x20)], _u(0x30))] + _push(START + 3) + [_op("CALLIND", [_u(0x30)])], "call_indirect"),
+    ("48 FF 25 jmp [rip+x]: BRANCHIND of the slot", "48ff2500010000",
+     [_op("BRANCHIND", [_a(START + 7 + 0x100)])], "jmp_indirect"),
+], ids=lambda v: v if isinstance(v, str) else None)
+def test_r4_s3_a11c_real_ghidra_memory_shapes(name, data, ops, form):
+    raw = bytes.fromhex(data)
+    facts = _row(len(raw), ops, fallthrough=form.startswith("call"), flow=_flow(form))
+    lift, result = _compare(facts, raw + b"\xCC" * (15 - len(raw)), native_call=form.startswith("call"))
+    assert lift.values.get("a11c") == 64, (name, lift)
+    assert result["attributes"]["a11c"]["state"] == "applied", (name, result["attributes"]["a11c"])
+    assert result["state"] == "applied", (name, result["attributes"])
+
+
+def test_r4_s3_a11c_unknown_voter_or_split():
+    import compare
+    import decoders
+
+    def voter(name, kind, amd=False):
+        return decoders.Decoded(voter=name, version="t", amd=amd, status="ok", length=6, flow="call_near",
+                                indirect=kind != "direct", address_bits=64, target_kind=kind)
+
+    facts = {"flow": {"is_override": False}}
+    ghidra = {"a11c": 64}
+
+    def a11c(intel, amd):
+        return compare._attribute("a11c", ghidra, {}, [compare.voter_values(d, START) for d in intel],
+                                  [compare.voter_values(d, START) for d in amd], facts)
+
+    assert a11c([voter("a", "memory"), voter("b", "unknown")], [voter("a", "memory", True)])["state"] == "unobserved"
+    split = a11c([voter("a", "memory"), voter("b", "register")], [voter("a", "memory", True)])
+    assert (split["state"], split["kind"]) == ("withheld", "decoder-disagreement")
+    amd = a11c([voter("a", "memory")], [voter("a", "memory", True), voter("b", "register", True)])
+    assert (amd["state"], amd["kind"]) == ("withheld", "amd-disagreement")
+    vendor = a11c([voter("a", "memory")], [voter("a", "register", True)])
+    assert (vendor["state"], vendor["kind"]) == ("withheld", "vendor")
+
+
+def _kind4(length, target_space, target_offset):
+    facts = _row(length, _push(START + 5) + [_op("CALL", [_a(START + 0x40)])], flow=_flow("call_direct"))
+    facts["fallthrough"] = None
+    facts["exit"] = {"target": target_offset, "target_space": target_space, "kind": 4, "function": None}
+    return facts
+
+
+@needs
+@pytest.mark.parametrize("name, facts, a2, a4", [
+    ("length 5, exit (1, X+5)", _kind4(5, 1, START + 5), ("applied", None), ("applied", None)),
+    ("length 5, exit (1, X+6)", _kind4(5, 1, START + 6), ("unrecognized", "ghidra-internal-inconsistency"),
+     ("unrecognized", "cause-unknown")),
+    ("length 5, exit (2, X+5)", _kind4(5, 2, START + 5), ("unrecognized", "ghidra-internal-inconsistency"),
+     ("unrecognized", "cause-unknown")),
+    ("no length, exit (2, X+5)", _kind4(None, 2, START + 5), ("unobserved", None), ("unrecognized", "cause-unknown")),
+    ("no length, exit (1, X+5)", _kind4(None, 1, START + 5), ("applied", None), ("applied", None)),
+], ids=lambda v: v if isinstance(v, str) else None)
+def test_r4_s4_kind4_continuation_space_and_contract(name, facts, a2, a4):
+    _, result = _compare(facts, bytes.fromhex("e83b000000" + "cc" * 10), s1=True, native_call=True)
+    attributes = result["attributes"]
+    for attribute, (state, kind) in (("a2", a2), ("a4", a4)):
+        item = attributes[attribute]
+        assert item["state"] == state, (name, attribute, item)
+        if kind:
+            assert item["kind"] == kind, (name, attribute, item)
+    if name == "no length, exit (1, X+5)":
+        assert attributes["a2"].get("provenance") == "via A4 (counted once)"
+
+
+@needs
+def test_r4_s4_row_facts_keeps_the_exit_space():
+    """At least one vector through row_facts: a kind-4 exit to the same offset in another space."""
+    from types import SimpleNamespace as N
+
+    import lifting
+
+    def coord(space, offset):
+        return N(space_id=space, byte_offset=offset)
+
+    def varnode(item):
+        return None if item is None else N(kind=N(name=item["kind"]), coordinate=coord(item["space"], item["offset"]),
+                                           byte_size=item["size"])
+
+    ops = _push(START + 5) + [_op("CALL", [_a(START + 0x40)])]
+    instruction = N(address=coord(1, START), length=5, fallthrough=None, flow_targets=[],
+                    flow=N(**_flow("call_direct")),
+                    operations=[N(opcode=op["opcode"], inputs=[varnode(item) for item in op["inputs"]],
+                                  output=varnode(op["output"])) for op in ops])
+    exit_row = N(target=coord(2, START + 5), kind=4, function=None)
+    facts = lifting.row_facts(instruction, exit_row)
+    assert facts["exit"]["target_space"] == 2
+    _, result = _compare(facts, bytes.fromhex("e83b000000" + "cc" * 10), s1=True, native_call=True)
+    assert result["attributes"]["a2"]["kind"] == "ghidra-internal-inconsistency"
+    assert result["attributes"]["a4"]["state"] == "unrecognized"
+
+
+def test_r4_s5_l2_blocking_names_the_attribute_and_the_cause():
+    for bad in ("a7", "a1", "a2"):
+        judged = _judged(_fn([{"space": 1, "address": 0x10, "native_call": False}]),
+                         {(1, 0x10): {bad: "unrecognized", "+": _ok(bad)}})
+        run_state, verdict, detail = judged[("s1_l2_estimate", "f")]
+        assert (run_state, verdict) == ("evaluated", "withheld"), bad
+        assert detail["would_block"] and detail["cause"] == "disagreement"
+        assert detail["blocking"] == [["1:10", bad, "unrecognized"]] and detail["blocking_count"] == 1
+        s1 = judged[("s1", "f")]
+        assert (s1[0], s1[1]) == ("evaluated", "applied") and not s1[2]["would_block"]
+
+
+def test_r4_s5_first_and_third_pt_load_share_a_page():
+    """L1 [0x1000, 0x3800), L2 [0x2100, 0x2120), L3 [0x3400, 0x3420): 0x3200 is covered by L1 only, and its page
+    is shared by L1 and L3 only -> ambiguous; 0x1800 stays file."""
+    import _elf_fixture as ef
+    import elf_map
+
+    image = elf_map.parse(ef.make_elf([ef.Segment(0x1000, b"\x90" * 0x2800, offset=0x1000),
+                                       ef.Segment(0x2100, b"\x91" * 0x20, offset=0x5100),
+                                       ef.Segment(0x3400, b"\x92" * 0x20, offset=0x6400)]).data)
+    assert image.at(0x3200).kind == "ambiguous"
+    assert image.at(0x1800).kind == "file"
 
 
 def test_guard_function_condition_is_x86_64_only():
