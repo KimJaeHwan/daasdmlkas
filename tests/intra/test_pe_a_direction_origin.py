@@ -16,6 +16,9 @@ from synthetic import (
     operation_node_at, program_units, reg, slice_from, store, tmp,
 )
 from test_rep_strings import DF, _rep
+from synthetic import X64, register_evidence
+
+REGISTERS = register_evidence(X64)   # (the exported register table names DF)
 from tdo_v2.normalize import FunctionNormalizer
 
 SYSCALL = 5   # x86-64 ``syscall`` as Ghidra 12 lifts it: CALLOTHER(5)
@@ -52,7 +55,7 @@ def _function(*steps):
 def _direction(*steps, assume=True):
     """The rep site's proven direction (1 / -1) or None."""
     builder, _ = _function(*steps)
-    (unit,) = program_units(builder)
+    (unit,) = program_units(builder, registers=REGISTERS)
     function = FunctionNormalizer().normalize(unit, assume_direction_flag_clear=assume)
     return function.rep_blocks[0][2] if function.rep_blocks else None
 
@@ -104,7 +107,7 @@ def _through(callee_body):
 
     builder, _ = _function(_cld, call)
     callee = callee_body(FunctionBuilder(entry=WRAPPER)).ret()
-    results = analyze_units(program_units(builder, callee), assume_direction_flag_clear=True)
+    results = analyze_units(program_units(builder, callee, registers=REGISTERS), assume_direction_flag_clear=True)
     blocks = results["1:1000"].normalized.rep_blocks
     return blocks[0][2] if blocks else None
 
@@ -118,36 +121,55 @@ def test_a_wrapper_forwarding_a_kernel_return_is_not_covered():
     assert _through(wrapper) is None
 
 
-def test_a_plain_call_return_is_covered():
-    """An opaque call's return: the premise's own case (forward)."""
+def test_a_plain_direct_call_outside_the_program_is_not_covered_without_identity():
+    """r2 (Astra r1 P1-4): an address no observed function owns is no proof the
+    target is external code -- only an identified import call is covered."""
     from tdo_v2.interprocedural import analyze_units
 
     def call(builder):
         builder.call(OPAQUE)
 
     builder, _ = _function(_cld, call)
-    results = analyze_units(program_units(builder), assume_direction_flag_clear=True)
-    blocks = results["1:1000"].normalized.rep_blocks
-    assert blocks and blocks[0][2] == 1
+    results = analyze_units(program_units(builder, registers=REGISTERS), assume_direction_flag_clear=True)
+    assert not results["1:1000"].normalized.rep_blocks
 
 
-def _program_direction(*steps, extra=()):
-    """The rep site's direction under analyze_units (direction-flag-clear on)."""
+def _program_direction(*steps, extra=(), slots=True, builder_type=None):
+    """The rep site's direction under analyze_units (direction-flag-clear on;
+    the image's imports: ``test_import_ssa_targets.INFO``)."""
+    from test_import_ssa_targets import INFO
     from tdo_v2.interprocedural import analyze_units
 
     builder, _ = _function(*steps)
-    results = analyze_units(program_units(builder, *extra), assume_direction_flag_clear=True)
+    if builder_type is not None:
+        builder.__class__ = builder_type
+    results = analyze_units(program_units(builder, *extra, registers=REGISTERS), assume_direction_flag_clear=True,
+                            image_info=INFO,
+                            assume_import_slots_hold_exports=slots)
     blocks = results["1:1000"].normalized.rep_blocks
     return blocks[0][2] if blocks else None
 
 
-def _opaque_call(builder):
-    builder.call(OPAQUE)   # (no function of the program there: an opaque call)
+def _import_call(builder):
+    """mov rbx, [__imp_free]; call rbx -- an identified import call (no model)."""
+    from test_import_ssa_targets import OTHER_SLOT
+    from synthetic import ram
+
+    builder.ins(copy(reg(RBX), ram(OTHER_SLOT)))
+    builder.call_indirect(RBX)
 
 
-def test_an_opaque_call_and_an_unresolved_indirect_call_are_covered():
-    assert _program_direction(_cld, _opaque_call) == 1
-    assert _program_direction(_cld, lambda builder: builder.call_indirect(RBX)) == 1
+_opaque_call = _import_call
+
+
+def test_an_identified_import_call_is_covered_and_nothing_else_outside():
+    assert _program_direction(_cld, _import_call) == 1
+    # (r2, Astra r1 P1-2 / P1-4) an unresolved indirect call or a direct call to an
+    # address no function owns may be analysed code: not covered
+    assert _program_direction(_cld, lambda builder: builder.call_indirect(RBX)) is None
+    assert _program_direction(_cld, lambda builder: builder.call(OPAQUE)) is None
+    # the slot-bound identity rests on import-slots-hold-their-exports
+    assert _program_direction(_cld, _import_call, slots=False) is None
 
 
 def test_a_value_computed_from_df_after_a_covered_call_is_not_covered():
@@ -175,7 +197,7 @@ def test_an_analysed_callee_that_does_not_keep_df_is_not_covered_yet():
 def test_standalone_normalization_lists_no_covered_call():
     """Fail closed: without ``covered_call_returns`` no call return is covered."""
     builder, _ = _function(_cld, _opaque_call)
-    (unit,) = program_units(builder)
+    (unit,) = program_units(builder, registers=REGISTERS)
     assert not FunctionNormalizer().normalize(unit, assume_direction_flag_clear=True).rep_blocks
 
 
@@ -192,7 +214,7 @@ def test_a_call_to_a_refused_function_of_the_program_is_not_covered():
         builder.call(refused_entry)
 
     builder, _ = _function(_cld, call)
-    with open_configured_extraction(_Provider([builder, _refused(refused_entry)]),
+    with open_configured_extraction(_Provider([builder, _refused(refused_entry)], registers=REGISTERS),
                                     _mint_orchestrator_capability()) as envelope:
         units = list(envelope.iter_scoped_functions())
     results = analyze_units(units, assume_direction_flag_clear=True)
@@ -210,3 +232,79 @@ def test_an_indirect_call_resolved_to_an_analysed_wrapper_is_not_covered():
         builder.call_indirect(RBX)
 
     assert _program_direction(_cld, call, extra=(wrapper.ret(),)) is None
+
+
+def test_another_register_as_the_direction_operand_gets_no_premise(monkeypatch):
+    """r2 (Astra r1 P1-5): the premise is about the architectural DF -- a rep
+    shape whose direction operand is DL takes nothing from it (entry value or
+    an import call's return)."""
+    import test_rep_strings
+    from synthetic import RDX
+
+    monkeypatch.setattr(test_rep_strings, "DF", RDX)
+    assert _direction() is None                                   # (entry DL)
+    assert _program_direction(_import_call) is None               # (DL after a covered call)
+    monkeypatch.setattr(test_rep_strings, "DF", DF)
+    assert _direction() == 1                                      # (control: entry DF)
+
+
+class _LandingPad(FunctionBuilder):
+    """The import call row also lists a local successor (an exception landing
+    pad, G3b-7b): the instruction after the call."""
+
+    def to_json(self):
+        document = super().to_json()
+        rows = document["instructions"]
+        for index, row in enumerate(rows):
+            if any(item["opcode"] == "CALLIND" for item in row["operations"]):
+                row["flow_targets"] = [*row["flow_targets"], rows[index + 1]["address"]]
+        return document
+
+
+def test_a_call_with_a_landing_pad_is_not_covered():
+    """r2 (Astra r1 P1-1): the premise covers the normal return only; a call
+    row listing a local successor (a landing pad) is not listed."""
+    try:
+        found = _program_direction(_cld, _import_call, builder_type=_LandingPad)
+    except Exception as error:   # (a shape admission refuses is no coverage either)
+        assert "landing" in str(error) or "flow" in str(error), error
+        return
+    assert found is None
+    assert _program_direction(_cld, _import_call) == 1   # (control)
+
+
+def test_without_a_register_table_no_direction_is_assumed():
+    """r2 (Astra r1 P1-5; Fable r1 P3: decline rather than guess): without the
+    exported register table the operand is not known to be DF -- no premise,
+    not even the entry value (old Bundles: until re-exported, X-1)."""
+    builder, _ = _function()
+    (unit,) = program_units(builder)
+    assert not FunctionNormalizer().normalize(unit, assume_direction_flag_clear=True).rep_blocks
+    assert _direction() == 1   # (control: with the table)
+
+
+def test_dl_set_before_a_covered_call_is_still_not_df(monkeypatch):
+    """dl = 0; call [__imp_free]; rep (direction operand DL): the stale value
+    plans forward, and only the operand identity at the final check refuses."""
+    import test_rep_strings
+    from synthetic import RDX
+
+    monkeypatch.setattr(test_rep_strings, "DF", RDX)
+    assert _program_direction(lambda builder: builder.ins(copy(reg(RDX, 1), const(0, 1))), _import_call) is None
+
+
+def test_a_derived_template_call_is_not_listed():
+    """An import call whose effect is a derived template is an analysed body."""
+    from types import SimpleNamespace
+    from test_import_ssa_targets import INFO
+    from tdo_v2.interprocedural import _covered_call_returns, import_call_sites
+
+    builder, _ = _function(_cld, _import_call)
+    (unit,) = program_units(builder, registers=REGISTERS)
+    (key,) = import_call_sites(unit, INFO)
+    plain = _covered_call_returns(unit, INFO, frozenset(), {}, frozenset(), True)
+    hand = _covered_call_returns(unit, INFO, frozenset(), {key: (None, SimpleNamespace(template=None))},
+                                 frozenset(), True)
+    derived = _covered_call_returns(unit, INFO, frozenset(), {key: (None, SimpleNamespace(template=object()))},
+                                    frozenset(), True)
+    assert plain == hand == frozenset({key}) and derived == frozenset()

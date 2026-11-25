@@ -770,8 +770,11 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
                      blocked=frozenset(), used=None) -> dict:
     """Sites whose count (at the instruction start) and direction become
     proven on the current SSA: address -> (n, direction, used the assumption)."""
+    from .isa_identity import direction_flag, is_direction_flag
     from .relative_memory import expressions_at
 
+    # (PE-a1) the premise is about the architectural DF only
+    flag_register = direction_flag(scopes.program.evidence)
     pending = {address: site for address, site in sites.items() if address not in plan}
     if not pending:
         return {}
@@ -792,7 +795,7 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
         assumed = False
         if not atoms and value in (0, 1):
             direction = 1 if value == 0 else -1
-        elif entry and assume_clear:
+        elif entry and assume_clear and is_direction_flag(site.direction, flag_register):
             direction, assumed = 1, True
         else:
             continue
@@ -1614,7 +1617,7 @@ class FunctionNormalizer:
         ``assume_globals_disjoint_from_stack``: named opt-in assumption, see
         ``tdo_v2.may_alias``.
         ``covered_call_returns``: CALL / CALLIND keys whose return
-        direction-flag-clear covers -- calls with no analysed in-program target
+        direction-flag-clear covers -- positively identified import calls
         (``interprocedural._covered_call_returns``); a call not listed is
         uncovered (PE-a1, S3 design r18 amendment 1)."""
         if type(value) is not ScopedFunctionUnit:
@@ -1651,8 +1654,9 @@ class FunctionNormalizer:
             assume_direction_flag_clear=assume_direction_flag_clear,
             private_frame_above=private_frame_above,
             open_conditions=open_conditions or {},
-            covered_call_returns=frozenset(covered_call_returns),
         )
+        if covered_call_returns:   # (as given when set: a replay plan seals the same options)
+            options["covered_call_returns"] = frozenset(covered_call_returns)
         if _once_control is not None:
             options["_once_control"] = _once_control
         # a replay plan was sealed over every normalization input the analysis
@@ -1861,6 +1865,7 @@ class _ScopedNormalizer:
         rep_plan: dict = {}
         rep_used: dict = {}  # memory values the rep proofs used (validated at the end)
         direction_assumed = False
+        slot_direction = False   # (PE-a1) a covered return through an import slot was used
         while True:
             step()   # (budget: docs 25.30 K1c)
             dependencies = RustworkxDependencyGraph()
@@ -2446,19 +2451,21 @@ class _ScopedNormalizer:
                 # is then 0 (forward) at the site only if every debt is a call
                 # possibly changing DF itself (nothing assigned after it).
                 # (PE-a1, S3 design r18 amendment 1) and only a return the
-                # premise covers, read by the site itself: the debt's reader is
+                # premise covers, read by the site itself: the operand is the
+                # architectural DF (register evidence); the debt's reader is
                 # the site's own direction read (a value computed from DF after
                 # the call -- DF ^= 1 -- is no covered origin), its call a raw
                 # CALL / CALLIND (a CALLOTHER -- syscall, int -- returns from
-                # no call) listed in ``covered_call_returns`` (no analysed
-                # in-program target: the body, not the premise, decides those;
-                # an unlisted call is uncovered)
+                # no call) listed in ``covered_call_returns`` (positively
+                # identified import calls; an unlisted call is uncovered)
                 flag = _resolve_validated_storage(_storage_ref(site.direction), context)
                 from .call_clobber import debt_calls, rows_by_debt
+                from .isa_identity import direction_flag, is_direction_flag
 
                 rows = rows_by_debt(call_clobber_reads, call_clobber_debts)
                 producers = debt_calls(call_clobber_reads, call_clobber_debts)
                 if assume_direction_flag_clear and rep_plan[address][1] == 1 \
+                        and is_direction_flag(site.direction, direction_flag(unit.scopes.program.evidence)) \
                         and type(flag) is ResolvedStorage and all(
                             debt in rows and all(
                                 row.operation_key == site.direction_key
@@ -2468,6 +2475,10 @@ class _ScopedNormalizer:
                             and producers[debt] in covered_call_returns
                             for debt in debts):
                     direction_assumed = True
+                    # (a CALLIND bound through an import slot: the slot holding
+                    # the export rests on import-slots-hold-their-exports)
+                    slot_direction = slot_direction or any(
+                        producers[debt].endswith(":CALLIND") for debt in debts)
                 else:
                     failed_sites.add(address)
         failed_sites = frozenset(failed_sites)
@@ -2576,7 +2587,8 @@ class _ScopedNormalizer:
             intrinsic_refinements=tuple(sorted(intrinsic_refinements.items())),
             assumed_direction_flag_clear=direction_assumed,
             premise_uses=_premise_uses(unit, policy_uses, frame_uses, opaque_uses, pre_uses, image_uses,
-                                       direction_assumed, _import_slots_used(memory_ssa), sp_uses),
+                                       direction_assumed, _import_slots_used(memory_ssa) or slot_direction,
+                                       sp_uses),
             assumes_opaque_callees_restore_stack_pointer=_opaque_restores_sp(),
             private_frame_writes=private_writes,
             wild_objects=frozenset(wild_objects),

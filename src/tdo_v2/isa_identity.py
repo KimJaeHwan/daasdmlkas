@@ -44,6 +44,25 @@ class RegisterCoordinate:
     byte_size: int
 
 
+# (PE-a1) the x86 direction flag as SLEIGH names it (ia.sinc: DF, one byte)
+_DIRECTION_FLAGS = {
+    ("x86", "LE", "64"): ("DF", 1),
+    ("x86", "LE", "32"): ("DF", 1),
+}
+
+
+def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordinate | None:
+    """The x86 direction flag as the exported register evidence places it;
+    None for another language or without exact evidence (no certificate)."""
+    return _named(evidence, _DIRECTION_FLAGS)
+
+
+def is_direction_flag(varnode, flag: RegisterCoordinate | None) -> bool:
+    """``varnode`` is exactly the direction flag (``direction_flag``)."""
+    return flag is not None and varnode.byte_size == flag.byte_size \
+        and (varnode.coordinate.space_id, varnode.coordinate.byte_offset) == (flag.space_id, flag.byte_offset)
+
+
 def stack_register(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordinate | None:
     """The stack register of the program's language as its exported evidence
     places it; None for an unsupported language, no evidence, or no exact

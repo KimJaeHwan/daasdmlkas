@@ -609,7 +609,7 @@ def register_evidence(arch: "Arch") -> dict:
                 ("EBP", EBP, 4), ("ESI", ESI, 4), ("EDI", EDI, 4), ("EIP", EIP, 4), ("SP", ESP, 2)]
     else:
         rows = [(name, offset, 8) for offset, name in REGISTER_NAMES.items() if offset < 0x200]
-        rows += [("ESP", RSP, 4), ("EAX", RAX, 4), ("RIP", RIP, 8)]
+        rows += [("ESP", RSP, 4), ("EAX", RAX, 4), ("RIP", RIP, 8), ("DF", 0x20A, 1)]
     rows.sort(key=lambda row: (REG, row[1], row[2], row[0]))
     return {"revision": 1, "registers": [
         {"name": name, "space_id": REG, "byte_offset": offset, "byte_size": size} for name, offset, size in rows]}

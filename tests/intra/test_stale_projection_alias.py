@@ -362,7 +362,7 @@ def test_a_rep_direction_a_call_may_change_needs_the_assumption():
     builder.ins(*_rep(index, "stos"))
     builder.ins(add(t, reg(RSP), const(0x41)), load(reg(R9, 1), t))
     builder.add_rsp(0x80).ret()
-    (unit,) = program_units(builder)
+    (unit,) = program_units(builder, registers=__import__('synthetic').register_evidence(__import__('synthetic').X64))
     plain = FunctionNormalizer().normalize(unit)
     registers = next(definition.span.object_id for definition in plain.memory_ssa.definitions
                      if definition.span.object_id.kind is StorageObjectKind.REGISTER_FILE)

@@ -72,7 +72,10 @@ def _function(count, kind="movs", source_offset=0x20, destination_offset=0x40, d
 
 
 def _normalize(builder, assume=False):
-    (unit,) = program_units(builder)
+    # (PE-a1: the premise needs the operand known as DF -- the exported register table)
+    from synthetic import X64, register_evidence
+
+    (unit,) = program_units(builder, registers=register_evidence(X64))
     return FunctionNormalizer().normalize(unit, assume_direction_flag_clear=assume), unit.observation
 
 
