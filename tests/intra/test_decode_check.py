@@ -3273,3 +3273,117 @@ def test_isa_step3r2_profile_split_outside_the_tables_leaves_table_kinds_unobser
     assert row["basis"] == "cited:RDTSC" and row["facts"]["F4"]["split"]["source"] == "profiles"
     assert all("outside the tables" in row["unobserved"][kind] for kind in ("F2", "F2p", "F3", "F6", "F7"))
     assert "F4" not in row["unobserved"]
+
+
+# -- ISA facts step 3: review round 3 fixes (Astra's final list) --------------------------------------------------
+
+def test_isa_step3r3_f5_is_never_negative_without_a_table_basis():
+    """r3 Astra P1-1: an unclassified row (e.g. FXSAVE with a 67 prefix) cannot resolve a table f5."""
+    listed = {(1, 0x1000): {"basis": "unclassified", "facts": {}, "unobserved": {"F2": "no table basis"}},
+              (1, 0x1004): {"basis": "ordinary:sse_int", "facts": {}, "unobserved": {}}}
+    document, functions, held = _r2_reader(listed)
+    import isa_facts
+
+    ev = _ev_accept(document, _ev_view(functions))
+    assert ev.isa("f0", 1, 0x1000, "F5", held)["state"] == "unobserved"
+    names = isa_facts.premise_names(document["isa_facts"])
+    without_rule = held - {names["ordinary"]}
+    assert ev.isa("f0", 1, 0x1004, "F5", without_rule)["state"] == "unobserved"      # class f5 needs the rule
+    assert ev.isa("f0", 1, 0x1004, "F5", held)["state"] == "negative"
+
+
+def _r3_row(hexbytes, decode_profile=None, ballot_edit=None):
+    import decoders as d
+    import isa_facts
+    import isa_tables
+
+    data = bytes.fromhex(hexbytes) + ISA_PAD
+    ballot = d.ballot(data, CODE)
+    if ballot_edit:
+        ballot = ballot_edit(ballot)
+    return isa_facts.row_facts(isa_tables.load(), ballot, data, redecode=lambda w: d.xed_redecode(w, CODE),
+                               decode_profile=decode_profile or (lambda n, w: d.decode_profile(n, w, CODE)),
+                               decode_without=lambda s, w: d.decode_without(s, w, CODE))
+
+
+@needs
+def test_isa_step3r3_profile_failure_leaves_every_table_kind_unobserved():
+    """r3 Astra P1-2: an undecidable profile split may hide another form's table content (BSR's undefined output)."""
+    import dataclasses
+
+    import decoders as d
+    import isa_facts
+
+    def baseline_error(name, window):
+        vote = d.decode_profile(name, window, CODE)
+        return dataclasses.replace(vote, status="error") if name == "xed:baseline" else vote
+
+    for hexbytes in ("F30FBDC1", "0F31"):
+        row = _r3_row(hexbytes, baseline_error)
+        assert set(isa_facts.TABLE_KINDS) <= set(row["unobserved"]), (hexbytes, row["unobserved"])
+
+
+@needs
+def test_isa_step3r3_checked_range_is_the_verified_window():
+    """r3 Astra P2-1: a profile read inside the verified window is not 'beyond the checked bytes'."""
+    import dataclasses
+
+    import decoders as d
+
+    def longer(name, window):
+        vote = d.decode_profile(name, window, CODE)
+        return dataclasses.replace(vote, length=vote.length + 3) if name == "xed:all" else vote
+
+    row = _r3_row("4889C8", longer)
+    assert "beyond" not in str(row["unobserved"])
+
+
+@needs
+def test_isa_step3r3_features_of_the_voters_that_decoded_the_row_are_kept():
+    """r3 Astra P2-2: SYSENTER with Zydis failing keeps iced / XED features (the kind itself stays unobserved)."""
+    import dataclasses
+
+    def zydis_fails(ballot):
+        intel = tuple(dataclasses.replace(v, status="invalid") if v.voter == "zydis" else v for v in ballot["intel"])
+        return dict(ballot, intel=intel)
+
+    row = _r3_row("0F34", ballot_edit=zydis_fails)
+    features = row["facts"]["F4"]["features"]
+    assert features["zydis"] is None and features["xed"] and features["iced"]
+    assert "F4" in row["unobserved"]
+
+
+@pytest.mark.parametrize("name", ["F4 not an object", "split not an object", "split_table unknown id",
+                                  "split_table without id", "class_flags unknown field", "class_flags type",
+                                  "mxcsr_inputs item", "reason not a string"])
+def test_isa_step3r3_row_shape_rejections(name):
+    """r3 Astra P2-3 / Fable r3 P3-1: what the reader dereferences is checked at acceptance."""
+    import evidence
+
+    rows = [(1, 0x1000)]
+    functions = [_ev_function("f0", rows, {rows[0]: _ev_confirmed()})]
+    split = {"source": "split_table", "split": "lzcnt-bsr"}
+    row = {"basis": "cited:LZCNT", "facts": {"F4": {"features": {}, "split": split},
+                                            "class_flags": {"mxcsr_inputs": ["RC"], "alignment": False}},
+           "unobserved": {}}
+    document = _ev2(functions, {"f0": {rows[0]: row}})
+    _ev_accept(document, _ev_view(functions))                                     # the well-formed file passes
+    facts = document["functions"][0]["isa_facts"]["rows"][0]["facts"]
+    if name == "F4 not an object":
+        facts["F4"] = True
+    elif name == "split not an object":
+        facts["F4"]["split"] = "lzcnt-bsr"
+    elif name == "split_table unknown id":
+        facts["F4"]["split"]["split"] = "no-such-split"
+    elif name == "split_table without id":
+        del facts["F4"]["split"]["split"]
+    elif name == "class_flags unknown field":
+        facts["class_flags"]["fast"] = True
+    elif name == "class_flags type":
+        facts["class_flags"]["alignment"] = "yes"
+    elif name == "mxcsr_inputs item":
+        facts["class_flags"]["mxcsr_inputs"] = [1]
+    else:
+        document["functions"][0]["isa_facts"]["rows"][0]["unobserved"]["F6"] = 3
+    with pytest.raises(evidence.Rejected):
+        _ev_accept(document, _ev_view(functions))

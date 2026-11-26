@@ -26,7 +26,9 @@ import isa_tables
 FACT_SCHEMA = "tbr-isa-facts-1"
 KINDS = ("F1", "F2", "F2p", "F3", "F4", "F5", "F6", "F7")
 OMITTED_BASIS = "ordinary:plain"          # a row absent from the list: derived-ordinary plain, nothing row-specific
-TABLE_SOURCED = ("F2", "F2p", "F3", "F4", "F6", "F7")     # F1 and F5 come from the voters alone
+TABLE_SOURCED = ("F2", "F2p", "F3", "F4", "F6", "F7")     # F1 and F5 come from the voters (row facts)
+# kinds a table can also carry (F5: cited f5, class f5): never negative without a resolved table basis (r3 Astra P1-1)
+TABLE_KINDS = TABLE_SOURCED + ("F5",)
 FIXED_BASES = ("unclassified", "partial", "disagree")
 # the voter x condition capability matrix (design r3 s2, 2b r1 s4); XED profiles are one decoder, never voters
 CAPABILITY = {
@@ -366,16 +368,24 @@ def row_facts(tables, ballot: dict, window: bytes, *, redecode, decode_profile, 
         reason = "; ".join(classified.get("reasons", [])) or result
         for kind in TABLE_SOURCED:
             unobserved[kind] = f"no table basis ({reason})"[:300]
-    checked_length = max([v.length for v in votes.values() if v.status == "ok"] + [0])
+    # the bytes G1 checked (r3 Astra P2-1): check.decode_rows passes exactly the verified window, inside which G1
+    # bound every Intel / AMD voter's consumed bytes and Ghidra's claimed range (compare.compare_row)
+    checked_length = len(window)
     profiles = {name: decode_profile(name, window) for name in ("xed:g1", "xed:baseline", "xed:all")}
     f1, why = _f1(votes, profiles, checked_length)
     if why:
         unobserved["F1"] = why
-        unobserved.setdefault("F4", why)        # (r2 Astra P1-1: no profile split can be decided either)
+        _undecided_split(unobserved, why)
     if f1.get("class") != "valid" or len({p["mnemonic"] for p in f1["profiles"].values()}) > 1:
         facts["F1"] = f1
     ok = all(v.status == "ok" for v in votes.values())
     entry = tables.entry(basis.split(":", 1)[1]) if basis.startswith("cited:") else None
+    # (r3 Astra P2-2: the features of the voters that decoded the row, on every row the ordinary rule does not cover)
+    features = {"iced": votes["iced"].extra.get("cpuid_features"), "zydis": votes["zydis"].extra.get("isa_set"),
+                "xed": votes["xed"].extra.get("isa_set")}
+    features = {name: (value if votes[name].status == "ok" else None) for name, value in features.items()}
+    if not basis.startswith("ordinary:"):
+        facts["F4"] = {"features": features}
     if ok:
         privilege = _privilege(votes)
         raw = [privilege["iced"]["must_be_cpl0"], privilege["zydis"]["IS_PRIVILEGED"], privilege["xed"]["RING0"]]
@@ -414,16 +424,11 @@ def row_facts(tables, ballot: dict, window: bytes, *, redecode, decode_profile, 
                 facts["F3"] = f3
         split, why = _split(tables, basis, profiles, window, decode_without, checked_length)
         if why:
-            unobserved.setdefault("F4", why)
-        # (r2 Astra P1-4: the voters' features on every row the ordinary rule does not cover, table f4 or not)
-        if split or not basis.startswith("ordinary:"):
-            f4 = {"features": {"iced": votes["iced"].extra.get("cpuid_features"),
-                               "zydis": votes["zydis"].extra.get("isa_set"), "xed": votes["xed"].extra.get("isa_set")}}
-            if split:
-                f4["split"] = split
-            facts["F4"] = f4
+            _undecided_split(unobserved, why)
+        if split:
+            facts["F4"] = {"features": features, "split": split}
         if split and split["source"] != "split_table" and basis not in FIXED_BASES:
-            for kind in TABLE_SOURCED:          # (the baseline-profile form has no table entry behind this basis)
+            for kind in TABLE_KINDS:            # (the baseline-profile form has no table entry behind this basis)
                 if kind != "F4":
                     unobserved.setdefault(kind, f"the baseline profile decodes {split['baseline']}, outside the tables")
         values, why = _discriminators(tables, basis, window, votes)
@@ -451,6 +456,13 @@ def row_facts(tables, ballot: dict, window: bytes, *, redecode, decode_profile, 
     elif f5:
         facts["F5"] = f5
     return row
+
+
+def _undecided_split(unobserved: dict, why: str) -> None:
+    """r3 Astra P1-2: when no profile split can be decided, another form's table content (a fallback's undefined
+    outputs, its conditions) may apply: every kind a table can carry stays unobserved, not only F4."""
+    for kind in TABLE_KINDS:
+        unobserved.setdefault(kind, why)
 
 
 def listed(row: dict) -> bool:

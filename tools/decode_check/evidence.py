@@ -299,11 +299,11 @@ class Evidence:
                     "out_of_scope": out_of_scope, **flags}
         if kind in unverified:
             return {"state": "unobserved", "reason": unverified[kind], "basis": basis}
-        if kind in isa_facts.TABLE_SOURCED and basis in isa_facts.FIXED_BASES:
+        if kind in isa_facts.TABLE_KINDS and basis in isa_facts.FIXED_BASES:    # (r3 Astra P1-1: F5 too)
             return {"state": "unobserved", "reason": f"basis {basis}"}
         names = isa_facts.premise_names(self.isa_header)
         needed = {names["detection"][kind]}
-        if kind in isa_facts.TABLE_SOURCED and basis.startswith("ordinary:"):
+        if kind in isa_facts.TABLE_KINDS and basis.startswith("ordinary:"):
             needed.add(names["ordinary"])
         if needed <= set(premises):
             return {"state": "negative", "basis": basis, "premises": sorted(needed), "out_of_scope": out_of_scope}
@@ -446,6 +446,36 @@ def _check_isa_header(block) -> None:
     _keys(block["tables"], ("conditions", "map", "splits", "ordinary"), "isa_facts.tables")
 
 
+FLAG_TYPES = {"mxcsr_inputs": list, "simd_fp_exceptions": bool, "writes_mxcsr_status": bool,
+              "explicit_mmx_operand": bool, "alignment": bool, "masked_write": bool}
+
+
+def _check_row_shapes(row, fid, tables) -> None:
+    """r3 Astra P2-3: what the reader dereferences is checked at acceptance -- every fact is an object, every
+    unobserved reason a string, the F4 split and the class flags well formed, a split-table id in the pinned
+    tables (when the digests match)."""
+    import isa_facts
+
+    if not all(isinstance(value, dict) for value in row["facts"].values()) \
+            or not all(isinstance(reason, str) for reason in row["unobserved"].values()):
+        raise Rejected(f"{fid}: isa_facts fact values must be objects, reasons strings")
+    split = row["facts"].get("F4", {}).get("split")
+    if split is not None:
+        if not isinstance(split, dict) or not isinstance(split.get("source"), str):
+            raise Rejected(f"{fid}: isa_facts F4 split must be an object with a source")
+        if split["source"] == "split_table":
+            if not isinstance(split.get("split"), str):
+                raise Rejected(f"{fid}: isa_facts F4 split_table needs a split id")
+            if tables is not None and not isa_facts.basis_known(tables, "split:" + split["split"]):
+                raise Rejected(f"{fid}: isa_facts F4 split {split['split']!r} is not in the pinned tables")
+    flags = row["facts"].get("class_flags")
+    if flags is not None:
+        if not set(flags) <= set(FLAG_TYPES) or not all(isinstance(flags[name], FLAG_TYPES[name]) for name in flags):
+            raise Rejected(f"{fid}: isa_facts class_flags fields")
+        if not all(isinstance(item, str) for item in flags.get("mxcsr_inputs", [])):
+            raise Rejected(f"{fid}: isa_facts class_flags mxcsr_inputs")
+
+
 def _check_keys(row, fid, tables) -> None:
     """r2 Astra P2-1: partial / disagree rows name each voter's entry (or null) as classify found them."""
     keys = row.get("keys")
@@ -500,6 +530,7 @@ def _check_isa(section, fid, rows, never, tables=None) -> None:
         unknown = (set(row["facts"]) - set(isa_facts.KINDS) - {"class_flags"}) | (set(row["unobserved"]) - set(isa_facts.KINDS))
         if unknown:
             raise Rejected(f"{fid}: isa_facts unknown kinds {sorted(unknown)}")
+        _check_row_shapes(row, fid, tables)
         coordinates.append(where)
     if len(set(coordinates)) != len(coordinates) or coordinates != sorted(coordinates):
         raise Rejected(f"{fid}: isa_facts rows duplicated or not sorted")
