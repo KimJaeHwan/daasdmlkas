@@ -175,9 +175,21 @@ class IsaCollector:
             return
         entry["rows"][(space, address)] = row
 
-    def block(self) -> dict:
+    def block(self, facts: dict | None = None, states: dict | None = None) -> dict:
+        """The evidence-2 ISA block. With the G1 facts / states, ``checked`` is verified (review r1 P2-1): the rows
+        G1 compared (not '*') must be exactly the rows this collector processed, else failed:row-set-mismatch."""
         import isa_facts
 
+        if facts is not None and states is not None:
+            for function in facts["functions"]:
+                fid = function["function_id"]
+                compared = {(row["space"], row["address"]) for row in function["rows"]
+                            if "*" not in states.get((fid, row["space"], row["address"]), {"*": "unobserved"})}
+                entry = self.functions.get(fid)
+                processed = set(entry["rows"]) if entry else set()
+                if compared != processed and (entry is None or all(v == "checked" for v in entry["status"].values())):
+                    self.functions[fid] = {"status": {kind: "failed:row-set-mismatch" for kind in isa_facts.KINDS},
+                                           "rows": {}}
         return {"header": isa_facts.header_block(self.tables, decoders.profile_catalogue()),
                 "functions": self.functions}
 
@@ -271,7 +283,7 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     header["counts"] = g1_counts(rows)
     if evidence_out is not None:
         write_evidence(evidence_out, generation, naming_source, manifest, original, mapping, facts, states, use_table,
-                       reason, None if collector is None else collector.block())
+                       reason, None if collector is None else collector.block(facts, states))
         header["evidence_out"] = str(evidence_out)
     return header, rows
 

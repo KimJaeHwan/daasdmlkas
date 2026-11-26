@@ -1374,7 +1374,12 @@ def _ev_accept(document, view, allowlist=None):
     import evidence
 
     allowlist = [evidence.allowlist_entry(document)] if allowlist is None else allowlist
-    return evidence.accept(evidence.parse(evidence.dumps(document)), view, allowlist)
+    tables = None
+    if document.get("schema") == "g1-decode-evidence-2":
+        import isa_tables
+
+        tables = isa_tables.load()
+    return evidence.accept(evidence.parse(evidence.dumps(document)), view, allowlist, tables=tables)
 
 
 def test_evidence_consumers_2_bytes_and_digest():
@@ -2690,10 +2695,11 @@ def test_isa_step3_row_facts_on_the_design_vectors():
     assert tz["basis"] == "split:tzcnt-bsf" and tz["facts"]["F4"]["split"]["split"] == "tzcnt-bsf"
     fs = _row_facts("64488B042530000000")
     assert fs["basis"] == "ordinary:plain" and fs["facts"]["F7"]["accesses"] == [
-        {"segment": "fs", "read": True, "write": False, "conditional": False}]
+        {"segment": "fs", "role": "explicit", "read": True, "write": False, "cond_read": False, "cond_write": False}]
     movs = _row_facts("64F3A4")["facts"]["F7"]["accesses"]
-    assert movs == [{"segment": "fs", "read": True, "write": False, "conditional": True}]
-    assert _row_facts("9D")["facts"]["F2p"] == {"meaning": "POPF_FLAGS"}
+    assert movs == [{"segment": "fs", "role": "string_source", "read": True, "write": False, "cond_read": True,
+                     "cond_write": False}]
+    assert _row_facts("9D")["basis"] == "cited:POPFQ" and "F2p" not in _row_facts("9D")["facts"]   # (table)
     assert _row_facts("0F58C1")["facts"]["class_flags"]["mxcsr_inputs"] == ["RC", "DAZ", "FTZ"]
 
 
@@ -2747,16 +2753,16 @@ def test_isa_step3_evidence2_reader_rules():
     confirmed = {r: _ev_confirmed() for r in rows[:3]}
     confirmed[rows[3]] = {"*": "unobserved"}
     functions = [_ev_function("f0", rows, confirmed)]
-    rdtsc = {"basis": "cited:RDTSC", "facts": {"F2": {"ring0_candidate": False}}, "unobserved": {}}
+    call = {"basis": "cited:CALL_NEAR", "facts": {"F3": {"rel32_is_zero": False}}, "unobserved": {}}
     unclassified = {"basis": "unclassified", "facts": {}, "unobserved": {"F2": "no table basis"}}
-    document = _ev2(functions, {"f0": {(1, 0x1000): rdtsc, (1, 0x1003): unclassified}})
+    document = _ev2(functions, {"f0": {(1, 0x1000): call, (1, 0x1003): unclassified}})
     assert document["schema"] == "g1-decode-evidence-2"
     ev = _ev_accept(document, _ev_view(functions))
     names = isa_facts.premise_names(document["isa_facts"])
     held = {names["detection"]["F6"], names["detection"]["F2"]}
-    assert ev.isa("f0", 1, 0x1000, "F2", held)["state"] == "fact"
-    assert ev.isa("f0", 1, 0x1000, "F6", held) == {"state": "negative", "basis": "cited:RDTSC",
-                                                     "premises": [names["detection"]["F6"]]}
+    assert ev.isa("f0", 1, 0x1000, "F3", held)["state"] == "fact"
+    got = ev.isa("f0", 1, 0x1000, "F6", held)
+    assert (got["state"], got["basis"], got["premises"]) == ("negative", "cited:CALL_NEAR", [names["detection"]["F6"]])
     assert ev.isa("f0", 1, 0x1000, "F6", set())["state"] == "unobserved"                 # no premise
     assert ev.isa("f0", 1, 0x1003, "F2", held)["state"] == "unobserved"                  # marker
     assert ev.isa("f0", 1, 0x1003, "F6", held)["state"] == "unobserved"                  # no table basis
@@ -2764,7 +2770,7 @@ def test_isa_step3_evidence2_reader_rules():
     assert omitted["state"] == "unobserved" and names["ordinary"] in omitted["reason"]
     assert ev.isa("f0", 1, 0x1007, "F2", held | {names["ordinary"]})["state"] == "negative"
     assert ev.isa("f0", 1, 0x100a, "F2", held | {names["ordinary"]})["state"] == "unobserved"   # never compared
-    wrong = names["detection"]["F2"].rsplit(":", 1)[0] + ":" + "0" * 64                    # digest mismatch
+    wrong = names["detection"]["F6"].rsplit(":", 1)[0] + ":" + "0" * 64                    # digest mismatch, same K
     assert ev.isa("f0", 1, 0x1000, "F6", {wrong})["state"] == "unobserved"
     not_run = _ev2(functions, {"f0": {}}, status={k: "not_run" for k in isa_facts.KINDS})
     ev = _ev_accept(not_run, _ev_view(functions))
@@ -2829,7 +2835,9 @@ def test_isa_step3_end_to_end_evidence2_on_a_synthetic_bundle(tmp_path):
                                       "rows": set(), "kept": True} for row in manifest["functions"]}}
     for function in facts["functions"]:
         view["functions"][function["function_id"]]["rows"] = {(r["space"], r["address"]) for r in function["rows"]}
-    ev = evidence.accept(document, view, [evidence.allowlist_entry(document)])
+    import isa_tables
+
+    ev = evidence.accept(document, view, [evidence.allowlist_entry(document)], tables=isa_tables.load())
     assert all(item["isa_facts"]["status"] == {k: "checked" for k in isa_facts.KINDS} for item in document["functions"])
     call = ev.isa("function-000000", 1, CODE, "F6", set())
     assert call["state"] == "unobserved"                                   # cited CALL_NEAR, premise not held
@@ -2846,3 +2854,162 @@ def test_isa_step3_iced_rip_relative_memory_is_complete():
     for hexbytes in ("0F18441140", "0F1800"):                       # PREFETCHh: an operand that accesses nothing
         iced = _votes(hexbytes)["iced"].extra
         assert iced["memory_complete"] is True and iced["memory"] == [], hexbytes
+
+
+# -- ISA facts step 3: review round 1 fixes ----------------------------------------------------------------------
+
+def test_isa_step3r1_reader_merges_table_facts():
+    """review r1 P1 (Astra / Fable): a basis whose table lists K is a fact, never a negative."""
+    import isa_facts
+
+    rows = [(1, 0x1000 + 4 * i) for i in range(7)]
+    functions = [_ev_function("f0", rows, {r: _ev_confirmed() for r in rows})]
+    bases = ["cited:RDTSC", "cited:WRGSBASE", "cited:POP_FS", "cited:WRMSR", "ordinary:sse_fp", "split:tzcnt-bsf"]
+    listed = {rows[i]: {"basis": basis, "facts": {}, "unobserved": {}} for i, basis in enumerate(bases)}
+    document = _ev2(functions, {"f0": listed})
+    ev = _ev_accept(document, _ev_view(functions))
+    names = isa_facts.premise_names(document["isa_facts"])
+    held = set(names["detection"].values()) | {names["ordinary"]}
+    rdtsc = ev.isa("f0", *rows[0], "F6", held)
+    assert rdtsc["state"] == "fact" and rdtsc["table"]["f6"][0]["output"] == "EDX:EAX"
+    assert ev.isa("f0", *rows[1], "F7", held)["table"]["f7"]["writes_base"] == ["gs"]
+    assert ev.isa("f0", *rows[2], "F7", held)["table"]["f7"]["writes_base"] == ["fs"]
+    wrmsr = ev.isa("f0", *rows[3], "F7", held)["table"]["f7"]
+    assert "ECX unknown" in wrmsr["when"]
+    sse = ev.isa("f0", *rows[4], "F2", held)
+    assert sse["state"] == "fact" and "CR4.OSFXSR=1" in str(sse["table"]["class_conditions"])
+    split = ev.isa("f0", *rows[5], "F6", held)
+    assert split["state"] == "fact" and "fallback.undefined_outputs" in split["table"]   # BSF fallback
+    plain = ev.isa("f0", *rows[6], "F2", held)                                           # omitted row
+    assert plain["state"] == "negative" and plain["basis"] == "ordinary:plain"
+    assert "#GP non-canonical" in plain["out_of_scope"]
+    other = _ev_accept(document, _ev_view(functions))
+    other.tables = None                                                                  # tables not pinned
+    assert other.isa("f0", *rows[0], "F6", held)["state"] == "unobserved"
+
+
+def test_isa_step3r1_status_and_never_compared_rows():
+    import isa_facts
+
+    rows = [(1, 0x1000), (1, 0x1004)]
+    functions = [_ev_function("f0", rows, {rows[0]: _ev_confirmed(), rows[1]: {"*": "unobserved"}})]
+    fact = {"basis": "cited:RDTSC", "facts": {"F2": {"ring0_candidate": False}}, "unobserved": {}}
+    document = _ev2(functions, {"f0": {rows[0]: fact}}, status={k: "failed:x" for k in isa_facts.KINDS})
+    ev = _ev_accept(document, _ev_view(functions))
+    names = isa_facts.premise_names(document["isa_facts"])
+    held = set(names["detection"].values()) | {names["ordinary"]}
+    assert ev.isa("f0", *rows[0], "F2", held)["state"] == "unobserved"                  # failed status wins
+    assert ev.isa("f0", *rows[1], "F2", held)["state"] == "unobserved"                  # never compared
+
+
+@pytest.mark.parametrize("name", ["rows dict", "unknown basis key", "unknown class", "keys on cited", "omitted basis"])
+def test_isa_step3r1_more_rejections(name):
+    import evidence
+
+    rows = [(1, 0x1000)]
+    functions = [_ev_function("f0", rows, {rows[0]: _ev_confirmed()})]
+    document = _ev2(functions, {"f0": {rows[0]: {"basis": "cited:RDTSC", "facts": {}, "unobserved": {}}}})
+    section = document["functions"][0]["isa_facts"]
+    if name == "rows dict":
+        section["rows"] = {}
+    elif name == "unknown basis key":
+        section["rows"][0]["basis"] = "cited:DOES_NOT_EXIST"
+    elif name == "unknown class":
+        section["rows"][0]["basis"] = "ordinary:sse"
+    elif name == "keys on cited":
+        section["rows"][0]["keys"] = {"xed": "RDTSC"}
+    else:
+        document["isa_facts"]["omitted_row_basis"] = "ordinary:sse_int"
+    with pytest.raises(evidence.Rejected):
+        _ev_accept(document, _ev_view(functions))
+
+
+@needs
+def test_isa_step3r1_encoding_discriminators():
+    """review r1 P1-2: access width, CALL rel32 zero, NOTRACK, BND from the verified encoding."""
+    assert _row_facts("EC")["facts"]["F2"]["access_width"] == 1
+    assert _row_facts("ED")["facts"]["F2"]["access_width"] == 4
+    assert _row_facts("66ED")["facts"]["F2"]["access_width"] == 2
+    assert _row_facts("6D")["facts"]["F2"]["access_width"] == 4
+    assert _row_facts("E800000000")["facts"]["F3"]["rel32_is_zero"] is True
+    assert _row_facts("E810000000")["facts"]["F3"]["rel32_is_zero"] is False
+    assert _row_facts("3EFFD0")["facts"]["F3"]["notrack_prefix"] is True
+    assert _row_facts("643EFFD0")["facts"]["F3"]["notrack_prefix"] is False
+    assert _row_facts("FFD0")["facts"]["F3"]["notrack_prefix"] is False
+    assert _row_facts("F2E800000000")["facts"]["F4"]["bnd_prefix"] is True
+    assert _row_facts("E800000000")["facts"]["F4"]["bnd_prefix"] is False
+
+
+@needs
+def test_isa_step3r1_profile_failures_and_mode_agreement():
+    import dataclasses
+
+    import decoders as d
+    import isa_facts
+    import isa_tables
+
+    tables = isa_tables.load()
+    data = bytes.fromhex("0F01EE") + ISA_PAD                         # RDPKRU
+    ballot = d.ballot(data, CODE)
+
+    def profile_short(name, window):
+        vote = d.decode_profile(name, window, CODE)
+        return dataclasses.replace(vote, status="no_more_data") if name == "xed:baseline" else vote
+
+    row = isa_facts.row_facts(tables, ballot, data, redecode=lambda w: d.xed_redecode(w, CODE),
+                              decode_profile=profile_short, decode_without=lambda s, w: d.decode_without(s, w, CODE))
+    assert "F1" in row["unobserved"] and row["facts"]["F1"].get("class") is None     # never invalid_for_chip
+    amd = list(ballot["amd"])
+    one_off = dict(ballot, amd=(dataclasses.replace(amd[0], length=amd[0].length + 1), amd[1]))
+    differences, why = isa_facts._f5(one_off)                        # only AMD iced changes: undecided
+    assert differences is None and "length" in why
+    assert isa_facts._f5(ballot) == (None, None)                      # agreement, no difference
+    both = dict(ballot, amd=tuple(dataclasses.replace(v, operand_bits=16) for v in amd))
+    differences, why = isa_facts._f5(both)                            # every reporting decoder changes it
+    assert why is None and differences["operand_bits"]["zydis"]["amd"] == 16
+    byte = _votes("A801")                                             # TEST AL, 1: Zydis 8, XED 32, iced 0
+    import decoders as d
+
+    assert isa_facts._f5(d.ballot(bytes.fromhex("A801") + ISA_PAD, CODE)) == (None, None)
+    assert {v.operand_bits for v in byte.values()} != {byte["xed"].operand_bits}
+
+
+@needs
+def test_isa_step3r1_f7_compares_conditions_and_roles():
+    import dataclasses
+
+    import isa_facts
+    import isa_tables
+
+    tables = isa_tables.load()
+    votes = _votes("64F3A4")
+    zydis = votes["zydis"]
+    memory = [dict(m, cond_read=False, cond_write=True) if m["segment"] == "fs" else m for m in zydis.extra["memory"]]
+    broken = dict(votes, zydis=dataclasses.replace(zydis, extra=dict(zydis.extra, memory=memory)))
+    assert isa_facts._f7(tables, broken)[1] == "voters disagree on the FS / GS accesses"
+
+
+def test_isa_step3r1_checked_is_verified_against_the_rows():
+    """review r1 P2-1: a G1-compared row the collector never processed fails the function's status."""
+    import decode_check
+    import isa_facts
+
+    collector = decode_check.IsaCollector.__new__(decode_check.IsaCollector)
+    import isa_tables
+
+    collector.tables = isa_tables.load()
+    collector.functions = {"f0": {"status": {k: "checked" for k in isa_facts.KINDS},
+                                  "rows": {(1, 0x1000): {"basis": "ordinary:plain", "facts": {}, "unobserved": {}}}}}
+    facts = {"functions": [{"function_id": "f0", "rows": [{"space": 1, "address": 0x1000},
+                                                          {"space": 1, "address": 0x1004}]}]}
+    states = {("f0", 1, 0x1000): {"+": frozenset()}, ("f0", 1, 0x1004): {"+": frozenset()}}
+    collector.functions["f0"]["status"] = {k: "checked" for k in isa_facts.KINDS}
+    import decoders
+
+    original = decoders.profile_catalogue
+    decoders.profile_catalogue = lambda: {}
+    try:
+        block = collector.block(facts, states)
+    finally:
+        decoders.profile_catalogue = original
+    assert set(block["functions"]["f0"]["status"].values()) == {"failed:row-set-mismatch"}

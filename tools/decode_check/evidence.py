@@ -199,8 +199,8 @@ class Evidence:
     ``bundle = {"generation_id", "manifest_sha256", "original_sha256",
                 "functions": {function_id: {"observation_sha256", "rows": set((space, offset)), "kept": bool}}}``."""
 
-    def __init__(self, document: dict, bundle: dict) -> None:
-        self.document, self.bundle = document, bundle
+    def __init__(self, document: dict, bundle: dict, tables=None) -> None:
+        self.document, self.bundle, self.tables = document, bundle, tables
         self.global_reason = document["global_reason"]
         self.premises = set(document["premises"]) | {TRUST_PREMISE}
         self.table_applied = document["translation"]["table_applied"]
@@ -271,6 +271,9 @@ class Evidence:
 
         if self.isa_header is None:
             return {"state": "unobserved", "reason": "no ISA facts in this file (schema -1)"}
+        # (review r1 P1: the basis key is resolved from the reader's pinned tables, which must be the file's)
+        if self.tables is None or dict(self.tables.digests) != self.isa_header["tables"]:
+            return {"state": "unobserved", "reason": "the reader's tables are not the file's (digest mismatch)"}
         if self._never_compared(fid, space, offset):
             return {"state": "unobserved", "reason": "row not covered or never compared"}
         status = self.isa_status.get(fid, {}).get(kind)
@@ -278,16 +281,23 @@ class Evidence:
             return {"state": "unobserved", "reason": f"status {status}"}
         row = self.isa_rows.get((fid, space, offset))
         basis = row["basis"] if row else self.isa_header["omitted_row_basis"]
+        table, out_of_scope = (isa_facts.table_facts(self.tables, basis) if basis not in isa_facts.FIXED_BASES
+                               else ({}, []))
         if row and kind in row["unobserved"]:
-            return {"state": "unobserved", "reason": row["unobserved"][kind], "value": row["facts"].get(kind)}
-        if row and kind in row["facts"]:
-            return {"state": "fact", "value": row["facts"][kind], "basis": basis}
-        if not basis.startswith(("cited:", "split:", "ordinary:")):
+            return {"state": "unobserved", "reason": row["unobserved"][kind], "value": row["facts"].get(kind),
+                    "basis": basis}
+        row_value = row["facts"].get(kind) if row else None
+        if row_value or table.get(kind):
+            return {"state": "fact", "basis": basis, "row": row_value, "table": table.get(kind),
+                    "out_of_scope": out_of_scope}
+        if kind in isa_facts.TABLE_SOURCED and basis in isa_facts.FIXED_BASES:
             return {"state": "unobserved", "reason": f"basis {basis}"}
         names = isa_facts.premise_names(self.isa_header)
-        needed = {names["detection"][kind]} | ({names["ordinary"]} if basis.startswith("ordinary:") else set())
+        needed = {names["detection"][kind]}
+        if kind in isa_facts.TABLE_SOURCED and basis.startswith("ordinary:"):
+            needed.add(names["ordinary"])
         if needed <= set(premises):
-            return {"state": "negative", "basis": basis, "premises": sorted(needed)}
+            return {"state": "negative", "basis": basis, "premises": sorted(needed), "out_of_scope": out_of_scope}
         return {"state": "unobserved", "reason": "missing premises " + ", ".join(sorted(needed - set(premises)))}
 
     def _never_compared(self, fid, space, offset) -> bool:
@@ -320,7 +330,7 @@ PRODUCER_KEYS = ("decode_check_revision", "tool_digest", "decoders", "voters", "
 
 
 def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: str = CONSUMERS_VERSION,
-           digest: str = CONSUMERS_DIGEST) -> Evidence:
+           digest: str = CONSUMERS_DIGEST, tables=None) -> Evidence:
     """Every header, body and coverage-precondition check of design s2 / s3 / s5 / s7; raises Rejected."""
     schema = document.get("schema") if isinstance(document, dict) else None
     if schema == SCHEMA2:
@@ -404,10 +414,10 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
             raise Rejected(f"{fid}: exception coordinates outside the function's rows: {outside[:3]}")
         if schema == SCHEMA2:
             never = {c for c, e in zip(coordinates, item["exceptions"]) if "*" in e["attributes"]}
-            _check_isa(item["isa_facts"], fid, rows, never)
+            _check_isa(item["isa_facts"], fid, rows, never, tables)
     if schema == SCHEMA2:
         _check_isa_header(document["isa_facts"])
-    return Evidence(document, bundle)
+    return Evidence(document, bundle, tables)
 
 
 def _check_isa_header(block) -> None:
@@ -421,7 +431,7 @@ def _check_isa_header(block) -> None:
     _keys(block["tables"], ("conditions", "map", "splits", "ordinary"), "isa_facts.tables")
 
 
-def _check_isa(section, fid, rows, never) -> None:
+def _check_isa(section, fid, rows, never, tables=None) -> None:
     """Design r3 s5: the section is mandatory; a coordinate outside the rows, a duplicate, a fact on a never-compared
     (*) row, an unknown kind or status rejects the file."""
     import isa_facts
@@ -432,9 +442,13 @@ def _check_isa(section, fid, rows, never) -> None:
     for kind, state in section["status"].items():
         if state not in ISA_STATUS and not (isinstance(state, str) and state.startswith("failed:")):
             raise Rejected(f"{fid}: isa_facts status {kind}={state!r}")
+    if not isinstance(section["rows"], list):
+        raise Rejected(f"{fid}: isa_facts rows is not a list")
     coordinates = []
     for row in section["rows"]:
-        _keys(row, ("space", "offset", "basis", "facts", "unobserved"), f"{fid}.isa_facts row")
+        if not isinstance(row, dict) or not {"space", "offset", "basis", "facts", "unobserved"} <= set(row) \
+                <= {"space", "offset", "basis", "facts", "unobserved", "keys"}:
+            raise Rejected(f"{fid}: isa_facts row keys")
         _u64(row["space"], f"{fid}.isa space", 1 << 32)
         where = (row["space"], _offset(row["offset"], fid))
         if where not in rows:
@@ -444,6 +458,12 @@ def _check_isa(section, fid, rows, never) -> None:
         if not isinstance(row["basis"], str) or not isinstance(row["facts"], dict) \
                 or not isinstance(row["unobserved"], dict):
             raise Rejected(f"{fid}: isa_facts row types")
+        if row["basis"] not in isa_facts.FIXED_BASES and not row["basis"].startswith(("cited:", "split:", "ordinary:")):
+            raise Rejected(f"{fid}: isa_facts basis {row['basis']!r}")
+        if tables is not None and not isa_facts.basis_known(tables, row["basis"]):
+            raise Rejected(f"{fid}: isa_facts basis {row['basis']!r} is not in the pinned tables")
+        if "keys" in row and row["basis"] not in ("partial", "disagree"):
+            raise Rejected(f"{fid}: isa_facts keys only on partial / disagree rows")
         unknown = (set(row["facts"]) - set(isa_facts.KINDS) - {"class_flags"}) | (set(row["unobserved"]) - set(isa_facts.KINDS))
         if unknown:
             raise Rejected(f"{fid}: isa_facts unknown kinds {sorted(unknown)}")
