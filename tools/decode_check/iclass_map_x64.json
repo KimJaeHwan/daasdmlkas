@@ -1,0 +1,47 @@
+{
+ "schema": "tbr-iclass-map-1",
+ "design": ".census6/design_tbr_isa_facts_r3.md s1 (per-voter lookup by normalised iclass)",
+ "matching": "per voter: the first rule whose voters include the voter, whose mnemonic list holds the voter's mnemonic (upper-cased) and whose `when` holds gives the key; no rule -> the voter's lookup is absent (the form is not in the table for that voter). key \"=\" is the upper-cased mnemonic itself.",
+ "when_fields": {
+  "operand_bits": "the voter's effective operand size",
+  "flow": "the voter's G1 flow kind",
+  "target_kind": "the voter's explicit near CALL / JMP target kind (list: any of)",
+  "opcode": "the opcode bytes after legacy and REX prefixes, hex, compared as a prefix of the opcode (list: any of)",
+  "modrm_reg": "ModRM.reg of the byte after `opcode` (list: any of)"
+ },
+ "rules": [
+  {"voters": ["zydis", "xed"], "mnemonic": ["SYSRET"], "when": {"operand_bits": 64}, "key": "SYSRETQ"},
+  {"voters": ["xed"], "mnemonic": ["SYSRET64"], "key": "SYSRETQ"},
+  {"voters": ["zydis", "xed"], "mnemonic": ["SYSEXIT"], "when": {"operand_bits": 64}, "key": "SYSEXITQ"},
+  {"mnemonic": ["SYSRET", "SYSRETQ", "SYSEXIT", "SYSEXITQ"], "key": "="},
+
+  {"voters": ["iced"], "mnemonic": ["RETF"], "key": "RET_FAR"},
+  {"voters": ["xed"], "mnemonic": ["RET_FAR", "RET_NEAR"], "key": "="},
+  {"voters": ["iced", "zydis"], "mnemonic": ["RET"], "when": {"flow": "ret_far"}, "key": "RET_FAR"},
+  {"voters": ["iced", "zydis"], "mnemonic": ["RET"], "when": {"flow": "ret_near"}, "key": "RET_NEAR"},
+
+  {"voters": ["xed"], "mnemonic": ["JMP_FAR", "CALL_FAR"], "key": "="},
+  {"voters": ["iced", "zydis"], "mnemonic": ["JMP"], "when": {"flow": "jmp_far"}, "key": "JMP_FAR"},
+  {"voters": ["iced", "zydis"], "mnemonic": ["CALL"], "when": {"flow": "call_far"}, "key": "CALL_FAR"},
+  {"voters": ["iced", "zydis"], "mnemonic": ["CALL"], "when": {"flow": "call_near", "target_kind": ["register", "memory"]},
+   "key": "CALL_NEAR_INDIRECT"},
+  {"voters": ["xed"], "mnemonic": ["CALL_NEAR"], "when": {"target_kind": ["register", "memory"]}, "key": "CALL_NEAR_INDIRECT"},
+  {"mnemonic": ["JMP"], "when": {"flow": "jmp_near", "target_kind": ["register", "memory"]}, "key": "JMP_NEAR_INDIRECT"},
+
+  {"voters": ["xed"], "mnemonic": ["MOV_CR", "MOV_DR"], "key": "="},
+  {"voters": ["iced", "zydis"], "mnemonic": ["MOV"], "when": {"opcode": ["0F20", "0F22"]}, "key": "MOV_CR"},
+  {"voters": ["iced", "zydis"], "mnemonic": ["MOV"], "when": {"opcode": ["0F21", "0F23"]}, "key": "MOV_DR"},
+  {"mnemonic": ["MOV"], "when": {"opcode": ["8E"], "modrm_reg": [4]}, "key": "MOV_TO_FS"},
+  {"mnemonic": ["MOV"], "when": {"opcode": ["8E"], "modrm_reg": [5]}, "key": "MOV_TO_GS"},
+  {"mnemonic": ["POP"], "when": {"opcode": ["0FA1"]}, "key": "POP_FS"},
+  {"mnemonic": ["POP"], "when": {"opcode": ["0FA9"]}, "key": "POP_GS"},
+
+  {"mnemonic": ["LGDT", "LIDT", "LLDT", "LTR", "CLTS", "LMSW", "INVD", "WBINVD", "INVLPG", "SWAPGS", "RDMSR", "WRMSR",
+                "HLT", "SYSCALL", "SYSENTER", "INT3", "INT", "INT1", "UD0", "UD1", "UD2", "IRET", "IRETD", "IRETQ",
+                "IN", "OUT", "INSB", "INSW", "INSD", "OUTSB", "OUTSW", "OUTSD", "CLI", "STI", "POPF", "POPFQ",
+                "CPUID", "RDTSC", "RDTSCP", "RDPMC", "RDPKRU", "WRPKRU", "XGETBV", "SGDT", "SIDT", "SLDT", "SMSW",
+                "STR", "LAR", "LSL", "RDFSBASE", "RDGSBASE", "WRFSBASE", "WRGSBASE", "RDRAND", "RDSEED", "RDPID",
+                "XBEGIN", "XEND", "XABORT", "LFS", "LGS", "BSF", "BSR", "TZCNT", "LZCNT", "NOP", "PAUSE",
+                "ENDBR64", "ENDBR32"], "key": "="}
+ ]
+}

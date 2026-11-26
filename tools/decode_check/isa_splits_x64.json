@@ -1,0 +1,48 @@
+{
+ "schema": "tbr-isa-splits-1",
+ "design": ".census6/design_tbr_isa_facts_r3.md s3 (meaning_split and fallback meaning), s7a item 4",
+ "semantics": {
+  "split": "one encoding, two meanings: `main` when the deciding feature is supported (and enabled, where listed), `fallback` otherwise. Voter lookups that land on the main and the fallback key of the same split are that split (a meaning_split), not a table lookup disagreement; the row's conditions are the union of both keys' entries.",
+  "prefix_split": "a legacy prefix whose meaning depends on a feature, on the listed flows",
+  "no_split": "a negative entry: the encoding has one meaning on every processor (recorded so its absence from the split list is not mistaken for an oversight)",
+  "effect_differs": "true: the data effect differs between the meanings; false: neither meaning has a data effect beyond the next instruction"
+ },
+ "splits": [
+  {"id": "tzcnt-bsf", "encoding": "F3 0F BC /r", "main": "TZCNT", "fallback": "BSF", "feature": ["BMI1"],
+   "effect_differs": true, "vector": "F30FBCC1",
+   "cite": [{"doc": "SDM2", "entry": "TZCNT", "part": "Description (executes as BSF on processors without BMI1)"}]},
+  {"id": "lzcnt-bsr", "encoding": "F3 0F BD /r", "main": "LZCNT", "fallback": "BSR", "feature": ["LZCNT"],
+   "effect_differs": true, "vector": "F30FBDC1",
+   "cite": [{"doc": "SDM2", "entry": "LZCNT", "part": "Description (executes as BSR without LZCNT support)"}]},
+  {"id": "endbr64-nop", "encoding": "F3 0F 1E FA", "main": "ENDBR64", "fallback": "NOP", "feature": ["CET_IBT"],
+   "enabled": ["CR4.CET=1", "IA32_U_CET.ENDBR_EN=1 (CPL3) / IA32_S_CET.ENDBR_EN=1 (CPL0)"],
+   "effect_differs": false, "vector": "F30F1EFA",
+   "cite": [{"doc": "SDM2", "entry": "ENDBR64", "part": "Description (NOP when CET is not enabled or not supported)"}]},
+  {"id": "endbr32-nop", "encoding": "F3 0F 1E FB", "main": "ENDBR32", "fallback": "NOP", "feature": ["CET_IBT"],
+   "enabled": ["CR4.CET=1", "IA32_U_CET.ENDBR_EN=1 (CPL3) / IA32_S_CET.ENDBR_EN=1 (CPL0)"],
+   "effect_differs": false, "vector": "F30F1EFB",
+   "cite": [{"doc": "SDM2", "entry": "ENDBR32", "part": "Description"}]},
+  {"id": "pause-nop", "encoding": "F3 90", "main": "PAUSE", "fallback": "NOP", "feature": ["PAUSE"],
+   "effect_differs": false, "vector": "F390",
+   "cite": [{"doc": "SDM2", "entry": "PAUSE", "part": "Description (executes as NOP on earlier processors)"}]}
+ ],
+ "prefix_splits": [
+  {"id": "bnd-prefix", "prefix": "F2", "flows": ["call_near", "jmp_near", "ret_near", "jcc"], "feature": ["MPX"],
+   "enabled": ["BNDCFGU.EN=1 (CPL3) / IA32_BNDCFGS.EN=1 (CPL0)"],
+   "main": "BND-prefixed branch: BND0-BND3 initialised unless BNDPRESERVE=1",
+   "fallback": "F2 prefix ignored", "effect_differs": true, "vector": "F2E800000000",
+   "cite": [{"doc": "SDM3", "entry": "Intel MPX: BND prefix on branch instructions"}],
+   "note": "the branch target and continuation are the same in both meanings"}
+ ],
+ "no_split": [
+  {"id": "nop-66", "encoding": "66 90", "meaning": "NOP", "vector": "6690",
+   "cite": [{"doc": "SDM2", "entry": "NOP", "part": "Description (recommended multi-byte sequences)"}]},
+  {"id": "rep-ret", "encoding": "F3 C3", "meaning": "RET (REP prefix ignored)", "vector": "F3C3",
+   "cite": [{"doc": "SDM2", "entry": "Instruction prefixes: REP with non-string instructions (reserved, ignored)"}]}
+ ],
+ "not_covered": [
+  "0F 18 hint space (PREFETCHh / reserved-NOP forms)",
+  "0F 0D (PREFETCHW / reserved-NOP forms)",
+  "0F 1F (multi-byte NOP; FAT_NOP is in the baseline chip)"
+ ]
+}

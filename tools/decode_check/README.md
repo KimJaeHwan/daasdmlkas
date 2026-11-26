@@ -91,6 +91,27 @@ not voters:
 
 `profile_catalogue()` lists the ISA sets each profile enables, for the evidence header digest.
 
+Data files (`isa_tables.py` loads them, checks them together, and digests each over its canonical bytes):
+
+- `isa_conditions_x64.json`: the ISA condition table. Each entry cites its SDM / APM reference
+  entry. It holds:
+  - privilege / OS alternatives (f2) and privilege-dependent meanings (f2');
+  - continuation tags with target source and return mode (f3);
+  - CPU features (f4) and vendor notes (f5);
+  - per-output sources (f6) and base / state writers (f7);
+  - CET conditions, state-dependent and data-dependent faults.
+
+  Only the listed forms are covered. Any other form is `unobserved`, never "no condition".
+- `iclass_map_x64.json`: maps each voter's mnemonic to a canonical key. A rule can be qualified by
+  operand size, flow, target kind, opcode bytes or ModRM.reg.
+- `isa_splits_x64.json`: holds three kinds of entry:
+  - feature splits: main meaning, fallback meaning and deciding feature;
+  - the BND prefix split;
+  - negative entries (`66 90`, `F3 C3`).
+
+  Voters that land on the main and fallback keys of one split record a split, not a lookup
+  disagreement.
+
 ## File mapping
 
 Both mappings expose the same shape (`check.parse_original` picks one by magic):

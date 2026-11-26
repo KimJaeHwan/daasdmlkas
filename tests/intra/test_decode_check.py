@@ -1987,3 +1987,146 @@ def test_isa_raw_evidence_never_enters_the_g1_vote_json():
     vote = _votes("0F0110")["xed"]
     assert "extra" not in vote.as_json() and "privileged_attribute" not in vote.as_json()
     assert vote == type(vote)(**{**vote.__dict__, "extra": {}})   # (extra is not compared)
+
+
+# -- ISA facts step 2: the three data files (isa_tables.py) ----------------------------------------------------
+
+# every vector of design r3 s7 / s7a with the canonical key all three voters must land on
+ISA_KEYS = {
+    "0F0110": "LGDT", "0F0118": "LIDT", "0F0010": "LLDT", "0F0018": "LTR", "0F06": "CLTS", "0F0130": "LMSW",
+    "0F08": "INVD", "0F09": "WBINVD", "0F0138": "INVLPG", "0F01F8": "SWAPGS", "0F32": "RDMSR", "0F30": "WRMSR",
+    "0F20C0": "MOV_CR", "0F22C0": "MOV_CR", "0F21C0": "MOV_DR", "0F23C0": "MOV_DR", "F4": "HLT",
+    "EC": "IN", "E4FF": "IN", "ED": "IN", "66E5FF": "IN", "E6FF": "OUT", "EE": "OUT", "66EF": "OUT",
+    "6C": "INSB", "666D": "INSW", "6D": "INSD", "6E": "OUTSB", "6F": "OUTSD", "FA": "CLI", "FB": "STI",
+    "9D": "POPFQ", "669D": "POPF", "0FA2": "CPUID", "0F31": "RDTSC", "0F01F9": "RDTSCP", "0F33": "RDPMC",
+    "0F01EE": "RDPKRU", "0F01EF": "WRPKRU", "0F01D0": "XGETBV", "0F05": "SYSCALL", "0F34": "SYSENTER",
+    "0F07": "SYSRET", "480F07": "SYSRETQ", "0F35": "SYSEXIT", "480F35": "SYSEXITQ", "CC": "INT3", "CD29": "INT",
+    "F1": "INT1", "0FFF00": "UD0", "0FB900": "UD1", "0F0B": "UD2", "CF": "IRETD", "66CF": "IRET", "48CF": "IRETQ",
+    "CB": "RET_FAR", "FF2C2500100000": "JMP_FAR", "FF18": "CALL_FAR", "C3": "RET_NEAR", "F3C3": "RET_NEAR",
+    "FFD0": "CALL_NEAR_INDIRECT", "FFE0": "JMP_NEAR_INDIRECT", "C7F810000000": "XBEGIN", "0F01D5": "XEND",
+    "C6F805": "XABORT", "0F0100": "SGDT", "0F0108": "SIDT", "0F0000": "SLDT", "0F0120": "SMSW", "0F0008": "STR",
+    "0F02C0": "LAR", "0F03C0": "LSL", "F3480FAEC0": "RDFSBASE", "F3480FAEC8": "RDGSBASE",
+    "F3480FAED0": "WRFSBASE", "F3480FAED8": "WRGSBASE", "0FC7F0": "RDRAND", "0FC7F8": "RDSEED",
+    "F30FC7F8": "RDPID", "8EE0": "MOV_TO_FS", "8EE8": "MOV_TO_GS", "0FA1": "POP_FS", "0FA9": "POP_GS",
+    "0FB400": "LFS", "0FB500": "LGS", "6690": "NOP", "0F1F00": "NOP",
+}
+# split vectors: the G1 voters land on the main and the fallback of one split (design r3 s3, isa_splits_x64.json)
+ISA_SPLIT_VECTORS = {"F30FBCC1": "tzcnt-bsf", "F30FBDC1": "lzcnt-bsr", "F30F1EFA": "endbr64-nop",
+                     "F30F1EFB": "endbr32-nop", "F390": "pause-nop"}
+# forms outside the table: absent for every voter (unobserved, never "no condition")
+ISA_ABSENT = ("4889C8", "E800000000", "E900000000", "740A", "8EC0", "0F1800")
+
+
+def _keys(tables, hexbytes: str) -> dict:
+    import isa_tables
+
+    data = bytes.fromhex(hexbytes) + ISA_PAD
+    return {name: isa_tables.lookup(tables, vote, data) for name, vote in _votes(hexbytes).items()}
+
+
+def test_isa_tables_load_validate_and_digest():
+    import isa_tables
+
+    tables = isa_tables.load()
+    assert set(tables.digests) == {"conditions", "map", "splits"}
+    assert all(len(digest) == 64 for digest in tables.digests.values())
+    assert isa_tables.load().digests == tables.digests
+    for key, entry in tables.conditions["entries"].items():
+        assert entry["cite"], key
+    rdpkru = tables.entry("RDPKRU")   # s7a: CR4.PKE gate, EAX os_set_or_program_set, EDX constant 0
+    assert rdpkru["f2"]["enable"] == [["CR4.PKE=1"]]
+    assert {o["output"]: o["source"] for o in rdpkru["f6"]} == {"EAX (PKRU)": "os_set_or_program_set",
+                                                                 "EDX": "constant"}
+    assert tables.entry("STI")["f2"]["enable"][1][-1] == "RFLAGS.VIP=0" and "RFLAGS.VIP=0" not in str(tables.entry("CLI"))
+    assert tables.entry("SYSEXIT")["f3"]["tags"] == ["privileged_return", "may_change_mode"]
+    assert tables.entry("SYSEXITQ")["f3"]["tags"] == ["privileged_return"]
+    popf = {o["output"]: o for o in tables.conditions["f2_meanings"]["POPF_FLAGS"]["outputs"]}
+    assert popf["RFLAGS.AC"]["loaded_when"] == [] and popf["RFLAGS.IF"]["loaded_when"] == ["CPL<=IOPL"]
+
+
+@pytest.mark.parametrize("break_it", ["unknown condition", "no citation", "map key missing", "split main missing",
+                                      "unknown f3 tag", "constant without value", "schema"])
+def test_isa_tables_reject_a_malformed_file(break_it):
+    import copy
+    import json
+
+    import isa_tables
+
+    root = Path(isa_tables.__file__).parent
+    conditions, mapping, splits = (json.loads((root / isa_tables.FILES[name]).read_text(encoding="utf-8"))
+                                   for name in ("conditions", "map", "splits"))
+    conditions, mapping, splits = copy.deepcopy(conditions), copy.deepcopy(mapping), copy.deepcopy(splits)
+    if break_it == "unknown condition":
+        conditions["entries"]["HLT"]["f2"]["enable"] = [["CPL=7"]]
+    elif break_it == "no citation":
+        conditions["entries"]["HLT"]["cite"] = []
+    elif break_it == "map key missing":
+        mapping["rules"].append({"mnemonic": ["ADD"], "key": "="})
+    elif break_it == "split main missing":
+        del conditions["entries"]["TZCNT"]
+    elif break_it == "unknown f3 tag":
+        conditions["entries"]["HLT"]["f3"]["tags"] = ["sleeps"]
+    elif break_it == "constant without value":
+        del conditions["entries"]["RDPKRU"]["f6"][1]["value"]
+    else:
+        splits["schema"] = "tbr-isa-splits-0"
+    with pytest.raises(isa_tables.TableError):
+        isa_tables.validate(conditions, mapping, splits)
+
+
+@needs
+@pytest.mark.parametrize("hexbytes", sorted(ISA_KEYS))
+def test_isa_every_voter_lands_on_the_same_key(hexbytes):
+    import isa_tables
+
+    keys = _keys(isa_tables.load(), hexbytes)
+    assert set(keys.values()) == {ISA_KEYS[hexbytes]}, keys
+
+
+@needs
+@pytest.mark.parametrize("hexbytes", sorted(ISA_SPLIT_VECTORS))
+def test_isa_split_vectors_land_on_one_split(hexbytes):
+    """XED's G1 setting reads the legacy meaning; iced / Zydis the main one: one split, not a disagreement."""
+    import isa_tables
+
+    tables = isa_tables.load()
+    keys = _keys(tables, hexbytes)
+    split = tables.same_split(keys.values())
+    assert split is not None and split["id"] == ISA_SPLIT_VECTORS[hexbytes], keys
+    assert keys["iced"] == keys["zydis"] == split["main"] and keys["xed"] == split["fallback"]
+
+
+@needs
+def test_isa_split_table_agrees_with_the_xed_profiles():
+    """Where the baseline chip lacks the deciding feature, xed:baseline reads the fallback and xed:all the main."""
+    import isa_tables
+
+    tables = isa_tables.load()
+    for split in tables.splits["splits"]:
+        profiles = _profiles(split["vector"])
+        data = bytes.fromhex(split["vector"]) + ISA_PAD
+        main = isa_tables.lookup(tables, profiles["xed:all"], data)
+        baseline = isa_tables.lookup(tables, profiles["xed:baseline"], data)
+        assert main == split["main"], split["id"]
+        if split["id"] == "pause-nop":
+            assert baseline == "PAUSE"   # (PAUSE is in the baseline chip: only the table names this split)
+        else:
+            assert baseline == split["fallback"], split["id"]
+
+
+@needs
+@pytest.mark.parametrize("hexbytes", ISA_ABSENT)
+def test_isa_forms_outside_the_table_are_absent_for_every_voter(hexbytes):
+    import isa_tables
+
+    assert set(_keys(isa_tables.load(), hexbytes).values()) == {None}
+
+
+def test_isa_opcode_view_skips_prefixes_and_rex():
+    import isa_tables
+
+    assert isa_tables.opcode_view(bytes.fromhex("F3480FAED8")) == ((0xF3,), b"\x0F\xAE", 0xD8)
+    assert isa_tables.opcode_view(bytes.fromhex("66E5FF")) == ((0x66,), b"\xE5", 0xFF)
+    assert isa_tables.opcode_view(bytes.fromhex("8EE0")) == ((), b"\x8E", 0xE0)
+    assert isa_tables.opcode_view(bytes.fromhex("660F3800C1")) == ((0x66,), b"\x0F\x38\x00", 0xC1)
+    assert isa_tables.opcode_view(bytes.fromhex("C5FC58C1"))[1] == b""
