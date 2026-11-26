@@ -179,13 +179,23 @@ public class GhidraV2BundleExport extends HeadlessScript {
         }
     }
 
+    // (X-1, design_x1 r2 part 1) the producer profile every exported function
+    // declares: raw per-row override state and recorded landing pads (and,
+    // Bundle-wide, the sealed stack-switch evidence)
+    private static final String PRODUCER_PROFILE = "x1-producer-v1";
+
     private static final class ObservedFunction {
         final AddressSet body;
         final Map<Address, Set<Address>> exceptionalTargets;
+        // (X-1) every recorded landing pad per body row of a protected range,
+        // before the call-p-code filter that ``exceptionalTargets`` applies
+        final Map<Address, Set<Address>> recordedPads;
 
-        ObservedFunction(AddressSet body, Map<Address, Set<Address>> exceptionalTargets) {
+        ObservedFunction(AddressSet body, Map<Address, Set<Address>> exceptionalTargets,
+                Map<Address, Set<Address>> recordedPads) {
             this.body = body;
             this.exceptionalTargets = exceptionalTargets;
+            this.recordedPads = recordedPads;
         }
     }
 
@@ -1271,6 +1281,7 @@ public class GhidraV2BundleExport extends HeadlessScript {
         }
 
         Map<Address, Set<Address>> exceptionalTargets = new HashMap<>();
+        Map<Address, Set<Address>> recordedPads = new HashMap<>();
         for (ExceptionRegion region : ownedRegions) {
             for (ExceptionCallSite callSite : region.callSites) {
                 if (!body.contains(callSite.landingPad)) {
@@ -1285,6 +1296,12 @@ public class GhidraV2BundleExport extends HeadlessScript {
                     .getInstructions(new AddressSet(callSite.protectedRange), true);
                 while (instructions.hasNext()) {
                     Instruction instruction = instructions.next();
+                    if (body.contains(instruction.getAddress())) {
+                        recordedPads
+                            .computeIfAbsent(
+                                instruction.getAddress(), ignored -> new LinkedHashSet<>())
+                            .add(callSite.landingPad);
+                    }
                     if (!body.contains(instruction.getAddress()) ||
                             !hasCallOperation(instruction)) {
                         continue;
@@ -1296,7 +1313,7 @@ public class GhidraV2BundleExport extends HeadlessScript {
                 }
             }
         }
-        return new ObservedFunction(body, exceptionalTargets);
+        return new ObservedFunction(body, exceptionalTargets, recordedPads);
     }
 
     // (G3b-7b r9; proof-inputs review: Astra r1 P1-1 / P1-2, r2 P1-1, Fable r1
@@ -1487,14 +1504,19 @@ public class GhidraV2BundleExport extends HeadlessScript {
             monitor.checkCancelled();
             Instruction instruction = iterator.next();
             rows.add(instruction);
-            instructions.add(instruction(
+            Map<String, Object> row = instruction(
                 instruction,
                 observed.exceptionalTargets.getOrDefault(
-                    instruction.getAddress(), Set.of())));
+                    instruction.getAddress(), Set.of()));
+            row.put("override", overrideEvidence(instruction));
+            row.put("recorded_landing_pads", sortedCoordinates(
+                observed.recordedPads.getOrDefault(instruction.getAddress(), Set.of())));
+            instructions.add(row);
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("entry", coordinate(function.getEntryPoint()));
         result.put("instructions", instructions);
+        result.put("producer_profile", PRODUCER_PROFILE);
         // (G3b-7b r9e, Astra r10 / r11) a row whose length the CPU, not Ghidra's
         // decode, fixes (a 66-prefixed near control transfer) makes Ghidra's
         // fallthrough / return PC no ISA fact: the function gets neither S1 nor
@@ -2146,6 +2168,48 @@ public class GhidraV2BundleExport extends HeadlessScript {
         result.put("flow_type", flow);
         result.put("operations", operations);
         result.put("length", instruction.getLength());
+        return result;
+    }
+
+    /** (X-1, design_x1 r2 part 2) the row's own override state, raw: Ghidra's
+     *  instruction-level flow override, fallthrough override, length override
+     *  and override-type references. A claim of the producer about itself
+     *  (premise producer-override-report; TBR G1 attests the effect). Not
+     *  {@code FlowType.isOverride()}, which describes the computed flow type. */
+    private Map<String, Object> overrideEvidence(Instruction instruction) {
+        List<Reference> overrides = new ArrayList<>();
+        for (Reference reference : instruction.getReferencesFrom()) {
+            if (reference.getReferenceType().isOverride() && reference.getToAddress() != null) {
+                overrides.add(reference);
+            }
+        }
+        overrides.sort(Comparator
+            .comparing((Reference reference) -> spaceIdOf(reference.getToAddress()))
+            .thenComparing(reference -> byteOffset(reference.getToAddress()))
+            .thenComparing(reference -> reference.getReferenceType().getName()));
+        List<Map<String, Object>> references = new ArrayList<>();
+        for (Reference reference : overrides) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("address", coordinate(reference.getToAddress()));
+            item.put("type", reference.getReferenceType().getName());
+            references.add(item);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("flow_override", instruction.getFlowOverride().name());
+        result.put("fallthrough_overridden", instruction.isFallThroughOverridden());
+        result.put("length_overridden", instruction.isLengthOverridden());
+        result.put("override_references", references);
+        return result;
+    }
+
+    private List<Map<String, Object>> sortedCoordinates(Set<Address> addresses) {
+        List<Address> sorted = new ArrayList<>(addresses);
+        sorted.sort(Comparator.comparing(GhidraV2BundleExport::spaceIdOf)
+            .thenComparing(GhidraV2BundleExport::byteOffset));
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Address address : sorted) {
+            result.add(coordinate(address));
+        }
         return result;
     }
 
