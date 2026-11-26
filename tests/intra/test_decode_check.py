@@ -1337,7 +1337,7 @@ def test_r4_s5_first_and_third_pt_load_share_a_page():
 
 EV_BUNDLE = {"generation_id": "g" * 64, "manifest_sha256": "m" * 64, "original_sha256": "o" * 64}
 EV_PRODUCER = {"decode_check_revision": 2, "tool_digest": "t" * 64, "decoders": {"zydis": "x"},
-               "voters": {"intel": ["iced", "zydis", "xed"], "amd": ["iced", "zydis"]}, "rules": "pe-loader-rules-5",
+               "voters": {"intel": ["iced", "zydis", "xed"], "amd": ["iced", "zydis"]}, "rules": "pe-loader-rules-6",
                "lift_table": "x86-64-lift-table-6", "diagnosis_engine": {"source_digest": "e" * 64},
                "naming_source_sha256": "n" * 64}
 
@@ -1787,6 +1787,53 @@ def test_pe_map_load_config_code_rewriting_fields(offset, width, label):
         assert {"rf-failure-routine-pointer", "memcpy-pointer"} <= labels
     else:
         assert image.written.state == "indeterminate" and label in image.written.why
+
+
+def _dvrt_pe(*, symbol=7, version=1, reloc_type=1, overrides_size=None, chpe=False):
+    """A PE32+ whose load config points at a DVRT with one FUNCTION_OVERRIDE record: .text holds `E9 rel32` at
+    0x1010 (rel32 field at 0x1011); the record's X64_REL32 relocation names 0x1011 (pe-loader-rules-6)."""
+    import _pe_fixture as pf
+    import struct
+
+    text = bytearray(b"\xCC" * 0x40)
+    text[0x10:0x15] = b"\xE9" + struct.pack("<i", 0x20 - 0x15)
+    relocs = struct.pack("<IIHH", 0x1000, 12, reloc_type << 12 | 0x011, 0)
+    record = struct.pack("<IIII", 0x1020, 0, 4, len(relocs)) + struct.pack("<I", 0x1030) + relocs
+    bdd = struct.pack("<II", 1, 0)
+    size = len(record) if overrides_size is None else overrides_size
+    entry = struct.pack("<I", size) + record + bdd
+    table = struct.pack("<II", version, 12 + len(entry)) + struct.pack("<QI", symbol, len(entry)) + entry
+    data = bytearray(0x400)
+    struct.pack_into("<I", data, 0, 0x140)                      # load config size
+    struct.pack_into("<IH", data, 0xE0, 0x200, 2)               # DVRT offset 0x200 in section 2 (.data)
+    if chpe:
+        struct.pack_into("<Q", data, 0xC8, BASE + 0x2300)
+    data[0x200:0x200 + len(table)] = table
+    return pf.make_pe([pf.Section(".text", 0x1000, bytes(text)),
+                       pf.Section(".data", 0x2000, bytes(data), characteristics=0xC0000040)],
+                      directories=[pf.Directory(10, 0x2000, 0x140)])
+
+
+def test_pe_map_dvrt_function_override_marks_only_the_rel32_fields():
+    import pe_map
+
+    image = pe_map.parse(_dvrt_pe())
+    assert image.written.state == "complete", image.written.why
+    assert (0x1011, 0x1015, "dvrt-function-override (OS-dependent rewrite)") in image.written.ranges
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"symbol": 3}, "DVRT symbol 3 not modelled"),
+    ({"version": 2}, "DVRT version 2 not modelled"),
+    ({"reloc_type": 2}, "relocation type 2 not modelled"),
+    ({"overrides_size": 0x400}, "truncated"),
+    ({"chpe": True}, "CHPEMetadataPointer"),
+])
+def test_pe_map_dvrt_other_forms_stay_indeterminate(change, why):
+    import pe_map
+
+    image = pe_map.parse(_dvrt_pe(**change))
+    assert image.written.state == "indeterminate" and why in image.written.why, image.written.why
 
 
 def test_pe_map_marks_writable_code_sections():

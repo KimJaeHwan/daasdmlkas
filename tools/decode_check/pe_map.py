@@ -1,5 +1,5 @@
 """PE32+ file mapping of G1 decode_check (design r1 s2, r2 s3, r3 s5, r4 s4 / s7):
-``pe-loader-rules-5``. Only the file's own headers are read (never Ghidra data).
+``pe-loader-rules-6``. Only the file's own headers are read (never Ghidra data).
 
 A range of the image is ``file`` (bytes at a file offset), ``zero`` (zero-fill),
 or ``ambiguous`` (the rules do not decide its bytes: never used). Loader- or
@@ -14,7 +14,7 @@ import hashlib
 import json
 import struct
 
-RULES = "pe-loader-rules-5"
+RULES = "pe-loader-rules-6"
 IMAGE_FILE_MACHINE_AMD64 = 0x8664
 PE32_PLUS = 0x20B
 PAGE = 0x1000
@@ -304,6 +304,75 @@ def _relocations(image, data, directories) -> Parsed:
     return Parsed("complete", ranges)
 
 
+DVRT_FUNCTION_OVERRIDE = 7
+FUNCTION_OVERRIDE_X64_REL32 = 1
+
+
+def _dvrt(image, data, offset, section, ranges) -> list:
+    """The dynamic value relocation table (rules v6): version 1 and FUNCTION_OVERRIDE entries only (winnt.h
+    IMAGE_FUNCTION_OVERRIDE_HEADER / _DYNAMIC_RELOCATION / IMAGE_BDD_INFO). Each X64_REL32 relocation is a 4-byte
+    rel32 field the loader may rewrite at load time depending on OS state (BDD): written, so those bytes stay
+    unobserved without a named load-model premise; the rest of the image is still checked. Layout checked
+    against ntdll / kernelbase (every location is the rel32 of an E9 jmp to the overridden function). Any other
+    version, symbol, relocation type or a size inconsistency -> a problem (indeterminate). Returns problems."""
+    if not section or section > len(image.sections) or not offset:
+        return [f"DVRT offset {offset:#x} / section {section} not usable"]
+    try:
+        table_rva = image.sections[section - 1]["va"] + offset
+        version, total = struct.unpack_from("<II", _read(image, data, table_rva, 8))
+        if version != 1:
+            return [f"DVRT version {version} not modelled"]
+        body = _read(image, data, table_rva + 8, total)
+    except (_Unreadable, struct.error) as error:
+        return [f"DVRT unreadable: {error}"]
+    found = []
+    cursor = 0
+    while cursor < len(body):
+        if cursor + 12 > len(body):
+            return ["DVRT entry header truncated"]
+        symbol, size = struct.unpack_from("<QI", body, cursor)
+        entry = body[cursor + 12:cursor + 12 + size]
+        if len(entry) != size:
+            return ["DVRT entry truncated"]
+        cursor += 12 + size
+        if symbol != DVRT_FUNCTION_OVERRIDE:
+            return [f"DVRT symbol {symbol} not modelled"]
+        if size < 4:
+            return ["FUNCTION_OVERRIDE header truncated"]
+        overrides_size = struct.unpack_from("<I", entry, 0)[0]
+        overrides = entry[4:4 + overrides_size]
+        if len(overrides) != overrides_size:
+            return ["FUNCTION_OVERRIDE records truncated"]
+        inner = 0
+        while inner < overrides_size:
+            if inner + 16 > overrides_size:
+                return ["FUNCTION_OVERRIDE record header truncated"]
+            _, _, rva_size, reloc_size = struct.unpack_from("<IIII", overrides, inner)
+            start = inner + 16 + rva_size
+            if rva_size % 4 or start + reloc_size > overrides_size:
+                return ["FUNCTION_OVERRIDE record sizes inconsistent"]
+            relocs = overrides[start:start + reloc_size]
+            r = 0
+            while r < reloc_size:
+                if r + 8 > reloc_size:
+                    return ["FUNCTION_OVERRIDE relocation block truncated"]
+                page, block = struct.unpack_from("<II", relocs, r)
+                if block < 8 or r + block > reloc_size or block % 2:
+                    return ["FUNCTION_OVERRIDE relocation block size inconsistent"]
+                for at in range(r + 8, r + block, 2):
+                    word = struct.unpack_from("<H", relocs, at)[0]
+                    kind, low = word >> 12, word & 0xFFF
+                    if kind == 0:
+                        continue
+                    if kind != FUNCTION_OVERRIDE_X64_REL32:
+                        return [f"FUNCTION_OVERRIDE relocation type {kind} not modelled"]
+                    found.append((page + low, page + low + 4, "dvrt-function-override (OS-dependent rewrite)"))
+                r += block
+            inner = start + reloc_size
+    ranges.extend(found)
+    return []
+
+
 def _thunk_count(image, data, rva, limit=1 << 16) -> int:
     count = 0
     while count < limit:
@@ -380,12 +449,21 @@ def _written(image, data, directories) -> Parsed:
                     if va:
                         rva = va - image.image_base
                         ranges.append((rva, rva + 8, label))
-            rewriting = [label for offset, width, label in LOAD_CONFIG_REWRITING
-                         if offset + width <= len(config)
-                         and int.from_bytes(config[offset:offset + width], "little") != 0]
-            if rewriting:
+            present = {label: int.from_bytes(config[offset:offset + width], "little")
+                       for offset, width, label in LOAD_CONFIG_REWRITING if offset + width <= len(config)}
+            problems = []
+            if present.get("DynamicValueRelocTableOffset") or present.get("DynamicValueRelocTableSection"):
+                problems.extend("DynamicValueRelocTableOffset / DynamicValueRelocTableSection: " + item
+                                for item in _dvrt(image, data, present.get("DynamicValueRelocTableOffset", 0),
+                                                  present.get("DynamicValueRelocTableSection", 0), ranges))
+            elif present.get("DynamicValueRelocTable"):
+                problems.append("DynamicValueRelocTable VA without offset / section (older form, not modelled)")
+            for label in ("CHPEMetadataPointer", "HotPatchTableOffset"):
+                if present.get(label):
+                    problems.append(f"{label} (hybrid / hot-patch metadata not modelled)")
+            if problems:
                 states.append("indeterminate: load-config code rewriting / hybrid metadata not modelled ("
-                              + ", ".join(rewriting) + ")")
+                              + "; ".join(problems) + ")")
             else:
                 states.append("complete")
         except _Unreadable as error:

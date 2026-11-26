@@ -3,7 +3,7 @@
 Checks one sealed Bundle against its own `original` file, without Ghidra:
 
 1. **Mapping (layer `mapping`)** — the original is mapped by pinned loader rules
-   (PE32+: `pe-loader-rules-5`, ELF64: `elf-loader-rules-4`) and every sealed
+   (PE32+: `pe-loader-rules-6`, ELF64: `elf-loader-rules-4`) and every sealed
    block byte is compared with the byte the loader would place there.
 2. **Decode (layer `decode`)** — every Ghidra-listed instruction row is decoded
    again from *verified* bytes only (sealed byte == loader byte) by pinned
@@ -138,14 +138,12 @@ Bundle (admission refuses unlisted entries) and is passed by explicit path.
 
 ## Open items
 
-- **PE load-config code rewriting (owner, 2026-11-25).** Today a non-zero DynamicValueRelocTable /
-  DVRT offset / CHPEMetadataPointer / HotPatchTableOffset makes the written ranges indeterminate, so the
-  whole image is unobserved. This is temporary, not a permanent limit:
-  1. a later `pe-loader-rules` version parses the DVRT entries and marks only the rewritten bytes as
-     loader-written, so the rest of the image keeps being checked;
-  2. the TBR G3 loader / LoadState model computes the post-rewrite bytes, so those rows can be decoded too;
-  3. DVRT entries whose rewrite depends on the OS version or settings (e.g. retpoline enabled) need a named
-     load-model premise; without it those bytes stay unobserved.
+- **PE load-config code rewriting.** Done in `pe-loader-rules-6` for DVRT version 1 FUNCTION_OVERRIDE entries
+  (the form found in ntdll / kernelbase): only each X64_REL32 rel32 field (4 bytes) is loader-written, so those
+  OS-dependent bytes stay unobserved and the rest of the image is checked. Still indeterminate (whole image):
+  other DVRT symbols (retpoline, import / indirect control transfer, switch table, ARM64X), other DVRT versions,
+  CHPE (hybrid), hot patch. Follow-ups (owner, 2026-11-25): the TBR G3 LoadState model computes post-rewrite
+  bytes; OS / setting-dependent entries need a named load-model premise, else unobserved.
 - (done, lift table -5) cmov / rep listing bits pinned to the no-transfer form after a real-Bundle data check:
   all 2,487 cmov and 5 rep rows of the UE core probe and the ELF test Bundles export the plain rows' bits.
 - (done, lift table -6) rows whose only flow ops are pinned no-flow userops (LOCK / UNLOCK, the observed SIMD

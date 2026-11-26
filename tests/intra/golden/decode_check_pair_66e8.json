@@ -284,10 +284,10 @@
   "mapping": {
    "format": "pe",
    "load_bias": 0,
-   "mapping_id": "e1d66ed77e55bddb63afadc8de3e9b2e1e92681fbe18593bb2bb7963c8de0097",
-   "rules": "pe-loader-rules-5"
+   "mapping_id": "4fdd81d4f816edcf17419bd53561d43bfa32057d7e2f894e0da1658dea4ea90d",
+   "rules": "pe-loader-rules-6"
   },
-  "mapping_id": "e1d66ed77e55bddb63afadc8de3e9b2e1e92681fbe18593bb2bb7963c8de0097",
+  "mapping_id": "4fdd81d4f816edcf17419bd53561d43bfa32057d7e2f894e0da1658dea4ea90d",
   "premises": [
    "decoder-matches-cpu",
    "stock-ghidra-translator"
@@ -1645,9 +1645,9 @@
     },
     "format": "pe",
     "load_bias": 0,
-    "mapping_id": "e1d66ed77e55bddb63afadc8de3e9b2e1e92681fbe18593bb2bb7963c8de0097",
+    "mapping_id": "4fdd81d4f816edcf17419bd53561d43bfa32057d7e2f894e0da1658dea4ea90d",
     "relocations": "absent",
-    "rules": "pe-loader-rules-5",
+    "rules": "pe-loader-rules-6",
     "written": "absent"
    },
    "key": "bundle",
