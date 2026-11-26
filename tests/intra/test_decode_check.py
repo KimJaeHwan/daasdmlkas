@@ -1888,3 +1888,102 @@ def test_elf_map_rejects_other_machines_and_types():
 
     assert not _elf([ef.Segment(0x1000, b"\x90")], machine=183).ok          # EM_AARCH64: later
     assert not _elf([ef.Segment(0x1000, b"\x90")], e_type=1).ok             # ET_REL
+
+
+# -- ISA facts step 1: raw per-voter evidence of the shims (layout revision 3, design_tbr_isa_facts_r3) --------
+
+ISA_PAD = b"\x90" * 14   # (whole-instruction vectors: trailing bytes never join a complete instruction)
+
+
+def _votes(hexbytes: str, pad: bool = True) -> dict:
+    import decoders as d
+
+    data = bytes.fromhex(hexbytes) + (ISA_PAD if pad else b"")
+    return {name: d.decode(name, data, CODE, False) for name in d.INTEL_VOTERS}
+
+
+def _profiles(hexbytes: str) -> dict:
+    import decoders as d
+
+    data = bytes.fromhex(hexbytes) + ISA_PAD
+    return {profile: d.decode_profile(profile, data, CODE) for profile in d.XED_PROFILES}
+
+
+@needs
+def test_isa_raw_privilege_evidence_keeps_each_voter_apart():
+    """lgdt: iced must_be_cpl0, XED RING0, Zydis IS_PRIVILEGED not set (r3 s7: mapped says_no later)."""
+    votes = _votes("0F0110")
+    assert votes["iced"].extra["must_be_cpl0"] and votes["iced"].extra["is_privileged"]
+    assert votes["xed"].extra["privileged_attribute"] is True
+    assert votes["zydis"].extra["privileged_attribute"] is False
+    io = _votes("EC")   # in al, dx: iced is_privileged (IOPL) only, neither shim attribute
+    assert io["iced"].extra["is_privileged"] and not io["iced"].extra["must_be_cpl0"]
+    assert not io["zydis"].extra["privileged_attribute"] and not io["xed"].extra["privileged_attribute"]
+    os_gated = _votes("0F31")   # rdtsc: iced may_require_cpl0 only
+    assert os_gated["iced"].extra["may_require_cpl0"] and not os_gated["iced"].extra["is_privileged"]
+
+
+@needs
+def test_isa_sysret_and_sysexit_forms_are_separated_and_agree_on_the_g1_flow():
+    """The REX.W forms: iced names them SYSRETQ / SYSEXITQ; the G1 flow vote stays sysret for all three."""
+    for hexbytes, detail, bits in (("0F07", "sysret", 32), ("480F07", "sysret", 64),
+                                   ("0F35", "sysexit", 32), ("480F35", "sysexit", 64)):
+        votes = _votes(hexbytes)
+        assert {v.flow for v in votes.values()} == {"sysret"}, hexbytes
+        assert {v.extra["flow_detail"] for v in votes.values()} == {detail}, hexbytes
+        assert votes["zydis"].operand_bits == bits, hexbytes
+
+
+@needs
+def test_isa_fs_gs_effective_segments_and_address_only_operands():
+    fs, gs = _votes("64488B042530000000"), _votes("65488B042560000000")
+    assert all(v.extra["mem_segments"] == ["fs"] for v in fs.values())
+    assert all(v.extra["mem_segments"] == ["gs"] for v in gs.values())
+    lea = _votes("64488D042530000000")   # lea with an FS prefix touches no memory
+    assert all("fs" not in v.extra["mem_segments"] for v in lea.values())
+
+
+@needs
+def test_isa_xed_profiles_expose_the_feature_split_and_keep_invalid_for_chip_apart():
+    tz = _profiles("F30FBCC1")
+    assert (tz["xed:g1"].mnemonic, tz["xed:baseline"].mnemonic, tz["xed:all"].mnemonic) == ("BSF", "BSF", "TZCNT")
+    assert tz["xed:baseline"].extra["chip"] == "P4PRESCOTT_NOLAHF" and tz["xed:all"].extra["chip"] == "ALL"
+    assert tz["xed:g1"].extra["chip"] == ""
+    lahf = _profiles("9F")   # LAHF in 64-bit mode needs a feature the baseline chip lacks
+    assert lahf["xed:baseline"].status == "invalid" and lahf["xed:baseline"].extra["error"] == "INVALID_FOR_CHIP"
+    assert lahf["xed:all"].status == "ok"
+    avx = _profiles("C5FC58C1")   # without AVX the VEX prefix is not recognised: XED reports a general error
+    assert avx["xed:baseline"].status == "invalid" and avx["xed:baseline"].extra["error"] == "GENERAL_ERROR"
+    assert avx["xed:all"].status == "ok" and avx["xed:all"].mnemonic == "VADDPS"
+
+
+@needs
+def test_isa_raw_error_names_and_truncation():
+    lock = _votes("F083C001")
+    assert {v.status for v in lock.values()} == {"invalid"}
+    assert (lock["zydis"].extra["error"], lock["xed"].extra["error"]) == ("ILLEGAL_LOCK", "BAD_LOCK_PREFIX")
+    cut = _votes("0F", pad=False)
+    assert {v.status for v in cut.values()} == {"no_more_data"}
+    assert cut["xed"].extra["error"] == "BUFFER_TOO_SHORT"
+
+
+@needs
+def test_isa_profile_catalogue_and_unsupported_profiles():
+    import decoders as d
+
+    catalogue = d.profile_catalogue()
+    assert catalogue["xed:g1"] == {"chip": None, "isa_sets": None}
+    baseline, full = catalogue["xed:baseline"]["isa_sets"], catalogue["xed:all"]["isa_sets"]
+    assert "LONGMODE" in baseline and "LAHF" not in baseline and set(baseline) < set(full)
+    assert d.voter("xed").chip_isa_sets("NO_SUCH_CHIP") is None
+    assert d.voter("zydis").chip_isa_sets("ALL") is None
+    bad = d.voter("xed").decode(b"\x90" * 15, CODE, False, "NO_SUCH_CHIP")
+    assert bad.status == "error" and bad.extra["error"] == "unknown chip profile"
+    assert d.voter("zydis").decode(b"\x90" * 15, CODE, False, "ALL").status == "error"
+
+
+@needs
+def test_isa_raw_evidence_never_enters_the_g1_vote_json():
+    vote = _votes("0F0110")["xed"]
+    assert "extra" not in vote.as_json() and "privileged_attribute" not in vote.as_json()
+    assert vote == type(vote)(**{**vote.__dict__, "extra": {}})   # (extra is not compared)

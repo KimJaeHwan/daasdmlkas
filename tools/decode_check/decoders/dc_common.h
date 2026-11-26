@@ -1,5 +1,6 @@
 /* G1 decode_check: the flat result every C decoder shim fills (Zydis, XED).
- * Field meanings are the voter-side attributes of design r1-r4 (A1-A12).
+ * Field meanings are the voter-side attributes of design r1-r4 (A1-A12); the fields after
+ * target_kind are the raw per-voter evidence of the TBR ISA facts design r3 (layout revision 3).
  * Python reads it through ctypes (decoders.py, DcDecoded): keep the layout in sync. */
 #ifndef DC_COMMON_H
 #define DC_COMMON_H
@@ -8,7 +9,7 @@
 
 enum dc_status {
     DC_OK = 0,
-    DC_INVALID = 1,      /* the decoder says: not a valid encoding (an A1 vote value) */
+    DC_INVALID = 1,      /* the decoder says: not a valid encoding (an A1 vote value); error_name says which */
     DC_NO_MORE_DATA = 2, /* needs more bytes than given (a failure: insufficient bytes) */
     DC_ERROR = 3         /* any other decoder error (a failure) */
 };
@@ -31,7 +32,7 @@ enum dc_flow {
     DC_FLOW_UD = 13,          /* ud0 / ud1 / ud2 */
     DC_FLOW_SYSCALL = 14,
     DC_FLOW_SYSENTER = 15,
-    DC_FLOW_SYSRET = 16,      /* sysret / sysexit */
+    DC_FLOW_SYSRET = 16,      /* sysret / sysexit (G1 vote value; flow_detail separates them) */
     DC_FLOW_HLT = 17,
     DC_FLOW_XBEGIN = 18,
     DC_FLOW_XABORT = 19,
@@ -47,6 +48,24 @@ enum dc_target_kind {
     DC_TARGET_REGISTER = 3,
     DC_TARGET_MEMORY = 4     /* its effective-address width is address_bits */
 };
+
+/* the folded kinds of DC_FLOW_SYSRET kept apart (ISA facts r3 s3 F3); the return form is operand_bits */
+enum dc_flow_detail {
+    DC_DETAIL_NONE = 0,
+    DC_DETAIL_SYSRET = 1,
+    DC_DETAIL_SYSEXIT = 2
+};
+
+/* priv_flags: the decoder's own privilege attribute, raw (ISA facts r3 s2 capability matrix maps it) */
+#define DC_PRIV_ATTRIBUTE 1   /* Zydis ZYDIS_ATTRIB_IS_PRIVILEGED / XED XED_ATTRIBUTE_RING0 */
+
+/* mem_seg_mask: effective segments of the memory operands that access memory (not address-only) */
+#define DC_SEG_ES 1
+#define DC_SEG_CS 2
+#define DC_SEG_SS 4
+#define DC_SEG_DS 8
+#define DC_SEG_FS 16
+#define DC_SEG_GS 32
 
 typedef struct {
     int32_t status;
@@ -69,14 +88,30 @@ typedef struct {
     int32_t imm_offset[2], imm_size[2]; /* immediate fields, -1 / 0 if none */
     char mnemonic[32];
     int32_t target_kind;       /* enum dc_target_kind (layout revision 2) */
+    /* layout revision 3: raw ISA-fact evidence (never part of a G1 vote) */
+    int32_t flow_detail;       /* enum dc_flow_detail */
+    int32_t priv_flags;        /* DC_PRIV_* */
+    int32_t mem_seg_mask;      /* DC_SEG_* */
+    int32_t error_code;        /* the decoder's raw error / status code (0 when ok) */
+    char error_name[48];       /* its name, e.g. XED "INVALID_FOR_CHIP", Zydis "ILLEGAL_LOCK" */
+    char isa_set[48];          /* the decoder's own ISA-set name */
+    char extension[48];        /* the decoder's own extension / ISA-extension name */
+    char chip[32];             /* the chip profile this decode used ("" = the G1 voter setting) */
 } dc_decoded;
 
 /* amd: 0 Intel behaviour, 1 AMD behaviour (where the decoder models it) */
 int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc_decoded *out);
+/* chip: NULL = the G1 voter setting; otherwise a chip profile name (XED only; others return DC_ERROR) */
+int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip,
+                 dc_decoded *out);
+/* ISA-set catalogue for profile digests: name of set `index` (NULL past the last); whether that set is
+ * valid for `chip` (1 / 0, -1 unknown chip or not supported by this decoder) */
+const char *dc_isa_set_name(int index);
+int dc_isa_set_valid_for_chip(int index, const char *chip);
 const char *dc_version(void);
 int dc_struct_size(void);
-/* the layout revision: target_kind fits in the old struct padding, so the size alone cannot tell (2) */
-#define DC_LAYOUT_REVISION 2
+/* the layout revision: fields can fit in old struct padding, so the size alone cannot tell (3) */
+#define DC_LAYOUT_REVISION 3
 int dc_layout_revision(void);
 
 #endif

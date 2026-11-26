@@ -1,11 +1,16 @@
 /* G1 decode_check: Intel XED (v2026.08.23) behind dc_common.h.
- * Long mode 64, address width 64, default chip (all); XED models Intel behaviour only, so `amd` must be 0. */
+ * Long mode 64, address width 64; XED models Intel behaviour only, so `amd` must be 0.
+ * The G1 voter setting leaves the input chip unset (XED_CHIP_INVALID). Measured on v2026.08.23: then XED
+ * accepts every ISA set but decodes feature-dependent encodings under their legacy meaning (F3 0F BC BSF,
+ * F3 90 NOP, F3 0F 1E FA NOP). dc_decode_ex(chip) decodes the same bytes under a named chip profile
+ * (ISA facts r3 s3 F4). mem_seg_mask: in 64-bit mode XED reports a segment only for an FS / GS
+ * override (the flat default segments come back as no register), so only its FS / GS bits are evidence. */
 #include <string.h>
 #include <stdio.h>
 #include "xed/xed-interface.h"
 #include "dc_common.h"
 
-static int initialised = 0;
+static int initialised = 0;   /* (xed_tables_init once; ctypes calls are serial) */
 
 static void reset(dc_decoded *out) {
     memset(out, 0, sizeof(*out));
@@ -52,26 +57,84 @@ static int first_operand_name(const xed_decoded_inst_t *x) {
     return xed_operand_name(xed_inst_operand(inst, 0));
 }
 
+static void init_tables(void) {
+    if (!initialised) {
+        xed_tables_init();
+        initialised = 1;
+    }
+}
+
+/* a chip profile name ("ALL", "P4PRESCOTT_NOLAHF", ...) -> its enum; XED_CHIP_INVALID if unknown */
+static xed_chip_enum_t chip_by_name(const char *name) {
+    xed_chip_enum_t chip = str2xed_chip_enum_t(name);
+    return chip == XED_CHIP_LAST ? XED_CHIP_INVALID : chip;
+}
+
+const char *dc_isa_set_name(int index) {
+    init_tables();
+    if (index <= (int)XED_ISA_SET_INVALID || index >= (int)XED_ISA_SET_LAST) {
+        return NULL;
+    }
+    return xed_isa_set_enum_t2str((xed_isa_set_enum_t)index);
+}
+
+int dc_isa_set_valid_for_chip(int index, const char *chip_name) {
+    init_tables();
+    xed_chip_enum_t chip = chip_by_name(chip_name);
+    if (chip == XED_CHIP_INVALID || index <= (int)XED_ISA_SET_INVALID || index >= (int)XED_ISA_SET_LAST) {
+        return -1;
+    }
+    return xed_isa_set_is_valid_for_chip((xed_isa_set_enum_t)index, chip) ? 1 : 0;
+}
+
+static int32_t seg_bit(xed_reg_enum_t seg) {
+    switch (seg) {
+    case XED_REG_ES: return DC_SEG_ES;
+    case XED_REG_CS: return DC_SEG_CS;
+    case XED_REG_SS: return DC_SEG_SS;
+    case XED_REG_DS: return DC_SEG_DS;
+    case XED_REG_FS: return DC_SEG_FS;
+    case XED_REG_GS: return DC_SEG_GS;
+    default: return 0;
+    }
+}
+
 int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc_decoded *out) {
+    return dc_decode_ex(bytes, length, address, amd, NULL, out);
+}
+
+int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip_name,
+                 dc_decoded *out) {
     xed_decoded_inst_t x;
     reset(out);
     if (amd) {
         out->status = DC_ERROR;   /* XED does not model AMD behaviour: never a voter there */
         return out->status;
     }
-    if (!initialised) {
-        xed_tables_init();
-        initialised = 1;
-    }
+    init_tables();
     xed_decoded_inst_zero(&x);
     xed_decoded_inst_set_mode(&x, XED_MACHINE_MODE_LONG_64, XED_ADDRESS_WIDTH_64b);
+    if (chip_name) {
+        xed_chip_enum_t chip = chip_by_name(chip_name);
+        if (chip == XED_CHIP_INVALID) {
+            out->status = DC_ERROR;
+            strncpy(out->error_name, "unknown chip profile", sizeof(out->error_name) - 1);
+            return out->status;
+        }
+        xed_decoded_inst_set_input_chip(&x, chip);
+        strncpy(out->chip, xed_chip_enum_t2str(chip), sizeof(out->chip) - 1);
+    }
     xed_error_enum_t error = xed_decode(&x, (const xed_uint8_t *)bytes, (unsigned int)length);
+    out->error_code = (int32_t)error;
+    if (error != XED_ERROR_NONE) {
+        strncpy(out->error_name, xed_error_enum_t2str(error), sizeof(out->error_name) - 1);
+    }
     if (error == XED_ERROR_BUFFER_TOO_SHORT) {
         out->status = DC_NO_MORE_DATA;
         return out->status;
     }
     if (error != XED_ERROR_NONE) {
-        out->status = DC_INVALID;
+        out->status = DC_INVALID;   /* INVALID_FOR_CHIP stays apart in error_name (F1) */
         return out->status;
     }
     out->status = DC_OK;
@@ -172,5 +235,23 @@ int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc
     if ((out->flow == DC_FLOW_CALL_FAR || out->flow == DC_FLOW_JMP_FAR) && op0 != XED_OPERAND_PTR) {
         out->indirect = 1;
     }
+    /* layout revision 3: raw ISA-fact evidence */
+    if (iclass == XED_ICLASS_SYSEXIT) {
+        out->flow_detail = DC_DETAIL_SYSEXIT;
+    } else if (out->flow == DC_FLOW_SYSRET) {
+        out->flow_detail = DC_DETAIL_SYSRET;
+    }
+    if (xed_decoded_inst_get_attribute(&x, XED_ATTRIBUTE_RING0)) {
+        out->priv_flags |= DC_PRIV_ATTRIBUTE;
+    }
+    unsigned int memops = xed_decoded_inst_number_of_memory_operands(&x);
+    for (unsigned int i = 0; i < memops; i++) {
+        if (xed_decoded_inst_mem_read(&x, i) || xed_decoded_inst_mem_written(&x, i)) {
+            out->mem_seg_mask |= seg_bit(xed_decoded_inst_get_seg_reg(&x, i));
+        }
+    }
+    strncpy(out->isa_set, xed_isa_set_enum_t2str(xed_decoded_inst_get_isa_set(&x)), sizeof(out->isa_set) - 1);
+    strncpy(out->extension, xed_extension_enum_t2str(xed_decoded_inst_get_extension(&x)),
+            sizeof(out->extension) - 1);
     return out->status;
 }

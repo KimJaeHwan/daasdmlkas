@@ -21,8 +21,11 @@ FLOWS = ("none", "call_near", "call_far", "jmp_near", "jmp_far", "jcc", "ret_nea
          "int_n", "int1", "into", "ud", "syscall", "sysenter", "sysret", "hlt", "xbegin", "xabort", "xend", "other")
 STATUSES = ("ok", "invalid", "no_more_data", "error")
 TARGET_KINDS = ("unknown", "none", "direct", "register", "memory")   # (enum dc_target_kind)
-LAYOUT_REVISION = 2
+LAYOUT_REVISION = 3
 MAX_LENGTH = 15
+FLOW_DETAILS = ("none", "sysret", "sysexit")                     # (enum dc_flow_detail)
+SEGMENTS = (("es", 1), ("cs", 2), ("ss", 4), ("ds", 8), ("fs", 16), ("gs", 32))   # (DC_SEG_*)
+PRIV_ATTRIBUTE = 1                                                 # (DC_PRIV_ATTRIBUTE)
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,7 @@ class Decoded:
     mnemonic: str = ""
     target_derivation: str = ""       # "decoder" | "computed: next IP + displacement at the operand width"
     target_kind: str = "unknown"      # near CALL / JMP explicit target: memory / register / direct / none / unknown
+    # raw ISA-fact evidence (ISA facts r3; layout revision 3): never part of a G1 vote nor of as_json
     extra: dict = field(default_factory=dict, compare=False)
 
     def as_json(self) -> dict:
@@ -70,7 +74,27 @@ class DcDecoded(ctypes.Structure):
         ("prefix_count", ctypes.c_int32), ("disp_offset", ctypes.c_int32), ("disp_size", ctypes.c_int32),
         ("imm_offset", ctypes.c_int32 * 2), ("imm_size", ctypes.c_int32 * 2), ("mnemonic", ctypes.c_char * 32),
         ("target_kind", ctypes.c_int32),   # (layout revision 2: an older library fails the size check)
+        # layout revision 3: raw ISA-fact evidence
+        ("flow_detail", ctypes.c_int32), ("priv_flags", ctypes.c_int32), ("mem_seg_mask", ctypes.c_int32),
+        ("error_code", ctypes.c_int32), ("error_name", ctypes.c_char * 48), ("isa_set", ctypes.c_char * 48),
+        ("extension", ctypes.c_char * 48), ("chip", ctypes.c_char * 32),
     ]
+
+
+def _text(raw: bytes) -> str:
+    return raw.decode(errors="replace")
+
+
+def _shim_extra(out: DcDecoded) -> dict:
+    """The raw per-voter ISA-fact evidence of one shim decode (ISA facts r3 s1 layer 1)."""
+    extra = {"error": _text(out.error_name), "error_code": out.error_code, "chip": _text(out.chip)}
+    if out.status == 0:
+        extra.update({
+            "flow_detail": FLOW_DETAILS[out.flow_detail] if 0 <= out.flow_detail < len(FLOW_DETAILS) else "none",
+            "privileged_attribute": bool(out.priv_flags & PRIV_ATTRIBUTE),
+            "mem_segments": [name for name, bit in SEGMENTS if out.mem_seg_mask & bit],
+            "isa_set": _text(out.isa_set), "extension": _text(out.extension)})
+    return extra
 
 
 class _Shim:
@@ -80,6 +104,13 @@ class _Shim:
         self.lib.dc_decode.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64, ctypes.c_int,
                                        ctypes.POINTER(DcDecoded)]
         self.lib.dc_decode.restype = ctypes.c_int
+        self.lib.dc_decode_ex.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64, ctypes.c_int,
+                                          ctypes.c_char_p, ctypes.POINTER(DcDecoded)]
+        self.lib.dc_decode_ex.restype = ctypes.c_int
+        self.lib.dc_isa_set_name.argtypes = [ctypes.c_int]
+        self.lib.dc_isa_set_name.restype = ctypes.c_char_p
+        self.lib.dc_isa_set_valid_for_chip.argtypes = [ctypes.c_int, ctypes.c_char_p]
+        self.lib.dc_isa_set_valid_for_chip.restype = ctypes.c_int
         self.lib.dc_version.restype = ctypes.c_char_p
         self.lib.dc_struct_size.restype = ctypes.c_int
         if self.lib.dc_struct_size() != ctypes.sizeof(DcDecoded):
@@ -91,12 +122,15 @@ class _Shim:
         self.version = self.lib.dc_version().decode()
         self.derivation = derivation
 
-    def decode(self, data: bytes, address: int, amd: bool) -> Decoded:
+    def decode(self, data: bytes, address: int, amd: bool, chip: str | None = None) -> Decoded:
+        """chip None: the G1 voter setting; else a chip profile (XED only, ISA facts r3 s3 F4)."""
         out = DcDecoded()
-        self.lib.dc_decode(data, len(data), address, 1 if amd else 0, ctypes.byref(out))
+        self.lib.dc_decode_ex(data, len(data), address, 1 if amd else 0, chip.encode() if chip else None,
+                              ctypes.byref(out))
         status = STATUSES[out.status] if 0 <= out.status < len(STATUSES) else "error"
+        extra = _shim_extra(out)
         if status != "ok":
-            return Decoded(self.name, self.version, amd, status)
+            return Decoded(self.name, self.version, amd, status, extra=extra)
         fields = []
         if out.disp_offset >= 0 and out.disp_size:
             fields.append((out.disp_offset, out.disp_size))
@@ -110,7 +144,25 @@ class _Shim:
             out.ret_imm_value if out.ret_imm else None, out.int_vector if out.int_vector >= 0 else None,
             tuple(sorted(set(fields))), out.mnemonic.decode(errors="replace"),
             self.derivation if out.has_target else "",
-            target_kind=TARGET_KINDS[out.target_kind] if 0 <= out.target_kind < len(TARGET_KINDS) else "unknown")
+            target_kind=TARGET_KINDS[out.target_kind] if 0 <= out.target_kind < len(TARGET_KINDS) else "unknown",
+            extra=extra)
+
+    def chip_isa_sets(self, chip: str) -> list | None:
+        """The ISA sets the decoder accepts under `chip` (sorted), None if the chip is unknown / unsupported."""
+        names, index = [], 1
+        while True:
+            name = self.lib.dc_isa_set_name(index)
+            if name is None:
+                if index == 1:
+                    return None   # (this decoder has no ISA-set catalogue: chip profiles are XED's)
+                break
+            valid = self.lib.dc_isa_set_valid_for_chip(index, chip.encode())
+            if valid < 0:
+                return None
+            if valid:
+                names.append(name.decode())
+            index += 1
+        return sorted(names)
 
 
 # -- iced-x86 --------------------------------------------------------------------------------
@@ -128,6 +180,10 @@ class _Iced:
         self.version = f"iced-x86 {getattr(iced_x86, '__version__', '1.22.0')}"
         self.mnemonics = {value: name for name, value in vars(iced_x86.Mnemonic).items() if not name.startswith("_")}
         self.op_kinds = iced_x86.OpKind
+        public = lambda enum: {value: name for name, value in vars(enum).items() if not name.startswith("_")}
+        self.errors = public(iced_x86.DecoderError)
+        self.features = public(iced_x86.CpuidFeature)
+        self.registers = {value: name.lower() for value, name in public(iced_x86.Register).items()}
 
     def decode(self, data: bytes, address: int, amd: bool) -> Decoded:
         x = self.iced
@@ -135,10 +191,11 @@ class _Iced:
         decoder = x.Decoder(64, data, options, ip=address)
         instr = decoder.decode()
         error = decoder.last_error
+        error_name = self.errors.get(error, str(error))
         if error == x.DecoderError.NO_MORE_BYTES:
-            return Decoded(self.name, self.version, amd, "no_more_data")
+            return Decoded(self.name, self.version, amd, "no_more_data", extra={"error": error_name})
         if error != x.DecoderError.NONE or instr.is_invalid:
-            return Decoded(self.name, self.version, amd, "invalid")
+            return Decoded(self.name, self.version, amd, "invalid", extra={"error": error_name})
         m = x.Mnemonic
         mnemonic = instr.mnemonic
         name = self.mnemonics.get(mnemonic, str(mnemonic))
@@ -165,7 +222,9 @@ class _Iced:
             flow = {m.INT3: "int3", m.INT: "int_n", m.INT1: "int1", m.INTO: "into", m.UD0: "ud", m.UD1: "ud",
                     m.UD2: "ud", m.SYSCALL: "syscall", m.SYSENTER: "sysenter", m.SYSRET: "sysret",
                     m.SYSEXIT: "sysret", m.HLT: "hlt", m.XBEGIN: "xbegin", m.XABORT: "xabort",
-                    m.XEND: "xend"}.get(mnemonic, "none")
+                    m.XEND: "xend",
+                    # (iced names the REX.W forms apart; Zydis / XED fold them into sysret / sysexit)
+                    m.SYSRETQ: "sysret", m.SYSEXITQ: "sysret"}.get(mnemonic, "none")
             if flow == "none" and instr.flow_control not in (x.FlowControl.NEXT,):
                 flow = "other"
         k = self.op_kinds
@@ -211,7 +270,30 @@ class _Iced:
         stack = 64   # (long mode: the stack width; push / pop sizes follow the operand size)
         return Decoded(self.name, self.version, amd, "ok", instr.len, flow, indirect, target, counter, ip_bits,
                        disp_bits, operand_bits, address_bits, stack, ret_imm, vector, tuple(sorted(set(fields))),
-                       name, "decoder" if target is not None else "", target_kind=target_kind)
+                       name, "decoder" if target is not None else "", target_kind=target_kind,
+                       extra=self._extra(instr, code, mnemonic))
+
+    def _extra(self, instr, code, mnemonic) -> dict:
+        """The raw iced ISA-fact evidence (ISA facts r3 s1 layer 1; s2: the three privilege flags)."""
+        m, k = self.iced.Mnemonic, self.op_kinds
+        segments = set()
+        if mnemonic not in (m.LEA, m.NOP):   # (address-only / hint operands touch no segment)
+            for index in range(instr.op_count):
+                kind = instr.op_kind(index)
+                if kind in (k.MEMORY, k.MEMORY_SEG_SI, k.MEMORY_SEG_ESI, k.MEMORY_SEG_RSI,
+                            k.MEMORY_SEG_DI, k.MEMORY_SEG_EDI, k.MEMORY_SEG_RDI):
+                    segments.add(self.registers.get(instr.memory_segment, "?"))
+                elif kind in (k.MEMORY_ESDI, k.MEMORY_ESEDI, k.MEMORY_ESRDI):
+                    segments.add("es")
+        order = [name for name, _ in SEGMENTS]
+        return {
+            "error": "", "chip": "",
+            "flow_detail": {m.SYSRET: "sysret", m.SYSRETQ: "sysret", m.SYSEXIT: "sysexit",
+                            m.SYSEXITQ: "sysexit"}.get(mnemonic, "none"),
+            "must_be_cpl0": bool(code.must_be_cpl0), "is_privileged": bool(code.is_privileged),
+            "may_require_cpl0": bool(code.may_require_cpl0),
+            "cpuid_features": sorted(self.features.get(f, str(f)) for f in instr.cpuid_features()),
+            "mem_segments": sorted(segments, key=lambda s: order.index(s) if s in order else len(order))}
 
 
 _VOTERS = {}
@@ -230,6 +312,26 @@ def voter(name: str):
         else:
             raise ValueError(f"unknown voter {name!r}")
     return _VOTERS[name]
+
+
+# XED chip profiles (ISA facts r3 s3 F4): profiles of ONE decoder, never voters, never counted in votes.
+# xed:g1 is the G1 voter setting itself (input chip unset); the other two name their chip enum.
+# Baseline: P4PRESCOTT_NOLAHF is the smallest chip of the pinned XED build with LONGMODE (33 ISA sets; no
+# LAHF / SAHF in 64-bit mode, like the first x86-64 parts; it does include SSE3, CMPXCHG16B, MONITOR, PAUSE,
+# so splits on those come from the SDM split table, not from the profile comparison). Measured 2026-11-26.
+XED_PROFILES = {"xed:g1": None, "xed:baseline": "P4PRESCOTT_NOLAHF", "xed:all": "ALL"}
+
+
+def decode_profile(profile: str, data: bytes, address: int) -> Decoded:
+    """One XED chip-profile decode of the same (verified) bytes."""
+    return voter("xed").decode(bytes(data[:MAX_LENGTH]), address, False, XED_PROFILES[profile])
+
+
+def profile_catalogue() -> dict:
+    """{profile: {"chip": name, "isa_sets": [...] | None}} for the header digest (ISA facts r3 s5)."""
+    xed = voter("xed")
+    return {profile: {"chip": chip, "isa_sets": xed.chip_isa_sets(chip) if chip else None}
+            for profile, chip in XED_PROFILES.items()}
 
 
 # the votes of design r1 s5: Intel mode iced, Zydis, XED; AMD mode iced, Zydis

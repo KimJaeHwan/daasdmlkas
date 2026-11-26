@@ -70,6 +70,27 @@ No majority vote. Precedence: `unobserved` > `withheld` (decoder / AMD / vendor
 split) > `unrecognized` (internal inconsistency, analysis override, cause unknown,
 Ghidra decode suspect) > `applied`.
 
+### Raw ISA-fact evidence (TBR ISA facts, design `.census6/design_tbr_isa_facts_r3.md`)
+
+The shims fill the fields after `target_kind` (layout revision 3), and `decoders.py` keeps them in
+`Decoded.extra`. They never enter a G1 vote or `as_json`. Per voter they hold:
+
+- the privilege attribute: Zydis `IS_PRIVILEGED`, XED `RING0`, and iced `must_be_cpl0` /
+  `is_privileged` / `may_require_cpl0`;
+- `flow_detail`: whether a `sysret` vote is a sysret or a sysexit; the form comes from `operand_bits`;
+- the effective segments of memory operands. XED reports only FS / GS overrides in 64-bit mode;
+- the raw error name. XED `INVALID_FOR_CHIP` is kept apart, while the G1 status stays `invalid`;
+- each decoder's own ISA-set / extension names; iced reports its CPUID features.
+
+There are three XED chip profiles (`decoders.XED_PROFILES`, `decode_profile`). They are one decoder,
+not voters:
+- `xed:g1`: the G1 voter setting. The input chip is unset, so XED decodes feature-dependent
+  encodings in their legacy meaning, e.g. `F3 0F BC` = BSF.
+- `xed:baseline` = `P4PRESCOTT_NOLAHF`: the smallest chip with LONGMODE in the pinned build.
+- `xed:all` = `XED_CHIP_ALL`.
+
+`profile_catalogue()` lists the ISA sets each profile enables, for the evidence header digest.
+
 ## File mapping
 
 Both mappings expose the same shape (`check.parse_original` picks one by magic):

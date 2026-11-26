@@ -25,17 +25,65 @@ const char *dc_version(void) {
     return text;
 }
 
+/* chip profiles are an XED facility (ISA facts r3 s3 F4): no ISA-set catalogue here */
+const char *dc_isa_set_name(int index) { (void)index; return NULL; }
+
+int dc_isa_set_valid_for_chip(int index, const char *chip) { (void)index; (void)chip; return -1; }
+
+static const char *status_name(ZyanStatus status) {
+    switch (status) {
+    case ZYDIS_STATUS_NO_MORE_DATA: return "NO_MORE_DATA";
+    case ZYDIS_STATUS_DECODING_ERROR: return "DECODING_ERROR";
+    case ZYDIS_STATUS_INSTRUCTION_TOO_LONG: return "INSTRUCTION_TOO_LONG";
+    case ZYDIS_STATUS_BAD_REGISTER: return "BAD_REGISTER";
+    case ZYDIS_STATUS_ILLEGAL_LOCK: return "ILLEGAL_LOCK";
+    case ZYDIS_STATUS_ILLEGAL_LEGACY_PFX: return "ILLEGAL_LEGACY_PFX";
+    case ZYDIS_STATUS_ILLEGAL_REX: return "ILLEGAL_REX";
+    case ZYDIS_STATUS_INVALID_MAP: return "INVALID_MAP";
+    case ZYDIS_STATUS_MALFORMED_EVEX: return "MALFORMED_EVEX";
+    case ZYDIS_STATUS_MALFORMED_MVEX: return "MALFORMED_MVEX";
+    case ZYDIS_STATUS_INVALID_MASK: return "INVALID_MASK";
+    default: return "OTHER";
+    }
+}
+
+static int32_t seg_bit(ZydisRegister seg) {
+    switch (seg) {
+    case ZYDIS_REGISTER_ES: return DC_SEG_ES;
+    case ZYDIS_REGISTER_CS: return DC_SEG_CS;
+    case ZYDIS_REGISTER_SS: return DC_SEG_SS;
+    case ZYDIS_REGISTER_DS: return DC_SEG_DS;
+    case ZYDIS_REGISTER_FS: return DC_SEG_FS;
+    case ZYDIS_REGISTER_GS: return DC_SEG_GS;
+    default: return 0;
+    }
+}
+
 int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc_decoded *out) {
+    return dc_decode_ex(bytes, length, address, amd, NULL, out);
+}
+
+int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip,
+                 dc_decoded *out) {
     ZydisDecoder decoder;
     ZydisDecodedInstruction insn;
     ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
     reset(out);
+    if (chip) {
+        out->status = DC_ERROR;
+        strncpy(out->error_name, "chip profiles not supported", sizeof(out->error_name) - 1);
+        return out->status;
+    }
     if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
         out->status = DC_ERROR;
         return out->status;
     }
     ZydisDecoderEnableMode(&decoder, ZYDIS_DECODER_MODE_AMD_BRANCHES, amd ? ZYAN_TRUE : ZYAN_FALSE);
     ZyanStatus status = ZydisDecoderDecodeFull(&decoder, bytes, length, &insn, ops);
+    if (!ZYAN_SUCCESS(status)) {
+        out->error_code = (int32_t)ZYAN_STATUS_CODE(status);
+        strncpy(out->error_name, status_name(status), sizeof(out->error_name) - 1);
+    }
     if (status == ZYDIS_STATUS_NO_MORE_DATA) {
         out->status = DC_NO_MORE_DATA;
         return out->status;
@@ -144,6 +192,29 @@ int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc
     if ((out->flow == DC_FLOW_CALL_FAR || out->flow == DC_FLOW_JMP_FAR) && op0
             && (op0->type == ZYDIS_OPERAND_TYPE_REGISTER || op0->type == ZYDIS_OPERAND_TYPE_MEMORY)) {
         out->indirect = 1;
+    }
+    /* layout revision 3: raw ISA-fact evidence */
+    if (insn.mnemonic == ZYDIS_MNEMONIC_SYSEXIT) {
+        out->flow_detail = DC_DETAIL_SYSEXIT;
+    } else if (insn.mnemonic == ZYDIS_MNEMONIC_SYSRET) {
+        out->flow_detail = DC_DETAIL_SYSRET;
+    }
+    if (insn.attributes & ZYDIS_ATTRIB_IS_PRIVILEGED) {
+        out->priv_flags |= DC_PRIV_ATTRIBUTE;
+    }
+    for (int i = 0; i < insn.operand_count; i++) {
+        /* memory accesses only: an address-only operand (lea, AGEN) touches no segment */
+        if (ops[i].type == ZYDIS_OPERAND_TYPE_MEMORY && ops[i].mem.type != ZYDIS_MEMOP_TYPE_AGEN) {
+            out->mem_seg_mask |= seg_bit(ops[i].mem.segment);
+        }
+    }
+    const char *isa_set = ZydisISASetGetString(insn.meta.isa_set);
+    const char *isa_ext = ZydisISAExtGetString(insn.meta.isa_ext);
+    if (isa_set) {
+        strncpy(out->isa_set, isa_set, sizeof(out->isa_set) - 1);
+    }
+    if (isa_ext) {
+        strncpy(out->extension, isa_ext, sizeof(out->extension) - 1);
     }
     return out->status;
 }
