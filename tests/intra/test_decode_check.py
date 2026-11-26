@@ -2695,7 +2695,8 @@ def test_isa_step3_row_facts_on_the_design_vectors():
     assert tz["basis"] == "split:tzcnt-bsf" and tz["facts"]["F4"]["split"]["split"] == "tzcnt-bsf"
     fs = _row_facts("64488B042530000000")
     assert fs["basis"] == "ordinary:plain" and fs["facts"]["F7"]["accesses"] == [
-        {"segment": "fs", "role": "explicit", "read": True, "write": False, "cond_read": False, "cond_write": False}]
+        {"segment": "fs", "role": "explicit", "read": True, "write": False, "cond_read": False, "cond_write": False,
+         "operand_index": 1}]
     movs = _row_facts("64F3A4")["facts"]["F7"]["accesses"]
     assert movs == [{"segment": "fs", "role": "string_source", "read": True, "write": False, "cond_read": True,
                      "cond_write": False}]
@@ -2934,7 +2935,7 @@ def test_isa_step3r1_encoding_discriminators():
     assert _row_facts("E800000000")["facts"]["F3"]["rel32_is_zero"] is True
     assert _row_facts("E810000000")["facts"]["F3"]["rel32_is_zero"] is False
     assert _row_facts("3EFFD0")["facts"]["F3"]["notrack_prefix"] is True
-    assert _row_facts("643EFFD0")["facts"]["F3"]["notrack_prefix"] is False
+    assert "NOTRACK" in _row_facts("643EFFD0")["unobserved"]["F3"]              # (r2: order-dependent pair)
     assert _row_facts("FFD0")["facts"]["F3"]["notrack_prefix"] is False
     assert _row_facts("F2E800000000")["facts"]["F4"]["bnd_prefix"] is True
     assert _row_facts("E800000000")["facts"]["F4"]["bnd_prefix"] is False
@@ -2959,6 +2960,7 @@ def test_isa_step3r1_profile_failures_and_mode_agreement():
     row = isa_facts.row_facts(tables, ballot, data, redecode=lambda w: d.xed_redecode(w, CODE),
                               decode_profile=profile_short, decode_without=lambda s, w: d.decode_without(s, w, CODE))
     assert "F1" in row["unobserved"] and row["facts"]["F1"].get("class") is None     # never invalid_for_chip
+    assert row["unobserved"]["F4"] == row["unobserved"]["F1"]                          # (r2: nor a split decision)
     amd = list(ballot["amd"])
     one_off = dict(ballot, amd=(dataclasses.replace(amd[0], length=amd[0].length + 1), amd[1]))
     differences, why = isa_facts._f5(one_off)                        # only AMD iced changes: undecided
@@ -3013,3 +3015,261 @@ def test_isa_step3r1_checked_is_verified_against_the_rows():
     finally:
         decoders.profile_catalogue = original
     assert set(block["functions"]["f0"]["status"].values()) == {"failed:row-set-mismatch"}
+
+
+# -- ISA facts step 3: review round 2 fixes ----------------------------------------------------------------------
+
+def _r2_reader(listed_rows, tables=None):
+    import isa_facts
+
+    rows = sorted(listed_rows)
+    functions = [_ev_function("f0", rows, {r: _ev_confirmed() for r in rows})]
+    document = _ev2(functions, {"f0": listed_rows})
+    names = isa_facts.premise_names(document["isa_facts"])
+    held = set(names["detection"].values()) | {names["ordinary"]}
+    return document, functions, held
+
+
+def test_isa_step3r2_reader_uses_the_rows_split_and_class_flags():
+    """r2 Astra P1-3 / Fable P1: a split the row identified, the row's class flags, class f5, unverified notes."""
+    split = {"source": "split_table", "split": "tzcnt-bsf", "baseline": "BSF", "all": "TZCNT"}
+    listed = {(1, 0x1000): {"basis": "cited:TZCNT", "facts": {"F4": {"split": split}}, "unobserved": {}},
+              (1, 0x1004): {"basis": "ordinary:sse_fp", "unobserved": {},
+                            "facts": {"class_flags": {"mxcsr_inputs": ["RC", "DAZ", "FTZ"], "alignment": True,
+                                                      "simd_fp_exceptions": True, "writes_mxcsr_status": True}}},
+              (1, 0x1008): {"basis": "ordinary:fxsave", "facts": {}, "unobserved": {}},
+              (1, 0x100c): {"basis": "ordinary:fxrstor", "facts": {}, "unobserved": {}},
+              (1, 0x1010): {"basis": "cited:CLI", "facts": {}, "unobserved": {}},
+              (1, 0x1014): {"basis": "cited:SYSENTER", "facts": {}, "unobserved": {}}}
+    document, functions, held = _r2_reader(listed)
+    ev = _ev_accept(document, _ev_view(functions))
+    tz = ev.isa("f0", 1, 0x1000, "F6", held)
+    assert tz["state"] == "fact" and "split.fallback.undefined_outputs" in tz["table"]
+    sse = ev.isa("f0", 1, 0x1004, "F6", held)
+    assert sse["state"] == "fact" and sse["table"]["class_flags.mxcsr_inputs"] == ["RC", "DAZ", "FTZ"]
+    assert sse["class_flags"]["alignment"] is True
+    assert any(item.startswith("alignment") for item in sse["out_of_scope"])
+    assert ev.isa("f0", 1, 0x1004, "F3", held)["table"]["class_flags.writes_mxcsr_status"] is True
+    for offset in (0x1008, 0x100c):
+        f5 = ev.isa("f0", 1, offset, "F5", held)
+        assert f5["state"] == "fact" and f5["table"]["class_f5"][1]["condition"].endswith("EFER.FFXSR=1")
+    cli = ev.isa("f0", 1, 0x1010, "F5", held)
+    assert cli["state"] == "unobserved" and cli["reason"].startswith("table: AMD long-mode PVI")
+    assert ev.isa("f0", 1, 0x1014, "F5", held)["table"]["f5"] == {"amd": "#UD in long mode"}
+
+
+def test_isa_step3r2_reader_returns_copies_of_the_pinned_tables():
+    """r2 Astra P2-3: mutating a reader result never changes a later answer."""
+    document, functions, held = _r2_reader({(1, 0x1000): {"basis": "cited:RDTSC", "facts": {}, "unobserved": {}}})
+    ev = _ev_accept(document, _ev_view(functions))
+    first = ev.isa("f0", 1, 0x1000, "F6", held)
+    first["table"]["f6"].clear()
+    assert ev.isa("f0", 1, 0x1000, "F6", held)["state"] == "fact"
+    assert ev.isa("f0", 1, 0x1000, "F6", held)["table"]["f6"]
+
+
+def test_isa_step3r2_accept_pins_tables_and_checks_the_header_first():
+    """r2 Astra P2-1 / Fable P2-1: the default path loads the pinned tables; other tables skip the key check and
+    every read is unobserved; the header is checked before the rows."""
+    import dataclasses
+
+    import evidence
+    import isa_tables
+
+    listed = {(1, 0x1000): {"basis": "cited:RDTSC", "facts": {}, "unobserved": {}}}
+    document, functions, held = _r2_reader(listed)
+    view = _ev_view(functions)
+    allow = [evidence.allowlist_entry(document)]
+    ev = evidence.accept(document, view, allow)                                   # tables omitted
+    assert ev.isa("f0", 1, 0x1000, "F6", held)["state"] == "fact"
+    document["functions"][0]["isa_facts"]["rows"][0]["basis"] = "cited:DOES_NOT_EXIST"
+    with pytest.raises(evidence.Rejected):
+        evidence.accept(document, view, allow)
+    tables = isa_tables.load()
+    other = dataclasses.replace(tables, digests=dict(tables.digests, map="0" * 64))   # digest-only difference
+    ev = evidence.accept(document, view, allow, tables=other)
+    assert "digest mismatch" in ev.isa("f0", 1, 0x1000, "F6", held)["reason"]
+    document["isa_facts"]["kinds"] = ["F1"]
+    document["functions"][0]["isa_facts"]["rows"] = {}                           # the header is reported first
+    with pytest.raises(evidence.Rejected, match="isa_facts schema / kinds"):
+        evidence.accept(document, view, allow)
+
+
+@pytest.mark.parametrize("name", ["partial no keys", "keys int", "keys unknown entry", "partial all found",
+                                  "disagree one entry", "keys missing voter", "listed never compared"])
+def test_isa_step3r2_keys_and_never_compared_rejections(name):
+    import evidence
+
+    rows = [(1, 0x1000), (1, 0x1004)]
+    functions = [_ev_function("f0", rows, {rows[0]: _ev_confirmed(), rows[1]: {"*": "unobserved"}})]
+    row = {"basis": "partial", "facts": {}, "unobserved": {}, "keys": {"iced": "RDTSC", "zydis": None, "xed": None}}
+    document = _ev2(functions, {"f0": {rows[0]: row}})
+    _ev_accept(document, _ev_view(functions))                                     # the well-formed file passes
+    listed = document["functions"][0]["isa_facts"]["rows"]
+    if name == "partial no keys":
+        del listed[0]["keys"]
+    elif name == "keys int":
+        listed[0]["keys"]["iced"] = 7
+    elif name == "keys unknown entry":
+        listed[0]["keys"]["iced"] = "NOT_AN_ENTRY"
+    elif name == "partial all found":
+        listed[0]["keys"] = {"iced": "RDTSC", "zydis": "RDTSC", "xed": "RDTSC"}
+    elif name == "disagree one entry":
+        listed[0].update(basis="disagree", keys={"iced": "RDTSC", "zydis": "RDTSC", "xed": "RDTSC"})
+    elif name == "keys missing voter":
+        del listed[0]["keys"]["xed"]
+    else:
+        listed.append({"space": 1, "offset": "1004", "basis": "cited:RDTSC", "facts": {}, "unobserved": {}})
+    with pytest.raises(evidence.Rejected):
+        _ev_accept(document, _ev_view(functions))
+
+
+@needs
+def test_isa_step3r2_port_io_width_bnd_and_notrack_follow_the_effective_prefixes():
+    """r2 Astra P1-5: REX only immediately before the opcode; widths confirmed by every voter; F2+F3 / 3E+segment
+    left unobserved."""
+    assert _row_facts("6648ED")["facts"]["F2"]["access_width"] == 4                   # in eax, dx
+    assert _row_facts("4866ED")["facts"]["F2"]["access_width"] == 2                   # in ax, dx (REX ignored)
+    assert _row_facts("48ED")["facts"]["F2"]["access_width"] == 4
+    assert _row_facts("66E5FF")["facts"]["F2"]["access_width"] == 2
+    assert _row_facts("486D")["facts"]["F2"]["access_width"] == 4                     # INSD: fixed
+    for hexbytes in ("F2F3E800000000", "F3F2E800000000"):
+        row = _row_facts(hexbytes)
+        assert "BND" in row["unobserved"]["F4"] and "bnd_prefix" not in row["facts"].get("F4", {}), hexbytes
+    assert "NOTRACK" in _row_facts("2E3EFFD0")["unobserved"]["F3"]
+    assert _row_facts("2EFFD0")["facts"]["F3"]["notrack_prefix"] is False
+
+
+@needs
+def test_isa_step3r2_port_io_width_disagreeing_voter_is_unobserved():
+    import dataclasses
+
+    import decoders as d
+    import isa_facts
+    import isa_tables
+
+    data = bytes.fromhex("66ED") + ISA_PAD
+    ballot = d.ballot(data, CODE)
+    intel = list(ballot["intel"])
+    intel[0] = dataclasses.replace(intel[0], operand_bits=32)
+    row = isa_facts.row_facts(isa_tables.load(), dict(ballot, intel=tuple(intel)), data,
+                              redecode=lambda w: d.xed_redecode(w, CODE),
+                              decode_profile=lambda n, w: d.decode_profile(n, w, CODE),
+                              decode_without=lambda s, w: d.decode_without(s, w, CODE))
+    assert "port-I/O width" in row["unobserved"]["F2"]
+
+
+@needs
+def test_isa_step3r2_voter_features_kept_without_a_table_f4():
+    """r2 Astra P1-4: SYSENTER (no table f4) keeps the voters' features."""
+    sysenter = _row_facts("0F34")
+    assert sysenter["basis"] == "cited:SYSENTER"
+    assert set(sysenter["facts"]["F4"]["features"]) == {"iced", "zydis", "xed"}
+    assert sysenter["facts"]["F4"]["features"]["xed"]
+
+
+@needs
+def test_isa_step3r2_f5_compares_values_reported_in_both_modes():
+    """r2 Astra P1-2: a width reported in one mode only, or a failed decode's defaults, is no difference."""
+    import dataclasses
+
+    import decoders as d
+    import isa_facts
+
+    ballot = d.ballot(bytes.fromhex("0F01EE") + ISA_PAD, CODE)
+    intel, amd = list(ballot["intel"]), list(ballot["amd"])
+    intel[0] = dataclasses.replace(intel[0], operand_bits=0)
+    amd[0] = dataclasses.replace(amd[0], operand_bits=16)                   # iced 0 -> 16 only
+    assert isa_facts._f5(dict(ballot, intel=tuple(intel), amd=tuple(amd))) == (None, None)
+    failed = [dataclasses.replace(v, status="invalid", length=0) for v in ballot["amd"]]
+    differences, why = isa_facts._f5(dict(ballot, amd=tuple(failed)))
+    assert why is None and set(differences) == {"status"}
+
+
+@needs
+def test_isa_step3r2_f2_without_any_cpl0_bit_is_unobserved(monkeypatch):
+    """r2 Fable P2-2 (classify would already refuse missing bits as evidence problems: bypassed to reach the rule)."""
+    import dataclasses
+
+    import decoders as d
+    import isa_facts
+    import isa_tables
+
+    data = bytes.fromhex("4889C8") + ISA_PAD
+    ballot = d.ballot(data, CODE)
+    names = {"iced": "must_be_cpl0", "zydis": "privileged_attribute", "xed": "privileged_attribute"}
+    monkeypatch.setattr(isa_tables, "evidence_problems", lambda vote: [])
+    intel = tuple(dataclasses.replace(v, extra=dict(v.extra, **{names[v.voter]: None})) for v in ballot["intel"])
+    row = isa_facts.row_facts(isa_tables.load(), dict(ballot, intel=intel), data,
+                              redecode=lambda w: d.xed_redecode(w, CODE),
+                              decode_profile=lambda n, w: d.decode_profile(n, w, CODE),
+                              decode_without=lambda s, w: d.decode_without(s, w, CODE))
+    assert row["unobserved"]["F2"] == "no voter provided a CPL0 bit"
+
+
+@needs
+def test_isa_step3r2_f7_compares_the_explicit_operand_index():
+    """r2 Astra P2-2."""
+    import dataclasses
+
+    import isa_facts
+    import isa_tables
+
+    votes = _votes("64488B042530000000")
+    iced = votes["iced"]
+    memory = [dict(m, operand_index=0) for m in iced.extra["memory"]]
+    broken = dict(votes, iced=dataclasses.replace(iced, extra=dict(iced.extra, memory=memory)))
+    assert isa_facts._f7(isa_tables.load(), broken)[1] == "voters disagree on the FS / GS accesses"
+
+
+@needs
+def test_isa_step3r2_profile_rules():
+    """r2 Astra P1-1: invalid_for_chip only when the baseline rejects; the single-feature run must match length and
+    flow and must have read the row."""
+    import dataclasses
+
+    import decoders as d
+    import isa_facts
+    import isa_tables
+
+    tables = isa_tables.load()
+    data = bytes.fromhex("4889C8") + ISA_PAD
+
+    def g1_rejects(name, window):
+        vote = d.decode_profile(name, window, CODE)
+        return dataclasses.replace(vote, status="invalid") if name == "xed:g1" else vote
+
+    row = isa_facts.row_facts(tables, d.ballot(data, CODE), data, redecode=lambda w: d.xed_redecode(w, CODE),
+                              decode_profile=g1_rejects, decode_without=lambda s, w: d.decode_without(s, w, CODE))
+    assert row["facts"]["F1"]["class"] == "mixed"
+    no_split = dataclasses.replace(tables, splits={**tables.splits, "splits": [
+        s for s in tables.splits["splits"] if s["id"] != "lzcnt-bsr"]})
+    data = bytes.fromhex("F30FBDC1") + ISA_PAD
+
+    profiles = {name: d.decode_profile(name, data, CODE) for name in ("xed:g1", "xed:baseline", "xed:all")}
+
+    def run(without):
+        return isa_facts._split(no_split, "cited:LZCNT", profiles, data, without, 4)
+
+    split, why = run(lambda s, w: dataclasses.replace(d.decode_without(s, w, CODE), length=9))
+    assert split is None and "beyond" in why
+    split, why = run(lambda s, w: dataclasses.replace(d.decode_without(s, w, CODE), status="no_more_data"))
+    assert split is None and "could not read" in why
+    assert run(lambda s, w: dataclasses.replace(d.decode_without(s, w, CODE), flow="call"))[0]["source"] == "profiles"
+    assert run(lambda s, w: d.decode_without(s, w, CODE))[0]["source"] == "single_feature_run"
+    failed = dict(profiles, **{"xed:baseline": dataclasses.replace(profiles["xed:baseline"], status="error")})
+    assert isa_facts._split(no_split, "cited:LZCNT", failed, data, None, 4) == (
+        None, "an XED profile could not read the row")
+
+
+@needs
+def test_isa_step3r2_profile_split_outside_the_tables_leaves_table_kinds_unobserved(monkeypatch):
+    """A cited row whose baseline profile decodes another form with no table entry: no table negative."""
+    import isa_facts
+
+    monkeypatch.setattr(isa_facts, "_split", lambda *args: (
+        {"source": "profiles", "split_feature_unknown": True, "baseline": "NOP", "all": "RDTSC"}, None))
+    row = _row_facts("0F31")
+    assert row["basis"] == "cited:RDTSC" and row["facts"]["F4"]["split"]["source"] == "profiles"
+    assert all("outside the tables" in row["unobserved"][kind] for kind in ("F2", "F2p", "F3", "F6", "F7"))
+    assert "F4" not in row["unobserved"]

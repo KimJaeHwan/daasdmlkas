@@ -307,6 +307,18 @@
     "CR4.OSFXSR=0: Intel implementation-dependent (UNKNOWN), AMD neither (F5)",
     "AMD, OSFXSR=1, CPL=0, 64-bit, EFER.FFXSR=1: XMM0-15 skipped, MXCSR and x87 saved (F5)"
    ],
+   "f5": [
+    {
+     "condition": "CR4.OSFXSR=0",
+     "intel": "XMM / MXCSR saved or not: implementation-dependent (UNKNOWN)",
+     "amd": "XMM / MXCSR not saved"
+    },
+    {
+     "condition": "CR4.OSFXSR=1, CPL=0, 64-bit mode, EFER.FFXSR=1",
+     "intel": "XMM0-15, MXCSR and x87 saved",
+     "amd": "XMM0-15 skipped, MXCSR and x87 saved"
+    }
+   ],
    "data_faults": [
     "16-byte alignment #GP / #AC"
    ],
@@ -343,6 +355,18 @@
     "CR4.OSFXSR=1: XMM and MXCSR restored",
     "CR4.OSFXSR=0: Intel implementation-dependent (UNKNOWN), AMD neither (F5)",
     "AMD, OSFXSR=1, CPL=0, 64-bit, EFER.FFXSR=1: XMM0-15 skipped, MXCSR and x87 restored (F5)"
+   ],
+   "f5": [
+    {
+     "condition": "CR4.OSFXSR=0",
+     "intel": "XMM / MXCSR restored or not: implementation-dependent (UNKNOWN)",
+     "amd": "XMM / MXCSR not restored"
+    },
+    {
+     "condition": "CR4.OSFXSR=1, CPL=0, 64-bit mode, EFER.FFXSR=1",
+     "intel": "XMM0-15, MXCSR and x87 restored",
+     "amd": "XMM0-15 skipped, MXCSR and x87 restored"
+    }
    ],
    "data_faults": [
     "MXCSR reserved bits #GP (on the paths that load MXCSR)",

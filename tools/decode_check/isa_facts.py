@@ -17,6 +17,7 @@ before it ever answers "no condition" (step 3 review r1 P1).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 
@@ -42,6 +43,10 @@ TRANSFER_FLOWS = frozenset(("int3", "int_n", "int1", "into", "syscall", "sysente
 # Intel / AMD attributes (r1 P1-4: agreement inside each mode first); targets only where the decoder reports them
 F5_FIELDS = ("status", "length", "flow", "operand_bits", "target_ip_bits", "ret_imm")
 INDIRECT_KEYS = ("CALL_NEAR_INDIRECT", "JMP_NEAR_INDIRECT")
+SEGMENT_PREFIXES = frozenset((0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65))
+# ordinary class flags carry row-specific conditions (step 3 review r2, Astra P1-3): flag -> kind, or out of scope
+CLASS_FLAG_KINDS = {"mxcsr_inputs": "F6", "writes_mxcsr_status": "F3", "explicit_mmx_operand": "F3"}
+CLASS_FLAG_OUT_OF_SCOPE = ("simd_fp_exceptions", "alignment", "masked_write")
 
 
 def header_block(tables, profiles: dict) -> dict:
@@ -82,14 +87,16 @@ def basis_known(tables, basis: str) -> bool:
 
 
 def table_facts(tables, basis: str) -> tuple:
-    """({kind: table content}, out_of_scope) behind a basis (r1 P1): cited entry; split = the split entry plus the
-    union of its main and fallback entries; ordinary = the class. Data-dependent faults are out of scope (s3 end,
-    s0): returned apart, never a kind's condition."""
-    kinds, out_of_scope = {}, []
+    """({kind: table content}, out_of_scope, {kind: unverified reason}) behind a basis (r1 P1): cited entry; split =
+    the split entry plus the union of its main and fallback entries; ordinary = the class. Data-dependent faults are
+    out of scope (s3 end, s0): returned apart, never a kind's condition. A table note that a vendor behaviour is
+    still to be checked is no fact (r2 Astra P1-2): it is returned as unverified. Everything returned is a copy,
+    never the pinned tables' own objects (r2 Astra P2-3)."""
+    kinds, out_of_scope, unverified = {}, [], {}
 
     def add(kind, name, value):
         if value:
-            kinds.setdefault(kind, {})[name] = value
+            kinds.setdefault(kind, {})[name] = copy.deepcopy(value)
 
     def entry(key, prefix=""):
         item = tables.entry(key) or {}
@@ -104,7 +111,10 @@ def table_facts(tables, basis: str) -> tuple:
         add("F4", prefix + "f4", item.get("f4"))
         if item.get("mpx"):
             add("F4", prefix + "mpx", tables.conditions["mpx_effects"][item["mpx"]]["rule"])
-        add("F5", prefix + "f5", item.get("f5"))
+        f5 = dict(item.get("f5") or {})
+        if "unverified" in f5:
+            unverified.setdefault("F5", "table: " + f5.pop("unverified"))
+        add("F5", prefix + "f5", f5)
         add("F6", prefix + "f6", item.get("f6"))
         add("F6", prefix + "undefined_outputs", item.get("undefined_outputs"))
         add("F7", prefix + "f7", item.get("f7"))
@@ -123,10 +133,35 @@ def table_facts(tables, basis: str) -> tuple:
         klass = tables.ordinary["classes"][key]
         add("F2", "class_conditions", klass.get("conditions"))
         add("F3", "class_state_dependent", klass.get("state_dependent"))
+        add("F5", "class_f5", klass.get("f5"))              # (r2 Fable P1: FXSAVE / FXRSTOR Intel / AMD differences)
         add("F6", "class_effects", klass.get("effects"))
         add("F6", "class_f6", klass.get("f6"))
         out_of_scope.extend(klass.get("data_faults", ()))
-    return kinds, out_of_scope
+    return kinds, list(out_of_scope), unverified
+
+
+def row_table_facts(tables, basis: str, facts: dict) -> tuple:
+    """The table side of one row (r2 Astra P1-3): the basis's table facts, plus the split the row's F4 identified
+    from the XED profiles (its main and fallback entries, for every kind) and the row's ordinary class flags."""
+    kinds, out_of_scope, unverified = table_facts(tables, basis) if basis not in FIXED_BASES else ({}, [], {})
+    split = (facts.get("F4") or {}).get("split") or {}
+    other = "split:" + str(split.get("split"))
+    if split.get("source") == "split_table" and other != basis and basis_known(tables, other):
+        more, scope, why = table_facts(tables, other)
+        for kind, values in more.items():
+            kinds.setdefault(kind, {}).update({"split." + name: value for name, value in values.items()})
+        out_of_scope += [item for item in scope if item not in out_of_scope]
+        for kind, reason in why.items():
+            unverified.setdefault(kind, reason)
+    flags = facts.get("class_flags") or {}
+    meanings = tables.ordinary.get("flag_meanings", {})
+    for name, kind in CLASS_FLAG_KINDS.items():
+        if flags.get(name):
+            kinds.setdefault(kind, {})["class_flags." + name] = copy.deepcopy(flags[name])
+    for name in CLASS_FLAG_OUT_OF_SCOPE:
+        if flags.get(name):
+            out_of_scope.append(f"{name}: {meanings.get(name, name)}")
+    return kinds, out_of_scope, unverified
 
 
 def _privilege(votes: dict) -> dict:
@@ -153,31 +188,40 @@ def _f1(votes: dict, profiles: dict, checked_length: int) -> tuple:
         fact["class"] = "valid"
     elif all(item["status"] == "invalid" and item["error"] != "INVALID_FOR_CHIP" for item in every):
         fact["class"] = "invalid_encoding"
-    elif views["xed:all"]["status"] == "ok" and all(v["status"] == "ok" for v in voters.values()) and all(
+    elif views["xed:baseline"]["status"] == "invalid" and views["xed:all"]["status"] == "ok" and all(
+            v["status"] == "ok" for v in voters.values()) and all(
             view["status"] in ("ok", "invalid") for view in views.values()):
-        fact["class"] = "invalid_for_chip"   # a profile REJECTS what the all-features chip and every voter accept
+        fact["class"] = "invalid_for_chip"   # the baseline REJECTS what the all-features chip and every voter accept
     else:
         fact["class"] = "mixed"
     return fact, None
 
 
 def _split(tables, basis: str, profiles: dict, window: bytes, decode_without, checked_length: int) -> tuple:
-    """(split decision or None, unobserved reason)."""
+    """(split decision or None, unobserved reason). Profile and single-feature read failures, and reads beyond
+    the bytes G1 checked, are handled before any decision (r2 Astra P1-1)."""
     base, full = profiles["xed:baseline"], profiles["xed:all"]
     if basis.startswith("split:"):
         return {"source": "split_table", "split": basis.split(":", 1)[1]}, None
+    if any(p.status in ("no_more_data", "error") for p in (base, full)):
+        return None, "an XED profile could not read the row"
+    if any(p.status == "ok" and p.length > checked_length for p in (base, full)):
+        return None, "an XED profile read beyond the bytes G1 checked"
     if not (base.status == "ok" and full.status == "ok" and base.length == full.length and base.flow == full.flow
             and base.mnemonic != full.mnemonic):
         return None, None
-    if full.length > checked_length:
-        return None, "an XED profile read beyond the bytes G1 checked"
     keys = {isa_tables.lookup(tables, base, window), isa_tables.lookup(tables, full, window)}
     known = tables.same_split(keys) if None not in keys else None
     if known:
         return {"source": "split_table", "split": known["id"], "baseline": base.mnemonic, "all": full.mnemonic}, None
     feature = full.extra.get("isa_set", "")
     single = decode_without(feature, window) if feature else None
-    if single is not None and single.status == "ok" and single.mnemonic == base.mnemonic:
+    if single is not None and single.status in ("no_more_data", "error"):
+        return None, "the single-feature XED run could not read the row"
+    if single is not None and single.status == "ok" and single.length > checked_length:
+        return None, "the single-feature XED run read beyond the bytes G1 checked"
+    if single is not None and single.status == "ok" and (single.mnemonic, single.length, single.flow) == (
+            base.mnemonic, base.length, base.flow):
         return {"source": "single_feature_run", "deciding_feature": feature, "baseline": base.mnemonic,
                 "all": full.mnemonic}, None
     return {"source": "profiles", "split_feature_unknown": True, "baseline": base.mnemonic,
@@ -185,7 +229,12 @@ def _split(tables, basis: str, profiles: dict, window: bytes, decode_without, ch
 
 
 def _field(vote, field):
-    """A decoder's value for an F5 field, or None when it does not report it (iced width 0, a computed target)."""
+    """A decoder's value for an F5 field, or None when it does not report it (iced width 0, a computed target, any
+    field but the status of a decode that failed: its fields are defaults, not reports)."""
+    if field == "status":
+        return vote.status
+    if vote.status != "ok":
+        return None
     if field == "target":
         return vote.target if vote.target is not None and vote.target_derivation == "decoder" else None
     value = getattr(vote, field)
@@ -197,7 +246,8 @@ def _field(vote, field):
 def _f5(ballot: dict) -> tuple:
     """Intel / AMD differences (review r1 P1-4), per decoder that runs in both modes (iced, Zydis; XED is Intel
     only), so the decoders' own conventions (Zydis 8 vs XED 32 for byte operands) never meet. A field differs when
-    every reporting decoder changes it between the modes; some changing and some not leaves F5 unobserved."""
+    every decoder that reports it in both modes changes it (r2 Astra P1-2: a value reported in one mode only is
+    no difference); some changing and some not leaves F5 unobserved."""
     intel = dict(zip(("iced", "zydis", "xed"), ballot["intel"]))
     amd = dict(zip(("iced", "zydis"), ballot["amd"]))
     if any(v.status == "error" for v in amd.values()):
@@ -207,7 +257,7 @@ def _f5(ballot: dict) -> tuple:
         changes = {}
         for name in ("iced", "zydis"):
             left, right = _field(intel[name], field), _field(amd[name], field)
-            if left is None and right is None:
+            if left is None or right is None:
                 continue
             changes[name] = (left, right)
         changed = [name for name, (left, right) in changes.items() if left != right]
@@ -221,37 +271,58 @@ def _f5(ballot: dict) -> tuple:
 
 
 def _f7(tables, votes: dict) -> tuple:
-    """r1 P2-1: voters must agree on every FS / GS access (segment, role, read, write, conditional read / write)."""
+    """r1 P2-1: voters must agree on every FS / GS access (segment, role, read, write, conditional read / write);
+    an explicit access also on its operand index (r2 Astra P2-2)."""
     views = {}
     for name, vote in votes.items():
         if not vote.extra.get("memory_complete", False) or vote.extra.get("mem_overflow"):
             return None, f"{name}: memory evidence incomplete"
         accesses = isa_tables.memory_evidence(tables, vote)
-        views[name] = sorted((m["segment"], m["role"], m["read"], m["write"], m["cond_read"], m["cond_write"])
-                             for m in accesses if m["segment"] in ("fs", "gs"))
+        views[name] = sorted((m["segment"], m["role"], _operand(m), m["read"], m["write"], m["cond_read"],
+                              m["cond_write"]) for m in accesses if m["segment"] in ("fs", "gs"))
     if len({tuple(view) for view in views.values()}) != 1:
         return None, "voters disagree on the FS / GS accesses"
     accesses = views["xed"]
     if not accesses:
         return None, None
-    return [{"segment": s, "role": role, "read": r, "write": w, "cond_read": cr, "cond_write": cw}
-            for s, role, r, w, cr, cw in accesses], None
+    out = []
+    for s, role, index, r, w, cr, cw in accesses:
+        item = {"segment": s, "role": role, "read": r, "write": w, "cond_read": cr, "cond_write": cw}
+        if role == "explicit":
+            item["operand_index"] = None if index < 0 else index
+        out.append(item)
+    return out, None
 
 
-def _discriminators(tables, basis: str, window: bytes) -> dict:
-    """r1 P1-2: what the shared basis does not fix, read from the verified encoding."""
+def _operand(access: dict) -> int:
+    """The operand index of an explicit access (-1: not reported); implicit accesses have none."""
+    index = access.get("operand_index")
+    return index if access["role"] == "explicit" and isinstance(index, int) else -1
+
+
+def _discriminators(tables, basis: str, window: bytes, votes: dict) -> tuple:
+    """r1 P1-2: what the shared basis does not fix, read from the verified encoding -> (facts, unobserved). r2
+    Astra P1-5: the port-I/O width follows the effective prefixes (a REX only immediately before the opcode) and
+    must be the width every voter reports; F2 + F3 (BND) and 3E with another segment prefix (NOTRACK) depend on
+    prefix order and are left unobserved."""
     prefixes, opcode, _, rex = isa_tables.encoding_view(window)
-    out = {}
+    out, unobserved = {}, {}
     key = basis.split(":", 1)[1] if basis.startswith("cited:") else None
     entry = tables.entry(key) if key else None
     width = (entry or {}).get("access_width")
     if width:
         if "fixed" in width:
             out.setdefault("F2", {})["access_width"] = width["fixed"]
+        elif opcode.hex().upper() in width["byte_opcodes"]:
+            out.setdefault("F2", {})["access_width"] = 1
         else:
-            byte = opcode.hex().upper() in width["byte_opcodes"]
-            word = int(width["word_prefix"], 16) in prefixes
-            out.setdefault("F2", {})["access_width"] = 1 if byte else (2 if word else width["default"])
+            word = not rex & 0x08 and int(width["word_prefix"], 16) in prefixes
+            expected = 2 if word else width["default"]
+            reported = sorted({v.operand_bits for v in votes.values()})
+            if reported == [expected * 8]:
+                out.setdefault("F2", {})["access_width"] = expected
+            else:
+                unobserved["F2"] = f"port-I/O width: the voters report {reported} bits, the prefixes give {expected * 8}"
     if key == "CALL_NEAR":
         index = 0
         while index < len(window) and (window[index] in isa_tables.LEGACY_PREFIXES or 0x40 <= window[index] <= 0x4F):
@@ -260,10 +331,17 @@ def _discriminators(tables, basis: str, window: bytes) -> dict:
             rel32 = int.from_bytes(window[index + 1:index + 5], "little", signed=True)
             out.setdefault("F3", {})["rel32_is_zero"] = rel32 == 0
     if key in INDIRECT_KEYS:
-        out.setdefault("F3", {})["notrack_prefix"] = 0x3E in prefixes and not ({0x64, 0x65} & set(prefixes))
+        segments = {p for p in prefixes if p in SEGMENT_PREFIXES}
+        if 0x3E in segments and len(segments) > 1:
+            unobserved["F3"] = "3E with another segment prefix: NOTRACK depends on prefix order (not decided)"
+        else:
+            out.setdefault("F3", {})["notrack_prefix"] = 0x3E in segments
     if entry and entry.get("mpx"):
-        out.setdefault("F4", {})["bnd_prefix"] = 0xF2 in prefixes
-    return out
+        if 0xF2 in prefixes and 0xF3 in prefixes:
+            unobserved["F4"] = "both F2 and F3 prefixes: BND depends on prefix order (not decided)"
+        else:
+            out.setdefault("F4", {})["bnd_prefix"] = 0xF2 in prefixes
+    return out, unobserved
 
 
 def row_facts(tables, ballot: dict, window: bytes, *, redecode, decode_profile, decode_without) -> dict:
@@ -293,6 +371,7 @@ def row_facts(tables, ballot: dict, window: bytes, *, redecode, decode_profile, 
     f1, why = _f1(votes, profiles, checked_length)
     if why:
         unobserved["F1"] = why
+        unobserved.setdefault("F4", why)        # (r2 Astra P1-1: no profile split can be decided either)
     if f1.get("class") != "valid" or len({p["mnemonic"] for p in f1["profiles"].values()}) > 1:
         facts["F1"] = f1
     ok = all(v.status == "ok" for v in votes.values())
@@ -314,6 +393,8 @@ def row_facts(tables, ballot: dict, window: bytes, *, redecode, decode_profile, 
             if entry is not None and cpl0 and table_cpl0 != all(cpl0):
                 f2["table_vs_voter"] = {"table_requires_cpl0": table_cpl0, "voters": raw}
             facts["F2"] = f2
+        if not cpl0 and not (entry and "f2" in entry):
+            unobserved.setdefault("F2", "no voter provided a CPL0 bit")         # (r2 Fable P2-2)
         flows = {name: (v.flow, v.extra.get("flow_detail"), v.int_vector) for name, v in votes.items()}
         # (targets only where the decoder itself reports them: G1's XED target is computed at the operand width)
         targets = {v.target for v in votes.values() if v.target is not None and v.target_derivation == "decoder"}
@@ -334,14 +415,22 @@ def row_facts(tables, ballot: dict, window: bytes, *, redecode, decode_profile, 
         split, why = _split(tables, basis, profiles, window, decode_without, checked_length)
         if why:
             unobserved.setdefault("F4", why)
-        if split or (entry and "f4" in entry) or basis in FIXED_BASES:
+        # (r2 Astra P1-4: the voters' features on every row the ordinary rule does not cover, table f4 or not)
+        if split or not basis.startswith("ordinary:"):
             f4 = {"features": {"iced": votes["iced"].extra.get("cpuid_features"),
                                "zydis": votes["zydis"].extra.get("isa_set"), "xed": votes["xed"].extra.get("isa_set")}}
             if split:
                 f4["split"] = split
             facts["F4"] = f4
-        for kind, values in _discriminators(tables, basis, window).items():
-            facts.setdefault(kind, {}).update(values)
+        if split and split["source"] != "split_table" and basis not in FIXED_BASES:
+            for kind in TABLE_SOURCED:          # (the baseline-profile form has no table entry behind this basis)
+                if kind != "F4":
+                    unobserved.setdefault(kind, f"the baseline profile decodes {split['baseline']}, outside the tables")
+        values, why = _discriminators(tables, basis, window, votes)
+        for kind, value in values.items():
+            facts.setdefault(kind, {}).update(value)
+        for kind, reason in why.items():
+            unobserved.setdefault(kind, reason)
         f7, why = _f7(tables, votes)
         if why:
             unobserved["F7"] = why

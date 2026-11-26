@@ -126,6 +126,7 @@ def validate(conditions: dict, mapping: dict, splits: dict, ordinary: dict | Non
         _check(key == key.upper(), f"conditions: key {key} is not upper case")
         _check(set(entry) <= ENTRY_FIELDS, f"conditions: {key} has unknown fields {sorted(set(entry) - ENTRY_FIELDS)}")
         _check(bool(entry.get("cite")), f"conditions: {key} has no citation")
+        _check(set(entry.get("f5", {})) <= {"amd", "intel", "unverified"}, f"conditions: {key} f5 fields")
         for cite in entry["cite"]:
             _check(cite.get("doc") in documents and cite.get("entry"), f"conditions: {key} citation {cite}")
         for alternative in entry.get("f2", {}).get("enable", []):
@@ -305,6 +306,8 @@ def _validate_ordinary(ordinary: dict, cited: dict) -> None:
     classes = ordinary["classes"]
     for name, klass in classes.items():
         _check(bool(klass.get("cite")), f"ordinary: class {name} has no citation")
+        _check(all(set(item) == {"condition", "intel", "amd"} for item in klass.get("f5", ())),
+               f"ordinary: class {name} f5 items need condition / intel / amd")
     _check(set(ordinary["system_flags"]["bits"]) <= set(RFLAGS), "ordinary: unknown system flag")
     seen = set()
     for entry in ordinary["entries"]:
