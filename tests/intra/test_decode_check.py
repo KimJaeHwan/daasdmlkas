@@ -3390,7 +3390,7 @@ def test_isa_step3r3_row_shape_rejections(name):
         _ev_accept(document, _ev_view(functions))
 
 
-# -- G1 on X-1 producer Bundles (design .census6/design_tbr_g1_x1_r1.md + r2 / r3 deltas) ---------------------------
+# -- G1 on X-1 producer Bundles (design .census6/design_tbr_g1_x1_r1.md + r2 / r3 deltas; impl review r1) ------
 
 NONE_REPORT = {"flow_override": "NONE", "fallthrough_overridden": False, "length_overridden": False, "references": []}
 
@@ -3408,25 +3408,25 @@ def _verdict(facts, data):
     import producer_override
 
     lift, result = _compare(facts, data)
-    return producer_override.row_verdict(facts, result, lift, decoders.ballot(data, facts["address"]))
+    return producer_override.row_verdict(facts, result, lift, decoders.ballot(data, facts["address"]), data)
 
 
 def _plain_mov():
     return _row(3, [_op("COPY", [_r(RCX_)], _r(RAX_))])
 
 
-def _syscall(inputs=None, output=None):
-    return _row(2, [_op("CALLOTHER", inputs or [_c(5)], output)])
+def _syscall(inputs=None, output=None, length=2):
+    return _row(length, [_op("CALLOTHER", inputs or [_c(5)], output)])
 
 
-def _int_pair(vector=0x2E, tail=False):
+def _int_pair(vector=0x2E, tail=False, length=2):
+    import producer_override
+
     ops = [_op("CALLOTHER", [_c(16), _c(vector)], _u(0x100)), _op("CALLIND", [_u(0x100)])]
     if tail:
         ops.append(_op("RETURN", [_c(0)]))
-    import producer_override
-
     flow = dict(producer_override.PINNED_BITS["interrupt"], is_override=False)
-    return _row(2, ops, flow=flow, fallthrough=not tail)
+    return _row(length, ops, flow=flow, fallthrough=not tail)
 
 
 def _direct_call(target):
@@ -3453,7 +3453,8 @@ def test_g1x1_effect_attested_and_reported_overrides():
 
 @needs
 def test_g1x1_exact_syscall_and_interrupt_pins():
-    """r2 s3 / r3 s3: exact shapes only; a3 exempt under the OS-contract model; a4 = va + length; pinned bits."""
+    """r2 s3 / r3 s3, impl r1 Astra P1-2: exact shapes bound to the verified bytes; a3 exempt under the OS-contract
+    model; a4 = va + length; pinned bits; a C / U / O row that used a pin carries `exempt`."""
     import lifting
 
     assert lifting.identify(_syscall()).pattern == "syscall"
@@ -3461,10 +3462,19 @@ def test_g1x1_exact_syscall_and_interrupt_pins():
     assert lifting.identify(_int_pair()).pattern == "interrupt"
     assert _verdict(_profile(_int_pair()), bytes.fromhex("cd2e")) == ("I", None)
     assert _verdict(_profile(_int_pair(0x29)), bytes.fromhex("cd29")) == ("I", None)
+    rex = _verdict(_profile(_syscall(length=3)), bytes.fromhex("480f05"))          # (48 0F 05: no pin)
+    assert rex[0] == "U" and "a3" in rex[1]["unobserved"] and "exempt" not in rex[1]
+    int3 = _verdict(_profile(_int_pair(3, length=1)), bytes.fromhex("cc"))          # (CC with a swi(3) pair: no pin)
+    assert int3[0] != "I" and "exempt" not in (int3[1] or {})
+    wrong_vector = _verdict(_profile(_int_pair(0x2E)), bytes.fromhex("cd29"))
+    assert wrong_vector[0] != "I"
     tail = _int_pair(3, tail=True)                                       # (int3 lifts with a trailing RETURN)
     assert lifting.identify(tail).pattern == "interrupt-return"
     code, detail = _verdict(_profile(tail), bytes.fromhex("cd03"))
     assert code == "U" and "a3" in detail["unobserved"]                  # (no exemption outside the exact shape)
+    lone = _row(2, [_op("CALLOTHER", [_c(16), _c(0x2E)], _u(0x100))])  # (a lone swi: no CALLIND)
+    assert lifting.identify(lone).pattern == "userop"
+    assert _verdict(_profile(lone), bytes.fromhex("cd2e"))[0] == "U"
     output = _syscall(output=_u(0x10))
     assert lifting.identify(output).pattern == "userop"
     assert _verdict(_profile(output), bytes.fromhex("0f05"))[0] == "U"
@@ -3473,50 +3483,88 @@ def test_g1x1_exact_syscall_and_interrupt_pins():
     wrong_bits = _syscall()
     wrong_bits["flow"] = _flow("call_direct")
     code, detail = _verdict(_profile(wrong_bits), bytes.fromhex("0f05"))
-    assert code == "C" and "F.is_call" in detail["disagree"]
+    assert code == "C" and "F.is_call" in detail["disagree"] and detail["exempt"] == "S"
     elsewhere = _syscall()
     elsewhere["fallthrough"] = START + 3
     assert "a4" in _verdict(_profile(elsewhere), bytes.fromhex("0f05"))[1]["disagree"]
+    # CALLOTHER_OVERRIDE_CALL on a syscall: override_present is certain; the effect is only what the exported
+    # p-code / bits / targets show (getPcode(false): no a6 / a8 difference assumed)
+    reference = {"references": [{"type": "CALLOTHER_OVERRIDE_CALL", "primary": True, "in_index": True}]}
+    code, detail = _verdict(_profile(_syscall(), reference), bytes.fromhex("0f05"))
+    assert code == "O" and detail["exempt"] == "S" and detail["effect"] == {"disagree": [], "unobserved": []}
+
+
+@needs
+def test_g1x1_syscall_keeps_the_g1_core_result():
+    """impl r1 Astra P1-4: table -8 leaves G1's own comparison of 0F 05 as before (a3 a5 a6 a8 a9 a10 unobserved),
+    so the -1 / -2 exceptions do not change."""
+    import dependents
+    import evidence
+
+    _, result = _compare(_syscall(), bytes.fromhex("0f05"))
+    exception = evidence.exception_of(dependents.attribute_states(result))
+    assert {"a3", "a5", "a6", "a8", "a9", "a10"} <= set(exception)
+    assert all(exception[name] == "unobserved" for name in ("a5", "a6", "a8", "a9", "a10"))
 
 
 @needs
 def test_g1x1_target_set_rules():
-    """r2 s2 / r3 s2: non-call rows compare the raw set; call rows with pads are unobserved; external -> disagree."""
-    target = START + 0x40
-    jcc = _jcc(2, target)
-    data = bytes.fromhex("743e")
-    assert _verdict(_profile(jcc, targets=[(1, target)]), data) == ("A", None)
-    assert _verdict(_profile(jcc, targets=[(1, target)], pads=[(1, target)]), data) == ("A", None)
-    code, detail = _verdict(_profile(jcc, targets=[(1, target), (1, START + 0x80)], pads=[(1, START + 0x80)]), data)
-    assert code == "C" and detail["disagree"] == ["T"]                   # (a non-call row never subtracts pads)
-    assert _verdict(_profile(jcc, targets=[(2, target)]), data)[1]["disagree"] == ["T"]      # (wrong space)
-    assert _verdict(_profile(jcc, targets=[(1, target)], external=1), data)[1]["disagree"] == ["T"]
-    call = _direct_call(START + 0x20)
-    data = bytes.fromhex("e81b000000")
-    pad = (1, START + 0x90)
-    assert _verdict(_profile(call, targets=[(1, START + 0x20)]), data) == ("A", None)
-    # expected a, pad p: normal {a} and normal {a, p} both export {a, p} -> unobserved, never confirmed
-    code, detail = _verdict(_profile(call, targets=[(1, START + 0x20), pad], pads=[pad]), data)
+    """r2 s2 / r3 s2, impl r1 Astra P1-3: direct targets need every voter's own report (XED's is computed -> T
+    unobserved); no-target E needs the pinned voter form; non-call rows compare the raw set; call rows with pads
+    are unobserved; an external target disagrees."""
+    jcc = _jcc(2, START + 0x40)
+    code, detail = _verdict(_profile(jcc, targets=[(1, START + 0x40)]), bytes.fromhex("743e"))
     assert code == "U" and detail["unobserved"] == ["T"]
-    assert _verdict(_profile(call, targets=[(1, START + 0x20)], pads=[pad]), data)[1]["disagree"] == ["T"]
+    call = _direct_call(START + 0x20)
+    assert _verdict(_profile(call, targets=[(1, START + 0x20)]), bytes.fromhex("e81b000000"))[1]["unobserved"] == ["T"]
     plain = _plain_mov()
-    assert _verdict(_profile(plain, targets=[(1, START + 0x10)]), bytes.fromhex("4889c8"))[1]["disagree"] == ["T"]
+    data = bytes.fromhex("4889c8")
+    pad = (1, START + 0x90)
+    assert _verdict(_profile(plain, pads=[pad]), data) == ("A", None)
+    assert _verdict(_profile(plain, targets=[pad], pads=[pad]), data)[1]["disagree"] == ["T"]   # (no subtraction)
+    assert _verdict(_profile(plain, targets=[(2, START + 3)]), data)[1]["disagree"] == ["T"]
+    assert _verdict(_profile(plain, external=1), data)[1]["disagree"] == ["T"]
+    two_bytes = _row(2, [_op("COPY", [_r(RCX_)], _r(RAX_))])
+    import decoders
+    import producer_override
+
+    lift, _ = _compare(two_bytes, bytes.fromhex("0f05"))               # (plain lift, voters: syscall form)
+    state, why = producer_override.target_check(_profile(two_bytes), lift, decoders.ballot(bytes.fromhex("0f05"), START))
+    assert state == "unobserved" and "not pinned for the voters' form syscall" in why
+    pair = _int_pair()                                                 # (a call row: CALLIND)
+    data = bytes.fromhex("cd2e")
+    assert _verdict(_profile(pair), data) == ("I", None)
+    code, detail = _verdict(_profile(pair, targets=[pad], pads=[pad]), data)    # ({} or {p}: not excluded)
+    assert code == "U" and detail["unobserved"] == ["T"]
+    assert _verdict(_profile(pair, pads=[pad]), data)[1]["disagree"] == ["T"]
+    assert _verdict(_profile(pair, external=1), data)[1]["disagree"] == ["T"]
 
 
 def test_g1x1_raw_state_rules():
-    """r2 s4: mode-constant equal -> neutral; a2 via A4 and a4 from an S1 exit -> unobserved; not applicable ->
-    neutral; withheld -> unobserved; other disagreements -> disagree."""
+    """r2 s4, impl r1 Astra P2-1: provenance before state; mode-constant equal -> neutral; not applicable ->
+    neutral; withheld -> unobserved; an internal inconsistency disagrees only when the exported length itself
+    differs from the consensus."""
+    from types import SimpleNamespace
+
     import producer_override as po
 
     facts = {"address": START, "space": 1, "length": 2, "fallthrough": START + 2, "exit": None}
+    exit_facts = dict(facts, fallthrough=None, exit={"target": 2})
     assert po._state("F.is_flow", {"state": "applied"}, facts, None) == "neutral"
-    assert po._state("a2", {"state": "applied", "provenance": "via A4 (counted once)"}, facts, None) == "unobserved"
-    assert po._state("a4", {"state": "applied"}, dict(facts, fallthrough=None, exit={"target": 2}), None) == \
-        "unobserved"
+    assert po._state("a2", {"state": "unrecognized", "kind": "cause-unknown", "provenance": "via A4"}, facts,
+                     None) == "unobserved"
+    assert po._state("a4", {"state": "unrecognized", "kind": "cause-unknown"}, exit_facts, None) == "unobserved"
     assert po._state("a9", {"state": "not_applicable"}, facts, None) == "neutral"
     assert po._state("a3", {"state": "withheld", "kind": "vendor"}, facts, None) == "unobserved"
     assert po._state("a3", {"state": "unrecognized", "kind": "cause-unknown"}, facts, None) == "disagree"
-    assert po._state("F.is_flow", {"state": "unrecognized", "kind": "cause-unknown"}, facts, None) == "disagree"
+    voter = SimpleNamespace(status="ok", length=2)
+    ballot = {"intel": [voter, voter, voter], "amd": [voter, voter]}
+    inconsistency = {"state": "unrecognized", "kind": "ghidra-internal-inconsistency"}
+    assert po._state("a2", inconsistency, facts, ballot) == "unobserved"            # (only the exit differs)
+    assert po._state("a2", inconsistency, dict(facts, length=3), ballot) == "disagree"
+
+
+ENGINE = {"package": "tdo_v2", "digest": "d" * 64, "revision": None, "dirty": None}
 
 
 def _ov_document(functions, override_functions, profile="x1-producer-v1"):
@@ -3524,21 +3572,20 @@ def _ov_document(functions, override_functions, profile="x1-producer-v1"):
     import producer_override
 
     premises = ["decoder-matches-cpu", "stock-ghidra-translator"]
-    engine = {"package": "tdo_v2", "digest": "d" * 64, "revision": None, "dirty": None}
     return evidence.build(bundle=dict(EV_BUNDLE), producer=dict(EV_PRODUCER),
                           mapping={"format": "pe", "mapping_id": "p" * 64}, premises=premises, table_applied=True,
                           global_reason=None, functions=functions, isa=_isa_block({}),
-                          override={"header": producer_override.header_block(profile, engine),
+                          override={"header": producer_override.header_block(profile, ENGINE),
                                     "functions": override_functions})
 
 
-def _ov_case():
+def _ov_case(states=None):
     rows = [(1, 0x1000), (1, 0x1004), (1, 0x1008), (1, 0x100c), (1, 0x1010), (1, 0x1014)]
-    states = {r: _ev_confirmed() for r in rows[:5]}
+    states = states or {r: _ev_confirmed() for r in rows[:5]}
     states[rows[5]] = {"*": "unobserved"}
     functions = [_ev_function("f0", rows, states)]
     codes = {rows[0]: "A", rows[1]: "S", rows[2]: "C", rows[3]: "O", rows[4]: "U"}
-    details = {rows[2]: {"disagree": ["T"]},
+    details = {rows[2]: {"disagree": ["T"], "exempt": "S"},
                rows[3]: {"kinds": ["length"], "effect": {"disagree": ["a2"], "unobserved": []}},
                rows[4]: {"unobserved": ["a3"]},
                rows[5]: {"star": True, "kinds": ["flow:BRANCH"], "effect": {"unobserved": ["*"]}}}
@@ -3546,22 +3593,28 @@ def _ov_case():
     return rows, functions, override
 
 
-def test_g1x1_evidence3_round_trip_and_reader():
-    import evidence
+def _ov_view(functions, rows, profile="x1-producer-v1", present=None):
+    view = _ev_view(functions)
+    view["producer_profile"] = profile
+    reported = present if present is not None else {rows[3], rows[5]}
+    view["functions"]["f0"]["override_report"] = None if profile is None else {r: r in reported for r in rows}
+    return view
 
+
+def test_g1x1_evidence3_round_trip_and_reader():
     rows, functions, override = _ov_case()
     document = _ov_document(functions, override)
     assert document["schema"] == "g1-decode-evidence-3"
     assert document["functions"][0]["producer_override"]["codes"] == "ASCOU"
-    view = _ev_view(functions)
-    view["functions"]["f0"]["override_present"] = {rows[3], rows[5]}
-    ev = _ev_accept(document, view)
+    ev = _ev_accept(document, _ov_view(functions, rows))
     attested = ev.override("f0", *rows[0])
     assert attested["verdict"] == "effect_attested" and attested["exemption"] is None
     assert "g1-evidence-from-allowlisted-build" in attested["premises"]
     syscall = ev.override("f0", *rows[1])
     assert syscall["exemption"]["attribute"] == "a3" and "kernel-boundary-contract" in syscall["premises"]
-    assert ev.override("f0", *rows[2]) == {"verdict": "contradicted", "disagree": ["T"]}
+    contradicted = ev.override("f0", *rows[2])
+    assert contradicted["verdict"] == "contradicted" and contradicted["disagree"] == ["T"]
+    assert contradicted["exemption"]["pattern"] == "syscall" and "kernel-boundary-contract" in contradicted["premises"]
     assert ev.override("f0", *rows[3])["verdict"] == "override_present"
     assert ev.override("f0", *rows[4]) == {"verdict": "unobserved", "unobserved": ["a3"]}
     star = ev.override("f0", *rows[5])
@@ -3569,34 +3622,42 @@ def test_g1x1_evidence3_round_trip_and_reader():
     two = _ev2(functions, {"f0": {}})                                         # schema -2: no override section
     assert _ev_accept(two, _ev_view(functions)).override("f0", *rows[0])["verdict"] == "unobserved"
     legacy = _ov_document(functions, {"f0": {"status": "not_reported", "codes": {}, "details": {}}}, profile=None)
-    assert _ev_accept(legacy, _ev_view(functions)).override("f0", *rows[0])["verdict"] == "not_reported"
-    import producer_override
-
-    changed = _ov_document(functions, override)
-    ev = _ev_accept(changed, view)
+    assert _ev_accept(legacy, _ov_view(functions, rows, profile=None)).override("f0", *rows[0])["verdict"] == \
+        "not_reported"
+    ev = _ev_accept(_ov_document(functions, override), _ov_view(functions, rows))
     ev.compared = ev.compared - {"a9"}                                          # (a required comparison missing)
     assert ev.override("f0", *rows[0])["verdict"] == "unobserved"
-    assert producer_override.SPEC["required"][-1] == "T"
 
 
 @pytest.mark.parametrize("name", ["code dropped", "detail dropped", "T-only row deleted", "listed A detail",
                                   "unknown code", "star detail missing", "star at compared row", "C fields",
-                                  "O effect keys", "codes without checked", "spec changed", "unsorted details"])
+                                  "O effect keys", "codes without checked", "spec changed", "unsorted details",
+                                  "header profile null", "O turned A", "A with an exception", "S with a2 exception",
+                                  "view without reports", "view without profile", "unknown exempt"])
 def test_g1x1_evidence3_rejections(name):
-    """r2 s5 / r3 s5 / r3 s8: a detail or code deleted after serialization rejects the file (C and O alike)."""
+    """r2 s5 / r3 s5 / r3 s8, impl r1 Astra P1-1 / Fable P2-1: a detail or code deleted after serialization, and any
+    contradiction with the Bundle's reports or G1's own exceptions, rejects the file."""
     import evidence
 
-    rows, functions, override = _ov_case()
+    states = None
+    rows = [(1, 0x1000), (1, 0x1004), (1, 0x1008), (1, 0x100c), (1, 0x1010), (1, 0x1014)]
+    if name == "A with an exception":
+        states = {r: _ev_confirmed() for r in rows[:5]}
+        states[rows[0]] = {"a2": "withheld", "~": {"a2": "vendor"}, "+": frozenset()}
+    if name == "S with a2 exception":
+        states = {r: _ev_confirmed() for r in rows[:5]}
+        states[rows[1]] = {"a2": "unobserved", "+": frozenset()}
+    rows, functions, override = _ov_case(states)
     document = _ov_document(functions, override)
-    view = _ev_view(functions)
-    view["functions"]["f0"]["override_present"] = {rows[3], rows[5]}
-    _ev_accept(document, view)                                                 # the well-formed file passes
+    view = _ov_view(functions, rows)
+    if name not in ("A with an exception", "S with a2 exception"):
+        _ev_accept(document, view)                                             # the well-formed file passes
     section = document["functions"][0]["producer_override"]
     details = section["details"]
     if name == "code dropped":
         section["codes"] = section["codes"][:-1]
     elif name == "detail dropped":
-        del details[2]                                                          # (the O row's detail)
+        del details[1]                                                          # (the O row's detail)
     elif name == "T-only row deleted":                                        # (the C row: code and detail)
         section["codes"] = "ASOU"
         del details[0]
@@ -3616,66 +3677,99 @@ def test_g1x1_evidence3_rejections(name):
     elif name == "codes without checked":
         section["status"] = "not_reported"
     elif name == "spec changed":
-        document["producer_override"]["spec"]["pinned_e"] = ["plain"]
-    else:
+        document["producer_override"]["spec"]["direct_e"] = ["call"]
+    elif name == "unsorted details":
         details.reverse()
+    elif name == "header profile null":
+        document["producer_override"]["profile"] = None
+    elif name == "O turned A":
+        section["codes"] = "ASCAU"
+        del details[1]
+    elif name == "view without reports":
+        del view["functions"]["f0"]["override_report"]
+    elif name == "view without profile":
+        del view["producer_profile"]
+    elif name == "unknown exempt":
+        details[0]["exempt"] = "X"
     with pytest.raises(evidence.Rejected):
-        _ev_accept(document, view)
+        _ev_accept(document, view, [evidence.allowlist_entry(document)])
 
 
 def test_g1x1_collector_statuses():
-    """r1 s7 / r2 s5: legacy Bundle -> not_reported; declared profile with a parser that exposes none ->
-    failed:parser-without-profile; a compared row without a code -> failed:row-set-mismatch."""
+    """r1 s7 / r2 s5, impl r1 Astra P2-2: legacy Bundle -> not_reported; declared profile with a parser that exposes
+    none -> failed:parser-without-profile; profile mismatch; a profile row without fields; a compared row without a
+    code, a missing detail or a missing star detail -> failed:row-set-mismatch."""
     import decode_check
 
-    rows = [{"space": 1, "address": 0x1000}, {"space": 1, "address": 0x1004}]
-    states = {("f0", 1, 0x1000): {"+": frozenset()}, ("f0", 1, 0x1004): {"+": frozenset()}}
-    engine = {"package": "tdo_v2", "digest": "d" * 64, "revision": None, "dirty": None}
+    rows = [{"space": 1, "address": 0x1000, "override": dict(NONE_REPORT)},
+            {"space": 1, "address": 0x1004, "override": dict(NONE_REPORT)},
+            {"space": 1, "address": 0x1008, "override": dict(NONE_REPORT, length_overridden=True)}]
+    states = {("f0", 1, 0x1000): {"+": frozenset()}, ("f0", 1, 0x1004): {"+": frozenset()},
+              ("f0", 1, 0x1008): {"*": "unobserved"}}
     facts = {"functions": [{"function_id": "f0", "rows": rows, "producer_profile": None}]}
-    assert decode_check.OverrideCollector(None).block(facts, states, engine)["functions"]["f0"]["status"] == \
+    assert decode_check.OverrideCollector(None).block(facts, states, ENGINE)["functions"]["f0"]["status"] == \
         "not_reported"
-    assert decode_check.OverrideCollector("x1-producer-v1").block(facts, states, engine)["functions"]["f0"][
+    assert decode_check.OverrideCollector("x1-producer-v1").block(facts, states, ENGINE)["functions"]["f0"][
         "status"] == "failed:parser-without-profile"
     facts["functions"][0]["producer_profile"] = "x1-producer-v1"
+    assert decode_check.OverrideCollector(None).block(facts, states, ENGINE)["functions"]["f0"]["status"] == \
+        "failed:profile-mismatch"
+    star = {"star": True, "kinds": ["length"], "effect": {"unobserved": ["*"]}}
     collector = decode_check.OverrideCollector("x1-producer-v1")
-    collector.functions["f0"] = {"codes": {(1, 0x1000): "A"}, "details": {}, "error": None}
-    assert collector.block(facts, states, engine)["functions"]["f0"]["status"] == "failed:row-set-mismatch"
+    collector.functions["f0"] = {"codes": {(1, 0x1000): "A"}, "details": {(1, 0x1008): star}, "rows": {},
+                                 "error": None}
+    assert collector.block(facts, states, ENGINE)["functions"]["f0"]["status"] == "failed:row-set-mismatch"
+    collector.functions["f0"]["codes"][(1, 0x1004)] = "U"                       # (U without its detail)
+    assert collector.block(facts, states, ENGINE)["functions"]["f0"]["status"] == "failed:row-set-mismatch"
     collector.functions["f0"]["codes"][(1, 0x1004)] = "A"
-    assert collector.block(facts, states, engine)["functions"]["f0"]["status"] == "checked"
+    assert collector.block(facts, states, ENGINE)["functions"]["f0"]["status"] == "checked"
+    del collector.functions["f0"]["details"][(1, 0x1008)]                        # (the star callback lost)
+    assert collector.block(facts, states, ENGINE)["functions"]["f0"]["status"] == "failed:row-set-mismatch"
+    rows[1]["override"] = None
+    assert collector.block(facts, states, ENGINE)["functions"]["f0"]["status"] == "failed:missing-row-fields"
 
 
-def test_g1x1_g3b7b_uses_the_verdicts():
-    """r1 s6 / r2 s6: a reported length override blocks (exporter refusal); a reference override is conservative;
-    the entry-reference input stays unobserved; precedence refused > disagreement > override > unobserved."""
+def test_g1x1_g3b7b_reproduces_the_exporter():
+    """r1 s6 / r2 s6, impl r1 Astra P2-3: per-row inputs; a length override blocks; a fallthrough override that
+    keeps address + length passes, one that misses it blocks; a flow override on a call row blocks; the
+    entry-reference input is unobserved on call rows only; the result names producer-override-report."""
     import dependents
 
-    rows = [{"space": 1, "address": 0x1000, "ops": [], "flow": {}, "fallthrough": 0x1002, "exit": None,
-             "native_call": False},
-            {"space": 1, "address": 0x1002, "ops": [], "flow": {}, "fallthrough": 0x1004, "exit": None,
-             "native_call": False}]
-    states = {(1, 0x1000): {"+": frozenset(("a1", "a2", "a3", "a4", "a5", "a8"))},
-              (1, 0x1002): {"+": frozenset(("a1", "a2", "a3", "a4", "a5", "a8"))}}
-    override = {"status": "checked", "codes": {(1, 0x1000): "A", (1, 0x1002): "O"},
-                "details": {(1, 0x1002): {"kinds": ["length"], "effect": {"disagree": ["a2"], "unobserved": []}}}}
-    function = {"function_id": "f0", "s1": False, "rows": rows, "baseline": {}, "override": override}
-    found = {row[0]: row for row in dependents.function_rows(function, states)}
-    _, _, run_state, verdict, detail = found["g3b7b_none_estimate"]
-    assert (run_state, verdict, detail["cause"]) == ("evaluated", "withheld", "override")
-    assert "exporter refusal" in detail["blocking"][0][1]
-    override["details"][(1, 0x1002)]["kinds"] = ["reference:JUMP_OVERRIDE_UNCONDITIONAL:primary"]
-    found = {row[0]: row for row in dependents.function_rows(function, states)}
-    assert "conservative" in found["g3b7b_none_estimate"][4]["blocking"][0][1]
-    override["codes"][(1, 0x1002)] = "A"
-    override["details"] = {}
-    found = {row[0]: row for row in dependents.function_rows(function, states)}
-    detail = found["g3b7b_none_estimate"][4]
-    assert detail["cause"] == "unobserved" and detail["blocking"][0][1] == dependents.G3B7B_X1_MISSING
+    reads = frozenset(("a1", "a2", "a3", "a4", "a5", "a8", "F.has_fallthrough"))
+
+    def run(info, kinds, fallthrough=0x1004, call_row=False):
+        row = {"space": 1, "address": 0x1002, "length": 2, "ops": [], "flow": {}, "fallthrough": fallthrough,
+               "exit": None, "native_call": False}
+        states = {(1, 0x1002): {"+": reads}}
+        override = {"status": "checked", "codes": {(1, 0x1002): "O" if kinds else "A"}, "details": {},
+                    "rows": {(1, 0x1002): {"isa_fallthrough": info, "call_row": call_row, "kinds": kinds,
+                                           "consensus_length": 2}}}
+        function = {"function_id": "f0", "s1": False, "rows": [row], "baseline": {}, "override": override}
+        found = {item[0]: item for item in dependents.function_rows(function, states)}
+        return found["g3b7b_none_estimate"]
+
+    applied = run(True, [])
+    assert applied[3] == "applied" and applied[4]["would_block"] is False
+    assert applied[4].get("premises") == ["producer-override-report"] or "premises" not in applied[4]
+    blocked = run(True, ["length"])
+    assert blocked[4]["cause"] == "override" and "length" in blocked[4]["blocking"][0][1]
+    assert run(True, ["fallthrough"])[4]["would_block"] is False                 # (keeps address + length)
+    missed = run(True, ["fallthrough"], fallthrough=0x1010)
+    assert missed[4]["cause"] == "override"
+    call = run(True, ["flow:CALL_RETURN"], call_row=True)
+    assert call[4]["cause"] == "override"
+    names = [item[1] for item in call[4]["blocking"]]
+    assert any("call row" in name for name in names)
+    assert run(None, [])[4]["cause"] == "unobserved"                            # (undecided prototype form)
+    plain_call = run(True, [], call_row=True)
+    assert plain_call[4]["cause"] == "unobserved" and plain_call[4]["blocking"][0][1] == dependents.G3B7B_X1_MISSING
+    assert run(True, ["reference:JUMP_OVERRIDE_UNCONDITIONAL:primary"])[4]["would_block"] is False
 
 
 @needs
 def test_g1x1_end_to_end_legacy_bundle_writes_schema3_not_reported(tmp_path):
     """decode_check --producer-override on a legacy synthetic Bundle: schema -3, every function not_reported,
-    accepted by the reference reader; override() -> not_reported."""
+    accepted by the reference reader with a legacy view."""
     import _sealed as s
     import decode_check
     import evidence

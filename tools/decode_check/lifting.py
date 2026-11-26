@@ -105,6 +105,7 @@ class Lift:
     values: dict = field(default_factory=dict)     # attribute -> Ghidra value
     unobserved: dict = field(default_factory=dict)  # attribute -> reason
     skipped: tuple = ()                             # ordinals excluded as intra-instruction skips
+    pinned: dict = field(default_factory=dict)      # (table -8) values only the producer-override layer reads
 
 
 def _is_reg(item, offset=None, size=None):
@@ -259,13 +260,16 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
             out = ops[0]["output"]
             exact = rest == ["CALLIND"] and out is not None and out["kind"] == "UNIQUE" and out["size"] == 8 \
                 and ops[1]["inputs"] == [out] and ops[1]["output"] is None
-            return Lift("interrupt" if exact else "interrupt-return",
-                        {"a10": ("int", vector), "a6": "none", "a8": "none", "a9": "none", "a5": None},
-                        {"a3": "OS return after an interrupt is not observable"})
+            values = {"a10": ("int", vector), "a6": "none", "a8": "none", "a9": "none", "a5": None}
+            return Lift("interrupt" if exact else "interrupt-return", values,
+                        {"a3": "OS return after an interrupt is not observable"}, (), dict(values))
         if name == "syscall" and not rest and ops[0]["output"] is None:
-            # (table -8: the exact S3 shape -- one CALLOTHER, all inputs constant, no output; S3 r16 1.2 item 2)
-            return Lift("syscall", {"a10": ("syscall",), "a6": "none", "a8": "none", "a9": "none", "a5": None},
-                        {"a3": "OS return after syscall is not observable"})
+            # (table -8: the exact S3 shape -- one CALLOTHER, all inputs constant, no output; S3 r16 1.2 item 2).
+            # G1's own comparison keeps the generic userop result (a3 a5 a6 a8 a9 a10 unobserved: the -1 / -2
+            # exceptions do not change, impl r1 Astra P1-4); the values are pinned for the producer-override layer
+            return Lift("syscall", {}, {name_: "userop 5 (syscall): pinned only in the producer-override layer"
+                                        for name_ in ("a3", "a5", "a6", "a8", "a9", "a10")}, (),
+                        {"a10": ("syscall",), "a6": "none", "a8": "none", "a9": "none", "a5": None})
         if name == "invalidInstructionException" and rest == ["BRANCHIND"]:
             return lift("fault", a10=("invalid-opcode",), a6="none", a8="none", a9="none", a5=None,
                         a3="sequential" if continuation else "none")

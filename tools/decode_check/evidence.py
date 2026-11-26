@@ -143,8 +143,8 @@ def build(*, bundle: dict, producer: dict, mapping: dict, premises: list, table_
 def _override_section(entry, rows, states) -> dict:
     """``{status, codes, details}``: one code per compared row in (space, offset) order, a detail per C / U / O row
     and per star row (design_tbr_g1_x1 r2 s5, r3 s5)."""
-    if entry is None or entry["status"] != "checked":
-        return {"status": "not_reported" if entry is None else entry["status"], "codes": "", "details": []}
+    if entry is None or entry["status"] != "checked":     # (a function without verdicts: never not_reported)
+        return {"status": "failed:no-verdicts" if entry is None else entry["status"], "codes": "", "details": []}
     compared = [where for where in rows if "*" not in states.get(where, {"*": "unobserved"})]
     codes = "".join(entry["codes"][where] for where in compared)
     details = []
@@ -244,6 +244,7 @@ class Evidence:
         self.override_header = document.get("producer_override")
         self.override_sections = {entry["function_id"]: entry["producer_override"] for entry in document["functions"]
                                   if "producer_override" in entry}
+        self._override_cache = {}
         self.isa_status, self.isa_rows = {}, {}
         for entry in document["functions"]:
             if "isa_facts" in entry:
@@ -338,7 +339,8 @@ class Evidence:
     def override(self, fid: str, space: int, offset: int) -> dict:
         """The producer-override verdict of one row (design_tbr_g1_x1 r1-r3): ``{"verdict": "effect_attested",
         "exemption", "premises"}`` / ``override_present`` (kinds, effect) / ``contradicted`` / ``unobserved`` /
-        ``not_reported``. effect_attested is an effect attestation only, never the report's completeness."""
+        ``not_reported``. effect_attested is an effect attestation only, never the report's completeness. A verdict
+        that used a pin (S / I, or ``exempt`` on C / U / O) returns the exemption and the OS-contract premise."""
         import producer_override as po
 
         if self.override_header is None:
@@ -350,28 +352,43 @@ class Evidence:
             return {"verdict": "not_reported", "reason": "the Bundle declares no producer profile"}
         if section["status"] != "checked":
             return {"verdict": "unobserved", "reason": f"status {section['status']}"}
-        rows = sorted(self.bundle["functions"][fid]["rows"])
-        if (space, offset) not in rows:
+        index = self._override_index(fid)
+        where = (space, offset)
+        if where not in index["rows"]:
             return {"verdict": "unobserved", "reason": "not a row of the function"}
-        details = {(item["space"], int(item["offset"], 16)): item for item in section["details"]}
+        item = index["details"].get(where)
         if self._never_compared(fid, space, offset):
-            item = details.get((space, offset))
             if item is not None and item.get("star"):
                 return {"verdict": "override_present", "kinds": list(item["kinds"]), "effect": dict(item["effect"])}
             return {"verdict": "unobserved", "reason": "row never compared"}
-        compared = [where for where in rows if not self._never_compared(fid, *where)]
-        code = section["codes"][compared.index((space, offset))]
+        code = index["codes"][where]
+        base = sorted({"decoder-matches-cpu", "stock-ghidra-translator", TRUST_PREMISE})
         if code in po.DETAIL_CODES:
-            item = {k: v for k, v in details[(space, offset)].items() if k not in ("space", "offset")}
-            return {"verdict": po.CODES[code], **item}
-        # (r3 s5: before A / S / I, the required list must be inside the compared attributes, the T rule the fixed
-        #  one, the translation table applied)
-        if not set(po.REQUIRED) - {"T"} <= self.compared or self.override_header["spec"] != json.loads(json.dumps(po.SPEC)) \
-                or not self.table_applied:
+            out = {"verdict": po.CODES[code], **{k: v for k, v in item.items() if k not in ("space", "offset", "exempt")}}
+            if "exempt" in item:
+                out["exemption"] = po.EXEMPTIONS[item["exempt"]]
+                out["premises"] = sorted(set(base) | {po.EXEMPTIONS[item["exempt"]]["premise"]})
+            return out
+        # (r3 s5: before A / S / I, the required list must be inside the compared attributes, the spec the fixed
+        #  one, the translation table applied, the file's profile set)
+        if not set(po.REQUIRED) - {"T"} <= self.compared \
+                or self.override_header["spec"] != json.loads(json.dumps(po.SPEC)) or not self.table_applied \
+                or self.override_header["profile"] is None:
             return {"verdict": "unobserved", "reason": "the required comparisons did not all run"}
-        premises = sorted({"decoder-matches-cpu", "stock-ghidra-translator", TRUST_PREMISE}
-                          | ({po.EXEMPTIONS[code]["premise"]} if code in po.EXEMPTIONS else set()))
+        premises = sorted(set(base) | ({po.EXEMPTIONS[code]["premise"]} if code in po.EXEMPTIONS else set()))
         return {"verdict": "effect_attested", "exemption": po.EXEMPTIONS.get(code), "premises": premises}
+
+    def _override_index(self, fid: str) -> dict:
+        """(impl r1 P2-5) coordinate -> code / detail, built once per function."""
+        cached = self._override_cache.get(fid)
+        if cached is None:
+            section = self.override_sections[fid]
+            rows = sorted(self.bundle["functions"][fid]["rows"])
+            compared = [where for where in rows if not self._never_compared(fid, *where)]
+            cached = {"rows": set(rows), "codes": dict(zip(compared, section["codes"])),
+                      "details": {(item["space"], int(item["offset"], 16)): item for item in section["details"]}}
+            self._override_cache[fid] = cached
+        return cached
 
     def _never_compared(self, fid, space, offset) -> bool:
         if self.status.get(fid) != "covered" or (space, offset) not in self.bundle["functions"][fid]["rows"]:
@@ -501,7 +518,14 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
             never = {c for c, e in zip(coordinates, item["exceptions"]) if "*" in e["attributes"]}
             _check_isa(item["isa_facts"], fid, rows, never, pinned)
         if schema == SCHEMA3:
-            _check_override(item["producer_override"], fid, rows, never, bundle["functions"][fid])
+            exceptions = {coordinate: exception["attributes"]
+                          for coordinate, exception in zip(coordinates, item["exceptions"])}
+            if "producer_profile" not in bundle:
+                raise Rejected("-3 needs the Bundle view's producer_profile")
+            if document["producer_override"]["profile"] != bundle["producer_profile"]:
+                raise Rejected("producer_override profile differs from the Bundle's")
+            _check_override(item["producer_override"], fid, rows, never, bundle["functions"][fid], exceptions,
+                            bundle["producer_profile"])
     return Evidence(document, bundle, tables)
 
 
@@ -516,9 +540,11 @@ def _check_override_header(block) -> None:
     _keys(block["engine_source"], ("package", "digest", "revision", "dirty"), "producer_override.engine_source")
 
 
-def _check_override(section, fid, rows, never, view) -> None:
-    """r2 s5 / r3 s5: codes cover exactly the compared rows; one detail per C / U / O code and per star row (checked
-    against the Bundle view's reported overrides when it carries them); fields as the code says."""
+def _check_override(section, fid, rows, never, view, exceptions, profile) -> None:
+    """r2 s5 / r3 s5, impl r1 Astra P1-1: codes cover exactly the compared rows; one detail per C / U / O code and
+    per star row; fields as the code says; and against the Bundle's own view (mandatory for -3): the status matches
+    the view's profile, ``O`` <=> a reported override on compared rows, star details <=> a reported override on
+    never-compared rows, and an A / S / I row has no G1 exception beyond the attributes its pin allows."""
     import producer_override as po
 
     _keys(section, ("status", "codes", "details"), f"{fid}.producer_override")
@@ -527,13 +553,21 @@ def _check_override(section, fid, rows, never, view) -> None:
         raise Rejected(f"{fid}: producer_override status {status!r}")
     if not isinstance(codes, str) or not isinstance(details, list):
         raise Rejected(f"{fid}: producer_override codes / details types")
+    if "override_report" not in view:
+        raise Rejected(f"{fid}: -3 needs the Bundle view's per-row override reports")
+    reports = view["override_report"]
+    if status == "not_reported" and (profile is not None or reports is not None):
+        raise Rejected(f"{fid}: not_reported on a Bundle that declares a producer profile")
     if status != "checked":
         if codes or details:
             raise Rejected(f"{fid}: producer_override codes / details without status checked")
         return
+    if profile is None or reports is None or set(reports) != set(rows):
+        raise Rejected(f"{fid}: status checked without the Bundle's profile and a report for every row")
     compared = [where for where in sorted(rows) if where not in never]
     if len(codes) != len(compared) or set(codes) - set(po.CODES):
         raise Rejected(f"{fid}: producer_override codes do not cover the compared rows")
+    position = dict(zip(compared, codes))
     seen = []
     star = set()
     for item in details:
@@ -553,9 +587,13 @@ def _check_override(section, fid, rows, never, view) -> None:
             continue
         if where in never:
             raise Rejected(f"{fid}: producer_override detail at a never-compared row without star")
-        code = codes[compared.index(where)]
+        code = position[where]
         if code not in po.DETAIL_CODES:
             raise Rejected(f"{fid}: producer_override detail on code {code}")
+        if "exempt" in item:
+            if item["exempt"] not in po.EXEMPTIONS:
+                raise Rejected(f"{fid}: producer_override exempt {item['exempt']!r}")
+            fields = fields - {"exempt"}
         if code == "C" and (fields != {"disagree"} or not _strings(item["disagree"], nonempty=True, within=po.REQUIRED)):
             raise Rejected(f"{fid}: producer_override C detail")
         if code == "U" and (fields != {"unobserved"}
@@ -570,11 +608,20 @@ def _check_override(section, fid, rows, never, view) -> None:
                 raise Rejected(f"{fid}: producer_override O detail")
     if seen != sorted(set(seen)):
         raise Rejected(f"{fid}: producer_override details duplicated or not sorted")
-    needing = {where for where, code in zip(compared, codes) if code in po.DETAIL_CODES}
+    needing = {where for where, code in position.items() if code in po.DETAIL_CODES}
     if needing != set(seen) - star:
         raise Rejected(f"{fid}: producer_override details do not match the C / U / O codes")
-    reported = view.get("override_present")
-    if reported is not None and {where for where in reported if where in never} != star:
+    for where, code in position.items():
+        if (code == "O") != bool(reports[where]):
+            raise Rejected(f"{fid}: producer_override code {code} at {render(*where)} contradicts the Bundle's report")
+        exception = exceptions.get(where)
+        if code == "A" and exception is not None:
+            raise Rejected(f"{fid}: effect_attested at {render(*where)} with a G1 exception")
+        if code in po.EXEMPTIONS and exception is not None and (
+                not set(exception) <= set(po.EXEMPTIONS[code]["core_unobserved"])
+                or any(state != "unobserved" for state in exception.values())):
+            raise Rejected(f"{fid}: {code} at {render(*where)} with a G1 exception its pin does not allow")
+    if {where for where in never if reports[where]} != star:
         raise Rejected(f"{fid}: producer_override star details do not match the Bundle's reported overrides")
 
 

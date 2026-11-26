@@ -173,8 +173,13 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
         extra = _override_extras(function, override, addresses)
     else:
         extra = (addresses[0] if addresses else 0, G3B7B_MISSING, "unobserved")
-    g3b7b = _judge(reads_of(addresses, G3B7B_READS), None, extra)
+    x1 = not branchind and override is not None and override["status"] == "checked"
+    # (impl r1: the X-1 path also reads F.has_fallthrough -- the prototype hasFallthrough input -- and rests on the
+    #  producer's raw claims, so its result names the premise)
+    g3b7b = _judge(reads_of(addresses, G3B7B_READS + (("F.has_fallthrough",) if x1 else ())), None, extra)
     g3b7b[2]["branchind_rows"] = len(branchind)
+    if x1:
+        g3b7b[2]["premises"] = ["producer-override-report"]
     out.append(("g3b7b_none_estimate", fid, *g3b7b))
     for call in baseline.get("calls", ()):
         key = f"{fid}/{call['op']}"
@@ -203,30 +208,44 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
 
 
 def _override_extras(function: dict, override: dict, addresses: list) -> list:
-    """g3b7b inputs from the X-1 verdicts (design_tbr_g1_x1 r1 s6, r2 s6): a reported override blocks, labelled
-    "exporter refusal" where the exporter refuses (length override: every row; fallthrough override: rows with an
-    ISA fallthrough -- here rows whose last p-code op is not an unconditional BRANCH / BRANCHIND / RETURN; flow
-    override: call rows) and "conservative" otherwise; a4 rebuilt from an S1 exit is unobserved; the entry-reference
-    input stays unobserved."""
+    """g3b7b inputs from the X-1 row facts and G1's evidence (design_tbr_g1_x1 r1 s6, r2 s6; impl r1 Astra P2-3),
+    per row (``override["rows"]``: producer_override.g3b7b_row):
+    - a reported length override: the exporter refuses every such row (block, cause override);
+    - a prototype-fallthrough row (the voters' consensus form; the pinned shapes by their bits): Ghidra's own
+      fallthrough must exist and equal address + parsed length (= the exported length when not length-overridden,
+      a raw claim); a reported fallthrough override that misses it is the exporter's refusal (block), one that
+      meets it passes; a missing fallthrough without the override is G1's a4 disagreement (the reads); a4 rebuilt
+      from an S1 exit, a missing length or an undecided form -> unobserved;
+    - a reported flow override on a call row: the exporter's refusal (block);
+    - the entry-reference refusal reads ordinary references G1 cannot see: unobserved, on call rows only;
+    - reference overrides alone never block here (they matter only through the entry-reference input)."""
     by_where = {(row.get("space"), row["address"]): row for row in function["rows"]}
     out = []
-    for where, detail in sorted(override["details"].items()):
-        code = override["codes"].get(where, "O" if detail.get("star") else None)
-        if code != "O":
-            continue
+    call_rows = []
+    for where, info in sorted(override.get("rows", {}).items()):
         row = by_where.get(where, {})
-        ops = [op["opcode"] for op in row.get("ops", ())]
-        isa_fallthrough = not ops or ops[-1] not in ("BRANCH", "BRANCHIND", "RETURN")
-        call_row = row.get("has_call_op") or row.get("flow", {}).get("is_call")
-        kinds = detail["kinds"]
-        refuses = "length" in kinds or ("fallthrough" in kinds and isa_fallthrough) \
-            or (any(kind.startswith("flow:") for kind in kinds) and call_row)
-        label = "exporter refusal" if refuses else "conservative"
-        out.append((where, f"producer override {', '.join(kinds)} ({label})", OVERRIDE))
-    for where, row in sorted(by_where.items()):
-        if row.get("fallthrough") is None and row.get("exit"):
-            out.append((where, "a4 rebuilt from an S1 exit (getFallThrough not exported)", "unobserved"))
-    out.append((addresses[0] if addresses else 0, G3B7B_X1_MISSING, "unobserved"))
+        kinds = info["kinds"]
+        length = row.get("length")
+        if info["call_row"]:
+            call_rows.append(where)
+        if "length" in kinds:
+            out.append((where, "producer length override (exporter refusal: every row)", OVERRIDE))
+        if info["isa_fallthrough"] is None:
+            out.append((where, "prototype fallthrough undecided (the voters' form)", "unobserved"))
+        elif info["isa_fallthrough"]:
+            fallthrough = row.get("fallthrough")
+            if fallthrough is None and row.get("exit"):
+                out.append((where, "a4 rebuilt from an S1 exit (getFallThrough not exported)", "unobserved"))
+            elif length is None:
+                out.append((where, "length not exported (getParsedLength)", "unobserved"))
+            elif "fallthrough" in kinds and "length" not in kinds \
+                    and (fallthrough is None or fallthrough != row["address"] + length):
+                out.append((where, "fallthrough override missing address + parsed length (exporter refusal)",
+                            OVERRIDE))
+        if info["call_row"] and any(kind.startswith("flow:") for kind in kinds):
+            out.append((where, "flow override on a call row (exporter refusal)", OVERRIDE))
+    if call_rows:
+        out.append((call_rows[0], G3B7B_X1_MISSING, "unobserved"))
     return out
 
 

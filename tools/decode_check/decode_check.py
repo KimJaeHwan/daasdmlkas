@@ -203,19 +203,20 @@ class OverrideCollector:
         self.declared = declared            # the manifest's producer_profile (None: a legacy Bundle)
         self.functions = {}
 
-    def __call__(self, fid, facts, result, lift, ballot) -> None:
+    def __call__(self, fid, facts, result, lift, ballot, window=None) -> None:
         import producer_override
 
-        entry = self.functions.setdefault(fid, {"codes": {}, "details": {}, "error": None})
+        entry = self.functions.setdefault(fid, {"codes": {}, "details": {}, "rows": {}, "error": None})
+        where = (facts["space"], facts["address"])
         try:
-            verdict = producer_override.row_verdict(facts, result, lift, ballot)
+            verdict = producer_override.row_verdict(facts, result, lift, ballot, window)
+            entry["rows"][where] = producer_override.g3b7b_row(facts, ballot, window, lift)
         except Exception as error:          # (one failing row fails the function's status, never the run)
             entry["error"] = f"failed:{type(error).__name__}: {error}"[:200]
             return
         if verdict is None:
             return
         code, detail = verdict
-        where = (facts["space"], facts["address"])
         if code is not None:
             entry["codes"][where] = code
         if detail is not None:
@@ -227,18 +228,32 @@ class OverrideCollector:
         functions = {}
         for function in facts["functions"]:
             fid = function["function_id"]
-            entry = self.functions.get(fid, {"codes": {}, "details": {}, "error": None})
+            entry = self.functions.get(fid, {"codes": {}, "details": {}, "rows": {}, "error": None})
+            never = {(row["space"], row["address"]) for row in function["rows"]
+                     if "*" in states.get((fid, row["space"], row["address"]), {"*": "unobserved"})}
             compared = sorted((row["space"], row["address"]) for row in function["rows"]
-                              if "*" not in states.get((fid, row["space"], row["address"]), {"*": "unobserved"}))
-            out = {"status": "checked", "codes": {}, "details": {}}
-            if function.get("producer_profile") is None:
+                              if (row["space"], row["address"]) not in never)
+            # (impl r1 Astra P2-2) the star details and the C / U / O details expected from the rows themselves
+            star = {(row["space"], row["address"]) for row in function["rows"]
+                    if (row["space"], row["address"]) in never and row.get("override") is not None
+                    and producer_override.present(row["override"])}
+            needing = {where for where, code in entry["codes"].items() if code in producer_override.DETAIL_CODES}
+            out = {"status": "checked", "codes": {}, "details": {}, "rows": {}}
+            profile = function.get("producer_profile")
+            if profile is None:
                 out["status"] = "failed:parser-without-profile" if self.declared is not None else "not_reported"
+            elif profile != self.declared:
+                out["status"] = "failed:profile-mismatch"
+            elif any(row.get("override") is None for row in function["rows"]):
+                out["status"] = "failed:missing-row-fields"
             elif entry["error"]:
                 out["status"] = entry["error"]
-            elif sorted(entry["codes"]) != compared:
+            elif sorted(entry["codes"]) != compared or set(entry["details"]) != needing | star \
+                    or {w for w, d in entry["details"].items() if d.get("star")} != star:
                 out["status"] = "failed:row-set-mismatch"
             else:
                 out["codes"], out["details"] = dict(entry["codes"]), dict(entry["details"])
+                out["rows"] = dict(entry["rows"])
             functions[fid] = out
         return {"header": producer_override.header_block(self.declared, engine_source), "functions": functions}
 
@@ -257,10 +272,14 @@ def engine_source() -> dict:
         f"{path.relative_to(package.parent).as_posix()}\0{hashlib.sha256(path.read_bytes()).hexdigest()}\n"
         for path in files).encode("utf-8")).hexdigest()
     try:
+        # (impl r1 Astra P2-4: a revision only when that repository tracks the imported package itself -- an
+        #  archive unpacked under another repository would otherwise report the outer HEAD)
+        tracked = subprocess.run(["git", "-C", str(package), "ls-files", "--error-unmatch", "__init__.py"],
+                                 capture_output=True, text=True, timeout=30).returncode == 0
         revision = subprocess.run(["git", "-C", str(package), "rev-parse", "HEAD"], capture_output=True, text=True,
-                                  timeout=30).stdout.strip() or None
+                                  timeout=30).stdout.strip() or None if tracked else None
         dirty = bool(subprocess.run(["git", "-C", str(package), "status", "--porcelain", "--", "."],
-                                    capture_output=True, text=True, timeout=60).stdout.strip())
+                                    capture_output=True, text=True, timeout=60).stdout.strip()) if tracked else None
     except (OSError, subprocess.SubprocessError):
         revision, dirty = None, None
     if revision is None:
@@ -270,7 +289,7 @@ def engine_source() -> dict:
 
 def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: dict, original: bytes, mapping,
                    facts: dict, states: dict, use_table: bool, reason, isa: dict | None = None,
-                   override: dict | None = None) -> None:
+                   override: dict | None = None, engine: dict | None = None) -> None:
     """``g1-decode-evidence-1`` (design .census6/design_g1_engine_evidence_r3.md, s2 / s3 / s7); with ``isa``
     ``g1-decode-evidence-2`` (design .census6/design_tbr_isa_facts_r3.md s5)."""
     import hashlib
@@ -279,7 +298,7 @@ def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: 
     members = {row["id"]: row for row in manifest["members"]}
     observation = {row["id"]: members[row["observation_member"]]["sha256"] for row in manifest["functions"]}
     # (design_tbr_g1_x1 r1 s5: the engine G1 actually imported, not wt_lint/src)
-    engine_digest = engine_source()["digest"]
+    engine_digest = (engine or engine_source())["digest"]      # (computed once per run, impl r1 P2-4)
     document = evidence.build(
         bundle={"generation_id": seal["generation_id"], "manifest_sha256": seal["manifest_sha256"],
                 "original_sha256": hashlib.sha256(original).hexdigest()},
@@ -346,8 +365,9 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     rows.extend(check.decode_rows(image, facts["functions"], use_table, reason, full, states, facts["language"] or "",
                                   unverified, isa=collector, override=verdicts))
     override_block = None
+    engine = engine_source() if evidence_out is not None or verdicts is not None else None
     if verdicts is not None:
-        override_block = verdicts.block(facts, states, engine_source())
+        override_block = verdicts.block(facts, states, engine)
         for function in facts["functions"]:
             function["override"] = override_block["functions"][function["function_id"]]
     rows.extend(check.suspect_rows(rows))
@@ -364,7 +384,7 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     header["counts"] = g1_counts(rows)
     if evidence_out is not None:
         write_evidence(evidence_out, generation, naming_source, manifest, original, mapping, facts, states, use_table,
-                       reason, None if collector is None else collector.block(facts, states), override_block)
+                       reason, None if collector is None else collector.block(facts, states), override_block, engine)
         header["evidence_out"] = str(evidence_out)
     return header, rows
 
