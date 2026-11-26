@@ -329,7 +329,7 @@ def _override_evidence(
             return None
         references.append(OverrideReference(target, type_name, index.memory_coordinate(target), primary))
     try:
-        return InstructionOverrideEvidence(flow_override, fallthrough, length, tuple(sorted(set(references))))
+        return InstructionOverrideEvidence(flow_override, fallthrough, length, tuple(sorted(references)))
     except (TypeError, ValueError):
         defects.invalid = True
         return None

@@ -34,9 +34,11 @@ and binaries not scanned, are outside it -- reported.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
 import struct
-from dataclasses import dataclass, replace
+from dataclasses import astuple, dataclass, replace
 from pathlib import Path
 
 FORMAT = "tdo-v2-stack-switch-evidence"
@@ -111,9 +113,12 @@ class StackEvidence:
     # undecidable) and whether the scanner's stack pointer is the unique
     # eight-byte RSP of its sealed register table
     seal: str | None = None
-    verified: bool = False
     applicable: bool | None = None
     rsp_verified: bool = False
+    # (Astra X-1a r2 P1-1) the admission's attestation over every field it
+    # vouches for (verdicts, kernel rows, digest, seal, applicability, RSP):
+    # a copy with any of them changed is not verified
+    attestation: str | None = None
     # (v2) the s3-on scan's language flag and the fallback verdict (every
     # instruction start a destination, r4 4.8 -- measured, not authority)
     stack_pointer: tuple | None = None
@@ -122,6 +127,11 @@ class StackEvidence:
 
     def _scanned(self) -> bool:
         return self.functions_scanned > 0 and self.instructions_scanned > 0
+
+    @property
+    def verified(self) -> bool:
+        """Issued by a Bundle admission (``verify_bundle_evidence``) and unchanged since."""
+        return self.attestation is not None and hmac.compare_digest(self.attestation, _attestation(self))
 
     def describe(self) -> str:
         found = f"{len(self.switches)} switch(es)" if self.switches else "no switch"
@@ -248,6 +258,27 @@ def _load_v2(path, data: bytes, raw: dict) -> StackEvidence:
         fallback_switches=tuple(_switches(on["fallback_switches"], path, cause=True)))
 
 
+_ATTESTATION_KEY = secrets.token_bytes(32)   # (process-local: an attestation never leaves this process)
+
+
+def _attestation(item: "StackEvidence") -> str:
+    vouched = [item.digest, item.executable_sha256, item.detector, item.version, item.functions_scanned,
+               item.instructions_scanned, item.instructions_outside_functions, list(item.switches),
+               None if item.on_switches is None else list(item.on_switches),
+               [list(astuple(row)) for row in item.kernel_transfers], item.bound,
+               None if item.listing_digest is None else list(item.listing_digest), item.seal, item.applicable,
+               item.rsp_verified, None if item.stack_pointer is None else list(item.stack_pointer),
+               item.language_x86_64, None if item.fallback_switches is None else list(item.fallback_switches)]
+    data = json.dumps(vouched, sort_keys=True, default=str).encode()
+    return hmac.new(_ATTESTATION_KEY, data, hashlib.sha256).hexdigest()
+
+
+def _attest(item: "StackEvidence", *, seal: str, applicable, rsp_verified: bool) -> "StackEvidence":
+    """The admission's verified object (``verify_bundle_evidence`` only; tests)."""
+    bound = replace(item, seal=seal, applicable=applicable, rsp_verified=rsp_verified, attestation=None)
+    return replace(bound, attestation=_attestation(bound))
+
+
 @dataclass(frozen=True, slots=True)
 class Coverage:
     """(X-1 r4 4.4 / 4.5) what the consuming run decided for one image's s3-on
@@ -291,7 +322,7 @@ def authority(evidences, *, policy: str = "s3-off", images=(), seals=None, cover
         if not item._scanned():
             reasons.append(f"{item.program}: nothing scanned")
             continue
-        if policy == "s3-off" or (item.verified and item.applicable is False):
+        if policy == "s3-off":
             if item.switches:
                 reasons.append(f"stack switch evidence in {item.program}")
             continue
@@ -303,8 +334,12 @@ def authority(evidences, *, policy: str = "s3-off", images=(), seals=None, cover
                            "(not verified by its Bundle's admission)")
             continue
         expected = None if seals is None else seals.get(item.executable_sha256)
-        if expected is None or item.seal != expected:
+        if expected is None or item.seal != expected:   # (Astra X-1a r2 P1-1: before either verdict)
             reasons.append(f"{item.program}: stack evidence is not bound to the run's verified Bundle")
+            continue
+        if item.applicable is False:   # (affirmatively outside S3: its verified s3-off verdict)
+            if item.switches:
+                reasons.append(f"stack switch evidence in {item.program}")
             continue
         if item.applicable is None:
             reasons.append(f"{item.program}: S3 applicability of the image is undecidable")
@@ -372,28 +407,34 @@ def verifiable_row_line(row: dict, read_bytes) -> str:
             f"{','.join(references) if references else '-'}")
 
 
-def pe_header_facts(head: bytes) -> tuple[int, int, int] | None:
-    """(design_s3_r16 1.1) (optional-header magic, COFF machine, subsystem) of a
-    PE image from its first bytes; None when they are not decidable (a DOS
-    header whose PE header lies beyond ``head`` or is malformed)."""
-    if len(head) < 0x40:
+def pe_header_facts(data: bytes) -> tuple[int, int, int] | None:
+    """(design_s3_r16 1.1, Astra X-1a r2 P2-7) (optional-header magic, COFF
+    machine, subsystem) of a PE image, read from ``e_lfanew`` within the whole
+    sealed original and bounds-checked against ``SizeOfOptionalHeader``; None
+    when not decidable (the PE header or the subsystem field lies outside the
+    file or the declared optional header)."""
+    if len(data) < 0x40:
         return None
-    (offset,) = struct.unpack_from("<I", head, 0x3C)
-    if offset + 24 + 70 > len(head) or head[offset:offset + 4] != b"PE\0\0":
+    (offset,) = struct.unpack_from("<I", data, 0x3C)
+    if offset + 24 > len(data) or data[offset:offset + 4] != b"PE\0\0":
         return None
-    (machine,) = struct.unpack_from("<H", head, offset + 4)
-    (magic,) = struct.unpack_from("<H", head, offset + 24)
-    (subsystem,) = struct.unpack_from("<H", head, offset + 24 + 68)
+    machine, size_of_optional = struct.unpack_from("<H", data, offset + 4)[0], \
+        struct.unpack_from("<H", data, offset + 20)[0]
+    optional = offset + 24
+    if size_of_optional < 70 or optional + size_of_optional > len(data):
+        return None   # (the subsystem field, optional-header offset 68, is not inside the declared header)
+    (magic,) = struct.unpack_from("<H", data, optional)
+    (subsystem,) = struct.unpack_from("<H", data, optional + 68)
     return magic, machine, subsystem
 
 
-def s3_applicable(head: bytes) -> bool | None:
+def s3_applicable(data: bytes) -> bool | None:
     """(design_s3_r16 1.1) True for a PE32+ AMD64 image of subsystem 1 / 2 / 3,
     False for any other image (not PE at all, or another kind of PE), None when
-    a PE's headers are not decidable."""
-    if head[:2] != b"MZ":
+    a PE's headers are not decidable. ``data``: the whole sealed original."""
+    if data[:2] != b"MZ":
         return False
-    facts = pe_header_facts(head)
+    facts = pe_header_facts(data)
     if facts is None:
         return None
     magic, machine, subsystem = facts
@@ -421,13 +462,23 @@ def sealed_rsp(program: dict) -> tuple[int, int, int] | None:
     return space, offset, 8
 
 
-def verify_bundle_evidence(*, evidence_bytes: bytes, manifest_sha256: str, original_sha256: str, original_head: bytes,
-                           program: dict, observations, read_bytes) -> StackEvidence:
-    """(X-1 r4 4.2, Astra X-1a r1 P1-3 / P1-4) the admission check of a profiled
-    Bundle's sealed stack-switch evidence; the only path that binds it:
-    bound v2, the executable SHA-256 of the sealed original, the verifiable
-    listing digest recomputed from the sealed observations and block bytes
-    (``read_bytes(space, offset, length) -> bytes | None``), then the S3
+def observation_lines(raw: bytes, read_bytes) -> tuple[tuple[int, int], list[str]]:
+    """(Astra X-1a r2 P2-6) one sealed observation reduced to its entry and its
+    verifiable digest lines (the parsed object is dropped by the caller)."""
+    observation = json.loads(raw)
+    entry = observation["entry"]
+    rows = sorted(observation["instructions"],
+                  key=lambda row: (row["address"]["space_id"], row["address"]["byte_offset"]))
+    return (entry["space_id"], entry["byte_offset"]), [verifiable_row_line(row, read_bytes) for row in rows]
+
+
+def verify_bundle_evidence(*, evidence_bytes: bytes, manifest_sha256: str, original_sha256: str, original: bytes,
+                           program: dict, functions) -> StackEvidence:
+    """(X-1 r4 4.2, Astra X-1a r1 P1-3 / P1-4, r2 P1-1 / P1-4) the admission
+    check of a profiled Bundle's sealed stack-switch evidence -- the only issuer
+    of a verified (attested) object: bound v2, the executable SHA-256 of the
+    sealed original, the verifiable listing digest recomputed from
+    ``functions`` (``(entry, row lines)`` per observation), then the S3
     applicability of the original and the RSP identity. Raises
     ``EvidenceError`` when the evidence is not this Bundle's."""
     item = load_stack_evidence("stack-switch-evidence", data=evidence_bytes)
@@ -435,19 +486,15 @@ def verify_bundle_evidence(*, evidence_bytes: bytes, manifest_sha256: str, origi
         raise EvidenceError("the sealed stack-switch evidence is not bound version-2 evidence")
     if item.executable_sha256 != original_sha256:
         raise EvidenceError("the sealed stack-switch evidence is of another executable than the sealed original")
-    observations = sorted(observations, key=lambda raw: (raw["entry"]["space_id"], raw["entry"]["byte_offset"]))
     digest = hashlib.sha256()
-    for raw in observations:
-        entry = raw["entry"]
-        digest.update(f"F {entry['space_id']}:{entry['byte_offset']:x}\n".encode())
-        for row in sorted(raw["instructions"], key=lambda row: (row["address"]["space_id"],
-                                                                row["address"]["byte_offset"])):
-            digest.update((verifiable_row_line(row, read_bytes) + "\n").encode())
+    for (space, offset), lines in sorted(functions):
+        digest.update(f"F {space}:{offset:x}\n".encode())
+        for line in lines:
+            digest.update((line + "\n").encode())
     if digest.hexdigest() != item.listing_digest[0]:
         raise EvidenceError("the sealed stack-switch evidence's listing digest is not this Bundle's")
-    applicable = s3_applicable(original_head)
     rsp = sealed_rsp(program)
-    return replace(item, seal=manifest_sha256, verified=True, applicable=applicable,
+    return _attest(item, seal=manifest_sha256, applicable=s3_applicable(original),
                    rsp_verified=rsp is not None and item.stack_pointer == rsp)
 
 

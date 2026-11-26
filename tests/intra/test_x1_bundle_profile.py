@@ -182,3 +182,26 @@ def test_a_format_1_bundle_reads_as_before(generation, tmp_path):
             digests = [None if unit.observation is None else _observation_digest(unit.observation)
                        for unit in session.iter_scoped_functions()]
     assert digests == expected and all(item is not None for item in digests)
+
+
+def test_live_admission_refuses_placeholder_evidence(generation, tmp_path):
+    """Astra X-1a r2 P1-4: the live path verifies before returning a snapshot and receipt."""
+    from tdo_v2.integration.configured_bundle import ConfiguredBundleCapture
+
+    _declare(generation)
+    root = tmp_path / "liveroot"
+    root.mkdir(mode=0o750)
+    with ConfiguredBundleCapture(root) as capture:
+        target = capture.published_path
+        shutil.copytree(generation, target)
+        for path in [target, *target.iterdir()]:
+            path.chmod(0o750 if path.is_dir() else 0o640)
+        manifest = json.loads((target / "manifest.json").read_text())
+        manifest["generation_id"] = capture.generation_hex
+        data = json.dumps(manifest, separators=(",", ":")).encode()
+        (target / "manifest.json").write_bytes(data)
+        seal = json.loads((target / "seal.json").read_text())
+        seal.update(generation_id=capture.generation_hex, manifest_size=len(data), manifest_sha256=_sha(data))
+        (target / "seal.json").write_text(json.dumps(seal, separators=(",", ":")))
+        with pytest.raises(BundleAdmissionError, match="stack-switch evidence"):
+            capture.admit_published_with_receipt()

@@ -884,15 +884,19 @@ def refusal(model_file, entry, *, external_models, pcodeop_models, private_frame
 
     if entry.refusal is not None:
         return entry.refusal
-    if policy == "s3-on" and stack_authority is None:
-        return "an s3-on run needs the stack-switch authority of this template's library"   # (Fable r1 P2-1)
+    from .summary_store import stack_authority_problem
+
+    recorded = model_file.source_field("stack_authority")
+    if policy == "s3-off" and recorded is not None and recorded.get("policy") == "s3-on":
+        return "derived under s3-on, this run is s3-off"   # (Astra X-1a r2 P1-5: an incompatible policy)
+    if policy == "s3-on" and (stack_authority is None or stack_authority_problem(stack_authority) is not None):
+        return "an s3-on run needs the complete stack-switch authority of this template's library"
     if policy == "s3-on":
         # (X-1 r4 4.5 item 4) an s3-on run: the template carries what it was
         # derived under -- the library Bundle's verified seal, the evidence
         # digest, the policy and the coverage decision -- and it must be this
         # run's (None: an s3-off run, unchanged)
-        recorded = model_file.source_field("stack_authority")
-        if recorded is None:
+        if recorded is None or stack_authority_problem(recorded) is not None:
             return "derived without the s3-on stack-switch authority this run requires"
         if recorded != stack_authority:
             return "derived under another stack-switch authority (seal, evidence, policy or coverage)"

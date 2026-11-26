@@ -7558,3 +7558,47 @@ TBR 세션과 합의): Bundle에는 생산자의 원래 주장만, TBR 증거에
     s3-on 링커 조회 순서와 캐시 키, 템플릿 적용 인자, Astra r3 A3-4 시험, UE 템플릿, 목적지 모를 이동과 UD2의 소유자 결정.
   - 행 단위 Java 고정(번역 하나만 바뀐 행, 대상 하나만 바뀐 행, 벡터가 다른 `CD 2E`, 마지막 연산을 건너뛰는 분기)은 Ghidra
     프로그램 없이 만들 수 없어 실제 내보내기와 코드 읽기로 확인했다 -- [ASTRA-OPEN 후보]로 리뷰에 남긴다.
+- 코드 리뷰 r2(Fable APPROVE WITH FIXES 1 P2; Astra 완전 목록 5 P1 + 6 P2 "With these changes: APPROVE") -> r3:
+  - 증거의 증명(`attestation`): 수용만이 만드는 HMAC(프로세스 키)이 판정, 커널 행, 다이제스트, 봉인, 적용 가능성, RSP를
+    덮는다 -- 바뀐 사본은 검증되지 않는다; s3-on은 어느 판정보다 먼저 실행의 봉인을 확인한다(적용 불가 이미지의 s3-off
+    판정도 그 뒤).
+  - 수용 공통 경로에서 검증(`configured_bundle._verify_profile_evidence`, 동결 / 실시간 모두, 스냅숏이나 영수증을 돌려주기
+    전); 제공자는 그 결과(`inventory.verified_stack_evidence`)를 다시 쓴다. 블록 멤버는 수용마다 한 번 읽어 검증하고,
+    관찰은 하나씩 (입구, 다이제스트 줄)만 남긴다(Fable P2-1 / Astra P2-6).
+  - 템플릿 권한은 양방향: 완전한 기록(봉인, 증거 다이제스트, 정책, 수용 결정)만 받고(`summary_store.stack_authority_problem`,
+    로드 때도 검사), s3-on 템플릿은 s3-off 실행에서, 불완전하거나 다른 기록은 s3-on 실행에서 거부.
+  - PE 사실은 원본 전체에서 `e_lfanew`를 따라 읽고 `SizeOfOptionalHeader` 경계를 확인(헤더가 경계 밖이면 판정 불가).
+  - 덮어쓰기 참조의 개수를 지킨다(같은 대상 / 형 / 주 여부의 참조 둘은 하나가 아니다).
+  - 검사기(Java): 커널 행 번역을 정확한 모양으로 확인하는 순수 함수 `validateRow` -- `0F 05`는 `syscall` CALLOTHER 하나,
+    `CD xx` / `CC`는 `swi`(벡터) -> unique -> CALLIND(그 unique)(`CC`는 끝의 RETURN 0), `0F 0B`는
+    `invalidInstructionException` -> unique -> 그 unique의 BRANCHIND; 행 안 어디서든 SP 접근은 UNCHECKED(앞선 분기가 감추지
+    못한다); 검증된 UD2만 목적지 모를 이동에서 뺀다. 실제 모양은 ntdll에서 덤프해 확인했다(`.census6/x1_tools/DumpKernelLifts.java`).
+  - 검사점: 증명 줄에 분류기가 읽은 바이트(15바이트 또는 끊김까지, `cls=`)를 더했고, 검사가 첫 패스에서 읽은 행의 줄을
+    붙잡아 두 번째 검사점에 쓰며, 세 검사점 비교는 `requireSameListing` 하나다.
+  - trap 뒤의 모름 시드는 목록의 다음 명령(`getInstructionAfter`)을 그 영역의 목적지로 넣는다(끊김 / 영역 경계 너머).
+  - 좌표는 Bundle의 부호 없는 표현(공간 id `toUnsignedLong`, 주소 `getOffsetAsBigInteger`, 다이제스트 문자열과 순서도).
+  - 대체 판정은 목적지 모를 이동이 있을 때만 따로 계산하고, 없으면 보통 s3-on 판정과 같다.
+  - Java 시험 `test_x1_scanner_java.py`: Ghidra 12.0.4 jar에 대해 실제 소스를 컴파일 -- `validateRow`에 만든 p-code(옳은
+    모양들, 틀린 벡터, 벡터 46인 다른 연산, SP 접근을 마지막에 둔 앞선 분기, 다른 unique의 UD2 분기, 여분 연산, CD 03의
+    RETURN, 번역 벡터 불일치); 동적 프록시로 만든 명령 보기에서 나열된 대상 하나 / 내보낸 p-code 피연산자 하나 / 한 바이트
+    `0F` 행 다음의 둘째 바이트만 바꾸면 다이제스트가 달라지고 `requireSameListing`이 게시를 막는다.
+  - 실제 단독 검사(ntdll v5, null 필드 유지)가 읽히고 그 s3-off 스위치가 링커가 쓰는 판정기에서 철회한다.
+- 측정(4.8, `.census6/x1_measure.sh` + `x1_measure_report.py`: 게이트 이미지마다 새로 가져와 분석, v4(main)와 v5를 한
+  실행에서; ntdll은 준비된 프로젝트):
+
+  | 이미지 | v4 = s3-off | s3-on 원인 | 커널 행 | 대체 판정 |
+  |---|---|---|---|---|
+  | corpus clang-x64-O0 / -O2 / clang-x86-O2 (ELF) | 같음 (0) | 목적지 모를 이동 1 | - | 깨끗 |
+  | corpus gcc-x64-O3 | 같음 (2) | 값 2 | - | 값 2 |
+  | zlib | 같음 (39) | 값 40, 목적지 모를 이동 1 | - | 값 41 |
+  | v2-win-debug-full | 같음 (2) | 값 2 | - | 값 2 |
+  | v3-win-release-full | 같음 (2) | 값 2, 목적지 모를 이동 1 | - | 값 2 |
+  | v3-win32-release-full | 같음 (29) | 값 29 | - | 값 29 |
+  | ue-dll-debuggame | 같음 (0) | 목적지 모를 이동 1 | trap 95 | 값 1 |
+  | ue-dll-development | 같음 (0) | 목적지 모를 이동 2 | trap 99 | 값 3 |
+  | ntdll | 같음 (30) | 값 30, 목적지 모를 이동 28, uncovered 21 | covered 988, trap 326 | (측정 r2 스캐너) |
+
+  모든 이미지에서 s3-off = v4(목록과 검사 수까지). 모름 시드로 새로 생긴 값 스위치는 zlib 1뿐. UE DLL은 목적지 모를 이동을
+  어느 쪽으로 읽어도 s3-on에서 깨끗하지 않다 -- S3 전에 소유자가 정한다(`.census6/s3_prereqs_from_x1.md` 6). ELF 이미지는 S3
+  적용 대상이 아니다(s3-off로 읽는다).
+- r3 돌연변이 `cob/x1_mutants.py` 33/34(M2는 중복 방어; Java 시험 하네스를 포함해 WSL에서 실행).

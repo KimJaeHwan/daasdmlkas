@@ -101,6 +101,8 @@ public class GhidraV2StackSwitchScanner {
     private Map<Address, String> kernelCauses = Map.of();   // kernel row -> why UNCHECKED (absent: resolved)
     private Set<Address> crossTargets = Set.of();
     private boolean everyRowSeeded;
+    // (Astra X-1a r2 P1-3) the attested line of every row as the first scan pass read it
+    private Map<Address, String> scanLines = null;
     private Map<Node, String> causes = new HashMap<>();
 
     public GhidraV2StackSwitchScanner(Program program, TaskMonitor monitor, boolean conservative) {
@@ -148,7 +150,10 @@ public class GhidraV2StackSwitchScanner {
         }
         s3on = false;
         List<Map<String, Object>> off = new ArrayList<>();
+        scanLines = new HashMap<>();
         long[] counts = scanProgram(off);
+        Map<Address, String> captured = scanLines;
+        scanLines = null;
         s3on = true;
         // (Astra X-1a r1 P1-4) the byte classifier is x86-64's; another language
         // has no kernel-transfer rows here and its consumer reads s3-on as
@@ -165,10 +170,13 @@ public class GhidraV2StackSwitchScanner {
         // (r4 4.8, Astra r1 P2-4 / Fable r1 P2-3) the other reading of an
         // unbounded transfer: every instruction start a destination (measured,
         // the owner chooses before S3)
-        everyRowSeeded = true;
-        List<Map<String, Object>> fallback = new ArrayList<>();
-        scanProgram(fallback);
-        everyRowSeeded = false;
+        List<Map<String, Object>> fallback = new ArrayList<>(on);
+        if (!unbounded.isEmpty()) {   // (Astra X-1a r2 P2-11: otherwise the ordinary s3-on reading)
+            everyRowSeeded = true;
+            fallback = new ArrayList<>();
+            scanProgram(fallback);
+            everyRowSeeded = false;
+        }
         s3on = false;
 
         Map<String, Object> evidence = header(2, DETECTOR, expectedSha256);
@@ -176,8 +184,8 @@ public class GhidraV2StackSwitchScanner {
         evidence.put("instructions_scanned", counts[1]);
         evidence.put("instructions_outside_functions", counts[2]);
         Map<String, Object> stackPointer = new LinkedHashMap<>();
-        stackPointer.put("space_id", sp.getAddress().getAddressSpace().getSpaceID());
-        stackPointer.put("byte_offset", sp.getAddress().getOffset());
+        stackPointer.put("space_id", Integer.toUnsignedLong(sp.getAddress().getAddressSpace().getSpaceID()));
+        stackPointer.put("byte_offset", sp.getAddress().getOffsetAsBigInteger());
         stackPointer.put("size", sp.getMinimumByteSize());
         evidence.put("stack_pointer_coordinate", stackPointer);
         Map<String, Object> policies = new LinkedHashMap<>();
@@ -194,7 +202,7 @@ public class GhidraV2StackSwitchScanner {
         policies.put("s3-on", onPolicy);
         evidence.put("policies", policies);
         evidence.put("bound", exported != null);
-        evidence.put("listing_digest", listingDigest(program, exported, null, monitor));
+        evidence.put("listing_digest", listingDigest(program, exported, captured, monitor));
         return evidence;
     }
 
@@ -250,6 +258,9 @@ public class GhidraV2StackSwitchScanner {
         for (Instruction instruction : listing.getInstructions(body, true)) {
             pcode.put(instruction.getAddress(), instruction.getPcode());
             rows.put(instruction.getAddress(), instruction);
+            if (scanLines != null) {
+                scanLines.put(instruction.getAddress(), attestedLine(instruction));
+            }
         }
         Map<Node, Map<Loc, Integer>> in = new HashMap<>();
         Set<Node> unchecked = new LinkedHashSet<>();
@@ -275,18 +286,6 @@ public class GhidraV2StackSwitchScanner {
             for (Address start : pcode.keySet()) {
                 if (everyRowSeeded || crossTargets.contains(start)) {
                     seed(start, false, in, pending, pcode, rows);
-                }
-                // (Astra X-1a r1 P2-3) the row after a resolved trap gets its
-                // unknown seed even when another predecessor reached it
-                Kernel kernel = kernels.get(start);
-                if (kernel != null && "trap".equals(kernel.kind()) && !kernelCauses.containsKey(start)) {
-                    Address next = rows.get(start).getFallThrough();
-                    if (next == null) {
-                        next = start.add(rows.get(start).getLength());
-                    }
-                    if (pcode.containsKey(next)) {
-                        seed(next, false, in, pending, pcode, rows);
-                    }
                 }
             }
             propagate(in, pending, pcode, rows, unchecked);
@@ -575,8 +574,15 @@ public class GhidraV2StackSwitchScanner {
         }
     }
 
-    /** Why a kernel row is UNCHECKED under s3-on, or null when it is a covered candidate / a resolved trap. */
-    private String kernelCause(Kernel kernel, PcodeOp[] ops, Instruction row) {
+    /** (Astra X-1a r2 P1-2) why a kernel row is UNCHECKED under s3-on, or null when its whole lift is exactly
+     *  the shape of its bytes (pure: tested with constructed p-code). The shapes, as Ghidra 12.0.4's x86 lifts
+     *  them: {@code 0F 05} -- one CALLOTHER {@code syscall} with no operand and no output; {@code CD xx} /
+     *  {@code CC} -- CALLOTHER {@code swi}(constant vector of one byte) into a unique, then a CALLIND of that
+     *  unique ({@code CC} with a closing {@code RETURN 0}); {@code 0F 0B} -- CALLOTHER
+     *  {@code invalidInstructionException} into a unique, then a BRANCHIND of exactly that unique. No
+     *  operation of the row may read or write the stack pointer. */
+    static String validateRow(Kernel kernel, PcodeOp[] ops, int rowLength, Loc stack,
+            java.util.function.IntFunction<String> userOpName) {
         switch (kernel.kind()) {
             case "uncovered" -> {
                 return "kernel-uncovered";
@@ -587,45 +593,51 @@ public class GhidraV2StackSwitchScanner {
             default -> {
             }
         }
-        if (row.getLength() != kernel.formLength()) {
+        if (ops.length == 0) {
+            return "empty-lift";
+        }
+        if (rowLength != kernel.formLength()) {
             return "length-mismatch";
         }
-        PcodeOp callother = null;
         for (PcodeOp op : ops) {
-            if (op.getOpcode() == PcodeOp.CALLOTHER) {
-                callother = op;
-            }
             for (Varnode input : op.getInputs()) {
-                if ("covered".equals(kernel.kind()) && loc(input).overlaps(stack)) {
+                if (loc(input).overlaps(stack)) {
                     return "sp-in-kernel-row";
                 }
             }
-            Varnode out = op.getOutput();
-            if ("covered".equals(kernel.kind()) && out != null && loc(out).overlaps(stack)) {
+            if (op.getOutput() != null && loc(op.getOutput()).overlaps(stack)) {
                 return "sp-in-kernel-row";
             }
         }
-        if (callother == null) {
+        PcodeOp first = ops[0];
+        if (first.getOpcode() != PcodeOp.CALLOTHER || !first.getInput(0).isConstant()) {
             return "contradictory-lift";
         }
-        if ("covered".equals(kernel.kind())) {
-            // (Astra X-1a r1 P2-1) the lift agrees with the bytes: 0F 05 lifts to
-            // the syscall user op, CD 2E to a trap op carrying vector 0x2E
-            if (kernel.vector() == null) {
-                String name = program.getLanguage().getUserDefinedOpName((int) callother.getInput(0).getOffset());
-                if (name == null || !name.toLowerCase(Locale.ROOT).contains("syscall")) {
-                    return "contradictory-lift";
-                }
-            }
-            else if (!kernel.vector().equals(liftVector(callother))) {
-                return "contradictory-lift";
-            }
+        String name = userOpName.apply((int) first.getInput(0).getOffset());
+        if ("covered".equals(kernel.kind()) && kernel.vector() == null) {   // 0F 05
+            return ops.length == 1 && "syscall".equals(name) && first.getNumInputs() == 1 && first.getOutput() == null
+                ? null : "contradictory-lift";
         }
-        if ("trap".equals(kernel.kind()) && kernel.vector() != null && !"ud".equals(kernel.vector())) {
-            String lifted = liftVector(callother);
-            if (!kernel.vector().equals(lifted)) {
-                return "kernel-undecidable";   // (r4 4.3) the bytes' vector and the lift's disagree
-            }
+        if ("ud".equals(kernel.vector())) {   // 0F 0B
+            Varnode target = first.getOutput();
+            return ops.length == 2 && "invalidInstructionException".equals(name) && first.getNumInputs() == 1 &&
+                target != null && target.isUnique() && ops[1].getOpcode() == PcodeOp.BRANCHIND &&
+                ops[1].getNumInputs() == 1 && ops[1].getInput(0).equals(target) ? null : "contradictory-lift";
+        }
+        // CD xx / CC: swi(vector) then CALLIND of its output (CC: and RETURN 0)
+        Varnode target = first.getOutput();
+        boolean swi = "swi".equals(name) && first.getNumInputs() == 2 && first.getInput(1).isConstant() &&
+            first.getInput(1).getSize() == 1 && target != null && target.isUnique();
+        if (!swi || ops.length < 2 || ops[1].getOpcode() != PcodeOp.CALLIND || ops[1].getNumInputs() != 1 ||
+                !ops[1].getInput(0).equals(target)) {
+            return "contradictory-lift";
+        }
+        boolean closingReturn = ops.length == 3 && ops[2].getOpcode() == PcodeOp.RETURN && "cc".equals(kernel.bytes());
+        if (ops.length != 2 && !closingReturn) {
+            return "contradictory-lift";
+        }
+        if (!kernel.vector().equals(Long.toString(first.getInput(1).getOffset()))) {
+            return "trap".equals(kernel.kind()) ? "kernel-undecidable" : "contradictory-lift";
         }
         return null;
     }
@@ -638,7 +650,8 @@ public class GhidraV2StackSwitchScanner {
         for (Map.Entry<Address, Kernel> entry : kernels.entrySet()) {
             Instruction row = listing.getInstructionAt(entry.getKey());
             PcodeOp[] ops = row == null ? new PcodeOp[0] : row.getPcode();
-            String cause = ops.length == 0 ? "empty-lift" : kernelCause(entry.getValue(), ops, row);
+            String cause = validateRow(entry.getValue(), ops, row == null ? 0 : row.getLength(), stack,
+                index -> program.getLanguage().getUserDefinedOpName(index));
             if (cause != null) {
                 result.put(entry.getKey(), cause);
             }
@@ -742,13 +755,22 @@ public class GhidraV2StackSwitchScanner {
                     destinations.add(op.getInput(0).getAddress());
                 }
             }
-            // (Astra X-1a r1 P2-2) a validated trap row (UD2's lift ends in a
-            // targetless BRANCHIND) is the trap's own business: its site decision
-            // resolves it, not an unbounded-transfer verdict
+            // (Astra X-1a r2 P1-2) only a validated UD2 (its BRANCHIND consumes the
+            // fault op's result, validateRow) is the trap's own business: its site
+            // decision resolves it, not an unbounded-transfer verdict
             Kernel kernel = kernels.get(row.getAddress());
             boolean validatedTrap = kernel != null && "trap".equals(kernel.kind()) &&
                 !kernelCauses.containsKey(row.getAddress());
-            if (indirect && !validatedTrap) {
+            boolean validatedUd2 = validatedTrap && "ud".equals(kernel.vector());
+            if (validatedTrap) {
+                // (Astra X-1a r2 P2-8) the next LISTED instruction after a resolved
+                // trap merges the unknown state in its own region, wherever it is
+                Instruction after = listing.getInstructionAfter(row.getAddress());
+                if (after != null) {
+                    crossTargets.add(after.getAddress());
+                }
+            }
+            if (indirect && !validatedUd2) {
                 Address[] flows = row.getFlows();
                 if (flows.length == 0) {
                     report(unbounded, none, new Node(row.getAddress(), row.getPcode().length - 1), "UNCHECKED",
@@ -875,8 +897,8 @@ public class GhidraV2StackSwitchScanner {
             Instruction row = listing.getInstructionAt(entry.getKey());
             Kernel kernel = entry.getValue();
             Map<String, Object> item = new LinkedHashMap<>();
-            item.put("space_id", entry.getKey().getAddressSpace().getSpaceID());
-            item.put("byte_offset", entry.getKey().getOffset());
+            item.put("space_id", Integer.toUnsignedLong(entry.getKey().getAddressSpace().getSpaceID()));
+            item.put("byte_offset", entry.getKey().getOffsetAsBigInteger());   // (Astra X-1a r2 P2-9: unsigned)
             item.put("bytes", kernel.bytes());
             item.put("class", kernel.kind());
             item.put("vector", kernel.vector());
@@ -945,6 +967,7 @@ public class GhidraV2StackSwitchScanner {
         flows.sort(GhidraV2StackSwitchScanner::compare);
         StringBuilder line = new StringBuilder(rowLine(row, row.getAddress()));
         line.append(" owner=").append(owner == null ? "-" : coordinate(owner.getEntryPoint()));
+        line.append(" cls=").append(classifierBytes(program.getMemory(), row.getAddress()));   // (r2 P1-3)
         line.append(" ft=").append(fallthrough == null ? "-" : coordinate(fallthrough));
         line.append(" flows=");
         for (Address flow : flows) {
@@ -954,6 +977,29 @@ public class GhidraV2StackSwitchScanner {
             line.append(' ').append(op.toString());
         }
         return line.toString();
+    }
+
+    /** (Astra X-1a r2 P1-3) the bytes the classifier reads at an instruction start (up to a gap or 15) --
+     *  whatever decided its class -- as hex, "|" marking where readable bytes end before 15. */
+    static String classifierBytes(Memory memory, Address address) {
+        StringBuilder text = new StringBuilder();
+        for (int count = 0; count < MAX_INSTRUCTION_BYTES; count++) {
+            try {
+                text.append(String.format("%02x", memory.getByte(address.add(count)) & 0xFF));
+            }
+            catch (MemoryAccessException | ghidra.program.model.address.AddressOutOfBoundsException gap) {
+                return text.append('|').toString();
+            }
+        }
+        return text.toString();
+    }
+
+    /** (Astra X-1a r2 P1-3) the three checkpoints -- as collected, as scanned, as sealed -- name one listing. */
+    public static void requireSameListing(Map<String, Object> collected, Map<String, Object> scanned,
+            Map<String, Object> sealing) throws java.io.IOException {
+        if (!collected.equals(scanned) || !collected.equals(sealing)) {
+            throw new java.io.IOException("the listing changed between observation, stack scan and sealing");
+        }
     }
 
     /** One row of the canonical digest text (mirrored by tdo_v2.stack_evidence.verifiable_row_line):
@@ -991,13 +1037,15 @@ public class GhidraV2StackSwitchScanner {
             (row.isLengthOverridden() ? 1 : 0) + " " + (references.isEmpty() ? "-" : String.join(",", references));
     }
 
-    private static int compare(Address left, Address right) {
-        int space = Integer.compare(left.getAddressSpace().getSpaceID(), right.getAddressSpace().getSpaceID());
+    // (Astra X-1a r2 P2-9) the Bundle's unsigned coordinates: ordering and text as the exporter writes them
+    static int compare(Address left, Address right) {
+        int space = Integer.compareUnsigned(left.getAddressSpace().getSpaceID(), right.getAddressSpace().getSpaceID());
         return space != 0 ? space : Long.compareUnsigned(left.getOffset(), right.getOffset());
     }
 
-    private static String coordinate(Address address) {
-        return address.getAddressSpace().getSpaceID() + ":" + Long.toHexString(address.getOffset());
+    static String coordinate(Address address) {
+        return Integer.toUnsignedString(address.getAddressSpace().getSpaceID()) + ":" +
+            Long.toUnsignedString(address.getOffset(), 16);
     }
 
     private static void update(MessageDigest digest, String text) {

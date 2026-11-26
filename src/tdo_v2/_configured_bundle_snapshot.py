@@ -262,6 +262,10 @@ class _BundleInventory:
     # together; None in older Bundles
     producer_profile: str | None = None
     stack_switch_evidence_member: _BundleMember | None = None
+    # (X-1, Astra X-1a r2 P1-4) the evidence the admission verified (an
+    # attested ``stack_evidence.StackEvidence``); set before any snapshot or
+    # receipt is returned, reused by the provider
+    verified_stack_evidence: object | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.container_identity) is not _BundleContainerIdentity:

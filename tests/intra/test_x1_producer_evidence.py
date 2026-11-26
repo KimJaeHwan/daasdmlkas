@@ -124,6 +124,15 @@ def test_every_raw_field_changes_the_digest():
     assert len(set(digests.values())) == len(digests)
 
 
+def test_override_reference_multiplicity_is_kept():
+    """Astra X-1a r2 P2-10: two raw references with the same target, type and primary flag are not one."""
+    reference = {"address": _coordinate(CALLEE), "type": "CALL_OVERRIDE_UNCONDITIONAL", "primary": True}
+    one = _observation(_caller(Profiled(edit=_row(0, override=_override(override_references=[reference])))))
+    two = _observation(_caller(Profiled(edit=_row(0, override=_override(override_references=[reference, reference])))))
+    assert len(two.instructions[0].override.references) == 2
+    assert _digest(one) != _digest(two)
+
+
 def test_the_external_target_count_is_bound():
     def external(data):
         data["instructions"][0]["flow_targets"].append(_coordinate(0x10, EXTERNAL))

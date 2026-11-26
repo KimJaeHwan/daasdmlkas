@@ -736,9 +736,9 @@ public class GhidraV2BundleExport extends HeadlessScript {
                 .evidence(options.originalSha256, exportedRows);
             Map<String, Object> sealing = GhidraV2StackSwitchScanner.listingDigest(
                 currentProgram, exportedRows, null, monitor);
-            if (!collected.equals(scanEvidence.get("listing_digest")) || !collected.equals(sealing)) {
-                throw new IOException("the listing changed between observation, stack scan and sealing");
-            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> scanned = (Map<String, Object>) scanEvidence.get("listing_digest");
+            GhidraV2StackSwitchScanner.requireSameListing(collected, scanned, sealing);
             Map<String, Object> evidenceMember = writeJsonMember(
                 "stack-switch-evidence", stage.resolve("stack-switch-evidence.json"), scanEvidence);
             members.add(evidenceMember);

@@ -276,6 +276,21 @@ class ModelFile:
         return next((json.loads(value) for name, value in self.source if name == key), None)
 
 
+def stack_authority_problem(value) -> str | None:
+    """(X-1, Astra X-1a r2 P1-5) why a ``stack_authority`` record is not a
+    complete one -- the verified seal, the evidence digest, the effective policy
+    and the coverage identity -- or None."""
+    if type(value) is not dict or set(value) != {"policy", "seal", "evidence_digest", "coverage"}:
+        return "needs exactly policy, seal, evidence_digest and coverage"
+    if value["policy"] not in ("s3-off", "s3-on"):
+        return "unknown policy"
+    for key in ("seal", "evidence_digest", "coverage"):
+        text = value[key]
+        if type(text) is not str or len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
+            return f"{key} must be a SHA-256 hex digest"
+    return None
+
+
 SOURCE_KINDS = ("hand", "derived", "external")
 _LABEL_PREFIX = {"hand": "external-model", "derived": "derived-model", "external": "supplied-model"}
 
@@ -708,6 +723,8 @@ def _load_summary_file(raw, path) -> ModelFile:
     source = _source(raw, path, recorded=True)
     optional = {"producer", "declarations", "code_only_switches", "call_fallthrough",
                 "stack_authority"}   # (X-1: what an s3-on derivation rested on)
+    if "stack_authority" in source and stack_authority_problem(source["stack_authority"]) is not None:
+        raise ModelError(f"{path}: stack_authority: {stack_authority_problem(source['stack_authority'])}")
     if source["kind"] != "derived" or set(source) - optional != DERIVED_SOURCE_KEYS:
         raise ModelError(f"{path}: a summary file's source is derived with {sorted(DERIVED_SOURCE_KEYS)}")
     # (S1, docs 25.100 / 25.106) the derivation's observations' CALL fallthrough

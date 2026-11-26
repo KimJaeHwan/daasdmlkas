@@ -19,7 +19,7 @@ from dataclasses import replace
 import pytest
 
 from tdo_v2.stack_evidence import (
-    Coverage, DETECTORS, EvidenceError, V5_OFF_EXCEPTIONS, V5_ON_EXCEPTIONS, assumption_allowed, authority,
+    Coverage, DETECTORS, EvidenceError, V5_OFF_EXCEPTIONS, V5_ON_EXCEPTIONS, _attest, assumption_allowed, authority,
     load_stack_evidence, pe_header_facts, s3_applicable, sealed_rsp,
 )
 
@@ -63,8 +63,8 @@ def _load(tmp_path, **kwargs):
 
 
 def _verified(item, *, seal=SEAL, applicable=True, rsp=True):
-    """What a successful admission (``verify_bundle_evidence``) makes of it."""
-    return replace(item, seal=seal, verified=True, applicable=applicable, rsp_verified=rsp)
+    """What a successful admission (``verify_bundle_evidence``) issues: an attested object."""
+    return _attest(item, seal=seal, applicable=applicable, rsp_verified=rsp)
 
 
 FULL = Coverage(frozenset({COVERED}), frozenset({TRAP}), SEAL)
@@ -160,11 +160,26 @@ def test_s3_on_withdraws_without_full_authority(tmp_path, case):
 
 
 def test_an_inapplicable_image_is_read_by_its_s3_off_verdict(tmp_path):
-    """r4 4.3: an image affirmatively outside S3 (not PE32+ / AMD64 / subsystem 1-3) uses s3-off."""
+    """r4 4.3: an image affirmatively outside S3 (not PE32+ / AMD64 / subsystem 1-3) uses its verified s3-off
+    verdict -- only after the run's seal (Astra X-1a r2 P1-1): two exports of one inapplicable image, the clean
+    one of seal A does not stand for a run requiring seal B."""
     clean = _verified(_load(tmp_path, on=[_row("3000", "kernel-uncovered")]), applicable=False)
     assert _on([clean])[0]
-    dirty = _verified(_load(tmp_path, off=[_row("3000")], name="dirty"), applicable=False)
-    assert not _on([dirty])[0]
+    dirty = _verified(_load(tmp_path, off=[_row("3000")], name="dirty"), applicable=False, seal="6" * 64)
+    assert not _on([dirty], seals={CORE: "6" * 64})[0]
+    assert not _on([clean], seals={CORE: "6" * 64})[0]   # (A's clean verdict, B required)
+    assert not _on([clean], seals={})[0]                 # (no seal for the image)
+
+
+def test_a_changed_copy_of_a_verified_object_is_not_verified(tmp_path):
+    """Astra X-1a r2 P1-1: verified only as issued -- clearing the s3-on switches (or any vouched field) of a
+    copy drops it."""
+    dirty = _verified(_load(tmp_path, kernels=KERNELS, on=[_row("3000", "value")]))
+    assert dirty.verified and not _on([dirty])[0]
+    forged = replace(dirty, on_switches=())
+    assert not forged.verified
+    assert any("not verified" in reason for reason in _on([forged])[1])
+    assert not replace(dirty, applicable=False).verified and not replace(dirty, seal="6" * 64).verified
 
 
 def test_empty_s3_on_input_fails_closed():
@@ -181,15 +196,16 @@ def test_every_image_needs_evidence_under_either_policy(tmp_path):
     assert not authority([], images=(CORE,))[0]
 
 
-def _pe(magic=0x20B, machine=0x8664, subsystem=3, *, offset=0x80, size=0x200) -> bytes:
-    data = bytearray(size)
+def _pe(magic=0x20B, machine=0x8664, subsystem=3, *, offset=0x80, size=0x200, optional=240) -> bytes:
+    data = bytearray(max(size, offset + 24 + max(optional, 70)))
     data[:2] = b"MZ"
     struct.pack_into("<I", data, 0x3C, offset)
     data[offset:offset + 4] = b"PE\0\0"
     struct.pack_into("<H", data, offset + 4, machine)
+    struct.pack_into("<H", data, offset + 20, optional)
     struct.pack_into("<H", data, offset + 24, magic)
     struct.pack_into("<H", data, offset + 24 + 68, subsystem)
-    return bytes(data)
+    return bytes(data[:size]) if size < len(data) else bytes(data)
 
 
 def test_the_s3_applicability_predicate():
@@ -201,7 +217,10 @@ def test_the_s3_applicability_predicate():
     assert s3_applicable(_pe(magic=0x10B)) is False        # (PE32)
     assert s3_applicable(_pe(machine=0x14C)) is False      # (i386)
     assert s3_applicable(b"\x7fELF" + bytes(60)) is False  # (not a PE at all)
-    assert s3_applicable(_pe(offset=0x1F0, size=0x300)[:0x200]) is None   # (the headers lie beyond the bytes read)
+    assert s3_applicable(_pe(offset=5000, size=6000)) is True   # (Astra X-1a r2 P2-7: read where e_lfanew says)
+    assert s3_applicable(_pe(optional=0)) is None          # (no optional header declared: undecidable)
+    assert s3_applicable(_pe(optional=60)) is None         # (the subsystem field outside the declared header)
+    assert s3_applicable(_pe(offset=0x1F0, size=0x200)) is None   # (the header past the end of the file)
     assert s3_applicable(b"MZ" + bytes(10)) is None        # (truncated)
 
 
@@ -251,6 +270,12 @@ def test_an_s3_on_template_needs_its_recorded_authority():
     from tdo_v2.summary_templates import refusal
 
     current = {"policy": "s3-on", "seal": SEAL, "evidence_digest": "e" * 64, "coverage": "c" * 64}
+    from tdo_v2.summary_store import stack_authority_problem
+
+    assert stack_authority_problem(current) is None
+    for key in current:   # (Astra X-1a r2 P1-5: every field required)
+        assert stack_authority_problem({k: v for k, v in current.items() if k != key}) is not None
+    assert stack_authority_problem({}) is not None
 
     def template(recorded):
         return SimpleNamespace(source_field=lambda key: recorded if key == "stack_authority" else None)
@@ -263,6 +288,27 @@ def test_an_s3_on_template_needs_its_recorded_authority():
                                                        stack_authority=current, **on)
     assert "another stack-switch authority" in refusal(template({**current, "coverage": "d" * 64}), entry,
                                                        stack_authority=current, **on)
-    assert "needs the stack-switch authority" in refusal(template(current), entry, **on)   # (forgotten argument)
+    assert "needs the complete stack-switch authority" in refusal(template(current), entry, **on)   # (forgotten)
+    assert "needs the complete stack-switch authority" in refusal(template({}), entry, stack_authority={}, **on)
+    assert "derived under s3-on" in refusal(template(current), entry, **common)   # (an ON template under OFF)
     refused = SimpleNamespace(refusal="engine version")
     assert refusal(template(None), refused, stack_authority=current, **on) == "engine version"
+
+
+def test_an_actual_standalone_scan_loads_and_withdraws():
+    """Astra X-1a r1 P1-2 / r2 P2-11: real standalone wrapper output (ntdll, the v5 wrapper with null fields kept:
+    its syscall rows carry ``vector: null``) loads, and its s3-off switches withdraw the assumption through the
+    reader the linker uses."""
+    import os
+    from pathlib import Path
+
+    path = Path(os.environ.get("TDO_X1_STANDALONE_SCAN", "/root/x1_scan_ntdll2/x1.json"))
+    if not path.is_file():
+        pytest.skip("set TDO_X1_STANDALONE_SCAN to a standalone v5 scan")
+    item = load_stack_evidence(path)
+    assert item.version == 2 and not item.bound and not item.verified
+    assert any(row.kind == "covered" and row.vector is None for row in item.kernel_transfers)   # (syscall rows)
+    assert item.switches   # (ntdll's s3-off switches)
+    assert not authority([item])[0]   # (linking.py: `if not authority([load_stack_evidence(evidence)])[0]`)
+    assert not assumption_allowed([item], requested=True)[0]
+    assert not authority([item], policy="s3-on", images=(item.executable_sha256,))[0]   # (unbound)

@@ -497,8 +497,8 @@ class InstructionOverrideEvidence:
         require_bool(self.length_overridden, "length_overridden")
         if type(self.references) is not tuple or any(type(item) is not OverrideReference for item in self.references):
             raise TypeError("override references must be an exact tuple")
-        if tuple(sorted(set(self.references))) != self.references:
-            raise ValueError("override references must be sorted and unique")
+        if tuple(sorted(self.references)) != self.references:   # (Astra X-1a r2 P2-10: multiplicity kept)
+            raise ValueError("override references must be sorted")
 
     @property
     def none(self) -> bool:

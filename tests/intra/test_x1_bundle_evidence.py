@@ -28,7 +28,7 @@ from tdo_v2.stack_evidence import Coverage, authority, bundle_stack_evidence
 
 SOURCE = Path(os.environ.get(
     "TDO_X1_EXPORTED_BUNDLE",   # (exported 2026-11-27 from the clang-x64-O0 corpus binary, --entry 433 1057856)
-    "/root/x1_export_test/23e34289fd77697e5cfa577495d850bbbd0adee9ddeadde77efe91fa01583af3"))
+    "/root/x1_export_test/bbf32f69d8f8d2a3d11d4053b9875512a4425d6b203ffa99be0e182a89ecf637"))
 
 
 @pytest.fixture
@@ -147,8 +147,7 @@ def test_evidence_of_another_executable_is_refused_at_admission(generation):
 
 
 def test_another_seal_is_not_this_bundles(generation):
-    item = bundle_stack_evidence(generation)
-    item = item.__class__(**{**{name: getattr(item, name) for name in item.__slots__}, "applicable": True})
+    item = bundle_stack_evidence(generation)   # (inapplicable, verified: the seal is checked first -- r2 P1-1)
     allowed, reasons = authority([item], policy="s3-on", images=(item.executable_sha256,),
                                  seals={item.executable_sha256: "0" * 64})
     assert not allowed and any("not bound to the run's verified Bundle" in reason for reason in reasons)
@@ -162,3 +161,54 @@ def test_a_function_that_stops_declaring_the_profile_is_refused_alone(generation
     _reseal(generation, manifest)
     observations = _observations(generation)
     assert observations[0] is None
+
+
+@pytest.mark.parametrize("change", ("a loaded byte", "an override fact", "the executable"))
+def test_frozen_admission_itself_refuses_bad_evidence(generation, change):
+    """Astra X-1a r2 P1-4: ``admit_frozen_bundle`` verifies before returning a snapshot -- no provider opened."""
+    manifest = _manifest(generation)
+    if change == "a loaded byte":
+        observation = json.loads(_path(generation, manifest, manifest["functions"][0]["observation_member"]).read_text())
+        row = observation["instructions"][0]["address"]
+        block = next(item for item in manifest["blocks"] if item.get("member_id")
+                     and item["space_id"] == row["space_id"]
+                     and item["byte_start"] <= row["byte_offset"] < item["byte_start"] + item["byte_size"])
+        data = bytearray(_path(generation, manifest, block["member_id"]).read_bytes())
+        data[row["byte_offset"] - block["byte_start"]] ^= 0xFF
+        _replace_member(generation, manifest, block["member_id"], bytes(data))
+    elif change == "an override fact":
+        _replace_observation(generation, manifest, 0,
+                             lambda raw: raw["instructions"][0]["override"].update(fallthrough_overridden=True))
+    else:
+        member = manifest["stack_switch_evidence_member"]
+        evidence = json.loads(_path(generation, manifest, member).read_text())
+        evidence["executable_sha256"] = "0" * 64
+        _replace_member(generation, manifest, member, json.dumps(evidence).encode())
+    _reseal(generation, manifest)
+    with pytest.raises(BundleAdmissionError, match="stack-switch evidence"):
+        admit_frozen_bundle(generation)
+
+
+def test_admission_reads_each_block_once(generation, monkeypatch):
+    """Astra X-1a r2 P2-6: admission verifies each needed block member once (bytes read proportional to the
+    blocks, not to the rows), and the observations one at a time."""
+    from tdo_v2.integration import configured_bundle
+
+    reads = []
+    original = configured_bundle._read_verified_member
+
+    def counting(generation_fd, records_by_id, member):
+        reads.append(member.member_id)
+        return original(generation_fd, records_by_id, member)
+
+    monkeypatch.setattr(configured_bundle, "_read_verified_member", counting)
+    provider = read_configured_bundle(admit_frozen_bundle(generation))
+    try:
+        assert provider.stack_switch_evidence().verified
+    finally:
+        provider.close()
+    manifest = _manifest(generation)
+    rows = sum(len(json.loads(_path(generation, manifest, row["observation_member"]).read_text())["instructions"])
+               for row in manifest["functions"])
+    blocks = [member for member in reads if member.startswith("memory-")]
+    assert rows > 1 and len(blocks) == len(set(blocks)) <= len([row for row in manifest["blocks"] if row.get("member_id")])
