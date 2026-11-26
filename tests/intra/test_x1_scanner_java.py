@@ -176,6 +176,14 @@ public class ScannerJavaTest {
         var int3 = kernel("trap", "3", 1, "cc");
         expect("int3 (CC, closing RETURN)", null, int3, 1, op(PcodeOp.CALLOTHER, u(0x100), c(0x10, 4), c(3, 1)),
             op(PcodeOp.CALLIND, null, u(0x100)), op(PcodeOp.RETURN, null, c(0, 1)));
+        expect("int3 (CC) without its closing RETURN", "contradictory-lift", int3, 1,
+            op(PcodeOp.CALLOTHER, u(0x100), c(0x10, 4), c(3, 1)), op(PcodeOp.CALLIND, null, u(0x100)));
+        expect("int3 (CC) closing with RETURN 1", "contradictory-lift", int3, 1,
+            op(PcodeOp.CALLOTHER, u(0x100), c(0x10, 4), c(3, 1)), op(PcodeOp.CALLIND, null, u(0x100)),
+            op(PcodeOp.RETURN, null, c(1, 1)));
+        expect("int3 (CC) closing with RETURN of a temporary", "contradictory-lift", int3, 1,
+            op(PcodeOp.CALLOTHER, u(0x100), c(0x10, 4), c(3, 1)), op(PcodeOp.CALLIND, null, u(0x100)),
+            op(PcodeOp.RETURN, null, u(0x100)));
         var cd03 = kernel("trap", "3", 2, "cd03");
         expect("CD 03 with a RETURN", "contradictory-lift", cd03, 2,
             op(PcodeOp.CALLOTHER, u(0x100), c(0x10, 4), c(3, 1)), op(PcodeOp.CALLIND, null, u(0x100)),
@@ -207,6 +215,15 @@ public class ScannerJavaTest {
         refused("an exported p-code operand", base, view(bytes, 1, flows,
             new PcodeOp[] {op(PcodeOp.COPY, r(0, 8), c(2, 8))}));
         refused("byte two after a one-byte 0F row", base, view(new byte[] {0x0F, 0x34, (byte) 0x90}, 1, flows, pcode));
+        // (Astra X-1a r3 #3) the exporter's line is built from the lift it serializes, not a second read
+        Instruction row = base.getListing().getInstructionAt(RAM.getAddress(0x1000));
+        PcodeOp[] serialized = {op(PcodeOp.COPY, r(0, 8), c(2, 8))};
+        String fromSerialized = GhidraV2StackSwitchScanner.attestedLine(row, serialized);
+        if (fromSerialized.equals(GhidraV2StackSwitchScanner.attestedLine(row))
+                || !fromSerialized.equals(GhidraV2StackSwitchScanner.attestedLine(
+                    view(bytes, 1, flows, serialized).getListing().getInstructionAt(RAM.getAddress(0x1000))))) {
+            throw new AssertionError("the attested line must follow the passed lift");
+        }
         System.out.println("ok");
     }
 }

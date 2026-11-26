@@ -288,9 +288,11 @@ def test_an_s3_on_template_needs_its_recorded_authority():
                                                        stack_authority=current, **on)
     assert "another stack-switch authority" in refusal(template({**current, "coverage": "d" * 64}), entry,
                                                        stack_authority=current, **on)
-    assert "needs the complete stack-switch authority" in refusal(template(current), entry, **on)   # (forgotten)
-    assert "needs the complete stack-switch authority" in refusal(template({}), entry, stack_authority={}, **on)
+    assert "needs the complete s3-on stack-switch authority" in refusal(template(current), entry, **on)   # (forgotten)
+    assert "needs the complete s3-on stack-switch authority" in refusal(template({}), entry, stack_authority={}, **on)
     assert "derived under s3-on" in refusal(template(current), entry, **common)   # (an ON template under OFF)
+    off = {**current, "policy": "s3-off"}   # (Astra X-1a r3 #5: matching s3-off records do not serve an s3-on run)
+    assert refusal(template(off), entry, stack_authority=off, **on) is not None
     refused = SimpleNamespace(refusal="engine version")
     assert refusal(template(None), refused, stack_authority=current, **on) == "engine version"
 

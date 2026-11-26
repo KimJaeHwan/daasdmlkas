@@ -1535,11 +1535,13 @@ public class GhidraV2BundleExport extends HeadlessScript {
             rows.add(instruction);
             exportedRows.computeIfAbsent(function.getEntryPoint(), ignored -> new ArrayList<>())
                 .add(instruction.getAddress());
-            collectedLines.put(instruction.getAddress(), GhidraV2StackSwitchScanner.attestedLine(instruction));
+            // (Astra X-1a r3 #3) one read of the lift: serialized and attested alike
+            PcodeOp[] lift = instruction.getPcode();
+            collectedLines.put(instruction.getAddress(), GhidraV2StackSwitchScanner.attestedLine(instruction, lift));
             Map<String, Object> row = instruction(
                 instruction,
                 observed.exceptionalTargets.getOrDefault(
-                    instruction.getAddress(), Set.of()));
+                    instruction.getAddress(), Set.of()), lift);
             row.put("override", overrideEvidence(instruction));
             row.put("recorded_landing_pads", sortedCoordinates(
                 observed.recordedPads.getOrDefault(instruction.getAddress(), Set.of())));
@@ -2127,7 +2129,7 @@ public class GhidraV2BundleExport extends HeadlessScript {
     }
 
     private Map<String, Object> instruction(
-            Instruction instruction, Set<Address> exceptionalTargets) {
+            Instruction instruction, Set<Address> exceptionalTargets, PcodeOp[] pcode) {
         FlowType flowType = instruction.getFlowType();
         Address fallthrough = instruction.getFallThrough();
         Set<Address> targets = new LinkedHashSet<>(Arrays.asList(instruction.getFlows()));
@@ -2177,7 +2179,6 @@ public class GhidraV2BundleExport extends HeadlessScript {
             dataReferences.add(row);
         }
         List<Map<String, Object>> operations = new ArrayList<>();
-        PcodeOp[] pcode = instruction.getPcode();
         for (int ordinal = 0; ordinal < pcode.length; ordinal++) {
             operations.add(operation(pcode[ordinal], ordinal));
         }

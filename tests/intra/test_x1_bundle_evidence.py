@@ -190,25 +190,33 @@ def test_frozen_admission_itself_refuses_bad_evidence(generation, change):
 
 
 def test_admission_reads_each_block_once(generation, monkeypatch):
-    """Astra X-1a r2 P2-6: admission verifies each needed block member once (bytes read proportional to the
-    blocks, not to the rows), and the observations one at a time."""
+    """Astra X-1a r2 P2-6 / r3 #6: frozen admission reads only the row slices of the blocks (bytes read bounded
+    by the blocks), never hashes a member a second time, and reads only the original's headers."""
     from tdo_v2.integration import configured_bundle
 
-    reads = []
-    original = configured_bundle._read_verified_member
+    sliced, hashed = [], []
+    read_slice, hash_member = configured_bundle._read_slice, configured_bundle._hash_member
 
-    def counting(generation_fd, records_by_id, member):
-        reads.append(member.member_id)
-        return original(generation_fd, records_by_id, member)
+    def counting_slice(generation_fd, record, offset, length):
+        data = read_slice(generation_fd, record, offset, length)
+        sliced.append((record.handle.member_id, len(data)))
+        return data
 
-    monkeypatch.setattr(configured_bundle, "_read_verified_member", counting)
+    def counting_hash(generation_fd, record, member):
+        hashed.append(member.member_id)
+        return hash_member(generation_fd, record, member)
+
+    monkeypatch.setattr(configured_bundle, "_read_slice", counting_slice)
+    monkeypatch.setattr(configured_bundle, "_hash_member", counting_hash)
     provider = read_configured_bundle(admit_frozen_bundle(generation))
     try:
         assert provider.stack_switch_evidence().verified
     finally:
         provider.close()
     manifest = _manifest(generation)
-    rows = sum(len(json.loads(_path(generation, manifest, row["observation_member"]).read_text())["instructions"])
-               for row in manifest["functions"])
-    blocks = [member for member in reads if member.startswith("memory-")]
-    assert rows > 1 and len(blocks) == len(set(blocks)) <= len([row for row in manifest["blocks"] if row.get("member_id")])
+    sizes = {row["member_id"]: row["byte_size"] for row in manifest["blocks"] if row.get("member_id")}
+    block_bytes = sum(size for member, size in sliced if member in sizes)
+    assert hashed == []   # (the frozen path checked every member already)
+    assert 0 < block_bytes <= sum(sizes.values())
+    original = next(row["size"] for row in manifest["members"] if row["id"] == "original")
+    assert sum(size for member, size in sliced if member == "original") < original

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
+import struct
 import os
 from pathlib import Path
 import re
@@ -176,7 +177,7 @@ class ConfiguredBundleCapture:
             inventory, records = _load_inventory(
                 generation_fd, self._generation, expected_version
             )
-            inventory = _verify_profile_evidence(generation_fd, inventory, records)
+            inventory = _verify_profile_evidence(generation_fd, inventory, records, hashed=False)
             receipt = (
                 LiveBundleContainerReceipt(
                     inventory.container_identity, _mint=_RECEIPT_MINT
@@ -306,7 +307,7 @@ def _admit_frozen_bundle(generation_path, max_total_bytes, expected_receipt):
         if total_bytes > max_total_bytes:
             raise BundleAdmissionError("frozen bundle exceeds its byte bound")
         _verify_frozen_members(generation_fd, inventory, records)
-        inventory = _verify_profile_evidence(generation_fd, inventory, records)
+        inventory = _verify_profile_evidence(generation_fd, inventory, records, hashed=True)
         if expected_receipt is not None:
             _verify_control_identity(generation_fd, expected_receipt.container_identity)
         source = _FrozenFileSource(-1, -1, generation_fd, records, os.getpid())
@@ -363,13 +364,43 @@ def _read_verified_member(generation_fd, records_by_id, member) -> bytes:
     return data
 
 
-def _verify_profile_evidence(generation_fd, inventory, records):
-    """(X-1, Astra X-1a r1 P1-3 / r2 P1-4 / P2-6) a profiled Bundle's sealed
-    stack-switch evidence is verified in the common admission path, before any
-    snapshot or receipt is returned (``stack_evidence.verify_bundle_evidence``):
-    each block member is read and checked once, the observations one at a time
-    (only their entry and digest lines are kept). A failure refuses the Bundle.
-    The inventory returned carries the attested evidence."""
+def _hash_member(generation_fd, record, member) -> None:
+    """A member's digest checked by streaming it (nothing retained)."""
+    fd = _open_regular_member(generation_fd, record)
+    try:
+        digest, offset = hashlib.sha256(), 0
+        while offset < record.byte_size:
+            chunk = os.pread(fd, min(IO_CHUNK_BYTES, record.byte_size - offset), offset)
+            if not chunk:
+                raise BundleAdmissionError("bundle member ended early")
+            digest.update(chunk)
+            offset += len(chunk)
+    finally:
+        os.close(fd)
+    if digest.digest() != member.sha256_digest:
+        raise BundleAdmissionError("bundle member digest mismatch")
+
+
+def _read_slice(generation_fd, record, offset: int, length: int) -> bytes:
+    """``length`` bytes of a member at ``offset`` (short at its end)."""
+    fd = _open_regular_member(generation_fd, record)
+    try:
+        length = max(0, min(length, record.byte_size - offset))
+        return os.pread(fd, length, offset) if length else b""
+    finally:
+        os.close(fd)
+
+
+def _verify_profile_evidence(generation_fd, inventory, records, *, hashed: bool):
+    """(X-1, Astra X-1a r1 P1-3 / r2 P1-4 / r3 #6, Fable r3 P2-1) a profiled
+    Bundle's sealed stack-switch evidence is verified in the common admission
+    path, before any snapshot or receipt is returned
+    (``stack_evidence.verify_bundle_evidence``). Bounded: each touched block
+    member is hashed once (not at all again when ``hashed`` -- the frozen path
+    checked every member already) and only the row slices are read; only the
+    original's headers are read; each observation becomes one blob of digest
+    lines. A failure refuses the Bundle. The inventory returned carries the
+    attested evidence."""
     if inventory.producer_profile is None:
         return inventory
     import dataclasses
@@ -378,18 +409,23 @@ def _verify_profile_evidence(generation_fd, inventory, records):
 
     records_by_id = {record.handle.member_id: record for record in records}
     blocks = [row for row in inventory.blocks if row.member is not None]
-    loaded: dict = {}
+    checked: set = set()
+
+    def member_record(member):
+        record = records_by_id[member.member_id]
+        if not hashed and member.member_id not in checked:
+            _hash_member(generation_fd, record, member)
+            checked.add(member.member_id)
+        return record
 
     def read_bytes(space, offset, length):
         for row in blocks:
             if row.space_id == space and row.byte_start <= offset and offset + length <= row.byte_start + row.byte_size:
-                if row.member.member_id not in loaded:
-                    loaded[row.member.member_id] = _read_verified_member(generation_fd, records_by_id, row.member)
-                data = loaded[row.member.member_id]
-                start = offset - row.byte_start
-                return data[start:start + length]
+                data = _read_slice(generation_fd, member_record(row.member), offset - row.byte_start, length)
+                return data if len(data) == length else None
         return None
 
+    original = member_record(inventory.original)
     try:
         functions = [observation_lines(_read_verified_member(generation_fd, records_by_id, row.observation_member),
                                        read_bytes) for row in inventory.functions]
@@ -398,10 +434,10 @@ def _verify_profile_evidence(generation_fd, inventory, records):
                                                  inventory.stack_switch_evidence_member),
             manifest_sha256=inventory.container_identity.manifest_sha256_digest.hex(),
             original_sha256=inventory.original.sha256_digest.hex(),
-            original=_read_verified_member(generation_fd, records_by_id, inventory.original),
+            original=lambda offset, length: _read_slice(generation_fd, original, offset, length),
             program=json.loads(_read_verified_member(generation_fd, records_by_id, inventory.program)),
             functions=functions)
-    except (EvidenceError, ValueError, KeyError, TypeError) as error:
+    except (EvidenceError, ValueError, KeyError, TypeError, struct.error) as error:
         raise BundleAdmissionError(f"sealed stack-switch evidence: {error}") from error
     return dataclasses.replace(inventory, verified_stack_evidence=item)
 

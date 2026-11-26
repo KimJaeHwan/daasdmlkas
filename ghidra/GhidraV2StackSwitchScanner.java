@@ -86,6 +86,10 @@ public class GhidraV2StackSwitchScanner {
     /** (r3 4.3) a kernel-transfer row by its bytes. */
     record Kernel(String kind, String vector, int formLength, String bytes) {}
 
+    /** (Astra X-1a r3 #3) a row's facts read once: its lift, listed flows, effective fallthrough, the bytes the
+     *  classifier reads (count: readable before a gap or 15) and its attested line built from exactly these. */
+    record Captured(PcodeOp[] pcode, Address[] flows, Address fallthrough, byte[] bytes, int count, String line) {}
+
     private final Program program;
     private final TaskMonitor monitor;
     private final boolean conservative;
@@ -101,8 +105,9 @@ public class GhidraV2StackSwitchScanner {
     private Map<Address, String> kernelCauses = Map.of();   // kernel row -> why UNCHECKED (absent: resolved)
     private Set<Address> crossTargets = Set.of();
     private boolean everyRowSeeded;
-    // (Astra X-1a r2 P1-3) the attested line of every row as the first scan pass read it
-    private Map<Address, String> scanLines = null;
+    // (Astra X-1a r3 #3) every row's facts, read once before the first pass; every pass, the classifier, the
+    // kernel validation, the cross-region destinations and the scan's checkpoint use them (null: v1 path)
+    private Map<Address, Captured> captures = null;
     private Map<Node, String> causes = new HashMap<>();
 
     public GhidraV2StackSwitchScanner(Program program, TaskMonitor monitor, boolean conservative) {
@@ -150,10 +155,10 @@ public class GhidraV2StackSwitchScanner {
         }
         s3on = false;
         List<Map<String, Object>> off = new ArrayList<>();
-        scanLines = new HashMap<>();
+        captures = captureRows();
         long[] counts = scanProgram(off);
-        Map<Address, String> captured = scanLines;
-        scanLines = null;
+        Map<Address, String> captured = new HashMap<>();
+        captures.forEach((address, row) -> captured.put(address, row.line()));
         s3on = true;
         // (Astra X-1a r1 P1-4) the byte classifier is x86-64's; another language
         // has no kernel-transfer rows here and its consumer reads s3-on as
@@ -178,6 +183,7 @@ public class GhidraV2StackSwitchScanner {
             everyRowSeeded = false;
         }
         s3on = false;
+        captures = null;
 
         Map<String, Object> evidence = header(2, DETECTOR, expectedSha256);
         evidence.put("functions_scanned", counts[0]);
@@ -256,11 +262,9 @@ public class GhidraV2StackSwitchScanner {
         Map<Address, PcodeOp[]> pcode = new LinkedHashMap<>();
         Map<Address, Instruction> rows = new HashMap<>();
         for (Instruction instruction : listing.getInstructions(body, true)) {
-            pcode.put(instruction.getAddress(), instruction.getPcode());
+            Captured row = captures == null ? null : captures.get(instruction.getAddress());
+            pcode.put(instruction.getAddress(), row != null ? row.pcode() : instruction.getPcode());
             rows.put(instruction.getAddress(), instruction);
-            if (scanLines != null) {
-                scanLines.put(instruction.getAddress(), attestedLine(instruction));
-            }
         }
         Map<Node, Map<Loc, Integer>> in = new HashMap<>();
         Set<Node> unchecked = new LinkedHashSet<>();
@@ -632,8 +636,13 @@ public class GhidraV2StackSwitchScanner {
                 !ops[1].getInput(0).equals(target)) {
             return "contradictory-lift";
         }
-        boolean closingReturn = ops.length == 3 && ops[2].getOpcode() == PcodeOp.RETURN && "cc".equals(kernel.bytes());
-        if (ops.length != 2 && !closingReturn) {
+        if ("cc".equals(kernel.bytes())) {   // (Astra X-1a r3 #2: CC closes with exactly RETURN 0)
+            if (ops.length != 3 || ops[2].getOpcode() != PcodeOp.RETURN || ops[2].getNumInputs() != 1 ||
+                    !ops[2].getInput(0).isConstant() || ops[2].getInput(0).getOffset() != 0) {
+                return "contradictory-lift";
+            }
+        }
+        else if (ops.length != 2) {
             return "contradictory-lift";
         }
         if (!kernel.vector().equals(Long.toString(first.getInput(1).getOffset()))) {
@@ -649,7 +658,8 @@ public class GhidraV2StackSwitchScanner {
         Listing listing = program.getListing();
         for (Map.Entry<Address, Kernel> entry : kernels.entrySet()) {
             Instruction row = listing.getInstructionAt(entry.getKey());
-            PcodeOp[] ops = row == null ? new PcodeOp[0] : row.getPcode();
+            Captured captured = captures == null ? null : captures.get(entry.getKey());
+            PcodeOp[] ops = captured != null ? captured.pcode() : row == null ? new PcodeOp[0] : row.getPcode();
             String cause = validateRow(entry.getValue(), ops, row == null ? 0 : row.getLength(), stack,
                 index -> program.getLanguage().getUserDefinedOpName(index));
             if (cause != null) {
@@ -681,7 +691,7 @@ public class GhidraV2StackSwitchScanner {
                     result.add(new Node(node.instruction(), (int) ordinal));
                 }
                 else if (ordinal == ops.length) {
-                    addInstruction(result, instruction.getFallThrough(), pcode, rows);
+                    addInstruction(result, fallthroughOf(instruction), pcode, rows);
                 }
                 else {
                     unchecked.add(node);
@@ -698,7 +708,7 @@ public class GhidraV2StackSwitchScanner {
             if (node.ordinal() != ops.length - 1) {
                 unchecked.add(node);
             }
-            for (Address flow : instruction.getFlows()) {
+            for (Address flow : flowsOf(instruction)) {
                 addInstruction(result, flow, pcode, rows);
             }
             return result;
@@ -713,7 +723,7 @@ public class GhidraV2StackSwitchScanner {
             result.add(new Node(node.instruction(), node.ordinal() + 1));
         }
         else {
-            addInstruction(result, instruction.getFallThrough(), pcode, rows);
+            addInstruction(result, fallthroughOf(instruction), pcode, rows);
         }
         return result;
     }
@@ -726,7 +736,7 @@ public class GhidraV2StackSwitchScanner {
                 result.add(new Node(address, 0));
                 return;
             }
-            address = rows.get(address).getFallThrough();
+            address = fallthroughOf(rows.get(address));
         }
     }
 
@@ -746,7 +756,7 @@ public class GhidraV2StackSwitchScanner {
             Function owner = functions.getFunctionContaining(row.getAddress());
             List<Address> destinations = new ArrayList<>();
             boolean indirect = false;
-            for (PcodeOp op : row.getPcode()) {
+            for (PcodeOp op : pcodeOf(row)) {
                 int opcode = op.getOpcode();
                 if (opcode == PcodeOp.BRANCHIND) {
                     indirect = true;
@@ -771,7 +781,7 @@ public class GhidraV2StackSwitchScanner {
                 }
             }
             if (indirect && !validatedUd2) {
-                Address[] flows = row.getFlows();
+                Address[] flows = flowsOf(row);
                 if (flows.length == 0) {
                     report(unbounded, none, new Node(row.getAddress(), row.getPcode().length - 1), "UNCHECKED",
                         owner == null ? "(outside functions)" : owner.getName(true), Map.of(row.getAddress(), row),
@@ -779,11 +789,11 @@ public class GhidraV2StackSwitchScanner {
                 }
                 destinations.addAll(Arrays.asList(flows));
             }
-            if (row.getFallThrough() != null) {
-                destinations.add(row.getFallThrough());
+            if (fallthroughOf(row) != null) {
+                destinations.add(fallthroughOf(row));
             }
             for (Address destination : destinations) {
-                if (listing.getInstructionAt(destination) == null) {
+                if (captures != null ? !captures.containsKey(destination) : listing.getInstructionAt(destination) == null) {
                     continue;   // no row there (an import, data): bounded, nothing to seed
                 }
                 Function target = functions.getFunctionContaining(destination);
@@ -805,7 +815,9 @@ public class GhidraV2StackSwitchScanner {
         while (all.hasNext()) {
             monitor.checkCancelled();
             Instruction row = all.next();
-            Kernel kernel = classify(memory, row.getAddress());
+            Captured captured = captures == null ? null : captures.get(row.getAddress());
+            Kernel kernel = captured != null ? classifyBytes(captured.bytes(), captured.count())
+                : classify(memory, row.getAddress());
             if (kernel != null) {
                 result.put(row.getAddress(), kernel);
             }
@@ -815,16 +827,7 @@ public class GhidraV2StackSwitchScanner {
 
     static Kernel classify(Memory memory, Address address) {
         byte[] buffer = new byte[MAX_INSTRUCTION_BYTES];
-        int count = 0;
-        for (; count < MAX_INSTRUCTION_BYTES; count++) {
-            try {
-                buffer[count] = memory.getByte(address.add(count));
-            }
-            catch (MemoryAccessException | ghidra.program.model.address.AddressOutOfBoundsException gap) {
-                break;
-            }
-        }
-        return classifyBytes(buffer, count);
+        return classifyBytes(buffer, readBytes(memory, address, buffer));
     }
 
     /** (r3 4.3 / r4 4.3, Astra X-1a r1 P1-6) the kernel-transfer class of the bytes at an instruction start:
@@ -958,25 +961,86 @@ public class GhidraV2StackSwitchScanner {
     }
 
     /** (Astra X-1a r1 P1-7) one row of the attested digest: the verifiable fields and every other scan input --
-     *  the owning function's entry, the effective fallthrough, the listed flows (sorted) and the p-code. */
+     *  the owning function's entry, the classifier's bytes, the effective fallthrough, the listed flows (sorted)
+     *  and the p-code. */
     public static String attestedLine(Instruction row) {
+        return attestedLine(row, row.getPcode());
+    }
+
+    /** (Astra X-1a r3 #3) the attested line from the lift the caller actually uses (the exporter passes the
+     *  array it serializes). */
+    public static String attestedLine(Instruction row, PcodeOp[] pcode) {
+        byte[] bytes = new byte[MAX_INSTRUCTION_BYTES];
+        int count = readBytes(row.getProgram().getMemory(), row.getAddress(), bytes);
+        return attestedLine(row, pcode, row.getFlows(), row.getFallThrough(), bytes, count);
+    }
+
+    static String attestedLine(Instruction row, PcodeOp[] pcode, Address[] rowFlows, Address fallthrough,
+            byte[] bytes, int count) {
         Program program = row.getProgram();
         Function owner = program.getFunctionManager().getFunctionContaining(row.getAddress());
-        Address fallthrough = row.getFallThrough();
-        List<Address> flows = new ArrayList<>(Arrays.asList(row.getFlows()));
+        List<Address> flows = new ArrayList<>(Arrays.asList(rowFlows));
         flows.sort(GhidraV2StackSwitchScanner::compare);
         StringBuilder line = new StringBuilder(rowLine(row, row.getAddress()));
         line.append(" owner=").append(owner == null ? "-" : coordinate(owner.getEntryPoint()));
-        line.append(" cls=").append(classifierBytes(program.getMemory(), row.getAddress()));   // (r2 P1-3)
+        line.append(" cls=").append(hex(bytes, count)).append(count < MAX_INSTRUCTION_BYTES ? "|" : "");
         line.append(" ft=").append(fallthrough == null ? "-" : coordinate(fallthrough));
         line.append(" flows=");
         for (Address flow : flows) {
             line.append(coordinate(flow)).append(',');
         }
-        for (PcodeOp op : row.getPcode()) {
+        for (PcodeOp op : pcode) {
             line.append(' ').append(op.toString());
         }
         return line.toString();
+    }
+
+    /** (Astra X-1a r3 #3) every listed row's facts, read once. */
+    private Map<Address, Captured> captureRows() throws Exception {
+        Map<Address, Captured> result = new HashMap<>();
+        Memory memory = program.getMemory();
+        InstructionIterator all = program.getListing().getInstructions(true);
+        while (all.hasNext()) {
+            monitor.checkCancelled();
+            Instruction row = all.next();
+            PcodeOp[] pcode = row.getPcode();
+            Address[] flows = row.getFlows();
+            Address fallthrough = row.getFallThrough();
+            byte[] bytes = new byte[MAX_INSTRUCTION_BYTES];
+            int count = readBytes(memory, row.getAddress(), bytes);
+            result.put(row.getAddress(), new Captured(pcode, flows, fallthrough, bytes, count,
+                attestedLine(row, pcode, flows, fallthrough, bytes, count)));
+        }
+        return result;
+    }
+
+    private PcodeOp[] pcodeOf(Instruction row) {
+        Captured captured = captures == null ? null : captures.get(row.getAddress());
+        return captured != null ? captured.pcode() : row.getPcode();
+    }
+
+    private Address[] flowsOf(Instruction row) {
+        Captured captured = captures == null ? null : captures.get(row.getAddress());
+        return captured != null ? captured.flows() : row.getFlows();
+    }
+
+    private Address fallthroughOf(Instruction row) {
+        Captured captured = captures == null ? null : captures.get(row.getAddress());
+        return captured != null ? captured.fallthrough() : row.getFallThrough();
+    }
+
+    /** The readable bytes at an instruction start (up to a gap or the 15-byte limit): their count. */
+    static int readBytes(Memory memory, Address address, byte[] buffer) {
+        int count = 0;
+        for (; count < MAX_INSTRUCTION_BYTES; count++) {
+            try {
+                buffer[count] = memory.getByte(address.add(count));
+            }
+            catch (MemoryAccessException | ghidra.program.model.address.AddressOutOfBoundsException gap) {
+                break;
+            }
+        }
+        return count;
     }
 
     /** (Astra X-1a r2 P1-3) the bytes the classifier reads at an instruction start (up to a gap or 15) --

@@ -407,32 +407,45 @@ def verifiable_row_line(row: dict, read_bytes) -> str:
             f"{','.join(references) if references else '-'}")
 
 
-def pe_header_facts(data: bytes) -> tuple[int, int, int] | None:
-    """(design_s3_r16 1.1, Astra X-1a r2 P2-7) (optional-header magic, COFF
-    machine, subsystem) of a PE image, read from ``e_lfanew`` within the whole
+def _reader(data):
+    """A ``read(offset, length) -> bytes`` over bytes, or the reader itself."""
+    if callable(data):
+        return data
+    return lambda offset, length: bytes(data[offset:offset + length])
+
+
+def pe_header_facts(data) -> tuple[int, int, int] | None:
+    """(design_s3_r16 1.1, Astra X-1a r2 P2-7 / r3 #6) (optional-header magic,
+    COFF machine, subsystem) of a PE image, read from ``e_lfanew`` within the
     sealed original and bounds-checked against ``SizeOfOptionalHeader``; None
-    when not decidable (the PE header or the subsystem field lies outside the
-    file or the declared optional header)."""
-    if len(data) < 0x40:
+    when not decidable. ``data``: the original's bytes, or a reader
+    ``read(offset, length)`` returning the bytes there (short at the end) --
+    only the headers are read."""
+    read = _reader(data)
+    dos = read(0, 0x40)
+    if len(dos) < 0x40:
         return None
-    (offset,) = struct.unpack_from("<I", data, 0x3C)
-    if offset + 24 > len(data) or data[offset:offset + 4] != b"PE\0\0":
+    (offset,) = struct.unpack_from("<I", dos, 0x3C)
+    head = read(offset, 24)
+    if len(head) < 24 or head[:4] != b"PE\0\0":
         return None
-    machine, size_of_optional = struct.unpack_from("<H", data, offset + 4)[0], \
-        struct.unpack_from("<H", data, offset + 20)[0]
-    optional = offset + 24
-    if size_of_optional < 70 or optional + size_of_optional > len(data):
+    (machine,) = struct.unpack_from("<H", head, 4)
+    (size_of_optional,) = struct.unpack_from("<H", head, 20)
+    if size_of_optional < 70:
         return None   # (the subsystem field, optional-header offset 68, is not inside the declared header)
-    (magic,) = struct.unpack_from("<H", data, optional)
-    (subsystem,) = struct.unpack_from("<H", data, optional + 68)
+    optional = read(offset + 24, size_of_optional)
+    if len(optional) < size_of_optional:
+        return None
+    (magic,) = struct.unpack_from("<H", optional, 0)
+    (subsystem,) = struct.unpack_from("<H", optional, 68)
     return magic, machine, subsystem
 
 
-def s3_applicable(data: bytes) -> bool | None:
+def s3_applicable(data) -> bool | None:
     """(design_s3_r16 1.1) True for a PE32+ AMD64 image of subsystem 1 / 2 / 3,
     False for any other image (not PE at all, or another kind of PE), None when
-    a PE's headers are not decidable. ``data``: the whole sealed original."""
-    if data[:2] != b"MZ":
+    a PE's headers are not decidable. ``data``: bytes or a reader."""
+    if _reader(data)(0, 2) != b"MZ":
         return False
     facts = pe_header_facts(data)
     if facts is None:
@@ -462,17 +475,19 @@ def sealed_rsp(program: dict) -> tuple[int, int, int] | None:
     return space, offset, 8
 
 
-def observation_lines(raw: bytes, read_bytes) -> tuple[tuple[int, int], list[str]]:
-    """(Astra X-1a r2 P2-6) one sealed observation reduced to its entry and its
-    verifiable digest lines (the parsed object is dropped by the caller)."""
+def observation_lines(raw: bytes, read_bytes) -> tuple[tuple[int, int], bytes]:
+    """(Astra X-1a r2 P2-6, Fable r3 P2-1) one sealed observation reduced to its
+    entry and ONE encoded blob of its verifiable digest lines (the parsed object
+    is dropped at return)."""
     observation = json.loads(raw)
     entry = observation["entry"]
     rows = sorted(observation["instructions"],
                   key=lambda row: (row["address"]["space_id"], row["address"]["byte_offset"]))
-    return (entry["space_id"], entry["byte_offset"]), [verifiable_row_line(row, read_bytes) for row in rows]
+    blob = "".join(verifiable_row_line(row, read_bytes) + "\n" for row in rows).encode()
+    return (entry["space_id"], entry["byte_offset"]), blob
 
 
-def verify_bundle_evidence(*, evidence_bytes: bytes, manifest_sha256: str, original_sha256: str, original: bytes,
+def verify_bundle_evidence(*, evidence_bytes: bytes, manifest_sha256: str, original_sha256: str, original,
                            program: dict, functions) -> StackEvidence:
     """(X-1 r4 4.2, Astra X-1a r1 P1-3 / P1-4, r2 P1-1 / P1-4) the admission
     check of a profiled Bundle's sealed stack-switch evidence -- the only issuer
@@ -487,10 +502,9 @@ def verify_bundle_evidence(*, evidence_bytes: bytes, manifest_sha256: str, origi
     if item.executable_sha256 != original_sha256:
         raise EvidenceError("the sealed stack-switch evidence is of another executable than the sealed original")
     digest = hashlib.sha256()
-    for (space, offset), lines in sorted(functions):
+    for (space, offset), blob in sorted(functions):
         digest.update(f"F {space}:{offset:x}\n".encode())
-        for line in lines:
-            digest.update((line + "\n").encode())
+        digest.update(blob)
     if digest.hexdigest() != item.listing_digest[0]:
         raise EvidenceError("the sealed stack-switch evidence's listing digest is not this Bundle's")
     rsp = sealed_rsp(program)
