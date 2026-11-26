@@ -199,6 +199,17 @@ Bundle (admission refuses unlisted entries) and is passed by explicit path.
 - `evidence.py` also holds a reference reader (`parse`, `accept`, `Evidence.read`, `decide`, `coverage`):
   the six-step read, level A / B decisions and premise attachment exactly as the design states. The engine's
   reader is TDO work; this one is its executable specification.
+- `--isa-facts` writes `g1-decode-evidence-2`: -1 plus the per-row ISA facts F1-F7 (design
+  `.census6/design_tbr_isa_facts_r3.md`, 2b `.census6/design_tbr_isa_ordinary_r3.md`); reader `Evidence.isa`.
+- `--producer-override` writes `g1-decode-evidence-3`: -2 plus one producer-override verdict code per compared row
+  of X-1 producer-profile Bundles (design `.census6/design_tbr_g1_x1_r1.md` + r2 / r3, closed;
+  `producer_override.py`). Codes: A effect_attested, S / I effect_attested with the syscall / interrupt a3
+  exemption (OS-contract model), C contradicted, U unobserved, O override_present; details for C / U / O and for
+  never-compared rows with a reported override. effect_attested attests effects only (the exported row equals the
+  bytes on every compared attribute and the target set T), never the completeness of the producer's report;
+  whether it discharges `producer-override-report` is TDO's choice. Legacy Bundles: every function
+  `not_reported`. Reader `Evidence.override`. Until X-1 lands on main, run X-1 Bundles with `PYTHONPATH` set to
+  the X-1 tree (no admission copy); the header's `engine_source` records the imported `tdo_v2` digest.
 
 ## Open items
 

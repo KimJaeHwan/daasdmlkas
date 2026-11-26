@@ -68,6 +68,10 @@ READS = {
 G3B7B_READS = ("a1", "a2", "a3", "a4", "a5", "a8")
 L2_EXTRA = ("a1", "a2", "a3", "a4", "a5", "a6", "a8", "F.is_call")
 G3B7B_MISSING = "producer inputs not exported: getParsedLength, prototype flow (r3 s6)"
+# (design_tbr_g1_x1 r2 s6) with the X-1 verdicts getParsedLength and the prototype flow are covered per row; the
+# exporter's entry-reference refusal reads ordinary flow references G1 cannot see
+G3B7B_X1_MISSING = "producer input not exported: ordinary flow references to the entry (entry-reference refusal)"
+OVERRIDE = "override"
 UNDETERMINED = {"rp": "needs the PC the unwinder restores at each fault point (not in a Bundle)",
                 "pass_through": "needs the PC the unwinder restores at each fault point (not in a Bundle)"}
 EXAMPLES = 5
@@ -105,26 +109,29 @@ def _where(address) -> str:
 
 
 def _judge(reads, baseline_present, extra=None):
-    """reads: [(address, attribute, state)] -> (run state, verdict, detail). ``extra``: a
-    (address, reason, state) the reads cannot show (a BRANCHIND row, a missing producer input)."""
+    """reads: [(address, attribute, state)] -> (run state, verdict, detail). ``extra``: one or a list of
+    (address, reason, state) the reads cannot show (a BRANCHIND row, a missing producer input, a reported producer
+    override). Precedence (design_tbr_g1_x1 r2 s6): refused, disagreement, override, unobserved."""
     blocking = [(address, name, state) for address, name, state in reads if state not in OK]
     if extra is not None:
-        blocking.append(extra)
+        blocking.extend(extra if isinstance(extra, list) else [extra])
     refused = [item for item in blocking if item[2] == "refused"]
     disagreement = [item for item in blocking if item[2] in ("withheld", "unrecognized")]
+    overridden = [item for item in blocking if item[2] == OVERRIDE]
     if not blocking:
         return "evaluated", "applied", {"would_block": False, "baseline": baseline_present}
-    cause = "refused" if refused else "disagreement" if disagreement else "unobserved"
+    cause = "refused" if refused else "disagreement" if disagreement else OVERRIDE if overridden else "unobserved"
     if baseline_present is None:
         loss = "unknown"
     else:
         loss = 1 if baseline_present else 0
     detail = {"would_block": True, "cause": cause, "baseline": baseline_present, "loss": loss,
               "blocking": [[_where(address), name, state] for address, name, state in
-                           (refused or disagreement or blocking)[:EXAMPLES]], "blocking_count": len(blocking)}
+                           (refused or disagreement or overridden or blocking)[:EXAMPLES]],
+              "blocking_count": len(blocking)}
     if refused:   # (the report contract keeps verdict "refused" for the engine: a lint row withholds)
         return "evaluated", "withheld", detail
-    if disagreement:
+    if disagreement or overridden:
         return "evaluated", "withheld", detail
     return "unobserved", None, detail
 
@@ -159,8 +166,13 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
     out.append(("s1_l2_estimate", fid, *_judge(s1_reads + reads_of(addresses, L2_EXTRA)
                                                + reads_of(candidates, ("a7",)), bool(function["s1"]))))
     branchind = baseline.get("branchind", ())
-    extra = (branchind[0]["address"], "BRANCHIND (the exporter refuses the function)", "refused") if branchind else \
-        (addresses[0] if addresses else 0, G3B7B_MISSING, "unobserved")
+    override = function.get("override")
+    if branchind:
+        extra = (branchind[0]["address"], "BRANCHIND (the exporter refuses the function)", "refused")
+    elif override is not None and override["status"] == "checked":
+        extra = _override_extras(function, override, addresses)
+    else:
+        extra = (addresses[0] if addresses else 0, G3B7B_MISSING, "unobserved")
     g3b7b = _judge(reads_of(addresses, G3B7B_READS), None, extra)
     g3b7b[2]["branchind_rows"] = len(branchind)
     out.append(("g3b7b_none_estimate", fid, *g3b7b))
@@ -190,14 +202,43 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
     return out
 
 
+def _override_extras(function: dict, override: dict, addresses: list) -> list:
+    """g3b7b inputs from the X-1 verdicts (design_tbr_g1_x1 r1 s6, r2 s6): a reported override blocks, labelled
+    "exporter refusal" where the exporter refuses (length override: every row; fallthrough override: rows with an
+    ISA fallthrough -- here rows whose last p-code op is not an unconditional BRANCH / BRANCHIND / RETURN; flow
+    override: call rows) and "conservative" otherwise; a4 rebuilt from an S1 exit is unobserved; the entry-reference
+    input stays unobserved."""
+    by_where = {(row.get("space"), row["address"]): row for row in function["rows"]}
+    out = []
+    for where, detail in sorted(override["details"].items()):
+        code = override["codes"].get(where, "O" if detail.get("star") else None)
+        if code != "O":
+            continue
+        row = by_where.get(where, {})
+        ops = [op["opcode"] for op in row.get("ops", ())]
+        isa_fallthrough = not ops or ops[-1] not in ("BRANCH", "BRANCHIND", "RETURN")
+        call_row = row.get("has_call_op") or row.get("flow", {}).get("is_call")
+        kinds = detail["kinds"]
+        refuses = "length" in kinds or ("fallthrough" in kinds and isa_fallthrough) \
+            or (any(kind.startswith("flow:") for kind in kinds) and call_row)
+        label = "exporter refusal" if refuses else "conservative"
+        out.append((where, f"producer override {', '.join(kinds)} ({label})", OVERRIDE))
+    for where, row in sorted(by_where.items()):
+        if row.get("fallthrough") is None and row.get("exit"):
+            out.append((where, "a4 rebuilt from an S1 exit (getFallThrough not exported)", "unobserved"))
+    out.append((addresses[0] if addresses else 0, G3B7B_X1_MISSING, "unobserved"))
+    return out
+
+
 def summary(rows: list[tuple]) -> dict:
     """Per consumer: units, baseline present, confirmed, would_block (by cause), loss."""
     out = {}
     for consumer, _, run_state, verdict, detail in rows:
         item = out.setdefault(consumer, {"units": 0, "baseline_present": 0, "confirmed": 0,
                                          "would_block_disagreement": 0, "would_block_unobserved": 0,
-                                         "would_block_refused": 0, "loss_disagreement": 0, "loss_unobserved": 0,
-                                         "loss_refused": 0, "loss_unknown": 0})
+                                         "would_block_refused": 0, "would_block_override": 0,
+                                         "loss_disagreement": 0, "loss_unobserved": 0, "loss_refused": 0,
+                                         "loss_override": 0, "loss_unknown": 0})
         item["units"] += 1
         if detail.get("baseline"):
             item["baseline_present"] += 1

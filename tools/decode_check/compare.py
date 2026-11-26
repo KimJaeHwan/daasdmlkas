@@ -150,8 +150,10 @@ def ghidra_values(facts: dict, lift, s1: bool, native_call: bool,
         reasons[name] = reason
     # (cmov / rep: pinned to the no-transfer form by a real-Bundle data check -- every cmov / rep row of the UE
     #  core probe and the ELF test Bundles exports exactly the plain rows' bits, lift table -5)
-    if lift.pattern in ("branch-self", "interrupt", "fault", "transactional", "userop",
-                        "unidentified"):
+    # (syscall / interrupt bits are pinned only in the producer-override layer, under the OS-contract premise:
+    #  design_tbr_g1_x1 r2 s3; G1's own comparison keeps them unobserved)
+    if lift.pattern in ("branch-self", "interrupt", "interrupt-return", "syscall", "fault", "transactional",
+                        "userop", "unidentified"):
         for bit in F_BITS:
             reasons.setdefault("F." + bit, f"listing bits of the {lift.pattern} form are not pinned")
     else:

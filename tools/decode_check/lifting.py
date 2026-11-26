@@ -24,11 +24,13 @@ _CLASSES_SHA256 = hashlib.sha256(_CLASSES_PATH.read_bytes()).hexdigest()
 _NO_FLOW = {int(index): name for index, name in json.loads(_CLASSES_PATH.read_bytes())["no_flow"].items()}
 
 TABLE = {
-    "id": "x86-64-lift-table-7",
+    "id": "x86-64-lift-table-8",
     "language": ("x86:LE:64:default", 4, 6),
     "ghidra": "12.0.4",
     "sla_sha256_prefix": "d5adc314",
-    "userops": {16: "swi", 77: "invalidInstructionException", 84: "xabort", 85: "xbegin", 86: "xend", 99: "xtest"},
+    # (table -8: 5 syscall, design_tbr_g1_x1 r3 s3; index read from the userop test Bundle: 0F 05 -> CALLOTHER 5)
+    "userops": {5: "syscall", 16: "swi", 77: "invalidInstructionException", 84: "xabort", 85: "xbegin", 86: "xend",
+                99: "xtest"},
     # userops with no flow effect: tools/decode_check/userops_x64_classes.json (table -7), derived from Ghidra's
     # SLEIGH sources + a test binary of every userop-using constructor + the voters' votes and iced privilege
     # facts; privileged / OS-gated, flow and unexercised userops are never pinned
@@ -55,6 +57,14 @@ def row_facts(instruction, exit_row=None, register_space=None) -> dict:
                 "size": item.byte_size}
 
     flow = instruction.flow
+    # (X-1 producer profile, design_tbr_g1_x1 r1-r3: raw row fields; None on older trees / Bundles)
+    report = getattr(instruction, "override", None)
+    pads = getattr(instruction, "recorded_landing_pads", None)
+    profile = None if report is None else {
+        "flow_override": report.flow_override, "fallthrough_overridden": report.fallthrough_overridden,
+        "length_overridden": report.length_overridden,
+        "references": [{"type": item.type_name, "primary": item.primary, "in_index": item.in_index}
+                       for item in report.references]}
     return {
         "address": instruction.address.byte_offset,
         "space": instruction.address.space_id,
@@ -62,6 +72,11 @@ def row_facts(instruction, exit_row=None, register_space=None) -> dict:
         "fallthrough": None if instruction.fallthrough is None else instruction.fallthrough.byte_offset,
         "fallthrough_space": None if instruction.fallthrough is None else instruction.fallthrough.space_id,
         "flow_targets": sorted(target.byte_offset for target in instruction.flow_targets),
+        "flow_target_coords": sorted((target.space_id, target.byte_offset) for target in instruction.flow_targets),
+        "override": profile,
+        "recorded_landing_pads": None if pads is None else sorted((pad.space_id, pad.byte_offset) for pad in pads),
+        "external_flow_targets": getattr(instruction, "external_flow_targets", None),
+        "has_call_op": any(op.opcode in ("CALL", "CALLIND") for op in instruction.operations),
         "flow": {name: getattr(flow, name) for name in ("is_flow", "has_fallthrough", "is_call", "is_jump",
                                                          "is_terminal", "is_computed", "is_conditional",
                                                          "is_unconditional", "is_override")},
@@ -238,9 +253,19 @@ def identify(facts: dict, table: dict = TABLE) -> Lift:
         rest = opcodes[1:]
         if name == "swi" and rest in (["CALLIND"], ["CALLIND", "RETURN"]) and len(ops[0]["inputs"]) == 2:
             vector = ops[0]["inputs"][1]["offset"]
-            # (whether the OS returns after an interrupt is not observable: A3 unobserved, r3 s3)
-            return Lift("interrupt", {"a10": ("int", vector), "a6": "none", "a8": "none", "a9": "none", "a5": None},
+            # (whether the OS returns after an interrupt is not observable: A3 unobserved, r3 s3). Table -8: the
+            # exact S3 shape t:UNIQUE(8) = CALLOTHER swi(c, v); CALLIND t (no output, no RETURN) is "interrupt";
+            # the RETURN form (int3 / int1 lift that way) is "interrupt-return" (design_tbr_g1_x1 r3 s3)
+            out = ops[0]["output"]
+            exact = rest == ["CALLIND"] and out is not None and out["kind"] == "UNIQUE" and out["size"] == 8 \
+                and ops[1]["inputs"] == [out] and ops[1]["output"] is None
+            return Lift("interrupt" if exact else "interrupt-return",
+                        {"a10": ("int", vector), "a6": "none", "a8": "none", "a9": "none", "a5": None},
                         {"a3": "OS return after an interrupt is not observable"})
+        if name == "syscall" and not rest and ops[0]["output"] is None:
+            # (table -8: the exact S3 shape -- one CALLOTHER, all inputs constant, no output; S3 r16 1.2 item 2)
+            return Lift("syscall", {"a10": ("syscall",), "a6": "none", "a8": "none", "a9": "none", "a5": None},
+                        {"a3": "OS return after syscall is not observable"})
         if name == "invalidInstructionException" and rest == ["BRANCHIND"]:
             return lift("fault", a10=("invalid-opcode",), a6="none", a8="none", a9="none", a5=None,
                         a3="sequential" if continuation else "none")

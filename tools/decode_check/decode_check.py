@@ -116,6 +116,7 @@ def collect(generation: Path, naming_source: Path) -> dict:
                 baseline, baseline_error = None, f"{type(error).__qualname__}: {error}"
             found["functions"].append({"function_id": claim.function_id, "entry": claim.entry,
                                        "s1": bool(getattr(observation, "call_fallthrough_isa", False)),
+                                       "producer_profile": getattr(observation, "producer_profile", None),
                                        "rows": rows, "baseline": baseline, "baseline_error": baseline_error})
 
     diagnosis = diagnose.diagnose(generation, naming_source, keep=keep)
@@ -194,8 +195,82 @@ class IsaCollector:
                 "functions": self.functions}
 
 
+class OverrideCollector:
+    """design_tbr_g1_x1 r1-r3: one verdict code per compared profile row (producer_override.row_verdict) and the
+    star details; ``block`` verifies the coded rows against the rows G1 compared (failed:row-set-mismatch)."""
+
+    def __init__(self, declared) -> None:
+        self.declared = declared            # the manifest's producer_profile (None: a legacy Bundle)
+        self.functions = {}
+
+    def __call__(self, fid, facts, result, lift, ballot) -> None:
+        import producer_override
+
+        entry = self.functions.setdefault(fid, {"codes": {}, "details": {}, "error": None})
+        try:
+            verdict = producer_override.row_verdict(facts, result, lift, ballot)
+        except Exception as error:          # (one failing row fails the function's status, never the run)
+            entry["error"] = f"failed:{type(error).__name__}: {error}"[:200]
+            return
+        if verdict is None:
+            return
+        code, detail = verdict
+        where = (facts["space"], facts["address"])
+        if code is not None:
+            entry["codes"][where] = code
+        if detail is not None:
+            entry["details"][where] = detail
+
+    def block(self, facts: dict, states: dict, engine_source: dict) -> dict:
+        import producer_override
+
+        functions = {}
+        for function in facts["functions"]:
+            fid = function["function_id"]
+            entry = self.functions.get(fid, {"codes": {}, "details": {}, "error": None})
+            compared = sorted((row["space"], row["address"]) for row in function["rows"]
+                              if "*" not in states.get((fid, row["space"], row["address"]), {"*": "unobserved"}))
+            out = {"status": "checked", "codes": {}, "details": {}}
+            if function.get("producer_profile") is None:
+                out["status"] = "failed:parser-without-profile" if self.declared is not None else "not_reported"
+            elif entry["error"]:
+                out["status"] = entry["error"]
+            elif sorted(entry["codes"]) != compared:
+                out["status"] = "failed:row-set-mismatch"
+            else:
+                out["codes"], out["details"] = dict(entry["codes"]), dict(entry["details"])
+            functions[fid] = out
+        return {"header": producer_override.header_block(self.declared, engine_source), "functions": functions}
+
+
+def engine_source() -> dict:
+    """The TDO tree G1 imported for admission and parsing (design_tbr_g1_x1 r1 s5 / s7): the digest of the imported
+    ``tdo_v2`` package and its git revision when known -- not wt_lint/src unless that is what was imported."""
+    import hashlib
+    import subprocess
+
+    import tdo_v2
+
+    package = Path(tdo_v2.__file__).resolve().parent
+    files = sorted(package.rglob("*.py"))
+    digest = hashlib.sha256("".join(
+        f"{path.relative_to(package.parent).as_posix()}\0{hashlib.sha256(path.read_bytes()).hexdigest()}\n"
+        for path in files).encode("utf-8")).hexdigest()
+    try:
+        revision = subprocess.run(["git", "-C", str(package), "rev-parse", "HEAD"], capture_output=True, text=True,
+                                  timeout=30).stdout.strip() or None
+        dirty = bool(subprocess.run(["git", "-C", str(package), "status", "--porcelain", "--", "."],
+                                    capture_output=True, text=True, timeout=60).stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        revision, dirty = None, None
+    if revision is None:
+        dirty = None                        # (git did not answer: neither the revision nor its state is known)
+    return {"package": "tdo_v2", "digest": digest, "revision": revision, "dirty": dirty}
+
+
 def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: dict, original: bytes, mapping,
-                   facts: dict, states: dict, use_table: bool, reason, isa: dict | None = None) -> None:
+                   facts: dict, states: dict, use_table: bool, reason, isa: dict | None = None,
+                   override: dict | None = None) -> None:
     """``g1-decode-evidence-1`` (design .census6/design_g1_engine_evidence_r3.md, s2 / s3 / s7); with ``isa``
     ``g1-decode-evidence-2`` (design .census6/design_tbr_isa_facts_r3.md s5)."""
     import hashlib
@@ -203,10 +278,8 @@ def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: 
     seal = json.loads((generation / "seal.json").read_bytes())
     members = {row["id"]: row for row in manifest["members"]}
     observation = {row["id"]: members[row["observation_member"]]["sha256"] for row in manifest["functions"]}
-    engine_files = sorted((_HERE.parents[1] / "src" / "tdo_v2").rglob("*.py"))
-    engine_digest = hashlib.sha256("".join(
-        f"{path.relative_to(_HERE.parents[1]).as_posix()}\0{hashlib.sha256(path.read_bytes()).hexdigest()}\n"
-        for path in engine_files).encode("utf-8")).hexdigest()
+    # (design_tbr_g1_x1 r1 s5: the engine G1 actually imported, not wt_lint/src)
+    engine_digest = engine_source()["digest"]
     document = evidence.build(
         bundle={"generation_id": seal["generation_id"], "manifest_sha256": seal["manifest_sha256"],
                 "original_sha256": hashlib.sha256(original).hexdigest()},
@@ -225,12 +298,13 @@ def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: 
                                                                            row["address"]), {"*": "unobserved"})
                                for row in function["rows"]}}
                    for function in facts["functions"]],
-        isa=isa)
+        isa=isa, override=override)
     path.write_bytes(evidence.dumps(document))
 
 
 def run(generation: Path, naming_source: Path, premise: bool, full: bool = False,
-        evidence_out: Path | None = None, isa_facts: bool = False) -> tuple[dict, list]:
+        evidence_out: Path | None = None, isa_facts: bool = False,
+        producer_override: bool = False) -> tuple[dict, list]:
     facts = collect(generation, naming_source)
     manifest = json.loads((generation / "manifest.json").read_bytes())
     original_path = next(row["path"] for row in manifest["members"] if row["id"] == manifest["original_member_id"])
@@ -266,9 +340,16 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
                      f"{lifting.TRANSLATION_PREMISE} off)"
     header["translation_identity"] = {**identity, "premise": premise, "table_applied": use_table}
     states = {}
-    collector = IsaCollector() if isa_facts and evidence_out is not None else None
+    # (design_tbr_g1_x1: schema -3 = -2 + the producer-override verdicts; always with the ISA facts)
+    collector = IsaCollector() if (isa_facts or producer_override) and evidence_out is not None else None
+    verdicts = OverrideCollector(manifest.get("producer_profile")) if producer_override else None
     rows.extend(check.decode_rows(image, facts["functions"], use_table, reason, full, states, facts["language"] or "",
-                                  unverified, isa=collector))
+                                  unverified, isa=collector, override=verdicts))
+    override_block = None
+    if verdicts is not None:
+        override_block = verdicts.block(facts, states, engine_source())
+        for function in facts["functions"]:
+            function["override"] = override_block["functions"][function["function_id"]]
     rows.extend(check.suspect_rows(rows))
     rows.extend(dependents_rows(facts["functions"], states, reason, full, header))
     header["mapping"] = {"format": mapping.format, "rules": mapping.rules, "mapping_id": mapping.mapping_id,
@@ -283,7 +364,7 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     header["counts"] = g1_counts(rows)
     if evidence_out is not None:
         write_evidence(evidence_out, generation, naming_source, manifest, original, mapping, facts, states, use_table,
-                       reason, None if collector is None else collector.block(facts, states))
+                       reason, None if collector is None else collector.block(facts, states), override_block)
         header["evidence_out"] = str(evidence_out)
     return header, rows
 
@@ -313,6 +394,8 @@ def main(argv=None) -> int:
     parser.add_argument("--full", action="store_true", help="keep every attribute and vote of applied rows too")
     parser.add_argument("--isa-facts", action="store_true",
                         help="write g1-decode-evidence-2: the evidence file plus the per-row ISA facts")
+    parser.add_argument("--producer-override", action="store_true",
+                        help="write g1-decode-evidence-3: -2 plus the per-row producer-override verdicts (X-1)")
     parser.add_argument("--evidence-out", type=Path, default=None,
                         help="also write the engine evidence file g1-decode-evidence-1 (outside the Bundle)")
     args = parser.parse_args(argv)
@@ -320,7 +403,7 @@ def main(argv=None) -> int:
         print("decode_check: the generation directory and the naming source must exist", file=sys.stderr)
         return 2
     header, rows = run(args.generation, args.naming_source, args.assume_stock_ghidra_translator, args.full,
-                       args.evidence_out, args.isa_facts)
+                       args.evidence_out, args.isa_facts, args.producer_override)
     args.out.write_text(dumps(header, rows), encoding="utf-8")
     return 0
 

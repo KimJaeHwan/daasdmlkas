@@ -231,11 +231,13 @@ STATE_TO_ROW = {"applied": ("evaluated", "applied"), "not_applicable": ("evaluat
 
 def decode_rows(image: Image, functions: list, premise: bool, reason: str | None, full: bool = False,
                 states: dict | None = None, language: str = LANGUAGE, unverified_reason: str | None = None,
-                isa=None) -> list[Row]:
+                isa=None, override=None) -> list[Row]:
     """Decode rows; ``states`` (when given) receives ``(function id, address) ->
     dependents.attribute_states(result)`` for the dependents table. ``isa`` (when given) is called as
     ``isa(function_id, space, address, verified window bytes, ballot)`` for every row G1 compared (ISA facts
-    step 3: facts only from the bytes G1 verified, design r3 s5)."""
+    step 3: facts only from the bytes G1 verified, design r3 s5). ``override`` (when given) is called as
+    ``override(function_id, facts, result, lift, ballot)`` for every row, ``result`` None for a row never compared
+    (design_tbr_g1_x1 r1-r3)."""
     rows = []
     states = {} if states is None else states
     for function in functions:
@@ -247,6 +249,8 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
             conditions[where] = guards.UNOBSERVED
             if reason is not None:
                 rows.append(Row("decode", "row", key, "unobserved", None, "lint", {"reason": reason}))
+                if override is not None:
+                    override(function["function_id"], facts, None, None, None)
                 continue
             window = image.window(facts["address"], facts["space"])
             lift = lifting.identify(facts) if premise else None
@@ -254,6 +258,8 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
             if not window["bytes"]:
                 rows.append(Row("decode", "row", key, "unobserved", None, "lint",
                                 {"reason": f"no verified byte at the row start ({window['stop']})"}))
+                if override is not None:
+                    override(function["function_id"], facts, None, lift, None)
                 continue
             ballot = decoders.ballot(window["bytes"], facts["address"])
             result = compare.compare_row(facts, lift, window, ballot, s1=function["s1"],
@@ -262,6 +268,8 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
             states[(function["function_id"], *where)] = dependents.attribute_states(result)
             if isa is not None and "*" not in states[(function["function_id"], *where)]:
                 isa(function["function_id"], facts["space"], facts["address"], window["bytes"], ballot)
+            if override is not None:
+                override(function["function_id"], facts, result, lift, ballot)
             state = result["state"]
             detail = {"window": result["window"], "lift": None if lift is None else lift.pattern, "s1": function["s1"]}
             if conditions[where] is not False:
