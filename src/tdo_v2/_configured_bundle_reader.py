@@ -10,6 +10,7 @@ from ._configured_bundle_snapshot import (
     _ConfiguredBundleV2Snapshot,
     _claim_bundle_snapshot,
 )
+from ._scope_raw import _FieldState as _RawFieldState, _field as _raw_field
 from .scope_identity import (
     FrozenMemoryBlockDescriptor as _FrozenMemoryBlockDescriptor,
     FrozenProgramViewProvider as _FrozenProgramViewProvider,
@@ -61,7 +62,7 @@ class _OwnerBoundStream(_Iterator[_PositionedChunk]):
 class _ConfiguredBundleProvider:
     __slots__ = (
         "_active_guards", "_block_handles", "_block_indexes", "_block_used",
-        "_closed", "_function_handles", "_function_indexes", "_function_parsed",
+        "_closed", "_function_handles", "_function_indexes", "_function_parsed", "_profile_agrees",
         "_function_used", "_functions_claimed", "_inventory", "_observation_used",
         "_original_claimed", "_owner", "_program_claimed", "_program_verified",
         "_snapshot", "_snapshot_claim",
@@ -85,6 +86,7 @@ class _ConfiguredBundleProvider:
         }
         self._function_used = [False] * len(self._inventory.functions)
         self._function_parsed = [False] * len(self._inventory.functions)
+        self._profile_agrees = [True] * len(self._inventory.functions)
         self._observation_used = [False] * len(self._inventory.functions)
         self._original_claimed = False
         self._program_claimed = False
@@ -156,7 +158,11 @@ class _ConfiguredBundleProvider:
         return self._function_handles
     def observation_complete(self, handle: object) -> bool:
         self._require_active()
-        return self._function_parsed[self._function_index(handle)]
+        index = self._function_index(handle)
+        # (X-1, design_x1 r3 part 1) a profiled Bundle's function declares the
+        # same profile, and a legacy Bundle's none: otherwise the observation is
+        # not the complete one the manifest promises (the function is refused)
+        return self._function_parsed[index] and self._profile_agrees[index]
     def function_candidate(self, handle: object) -> _RawObject | None:
         self._require_active()
         index = self._claim_function(handle)
@@ -166,6 +172,7 @@ class _ConfiguredBundleProvider:
             self._snapshot_claim, self._inventory.functions[index].observation_member
         ))
         self._function_parsed[index] = True
+        self._note_profile(index, raw)
         return raw
     def close(self) -> None:
         self._require_owner()
@@ -301,7 +308,14 @@ class _ConfiguredBundleV2Provider(_ConfiguredBundleProvider):
             self._snapshot_claim, self._inventory.functions[index].observation_member
         ))
         self._function_parsed[index] = True
+        self._note_profile(index, raw)
         return raw
+    def _note_profile(self, index: int, raw) -> None:
+        """(X-1) whether the observation declares exactly the Bundle's profile."""
+        declared = _raw_field(raw, "producer_profile")
+        self._profile_agrees[index] = (
+            declared.value == self._inventory.producer_profile
+            if declared.state is _RawFieldState.PRESENT else self._inventory.producer_profile is None)
     def _function_transport_identity(self, index: int):
         return self._inventory.functions[index].transport_identity
     def _finish_function_guard(self, index: int) -> None:

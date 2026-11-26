@@ -29,6 +29,7 @@ from .._configured_bundle_snapshot import (
     _admit_bundle_snapshot,
     _mint_bundle_admission,
 )
+from .._scope_contracts import PRODUCER_PROFILE_X1
 from ..scope_identity import IO_CHUNK_BYTES, PositionedChunk
 
 
@@ -353,6 +354,8 @@ def _verify_frozen_members(generation_fd, inventory, records) -> None:
         members.extend(
             (row.observation_member, row.call_names_member, row.call_effects_member)
         )
+    if inventory.stack_switch_evidence_member is not None:
+        members.append(inventory.stack_switch_evidence_member)
     by_id = {row.member_id: row for row in members}
     for record in records:
         fd = _open_regular_member(generation_fd, record)
@@ -475,6 +478,10 @@ def _load_inventory(generation_fd: int, generation: bytes, expected_version: int
         manifest_fields.add("call_interface_profile_member")
         if "image_info_member" in manifest:  # optional sealed image facts
             manifest_fields.add("image_info_member")
+        # (X-1, design_x1 r3 part 1) the atomic producer profile: both fields
+        # or neither (a partial declaration fails the exact-key check)
+        if "producer_profile" in manifest or "stack_switch_evidence_member" in manifest:
+            manifest_fields.update(("producer_profile", "stack_switch_evidence_member"))
     _exact_keys(manifest, manifest_fields, "bundle manifest")
     _exact_int(
         manifest["schema_version"],
@@ -569,6 +576,14 @@ def _load_inventory(generation_fd: int, generation: bytes, expected_version: int
     if "image_info_member" in manifest:
         image_info = _member_reference(manifest["image_info_member"], members_by_id, "image info")
         used.add(image_info.member_id)
+    producer_profile = stack_evidence = None
+    if "producer_profile" in manifest:
+        if manifest["producer_profile"] != PRODUCER_PROFILE_X1:
+            raise BundleAdmissionError("bundle manifest declares an unknown producer profile")
+        producer_profile = PRODUCER_PROFILE_X1
+        stack_evidence = _member_reference(
+            manifest["stack_switch_evidence_member"], members_by_id, "stack-switch evidence")
+        used.add(stack_evidence.member_id)
     functions = []
     for raw in manifest["functions"]:
         if expected_version == FORMAT_VERSION_V1:
@@ -636,6 +651,8 @@ def _load_inventory(generation_fd: int, generation: bytes, expected_version: int
                     row.call_effects_member,
                 )
             )
+        if stack_evidence is not None:
+            role_members.append(stack_evidence)   # (X-1: the last role slot)
         if tuple(members_by_id) != tuple(row.member_id for row in role_members):
             raise BundleAdmissionError(
                 "bundle members do not match the canonical role-slot order"
@@ -659,6 +676,8 @@ def _load_inventory(generation_fd: int, generation: bytes, expected_version: int
         tuple(blocks),
         tuple(functions),
         image_info,
+        producer_profile,
+        stack_evidence,
     )
     return inventory, tuple(records_by_id.values())
 

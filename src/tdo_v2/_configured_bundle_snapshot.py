@@ -257,6 +257,11 @@ class _BundleInventory:
     # optional sealed image facts (permissions, imports, exports, relocations;
     # ``tdo_v2.image_info``), placed after the block members
     image_info_member: _BundleMember | None = None
+    # (X-1, design_x1 r3 part 1) the atomic producer profile: the declared
+    # profile and its sealed stack-switch evidence member (placed last) come
+    # together; None in older Bundles
+    producer_profile: str | None = None
+    stack_switch_evidence_member: _BundleMember | None = None
 
     def __post_init__(self) -> None:
         if type(self.container_identity) is not _BundleContainerIdentity:
@@ -313,6 +318,12 @@ class _BundleInventory:
                 members.append(row.call_names_member)
             if row.call_effects_member is not None:
                 members.append(row.call_effects_member)
+        if (self.producer_profile is None) is not (self.stack_switch_evidence_member is None):
+            raise ValueError("the producer profile and its stack-switch evidence come together")
+        if self.stack_switch_evidence_member is not None:
+            if type(self.stack_switch_evidence_member) is not _BundleMember:
+                raise TypeError("bundle stack-switch evidence member must be exact")
+            members.append(self.stack_switch_evidence_member)
         if len({row.member_id for row in members}) != len(members):
             raise ValueError("bundle member IDs must be unique")
         if len({row.relative_name for row in members}) != len(members):
@@ -429,6 +440,8 @@ class _ConfiguredBundleSnapshotBase:
                 members.append(row.call_names_member)
             if row.call_effects_member is not None:
                 members.append(row.call_effects_member)
+        if inventory.stack_switch_evidence_member is not None:
+            members.append(inventory.stack_switch_evidence_member)
         self._member_indexes = {id(member): member for member in members}
         self._state = "active"
 
