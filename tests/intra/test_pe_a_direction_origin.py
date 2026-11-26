@@ -210,7 +210,7 @@ def test_agreeing_rep_rows_in_two_functions_give_the_coordinate(monkeypatch):
 
 def test_an_inferred_coordinate_never_overrides_a_table():
     """Normalization with a table lacking DF ignores a passed coordinate."""
-    from tdo_v2.isa_identity import inferred_direction_flag, InferredDirectionFlag
+    from tdo_v2.isa_identity import inferred_direction_flag, _issue as InferredDirectionFlag
 
     table = {**REGISTERS, "registers": [row for row in REGISTERS["registers"] if row["name"] != "DF"]}
     builder, _ = _function()
@@ -278,7 +278,7 @@ def test_an_inferred_coordinate_is_bound_to_its_snapshot():
     """Astra r4 P1-2: units of several program snapshots infer nothing, and a
     coordinate is a certificate only in the snapshot it was inferred from."""
     from synthetic import AARCH64
-    from tdo_v2.isa_identity import InferredDirectionFlag, inferred_direction_flag
+    from tdo_v2.isa_identity import _issue as InferredDirectionFlag, inferred_direction_flag
 
     builder, _ = _function()
     (x86,) = program_units(builder)
@@ -298,7 +298,7 @@ def test_an_inferred_coordinate_is_bound_to_its_snapshot():
 
 def test_a_coordinate_from_an_x86_program_is_no_certificate_for_another_language():
     from synthetic import AARCH64
-    from tdo_v2.isa_identity import InferredDirectionFlag, inferred_direction_flag
+    from tdo_v2.isa_identity import _issue as InferredDirectionFlag, inferred_direction_flag
 
     builder, _ = _function()
     inferred = inferred_direction_flag(program_units(builder))
@@ -432,3 +432,123 @@ def test_truncated_rep_rows_are_declined_without_error():
     row = next(item for item in unit.observation.instructions if recognize(item) is not None)
     for length in range(len(row.operations)):
         assert recognize(replace(row, operations=row.operations[:length])) is None
+
+
+def test_a_certificate_is_issued_only_by_the_inference():
+    """Astra r6 P1-2: neither direct construction nor ``dataclasses.replace``
+    (extending the covered observations) yields a certificate."""
+    from dataclasses import replace
+    from tdo_v2.isa_identity import InferredDirectionFlag, inferred_direction_flag
+
+    (unit,) = program_units(_function()[0])
+    genuine = inferred_direction_flag([unit])
+    assert genuine is not None
+    assert FunctionNormalizer().normalize(unit, assume_direction_flag_clear=True,
+                                          inferred_direction_flag=genuine).rep_blocks   # (control)
+    with pytest.raises(ValueError, match="issued only"):
+        InferredDirectionFlag(genuine.program, genuine.flag, genuine.observations, b"0" * 32)
+    with pytest.raises(ValueError, match="issued only"):
+        replace(genuine, observations=genuine.observations | {b"\x01" * 32})
+
+
+def test_a_refused_program_scope_gives_no_certificate():
+    """Astra r6 P2: a unit whose program scope was refused (no ``.scope``):
+    no inference, in either order, never an error."""
+    from types import SimpleNamespace
+    from tdo_v2.isa_identity import inferred_direction_flag
+
+    (unit,) = program_units(_function()[0])
+    refused = SimpleNamespace(scopes=SimpleNamespace(program=object()), observation=None)
+    assert inferred_direction_flag([unit, refused]) is None
+    assert inferred_direction_flag([refused, unit]) is None
+    assert inferred_direction_flag([refused]) is None
+
+
+def _retained_pair(monkeypatch):
+    """main (rep reads DL) and a retained refusal whose rep reads DF."""
+    import test_rep_strings
+    from dataclasses import replace
+    from tdo_v2._scope_results import (ScopeConstructionReason, ScopeConstructionStage, UnresolvedFunctionScope,
+                                       _observation_digest)
+
+    monkeypatch.setattr(test_rep_strings, "DF", RDX)
+    main, _ = _function()
+    monkeypatch.setattr(test_rep_strings, "DF", DF)
+    monkeypatch.setattr(test_rep_strings, "CODE_BASE", WRAPPER)
+    other, _ = _function(entry=WRAPPER)
+    monkeypatch.setattr(test_rep_strings, "CODE_BASE", CODE_BASE)
+    first, second = program_units(main, other)
+    return first, replace(second, scopes=replace(second.scopes, function=UnresolvedFunctionScope(
+        ScopeConstructionStage.FUNCTION_COORDINATE, ScopeConstructionReason.INVALID_FUNCTION_ENTRY,
+        validated_observation_digest=_observation_digest(second.observation))))
+
+
+@pytest.mark.parametrize("form", ("tuple", "iterator"))
+def test_the_combined_entry_freezes_the_retained_observations(monkeypatch, form):
+    """Astra r6 P1-1: an iterator of retained observations is read once -- the
+    check and both passes see the same set, so neither expands DL."""
+    from tdo_v2.base_graph import BaseGraphPolicy, BaseGraphPublication
+    from tdo_v2.integration.observed_function_session import ObservedFunctionAdmissionFailure
+    from tdo_v2.interprocedural import analyze_units
+
+    first, retained = _retained_pair(monkeypatch)
+    failure = ObservedFunctionAdmissionFailure(b"g" * 32, "function-1", "function-1", b"\x01" * 32, retained)
+    publication = BaseGraphPublication([first], policy=BaseGraphPolicy(assume_direction_flag_clear=True),
+                                       admission_failures=(failure,))
+    given = (retained,) if form == "tuple" else iter((retained,))
+    results = analyze_units([first], base_graphs=publication, assume_direction_flag_clear=True,
+                            retained_observations=given, unidentified_refusals=True)
+    assert not results["1:1000"].normalized.rep_blocks
+    assert not publication.snapshot.graphs["1:1000"].normalized.rep_blocks
+
+
+@pytest.mark.parametrize("proof_on", (True, False))
+def test_the_combined_entry_compares_observation_sets_not_inferences(monkeypatch, proof_on):
+    """Astra r6 P1-1: mismatched observation sets are refused when either pass
+    enables the premise, even when both inferences are None."""
+    from tdo_v2.base_graph import BaseGraphPolicy, BaseGraphPublication
+    from tdo_v2.interprocedural import analyze_units
+
+    first, retained = _retained_pair(monkeypatch)
+    publication = BaseGraphPublication([first], policy=BaseGraphPolicy(assume_direction_flag_clear=True))
+    with pytest.raises(ValueError, match="direction flag"):
+        analyze_units([first], base_graphs=publication, assume_direction_flag_clear=proof_on,
+                      retained_observations=(retained,), unidentified_refusals=False)
+
+
+def test_one_scan_no_rehash_and_one_table_lookup(monkeypatch):
+    """Astra r6 P2: an observation set is scanned once, bodies are not re-hashed
+    (the validated scope digests are reused), the table DF is looked up once."""
+    from tdo_v2 import _scope_results, isa_identity, rep_strings
+    from tdo_v2.interprocedural import analyze_units
+
+    counts = {"recognize": 0, "digest": 0, "named": 0}
+    recognize, digest, named = rep_strings.recognize, _scope_results._observation_digest, isa_identity._named
+
+    def counted(name, function):
+        def run(*args, **kwargs):
+            counts[name] += 1
+            return function(*args, **kwargs)
+        return run
+
+    builder, _ = _function()
+    units = program_units(builder)
+    isa_identity._INFERRED.clear()
+    monkeypatch.setattr(rep_strings, "recognize", counted("recognize", recognize))
+    monkeypatch.setattr(_scope_results, "_observation_digest", counted("digest", digest))
+    first = isa_identity.inferred_direction_flag(units)
+    scans = counts["recognize"]
+    assert first is not None and scans and counts["digest"] == 0
+    assert isa_identity.inferred_direction_flag(units) is first and counts["recognize"] == scans
+
+    def named_df(evidence, names):
+        if names is isa_identity._DIRECTION_FLAGS:
+            counts["named"] += 1
+        return named(evidence, names)
+
+    monkeypatch.setattr(isa_identity, "_named", named_df)
+    other, _ = _function()
+    with_table = program_units(builder, FunctionBuilder(entry=WRAPPER).ret(), registers=REGISTERS)
+    for unit in with_table:
+        isa_identity.direction_flag(unit.scopes.program.evidence)
+    assert counts["named"] == 1

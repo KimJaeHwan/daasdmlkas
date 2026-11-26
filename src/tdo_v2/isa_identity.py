@@ -10,7 +10,7 @@ a function owns the memory it points to, or that any register is preserved.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ._scope_contracts import VerifiedProgramSnapshotEvidence, require_exact
 
@@ -51,29 +51,84 @@ _DIRECTION_FLAGS = {
 }
 
 
-def x86_language(evidence) -> bool:
-    """(PE-a1) The one language rule of both DF identity paths (``_named``'s:
-    a full language id whose first three parts name x86)."""
+def _language_parts(evidence) -> tuple | None:
+    """(PE-a1, Astra r6 P3) The one language-id rule of both DF identity paths
+    and ``_named``: a full id (four parts or more) -> its first three parts."""
     parts = tuple(evidence.translation_namespace.language_id.split(":"))
-    return len(parts) >= 4 and parts[:3] in _DIRECTION_FLAGS
+    return parts[:3] if len(parts) >= 4 else None
+
+
+def x86_language(evidence) -> bool:
+    """(PE-a1) An x86 language by ``_language_parts``."""
+    return _language_parts(evidence) in _DIRECTION_FLAGS
+
+
+_TABLE_FLAGS: dict = {}   # id(evidence) -> (evidence, its table DF row) -- one lookup per program
 
 
 def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordinate | None:
     """The x86 direction flag as the exported register evidence places it;
-    None for another language or without exact evidence (no certificate)."""
-    return _named(evidence, _DIRECTION_FLAGS)
+    None for another language or without exact evidence (no certificate).
+    Looked up once per program snapshot (Astra r6 P2)."""
+    held = _TABLE_FLAGS.get(id(evidence))
+    if held is not None and held[0] is evidence:
+        return held[1]
+    if len(_TABLE_FLAGS) > 64:
+        _TABLE_FLAGS.clear()
+    found = _named(evidence, _DIRECTION_FLAGS)
+    _TABLE_FLAGS[id(evidence)] = (evidence, found)
+    return found
+
+
+# (Astra r6 P1-2) a certificate is issued only by ``inferred_direction_flag``:
+# its seal is a keyed digest of its fields with a key private to this process,
+# so neither direct construction nor ``dataclasses.replace`` (say, adding an
+# observation the unanimity never covered) yields a certificate
+_SEAL_KEY = __import__("os").urandom(32)
+
+
+def _seal_of(program, flag, observations) -> bytes:
+    import hashlib
+    import hmac
+
+    text = repr((program, flag, tuple(sorted(observations)))).encode("utf-8")
+    return hmac.new(_SEAL_KEY, text, hashlib.sha256).digest()
 
 
 @dataclass(frozen=True, slots=True)
 class InferredDirectionFlag:
     """(PE-a1) The program-wide DF coordinate, bound to the program snapshot
-    it was inferred from (``program``: its program scope id)."""
+    it was inferred from (``program``: its program scope id) and to the
+    observations its unanimity covered (``observations``: their digests; the
+    certificate is used only for one of them, ``normalize._direction_flag_of``).
+    Issued only by ``inferred_direction_flag`` (``seal``)."""
 
     program: object
     flag: RegisterCoordinate
-    # (Astra r5 P1-2) the observations the unanimity covered: the certificate
-    # is used only for one of them (``normalize._direction_flag_of``)
-    observations: frozenset = frozenset()
+    observations: frozenset
+    seal: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if type(self.observations) is not frozenset or type(self.seal) is not bytes \
+                or not __import__("hmac").compare_digest(self.seal, _seal_of(self.program, self.flag,
+                                                                             self.observations)):
+            raise ValueError("an inferred direction flag is issued only by inferred_direction_flag")
+
+
+def _issue(program, flag, observations) -> InferredDirectionFlag:
+    """(module-private) the one issuer -- tests reach the consumer guards with it."""
+    observations = frozenset(observations)
+    return InferredDirectionFlag(program, flag, observations, _seal_of(program, flag, observations))
+
+
+_INFERRED: dict = {}   # (program, digests) -> result: one scan per observation set (Astra r6 P2)
+
+
+def _digest_of(unit):
+    """The observation digest the unit's function scope already validated
+    (``ScopedFunctionUnit``: constructed scopes bind it, refusals retain it)."""
+    function = unit.scopes.function
+    return getattr(function, "observation_digest", None) or getattr(function, "validated_observation_digest", None)
 
 
 def inferred_direction_flag(units) -> InferredDirectionFlag | None:
@@ -87,13 +142,16 @@ def inferred_direction_flag(units) -> InferredDirectionFlag | None:
     with a register table, another language, no rep row or disagreeing rows:
     None (the table rule, or no certificate). ``units``: every retained
     observation of ONE program snapshot -- admitted, cut and refused-at-
-    admission bodies alike (Astra r4 P1-1); units of several snapshots: None
-    (Astra r4 P1-2). The result is bound to that snapshot."""
-    from ._scope_results import _observation_digest
+    admission bodies alike (Astra r4 P1-1); the caller passes every
+    observation of the snapshot it holds. Units of several snapshots, or a
+    unit whose program scope was refused: None. The result is bound to that
+    snapshot and to the observations it covered, and is the only issuer of a
+    certificate."""
+    from ._scope_results import ConstructedProgramScope
     from .rep_strings import recognize
 
     supplied = list(units)
-    if not supplied:
+    if not supplied or any(type(unit.scopes.program) is not ConstructedProgramScope for unit in supplied):
         return None
     # (Astra r5 P2) every supplied unit's snapshot -- an observation-free
     # refusal of another snapshot included -- before any observation is read
@@ -103,12 +161,20 @@ def inferred_direction_flag(units) -> InferredDirectionFlag | None:
     observations = {}
     for unit in supplied:   # (each observation once: a unit may be passed twice)
         if unit.observation is not None:
-            observations.setdefault(_observation_digest(unit.observation), unit.observation)
+            digest = _digest_of(unit)
+            if digest is None:
+                return None
+            observations.setdefault(digest, unit.observation)
     if not observations:
         return None
     evidence = supplied[0].scopes.program.evidence
     if not x86_language(evidence) or evidence.register_evidence is not None:
         return None
+    key = (program, frozenset(observations))
+    if key in _INFERRED:
+        return _INFERRED[key]
+    if len(_INFERRED) > 64:
+        _INFERRED.clear()
     found = set()
     for observation in observations.values():
         for instruction in observation.instructions:
@@ -116,12 +182,13 @@ def inferred_direction_flag(units) -> InferredDirectionFlag | None:
             if site is not None:
                 operand = site.direction
                 found.add((operand.coordinate.space_id, operand.coordinate.byte_offset, operand.byte_size))
-    if len(found) != 1:
-        return None
-    ((space_id, offset, size),) = found
-    if size != 1:
-        return None
-    return InferredDirectionFlag(program, RegisterCoordinate("DF", space_id, offset, size), frozenset(observations))
+    result = None
+    if len(found) == 1:
+        ((space_id, offset, size),) = found
+        if size == 1:
+            result = _issue(program, RegisterCoordinate("DF", space_id, offset, size), observations)
+    _INFERRED[key] = result
+    return result
 
 
 def is_direction_flag(varnode, flag: RegisterCoordinate | None) -> bool:
@@ -150,8 +217,8 @@ def program_counter(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordi
 
 def _named(evidence, names) -> RegisterCoordinate | None:
     require_exact(evidence, VerifiedProgramSnapshotEvidence, "program evidence")
-    parts = tuple(evidence.translation_namespace.language_id.split(":"))
-    wanted = names.get(parts[:3]) if len(parts) >= 4 else None
+    parts = _language_parts(evidence)
+    wanted = names.get(parts) if parts is not None else None
     table = evidence.register_evidence
     if wanted is None or table is None:
         return None

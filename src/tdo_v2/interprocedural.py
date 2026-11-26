@@ -256,6 +256,9 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
         # (PE-c, Astra r3 P1-5) one set for every reader below (an iterator
         # would be consumed by the first)
         options["unavailable_entries"] = frozenset(options["unavailable_entries"])
+    if "retained_observations" in options:
+        # (PE-a1, Astra r6 P1-1) frozen once: the check and the analysis read the same
+        options["retained_observations"] = tuple(options["retained_observations"])
     if code_only_profile is not None:
         from .code_only_profile import forced_arguments
 
@@ -291,12 +294,19 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
             if getattr(scope, "refused_entry", None) is not None)
         expected_unidentified = bool(options.get("unidentified_refusals", False)) or any(
             getattr(scope, "refused_entry", None) is None for scope in carried)
-        if options.get("assume_direction_flag_clear"):
-            # (PE-a1, Astra r5 P1-1) both passes infer DF from one observation set
-            from .isa_identity import inferred_direction_flag
+        if options.get("assume_direction_flag_clear") or base_graphs._policy.assume_direction_flag_clear:
+            # (PE-a1, Astra r5 P1-1 / r6 P1-1) both passes read one observation
+            # set: the snapshots and the observation digests themselves, not
+            # just the inferences (two Nones prove nothing)
+            from .isa_identity import _digest_of
 
-            if inferred_direction_flag([*base_graphs._units, *(item.unit for item in published)]) != \
-                    inferred_direction_flag([*units, *options.get("retained_observations", ())]):
+            def observed(items):
+                items = list(items)
+                return (frozenset(getattr(item.scopes.program, "scope", None) for item in items),
+                        frozenset(_digest_of(item) for item in items if item.observation is not None))
+
+            if observed([*base_graphs._units, *(item.unit for item in published)]) != \
+                    observed([*units, *options.get("retained_observations", ())]):
                 raise ValueError("base graph publication and proof pass disagree on the direction flag's observations")
         if refused != expected or unidentified != expected_unidentified:
             raise ValueError("base graph publication and proof pass disagree on admission refusals "

@@ -217,13 +217,13 @@ def derive_library(generation: Path, library: str, export_names, *, file_id: str
         if not per_export:
             reached_cuts = set(cuts)   # as before (the one shipped file)
         selected = [by_key[key] for key in sorted(reach | reached_cuts)]
+        chosen = {id(item) for item in selected}   # (once per group: the retained observations below)
         log(f"{', '.join(group) if per_export else 'closure'}: {len(reach)} functions + {len(reached_cuts)} cut")
         tracking = ImageBaseTracking(ranges, relocates)
         with tracking as found:
             results = ip.analyze_units(selected, image_info=info, external_models=models, pcodeop_models=pcodeops,
                                        # (PE-a1, Fable r4 P2-1) every other observation of the library
-                                       retained_observations=(*(unit for unit in units
-                                                                if id(unit) not in {id(item) for item in selected}),
+                                       retained_observations=(*(unit for unit in units if id(unit) not in chosen),
                                                               *refused_units),
                                        unavailable_entries=frozenset(refused_entries),
                                        unidentified_refusals=unidentified_refusals,

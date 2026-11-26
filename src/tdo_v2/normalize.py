@@ -779,7 +779,7 @@ def _prove_rep_sites(sites, plan, memory_ssa, observation, scopes, overrides, as
     # (PE-a1) the premise is about the architectural DF only: the register
     # table's DF row, else the program-wide inferred coordinate -- looked up
     # once, when an entry value first needs it
-    flag_register = []
+    flag_register: dict = {}
     requests = []
     for site in pending.values():
         requests.append((site.count_key, site.count))
@@ -815,28 +815,38 @@ def _entry_direction(memory_ssa, scopes, site, observation, inferred_flag, cache
     a value an expression only simplifies to it (Astra r5 P2: ``DF = DF + 0``)."""
     from .isa_identity import is_direction_flag
 
-    if not cache:
-        cache.append(_direction_flag_of(scopes, inferred_flag, observation))
-    if not is_direction_flag(site.direction, cache[0]):
+    if "flag" not in cache:
+        cache["flag"] = _direction_flag_of(scopes, inferred_flag, observation)
+    if not is_direction_flag(site.direction, cache["flag"]):
         return False
     resolved = _resolve_validated_storage(_storage_ref(site.direction), scopes.resolution_context)
     if type(resolved) is not ResolvedStorage:
         return False
-    actions = {index for index, action in enumerate(memory_ssa.actions) if action.operation_key == site.direction_key}
-    reads = [read for read in memory_ssa.reads if read.action_id in actions and read.span.overlaps(resolved.span)]
+    if "reads" not in cache:   # (one action / read index per proof iteration, Astra r6 P2)
+        by_key: dict = {}
+        for index, action in enumerate(memory_ssa.actions):
+            by_key.setdefault(action.operation_key, set()).add(index)
+        by_action: dict = {}
+        for read in memory_ssa.reads:
+            by_action.setdefault(read.action_id, []).append(read)
+        cache["reads"] = (by_key, by_action)
+    by_key, by_action = cache["reads"]
+    reads = [read for action in by_key.get(site.direction_key, ()) for read in by_action.get(action, ())
+             if read.span.overlaps(resolved.span)]
     return bool(reads) and all(
         memory_ssa.definitions[definition].kind is MemoryDefinitionKind.ENTRY
         for read in reads for fragment in read.fragments for definition in fragment.definition_ids)
 
 
 def _direction_flag_of(scopes, inferred_flag, observation=None):
+    from types import SimpleNamespace
+
     """(PE-a1) DF for the premise: the exported register table's DF row when
     the program has a table (precedence: no row, no certificate), else the
     sealed program-wide inferred coordinate (``inferred_direction_flag``) --
     only for the snapshot it was inferred from (Astra r4 P1-2) and for an
     observation its unanimity covered (Astra r5 P1-2)."""
-    from ._scope_results import _observation_digest
-    from .isa_identity import InferredDirectionFlag, direction_flag, x86_language
+    from .isa_identity import InferredDirectionFlag, _digest_of, direction_flag, x86_language
 
     evidence = scopes.program.evidence
     if evidence.register_evidence is not None:
@@ -846,7 +856,7 @@ def _direction_flag_of(scopes, inferred_flag, observation=None):
     if type(inferred_flag) is not InferredDirectionFlag:
         raise TypeError("inferred_direction_flag requires an exact InferredDirectionFlag")
     if inferred_flag.program != scopes.program.scope or not x86_language(evidence) \
-            or _observation_digest(observation) not in inferred_flag.observations:
+            or _digest_of(SimpleNamespace(scopes=scopes)) not in inferred_flag.observations:
         return None
     return inferred_flag.flag
 
