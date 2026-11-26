@@ -116,9 +116,13 @@ class CallClobberDischarger:
         # cycle guards: the open questions (``_pending``) and the active path's
         # members. A member can only be met again below the question if its
         # function is reachable from the question's function by direct
-        # internal calls (``_reach``; a proof visits nothing else -- the
-        # caller state it explains is the judged function's own), so
-        # ``_cached`` keys an entry by (question, those relevant members) and
+        # internal calls (a proof visits nothing else -- the caller state it
+        # explains is the judged function's own). Every member already reaches
+        # the question's function (the path came down by such calls), so it is
+        # reachable back exactly when both share a strongly connected
+        # component (``_component``: one id per function, linear storage --
+        # Astra r6 P2), and ``_cached`` keys an entry by (question, those
+        # relevant members) and
         # paths that differ only in unreachable ancestors share it (Astra r5
         # P2: no per-path re-evaluation on a shared call graph). The answers
         # are monotone in both depth budgets: every guard only answers False and
@@ -139,7 +143,7 @@ class CallClobberDischarger:
         self._cut_events = 0
         self._cycle_events = 0
         self._pending: set = set()
-        self._reach_cache: dict = {}
+        self._components: dict | None = None   # function -> its component's root (``_component``)
         self._frame_safe: dict = {}   # ((callee, start, stop), relevant active) -> ``_Entry``
         from ..call_clobber import rows_by_debt
 
@@ -191,23 +195,20 @@ class CallClobberDischarger:
             judged = self._judged[key] = (context, value)
         return judged[1]
 
-    def _reach(self, entry) -> frozenset:
-        """``entry`` and every function its direct internal calls reach."""
-        held = self._reach_cache.get(entry)
-        if held is None:
-            seen, work = {entry}, [entry]
-            while work:
-                for target in self._targets.get(work.pop(), {}).values():
-                    if target not in seen:
-                        seen.add(target)
-                        work.append(target)
-            held = self._reach_cache[entry] = frozenset(seen)
-        return held
+    def _component(self, entry):
+        """(PE-d r7) The root of ``entry``'s strongly connected component in
+        the direct internal call graph (``_targets``); a function outside it is
+        its own component."""
+        if self._components is None:
+            self._components = _strongly_connected(self._targets)
+        return self._components.get(entry, entry)
 
     def _relevant(self, entry, active) -> tuple:
-        """The members of ``active`` a proof below ``entry`` may meet again."""
-        reach = self._reach(entry)
-        return tuple(item for item in active if item[0] in reach)
+        """The members of ``active`` a proof below ``entry`` may meet again:
+        each member reaches ``entry`` (the path came down by direct internal
+        calls), so ``entry`` reaches it back iff they share a component."""
+        component = self._component(entry)
+        return tuple(item for item in active if self._component(item[0]) == component)
 
     def _cached(self, kind, cache, key, entry_function, active, compute):
         """(PE-d r6) ``compute()`` for one question, exact per state (see
@@ -819,6 +820,53 @@ class _Frame:
         if self.unresolved_writes or self.other_bases:
             return False
         return not any(low < stop and start < high for low, high in self.stack_writes)
+
+
+def _strongly_connected(targets) -> dict:
+    """(PE-d r7) Tarjan, iterative: each function of the graph ``targets``
+    (function -> {call key: callee}) mapped to its component's root."""
+    index: dict = {}
+    low: dict = {}
+    on_stack: set = set()
+    stack: list = []
+    root: dict = {}
+    counter = 0
+    for start in targets:
+        if start in index:
+            continue
+        index[start] = low[start] = counter
+        counter += 1
+        stack.append(start)
+        on_stack.add(start)
+        work = [(start, iter(targets.get(start, {}).values()))]
+        while work:
+            node, successors = work[-1]
+            descended = False
+            for successor in successors:
+                if successor not in index:
+                    index[successor] = low[successor] = counter
+                    counter += 1
+                    stack.append(successor)
+                    on_stack.add(successor)
+                    work.append((successor, iter(targets.get(successor, {}).values())))
+                    descended = True
+                    break
+                if successor in on_stack:
+                    low[node] = min(low[node], index[successor])
+            if descended:
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index[node]:
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    root[member] = node
+                    if member == node:
+                        break
+    return root
 
 
 def _sole_terminal_writer(view, definition_id: int, span: ByteSpan) -> bool:

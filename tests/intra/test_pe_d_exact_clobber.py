@@ -392,14 +392,29 @@ def test_a_replacement_write_must_hold_on_every_exit(conditional):
 
 
 def _bare_discharger():
-    """A discharger with only the cache state; function "c" calls "d"."""
+    """A discharger with only the cache state; "c" and "d" call each other
+    (one component), "z" calls "c" (its own component)."""
     from tdo_v2.integration.configured_call_clobber_discharge import CallClobberDischarger
 
     discharger = CallClobberDischarger.__new__(CallClobberDischarger)
     discharger._cut_events = discharger._cycle_events = discharger._keep_depth = 0
-    discharger._pending, discharger._reach_cache = set(), {}
-    discharger._targets = {"c": {"c:call": "d"}}
+    discharger._pending, discharger._components = set(), None
+    discharger._targets = {"c": {"c:call": "d"}, "d": {"d:call": "c"}, "z": {"z:call": "c"}}
     return discharger
+
+
+def test_relevant_members_are_the_question_component_in_linear_storage():
+    """Astra r6 P2: one component id per function, not a reach set per function
+    (a 4096-function chain held 8.4 M reach entries); an ancestor on a call
+    chain is irrelevant, a mutually recursive one is kept (its guard holds)."""
+    discharger = _bare_discharger()
+    count = 4096
+    discharger._targets = {index: {f"{index}:call": index + 1} for index in range(count - 1)}
+    discharger._targets[count - 1] = {}
+    assert all(discharger._relevant(index + 1, ((index, "read"),)) == () for index in range(count - 1))
+    assert len(discharger._components) == count   # (one id each)
+    mutual = _bare_discharger()
+    assert mutual._relevant("d", (("c", "read"), ("z", "read"))) == (("c", "read"),)
 
 
 def test_a_cached_answer_holds_only_where_it_was_proven():
@@ -524,14 +539,17 @@ def test_frame_proofs_on_a_shared_call_graph_grow_linearly():
     assert computed.count("frame") <= 3 * len(functions), computed.count("frame")   # (2 ** levels paths)
 
 
-@pytest.mark.parametrize("count, complete", ((14, True), (15, False)))
+@pytest.mark.parametrize("count, complete", ((13, True), (14, False)))
 def test_one_read_judged_at_two_keep_depths_keeps_both_answers(count, complete):
-    """Astra r5 P3 (M21): the dispatcher saves and restores RBX, then calls the
-    RBX-saving helper directly and through ``count`` forwarders; the helper's
-    saved slot is proven across a call that sets RCX, calls an RCX-preserving
-    callee (which calls a leaf after its restore) and reads RCX -- the same
-    read is judged near the top and near the depth bound. 14 forwarders fit
-    the bound (complete), 15 do not (the deep path is withheld)."""
+    """Astra r5 / r6 P3 (M21): the dispatcher saves and restores RBX, then calls
+    one function that leaves RBX alone and calls the RBX-saving helper
+    directly, then through ``count`` forwarders (one call: no set order of the
+    dispatcher's exit labels decides which comes first); the helper's saved
+    slot is proven across a call that sets RCX, calls an RCX-preserving callee
+    (which calls a leaf after its restore) and reads RCX -- the same read is
+    judged near the top and near the depth bound. 13 forwarders fit the bound
+    (complete), 14 do not (withheld; a judgement memoized across keep depths
+    certified it)."""
     from synthetic import RCX
 
     leaf, keeper, setter, helper_entry = CODE_BASE + 0x700, CODE_BASE + 0x710, CODE_BASE + 0x720, CODE_BASE + 0x730
@@ -544,13 +562,16 @@ def test_one_read_judged_at_two_keep_depths_keeps_both_answers(count, complete):
               .pop(RBX).ret())
     chain = [FunctionBuilder(entry=entry).call(forwarders[index + 1] if index + 1 < len(forwarders) else helper_entry)
              .ret() for index, entry in enumerate(forwarders)]
+    middle = CODE_BASE + 0x750
+    middle_body = FunctionBuilder(entry=middle).call(helper_entry).call(forwarders[0]).ret()
     dispatcher_body = (FunctionBuilder(entry=dispatcher).push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX)
-                       .call(helper_entry).call(forwarders[0]).ret())   # (both calls cross the restored RBX)
+                       .call(middle).ret())   # (the call crosses the restored RBX)
     main = (FunctionBuilder(entry=MAIN).call(SOURCE).ins(copy(reg(RBX, 4), reg(RAX, 4))).call(dispatcher)
             .ins(copy(reg(RCX, 4), reg(RBX, 4))).call(SINK).ret())
     functions = {"main": main, "source": _source(), "sink": FunctionBuilder(entry=SINK).ret(),
                  "leaf": FunctionBuilder(entry=leaf).ret(), "keeper": keeper_body, "setter": setter_body,
-                 "helper": helper, "dispatcher": dispatcher_body, **{f"f{i}": body for i, body in enumerate(chain)}}
+                 "helper": helper, "dispatcher": dispatcher_body, "middle": middle_body,
+                 **{f"f{i}": body for i, body in enumerate(chain)}}
     assert analyze_program(functions, PROVIDER)[("main", "sink.arg0")].is_effectively_complete is complete
 
 
