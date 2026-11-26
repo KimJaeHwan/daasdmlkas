@@ -444,7 +444,8 @@ def test_a_split_debt_row_is_judged_on_all_its_rows(models):
     discharger = CallClobberDischarger.__new__(CallClobberDischarger)
     discharger._clobber_rows = {"f": {node: parts}}
     discharger._judged = {}
-    discharger._cut_events = discharger._cycle_events = discharger._keep_depth = 0   # (PE-d r5)
+    discharger._cut_events = discharger._cycle_events = discharger._keep_depth = 0   # (PE-d r5 / r6)
+    discharger._targets, discharger._reach_cache = {}, {}
     for undischargeable in parts:
         discharger._discharge_read = lambda entry, read, context, active, bad=undischargeable: (
             None if read is bad else (DischargeKind.PRESERVED,))

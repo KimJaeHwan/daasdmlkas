@@ -372,10 +372,7 @@ def test_an_override_branch_after_the_restore_or_the_write_is_open_control(route
     source.ins(copy(reg(RAX, 4), const(7, 4))).tail_call(WRITES_RBX)
     main = FunctionBuilder(entry=MAIN).call(SOURCE).ins(copy(reg(RCX, 4), reg(RAX, 4))).call(SINK).ret()
     functions = {"main": main, "source": source, "writer": writer, "sink": FunctionBuilder(entry=SINK).ret()}
-    try:
-        assert not analyze_program(functions, PROVIDER)[("main", "sink.arg0")].is_effectively_complete
-    except Exception as error:
-        assert "override" in str(error).lower() or "flow" in str(error).lower(), error
+    assert not analyze_program(functions, PROVIDER)[("main", "sink.arg0")].is_effectively_complete   # (Astra r5 P3)
 
 
 @pytest.mark.parametrize("conditional", (False, True))
@@ -395,46 +392,58 @@ def test_a_replacement_write_must_hold_on_every_exit(conditional):
 
 
 def _bare_discharger():
+    """A discharger with only the cache state; function "c" calls "d"."""
     from tdo_v2.integration.configured_call_clobber_discharge import CallClobberDischarger
 
     discharger = CallClobberDischarger.__new__(CallClobberDischarger)
     discharger._cut_events = discharger._cycle_events = discharger._keep_depth = 0
-    discharger._pending = set()
+    discharger._pending, discharger._reach_cache = set(), {}
+    discharger._targets = {"c": {"c:call": "d"}}
     return discharger
 
 
 def test_a_cached_answer_holds_only_where_it_was_proven():
-    """Astra r3 P2-4 / r4 P2, Fable r3 P2-1, the cache contract itself (depth
-    = keep depth; one cache key = (question, active path)): a True holds at its
-    depth and shallower, a False a depth cut decided at its depth and deeper,
-    a False with no guard below it at every depth."""
-    discharger, cache, calls, active = _bare_discharger(), {}, [], (("caller", "read"),)
+    """Astra r3 P2-4 / r4 P2 / r5 P3, Fable r3 P2-1, the cache contract itself:
+    a point is (keep depth, active length); a True holds at its point and every
+    point with no less budget, a False a depth cut decided at its point and
+    every point with no more budget, a False with no guard below everywhere;
+    an entry is shared by active paths that differ only in members the
+    question's function cannot reach, and not otherwise."""
+    discharger, cache, calls = _bare_discharger(), {}, []
+    reachable, unreachable = (("d", "read"),), (("z", "read"),)
 
-    def at(depth, compute, path=active):
+    def at(depth, compute, path=(("d", "read"),)):
         discharger._keep_depth = depth
-        return discharger._cached("keeps", cache, "q", path, compute)
+        return discharger._cached("keeps", cache, "q", "c", path, compute)
 
     def cut():
         calls.append("cut")
         discharger._cut_events += 1   # (a depth guard below decided)
         return False
 
-    def proved():
-        calls.append("proved")
-        return True
+    def proved(label="proved"):
+        def compute():
+            calls.append(label)
+            return True
+        return compute
 
-    assert at(3, cut) is False and at(3, proved) is False and at(5, proved) is False   # (no more budget)
+    assert at(3, cut) is False and at(3, proved()) is False and at(5, proved()) is False   # (no more budget)
+    assert at(3, proved(), reachable + unreachable) is False   # (a longer path, same relevant members: no more budget)
     assert calls == ["cut"]
-    assert at(2, proved) is True   # (more budget: computed again)
+    assert at(2, proved()) is True   # (more budget: computed again)
     assert at(1, cut) is True and at(2, cut) is True   # (a True holds with no less budget)
     assert calls == ["cut", "proved"]
-    assert at(2, proved, (("other", "read"),)) is True and calls[-1] == "proved"   # (another active path)
+    assert at(2, proved("other path"), (("c", "other"),)) is True   # (another relevant member: its own entry)
+    assert calls[-1] == "other path"
+    assert at(2, proved("unreachable"), unreachable) is True and calls[-1] == "unreachable"
+    assert at(2, proved("no members"), ()) is True   # (the same entry: the member is unreachable; a shorter path)
+    assert calls[-1] == "unreachable"
     cache.clear()
-    assert at(1, proved) is True and at(2, cut) is False   # (a True does not hold with less budget)
+    assert at(1, proved()) is True and at(2, cut) is False   # (a True does not hold with less budget)
     assert calls[-2:] == ["proved", "cut"]
     cache.clear()
     assert at(4, lambda: calls.append("plain") or False) is False
-    assert at(0, proved) is False and calls[-1] == "plain"   # (no guard below: False at every depth)
+    assert at(0, proved()) is False and calls[-1] == "plain"   # (no guard below: False at every depth)
 
 
 def test_a_false_resting_on_a_cycle_is_not_kept():
@@ -448,11 +457,24 @@ def test_a_false_resting_on_a_cycle_is_not_kept():
         return True   # (P's other branch)
 
     def q():
-        return discharger._cached("keeps", cache, "Q", (), lambda: discharger._cached("keeps", cache, "P", (), p))
+        return discharger._cached("keeps", cache, "Q", "c", (),
+                                  lambda: discharger._cached("keeps", cache, "P", "c", (), p))
 
-    assert discharger._cached("keeps", cache, "P", (), p) is True
+    assert discharger._cached("keeps", cache, "P", "c", (), p) is True
     assert discharger._cycle_events == 1
     assert q() is True
+
+
+def _counting_cached(computed):
+    from tdo_v2.integration import configured_call_clobber_discharge as module
+
+    original = module.CallClobberDischarger._cached
+
+    def counting(self, kind, cache, key, entry_function, active, compute):
+        return original(self, kind, cache, key, entry_function, active,
+                        lambda: computed.append(kind) or compute())
+
+    return module, original, counting
 
 
 def test_a_chain_is_walked_once_per_depth():
@@ -461,25 +483,75 @@ def test_a_chain_is_walked_once_per_depth():
     chain (about one per callee and kind), not 2 ** depth. (The analysis
     before the discharger already costs about 2x per level on this shape, so
     the chain is short.)"""
-    from tdo_v2.integration import configured_call_clobber_discharge as module
-
     depth = 8
     entries = [CODE_BASE + 0x100 + 0x10 * index for index in range(depth)]
     chain = [FunctionBuilder(entry=entry).call(entries[index + 1]).call(entries[index + 1]).ret()
              if index + 1 < depth else FunctionBuilder(entry=entry).ret() for index, entry in enumerate(entries)]
     helper = (FunctionBuilder(entry=HELPER).push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX).call(entries[0]).ret())
     computed = []
-    original = module.CallClobberDischarger._cached
-
-    def counting(self, kind, cache, key, active, compute):
-        return original(self, kind, cache, key, active, lambda: computed.append(kind) or compute())
-
+    module, original, counting = _counting_cached(computed)
     module.CallClobberDischarger._cached = counting
     try:
         assert _complete_with(helper, *chain)
     finally:
         module.CallClobberDischarger._cached = original
     assert computed.count("keeps") == depth and len(computed) <= 4 * depth, computed
+
+
+def test_frame_proofs_on_a_shared_call_graph_grow_linearly():
+    """Astra r5 P2: push rbx; call n0a; rbx = 0; pop rbx; ret where every node of
+    a level calls both nodes of the next level -- the saved slot's frame proof
+    reaches each node by 2 ** level paths that differ only in ancestors the
+    node cannot reach: one evaluation per (node, interval), not per path."""
+    levels = 7
+    nodes = [[CODE_BASE + 0x100 + 0x20 * level + 0x10 * side for side in (0, 1)] for level in range(levels)]
+    functions = []
+    for level, pair in enumerate(nodes):
+        for entry in pair:
+            builder = FunctionBuilder(entry=entry)
+            if level + 1 < levels:
+                builder.call(nodes[level + 1][0]).call(nodes[level + 1][1])
+            functions.append(builder.ret())
+    helper = (FunctionBuilder(entry=HELPER).push(RBX).call(nodes[0][0]).ins(copy(reg(RBX), const(0)))
+              .pop(RBX).ret())
+    computed = []
+    module, original, counting = _counting_cached(computed)
+    module.CallClobberDischarger._cached = counting
+    try:
+        assert _complete_with(helper, *functions)
+    finally:
+        module.CallClobberDischarger._cached = original
+    assert computed.count("frame") <= 3 * len(functions), computed.count("frame")   # (2 ** levels paths)
+
+
+@pytest.mark.parametrize("count, complete", ((14, True), (15, False)))
+def test_one_read_judged_at_two_keep_depths_keeps_both_answers(count, complete):
+    """Astra r5 P3 (M21): the dispatcher saves and restores RBX, then calls the
+    RBX-saving helper directly and through ``count`` forwarders; the helper's
+    saved slot is proven across a call that sets RCX, calls an RCX-preserving
+    callee (which calls a leaf after its restore) and reads RCX -- the same
+    read is judged near the top and near the depth bound. 14 forwarders fit
+    the bound (complete), 15 do not (the deep path is withheld)."""
+    from synthetic import RCX
+
+    leaf, keeper, setter, helper_entry = CODE_BASE + 0x700, CODE_BASE + 0x710, CODE_BASE + 0x720, CODE_BASE + 0x730
+    forwarders = [CODE_BASE + 0x100 + 0x10 * index for index in range(count)]
+    dispatcher = CODE_BASE + 0x740
+    keeper_body = (FunctionBuilder(entry=keeper).push(RCX).ins(copy(reg(RCX), const(0))).pop(RCX).call(leaf).ret())
+    setter_body = (FunctionBuilder(entry=setter).ins(copy(reg(RCX), const(1))).call(keeper)
+                   .ins(copy(reg(RAX), reg(RCX))).ret())
+    helper = (FunctionBuilder(entry=helper_entry).push(RBX).call(setter).ins(copy(reg(RBX), const(0)))
+              .pop(RBX).ret())
+    chain = [FunctionBuilder(entry=entry).call(forwarders[index + 1] if index + 1 < len(forwarders) else helper_entry)
+             .ret() for index, entry in enumerate(forwarders)]
+    dispatcher_body = (FunctionBuilder(entry=dispatcher).push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX)
+                       .call(helper_entry).call(forwarders[0]).ret())   # (both calls cross the restored RBX)
+    main = (FunctionBuilder(entry=MAIN).call(SOURCE).ins(copy(reg(RBX, 4), reg(RAX, 4))).call(dispatcher)
+            .ins(copy(reg(RCX, 4), reg(RBX, 4))).call(SINK).ret())
+    functions = {"main": main, "source": _source(), "sink": FunctionBuilder(entry=SINK).ret(),
+                 "leaf": FunctionBuilder(entry=leaf).ret(), "keeper": keeper_body, "setter": setter_body,
+                 "helper": helper, "dispatcher": dispatcher_body, **{f"f{i}": body for i, body in enumerate(chain)}}
+    assert analyze_program(functions, PROVIDER)[("main", "sink.arg0")].is_effectively_complete is complete
 
 
 @pytest.mark.parametrize("long_first", (True, False))

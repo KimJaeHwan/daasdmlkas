@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from ..resource_limits import RESOURCE_FAILURES
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .._scope_contracts import VarnodeKindCode
@@ -72,6 +72,17 @@ class CallClobberDischarge:
     kinds: tuple[DischargeKind, ...]
 
 
+@dataclass(slots=True)
+class _Entry:
+    """(PE-d r6) One cached question: the (keep depth, active length) points
+    where it was proven, where a depth cut refused it, and whether it fails
+    with no guard at all (``CallClobberDischarger._cached``)."""
+
+    proved: set = field(default_factory=set)
+    cut: set = field(default_factory=set)
+    never: bool = False
+
+
 class CallClobberDischarger:
     """Per-program cache of callee facts; one instance per engine run.
 
@@ -91,35 +102,45 @@ class CallClobberDischarger:
         # one discharge(): a row's judgement per (entry, row, context, active)
         # -- a read has a debt node per crossing call, each judged on its rows
         self._judged: dict = {}
-        self._preserved: dict = {}   # ((callee, span key), active) -> ``_cached`` entry
+        self._preserved: dict = {}   # ((callee, span key), relevant active) -> ``_Entry``
         # (PE-d) the exit crossings of a callee, and its kept spans (``_keeps``)
         self._exit_crossing_cache: dict = {}
         self._kept: dict = {}
         self._open_control_cache: dict = {}
         self._keep_depth = 0   # (Astra PE-d r1 P2: a bounded recursion)
-        # (PE-d r5, Astra r4 P2 / Fable r4 P2-1) a cached answer is exact for
-        # the state it was computed in. Inside a proof the context is always
-        # ``_EMPTY_CONTEXT``, so an answer depends on the question, the active
-        # path (``active``: its length bounds the frame and read recursion,
-        # its members are their cycle guards), the keep depth, and the
-        # questions open on the current path (``_pending``). ``_cached`` keys
-        # its entries by (question, active) and records, per keep depth:
-        #   True at depth d           -> True at every depth <= d (more budget);
-        #   False from a depth cut    -> False at every depth >= d (less budget);
-        #   False with no cut below   -> False at every depth;
-        #   any False resting on an open question (a cycle) -> not stored.
-        # A stored answer is then the question's own: whether a proof without
-        # circular steps exists within that depth (a True is such a proof; a
-        # stored False found none and never rested on an open question) -- no
-        # root order changes a result, and a chain is walked once per depth,
-        # not once per visit. ``_cut_events`` counts depth and active-path guards,
-        # ``_cycle_events`` the open-question guard (Fable r4 P3-3). The entries
-        # grow with the distinct (question, active path) pairs one engine run
-        # visits (Fable r4 P3-2): at most one per pair, each with two depths.
+        # (PE-d r6, Astra r4 P2 + r5 P2 / Fable r4 P2-1 + r5) a cached answer
+        # is exact for the state it was computed in. Inside a proof the context
+        # is always ``_EMPTY_CONTEXT`` (or a chain context built inside it), so
+        # an answer depends on the question, two depths -- the keep depth and
+        # the active path's length (the frame / read recursion) --, and the
+        # cycle guards: the open questions (``_pending``) and the active path's
+        # members. A member can only be met again below the question if its
+        # function is reachable from the question's function by direct
+        # internal calls (``_reach``; a proof visits nothing else -- the
+        # caller state it explains is the judged function's own), so
+        # ``_cached`` keys an entry by (question, those relevant members) and
+        # paths that differ only in unreachable ancestors share it (Astra r5
+        # P2: no per-path re-evaluation on a shared call graph). The answers
+        # are monotone in both depth budgets: every guard only answers False and
+        # a question only gets True from True parts (Fable r5 P3-3). An entry
+        # (``_Entry``) records:
+        #   True at (k, a)            -> True at every (k', a') <= (k, a);
+        #   False from a depth cut    -> False at every (k', a') >= (k, a);
+        #   False with no guard below -> False everywhere;
+        #   a False resting on a cycle guard (open question or member) -> not
+        #   stored (Fable r4 P2-1).
+        # A stored answer is then the question's own -- whether a proof without
+        # circular steps exists within those depths --, deliberately independent
+        # of the path that first asked it (Fable r5 P3-1): no root order changes
+        # a result, and a call graph is walked once per depth pair, not once per
+        # path. Entries: at most one per (question, relevant members) pair, each
+        # with at most (MAX_FRAME_DEPTH + 1) ** 2 points (Fable r4 P3-2).
+        # ``_cut_events`` counts depth guards, ``_cycle_events`` cycle guards.
         self._cut_events = 0
         self._cycle_events = 0
         self._pending: set = set()
-        self._frame_safe: dict = {}   # ((callee, start, stop), active) -> ``_cached`` entry
+        self._reach_cache: dict = {}
+        self._frame_safe: dict = {}   # ((callee, start, stop), relevant active) -> ``_Entry``
         from ..call_clobber import rows_by_debt
 
         # debt node -> all its rows (a copy proof splits one reader's row)
@@ -156,11 +177,11 @@ class CallClobberDischarger:
         return tuple(sorted(kinds))
 
     def _judge(self, entry, read, context, active):
-        """``_discharge_read`` once per (entry, row, context, active, keep
-        depth) within one ``discharge()``: a read's debt nodes (one per
-        crossing call) share rows. (PE-d r5) a judgement resting on a guard
-        below it is not memoized."""
-        key = (entry, read, id(context), active, self._keep_depth)
+        """``_discharge_read`` once per (entry, row, context, relevant active
+        members, both depths) within one ``discharge()``: a read's debt nodes
+        (one per crossing call) share rows. (PE-d r6) a judgement resting on a
+        guard below it is not memoized."""
+        key = (entry, read, id(context), self._relevant(entry, active), len(active), self._keep_depth)
         judged = self._judged.get(key)
         if judged is None or judged[0] is not context:   # (the context kept: its id is not reused)
             before = (self._cut_events, self._cycle_events)
@@ -170,23 +191,40 @@ class CallClobberDischarger:
             judged = self._judged[key] = (context, value)
         return judged[1]
 
-    def _cached(self, kind, cache, key, active, compute):
-        """(PE-d r5) ``compute()`` for one question, exact per state (see
-        ``_cycle_events`` in ``__init__``). An entry is ``[deepest True,
-        shallowest cut False, False at every depth]``."""
+    def _reach(self, entry) -> frozenset:
+        """``entry`` and every function its direct internal calls reach."""
+        held = self._reach_cache.get(entry)
+        if held is None:
+            seen, work = {entry}, [entry]
+            while work:
+                for target in self._targets.get(work.pop(), {}).values():
+                    if target not in seen:
+                        seen.add(target)
+                        work.append(target)
+            held = self._reach_cache[entry] = frozenset(seen)
+        return held
+
+    def _relevant(self, entry, active) -> tuple:
+        """The members of ``active`` a proof below ``entry`` may meet again."""
+        reach = self._reach(entry)
+        return tuple(item for item in active if item[0] in reach)
+
+    def _cached(self, kind, cache, key, entry_function, active, compute):
+        """(PE-d r6) ``compute()`` for one question, exact per state (see
+        ``_cycle_events`` in ``__init__``)."""
         question = (kind, key)
         if question in self._pending:
             self._cycle_events += 1   # (a cycle: answered False on this path, never stored)
             return False
-        depth = self._keep_depth
-        entry = cache.get((key, active))
-        if entry is not None:
-            true_upto, false_from, never = entry
-            if never:
+        point = (self._keep_depth, len(active))
+        slot = (key, self._relevant(entry_function, active))
+        held = cache.get(slot)
+        if held is not None:
+            if held.never:
                 return False
-            if true_upto is not None and depth <= true_upto:
+            if any(point[0] <= k and point[1] <= a for k, a in held.proved):
                 return True
-            if false_from is not None and depth >= false_from:
+            if any(point[0] >= k and point[1] >= a for k, a in held.cut):
                 self._cut_events += 1   # (still resting on that cut)
                 return False
         self._pending.add(question)
@@ -196,15 +234,15 @@ class CallClobberDischarger:
         finally:
             self._pending.discard(question)
         cut, cycle = self._cut_events != before[0], self._cycle_events != before[1]
-        entry = cache.setdefault((key, active), [None, None, False])
+        held = cache.setdefault(slot, _Entry())
         if value:
-            entry[0] = depth if entry[0] is None else max(entry[0], depth)
+            held.proved.add(point)
         elif cycle:
-            pass   # (rests on an open question: a later evaluation may prove it)
+            pass   # (rests on a cycle guard: a later evaluation may prove it)
         elif cut:
-            entry[1] = depth if entry[1] is None else min(entry[1], depth)
+            held.cut.add(point)
         else:
-            entry[2] = True
+            held.never = True
         return value
 
     def _rows(self, entry) -> tuple:
@@ -214,8 +252,11 @@ class CallClobberDischarger:
     # -- one read in one context ---------------------------------------------
     def _discharge_read(self, entry, read, context, active):
         marker = (entry, read.operation_key)
-        if marker in active or len(active) >= MAX_FRAME_DEPTH:
-            self._cut_events += 1   # (PE-d r4: a guard decided)
+        if marker in active:
+            self._cycle_events += 1   # (PE-d r6: a cycle guard decided)
+            return None
+        if len(active) >= MAX_FRAME_DEPTH:
+            self._cut_events += 1   # (PE-d r4: the depth guard decided)
             return None
         active = (*active, marker)
         targets = self._targets[entry]
@@ -487,7 +528,7 @@ class CallClobberDischarger:
                 lambda operation_key: self._callee_read_discharged(callee, operation_key, active),
             ) and not self._crossed_at_exit(callee, view, span, active)
 
-        return self._cached("preserves", self._preserved, (callee, span.canonical_key), active, compute)
+        return self._cached("preserves", self._preserved, (callee, span.canonical_key), callee, active, compute)
 
     def _crossed_at_exit(self, callee, view, span, active) -> bool:
         """(PE-d, S3 design r18 amendment 7) Some byte of ``span`` may change
@@ -602,7 +643,7 @@ class CallClobberDischarger:
             finally:
                 self._keep_depth -= 1
 
-        return self._cached("keeps", self._kept, (callee, span.canonical_key), active, compute)
+        return self._cached("keeps", self._kept, (callee, span.canonical_key), callee, active, compute)
 
     def _callee_read_discharged(self, callee, operation_key, active) -> bool:
         context = _EMPTY_CONTEXT
@@ -628,10 +669,13 @@ class CallClobberDischarger:
         """The callee never writes [start, stop) relative to its entry stack pointer."""
         if abs(start) >= MAX_FRAME_OFFSET or abs(stop) >= MAX_FRAME_OFFSET:
             return False
-        if len(active) >= MAX_FRAME_DEPTH or any(item[0] == callee for item in active):
-            self._cut_events += 1   # (PE-d r4: a guard decided)
+        if any(item[0] == callee for item in active):
+            self._cycle_events += 1   # (PE-d r6: a cycle guard decided)
             return False
-        return self._cached("frame", self._frame_safe, (callee, start, stop), active,
+        if len(active) >= MAX_FRAME_DEPTH:
+            self._cut_events += 1   # (PE-d r4: the depth guard decided)
+            return False
+        return self._cached("frame", self._frame_safe, (callee, start, stop), callee, active,
                             lambda: self._check_callee_frame(callee, start, stop, active))
 
     def _check_callee_frame(self, callee, start: int, stop: int, active) -> bool:
