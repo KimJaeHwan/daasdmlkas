@@ -30,6 +30,14 @@ const char *dc_isa_set_name(int index) { (void)index; return NULL; }
 
 int dc_isa_set_valid_for_chip(int index, const char *chip) { (void)index; (void)chip; return -1; }
 
+int dc_decode_without(const uint8_t *bytes, size_t length, uint64_t address, const char *isa_set, dc_decoded *out) {
+    (void)bytes; (void)length; (void)address; (void)isa_set;
+    memset(out, 0, sizeof(*out));
+    out->status = DC_ERROR;
+    strncpy(out->error_name, "single-feature decode not supported", sizeof(out->error_name) - 1);
+    return out->status;
+}
+
 static const char *status_name(ZyanStatus status) {
     switch (status) {
     case ZYDIS_STATUS_NO_MORE_DATA: return "NO_MORE_DATA";
@@ -96,9 +104,9 @@ static void fill_form_evidence(const ZydisDecodedInstruction *insn, const ZydisD
         strncpy(out->category, category, sizeof(out->category) - 1);
     }
     if (insn->cpu_flags) {
-        out->rflags_read = insn->cpu_flags->tested;
-        out->rflags_written = insn->cpu_flags->modified | insn->cpu_flags->set_0 | insn->cpu_flags->set_1
-                              | insn->cpu_flags->undefined;
+        out->rflags_read = insn->cpu_flags->tested & DC_RFLAGS_MASK;
+        out->rflags_written = (insn->cpu_flags->modified | insn->cpu_flags->set_0 | insn->cpu_flags->set_1
+                               | insn->cpu_flags->undefined) & DC_RFLAGS_MASK;
     }
     if (insn->attributes & ZYDIS_ATTRIB_HAS_LOCK) {
         out->prefix_flags |= DC_PFX_LOCK;

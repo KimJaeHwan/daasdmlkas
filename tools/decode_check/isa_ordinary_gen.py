@@ -73,16 +73,30 @@ def aliases(base: str) -> dict:
     return {voter: sorted(items) for voter, items in names.items()}
 
 
-def classify_form(row: dict) -> tuple:
+def mxcsr_flags(iclass: str, ordinary: dict, group: str | None = None) -> dict | None:
+    """simd_fp_exceptions / mxcsr_inputs / writes_mxcsr_status of an FP form from the reviewed groups."""
+    groups = ordinary["mxcsr_groups"]
+    name = group or next((key for key, item in groups.items() if iclass in item["iclasses"]), None)
+    if name is None:
+        return None
+    item = groups[name]
+    return {"simd_fp_exceptions": item["simd_fp_exceptions"], "mxcsr_inputs": list(item["mxcsr_inputs"]),
+            "writes_mxcsr_status": item["simd_fp_exceptions"]}
+
+
+def classify_form(row: dict, ordinary: dict) -> tuple:
     """(class, flags) or (None, reason)."""
     iclass, extension, exception, sig = row["iclass"], row["extension"], row["exception"], row["sig"]
     if exception not in KNOWN_EXCEPTIONS:
         return None, f"exception class {exception} not stated"
     fp = exception in FP_EXCEPTIONS
-    flags = {"simd_fp_exceptions": fp, "reads_mxcsr": fp, "writes_mxcsr_status": fp,
+    flags = {"simd_fp_exceptions": False, "mxcsr_inputs": [], "writes_mxcsr_status": False,
              "explicit_mmx_operand": "m" in sig, "alignment": "M" in sig and exception in ALIGNED}
-    if row["isa_set"] == "SSE2MMX":
-        return None, "SSE2 on MMX registers: OSFXSR dependence not stated"
+    grouped = mxcsr_flags(iclass, ordinary)
+    if fp or grouped:
+        if grouped is None:
+            return None, "SIMD FP form without a reviewed MXCSR group"
+        flags.update(grouped)
     if iclass in ("FXSAVE", "FXSAVE64"):
         return "fxsave", flags
     if iclass in ("FXRSTOR", "FXRSTOR64"):
@@ -91,11 +105,15 @@ def classify_form(row: dict) -> tuple:
         return "mxcsr", flags
     if extension == "X87":
         return ("fwait" if iclass == "FWAIT" else "x87_nowait" if iclass in X87_NOWAIT else "x87"), flags
+    if iclass == "EMMS":
+        return "emms", flags
+    if "m" in sig and "x" not in sig and not fp:
+        return "mmx", flags                # MMX registers only, integer: no OSFXSR (PAVGB mm, PMULHUW mm, PADDQ mm)
     if extension == "MMX":
         return "mmx", flags
     if extension in ("SSE", "SSE2"):
-        if "m" in sig:
-            return "mmx_sse", flags
+        if "m" in sig or exception in ("MMX_FP", "MMX_FP_16ALIGN"):
+            return "mmx_sse", flags        # XMM + MMX, or an SSE FP conversion with an MMX operand
         if "x" in sig or exception != "INVALID":   # XMM forms, and SSE forms reading memory (CVTSD2SI r, m64 ...)
             return ("sse_fp" if fp else "sse_int"), flags
         return "plain", flags              # exception INVALID, no XMM / MMX operand: fences, MOVNTI, PREFETCHh
@@ -131,7 +149,7 @@ def generate(rows: list, ordinary: dict, cited: set) -> tuple:
             dropped.setdefault(key, {"iclass": row["iclass"], "extension": row["extension"],
                                      "isa_set": row["isa_set"], "sig": row["sig"], "reason": why})
             continue
-        klass, flags = classify_form(row)
+        klass, flags = classify_form(row, ordinary)
         if klass is None:
             dropped.setdefault(key, {"iclass": row["iclass"], "extension": row["extension"],
                                      "isa_set": row["isa_set"], "sig": row["sig"], "reason": flags})
@@ -139,6 +157,10 @@ def generate(rows: list, ordinary: dict, cited: set) -> tuple:
         entry = {"iclass": row["iclass"], "extension": row["extension"], "isa_set": row["isa_set"],
                  "sig": row["sig"], "exception": row["exception"], "class": klass, "flags": flags,
                  "names": aliases(name), "rep": rep, "lock": lock, "widths": widths.get(row["iclass"])}
+        for override in ordinary.get("mxcsr_width_overrides", ()):
+            if override["iclass"] == row["iclass"]:
+                width_flags = mxcsr_flags(row["iclass"], ordinary, override["group"])
+                entry.setdefault("width_flags", {}).update({str(w): width_flags for w in override["widths"]})
         if key in entries and (entries[key]["class"], entries[key]["flags"]) != (klass, flags):
             entries.pop(key)
             dropped[key] = {"iclass": row["iclass"], "extension": row["extension"], "isa_set": row["isa_set"],

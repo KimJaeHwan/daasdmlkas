@@ -21,7 +21,7 @@ FLOWS = ("none", "call_near", "call_far", "jmp_near", "jmp_far", "jcc", "ret_nea
          "int_n", "int1", "into", "ud", "syscall", "sysenter", "sysret", "hlt", "xbegin", "xabort", "xend", "other")
 STATUSES = ("ok", "invalid", "no_more_data", "error")
 TARGET_KINDS = ("unknown", "none", "direct", "register", "memory")   # (enum dc_target_kind)
-LAYOUT_REVISION = 4
+LAYOUT_REVISION = 5
 MAX_LENGTH = 15
 FLOW_DETAILS = ("none", "sysret", "sysexit")                     # (enum dc_flow_detail)
 SEGMENTS = (("es", 1), ("cs", 2), ("ss", 4), ("ds", 8), ("fs", 16), ("gs", 32))   # (DC_SEG_*)
@@ -114,13 +114,16 @@ def _shim_extra(out: DcDecoded) -> dict:
             "sreg_operand": bool(out.sreg_operand), "lock": bool(out.prefix_flags & PFX_LOCK),
             "rep": "rep" if out.prefix_flags & PFX_REP else ("repne" if out.prefix_flags & PFX_REPNE else ""),
             "op_sig": _text(out.op_sig), "mem_overflow": bool(out.mem_overflow),
-            "memory": [_mem(out.mem[i]) for i in range(min(out.mem_count, MAX_MEM))]})
+            "memory": [_mem(out.mem[i], out.prefix_flags) for i in range(min(out.mem_count, MAX_MEM))]})
     return extra
 
 
-def _mem(m) -> dict:
+def _mem(m, prefix_flags: int) -> dict:
+    role = MEM_ROLES[m.role] if 0 <= m.role < len(MEM_ROLES) else "other"
+    # a REP-prefixed string access does not happen when the count register is 0 (2b r3 s6)
+    conditional = bool(prefix_flags & (PFX_REP | PFX_REPNE)) and role in ("string_source", "string_dest")
     return {"segment": next((name for name, bit in SEGMENTS if m.segment == bit), ""), "read": bool(m.read),
-            "write": bool(m.write), "role": MEM_ROLES[m.role] if 0 <= m.role < len(MEM_ROLES) else "other",
+            "write": bool(m.write), "role": role, "conditional": conditional,
             "operand_index": m.operand_index if m.operand_index >= 0 else None}
 
 
@@ -134,6 +137,9 @@ class _Shim:
         self.lib.dc_decode_ex.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64, ctypes.c_int,
                                           ctypes.c_char_p, ctypes.POINTER(DcDecoded)]
         self.lib.dc_decode_ex.restype = ctypes.c_int
+        self.lib.dc_decode_without.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64, ctypes.c_char_p,
+                                               ctypes.POINTER(DcDecoded)]
+        self.lib.dc_decode_without.restype = ctypes.c_int
         self.lib.dc_isa_set_name.argtypes = [ctypes.c_int]
         self.lib.dc_isa_set_name.restype = ctypes.c_char_p
         self.lib.dc_isa_set_valid_for_chip.argtypes = [ctypes.c_int, ctypes.c_char_p]
@@ -149,11 +155,16 @@ class _Shim:
         self.version = self.lib.dc_version().decode()
         self.derivation = derivation
 
-    def decode(self, data: bytes, address: int, amd: bool, chip: str | None = None) -> Decoded:
-        """chip None: the G1 voter setting; else a chip profile (XED only, ISA facts r3 s3 F4)."""
+    def decode(self, data: bytes, address: int, amd: bool, chip: str | None = None,
+               without: str | None = None) -> Decoded:
+        """chip None: the G1 voter setting; else a chip profile (XED only, ISA facts r3 s3 F4). without: decode
+        under XED_CHIP_ALL with that one ISA set removed (XED only: single-feature run)."""
         out = DcDecoded()
-        self.lib.dc_decode_ex(data, len(data), address, 1 if amd else 0, chip.encode() if chip else None,
-                              ctypes.byref(out))
+        if without:
+            self.lib.dc_decode_without(data, len(data), address, without.encode(), ctypes.byref(out))
+        else:
+            self.lib.dc_decode_ex(data, len(data), address, 1 if amd else 0, chip.encode() if chip else None,
+                                  ctypes.byref(out))
         status = STATUSES[out.status] if 0 <= out.status < len(STATUSES) else "error"
         extra = _shim_extra(out)
         if status != "ok":
@@ -378,6 +389,11 @@ class _Iced:
                 sig.append("r")
             else:
                 sig.append("?")
+        rep = ""
+        if code.can_use_rep_prefix and (instr.has_rep_prefix or instr.has_repe_prefix):
+            rep = "rep"
+        elif code.can_use_repne_prefix and instr.has_repne_prefix:
+            rep = "repne"
         memory, overflow = [], False
         if mnemonic not in (m.LEA, m.NOP):
             for used in self.info_factory.info(instr).used_memory():
@@ -398,13 +414,11 @@ class _Iced:
                                   x.OpAccess.READ_COND_WRITE)
                 write = access in (x.OpAccess.WRITE, x.OpAccess.COND_WRITE, x.OpAccess.READ_WRITE,
                                    x.OpAccess.READ_COND_WRITE)
+                conditional = access in (x.OpAccess.COND_READ, x.OpAccess.COND_WRITE) or (
+                    bool(rep) and role in ("string_source", "string_dest"))
                 memory.append({"segment": self.registers.get(used.segment, ""), "read": read, "write": write,
-                               "role": role, "operand_index": explicit_memory if is_explicit else None})
-        rep = ""
-        if code.can_use_rep_prefix and (instr.has_rep_prefix or instr.has_repe_prefix):
-            rep = "rep"
-        elif code.can_use_repne_prefix and instr.has_repne_prefix:
-            rep = "repne"
+                               "role": role, "conditional": conditional,
+                               "operand_index": explicit_memory if is_explicit else None})
         written = (instr.rflags_written | instr.rflags_cleared | instr.rflags_set | instr.rflags_undefined
                    | instr.rflags_modified)
         return {"category": self.flow_controls.get(instr.flow_control, str(instr.flow_control)),
@@ -438,6 +452,11 @@ def voter(name: str):
 # LAHF / SAHF in 64-bit mode, like the first x86-64 parts; it does include SSE3, CMPXCHG16B, MONITOR, PAUSE,
 # so splits on those come from the SDM split table, not from the profile comparison). Measured 2026-11-26.
 XED_PROFILES = {"xed:g1": None, "xed:baseline": "P4PRESCOTT_NOLAHF", "xed:all": "ALL"}
+
+
+def decode_without(isa_set: str, data: bytes, address: int) -> Decoded:
+    """XED under XED_CHIP_ALL with one ISA set removed (r3 s3 F4: the deciding feature of a split candidate)."""
+    return voter("xed").decode(bytes(data[:MAX_LENGTH]), address, False, without=isa_set)
 
 
 def decode_profile(profile: str, data: bytes, address: int) -> Decoded:

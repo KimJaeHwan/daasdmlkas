@@ -132,9 +132,11 @@ static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out) {
     strncpy(out->category, xed_category_enum_t2str(xed_decoded_inst_get_category(x)), sizeof(out->category) - 1);
     const xed_simple_flag_t *flags = xed_decoded_inst_get_rflags_info(x);
     if (flags) {
-        out->rflags_read = (uint32_t)xed_flag_set_mask(xed_simple_flag_get_read_flag_set(flags));
-        out->rflags_written = (uint32_t)xed_flag_set_mask(xed_simple_flag_get_written_flag_set(flags))
-                              | (uint32_t)xed_flag_set_mask(xed_simple_flag_get_undefined_flag_set(flags));
+        /* (XED's flag-set mask puts x87 FC0-FC3 above bit 21: only the architectural RFLAGS bits are kept) */
+        out->rflags_read = (uint32_t)xed_flag_set_mask(xed_simple_flag_get_read_flag_set(flags)) & DC_RFLAGS_MASK;
+        out->rflags_written = ((uint32_t)xed_flag_set_mask(xed_simple_flag_get_written_flag_set(flags))
+                               | (uint32_t)xed_flag_set_mask(xed_simple_flag_get_undefined_flag_set(flags)))
+                              & DC_RFLAGS_MASK;
     }
     const xed_operand_values_t *values = xed_decoded_inst_operands_const(x);
     if (xed_operand_values_has_lock_prefix(values)) {
@@ -201,6 +203,29 @@ static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out) {
 
 static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out);
 
+/* set only for the duration of one dc_decode_without call (ctypes calls are serial) */
+static xed_chip_features_t *pending_features = NULL;
+
+int dc_decode_without(const uint8_t *bytes, size_t length, uint64_t address, const char *isa_set_name,
+                      dc_decoded *out) {
+    init_tables();
+    xed_isa_set_enum_t isa_set = str2xed_isa_set_enum_t(isa_set_name);
+    if (isa_set == XED_ISA_SET_INVALID || isa_set == XED_ISA_SET_LAST) {
+        reset(out);
+        out->status = DC_ERROR;
+        strncpy(out->error_name, "unknown ISA set", sizeof(out->error_name) - 1);
+        return out->status;
+    }
+    xed_chip_features_t features;
+    xed_get_chip_features(&features, XED_CHIP_ALL);
+    xed_modify_chip_features(&features, isa_set, 0);
+    pending_features = &features;
+    int status = dc_decode_ex(bytes, length, address, 0, NULL, out);
+    pending_features = NULL;
+    snprintf(out->chip, sizeof(out->chip), "ALL-%s", isa_set_name);
+    return status;
+}
+
 int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip_name,
                  dc_decoded *out) {
     xed_decoded_inst_t x;
@@ -222,7 +247,9 @@ int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd,
         xed_decoded_inst_set_input_chip(&x, chip);
         strncpy(out->chip, xed_chip_enum_t2str(chip), sizeof(out->chip) - 1);
     }
-    xed_error_enum_t error = xed_decode(&x, (const xed_uint8_t *)bytes, (unsigned int)length);
+    xed_error_enum_t error = pending_features
+        ? xed_decode_with_features(&x, (const xed_uint8_t *)bytes, (unsigned int)length, pending_features)
+        : xed_decode(&x, (const xed_uint8_t *)bytes, (unsigned int)length);
     out->error_code = (int32_t)error;
     if (error != XED_ERROR_NONE) {
         strncpy(out->error_name, xed_error_enum_t2str(error), sizeof(out->error_name) - 1);

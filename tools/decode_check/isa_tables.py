@@ -31,7 +31,16 @@ LEGACY_PREFIXES = frozenset((0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x2
 ENTRY_FIELDS = frozenset(("cite", "f2", "f2_meaning", "f3", "f4", "f5", "f6", "f7", "cet", "mpx", "access_width",
                           "state_dependent", "state_effect", "data_faults", "undefined_outputs", "split",
                           "split_member", "note"))
-WHEN_FIELDS = frozenset(("operand_bits", "flow", "counter", "target_kind", "opcode", "modrm_reg", "prefix"))
+WHEN_FIELDS = frozenset(("operand_bits", "flow", "counter", "target_kind", "opcode", "modrm_reg", "prefix", "modrm"))
+F7_FIELDS = frozenset(("writes_base", "writes_state", "when"))
+# the evidence each voter must report for the ordinary tests (missing -> the test fails, never passes; impl r1 P1-2)
+REQUIRED_EVIDENCE = {
+    "xed": ("op_sig", "rep", "lock", "isa_set", "privileged_attribute", "rflags_read", "rflags_written",
+            "sreg_operand", "category", "memory"),
+    "zydis": ("op_sig", "rep", "lock", "isa_set", "privileged_attribute", "rflags_read", "rflags_written",
+              "sreg_operand", "category", "memory"),
+    "iced": ("op_sig", "rep", "lock", "cpuid_features", "must_be_cpl0", "is_privileged", "may_require_cpl0",
+             "rflags_read", "rflags_written", "sreg_operand", "category", "is_input_output", "memory")}
 CET_CONDITIONS = frozenset(("CET_SS", "CET_IBT"))
 RFLAGS = {"TF": 1 << 8, "IF": 1 << 9, "IOPL": 3 << 12, "NT": 1 << 14, "RF": 1 << 16, "VM": 1 << 17, "AC": 1 << 18,
           "VIF": 1 << 19, "VIP": 1 << 20, "ID": 1 << 21}
@@ -132,6 +141,7 @@ def validate(conditions: dict, mapping: dict, splits: dict, ordinary: dict | Non
             _check(isinstance(item, dict) and item.get("output"), f"conditions: {key} undefined_outputs {item}")
         if "split" in entry:
             _check(entry["split"] in split_ids, f"conditions: {key} names unknown split {entry['split']}")
+        _check(set(entry.get("f7", {})) <= F7_FIELDS, f"conditions: {key} f7 fields {sorted(entry.get('f7', {}))}")
     for meaning, item in meanings.items():
         _check(bool(item.get("cite")) and bool(item.get("outputs")), f"conditions: f2 meaning {meaning}")
         for output in item["outputs"]:
@@ -153,6 +163,7 @@ def validate(conditions: dict, mapping: dict, splits: dict, ordinary: dict | Non
                 selector = (voter, mnemonic, json.dumps(rule.get("when", {}), sort_keys=True))
                 key = mnemonic if rule["key"] == "=" else rule["key"]
                 _check(seen_rules.setdefault(selector, key) == key, f"{where}: selector {selector} gives two keys")
+    _check_overlaps(mapping["rules"])
     for split in splits["splits"]:
         for role in ("main", "fallback"):
             _check(split[role] in entries, f"splits: {split['id']} {role} {split[role]} is not in the condition table")
@@ -161,6 +172,57 @@ def validate(conditions: dict, mapping: dict, splits: dict, ordinary: dict | Non
         _check(bool(item.get("cite")) and bool(item.get("vector")), f"splits: {item['id']} cite / vector")
     if ordinary is not None:
         _validate_ordinary(ordinary, entries)
+
+
+def _check_overlaps(rules: list) -> None:
+    """Rules for the same voter and named mnemonic that give different keys (impl r1 P2-4) are rejected when
+    (1) both list opcodes / ModRM values and the lists intersect, or (2) an earlier rule is at least as general
+    as a later one, so the later rule can never be reached. Specific-then-general ordering is allowed. The "*"
+    rules select by flow (the three jcc groups, reviewed as a set) and are not compared with named mnemonics."""
+    lists = ("opcode", "modrm", "modrm_reg")
+
+    def intersect(name, left, right):
+        if name == "opcode":
+            return any(x.startswith(y) or y.startswith(x) for x in left for y in right)
+        return bool(set(left) & set(right))
+
+    def covers(general, specific):                 # every field of `general` holds whenever `specific` holds
+        for name, value in general.items():
+            if name not in specific:
+                return False
+            other = specific[name]
+            if name in lists:
+                if name == "opcode":
+                    if not all(any(o.startswith(g) for g in value) for o in other):
+                        return False
+                elif not set(other) <= set(value):
+                    return False
+            elif isinstance(value, list):
+                if not set(other) <= set(value):
+                    return False
+            elif value != other:
+                return False
+        return True
+
+    mnemonics = sorted({m for rule in rules for m in rule["mnemonic"] if m != "*"})
+    for voter in VOTERS:
+        for mnemonic in mnemonics:
+            chosen = [(i, r) for i, r in enumerate(rules)
+                      if voter in r.get("voters", VOTERS) and mnemonic in r["mnemonic"]]
+            for x, (i, a) in enumerate(chosen):
+                for j, b in chosen[x + 1:]:
+                    key_a = mnemonic if a["key"] == "=" else a["key"]
+                    key_b = mnemonic if b["key"] == "=" else b["key"]
+                    if key_a == key_b:
+                        continue
+                    wa, wb = a.get("when", {}), b.get("when", {})
+                    shared = [n for n in lists if n in wa and n in wb]
+                    others_equal = all(wa.get(n) == wb.get(n) for n in set(wa) | set(wb) if n not in lists)
+                    if shared and others_equal and all(intersect(n, wa[n], wb[n]) for n in shared):
+                        _check(False, f"map: rules {i} and {j} select the same {shared} for {voter} {mnemonic}: "
+                                      f"{key_a} / {key_b}")
+                    _check(not covers(wa, wb), f"map: rule {j} ({key_b}) is shadowed by rule {i} ({key_a}) "
+                                               f"for {voter} {mnemonic}")
 
 
 def _validate_ordinary(ordinary: dict, cited: dict) -> None:
@@ -196,10 +258,9 @@ def opcode_view(window: bytes) -> tuple:
     """(legacy prefixes, opcode bytes, ModRM or None) of a legacy / REX encoded instruction; VEX / EVEX / XOP
     encodings give empty opcode bytes (no map rule qualifies them by opcode)."""
     index, prefixes = 0, []
-    while index < len(window) and window[index] in LEGACY_PREFIXES:
-        prefixes.append(window[index])
-        index += 1
-    if index < len(window) and 0x40 <= window[index] <= 0x4F:
+    while index < len(window) and (window[index] in LEGACY_PREFIXES or 0x40 <= window[index] <= 0x4F):
+        if window[index] in LEGACY_PREFIXES:   # (a REX followed by a legacy prefix is ignored, not the opcode)
+            prefixes.append(window[index])
         index += 1
     if index >= len(window) or window[index] in (0xC4, 0xC5, 0x62, 0x8F):
         return tuple(prefixes), b"", None
@@ -228,6 +289,8 @@ def _when_holds(when: dict, vote, view) -> bool:
         if name == "modrm_reg" and (modrm is None or (modrm >> 3) & 7 not in wanted):
             return False
         if name == "prefix" and int(wanted, 16) not in prefixes:
+            return False
+        if name == "modrm" and (modrm is None or modrm not in {int(item, 16) for item in wanted}):
             return False
     return True
 
@@ -266,12 +329,19 @@ def _system_mask(tables: Tables, voter: str) -> int:
 def _voter_failures(tables: Tables, entry: dict, vote, window: bytes) -> list:
     """The 2b r1 s4 tests (A-F) one voter fails for `entry`, from its own evidence: [(test, detail), ...]."""
     ordinary, extra, voter = tables.ordinary, vote.extra, vote.voter
+    missing = [name for name in REQUIRED_EVIDENCE[voter] if name not in extra]
+    if missing:
+        return [("evidence", f"missing {missing}")]
     failures = []
-    # A: form (name / alias, normalised operand kinds, effective REP / LOCK, 64-bit addressing)
-    if voter == "xed":
-        if extra.get("op_sig", None) != entry["sig"]:
-            failures.append(("A", f"operand kinds {extra.get('op_sig')!r} != {entry['sig']!r}"))
-    else:
+    # A: form (name / alias, operand kinds, effective REP / LOCK, address and operand width). XED and Zydis share
+    # the operand-kind convention and must match the entry exactly; iced lists implicit accumulator / count /
+    # string registers as operands, so its check is the name plus the non-GPR, non-immediate kinds.
+    if voter in ("xed", "zydis"):
+        if extra["op_sig"] != entry["sig"]:
+            failures.append(("A", f"operand kinds {extra['op_sig']!r} != {entry['sig']!r}"))
+    if voter == "zydis" and vote.mnemonic.upper() not in entry["names"]["zydis"]:
+        failures.append(("A", f"name {vote.mnemonic} not in {entry['names']['zydis']}"))
+    if voter == "iced":
         if vote.mnemonic.upper() not in entry["names"][voter]:
             failures.append(("A", f"name {vote.mnemonic} not in {entry['names'][voter]}"))
         own = _norm_sig(extra.get("op_sig", ""))
@@ -283,10 +353,14 @@ def _voter_failures(tables: Tables, entry: dict, vote, window: bytes) -> list:
         failures.append(("A", f"rep {extra.get('rep')!r} != {entry['rep']!r}"))
     if bool(extra.get("lock")) != entry["lock"]:
         failures.append(("A", f"lock {extra.get('lock')} != {entry['lock']}"))
-    if ("M" in entry["sig"] or extra.get("memory")) and vote.address_bits != 64:
+    if ("M" in entry["sig"] or "A" in entry["sig"] or extra.get("memory")) and vote.address_bits != 64:
         failures.append(("A", f"address width {vote.address_bits}"))
-    if entry.get("widths") and vote.operand_bits and vote.operand_bits not in entry["widths"]:
-        failures.append(("A", f"operand width {vote.operand_bits} not in {entry['widths']}"))
+    if entry.get("widths"):
+        # XED and Zydis must report the width; iced reports 0 for many forms (not provided, not a pass on its own)
+        if voter in ("xed", "zydis") and not vote.operand_bits:
+            failures.append(("A", "operand width not reported"))
+        elif vote.operand_bits and vote.operand_bits not in entry["widths"]:
+            failures.append(("A", f"operand width {vote.operand_bits} not in {entry['widths']}"))
     # B: base ISA level
     if voter == "iced":
         outside = sorted(set(extra.get("cpuid_features", ())) - set(ordinary["base_cpuid_features_iced"]))
@@ -301,7 +375,7 @@ def _voter_failures(tables: Tables, entry: dict, vote, window: bytes) -> list:
     elif extra.get("privileged_attribute"):
         failures.append(("C", "privileged attribute"))
     # D: system flags (per-voter capability)
-    touched = (extra.get("rflags_read", 0) | extra.get("rflags_written", 0)) & _system_mask(tables, voter)
+    touched = (extra["rflags_read"] | extra["rflags_written"]) & _system_mask(tables, voter)
     if touched:
         failures.append(("D", f"system flags {touched:#x}"))
     # E: segment-register operand
@@ -321,12 +395,13 @@ def classify(tables: Tables, votes: dict, window: bytes) -> dict:
     unclassified, with per-voter evidence and the digests applied (2b r2 G)."""
     out = {"digests": dict(tables.digests), "voters": {}}
     missing = [name for name in VOTERS if name not in votes or votes[name].status != "ok"]
-    if missing:
-        out.update(result="unclassified", reasons=[f"{name}: no ok vote" for name in missing])
-        return out
-    cited = {name: lookup(tables, votes[name], window) for name in VOTERS}
+    cited = {name: (lookup(tables, votes[name], window) if name not in missing else None) for name in VOTERS}
     for name in VOTERS:
         out["voters"][name] = {"cited": cited[name]}
+    if missing:
+        out.update(result="unclassified", reasons=[f"{name}: no ok vote" for name in missing],
+                   keys={name: key for name, key in cited.items() if name not in missing})
+        return out
     present = {key for key in cited.values() if key}
     if present:
         if None in cited.values():
@@ -358,8 +433,15 @@ def classify(tables: Tables, votes: dict, window: bytes) -> dict:
     if reasons:
         out.update(result="unclassified", reasons=reasons, entry=_entry_id(entry))
     else:
-        out.update(result="derived_ordinary", entry=_entry_id(entry), **{"class": entry["class"]},
-                   flags=dict(entry["flags"]))
+        flags = dict(entry["flags"])
+        width_flags = entry.get("width_flags", {}).get(str(xed.operand_bits))
+        if width_flags is not None:
+            if votes["zydis"].operand_bits != xed.operand_bits:
+                out.update(result="unclassified", reasons=["width-dependent flags: XED / Zydis widths differ"],
+                           entry=_entry_id(entry))
+                return out
+            flags.update(width_flags)
+        out.update(result="derived_ordinary", entry=_entry_id(entry), **{"class": entry["class"]}, flags=flags)
     return out
 
 

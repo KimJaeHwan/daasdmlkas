@@ -80,6 +80,8 @@ enum dc_mem_role {
     DC_ROLE_OTHER = 4            /* any other implicit access (descriptor tables, XLAT, ...) */
 };
 
+#define DC_RFLAGS_MASK 0x3FFFFFu   /* architectural RFLAGS bits 0-21 */
+
 #define DC_MAX_MEM 8
 typedef struct {
     int32_t segment;        /* DC_SEG_* bit of its address segment; 0 when the decoder reports none (flat) */
@@ -137,14 +139,18 @@ int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc
 /* chip: NULL = the G1 voter setting; otherwise a chip profile name (XED only; others return DC_ERROR) */
 int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip,
                  dc_decoded *out);
+/* XED only: decode under XED_CHIP_ALL with one ISA set removed (single-feature run for split candidates outside
+ * the split table, ISA facts r3 s3 F4); others return DC_ERROR */
+int dc_decode_without(const uint8_t *bytes, size_t length, uint64_t address, const char *isa_set, dc_decoded *out);
 /* ISA-set catalogue for profile digests: name of set `index` (NULL past the last); whether that set is
  * valid for `chip` (1 / 0, -1 unknown chip or not supported by this decoder) */
 const char *dc_isa_set_name(int index);
 int dc_isa_set_valid_for_chip(int index, const char *chip);
 const char *dc_version(void);
 int dc_struct_size(void);
-/* the layout revision: fields can fit in old struct padding, so the size alone cannot tell (4) */
-#define DC_LAYOUT_REVISION 4
+/* the layout / ABI revision: fields can fit in old struct padding, so the size alone cannot tell (5: the struct
+ * of revision 4, RFLAGS masks limited to bits 0-21, dc_decode_without added) */
+#define DC_LAYOUT_REVISION 5
 int dc_layout_revision(void);
 
 #endif

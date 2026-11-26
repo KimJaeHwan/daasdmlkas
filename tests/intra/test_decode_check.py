@@ -2154,7 +2154,7 @@ ISA_CLASSIFY = {
     "0F2AC1": ("derived_ordinary", "mmx_sse"), "660F2AC1": ("derived_ordinary", "mmx_sse"),
     "660F2A00": ("derived_ordinary", "sse_int"), "0F53C1": ("derived_ordinary", "sse_int"),
     "F20F2D00": ("derived_ordinary", "sse_fp"),                       # CVTSD2SI eax, [rax]: SSE without an XMM operand
-    "0F10C1": ("derived_ordinary", "sse_int"), "0F77": ("derived_ordinary", "mmx"),
+    "0F10C1": ("derived_ordinary", "sse_int"),
     "9B": ("derived_ordinary", "fwait"), "0FAE00": ("derived_ordinary", "fxsave"),
     "0FAE08": ("derived_ordinary", "fxrstor"), "0FAE10": ("derived_ordinary", "mxcsr"),
     "DFE0": ("derived_ordinary", "x87_nowait"), "D9E8": ("derived_ordinary", "x87"),
@@ -2171,6 +2171,14 @@ ISA_CLASSIFY = {
     "F390": ("cited_split", "pause-nop"), "F30F1EFA": ("cited_split", "endbr64-nop"),
     "F30FBCC1": ("cited_split", "tzcnt-bsf"),
     "F083C001": ("unclassified", "no ok vote"),                        # illegal LOCK: F1, no class
+    # implementation review round 1 (Astra / Fable)
+    "660FA4C811": ("cited", "SHLD16"), "660FADC8": ("cited", "SHRD16"), "0FA4C811": ("derived_ordinary", "plain"),
+    "678D00": ("unclassified", "address width 32"), "678D0408": ("unclassified", "address width 32"),
+    "40F301C8": ("unclassified", "F2 / F3 prefix"), "F2F00100": ("unclassified", "F2 / F3 prefix"),
+    "0FE4C1": ("derived_ordinary", "mmx"), "0FD4C1": ("derived_ordinary", "mmx"),     # PMULHUW mm, PADDQ mm
+    "0F77": ("derived_ordinary", "emms"),
+    "F20F2AC0": ("derived_ordinary", "sse_fp"), "F2480F2AC0": ("derived_ordinary", "sse_fp"),
+    "669D": ("cited", "POPF"),
 }
 
 
@@ -2209,8 +2217,13 @@ def test_isa_2b_class_flags_and_per_operand_mmx():
     tables = isa_tables.load()
     with_mm, with_mem = _classify(tables, "660F2AC1"), _classify(tables, "660F2A00")   # CVTPI2PD xmm, mm / m64
     assert with_mm["flags"]["explicit_mmx_operand"] and not with_mem["flags"]["explicit_mmx_operand"]
-    assert not with_mm["flags"]["reads_mxcsr"]                       # exact conversion
-    assert _classify(tables, "0F2AC1")["flags"]["reads_mxcsr"]        # CVTPI2PS rounds
+    assert with_mm["flags"]["mxcsr_inputs"] == [] and not with_mm["flags"]["simd_fp_exceptions"]   # exact
+    assert _classify(tables, "0F2AC1")["flags"]["mxcsr_inputs"] == ["RC"]                        # CVTPI2PS rounds
+    assert _classify(tables, "0F2CC1")["flags"]["mxcsr_inputs"] == ["DAZ"]                       # CVTTPS2PI truncates
+    assert _classify(tables, "0F58C1")["flags"]["mxcsr_inputs"] == ["RC", "DAZ", "FTZ"]         # ADDPS
+    r32, r64 = _classify(tables, "F20F2AC0")["flags"], _classify(tables, "F2480F2AC0")["flags"]   # CVTSI2SD
+    assert (r32["simd_fp_exceptions"], r32["mxcsr_inputs"]) == (False, [])
+    assert (r64["simd_fp_exceptions"], r64["mxcsr_inputs"]) == (True, ["RC"])
     rcpps = _classify(tables, "0F53C1")["flags"]
     assert not rcpps["simd_fp_exceptions"]
     assert _classify(tables, "0F10C1")["flags"]["alignment"] is False  # MOVUPS (type 4M)
@@ -2303,3 +2316,111 @@ def test_isa_2b_mpx_set_and_bnd_direction():
     assert {"name": "CET_IBT", "unless": "NOTRACK"} in tables.entry("JMP_NEAR_INDIRECT")["cet"]
     assert tables.entry("BSF")["undefined_outputs"][0]["when"].startswith("source = 0")
     assert "state_effect" in tables.entry("MOV_TO_SS") and "state_effect" not in tables.entry("LSS")
+
+
+# -- ISA facts: implementation review round 1 fixes ------------------------------------------------------------
+
+@needs
+def test_isa_impl_missing_evidence_or_form_mismatch_never_passes():
+    """impl r1 P1-2: a voter without its evidence, or with another operand-kind form, is not an agreement."""
+    import dataclasses
+
+    import isa_tables
+
+    tables = isa_tables.load()
+    data = bytes.fromhex("4801C8") + ISA_PAD                      # add rax, rcx
+    votes = _votes("4801C8")
+    assert isa_tables.classify(tables, votes, data)["result"] == "derived_ordinary"
+    for name, field in (("iced", "must_be_cpl0"), ("iced", "rflags_written"), ("zydis", "sreg_operand"),
+                        ("xed", "privileged_attribute")):
+        extra = {k: v for k, v in votes[name].extra.items() if k != field}
+        broken = dict(votes, **{name: dataclasses.replace(votes[name], extra=extra)})
+        got = isa_tables.classify(tables, broken, data)
+        assert got["result"] == "unclassified" and any("evidence" in r for r in got["reasons"]), (name, field)
+    zydis = dataclasses.replace(votes["zydis"], extra=dict(votes["zydis"].extra, op_sig="gi"))
+    got = isa_tables.classify(tables, dict(votes, zydis=zydis), data)
+    assert got["result"] == "unclassified" and any("operand kinds" in r for r in got["reasons"])
+
+
+@needs
+def test_isa_impl_partial_lookup_is_kept_when_a_voter_fails():
+    import dataclasses
+
+    import isa_tables
+
+    tables = isa_tables.load()
+    votes = _votes("0FA2")
+    failed = dict(votes, zydis=dataclasses.replace(votes["zydis"], status="error"))
+    got = isa_tables.classify(tables, failed, bytes.fromhex("0FA2") + ISA_PAD)
+    assert got["result"] == "unclassified" and got["keys"] == {"iced": "CPUID", "xed": "CPUID"}
+
+
+@needs
+def test_isa_impl_rflags_masks_are_architectural_bits():
+    """impl r1 Fable P3-1 / Astra P3: CLI writes IF; POPFQ writes IF, IOPL, AC; no bit above 21."""
+    IF, IOPL, AC = 1 << 9, 3 << 12, 1 << 18
+    cli, popfq = _votes("FA"), _votes("9D")
+    for name in ("xed", "zydis", "iced"):
+        assert cli[name].extra["rflags_written"] & IF, name
+        assert popfq[name].extra["rflags_written"] & (IF | AC) == IF | AC, name
+        assert (cli[name].extra["rflags_written"] | popfq[name].extra["rflags_written"]) < (1 << 22), name
+    for name in ("xed", "zydis"):
+        assert popfq[name].extra["rflags_written"] & IOPL, name
+    assert not popfq["iced"].extra["rflags_written"] & IOPL     # (iced reports IF / AC only: capability)
+
+
+@needs
+def test_isa_impl_single_feature_decode_and_conditional_accesses():
+    import decoders as d
+
+    for hexbytes, isa_set, fallback in (("F30FBCC1", "BMI1", "BSF"), ("F30FBDC1", "LZCNT", "BSR"),
+                                        ("F30F1EFA", "CET", "NOP")):
+        got = d.decode_without(isa_set, bytes.fromhex(hexbytes) + ISA_PAD, CODE)
+        assert got.status == "ok" and got.mnemonic == fallback and got.extra["chip"] == f"ALL-{isa_set}"
+    assert d.decode_without("NO_SUCH_SET", b"\x90" * 15, CODE).status == "error"
+    for name, vote in _votes("64F3A4").items():
+        assert all(m["conditional"] for m in vote.extra["memory"]), name
+    for name, vote in _votes("64A4").items():                       # movsb without REP: unconditional
+        assert not any(m["conditional"] for m in vote.extra["memory"]), name
+
+
+def test_isa_impl_data_fixes():
+    import isa_tables
+
+    tables = isa_tables.load()
+    wrmsr = tables.entry("WRMSR")["f7"]
+    assert set(wrmsr["writes_base"]) == {"fs", "gs", "kernel_gs"} and "ECX unknown" in wrmsr["when"]
+    assert tables.entry("XGETBV")["f6"][0]["source"] == "os_set_or_program_set"
+    assert tables.entry("POPF")["f2_meaning"] == "POPF16_FLAGS" and tables.entry("POPFQ")["f2_meaning"] == "POPF_FLAGS"
+    popf16 = {o["output"]: o for o in tables.conditions["f2_meanings"]["POPF16_FLAGS"]["outputs"]}
+    assert not any("loaded at any CPL" in str(o) for o in popf16.values())
+    endbr32 = next(s for s in tables.splits["splits"] if s["id"] == "endbr32-nop")
+    assert any(item.startswith("CS.L=0") for item in endbr32["enabled"])
+    assert tables.ordinary["classes"]["fxsave"]["f6"][0]["source"] == "external"
+    assert "transition" not in str(tables.ordinary["classes"]["emms"]["effects"]).replace("no x87-to-MMX transition", "")
+    for name in ("SHLD", "SHRD", "BSWAP"):
+        assert tables.ordinary["width_limits"][name]["widths"] == [32, 64]
+
+
+def test_isa_impl_validator_rejects_overlapping_selectors():
+    import copy
+    import json
+
+    import isa_tables
+
+    root = Path(isa_tables.__file__).parent
+    files = {name: json.loads((root / isa_tables.FILES[name]).read_text(encoding="utf-8")) for name in isa_tables.FILES}
+    mapping = copy.deepcopy(files["map"])
+    mapping["rules"].insert(0, {"mnemonic": ["NOP"], "when": {"opcode": ["90", "91"]}, "key": "PAUSE"})
+    with pytest.raises(isa_tables.TableError):
+        isa_tables.validate(files["conditions"], mapping, files["splits"], files["ordinary"])
+    isa_tables.validate(files["conditions"], files["map"], files["splits"], files["ordinary"])
+
+
+@needs
+def test_isa_impl_nop_fallback_needs_the_exact_endbr_byte():
+    import isa_tables
+
+    tables = isa_tables.load()
+    assert _classify(tables, "F30F1EFA")["result"] == "cited_split"
+    assert _classify(tables, "F30F1EF8")["result"] != "cited"        # 0F 1E /7 but not FA / FB
