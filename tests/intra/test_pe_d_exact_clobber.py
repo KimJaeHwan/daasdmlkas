@@ -176,3 +176,109 @@ def test_an_untouching_callee_that_calls_an_opaque_function_keeps_nothing():
     the leaf never writes RBX, but its own opaque call may: no certificate."""
     helper = (FunctionBuilder(entry=HELPER).push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX).call(LEAF).ret())
     assert not _complete_with(helper, FunctionBuilder(entry=LEAF).call(OPAQUE).ret())
+
+
+class _ListedJump(FunctionBuilder):
+    """Its BRANCHIND lists the next instruction (a jump table inside the
+    function), or an address outside it (``outside``)."""
+
+    outside = False
+
+    def to_json(self):
+        document = super().to_json()
+        rows = document["instructions"]
+        for index, row in enumerate(rows):
+            if any(item["opcode"] == "BRANCHIND" for item in row["operations"]):
+                target = dict(rows[index + 1]["address"])
+                if self.outside:
+                    target["byte_offset"] = OPAQUE
+                row["flow_targets"] = [target]
+        return document
+
+
+@pytest.mark.parametrize("outside", (False, True))
+def test_a_jump_table_inside_the_callee_keeps_the_certificate(outside):
+    """Fable PE-d r2 P2-1: a BRANCHIND whose listed targets are all inside the
+    function does not leave it (certificate kept); one listing an outside
+    target does (no certificate)."""
+    from synthetic import RDX
+
+    helper = _ListedJump(entry=HELPER)
+    helper.outside = outside
+    helper.push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX).jump_indirect(reg(RDX))
+    helper.ret()
+    try:
+        complete = _complete(helper)
+    except Exception as error:   # (a shape admission refuses is no certificate either)
+        assert outside, error
+        return
+    assert complete is (not outside)
+
+
+INNER, WRITER = CODE_BASE + 0x880, CODE_BASE + 0x8C0
+
+
+def test_a_tail_jump_in_an_inner_call_voids_the_frame_proof():
+    """Astra PE-d r2 P1-2: push rbx; call inner; pop rbx; ret with inner tail-jumping
+    to a writer of [rsp + 8] -- the saved copy may be overwritten: no certificate."""
+    from synthetic import R8, add, store, tmp
+
+    t = tmp(0x100)
+    helper = FunctionBuilder(entry=HELPER).push(RBX).call(INNER).ins(copy(reg(RBX), const(0)))
+    helper = helper.pop(RBX).ret()
+    inner = FunctionBuilder(entry=INNER).ins(copy(reg(RCX), const(1))).tail_call(WRITER)   # (no pure thunk)
+    writer = FunctionBuilder(entry=WRITER).ins(add(t, reg(RSP), const(8)), store(t, reg(R8))).ret()
+    assert not _complete_with(helper, inner, writer)
+
+
+def test_a_recorded_fallthrough_exit_is_open_control():
+    """Astra PE-d r2 P1-1: a row whose fallthrough leaves the function (a
+    recorded ``fallthrough_exits`` row) -- the exit check does not model what
+    runs after it."""
+    from types import SimpleNamespace
+    from tdo_v2.integration.configured_call_clobber_discharge import CallClobberDischarger
+
+    discharger = CallClobberDischarger.__new__(CallClobberDischarger)
+    discharger._open_control_cache = {}
+    observation = SimpleNamespace(instructions=(), fallthrough_exits=(object(),))
+    view = SimpleNamespace(analysis=SimpleNamespace(evidence=SimpleNamespace(unit=SimpleNamespace(
+        observation=observation, scopes=None))), operations={})
+    from tdo_v2._scope_contracts import AddressCoordinate
+
+    entry = AddressCoordinate(1, 0x1000)
+    import tdo_v2.interprocedural as ip
+    original = ip._tail_jumps
+    try:
+        ip._tail_jumps = lambda unit: frozenset()
+        assert discharger._open_control(entry, view)
+        discharger._open_control_cache.clear()
+        observation.fallthrough_exits = ()
+        assert not discharger._open_control(entry, view)
+    finally:
+        ip._tail_jumps = original
+
+
+def test_the_depth_cut_does_not_depend_on_root_order():
+    """Astra PE-d r2 P2-1: a root over a chain deeper than the bound, decided
+    first, must not leave a later root over a short part of the same chain
+    uncertified (results resting on the cut are not memoized)."""
+    depth = 18
+    entries = [CODE_BASE + 0x100 + 0x10 * index for index in range(depth)]
+    chain = [FunctionBuilder(entry=entry).call(entries[index + 1]).ret() if index + 1 < depth
+             else FunctionBuilder(entry=entry).ret() for index, entry in enumerate(entries)]
+    long_helper = (FunctionBuilder(entry=HELPER).push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX)
+                   .call(entries[0]).ret())
+    short_helper = (FunctionBuilder(entry=LEAF).push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX)
+                    .call(entries[15]).ret())   # (the node just above the cut)
+    second = CODE_BASE + 0x600
+
+    def root_function(entry, helper):
+        return (FunctionBuilder(entry=entry).call(SOURCE).ins(copy(reg(RBX, 4), reg(RAX, 4))).call(helper)
+                .ins(copy(reg(RCX, 4), reg(RBX, 4))).call(SINK).ret())
+
+    functions = {"main": root_function(MAIN, HELPER), "second": root_function(second, LEAF), "source": _source(),
+                 "helper": long_helper, "short": short_helper, "sink": FunctionBuilder(entry=SINK).ret(),
+                 **{f"c{i}": body for i, body in enumerate(chain)}}
+    roots = analyze_program(functions, PROVIDER)
+    assert not roots[("main", "sink.arg0")].is_effectively_complete   # (beyond the bound: withheld)
+    assert roots[("second", "sink.arg0")].is_effectively_complete

@@ -97,6 +97,7 @@ class CallClobberDischarger:
         self._kept: dict = {}
         self._open_control_cache: dict = {}
         self._keep_depth = 0   # (Astra PE-d r1 P2: a bounded recursion)
+        self._keep_cut = False   # (a result on this path rests on the depth cut: not memoized)
         self._frame_safe: dict[tuple[AddressCoordinate, int, int], bool] = {}
         from ..call_clobber import rows_by_debt
 
@@ -413,11 +414,18 @@ class CallClobberDischarger:
         if key not in self._preserved:
             view = self._views.get(callee)
             self._preserved[key] = False   # (a cycle through this question proves nothing)
-            self._preserved[key] = view is not None and _callee_preserves(
+            cut_before, self._keep_cut = self._keep_cut, False
+            result = view is not None and _callee_preserves(
                 view,
                 span,
                 lambda operation_key: self._callee_read_discharged(callee, operation_key, active),
             ) and not self._crossed_at_exit(callee, view, span, active)
+            if self._keep_cut:   # (rests on the depth cut: not memoized)
+                del self._preserved[key]
+                self._keep_cut = True
+                return result
+            self._keep_cut = cut_before
+            self._preserved[key] = result
         return self._preserved[key]
 
     def _crossed_at_exit(self, callee, view, span, active) -> bool:
@@ -432,7 +440,8 @@ class CallClobberDischarger:
         itself proven to keep the same bytes (``_keeps``, recursively).
         Invariant (Fable PE-d r1 P2-1): ``_exit_crossings`` stores a byte of an
         exit only when something crosses it there -- an absent byte is "not
-        crossed". That is sound for both callers: a saved-copy certificate
+        crossed". That is sound for every caller (the three certificate
+        routes and ``_keeps``): a saved-copy certificate
         (``_preserves``) first requires one terminal write covering the span
         at EVERY exit, so every claimed byte is a terminal byte of every exit;
         ``_keeps`` decides untouched bytes from the definitions, not from here."""
@@ -469,19 +478,28 @@ class CallClobberDischarger:
     def _open_control(self, callee, view) -> bool:
         """(PE-d, Astra r1 P1-2) The callee leaves by a transfer whose effect on
         any byte is unproven here: an unresolved indirect jump
-        (``control_context.unknown_transfer_sites``), any BRANCHIND, or a tail
-        jump (``interprocedural._tail_jumps``) -- the exit crossings do not
-        model what runs after them. No certificate then (conservative)."""
+        (``control_context.unknown_transfer_sites``), a BRANCHIND listing a
+        target outside the function (Fable r2 P2-1: a jump table inside the
+        function does not leave it -- the exit crossings model what follows),
+        a tail jump (``interprocedural._tail_jumps``), or a recorded fallthrough
+        exit -- a row whose fallthrough leaves the function or enters another
+        function (``fallthrough_exits``, Astra PE-d r2 P1-1) -- the exit
+        crossings do not model what runs after them. No certificate then
+        (conservative)."""
         held = self._open_control_cache.get(callee)
         if held is None:
             from ..control_context import unknown_transfer_sites
             from ..interprocedural import _tail_jumps, function_key
 
             unit = view.analysis.evidence.unit
+            rows = unit.observation.instructions
+            local = {row.address for row in rows}
+            leaves = any(any(operation.opcode == "BRANCHIND" for operation in row.operations)
+                         and (not row.flow_targets or any(target not in local for target in row.flow_targets))
+                         for row in rows)
             held = self._open_control_cache[callee] = bool(
-                unknown_transfer_sites(function_key(callee), unit.observation)
-                or any(key.endswith(":BRANCHIND") for key in view.operations)
-                or _tail_jumps(unit))
+                unknown_transfer_sites(function_key(callee), unit.observation) or leaves or _tail_jumps(unit)
+                or getattr(unit.observation, "fallthrough_exits", ()))
         return held
 
     def _keeps(self, callee, span, active) -> bool:
@@ -493,8 +511,15 @@ class CallClobberDischarger:
             return self._kept[key]
         self._kept[key] = False   # (a cycle proves nothing)
         view = self._views.get(callee)
-        if view is None or self._keep_depth >= MAX_FRAME_DEPTH or self._open_control(callee, view):
-            return False   # (too deep: withheld, not decided -- left False only for this question)
+        if view is None or self._open_control(callee, view):
+            return False
+        if self._keep_depth >= MAX_FRAME_DEPTH:
+            # (too deep: withheld for this question, not decided -- and no caller
+            # on this path memoizes a result the cut decided, Astra r2 P2-1)
+            del self._kept[key]
+            self._keep_cut = True
+            return False
+        cut_before, self._keep_cut = self._keep_cut, False
         # never written by the callee itself, and every call in it a direct
         # internal call whose callee keeps those bytes too (an untouched byte
         # has no exit crossing of its own: the calls decide -- a CALLOTHER, an
@@ -513,10 +538,13 @@ class CallClobberDischarger:
                 and not view.normalized.memory_graph.unresolved_write_nodes
                 and all(call in targets and self._keeps(targets[call], span, active) for call in calls)
             )
-            self._kept[key] = untouched or self._preserves(callee, span, active)
+            result = self._kept[key] = untouched or self._preserves(callee, span, active)
         finally:
             self._keep_depth -= 1
-        return self._kept[key]
+            if self._keep_cut:
+                self._kept.pop(key, None)
+            self._keep_cut = self._keep_cut or cut_before
+        return result
 
     def _callee_read_discharged(self, callee, operation_key, active) -> bool:
         context = _EMPTY_CONTEXT
@@ -550,6 +578,11 @@ class CallClobberDischarger:
         return self._frame_safe[key]
 
     def _check_callee_frame(self, callee, start: int, stop: int, active) -> bool:
+        view = self._views.get(callee)
+        if view is None or self._open_control(callee, view):
+            # (PE-d, Astra r2 P1-2) what runs after a tail jump or an unresolved
+            # transfer may write the interval: no frame proof
+            return False
         frame = self._frame(callee)
         if frame is None or not frame.write_safe(start, stop):
             return False
