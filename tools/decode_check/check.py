@@ -230,9 +230,12 @@ STATE_TO_ROW = {"applied": ("evaluated", "applied"), "not_applicable": ("evaluat
 
 
 def decode_rows(image: Image, functions: list, premise: bool, reason: str | None, full: bool = False,
-                states: dict | None = None, language: str = LANGUAGE, unverified_reason: str | None = None) -> list[Row]:
+                states: dict | None = None, language: str = LANGUAGE, unverified_reason: str | None = None,
+                isa=None) -> list[Row]:
     """Decode rows; ``states`` (when given) receives ``(function id, address) ->
-    dependents.attribute_states(result)`` for the dependents table."""
+    dependents.attribute_states(result)`` for the dependents table. ``isa`` (when given) is called as
+    ``isa(function_id, space, address, verified window bytes, ballot)`` for every row G1 compared (ISA facts
+    step 3: facts only from the bytes G1 verified, design r3 s5)."""
     rows = []
     states = {} if states is None else states
     for function in functions:
@@ -257,6 +260,8 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
                                          native_call=facts["native_call"], premise=premise,
                                          unverified_reason=unverified_reason)
             states[(function["function_id"], *where)] = dependents.attribute_states(result)
+            if isa is not None and "*" not in states[(function["function_id"], *where)]:
+                isa(function["function_id"], facts["space"], facts["address"], window["bytes"], ballot)
             state = result["state"]
             detail = {"window": result["window"], "lift": None if lift is None else lift.pattern, "s1": function["s1"]}
             if conditions[where] is not False:

@@ -402,17 +402,25 @@ class _Iced:
         elif code.can_use_repne_prefix and instr.has_repne_prefix:
             rep = "repne"
         memory, overflow = [], False
+        info = self.info_factory.info(instr)
+        # an explicit memory operand that by definition accesses nothing (PREFETCHh hints): complete with no access
+        explicit_no_access = explicit_memory is not None and info.op_access(explicit_memory) in (
+            x.OpAccess.NO_MEM_ACCESS, x.OpAccess.NONE)
         if mnemonic not in (m.LEA, m.NOP):
-            for used in self.info_factory.info(instr).used_memory():
+            for used in info.used_memory():
                 if used.access in (x.OpAccess.NO_MEM_ACCESS, x.OpAccess.NONE):
                     continue
                 if len(memory) >= MAX_MEM:
                     overflow = True
                     break
                 base = self.registers.get(used.base, "")
-                is_explicit = (explicit_memory is not None and used.base == instr.memory_base
-                               and used.index == instr.memory_index and not any(
-                                   item["role"] == "explicit" for item in memory))
+                # iced resolves a RIP / EIP-relative operand to an absolute address with no base register
+                rip_relative = instr.memory_base in (x.Register.RIP, x.Register.EIP)
+                same_operand = (used.base == x.Register.NONE and used.index == x.Register.NONE
+                                and used.displacement == instr.memory_displacement) if rip_relative else (
+                    used.base == instr.memory_base and used.index == instr.memory_index)
+                is_explicit = (explicit_memory is not None and same_operand
+                               and not any(item["role"] == "explicit" for item in memory))
                 role = "explicit" if is_explicit else (
                     "stack" if base in ("rsp", "esp", "sp") else "string_source" if base in ("rsi", "esi", "si")
                     else "string_dest" if base in ("rdi", "edi", "di") else "other")
@@ -437,6 +445,7 @@ class _Iced:
                 "mem_overflow": overflow, "memory": memory, "iform": "",
                 # an explicit memory operand that no used-memory entry matched: the access list is incomplete
                 "memory_complete": not overflow and (explicit_memory is None or mnemonic in (m.LEA, m.NOP)
+                                                     or explicit_no_access
                                                      or any(m_["role"] == "explicit" for m_ in memory))}
 
 

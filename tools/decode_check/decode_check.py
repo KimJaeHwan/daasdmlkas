@@ -150,9 +150,42 @@ def dependents_rows(functions: list, states: dict, reason: str | None, full: boo
     return out
 
 
+class IsaCollector:
+    """ISA facts step 3: computes isa_facts.row_facts for every row G1 compared (check.decode_rows calls it with
+    the verified window and the ballot) and keeps the per-function status (design r3 s2 / s5)."""
+
+    def __init__(self) -> None:
+        import isa_tables
+
+        self.tables = isa_tables.load()
+        self.functions = {}
+
+    def __call__(self, fid, space, address, window, ballot) -> None:
+        import isa_facts
+
+        entry = self.functions.setdefault(fid, {"status": {kind: "checked" for kind in isa_facts.KINDS}, "rows": {}})
+        try:
+            row = isa_facts.row_facts(
+                self.tables, ballot, window,
+                redecode=lambda data: decoders.xed_redecode(data, address),
+                decode_profile=lambda name, data: decoders.decode_profile(name, data, address),
+                decode_without=lambda isa_set, data: decoders.decode_without(isa_set, data, address))
+        except Exception as error:          # (one failing row fails the function's status, never the run)
+            entry["status"] = {kind: f"failed:{type(error).__name__}: {error}"[:200] for kind in isa_facts.KINDS}
+            return
+        entry["rows"][(space, address)] = row
+
+    def block(self) -> dict:
+        import isa_facts
+
+        return {"header": isa_facts.header_block(self.tables, decoders.profile_catalogue()),
+                "functions": self.functions}
+
+
 def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: dict, original: bytes, mapping,
-                   facts: dict, states: dict, use_table: bool, reason) -> None:
-    """``g1-decode-evidence-1`` (design .census6/design_g1_engine_evidence_r3.md, s2 / s3 / s7)."""
+                   facts: dict, states: dict, use_table: bool, reason, isa: dict | None = None) -> None:
+    """``g1-decode-evidence-1`` (design .census6/design_g1_engine_evidence_r3.md, s2 / s3 / s7); with ``isa``
+    ``g1-decode-evidence-2`` (design .census6/design_tbr_isa_facts_r3.md s5)."""
     import hashlib
 
     seal = json.loads((generation / "seal.json").read_bytes())
@@ -179,12 +212,13 @@ def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: 
                     "states": {(row["space"], row["address"]): states.get((function["function_id"], row["space"],
                                                                            row["address"]), {"*": "unobserved"})
                                for row in function["rows"]}}
-                   for function in facts["functions"]])
+                   for function in facts["functions"]],
+        isa=isa)
     path.write_bytes(evidence.dumps(document))
 
 
 def run(generation: Path, naming_source: Path, premise: bool, full: bool = False,
-        evidence_out: Path | None = None) -> tuple[dict, list]:
+        evidence_out: Path | None = None, isa_facts: bool = False) -> tuple[dict, list]:
     facts = collect(generation, naming_source)
     manifest = json.loads((generation / "manifest.json").read_bytes())
     original_path = next(row["path"] for row in manifest["members"] if row["id"] == manifest["original_member_id"])
@@ -220,8 +254,9 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
                      f"{lifting.TRANSLATION_PREMISE} off)"
     header["translation_identity"] = {**identity, "premise": premise, "table_applied": use_table}
     states = {}
+    collector = IsaCollector() if isa_facts and evidence_out is not None else None
     rows.extend(check.decode_rows(image, facts["functions"], use_table, reason, full, states, facts["language"] or "",
-                                  unverified))
+                                  unverified, isa=collector))
     rows.extend(check.suspect_rows(rows))
     rows.extend(dependents_rows(facts["functions"], states, reason, full, header))
     header["mapping"] = {"format": mapping.format, "rules": mapping.rules, "mapping_id": mapping.mapping_id,
@@ -236,7 +271,7 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     header["counts"] = g1_counts(rows)
     if evidence_out is not None:
         write_evidence(evidence_out, generation, naming_source, manifest, original, mapping, facts, states, use_table,
-                       reason)
+                       reason, None if collector is None else collector.block())
         header["evidence_out"] = str(evidence_out)
     return header, rows
 
@@ -264,6 +299,8 @@ def main(argv=None) -> int:
     parser.add_argument("--assume-stock-ghidra-translator", action="store_true",
                         help="named premise: the Bundle's p-code comes from the stock Ghidra 12.0.4 translator")
     parser.add_argument("--full", action="store_true", help="keep every attribute and vote of applied rows too")
+    parser.add_argument("--isa-facts", action="store_true",
+                        help="write g1-decode-evidence-2: the evidence file plus the per-row ISA facts")
     parser.add_argument("--evidence-out", type=Path, default=None,
                         help="also write the engine evidence file g1-decode-evidence-1 (outside the Bundle)")
     args = parser.parse_args(argv)
@@ -271,7 +308,7 @@ def main(argv=None) -> int:
         print("decode_check: the generation directory and the naming source must exist", file=sys.stderr)
         return 2
     header, rows = run(args.generation, args.naming_source, args.assume_stock_ghidra_translator, args.full,
-                       args.evidence_out)
+                       args.evidence_out, args.isa_facts)
     args.out.write_text(dumps(header, rows), encoding="utf-8")
     return 0
 

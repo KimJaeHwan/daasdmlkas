@@ -2646,3 +2646,203 @@ def test_isa_impl3_shld_shrd_by_cl_convention():
     for hexbytes in ("0FA5C8", "480FA5C8", "0FADC8", "480FADC8", "0FA508"):
         assert _classify(tables, hexbytes)["result"] == "derived_ordinary", hexbytes
     assert _classify(tables, "660FA5C8")["key"] == "SHLD16"
+
+
+# -- ISA facts step 3: per-row facts and g1-decode-evidence-2 ---------------------------------------------------
+
+def _row_facts(hexbytes: str) -> dict:
+    import decoders as d
+    import isa_facts
+    import isa_tables
+
+    data = bytes.fromhex(hexbytes) + ISA_PAD
+    return isa_facts.row_facts(isa_tables.load(), d.ballot(data, CODE), data,
+                               redecode=lambda w: d.xed_redecode(w, CODE),
+                               decode_profile=lambda name, w: d.decode_profile(name, w, CODE),
+                               decode_without=lambda isa_set, w: d.decode_without(isa_set, w, CODE))
+
+
+@needs
+def test_isa_step3_row_facts_on_the_design_vectors():
+    """design r3 s7 expectations, as row facts."""
+    import isa_facts
+
+    plain = _row_facts("4889C8")
+    assert plain["basis"] == "ordinary:plain" and not isa_facts.listed(plain)
+    lgdt = _row_facts("0F0110")["facts"]["F2"]
+    assert lgdt["voters_disagree"] == "conflict" and lgdt["table_vs_voter"]["table_requires_cpl0"] is True
+    assert lgdt["voters"]["zydis"]["IS_PRIVILEGED"] is False and lgdt["voters"]["iced"]["must_be_cpl0"] is True
+    rdmsr = _row_facts("0F32")
+    assert rdmsr["basis"] == "cited:RDMSR" and "voters_disagree" not in rdmsr["facts"]["F2"]
+    assert _row_facts("CD29")["facts"]["F3"] == {"flow": "int_n", "flow_detail": "none", "vector": 0x29}
+    assert _row_facts("480F07")["facts"]["F3"]["flow_detail"] == "sysret"
+    xbegin = _row_facts("C7F810000000")
+    assert xbegin["facts"]["F3"]["abort_target"] == f"{CODE + 6 + 0x10:x}"
+    assert xbegin["facts"]["F1"]["class"] == "invalid_for_chip"
+    rdpkru = _row_facts("0F01EE")["facts"]["F1"]
+    assert rdpkru["class"] == "invalid_for_chip" and rdpkru["profiles"]["xed:baseline"]["error"] == "INVALID_FOR_CHIP"
+    vaddps = _row_facts("C5FC58C1")
+    assert vaddps["basis"] == "unclassified" and vaddps["facts"]["F1"]["class"] == "invalid_for_chip"
+    assert set(isa_facts.TABLE_SOURCED) <= set(vaddps["unobserved"])
+    assert _row_facts("60")["facts"]["F1"]["class"] == "invalid_encoding"
+    assert _row_facts("F083C001")["facts"]["F1"]["class"] == "invalid_encoding"
+    tz = _row_facts("F30FBCC1")
+    assert tz["basis"] == "split:tzcnt-bsf" and tz["facts"]["F4"]["split"]["split"] == "tzcnt-bsf"
+    fs = _row_facts("64488B042530000000")
+    assert fs["basis"] == "ordinary:plain" and fs["facts"]["F7"]["accesses"] == [
+        {"segment": "fs", "read": True, "write": False, "conditional": False}]
+    movs = _row_facts("64F3A4")["facts"]["F7"]["accesses"]
+    assert movs == [{"segment": "fs", "read": True, "write": False, "conditional": True}]
+    assert _row_facts("9D")["facts"]["F2p"] == {"meaning": "POPF_FLAGS"}
+    assert _row_facts("0F58C1")["facts"]["class_flags"]["mxcsr_inputs"] == ["RC", "DAZ", "FTZ"]
+
+
+@needs
+def test_isa_step3_single_feature_run_names_the_deciding_feature():
+    """A profile split outside the split table: the deciding feature from a single-feature XED run (r3 s3)."""
+    import dataclasses
+
+    import decoders as d
+    import isa_facts
+    import isa_tables
+
+    tables = isa_tables.load()
+    tables = dataclasses.replace(tables, splits={**tables.splits, "splits": [s for s in tables.splits["splits"]
+                                                                             if s["id"] != "lzcnt-bsr"]})
+    data = bytes.fromhex("F30FBDC1") + ISA_PAD
+    row = isa_facts.row_facts(tables, d.ballot(data, CODE), data, redecode=lambda w: d.xed_redecode(w, CODE),
+                              decode_profile=lambda n, w: d.decode_profile(n, w, CODE),
+                              decode_without=lambda s, w: d.decode_without(s, w, CODE))
+    split = row["facts"]["F4"]["split"]
+    assert split["source"] == "single_feature_run" and split["deciding_feature"] == "LZCNT", split
+
+
+def _isa_block(rows_by_function, status=None):
+    import isa_facts
+    import isa_tables
+
+    tables = isa_tables.load()
+    header = isa_facts.header_block(tables, {"xed:g1": {"chip": None, "isa_sets": None},
+                                             "xed:baseline": {"chip": "P4PRESCOTT_NOLAHF", "isa_sets": ["I86"]},
+                                             "xed:all": {"chip": "ALL", "isa_sets": ["I86", "AVX"]}})
+    functions = {fid: {"status": dict(status or {k: "checked" for k in isa_facts.KINDS}), "rows": rows}
+                 for fid, rows in rows_by_function.items()}
+    return {"header": header, "functions": functions}
+
+
+def _ev2(functions, rows_by_function, status=None):
+    import evidence
+
+    premises = ["decoder-matches-cpu", "stock-ghidra-translator"]
+    return evidence.build(bundle=dict(EV_BUNDLE), producer=dict(EV_PRODUCER),
+                          mapping={"format": "pe", "mapping_id": "p" * 64}, premises=premises,
+                          table_applied=True, global_reason=None, functions=functions,
+                          isa=_isa_block(rows_by_function, status))
+
+
+def test_isa_step3_evidence2_reader_rules():
+    import isa_facts
+
+    rows = [(1, 0x1000), (1, 0x1003), (1, 0x1007), (1, 0x100a)]
+    confirmed = {r: _ev_confirmed() for r in rows[:3]}
+    confirmed[rows[3]] = {"*": "unobserved"}
+    functions = [_ev_function("f0", rows, confirmed)]
+    rdtsc = {"basis": "cited:RDTSC", "facts": {"F2": {"ring0_candidate": False}}, "unobserved": {}}
+    unclassified = {"basis": "unclassified", "facts": {}, "unobserved": {"F2": "no table basis"}}
+    document = _ev2(functions, {"f0": {(1, 0x1000): rdtsc, (1, 0x1003): unclassified}})
+    assert document["schema"] == "g1-decode-evidence-2"
+    ev = _ev_accept(document, _ev_view(functions))
+    names = isa_facts.premise_names(document["isa_facts"])
+    held = {names["detection"]["F6"], names["detection"]["F2"]}
+    assert ev.isa("f0", 1, 0x1000, "F2", held)["state"] == "fact"
+    assert ev.isa("f0", 1, 0x1000, "F6", held) == {"state": "negative", "basis": "cited:RDTSC",
+                                                     "premises": [names["detection"]["F6"]]}
+    assert ev.isa("f0", 1, 0x1000, "F6", set())["state"] == "unobserved"                 # no premise
+    assert ev.isa("f0", 1, 0x1003, "F2", held)["state"] == "unobserved"                  # marker
+    assert ev.isa("f0", 1, 0x1003, "F6", held)["state"] == "unobserved"                  # no table basis
+    omitted = ev.isa("f0", 1, 0x1007, "F2", held)                                       # ordinary:plain row
+    assert omitted["state"] == "unobserved" and names["ordinary"] in omitted["reason"]
+    assert ev.isa("f0", 1, 0x1007, "F2", held | {names["ordinary"]})["state"] == "negative"
+    assert ev.isa("f0", 1, 0x100a, "F2", held | {names["ordinary"]})["state"] == "unobserved"   # never compared
+    wrong = names["detection"]["F2"].rsplit(":", 1)[0] + ":" + "0" * 64                    # digest mismatch
+    assert ev.isa("f0", 1, 0x1000, "F6", {wrong})["state"] == "unobserved"
+    not_run = _ev2(functions, {"f0": {}}, status={k: "not_run" for k in isa_facts.KINDS})
+    ev = _ev_accept(not_run, _ev_view(functions))
+    assert ev.isa("f0", 1, 0x1007, "F2", held | {names["ordinary"]})["state"] == "unobserved"
+
+
+@pytest.mark.parametrize("name", ["outside", "duplicate", "unsorted", "unknown kind", "never compared", "status",
+                                  "missing section", "header kinds"])
+def test_isa_step3_evidence2_rejections(name):
+    import evidence
+
+    rows = [(1, 0x1000), (1, 0x1003), (1, 0x100a)]
+    states = {(1, 0x1000): _ev_confirmed(), (1, 0x1003): _ev_confirmed(), (1, 0x100a): {"*": "unobserved"}}
+    functions = [_ev_function("f0", rows, states)]
+    row = {"basis": "cited:RDTSC", "facts": {"F2": {}}, "unobserved": {}}
+    document = _ev2(functions, {"f0": {(1, 0x1000): row, (1, 0x1003): row}})
+    listed = document["functions"][0]["isa_facts"]["rows"]
+    if name == "outside":
+        listed[0]["offset"] = "2000"
+    elif name == "duplicate":
+        listed.append(dict(listed[0]))
+    elif name == "unsorted":
+        listed.reverse()
+    elif name == "unknown kind":
+        listed[0]["facts"]["F9"] = {}
+    elif name == "never compared":
+        listed.append(dict(listed[0], offset="100a"))
+    elif name == "status":
+        document["functions"][0]["isa_facts"]["status"]["F1"] = "done"
+    elif name == "missing section":
+        del document["functions"][0]["isa_facts"]
+    else:
+        document["isa_facts"]["kinds"] = ["F1"]
+    with pytest.raises(evidence.Rejected):
+        _ev_accept(document, _ev_view(functions))
+
+
+@needs
+def test_isa_step3_end_to_end_evidence2_on_a_synthetic_bundle(tmp_path):
+    """decode_check --isa-facts on the 66 E8 pair writes schema -2, accepted by the reference reader."""
+    import json
+
+    import _sealed as s
+    import decode_check
+    import evidence
+    import isa_facts
+
+    functions, code = _pair(s)
+    (tmp_path / "b").mkdir()
+    generation = _bundle(tmp_path / "b", functions, code)
+    path = tmp_path / "evidence2.json"
+    decode_check.run(generation, s.NAMING_SOURCE, True, full=True, evidence_out=path, isa_facts=True)
+    document = evidence.parse(path.read_bytes())
+    assert document["schema"] == "g1-decode-evidence-2"
+    facts = decode_check.collect(generation, s.NAMING_SOURCE)
+    manifest = json.loads((generation / "manifest.json").read_bytes())
+    members = {row["id"]: row for row in manifest["members"]}
+    seal = json.loads((generation / "seal.json").read_bytes())
+    view = {"generation_id": seal["generation_id"], "manifest_sha256": seal["manifest_sha256"],
+            "original_sha256": members["original"]["sha256"],
+            "functions": {row["id"]: {"observation_sha256": members[row["observation_member"]]["sha256"],
+                                      "rows": set(), "kept": True} for row in manifest["functions"]}}
+    for function in facts["functions"]:
+        view["functions"][function["function_id"]]["rows"] = {(r["space"], r["address"]) for r in function["rows"]}
+    ev = evidence.accept(document, view, [evidence.allowlist_entry(document)])
+    assert all(item["isa_facts"]["status"] == {k: "checked" for k in isa_facts.KINDS} for item in document["functions"])
+    call = ev.isa("function-000000", 1, CODE, "F6", set())
+    assert call["state"] == "unobserved"                                   # cited CALL_NEAR, premise not held
+    names = isa_facts.premise_names(document["isa_facts"])
+    assert ev.isa("function-000000", 1, CODE, "F6", {names["detection"]["F6"]})["state"] == "negative"
+
+
+@needs
+def test_isa_step3_iced_rip_relative_memory_is_complete():
+    """iced resolves RIP / EIP-relative operands to absolute addresses (no base): still the explicit access."""
+    for hexbytes in ("488B3D33711A00", "0F100598CC1A00", "FF25EAFC0700", "67488B0533221100"):
+        iced = _votes(hexbytes)["iced"].extra
+        assert iced["memory_complete"] is True and [m["role"] for m in iced["memory"]] == ["explicit"], hexbytes
+    for hexbytes in ("0F18441140", "0F1800"):                       # PREFETCHh: an operand that accesses nothing
+        iced = _votes(hexbytes)["iced"].extra
+        assert iced["memory_complete"] is True and iced["memory"] == [], hexbytes
