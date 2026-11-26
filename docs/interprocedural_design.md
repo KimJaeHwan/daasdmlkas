@@ -7376,3 +7376,28 @@ PE-a3(템플릿). 각 단계는 혼자서 건전하다(기록이 없으면 "덮�
   잘린 행; r6: 봉인된 발급, 거부된 프로그램 scope, 통합 입구 고정 / 집합 비교(두 형태, 기본 그래프만 켬), 한 번 훑기 /
   다시 해시 없음 / 표 조회 한 번; r7: 정확한 단위만, 타입이 다른 봉인 거부, 통합 입구 추론 한 번; r8: 넘김은 내부만, 사본 거부. 돌연변이 `cob/pea1_mutants.py` 28/30(M20, M22는
   방어용: 공유 증명서와 정확한 단위 검사 뒤에서 도달 불가).
+
+### 25.120 호출 덮어쓰기 해소는 출구까지 정확한 바이트로 (PE-d, 2026-11-26)
+
+설계 `.census6/design_s3_r18.md` 수정 7(PRE-EXISTING; S3 전제, Fable r18 P2-4: `push rbx; ...; pop rbx; syscall; ret`은
+RBX를 증명하면 안 된다).
+- 구멍(main b8eee06에서 재현, legacy 엔진 = `integration/configured_call_clobber_discharge.py`): 보존 증명서(saved copy)와
+  레지스터 must-write(근원 증명의 증거 경로와 치환 행 경로)는 피호출자의 종료 SSA 정의만 보았다 -- SSA는 호출을 건너뛰므로
+  마지막 정의(복원 `pop rbx`, `mov eax, 7`) 뒤의 불투명 호출 / CALLOTHER(syscall)가 그 바이트를 바꿀 수 있음을 놓쳤다. 네 경우
+  (보존 x 호출 / syscall, must-write x 호출 / syscall)가 "완전"으로 나왔다. 요약 엔진 경로는 함수 요약의 종료 교차를 이미 쓰므로
+  건전했다(같은 시험 통과).
+- 규칙: 증명서는 주장하는 모든 바이트를 모든 출구에서 덮어야 한다 -- `function_summary._exit_crossings`(종료 요약의 교차
+  규칙)로 마지막 정의 뒤에 그 바이트를 건너는 것(호출, CALLOTHER, 별칭 / 알 수 없는 쓰기)이 있으면 증명서 없음. 예외: 교차가
+  직접 내부 호출이고 그 피호출자가 같은 바이트를 지킬 때(`_keeps`, 재귀: 그 바이트를 쓰지 않고 그 안의 모든 호출도 지키거나,
+  saved copy로 복원). 쓰지 않은 바이트는 자기 종료 교차가 없으므로 그 함수의 호출들이 결정한다(CALLOTHER / 간접 / 불투명
+  호출이 있으면 지키지 않음). 보존(`_preserves`), 증거 must-write(`_evidence_discharges`), 치환 must-write(`_discharge_span`)
+  세 곳에 같은 검사.
+- 수정 7의 앞 절반(정확한 (호출, 바이트 구간) 증거): 호출 덮어쓰기 행은 지금도 호출들을 합치고 더러운 바이트의 hull을 쓴다.
+  감사 결과 이것으로 해소하는 소비자는 남지 않았다 -- PE-a1이 DF 면제를 없앴고, 보존 해소는 모든 호출이 hull 전체를 지켜야
+  하며(`_discharge_span`), must-write는 뒤따르는 모든 호출이 hull을 지켜야 하고(`_ordered_last_call`), 나머지
+  (`call_clobber_spans` 사용처 셋)는 값이 빚에 닿는지만 본다 -- hull은 진짜 더러운 바이트를 모두 포함하므로 빚을 더할 뿐 숨기지
+  않는다. 따라서 행 형식은 바꾸지 않는다(과대 근사, 건전). 행 단위 호출별 구간이 필요한 소비자가 생기면 그때 넣는다.
+- 의미 버전 / 템플릿: 바뀐 것은 legacy 엔진의 해소기뿐이다(요약 엔진과 템플릿 도출은 이 해소기를 쓰지 않는다) -- 버전과
+  템플릿은 그대로.
+- 고정 `tests/intra/test_pe_d_exact_clobber.py`(복원 뒤 호출 / syscall, 지키는 분석된 단말 호출 앞 / 뒤, must-write 뒤 호출 /
+  syscall / 없음, 요약 엔진 같은 모양, 쓰지 않지만 불투명 호출을 하는 단말); 돌연변이 `cob/ped_mutants.py` 6/6.

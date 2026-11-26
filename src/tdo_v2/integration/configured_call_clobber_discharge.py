@@ -171,6 +171,11 @@ class CallClobberDischarger:
             row.proof.call_operation_key == calls[0]
             and row.read_span.contains(span)
             and row.proof.callee_entry == targets.get(calls[0])
+            # (PE-d, amendment 7) the proven write is the value at every exit
+            and (span.object_id.kind is not StorageObjectKind.REGISTER_FILE
+                 or row.proof.callee_entry in self._views
+                 and not self._crossed_at_exit(row.proof.callee_entry, self._views[row.proof.callee_entry], span,
+                                               active))
             and self._write_slice_effective(
                 row.proof.callee_entry,
                 row.proof.callee_write_operation_key,
@@ -211,7 +216,10 @@ class CallClobberDischarger:
         if not self._ordered_last_call(entry, read, span, call, active):
             return False
         if span.object_id.kind is StorageObjectKind.REGISTER_FILE:
-            if not self._terminal_register_write(callee, write_key, span):
+            # (PE-d, amendment 7) the last write must also be the value at every
+            # exit: nothing may cross those bytes after it
+            if not self._terminal_register_write(callee, write_key, span) \
+                    or self._crossed_at_exit(callee, self._views[callee], span, active):
                 return False
         else:
             interval = self._callee_interval(entry, call, span)
@@ -399,11 +407,76 @@ class CallClobberDischarger:
         key = (callee, span.canonical_key)
         if key not in self._preserved:
             view = self._views.get(callee)
+            self._preserved[key] = False   # (a cycle through this question proves nothing)
             self._preserved[key] = view is not None and _callee_preserves(
                 view,
                 span,
                 lambda operation_key: self._callee_read_discharged(callee, operation_key, active),
-            )
+            ) and not self._crossed_at_exit(callee, view, span, active)
+        return self._preserved[key]
+
+    def _crossed_at_exit(self, callee, view, span, active) -> bool:
+        """(PE-d, S3 design r18 amendment 7) Some byte of ``span`` may change
+        after its last definition on the way to some exit
+        (``function_summary._exit_crossings``, the exit summary's own rule): a
+        call -- opaque, a CALLOTHER such as a syscall, or one whose effect may
+        change it --, an aliasing or an unknown write. A preservation
+        certificate must then not stand although the last definition restores
+        the entry value: ``push rbx; ...; pop rbx; call f; ret`` proves no RBX.
+        A crossing direct internal call is excused only when that callee is
+        itself proven to preserve the same bytes (``_preserves``, recursively)."""
+        cache = self.__dict__.setdefault("_exit_crossing_cache", {})
+        held = cache.get(callee)
+        if held is None:
+            from ..call_clobber import _preserved_stack_pointers
+            from ..function_summary import _exit_crossings
+
+            normalized = view.normalized
+            found = _exit_crossings(normalized, view.analysis.evidence.unit.observation,
+                                    normalized.scopes.resolution_context, _preserved_stack_pointers, set())
+            held = cache[callee] = (found["label_universe"],
+                                    {key: offsets for key, offsets in found.items() if type(key) is tuple})
+        universe, crossings = held
+        labels = set()
+        for (_, object_id), offsets in crossings.items():
+            if object_id != span.object_id:
+                continue
+            for offset in range(span.start, span.end):
+                bits = offsets.get(offset)
+                if bits:
+                    labels.update(universe.decode(bits))
+        targets = self._targets.get(callee, {})
+        for label in labels:
+            kind, _, operation_key = label.partition(":")
+            target = targets.get(operation_key) if kind == "call" else None
+            if target is None or not self._keeps(target, span, active):
+                return True
+        return False
+
+    def _keeps(self, callee, span, active) -> bool:
+        """(PE-d) ``callee`` returns ``span`` unchanged on every exit: it never
+        writes those bytes and nothing crosses them at an exit, or its saved
+        copy restores them (``_preserves``)."""
+        key = ("keeps", callee, span.canonical_key)
+        if key in self._preserved:
+            return self._preserved[key]
+        self._preserved[key] = False   # (a cycle proves nothing)
+        view = self._views.get(callee)
+        if view is None:
+            return False
+        # never written by the callee itself, and every call in it a direct
+        # internal call whose callee keeps those bytes too (an untouched byte
+        # has no exit crossing of its own: the calls decide -- a CALLOTHER, an
+        # indirect or opaque call may change it)
+        targets = self._targets.get(callee, {})
+        calls = [operation for operation in view.operations
+                 if operation.endswith((":CALL", ":CALLIND", ":CALLOTHER"))]
+        untouched = (
+            not any(target.overlaps(span) for _, target in view.terminal_data_writes())
+            and not view.normalized.memory_graph.unresolved_write_nodes
+            and all(call in targets and self._keeps(targets[call], span, active) for call in calls)
+        )
+        self._preserved[key] = untouched or self._preserves(callee, span, active)
         return self._preserved[key]
 
     def _callee_read_discharged(self, callee, operation_key, active) -> bool:
