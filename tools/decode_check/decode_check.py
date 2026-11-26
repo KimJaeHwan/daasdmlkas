@@ -244,7 +244,10 @@ class OverrideCollector:
                 out["status"] = "failed:parser-without-profile" if self.declared is not None else "not_reported"
             elif profile != self.declared:
                 out["status"] = "failed:profile-mismatch"
-            elif any(row.get("override") is None for row in function["rows"]):
+            elif any(row.get(name) is None for row in function["rows"]
+                     for name in ("override", "external_flow_targets", "recorded_landing_pads")):
+                # (impl r2 Astra P2-2: the X-1 contract's three row fields come together; [] is a recorded empty
+                #  pad list, None a missing field)
                 out["status"] = "failed:missing-row-fields"
             elif entry["error"]:
                 out["status"] = entry["error"]

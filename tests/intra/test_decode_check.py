@@ -3593,11 +3593,13 @@ def _ov_case(states=None):
     return rows, functions, override
 
 
-def _ov_view(functions, rows, profile="x1-producer-v1", present=None):
+def _ov_view(functions, rows, profile="x1-producer-v1", present=None, pins=None):
     view = _ev_view(functions)
     view["producer_profile"] = profile
     reported = present if present is not None else {rows[3], rows[5]}
-    view["functions"]["f0"]["override_report"] = None if profile is None else {r: r in reported for r in rows}
+    pins = pins if pins is not None else {rows[1]: "S", rows[2]: "S"}
+    view["functions"]["f0"]["override_report"] = None if profile is None else {
+        r: {"present": r in reported, "pin": pins.get(r)} for r in rows}
     return view
 
 
@@ -3633,7 +3635,9 @@ def test_g1x1_evidence3_round_trip_and_reader():
                                   "unknown code", "star detail missing", "star at compared row", "C fields",
                                   "O effect keys", "codes without checked", "spec changed", "unsorted details",
                                   "header profile null", "O turned A", "A with an exception", "S with a2 exception",
-                                  "view without reports", "view without profile", "unknown exempt"])
+                                  "view without reports", "view without profile", "unknown exempt",
+                                  "S without the Bundle shape", "I turned S", "exempt dropped", "report None",
+                                  "exempt list", "no functions, profile differs"])
 def test_g1x1_evidence3_rejections(name):
     """r2 s5 / r3 s5 / r3 s8, impl r1 Astra P1-1 / Fable P2-1: a detail or code deleted after serialization, and any
     contradiction with the Bundle's reports or G1's own exceptions, rejects the file."""
@@ -3691,6 +3695,19 @@ def test_g1x1_evidence3_rejections(name):
         del view["producer_profile"]
     elif name == "unknown exempt":
         details[0]["exempt"] = "X"
+    elif name == "S without the Bundle shape":                                # (48 0F 05 relabelled S)
+        view["functions"]["f0"]["override_report"][rows[1]]["pin"] = None
+    elif name == "I turned S":
+        view["functions"]["f0"]["override_report"][rows[1]]["pin"] = "I"
+    elif name == "exempt dropped":
+        del details[0]["exempt"]
+    elif name == "report None":
+        view["functions"]["f0"]["override_report"][rows[3]] = None
+    elif name == "exempt list":
+        details[0]["exempt"] = ["S"]
+    elif name == "no functions, profile differs":
+        document["functions"] = []
+        view["producer_profile"] = None
     with pytest.raises(evidence.Rejected):
         _ev_accept(document, view, [evidence.allowlist_entry(document)])
 
@@ -3701,9 +3718,10 @@ def test_g1x1_collector_statuses():
     code, a missing detail or a missing star detail -> failed:row-set-mismatch."""
     import decode_check
 
-    rows = [{"space": 1, "address": 0x1000, "override": dict(NONE_REPORT)},
-            {"space": 1, "address": 0x1004, "override": dict(NONE_REPORT)},
-            {"space": 1, "address": 0x1008, "override": dict(NONE_REPORT, length_overridden=True)}]
+    fields = {"external_flow_targets": 0, "recorded_landing_pads": []}
+    rows = [{"space": 1, "address": 0x1000, "override": dict(NONE_REPORT), **fields},
+            {"space": 1, "address": 0x1004, "override": dict(NONE_REPORT), **fields},
+            {"space": 1, "address": 0x1008, "override": dict(NONE_REPORT, length_overridden=True), **fields}]
     states = {("f0", 1, 0x1000): {"+": frozenset()}, ("f0", 1, 0x1004): {"+": frozenset()},
               ("f0", 1, 0x1008): {"*": "unobserved"}}
     facts = {"functions": [{"function_id": "f0", "rows": rows, "producer_profile": None}]}
@@ -3725,6 +3743,9 @@ def test_g1x1_collector_statuses():
     assert collector.block(facts, states, ENGINE)["functions"]["f0"]["status"] == "checked"
     del collector.functions["f0"]["details"][(1, 0x1008)]                        # (the star callback lost)
     assert collector.block(facts, states, ENGINE)["functions"]["f0"]["status"] == "failed:row-set-mismatch"
+    rows[1]["recorded_landing_pads"] = None                                     # ([] recorded vs None missing)
+    assert collector.block(facts, states, ENGINE)["functions"]["f0"]["status"] == "failed:missing-row-fields"
+    rows[1]["recorded_landing_pads"] = []
     rows[1]["override"] = None
     assert collector.block(facts, states, ENGINE)["functions"]["f0"]["status"] == "failed:missing-row-fields"
 
@@ -3750,7 +3771,8 @@ def test_g1x1_g3b7b_reproduces_the_exporter():
 
     applied = run(True, [])
     assert applied[3] == "applied" and applied[4]["would_block"] is False
-    assert applied[4].get("premises") == ["producer-override-report"] or "premises" not in applied[4]
+    assert applied[4]["premises"] == ["producer-override-report"]
+    assert dependents.summary([applied])["g3b7b_none_estimate"]["premises"] == ["producer-override-report"]
     blocked = run(True, ["length"])
     assert blocked[4]["cause"] == "override" and "length" in blocked[4]["blocking"][0][1]
     assert run(True, ["fallthrough"])[4]["would_block"] is False                 # (keeps address + length)
@@ -3785,3 +3807,54 @@ def test_g1x1_end_to_end_legacy_bundle_writes_schema3_not_reported(tmp_path):
     assert document["producer_override"]["engine_source"]["package"] == "tdo_v2"
     assert all(item["producer_override"] == {"status": "not_reported", "codes": "", "details": []}
                for item in document["functions"])
+    facts = decode_check.collect(generation, s.NAMING_SOURCE)
+    import json
+
+    manifest = json.loads((generation / "manifest.json").read_bytes())
+    members = {row["id"]: row for row in manifest["members"]}
+    seal = json.loads((generation / "seal.json").read_bytes())
+    view = {"generation_id": seal["generation_id"], "manifest_sha256": seal["manifest_sha256"],
+            "original_sha256": members["original"]["sha256"], "producer_profile": None,
+            "functions": {row["id"]: {"observation_sha256": members[row["observation_member"]]["sha256"],
+                                      "rows": set(), "kept": True, "override_report": None}
+                          for row in manifest["functions"]}}
+    for function in facts["functions"]:
+        view["functions"][function["function_id"]]["rows"] = {(r["space"], r["address"]) for r in function["rows"]}
+    ev = evidence.accept(document, view, [evidence.allowlist_entry(document)])
+    first = facts["functions"][0]["rows"][0]
+    assert ev.override(facts["functions"][0]["function_id"], first["space"], first["address"])["verdict"] == \
+        "not_reported"
+
+
+@needs
+def test_g1x1_generated_verdicts_round_trip_through_the_reader():
+    """impl r2 Astra P3: verdicts the judge generated (I for CD 29, U with `exempt` when the voters do not agree)
+    serialize and read back against the Bundle-side shape."""
+    import dataclasses
+
+    import decoders
+    import producer_override
+
+    pair = _profile(_int_pair(0x29))
+    data = bytes.fromhex("cd29")
+    lift, result = _compare(pair, data)
+    ballot = decoders.ballot(data, START)
+    code, detail = producer_override.row_verdict(pair, result, lift, ballot, data)
+    assert (code, detail) == ("I", None)
+    assert producer_override.shape_code(pair, lift, data) == "I"
+    split = dict(ballot, amd=tuple(dataclasses.replace(v, int_vector=0x2A) for v in ballot["amd"]))
+    code2, detail2 = producer_override.row_verdict(pair, result, lift, split, data)
+    assert code2 == "U" and detail2["exempt"] == "I"                    # (shape kept, pinned values unobserved)
+    rows = [(1, 0x1000), (1, 0x1004)]
+    functions = [_ev_function("f0", rows, {r: _ev_confirmed() for r in rows})]
+    override = {"f0": {"status": "checked", "codes": {rows[0]: code, rows[1]: code2},
+                       "details": {rows[1]: detail2}}}
+    document = _ov_document(functions, override)
+    view = _ev_view(functions)
+    view["producer_profile"] = "x1-producer-v1"
+    view["functions"]["f0"]["override_report"] = {r: {"present": False, "pin": "I"} for r in rows}
+    ev = _ev_accept(document, view)
+    first = ev.override("f0", *rows[0])
+    assert first["verdict"] == "effect_attested" and first["exemption"]["pattern"] == "interrupt"
+    second = ev.override("f0", *rows[1])
+    assert second["verdict"] == "unobserved" and "kernel-boundary-contract" in second["premises"]

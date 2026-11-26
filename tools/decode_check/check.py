@@ -248,8 +248,16 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
             where = (facts["space"], facts["address"])
             states[(function["function_id"], *where)] = {"*": "unobserved"}
             conditions[where] = guards.UNOBSERVED
+            x1 = None
+            if facts.get("override") is not None:
+                # (design_tbr_g1_x1 r3 s5: S3 computes these from the Bundle; G1 reports them in its text report,
+                #  on every row, early returns included -- impl r2 Astra P3)
+                where_ft = None if facts["fallthrough"] is None else (facts.get("fallthrough_space", facts["space"]),
+                                                                     facts["fallthrough"])
+                x1 = {"exit_listed": facts["exit"] is not None, "in_function": where_ft in own}
             if reason is not None:
-                rows.append(Row("decode", "row", key, "unobserved", None, "lint", {"reason": reason}))
+                rows.append(Row("decode", "row", key, "unobserved", None, "lint",
+                                {"reason": reason} | ({"x1": x1} if x1 else {})))
                 if override is not None:
                     override(function["function_id"], facts, None, None, None, None)
                 continue
@@ -258,7 +266,8 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
             conditions[where] = guards.row_condition(facts, window["bytes"], lift)
             if not window["bytes"]:
                 rows.append(Row("decode", "row", key, "unobserved", None, "lint",
-                                {"reason": f"no verified byte at the row start ({window['stop']})"}))
+                                {"reason": f"no verified byte at the row start ({window['stop']})"}
+                                | ({"x1": x1} if x1 else {})))
                 if override is not None:
                     override(function["function_id"], facts, None, lift, None, None)
                 continue
@@ -281,11 +290,8 @@ def decode_rows(image: Image, functions: list, premise: bool, reason: str | None
                 # large DLL would otherwise be gigabytes)
                 detail["attributes"] = result.get("attributes", {})
                 detail["votes"] = {mode: [d.as_json() for d in ballot[mode]] for mode in ("intel", "amd")}
-            if facts.get("override") is not None:
-                # (design_tbr_g1_x1 r3 s5: S3 computes these from the Bundle; G1 reports them in its text report)
-                where_ft = None if facts["fallthrough"] is None else (facts.get("fallthrough_space", facts["space"]),
-                                                                     facts["fallthrough"])
-                detail["x1"] = {"exit_listed": facts["exit"] is not None, "in_function": where_ft in own}
+            if x1:
+                detail["x1"] = x1
             if "reason" in result:
                 detail["reason"] = result["reason"]
             if "suspect_pattern" in result:

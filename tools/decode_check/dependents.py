@@ -174,9 +174,23 @@ def function_rows(function: dict, states: dict) -> list[tuple]:
     else:
         extra = (addresses[0] if addresses else 0, G3B7B_MISSING, "unobserved")
     x1 = not branchind and override is not None and override["status"] == "checked"
-    # (impl r1: the X-1 path also reads F.has_fallthrough -- the prototype hasFallthrough input -- and rests on the
-    #  producer's raw claims, so its result names the premise)
-    g3b7b = _judge(reads_of(addresses, G3B7B_READS + (("F.has_fallthrough",) if x1 else ())), None, extra)
+    if x1:
+        # (impl r2 Astra P2-1) per-row reads: a2 only where the length is exported, a4 only on prototype-fallthrough
+        # rows with their own fallthrough (an exit-rebuilt a4 is the extra's unobserved, never a read), and
+        # F.has_fallthrough (prototype hasFallthrough); the result rests on raw claims and names the premise
+        info = override.get("rows", {})
+        g3b7b_reads = []
+        for row in function["rows"]:
+            where = (row["space"], row["address"]) if "space" in row else row["address"]
+            names = ["a1", "a3", "a5", "a8", "F.has_fallthrough"]
+            if row.get("length") is not None:
+                names.append("a2")
+            if info.get(where, {}).get("isa_fallthrough") and row.get("fallthrough") is not None:
+                names.append("a4")
+            g3b7b_reads.extend(reads_of([where], names))
+    else:
+        g3b7b_reads = reads_of(addresses, G3B7B_READS)
+    g3b7b = _judge(g3b7b_reads, None, extra)
     g3b7b[2]["branchind_rows"] = len(branchind)
     if x1:
         g3b7b[2]["premises"] = ["producer-override-report"]
@@ -238,8 +252,9 @@ def _override_extras(function: dict, override: dict, addresses: list) -> list:
                 out.append((where, "a4 rebuilt from an S1 exit (getFallThrough not exported)", "unobserved"))
             elif length is None:
                 out.append((where, "length not exported (getParsedLength)", "unobserved"))
-            elif "fallthrough" in kinds and "length" not in kinds \
-                    and (fallthrough is None or fallthrough != row["address"] + length):
+            elif "fallthrough" in kinds and "length" not in kinds and (
+                    fallthrough is None or (row.get("fallthrough_space", row.get("space")), fallthrough)
+                    != (row.get("space"), row["address"] + length)):     # (impl r2: the whole (space, offset))
                 out.append((where, "fallthrough override missing address + parsed length (exporter refusal)",
                             OVERRIDE))
         if info["call_row"] and any(kind.startswith("flow:") for kind in kinds):
@@ -259,6 +274,8 @@ def summary(rows: list[tuple]) -> dict:
                                          "loss_disagreement": 0, "loss_unobserved": 0, "loss_refused": 0,
                                          "loss_override": 0, "loss_unknown": 0})
         item["units"] += 1
+        if detail.get("premises"):       # (impl r2 Astra P2-1: a result resting on raw claims names its premise)
+            item["premises"] = sorted(set(item.get("premises", [])) | set(detail["premises"]))
         if detail.get("baseline"):
             item["baseline_present"] += 1
         if not detail["would_block"]:

@@ -440,6 +440,11 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
             raise Rejected(f"schema {schema!r}")
     if schema == SCHEMA3:
         _check_override_header(document["producer_override"])
+        # (impl r2 Astra P1-2: the Bundle's profile is checked once, also for a file with no functions)
+        if not isinstance(bundle, dict) or "producer_profile" not in bundle:
+            raise Rejected("-3 needs the Bundle view's producer_profile")
+        if document["producer_override"]["profile"] != bundle["producer_profile"]:
+            raise Rejected("producer_override profile differs from the Bundle's")
     _keys(document["bundle"], ("generation_id", "manifest_sha256", "original_sha256"), "bundle")
     for name in ("generation_id", "manifest_sha256", "original_sha256"):
         if document["bundle"][name] != bundle[name]:
@@ -520,10 +525,6 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
         if schema == SCHEMA3:
             exceptions = {coordinate: exception["attributes"]
                           for coordinate, exception in zip(coordinates, item["exceptions"])}
-            if "producer_profile" not in bundle:
-                raise Rejected("-3 needs the Bundle view's producer_profile")
-            if document["producer_override"]["profile"] != bundle["producer_profile"]:
-                raise Rejected("producer_override profile differs from the Bundle's")
             _check_override(item["producer_override"], fid, rows, never, bundle["functions"][fid], exceptions,
                             bundle["producer_profile"])
     return Evidence(document, bundle, tables)
@@ -562,8 +563,12 @@ def _check_override(section, fid, rows, never, view, exceptions, profile) -> Non
         if codes or details:
             raise Rejected(f"{fid}: producer_override codes / details without status checked")
         return
-    if profile is None or reports is None or set(reports) != set(rows):
-        raise Rejected(f"{fid}: status checked without the Bundle's profile and a report for every row")
+    # (impl r2 Astra P1-1 / P1-2) per row, from the Bundle alone: {"present": the reported override (a real bool),
+    # "pin": producer_override.shape_code -- "S" / "I" / None from the original bytes, p-code and length}
+    if profile is None or not isinstance(reports, dict) or set(reports) != set(rows) or not all(
+            isinstance(report, dict) and set(report) == {"present", "pin"} and type(report["present"]) is bool
+            and report["pin"] in (None, "S", "I") for report in reports.values()):
+        raise Rejected(f"{fid}: status checked without the Bundle's profile and a {{present, pin}} report per row")
     compared = [where for where in sorted(rows) if where not in never]
     if len(codes) != len(compared) or set(codes) - set(po.CODES):
         raise Rejected(f"{fid}: producer_override codes do not cover the compared rows")
@@ -591,7 +596,7 @@ def _check_override(section, fid, rows, never, view, exceptions, profile) -> Non
         if code not in po.DETAIL_CODES:
             raise Rejected(f"{fid}: producer_override detail on code {code}")
         if "exempt" in item:
-            if item["exempt"] not in po.EXEMPTIONS:
+            if not isinstance(item["exempt"], str) or item["exempt"] not in po.EXEMPTIONS:
                 raise Rejected(f"{fid}: producer_override exempt {item['exempt']!r}")
             fields = fields - {"exempt"}
         if code == "C" and (fields != {"disagree"} or not _strings(item["disagree"], nonempty=True, within=po.REQUIRED)):
@@ -611,9 +616,15 @@ def _check_override(section, fid, rows, never, view, exceptions, profile) -> Non
     needing = {where for where, code in position.items() if code in po.DETAIL_CODES}
     if needing != set(seen) - star:
         raise Rejected(f"{fid}: producer_override details do not match the C / U / O codes")
+    details_at = {(item["space"], int(item["offset"], 16)): item for item in details}
     for where, code in position.items():
-        if (code == "O") != bool(reports[where]):
+        if (code == "O") != reports[where]["present"]:
             raise Rejected(f"{fid}: producer_override code {code} at {render(*where)} contradicts the Bundle's report")
+        # (impl r2 Astra P1-1) S / I and a C / U / O `exempt` exactly where the Bundle-side shape is, and nowhere else
+        pin = code if code in po.EXEMPTIONS else details_at.get(where, {}).get("exempt")
+        if pin != reports[where]["pin"]:
+            raise Rejected(f"{fid}: producer_override pin {pin!r} at {render(*where)} differs from the Bundle's shape "
+                           f"{reports[where]['pin']!r}")
         exception = exceptions.get(where)
         if code == "A" and exception is not None:
             raise Rejected(f"{fid}: effect_attested at {render(*where)} with a G1 exception")
@@ -621,7 +632,7 @@ def _check_override(section, fid, rows, never, view, exceptions, profile) -> Non
                 not set(exception) <= set(po.EXEMPTIONS[code]["core_unobserved"])
                 or any(state != "unobserved" for state in exception.values())):
             raise Rejected(f"{fid}: {code} at {render(*where)} with a G1 exception its pin does not allow")
-    if {where for where in never if reports[where]} != star:
+    if {where for where in never if reports[where]["present"]} != star:
         raise Rejected(f"{fid}: producer_override star details do not match the Bundle's reported overrides")
 
 

@@ -141,21 +141,33 @@ def target_check(facts: dict, lift, ballot: dict) -> tuple:
     return "confirmed", None
 
 
-def pinned_code(lift, ballot: dict | None, window: bytes | None) -> str | None:
-    """The exemption code of an exact pinned shape (impl r1 Astra P1-2): the lift's exact shape, the voters'
-    consensus form and length, and the verified bytes 0F 05 / CD <vector> with the lift's own vector."""
-    if lift is None or lift.pattern not in ("syscall", "interrupt") or ballot is None or not window:
+def shape_code(facts: dict, lift, window: bytes | None) -> str | None:
+    """The Bundle-side exact shape (impl r2 Astra P1-1): the lift's exact pattern, the exported length 2 and the
+    verified bytes 0F 05 / CD <the lift's vector>. Computable from the Bundle alone (original bytes, p-code, length),
+    so a reader can bind S / I / ``exempt`` to the row."""
+    if lift is None or lift.pattern not in ("syscall", "interrupt") or not window or len(window) < 2:
         return None
-    if consensus_length(ballot) != 2 or len(window) < 2:
+    if facts.get("length") != 2:
+        return None
+    if lift.pattern == "syscall":
+        return "S" if window[:2] == b"\x0f\x05" else None
+    vector = lift.pinned.get("a10", (None, None))[1]
+    return "I" if window[0] == 0xCD and window[1] == vector else None
+
+
+def pinned_code(lift, ballot: dict | None, window: bytes | None, facts: dict | None = None) -> str | None:
+    """The pin applies (impl r1 Astra P1-2): the Bundle-side shape and the voters' consensus length 2 and form
+    (syscall / int_n with the lift's vector)."""
+    if ballot is None:
+        return None
+    shape = shape_code(facts if facts is not None else {"length": 2}, lift, window)
+    if shape is None or consensus_length(ballot) != 2:
         return None
     flow = consensus_flow(ballot)
-    if lift.pattern == "syscall":
-        return "S" if flow == "syscall" and window[:2] == b"\x0f\x05" else None
+    if shape == "S":
+        return "S" if flow == "syscall" else None
     vector = lift.pinned.get("a10", (None, None))[1]
-    vectors = {v.int_vector for v in _voters(ballot)}
-    if flow == "int_n" and vectors == {vector} and window[0] == 0xCD and window[1] == vector:
-        return "I"
-    return None
+    return "I" if flow == "int_n" and {v.int_vector for v in _voters(ballot)} == {vector} else None
 
 
 def _state(name: str, item: dict, facts: dict, ballot: dict) -> str:
@@ -217,14 +229,17 @@ def row_verdict(facts: dict, result: dict | None, lift, ballot: dict | None, win
         if present(report):
             return None, {"star": True, "kinds": kinds(report), "effect": {"unobserved": ["*"]}}
         return None, None
-    code = pinned_code(lift, ballot, window)
+    # (impl r2 Astra P1-1) the exemption follows the Bundle-side shape, so a reader can bind it to the row; the
+    # pinned values count only when the voters also agree (pinned_code), else they stay unobserved
+    code = shape_code(facts, lift, window)
+    agreed = code is not None and pinned_code(lift, ballot, window, facts) == code
     pinned = set(EXEMPTIONS[code]["core_unobserved"]) - {"a3"} if code else set()
     disagree, unobserved = [], []
     for name in compare.COMPARED:
         if code and name == "a3":
             continue                                    # (the exemption: OS-contract model)
         if name in pinned:
-            state = _pinned_state(name, code, facts, ballot, lift)
+            state = _pinned_state(name, code, facts, ballot, lift) if agreed else "unobserved"
         else:
             state = _state(name, result["attributes"].get(name, {"state": "unobserved"}), facts, ballot)
         if state == "disagree":
@@ -255,7 +270,7 @@ def g3b7b_row(facts: dict, ballot: dict | None, window: bytes | None, lift) -> d
         isa_fallthrough = True
     elif flow in ("jmp_near", "jmp_far", "ret_near", "ret_far", "iret", "ud", "sysret"):
         isa_fallthrough = False
-    elif pinned_code(lift, ballot, window):
+    elif pinned_code(lift, ballot, window, facts):
         isa_fallthrough = True                  # (the pinned bits: has_fallthrough)
     else:
         isa_fallthrough = None
