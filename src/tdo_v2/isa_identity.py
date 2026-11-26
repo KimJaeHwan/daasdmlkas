@@ -64,6 +64,7 @@ def x86_language(evidence) -> bool:
 
 
 _TABLE_FLAGS: dict = {}   # (language, register table) -> its DF row -- one lookup per snapshot content
+_TABLE_BY_OBJECT: dict = {}   # id(evidence) -> (evidence, its DF row): a warm hit hashes nothing
 
 
 def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordinate | None:
@@ -72,15 +73,21 @@ def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordin
     Looked up once per snapshot content (language id and register table --
     two loads of one snapshot share it; Astra r6 / r7 P2)."""
     require_exact(evidence, VerifiedProgramSnapshotEvidence, "program evidence")
+    held = _TABLE_BY_OBJECT.get(id(evidence))
+    if held is not None and held[0] is evidence:   # (warm: no hashing at all)
+        return held[1]
     key = (evidence.translation_namespace.language_id, evidence.register_evidence)
     try:
-        if key in _TABLE_FLAGS:
-            return _TABLE_FLAGS[key]
+        found = _TABLE_FLAGS[key] if key in _TABLE_FLAGS else None
+        if key not in _TABLE_FLAGS:
+            if len(_TABLE_FLAGS) > 16:
+                _TABLE_FLAGS.clear()
+            found = _TABLE_FLAGS[key] = _named(evidence, _DIRECTION_FLAGS)
     except TypeError:   # (an unhashable table: no cache)
         return _named(evidence, _DIRECTION_FLAGS)
-    if len(_TABLE_FLAGS) > 16:
-        _TABLE_FLAGS.clear()
-    found = _TABLE_FLAGS[key] = _named(evidence, _DIRECTION_FLAGS)
+    if len(_TABLE_BY_OBJECT) > 16:
+        _TABLE_BY_OBJECT.clear()
+    _TABLE_BY_OBJECT[id(evidence)] = (evidence, found)
     return found
 
 
@@ -131,6 +138,8 @@ class InferredDirectionFlag:
     seal: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
+        if not _ISSUING.get():   # (Astra r8 P3: even a copy of a genuine certificate is refused)
+            raise ValueError("an inferred direction flag is issued only by inferred_direction_flag")
         expected = _seal_of(self.program, self.flag, self.observations)
         if expected is None or type(self.seal) is not bytes \
                 or not __import__("hmac").compare_digest(self.seal, expected):
@@ -140,10 +149,17 @@ class InferredDirectionFlag:
         # change without a new seal)
 
 
+_ISSUING = __import__("contextvars").ContextVar("PE_A1_ISSUING", default=False)
+
+
 def _issue(program, flag, observations) -> InferredDirectionFlag:
     """(module-private) the one issuer -- tests reach the consumer guards with it."""
     observations = frozenset(observations)
-    return InferredDirectionFlag(program, flag, observations, _seal_of(program, flag, observations))
+    token = _ISSUING.set(True)
+    try:
+        return InferredDirectionFlag(program, flag, observations, _seal_of(program, flag, observations))
+    finally:
+        _ISSUING.reset(token)
 
 
 _INFERRED: dict = {}   # (program, digests) -> result: one scan per observation set (Astra r6 P2)

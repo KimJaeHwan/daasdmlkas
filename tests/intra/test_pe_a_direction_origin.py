@@ -596,3 +596,25 @@ def test_the_combined_entry_infers_once(monkeypatch):
     publication = BaseGraphPublication(units, policy=BaseGraphPolicy(assume_direction_flag_clear=True))
     results = analyze_units(units, base_graphs=publication, assume_direction_flag_clear=True)
     assert len(calls) == 1 and results["1:1000"].normalized.rep_blocks
+
+
+def test_the_shared_certificate_is_internal():
+    """Astra r8 P1: a caller cannot hand the proof pass a certificate."""
+    from tdo_v2.interprocedural import analyze_units
+    from tdo_v2.isa_identity import inferred_direction_flag
+
+    units = program_units(_function()[0])
+    with pytest.raises(TypeError, match="internal"):
+        analyze_units(units, assume_direction_flag_clear=True, shared_direction_flag=inferred_direction_flag(units))
+
+
+def test_even_an_unchanged_copy_of_a_certificate_is_refused():
+    """Astra r8 P3: only the issuer constructs; copies and replace() are refused."""
+    from dataclasses import replace
+    from tdo_v2.isa_identity import InferredDirectionFlag, inferred_direction_flag
+
+    genuine = inferred_direction_flag(program_units(_function()[0]))
+    with pytest.raises(ValueError, match="issued only"):
+        replace(genuine)
+    with pytest.raises(ValueError, match="issued only"):
+        InferredDirectionFlag(genuine.program, genuine.flag, genuine.observations, genuine.seal)

@@ -259,6 +259,9 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
     if "retained_observations" in options:
         # (PE-a1, Astra r6 P1-1) frozen once: the check and the analysis read the same
         options["retained_observations"] = tuple(options["retained_observations"])
+    if "shared_direction_flag" in options:
+        # (PE-a1, Astra r8 P1) set only below, by the validated base-pass handoff
+        raise TypeError("shared_direction_flag is internal to the combined base-graph entry")
     if code_only_profile is not None:
         from .code_only_profile import forced_arguments
 
@@ -313,12 +316,14 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
                              "(unavailable_entries / unidentified_refusals or refused units)")
         if not base_graphs._started:
             base_graphs.build()
-        if options.get("assume_direction_flag_clear") and base_graphs._policy.assume_direction_flag_clear:
-            # (PE-a1, Astra r7 P2) one inference: the sets matched above
-            options["shared_direction_flag"] = base_graphs._direction_flag
         snapshot = base_graphs.snapshot
         if snapshot.stop != "finished" or not snapshot.local_pass_finished or not snapshot.entry_links_finished:
             raise ValueError("base graph pass did not finish; proof pass was not started")
+        if options.get("assume_direction_flag_clear") and base_graphs._policy.assume_direction_flag_clear \
+                and hasattr(base_graphs, "_direction_flag"):
+            # (PE-a1, Astra r7 P2 / r8 P3) one inference, after the base pass
+            # finished: the observation sets matched above
+            options["shared_direction_flag"] = base_graphs._direction_flag
     from .may_alias import ENTRY_VALUES_NOT_FRAME, OPAQUE_NO_STACK_ADDRESSES, PRE_ESCAPE_NOT_FRAME
     from .relative_memory import IMPORT_SLOTS, ImportSlots, reset_index_diagnostics
 
