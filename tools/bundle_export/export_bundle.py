@@ -56,6 +56,7 @@ SOURCES = {
     "--profile-exporter-sha256": "GhidraV2CallInterfaceProfile.java",
     "--naming-exporter-sha256": "GhidraV2CallNaming.java",
     "--effect-exporter-sha256": "GhidraV2CallEffect.java",
+    "--scanner-sha256": "GhidraV2StackSwitchScanner.java",   # (X-1: the sealed stack-switch scan)
 }
 # Exported functions of libdfbench_importlib.dll (no manifest cases of its own).
 IMPORTLIB_FUNCTIONS = (

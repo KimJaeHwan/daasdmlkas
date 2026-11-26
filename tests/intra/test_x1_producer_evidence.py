@@ -104,11 +104,13 @@ VARIANTS = {
     "fallthrough override": _row(1, override=_override(fallthrough_overridden=True)),
     "length override": _row(1, override=_override(length_overridden=True)),
     "call override reference": _row(0, override=_override(override_references=[
-        {"address": _coordinate(CALLEE), "type": "CALL_OVERRIDE_UNCONDITIONAL"}])),
+        {"address": _coordinate(CALLEE), "type": "CALL_OVERRIDE_UNCONDITIONAL", "primary": True}])),
     "other reference type": _row(0, override=_override(override_references=[
-        {"address": _coordinate(CALLEE), "type": "JUMP_OVERRIDE_UNCONDITIONAL"}])),
+        {"address": _coordinate(CALLEE), "type": "JUMP_OVERRIDE_UNCONDITIONAL", "primary": True}])),
     "other reference target": _row(0, override=_override(override_references=[
-        {"address": _coordinate(CALLEE + 4), "type": "CALL_OVERRIDE_UNCONDITIONAL"}])),
+        {"address": _coordinate(CALLEE + 4), "type": "CALL_OVERRIDE_UNCONDITIONAL", "primary": True}])),
+    "a non-primary reference": _row(0, override=_override(override_references=[
+        {"address": _coordinate(CALLEE), "type": "CALL_OVERRIDE_UNCONDITIONAL", "primary": False}])),
     "one landing pad": _row(0, recorded_landing_pads=[_coordinate(CALLEE)]),
 }
 
@@ -141,8 +143,8 @@ def test_an_override_reference_outside_the_program_is_recorded():
     """Fable X-1 r1 P2-4: an override reference to an external or unmapped address is recorded raw
     (``in_index`` false); the observation stays valid."""
     edit = _row(0, override=_override(override_references=[
-        {"address": _coordinate(0x10, EXTERNAL), "type": "CALL_OVERRIDE_UNCONDITIONAL"},
-        {"address": _coordinate(0x900000), "type": "CALL_OVERRIDE_UNCONDITIONAL"}]))
+        {"address": _coordinate(0x10, EXTERNAL), "type": "CALL_OVERRIDE_UNCONDITIONAL", "primary": True},
+        {"address": _coordinate(0x900000), "type": "CALL_OVERRIDE_UNCONDITIONAL", "primary": True}]))
     observation = _observation(_caller(Profiled(edit=edit)))
     assert observation is not None
     references = observation.instructions[0].override.references
@@ -164,7 +166,10 @@ DEFECTS = {
                                               if key != "length_overridden"}),
     "unknown flow override": _row(1, override=_override(flow_override="SOMETIMES")),
     "flag of the wrong type": _row(1, override=_override(fallthrough_overridden=0)),
-    "reference without type": _row(0, override=_override(override_references=[{"address": _coordinate(CALLEE)}])),
+    "reference without type": _row(0, override=_override(override_references=[
+        {"address": _coordinate(CALLEE), "primary": True}])),
+    "reference without primary": _row(0, override=_override(override_references=[
+        {"address": _coordinate(CALLEE), "type": "CALL_OVERRIDE_UNCONDITIONAL"}])),
     "unknown profile": lambda data: data.update(producer_profile="x1-producer-v0"),
 }
 

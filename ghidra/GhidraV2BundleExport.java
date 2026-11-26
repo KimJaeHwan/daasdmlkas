@@ -143,6 +143,7 @@ public class GhidraV2BundleExport extends HeadlessScript {
         String profileExporterSha256;
         String namingExporterSha256;
         String effectExporterSha256;
+        String scannerSha256;   // (X-1) GhidraV2StackSwitchScanner.java
         Path receiptPath;
         String receiptNonce;
         final List<Entry> entries = new ArrayList<>();
@@ -183,6 +184,8 @@ public class GhidraV2BundleExport extends HeadlessScript {
     // declares: raw per-row override state and recorded landing pads (and,
     // Bundle-wide, the sealed stack-switch evidence)
     private static final String PRODUCER_PROFILE = "x1-producer-v1";
+    // (X-1, design_x1 r4 4.2) the exported row map the scanner's verifiable digest covers
+    private final Map<Address, List<Address>> exportedRows = new LinkedHashMap<>();
 
     private static final class ObservedFunction {
         final AddressSet body;
@@ -516,6 +519,10 @@ public class GhidraV2BundleExport extends HeadlessScript {
                     values.effectExporterSha256 = lowerHex(
                         value, "effect exporter source SHA-256");
                 }
+                case "--scanner-sha256" -> {
+                    requireUnset(values.scannerSha256, arg);
+                    values.scannerSha256 = lowerHex(value, "stack-switch scanner source SHA-256");
+                }
                 case "--receipt-path" -> {
                     requireUnset(values.receiptPath, arg);
                     values.receiptPath = Path.of(value).toAbsolutePath().normalize();
@@ -532,6 +539,7 @@ public class GhidraV2BundleExport extends HeadlessScript {
             values.originalSize == null || values.originalSha256 == null ||
             values.bundleExporterSha256 == null || values.profileExporterSha256 == null ||
             values.namingExporterSha256 == null || values.effectExporterSha256 == null ||
+            values.scannerSha256 == null ||
             values.receiptPath == null || values.receiptNonce == null) {
             throw new IllegalArgumentException("configured exporter arguments are incomplete");
         }
@@ -715,6 +723,23 @@ public class GhidraV2BundleExport extends HeadlessScript {
                     options, stage, members, profileSession, profileMember,
                     runtimeClasses(options));
             }
+            // (X-1, design_x1 r3 4.1 / 4.2, r4 4.2) the stack-switch scan runs here,
+            // read-only on the locked program (no transaction); its evidence is
+            // sealed as the last member. The listing digest is computed when the
+            // observations are collected, inside the scan and before sealing: any
+            // difference (or a scan failure) fails the export.
+            Map<String, Object> collected = GhidraV2StackSwitchScanner.listingDigest(
+                currentProgram, exportedRows, monitor);
+            Map<String, Object> scanEvidence = new GhidraV2StackSwitchScanner(currentProgram, monitor, true)
+                .evidence(options.originalSha256, exportedRows);
+            Map<String, Object> sealing = GhidraV2StackSwitchScanner.listingDigest(
+                currentProgram, exportedRows, monitor);
+            if (!collected.equals(scanEvidence.get("listing_digest")) || !collected.equals(sealing)) {
+                throw new IOException("the listing changed between observation, stack scan and sealing");
+            }
+            Map<String, Object> evidenceMember = writeJsonMember(
+                "stack-switch-evidence", stage.resolve("stack-switch-evidence.json"), scanEvidence);
+            members.add(evidenceMember);
 
             Map<String, Object> manifest = new LinkedHashMap<>();
             manifest.put("schema_version", FORMAT_VERSION);
@@ -727,6 +752,8 @@ public class GhidraV2BundleExport extends HeadlessScript {
             manifest.put("blocks", blocks);
             manifest.put("functions", functions);
             manifest.put("image_info_member", memberText(imageInfoMember, "id"));
+            manifest.put("producer_profile", PRODUCER_PROFILE);
+            manifest.put("stack_switch_evidence_member", memberText(evidenceMember, "id"));
             byte[] manifestBytes = jsonBytes(manifest);
             writeFile(stage.resolve("manifest.json"), manifestBytes);
 
@@ -1504,6 +1531,8 @@ public class GhidraV2BundleExport extends HeadlessScript {
             monitor.checkCancelled();
             Instruction instruction = iterator.next();
             rows.add(instruction);
+            exportedRows.computeIfAbsent(function.getEntryPoint(), ignored -> new ArrayList<>())
+                .add(instruction.getAddress());
             Map<String, Object> row = instruction(
                 instruction,
                 observed.exceptionalTargets.getOrDefault(
@@ -2186,12 +2215,15 @@ public class GhidraV2BundleExport extends HeadlessScript {
         overrides.sort(Comparator
             .comparing((Reference reference) -> spaceIdOf(reference.getToAddress()))
             .thenComparing(reference -> byteOffset(reference.getToAddress()))
-            .thenComparing(reference -> reference.getReferenceType().getName()));
+            .thenComparing(reference -> reference.getReferenceType().getName())
+            .thenComparing(reference -> reference.isPrimary()));
         List<Map<String, Object>> references = new ArrayList<>();
         for (Reference reference : overrides) {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("address", coordinate(reference.getToAddress()));
             item.put("type", reference.getReferenceType().getName());
+            // (TBR) an override reference takes effect only as the single primary one of its type
+            item.put("primary", reference.isPrimary());
             references.add(item);
         }
         Map<String, Object> result = new LinkedHashMap<>();

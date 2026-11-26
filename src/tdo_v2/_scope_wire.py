@@ -281,7 +281,8 @@ def _producer_profile_row_pieces(value: ValidatedInstruction) -> list[bytes]:
         _u64(len(override.references)),
     ]
     for reference in override.references:
-        pieces.extend((_coordinate(reference.target), _text(reference.type_name), bytes((int(reference.in_index),))))
+        pieces.extend((_coordinate(reference.target), _text(reference.type_name),
+                       bytes((int(reference.in_index), int(reference.primary)))))
     pieces.extend((_u64(value.external_flow_targets), _u64(len(value.recorded_landing_pads))))
     pieces.extend(_coordinate(item) for item in value.recorded_landing_pads)
     return pieces

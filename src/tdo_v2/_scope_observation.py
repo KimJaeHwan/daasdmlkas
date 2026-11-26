@@ -319,14 +319,15 @@ def _override_evidence(
         return None
     references = []
     for item in raw_references:
-        if not _exact_keys(item, ("address", "type"), defects):
+        if not _exact_keys(item, ("address", "type", "primary"), defects):
             return None
         target = _observation_coordinate(_field(item, "address").value, defects)
         type_name = _field(item, "type").value
-        if target is None or type(type_name) is not str or not type_name:
+        primary = _field(item, "primary").value
+        if target is None or type(type_name) is not str or not type_name or type(primary) is not bool:
             defects.invalid = True
             return None
-        references.append(OverrideReference(target, type_name, index.memory_coordinate(target)))
+        references.append(OverrideReference(target, type_name, index.memory_coordinate(target), primary))
     try:
         return InstructionOverrideEvidence(flow_override, fallthrough, length, tuple(sorted(set(references))))
     except (TypeError, ValueError):

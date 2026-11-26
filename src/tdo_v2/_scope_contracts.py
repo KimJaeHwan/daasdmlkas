@@ -464,12 +464,16 @@ class OverrideReference:
     target: AddressCoordinate
     type_name: str
     in_index: bool
+    # (TBR) an override reference takes effect only as the single primary
+    # reference of its type: whether this one is primary, raw
+    primary: bool = True
 
     def __post_init__(self) -> None:
         require_exact(self.target, AddressCoordinate, "override reference target")
         if type(self.type_name) is not str or not self.type_name:
             raise TypeError("override reference type must be a nonempty str")
         require_bool(self.in_index, "override reference in_index")
+        require_bool(self.primary, "override reference primary")
 
 
 @dataclass(frozen=True, slots=True)

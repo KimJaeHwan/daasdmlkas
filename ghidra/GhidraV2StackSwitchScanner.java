@@ -30,6 +30,8 @@ import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryAccessException;
+import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.mem.MemoryBlockType;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.symbol.Reference;
@@ -861,22 +863,31 @@ public class GhidraV2StackSwitchScanner {
 
     /** One row of the canonical digest text (mirrored by tdo_v2.stack_evidence.verifiable_row_line):
      *  {@code R <space>:<offset hex> <length> <bytes hex | -> <flow override> <fallthrough 0/1> <length 0/1>
-     *  <references: space:offset:type,... | ->}. */
+     *  <references: space:offset:type:primary,... | ->}. */
     static String rowLine(Instruction row, Address address) {
         if (row == null) {
             return "R " + coordinate(address) + " - - - - - -";
         }
-        String bytes;
-        try {
-            bytes = hex(row.getBytes(), row.getLength());
-        }
-        catch (MemoryAccessException unavailable) {
-            bytes = "-";
+        // (r4 4.2) the bytes TDO can read back: only from a block the exporter
+        // seals as a byte member (loaded, initialized, no overlay, not external,
+        // a default block), the whole row inside it; otherwise "unavailable"
+        String bytes = "-";
+        MemoryBlock block = row.getProgram().getMemory().getBlock(address);
+        if (block != null && block.isLoaded() && block.isInitialized() &&
+                !block.getStart().getAddressSpace().isOverlaySpace() && !block.isExternalBlock() &&
+                block.getType() == MemoryBlockType.DEFAULT && block.contains(row.getMaxAddress())) {
+            try {
+                bytes = hex(row.getBytes(), row.getLength());
+            }
+            catch (MemoryAccessException unavailable) {
+                bytes = "-";
+            }
         }
         List<String> references = new ArrayList<>();
         for (Reference reference : row.getReferencesFrom()) {
             if (reference.getReferenceType().isOverride() && reference.getToAddress() != null) {
-                references.add(coordinate(reference.getToAddress()) + ":" + reference.getReferenceType().getName());
+                references.add(coordinate(reference.getToAddress()) + ":" + reference.getReferenceType().getName() +
+                    ":" + (reference.isPrimary() ? 1 : 0));
             }
         }
         Collections.sort(references);

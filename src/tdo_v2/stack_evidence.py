@@ -312,5 +312,75 @@ def assumption_allowed(evidences, *, requested: bool, require_for: str | None = 
     return True, lines
 
 
+def _member_bytes(generation: Path, members: dict, member_id: str) -> bytes:
+    row = members[member_id]
+    data = (generation / row["path"]).read_bytes()
+    if len(data) != row["size"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
+        raise EvidenceError(f"{generation}: member {member_id} does not match its seal")
+    return data
+
+
+def verifiable_row_line(row: dict, blocks) -> str:
+    """One row of the verifiable listing digest, exactly as
+    ``GhidraV2StackSwitchScanner.rowLine`` writes it: ``R <space>:<offset hex>
+    <length> <bytes hex | -> <flow override> <fallthrough 0/1> <length 0/1>
+    <references space:offset:type:primary,... | ->``. Bytes come only from a sealed
+    block member that holds the whole row."""
+    address = row["address"]
+    space, offset, length = address["space_id"], address["byte_offset"], row["length"]
+    data = "-"
+    for block_space, start, payload in blocks:
+        if block_space == space and start <= offset and offset + length <= start + len(payload):
+            data = payload[offset - start:offset - start + length].hex()
+            break
+    override = row["override"]
+    references = sorted(f"{item['address']['space_id']}:{item['address']['byte_offset']:x}:{item['type']}:"
+                        f"{int(item['primary'])}" for item in override["override_references"])
+    return (f"R {space}:{offset:x} {length} {data} {override['flow_override']} "
+            f"{int(override['fallthrough_overridden'])} {int(override['length_overridden'])} "
+            f"{','.join(references) if references else '-'}")
+
+
+def bundle_stack_evidence(generation) -> StackEvidence:
+    """(X-1, design_x1 r4 4.2) the stack-switch evidence sealed into a profiled
+    Bundle, bound to it: the seal's manifest SHA-256 is the evidence's seal, and
+    the verifiable part of its listing digest is recomputed from the sealed
+    function observations and block members (a mismatch is an
+    ``EvidenceError``: the evidence is not this Bundle's)."""
+    generation = Path(generation)
+    manifest_bytes = (generation / "manifest.json").read_bytes()
+    seal = json.loads((generation / "seal.json").read_text(encoding="utf-8"))
+    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    if seal.get("manifest_sha256") != manifest_sha or seal.get("manifest_size") != len(manifest_bytes):
+        raise EvidenceError(f"{generation}: the manifest does not match its seal")
+    manifest = json.loads(manifest_bytes)
+    if manifest.get("producer_profile") is None:
+        raise EvidenceError(f"{generation}: not a profiled Bundle (no sealed stack-switch evidence)")
+    members = {row["id"]: row for row in manifest["members"]}
+    evidence_id = manifest["stack_switch_evidence_member"]
+    item = load_stack_evidence(generation / members[evidence_id]["path"],
+                               data=_member_bytes(generation, members, evidence_id), seal=manifest_sha)
+    if not item.bound:
+        raise EvidenceError(f"{generation}: the sealed stack-switch evidence is not bound")
+    blocks = [(row["space_id"], row["byte_start"], _member_bytes(generation, members, row["member_id"]))
+              for row in manifest["blocks"] if row.get("member_id")]
+    functions = []
+    for row in manifest["functions"]:
+        observation = json.loads(_member_bytes(generation, members, row["observation_member"]))
+        functions.append(observation)
+    functions.sort(key=lambda item: (item["entry"]["space_id"], item["entry"]["byte_offset"]))
+    digest = hashlib.sha256()
+    for observation in functions:
+        entry = observation["entry"]
+        digest.update(f"F {entry['space_id']}:{entry['byte_offset']:x}\n".encode())
+        rows = sorted(observation["instructions"],
+                      key=lambda row: (row["address"]["space_id"], row["address"]["byte_offset"]))
+        for instruction in rows:
+            digest.update((verifiable_row_line(instruction, blocks) + "\n").encode())
+    if digest.hexdigest() != item.listing_digest[0]:
+        raise EvidenceError(f"{generation}: the stack-switch evidence's listing digest is not this Bundle's")
+    return item
+
+
 __all__ = ("Coverage", "DETECTORS", "EvidenceError", "FORMAT", "KernelTransfer", "POLICIES", "StackEvidence",
-           "assumption_allowed", "authority", "load_stack_evidence")
+           "assumption_allowed", "authority", "bundle_stack_evidence", "load_stack_evidence", "verifiable_row_line")
