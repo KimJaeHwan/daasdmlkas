@@ -7479,3 +7479,55 @@ RBX를 증명하면 안 된다).
   호출, 꼬리 점프 / 간접 점프 뒤 보존과 must-write, 깊이 5 / 40 사슬; r3: 함수 안 / 밖 점프 테이블, 안쪽 호출의 꼬리 점프, 기록된 fallthrough, 뿌리 순서;
   r4 - r7: 위 목록, 46개); 돌연변이 `cob/ped_mutants.py` 23/24 -- 살아남는 M11은 블록 그래프의 may_leave와 겹치는 이중
   검사라 혼자서는 살아남고, M11 + M16을 함께 넣으면 점프 테이블 시험이 잡는다(M21은 r7의 깊이 경계 시험이 잡는다).
+
+### 25.121 S3를 위한 생산자 증거 (X-1a, 2026-11-27)
+
+설계 `.census6/design_x1_r2.md` + r3 + r4(r4.1)(리뷰: Astra r1 / r2 반려 -> r3 완전 목록 "With these changes: APPROVE"
+-> r4 확인, Fable r1 - r4 고칠 점을 단 승인). `design_s3_r18.md` A절 X-1 행, B절 수정 4 / 5 / 15. 소유자 결정(2026-11-26,
+TBR 세션과 합의): Bundle에는 생산자의 원래 주장만, TBR 증거에는 판정만; S3는 덮어쓰기 주장을 이름 붙인 전제
+`producer-override-report`([TBR-G1-flow])로 쓰고 G1 리더가 생기면 G1 판정으로 푼다(순서 X-1 -> S3 -> G1 리더); 다시
+내보내기는 행 길이와 원본 이미지를 함께(X-1b). X-1a는 증거만 만든다 -- 쓰는 쪽(자리 수용, S3 켜짐 전이)은 S3다. 지금 결과
+(S3 꺼짐)는 바뀌지 않는다.
+- 생산 프로필 `x1-producer-v1`(원자적): 매니페스트가 `producer_profile`과 `stack_switch_evidence_member`(봉인, 마지막 역할
+  자리)를 함께 선언하고, 모든 함수 관찰이 같은 프로필을 선언하며 모든 행에 `override`(Ghidra의 명령 수준 흐름 덮어쓰기,
+  넘어감 덮어쓰기, 길이 덮어쓰기, 덮어쓰기 형 참조 -- 주소, 형, 주 참조 여부; TBR: 덮어쓰기 참조는 그 형의 유일한 주
+  참조일 때만 효과가 있다)와 `recorded_landing_pads`(보호 구간의 landing pad, 호출 p-code 거르기 전)를 둔다. 하나라도
+  모자라면 결함이다 -- 함수 거부 또는 Bundle 거부, 결코 "옛 Bundle"로 읽지 않는다. 프로그램 밖 / 사상 안 된 덮어쓰기 참조는
+  `in_index` 거짓으로 그대로 적는다(거부 아님). `flow_type.is_override`는 계산된 흐름 형의 성질이고 이 주장이 아니다
+  (그대로 둔다).
+- 외부 대상 표시: 대상 검증이 외부 대상을 버릴 때 그 수를 `external_flow_targets`로 남긴다.
+- 정체성: 두 정체성 인코더(`_validated_instruction_preimage`, `_stream_observation`)가 한 도우미로 꼬리표 블록
+  (`tdo-v2-instruction-override-v1`)과 프로필 조각을 스트림한다 -- 프로필이 없으면 빈 값이라 옛 다이제스트는 바이트까지
+  같다(main a70d6d5의 다이제스트를 시험에 고정). 설계 r2가 적은 영역 문자열 v3는 쓰지 않았다(꼬리표가 이미 구분한다).
+- 스택 전환 검사: 검사 루틴을 읽기 전용 클래스 `GhidraV2StackSwitchScanner`로 떼었다(트랜잭션 없음); 단독 스크립트는
+  얇은 감싸개, 내보내기 도구는 잠긴 프로그램에서 `publish` 안에서 직접 부르고 결과를 마지막 멤버로 봉인한다(`runScript`는
+  잠금 때문에 불가). 한 번의 검사가 두 판정을 낸다: `s3-off` = v4 규칙 그대로(같은 코드 경로), `s3-on` = 모든 시드(함수
+  입구 포함)와 호출이 아닌 이동의 모든 영역 간 목적지(입구 또는 몸통 중간)에서 레지스터와 unique를 모름으로, 커널 진입은
+  바이트로 분류(covered `0F 05` / `CD 2E`, trap `CC` / `CD 03` / `CD 29` / `0F 0B`, uncovered, 접두어·REX·끊김은
+  undecidable), trap은 경로를 끝내고(실행이 자리마다 결정), covered 뒤에는 스택 포인터만 남고, uncovered / undecidable /
+  길이 불일치 / 비거나 모순된 번역 / covered 행의 SP 접근 / 목적지 모를 간접 점프는 원인과 함께 UNCHECKED. 증거 v2
+  (검출기 v5)는 두 판정, 커널 진입 행, 목록 다이제스트(검증 가능한 부분 = 내보낸 행의 좌표 / 길이 / 봉인된 블록 바이트 /
+  덮어쓰기 사실, 나머지는 생산자 증명)를 담고, 내보내기 도구는 관찰 수집 때 / 검사 안 / 봉인 직전 세 번 다이제스트가 같아야
+  내보낸다. 단독 파일은 묶이지 않음(s3-off에만 쓰인다).
+- 한 판정기 `stack_evidence.authority`가 `.clean`을 대신한다(요약 엔진의 거부 구성원 덮음, 링크, `assumption_allowed`):
+  s3-off는 v1 / v2를 전과 같이; s3-on은 실행의 모든 이미지에 대해 그 이미지 Bundle의 봉인에 묶인 v2 증거, 깨끗한 s3-on
+  판정, 모든 covered 행의 수용, 모든 trap 행의 실행 결정을 요구하고, 아니면 이유와 함께 철회한다(증거 없는 이미지는
+  실패). `bundle_stack_evidence`는 Bundle 봉인에 묶인 증거를 읽고 검증 가능한 다이제스트를 봉인된 관찰과 블록 멤버에서
+  다시 계산한다. 템플릿 적용 검사(`summary_templates.refusal`)는 s3-on 실행이 주는 `stack_authority`(봉인, 증거 다이제스트,
+  정책, 수용 결정)를 템플릿의 기록과 비교한다(없으면 거부; s3-off는 그대로).
+- 전제: `producer-override-report`는 `reported` 종류 -- 그 주장에 기대는 소비자(S3 자리 수용)만 보고한다; 옛 실행의
+  기본 전제 목록은 그대로다. `stack-switch-check-exceptions` 문장에 v5의 진입 레지스터 읽기와 s3-on 규칙을 더했다.
+- S3로 넘긴 연결(이 단계에는 s3-on 호출자가 없다): 실행 전체의 이미지별 판정을 모으는 호출(주 이미지 + 연결 DLL),
+  s3-on에서 캐시 조회 전에 라이브러리 Bundle을 여는 순서와 캐시 키(r4 4.5 항목 5, Astra r3 A3-4 시험), 템플릿 적용
+  검사에 `stack_authority`를 넘기는 호출. 판정기, 증거, 템플릿 검사는 여기서 구현하고 시험했다.
+- 측정(4.8): 실제 Ghidra로 v4(main)와 v5를 같은 프로그램에서 돌렸다(`.census6/x1_scan_compare.sh`) -- 플러그인 DLL(981
+  함수): s3-off 스위치 0 = v4, s3-on 목적지 모를 간접 점프 1, trap 106(int3 100, int 29h 6); ntdll(4642 함수): s3-off 30 =
+  v4(같은 목록), s3-on 값 스위치 30(시드 때문에 새로 생긴 것 0), 목적지 모를 간접 점프 28, uncovered 21(int 2c 19, int 2d
+  2), covered 988(syscall 494, int 2e 494), trap 326(int 29h 223, int3 103). 게이트 이미지 전부의 원인별 측정은 X-1b 다시
+  내보내기(내보내기가 검사를 돌린다)에서.
+- 실제 내보내기: clang-x64-O0 말뭉치 바이너리(`--entry 433 1057856`)를 이 트리의 내보내기 도구로 내보내 프로필 수용,
+  묶인 증거와 다이제스트 재계산을 확인했다; 바이트 하나 / 덮어쓰기 사실 하나 / 봉인을 바꾸면 묶임이 깨진다
+  (`tests/intra/test_x1_bundle_evidence.py`, 기본 경로 `/root/x1_export_test/149c1cb8...`).
+- 시험 `test_x1_producer_evidence.py`, `test_x1_bundle_profile.py`(실제 Bundle 복사 + 재봉인), `test_x1_bundle_evidence.py`,
+  `test_x1_stack_authority.py`, `test_stack_evidence.py`의 Java 하네스(s3-on 시드 / 커널 상태); 돌연변이 `cob/x1_mutants.py`
+  19/20(M2는 중복 방어: 행 주장이 없으면 파서와 관찰 계약이 이미 거부).

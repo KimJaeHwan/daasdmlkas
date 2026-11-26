@@ -97,6 +97,17 @@ REGISTRY: tuple[Assumption, ...] = (
         "A jump table whose bound the producer misread; a computed jump with one destination listed and others not.",
         "pcode_blocks successors, the state barrier's successor completeness, control_context unknown-transfer sites"),
     Assumption(
+        "producer-override-report", "reported", True,
+        "(X-1, [TBR-G1-flow]) The exporter's own per-instruction override report is accurate: Ghidra's "
+        "instruction-level flow override, fallthrough override, length override and override-type references "
+        "(each with whether it is primary) as the producer-profile row fields record them. A raw claim of the "
+        "producer about itself (not FlowType.isOverride(), which describes the computed flow type); TBR's G1 "
+        "evidence attests its effect once TDO's G1 reader exists. Reported only by a consumer that relies on the "
+        "profile's override claim (S3 site admission), so a run that does not use it does not list it.",
+        "An override the producer applied but did not report, or reported wrongly; a listing changed after the "
+        "report (the sealed listing digest binds the exported rows).",
+        "S3 site admission (consumer, not yet active); the producer-profile row fields of _scope_observation"),
+    Assumption(
         "image-code-unmodified-at-runtime", "runtime", True,
         "The analysed code is the code that runs: the image's code bytes, and the static unwind / exception metadata "
         "(.pdata / .xdata) the exception-handler fact reads, are not changed after loading (no unpacking, "
@@ -124,7 +135,11 @@ REGISTRY: tuple[Assumption, ...] = (
         "raw-leaf SSA byte identity replaces that exception at particular Python call spans; an examined "
         "unconditional nonidentity is unknown, not proven clobber. Conservative scanner v4 instead keeps "
         "all post-call registers except call-shape SP unknown, including first and partial reads, with "
-        "no nonvolatile list. Remaining exceptions are still reported with globals-disjoint-from-stack.",
+        "no nonvolatile list. Remaining exceptions are still reported with globals-disjoint-from-stack. "
+        "(X-1) Scanner v5 keeps v4 as its s3-off verdict and names its entry reading: an entry register holds "
+        "no stack-derived value (a caller passing a stack-relative delta the callee adds to the stack pointer "
+        "breaks it); its s3-on verdict reads every register and unique location at every seed and cross-region "
+        "destination as unknown, and keeps the user-op exception for non-kernel CALLOTHERs only.",
         "A stack moved to static data by arithmetic on a saved stack pointer read back from memory or "
         "returned by a call (rsp -= saved; rsp += buffer), by a user op with hidden effects, or through a callee "
         "that changes an assumed-preserved register where legacy fallback remains. A direct load into the stack pointer "

@@ -105,6 +105,9 @@ def test_s3_on_withdraws_without_full_authority(tmp_path, case):
         item = _load(tmp_path, **kwargs)
     allowed, reasons = authority([item], policy="s3-on", images=images, seals=seals, coverage=coverage)
     assert not allowed and reasons
+    expected = {"v1": "predates S3-aware scanning", "unbound": "unbound stack evidence",
+                "other seal": "not bound to the run's verified Bundle"}.get(case)
+    assert expected is None or any(expected in reason for reason in reasons), reasons
     # the control: the same file, fully covered, under the same run
     control = _load(tmp_path, kernels=kernels, name="control")
     assert authority([control], policy="s3-on", seals={CORE: SEAL},
@@ -136,3 +139,26 @@ def test_malformed_v2_rows_are_rejected(tmp_path):
 def test_unknown_policy_is_an_error(tmp_path):
     with pytest.raises(ValueError):
         authority([_load(tmp_path)], policy="s3-maybe")
+
+
+def test_an_s3_on_template_needs_its_recorded_authority():
+    """r4 4.5 item 4: an s3-on run refuses a template without the stack-switch authority it was derived under,
+    or with another (seal, evidence, policy or coverage); an s3-off run (no authority asked) is unchanged."""
+    from types import SimpleNamespace
+
+    from tdo_v2.summary_templates import refusal
+
+    current = {"policy": "s3-on", "seal": SEAL, "evidence_digest": "e" * 64, "coverage": "c" * 64}
+
+    def template(recorded):
+        return SimpleNamespace(source_field=lambda key: recorded if key == "stack_authority" else None)
+
+    entry = SimpleNamespace(refusal=None)
+    common = dict(external_models=None, pcodeop_models=None, private_frame_above=0)
+    assert "without the s3-on" in refusal(template(None), entry, stack_authority=current, **common)
+    assert "another stack-switch authority" in refusal(template({**current, "seal": "6" * 64}), entry,
+                                                       stack_authority=current, **common)
+    assert "another stack-switch authority" in refusal(template({**current, "coverage": "d" * 64}), entry,
+                                                       stack_authority=current, **common)
+    refused = SimpleNamespace(refusal="engine version")
+    assert refusal(template(None), refused, stack_authority=current, **common) == "engine version"

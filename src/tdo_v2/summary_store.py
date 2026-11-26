@@ -706,7 +706,8 @@ def _load_summary_file(raw, path) -> ModelFile:
         raise ModelError(f"{path}: unsupported model format")
     _file_id(raw, path)
     source = _source(raw, path, recorded=True)
-    optional = {"producer", "declarations", "code_only_switches", "call_fallthrough"}
+    optional = {"producer", "declarations", "code_only_switches", "call_fallthrough",
+                "stack_authority"}   # (X-1: what an s3-on derivation rested on)
     if source["kind"] != "derived" or set(source) - optional != DERIVED_SOURCE_KEYS:
         raise ModelError(f"{path}: a summary file's source is derived with {sorted(DERIVED_SOURCE_KEYS)}")
     # (S1, docs 25.100 / 25.106) the derivation's observations' CALL fallthrough
