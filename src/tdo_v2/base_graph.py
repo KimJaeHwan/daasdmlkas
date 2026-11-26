@@ -214,10 +214,11 @@ class BaseGraphPublication:
                 normalizer = FunctionNormalizer()
                 # (PE-a1, Astra r4 P2) the program-wide DF coordinate, as the proof pass
                 inferred_flag = None
+                self._direction_flag = None
                 if self._policy.assume_direction_flag_clear:
                     from .isa_identity import inferred_direction_flag
 
-                    inferred_flag = inferred_direction_flag(
+                    inferred_flag = self._direction_flag = inferred_direction_flag(
                         [*self._units, *(item.unit for item in self._admission_failures)])
                 for key, unit in zip(self._keys, self._units):
                     try:

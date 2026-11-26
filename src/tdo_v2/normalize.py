@@ -839,14 +839,12 @@ def _entry_direction(memory_ssa, scopes, site, observation, inferred_flag, cache
 
 
 def _direction_flag_of(scopes, inferred_flag, observation=None):
-    from types import SimpleNamespace
-
     """(PE-a1) DF for the premise: the exported register table's DF row when
     the program has a table (precedence: no row, no certificate), else the
     sealed program-wide inferred coordinate (``inferred_direction_flag``) --
     only for the snapshot it was inferred from (Astra r4 P1-2) and for an
     observation its unanimity covered (Astra r5 P1-2)."""
-    from .isa_identity import InferredDirectionFlag, _digest_of, direction_flag, x86_language
+    from .isa_identity import InferredDirectionFlag, _scope_digest, direction_flag, x86_language
 
     evidence = scopes.program.evidence
     if evidence.register_evidence is not None:
@@ -856,7 +854,7 @@ def _direction_flag_of(scopes, inferred_flag, observation=None):
     if type(inferred_flag) is not InferredDirectionFlag:
         raise TypeError("inferred_direction_flag requires an exact InferredDirectionFlag")
     if inferred_flag.program != scopes.program.scope or not x86_language(evidence) \
-            or _digest_of(SimpleNamespace(scopes=scopes)) not in inferred_flag.observations:
+            or _scope_digest(scopes.function) not in inferred_flag.observations:
         return None
     return inferred_flag.flag
 

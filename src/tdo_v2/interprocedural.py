@@ -313,6 +313,9 @@ def analyze_units(units, *, assume_import_slots_hold_exports=False, assume_entry
                              "(unavailable_entries / unidentified_refusals or refused units)")
         if not base_graphs._started:
             base_graphs.build()
+        if options.get("assume_direction_flag_clear") and base_graphs._policy.assume_direction_flag_clear:
+            # (PE-a1, Astra r7 P2) one inference: the sets matched above
+            options["shared_direction_flag"] = base_graphs._direction_flag
         snapshot = base_graphs.snapshot
         if snapshot.stop != "finished" or not snapshot.local_pass_finished or not snapshot.entry_links_finished:
             raise ValueError("base graph pass did not finish; proof pass was not started")
@@ -635,8 +638,12 @@ def _without_late_refusals(published, owners, functions, calls, late_edges=None,
     return found
 
 
+_UNSHARED = object()   # (PE-a1: no certificate handed over by the combined entry)
+
+
 @measured("analyze_units")
 def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None, retained_observations=(),
+                   shared_direction_flag=_UNSHARED,
                   assume_globals_disjoint_from_stack=False, sink_roots=None,
                   image_info=None, external_models=None, readonly_image=None,
                   declared_boundaries=None, assume_direction_flag_clear=False,
@@ -898,8 +905,9 @@ def _analyze_units(units, *, assumed_call_effects=None, extra_origins=None, reta
     # (Astra r4 P1-1: every retained observation -- the units passed, admitted
     # or not, cut ones, and refusals the caller retained; the caller passes
     # every observation of the snapshot it holds: ``retained_observations``)
-    direction_flag_inferred = inferred_direction_flag(
-        [*units, *program.values(), *retained_observations]) if assume_direction_flag_clear else None
+    direction_flag_inferred = (shared_direction_flag if shared_direction_flag is not _UNSHARED
+                               else inferred_direction_flag([*units, *program.values(), *retained_observations])) \
+        if assume_direction_flag_clear else None
     externals = {
         key: {**(_external_sites(unit, image_info, external_models, disabled, usable,
                                  refused_sites.setdefault(key, {}), local_entries,

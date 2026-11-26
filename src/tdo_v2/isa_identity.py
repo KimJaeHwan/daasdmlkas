@@ -63,20 +63,24 @@ def x86_language(evidence) -> bool:
     return _language_parts(evidence) in _DIRECTION_FLAGS
 
 
-_TABLE_FLAGS: dict = {}   # id(evidence) -> (evidence, its table DF row) -- one lookup per program
+_TABLE_FLAGS: dict = {}   # (language, register table) -> its DF row -- one lookup per snapshot content
 
 
 def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordinate | None:
     """The x86 direction flag as the exported register evidence places it;
     None for another language or without exact evidence (no certificate).
-    Looked up once per program snapshot (Astra r6 P2)."""
-    held = _TABLE_FLAGS.get(id(evidence))
-    if held is not None and held[0] is evidence:
-        return held[1]
-    if len(_TABLE_FLAGS) > 64:
+    Looked up once per snapshot content (language id and register table --
+    two loads of one snapshot share it; Astra r6 / r7 P2)."""
+    require_exact(evidence, VerifiedProgramSnapshotEvidence, "program evidence")
+    key = (evidence.translation_namespace.language_id, evidence.register_evidence)
+    try:
+        if key in _TABLE_FLAGS:
+            return _TABLE_FLAGS[key]
+    except TypeError:   # (an unhashable table: no cache)
+        return _named(evidence, _DIRECTION_FLAGS)
+    if len(_TABLE_FLAGS) > 16:
         _TABLE_FLAGS.clear()
-    found = _named(evidence, _DIRECTION_FLAGS)
-    _TABLE_FLAGS[id(evidence)] = (evidence, found)
+    found = _TABLE_FLAGS[key] = _named(evidence, _DIRECTION_FLAGS)
     return found
 
 
@@ -87,12 +91,30 @@ def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordin
 _SEAL_KEY = __import__("os").urandom(32)
 
 
-def _seal_of(program, flag, observations) -> bytes:
+def _canonical(program, flag, observations) -> bytes | None:
+    """(Astra r7 P1-2) the exact values a seal covers: a program scope id, a
+    register coordinate and a frozenset of observation digests, each of its
+    exact type -- None for anything else (no seal can match it)."""
+    from .span_geometry import StorageScopeId
+
+    if type(program) is not StorageScopeId or type(flag) is not RegisterCoordinate \
+            or type(observations) is not frozenset or any(type(item) is not bytes for item in observations):
+        return None
+    if type(program.digest) is not bytes or type(flag.name) is not str or any(
+            type(value) is not int for value in (flag.space_id, flag.byte_offset, flag.byte_size)):
+        return None
+    parts = [program.kind.value.encode(), program.digest, flag.name.encode(),
+             *(value.to_bytes(16, "little", signed=True) for value in (flag.space_id, flag.byte_offset, flag.byte_size)),
+             *sorted(observations)]
+    return b"".join(len(part).to_bytes(4, "little") + part for part in parts)
+
+
+def _seal_of(program, flag, observations) -> bytes | None:
     import hashlib
     import hmac
 
-    text = repr((program, flag, tuple(sorted(observations)))).encode("utf-8")
-    return hmac.new(_SEAL_KEY, text, hashlib.sha256).digest()
+    text = _canonical(program, flag, observations)
+    return None if text is None else hmac.new(_SEAL_KEY, text, hashlib.sha256).digest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,10 +131,13 @@ class InferredDirectionFlag:
     seal: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
-        if type(self.observations) is not frozenset or type(self.seal) is not bytes \
-                or not __import__("hmac").compare_digest(self.seal, _seal_of(self.program, self.flag,
-                                                                             self.observations)):
+        expected = _seal_of(self.program, self.flag, self.observations)
+        if expected is None or type(self.seal) is not bytes \
+                or not __import__("hmac").compare_digest(self.seal, expected):
             raise ValueError("an inferred direction flag is issued only by inferred_direction_flag")
+        # (a copy of a genuine certificate -- equal fields, its own seal -- is
+        # that same certificate: no observation, snapshot or coordinate can
+        # change without a new seal)
 
 
 def _issue(program, flag, observations) -> InferredDirectionFlag:
@@ -126,8 +151,19 @@ _INFERRED: dict = {}   # (program, digests) -> result: one scan per observation 
 
 def _digest_of(unit):
     """The observation digest the unit's function scope already validated
-    (``ScopedFunctionUnit``: constructed scopes bind it, refusals retain it)."""
-    function = unit.scopes.function
+    -- only for an exact ``ScopedFunctionUnit``, whose construction checked
+    that its observation is the one the scope names (Astra r7 P1-1); None
+    otherwise (no certificate)."""
+    from ._scope_results import ScopedFunctionUnit
+
+    if type(unit) is not ScopedFunctionUnit:
+        return None
+    return _scope_digest(unit.scopes.function)
+
+
+def _scope_digest(function):
+    """The observation digest a function scope carries (constructed scopes
+    bind it, refusals retain it); for a unit already validated by its caller."""
     return getattr(function, "observation_digest", None) or getattr(function, "validated_observation_digest", None)
 
 
@@ -150,8 +186,11 @@ def inferred_direction_flag(units) -> InferredDirectionFlag | None:
     from ._scope_results import ConstructedProgramScope
     from .rep_strings import recognize
 
+    from ._scope_results import ScopedFunctionUnit
+
     supplied = list(units)
-    if not supplied or any(type(unit.scopes.program) is not ConstructedProgramScope for unit in supplied):
+    if not supplied or any(type(unit) is not ScopedFunctionUnit or type(unit.scopes.program) is not
+                           ConstructedProgramScope for unit in supplied):
         return None
     # (Astra r5 P2) every supplied unit's snapshot -- an observation-free
     # refusal of another snapshot included -- before any observation is read

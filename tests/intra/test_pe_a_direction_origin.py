@@ -547,8 +547,52 @@ def test_one_scan_no_rehash_and_one_table_lookup(monkeypatch):
         return named(evidence, names)
 
     monkeypatch.setattr(isa_identity, "_named", named_df)
-    other, _ = _function()
+    isa_identity._TABLE_FLAGS.clear()
     with_table = program_units(builder, FunctionBuilder(entry=WRAPPER).ret(), registers=REGISTERS)
-    for unit in with_table:
+    again = program_units(builder, FunctionBuilder(entry=WRAPPER).ret(), registers=REGISTERS)   # (a second load)
+    assert again[0].scopes.program.evidence is not with_table[0].scopes.program.evidence
+    for unit in (*with_table, *again):
         isa_identity.direction_flag(unit.scopes.program.evidence)
-    assert counts["named"] == 1
+    assert counts["named"] == 1   # (Astra r7 P2: one lookup per snapshot content, not per object)
+
+
+
+def test_only_exact_validated_units_give_digests():
+    """Astra r7 P1-1: an object pairing one body's scope with another body's
+    observation is no ScopedFunctionUnit -- no digest, no certificate."""
+    from types import SimpleNamespace
+    from tdo_v2.isa_identity import _digest_of, inferred_direction_flag
+
+    first, second = program_units(_function()[0], FunctionBuilder(entry=WRAPPER).ret())
+    mixed = SimpleNamespace(scopes=first.scopes, observation=second.observation)
+    assert _digest_of(mixed) is None and _digest_of(first) is not None
+    assert inferred_direction_flag([mixed]) is None and inferred_direction_flag([first, mixed]) is None
+
+
+def test_a_seal_covers_exact_typed_values_only():
+    """Astra r7 P1-2: fields of other types (equal reprs or not) get no seal."""
+    from tdo_v2.isa_identity import _issue, _seal_of, inferred_direction_flag
+
+    (unit,) = program_units(_function()[0])
+    genuine = inferred_direction_flag([unit])
+    assert _seal_of(repr(genuine.program), genuine.flag, genuine.observations) is None
+    assert _seal_of(genuine.program, repr(genuine.flag), genuine.observations) is None
+    assert _seal_of(genuine.program, genuine.flag, frozenset(map(bytes.hex, genuine.observations))) is None
+    with pytest.raises(ValueError, match="issued only"):
+        _issue(repr(genuine.program), genuine.flag, genuine.observations)
+
+
+def test_the_combined_entry_infers_once(monkeypatch):
+    """Astra r7 P2: the proof pass takes the base pass's certificate."""
+    from tdo_v2 import isa_identity
+    from tdo_v2.base_graph import BaseGraphPolicy, BaseGraphPublication
+    from tdo_v2.interprocedural import analyze_units
+
+    calls = []
+    original = isa_identity.inferred_direction_flag
+    monkeypatch.setattr(isa_identity, "inferred_direction_flag",
+                        lambda units: calls.append(1) or original(units))
+    units = program_units(_function()[0])
+    publication = BaseGraphPublication(units, policy=BaseGraphPolicy(assume_direction_flag_clear=True))
+    results = analyze_units(units, base_graphs=publication, assume_direction_flag_clear=True)
+    assert len(calls) == 1 and results["1:1000"].normalized.rep_blocks
