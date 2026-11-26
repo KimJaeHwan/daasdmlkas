@@ -1338,7 +1338,7 @@ def test_r4_s5_first_and_third_pt_load_share_a_page():
 EV_BUNDLE = {"generation_id": "g" * 64, "manifest_sha256": "m" * 64, "original_sha256": "o" * 64}
 EV_PRODUCER = {"decode_check_revision": 2, "tool_digest": "t" * 64, "decoders": {"zydis": "x"},
                "voters": {"intel": ["iced", "zydis", "xed"], "amd": ["iced", "zydis"]}, "rules": "pe-loader-rules-6",
-               "lift_table": "x86-64-lift-table-6", "diagnosis_engine": {"source_digest": "e" * 64},
+               "lift_table": "x86-64-lift-table-7", "diagnosis_engine": {"source_digest": "e" * 64},
                "naming_source_sha256": "n" * 64}
 
 
@@ -1698,8 +1698,30 @@ def test_internal_rows_against_the_voters(name, data, ops, pattern):
     assert result["state"] == "applied", (name, result["attributes"])
 
 
+def test_userop_classes_file_is_consistent():
+    """Table -7: the pinned no-flow userops come from userops_x64_classes.json (spec + test binary + voters +
+    iced privilege facts); flow, privileged / OS-gated and unknown userops are never pinned."""
+    import hashlib
+    import json
+
+    import lifting
+
+    path = REPO / "tools" / "decode_check" / "userops_x64_classes.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert lifting.TABLE["no_flow_userops_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert data["sla_sha256"].startswith("d5adc314") and data["language"] == ["x86:LE:64:default", 4, 6]
+    pinned = set(data["no_flow"].values())
+    for group in data["excluded"].values():
+        assert not pinned & set(group)
+    assert {"syscall", "swi", "invalidInstructionException"} <= set(data["excluded"]["flow"])
+    assert {"rdmsr", "wrmsr", "in", "out", "cpuid", "rdtsc"} <= set(data["excluded"]["privileged"])
+    assert {"LOCK", "UNLOCK", "psraw", "pshufb"} <= pinned
+    assert lifting.TABLE["no_flow_userops"] == {int(k): v for k, v in data["no_flow"].items()}
+
+
 @pytest.mark.parametrize("name, ops", [
     ("an unpinned userop (syscall, 5)", [_co(5)]),
+    ("an OS-gated userop (cpuid, 44: CPUID faulting)", [_co(44, output=_u(0x40))]),
     ("a marker next to a real branch", [_co(17), _op("BRANCH", [_a(START + 0x40)]), _co(18)]),
     ("an internal branch next to a real one", [_op("CBRANCH", [_c(2), _u(0x30, 1)]),
                                                _op("CBRANCH", [_a(START + 0x40), _u(0x30, 1)])]),

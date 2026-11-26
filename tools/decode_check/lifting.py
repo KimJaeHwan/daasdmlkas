@@ -13,28 +13,27 @@ identity, so without the premise every table-dependent attribute is
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
+from pathlib import Path
 
 # Ghidra 12.0.4, x86:LE:64:default 4.6 (x86-64.sla d5adc314, the engine's own evidence: fault_premise.py,
 # pcodeop_models x86.json): userop indices this table reads
+_CLASSES_PATH = Path(__file__).resolve().parent / "userops_x64_classes.json"
+_CLASSES_SHA256 = hashlib.sha256(_CLASSES_PATH.read_bytes()).hexdigest()
+_NO_FLOW = {int(index): name for index, name in json.loads(_CLASSES_PATH.read_bytes())["no_flow"].items()}
+
 TABLE = {
-    "id": "x86-64-lift-table-6",
+    "id": "x86-64-lift-table-7",
     "language": ("x86:LE:64:default", 4, 6),
     "ghidra": "12.0.4",
     "sla_sha256_prefix": "d5adc314",
     "userops": {16: "swi", 77: "invalidInstructionException", 84: "xabort", 85: "xbegin", 86: "xend", 99: "xtest"},
-    # userops with no flow effect, pinned only from a real-Bundle data check (UE core probe, table -6): every row
-    # using them exports the plain flow bits and every voter decodes no transfer. Numbers / names from
-    # ghidra/GhidraV2ListUserOps.java on x86:LE:64:default 4.6 (Ghidra 12.0.4). LOCK / UNLOCK are the engine's own
-    # no-effect markers (models/pcodeops/x86.json).
-    "no_flow_userops": {17: "LOCK", 18: "UNLOCK", 130: "movmskpd", 155: "pshufb", 163: "psraw",
-                        1623: "sha1rnds4_sha", 1624: "sha1nexte_sha", 1625: "sha1msg1_sha", 1626: "sha1msg2_sha",
-                        44: "cpuid", 45: "cpuid_basic_info", 46: "cpuid_Version_info", 47: "cpuid_cache_tlb_info",
-                        48: "cpuid_serial_info", 49: "cpuid_Deterministic_Cache_Parameters_info",
-                        50: "cpuid_MONITOR_MWAIT_Features_info", 51: "cpuid_Thermal_Power_Management_info",
-                        52: "cpuid_Extended_Feature_Enumeration_info", 53: "cpuid_Direct_Cache_Access_info",
-                        54: "cpuid_Architectural_Performance_Monitoring_info", 55: "cpuid_Extended_Topology_info",
-                        56: "cpuid_Processor_Extended_States_info", 57: "cpuid_Quality_of_Service_info",
-                        58: "cpuid_brand_part1_info", 59: "cpuid_brand_part2_info", 60: "cpuid_brand_part3_info"},
+    # userops with no flow effect: tools/decode_check/userops_x64_classes.json (table -7), derived from Ghidra's
+    # SLEIGH sources + a test binary of every userop-using constructor + the voters' votes and iced privilege
+    # facts; privileged / OS-gated, flow and unexercised userops are never pinned
+    "no_flow_userops": _NO_FLOW,
+    "no_flow_userops_sha256": _CLASSES_SHA256,
     "allowed_prefix": frozenset({"COPY", "INT_ADD", "INT_SUB", "INT_MULT", "INT_ZEXT", "INT_SEXT", "SUBPIECE",
                                  "PIECE", "LOAD", "INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_SLESS",
                                  "INT_LESSEQUAL", "INT_SLESSEQUAL", "BOOL_NEGATE", "BOOL_AND", "BOOL_OR",

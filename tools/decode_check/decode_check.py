@@ -43,7 +43,10 @@ RESERVED_LAYERS = {"semantics": {"revision": None, "status": "reserved (TBR A3 /
 SCOPE = ("only Ghidra-listed rows are checked (L5); 64-bit long mode only (no compatibility-mode switches); "
          "decoder agreement is not a proof of CPU behaviour (premise decoder-matches-cpu); vendor agreement covers "
          "only what the decoders model; instruction meaning beyond the compared attributes (mnemonic, data effects, "
-         "registers written) is not compared; whether a producer guard fired cannot be decided from the Bundle")
+         "registers written) is not compared; whether a producer guard fired cannot be decided from the Bundle; the "
+         "continuation compared is the no-fault one: faults (memory access, privilege, CPU feature availability) are not "
+         "compared -- privileged / OS-gated userops are never pinned as no-flow, and per-row privilege / feature facts are "
+         "the TBR to-do 'ISA fact annotations'")
 
 
 def _offset(coordinate_text: str) -> tuple:
@@ -189,8 +192,9 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     mapping = check.parse_original(original)
     header = {"tool": "decode_check", "revision": REVISION, "generation": generation.name,
               "premises": ["decoder-matches-cpu"] + ([lifting.TRANSLATION_PREMISE] if premise else []),
-              "lift_table": {k: v for k, v in lifting.TABLE.items() if k != "allowed_prefix"} | {
-                  "allowed_prefix": sorted(lifting.TABLE["allowed_prefix"])},
+              "lift_table": {k: v for k, v in lifting.TABLE.items() if k not in ("allowed_prefix", "no_flow_userops")} | {
+                  "allowed_prefix": sorted(lifting.TABLE["allowed_prefix"]),
+                  "no_flow_userops_count": len(lifting.TABLE["no_flow_userops"])},
               "decoders": decoders.manifest(), "voters": {"intel": list(decoders.INTEL_VOTERS),
                                                           "amd": list(decoders.AMD_VOTERS)},
               "scope": SCOPE, "PYTHONHASHSEED": "0", "layers": {"g1": list(G1_LAYERS), "derived": ["dependents"],

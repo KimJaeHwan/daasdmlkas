@@ -146,8 +146,11 @@ Bundle (admission refuses unlisted entries) and is passed by explicit path.
   bytes; OS / setting-dependent entries need a named load-model premise, else unobserved.
 - (done, lift table -5) cmov / rep listing bits pinned to the no-transfer form after a real-Bundle data check:
   all 2,487 cmov and 5 rep rows of the UE core probe and the ELF test Bundles export the plain rows' bits.
-- (done, lift table -6) rows whose only flow ops are pinned no-flow userops (LOCK / UNLOCK, the observed SIMD
-  ops, the cpuid family) and intra-instruction branches (CONSTANT destination) are compared as "internal"
-  (no transfer); pinned only from the UE data check. Other userops stay unobserved.
+- (done, lift table -7) all 1,756 x86-64 userops classified once, from Ghidra's own SLEIGH sources and a test
+  binary (`sleigh_userops.py` -> `userop_testbin.py` -> Ghidra export -> `userop_classify.py`): 1,259 no-flow
+  (pinned, `userops_x64_classes.json`), 12 flow, 89 privileged / OS-gated (iced: is_privileged / must_be_cpl0 /
+  may_require_cpl0 -- never pinned; cpuid and rdtsc are here), 396 not exercised. A row whose only flow ops are
+  pinned no-flow userops and intra-instruction branches is "internal". The test binary and its Bundle stay local.
+- repe / repne string compares (conditional loop-back CBRANCH): a named shape to add after a data check.
 - Far call / far ret lift patterns (today unidentified, never a false near-call suspect).
 - Block rows: count the "outside" tail beyond the file mapping apart from real differences.
