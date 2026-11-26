@@ -92,6 +92,11 @@ class CallClobberDischarger:
         # -- a read has a debt node per crossing call, each judged on its rows
         self._judged: dict = {}
         self._preserved: dict[tuple[AddressCoordinate, tuple[object, ...]], bool] = {}
+        # (PE-d) the exit crossings of a callee, and its kept spans (``_keeps``)
+        self._exit_crossing_cache: dict = {}
+        self._kept: dict = {}
+        self._open_control_cache: dict = {}
+        self._keep_depth = 0   # (Astra PE-d r1 P2: a bounded recursion)
         self._frame_safe: dict[tuple[AddressCoordinate, int, int], bool] = {}
         from ..call_clobber import rows_by_debt
 
@@ -424,8 +429,14 @@ class CallClobberDischarger:
         certificate must then not stand although the last definition restores
         the entry value: ``push rbx; ...; pop rbx; call f; ret`` proves no RBX.
         A crossing direct internal call is excused only when that callee is
-        itself proven to preserve the same bytes (``_preserves``, recursively)."""
-        cache = self.__dict__.setdefault("_exit_crossing_cache", {})
+        itself proven to keep the same bytes (``_keeps``, recursively).
+        Invariant (Fable PE-d r1 P2-1): ``_exit_crossings`` stores a byte of an
+        exit only when something crosses it there -- an absent byte is "not
+        crossed". That is sound for both callers: a saved-copy certificate
+        (``_preserves``) first requires one terminal write covering the span
+        at EVERY exit, so every claimed byte is a terminal byte of every exit;
+        ``_keeps`` decides untouched bytes from the definitions, not from here."""
+        cache = self._exit_crossing_cache
         held = cache.get(callee)
         if held is None:
             from ..call_clobber import _preserved_stack_pointers
@@ -437,6 +448,8 @@ class CallClobberDischarger:
             held = cache[callee] = (found["label_universe"],
                                     {key: offsets for key, offsets in found.items() if type(key) is tuple})
         universe, crossings = held
+        if self._open_control(callee, view):
+            return True   # (Astra PE-d r1 P1-2: an unresolved continuation may change anything)
         labels = set()
         for (_, object_id), offsets in crossings.items():
             if object_id != span.object_id:
@@ -453,17 +466,35 @@ class CallClobberDischarger:
                 return True
         return False
 
+    def _open_control(self, callee, view) -> bool:
+        """(PE-d, Astra r1 P1-2) The callee leaves by a transfer whose effect on
+        any byte is unproven here: an unresolved indirect jump
+        (``control_context.unknown_transfer_sites``), any BRANCHIND, or a tail
+        jump (``interprocedural._tail_jumps``) -- the exit crossings do not
+        model what runs after them. No certificate then (conservative)."""
+        held = self._open_control_cache.get(callee)
+        if held is None:
+            from ..control_context import unknown_transfer_sites
+            from ..interprocedural import _tail_jumps, function_key
+
+            unit = view.analysis.evidence.unit
+            held = self._open_control_cache[callee] = bool(
+                unknown_transfer_sites(function_key(callee), unit.observation)
+                or any(key.endswith(":BRANCHIND") for key in view.operations)
+                or _tail_jumps(unit))
+        return held
+
     def _keeps(self, callee, span, active) -> bool:
         """(PE-d) ``callee`` returns ``span`` unchanged on every exit: it never
         writes those bytes and nothing crosses them at an exit, or its saved
         copy restores them (``_preserves``)."""
-        key = ("keeps", callee, span.canonical_key)
-        if key in self._preserved:
-            return self._preserved[key]
-        self._preserved[key] = False   # (a cycle proves nothing)
+        key = (callee, span.canonical_key)
+        if key in self._kept:
+            return self._kept[key]
+        self._kept[key] = False   # (a cycle proves nothing)
         view = self._views.get(callee)
-        if view is None:
-            return False
+        if view is None or self._keep_depth >= MAX_FRAME_DEPTH or self._open_control(callee, view):
+            return False   # (too deep: withheld, not decided -- left False only for this question)
         # never written by the callee itself, and every call in it a direct
         # internal call whose callee keeps those bytes too (an untouched byte
         # has no exit crossing of its own: the calls decide -- a CALLOTHER, an
@@ -471,13 +502,21 @@ class CallClobberDischarger:
         targets = self._targets.get(callee, {})
         calls = [operation for operation in view.operations
                  if operation.endswith((":CALL", ":CALLIND", ":CALLOTHER"))]
-        untouched = (
-            not any(target.overlaps(span) for _, target in view.terminal_data_writes())
-            and not view.normalized.memory_graph.unresolved_write_nodes
-            and all(call in targets and self._keeps(targets[call], span, active) for call in calls)
-        )
-        self._preserved[key] = untouched or self._preserves(callee, span, active)
-        return self._preserved[key]
+        # (Fable PE-d r1 P1-1) untouched = no definition but ENTRY overlaps the
+        # span -- not "no write shared by every exit": a write on one path, two
+        # exits writing differently, or a JOIN at one exit all touch it
+        self._keep_depth += 1
+        try:
+            untouched = (
+                not any(definition.kind is not MemoryDefinitionKind.ENTRY and definition.span.overlaps(span)
+                        for definition in view.memory.definitions)
+                and not view.normalized.memory_graph.unresolved_write_nodes
+                and all(call in targets and self._keeps(targets[call], span, active) for call in calls)
+            )
+            self._kept[key] = untouched or self._preserves(callee, span, active)
+        finally:
+            self._keep_depth -= 1
+        return self._kept[key]
 
     def _callee_read_discharged(self, callee, operation_key, active) -> bool:
         context = _EMPTY_CONTEXT
