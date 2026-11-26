@@ -416,3 +416,38 @@ def test_a_cut_false_is_reused_only_with_no_more_budget():
     before = discharger._cut_events
     assert discharger._cached("keeps", cache, "loop", 5, active, cycle) is False
     assert discharger._cut_events > before and "loop" not in cache
+
+
+@pytest.mark.parametrize("long_first", (True, False))
+def test_a_frame_proof_cut_does_not_depend_on_root_order(long_first):
+    """Astra r3 P2-4, second case: a saved copy across a call (push rbx; call cK;
+    rbx = 0; pop rbx; ret) needs the frame proof of the whole chain below cK.
+    The long root (from c0) is cut at the depth bound; the short root calls
+    c13 with its slot at the same offset in c13's frame as on the long chain
+    (sub rsp, 8 * 13), so it asks the very frame question the long root
+    answered False under the cut. Short complete, long not, in both orders
+    (on e69a30b the memoized cut False failed the short root)."""
+    depth, short_at = 18, 13
+    entries = [CODE_BASE + 0x100 + 0x10 * index for index in range(depth)]
+    chain = [FunctionBuilder(entry=entry).call(entries[index + 1]).ret() if index + 1 < depth
+             else FunctionBuilder(entry=entry).ret() for index, entry in enumerate(entries)]
+    long_helper = (FunctionBuilder(entry=HELPER).push(RBX).call(entries[0]).ins(copy(reg(RBX), const(0)))
+                   .pop(RBX).ret())
+    short_helper = (FunctionBuilder(entry=LEAF).push(RBX).sub_rsp(8 * short_at).call(entries[short_at])
+                    .ins(copy(reg(RBX), const(0))).add_rsp(8 * short_at).pop(RBX).ret())
+    second = CODE_BASE + 0x600
+
+    def root_function(entry, helper):
+        return (FunctionBuilder(entry=entry).call(SOURCE).ins(copy(reg(RBX, 4), reg(RAX, 4))).call(helper)
+                .ins(copy(reg(RCX, 4), reg(RBX, 4))).call(SINK).ret())
+
+    first, then = (HELPER, LEAF) if long_first else (LEAF, HELPER)
+    rest = {"source": _source(), "helper": long_helper, "short": short_helper, "sink": FunctionBuilder(entry=SINK).ret(),
+            **{f"c{i}": body for i, body in enumerate(chain)}}
+    functions = {"main": root_function(MAIN, first), "second": root_function(second, then), **rest}
+    if not long_first:
+        functions = {"second": functions["second"], "main": functions["main"], **rest}
+    roots = analyze_program(functions, PROVIDER)
+    long_root, short_root = ("main", "second") if long_first else ("second", "main")
+    assert not roots[(long_root, "sink.arg0")].is_effectively_complete
+    assert roots[(short_root, "sink.arg0")].is_effectively_complete
