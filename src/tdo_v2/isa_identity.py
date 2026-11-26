@@ -64,6 +64,7 @@ def x86_language(evidence) -> bool:
 
 
 _TABLE_FLAGS: dict = {}   # (language, register table) -> its DF row -- one lookup per snapshot content
+_MISS = object()   # (a cache miss, distinct from a cached None)
 _TABLE_BY_OBJECT: dict = {}   # id(evidence) -> (evidence, its DF row): a warm hit hashes nothing
 
 
@@ -78,8 +79,8 @@ def direction_flag(evidence: VerifiedProgramSnapshotEvidence) -> RegisterCoordin
         return held[1]
     key = (evidence.translation_namespace.language_id, evidence.register_evidence)
     try:
-        found = _TABLE_FLAGS[key] if key in _TABLE_FLAGS else None
-        if key not in _TABLE_FLAGS:
+        found = _TABLE_FLAGS.get(key, _MISS)   # (one lookup: Astra r9 P2, no check-then-read race)
+        if found is _MISS:
             if len(_TABLE_FLAGS) > 16:
                 _TABLE_FLAGS.clear()
             found = _TABLE_FLAGS[key] = _named(evidence, _DIRECTION_FLAGS)

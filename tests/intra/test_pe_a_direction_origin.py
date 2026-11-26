@@ -618,3 +618,21 @@ def test_even_an_unchanged_copy_of_a_certificate_is_refused():
         replace(genuine)
     with pytest.raises(ValueError, match="issued only"):
         InferredDirectionFlag(genuine.program, genuine.flag, genuine.observations, genuine.seal)
+
+
+def test_a_cached_no_row_is_a_hit_not_a_miss(monkeypatch):
+    """Astra r9 P2: one lookup with a miss sentinel -- a table without a DF row is
+    cached as None and served without a second scan."""
+    from tdo_v2 import isa_identity
+
+    table = {**REGISTERS, "registers": [row for row in REGISTERS["registers"] if row["name"] != "DF"]}
+    builder, _ = _function()
+    first = program_units(builder, registers=table)[0].scopes.program.evidence
+    second = program_units(builder, registers=table)[0].scopes.program.evidence
+    isa_identity._TABLE_FLAGS.clear()
+    isa_identity._TABLE_BY_OBJECT.clear()
+    calls = []
+    named = isa_identity._named
+    monkeypatch.setattr(isa_identity, "_named", lambda evidence, names: calls.append(1) or named(evidence, names))
+    assert isa_identity.direction_flag(first) is None and isa_identity.direction_flag(second) is None
+    assert len(calls) == 1

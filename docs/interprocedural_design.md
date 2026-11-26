@@ -7357,6 +7357,8 @@ PE-a3(템플릿). 각 단계는 혼자서 건전하다(기록이 없으면 "덮�
   r8(Astra 마감 확인 r8: P1 + P2 + 2 P3): 증명 패스에 증명서를 넘기는 것은 통합 입구 내부뿐이다(공개 `analyze_units`에
   `shared_direction_flag`를 주면 TypeError); 넘김은 기본 패스가 끝났음을 확인한 뒤; 증명서는 발급자(`_issue`)만 만든다(같은
   필드의 사본이나 `replace`도 거부); 표 조회는 같은 증거 객체면 해시 없이(내용 열쇠는 처음 볼 때만).
+  마감(2026-11-26): Fable r6 APPROVE, Astra r9 APPROVE WITH FIXES(표 캐시를 한 번 조회 + 빠짐 표시로 -- 반영). 최종 게이트
+  pea1d(30e2e72 vs pec2): 테스트 두 묶음 7443 통과, UE 템플릿 통과, 오라클 pea1c와 동일. 기준선은 pea1d.
 - 측정(게이트 pea1 = d7d8061 vs pec2, 같은 입력; `.census6/cob/pea_census.py`, `pea_cause.py`): 테스트 두 묶음 7422 통과, UE
   템플릿 확인 통과, 프로그램 오라클 수치 pec2와 동일. rep 지점(펼친 것): corpus gcc-x64-O2-rep 1 -> 1, gcc-x64-O3 1 -> 1,
   ue-dll-debuggame default 31 -> 13, accessor 31 -> 13(가정을 쓴 함수 19 -> 11); 나머지 Bundle은 rep 지점 0. 잃은 18곳은 모두
