@@ -67,6 +67,27 @@ enum dc_flow_detail {
 #define DC_SEG_FS 16
 #define DC_SEG_GS 32
 
+/* layout revision 4 (ISA facts 2b, design_tbr_isa_ordinary_r3): form evidence and memory accesses */
+#define DC_PFX_LOCK 1    /* an effective LOCK prefix */
+#define DC_PFX_REP 2     /* an effective REP / REPE (F3) on a string form */
+#define DC_PFX_REPNE 4   /* an effective REPNE (F2) on a string form */
+
+enum dc_mem_role {
+    DC_ROLE_EXPLICIT = 0,        /* an explicit memory operand (operand_index) */
+    DC_ROLE_STACK = 1,           /* implicit, based on RSP / ESP */
+    DC_ROLE_STRING_SOURCE = 2,   /* implicit, based on RSI / ESI */
+    DC_ROLE_STRING_DEST = 3,     /* implicit, based on RDI / EDI */
+    DC_ROLE_OTHER = 4            /* any other implicit access (descriptor tables, XLAT, ...) */
+};
+
+#define DC_MAX_MEM 8
+typedef struct {
+    int32_t segment;        /* DC_SEG_* bit of its address segment; 0 when the decoder reports none (flat) */
+    int32_t read, write;
+    int32_t role;           /* enum dc_mem_role */
+    int32_t operand_index;  /* explicit operand position, -1 for implicit */
+} dc_mem;
+
 typedef struct {
     int32_t status;
     int32_t length;
@@ -97,6 +118,18 @@ typedef struct {
     char isa_set[48];          /* the decoder's own ISA-set name */
     char extension[48];        /* the decoder's own extension / ISA-extension name */
     char chip[32];             /* the chip profile this decode used ("" = the G1 voter setting) */
+    /* layout revision 4: form evidence (2b) */
+    char category[32];         /* the decoder's own category name */
+    uint32_t rflags_read;      /* RFLAGS bits read, at their architectural positions */
+    uint32_t rflags_written;   /* RFLAGS bits written (modified, set, cleared or undefined) */
+    int32_t sreg_operand;      /* 1: a segment register is an operand (explicit or hidden); address segments excluded */
+    int32_t prefix_flags;      /* DC_PFX_* */
+    char op_sig[16];           /* explicit operand kinds: g gpr, m mmx, x xmm, y wider vector, k mask, s segment,
+                                  c control / debug, f x87, M memory, A address only, i immediate, r branch target,
+                                  ? other */
+    int32_t mem_count;         /* memory accesses below (address-only operands excluded) */
+    int32_t mem_overflow;      /* 1: more than DC_MAX_MEM accesses */
+    dc_mem mem[DC_MAX_MEM];
 } dc_decoded;
 
 /* amd: 0 Intel behaviour, 1 AMD behaviour (where the decoder models it) */
@@ -110,8 +143,8 @@ const char *dc_isa_set_name(int index);
 int dc_isa_set_valid_for_chip(int index, const char *chip);
 const char *dc_version(void);
 int dc_struct_size(void);
-/* the layout revision: fields can fit in old struct padding, so the size alone cannot tell (3) */
-#define DC_LAYOUT_REVISION 3
+/* the layout revision: fields can fit in old struct padding, so the size alone cannot tell (4) */
+#define DC_LAYOUT_REVISION 4
 int dc_layout_revision(void);
 
 #endif

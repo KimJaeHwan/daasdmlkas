@@ -63,6 +63,87 @@ int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc
     return dc_decode_ex(bytes, length, address, amd, NULL, out);
 }
 
+static char reg_kind(ZydisRegister reg) {
+    switch (ZydisRegisterGetClass(reg)) {
+    case ZYDIS_REGCLASS_GPR8: case ZYDIS_REGCLASS_GPR16: case ZYDIS_REGCLASS_GPR32: case ZYDIS_REGCLASS_GPR64:
+        return 'g';
+    case ZYDIS_REGCLASS_MMX: return 'm';
+    case ZYDIS_REGCLASS_XMM: return 'x';
+    case ZYDIS_REGCLASS_YMM: case ZYDIS_REGCLASS_ZMM: case ZYDIS_REGCLASS_TMM: return 'y';
+    case ZYDIS_REGCLASS_MASK: return 'k';
+    case ZYDIS_REGCLASS_SEGMENT: return 's';
+    case ZYDIS_REGCLASS_CONTROL: case ZYDIS_REGCLASS_DEBUG: return 'c';
+    case ZYDIS_REGCLASS_X87: return 'f';
+    default: return '?';
+    }
+}
+
+static int32_t base_role(ZydisRegister base) {
+    switch (base) {
+    case ZYDIS_REGISTER_RSP: case ZYDIS_REGISTER_ESP: case ZYDIS_REGISTER_SP: return DC_ROLE_STACK;
+    case ZYDIS_REGISTER_RSI: case ZYDIS_REGISTER_ESI: case ZYDIS_REGISTER_SI: return DC_ROLE_STRING_SOURCE;
+    case ZYDIS_REGISTER_RDI: case ZYDIS_REGISTER_EDI: case ZYDIS_REGISTER_DI: return DC_ROLE_STRING_DEST;
+    default: return DC_ROLE_OTHER;
+    }
+}
+
+/* layout revision 4: category, RFLAGS read / written, segment-register operands, explicit operand kinds,
+ * effective LOCK / REP, memory accesses with role (operands: visible first, then hidden) */
+static void fill_form_evidence(const ZydisDecodedInstruction *insn, const ZydisDecodedOperand *ops,
+                               dc_decoded *out) {
+    const char *category = ZydisCategoryGetString(insn->meta.category);
+    if (category) {
+        strncpy(out->category, category, sizeof(out->category) - 1);
+    }
+    if (insn->cpu_flags) {
+        out->rflags_read = insn->cpu_flags->tested;
+        out->rflags_written = insn->cpu_flags->modified | insn->cpu_flags->set_0 | insn->cpu_flags->set_1
+                              | insn->cpu_flags->undefined;
+    }
+    if (insn->attributes & ZYDIS_ATTRIB_HAS_LOCK) {
+        out->prefix_flags |= DC_PFX_LOCK;
+    }
+    if (insn->attributes & (ZYDIS_ATTRIB_HAS_REP | ZYDIS_ATTRIB_HAS_REPE)) {
+        out->prefix_flags |= DC_PFX_REP;
+    }
+    if (insn->attributes & ZYDIS_ATTRIB_HAS_REPNE) {
+        out->prefix_flags |= DC_PFX_REPNE;
+    }
+    int sig = 0;
+    for (int i = 0; i < insn->operand_count; i++) {
+        const ZydisDecodedOperand *op = &ops[i];
+        int is_explicit = op->visibility == ZYDIS_OPERAND_VISIBILITY_EXPLICIT;
+        char kind = '?';
+        if (op->type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            if (ZydisRegisterGetClass(op->reg.value) == ZYDIS_REGCLASS_SEGMENT) {
+                out->sreg_operand = 1;
+            }
+            kind = reg_kind(op->reg.value);
+        } else if (op->type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            kind = op->mem.type == ZYDIS_MEMOP_TYPE_AGEN ? 'A' : 'M';
+            if (op->mem.type != ZYDIS_MEMOP_TYPE_AGEN) {
+                if (out->mem_count >= DC_MAX_MEM) {
+                    out->mem_overflow = 1;
+                } else {
+                    dc_mem *m = &out->mem[out->mem_count++];
+                    m->segment = seg_bit(op->mem.segment);
+                    m->read = (op->actions & ZYDIS_OPERAND_ACTION_MASK_READ) != 0;
+                    m->write = (op->actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0;
+                    m->operand_index = is_explicit ? i : -1;
+                    m->role = is_explicit ? DC_ROLE_EXPLICIT : base_role(op->mem.base);
+                }
+            }
+        } else if (op->type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+            kind = op->imm.is_relative ? 'r' : 'i';
+        } else if (op->type == ZYDIS_OPERAND_TYPE_POINTER) {
+            kind = 'r';
+        }
+        if (is_explicit && sig < (int)sizeof(out->op_sig) - 1) {
+            out->op_sig[sig++] = kind;
+        }
+    }
+}
+
 int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip,
                  dc_decoded *out) {
     ZydisDecoder decoder;
@@ -216,5 +297,6 @@ int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd,
     if (isa_ext) {
         strncpy(out->extension, isa_ext, sizeof(out->extension) - 1);
     }
+    fill_form_evidence(&insn, ops, out);
     return out->status;
 }

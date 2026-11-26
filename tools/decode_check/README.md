@@ -111,6 +111,28 @@ Data files (`isa_tables.py` loads them, checks them together, and digests each o
 
   Voters that land on the main and fallback keys of one split record a split, not a lookup
   disagreement.
+- `isa_ordinary_x64.json` (2b, design `.census6/design_tbr_isa_ordinary_r3.md`): classifies every
+  ordinary form, so that it does not stay `unobserved`. It holds:
+  - the cited 64-bit base level (XED ISA sets; the iced CPUID features mapped from them);
+  - the allowed categories;
+  - the per-form class conditions (plain / x87 / x87_nowait / fwait / mmx / sse_fp / sse_int / mmx_sse
+    / fxsave / fxrstor / mxcsr);
+  - the generated, reviewed allowlist.
+
+  `isa_ordinary_gen.py <xed_catalogue.tsv> [--write]` regenerates the allowlist from the pinned XED
+  instruction table (`decoders/xed_catalogue.c`, built by `build_decoders.sh`).
+- `isa_tables.classify(tables, votes, window)` decides one row:
+  - the cited table comes first: cited / cited_split / table_lookup_disagree / partial_lookup;
+  - only when no voter's form is cited, the allowlist: every voter must pass tests A-F from its own
+    evidence (form and aliases, base ISA, privilege, system flags with per-voter capability,
+    segment-register operand, kind). The result is derived_ordinary(class, flags), or unclassified with
+    reasons per voter and test.
+
+  TDO may use a derived-ordinary row only under the premise `isa-ordinary-rule`.
+
+Shim layout revision 4 adds the form evidence: category, RFLAGS read / written, segment-register
+operands, explicit operand kinds, effective LOCK / REP, and up to 8 memory accesses with role, segment and
+read / write.
 
 ## File mapping
 

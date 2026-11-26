@@ -103,6 +103,104 @@ int dc_decode(const uint8_t *bytes, size_t length, uint64_t address, int amd, dc
     return dc_decode_ex(bytes, length, address, amd, NULL, out);
 }
 
+static char reg_kind(xed_reg_enum_t reg) {
+    switch (xed_reg_class(reg)) {
+    case XED_REG_CLASS_GPR: return 'g';
+    case XED_REG_CLASS_MMX: return 'm';
+    case XED_REG_CLASS_XMM: return 'x';
+    case XED_REG_CLASS_YMM: case XED_REG_CLASS_ZMM: return 'y';
+    case XED_REG_CLASS_MASK: return 'k';
+    case XED_REG_CLASS_SR: return 's';
+    case XED_REG_CLASS_CR: case XED_REG_CLASS_DR: return 'c';
+    case XED_REG_CLASS_X87: return 'f';
+    default: return '?';
+    }
+}
+
+static int32_t base_role(xed_reg_enum_t base) {
+    switch (base) {
+    case XED_REG_RSP: case XED_REG_ESP: case XED_REG_SP: return DC_ROLE_STACK;
+    case XED_REG_RSI: case XED_REG_ESI: case XED_REG_SI: return DC_ROLE_STRING_SOURCE;
+    case XED_REG_RDI: case XED_REG_EDI: case XED_REG_DI: return DC_ROLE_STRING_DEST;
+    default: return DC_ROLE_OTHER;
+    }
+}
+
+/* layout revision 4: category, RFLAGS read / written, segment-register operands, explicit operand kinds,
+ * effective LOCK / REP, memory accesses with role */
+static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out) {
+    strncpy(out->category, xed_category_enum_t2str(xed_decoded_inst_get_category(x)), sizeof(out->category) - 1);
+    const xed_simple_flag_t *flags = xed_decoded_inst_get_rflags_info(x);
+    if (flags) {
+        out->rflags_read = (uint32_t)xed_flag_set_mask(xed_simple_flag_get_read_flag_set(flags));
+        out->rflags_written = (uint32_t)xed_flag_set_mask(xed_simple_flag_get_written_flag_set(flags))
+                              | (uint32_t)xed_flag_set_mask(xed_simple_flag_get_undefined_flag_set(flags));
+    }
+    const xed_operand_values_t *values = xed_decoded_inst_operands_const(x);
+    if (xed_operand_values_has_lock_prefix(values)) {
+        out->prefix_flags |= DC_PFX_LOCK;
+    }
+    if (xed_operand_values_has_real_rep(values)) {
+        out->prefix_flags |= xed3_operand_get_rep(x) == 2 ? DC_PFX_REPNE : DC_PFX_REP;
+    }
+    const xed_inst_t *inst = xed_decoded_inst_inst(x);
+    unsigned int count = xed_inst_noperands(inst);
+    int explicit_index = 0, sig = 0;
+    int mem_explicit[2] = {-1, -1};
+    for (unsigned int i = 0; i < count; i++) {
+        const xed_operand_t *operand = xed_inst_operand(inst, i);
+        xed_operand_enum_t name = xed_operand_name(operand);
+        int is_explicit = xed_operand_operand_visibility(operand) == XED_OPVIS_EXPLICIT;
+        char kind = 0;
+        if (xed_operand_is_register(name)) {
+            xed_reg_enum_t reg = xed_decoded_inst_get_reg(x, name);
+            if (xed_reg_class(reg) == XED_REG_CLASS_SR) {
+                out->sreg_operand = 1;
+            }
+            kind = reg_kind(reg);
+        } else if (name == XED_OPERAND_MEM0 || name == XED_OPERAND_MEM1) {
+            kind = 'M';
+            if (is_explicit) {
+                mem_explicit[name == XED_OPERAND_MEM1] = explicit_index;
+            }
+        } else if (name == XED_OPERAND_AGEN) {
+            kind = 'A';
+        } else if (name == XED_OPERAND_IMM0 || name == XED_OPERAND_IMM1 || name == XED_OPERAND_IMM0SIGNED) {
+            kind = 'i';
+        } else if (name == XED_OPERAND_RELBR || name == XED_OPERAND_PTR) {
+            kind = 'r';
+        } else {
+            kind = '?';
+        }
+        if (is_explicit) {
+            if (sig < (int)sizeof(out->op_sig) - 1) {
+                out->op_sig[sig++] = kind;
+            }
+            explicit_index++;
+        }
+    }
+    unsigned int memops = xed_decoded_inst_number_of_memory_operands(x);
+    for (unsigned int i = 0; i < memops; i++) {
+        int read = xed_decoded_inst_mem_read(x, i), write = xed_decoded_inst_mem_written(x, i);
+        if (!read && !write) {
+            continue;   /* address only (AGEN) */
+        }
+        if (out->mem_count >= DC_MAX_MEM) {
+            out->mem_overflow = 1;
+            break;
+        }
+        dc_mem *m = &out->mem[out->mem_count++];
+        m->segment = seg_bit(xed_decoded_inst_get_seg_reg(x, i));
+        m->read = read;
+        m->write = write;
+        int index = i < 2 ? mem_explicit[i] : -1;
+        m->operand_index = index;
+        m->role = index >= 0 ? DC_ROLE_EXPLICIT : base_role(xed_decoded_inst_get_base_reg(x, i));
+    }
+}
+
+static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out);
+
 int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip_name,
                  dc_decoded *out) {
     xed_decoded_inst_t x;
@@ -253,5 +351,6 @@ int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd,
     strncpy(out->isa_set, xed_isa_set_enum_t2str(xed_decoded_inst_get_isa_set(&x)), sizeof(out->isa_set) - 1);
     strncpy(out->extension, xed_extension_enum_t2str(xed_decoded_inst_get_extension(&x)),
             sizeof(out->extension) - 1);
+    fill_form_evidence(&x, out);
     return out->status;
 }

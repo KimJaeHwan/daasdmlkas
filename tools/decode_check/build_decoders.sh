@@ -58,6 +58,10 @@ if [ ! -f obj/wkit/lib/libxed.a ]; then
 fi
 gcc -O2 -fPIC -shared -I"$DEST/src/xed/obj/wkit/include" -I"$HERE/decoders" \
     "$HERE/decoders/xed_shim.c" "$DEST/src/xed/obj/wkit/lib/libxed.a" -o "$DEST/lib/libdc_xed.so"
+# the XED instruction-table dump for the ordinary-form generator (isa_ordinary_gen.py) and its tests
+gcc -O1 -I"$DEST/src/xed/obj/wkit/include" "$HERE/decoders/xed_catalogue.c" \
+    "$DEST/src/xed/obj/wkit/lib/libxed.a" -o "$DEST/xed_catalogue"
+"$DEST/xed_catalogue" > "$DEST/xed_catalogue.tsv"
 
 # -- manifest
 "$PY" - "$DEST" <<'PYEOF'

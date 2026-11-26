@@ -1,6 +1,6 @@
 {
- "schema": "tbr-isa-splits-1",
- "design": ".census6/design_tbr_isa_facts_r3.md s3 (meaning_split and fallback meaning), s7a item 4",
+ "schema": "tbr-isa-splits-2",
+ "design": ".census6/design_tbr_isa_facts_r3.md (s3 meaning_split and fallback meaning, s7a item 4); .census6/design_tbr_isa_ordinary_r3.md s1 (MPX set, corrected effect), s3 (split fallbacks)",
  "semantics": {
   "split": "one encoding, two meanings: `main` when the deciding feature is supported (and enabled, where listed), `fallback` otherwise. Voter lookups that land on the main and the fallback key of the same split are that split (a meaning_split), not a table lookup disagreement; the row's conditions are the union of both keys' entries.",
   "prefix_split": "a legacy prefix whose meaning depends on a feature, on the listed flows",
@@ -27,12 +27,14 @@
    "cite": [{"doc": "SDM2", "entry": "PAUSE", "part": "Description (executes as NOP on earlier processors)"}]}
  ],
  "prefix_splits": [
-  {"id": "bnd-prefix", "prefix": "F2", "flows": ["call_near", "jmp_near", "ret_near", "jcc"], "feature": ["MPX"],
+  {"id": "bnd-prefix", "prefix": "F2", "opcodes": "TABLE_E4 (isa_conditions_x64.json mpx_effects)", "feature": ["MPX"],
    "enabled": ["BNDCFGU.EN=1 (CPL3) / IA32_BNDCFGS.EN=1 (CPL0)"],
-   "main": "BND-prefixed branch: BND0-BND3 initialised unless BNDPRESERVE=1",
-   "fallback": "F2 prefix ignored", "effect_differs": true, "vector": "F2E800000000",
-   "cite": [{"doc": "SDM3", "entry": "Intel MPX: BND prefix on branch instructions"}],
-   "note": "the branch target and continuation are the same in both meanings"}
+   "main": "MPX enabled: an effective BND prefix PRESERVES BND0-BND3 (the same branch without the prefix initialises them when BNDPRESERVE = 0)",
+   "fallback": "MPX disabled or absent: F2 prefix ignored, BND0-BND3 unchanged",
+   "effect_differs": "only the BND registers, and only when MPX is enabled and BNDPRESERVE = 0; target and continuation never differ",
+   "vector": "F2E800000000",
+   "cite": [{"doc": "SDM1", "entry": "E.5.3, Table E-4 (branch instructions and the BND prefix)"}],
+   "note": "corrected in schema 2: schema 1 stated the effect backwards (Astra 2b round 2 P1-4)"}
  ],
  "no_split": [
   {"id": "nop-66", "encoding": "66 90", "meaning": "NOP", "vector": "6690",
@@ -41,8 +43,8 @@
    "cite": [{"doc": "SDM2", "entry": "Instruction prefixes: REP with non-string instructions (reserved, ignored)"}]}
  ],
  "not_covered": [
-  "0F 18 hint space (PREFETCHh / reserved-NOP forms)",
-  "0F 0D (PREFETCHW / reserved-NOP forms)",
-  "0F 1F (multi-byte NOP; FAT_NOP is in the baseline chip)"
+  "0F 18 /4-/7 reserved-NOP forms (0F 18 /0-/3 PREFETCHh are ordinary, isa_ordinary_x64.json)",
+  "0F 0D (PREFETCHW / reserved-NOP forms): outside the base level, unclassified",
+  "0F 1F /1-/7 (only 0F 1F /0 reaches the cited NOP key)"
  ]
 }

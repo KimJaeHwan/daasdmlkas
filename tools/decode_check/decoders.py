@@ -21,11 +21,17 @@ FLOWS = ("none", "call_near", "call_far", "jmp_near", "jmp_far", "jcc", "ret_nea
          "int_n", "int1", "into", "ud", "syscall", "sysenter", "sysret", "hlt", "xbegin", "xabort", "xend", "other")
 STATUSES = ("ok", "invalid", "no_more_data", "error")
 TARGET_KINDS = ("unknown", "none", "direct", "register", "memory")   # (enum dc_target_kind)
-LAYOUT_REVISION = 3
+LAYOUT_REVISION = 4
 MAX_LENGTH = 15
 FLOW_DETAILS = ("none", "sysret", "sysexit")                     # (enum dc_flow_detail)
 SEGMENTS = (("es", 1), ("cs", 2), ("ss", 4), ("ds", 8), ("fs", 16), ("gs", 32))   # (DC_SEG_*)
 PRIV_ATTRIBUTE = 1                                                 # (DC_PRIV_ATTRIBUTE)
+PFX_LOCK, PFX_REP, PFX_REPNE = 1, 2, 4                             # (DC_PFX_*)
+MEM_ROLES = ("explicit", "stack", "string_source", "string_dest", "other")   # (enum dc_mem_role)
+MAX_MEM = 8                                                        # (DC_MAX_MEM)
+# RFLAGS bit positions (architectural)
+RFLAGS_BITS = {"CF": 0, "PF": 2, "AF": 4, "ZF": 6, "SF": 7, "TF": 8, "IF": 9, "DF": 10, "OF": 11, "IOPL": 12,
+               "NT": 14, "RF": 16, "VM": 17, "AC": 18, "VIF": 19, "VIP": 20, "ID": 21}
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,11 @@ class Decoded:
 
 # -- C shims ---------------------------------------------------------------------------------
 
+class DcMem(ctypes.Structure):
+    _fields_ = [("segment", ctypes.c_int32), ("read", ctypes.c_int32), ("write", ctypes.c_int32),
+                ("role", ctypes.c_int32), ("operand_index", ctypes.c_int32)]
+
+
 class DcDecoded(ctypes.Structure):
     _fields_ = [
         ("status", ctypes.c_int32), ("length", ctypes.c_int32), ("flow", ctypes.c_int32),
@@ -78,6 +89,10 @@ class DcDecoded(ctypes.Structure):
         ("flow_detail", ctypes.c_int32), ("priv_flags", ctypes.c_int32), ("mem_seg_mask", ctypes.c_int32),
         ("error_code", ctypes.c_int32), ("error_name", ctypes.c_char * 48), ("isa_set", ctypes.c_char * 48),
         ("extension", ctypes.c_char * 48), ("chip", ctypes.c_char * 32),
+        # layout revision 4: form evidence (2b)
+        ("category", ctypes.c_char * 32), ("rflags_read", ctypes.c_uint32), ("rflags_written", ctypes.c_uint32),
+        ("sreg_operand", ctypes.c_int32), ("prefix_flags", ctypes.c_int32), ("op_sig", ctypes.c_char * 16),
+        ("mem_count", ctypes.c_int32), ("mem_overflow", ctypes.c_int32), ("mem", DcMem * 8),
     ]
 
 
@@ -93,8 +108,20 @@ def _shim_extra(out: DcDecoded) -> dict:
             "flow_detail": FLOW_DETAILS[out.flow_detail] if 0 <= out.flow_detail < len(FLOW_DETAILS) else "none",
             "privileged_attribute": bool(out.priv_flags & PRIV_ATTRIBUTE),
             "mem_segments": [name for name, bit in SEGMENTS if out.mem_seg_mask & bit],
-            "isa_set": _text(out.isa_set), "extension": _text(out.extension)})
+            "isa_set": _text(out.isa_set), "extension": _text(out.extension),
+            # layout revision 4
+            "category": _text(out.category), "rflags_read": out.rflags_read, "rflags_written": out.rflags_written,
+            "sreg_operand": bool(out.sreg_operand), "lock": bool(out.prefix_flags & PFX_LOCK),
+            "rep": "rep" if out.prefix_flags & PFX_REP else ("repne" if out.prefix_flags & PFX_REPNE else ""),
+            "op_sig": _text(out.op_sig), "mem_overflow": bool(out.mem_overflow),
+            "memory": [_mem(out.mem[i]) for i in range(min(out.mem_count, MAX_MEM))]})
     return extra
+
+
+def _mem(m) -> dict:
+    return {"segment": next((name for name, bit in SEGMENTS if m.segment == bit), ""), "read": bool(m.read),
+            "write": bool(m.write), "role": MEM_ROLES[m.role] if 0 <= m.role < len(MEM_ROLES) else "other",
+            "operand_index": m.operand_index if m.operand_index >= 0 else None}
 
 
 class _Shim:
@@ -184,6 +211,12 @@ class _Iced:
         self.errors = public(iced_x86.DecoderError)
         self.features = public(iced_x86.CpuidFeature)
         self.registers = {value: name.lower() for value, name in public(iced_x86.Register).items()}
+        self.flow_controls = public(iced_x86.FlowControl)
+        self.info_factory = iced_x86.InstructionInfoFactory()
+        rf = iced_x86.RflagsBits
+        # iced RflagsBits -> architectural positions; among the system flags iced reports IF and AC only
+        self.rflags_map = [(rf.CF, 0), (rf.PF, 2), (rf.AF, 4), (rf.ZF, 6), (rf.SF, 7), (rf.IF, 9), (rf.DF, 10),
+                           (rf.OF, 11), (rf.AC, 18)]
 
     def decode(self, data: bytes, address: int, amd: bool) -> Decoded:
         x = self.iced
@@ -293,7 +326,92 @@ class _Iced:
             "must_be_cpl0": bool(code.must_be_cpl0), "is_privileged": bool(code.is_privileged),
             "may_require_cpl0": bool(code.may_require_cpl0),
             "cpuid_features": sorted(self.features.get(f, str(f)) for f in instr.cpuid_features()),
-            "mem_segments": sorted(segments, key=lambda s: order.index(s) if s in order else len(order))}
+            "mem_segments": sorted(segments, key=lambda s: order.index(s) if s in order else len(order)),
+            **self._form_evidence(instr, code, mnemonic)}
+
+    def _rflags(self, bits: int) -> int:
+        return sum(1 << position for flag, position in self.rflags_map if bits & flag)
+
+    def _form_evidence(self, instr, code, mnemonic) -> dict:
+        """Layout-revision-4 evidence from iced (2b): flow control as category, RFLAGS (IF / AC only among the
+        system flags), segment-register operands, explicit operand kinds, effective LOCK / REP, memory accesses
+        (InstructionInfoFactory used memory: implicit stack / string accesses included)."""
+        x, k, m = self.iced, self.op_kinds, self.iced.Mnemonic
+        R = x.RegisterExt
+        string_kinds = {k.MEMORY_SEG_SI, k.MEMORY_SEG_ESI, k.MEMORY_SEG_RSI, k.MEMORY_SEG_DI, k.MEMORY_SEG_EDI,
+                        k.MEMORY_SEG_RDI, k.MEMORY_ESDI, k.MEMORY_ESEDI, k.MEMORY_ESRDI}
+        immediates = {k.IMMEDIATE8, k.IMMEDIATE8_2ND, k.IMMEDIATE16, k.IMMEDIATE32, k.IMMEDIATE64,
+                      k.IMMEDIATE8TO16, k.IMMEDIATE8TO32, k.IMMEDIATE8TO64, k.IMMEDIATE32TO64}
+        branches = {k.NEAR_BRANCH16, k.NEAR_BRANCH32, k.NEAR_BRANCH64, k.FAR_BRANCH16, k.FAR_BRANCH32}
+        sig, sreg, explicit_memory = [], False, None
+        for index in range(instr.op_count):
+            kind = instr.op_kind(index)
+            if kind == k.REGISTER:
+                reg = instr.op_register(index)
+                if R.is_segment_register(reg):
+                    sreg = True
+                    sig.append("s")
+                elif R.is_gpr(reg):
+                    sig.append("g")
+                elif R.is_mm(reg):
+                    sig.append("m")
+                elif R.is_xmm(reg):
+                    sig.append("x")
+                elif R.is_ymm(reg) or R.is_zmm(reg) or R.is_tmm(reg):
+                    sig.append("y")
+                elif R.is_k(reg):
+                    sig.append("k")
+                elif R.is_cr(reg) or R.is_dr(reg):
+                    sig.append("c")
+                elif R.is_st(reg):
+                    sig.append("f")
+                else:
+                    sig.append("?")
+            elif kind == k.MEMORY:
+                sig.append("A" if mnemonic == m.LEA else "M")
+                explicit_memory = index
+            elif kind in string_kinds:
+                continue   # (implicit string memory: not an explicit operand in XED / Zydis terms)
+            elif kind in immediates:
+                sig.append("i")
+            elif kind in branches:
+                sig.append("r")
+            else:
+                sig.append("?")
+        memory, overflow = [], False
+        if mnemonic not in (m.LEA, m.NOP):
+            for used in self.info_factory.info(instr).used_memory():
+                if used.access in (x.OpAccess.NO_MEM_ACCESS, x.OpAccess.NONE):
+                    continue
+                if len(memory) >= MAX_MEM:
+                    overflow = True
+                    break
+                base = self.registers.get(used.base, "")
+                is_explicit = (explicit_memory is not None and used.base == instr.memory_base
+                               and used.index == instr.memory_index and not any(
+                                   item["role"] == "explicit" for item in memory))
+                role = "explicit" if is_explicit else (
+                    "stack" if base in ("rsp", "esp", "sp") else "string_source" if base in ("rsi", "esi", "si")
+                    else "string_dest" if base in ("rdi", "edi", "di") else "other")
+                access = used.access
+                read = access in (x.OpAccess.READ, x.OpAccess.COND_READ, x.OpAccess.READ_WRITE,
+                                  x.OpAccess.READ_COND_WRITE)
+                write = access in (x.OpAccess.WRITE, x.OpAccess.COND_WRITE, x.OpAccess.READ_WRITE,
+                                   x.OpAccess.READ_COND_WRITE)
+                memory.append({"segment": self.registers.get(used.segment, ""), "read": read, "write": write,
+                               "role": role, "operand_index": explicit_memory if is_explicit else None})
+        rep = ""
+        if code.can_use_rep_prefix and (instr.has_rep_prefix or instr.has_repe_prefix):
+            rep = "rep"
+        elif code.can_use_repne_prefix and instr.has_repne_prefix:
+            rep = "repne"
+        written = (instr.rflags_written | instr.rflags_cleared | instr.rflags_set | instr.rflags_undefined
+                   | instr.rflags_modified)
+        return {"category": self.flow_controls.get(instr.flow_control, str(instr.flow_control)),
+                "is_input_output": bool(code.is_input_output),
+                "rflags_read": self._rflags(instr.rflags_read), "rflags_written": self._rflags(written),
+                "sreg_operand": sreg, "lock": bool(instr.has_lock_prefix), "rep": rep, "op_sig": "".join(sig),
+                "mem_overflow": overflow, "memory": memory}
 
 
 _VOTERS = {}

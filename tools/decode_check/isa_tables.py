@@ -1,12 +1,17 @@
-"""TBR ISA facts step 2: the three versioned data files (design .census6/design_tbr_isa_facts_r3.md).
+"""TBR ISA facts: the versioned data files and the per-row form classification.
 
-- ``isa_conditions_x64.json``: the ISA condition table (s1 layer 2), every entry citing its reference entry;
-- ``iclass_map_x64.json``: per-voter mnemonic -> canonical key (s1: per-voter lookup);
-- ``isa_splits_x64.json``: feature-dependent encodings with their deciding feature and fallback (s3 F4).
+Designs: .census6/design_tbr_isa_facts_r3.md (step 2) and .census6/design_tbr_isa_ordinary_r3.md (2b, = r2 + r1).
 
-``load()`` validates them together and gives each a digest over canonical bytes (s5 header binding).
-``lookup(vote, window)`` is one voter's lookup; ``None`` means the form is absent for that voter.
-Nothing here decides a fact: the computation (step 3) combines the lookups of all voters.
+- ``isa_conditions_x64.json``: the ISA condition table (r3 s1 layer 2), every entry citing its reference entry;
+- ``iclass_map_x64.json``: per-voter mnemonic -> canonical key (r3 s1: per-voter lookup);
+- ``isa_splits_x64.json``: feature-dependent encodings with their deciding feature and fallback (r3 s3 F4);
+- ``isa_ordinary_x64.json``: the reviewed ordinary-form allowlist, base lists, classes (2b).
+
+``load()`` validates them together and digests each over canonical bytes (header binding).
+``lookup(vote, window)`` is one voter's cited lookup (``None``: absent for that voter).
+``classify(tables, votes, window)`` combines the three Intel voters: cited first; only when every cited lookup
+is absent, the ordinary allowlist with the per-voter tests of 2b r1 s4 (A-F). Nothing here is a verdict: TDO uses
+a derived-ordinary result only under the premise ``isa-ordinary-rule`` (2b r1 s8).
 """
 
 from __future__ import annotations
@@ -17,14 +22,20 @@ import json
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-FILES = {"conditions": "isa_conditions_x64.json", "map": "iclass_map_x64.json", "splits": "isa_splits_x64.json"}
-SCHEMAS = {"conditions": "tbr-isa-conditions-1", "map": "tbr-iclass-map-1", "splits": "tbr-isa-splits-1"}
+FILES = {"conditions": "isa_conditions_x64.json", "map": "iclass_map_x64.json", "splits": "isa_splits_x64.json",
+         "ordinary": "isa_ordinary_x64.json"}
+SCHEMAS = {"conditions": "tbr-isa-conditions-2", "map": "tbr-iclass-map-2", "splits": "tbr-isa-splits-2",
+           "ordinary": "tbr-isa-ordinary-1"}
 VOTERS = ("iced", "zydis", "xed")
 LEGACY_PREFIXES = frozenset((0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65))
-ENTRY_FIELDS = frozenset(("cite", "f2", "f2_meaning", "f3", "f4", "f5", "f6", "f7", "cet", "access_width",
-                          "state_dependent", "data_faults", "split", "split_member", "note"))
-WHEN_FIELDS = frozenset(("operand_bits", "flow", "target_kind", "opcode", "modrm_reg"))
+ENTRY_FIELDS = frozenset(("cite", "f2", "f2_meaning", "f3", "f4", "f5", "f6", "f7", "cet", "mpx", "access_width",
+                          "state_dependent", "state_effect", "data_faults", "undefined_outputs", "split",
+                          "split_member", "note"))
+WHEN_FIELDS = frozenset(("operand_bits", "flow", "counter", "target_kind", "opcode", "modrm_reg", "prefix"))
 CET_CONDITIONS = frozenset(("CET_SS", "CET_IBT"))
+RFLAGS = {"TF": 1 << 8, "IF": 1 << 9, "IOPL": 3 << 12, "NT": 1 << 14, "RF": 1 << 16, "VM": 1 << 17, "AC": 1 << 18,
+          "VIF": 1 << 19, "VIP": 1 << 20, "ID": 1 << 21}
+SIG_KEEP = frozenset("mxykcfsMA")   # operand kinds that tell forms apart across voters (g / i / r conventions differ)
 
 
 class TableError(ValueError):
@@ -40,7 +51,9 @@ class Tables:
     conditions: dict
     map: dict
     splits: dict
-    digests: dict      # {"conditions" | "map" | "splits": sha256 of canonical bytes}
+    ordinary: dict
+    digests: dict      # {name: sha256 of canonical bytes}
+    index: dict        # (iclass, extension, isa_set, sig) -> allowlist entry
 
     def entry(self, key: str) -> dict | None:
         return self.conditions["entries"].get(key)
@@ -72,15 +85,19 @@ def _check(condition: bool, message: str) -> None:
         raise TableError(message)
 
 
-def validate(conditions: dict, mapping: dict, splits: dict) -> None:
-    """Schema and cross-file consistency (design r3 s5: a malformed table is never partly used)."""
-    for name, data in (("conditions", conditions), ("map", mapping), ("splits", splits)):
+def validate(conditions: dict, mapping: dict, splits: dict, ordinary: dict | None = None) -> None:
+    """Schema and cross-file consistency (a malformed table is never partly used)."""
+    named = (("conditions", conditions), ("map", mapping), ("splits", splits)) + (
+        (("ordinary", ordinary),) if ordinary is not None else ())
+    for name, data in named:
         _check(data.get("schema") == SCHEMAS[name], f"{name}: schema is not {SCHEMAS[name]}")
     vocabulary = set(conditions["conditions"])
     documents = set(conditions["documents"])
     tags = set(conditions["f3_tags"])
     sources = set(conditions["f6_sources"])
     meanings = conditions.get("f2_meanings", {})
+    expressions = set(conditions.get("cet_expressions", {}))
+    mpx = set(conditions.get("mpx_effects", {}))
     entries = conditions["entries"]
     split_ids = {split["id"] for split in splits["splits"]}
     for key, entry in entries.items():
@@ -103,8 +120,16 @@ def validate(conditions: dict, mapping: dict, splits: dict) -> None:
             _check(output.get("source") in sources, f"conditions: {key} f6 source {output}")
             if output["source"] == "constant":
                 _check("value" in output, f"conditions: {key} f6 constant without a value")
-        for name in entry.get("cet", []):
-            _check(name in CET_CONDITIONS, f"conditions: {key} cet {name}")
+        for item in entry.get("cet", []):
+            _check(isinstance(item, dict) and item.get("name") in CET_CONDITIONS, f"conditions: {key} cet {item}")
+            _check(set(item) <= {"name", "when", "unless"}, f"conditions: {key} cet fields {item}")
+            for part in ("when", "unless"):
+                if part in item:
+                    _check(item[part] in expressions, f"conditions: {key} cet {part} {item[part]!r} unknown")
+        if "mpx" in entry:
+            _check(entry["mpx"] in mpx, f"conditions: {key} mpx {entry['mpx']}")
+        for item in entry.get("undefined_outputs", []):
+            _check(isinstance(item, dict) and item.get("output"), f"conditions: {key} undefined_outputs {item}")
         if "split" in entry:
             _check(entry["split"] in split_ids, f"conditions: {key} names unknown split {entry['split']}")
     for meaning, item in meanings.items():
@@ -112,33 +137,60 @@ def validate(conditions: dict, mapping: dict, splits: dict) -> None:
         for output in item["outputs"]:
             for name in output.get("loaded_when", []):
                 _check(name in vocabulary, f"conditions: f2 meaning {meaning} uses unknown condition {name}")
+    seen_rules = {}
     for index, rule in enumerate(mapping["rules"]):
         where = f"map: rule {index}"
         _check(set(rule) <= {"voters", "mnemonic", "when", "key"}, f"{where} has unknown fields")
         _check(set(rule.get("voters", VOTERS)) <= set(VOTERS), f"{where} names an unknown voter")
         _check(bool(rule.get("mnemonic")) and all(m == m.upper() for m in rule["mnemonic"]), f"{where} mnemonics")
         _check(set(rule.get("when", {})) <= WHEN_FIELDS, f"{where} has unknown when fields")
+        _check(rule["key"] != "=" or "*" not in rule["mnemonic"], f"{where}: key = with mnemonic *")
         keys = rule["mnemonic"] if rule["key"] == "=" else [rule["key"]]
         for key in keys:
             _check(key in entries, f"{where}: key {key} is not in the condition table")
+        for voter in rule.get("voters", VOTERS):          # (the same selector must not give two keys)
+            for mnemonic in rule["mnemonic"]:
+                selector = (voter, mnemonic, json.dumps(rule.get("when", {}), sort_keys=True))
+                key = mnemonic if rule["key"] == "=" else rule["key"]
+                _check(seen_rules.setdefault(selector, key) == key, f"{where}: selector {selector} gives two keys")
     for split in splits["splits"]:
         for role in ("main", "fallback"):
             _check(split[role] in entries, f"splits: {split['id']} {role} {split[role]} is not in the condition table")
         _check(bool(split.get("feature")) and bool(split.get("cite")), f"splits: {split['id']} feature / cite")
     for item in splits["prefix_splits"] + splits["no_split"]:
         _check(bool(item.get("cite")) and bool(item.get("vector")), f"splits: {item['id']} cite / vector")
+    if ordinary is not None:
+        _validate_ordinary(ordinary, entries)
+
+
+def _validate_ordinary(ordinary: dict, cited: dict) -> None:
+    classes = ordinary["classes"]
+    for name, klass in classes.items():
+        _check(bool(klass.get("cite")), f"ordinary: class {name} has no citation")
+    _check(set(ordinary["system_flags"]["bits"]) <= set(RFLAGS), "ordinary: unknown system flag")
+    seen = set()
+    for entry in ordinary["entries"]:
+        key = (entry["iclass"], entry["extension"], entry["isa_set"], entry["sig"])
+        _check(key not in seen, f"ordinary: duplicate entry {key}")
+        seen.add(key)
+        _check(entry["class"] in classes, f"ordinary: {key} unknown class {entry['class']}")
+        _check(entry["isa_set"] in ordinary["base_isa_sets"], f"ordinary: {key} ISA set outside the base level")
+        _check(entry["iclass"] not in cited, f"ordinary: {key} is also cited in the condition table")
+        _check(set(entry["names"]) == {"iced", "zydis"}, f"ordinary: {key} names")
+        limit = ordinary.get("width_limits", {}).get(entry["iclass"])
+        _check(limit is None or entry.get("widths") == limit["widths"], f"ordinary: {key} widths differ from width_limits")
 
 
 def load(root: Path | None = None) -> Tables:
     root = root or _HERE
-    conditions, mapping, splits = (_load_json(name, root) for name in ("conditions", "map", "splits"))
-    validate(conditions, mapping, splits)
-    digests = {name: hashlib.sha256(canonical_bytes(data)).hexdigest()
-               for name, data in (("conditions", conditions), ("map", mapping), ("splits", splits))}
-    return Tables(conditions, mapping, splits, digests)
+    data = {name: _load_json(name, root) for name in FILES}
+    validate(data["conditions"], data["map"], data["splits"], data["ordinary"])
+    digests = {name: hashlib.sha256(canonical_bytes(item)).hexdigest() for name, item in data.items()}
+    index = {(e["iclass"], e["extension"], e["isa_set"], e["sig"]): e for e in data["ordinary"]["entries"]}
+    return Tables(data["conditions"], data["map"], data["splits"], data["ordinary"], digests, index)
 
 
-# -- one voter's lookup ----------------------------------------------------------------------------
+# -- one voter's cited lookup ----------------------------------------------------------------------
 
 def opcode_view(window: bytes) -> tuple:
     """(legacy prefixes, opcode bytes, ModRM or None) of a legacy / REX encoded instruction; VEX / EVEX / XOP
@@ -161,17 +213,21 @@ def opcode_view(window: bytes) -> tuple:
 
 
 def _when_holds(when: dict, vote, view) -> bool:
-    _, opcode, modrm = view
+    prefixes, opcode, modrm = view
     for name, wanted in when.items():
         if name == "operand_bits" and vote.operand_bits != wanted:
             return False
         if name == "flow" and vote.flow != wanted:
+            return False
+        if name == "counter" and bool(vote.counter) != wanted:
             return False
         if name == "target_kind" and vote.target_kind not in wanted:
             return False
         if name == "opcode" and not any(opcode.startswith(bytes.fromhex(item)) for item in wanted):
             return False
         if name == "modrm_reg" and (modrm is None or (modrm >> 3) & 7 not in wanted):
+            return False
+        if name == "prefix" and int(wanted, 16) not in prefixes:
             return False
     return True
 
@@ -183,8 +239,129 @@ def lookup(tables: Tables, vote, window: bytes) -> str | None:
     mnemonic = vote.mnemonic.upper()
     view = opcode_view(window)
     for rule in tables.map["rules"]:
-        if vote.voter not in rule.get("voters", VOTERS) or mnemonic not in rule["mnemonic"]:
+        if vote.voter not in rule.get("voters", VOTERS):
+            continue
+        if mnemonic not in rule["mnemonic"] and "*" not in rule["mnemonic"]:
             continue
         if _when_holds(rule.get("when", {}), vote, view):
             return mnemonic if rule["key"] == "=" else rule["key"]
     return None
+
+
+# -- the per-row classification (2b) ---------------------------------------------------------------
+
+def _norm_sig(sig: str) -> str:
+    return "".join(kind for kind in sig if kind in SIG_KEEP)
+
+
+def _system_mask(tables: Tables, voter: str) -> int:
+    capability = tables.ordinary["system_flags"]["capability"][voter]
+    bits = tables.ordinary["system_flags"]["bits"] if capability == "all" else capability
+    mask = 0
+    for name in bits:
+        mask |= RFLAGS[name]
+    return mask
+
+
+def _voter_failures(tables: Tables, entry: dict, vote, window: bytes) -> list:
+    """The 2b r1 s4 tests (A-F) one voter fails for `entry`, from its own evidence: [(test, detail), ...]."""
+    ordinary, extra, voter = tables.ordinary, vote.extra, vote.voter
+    failures = []
+    # A: form (name / alias, normalised operand kinds, effective REP / LOCK, 64-bit addressing)
+    if voter == "xed":
+        if extra.get("op_sig", None) != entry["sig"]:
+            failures.append(("A", f"operand kinds {extra.get('op_sig')!r} != {entry['sig']!r}"))
+    else:
+        if vote.mnemonic.upper() not in entry["names"][voter]:
+            failures.append(("A", f"name {vote.mnemonic} not in {entry['names'][voter]}"))
+        own = _norm_sig(extra.get("op_sig", ""))
+        if voter == "iced" and entry["iclass"] == "XLAT":
+            own = own.replace("M", "")                 # (iced lists XLAT's implicit [RBX + AL] as an operand)
+        if own != _norm_sig(entry["sig"]):
+            failures.append(("A", f"operand kinds {own!r} != {_norm_sig(entry['sig'])!r}"))
+    if extra.get("rep", "") != entry["rep"]:
+        failures.append(("A", f"rep {extra.get('rep')!r} != {entry['rep']!r}"))
+    if bool(extra.get("lock")) != entry["lock"]:
+        failures.append(("A", f"lock {extra.get('lock')} != {entry['lock']}"))
+    if ("M" in entry["sig"] or extra.get("memory")) and vote.address_bits != 64:
+        failures.append(("A", f"address width {vote.address_bits}"))
+    if entry.get("widths") and vote.operand_bits and vote.operand_bits not in entry["widths"]:
+        failures.append(("A", f"operand width {vote.operand_bits} not in {entry['widths']}"))
+    # B: base ISA level
+    if voter == "iced":
+        outside = sorted(set(extra.get("cpuid_features", ())) - set(ordinary["base_cpuid_features_iced"]))
+        if outside or "cpuid_features" not in extra:
+            failures.append(("B", f"features outside the base: {outside}"))
+    elif extra.get("isa_set") not in ordinary["base_isa_sets"]:
+        failures.append(("B", f"ISA set {extra.get('isa_set')}"))
+    # C: privilege
+    if voter == "iced":
+        if extra.get("must_be_cpl0") or extra.get("is_privileged") or extra.get("may_require_cpl0"):
+            failures.append(("C", "iced privilege flag"))
+    elif extra.get("privileged_attribute"):
+        failures.append(("C", "privileged attribute"))
+    # D: system flags (per-voter capability)
+    touched = (extra.get("rflags_read", 0) | extra.get("rflags_written", 0)) & _system_mask(tables, voter)
+    if touched:
+        failures.append(("D", f"system flags {touched:#x}"))
+    # E: segment-register operand
+    if extra.get("sreg_operand"):
+        failures.append(("E", "segment-register operand"))
+    # F: kind
+    if voter == "iced":
+        if extra.get("category") not in ordinary["iced_flow_controls"] or extra.get("is_input_output"):
+            failures.append(("F", f"flow control {extra.get('category')}"))
+    elif extra.get("category") not in ordinary["allowed_categories"]:
+        failures.append(("F", f"category {extra.get('category')}"))
+    return failures
+
+
+def classify(tables: Tables, votes: dict, window: bytes) -> dict:
+    """One compared row: cited / cited_split / table_lookup_disagree / partial_lookup / derived_ordinary /
+    unclassified, with per-voter evidence and the digests applied (2b r2 G)."""
+    out = {"digests": dict(tables.digests), "voters": {}}
+    missing = [name for name in VOTERS if name not in votes or votes[name].status != "ok"]
+    if missing:
+        out.update(result="unclassified", reasons=[f"{name}: no ok vote" for name in missing])
+        return out
+    cited = {name: lookup(tables, votes[name], window) for name in VOTERS}
+    for name in VOTERS:
+        out["voters"][name] = {"cited": cited[name]}
+    present = {key for key in cited.values() if key}
+    if present:
+        if None in cited.values():
+            out.update(result="partial_lookup", keys=cited)
+        elif len(present) == 1:
+            out.update(result="cited", key=present.pop())
+        elif tables.same_split(present):
+            out.update(result="cited_split", split=tables.same_split(present)["id"], keys=cited)
+        else:
+            out.update(result="table_lookup_disagree", keys=cited)
+        return out
+    xed = votes["xed"]
+    key = (xed.mnemonic.upper(), xed.extra.get("extension"), xed.extra.get("isa_set"), xed.extra.get("op_sig"))
+    entry = tables.index.get(key)
+    if entry is None:
+        reasons = [f"xed: no allowlist entry for {key}"]
+        if key[2] not in tables.ordinary["base_isa_sets"]:
+            reasons.append(f"xed B: ISA set {key[2]} outside the base level")
+        out.update(result="unclassified", reasons=reasons)
+        return out
+    prefixes = opcode_view(window)[0]
+    reasons = []
+    if (0xF2 in prefixes or 0xF3 in prefixes) and not entry["rep"] and entry["extension"] not in ("SSE", "SSE2"):
+        reasons.append("an F2 / F3 prefix on a non-string, non-SSE form (ignored or HLE)")
+    for name in VOTERS:
+        failures = _voter_failures(tables, entry, votes[name], window)
+        out["voters"][name]["failures"] = [f"{test}: {detail}" for test, detail in failures]
+        reasons += [f"{name} {test}: {detail}" for test, detail in failures]
+    if reasons:
+        out.update(result="unclassified", reasons=reasons, entry=_entry_id(entry))
+    else:
+        out.update(result="derived_ordinary", entry=_entry_id(entry), **{"class": entry["class"]},
+                   flags=dict(entry["flags"]))
+    return out
+
+
+def _entry_id(entry: dict) -> dict:
+    return {name: entry[name] for name in ("iclass", "extension", "isa_set", "sig")}

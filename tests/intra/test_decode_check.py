@@ -2009,12 +2009,18 @@ ISA_KEYS = {
     "F3480FAED0": "WRFSBASE", "F3480FAED8": "WRGSBASE", "0FC7F0": "RDRAND", "0FC7F8": "RDSEED",
     "F30FC7F8": "RDPID", "8EE0": "MOV_TO_FS", "8EE8": "MOV_TO_GS", "0FA1": "POP_FS", "0FA9": "POP_GS",
     "0FB400": "LFS", "0FB500": "LGS", "6690": "NOP", "0F1F00": "NOP",
+    # 2b additions (design_tbr_isa_ordinary_r3: r2 B, r3 s1 / s8)
+    "E800000000": "CALL_NEAR", "E900000000": "JMP_NEAR", "EB00": "JMP_SHORT", "740A": "JCC_SHORT",
+    "0F8400000000": "JCC_NEAR", "E2FE": "LOOP_JCXZ", "E3FE": "LOOP_JCXZ", "C20800": "RET_NEAR_IMM",
+    "8EC0": "MOV_TO_DS_ES", "8ED8": "MOV_TO_DS_ES", "8ED0": "MOV_TO_SS", "8CC0": "MOV_FROM_SREG",
+    "0FA0": "PUSH_FS", "0FA8": "PUSH_GS", "9C": "PUSHFQ", "669C": "PUSHF", "660FC8": "BSWAP16", "0FB200": "LSS",
+    "F36C": "INSB", "F36E": "OUTSB",
 }
 # split vectors: the G1 voters land on the main and the fallback of one split (design r3 s3, isa_splits_x64.json)
 ISA_SPLIT_VECTORS = {"F30FBCC1": "tzcnt-bsf", "F30FBDC1": "lzcnt-bsr", "F30F1EFA": "endbr64-nop",
                      "F30F1EFB": "endbr32-nop", "F390": "pause-nop"}
 # forms outside the table: absent for every voter (unobserved, never "no condition")
-ISA_ABSENT = ("4889C8", "E800000000", "E900000000", "740A", "8EC0", "0F1800")
+ISA_ABSENT = ("4889C8", "0FC8", "0F1800", "F20F7CC1", "0F1E00")
 
 
 def _keys(tables, hexbytes: str) -> dict:
@@ -2028,7 +2034,7 @@ def test_isa_tables_load_validate_and_digest():
     import isa_tables
 
     tables = isa_tables.load()
-    assert set(tables.digests) == {"conditions", "map", "splits"}
+    assert set(tables.digests) == {"conditions", "map", "splits", "ordinary"}
     assert all(len(digest) == 64 for digest in tables.digests.values())
     assert isa_tables.load().digests == tables.digests
     for key, entry in tables.conditions["entries"].items():
@@ -2130,3 +2136,170 @@ def test_isa_opcode_view_skips_prefixes_and_rex():
     assert isa_tables.opcode_view(bytes.fromhex("8EE0")) == ((), b"\x8E", 0xE0)
     assert isa_tables.opcode_view(bytes.fromhex("660F3800C1")) == ((0x66,), b"\x0F\x38\x00", 0xC1)
     assert isa_tables.opcode_view(bytes.fromhex("C5FC58C1"))[1] == b""
+
+
+# -- ISA facts 2b: classifying every form (design_tbr_isa_ordinary_r3 = r2 + r1) --------------------------------
+
+# final classification (r2 F2 / r3 s7): expected result and class / key
+ISA_CLASSIFY = {
+    "4889C8": ("derived_ordinary", "plain"), "8B00": ("derived_ordinary", "plain"),
+    "678B00": ("unclassified", "A"),                                  # address width 32 (r3 s3)
+    "64D7": ("derived_ordinary", "plain"), "D7": ("derived_ordinary", "plain"),
+    "F3A4": ("derived_ordinary", "plain"), "64F3A4": ("derived_ordinary", "plain"),
+    "F0830001": ("derived_ordinary", "plain"), "8700": ("derived_ordinary", "plain"),
+    "0FC8": ("derived_ordinary", "plain"), "C8000003": ("derived_ordinary", "plain"),
+    "0F1800": ("derived_ordinary", "plain"), "0FAEE8": ("derived_ordinary", "plain"),     # PREFETCHNTA, LFENCE
+    "660FEFC1": ("derived_ordinary", "sse_int"), "0FEFC1": ("derived_ordinary", "mmx"),
+    "0F58C1": ("derived_ordinary", "sse_fp"), "F20F10C1": ("derived_ordinary", "sse_int"),
+    "0F2AC1": ("derived_ordinary", "mmx_sse"), "660F2AC1": ("derived_ordinary", "mmx_sse"),
+    "660F2A00": ("derived_ordinary", "sse_int"), "0F53C1": ("derived_ordinary", "sse_int"),
+    "F20F2D00": ("derived_ordinary", "sse_fp"),                       # CVTSD2SI eax, [rax]: SSE without an XMM operand
+    "0F10C1": ("derived_ordinary", "sse_int"), "0F77": ("derived_ordinary", "mmx"),
+    "9B": ("derived_ordinary", "fwait"), "0FAE00": ("derived_ordinary", "fxsave"),
+    "0FAE08": ("derived_ordinary", "fxrstor"), "0FAE10": ("derived_ordinary", "mxcsr"),
+    "DFE0": ("derived_ordinary", "x87_nowait"), "D9E8": ("derived_ordinary", "x87"),
+    # outside the base level (r1 s1): never derived-ordinary
+    "F20F7CC1": ("unclassified", "B"), "F30F16C1": ("unclassified", "B"), "F20FF008": ("unclassified", "B"),
+    "9F": ("unclassified", "B"), "9E": ("unclassified", "B"), "480FC70E": ("unclassified", "B"),
+    "0FAE38": ("unclassified", "B"), "0F0D08": ("unclassified", "B"), "0F01C8": ("unclassified", "B"),
+    "F3480FB8C1": ("unclassified", "B"),
+    # cited first (r2 A1), cited splits (r3 s3)
+    "0FA2": ("cited", "CPUID"), "0F0B": ("cited", "UD2"), "660FC8": ("cited", "BSWAP16"),
+    "8ED0": ("cited", "MOV_TO_SS"), "0FB200": ("cited", "LSS"), "3EFFD0": ("cited", "CALL_NEAR_INDIRECT"),
+    "F3C3": ("cited", "RET_NEAR"), "EB00": ("cited", "JMP_SHORT"), "E2FE": ("cited", "LOOP_JCXZ"),
+    "9D": ("cited", "POPFQ"), "9C": ("cited", "PUSHFQ"), "8CC0": ("cited", "MOV_FROM_SREG"),
+    "F390": ("cited_split", "pause-nop"), "F30F1EFA": ("cited_split", "endbr64-nop"),
+    "F30FBCC1": ("cited_split", "tzcnt-bsf"),
+    "F083C001": ("unclassified", "no ok vote"),                        # illegal LOCK: F1, no class
+}
+
+
+def _classify(tables, hexbytes: str) -> dict:
+    import isa_tables
+
+    data = bytes.fromhex(hexbytes) + ISA_PAD
+    return isa_tables.classify(tables, _votes(hexbytes), data)
+
+
+@needs
+@pytest.mark.parametrize("hexbytes", sorted(ISA_CLASSIFY))
+def test_isa_2b_final_classification(hexbytes):
+    import isa_tables
+
+    tables = isa_tables.load()
+    got = _classify(tables, hexbytes)
+    result, detail = ISA_CLASSIFY[hexbytes]
+    assert got["result"] == result, got
+    if result == "derived_ordinary":
+        assert got["class"] == detail, got
+    elif result == "cited":
+        assert got["key"] == detail, got
+    elif result == "cited_split":
+        assert got["split"] == detail, got
+    else:
+        assert any(detail in reason for reason in got["reasons"]), got
+    assert set(got["digests"]) == {"conditions", "map", "splits", "ordinary"}
+
+
+@needs
+def test_isa_2b_class_flags_and_per_operand_mmx():
+    """r3 s4: MMX transition only with an MMX register operand; MXCSR read only by forms that round."""
+    import isa_tables
+
+    tables = isa_tables.load()
+    with_mm, with_mem = _classify(tables, "660F2AC1"), _classify(tables, "660F2A00")   # CVTPI2PD xmm, mm / m64
+    assert with_mm["flags"]["explicit_mmx_operand"] and not with_mem["flags"]["explicit_mmx_operand"]
+    assert not with_mm["flags"]["reads_mxcsr"]                       # exact conversion
+    assert _classify(tables, "0F2AC1")["flags"]["reads_mxcsr"]        # CVTPI2PS rounds
+    rcpps = _classify(tables, "0F53C1")["flags"]
+    assert not rcpps["simd_fp_exceptions"]
+    assert _classify(tables, "0F10C1")["flags"]["alignment"] is False  # MOVUPS (type 4M)
+    assert _classify(tables, "0F2800")["flags"]["alignment"] is True   # MOVAPS xmm, m128 (type 1)
+
+
+@needs
+def test_isa_2b_known_positives_fail_the_rule_without_the_cited_table():
+    """r2 F1 / r1 s9-2: an allowlist generated WITHOUT the cited exclusion, used WITHOUT cited lookups, must still
+    never call a cited conditional form derived-ordinary (the per-row tests catch what the generator lets in)."""
+    import dataclasses
+
+    import isa_ordinary_gen
+    import isa_tables
+
+    catalogue = DECODERS / "xed_catalogue.tsv"
+    if not catalogue.exists():
+        pytest.skip("the XED catalogue dump is built by build_decoders.sh")
+    tables = isa_tables.load()
+    entries, _ = isa_ordinary_gen.generate(isa_ordinary_gen.read_catalogue(catalogue), tables.ordinary, set())
+    index = {(e["iclass"], e["extension"], e["isa_set"], e["sig"]): e for e in entries}
+    loose = dataclasses.replace(tables, map={**tables.map, "rules": []}, index=index)
+    conditional = [key for key, entry in tables.conditions["entries"].items()
+                   if set(entry) & {"f2", "f2_meaning", "f3", "f4", "f6", "f7", "cet", "state_effect",
+                                    "undefined_outputs"}]
+    vectors = [hexbytes for hexbytes, key in ISA_KEYS.items() if key in conditional] + [
+        "F20F7CC1", "9F", "9E", "480FC70E", "0FAE38", "0F0D08", "0F01C8", "0F01C9", "660FC8", "0FA2", "0F0B"]
+    passed = [hexbytes for hexbytes in vectors if _classify(loose, hexbytes)["result"] == "derived_ordinary"]
+    assert passed == [], passed
+
+
+@needs
+def test_isa_2b_memory_access_evidence():
+    """r3 s6: per access role / segment; FS source and ES destination for 64 F3 A4; iced keeps ENTER's 6 accesses."""
+    movs = _votes("64F3A4")
+    for name in ("iced", "zydis", "xed"):
+        roles = {(m["role"], m["read"], m["write"]) for m in movs[name].extra["memory"]}
+        assert ("string_source", True, False) in roles and ("string_dest", False, True) in roles, name
+        source = next(m for m in movs[name].extra["memory"] if m["role"] == "string_source")
+        assert source["segment"] == "fs", name
+        assert movs[name].extra["rep"] == "rep"
+    enter = _votes("C8000003")
+    assert len(enter["iced"].extra["memory"]) == 6 and not enter["iced"].extra["mem_overflow"]
+    assert len(enter["xed"].extra["memory"]) == 1   # (XED / Zydis model one access: F7 voters differ, step 3)
+
+
+def test_isa_2b_ordinary_file_validation():
+    import copy
+    import json
+
+    import isa_tables
+
+    root = Path(isa_tables.__file__).parent
+    files = {name: json.loads((root / isa_tables.FILES[name]).read_text(encoding="utf-8"))
+             for name in isa_tables.FILES}
+    isa_tables.validate(files["conditions"], files["map"], files["splits"], files["ordinary"])
+    broken = copy.deepcopy(files["ordinary"])
+    broken["entries"].append(dict(broken["entries"][0], iclass="CPUID"))      # cited and ordinary at once
+    with pytest.raises(isa_tables.TableError):
+        isa_tables.validate(files["conditions"], files["map"], files["splits"], broken)
+    broken = copy.deepcopy(files["ordinary"])
+    broken["entries"].append(dict(broken["entries"][0], isa_set="SSE3"))      # outside the base level
+    with pytest.raises(isa_tables.TableError):
+        isa_tables.validate(files["conditions"], files["map"], files["splits"], broken)
+    conditions = copy.deepcopy(files["conditions"])
+    conditions["entries"]["CALL_NEAR"]["cet"] = [{"name": "CET_SS", "when": "rel8 != 0"}]   # unknown expression
+    with pytest.raises(isa_tables.TableError):
+        isa_tables.validate(conditions, files["map"], files["splits"], files["ordinary"])
+    mapping = copy.deepcopy(files["map"])
+    mapping["rules"].append({"mnemonic": ["NOP"], "when": {"opcode": ["90"]}, "key": "PAUSE"})   # same selector
+    with pytest.raises(isa_tables.TableError):
+        isa_tables.validate(files["conditions"], mapping, files["splits"], files["ordinary"])
+
+
+def test_isa_2b_mpx_set_and_bnd_direction():
+    """r3 s1: the Table E-4 set excludes EB and E0-E3; the BND prefix preserves (schema 1 had it backwards)."""
+    import isa_tables
+
+    tables = isa_tables.load()
+    mpx = tables.conditions["mpx_effects"]["TABLE_E4"]
+    assert "EB" in mpx["not_members"] and "E0-E3" in mpx["not_members"]
+    for key in ("CALL_NEAR", "CALL_NEAR_INDIRECT", "RET_NEAR", "RET_NEAR_IMM", "JMP_NEAR", "JMP_NEAR_INDIRECT",
+                "JCC_SHORT", "JCC_NEAR"):
+        assert tables.entry(key)["mpx"] == "TABLE_E4", key
+    for key in ("JMP_SHORT", "LOOP_JCXZ"):
+        assert "mpx" not in tables.entry(key), key
+    bnd = tables.splits["prefix_splits"][0]
+    assert "PRESERVES" in bnd["main"]
+    assert tables.entry("CALL_NEAR")["cet"] == [{"name": "CET_SS", "when": "rel32 != 0"}]
+    assert {"name": "CET_IBT", "unless": "NOTRACK"} in tables.entry("JMP_NEAR_INDIRECT")["cet"]
+    assert tables.entry("BSF")["undefined_outputs"][0]["when"].startswith("source = 0")
+    assert "state_effect" in tables.entry("MOV_TO_SS") and "state_effect" not in tables.entry("LSS")
