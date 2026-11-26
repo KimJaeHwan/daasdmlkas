@@ -2185,7 +2185,7 @@ ISA_CLASSIFY = {
 def _xed_redecode(window: bytes):
     import decoders as d
 
-    return d.decode("xed", window, CODE, False)
+    return d.xed_redecode(window, CODE)
 
 
 def _classify(tables, hexbytes: str) -> dict:

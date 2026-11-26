@@ -9,9 +9,11 @@ Designs: .census6/design_tbr_isa_facts_r3.md (step 2) and .census6/design_tbr_is
 
 ``load()`` validates them together and digests each over canonical bytes (header binding).
 ``lookup(vote, window)`` is one voter's cited lookup (``None``: absent for that voter).
-``classify(tables, votes, window)`` combines the three Intel voters: cited first; only when every cited lookup
-is absent, the ordinary allowlist with the per-voter tests of 2b r1 s4 (A-F). Nothing here is a verdict: TDO uses
-a derived-ordinary result only under the premise ``isa-ordinary-rule`` (2b r1 s8).
+``classify(tables, votes, window, redecode)`` combines the three Intel voters: the evidence is validated and the
+XED vote bound to the bytes (``redecode`` = ``decoders.xed_redecode``; without it the row is unclassified); then cited
+first; only when every cited lookup is absent, the ordinary allowlist with the per-voter tests of 2b r1 s4 (A-F).
+Nothing here is a verdict: TDO uses a derived-ordinary result only under the premise ``isa-ordinary-rule``
+(2b r1 s8).
 """
 
 from __future__ import annotations
@@ -538,9 +540,11 @@ def classify(tables: Tables, votes: dict, window: bytes, redecode=None) -> dict:
     """One compared row: cited / cited_split / table_lookup_disagree / partial_lookup / derived_ordinary /
     unclassified, with per-voter evidence and the digests applied (2b r2 G).
 
-    `redecode(window)` re-decodes the verified window with the XED G1 setting; the XED vote must equal it
-    (status, mnemonic, length, operand kinds, iform), which binds the evidence to the bytes (impl r3 P1-1).
-    Without it the row is unclassified (no byte binding)."""
+    `redecode(window)` (``decoders.xed_redecode``) re-decodes the verified window with the XED G1 setting; the
+    XED vote must equal it (status, mnemonic, length, operand kinds, iform), which binds the evidence to the bytes
+    (impl r3 P1-1). Without it the row is unclassified (no byte binding). Scope: only the XED vote is bound here;
+    the iced and Zydis votes rely on the pipeline decoding the same verified window (decode_check.ballot) --
+    re-check this if another input path ever feeds classify."""
     out = {"digests": dict(tables.digests), "voters": {}}
     bad = {name: evidence_problems(votes[name]) for name in VOTERS
            if name in votes and votes[name].status == "ok" and evidence_problems(votes[name])}

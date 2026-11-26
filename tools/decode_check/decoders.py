@@ -466,6 +466,12 @@ def voter(name: str):
 XED_PROFILES = {"xed:g1": None, "xed:baseline": "P4PRESCOTT_NOLAHF", "xed:all": "ALL"}
 
 
+def xed_redecode(window: bytes, address: int = 0) -> Decoded:
+    """The XED G1-setting decode of a verified window: the byte binding isa_tables.classify requires (impl r3 P1-1).
+    One shared function, so every caller re-decodes the same way."""
+    return decode("xed", window, address, False)
+
+
 def decode_without(isa_set: str, data: bytes, address: int) -> Decoded:
     """XED under XED_CHIP_ALL with one ISA set removed (r3 s3 F4: the deciding feature of a split candidate)."""
     return voter("xed").decode(bytes(data[:MAX_LENGTH]), address, False, without=isa_set)
