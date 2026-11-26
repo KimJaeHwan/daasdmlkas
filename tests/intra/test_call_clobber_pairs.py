@@ -83,7 +83,7 @@ def test_the_discharger_judges_each_row_once_per_discharge():
     discharger = CallClobberDischarger.__new__(CallClobberDischarger)
     discharger._clobber_rows = {"f": rows_by_debt(rows, debts)}
     discharger._judged = {}
-    discharger._cut_events = 0   # (PE-d r4)
+    discharger._cut_events = discharger._cycle_events = discharger._keep_depth = 0   # (PE-d r5)
     judged = []
     discharger._discharge_read = lambda entry, read, context, active: judged.append(read) or (
         DischargeKind.PRESERVED,)

@@ -269,8 +269,8 @@ def test_a_recorded_fallthrough_exit_is_open_control():
 def test_the_depth_cut_does_not_depend_on_root_order(long_first):
     """Astra PE-d r2 P2-1 / r3 P2-4: a root over a chain deeper than the bound
     and a root over a short part of the same chain: the short one is certified
-    and the long one is not, whichever is decided first (results resting on
-    the cut are not memoized; a cut False is reused only with no more budget)."""
+    and the long one is not, whichever is decided first (a cut False is reused
+    only with no more budget, a True only with no less -- Astra r4 P2)."""
     depth = 18
     entries = [CODE_BASE + 0x100 + 0x10 * index for index in range(depth)]
     chain = [FunctionBuilder(entry=entry).call(entries[index + 1]).ret() if index + 1 < depth
@@ -285,16 +285,35 @@ def test_the_depth_cut_does_not_depend_on_root_order(long_first):
         return (FunctionBuilder(entry=entry).call(SOURCE).ins(copy(reg(RBX, 4), reg(RAX, 4))).call(helper)
                 .ins(copy(reg(RCX, 4), reg(RBX, 4))).call(SINK).ret())
 
-    first, then = (HELPER, LEAF) if long_first else (LEAF, HELPER)
-    rest = {"source": _source(), "helper": long_helper, "short": short_helper, "sink": FunctionBuilder(entry=SINK).ret(),
-            **{f"c{i}": body for i, body in enumerate(chain)}}
-    functions = {"main": root_function(MAIN, first), "second": root_function(second, then), **rest}
-    if not long_first:
-        functions = {"second": functions["second"], "main": functions["main"], **rest}
-    roots = analyze_program(functions, PROVIDER)
+    roots = _two_roots(long_first, root_function, second, long_helper, short_helper, chain)
     long_root, short_root = ("main", "second") if long_first else ("second", "main")
     assert not roots[(long_root, "sink.arg0")].is_effectively_complete   # (beyond the bound: withheld)
     assert roots[(short_root, "sink.arg0")].is_effectively_complete
+
+
+def _two_roots(long_first, root_function, second, long_helper, short_helper, chain):
+    """main (decided first) over the long helper if ``long_first``, else over
+    the short one; second over the other."""
+    first, then = (HELPER, LEAF) if long_first else (LEAF, HELPER)
+    functions = {"main": root_function(MAIN, first), "second": root_function(second, then), "source": _source(),
+                 "helper": long_helper, "short": short_helper, "sink": FunctionBuilder(entry=SINK).ret(),
+                 **{f"c{i}": body for i, body in enumerate(chain)}}
+    from tdo_v2.integration import configured_call_clobber_discharge as module
+
+    order = []
+    original = module.CallClobberDischarger.discharge
+
+    def spy(self, entry, *args, **kwargs):
+        order.append(entry.byte_offset)
+        return original(self, entry, *args, **kwargs)
+
+    module.CallClobberDischarger.discharge = spy
+    try:
+        roots = analyze_program(functions, PROVIDER)
+    finally:
+        module.CallClobberDischarger.discharge = original
+    assert order.index(MAIN) < order.index(second)   # (the order the parameter names)
+    return roots
 
 
 # -- Astra PE-d r3 complete list ---------------------------------------------------------------
@@ -347,10 +366,7 @@ def test_an_override_branch_after_the_restore_or_the_write_is_open_control(route
     if route == "preserved":
         helper = _OverrideBranch(entry=HELPER)
         helper.push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX).tail_call(WRITES_RBX)
-        try:
-            assert not _complete_with(helper, writer)
-        except Exception as error:   # (admission may refuse the shape: no certificate either)
-            assert "override" in str(error).lower() or "flow" in str(error).lower(), error
+        assert not _complete_with(helper, writer)
         return
     source = _OverrideBranch(entry=SOURCE)
     source.ins(copy(reg(RAX, 4), const(7, 4))).tail_call(WRITES_RBX)
@@ -378,44 +394,92 @@ def test_a_replacement_write_must_hold_on_every_exit(conditional):
     assert analyze_program(functions, PROVIDER)[("main", "sink.arg0")].is_effectively_complete is (not conditional)
 
 
-def test_a_cut_false_is_reused_only_with_no_more_budget():
-    """Astra r3 P2-4 / Fable r3 P2-1, the cache contract itself: a False that a
-    guard decided is kept with its budget; the same question in the same
-    context is answered from it with no more budget, and computed again with
-    more; an answer with no cut below it is memoized; a question met again
-    while being answered (a cycle) is a cut False."""
+def _bare_discharger():
     from tdo_v2.integration.configured_call_clobber_discharge import CallClobberDischarger
 
     discharger = CallClobberDischarger.__new__(CallClobberDischarger)
-    discharger._cut_events, discharger._cut_budgets = 0, {}
-    cache, calls, active = {}, [], (("caller", "read"),)
+    discharger._cut_events = discharger._cycle_events = discharger._keep_depth = 0
+    discharger._pending = set()
+    return discharger
+
+
+def test_a_cached_answer_holds_only_where_it_was_proven():
+    """Astra r3 P2-4 / r4 P2, Fable r3 P2-1, the cache contract itself (depth
+    = keep depth; one cache key = (question, active path)): a True holds at its
+    depth and shallower, a False a depth cut decided at its depth and deeper,
+    a False with no guard below it at every depth."""
+    discharger, cache, calls, active = _bare_discharger(), {}, [], (("caller", "read"),)
+
+    def at(depth, compute, path=active):
+        discharger._keep_depth = depth
+        return discharger._cached("keeps", cache, "q", path, compute)
 
     def cut():
         calls.append("cut")
-        discharger._cut_events += 1   # (a guard below decided)
+        discharger._cut_events += 1   # (a depth guard below decided)
         return False
 
     def proved():
         calls.append("proved")
         return True
 
-    assert discharger._cached("keeps", cache, "q", 3, active, cut) is False
-    assert "q" not in cache   # (resting on a cut: not memoized)
-    assert discharger._cached("keeps", cache, "q", 3, active, proved) is False   # (no more budget: reused)
-    assert discharger._cached("keeps", cache, "q", 2, active, proved) is False
+    assert at(3, cut) is False and at(3, proved) is False and at(5, proved) is False   # (no more budget)
     assert calls == ["cut"]
-    assert discharger._cached("keeps", cache, "q", 4, (("other", "read"),), proved) is True   # (another context)
-    del cache["q"]
-    assert discharger._cached("keeps", cache, "q", 4, active, proved) is True   # (more budget: computed again)
-    assert calls == ["cut", "proved", "proved"] and cache["q"] is True
-    assert discharger._cached("keeps", cache, "q", 1, active, cut) is True   # (memoized: no cut below it)
+    assert at(2, proved) is True   # (more budget: computed again)
+    assert at(1, cut) is True and at(2, cut) is True   # (a True holds with no less budget)
+    assert calls == ["cut", "proved"]
+    assert at(2, proved, (("other", "read"),)) is True and calls[-1] == "proved"   # (another active path)
+    cache.clear()
+    assert at(1, proved) is True and at(2, cut) is False   # (a True does not hold with less budget)
+    assert calls[-2:] == ["proved", "cut"]
+    cache.clear()
+    assert at(4, lambda: calls.append("plain") or False) is False
+    assert at(0, proved) is False and calls[-1] == "plain"   # (no guard below: False at every depth)
 
-    def cycle():
-        return discharger._cached("keeps", cache, "loop", 5, active, cycle)
 
-    before = discharger._cut_events
-    assert discharger._cached("keeps", cache, "loop", 5, active, cycle) is False
-    assert discharger._cut_events > before and "loop" not in cache
+def test_a_false_resting_on_a_cycle_is_not_kept():
+    """Fable r4 P2-1: P asks Q, Q asks P (open: a cycle) -- Q is False on that
+    path; P is then proven by another branch. Q asked again on its own is
+    True (it rests on P), not the False met inside the cycle."""
+    discharger, cache = _bare_discharger(), {}
+
+    def p():
+        q()   # (False here: it meets P open)
+        return True   # (P's other branch)
+
+    def q():
+        return discharger._cached("keeps", cache, "Q", (), lambda: discharger._cached("keeps", cache, "P", (), p))
+
+    assert discharger._cached("keeps", cache, "P", (), p) is True
+    assert discharger._cycle_events == 1
+    assert q() is True
+
+
+def test_a_chain_is_walked_once_per_depth():
+    """Fable r3 P2-1 / r4 P3-1: every callee calls the next one twice and all
+    keep RBX (certified) -- the computed questions grow linearly with the
+    chain (about one per callee and kind), not 2 ** depth. (The analysis
+    before the discharger already costs about 2x per level on this shape, so
+    the chain is short.)"""
+    from tdo_v2.integration import configured_call_clobber_discharge as module
+
+    depth = 8
+    entries = [CODE_BASE + 0x100 + 0x10 * index for index in range(depth)]
+    chain = [FunctionBuilder(entry=entry).call(entries[index + 1]).call(entries[index + 1]).ret()
+             if index + 1 < depth else FunctionBuilder(entry=entry).ret() for index, entry in enumerate(entries)]
+    helper = (FunctionBuilder(entry=HELPER).push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX).call(entries[0]).ret())
+    computed = []
+    original = module.CallClobberDischarger._cached
+
+    def counting(self, kind, cache, key, active, compute):
+        return original(self, kind, cache, key, active, lambda: computed.append(kind) or compute())
+
+    module.CallClobberDischarger._cached = counting
+    try:
+        assert _complete_with(helper, *chain)
+    finally:
+        module.CallClobberDischarger._cached = original
+    assert computed.count("keeps") == depth and len(computed) <= 4 * depth, computed
 
 
 @pytest.mark.parametrize("long_first", (True, False))
@@ -441,13 +505,7 @@ def test_a_frame_proof_cut_does_not_depend_on_root_order(long_first):
         return (FunctionBuilder(entry=entry).call(SOURCE).ins(copy(reg(RBX, 4), reg(RAX, 4))).call(helper)
                 .ins(copy(reg(RCX, 4), reg(RBX, 4))).call(SINK).ret())
 
-    first, then = (HELPER, LEAF) if long_first else (LEAF, HELPER)
-    rest = {"source": _source(), "helper": long_helper, "short": short_helper, "sink": FunctionBuilder(entry=SINK).ret(),
-            **{f"c{i}": body for i, body in enumerate(chain)}}
-    functions = {"main": root_function(MAIN, first), "second": root_function(second, then), **rest}
-    if not long_first:
-        functions = {"second": functions["second"], "main": functions["main"], **rest}
-    roots = analyze_program(functions, PROVIDER)
+    roots = _two_roots(long_first, root_function, second, long_helper, short_helper, chain)
     long_root, short_root = ("main", "second") if long_first else ("second", "main")
     assert not roots[(long_root, "sink.arg0")].is_effectively_complete
     assert roots[(short_root, "sink.arg0")].is_effectively_complete
