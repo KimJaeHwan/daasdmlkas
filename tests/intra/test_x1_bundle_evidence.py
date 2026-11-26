@@ -197,9 +197,12 @@ def test_admission_reads_each_block_once(generation, monkeypatch):
     sliced, hashed = [], []
     read_slice, hash_member = configured_bundle._read_slice, configured_bundle._hash_member
 
-    def counting_slice(generation_fd, record, offset, length):
-        data = read_slice(generation_fd, record, offset, length)
+    descriptors = {}
+
+    def counting_slice(fd, record, offset, length):
+        data = read_slice(fd, record, offset, length)
         sliced.append((record.handle.member_id, len(data)))
+        descriptors.setdefault(record.handle.member_id, set()).add(fd)
         return data
 
     def counting_hash(generation_fd, record, member):
@@ -217,6 +220,7 @@ def test_admission_reads_each_block_once(generation, monkeypatch):
     sizes = {row["member_id"]: row["byte_size"] for row in manifest["blocks"] if row.get("member_id")}
     block_bytes = sum(size for member, size in sliced if member in sizes)
     assert hashed == []   # (the frozen path checked every member already)
+    assert all(len(fds) == 1 for fds in descriptors.values())   # (Fable r4 P2-1: one open per member)
     assert 0 < block_bytes <= sum(sizes.values())
     original = next(row["size"] for row in manifest["members"] if row["id"] == "original")
     assert sum(size for member, size in sliced if member == "original") < original

@@ -106,8 +106,9 @@ public class GhidraV2StackSwitchScanner {
     private Set<Address> crossTargets = Set.of();
     private boolean everyRowSeeded;
     // (Astra X-1a r3 #3) every row's facts, read once before the first pass; every pass, the classifier, the
-    // kernel validation, the cross-region destinations and the scan's checkpoint use them (null: v1 path)
-    private Map<Address, Captured> captures = null;
+    // kernel validation, the cross-region destinations, the kernel rows and the scan's checkpoint use them, until
+    // the evidence is assembled (null: v1 path); ordered, so the next listed row is the next key
+    private TreeMap<Address, Captured> captures = null;
     private Map<Node, String> causes = new HashMap<>();
 
     public GhidraV2StackSwitchScanner(Program program, TaskMonitor monitor, boolean conservative) {
@@ -183,7 +184,6 @@ public class GhidraV2StackSwitchScanner {
             everyRowSeeded = false;
         }
         s3on = false;
-        captures = null;
 
         Map<String, Object> evidence = header(2, DETECTOR, expectedSha256);
         evidence.put("functions_scanned", counts[0]);
@@ -209,6 +209,7 @@ public class GhidraV2StackSwitchScanner {
         evidence.put("policies", policies);
         evidence.put("bound", exported != null);
         evidence.put("listing_digest", listingDigest(program, exported, captured, monitor));
+        captures = null;   // (Astra X-1a r4: held through evidence assembly -- the kernel rows read it)
         return evidence;
     }
 
@@ -775,15 +776,22 @@ public class GhidraV2StackSwitchScanner {
             if (validatedTrap) {
                 // (Astra X-1a r2 P2-8) the next LISTED instruction after a resolved
                 // trap merges the unknown state in its own region, wherever it is
-                Instruction after = listing.getInstructionAfter(row.getAddress());
+                Address after;
+                if (captures != null) {
+                    after = captures.higherKey(row.getAddress());
+                }
+                else {
+                    Instruction next = listing.getInstructionAfter(row.getAddress());
+                    after = next == null ? null : next.getAddress();
+                }
                 if (after != null) {
-                    crossTargets.add(after.getAddress());
+                    crossTargets.add(after);
                 }
             }
             if (indirect && !validatedUd2) {
                 Address[] flows = flowsOf(row);
                 if (flows.length == 0) {
-                    report(unbounded, none, new Node(row.getAddress(), row.getPcode().length - 1), "UNCHECKED",
+                    report(unbounded, none, new Node(row.getAddress(), pcodeOf(row).length - 1), "UNCHECKED",
                         owner == null ? "(outside functions)" : owner.getName(true), Map.of(row.getAddress(), row),
                         "unbounded-transfer");
                 }
@@ -906,7 +914,8 @@ public class GhidraV2StackSwitchScanner {
             item.put("class", kernel.kind());
             item.put("vector", kernel.vector());
             PcodeOp callother = null;
-            PcodeOp[] ops = row == null ? new PcodeOp[0] : row.getPcode();
+            Captured captured = captures == null ? null : captures.get(entry.getKey());
+            PcodeOp[] ops = captured != null ? captured.pcode() : row == null ? new PcodeOp[0] : row.getPcode();
             for (PcodeOp op : ops) {
                 if (op.getOpcode() == PcodeOp.CALLOTHER) {
                     callother = op;
@@ -996,8 +1005,8 @@ public class GhidraV2StackSwitchScanner {
     }
 
     /** (Astra X-1a r3 #3) every listed row's facts, read once. */
-    private Map<Address, Captured> captureRows() throws Exception {
-        Map<Address, Captured> result = new HashMap<>();
+    private TreeMap<Address, Captured> captureRows() throws Exception {
+        TreeMap<Address, Captured> result = new TreeMap<>();
         Memory memory = program.getMemory();
         InstructionIterator all = program.getListing().getInstructions(true);
         while (all.hasNext()) {

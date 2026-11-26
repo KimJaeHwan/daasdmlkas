@@ -7596,8 +7596,10 @@ TBR 세션과 합의): Bundle에는 생산자의 원래 주장만, TBR 증거에
   | v3-win32-release-full | 같음 (29) | 값 29 | - | 값 29 |
   | ue-dll-debuggame | 같음 (0) | 목적지 모를 이동 1 | trap 95 | 값 1 |
   | ue-dll-development | 같음 (0) | 목적지 모를 이동 2 | trap 99 | 값 3 |
-  | ntdll | 같음 (30) | 값 30, 목적지 모를 이동 28, uncovered 21 | covered 988, trap 326 | (측정 r2 스캐너) |
+  | ntdll | 같음 (30) | 값 30, 목적지 모를 이동 28, uncovered 21 | covered 988, trap 326 | 값 326, uncovered 21 (35a01c4) |
 
+  r4 스캐너(35a01c4, 2026-11-27 재측정, `/root/x1_measure`, `/root/x1_scan_ntdll4`)로 모든 칸이 r2와 같고 ntdll 대체 판정이
+  새로 채워졌다: 모든 명령 시작을 목적지로 읽으면 값 스위치 326 + 덮이지 않은 커널 행 21(347).
   모든 이미지에서 s3-off = v4(목록과 검사 수까지). 모름 시드로 새로 생긴 값 스위치는 zlib 1뿐. UE DLL은 목적지 모를 이동을
   어느 쪽으로 읽어도 s3-on에서 깨끗하지 않다 -- S3 전에 소유자가 정한다(`.census6/s3_prereqs_from_x1.md` 6). ELF 이미지는 S3
   적용 대상이 아니다(s3-off로 읽는다).
@@ -7614,3 +7616,8 @@ TBR 세션과 합의): Bundle에는 생산자의 원래 주장만, TBR 증거에
   - 범위(소유자 2026-11-27): "Ghidra가 명령을 맞게 번역했는가"(커널 행 번역 모양)와 "내보내는 동안 Ghidra 목록이 바뀌지
     않는가"는 생산자 신뢰 문제라 TBR 몫이다([TBR-G1-decode] / [TBR-G2-lifter] / [TBR-G3-scan]; G1의 syscall / int 2E 고정
     검사, ISA 사실 표기). X-1a에 이미 들어간 검사는 남기되 더 넓히지 않는다; 그런 지적은 태그로 닫는다.
+- r4b(Astra r4 #3, Fable r4 P2-1): 붙잡은 값은 증거를 다 만들 때까지 유지해 커널 행의 `lift` / `lift_vector`도 그 p-code를
+  쓰고, 목적지 모를 이동의 보고 순번도 붙잡은 p-code에서 센다; trap 뒤 "목록의 다음 명령"도 붙잡은 행의 다음 주소다(순서
+  있는 맵). 수용은 건드린 멤버마다 한 번만 열고(수용 동안 기술자 하나) 그 기술자로 조각을 읽는다. ntdll 출력은 35a01c4와
+  같다(`/root/x1_scan_ntdll5`). 돌연변이 36/37(M35-M37 추가: CC의 0 아닌 RETURN, RETURN 없는 CC, 내보내기 줄의 p-code 재읽기;
+  M2는 중복 방어).
