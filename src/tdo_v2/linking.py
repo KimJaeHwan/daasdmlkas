@@ -344,7 +344,7 @@ class Linker:
                 raise LinkError(f"{target.dll} does not export {len(absent)} of the program's imports from "
                                 f"{target.library} (e.g. {absent[0]}): not the library the program was built against")
             checked.append((target, exports, imported))
-        from .stack_evidence import load_stack_evidence
+        from .stack_evidence import authority, load_stack_evidence
 
         if self.refresh and not self.dry_run:
             import shutil
@@ -362,7 +362,7 @@ class Linker:
             evidences[target] = evidence
             if evidence is not None:
                 self.report.evidence_files.append(evidence)
-                if not load_stack_evidence(evidence).clean:
+                if not authority([load_stack_evidence(evidence)])[0]:   # (X-1: the one reader)
                     # the run will withdraw the assumption: no template may rest on it
                     switches["globals_disjoint"] = False
         # (the linked-DLL profile's remaining coupling: the main run's SSA identity

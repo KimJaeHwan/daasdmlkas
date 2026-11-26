@@ -561,13 +561,19 @@ def test_a_refused_member_withdraws_globals_disjoint_without_whole_program_evide
     assert "globals-disjoint-from-stack" not in refused_run.assumptions
     plain = _run([_main(), FunctionBuilder(entry=SINK).ret()])
     assert "globals-disjoint-from-stack" in plain.assumptions   # (control)
-    evidence = SimpleNamespace(clean=True, executable_sha256=refused_run.executable_sha256, describe=lambda: "x",
-                               program="p")
+    evidence = _evidence(refused_run.executable_sha256)
     kept = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()], stack_evidence=(evidence,))
     assert "globals-disjoint-from-stack" in kept.assumptions
-    other = SimpleNamespace(clean=True, executable_sha256="0" * 64, describe=lambda: "x", program="other")
+    other = _evidence("0" * 64)
     elsewhere = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()], stack_evidence=(other,))
     assert "globals-disjoint-from-stack" not in elsewhere.assumptions   # (another executable's scan)
+
+
+def _evidence(sha: str, switches=()):
+    """(X-1) a real v1 evidence object: clean without switches."""
+    from tdo_v2.stack_evidence import DETECTORS, StackEvidence
+
+    return StackEvidence("p", "0" * 64, sha, "p", (), DETECTORS[1], 1, 1, 0, tuple(switches))
 
 
 def _refused_failures(bodies):
@@ -607,8 +613,7 @@ def test_the_evidence_may_be_a_one_shot_iterator():
     from types import SimpleNamespace
 
     probe = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()])
-    evidence = SimpleNamespace(clean=True, executable_sha256=probe.executable_sha256, describe=lambda: "x",
-                               program="p")
+    evidence = _evidence(probe.executable_sha256)
     kept = _run([_main(), FunctionBuilder(entry=SINK).ret(), _refused()], stack_evidence=iter((evidence,)))
     assert "globals-disjoint-from-stack" in kept.assumptions
 
@@ -618,7 +623,7 @@ def test_a_dirty_evidence_iterator_still_withdraws():
     as a one-shot iterator, dirty evidence must still withdraw the assumption."""
     from types import SimpleNamespace
 
-    dirty = SimpleNamespace(clean=False, executable_sha256="0" * 64, describe=lambda: "x", program="p")
+    dirty = _evidence("0" * 64, switches=(("f", "1000", 0, "COPY"),))
     run = _run([_main(), FunctionBuilder(entry=SINK).ret()], stack_evidence=iter((dirty,)))
     assert "globals-disjoint-from-stack" not in run.assumptions
 

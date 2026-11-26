@@ -9,7 +9,7 @@ import subprocess
 import pytest
 
 from tdo_v2.stack_evidence import (
-    CONSERVATIVE_EXCEPTIONS, DETECTORS, EXCEPTIONS, EvidenceError, assumption_allowed, load_stack_evidence,
+    CONSERVATIVE_EXCEPTIONS, DETECTORS, EXCEPTIONS, EvidenceError, assumption_allowed, authority, load_stack_evidence,
 )
 
 CORE = "fdea959764879bb55602c88a80a1adf6307b637c0c04f4b01f2e28c2fcb7b942"
@@ -33,7 +33,7 @@ def _file(directory, name, sha, switches=(), functions=10, **changes):
 
 def test_clean_evidence_allows_the_assumption(tmp_path):
     core = load_stack_evidence(_file(tmp_path, "CORE", CORE))
-    assert core.clean and "no switch" in core.describe()
+    assert authority([core])[0] and "no switch" in core.describe()
     allowed, lines = assumption_allowed([core], requested=True, require_for=CORE)
     assert allowed and len(lines) == 1
 
@@ -59,26 +59,27 @@ def test_not_requested_is_never_taken(tmp_path):
 
 
 def test_an_empty_scan_is_not_clean(tmp_path):
-    assert not load_stack_evidence(_file(tmp_path, "CORE", CORE, functions=0)).clean
-    assert not load_stack_evidence(_file(tmp_path, "CORE", CORE, instructions_scanned=0)).clean
+    assert not authority([load_stack_evidence(_file(tmp_path, "CORE", CORE, functions=0))])[0]
+    assert not authority([load_stack_evidence(_file(tmp_path, "CORE", CORE, instructions_scanned=0))])[0]
 
 
 def test_the_java_scanner_writes_the_detector_this_engine_accepts():
-    """GhidraV2StackSwitchScan.DETECTOR and stack_evidence.DETECTORS move together."""
+    """GhidraV2StackSwitchScanner.DETECTOR and stack_evidence.DETECTORS move together."""
     import re
 
     from tdo_v2.stack_evidence import DETECTORS
 
-    source = (Path(__file__).resolve().parents[2] / "ghidra" / "GhidraV2StackSwitchScan.java").read_text(
+    source = (Path(__file__).resolve().parents[2] / "ghidra" / "GhidraV2StackSwitchScanner.java").read_text(
         encoding="utf-8")
-    assert re.search(r'DETECTOR = "([^"]+)"', source).group(1) == DETECTORS[-1]
+    assert re.search(r' DETECTOR = "([^"]+)"', source).group(1) == DETECTORS[-1]
+    assert re.search(r'V4_DETECTOR = "([^"]+)"', source).group(1) == DETECTORS[1]
 
 
 def test_conservative_v4_evidence_has_no_language_preservation(tmp_path):
     item = load_stack_evidence(_file(
-        tmp_path, "CORE", CORE, detector=DETECTORS[-1], call_preserved=[],
+        tmp_path, "CORE", CORE, detector=DETECTORS[1], call_preserved=[],
         exceptions=list(CONSERVATIVE_EXCEPTIONS)))
-    assert item.clean and item.call_preserved == ()
+    assert authority([item])[0] and item.call_preserved == ()
     assert "conservative unknown post-call registers" in item.describe()
     assert assumption_allowed([item], requested=True, require_for=CORE)[0]
 
@@ -123,26 +124,28 @@ def test_java_conservative_call_state_first_partial_and_join_reads(tmp_path):
     """
     if shutil.which("javac") is None or shutil.which("java") is None:
         pytest.skip("Java compiler/runtime unavailable")
-    source = (Path(__file__).resolve().parents[2] / "ghidra" / "GhidraV2StackSwitchScan.java").read_text()
+    root = Path(__file__).resolve().parents[2] / "ghidra"
+    source = (root / "GhidraV2StackSwitchScanner.java").read_text()
+    script = (root / "GhidraV2StackSwitchScan.java").read_text()
     helpers = "\n".join(_java_member(source, signature) for signature in (
-        "private record Loc(", "private static boolean conservativeMode(",
-        "private Integer readLocation(", "private void write(",
+        "record Loc(", "private Integer readLocation(", "private void write(",
         "private void afterCall(", "private Map<Loc, Integer> merge(", "private Map<Loc, Integer> initialState(",
+        "private Map<Loc, Integer> kernelState(",
     ))
     harness = """import java.util.*;
 public class StackScanStateTest {
     private static final Integer UNKNOWN = null;
     private static final Loc UNKNOWN_REGISTERS = new Loc(Integer.MIN_VALUE, 0, 0);
+    private static final Loc UNKNOWN_UNIQUES = new Loc(Integer.MIN_VALUE, 1, 0);
     private Loc stack = new Loc(1, 32, 8);
     private final List<Loc> preserved = new ArrayList<>();
     private boolean conservative = true;
+    private boolean s3on = false;
+    private int uniqueSpace = 2;
     static void check(boolean ok) { if (!ok) throw new AssertionError(); }
 """ + helpers + """
     public static void main(String[] args) {
         StackScanStateTest scanner = new StackScanStateTest();
-        check(conservativeMode("conservative") && !conservativeMode("legacy-v3"));
-        try { conservativeMode("v4"); throw new AssertionError(); }
-        catch (IllegalArgumentException expected) { }
         Loc rbx = new Loc(1, 24, 8), rcx = new Loc(1, 8, 8), rax = new Loc(1, 0, 8);
         Loc al = new Loc(1, 0, 1), ah = new Loc(1, 1, 1), eax = new Loc(1, 0, 4);
         Loc unique = new Loc(2, 0, 8);
@@ -180,6 +183,20 @@ public class StackScanStateTest {
         scanner.write(called, rax, 0);
         Map<Loc, Integer> zeroJoined = scanner.merge(initial, called);
         check(scanner.readLocation(zeroJoined, rax) == 0); // exactly zero on both paths
+        // (X-1 r3 4.4 / r4.1) s3-on: every seed, entries included, reads registers
+        // and unique locations as unknown; after a kernel row only the stack pointer
+        scanner.s3on = true;
+        check(scanner.readLocation(scanner.initialState(true), rax) == null);
+        check(scanner.readLocation(scanner.initialState(true), unique) == null);
+        check(scanner.readLocation(scanner.initialState(true), scanner.stack) == 1);
+        Map<Loc, Integer> kernel = scanner.kernelState();
+        check(scanner.readLocation(kernel, rbx) == null && scanner.readLocation(kernel, unique) == null);
+        check(scanner.readLocation(kernel, scanner.stack) == 1);
+        Map<Loc, Integer> joinedOn = scanner.merge(scanner.initialState(true), initial);
+        check(scanner.readLocation(joinedOn, unique) == null); // unknown on one path
+        scanner.s3on = false;
+        check(scanner.readLocation(scanner.initialState(true), unique) == 0); // s3-off: as v4
+        check(scanner.readLocation(scanner.initialState(true), rax) == 0);
         scanner.conservative = false;
         check(scanner.readLocation(scanner.initialState(false), rax) == 0);
         scanner.preserved.add(rbx);
@@ -196,14 +213,14 @@ public class StackScanStateTest {
     subprocess.run(["java", "-cp", str(tmp_path), "StackScanStateTest"],
                    check=True, capture_output=True, text=True, timeout=30)
     # Both function and outside regions use the selected mode and call transfer.
-    assert 'private boolean conservative = true;' in source
-    assert 'case "--mode" -> conservative = conservativeMode(args[index + 1]);' in source
-    assert 'evidence.put("detector", conservative ? DETECTOR : LEGACY_DETECTOR);' in source
+    assert 'case "conservative" -> true;' in script and 'case "legacy-v3" -> false;' in script
+    assert 'scanner.evidence(expected, null)' in script and 'scanner.legacyEvidence(expected)' in script
+    assert 'header(1, conservative ? V4_DETECTOR : LEGACY_DETECTOR, expectedSha256)' in source
     assert 'evidence.put("exceptions", conservative ? EXCEPTIONS : LEGACY_EXCEPTIONS);' in source
     assert 'preservedNames = conservative ? List.of()' in source
     assert 'afterCall(state);' in source and 'merged = merge(known, state);' in source
     assert 'scan(null, outside, "(outside functions)", listing, switches)' in source
-    assert 'initialState(entry != null && start.equals(entry))' in source
+    assert 'seed(start, entry != null && start.equals(entry), in, pending, pcode, rows);' in source
 
 
 @pytest.mark.parametrize("change", [{"format": "other"}, {"detector": "stack-switch-coefficient-v2"},

@@ -509,10 +509,11 @@ def _analyze_session(program, evidences, image_info, readonly_image, *,
     # convention only (a PE image of a 64-bit x86 language)
     home_space = 0x28 if assume_win64_home_space_private and assume_entry_values_not_frame \
         and image_info is not None             and image_info.executable_format.startswith("Portable Executable") and _x86_64(evidences) else 0
-    from .stack_evidence import assumption_allowed
+    from .stack_evidence import assumption_allowed, authority
 
     stack_evidence = tuple(stack_evidence or ())   # (PE-c: read more than once below)
-    refusals_covered = any(item.clean and item.executable_sha256 == program.evidence.executable_sha256.hex()
+    # (X-1 r3 4.5) through the one policy-aware reader (s3-off until S3)
+    refusals_covered = any(authority([item])[0] and item.executable_sha256 == program.evidence.executable_sha256.hex()
                            for item in stack_evidence)
     if stack_evidence:
         assume_globals_disjoint_from_stack, _ = assumption_allowed(
