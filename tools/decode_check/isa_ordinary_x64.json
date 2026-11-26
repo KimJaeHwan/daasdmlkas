@@ -442,7 +442,8 @@
   "mxcsr_inputs": "MXCSR fields that are inputs: RC (rounding control), DAZ (denormal inputs as zero), FTZ (tiny results flushed)",
   "writes_mxcsr_status": "MXCSR status bits are written even when the exceptions are masked",
   "explicit_mmx_operand": "an explicit MMX register operand (x87-to-MMX transition, pending #MF check)",
-  "alignment": "a legacy-SSE memory operand that may require 16-byte alignment (data-dependent)"
+  "alignment": "a legacy-SSE memory operand that may require 16-byte alignment (data-dependent)",
+  "masked_write": "the memory write depends on a data mask (F7 / memory evidence: conditional)"
  },
  "entries": [
   {
@@ -469,7 +470,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADC_MEMb_GPR8",
+    "ADC_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "ADC",
@@ -495,7 +500,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADC_MEMb_IMMb_80r2",
+    "ADC_MEMb_IMMb_82r2",
+    "ADC_MEMv_IMMb",
+    "ADC_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "ADC",
@@ -521,7 +532,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADC_GPR8_MEMb",
+    "ADC_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "ADC",
@@ -547,7 +562,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADC_GPR8_GPR8_10",
+    "ADC_GPR8_GPR8_12",
+    "ADC_GPRv_GPRv_11",
+    "ADC_GPRv_GPRv_13"
+   ]
   },
   {
    "iclass": "ADC",
@@ -573,7 +594,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADC_GPR8_IMMb_80r2",
+    "ADC_GPR8_IMMb_82r2",
+    "ADC_GPRv_IMMb",
+    "ADC_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "ADC",
@@ -599,7 +626,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADC_AL_IMMb",
+    "ADC_OrAX_IMMz"
+   ]
   },
   {
    "iclass": "ADC_LOCK",
@@ -625,7 +656,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADC_LOCK_MEMb_GPR8",
+    "ADC_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "ADC_LOCK",
@@ -651,7 +686,13 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADC_LOCK_MEMb_IMMb_80r2",
+    "ADC_LOCK_MEMb_IMMb_82r2",
+    "ADC_LOCK_MEMv_IMMb",
+    "ADC_LOCK_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "ADD",
@@ -677,7 +718,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADD_MEMb_GPR8",
+    "ADD_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "ADD",
@@ -703,7 +748,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADD_MEMb_IMMb_80r0",
+    "ADD_MEMb_IMMb_82r0",
+    "ADD_MEMv_IMMb",
+    "ADD_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "ADD",
@@ -729,7 +780,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADD_GPR8_MEMb",
+    "ADD_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "ADD",
@@ -755,7 +810,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADD_GPR8_GPR8_00",
+    "ADD_GPR8_GPR8_02",
+    "ADD_GPRv_GPRv_01",
+    "ADD_GPRv_GPRv_03"
+   ]
   },
   {
    "iclass": "ADD",
@@ -781,7 +842,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADD_GPR8_IMMb_80r0",
+    "ADD_GPR8_IMMb_82r0",
+    "ADD_GPRv_IMMb",
+    "ADD_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "ADD",
@@ -807,7 +874,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADD_AL_IMMb",
+    "ADD_OrAX_IMMz"
+   ]
   },
   {
    "iclass": "ADDPD",
@@ -837,7 +908,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADDPD_XMMpd_MEMpd"
+   ]
   },
   {
    "iclass": "ADDPD",
@@ -867,7 +941,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADDPD_XMMpd_XMMpd"
+   ]
   },
   {
    "iclass": "ADDPS",
@@ -897,7 +974,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADDPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "ADDPS",
@@ -927,7 +1007,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADDPS_XMMps_XMMps"
+   ]
   },
   {
    "iclass": "ADDSD",
@@ -957,7 +1040,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADDSD_XMMsd_MEMsd"
+   ]
   },
   {
    "iclass": "ADDSD",
@@ -987,7 +1073,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADDSD_XMMsd_XMMsd"
+   ]
   },
   {
    "iclass": "ADDSS",
@@ -1017,7 +1106,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADDSS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "ADDSS",
@@ -1047,7 +1139,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADDSS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "ADD_LOCK",
@@ -1073,7 +1168,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADD_LOCK_MEMb_GPR8",
+    "ADD_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "ADD_LOCK",
@@ -1099,7 +1198,13 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ADD_LOCK_MEMb_IMMb_80r0",
+    "ADD_LOCK_MEMb_IMMb_82r0",
+    "ADD_LOCK_MEMv_IMMb",
+    "ADD_LOCK_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "AND",
@@ -1125,7 +1230,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "AND_MEMb_GPR8",
+    "AND_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "AND",
@@ -1151,7 +1260,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "AND_MEMb_IMMb_80r4",
+    "AND_MEMb_IMMb_82r4",
+    "AND_MEMv_IMMb",
+    "AND_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "AND",
@@ -1177,7 +1292,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "AND_GPR8_MEMb",
+    "AND_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "AND",
@@ -1203,7 +1322,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "AND_GPR8_GPR8_20",
+    "AND_GPR8_GPR8_22",
+    "AND_GPRv_GPRv_21",
+    "AND_GPRv_GPRv_23"
+   ]
   },
   {
    "iclass": "AND",
@@ -1229,7 +1354,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "AND_GPR8_IMMb_80r4",
+    "AND_GPR8_IMMb_82r4",
+    "AND_GPRv_IMMb",
+    "AND_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "AND",
@@ -1255,7 +1386,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "AND_AL_IMMb",
+    "AND_OrAX_IMMz"
+   ]
   },
   {
    "iclass": "ANDNPD",
@@ -1281,7 +1416,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ANDNPD_XMMxuq_MEMxuq"
+   ]
   },
   {
    "iclass": "ANDNPD",
@@ -1307,7 +1445,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ANDNPD_XMMxuq_XMMxuq"
+   ]
   },
   {
    "iclass": "ANDNPS",
@@ -1333,7 +1474,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ANDNPS_XMMxud_MEMxud"
+   ]
   },
   {
    "iclass": "ANDNPS",
@@ -1359,7 +1503,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ANDNPS_XMMxud_XMMxud"
+   ]
   },
   {
    "iclass": "ANDPD",
@@ -1385,7 +1532,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ANDPD_XMMxuq_MEMxuq"
+   ]
   },
   {
    "iclass": "ANDPD",
@@ -1411,7 +1561,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ANDPD_XMMxuq_XMMxuq"
+   ]
   },
   {
    "iclass": "ANDPS",
@@ -1437,7 +1590,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ANDPS_XMMxud_MEMxud"
+   ]
   },
   {
    "iclass": "ANDPS",
@@ -1463,7 +1619,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ANDPS_XMMxud_XMMxud"
+   ]
   },
   {
    "iclass": "AND_LOCK",
@@ -1489,7 +1648,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "AND_LOCK_MEMb_GPR8",
+    "AND_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "AND_LOCK",
@@ -1515,7 +1678,13 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "AND_LOCK_MEMb_IMMb_80r4",
+    "AND_LOCK_MEMb_IMMb_82r4",
+    "AND_LOCK_MEMv_IMMb",
+    "AND_LOCK_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "BSWAP",
@@ -1544,6 +1713,9 @@
    "widths": [
     32,
     64
+   ],
+   "iforms": [
+    "BSWAP_GPRv"
    ]
   },
   {
@@ -1570,7 +1742,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BT_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "BT",
@@ -1596,7 +1771,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BT_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "BT",
@@ -1622,7 +1800,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BT_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "BT",
@@ -1648,7 +1829,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BT_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "BTC",
@@ -1674,7 +1858,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTC_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "BTC",
@@ -1700,7 +1887,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTC_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "BTC",
@@ -1726,7 +1916,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTC_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "BTC",
@@ -1752,7 +1945,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTC_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "BTC_LOCK",
@@ -1778,7 +1974,10 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTC_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "BTC_LOCK",
@@ -1804,7 +2003,10 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTC_LOCK_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "BTR",
@@ -1830,7 +2032,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTR_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "BTR",
@@ -1856,7 +2061,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTR_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "BTR",
@@ -1882,7 +2090,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTR_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "BTR",
@@ -1908,7 +2119,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTR_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "BTR_LOCK",
@@ -1934,7 +2148,10 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTR_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "BTR_LOCK",
@@ -1960,7 +2177,10 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTR_LOCK_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "BTS",
@@ -1986,7 +2206,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTS_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "BTS",
@@ -2012,7 +2235,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTS_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "BTS",
@@ -2038,7 +2264,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTS_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "BTS",
@@ -2064,7 +2293,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTS_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "BTS_LOCK",
@@ -2090,7 +2322,10 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTS_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "BTS_LOCK",
@@ -2116,7 +2351,10 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "BTS_LOCK_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "CBW",
@@ -2142,7 +2380,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CBW"
+   ]
   },
   {
    "iclass": "CDQ",
@@ -2168,7 +2409,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CDQ"
+   ]
   },
   {
    "iclass": "CDQE",
@@ -2194,7 +2438,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CDQE"
+   ]
   },
   {
    "iclass": "CLC",
@@ -2220,7 +2467,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CLC"
+   ]
   },
   {
    "iclass": "CLD",
@@ -2246,7 +2496,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CLD"
+   ]
   },
   {
    "iclass": "CMC",
@@ -2272,7 +2525,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMC"
+   ]
   },
   {
    "iclass": "CMOVB",
@@ -2298,7 +2554,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVB_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVB",
@@ -2324,7 +2583,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVB_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVBE",
@@ -2350,7 +2612,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVBE_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVBE",
@@ -2376,7 +2641,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVBE_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVL",
@@ -2402,7 +2670,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVL_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVL",
@@ -2428,7 +2699,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVL_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVLE",
@@ -2454,7 +2728,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVLE_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVLE",
@@ -2480,7 +2757,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVLE_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVNB",
@@ -2506,7 +2786,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNB_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVNB",
@@ -2532,7 +2815,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNB_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVNBE",
@@ -2558,7 +2844,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNBE_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVNBE",
@@ -2584,7 +2873,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNBE_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVNL",
@@ -2610,7 +2902,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNL_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVNL",
@@ -2636,7 +2931,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNL_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVNLE",
@@ -2662,7 +2960,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNLE_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVNLE",
@@ -2688,7 +2989,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNLE_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVNO",
@@ -2714,7 +3018,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNO_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVNO",
@@ -2740,7 +3047,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNO_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVNP",
@@ -2766,7 +3076,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNP_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVNP",
@@ -2792,7 +3105,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNP_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVNS",
@@ -2818,7 +3134,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNS_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVNS",
@@ -2844,7 +3163,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNS_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVNZ",
@@ -2870,7 +3192,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNZ_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVNZ",
@@ -2896,7 +3221,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVNZ_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVO",
@@ -2922,7 +3250,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVO_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVO",
@@ -2948,7 +3279,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVO_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVP",
@@ -2974,7 +3308,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVP_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVP",
@@ -3000,7 +3337,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVP_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVS",
@@ -3026,7 +3366,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVS_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVS",
@@ -3052,7 +3395,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVS_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMOVZ",
@@ -3078,7 +3424,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVZ_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMOVZ",
@@ -3104,7 +3453,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMOVZ_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMP",
@@ -3130,7 +3482,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMP_MEMb_GPR8",
+    "CMP_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "CMP",
@@ -3156,7 +3512,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMP_MEMb_IMMb_80r7",
+    "CMP_MEMb_IMMb_82r7",
+    "CMP_MEMv_IMMb",
+    "CMP_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "CMP",
@@ -3182,7 +3544,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMP_GPR8_MEMb",
+    "CMP_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "CMP",
@@ -3208,7 +3574,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMP_GPR8_GPR8_38",
+    "CMP_GPR8_GPR8_3A",
+    "CMP_GPRv_GPRv_39",
+    "CMP_GPRv_GPRv_3B"
+   ]
   },
   {
    "iclass": "CMP",
@@ -3234,7 +3606,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMP_GPR8_IMMb_80r7",
+    "CMP_GPR8_IMMb_82r7",
+    "CMP_GPRv_IMMb",
+    "CMP_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "CMP",
@@ -3260,7 +3638,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMP_AL_IMMb",
+    "CMP_OrAX_IMMz"
+   ]
   },
   {
    "iclass": "CMPPD",
@@ -3288,7 +3670,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPPD_XMMpd_MEMpd_IMMb"
+   ]
   },
   {
    "iclass": "CMPPD",
@@ -3316,7 +3701,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPPD_XMMpd_XMMpd_IMMb"
+   ]
   },
   {
    "iclass": "CMPPS",
@@ -3344,7 +3732,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPPS_XMMps_MEMps_IMMb"
+   ]
   },
   {
    "iclass": "CMPPS",
@@ -3372,7 +3763,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPPS_XMMps_XMMps_IMMb"
+   ]
   },
   {
    "iclass": "CMPSB",
@@ -3398,7 +3792,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPSB"
+   ]
   },
   {
    "iclass": "CMPSD",
@@ -3424,7 +3821,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPSD"
+   ]
   },
   {
    "iclass": "CMPSD_XMM",
@@ -3452,7 +3852,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPSD_XMM_XMMsd_MEMsd_IMMb"
+   ]
   },
   {
    "iclass": "CMPSD_XMM",
@@ -3480,7 +3883,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPSD_XMM_XMMsd_XMMsd_IMMb"
+   ]
   },
   {
    "iclass": "CMPSQ",
@@ -3506,7 +3912,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPSQ"
+   ]
   },
   {
    "iclass": "CMPSS",
@@ -3534,7 +3943,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPSS_XMMss_MEMss_IMMb"
+   ]
   },
   {
    "iclass": "CMPSS",
@@ -3562,7 +3974,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPSS_XMMss_XMMss_IMMb"
+   ]
   },
   {
    "iclass": "CMPSW",
@@ -3588,7 +4003,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPSW"
+   ]
   },
   {
    "iclass": "CMPXCHG",
@@ -3614,7 +4032,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPXCHG_MEMb_GPR8",
+    "CMPXCHG_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "CMPXCHG",
@@ -3640,7 +4062,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPXCHG_GPR8_GPR8",
+    "CMPXCHG_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "CMPXCHG8B",
@@ -3666,7 +4092,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPXCHG8B_MEMq"
+   ]
   },
   {
    "iclass": "CMPXCHG8B_LOCK",
@@ -3692,7 +4121,10 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPXCHG8B_LOCK_MEMq"
+   ]
   },
   {
    "iclass": "CMPXCHG_LOCK",
@@ -3718,7 +4150,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CMPXCHG_LOCK_MEMb_GPR8",
+    "CMPXCHG_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "COMISD",
@@ -3746,7 +4182,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "COMISD_XMMsd_MEMsd"
+   ]
   },
   {
    "iclass": "COMISD",
@@ -3774,7 +4213,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "COMISD_XMMsd_XMMsd"
+   ]
   },
   {
    "iclass": "COMISS",
@@ -3802,7 +4244,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "COMISS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "COMISS",
@@ -3830,7 +4275,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "COMISS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "CQO",
@@ -3856,7 +4304,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CQO"
+   ]
   },
   {
    "iclass": "CVTDQ2PD",
@@ -3882,7 +4333,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTDQ2PD_XMMpd_MEMq"
+   ]
   },
   {
    "iclass": "CVTDQ2PD",
@@ -3908,7 +4362,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTDQ2PD_XMMpd_XMMq"
+   ]
   },
   {
    "iclass": "CVTDQ2PS",
@@ -3936,7 +4393,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTDQ2PS_XMMps_MEMdq"
+   ]
   },
   {
    "iclass": "CVTDQ2PS",
@@ -3964,7 +4424,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTDQ2PS_XMMps_XMMdq"
+   ]
   },
   {
    "iclass": "CVTPD2DQ",
@@ -3993,7 +4456,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPD2DQ_XMMdq_MEMpd"
+   ]
   },
   {
    "iclass": "CVTPD2DQ",
@@ -4022,7 +4488,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPD2DQ_XMMdq_XMMpd"
+   ]
   },
   {
    "iclass": "CVTPD2PI",
@@ -4051,7 +4520,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPD2PI_MMXq_MEMpd"
+   ]
   },
   {
    "iclass": "CVTPD2PI",
@@ -4080,7 +4552,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPD2PI_MMXq_XMMpd"
+   ]
   },
   {
    "iclass": "CVTPD2PS",
@@ -4110,7 +4585,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPD2PS_XMMps_MEMpd"
+   ]
   },
   {
    "iclass": "CVTPD2PS",
@@ -4140,7 +4618,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPD2PS_XMMps_XMMpd"
+   ]
   },
   {
    "iclass": "CVTPI2PD",
@@ -4166,7 +4647,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPI2PD_XMMpd_MEMq"
+   ]
   },
   {
    "iclass": "CVTPI2PD",
@@ -4192,7 +4676,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPI2PD_XMMpd_MMXq"
+   ]
   },
   {
    "iclass": "CVTPI2PS",
@@ -4220,7 +4707,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPI2PS_XMMq_MEMq"
+   ]
   },
   {
    "iclass": "CVTPI2PS",
@@ -4248,7 +4738,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPI2PS_XMMq_MMXq"
+   ]
   },
   {
    "iclass": "CVTPS2DQ",
@@ -4277,7 +4770,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPS2DQ_XMMdq_MEMps"
+   ]
   },
   {
    "iclass": "CVTPS2DQ",
@@ -4306,7 +4802,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPS2DQ_XMMdq_XMMps"
+   ]
   },
   {
    "iclass": "CVTPS2PD",
@@ -4334,7 +4833,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPS2PD_XMMpd_MEMq"
+   ]
   },
   {
    "iclass": "CVTPS2PD",
@@ -4362,7 +4864,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPS2PD_XMMpd_XMMq"
+   ]
   },
   {
    "iclass": "CVTPS2PI",
@@ -4391,7 +4896,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPS2PI_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "CVTPS2PI",
@@ -4420,7 +4928,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTPS2PI_MMXq_XMMq"
+   ]
   },
   {
    "iclass": "CVTSD2SI",
@@ -4449,7 +4960,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSD2SI_GPR32d_MEMsd",
+    "CVTSD2SI_GPR64q_MEMsd"
+   ]
   },
   {
    "iclass": "CVTSD2SI",
@@ -4478,7 +4993,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSD2SI_GPR32d_XMMsd",
+    "CVTSD2SI_GPR64q_XMMsd"
+   ]
   },
   {
    "iclass": "CVTSD2SS",
@@ -4508,7 +5027,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSD2SS_XMMss_MEMsd"
+   ]
   },
   {
    "iclass": "CVTSD2SS",
@@ -4538,7 +5060,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSD2SS_XMMss_XMMsd"
+   ]
   },
   {
    "iclass": "CVTSI2SD",
@@ -4572,8 +5097,19 @@
      "simd_fp_exceptions": false,
      "mxcsr_inputs": [],
      "writes_mxcsr_status": false
+    },
+    "64": {
+     "simd_fp_exceptions": true,
+     "mxcsr_inputs": [
+      "RC"
+     ],
+     "writes_mxcsr_status": true
     }
-   }
+   },
+   "iforms": [
+    "CVTSI2SD_XMMsd_MEMd",
+    "CVTSI2SD_XMMsd_MEMq"
+   ]
   },
   {
    "iclass": "CVTSI2SD",
@@ -4607,8 +5143,19 @@
      "simd_fp_exceptions": false,
      "mxcsr_inputs": [],
      "writes_mxcsr_status": false
+    },
+    "64": {
+     "simd_fp_exceptions": true,
+     "mxcsr_inputs": [
+      "RC"
+     ],
+     "writes_mxcsr_status": true
     }
-   }
+   },
+   "iforms": [
+    "CVTSI2SD_XMMsd_GPR32d",
+    "CVTSI2SD_XMMsd_GPR64q"
+   ]
   },
   {
    "iclass": "CVTSI2SS",
@@ -4636,7 +5183,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSI2SS_XMMss_MEMd",
+    "CVTSI2SS_XMMss_MEMq"
+   ]
   },
   {
    "iclass": "CVTSI2SS",
@@ -4664,7 +5215,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSI2SS_XMMss_GPR32d",
+    "CVTSI2SS_XMMss_GPR64q"
+   ]
   },
   {
    "iclass": "CVTSS2SD",
@@ -4692,7 +5247,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSS2SD_XMMsd_MEMss"
+   ]
   },
   {
    "iclass": "CVTSS2SD",
@@ -4720,7 +5278,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSS2SD_XMMsd_XMMss"
+   ]
   },
   {
    "iclass": "CVTSS2SI",
@@ -4749,7 +5310,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSS2SI_GPR32d_MEMss",
+    "CVTSS2SI_GPR64q_MEMss"
+   ]
   },
   {
    "iclass": "CVTSS2SI",
@@ -4778,7 +5343,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTSS2SI_GPR32d_XMMss",
+    "CVTSS2SI_GPR64q_XMMss"
+   ]
   },
   {
    "iclass": "CVTTPD2DQ",
@@ -4806,7 +5375,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTPD2DQ_XMMdq_MEMpd"
+   ]
   },
   {
    "iclass": "CVTTPD2DQ",
@@ -4834,7 +5406,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTPD2DQ_XMMdq_XMMpd"
+   ]
   },
   {
    "iclass": "CVTTPD2PI",
@@ -4862,7 +5437,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTPD2PI_MMXq_MEMpd"
+   ]
   },
   {
    "iclass": "CVTTPD2PI",
@@ -4890,7 +5468,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTPD2PI_MMXq_XMMpd"
+   ]
   },
   {
    "iclass": "CVTTPS2DQ",
@@ -4918,7 +5499,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTPS2DQ_XMMdq_MEMps"
+   ]
   },
   {
    "iclass": "CVTTPS2DQ",
@@ -4946,7 +5530,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTPS2DQ_XMMdq_XMMps"
+   ]
   },
   {
    "iclass": "CVTTPS2PI",
@@ -4974,7 +5561,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTPS2PI_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "CVTTPS2PI",
@@ -5002,7 +5592,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTPS2PI_MMXq_XMMq"
+   ]
   },
   {
    "iclass": "CVTTSD2SI",
@@ -5030,7 +5623,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTSD2SI_GPR32d_MEMsd",
+    "CVTTSD2SI_GPR64q_MEMsd"
+   ]
   },
   {
    "iclass": "CVTTSD2SI",
@@ -5058,7 +5655,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTSD2SI_GPR32d_XMMsd",
+    "CVTTSD2SI_GPR64q_XMMsd"
+   ]
   },
   {
    "iclass": "CVTTSS2SI",
@@ -5086,7 +5687,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTSS2SI_GPR32d_MEMss",
+    "CVTTSS2SI_GPR64q_MEMss"
+   ]
   },
   {
    "iclass": "CVTTSS2SI",
@@ -5114,7 +5719,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CVTTSS2SI_GPR32d_XMMss",
+    "CVTTSS2SI_GPR64q_XMMss"
+   ]
   },
   {
    "iclass": "CWD",
@@ -5140,7 +5749,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CWD"
+   ]
   },
   {
    "iclass": "CWDE",
@@ -5166,7 +5778,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "CWDE"
+   ]
   },
   {
    "iclass": "DEC",
@@ -5192,7 +5807,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DEC_MEMb",
+    "DEC_MEMv"
+   ]
   },
   {
    "iclass": "DEC",
@@ -5218,7 +5837,12 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DEC_GPR8",
+    "DEC_GPRv_48",
+    "DEC_GPRv_FFr1"
+   ]
   },
   {
    "iclass": "DEC_LOCK",
@@ -5244,7 +5868,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DEC_LOCK_MEMb",
+    "DEC_LOCK_MEMv"
+   ]
   },
   {
    "iclass": "DIV",
@@ -5270,7 +5898,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIV_MEMb",
+    "DIV_MEMv"
+   ]
   },
   {
    "iclass": "DIV",
@@ -5296,7 +5928,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIV_GPR8",
+    "DIV_GPRv"
+   ]
   },
   {
    "iclass": "DIVPD",
@@ -5326,7 +5962,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIVPD_XMMpd_MEMpd"
+   ]
   },
   {
    "iclass": "DIVPD",
@@ -5356,7 +5995,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIVPD_XMMpd_XMMpd"
+   ]
   },
   {
    "iclass": "DIVPS",
@@ -5386,7 +6028,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIVPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "DIVPS",
@@ -5416,7 +6061,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIVPS_XMMps_XMMps"
+   ]
   },
   {
    "iclass": "DIVSD",
@@ -5446,7 +6094,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIVSD_XMMsd_MEMsd"
+   ]
   },
   {
    "iclass": "DIVSD",
@@ -5476,7 +6127,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIVSD_XMMsd_XMMsd"
+   ]
   },
   {
    "iclass": "DIVSS",
@@ -5506,7 +6160,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIVSS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "DIVSS",
@@ -5536,7 +6193,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "DIVSS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "EMMS",
@@ -5562,7 +6222,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "EMMS"
+   ]
   },
   {
    "iclass": "ENTER",
@@ -5588,7 +6251,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ENTER_IMMw_IMMb"
+   ]
   },
   {
    "iclass": "F2XM1",
@@ -5614,7 +6280,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "F2XM1"
+   ]
   },
   {
    "iclass": "FABS",
@@ -5640,7 +6309,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FABS"
+   ]
   },
   {
    "iclass": "FADD",
@@ -5666,7 +6338,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FADD_MEMm64real",
+    "FADD_MEMmem32real"
+   ]
   },
   {
    "iclass": "FADD",
@@ -5692,7 +6368,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FADD_ST0_X87",
+    "FADD_X87_ST0"
+   ]
   },
   {
    "iclass": "FADDP",
@@ -5718,7 +6398,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FADDP_X87_ST0"
+   ]
   },
   {
    "iclass": "FBLD",
@@ -5744,7 +6427,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FBLD_ST0_MEMmem80dec"
+   ]
   },
   {
    "iclass": "FBSTP",
@@ -5770,7 +6456,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FBSTP_MEMmem80dec_ST0"
+   ]
   },
   {
    "iclass": "FCHS",
@@ -5796,7 +6485,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCHS"
+   ]
   },
   {
    "iclass": "FCMOVB",
@@ -5822,7 +6514,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCMOVB_ST0_X87"
+   ]
   },
   {
    "iclass": "FCMOVBE",
@@ -5848,7 +6543,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCMOVBE_ST0_X87"
+   ]
   },
   {
    "iclass": "FCMOVE",
@@ -5874,7 +6572,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCMOVE_ST0_X87"
+   ]
   },
   {
    "iclass": "FCMOVNB",
@@ -5900,7 +6601,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCMOVNB_ST0_X87"
+   ]
   },
   {
    "iclass": "FCMOVNBE",
@@ -5926,7 +6630,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCMOVNBE_ST0_X87"
+   ]
   },
   {
    "iclass": "FCMOVNE",
@@ -5952,7 +6659,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCMOVNE_ST0_X87"
+   ]
   },
   {
    "iclass": "FCMOVNU",
@@ -5978,7 +6688,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCMOVNU_ST0_X87"
+   ]
   },
   {
    "iclass": "FCMOVU",
@@ -6004,7 +6717,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCMOVU_ST0_X87"
+   ]
   },
   {
    "iclass": "FCOM",
@@ -6030,7 +6746,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCOM_ST0_MEMm64real",
+    "FCOM_ST0_MEMmem32real"
+   ]
   },
   {
    "iclass": "FCOM",
@@ -6056,7 +6776,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCOM_ST0_X87",
+    "FCOM_ST0_X87_DCD0"
+   ]
   },
   {
    "iclass": "FCOMI",
@@ -6082,7 +6806,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCOMI_ST0_X87"
+   ]
   },
   {
    "iclass": "FCOMIP",
@@ -6108,7 +6835,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCOMIP_ST0_X87"
+   ]
   },
   {
    "iclass": "FCOMP",
@@ -6134,7 +6864,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCOMP_ST0_MEMm64real",
+    "FCOMP_ST0_MEMmem32real"
+   ]
   },
   {
    "iclass": "FCOMP",
@@ -6160,7 +6894,12 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCOMP_ST0_X87",
+    "FCOMP_ST0_X87_DCD1",
+    "FCOMP_ST0_X87_DED0"
+   ]
   },
   {
    "iclass": "FCOMPP",
@@ -6186,7 +6925,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCOMPP"
+   ]
   },
   {
    "iclass": "FCOS",
@@ -6212,7 +6954,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FCOS"
+   ]
   },
   {
    "iclass": "FDECSTP",
@@ -6238,7 +6983,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FDECSTP"
+   ]
   },
   {
    "iclass": "FDISI8087_NOP",
@@ -6264,7 +7012,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FDISI8087_NOP"
+   ]
   },
   {
    "iclass": "FDIV",
@@ -6290,7 +7041,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FDIV_ST0_MEMm64real",
+    "FDIV_ST0_MEMmem32real"
+   ]
   },
   {
    "iclass": "FDIV",
@@ -6316,7 +7071,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FDIV_ST0_X87",
+    "FDIV_X87_ST0"
+   ]
   },
   {
    "iclass": "FDIVP",
@@ -6342,7 +7101,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FDIVP_X87_ST0"
+   ]
   },
   {
    "iclass": "FDIVR",
@@ -6368,7 +7130,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FDIVR_ST0_MEMm64real",
+    "FDIVR_ST0_MEMmem32real"
+   ]
   },
   {
    "iclass": "FDIVR",
@@ -6394,7 +7160,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FDIVR_ST0_X87",
+    "FDIVR_X87_ST0"
+   ]
   },
   {
    "iclass": "FDIVRP",
@@ -6420,7 +7190,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FDIVRP_X87_ST0"
+   ]
   },
   {
    "iclass": "FENI8087_NOP",
@@ -6446,7 +7219,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FENI8087_NOP"
+   ]
   },
   {
    "iclass": "FFREE",
@@ -6472,7 +7248,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FFREE_X87"
+   ]
   },
   {
    "iclass": "FFREEP",
@@ -6498,7 +7277,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FFREEP_X87"
+   ]
   },
   {
    "iclass": "FIADD",
@@ -6524,7 +7306,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FIADD_ST0_MEMmem16int",
+    "FIADD_ST0_MEMmem32int"
+   ]
   },
   {
    "iclass": "FICOM",
@@ -6550,7 +7336,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FICOM_ST0_MEMmem16int",
+    "FICOM_ST0_MEMmem32int"
+   ]
   },
   {
    "iclass": "FICOMP",
@@ -6576,7 +7366,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FICOMP_ST0_MEMmem16int",
+    "FICOMP_ST0_MEMmem32int"
+   ]
   },
   {
    "iclass": "FIDIV",
@@ -6602,7 +7396,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FIDIV_ST0_MEMmem16int",
+    "FIDIV_ST0_MEMmem32int"
+   ]
   },
   {
    "iclass": "FIDIVR",
@@ -6628,7 +7426,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FIDIVR_ST0_MEMmem16int",
+    "FIDIVR_ST0_MEMmem32int"
+   ]
   },
   {
    "iclass": "FILD",
@@ -6654,7 +7456,12 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FILD_ST0_MEMm64int",
+    "FILD_ST0_MEMmem16int",
+    "FILD_ST0_MEMmem32int"
+   ]
   },
   {
    "iclass": "FIMUL",
@@ -6680,7 +7487,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FIMUL_ST0_MEMmem16int",
+    "FIMUL_ST0_MEMmem32int"
+   ]
   },
   {
    "iclass": "FINCSTP",
@@ -6706,7 +7517,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FINCSTP"
+   ]
   },
   {
    "iclass": "FIST",
@@ -6732,7 +7546,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FIST_MEMmem16int_ST0",
+    "FIST_MEMmem32int_ST0"
+   ]
   },
   {
    "iclass": "FISTP",
@@ -6758,7 +7576,12 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FISTP_MEMm64int_ST0",
+    "FISTP_MEMmem16int_ST0",
+    "FISTP_MEMmem32int_ST0"
+   ]
   },
   {
    "iclass": "FISUB",
@@ -6784,7 +7607,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FISUB_ST0_MEMmem16int",
+    "FISUB_ST0_MEMmem32int"
+   ]
   },
   {
    "iclass": "FISUBR",
@@ -6810,7 +7637,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FISUBR_ST0_MEMmem16int",
+    "FISUBR_ST0_MEMmem32int"
+   ]
   },
   {
    "iclass": "FLD",
@@ -6836,7 +7667,12 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLD_ST0_MEMm64real",
+    "FLD_ST0_MEMmem32real",
+    "FLD_ST0_MEMmem80real"
+   ]
   },
   {
    "iclass": "FLD",
@@ -6862,7 +7698,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLD_ST0_X87"
+   ]
   },
   {
    "iclass": "FLD1",
@@ -6888,7 +7727,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLD1"
+   ]
   },
   {
    "iclass": "FLDCW",
@@ -6914,7 +7756,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLDCW_MEMmem16"
+   ]
   },
   {
    "iclass": "FLDENV",
@@ -6940,7 +7785,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLDENV_MEMmem14",
+    "FLDENV_MEMmem28"
+   ]
   },
   {
    "iclass": "FLDL2E",
@@ -6966,7 +7815,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLDL2E"
+   ]
   },
   {
    "iclass": "FLDL2T",
@@ -6992,7 +7844,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLDL2T"
+   ]
   },
   {
    "iclass": "FLDLG2",
@@ -7018,7 +7873,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLDLG2"
+   ]
   },
   {
    "iclass": "FLDLN2",
@@ -7044,7 +7902,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLDLN2"
+   ]
   },
   {
    "iclass": "FLDPI",
@@ -7070,7 +7931,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLDPI"
+   ]
   },
   {
    "iclass": "FLDZ",
@@ -7096,7 +7960,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FLDZ"
+   ]
   },
   {
    "iclass": "FMUL",
@@ -7122,7 +7989,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FMUL_ST0_MEMm64real",
+    "FMUL_ST0_MEMmem32real"
+   ]
   },
   {
    "iclass": "FMUL",
@@ -7148,7 +8019,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FMUL_ST0_X87",
+    "FMUL_X87_ST0"
+   ]
   },
   {
    "iclass": "FMULP",
@@ -7174,7 +8049,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FMULP_X87_ST0"
+   ]
   },
   {
    "iclass": "FNCLEX",
@@ -7200,7 +8078,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FNCLEX"
+   ]
   },
   {
    "iclass": "FNINIT",
@@ -7226,7 +8107,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FNINIT"
+   ]
   },
   {
    "iclass": "FNOP",
@@ -7252,7 +8136,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FNOP"
+   ]
   },
   {
    "iclass": "FNSAVE",
@@ -7278,7 +8165,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FNSAVE_MEMmem108",
+    "FNSAVE_MEMmem94"
+   ]
   },
   {
    "iclass": "FNSTCW",
@@ -7304,7 +8195,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FNSTCW_MEMmem16"
+   ]
   },
   {
    "iclass": "FNSTENV",
@@ -7330,7 +8224,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FNSTENV_MEMmem14",
+    "FNSTENV_MEMmem28"
+   ]
   },
   {
    "iclass": "FNSTSW",
@@ -7356,7 +8254,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FNSTSW_AX"
+   ]
   },
   {
    "iclass": "FNSTSW",
@@ -7382,7 +8283,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FNSTSW_MEMmem16"
+   ]
   },
   {
    "iclass": "FPATAN",
@@ -7408,7 +8312,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FPATAN"
+   ]
   },
   {
    "iclass": "FPREM",
@@ -7434,7 +8341,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FPREM"
+   ]
   },
   {
    "iclass": "FPREM1",
@@ -7460,7 +8370,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FPREM1"
+   ]
   },
   {
    "iclass": "FPTAN",
@@ -7486,7 +8399,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FPTAN"
+   ]
   },
   {
    "iclass": "FRNDINT",
@@ -7512,7 +8428,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FRNDINT"
+   ]
   },
   {
    "iclass": "FRSTOR",
@@ -7538,7 +8457,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FRSTOR_MEMmem108",
+    "FRSTOR_MEMmem94"
+   ]
   },
   {
    "iclass": "FSCALE",
@@ -7564,7 +8487,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSCALE"
+   ]
   },
   {
    "iclass": "FSETPM287_NOP",
@@ -7590,7 +8516,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSETPM287_NOP"
+   ]
   },
   {
    "iclass": "FSIN",
@@ -7616,7 +8545,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSIN"
+   ]
   },
   {
    "iclass": "FSINCOS",
@@ -7642,7 +8574,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSINCOS"
+   ]
   },
   {
    "iclass": "FSQRT",
@@ -7668,7 +8603,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSQRT"
+   ]
   },
   {
    "iclass": "FST",
@@ -7694,7 +8632,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FST_MEMm64real_ST0",
+    "FST_MEMmem32real_ST0"
+   ]
   },
   {
    "iclass": "FST",
@@ -7720,7 +8662,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FST_X87_ST0"
+   ]
   },
   {
    "iclass": "FSTP",
@@ -7746,7 +8691,12 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSTP_MEMm64real_ST0",
+    "FSTP_MEMmem32real_ST0",
+    "FSTP_MEMmem80real_ST0"
+   ]
   },
   {
    "iclass": "FSTP",
@@ -7772,7 +8722,12 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSTP_X87_ST0",
+    "FSTP_X87_ST0_DFD0",
+    "FSTP_X87_ST0_DFD1"
+   ]
   },
   {
    "iclass": "FSTPNCE",
@@ -7798,7 +8753,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSTPNCE_X87_ST0"
+   ]
   },
   {
    "iclass": "FSUB",
@@ -7824,7 +8782,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSUB_ST0_MEMm64real",
+    "FSUB_ST0_MEMmem32real"
+   ]
   },
   {
    "iclass": "FSUB",
@@ -7850,7 +8812,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSUB_ST0_X87",
+    "FSUB_X87_ST0"
+   ]
   },
   {
    "iclass": "FSUBP",
@@ -7876,7 +8842,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSUBP_X87_ST0"
+   ]
   },
   {
    "iclass": "FSUBR",
@@ -7902,7 +8871,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSUBR_ST0_MEMm64real",
+    "FSUBR_ST0_MEMmem32real"
+   ]
   },
   {
    "iclass": "FSUBR",
@@ -7928,7 +8901,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSUBR_ST0_X87",
+    "FSUBR_X87_ST0"
+   ]
   },
   {
    "iclass": "FSUBRP",
@@ -7954,7 +8931,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FSUBRP_X87_ST0"
+   ]
   },
   {
    "iclass": "FTST",
@@ -7980,7 +8960,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FTST"
+   ]
   },
   {
    "iclass": "FUCOM",
@@ -8006,7 +8989,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FUCOM_ST0_X87"
+   ]
   },
   {
    "iclass": "FUCOMI",
@@ -8032,7 +9018,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FUCOMI_ST0_X87"
+   ]
   },
   {
    "iclass": "FUCOMIP",
@@ -8058,7 +9047,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FUCOMIP_ST0_X87"
+   ]
   },
   {
    "iclass": "FUCOMP",
@@ -8084,7 +9076,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FUCOMP_ST0_X87"
+   ]
   },
   {
    "iclass": "FUCOMPP",
@@ -8110,7 +9105,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FUCOMPP"
+   ]
   },
   {
    "iclass": "FWAIT",
@@ -8136,7 +9134,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FWAIT"
+   ]
   },
   {
    "iclass": "FXAM",
@@ -8162,7 +9163,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FXAM"
+   ]
   },
   {
    "iclass": "FXCH",
@@ -8188,7 +9192,12 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FXCH_ST0_X87",
+    "FXCH_ST0_X87_DDC1",
+    "FXCH_ST0_X87_DFC1"
+   ]
   },
   {
    "iclass": "FXRSTOR",
@@ -8214,7 +9223,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FXRSTOR_MEMmfpxenv"
+   ]
   },
   {
    "iclass": "FXRSTOR64",
@@ -8240,7 +9252,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FXRSTOR64_MEMmfpxenv"
+   ]
   },
   {
    "iclass": "FXSAVE",
@@ -8266,7 +9281,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FXSAVE_MEMmfpxenv"
+   ]
   },
   {
    "iclass": "FXSAVE64",
@@ -8292,7 +9310,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FXSAVE64_MEMmfpxenv"
+   ]
   },
   {
    "iclass": "FXTRACT",
@@ -8318,7 +9339,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FXTRACT"
+   ]
   },
   {
    "iclass": "FYL2X",
@@ -8344,7 +9368,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FYL2X"
+   ]
   },
   {
    "iclass": "FYL2XP1",
@@ -8370,7 +9397,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "FYL2XP1"
+   ]
   },
   {
    "iclass": "IDIV",
@@ -8396,7 +9426,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "IDIV_MEMb",
+    "IDIV_MEMv"
+   ]
   },
   {
    "iclass": "IDIV",
@@ -8422,7 +9456,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "IDIV_GPR8",
+    "IDIV_GPRv"
+   ]
   },
   {
    "iclass": "IMUL",
@@ -8448,7 +9486,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "IMUL_GPRv_MEMv_IMMb",
+    "IMUL_GPRv_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "IMUL",
@@ -8474,7 +9516,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "IMUL_GPRv_GPRv_IMMb",
+    "IMUL_GPRv_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "IMUL",
@@ -8500,7 +9546,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "IMUL_MEMb",
+    "IMUL_MEMv"
+   ]
   },
   {
    "iclass": "IMUL",
@@ -8526,7 +9576,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "IMUL_GPR8",
+    "IMUL_GPRv"
+   ]
   },
   {
    "iclass": "IMUL",
@@ -8552,7 +9606,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "IMUL_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "IMUL",
@@ -8578,7 +9635,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "IMUL_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "INC",
@@ -8604,7 +9664,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "INC_MEMb",
+    "INC_MEMv"
+   ]
   },
   {
    "iclass": "INC",
@@ -8630,7 +9694,12 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "INC_GPR8",
+    "INC_GPRv_40",
+    "INC_GPRv_FFr0"
+   ]
   },
   {
    "iclass": "INC_LOCK",
@@ -8656,7 +9725,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "INC_LOCK_MEMb",
+    "INC_LOCK_MEMv"
+   ]
   },
   {
    "iclass": "LDMXCSR",
@@ -8682,7 +9755,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "LDMXCSR_MEMd"
+   ]
   },
   {
    "iclass": "LEA",
@@ -8708,7 +9784,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "LEA_GPRv_AGEN"
+   ]
   },
   {
    "iclass": "LEAVE",
@@ -8734,7 +9813,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "LEAVE"
+   ]
   },
   {
    "iclass": "LFENCE",
@@ -8760,7 +9842,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "LFENCE"
+   ]
   },
   {
    "iclass": "LODSB",
@@ -8786,7 +9871,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "LODSB"
+   ]
   },
   {
    "iclass": "LODSD",
@@ -8812,7 +9900,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "LODSD"
+   ]
   },
   {
    "iclass": "LODSQ",
@@ -8838,7 +9929,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "LODSQ"
+   ]
   },
   {
    "iclass": "LODSW",
@@ -8864,7 +9958,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "LODSW"
+   ]
   },
   {
    "iclass": "MASKMOVDQU",
@@ -8878,7 +9975,8 @@
     "mxcsr_inputs": [],
     "writes_mxcsr_status": false,
     "explicit_mmx_operand": false,
-    "alignment": false
+    "alignment": false,
+    "masked_write": true
    },
    "names": {
     "iced": [
@@ -8890,7 +9988,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MASKMOVDQU_XMMxub_XMMxub"
+   ]
   },
   {
    "iclass": "MAXPD",
@@ -8918,7 +10019,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MAXPD_XMMpd_MEMpd"
+   ]
   },
   {
    "iclass": "MAXPD",
@@ -8946,7 +10050,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MAXPD_XMMpd_XMMpd"
+   ]
   },
   {
    "iclass": "MAXPS",
@@ -8974,7 +10081,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MAXPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "MAXPS",
@@ -9002,7 +10112,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MAXPS_XMMps_XMMps"
+   ]
   },
   {
    "iclass": "MAXSD",
@@ -9030,7 +10143,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MAXSD_XMMsd_MEMsd"
+   ]
   },
   {
    "iclass": "MAXSD",
@@ -9058,7 +10174,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MAXSD_XMMsd_XMMsd"
+   ]
   },
   {
    "iclass": "MAXSS",
@@ -9086,7 +10205,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MAXSS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "MAXSS",
@@ -9114,7 +10236,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MAXSS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "MFENCE",
@@ -9140,7 +10265,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MFENCE"
+   ]
   },
   {
    "iclass": "MINPD",
@@ -9168,7 +10296,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MINPD_XMMpd_MEMpd"
+   ]
   },
   {
    "iclass": "MINPD",
@@ -9196,7 +10327,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MINPD_XMMpd_XMMpd"
+   ]
   },
   {
    "iclass": "MINPS",
@@ -9224,7 +10358,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MINPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "MINPS",
@@ -9252,7 +10389,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MINPS_XMMps_XMMps"
+   ]
   },
   {
    "iclass": "MINSD",
@@ -9280,7 +10420,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MINSD_XMMsd_MEMsd"
+   ]
   },
   {
    "iclass": "MINSD",
@@ -9308,7 +10451,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MINSD_XMMsd_XMMsd"
+   ]
   },
   {
    "iclass": "MINSS",
@@ -9336,7 +10482,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MINSS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "MINSS",
@@ -9364,7 +10513,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MINSS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "MOV",
@@ -9390,7 +10542,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOV_AL_MEMb",
+    "MOV_MEMb_AL",
+    "MOV_MEMv_OrAX",
+    "MOV_OrAX_MEMv"
+   ]
   },
   {
    "iclass": "MOV",
@@ -9416,7 +10574,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOV_MEMb_GPR8",
+    "MOV_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "MOV",
@@ -9442,7 +10604,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOV_MEMb_IMMb",
+    "MOV_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "MOV",
@@ -9468,7 +10634,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOV_GPR8_MEMb",
+    "MOV_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "MOV",
@@ -9494,7 +10664,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOV_GPR8_GPR8_88",
+    "MOV_GPR8_GPR8_8A",
+    "MOV_GPRv_GPRv_89",
+    "MOV_GPRv_GPRv_8B"
+   ]
   },
   {
    "iclass": "MOV",
@@ -9520,7 +10696,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOV_GPR8_IMMb_B0",
+    "MOV_GPR8_IMMb_C6r0",
+    "MOV_GPRv_IMMv",
+    "MOV_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "MOVAPD",
@@ -9546,7 +10728,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVAPD_MEMpd_XMMpd"
+   ]
   },
   {
    "iclass": "MOVAPD",
@@ -9572,7 +10757,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVAPD_XMMpd_MEMpd"
+   ]
   },
   {
    "iclass": "MOVAPD",
@@ -9598,7 +10786,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVAPD_XMMpd_XMMpd_0F28",
+    "MOVAPD_XMMpd_XMMpd_0F29"
+   ]
   },
   {
    "iclass": "MOVAPS",
@@ -9624,7 +10816,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVAPS_MEMps_XMMps"
+   ]
   },
   {
    "iclass": "MOVAPS",
@@ -9650,7 +10845,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVAPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "MOVAPS",
@@ -9676,7 +10874,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVAPS_XMMps_XMMps_0F28",
+    "MOVAPS_XMMps_XMMps_0F29"
+   ]
   },
   {
    "iclass": "MOVD",
@@ -9702,7 +10904,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVD_MEMd_MMXd"
+   ]
   },
   {
    "iclass": "MOVD",
@@ -9728,7 +10933,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVD_GPR32_MMXd"
+   ]
   },
   {
    "iclass": "MOVD",
@@ -9754,7 +10962,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVD_MMXq_MEMd"
+   ]
   },
   {
    "iclass": "MOVD",
@@ -9780,7 +10991,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVD_MMXq_GPR32"
+   ]
   },
   {
    "iclass": "MOVD",
@@ -9806,7 +11020,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVD_MEMd_XMMd"
+   ]
   },
   {
    "iclass": "MOVD",
@@ -9832,7 +11049,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVD_GPR32_XMMd"
+   ]
   },
   {
    "iclass": "MOVD",
@@ -9858,7 +11078,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVD_XMMdq_MEMd"
+   ]
   },
   {
    "iclass": "MOVD",
@@ -9884,7 +11107,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVD_XMMdq_GPR32"
+   ]
   },
   {
    "iclass": "MOVDQ2Q",
@@ -9910,7 +11136,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVDQ2Q_MMXq_XMMq"
+   ]
   },
   {
    "iclass": "MOVDQA",
@@ -9936,7 +11165,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVDQA_MEMdq_XMMdq"
+   ]
   },
   {
    "iclass": "MOVDQA",
@@ -9962,7 +11194,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVDQA_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "MOVDQA",
@@ -9988,7 +11223,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVDQA_XMMdq_XMMdq_0F6F",
+    "MOVDQA_XMMdq_XMMdq_0F7F"
+   ]
   },
   {
    "iclass": "MOVDQU",
@@ -10014,7 +11253,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVDQU_MEMdq_XMMdq"
+   ]
   },
   {
    "iclass": "MOVDQU",
@@ -10040,7 +11282,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVDQU_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "MOVDQU",
@@ -10066,7 +11311,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVDQU_XMMdq_XMMdq_0F6F",
+    "MOVDQU_XMMdq_XMMdq_0F7F"
+   ]
   },
   {
    "iclass": "MOVHLPS",
@@ -10092,7 +11341,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVHLPS_XMMq_XMMq"
+   ]
   },
   {
    "iclass": "MOVHPD",
@@ -10118,7 +11370,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVHPD_MEMq_XMMsd"
+   ]
   },
   {
    "iclass": "MOVHPD",
@@ -10144,7 +11399,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVHPD_XMMsd_MEMq"
+   ]
   },
   {
    "iclass": "MOVHPS",
@@ -10170,7 +11428,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVHPS_MEMq_XMMps"
+   ]
   },
   {
    "iclass": "MOVHPS",
@@ -10196,7 +11457,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVHPS_XMMq_MEMq"
+   ]
   },
   {
    "iclass": "MOVLHPS",
@@ -10222,7 +11486,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVLHPS_XMMq_XMMq"
+   ]
   },
   {
    "iclass": "MOVLPD",
@@ -10248,7 +11515,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVLPD_MEMq_XMMsd"
+   ]
   },
   {
    "iclass": "MOVLPD",
@@ -10274,7 +11544,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVLPD_XMMsd_MEMq"
+   ]
   },
   {
    "iclass": "MOVLPS",
@@ -10300,7 +11573,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVLPS_MEMq_XMMq"
+   ]
   },
   {
    "iclass": "MOVLPS",
@@ -10326,7 +11602,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVLPS_XMMq_MEMq"
+   ]
   },
   {
    "iclass": "MOVMSKPD",
@@ -10352,7 +11631,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVMSKPD_GPR32_XMMpd"
+   ]
   },
   {
    "iclass": "MOVMSKPS",
@@ -10378,7 +11660,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVMSKPS_GPR32_XMMps"
+   ]
   },
   {
    "iclass": "MOVNTDQ",
@@ -10404,7 +11689,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVNTDQ_MEMdq_XMMdq"
+   ]
   },
   {
    "iclass": "MOVNTI",
@@ -10430,7 +11718,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVNTI_MEMd_GPR32",
+    "MOVNTI_MEMq_GPR64"
+   ]
   },
   {
    "iclass": "MOVNTPD",
@@ -10456,7 +11748,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVNTPD_MEMdq_XMMpd"
+   ]
   },
   {
    "iclass": "MOVNTPS",
@@ -10482,7 +11777,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVNTPS_MEMdq_XMMps"
+   ]
   },
   {
    "iclass": "MOVQ",
@@ -10508,7 +11806,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVQ_MEMq_XMMq_0F7E",
+    "MOVQ_MEMq_XMMq_0FD6"
+   ]
   },
   {
    "iclass": "MOVQ",
@@ -10534,7 +11836,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVQ_GPR64_XMMq"
+   ]
   },
   {
    "iclass": "MOVQ",
@@ -10560,7 +11865,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVQ_XMMdq_MEMq_0F6E",
+    "MOVQ_XMMdq_MEMq_0F7E"
+   ]
   },
   {
    "iclass": "MOVQ",
@@ -10586,7 +11895,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVQ_XMMdq_GPR64"
+   ]
   },
   {
    "iclass": "MOVQ",
@@ -10612,7 +11924,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVQ_XMMdq_XMMq_0F7E",
+    "MOVQ_XMMdq_XMMq_0FD6"
+   ]
   },
   {
    "iclass": "MOVQ2DQ",
@@ -10638,7 +11954,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVQ2DQ_XMMdq_MMXq"
+   ]
   },
   {
    "iclass": "MOVSB",
@@ -10664,7 +11983,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSB"
+   ]
   },
   {
    "iclass": "MOVSD",
@@ -10690,7 +12012,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSD"
+   ]
   },
   {
    "iclass": "MOVSD_XMM",
@@ -10716,7 +12041,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSD_XMM_MEMsd_XMMsd"
+   ]
   },
   {
    "iclass": "MOVSD_XMM",
@@ -10742,7 +12070,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSD_XMM_XMMdq_MEMsd"
+   ]
   },
   {
    "iclass": "MOVSD_XMM",
@@ -10768,7 +12099,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSD_XMM_XMMsd_XMMsd_0F10",
+    "MOVSD_XMM_XMMsd_XMMsd_0F11"
+   ]
   },
   {
    "iclass": "MOVSQ",
@@ -10794,7 +12129,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSQ"
+   ]
   },
   {
    "iclass": "MOVSS",
@@ -10820,7 +12158,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSS_MEMss_XMMss"
+   ]
   },
   {
    "iclass": "MOVSS",
@@ -10846,7 +12187,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSS_XMMdq_MEMss"
+   ]
   },
   {
    "iclass": "MOVSS",
@@ -10872,7 +12216,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSS_XMMss_XMMss_0F10",
+    "MOVSS_XMMss_XMMss_0F11"
+   ]
   },
   {
    "iclass": "MOVSW",
@@ -10898,7 +12246,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSW"
+   ]
   },
   {
    "iclass": "MOVSX",
@@ -10924,7 +12275,14 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSX_GPR16_MEMw",
+    "MOVSX_GPR32_MEMw",
+    "MOVSX_GPR64_MEMw",
+    "MOVSX_GPRv_MEMb",
+    "MOVSX_GPRv_MEMw"
+   ]
   },
   {
    "iclass": "MOVSX",
@@ -10950,7 +12308,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSX_GPRv_GPR16",
+    "MOVSX_GPRv_GPR8"
+   ]
   },
   {
    "iclass": "MOVSXD",
@@ -10976,7 +12338,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSXD_GPR64_MEMd",
+    "MOVSXD_GPRz_MEMz"
+   ]
   },
   {
    "iclass": "MOVSXD",
@@ -11002,7 +12368,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVSXD_GPRv_GPRz"
+   ]
   },
   {
    "iclass": "MOVUPD",
@@ -11028,7 +12397,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVUPD_MEMpd_XMMpd"
+   ]
   },
   {
    "iclass": "MOVUPD",
@@ -11054,7 +12426,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVUPD_XMMpd_MEMpd"
+   ]
   },
   {
    "iclass": "MOVUPD",
@@ -11080,7 +12455,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVUPD_XMMpd_XMMpd_0F10",
+    "MOVUPD_XMMpd_XMMpd_0F11"
+   ]
   },
   {
    "iclass": "MOVUPS",
@@ -11106,7 +12485,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVUPS_MEMps_XMMps"
+   ]
   },
   {
    "iclass": "MOVUPS",
@@ -11132,7 +12514,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVUPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "MOVUPS",
@@ -11158,7 +12543,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVUPS_XMMps_XMMps_0F10",
+    "MOVUPS_XMMps_XMMps_0F11"
+   ]
   },
   {
    "iclass": "MOVZX",
@@ -11184,7 +12573,14 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVZX_GPR16_MEMw",
+    "MOVZX_GPR32_MEMw",
+    "MOVZX_GPR64_MEMw",
+    "MOVZX_GPRv_MEMb",
+    "MOVZX_GPRv_MEMw"
+   ]
   },
   {
    "iclass": "MOVZX",
@@ -11210,7 +12606,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MOVZX_GPRv_GPR16",
+    "MOVZX_GPRv_GPR8"
+   ]
   },
   {
    "iclass": "MUL",
@@ -11236,7 +12636,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MUL_MEMb",
+    "MUL_MEMv"
+   ]
   },
   {
    "iclass": "MUL",
@@ -11262,7 +12666,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MUL_GPR8",
+    "MUL_GPRv"
+   ]
   },
   {
    "iclass": "MULPD",
@@ -11292,7 +12700,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MULPD_XMMpd_MEMpd"
+   ]
   },
   {
    "iclass": "MULPD",
@@ -11322,7 +12733,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MULPD_XMMpd_XMMpd"
+   ]
   },
   {
    "iclass": "MULPS",
@@ -11352,7 +12766,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MULPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "MULPS",
@@ -11382,7 +12799,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MULPS_XMMps_XMMps"
+   ]
   },
   {
    "iclass": "MULSD",
@@ -11412,7 +12832,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MULSD_XMMsd_MEMsd"
+   ]
   },
   {
    "iclass": "MULSD",
@@ -11442,7 +12865,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MULSD_XMMsd_XMMsd"
+   ]
   },
   {
    "iclass": "MULSS",
@@ -11472,7 +12898,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MULSS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "MULSS",
@@ -11502,7 +12931,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "MULSS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "NEG",
@@ -11528,7 +12960,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "NEG_MEMb",
+    "NEG_MEMv"
+   ]
   },
   {
    "iclass": "NEG",
@@ -11554,7 +12990,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "NEG_GPR8",
+    "NEG_GPRv"
+   ]
   },
   {
    "iclass": "NEG_LOCK",
@@ -11580,7 +13020,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "NEG_LOCK_MEMb",
+    "NEG_LOCK_MEMv"
+   ]
   },
   {
    "iclass": "NOT",
@@ -11606,7 +13050,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "NOT_MEMb",
+    "NOT_MEMv"
+   ]
   },
   {
    "iclass": "NOT",
@@ -11632,7 +13080,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "NOT_GPR8",
+    "NOT_GPRv"
+   ]
   },
   {
    "iclass": "NOT_LOCK",
@@ -11658,7 +13110,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "NOT_LOCK_MEMb",
+    "NOT_LOCK_MEMv"
+   ]
   },
   {
    "iclass": "OR",
@@ -11684,7 +13140,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "OR_MEMb_GPR8",
+    "OR_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "OR",
@@ -11710,7 +13170,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "OR_MEMb_IMMb_80r1",
+    "OR_MEMb_IMMb_82r1",
+    "OR_MEMv_IMMb",
+    "OR_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "OR",
@@ -11736,7 +13202,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "OR_GPR8_MEMb",
+    "OR_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "OR",
@@ -11762,7 +13232,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "OR_GPR8_GPR8_08",
+    "OR_GPR8_GPR8_0A",
+    "OR_GPRv_GPRv_09",
+    "OR_GPRv_GPRv_0B"
+   ]
   },
   {
    "iclass": "OR",
@@ -11788,7 +13264,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "OR_GPR8_IMMb_80r1",
+    "OR_GPR8_IMMb_82r1",
+    "OR_GPRv_IMMb",
+    "OR_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "OR",
@@ -11814,7 +13296,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "OR_AL_IMMb",
+    "OR_OrAX_IMMz"
+   ]
   },
   {
    "iclass": "ORPD",
@@ -11840,7 +13326,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ORPD_XMMxuq_MEMxuq"
+   ]
   },
   {
    "iclass": "ORPD",
@@ -11866,7 +13355,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ORPD_XMMxuq_XMMxuq"
+   ]
   },
   {
    "iclass": "ORPS",
@@ -11892,7 +13384,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ORPS_XMMxud_MEMxud"
+   ]
   },
   {
    "iclass": "ORPS",
@@ -11918,7 +13413,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ORPS_XMMxud_XMMxud"
+   ]
   },
   {
    "iclass": "OR_LOCK",
@@ -11944,7 +13442,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "OR_LOCK_MEMb_GPR8",
+    "OR_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "OR_LOCK",
@@ -11970,7 +13472,13 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "OR_LOCK_MEMb_IMMb_80r1",
+    "OR_LOCK_MEMb_IMMb_82r1",
+    "OR_LOCK_MEMv_IMMb",
+    "OR_LOCK_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "PACKSSDW",
@@ -11996,7 +13504,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKSSDW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PACKSSDW",
@@ -12022,7 +13533,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKSSDW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PACKSSDW",
@@ -12048,7 +13562,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKSSDW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PACKSSDW",
@@ -12074,7 +13591,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKSSDW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PACKSSWB",
@@ -12100,7 +13620,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKSSWB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PACKSSWB",
@@ -12126,7 +13649,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKSSWB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PACKSSWB",
@@ -12152,7 +13678,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKSSWB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PACKSSWB",
@@ -12178,7 +13707,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKSSWB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PACKUSWB",
@@ -12204,7 +13736,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKUSWB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PACKUSWB",
@@ -12230,7 +13765,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKUSWB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PACKUSWB",
@@ -12256,7 +13794,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKUSWB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PACKUSWB",
@@ -12282,7 +13823,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PACKUSWB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PADDB",
@@ -12308,7 +13852,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PADDB",
@@ -12334,7 +13881,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PADDB",
@@ -12360,7 +13910,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PADDB",
@@ -12386,7 +13939,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PADDD",
@@ -12412,7 +13968,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDD_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PADDD",
@@ -12438,7 +13997,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDD_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PADDD",
@@ -12464,7 +14026,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PADDD",
@@ -12490,7 +14055,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDD_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PADDQ",
@@ -12516,7 +14084,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDQ_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PADDQ",
@@ -12542,7 +14113,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDQ_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PADDQ",
@@ -12568,7 +14142,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDQ_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PADDQ",
@@ -12594,7 +14171,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDQ_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PADDSB",
@@ -12620,7 +14200,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDSB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PADDSB",
@@ -12646,7 +14229,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDSB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PADDSB",
@@ -12672,7 +14258,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDSB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PADDSB",
@@ -12698,7 +14287,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDSB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PADDSW",
@@ -12724,7 +14316,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDSW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PADDSW",
@@ -12750,7 +14345,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDSW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PADDSW",
@@ -12776,7 +14374,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDSW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PADDSW",
@@ -12802,7 +14403,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDSW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PADDUSB",
@@ -12828,7 +14432,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDUSB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PADDUSB",
@@ -12854,7 +14461,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDUSB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PADDUSB",
@@ -12880,7 +14490,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDUSB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PADDUSB",
@@ -12906,7 +14519,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDUSB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PADDUSW",
@@ -12932,7 +14548,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDUSW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PADDUSW",
@@ -12958,7 +14577,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDUSW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PADDUSW",
@@ -12984,7 +14606,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDUSW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PADDUSW",
@@ -13010,7 +14635,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDUSW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PADDW",
@@ -13036,7 +14664,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PADDW",
@@ -13062,7 +14693,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PADDW",
@@ -13088,7 +14722,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PADDW",
@@ -13114,7 +14751,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PADDW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PAND",
@@ -13140,7 +14780,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAND_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PAND",
@@ -13166,7 +14809,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAND_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PAND",
@@ -13192,7 +14838,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAND_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PAND",
@@ -13218,7 +14867,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAND_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PANDN",
@@ -13244,7 +14896,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PANDN_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PANDN",
@@ -13270,7 +14925,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PANDN_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PANDN",
@@ -13296,7 +14954,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PANDN_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PANDN",
@@ -13322,7 +14983,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PANDN_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PAVGB",
@@ -13348,7 +15012,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAVGB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PAVGB",
@@ -13374,7 +15041,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAVGB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PAVGB",
@@ -13400,7 +15070,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAVGB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PAVGB",
@@ -13426,7 +15099,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAVGB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PAVGW",
@@ -13452,7 +15128,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAVGW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PAVGW",
@@ -13478,7 +15157,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAVGW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PAVGW",
@@ -13504,7 +15186,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAVGW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PAVGW",
@@ -13530,7 +15215,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PAVGW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PCMPEQB",
@@ -13556,7 +15244,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PCMPEQB",
@@ -13582,7 +15273,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PCMPEQB",
@@ -13608,7 +15302,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PCMPEQB",
@@ -13634,7 +15331,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PCMPEQD",
@@ -13660,7 +15360,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQD_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PCMPEQD",
@@ -13686,7 +15389,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQD_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PCMPEQD",
@@ -13712,7 +15418,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PCMPEQD",
@@ -13738,7 +15447,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQD_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PCMPEQW",
@@ -13764,7 +15476,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PCMPEQW",
@@ -13790,7 +15505,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PCMPEQW",
@@ -13816,7 +15534,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PCMPEQW",
@@ -13842,7 +15563,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPEQW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PCMPGTB",
@@ -13868,7 +15592,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PCMPGTB",
@@ -13894,7 +15621,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PCMPGTB",
@@ -13920,7 +15650,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PCMPGTB",
@@ -13946,7 +15679,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PCMPGTD",
@@ -13972,7 +15708,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTD_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PCMPGTD",
@@ -13998,7 +15737,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTD_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PCMPGTD",
@@ -14024,7 +15766,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PCMPGTD",
@@ -14050,7 +15795,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTD_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PCMPGTW",
@@ -14076,7 +15824,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PCMPGTW",
@@ -14102,7 +15853,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PCMPGTW",
@@ -14128,7 +15882,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PCMPGTW",
@@ -14154,7 +15911,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PCMPGTW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PEXTRW",
@@ -14180,7 +15940,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PEXTRW_GPR32_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PINSRW",
@@ -14206,7 +15969,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PINSRW_MMXq_MEMw_IMMb"
+   ]
   },
   {
    "iclass": "PINSRW",
@@ -14232,7 +15998,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PINSRW_MMXq_GPR32_IMMb"
+   ]
   },
   {
    "iclass": "PINSRW",
@@ -14258,7 +16027,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PINSRW_XMMdq_MEMw_IMMb"
+   ]
   },
   {
    "iclass": "PINSRW",
@@ -14284,7 +16056,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PINSRW_XMMdq_GPR32_IMMb"
+   ]
   },
   {
    "iclass": "PMADDWD",
@@ -14310,7 +16085,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMADDWD_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PMADDWD",
@@ -14336,7 +16114,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMADDWD_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PMADDWD",
@@ -14362,7 +16143,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMADDWD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PMADDWD",
@@ -14388,7 +16172,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMADDWD_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PMAXSW",
@@ -14414,7 +16201,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMAXSW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PMAXSW",
@@ -14440,7 +16230,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMAXSW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PMAXSW",
@@ -14466,7 +16259,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMAXSW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PMAXSW",
@@ -14492,7 +16288,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMAXSW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PMAXUB",
@@ -14518,7 +16317,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMAXUB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PMAXUB",
@@ -14544,7 +16346,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMAXUB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PMAXUB",
@@ -14570,7 +16375,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMAXUB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PMAXUB",
@@ -14596,7 +16404,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMAXUB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PMINSW",
@@ -14622,7 +16433,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMINSW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PMINSW",
@@ -14648,7 +16462,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMINSW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PMINSW",
@@ -14674,7 +16491,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMINSW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PMINSW",
@@ -14700,7 +16520,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMINSW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PMINUB",
@@ -14726,7 +16549,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMINUB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PMINUB",
@@ -14752,7 +16578,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMINUB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PMINUB",
@@ -14778,7 +16607,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMINUB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PMINUB",
@@ -14804,7 +16636,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMINUB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PMOVMSKB",
@@ -14830,7 +16665,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMOVMSKB_GPR32_XMMdq"
+   ]
   },
   {
    "iclass": "PMULHUW",
@@ -14856,7 +16694,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULHUW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PMULHUW",
@@ -14882,7 +16723,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULHUW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PMULHUW",
@@ -14908,7 +16752,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULHUW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PMULHUW",
@@ -14934,7 +16781,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULHUW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PMULHW",
@@ -14960,7 +16810,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULHW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PMULHW",
@@ -14986,7 +16839,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULHW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PMULHW",
@@ -15012,7 +16868,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULHW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PMULHW",
@@ -15038,7 +16897,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULHW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PMULLW",
@@ -15064,7 +16926,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULLW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PMULLW",
@@ -15090,7 +16955,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULLW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PMULLW",
@@ -15116,7 +16984,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULLW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PMULLW",
@@ -15142,7 +17013,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULLW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PMULUDQ",
@@ -15168,7 +17042,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULUDQ_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PMULUDQ",
@@ -15194,7 +17071,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULUDQ_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PMULUDQ",
@@ -15220,7 +17100,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULUDQ_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PMULUDQ",
@@ -15246,7 +17129,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PMULUDQ_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "POP",
@@ -15272,7 +17158,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "POP_MEMv"
+   ]
   },
   {
    "iclass": "POP",
@@ -15298,7 +17187,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "POP_GPRv_58",
+    "POP_GPRv_8F"
+   ]
   },
   {
    "iclass": "POR",
@@ -15324,7 +17217,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "POR_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "POR",
@@ -15350,7 +17246,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "POR_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "POR",
@@ -15376,7 +17275,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "POR_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "POR",
@@ -15402,7 +17304,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "POR_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PREFETCHNTA",
@@ -15428,7 +17333,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PREFETCHNTA_MEMmprefetch"
+   ]
   },
   {
    "iclass": "PREFETCHT0",
@@ -15454,7 +17362,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PREFETCHT0_MEMmprefetch"
+   ]
   },
   {
    "iclass": "PREFETCHT1",
@@ -15480,7 +17391,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PREFETCHT1_MEMmprefetch"
+   ]
   },
   {
    "iclass": "PREFETCHT2",
@@ -15506,7 +17420,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PREFETCHT2_MEMmprefetch"
+   ]
   },
   {
    "iclass": "PSADBW",
@@ -15532,7 +17449,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSADBW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSADBW",
@@ -15558,7 +17478,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSADBW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSADBW",
@@ -15584,7 +17507,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSADBW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSADBW",
@@ -15610,7 +17536,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSADBW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSHUFD",
@@ -15636,7 +17565,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSHUFD_XMMdq_MEMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSHUFD",
@@ -15662,7 +17594,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSHUFD_XMMdq_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSHUFHW",
@@ -15688,7 +17623,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSHUFHW_XMMdq_MEMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSHUFHW",
@@ -15714,7 +17652,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSHUFHW_XMMdq_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSHUFLW",
@@ -15740,7 +17681,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSHUFLW_XMMdq_MEMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSHUFLW",
@@ -15766,7 +17710,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSHUFLW_XMMdq_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSHUFW",
@@ -15792,7 +17739,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSHUFW_MMXq_MEMq_IMMb"
+   ]
   },
   {
    "iclass": "PSHUFW",
@@ -15818,7 +17768,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSHUFW_MMXq_MMXq_IMMb"
+   ]
   },
   {
    "iclass": "PSLLD",
@@ -15844,7 +17797,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLD_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSLLD",
@@ -15870,7 +17826,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLD_MMXq_IMMb"
+   ]
   },
   {
    "iclass": "PSLLD",
@@ -15896,7 +17855,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLD_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSLLD",
@@ -15922,7 +17884,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSLLD",
@@ -15948,7 +17913,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLD_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSLLD",
@@ -15974,7 +17942,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLD_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSLLDQ",
@@ -16000,7 +17971,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLDQ_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSLLQ",
@@ -16026,7 +18000,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLQ_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSLLQ",
@@ -16052,7 +18029,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLQ_MMXq_IMMb"
+   ]
   },
   {
    "iclass": "PSLLQ",
@@ -16078,7 +18058,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLQ_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSLLQ",
@@ -16104,7 +18087,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLQ_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSLLQ",
@@ -16130,7 +18116,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLQ_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSLLQ",
@@ -16156,7 +18145,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLQ_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSLLW",
@@ -16182,7 +18174,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSLLW",
@@ -16208,7 +18203,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLW_MMXq_IMMb"
+   ]
   },
   {
    "iclass": "PSLLW",
@@ -16234,7 +18232,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSLLW",
@@ -16260,7 +18261,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSLLW",
@@ -16286,7 +18290,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLW_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSLLW",
@@ -16312,7 +18319,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSLLW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSRAD",
@@ -16338,7 +18348,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAD_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSRAD",
@@ -16364,7 +18377,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAD_MMXq_IMMb"
+   ]
   },
   {
    "iclass": "PSRAD",
@@ -16390,7 +18406,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAD_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSRAD",
@@ -16416,7 +18435,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSRAD",
@@ -16442,7 +18464,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAD_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSRAD",
@@ -16468,7 +18493,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAD_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSRAW",
@@ -16494,7 +18522,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSRAW",
@@ -16520,7 +18551,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAW_MMXq_IMMb"
+   ]
   },
   {
    "iclass": "PSRAW",
@@ -16546,7 +18580,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSRAW",
@@ -16572,7 +18609,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSRAW",
@@ -16598,7 +18638,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAW_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSRAW",
@@ -16624,7 +18667,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRAW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSRLD",
@@ -16650,7 +18696,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLD_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSRLD",
@@ -16676,7 +18725,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLD_MMXq_IMMb"
+   ]
   },
   {
    "iclass": "PSRLD",
@@ -16702,7 +18754,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLD_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSRLD",
@@ -16728,7 +18783,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSRLD",
@@ -16754,7 +18812,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLD_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSRLD",
@@ -16780,7 +18841,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLD_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSRLDQ",
@@ -16806,7 +18870,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLDQ_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSRLQ",
@@ -16832,7 +18899,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLQ_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSRLQ",
@@ -16858,7 +18928,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLQ_MMXq_IMMb"
+   ]
   },
   {
    "iclass": "PSRLQ",
@@ -16884,7 +18957,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLQ_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSRLQ",
@@ -16910,7 +18986,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLQ_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSRLQ",
@@ -16936,7 +19015,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLQ_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSRLQ",
@@ -16962,7 +19044,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLQ_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSRLW",
@@ -16988,7 +19073,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSRLW",
@@ -17014,7 +19102,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLW_MMXq_IMMb"
+   ]
   },
   {
    "iclass": "PSRLW",
@@ -17040,7 +19131,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSRLW",
@@ -17066,7 +19160,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSRLW",
@@ -17092,7 +19189,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLW_XMMdq_IMMb"
+   ]
   },
   {
    "iclass": "PSRLW",
@@ -17118,7 +19218,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSRLW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSUBB",
@@ -17144,7 +19247,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSUBB",
@@ -17170,7 +19276,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSUBB",
@@ -17196,7 +19305,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSUBB",
@@ -17222,7 +19334,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSUBD",
@@ -17248,7 +19363,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBD_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSUBD",
@@ -17274,7 +19392,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBD_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSUBD",
@@ -17300,7 +19421,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSUBD",
@@ -17326,7 +19450,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBD_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSUBQ",
@@ -17352,7 +19479,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBQ_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSUBQ",
@@ -17378,7 +19508,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBQ_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSUBQ",
@@ -17404,7 +19537,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBQ_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSUBQ",
@@ -17430,7 +19566,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBQ_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSUBSB",
@@ -17456,7 +19595,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBSB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSUBSB",
@@ -17482,7 +19624,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBSB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSUBSB",
@@ -17508,7 +19653,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBSB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSUBSB",
@@ -17534,7 +19682,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBSB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSUBSW",
@@ -17560,7 +19711,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBSW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSUBSW",
@@ -17586,7 +19740,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBSW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSUBSW",
@@ -17612,7 +19769,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBSW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSUBSW",
@@ -17638,7 +19798,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBSW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSUBUSB",
@@ -17664,7 +19827,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBUSB_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSUBUSB",
@@ -17690,7 +19856,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBUSB_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSUBUSB",
@@ -17716,7 +19885,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBUSB_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSUBUSB",
@@ -17742,7 +19914,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBUSB_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSUBUSW",
@@ -17768,7 +19943,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBUSW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSUBUSW",
@@ -17794,7 +19972,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBUSW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSUBUSW",
@@ -17820,7 +20001,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBUSW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSUBUSW",
@@ -17846,7 +20030,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBUSW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PSUBW",
@@ -17872,7 +20059,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PSUBW",
@@ -17898,7 +20088,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBW_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PSUBW",
@@ -17924,7 +20117,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PSUBW",
@@ -17950,7 +20146,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PSUBW_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "PUNPCKHBW",
@@ -17976,7 +20175,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHBW_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PUNPCKHBW",
@@ -18002,7 +20204,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHBW_MMXq_MMXd"
+   ]
   },
   {
    "iclass": "PUNPCKHBW",
@@ -18028,7 +20233,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHBW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PUNPCKHBW",
@@ -18054,7 +20262,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHBW_XMMdq_XMMq"
+   ]
   },
   {
    "iclass": "PUNPCKHDQ",
@@ -18080,7 +20291,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHDQ_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PUNPCKHDQ",
@@ -18106,7 +20320,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHDQ_MMXq_MMXd"
+   ]
   },
   {
    "iclass": "PUNPCKHDQ",
@@ -18132,7 +20349,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHDQ_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PUNPCKHDQ",
@@ -18158,7 +20378,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHDQ_XMMdq_XMMq"
+   ]
   },
   {
    "iclass": "PUNPCKHQDQ",
@@ -18184,7 +20407,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHQDQ_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PUNPCKHQDQ",
@@ -18210,7 +20436,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHQDQ_XMMdq_XMMq"
+   ]
   },
   {
    "iclass": "PUNPCKHWD",
@@ -18236,7 +20465,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHWD_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PUNPCKHWD",
@@ -18262,7 +20494,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHWD_MMXq_MMXd"
+   ]
   },
   {
    "iclass": "PUNPCKHWD",
@@ -18288,7 +20523,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHWD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PUNPCKHWD",
@@ -18314,7 +20552,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKHWD_XMMdq_XMMq"
+   ]
   },
   {
    "iclass": "PUNPCKLBW",
@@ -18340,7 +20581,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLBW_MMXq_MEMd"
+   ]
   },
   {
    "iclass": "PUNPCKLBW",
@@ -18366,7 +20610,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLBW_MMXq_MMXd"
+   ]
   },
   {
    "iclass": "PUNPCKLBW",
@@ -18392,7 +20639,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLBW_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PUNPCKLBW",
@@ -18418,7 +20668,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLBW_XMMdq_XMMq"
+   ]
   },
   {
    "iclass": "PUNPCKLDQ",
@@ -18444,7 +20697,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLDQ_MMXq_MEMd"
+   ]
   },
   {
    "iclass": "PUNPCKLDQ",
@@ -18470,7 +20726,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLDQ_MMXq_MMXd"
+   ]
   },
   {
    "iclass": "PUNPCKLDQ",
@@ -18496,7 +20755,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLDQ_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PUNPCKLDQ",
@@ -18522,7 +20784,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLDQ_XMMdq_XMMq"
+   ]
   },
   {
    "iclass": "PUNPCKLQDQ",
@@ -18548,7 +20813,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLQDQ_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PUNPCKLQDQ",
@@ -18574,7 +20842,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLQDQ_XMMdq_XMMq"
+   ]
   },
   {
    "iclass": "PUNPCKLWD",
@@ -18600,7 +20871,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLWD_MMXq_MEMd"
+   ]
   },
   {
    "iclass": "PUNPCKLWD",
@@ -18626,7 +20900,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLWD_MMXq_MMXd"
+   ]
   },
   {
    "iclass": "PUNPCKLWD",
@@ -18652,7 +20929,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLWD_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PUNPCKLWD",
@@ -18678,7 +20958,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUNPCKLWD_XMMdq_XMMq"
+   ]
   },
   {
    "iclass": "PUSH",
@@ -18704,7 +20987,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUSH_IMMb",
+    "PUSH_IMMz"
+   ]
   },
   {
    "iclass": "PUSH",
@@ -18730,7 +21017,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUSH_MEMv"
+   ]
   },
   {
    "iclass": "PUSH",
@@ -18756,7 +21046,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PUSH_GPRv_50",
+    "PUSH_GPRv_FFr6"
+   ]
   },
   {
    "iclass": "PXOR",
@@ -18782,7 +21076,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PXOR_MMXq_MEMq"
+   ]
   },
   {
    "iclass": "PXOR",
@@ -18808,7 +21105,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PXOR_MMXq_MMXq"
+   ]
   },
   {
    "iclass": "PXOR",
@@ -18834,7 +21134,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PXOR_XMMdq_MEMdq"
+   ]
   },
   {
    "iclass": "PXOR",
@@ -18860,7 +21163,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "PXOR_XMMdq_XMMdq"
+   ]
   },
   {
    "iclass": "RCL",
@@ -18886,7 +21192,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCL_MEMb_IMMb",
+    "RCL_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "RCL",
@@ -18912,7 +21222,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCL_GPR8_IMMb",
+    "RCL_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "RCL",
@@ -18938,7 +21252,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCL_MEMb_CL",
+    "RCL_MEMb_ONE",
+    "RCL_MEMv_CL",
+    "RCL_MEMv_ONE"
+   ]
   },
   {
    "iclass": "RCL",
@@ -18964,7 +21284,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCL_GPR8_CL",
+    "RCL_GPR8_ONE",
+    "RCL_GPRv_CL",
+    "RCL_GPRv_ONE"
+   ]
   },
   {
    "iclass": "RCPPS",
@@ -18990,7 +21316,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCPPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "RCPPS",
@@ -19016,7 +21345,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCPPS_XMMps_XMMps"
+   ]
   },
   {
    "iclass": "RCPSS",
@@ -19042,7 +21374,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCPSS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "RCPSS",
@@ -19068,7 +21403,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCPSS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "RCR",
@@ -19094,7 +21432,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCR_MEMb_IMMb",
+    "RCR_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "RCR",
@@ -19120,7 +21462,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCR_GPR8_IMMb",
+    "RCR_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "RCR",
@@ -19146,7 +21492,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCR_MEMb_CL",
+    "RCR_MEMb_ONE",
+    "RCR_MEMv_CL",
+    "RCR_MEMv_ONE"
+   ]
   },
   {
    "iclass": "RCR",
@@ -19172,7 +21524,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RCR_GPR8_CL",
+    "RCR_GPR8_ONE",
+    "RCR_GPRv_CL",
+    "RCR_GPRv_ONE"
+   ]
   },
   {
    "iclass": "REPE_CMPSB",
@@ -19198,7 +21556,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPE_CMPSB"
+   ]
   },
   {
    "iclass": "REPE_CMPSD",
@@ -19224,7 +21585,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPE_CMPSD"
+   ]
   },
   {
    "iclass": "REPE_CMPSQ",
@@ -19250,7 +21614,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPE_CMPSQ"
+   ]
   },
   {
    "iclass": "REPE_CMPSW",
@@ -19276,7 +21643,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPE_CMPSW"
+   ]
   },
   {
    "iclass": "REPE_SCASB",
@@ -19302,7 +21672,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPE_SCASB"
+   ]
   },
   {
    "iclass": "REPE_SCASD",
@@ -19328,7 +21701,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPE_SCASD"
+   ]
   },
   {
    "iclass": "REPE_SCASQ",
@@ -19354,7 +21730,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPE_SCASQ"
+   ]
   },
   {
    "iclass": "REPE_SCASW",
@@ -19380,7 +21759,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPE_SCASW"
+   ]
   },
   {
    "iclass": "REPNE_CMPSB",
@@ -19406,7 +21788,10 @@
    },
    "rep": "repne",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPNE_CMPSB"
+   ]
   },
   {
    "iclass": "REPNE_CMPSD",
@@ -19432,7 +21817,10 @@
    },
    "rep": "repne",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPNE_CMPSD"
+   ]
   },
   {
    "iclass": "REPNE_CMPSQ",
@@ -19458,7 +21846,10 @@
    },
    "rep": "repne",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPNE_CMPSQ"
+   ]
   },
   {
    "iclass": "REPNE_CMPSW",
@@ -19484,7 +21875,10 @@
    },
    "rep": "repne",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPNE_CMPSW"
+   ]
   },
   {
    "iclass": "REPNE_SCASB",
@@ -19510,7 +21904,10 @@
    },
    "rep": "repne",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPNE_SCASB"
+   ]
   },
   {
    "iclass": "REPNE_SCASD",
@@ -19536,7 +21933,10 @@
    },
    "rep": "repne",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPNE_SCASD"
+   ]
   },
   {
    "iclass": "REPNE_SCASQ",
@@ -19562,7 +21962,10 @@
    },
    "rep": "repne",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPNE_SCASQ"
+   ]
   },
   {
    "iclass": "REPNE_SCASW",
@@ -19588,7 +21991,10 @@
    },
    "rep": "repne",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REPNE_SCASW"
+   ]
   },
   {
    "iclass": "REP_LODSB",
@@ -19614,7 +22020,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_LODSB"
+   ]
   },
   {
    "iclass": "REP_LODSD",
@@ -19640,7 +22049,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_LODSD"
+   ]
   },
   {
    "iclass": "REP_LODSQ",
@@ -19666,7 +22078,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_LODSQ"
+   ]
   },
   {
    "iclass": "REP_LODSW",
@@ -19692,7 +22107,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_LODSW"
+   ]
   },
   {
    "iclass": "REP_MOVSB",
@@ -19718,7 +22136,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_MOVSB"
+   ]
   },
   {
    "iclass": "REP_MOVSD",
@@ -19744,7 +22165,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_MOVSD"
+   ]
   },
   {
    "iclass": "REP_MOVSQ",
@@ -19770,7 +22194,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_MOVSQ"
+   ]
   },
   {
    "iclass": "REP_MOVSW",
@@ -19796,7 +22223,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_MOVSW"
+   ]
   },
   {
    "iclass": "REP_STOSB",
@@ -19822,7 +22252,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_STOSB"
+   ]
   },
   {
    "iclass": "REP_STOSD",
@@ -19848,7 +22281,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_STOSD"
+   ]
   },
   {
    "iclass": "REP_STOSQ",
@@ -19874,7 +22310,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_STOSQ"
+   ]
   },
   {
    "iclass": "REP_STOSW",
@@ -19900,7 +22339,10 @@
    },
    "rep": "rep",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "REP_STOSW"
+   ]
   },
   {
    "iclass": "ROL",
@@ -19926,7 +22368,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ROL_MEMb_IMMb",
+    "ROL_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "ROL",
@@ -19952,7 +22398,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ROL_GPR8_IMMb",
+    "ROL_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "ROL",
@@ -19978,7 +22428,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ROL_MEMb_CL",
+    "ROL_MEMb_ONE",
+    "ROL_MEMv_CL",
+    "ROL_MEMv_ONE"
+   ]
   },
   {
    "iclass": "ROL",
@@ -20004,7 +22460,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ROL_GPR8_CL",
+    "ROL_GPR8_ONE",
+    "ROL_GPRv_CL",
+    "ROL_GPRv_ONE"
+   ]
   },
   {
    "iclass": "ROR",
@@ -20030,7 +22492,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ROR_MEMb_IMMb",
+    "ROR_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "ROR",
@@ -20056,7 +22522,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ROR_GPR8_IMMb",
+    "ROR_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "ROR",
@@ -20082,7 +22552,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ROR_MEMb_CL",
+    "ROR_MEMb_ONE",
+    "ROR_MEMv_CL",
+    "ROR_MEMv_ONE"
+   ]
   },
   {
    "iclass": "ROR",
@@ -20108,7 +22584,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "ROR_GPR8_CL",
+    "ROR_GPR8_ONE",
+    "ROR_GPRv_CL",
+    "ROR_GPRv_ONE"
+   ]
   },
   {
    "iclass": "RSQRTPS",
@@ -20134,7 +22616,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RSQRTPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "RSQRTPS",
@@ -20160,7 +22645,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RSQRTPS_XMMps_XMMps"
+   ]
   },
   {
    "iclass": "RSQRTSS",
@@ -20186,7 +22674,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RSQRTSS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "RSQRTSS",
@@ -20212,7 +22703,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "RSQRTSS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "SAR",
@@ -20238,7 +22732,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SAR_MEMb_IMMb",
+    "SAR_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "SAR",
@@ -20264,7 +22762,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SAR_GPR8_IMMb",
+    "SAR_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "SAR",
@@ -20290,7 +22792,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SAR_MEMb_CL",
+    "SAR_MEMb_ONE",
+    "SAR_MEMv_CL",
+    "SAR_MEMv_ONE"
+   ]
   },
   {
    "iclass": "SAR",
@@ -20316,7 +22824,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SAR_GPR8_CL",
+    "SAR_GPR8_ONE",
+    "SAR_GPRv_CL",
+    "SAR_GPRv_ONE"
+   ]
   },
   {
    "iclass": "SBB",
@@ -20342,7 +22856,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SBB_MEMb_GPR8",
+    "SBB_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "SBB",
@@ -20368,7 +22886,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SBB_MEMb_IMMb_80r3",
+    "SBB_MEMb_IMMb_82r3",
+    "SBB_MEMv_IMMb",
+    "SBB_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "SBB",
@@ -20394,7 +22918,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SBB_GPR8_MEMb",
+    "SBB_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "SBB",
@@ -20420,7 +22948,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SBB_GPR8_GPR8_18",
+    "SBB_GPR8_GPR8_1A",
+    "SBB_GPRv_GPRv_19",
+    "SBB_GPRv_GPRv_1B"
+   ]
   },
   {
    "iclass": "SBB",
@@ -20446,7 +22980,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SBB_GPR8_IMMb_80r3",
+    "SBB_GPR8_IMMb_82r3",
+    "SBB_GPRv_IMMb",
+    "SBB_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "SBB",
@@ -20472,7 +23012,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SBB_AL_IMMb",
+    "SBB_OrAX_IMMz"
+   ]
   },
   {
    "iclass": "SBB_LOCK",
@@ -20498,7 +23042,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SBB_LOCK_MEMb_GPR8",
+    "SBB_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "SBB_LOCK",
@@ -20524,7 +23072,13 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SBB_LOCK_MEMb_IMMb_80r3",
+    "SBB_LOCK_MEMb_IMMb_82r3",
+    "SBB_LOCK_MEMv_IMMb",
+    "SBB_LOCK_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "SCASB",
@@ -20550,7 +23104,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SCASB"
+   ]
   },
   {
    "iclass": "SCASD",
@@ -20576,7 +23133,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SCASD"
+   ]
   },
   {
    "iclass": "SCASQ",
@@ -20602,7 +23162,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SCASQ"
+   ]
   },
   {
    "iclass": "SCASW",
@@ -20628,7 +23191,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SCASW"
+   ]
   },
   {
    "iclass": "SETB",
@@ -20654,7 +23220,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETB_MEMb"
+   ]
   },
   {
    "iclass": "SETB",
@@ -20680,7 +23249,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETB_GPR8"
+   ]
   },
   {
    "iclass": "SETBE",
@@ -20706,7 +23278,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETBE_MEMb"
+   ]
   },
   {
    "iclass": "SETBE",
@@ -20732,7 +23307,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETBE_GPR8"
+   ]
   },
   {
    "iclass": "SETL",
@@ -20758,7 +23336,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETL_MEMb"
+   ]
   },
   {
    "iclass": "SETL",
@@ -20784,7 +23365,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETL_GPR8"
+   ]
   },
   {
    "iclass": "SETLE",
@@ -20810,7 +23394,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETLE_MEMb"
+   ]
   },
   {
    "iclass": "SETLE",
@@ -20836,7 +23423,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETLE_GPR8"
+   ]
   },
   {
    "iclass": "SETNB",
@@ -20862,7 +23452,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNB_MEMb"
+   ]
   },
   {
    "iclass": "SETNB",
@@ -20888,7 +23481,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNB_GPR8"
+   ]
   },
   {
    "iclass": "SETNBE",
@@ -20914,7 +23510,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNBE_MEMb"
+   ]
   },
   {
    "iclass": "SETNBE",
@@ -20940,7 +23539,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNBE_GPR8"
+   ]
   },
   {
    "iclass": "SETNL",
@@ -20966,7 +23568,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNL_MEMb"
+   ]
   },
   {
    "iclass": "SETNL",
@@ -20992,7 +23597,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNL_GPR8"
+   ]
   },
   {
    "iclass": "SETNLE",
@@ -21018,7 +23626,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNLE_MEMb"
+   ]
   },
   {
    "iclass": "SETNLE",
@@ -21044,7 +23655,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNLE_GPR8"
+   ]
   },
   {
    "iclass": "SETNO",
@@ -21070,7 +23684,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNO_MEMb"
+   ]
   },
   {
    "iclass": "SETNO",
@@ -21096,7 +23713,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNO_GPR8"
+   ]
   },
   {
    "iclass": "SETNP",
@@ -21122,7 +23742,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNP_MEMb"
+   ]
   },
   {
    "iclass": "SETNP",
@@ -21148,7 +23771,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNP_GPR8"
+   ]
   },
   {
    "iclass": "SETNS",
@@ -21174,7 +23800,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNS_MEMb"
+   ]
   },
   {
    "iclass": "SETNS",
@@ -21200,7 +23829,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNS_GPR8"
+   ]
   },
   {
    "iclass": "SETNZ",
@@ -21226,7 +23858,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNZ_MEMb"
+   ]
   },
   {
    "iclass": "SETNZ",
@@ -21252,7 +23887,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETNZ_GPR8"
+   ]
   },
   {
    "iclass": "SETO",
@@ -21278,7 +23916,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETO_MEMb"
+   ]
   },
   {
    "iclass": "SETO",
@@ -21304,7 +23945,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETO_GPR8"
+   ]
   },
   {
    "iclass": "SETP",
@@ -21330,7 +23974,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETP_MEMb"
+   ]
   },
   {
    "iclass": "SETP",
@@ -21356,7 +24003,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETP_GPR8"
+   ]
   },
   {
    "iclass": "SETS",
@@ -21382,7 +24032,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETS_MEMb"
+   ]
   },
   {
    "iclass": "SETS",
@@ -21408,7 +24061,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETS_GPR8"
+   ]
   },
   {
    "iclass": "SETZ",
@@ -21434,7 +24090,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETZ_MEMb"
+   ]
   },
   {
    "iclass": "SETZ",
@@ -21460,7 +24119,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SETZ_GPR8"
+   ]
   },
   {
    "iclass": "SFENCE",
@@ -21486,7 +24148,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SFENCE"
+   ]
   },
   {
    "iclass": "SHL",
@@ -21512,7 +24177,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHL_MEMb_IMMb_C0r4",
+    "SHL_MEMb_IMMb_C0r6",
+    "SHL_MEMv_IMMb_C1r4",
+    "SHL_MEMv_IMMb_C1r6"
+   ]
   },
   {
    "iclass": "SHL",
@@ -21538,7 +24209,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHL_GPR8_IMMb_C0r4",
+    "SHL_GPR8_IMMb_C0r6",
+    "SHL_GPRv_IMMb_C1r4",
+    "SHL_GPRv_IMMb_C1r6"
+   ]
   },
   {
    "iclass": "SHL",
@@ -21564,7 +24241,17 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHL_MEMb_CL_D2r4",
+    "SHL_MEMb_CL_D2r6",
+    "SHL_MEMb_ONE_D0r4",
+    "SHL_MEMb_ONE_D0r6",
+    "SHL_MEMv_CL_D3r4",
+    "SHL_MEMv_CL_D3r6",
+    "SHL_MEMv_ONE_D1r4",
+    "SHL_MEMv_ONE_D1r6"
+   ]
   },
   {
    "iclass": "SHL",
@@ -21590,7 +24277,17 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHL_GPR8_CL_D2r4",
+    "SHL_GPR8_CL_D2r6",
+    "SHL_GPR8_ONE_D0r4",
+    "SHL_GPR8_ONE_D0r6",
+    "SHL_GPRv_CL_D3r4",
+    "SHL_GPRv_CL_D3r6",
+    "SHL_GPRv_ONE_D1r4",
+    "SHL_GPRv_ONE_D1r6"
+   ]
   },
   {
    "iclass": "SHLD",
@@ -21619,6 +24316,9 @@
    "widths": [
     32,
     64
+   ],
+   "iforms": [
+    "SHLD_MEMv_GPRv_CL"
    ]
   },
   {
@@ -21648,6 +24348,9 @@
    "widths": [
     32,
     64
+   ],
+   "iforms": [
+    "SHLD_MEMv_GPRv_IMMb"
    ]
   },
   {
@@ -21677,6 +24380,9 @@
    "widths": [
     32,
     64
+   ],
+   "iforms": [
+    "SHLD_GPRv_GPRv_CL"
    ]
   },
   {
@@ -21706,6 +24412,9 @@
    "widths": [
     32,
     64
+   ],
+   "iforms": [
+    "SHLD_GPRv_GPRv_IMMb"
    ]
   },
   {
@@ -21732,7 +24441,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHR_MEMb_IMMb",
+    "SHR_MEMv_IMMb"
+   ]
   },
   {
    "iclass": "SHR",
@@ -21758,7 +24471,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHR_GPR8_IMMb",
+    "SHR_GPRv_IMMb"
+   ]
   },
   {
    "iclass": "SHR",
@@ -21784,7 +24501,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHR_MEMb_CL",
+    "SHR_MEMb_ONE",
+    "SHR_MEMv_CL",
+    "SHR_MEMv_ONE"
+   ]
   },
   {
    "iclass": "SHR",
@@ -21810,7 +24533,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHR_GPR8_CL",
+    "SHR_GPR8_ONE",
+    "SHR_GPRv_CL",
+    "SHR_GPRv_ONE"
+   ]
   },
   {
    "iclass": "SHRD",
@@ -21839,6 +24568,9 @@
    "widths": [
     32,
     64
+   ],
+   "iforms": [
+    "SHRD_MEMv_GPRv_CL"
    ]
   },
   {
@@ -21868,6 +24600,9 @@
    "widths": [
     32,
     64
+   ],
+   "iforms": [
+    "SHRD_MEMv_GPRv_IMMb"
    ]
   },
   {
@@ -21897,6 +24632,9 @@
    "widths": [
     32,
     64
+   ],
+   "iforms": [
+    "SHRD_GPRv_GPRv_CL"
    ]
   },
   {
@@ -21926,6 +24664,9 @@
    "widths": [
     32,
     64
+   ],
+   "iforms": [
+    "SHRD_GPRv_GPRv_IMMb"
    ]
   },
   {
@@ -21952,7 +24693,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHUFPD_XMMpd_MEMpd_IMMb"
+   ]
   },
   {
    "iclass": "SHUFPD",
@@ -21978,7 +24722,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHUFPD_XMMpd_XMMpd_IMMb"
+   ]
   },
   {
    "iclass": "SHUFPS",
@@ -22004,7 +24751,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHUFPS_XMMps_MEMps_IMMb"
+   ]
   },
   {
    "iclass": "SHUFPS",
@@ -22030,7 +24780,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SHUFPS_XMMps_XMMps_IMMb"
+   ]
   },
   {
    "iclass": "SQRTPD",
@@ -22043,8 +24796,7 @@
     "simd_fp_exceptions": true,
     "mxcsr_inputs": [
      "RC",
-     "DAZ",
-     "FTZ"
+     "DAZ"
     ],
     "writes_mxcsr_status": true,
     "explicit_mmx_operand": false,
@@ -22060,7 +24812,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SQRTPD_XMMpd_MEMpd"
+   ]
   },
   {
    "iclass": "SQRTPD",
@@ -22073,8 +24828,7 @@
     "simd_fp_exceptions": true,
     "mxcsr_inputs": [
      "RC",
-     "DAZ",
-     "FTZ"
+     "DAZ"
     ],
     "writes_mxcsr_status": true,
     "explicit_mmx_operand": false,
@@ -22090,7 +24844,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SQRTPD_XMMpd_XMMpd"
+   ]
   },
   {
    "iclass": "SQRTPS",
@@ -22103,8 +24860,7 @@
     "simd_fp_exceptions": true,
     "mxcsr_inputs": [
      "RC",
-     "DAZ",
-     "FTZ"
+     "DAZ"
     ],
     "writes_mxcsr_status": true,
     "explicit_mmx_operand": false,
@@ -22120,7 +24876,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SQRTPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "SQRTPS",
@@ -22133,8 +24892,7 @@
     "simd_fp_exceptions": true,
     "mxcsr_inputs": [
      "RC",
-     "DAZ",
-     "FTZ"
+     "DAZ"
     ],
     "writes_mxcsr_status": true,
     "explicit_mmx_operand": false,
@@ -22150,7 +24908,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SQRTPS_XMMps_XMMps"
+   ]
   },
   {
    "iclass": "SQRTSD",
@@ -22163,8 +24924,7 @@
     "simd_fp_exceptions": true,
     "mxcsr_inputs": [
      "RC",
-     "DAZ",
-     "FTZ"
+     "DAZ"
     ],
     "writes_mxcsr_status": true,
     "explicit_mmx_operand": false,
@@ -22180,7 +24940,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SQRTSD_XMMsd_MEMsd"
+   ]
   },
   {
    "iclass": "SQRTSD",
@@ -22193,8 +24956,7 @@
     "simd_fp_exceptions": true,
     "mxcsr_inputs": [
      "RC",
-     "DAZ",
-     "FTZ"
+     "DAZ"
     ],
     "writes_mxcsr_status": true,
     "explicit_mmx_operand": false,
@@ -22210,7 +24972,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SQRTSD_XMMsd_XMMsd"
+   ]
   },
   {
    "iclass": "SQRTSS",
@@ -22223,8 +24988,7 @@
     "simd_fp_exceptions": true,
     "mxcsr_inputs": [
      "RC",
-     "DAZ",
-     "FTZ"
+     "DAZ"
     ],
     "writes_mxcsr_status": true,
     "explicit_mmx_operand": false,
@@ -22240,7 +25004,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SQRTSS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "SQRTSS",
@@ -22253,8 +25020,7 @@
     "simd_fp_exceptions": true,
     "mxcsr_inputs": [
      "RC",
-     "DAZ",
-     "FTZ"
+     "DAZ"
     ],
     "writes_mxcsr_status": true,
     "explicit_mmx_operand": false,
@@ -22270,7 +25036,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SQRTSS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "STC",
@@ -22296,7 +25065,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "STC"
+   ]
   },
   {
    "iclass": "STD",
@@ -22322,7 +25094,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "STD"
+   ]
   },
   {
    "iclass": "STMXCSR",
@@ -22348,7 +25123,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "STMXCSR_MEMd"
+   ]
   },
   {
    "iclass": "STOSB",
@@ -22374,7 +25152,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "STOSB"
+   ]
   },
   {
    "iclass": "STOSD",
@@ -22400,7 +25181,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "STOSD"
+   ]
   },
   {
    "iclass": "STOSQ",
@@ -22426,7 +25210,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "STOSQ"
+   ]
   },
   {
    "iclass": "STOSW",
@@ -22452,7 +25239,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "STOSW"
+   ]
   },
   {
    "iclass": "SUB",
@@ -22478,7 +25268,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUB_MEMb_GPR8",
+    "SUB_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "SUB",
@@ -22504,7 +25298,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUB_MEMb_IMMb_80r5",
+    "SUB_MEMb_IMMb_82r5",
+    "SUB_MEMv_IMMb",
+    "SUB_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "SUB",
@@ -22530,7 +25330,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUB_GPR8_MEMb",
+    "SUB_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "SUB",
@@ -22556,7 +25360,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUB_GPR8_GPR8_28",
+    "SUB_GPR8_GPR8_2A",
+    "SUB_GPRv_GPRv_29",
+    "SUB_GPRv_GPRv_2B"
+   ]
   },
   {
    "iclass": "SUB",
@@ -22582,7 +25392,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUB_GPR8_IMMb_80r5",
+    "SUB_GPR8_IMMb_82r5",
+    "SUB_GPRv_IMMb",
+    "SUB_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "SUB",
@@ -22608,7 +25424,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUB_AL_IMMb",
+    "SUB_OrAX_IMMz"
+   ]
   },
   {
    "iclass": "SUBPD",
@@ -22638,7 +25458,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUBPD_XMMpd_MEMpd"
+   ]
   },
   {
    "iclass": "SUBPD",
@@ -22668,7 +25491,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUBPD_XMMpd_XMMpd"
+   ]
   },
   {
    "iclass": "SUBPS",
@@ -22698,7 +25524,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUBPS_XMMps_MEMps"
+   ]
   },
   {
    "iclass": "SUBPS",
@@ -22728,7 +25557,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUBPS_XMMps_XMMps"
+   ]
   },
   {
    "iclass": "SUBSD",
@@ -22758,7 +25590,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUBSD_XMMsd_MEMsd"
+   ]
   },
   {
    "iclass": "SUBSD",
@@ -22788,7 +25623,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUBSD_XMMsd_XMMsd"
+   ]
   },
   {
    "iclass": "SUBSS",
@@ -22818,7 +25656,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUBSS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "SUBSS",
@@ -22848,7 +25689,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUBSS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "SUB_LOCK",
@@ -22874,7 +25718,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUB_LOCK_MEMb_GPR8",
+    "SUB_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "SUB_LOCK",
@@ -22900,7 +25748,13 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "SUB_LOCK_MEMb_IMMb_80r5",
+    "SUB_LOCK_MEMb_IMMb_82r5",
+    "SUB_LOCK_MEMv_IMMb",
+    "SUB_LOCK_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "TEST",
@@ -22926,7 +25780,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "TEST_MEMb_GPR8",
+    "TEST_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "TEST",
@@ -22952,7 +25810,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "TEST_MEMb_IMMb_F6r0",
+    "TEST_MEMb_IMMb_F6r1",
+    "TEST_MEMv_IMMz_F7r0",
+    "TEST_MEMv_IMMz_F7r1"
+   ]
   },
   {
    "iclass": "TEST",
@@ -22978,7 +25842,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "TEST_GPR8_GPR8",
+    "TEST_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "TEST",
@@ -23004,7 +25872,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "TEST_GPR8_IMMb_F6r0",
+    "TEST_GPR8_IMMb_F6r1",
+    "TEST_GPRv_IMMz_F7r0",
+    "TEST_GPRv_IMMz_F7r1"
+   ]
   },
   {
    "iclass": "TEST",
@@ -23030,7 +25904,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "TEST_AL_IMMb",
+    "TEST_OrAX_IMMz"
+   ]
   },
   {
    "iclass": "UCOMISD",
@@ -23058,7 +25936,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UCOMISD_XMMsd_MEMsd"
+   ]
   },
   {
    "iclass": "UCOMISD",
@@ -23086,7 +25967,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UCOMISD_XMMsd_XMMsd"
+   ]
   },
   {
    "iclass": "UCOMISS",
@@ -23114,7 +25998,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UCOMISS_XMMss_MEMss"
+   ]
   },
   {
    "iclass": "UCOMISS",
@@ -23142,7 +26029,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UCOMISS_XMMss_XMMss"
+   ]
   },
   {
    "iclass": "UNPCKHPD",
@@ -23168,7 +26058,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UNPCKHPD_XMMpd_MEMdq"
+   ]
   },
   {
    "iclass": "UNPCKHPD",
@@ -23194,7 +26087,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UNPCKHPD_XMMpd_XMMq"
+   ]
   },
   {
    "iclass": "UNPCKHPS",
@@ -23220,7 +26116,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UNPCKHPS_XMMps_MEMdq"
+   ]
   },
   {
    "iclass": "UNPCKHPS",
@@ -23246,7 +26145,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UNPCKHPS_XMMps_XMMdq"
+   ]
   },
   {
    "iclass": "UNPCKLPD",
@@ -23272,7 +26174,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UNPCKLPD_XMMpd_MEMdq"
+   ]
   },
   {
    "iclass": "UNPCKLPD",
@@ -23298,7 +26203,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UNPCKLPD_XMMpd_XMMq"
+   ]
   },
   {
    "iclass": "UNPCKLPS",
@@ -23324,7 +26232,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UNPCKLPS_XMMps_MEMdq"
+   ]
   },
   {
    "iclass": "UNPCKLPS",
@@ -23350,7 +26261,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "UNPCKLPS_XMMps_XMMq"
+   ]
   },
   {
    "iclass": "XADD",
@@ -23376,7 +26290,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XADD_MEMb_GPR8",
+    "XADD_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "XADD",
@@ -23402,7 +26320,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XADD_GPR8_GPR8",
+    "XADD_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "XADD_LOCK",
@@ -23428,7 +26350,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XADD_LOCK_MEMb_GPR8",
+    "XADD_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "XCHG",
@@ -23454,7 +26380,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XCHG_MEMb_GPR8",
+    "XCHG_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "XCHG",
@@ -23480,7 +26410,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XCHG_GPRv_OrAX"
+   ]
   },
   {
    "iclass": "XCHG",
@@ -23506,7 +26439,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XCHG_GPR8_GPR8",
+    "XCHG_GPRv_GPRv"
+   ]
   },
   {
    "iclass": "XLAT",
@@ -23532,7 +26469,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XLAT"
+   ]
   },
   {
    "iclass": "XOR",
@@ -23558,7 +26498,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XOR_MEMb_GPR8",
+    "XOR_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "XOR",
@@ -23584,7 +26528,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XOR_MEMb_IMMb_80r6",
+    "XOR_MEMb_IMMb_82r6",
+    "XOR_MEMv_IMMb",
+    "XOR_MEMv_IMMz"
+   ]
   },
   {
    "iclass": "XOR",
@@ -23610,7 +26560,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XOR_GPR8_MEMb",
+    "XOR_GPRv_MEMv"
+   ]
   },
   {
    "iclass": "XOR",
@@ -23636,7 +26590,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XOR_GPR8_GPR8_30",
+    "XOR_GPR8_GPR8_32",
+    "XOR_GPRv_GPRv_31",
+    "XOR_GPRv_GPRv_33"
+   ]
   },
   {
    "iclass": "XOR",
@@ -23662,7 +26622,13 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XOR_GPR8_IMMb_80r6",
+    "XOR_GPR8_IMMb_82r6",
+    "XOR_GPRv_IMMb",
+    "XOR_GPRv_IMMz"
+   ]
   },
   {
    "iclass": "XOR",
@@ -23688,7 +26654,11 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XOR_AL_IMMb",
+    "XOR_OrAX_IMMz"
+   ]
   },
   {
    "iclass": "XORPD",
@@ -23714,7 +26684,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XORPD_XMMxuq_MEMxuq"
+   ]
   },
   {
    "iclass": "XORPD",
@@ -23740,7 +26713,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XORPD_XMMxuq_XMMxuq"
+   ]
   },
   {
    "iclass": "XORPS",
@@ -23766,7 +26742,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XORPS_XMMxud_MEMxud"
+   ]
   },
   {
    "iclass": "XORPS",
@@ -23792,7 +26771,10 @@
    },
    "rep": "",
    "lock": false,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XORPS_XMMxud_XMMxud"
+   ]
   },
   {
    "iclass": "XOR_LOCK",
@@ -23818,7 +26800,11 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XOR_LOCK_MEMb_GPR8",
+    "XOR_LOCK_MEMv_GPRv"
+   ]
   },
   {
    "iclass": "XOR_LOCK",
@@ -23844,7 +26830,13 @@
    },
    "rep": "",
    "lock": true,
-   "widths": null
+   "widths": null,
+   "iforms": [
+    "XOR_LOCK_MEMb_IMMb_80r6",
+    "XOR_LOCK_MEMb_IMMb_82r6",
+    "XOR_LOCK_MEMv_IMMb",
+    "XOR_LOCK_MEMv_IMMz"
+   ]
   }
  ],
  "generated_drops": [
@@ -24993,10 +27985,6 @@
     "DIVPS",
     "DIVSD",
     "DIVSS",
-    "SQRTPD",
-    "SQRTPS",
-    "SQRTSD",
-    "SQRTSS",
     "CVTPD2PS",
     "CVTSD2SS"
    ]
@@ -25083,6 +28071,20 @@
     "CVTDQ2PD",
     "CVTPI2PD"
    ]
+  },
+  "sqrt": {
+   "simd_fp_exceptions": true,
+   "mxcsr_inputs": [
+    "RC",
+    "DAZ"
+   ],
+   "iclasses": [
+    "SQRTPD",
+    "SQRTPS",
+    "SQRTSD",
+    "SQRTSS"
+   ],
+   "note": "a same-precision square root of a non-zero finite value is never subnormal: no FTZ"
   }
  },
  "mxcsr_width_overrides": [
@@ -25092,7 +28094,15 @@
     32
    ],
    "group": "int_to_fp_exact",
-   "reason": "every int32 is exact as a double; the r64 form may round (int_to_fp_inexact)"
+   "reason": "every int32 is exact as a double"
+  },
+  {
+   "iclass": "CVTSI2SD",
+   "widths": [
+    64
+   ],
+   "group": "int_to_fp_inexact",
+   "reason": "an int64 may round to a double"
   }
  ],
  "mxcsr_cite": [
@@ -25104,5 +28114,109 @@
    "doc": "SDM1",
    "entry": "MXCSR: RC, DAZ, FTZ"
   }
- ]
+ ],
+ "iced_operand_conventions": {
+  "note": "iced lists implicit accumulator / count / string registers as explicit operands; measured on ntdll (1,822 of 128,310 forms). An iced signature that differs from the entry's is accepted only for these encodings and exactly these signature pairs; anything else fails test A.",
+  "pairs": [
+   {
+    "opcodes": [
+     "04",
+     "05",
+     "0C",
+     "0D",
+     "14",
+     "15",
+     "1C",
+     "1D",
+     "24",
+     "25",
+     "2C",
+     "2D",
+     "34",
+     "35",
+     "3C",
+     "3D",
+     "A8",
+     "A9"
+    ],
+    "xed": "i",
+    "iced": "gi",
+    "reason": "AL / AX / EAX / RAX accumulator immediate forms"
+   },
+   {
+    "opcodes": [
+     "D0",
+     "D1"
+    ],
+    "xed": "g",
+    "iced": "gi",
+    "reason": "shift / rotate by 1"
+   },
+   {
+    "opcodes": [
+     "D0",
+     "D1"
+    ],
+    "xed": "M",
+    "iced": "Mi",
+    "reason": "shift / rotate by 1, memory"
+   },
+   {
+    "opcodes": [
+     "D2",
+     "D3"
+    ],
+    "xed": "g",
+    "iced": "gg",
+    "reason": "shift / rotate by CL"
+   },
+   {
+    "opcodes": [
+     "D2",
+     "D3"
+    ],
+    "xed": "M",
+    "iced": "Mg",
+    "reason": "shift / rotate by CL, memory"
+   },
+   {
+    "opcodes": [
+     "AA",
+     "AB",
+     "AC",
+     "AD",
+     "AE",
+     "AF"
+    ],
+    "xed": "",
+    "iced": "g",
+    "reason": "STOS / LODS / SCAS with the accumulator"
+   },
+   {
+    "opcodes": [
+     "D7"
+    ],
+    "xed": "",
+    "iced": "M",
+    "reason": "XLAT [RBX + AL]"
+   },
+   {
+    "opcodes": [
+     "DF"
+    ],
+    "modrm": [
+     "E0"
+    ],
+    "xed": "",
+    "iced": "g",
+    "reason": "FNSTSW AX"
+   }
+  ]
+ },
+ "entry_flags": {
+  "MASKMOVDQU": {
+   "masked_write": true,
+   "reason": "writes only the bytes whose mask byte has bit 7 set (mask 0: no write); the decoders report an unconditional write"
+  }
+ }
 }

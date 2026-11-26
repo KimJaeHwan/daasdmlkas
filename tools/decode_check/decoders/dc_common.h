@@ -88,6 +88,8 @@ typedef struct {
     int32_t read, write;
     int32_t role;           /* enum dc_mem_role */
     int32_t operand_index;  /* explicit operand position, -1 for implicit */
+    int32_t cond_read;      /* revision 6: the read happens only under a data condition (e.g. CMOVcc) */
+    int32_t cond_write;     /* revision 6: the write happens only under a data condition (MASKMOVDQU mask, CMOVcc) */
 } dc_mem;
 
 typedef struct {
@@ -132,6 +134,7 @@ typedef struct {
     int32_t mem_count;         /* memory accesses below (address-only operands excluded) */
     int32_t mem_overflow;      /* 1: more than DC_MAX_MEM accesses */
     dc_mem mem[DC_MAX_MEM];
+    char iform[64];            /* revision 6: XED's iform name (empty for other decoders) */
 } dc_decoded;
 
 /* amd: 0 Intel behaviour, 1 AMD behaviour (where the decoder models it) */
@@ -148,9 +151,9 @@ const char *dc_isa_set_name(int index);
 int dc_isa_set_valid_for_chip(int index, const char *chip);
 const char *dc_version(void);
 int dc_struct_size(void);
-/* the layout / ABI revision: fields can fit in old struct padding, so the size alone cannot tell (5: the struct
- * of revision 4, RFLAGS masks limited to bits 0-21, dc_decode_without added) */
-#define DC_LAYOUT_REVISION 5
+/* the layout / ABI revision: fields can fit in old struct padding, so the size alone cannot tell (6: per-access
+ * conditional read / write, XED iform; 5: RFLAGS masks limited to bits 0-21, dc_decode_without) */
+#define DC_LAYOUT_REVISION 6
 int dc_layout_revision(void);
 
 #endif

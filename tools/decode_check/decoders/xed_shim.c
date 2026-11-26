@@ -149,6 +149,8 @@ static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out) {
     unsigned int count = xed_inst_noperands(inst);
     int explicit_index = 0, sig = 0;
     int mem_explicit[2] = {-1, -1};
+    xed_operand_action_enum_t mem_action[2] = {XED_OPERAND_ACTION_INVALID, XED_OPERAND_ACTION_INVALID};
+    strncpy(out->iform, xed_iform_enum_t2str(xed_decoded_inst_get_iform_enum(x)), sizeof(out->iform) - 1);
     for (unsigned int i = 0; i < count; i++) {
         const xed_operand_t *operand = xed_inst_operand(inst, i);
         xed_operand_enum_t name = xed_operand_name(operand);
@@ -162,6 +164,7 @@ static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out) {
             kind = reg_kind(reg);
         } else if (name == XED_OPERAND_MEM0 || name == XED_OPERAND_MEM1) {
             kind = 'M';
+            mem_action[name == XED_OPERAND_MEM1] = xed_decoded_inst_operand_action(x, i);
             if (is_explicit) {
                 mem_explicit[name == XED_OPERAND_MEM1] = explicit_index;
             }
@@ -197,14 +200,18 @@ static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out) {
         m->write = write;
         int index = i < 2 ? mem_explicit[i] : -1;
         m->operand_index = index;
+        if (i < 2) {
+            xed_operand_action_enum_t action = mem_action[i];
+            m->cond_read = action == XED_OPERAND_ACTION_CR || action == XED_OPERAND_ACTION_CRW;
+            m->cond_write = action == XED_OPERAND_ACTION_CW || action == XED_OPERAND_ACTION_RCW
+                            || action == XED_OPERAND_ACTION_CRW;
+        }
         m->role = index >= 0 ? DC_ROLE_EXPLICIT : base_role(xed_decoded_inst_get_base_reg(x, i));
     }
 }
 
-static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out);
-
-/* set only for the duration of one dc_decode_without call (ctypes calls are serial) */
-static xed_chip_features_t *pending_features = NULL;
+static int decode_impl(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip_name,
+                       xed_chip_features_t *features, dc_decoded *out);
 
 int dc_decode_without(const uint8_t *bytes, size_t length, uint64_t address, const char *isa_set_name,
                       dc_decoded *out) {
@@ -219,15 +226,18 @@ int dc_decode_without(const uint8_t *bytes, size_t length, uint64_t address, con
     xed_chip_features_t features;
     xed_get_chip_features(&features, XED_CHIP_ALL);
     xed_modify_chip_features(&features, isa_set, 0);
-    pending_features = &features;
-    int status = dc_decode_ex(bytes, length, address, 0, NULL, out);
-    pending_features = NULL;
+    int status = decode_impl(bytes, length, address, 0, NULL, &features, out);   /* (no shared state) */
     snprintf(out->chip, sizeof(out->chip), "ALL-%s", isa_set_name);
     return status;
 }
 
 int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip_name,
                  dc_decoded *out) {
+    return decode_impl(bytes, length, address, amd, chip_name, NULL, out);
+}
+
+static int decode_impl(const uint8_t *bytes, size_t length, uint64_t address, int amd, const char *chip_name,
+                       xed_chip_features_t *features, dc_decoded *out) {
     xed_decoded_inst_t x;
     reset(out);
     if (amd) {
@@ -247,8 +257,8 @@ int dc_decode_ex(const uint8_t *bytes, size_t length, uint64_t address, int amd,
         xed_decoded_inst_set_input_chip(&x, chip);
         strncpy(out->chip, xed_chip_enum_t2str(chip), sizeof(out->chip) - 1);
     }
-    xed_error_enum_t error = pending_features
-        ? xed_decode_with_features(&x, (const xed_uint8_t *)bytes, (unsigned int)length, pending_features)
+    xed_error_enum_t error = features
+        ? xed_decode_with_features(&x, (const xed_uint8_t *)bytes, (unsigned int)length, features)
         : xed_decode(&x, (const xed_uint8_t *)bytes, (unsigned int)length);
     out->error_code = (int32_t)error;
     if (error != XED_ERROR_NONE) {

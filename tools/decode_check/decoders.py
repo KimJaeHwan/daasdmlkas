@@ -21,7 +21,7 @@ FLOWS = ("none", "call_near", "call_far", "jmp_near", "jmp_far", "jcc", "ret_nea
          "int_n", "int1", "into", "ud", "syscall", "sysenter", "sysret", "hlt", "xbegin", "xabort", "xend", "other")
 STATUSES = ("ok", "invalid", "no_more_data", "error")
 TARGET_KINDS = ("unknown", "none", "direct", "register", "memory")   # (enum dc_target_kind)
-LAYOUT_REVISION = 5
+LAYOUT_REVISION = 6
 MAX_LENGTH = 15
 FLOW_DETAILS = ("none", "sysret", "sysexit")                     # (enum dc_flow_detail)
 SEGMENTS = (("es", 1), ("cs", 2), ("ss", 4), ("ds", 8), ("fs", 16), ("gs", 32))   # (DC_SEG_*)
@@ -72,7 +72,8 @@ class Decoded:
 
 class DcMem(ctypes.Structure):
     _fields_ = [("segment", ctypes.c_int32), ("read", ctypes.c_int32), ("write", ctypes.c_int32),
-                ("role", ctypes.c_int32), ("operand_index", ctypes.c_int32)]
+                ("role", ctypes.c_int32), ("operand_index", ctypes.c_int32),
+                ("cond_read", ctypes.c_int32), ("cond_write", ctypes.c_int32)]   # (revision 6)
 
 
 class DcDecoded(ctypes.Structure):
@@ -93,6 +94,7 @@ class DcDecoded(ctypes.Structure):
         ("category", ctypes.c_char * 32), ("rflags_read", ctypes.c_uint32), ("rflags_written", ctypes.c_uint32),
         ("sreg_operand", ctypes.c_int32), ("prefix_flags", ctypes.c_int32), ("op_sig", ctypes.c_char * 16),
         ("mem_count", ctypes.c_int32), ("mem_overflow", ctypes.c_int32), ("mem", DcMem * 8),
+        ("iform", ctypes.c_char * 64),     # (revision 6)
     ]
 
 
@@ -113,17 +115,22 @@ def _shim_extra(out: DcDecoded) -> dict:
             "category": _text(out.category), "rflags_read": out.rflags_read, "rflags_written": out.rflags_written,
             "sreg_operand": bool(out.sreg_operand), "lock": bool(out.prefix_flags & PFX_LOCK),
             "rep": "rep" if out.prefix_flags & PFX_REP else ("repne" if out.prefix_flags & PFX_REPNE else ""),
-            "op_sig": _text(out.op_sig), "mem_overflow": bool(out.mem_overflow),
+            "op_sig": _text(out.op_sig), "mem_overflow": bool(out.mem_overflow), "iform": _text(out.iform),
+            "memory_complete": not out.mem_overflow,
             "memory": [_mem(out.mem[i], out.prefix_flags) for i in range(min(out.mem_count, MAX_MEM))]})
     return extra
 
 
 def _mem(m, prefix_flags: int) -> dict:
     role = MEM_ROLES[m.role] if 0 <= m.role < len(MEM_ROLES) else "other"
-    # a REP-prefixed string access does not happen when the count register is 0 (2b r3 s6)
-    conditional = bool(prefix_flags & (PFX_REP | PFX_REPNE)) and role in ("string_source", "string_dest")
+    # a REP-prefixed string access does not happen when the count register is 0 (2b r3 s6); other conditional
+    # accesses (MASKMOVDQU's mask, CMOVcc's load) come from the decoder per read / write (revision 6)
+    rep = bool(prefix_flags & (PFX_REP | PFX_REPNE)) and role in ("string_source", "string_dest")
+    cond_read = bool(m.cond_read) or (rep and bool(m.read))
+    cond_write = bool(m.cond_write) or (rep and bool(m.write))
     return {"segment": next((name for name, bit in SEGMENTS if m.segment == bit), ""), "read": bool(m.read),
-            "write": bool(m.write), "role": role, "conditional": conditional,
+            "write": bool(m.write), "role": role, "cond_read": cond_read, "cond_write": cond_write,
+            "conditional": cond_read or cond_write,
             "operand_index": m.operand_index if m.operand_index >= 0 else None}
 
 
@@ -414,10 +421,12 @@ class _Iced:
                                   x.OpAccess.READ_COND_WRITE)
                 write = access in (x.OpAccess.WRITE, x.OpAccess.COND_WRITE, x.OpAccess.READ_WRITE,
                                    x.OpAccess.READ_COND_WRITE)
-                conditional = access in (x.OpAccess.COND_READ, x.OpAccess.COND_WRITE) or (
-                    bool(rep) and role in ("string_source", "string_dest"))
+                string_rep = bool(rep) and role in ("string_source", "string_dest")
+                cond_read = access == x.OpAccess.COND_READ or (string_rep and read)
+                cond_write = access in (x.OpAccess.COND_WRITE, x.OpAccess.READ_COND_WRITE) or (string_rep and write)
                 memory.append({"segment": self.registers.get(used.segment, ""), "read": read, "write": write,
-                               "role": role, "conditional": conditional,
+                               "role": role, "cond_read": cond_read, "cond_write": cond_write,
+                               "conditional": cond_read or cond_write,
                                "operand_index": explicit_memory if is_explicit else None})
         written = (instr.rflags_written | instr.rflags_cleared | instr.rflags_set | instr.rflags_undefined
                    | instr.rflags_modified)
@@ -425,7 +434,10 @@ class _Iced:
                 "is_input_output": bool(code.is_input_output),
                 "rflags_read": self._rflags(instr.rflags_read), "rflags_written": self._rflags(written),
                 "sreg_operand": sreg, "lock": bool(instr.has_lock_prefix), "rep": rep, "op_sig": "".join(sig),
-                "mem_overflow": overflow, "memory": memory}
+                "mem_overflow": overflow, "memory": memory, "iform": "",
+                # an explicit memory operand that no used-memory entry matched: the access list is incomplete
+                "memory_complete": not overflow and (explicit_memory is None
+                                                     or any(m["role"] == "explicit" for m in memory))}
 
 
 _VOTERS = {}

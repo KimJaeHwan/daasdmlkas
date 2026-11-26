@@ -2424,3 +2424,115 @@ def test_isa_impl_nop_fallback_needs_the_exact_endbr_byte():
     tables = isa_tables.load()
     assert _classify(tables, "F30F1EFA")["result"] == "cited_split"
     assert _classify(tables, "F30F1EF8")["result"] != "cited"        # 0F 1E /7 but not FA / FB
+
+
+# -- ISA facts: implementation review round 2 fixes ------------------------------------------------------------
+
+@needs
+def test_isa_impl2_iced_form_needs_exact_or_pinned_convention():
+    """impl r2 P1-1: 48 01 C8 with iced 'gi' fails; a pinned convention (accumulator immediate) passes."""
+    import dataclasses
+
+    import isa_tables
+
+    tables = isa_tables.load()
+    data = bytes.fromhex("4801C8") + ISA_PAD
+    votes = _votes("4801C8")
+    iced = dataclasses.replace(votes["iced"], extra=dict(votes["iced"].extra, op_sig="gi"))
+    got = isa_tables.classify(tables, dict(votes, iced=iced), data)
+    assert got["result"] == "unclassified" and any("iced A" in r for r in got["reasons"])
+    for field, value in (("op_sig", "g?"), ("must_be_cpl0", None), ("rflags_written", True)):
+        iced = dataclasses.replace(votes["iced"], extra=dict(votes["iced"].extra, **{field: value}))
+        got = isa_tables.classify(tables, dict(votes, iced=iced), data)
+        assert got["result"] == "unclassified" and any("evidence" in r for r in got["reasons"]), field
+    for hexbytes in ("3C05", "4883F805", "D1E8", "D3E0", "48AB", "D7", "DFE0"):   # pinned conventions
+        assert _classify(tables, hexbytes)["result"] == "derived_ordinary", hexbytes
+
+
+@needs
+def test_isa_impl2_width_dependent_flags_need_agreeing_listed_widths():
+    """impl r2 P1-2: CVTSI2SD flags only when XED and Zydis report the same listed width (iced 0 or the same)."""
+    import dataclasses
+
+    import isa_tables
+
+    tables = isa_tables.load()
+    data = bytes.fromhex("F2480F2AC0") + ISA_PAD
+    votes = _votes("F2480F2AC0")
+    assert _classify(tables, "F2480F2AC0")["flags"]["mxcsr_inputs"] == ["RC"]
+    for xed_bits, zydis_bits in ((64, 32), (64, 0), (0, 32), (16, 16), (32, 64)):
+        broken = dict(votes, xed=dataclasses.replace(votes["xed"], operand_bits=xed_bits),
+                      zydis=dataclasses.replace(votes["zydis"], operand_bits=zydis_bits))
+        got = isa_tables.classify(tables, broken, data)
+        assert got["result"] == "unclassified", (xed_bits, zydis_bits, got)
+
+
+@needs
+def test_isa_impl2_nop_encoding_ranges():
+    """impl r2 P2-2: only the listed prefix sets reach NOP; F3 0F 1E F8 gives no NOP lookup at all."""
+    import isa_tables
+
+    tables = isa_tables.load()
+    for hexbytes in ("F3F20F1EFA", "F290", "F2F390"):
+        votes = _votes(hexbytes)
+        assert isa_tables.lookup(tables, votes["xed"], bytes.fromhex(hexbytes) + ISA_PAD) != "NOP", hexbytes
+    for hexbytes in ("90", "6690", "0F1F00", "660F1F440000"):
+        assert _classify(tables, hexbytes)["key"] == "NOP", hexbytes
+    xed = _votes("F30F1EF8")["xed"]
+    assert isa_tables.lookup(tables, xed, bytes.fromhex("F30F1EF8") + ISA_PAD) is None
+    assert _classify(tables, "4190")["result"] != "cited" or _classify(tables, "4190").get("key") != "NOP"
+
+
+@needs
+def test_isa_impl2_conditional_writes_and_masked_write_flag():
+    import isa_tables
+
+    tables = isa_tables.load()
+    got = _classify(tables, "660FF7C1")                               # MASKMOVDQU
+    assert got["result"] == "derived_ordinary" and got["flags"]["masked_write"] is True
+    for name, vote in _votes("64F3A4").items():
+        source = next(m for m in vote.extra["memory"] if m["role"] == "string_source")
+        dest = next(m for m in vote.extra["memory"] if m["role"] == "string_dest")
+        assert (source["cond_read"], source["cond_write"]) == (True, False), name
+        assert (dest["cond_read"], dest["cond_write"]) == (False, True), name
+    for name, vote in _votes("480F4400").items():                    # CMOVZ rax, [rax]: the load always happens
+        assert not any(m["cond_read"] for m in vote.extra["memory"]), name
+    assert _votes("4801C8")["xed"].extra["iform"] == "ADD_GPRv_GPRv_01"
+
+
+@needs
+def test_isa_impl2_x87_flags_do_not_leak_into_rflags():
+    """impl r2 P3: XED's flag-set mask carries FC0-FC3 for x87 compares; rflags_* keep bits 0-21 only."""
+    for hexbytes in ("D8D1", "DBF1", "D9E4"):                       # FCOM st1, FCOMI st1, FTST
+        for name, vote in _votes(hexbytes).items():
+            assert vote.extra["rflags_read"] < (1 << 22) and vote.extra["rflags_written"] < (1 << 22), (hexbytes, name)
+
+
+def test_isa_impl2_data_fixes():
+    import isa_tables
+
+    tables = isa_tables.load()
+    popf16 = {o["output"]: o for o in tables.conditions["f2_meanings"]["POPF16_FLAGS"]["outputs"]}
+    assert popf16["RFLAGS.RF"]["rule"].startswith("cleared")
+    assert "SQRTPS" in tables.ordinary["mxcsr_groups"]["sqrt"]["iclasses"]
+    assert "FTZ" not in tables.ordinary["mxcsr_groups"]["sqrt"]["mxcsr_inputs"]
+    assert not any(n.startswith("SQRT") for n in tables.ordinary["mxcsr_groups"]["arith"]["iclasses"])
+
+
+def test_isa_impl2_validator_compares_star_rules_and_exact_modrm():
+    import copy
+    import json
+
+    import isa_tables
+
+    root = Path(isa_tables.__file__).parent
+    files = {name: json.loads((root / isa_tables.FILES[name]).read_text(encoding="utf-8")) for name in isa_tables.FILES}
+    mapping = copy.deepcopy(files["map"])
+    first_jcc = next(i for i, r in enumerate(mapping["rules"]) if r["key"] == "JCC_SHORT")
+    mapping["rules"].insert(first_jcc, {"mnemonic": ["*"], "when": {"flow": "jcc", "counter": False, "opcode": ["74"]},
+                                        "key": "JCC_NEAR"})
+    with pytest.raises(isa_tables.TableError):
+        isa_tables.validate(files["conditions"], mapping, files["splits"], files["ordinary"])
+    mapping = copy.deepcopy(files["map"])                         # exact ModRM FA vs /0: never the same vote
+    mapping["rules"].append({"mnemonic": ["NOP"], "when": {"opcode": ["0F1E"], "modrm_reg": [0]}, "key": "PAUSE"})
+    isa_tables.validate(files["conditions"], mapping, files["splits"], files["ordinary"])

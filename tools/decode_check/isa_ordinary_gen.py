@@ -37,10 +37,10 @@ STRING_REP = ("REP_", "REPE_", "REPNE_")
 def read_catalogue(path: Path) -> list:
     rows = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        iclass, category, extension, isa_set, ring0, exception, sig, sreg = line.split("\t")
+        iclass, category, extension, isa_set, ring0, exception, sig, sreg, iform = line.split("\t")
         rows.append({"iclass": iclass, "category": category, "extension": extension, "isa_set": isa_set,
                      "ring0": ring0 == "1", "exception": exception, "sig": "" if sig == "-" else sig,
-                     "sreg": sreg == "1"})
+                     "sreg": sreg == "1", "iform": iform})
     return rows
 
 
@@ -161,12 +161,18 @@ def generate(rows: list, ordinary: dict, cited: set) -> tuple:
             if override["iclass"] == row["iclass"]:
                 width_flags = mxcsr_flags(row["iclass"], ordinary, override["group"])
                 entry.setdefault("width_flags", {}).update({str(w): width_flags for w in override["widths"]})
+        flags.update({name: value for name, value in ordinary.get("entry_flags", {}).get(row["iclass"], {}).items()
+                      if name != "reason"})
         if key in entries and (entries[key]["class"], entries[key]["flags"]) != (klass, flags):
             entries.pop(key)
             dropped[key] = {"iclass": row["iclass"], "extension": row["extension"], "isa_set": row["isa_set"],
                             "sig": row["sig"], "reason": "one form, two classes"}
             continue
         if key not in dropped:
+            if key in entries:
+                entry["iforms"] = sorted(set(entries[key]["iforms"]) | {row["iform"]})
+            else:
+                entry["iforms"] = [row["iform"]]
             entries[key] = entry
     order = lambda item: (item["iclass"], item["extension"], item["isa_set"], item["sig"])
     return sorted(entries.values(), key=order), sorted(dropped.values(), key=order)

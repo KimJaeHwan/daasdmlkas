@@ -99,6 +99,7 @@ static int32_t base_role(ZydisRegister base) {
  * effective LOCK / REP, memory accesses with role (operands: visible first, then hidden) */
 static void fill_form_evidence(const ZydisDecodedInstruction *insn, const ZydisDecodedOperand *ops,
                                dc_decoded *out) {
+    /* (Zydis has no XED iform: the field stays empty; form identity is XED's) */
     const char *category = ZydisCategoryGetString(insn->meta.category);
     if (category) {
         strncpy(out->category, category, sizeof(out->category) - 1);
@@ -137,6 +138,8 @@ static void fill_form_evidence(const ZydisDecodedInstruction *insn, const ZydisD
                     m->segment = seg_bit(op->mem.segment);
                     m->read = (op->actions & ZYDIS_OPERAND_ACTION_MASK_READ) != 0;
                     m->write = (op->actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0;
+                    m->cond_read = (op->actions & ZYDIS_OPERAND_ACTION_CONDREAD) != 0;
+                    m->cond_write = (op->actions & ZYDIS_OPERAND_ACTION_CONDWRITE) != 0;
                     m->operand_index = is_explicit ? i : -1;
                     m->role = is_explicit ? DC_ROLE_EXPLICIT : base_role(op->mem.base);
                 }

@@ -10,13 +10,16 @@
   "opcode": "the opcode bytes after legacy and REX prefixes, hex, compared as a prefix of the opcode (list: any of)",
   "modrm_reg": "ModRM.reg of the byte after `opcode` (list: any of)",
   "prefix": "a legacy prefix that must be present (hex)",
-  "modrm": "the exact ModRM byte after `opcode` (list: any of, hex)"
+  "modrm": "the exact ModRM byte after `opcode` (list: any of, hex)",
+  "prefixes_only": "every legacy prefix present is in this list (hex; [] = none allowed)",
+  "rex_b": "REX.B as a boolean (absent REX = false)",
+  "rex_w": "REX.W as a boolean (absent REX = false)"
  },
  "rules": [
   {"voters": ["zydis", "xed"], "mnemonic": ["SYSRET"], "when": {"operand_bits": 64}, "key": "SYSRETQ"},
   {"voters": ["xed"], "mnemonic": ["SYSRET64"], "key": "SYSRETQ"},
   {"voters": ["zydis", "xed"], "mnemonic": ["SYSEXIT"], "when": {"operand_bits": 64}, "key": "SYSEXITQ"},
-  {"mnemonic": ["SYSRET", "SYSRETQ", "SYSEXIT", "SYSEXITQ"], "key": "="},
+  {"mnemonic": ["SYSRET", "SYSRETQ", "SYSEXIT", "SYSEXITQ"], "key": "=", "fallback": true},
 
   {"voters": ["iced"], "mnemonic": ["RETF"], "key": "RET_FAR"},
   {"voters": ["xed"], "mnemonic": ["RET_FAR"], "key": "="},
@@ -59,9 +62,10 @@
   {"mnemonic": ["POP"], "when": {"opcode": ["0FA9"]}, "key": "POP_GS"},
   {"mnemonic": ["PUSH"], "when": {"opcode": ["0FA0"]}, "key": "PUSH_FS"},
   {"mnemonic": ["PUSH"], "when": {"opcode": ["0FA8"]}, "key": "PUSH_GS"},
-  {"mnemonic": ["BSWAP"], "when": {"operand_bits": 16}, "key": "BSWAP16"},
-  {"mnemonic": ["SHLD"], "when": {"operand_bits": 16}, "key": "SHLD16"},
-  {"mnemonic": ["SHRD"], "when": {"operand_bits": 16}, "key": "SHRD16"},
+  {"mnemonic": ["BSWAP"], "when": {"opcode": ["0FC8", "0FC9", "0FCA", "0FCB", "0FCC", "0FCD", "0FCE", "0FCF"],
+                                    "prefix": "66", "rex_w": false}, "key": "BSWAP16"},
+  {"mnemonic": ["SHLD"], "when": {"opcode": ["0FA4", "0FA5"], "prefix": "66", "rex_w": false}, "key": "SHLD16"},
+  {"mnemonic": ["SHRD"], "when": {"opcode": ["0FAC", "0FAD"], "prefix": "66", "rex_w": false}, "key": "SHRD16"},
   {"voters": ["xed"], "mnemonic": ["REP_INSB"], "key": "INSB"},
   {"voters": ["xed"], "mnemonic": ["REP_INSW"], "key": "INSW"},
   {"voters": ["xed"], "mnemonic": ["REP_INSD"], "key": "INSD"},
@@ -69,9 +73,11 @@
   {"voters": ["xed"], "mnemonic": ["REP_OUTSW"], "key": "OUTSW"},
   {"voters": ["xed"], "mnemonic": ["REP_OUTSD"], "key": "OUTSD"},
 
-  {"mnemonic": ["NOP"], "when": {"opcode": ["90"]}, "key": "NOP"},
-  {"mnemonic": ["NOP"], "when": {"opcode": ["0F1F"], "modrm_reg": [0]}, "key": "NOP"},
-  {"mnemonic": ["NOP"], "when": {"opcode": ["0F1E"], "modrm": ["FA", "FB"], "prefix": "F3"}, "key": "NOP"},
+  {"mnemonic": ["NOP"], "when": {"opcode": ["90"], "prefixes_only": ["66"], "rex_b": false}, "key": "NOP"},
+  {"mnemonic": ["NOP"], "when": {"opcode": ["90"], "prefixes_only": ["F3"], "prefix": "F3", "rex_b": false}, "key": "NOP"},
+  {"mnemonic": ["NOP"], "when": {"opcode": ["0F1F"], "modrm_reg": [0], "prefixes_only": ["66"]}, "key": "NOP"},
+  {"mnemonic": ["NOP"], "when": {"opcode": ["0F1E"], "modrm": ["FA", "FB"], "prefix": "F3", "prefixes_only": ["F3"]},
+   "key": "NOP"},
 
   {"mnemonic": ["LGDT", "LIDT", "LLDT", "LTR", "CLTS", "LMSW", "INVD", "WBINVD", "INVLPG", "SWAPGS", "RDMSR", "WRMSR",
                 "HLT", "SYSCALL", "SYSENTER", "INT3", "INT", "INT1", "UD0", "UD1", "UD2", "IRET", "IRETD", "IRETQ",

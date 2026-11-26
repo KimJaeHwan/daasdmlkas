@@ -1,6 +1,6 @@
 /* TBR ISA facts 2b: dump the pinned XED instruction table for the ordinary-form generator
  * (tools/decode_check/isa_ordinary_gen.py). One line per xed_inst_t, tab separated:
- *   iclass category extension isa_set ring0 exception explicit_kinds sreg
+ *   iclass category extension isa_set ring0 exception explicit_kinds sreg iform
  * explicit_kinds: the explicit operands' kinds (g m x y k s c f M A i r ?), as in dc_common.h op_sig;
  * sreg: 1 when any operand (explicit or not) is a segment register. Built by build_decoders.sh. */
 #include <stdio.h>
@@ -74,10 +74,11 @@ int main(void) {
                 kinds[n++] = kind;
             }
         }
-        printf("%s\t%s\t%s\t%s\t%d\t%s\t%s\t%d\n", xed_iclass_enum_t2str(iclass),
+        printf("%s\t%s\t%s\t%s\t%d\t%s\t%s\t%d\t%s\n", xed_iclass_enum_t2str(iclass),
                xed_category_enum_t2str(xed_inst_category(p)), xed_extension_enum_t2str(xed_inst_extension(p)),
                xed_isa_set_enum_t2str(xed_inst_isa_set(p)), xed_inst_get_attribute(p, XED_ATTRIBUTE_RING0) ? 1 : 0,
-               xed_exception_enum_t2str(xed_inst_exception(p)), n ? kinds : "-", sreg);
+               xed_exception_enum_t2str(xed_inst_exception(p)), n ? kinds : "-", sreg,
+               xed_iform_enum_t2str(xed_inst_iform_enum(p)));
     }
     return 0;
 }
