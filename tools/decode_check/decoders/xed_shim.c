@@ -7,10 +7,12 @@
  * override (the flat default segments come back as no register), so only its FS / GS bits are evidence. */
 #include <string.h>
 #include <stdio.h>
+#include <pthread.h>
 #include "xed/xed-interface.h"
 #include "dc_common.h"
 
-static int initialised = 0;   /* (xed_tables_init once; ctypes calls are serial) */
+/* ctypes releases the GIL during calls: the one-time table set-up is guarded (impl review r3 P2-5) */
+static pthread_once_t tables_once = PTHREAD_ONCE_INIT;
 
 static void reset(dc_decoded *out) {
     memset(out, 0, sizeof(*out));
@@ -58,10 +60,7 @@ static int first_operand_name(const xed_decoded_inst_t *x) {
 }
 
 static void init_tables(void) {
-    if (!initialised) {
-        xed_tables_init();
-        initialised = 1;
-    }
+    pthread_once(&tables_once, xed_tables_init);
 }
 
 /* a chip profile name ("ALL", "P4PRESCOTT_NOLAHF", ...) -> its enum; XED_CHIP_INVALID if unknown */
@@ -202,9 +201,10 @@ static void fill_form_evidence(const xed_decoded_inst_t *x, dc_decoded *out) {
         m->operand_index = index;
         if (i < 2) {
             xed_operand_action_enum_t action = mem_action[i];
+            /* XED: CR conditional read; CW conditional write; RCW read + conditional write;
+             * CRW conditional read + (unconditional) write (impl review r3 P2-3) */
             m->cond_read = action == XED_OPERAND_ACTION_CR || action == XED_OPERAND_ACTION_CRW;
-            m->cond_write = action == XED_OPERAND_ACTION_CW || action == XED_OPERAND_ACTION_RCW
-                            || action == XED_OPERAND_ACTION_CRW;
+            m->cond_write = action == XED_OPERAND_ACTION_CW || action == XED_OPERAND_ACTION_RCW;
         }
         m->role = index >= 0 ? DC_ROLE_EXPLICIT : base_role(xed_decoded_inst_get_base_reg(x, i));
     }

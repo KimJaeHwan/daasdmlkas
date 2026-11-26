@@ -2182,11 +2182,17 @@ ISA_CLASSIFY = {
 }
 
 
+def _xed_redecode(window: bytes):
+    import decoders as d
+
+    return d.decode("xed", window, CODE, False)
+
+
 def _classify(tables, hexbytes: str) -> dict:
     import isa_tables
 
     data = bytes.fromhex(hexbytes) + ISA_PAD
-    return isa_tables.classify(tables, _votes(hexbytes), data)
+    return isa_tables.classify(tables, _votes(hexbytes), data, redecode=_xed_redecode)
 
 
 @needs
@@ -2330,15 +2336,15 @@ def test_isa_impl_missing_evidence_or_form_mismatch_never_passes():
     tables = isa_tables.load()
     data = bytes.fromhex("4801C8") + ISA_PAD                      # add rax, rcx
     votes = _votes("4801C8")
-    assert isa_tables.classify(tables, votes, data)["result"] == "derived_ordinary"
+    assert isa_tables.classify(tables, votes, data, redecode=_xed_redecode)["result"] == "derived_ordinary"
     for name, field in (("iced", "must_be_cpl0"), ("iced", "rflags_written"), ("zydis", "sreg_operand"),
                         ("xed", "privileged_attribute")):
         extra = {k: v for k, v in votes[name].extra.items() if k != field}
         broken = dict(votes, **{name: dataclasses.replace(votes[name], extra=extra)})
-        got = isa_tables.classify(tables, broken, data)
+        got = isa_tables.classify(tables, broken, data, redecode=_xed_redecode)
         assert got["result"] == "unclassified" and any("evidence" in r for r in got["reasons"]), (name, field)
     zydis = dataclasses.replace(votes["zydis"], extra=dict(votes["zydis"].extra, op_sig="gi"))
-    got = isa_tables.classify(tables, dict(votes, zydis=zydis), data)
+    got = isa_tables.classify(tables, dict(votes, zydis=zydis), data, redecode=_xed_redecode)
     assert got["result"] == "unclassified" and any("operand kinds" in r for r in got["reasons"])
 
 
@@ -2351,7 +2357,7 @@ def test_isa_impl_partial_lookup_is_kept_when_a_voter_fails():
     tables = isa_tables.load()
     votes = _votes("0FA2")
     failed = dict(votes, zydis=dataclasses.replace(votes["zydis"], status="error"))
-    got = isa_tables.classify(tables, failed, bytes.fromhex("0FA2") + ISA_PAD)
+    got = isa_tables.classify(tables, failed, bytes.fromhex("0FA2") + ISA_PAD, redecode=_xed_redecode)
     assert got["result"] == "unclassified" and got["keys"] == {"iced": "CPUID", "xed": "CPUID"}
 
 
@@ -2439,11 +2445,11 @@ def test_isa_impl2_iced_form_needs_exact_or_pinned_convention():
     data = bytes.fromhex("4801C8") + ISA_PAD
     votes = _votes("4801C8")
     iced = dataclasses.replace(votes["iced"], extra=dict(votes["iced"].extra, op_sig="gi"))
-    got = isa_tables.classify(tables, dict(votes, iced=iced), data)
+    got = isa_tables.classify(tables, dict(votes, iced=iced), data, redecode=_xed_redecode)
     assert got["result"] == "unclassified" and any("iced A" in r for r in got["reasons"])
     for field, value in (("op_sig", "g?"), ("must_be_cpl0", None), ("rflags_written", True)):
         iced = dataclasses.replace(votes["iced"], extra=dict(votes["iced"].extra, **{field: value}))
-        got = isa_tables.classify(tables, dict(votes, iced=iced), data)
+        got = isa_tables.classify(tables, dict(votes, iced=iced), data, redecode=_xed_redecode)
         assert got["result"] == "unclassified" and any("evidence" in r for r in got["reasons"]), field
     for hexbytes in ("3C05", "4883F805", "D1E8", "D3E0", "48AB", "D7", "DFE0"):   # pinned conventions
         assert _classify(tables, hexbytes)["result"] == "derived_ordinary", hexbytes
@@ -2463,7 +2469,7 @@ def test_isa_impl2_width_dependent_flags_need_agreeing_listed_widths():
     for xed_bits, zydis_bits in ((64, 32), (64, 0), (0, 32), (16, 16), (32, 64)):
         broken = dict(votes, xed=dataclasses.replace(votes["xed"], operand_bits=xed_bits),
                       zydis=dataclasses.replace(votes["zydis"], operand_bits=zydis_bits))
-        got = isa_tables.classify(tables, broken, data)
+        got = isa_tables.classify(tables, broken, data, redecode=_xed_redecode)
         assert got["result"] == "unclassified", (xed_bits, zydis_bits, got)
 
 
@@ -2536,3 +2542,107 @@ def test_isa_impl2_validator_compares_star_rules_and_exact_modrm():
     mapping = copy.deepcopy(files["map"])                         # exact ModRM FA vs /0: never the same vote
     mapping["rules"].append({"mnemonic": ["NOP"], "when": {"opcode": ["0F1E"], "modrm_reg": [0]}, "key": "PAUSE"})
     isa_tables.validate(files["conditions"], mapping, files["splits"], files["ordinary"])
+
+
+# -- ISA facts: implementation review round 3 (closing list) ---------------------------------------------------
+
+@needs
+def test_isa_impl3_xed_evidence_is_bound_to_the_bytes():
+    """impl r3 P1-1: a tampered XED iform or a vote that does not match the window is unclassified."""
+    import dataclasses
+
+    import isa_tables
+
+    tables = isa_tables.load()
+    data = bytes.fromhex("4801C8") + ISA_PAD
+    votes = _votes("4801C8")
+    xed = dataclasses.replace(votes["xed"], extra=dict(votes["xed"].extra, iform="ADD_GPRv_GPRv_03"))
+    got = isa_tables.classify(tables, dict(votes, xed=xed), data, redecode=_xed_redecode)
+    assert got["result"] == "unclassified" and "verified bytes" in got["reasons"][0]
+    cvtsi2sd = _votes("F20F2AC0")                                    # votes for F2 0F 2A, bytes of F3 0F 2A
+    got = isa_tables.classify(tables, cvtsi2sd, bytes.fromhex("F30F2AC0") + ISA_PAD, redecode=_xed_redecode)
+    assert got["result"] == "unclassified"
+    assert isa_tables.classify(tables, votes, data)["result"] == "unclassified"     # no re-decode, no binding
+
+
+@needs
+def test_isa_impl3_malformed_evidence_is_a_reason_not_an_exception():
+    import dataclasses
+
+    import isa_tables
+
+    tables = isa_tables.load()
+    data = bytes.fromhex("8B00") + ISA_PAD
+    votes = _votes("8B00")
+    for name, field, value in (("xed", "op_sig", []), ("iced", "cpuid_features", [{}]), ("zydis", "memory", [None]),
+                               ("iced", "memory", [{"segment": "ds"}])):
+        vote = dataclasses.replace(votes[name], extra=dict(votes[name].extra, **{field: value}))
+        got = isa_tables.classify(tables, dict(votes, **{name: vote}), data, redecode=_xed_redecode)
+        assert got["result"] == "unclassified" and any(name in r for r in got["reasons"]), (name, field)
+
+
+def test_isa_impl3_validator_matches_the_lookup():
+    import copy
+    import json
+
+    import isa_tables
+
+    root = Path(isa_tables.__file__).parent
+    files = {name: json.loads((root / isa_tables.FILES[name]).read_text(encoding="utf-8")) for name in isa_tables.FILES}
+
+    def rejects(rules):
+        mapping = copy.deepcopy(files["map"])
+        mapping["rules"] = rules
+        with pytest.raises(isa_tables.TableError):
+            isa_tables.validate(files["conditions"], mapping, files["splits"], files["ordinary"])
+
+    rules = files["map"]["rules"]
+    rejects([{"voters": ["xed"], "mnemonic": ["JZ"], "key": "JCC_NEAR"}] + rules)          # opcode-free JZ first
+    rejects(rules + [{"mnemonic": ["NOP"], "when": {"opcode": ["0f1f"]}, "key": "PAUSE"}])  # lower-case hex
+    rejects(rules + [{"mnemonic": ["NOP"], "when": {"opcode": ["90"], "prefix": "66"}, "key": "PAUSE"}])  # 66 + 90
+    rejects(rules + [{"mnemonic": ["*"], "when": {"opcode": ["90"]}, "key": "PAUSE"}])      # wildcard
+    fallback = copy.deepcopy(rules) + [
+        {"mnemonic": ["NOP"], "when": {"opcode": ["0F1E"], "modrm_reg": [7]}, "key": "PAUSE", "fallback": True}]
+    mapping = dict(copy.deepcopy(files["map"]), rules=fallback)                            # /7 covers FA / FB
+    isa_tables.validate(files["conditions"], mapping, files["splits"], files["ordinary"])
+
+
+@needs
+def test_isa_impl3_nop_ranges_and_segment_prefixes():
+    import isa_tables
+
+    tables = isa_tables.load()
+    for hexbytes in ("F3F390", "F3400F1EFA"):
+        xed = _votes(hexbytes)["xed"]
+        assert isa_tables.lookup(tables, xed, bytes.fromhex(hexbytes) + ISA_PAD) != "NOP", hexbytes
+    got = _classify(tables, "662E0F1F840000000000")                 # aligned multi-byte NOP
+    assert (got["result"], got.get("key")) == ("cited", "NOP")
+
+
+@needs
+def test_isa_impl3_conditional_writes_and_masked_semantics():
+    import isa_tables
+
+    tables = isa_tables.load()
+    for name, vote in _votes("0FB108").items():                     # CMPXCHG [rax], ecx: the store is conditional
+        accesses = isa_tables.memory_evidence(tables, vote)
+        assert accesses and all(m["read"] for m in accesses), name
+    for name, vote in _votes("660FF7C1").items():                   # MASKMOVDQU: every write conditional
+        accesses = isa_tables.memory_evidence(tables, vote)
+        writes = [m for m in accesses if m["write"]]
+        assert writes and all(m["cond_write"] and m["semantics"] == "masked_write" for m in writes), name
+    for name, vote in _votes("0FF7C1").items():                     # MASKMOVQ (outside the allowlist): same
+        writes = [m for m in isa_tables.memory_evidence(tables, vote) if m["write"]]
+        assert writes and all(m["cond_write"] for m in writes), name
+    lea = _votes("488D0408")["iced"].extra
+    assert lea["memory"] == [] and lea["memory_complete"] is True
+
+
+@needs
+def test_isa_impl3_shld_shrd_by_cl_convention():
+    import isa_tables
+
+    tables = isa_tables.load()
+    for hexbytes in ("0FA5C8", "480FA5C8", "0FADC8", "480FADC8", "0FA508"):
+        assert _classify(tables, hexbytes)["result"] == "derived_ordinary", hexbytes
+    assert _classify(tables, "660FA5C8")["key"] == "SHLD16"

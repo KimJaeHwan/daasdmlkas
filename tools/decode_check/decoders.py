@@ -436,8 +436,8 @@ class _Iced:
                 "sreg_operand": sreg, "lock": bool(instr.has_lock_prefix), "rep": rep, "op_sig": "".join(sig),
                 "mem_overflow": overflow, "memory": memory, "iform": "",
                 # an explicit memory operand that no used-memory entry matched: the access list is incomplete
-                "memory_complete": not overflow and (explicit_memory is None
-                                                     or any(m["role"] == "explicit" for m in memory))}
+                "memory_complete": not overflow and (explicit_memory is None or mnemonic in (m.LEA, m.NOP)
+                                                     or any(m_["role"] == "explicit" for m_ in memory))}
 
 
 _VOTERS = {}

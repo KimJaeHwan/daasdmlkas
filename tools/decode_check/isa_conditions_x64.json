@@ -284,6 +284,12 @@
                      "note": "ECX = 0: XCR0 (os_set); ECX = 1: XCR0 AND XINUSE (depends on the program's use of state components)"}],
              "data_faults": ["ECX not a supported XCR -> #GP(0)"]}
  },
+ "memory_semantics": {
+  "masked_write": {"mnemonics": {"xed": ["MASKMOVDQU", "MASKMOVQ"], "zydis": ["MASKMOVDQU", "MASKMOVQ"],
+                                 "iced": ["MASKMOVDQU", "MASKMOVQ"]},
+                   "rule": "the write to DS:[RDI] covers only the bytes whose mask byte has bit 7 set; mask 0: no write (every write access is conditional)",
+                   "cite": [{"doc": "SDM2", "entry": "MASKMOVDQU / MASKMOVQ", "part": "Operation"}]}
+ },
  "f2_meanings": {
   "POPF_FLAGS": {"cite": [{"doc": "SDM2", "entry": "POPF/POPFD/POPFQ", "part": "Operation (64-bit mode)"}],
                  "outputs": [{"output": "RFLAGS.IF", "loaded_when": ["CPL<=IOPL"], "else": "kept"},

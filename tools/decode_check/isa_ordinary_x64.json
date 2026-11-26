@@ -28210,6 +28210,24 @@
     "xed": "",
     "iced": "g",
     "reason": "FNSTSW AX"
+   },
+   {
+    "opcodes": [
+     "0FA5",
+     "0FAD"
+    ],
+    "xed": "gg",
+    "iced": "ggg",
+    "reason": "SHLD / SHRD by CL"
+   },
+   {
+    "opcodes": [
+     "0FA5",
+     "0FAD"
+    ],
+    "xed": "Mg",
+    "iced": "Mgg",
+    "reason": "SHLD / SHRD by CL, memory"
    }
   ]
  },
@@ -28217,6 +28235,10 @@
   "MASKMOVDQU": {
    "masked_write": true,
    "reason": "writes only the bytes whose mask byte has bit 7 set (mask 0: no write); the decoders report an unconditional write"
+  },
+  "MASKMOVQ": {
+   "masked_write": true,
+   "reason": "as MASKMOVDQU (not in the allowlist today: MMX_NOFP2)"
   }
  }
 }

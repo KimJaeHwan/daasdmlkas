@@ -1,7 +1,7 @@
 {
  "schema": "tbr-iclass-map-2",
  "design": ".census6/design_tbr_isa_facts_r3.md s1 (per-voter lookup); .census6/design_tbr_isa_ordinary_r3.md s3 / r2 A (cited first, NOP qualified, split fallbacks)",
- "matching": "per voter: the first rule whose voters include the voter, whose mnemonic list holds the voter's mnemonic (upper-cased; \"*\" = any) and whose `when` holds gives the key; no rule -> the voter's cited lookup is absent. key \"=\" is the upper-cased mnemonic itself.",
+ "matching": "per voter: the first rule whose voters include the voter, whose mnemonic list holds the voter's mnemonic (upper-cased) and whose `when` holds gives the key; no rule -> the voter's cited lookup is absent. key \"=\" is the upper-cased mnemonic itself. Hex values are canonical upper case.",
  "when_fields": {
   "operand_bits": "the voter's effective operand size",
   "flow": "the voter's G1 flow kind",
@@ -13,7 +13,9 @@
   "modrm": "the exact ModRM byte after `opcode` (list: any of, hex)",
   "prefixes_only": "every legacy prefix present is in this list (hex; [] = none allowed)",
   "rex_b": "REX.B as a boolean (absent REX = false)",
-  "rex_w": "REX.W as a boolean (absent REX = false)"
+  "rex_w": "REX.W as a boolean (absent REX = false)",
+  "prefixes_exact": "the legacy prefixes present, in order, are exactly this list (hex)",
+  "no_rex": "true: no effective REX prefix"
  },
  "rules": [
   {"voters": ["zydis", "xed"], "mnemonic": ["SYSRET"], "when": {"operand_bits": 64}, "key": "SYSRETQ"},
@@ -41,14 +43,15 @@
   {"mnemonic": ["JMP"], "when": {"flow": "jmp_near", "target_kind": ["register", "memory"]}, "key": "JMP_NEAR_INDIRECT"},
   {"mnemonic": ["JMP"], "when": {"flow": "jmp_near", "target_kind": ["direct"], "opcode": ["E9"]}, "key": "JMP_NEAR"},
   {"mnemonic": ["JMP"], "when": {"flow": "jmp_near", "target_kind": ["direct"], "opcode": ["EB"]}, "key": "JMP_SHORT"},
-  {"mnemonic": ["*"], "when": {"flow": "jcc", "counter": true, "opcode": ["E0", "E1", "E2", "E3"]}, "key": "LOOP_JCXZ"},
-  {"mnemonic": ["*"], "when": {"flow": "jcc", "counter": false,
-                                "opcode": ["70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "7A", "7B", "7C", "7D", "7E", "7F"]},
-   "key": "JCC_SHORT"},
-  {"mnemonic": ["*"], "when": {"flow": "jcc", "counter": false,
-                                "opcode": ["0F80", "0F81", "0F82", "0F83", "0F84", "0F85", "0F86", "0F87", "0F88", "0F89",
-                                           "0F8A", "0F8B", "0F8C", "0F8D", "0F8E", "0F8F"]},
-   "key": "JCC_NEAR"},
+  {"voters": ["iced"], "mnemonic": ["JCXZ", "JECXZ", "JRCXZ", "LOOP", "LOOPE", "LOOPNE"], "when": {"flow": "jcc", "counter": true, "opcode": ["E0", "E1", "E2", "E3"]}, "key": "LOOP_JCXZ"},
+  {"voters": ["iced"], "mnemonic": ["JO", "JNO", "JB", "JAE", "JE", "JNE", "JBE", "JA", "JS", "JNS", "JP", "JNP", "JL", "JGE", "JLE", "JG"], "when": {"flow": "jcc", "counter": false, "opcode": ["70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "7A", "7B", "7C", "7D", "7E", "7F"]}, "key": "JCC_SHORT"},
+  {"voters": ["iced"], "mnemonic": ["JO", "JNO", "JB", "JAE", "JE", "JNE", "JBE", "JA", "JS", "JNS", "JP", "JNP", "JL", "JGE", "JLE", "JG"], "when": {"flow": "jcc", "counter": false, "opcode": ["0F80", "0F81", "0F82", "0F83", "0F84", "0F85", "0F86", "0F87", "0F88", "0F89", "0F8A", "0F8B", "0F8C", "0F8D", "0F8E", "0F8F"]}, "key": "JCC_NEAR"},
+  {"voters": ["zydis"], "mnemonic": ["JCXZ", "JECXZ", "JRCXZ", "LOOP", "LOOPE", "LOOPNE"], "when": {"flow": "jcc", "counter": true, "opcode": ["E0", "E1", "E2", "E3"]}, "key": "LOOP_JCXZ"},
+  {"voters": ["zydis"], "mnemonic": ["JO", "JNO", "JB", "JNB", "JZ", "JNZ", "JBE", "JNBE", "JS", "JNS", "JP", "JNP", "JL", "JNL", "JLE", "JNLE"], "when": {"flow": "jcc", "counter": false, "opcode": ["70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "7A", "7B", "7C", "7D", "7E", "7F"]}, "key": "JCC_SHORT"},
+  {"voters": ["zydis"], "mnemonic": ["JO", "JNO", "JB", "JNB", "JZ", "JNZ", "JBE", "JNBE", "JS", "JNS", "JP", "JNP", "JL", "JNL", "JLE", "JNLE"], "when": {"flow": "jcc", "counter": false, "opcode": ["0F80", "0F81", "0F82", "0F83", "0F84", "0F85", "0F86", "0F87", "0F88", "0F89", "0F8A", "0F8B", "0F8C", "0F8D", "0F8E", "0F8F"]}, "key": "JCC_NEAR"},
+  {"voters": ["xed"], "mnemonic": ["JCXZ", "JECXZ", "JRCXZ", "LOOP", "LOOPE", "LOOPNE"], "when": {"flow": "jcc", "counter": true, "opcode": ["E0", "E1", "E2", "E3"]}, "key": "LOOP_JCXZ"},
+  {"voters": ["xed"], "mnemonic": ["JO", "JNO", "JB", "JNB", "JZ", "JNZ", "JBE", "JNBE", "JS", "JNS", "JP", "JNP", "JL", "JNL", "JLE", "JNLE"], "when": {"flow": "jcc", "counter": false, "opcode": ["70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "7A", "7B", "7C", "7D", "7E", "7F"]}, "key": "JCC_SHORT"},
+  {"voters": ["xed"], "mnemonic": ["JO", "JNO", "JB", "JNB", "JZ", "JNZ", "JBE", "JNBE", "JS", "JNS", "JP", "JNP", "JL", "JNL", "JLE", "JNLE"], "when": {"flow": "jcc", "counter": false, "opcode": ["0F80", "0F81", "0F82", "0F83", "0F84", "0F85", "0F86", "0F87", "0F88", "0F89", "0F8A", "0F8B", "0F8C", "0F8D", "0F8E", "0F8F"]}, "key": "JCC_NEAR"},
 
   {"voters": ["xed"], "mnemonic": ["MOV_CR", "MOV_DR"], "key": "="},
   {"voters": ["iced", "zydis"], "mnemonic": ["MOV"], "when": {"opcode": ["0F20", "0F22"]}, "key": "MOV_CR"},
@@ -74,9 +77,10 @@
   {"voters": ["xed"], "mnemonic": ["REP_OUTSD"], "key": "OUTSD"},
 
   {"mnemonic": ["NOP"], "when": {"opcode": ["90"], "prefixes_only": ["66"], "rex_b": false}, "key": "NOP"},
-  {"mnemonic": ["NOP"], "when": {"opcode": ["90"], "prefixes_only": ["F3"], "prefix": "F3", "rex_b": false}, "key": "NOP"},
-  {"mnemonic": ["NOP"], "when": {"opcode": ["0F1F"], "modrm_reg": [0], "prefixes_only": ["66"]}, "key": "NOP"},
-  {"mnemonic": ["NOP"], "when": {"opcode": ["0F1E"], "modrm": ["FA", "FB"], "prefix": "F3", "prefixes_only": ["F3"]},
+  {"mnemonic": ["NOP"], "when": {"opcode": ["90"], "prefixes_exact": ["F3"], "no_rex": true}, "key": "NOP"},
+  {"mnemonic": ["NOP"], "when": {"opcode": ["0F1F"], "modrm_reg": [0],
+                                  "prefixes_only": ["66", "2E", "3E", "26", "36", "64", "65"]}, "key": "NOP"},
+  {"mnemonic": ["NOP"], "when": {"opcode": ["0F1E"], "modrm": ["FA", "FB"], "prefixes_exact": ["F3"], "no_rex": true},
    "key": "NOP"},
 
   {"mnemonic": ["LGDT", "LIDT", "LLDT", "LTR", "CLTS", "LMSW", "INVD", "WBINVD", "INVLPG", "SWAPGS", "RDMSR", "WRMSR",

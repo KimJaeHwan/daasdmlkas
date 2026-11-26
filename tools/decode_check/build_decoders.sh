@@ -56,7 +56,7 @@ cd "$DEST/src/xed"
 if [ ! -f obj/wkit/lib/libxed.a ]; then
     "$PY" mfile.py --static >/dev/null   # (the working kit obj/wkit holds include/ and lib/libxed.a)
 fi
-gcc -O2 -fPIC -shared -I"$DEST/src/xed/obj/wkit/include" -I"$HERE/decoders" \
+gcc -O2 -fPIC -shared -pthread -I"$DEST/src/xed/obj/wkit/include" -I"$HERE/decoders" \
     "$HERE/decoders/xed_shim.c" "$DEST/src/xed/obj/wkit/lib/libxed.a" -o "$DEST/lib/libdc_xed.so"
 # the XED instruction-table dump for the ordinary-form generator (isa_ordinary_gen.py) and its tests
 gcc -O1 -I"$DEST/src/xed/obj/wkit/include" "$HERE/decoders/xed_catalogue.c" \
