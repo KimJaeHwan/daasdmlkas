@@ -446,6 +446,63 @@ class InstructionDataReference:
             )
 
 
+# (X-1, design_x1 r2 part 1 / r3) the one producer profile that carries the
+# raw per-instruction override state, the recorded landing pads and the
+# sealed stack-switch evidence; a function declaring it carries all of them
+# on every row (anything less is malformed, never "legacy")
+PRODUCER_PROFILE_X1 = "x1-producer-v1"
+FLOW_OVERRIDE_NAMES = frozenset({"NONE", "BRANCH", "CALL", "CALL_RETURN", "RETURN"})
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class OverrideReference:
+    """(X-1) a reference from the row whose type Ghidra marks as an override,
+    raw: ``in_index`` -- the target is program memory of the address index.
+    An external or unmapped target is recorded, never refused (Fable X-1 r1
+    P2-4)."""
+
+    target: AddressCoordinate
+    type_name: str
+    in_index: bool
+
+    def __post_init__(self) -> None:
+        require_exact(self.target, AddressCoordinate, "override reference target")
+        if type(self.type_name) is not str or not self.type_name:
+            raise TypeError("override reference type must be a nonempty str")
+        require_bool(self.in_index, "override reference in_index")
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionOverrideEvidence:
+    """(X-1, design_x1 r2 part 2) the producer's own per-instruction override
+    state: ``Instruction.getFlowOverride()``, ``isFallThroughOverridden()``,
+    ``isLengthOverridden()`` and the override-type references. A raw claim
+    (premise ``producer-override-report``, [TBR-G1-flow]); the flow flag
+    ``flow_type.is_override`` is a property of the computed flow type, not
+    this claim."""
+
+    flow_override: str
+    fallthrough_overridden: bool
+    length_overridden: bool
+    references: tuple[OverrideReference, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.flow_override) is not str or self.flow_override not in FLOW_OVERRIDE_NAMES:
+            raise ValueError("unknown flow override")
+        require_bool(self.fallthrough_overridden, "fallthrough_overridden")
+        require_bool(self.length_overridden, "length_overridden")
+        if type(self.references) is not tuple or any(type(item) is not OverrideReference for item in self.references):
+            raise TypeError("override references must be an exact tuple")
+        if tuple(sorted(set(self.references))) != self.references:
+            raise ValueError("override references must be sorted and unique")
+
+    @property
+    def none(self) -> bool:
+        """No override of any kind on the row."""
+        return (self.flow_override == "NONE" and not self.fallthrough_overridden
+                and not self.length_overridden and not self.references)
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatedInstruction:
     address: AddressCoordinate
@@ -462,9 +519,30 @@ class ValidatedInstruction:
     # no static exception handler (``exception_handlers: "none"``, derived
     # here, checked by ``ValidatedFunctionObservation``); None otherwise
     exception_targets: tuple[AddressCoordinate, ...] | None = None
+    # (X-1) under the producer profile only, None otherwise (so older digests
+    # are unchanged): the raw override claim, the number of raw flow targets
+    # dropped as external by target validation, and the landing pads the
+    # exporter recorded for the row from the protected ranges before its
+    # call-p-code filter (provenance; ``flow_targets`` keeps its projection)
+    override: InstructionOverrideEvidence | None = None
+    external_flow_targets: int | None = None
+    recorded_landing_pads: tuple[AddressCoordinate, ...] | None = None
 
     def __post_init__(self) -> None:
         require_exact(self.address, AddressCoordinate, "instruction address")
+        profile_fields = (self.override, self.external_flow_targets, self.recorded_landing_pads)
+        if any(item is None for item in profile_fields) and any(item is not None for item in profile_fields):
+            raise ValueError("the producer-profile row fields come together")
+        if self.override is not None:
+            require_exact(self.override, InstructionOverrideEvidence, "override evidence")
+            if type(self.external_flow_targets) is not int or self.external_flow_targets < 0:
+                raise TypeError("external flow target count must be a nonnegative int")
+            if type(self.recorded_landing_pads) is not tuple or any(
+                type(item) is not AddressCoordinate for item in self.recorded_landing_pads
+            ):
+                raise TypeError("recorded landing pads must be an exact coordinate tuple")
+            if tuple(sorted(set(self.recorded_landing_pads))) != self.recorded_landing_pads:
+                raise ValueError("recorded landing pads must be sorted and unique")
         if self.length is not None:
             if type(self.length) is not int:
                 raise TypeError("instruction length must be an exact int")
@@ -586,12 +664,20 @@ class ValidatedFunctionObservation:
     # frame PC of the function (x64 PE exception directory): every call row's
     # pad set is exactly ``()``. False in older Bundles and other formats.
     exception_handlers_none: bool = False
+    # (X-1) ``PRODUCER_PROFILE_X1`` when the exporter declared the producer
+    # profile for the function (every row then carries its fields); None in
+    # older Bundles
+    producer_profile: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.instructions) is not tuple or any(
             type(item) is not ValidatedInstruction for item in self.instructions
         ):
             raise TypeError("instructions must be an exact instruction tuple")
+        if self.producer_profile is not None and self.producer_profile != PRODUCER_PROFILE_X1:
+            raise ValueError("unknown producer profile")
+        if any((row.override is not None) is not (self.producer_profile is not None) for row in self.instructions):
+            raise ValueError("every row carries the producer-profile fields exactly when the function declares it")
         addresses = tuple(item.address for item in self.instructions)
         row_addresses = frozenset(addresses)
         if len(addresses) != len(row_addresses):

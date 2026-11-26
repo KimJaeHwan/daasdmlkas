@@ -263,7 +263,28 @@ def _validated_instruction_preimage(value: ValidatedInstruction) -> bytes:
         )
     if value.length is not None:
         pieces.extend((_text("tdo-v2-instruction-length-v1"), _u64(value.length)))
+    pieces.extend(_producer_profile_row_pieces(value))
     return b"".join(pieces)
+
+
+def _producer_profile_row_pieces(value: ValidatedInstruction) -> list[bytes]:
+    """(X-1, design_x1 r2 part 1) the producer profile's raw row fields as one
+    tagged block -- empty when absent, so older digests are unchanged; both
+    identity encoders use this one helper."""
+    if value.override is None:
+        return []
+    override = value.override
+    pieces = [
+        _text("tdo-v2-instruction-override-v1"),
+        _text(override.flow_override),
+        bytes((int(override.fallthrough_overridden), int(override.length_overridden))),
+        _u64(len(override.references)),
+    ]
+    for reference in override.references:
+        pieces.extend((_coordinate(reference.target), _text(reference.type_name), bytes((int(reference.in_index),))))
+    pieces.extend((_u64(value.external_flow_targets), _u64(len(value.recorded_landing_pads))))
+    pieces.extend(_coordinate(item) for item in value.recorded_landing_pads)
+    return pieces
 
 
 def _fallthrough_exit_preimage(value) -> bytes:
@@ -294,6 +315,12 @@ def _exception_handlers_preimage(value: ValidatedFunctionObservation) -> bytes:
     return _text("tdo-v2-exception-handlers-none-v1") if value.exception_handlers_none else b""
 
 
+def _producer_profile_preimage(value: ValidatedFunctionObservation) -> bytes:
+    """(X-1) the declared producer profile: empty when absent, so older digests
+    are unchanged."""
+    return b"" if value.producer_profile is None else _text("tdo-v2-producer-profile:" + value.producer_profile)
+
+
 def _observation_preimage(value: ValidatedFunctionObservation) -> bytes:
     require_exact(value, ValidatedFunctionObservation, "validated observation")
     return b"".join(
@@ -303,6 +330,7 @@ def _observation_preimage(value: ValidatedFunctionObservation) -> bytes:
             *(_validated_instruction_preimage(item) for item in value.instructions),
             _call_fallthrough_preimage(value),
             _exception_handlers_preimage(value),
+            _producer_profile_preimage(value),
         )
     )
 
@@ -350,8 +378,11 @@ def _stream_observation(
         if instruction.length is not None:
             update(_text("tdo-v2-instruction-length-v1"))
             update(_u64(instruction.length))
+        for piece in _producer_profile_row_pieces(instruction):
+            update(piece)
     update(_call_fallthrough_preimage(value))
     update(_exception_handlers_preimage(value))
+    update(_producer_profile_preimage(value))
 
 
 def _validated_flow_preimage(value) -> bytes:

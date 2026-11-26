@@ -9,6 +9,7 @@ from ._scope_contracts import (
     FallthroughExit,
     InstructionDataReference,
     InstructionFlowEvidence,
+    InstructionOverrideEvidence,
     MAX_CALL_CONTEXT_TARGET_REFERENCES,
     MAX_CALL_OCCURRENCES,
     MAX_DATA_REFERENCES_PER_INSTRUCTION,
@@ -21,6 +22,8 @@ from ._scope_contracts import (
     MAX_INSTRUCTION_LENGTH,
     MAX_OPCODE_ASCII_BYTES,
     MAX_OPERATION_INPUTS,
+    OverrideReference,
+    PRODUCER_PROFILE_X1,
     ValidatedFunctionObservation,
     ValidatedInstruction,
     ValidatedOperation,
@@ -109,10 +112,11 @@ def _validate_function_candidate(
         elif len(instructions_field.value) > MAX_FUNCTION_INSTRUCTIONS:
             defects.invalid = True
         else:
+            profile = _producer_profile(raw, defects)
             instructions = tuple(
                 item
                 for position, raw_instruction in enumerate(instructions_field.value)
-                if (item := _parse_instruction(raw_instruction, position, index, defects))
+                if (item := _parse_instruction(raw_instruction, position, index, defects, profile is not None))
                 is not None
             )
             addresses = tuple(item.address for item in instructions)
@@ -131,7 +135,7 @@ def _validate_function_candidate(
                     defects.invalid = True   # (as before S1: a fallthrough outside program memory)
             if not any((defects.duplicate, defects.invalid, defects.incomplete, defects.conflicting)):
                 try:
-                    observation = ValidatedFunctionObservation(instructions, isa, exits, no_handlers)
+                    observation = ValidatedFunctionObservation(instructions, isa, exits, no_handlers, profile)
                 except (TypeError, ValueError):
                     # (S1) e.g. a native call without fallthrough in an observation
                     # under the ISA call-fallthrough contract: malformed, refused
@@ -159,6 +163,7 @@ def _parse_instruction(
     position: int,
     index: _AddressSpaceIndex,
     defects: _ObservationDefects,
+    profile: bool = False,
 ) -> ValidatedInstruction | None:
     names = (
         "address",
@@ -169,6 +174,8 @@ def _parse_instruction(
         "flow_type",
         "operations",
         "length",
+        "override",
+        "recorded_landing_pads",
     )
     if type(raw) is not RawObject:
         defects.invalid = True
@@ -189,7 +196,16 @@ def _parse_instruction(
     # jump); it is not program memory and never this function's code, so it is
     # not a control successor: a jump there leaves the function. It is not
     # retained -- the naming sidecar carries call targets.
-    targets = _flow_targets(raw, index, defects, external_targets=True)
+    dropped: list = []
+    targets = _flow_targets(raw, index, defects, external_targets=True, dropped=dropped)
+    # (X-1) the producer profile's raw row fields: required on every row of a
+    # function declaring it, malformed anywhere else
+    override = pads = None
+    if profile:
+        override = _override_evidence(raw, index, defects)
+        pads = _recorded_landing_pads(raw, defects)
+    elif any(_field(raw, name).state is not _FieldState.MISSING for name in ("override", "recorded_landing_pads")):
+        defects.invalid = True
     operations_field = _field(raw, "operations")
     operations: tuple[ValidatedOperation, ...] = ()
     if operations_field.state is _FieldState.MISSING:
@@ -226,6 +242,8 @@ def _parse_instruction(
             defects.call_context_target_references += context_references
     if address is None or flow is None:
         return None
+    if profile and (override is None or pads is None):
+        return None
     try:
         return ValidatedInstruction(
             address,
@@ -235,10 +253,107 @@ def _parse_instruction(
             flow,
             data_references,
             length,
+            override=override,
+            external_flow_targets=len(dropped) if profile else None,
+            recorded_landing_pads=pads,
         )
     except (TypeError, ValueError):
         defects.conflicting = True
         return None
+
+
+def _producer_profile(raw: RawObject, defects: _ObservationDefects) -> str | None:
+    """(X-1) ``producer_profile: "x1-producer-v1"`` -- absent in older
+    Bundles; any other value is malformed."""
+    field = _field(raw, "producer_profile")
+    if field.state is _FieldState.MISSING:
+        return None
+    if field.state is _FieldState.DUPLICATE:
+        defects.duplicate = True
+        return None
+    if field.value != PRODUCER_PROFILE_X1:
+        defects.invalid = True
+        return None
+    return PRODUCER_PROFILE_X1
+
+
+def _exact_keys(value: object, names: tuple[str, ...], defects: _ObservationDefects) -> bool:
+    """An object with exactly these member names, each once."""
+    if type(value) is not RawObject:
+        defects.invalid = True
+        return False
+    members = [member.name for member in value.members]
+    if len(members) != len(set(members)):
+        defects.duplicate = True
+        return False
+    if set(members) != set(names):
+        defects.invalid = True
+        return False
+    return True
+
+
+def _override_evidence(
+    raw: RawObject, index: _AddressSpaceIndex, defects: _ObservationDefects
+) -> InstructionOverrideEvidence | None:
+    """(X-1, design_x1 r2 part 2) the row's ``override`` object: exact keys
+    and types; an override reference outside the address index is recorded
+    with ``in_index`` false (never a refusal)."""
+    field = _field(raw, "override")
+    if field.state is _FieldState.MISSING:
+        defects.invalid = True   # (declared profile, row without its claim)
+        return None
+    if field.state is _FieldState.DUPLICATE:
+        defects.duplicate = True
+        return None
+    value = field.value
+    if not _exact_keys(value, ("flow_override", "fallthrough_overridden", "length_overridden",
+                                "override_references"), defects):
+        return None
+    flow_override = _field(value, "flow_override").value
+    fallthrough = _field(value, "fallthrough_overridden").value
+    length = _field(value, "length_overridden").value
+    raw_references = _field(value, "override_references").value
+    if (type(flow_override) is not str or type(fallthrough) is not bool or type(length) is not bool
+            or type(raw_references) is not tuple or len(raw_references) > MAX_FLOW_TARGETS_PER_INSTRUCTION):
+        defects.invalid = True
+        return None
+    references = []
+    for item in raw_references:
+        if not _exact_keys(item, ("address", "type"), defects):
+            return None
+        target = _observation_coordinate(_field(item, "address").value, defects)
+        type_name = _field(item, "type").value
+        if target is None or type(type_name) is not str or not type_name:
+            defects.invalid = True
+            return None
+        references.append(OverrideReference(target, type_name, index.memory_coordinate(target)))
+    try:
+        return InstructionOverrideEvidence(flow_override, fallthrough, length, tuple(sorted(set(references))))
+    except (TypeError, ValueError):
+        defects.invalid = True
+        return None
+
+
+def _recorded_landing_pads(raw: RawObject, defects: _ObservationDefects) -> tuple[AddressCoordinate, ...] | None:
+    """(X-1, design_x1 r2 part 2) the landing pads the exporter recorded for
+    the row before its call-p-code filter: raw provenance, any coordinate."""
+    field = _field(raw, "recorded_landing_pads")
+    if field.state is _FieldState.MISSING:
+        defects.invalid = True
+        return None
+    if field.state is _FieldState.DUPLICATE:
+        defects.duplicate = True
+        return None
+    if type(field.value) is not tuple or len(field.value) > MAX_FLOW_TARGETS_PER_INSTRUCTION:
+        defects.invalid = True
+        return None
+    pads = []
+    for item in field.value:
+        coordinate = _observation_coordinate(item, defects)
+        if coordinate is None:
+            return None
+        pads.append(coordinate)
+    return tuple(sorted(set(pads)))
 
 
 def _instruction_length(raw: RawObject, defects: _ObservationDefects) -> int | None:
@@ -520,6 +635,7 @@ def _flow_targets(
     defects: _ObservationDefects,
     *,
     external_targets: bool = False,
+    dropped: list | None = None,
 ) -> tuple[AddressCoordinate, ...]:
     field = _field(raw, "flow_targets")
     if field.state is _FieldState.MISSING:
@@ -543,6 +659,8 @@ def _flow_targets(
         if target is not None:
             if not index.memory_coordinate(target):
                 if external_targets and index.external_coordinate(target):
+                    if dropped is not None:
+                        dropped.append(target)   # (X-1: the raw indicator survives as a count)
                     continue
                 defects.invalid = True
             targets.append(target)
