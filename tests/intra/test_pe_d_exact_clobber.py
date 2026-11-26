@@ -179,8 +179,8 @@ def test_an_untouching_callee_that_calls_an_opaque_function_keeps_nothing():
 
 
 class _ListedJump(FunctionBuilder):
-    """Its BRANCHIND lists the next instruction (a jump table inside the
-    function), or an address outside it (``outside``)."""
+    """Its BRANCHIND lists the next instruction, a local ``ret`` (a jump table
+    inside the function), and also an address outside it (``outside``)."""
 
     outside = False
 
@@ -189,46 +189,50 @@ class _ListedJump(FunctionBuilder):
         rows = document["instructions"]
         for index, row in enumerate(rows):
             if any(item["opcode"] == "BRANCHIND" for item in row["operations"]):
-                target = dict(rows[index + 1]["address"])
+                local = dict(rows[index + 1]["address"])
+                targets = [local]
                 if self.outside:
-                    target["byte_offset"] = OPAQUE
-                row["flow_targets"] = [target]
+                    targets.append({**local, "byte_offset": OPAQUE})
+                row["flow_targets"] = targets
         return document
 
 
 @pytest.mark.parametrize("outside", (False, True))
 def test_a_jump_table_inside_the_callee_keeps_the_certificate(outside):
-    """Fable PE-d r2 P2-1: a BRANCHIND whose listed targets are all inside the
-    function does not leave it (certificate kept); one listing an outside
-    target does (no certificate)."""
+    """Fable PE-d r2 P2-1 / Astra r3 P3: a BRANCHIND whose listed targets are
+    all inside the function does not leave it (certificate kept); one listing
+    the local ``ret`` and an outside target as well does (no certificate)."""
     from synthetic import RDX
 
     helper = _ListedJump(entry=HELPER)
     helper.outside = outside
     helper.push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX).jump_indirect(reg(RDX))
     helper.ret()
-    try:
-        complete = _complete(helper)
-    except Exception as error:   # (a shape admission refuses is no certificate either)
-        assert outside, error
-        return
-    assert complete is (not outside)
+    assert _complete(helper) is (not outside)
 
 
 INNER, WRITER = CODE_BASE + 0x880, CODE_BASE + 0x8C0
 
 
-def test_a_tail_jump_in_an_inner_call_voids_the_frame_proof():
-    """Astra PE-d r2 P1-2: push rbx; call inner; pop rbx; ret with inner tail-jumping
-    to a writer of [rsp + 8] -- the saved copy may be overwritten: no certificate."""
-    from synthetic import R8, add, store, tmp
+@pytest.mark.parametrize("inner_shape", ("ret", "tail", "conditional_tail"))
+def test_a_tail_jump_in_an_inner_call_voids_the_frame_proof(inner_shape):
+    """Astra PE-d r2 P1-2 / r3 P3: push rbx; call inner; rbx = 0; pop rbx; ret
+    with inner returning (certificate), tail-jumping to a writer of [rsp + 8]
+    always, or on one path while the other returns -- the saved copy may be
+    overwritten: no certificate. The conditional inner keeps a return token,
+    so its frame is built and only the open-control check refuses it."""
+    from synthetic import R8, ZF, add, store, tmp
 
     t = tmp(0x100)
     helper = FunctionBuilder(entry=HELPER).push(RBX).call(INNER).ins(copy(reg(RBX), const(0)))
     helper = helper.pop(RBX).ret()
-    inner = FunctionBuilder(entry=INNER).ins(copy(reg(RCX), const(1))).tail_call(WRITER)   # (no pure thunk)
+    inner = FunctionBuilder(entry=INNER).ins(copy(reg(RCX), const(1)))   # (no pure thunk)
+    if inner_shape == "conditional_tail":
+        inner = inner.cbranch("leave", reg(ZF, 1)).ret().label("leave").tail_call(WRITER)
+    else:
+        inner = inner.ret() if inner_shape == "ret" else inner.tail_call(WRITER)
     writer = FunctionBuilder(entry=WRITER).ins(add(t, reg(RSP), const(8)), store(t, reg(R8))).ret()
-    assert not _complete_with(helper, inner, writer)
+    assert _complete_with(helper, inner, writer) is (inner_shape == "ret")
 
 
 def test_a_recorded_fallthrough_exit_is_open_control():
@@ -241,27 +245,32 @@ def test_a_recorded_fallthrough_exit_is_open_control():
     discharger = CallClobberDischarger.__new__(CallClobberDischarger)
     discharger._open_control_cache = {}
     observation = SimpleNamespace(instructions=(), fallthrough_exits=(object(),))
-    view = SimpleNamespace(analysis=SimpleNamespace(evidence=SimpleNamespace(unit=SimpleNamespace(
-        observation=observation, scopes=None))), operations={})
     from tdo_v2._scope_contracts import AddressCoordinate
+    import tdo_v2.pcode_blocks as blocks
 
     entry = AddressCoordinate(1, 0x1000)
+    view = SimpleNamespace(analysis=SimpleNamespace(evidence=SimpleNamespace(unit=SimpleNamespace(
+        observation=observation, scopes=SimpleNamespace(function=SimpleNamespace(entry=entry))))), operations={})
     import tdo_v2.interprocedural as ip
-    original = ip._tail_jumps
+    original, original_exits = ip._tail_jumps, blocks.control_exits
     try:
         ip._tail_jumps = lambda unit: frozenset()
+        blocks.control_exits = lambda observation, entry: SimpleNamespace(non_return_exits=(), may_leave={})
         assert discharger._open_control(entry, view)
         discharger._open_control_cache.clear()
         observation.fallthrough_exits = ()
         assert not discharger._open_control(entry, view)
     finally:
         ip._tail_jumps = original
+        blocks.control_exits = original_exits
 
 
-def test_the_depth_cut_does_not_depend_on_root_order():
-    """Astra PE-d r2 P2-1: a root over a chain deeper than the bound, decided
-    first, must not leave a later root over a short part of the same chain
-    uncertified (results resting on the cut are not memoized)."""
+@pytest.mark.parametrize("long_first", (True, False))
+def test_the_depth_cut_does_not_depend_on_root_order(long_first):
+    """Astra PE-d r2 P2-1 / r3 P2-4: a root over a chain deeper than the bound
+    and a root over a short part of the same chain: the short one is certified
+    and the long one is not, whichever is decided first (results resting on
+    the cut are not memoized; a cut False is reused only with no more budget)."""
     depth = 18
     entries = [CODE_BASE + 0x100 + 0x10 * index for index in range(depth)]
     chain = [FunctionBuilder(entry=entry).call(entries[index + 1]).ret() if index + 1 < depth
@@ -276,9 +285,134 @@ def test_the_depth_cut_does_not_depend_on_root_order():
         return (FunctionBuilder(entry=entry).call(SOURCE).ins(copy(reg(RBX, 4), reg(RAX, 4))).call(helper)
                 .ins(copy(reg(RCX, 4), reg(RBX, 4))).call(SINK).ret())
 
-    functions = {"main": root_function(MAIN, HELPER), "second": root_function(second, LEAF), "source": _source(),
-                 "helper": long_helper, "short": short_helper, "sink": FunctionBuilder(entry=SINK).ret(),
-                 **{f"c{i}": body for i, body in enumerate(chain)}}
+    first, then = (HELPER, LEAF) if long_first else (LEAF, HELPER)
+    rest = {"source": _source(), "helper": long_helper, "short": short_helper, "sink": FunctionBuilder(entry=SINK).ret(),
+            **{f"c{i}": body for i, body in enumerate(chain)}}
+    functions = {"main": root_function(MAIN, first), "second": root_function(second, then), **rest}
+    if not long_first:
+        functions = {"second": functions["second"], "main": functions["main"], **rest}
     roots = analyze_program(functions, PROVIDER)
-    assert not roots[("main", "sink.arg0")].is_effectively_complete   # (beyond the bound: withheld)
-    assert roots[("second", "sink.arg0")].is_effectively_complete
+    long_root, short_root = ("main", "second") if long_first else ("second", "main")
+    assert not roots[(long_root, "sink.arg0")].is_effectively_complete   # (beyond the bound: withheld)
+    assert roots[(short_root, "sink.arg0")].is_effectively_complete
+
+
+# -- Astra PE-d r3 complete list ---------------------------------------------------------------
+
+@pytest.mark.parametrize("shape", ("ret", "tail", "conditional_tail", "conditional_override"))
+def test_an_outparam_writer_with_a_tail_is_no_must_write(shape):
+    """Astra r3 P1-3: the writer stores EDX through RCX, then returns (complete),
+    or tail-jumps to another store through RCX -- always, or on one path while
+    the other returns (no OUTPARAM_MUST_WRITTEN). The conditional shapes keep a
+    return token, so the frame is built and only the open-control check of
+    the out-parameter route refuses them."""
+    import test_outparam_discharge as out
+    from synthetic import R8, RDX, ZF, store
+
+    builder = _OverrideBranch if shape == "conditional_override" else FunctionBuilder
+    writer = builder(entry=out.WRITER).ins(store(reg(RCX), reg(RDX, 4)))
+    other = FunctionBuilder(entry=out.OTHER).ins(store(reg(RCX), reg(R8, 4))).ret()
+    if shape.startswith("conditional"):
+        writer = writer.cbranch("leave", reg(ZF, 1)).ret().label("leave").tail_call(out.OTHER)
+    else:
+        writer = writer.ret() if shape == "ret" else writer.tail_call(out.OTHER)
+    functions = {"main": out._main(before=(out._source_into_rdx,)), "source": out._source(),
+                 "source2": out._source(out.SOURCE2), "writer": writer, "other": other,
+                 "sink": FunctionBuilder(entry=out.SINK).ret()}
+    provider = boundary({"source": 4, "source2": 4}, {"sink": 4}, assume_call_effect=True)
+    root = analyze_program(functions, provider, assume_boundary_call_effects=True)[("main", "sink.arg0")]
+    assert root.is_effectively_complete is (shape == "ret")
+
+
+class _OverrideBranch(FunctionBuilder):
+    """Its terminal jump to another function is an override branch (Ghidra's
+    flow override), which ``_tail_jumps`` does not take for a tail."""
+
+    def to_json(self):
+        document = super().to_json()
+        for row in document["instructions"]:
+            if row["flow_type"].get("is_call") and row["flow_type"].get("is_terminal"):
+                row["flow_type"]["is_override"] = True
+        return document
+
+
+WRITES_RBX = CODE_BASE + 0x8C0
+
+
+@pytest.mark.parametrize("route", ("preserved", "must_write"))
+def test_an_override_branch_after_the_restore_or_the_write_is_open_control(route):
+    """Astra r3 P1-2: the block graph's exit facts (``control_exits``) catch a
+    departure ``_tail_jumps`` leaves out."""
+    writer = FunctionBuilder(entry=WRITES_RBX).ins(copy(reg(RBX), const(9)), copy(reg(RAX, 4), const(9, 4))).ret()
+    if route == "preserved":
+        helper = _OverrideBranch(entry=HELPER)
+        helper.push(RBX).ins(copy(reg(RBX), const(0))).pop(RBX).tail_call(WRITES_RBX)
+        try:
+            assert not _complete_with(helper, writer)
+        except Exception as error:   # (admission may refuse the shape: no certificate either)
+            assert "override" in str(error).lower() or "flow" in str(error).lower(), error
+        return
+    source = _OverrideBranch(entry=SOURCE)
+    source.ins(copy(reg(RAX, 4), const(7, 4))).tail_call(WRITES_RBX)
+    main = FunctionBuilder(entry=MAIN).call(SOURCE).ins(copy(reg(RCX, 4), reg(RAX, 4))).call(SINK).ret()
+    functions = {"main": main, "source": source, "writer": writer, "sink": FunctionBuilder(entry=SINK).ret()}
+    try:
+        assert not analyze_program(functions, PROVIDER)[("main", "sink.arg0")].is_effectively_complete
+    except Exception as error:
+        assert "override" in str(error).lower() or "flow" in str(error).lower(), error
+
+
+@pytest.mark.parametrize("conditional", (False, True))
+def test_a_replacement_write_must_hold_on_every_exit(conditional):
+    """Astra r3 P1-1: helper: eax = source() + 1; [if (zf) eax = [rsi]]; ret --
+    the replacement route needs the write to be the sole terminal value."""
+    from synthetic import RSI, ZF, add, load
+
+    helper = (FunctionBuilder(entry=HELPER).sub_rsp(0x28).call(SOURCE)
+              .ins(add(reg(RAX, 4), reg(RAX, 4), const(1, 4))))
+    if conditional:
+        helper.cbranch("done", reg(ZF, 1)).ins(load(reg(RAX, 4), reg(RSI))).label("done")
+    helper.add_rsp(0x28).ret()
+    main = FunctionBuilder(entry=MAIN).call(HELPER).ins(copy(reg(RCX, 4), reg(RAX, 4))).call(SINK).ret()
+    functions = {"main": main, "source": _source(), "helper": helper, "sink": FunctionBuilder(entry=SINK).ret()}
+    assert analyze_program(functions, PROVIDER)[("main", "sink.arg0")].is_effectively_complete is (not conditional)
+
+
+def test_a_cut_false_is_reused_only_with_no_more_budget():
+    """Astra r3 P2-4 / Fable r3 P2-1, the cache contract itself: a False that a
+    guard decided is kept with its budget; the same question in the same
+    context is answered from it with no more budget, and computed again with
+    more; an answer with no cut below it is memoized; a question met again
+    while being answered (a cycle) is a cut False."""
+    from tdo_v2.integration.configured_call_clobber_discharge import CallClobberDischarger
+
+    discharger = CallClobberDischarger.__new__(CallClobberDischarger)
+    discharger._cut_events, discharger._cut_budgets = 0, {}
+    cache, calls, active = {}, [], (("caller", "read"),)
+
+    def cut():
+        calls.append("cut")
+        discharger._cut_events += 1   # (a guard below decided)
+        return False
+
+    def proved():
+        calls.append("proved")
+        return True
+
+    assert discharger._cached("keeps", cache, "q", 3, active, cut) is False
+    assert "q" not in cache   # (resting on a cut: not memoized)
+    assert discharger._cached("keeps", cache, "q", 3, active, proved) is False   # (no more budget: reused)
+    assert discharger._cached("keeps", cache, "q", 2, active, proved) is False
+    assert calls == ["cut"]
+    assert discharger._cached("keeps", cache, "q", 4, (("other", "read"),), proved) is True   # (another context)
+    del cache["q"]
+    assert discharger._cached("keeps", cache, "q", 4, active, proved) is True   # (more budget: computed again)
+    assert calls == ["cut", "proved", "proved"] and cache["q"] is True
+    assert discharger._cached("keeps", cache, "q", 1, active, cut) is True   # (memoized: no cut below it)
+
+    def cycle():
+        return discharger._cached("keeps", cache, "loop", 5, active, cycle)
+
+    before = discharger._cut_events
+    assert discharger._cached("keeps", cache, "loop", 5, active, cycle) is False
+    assert discharger._cut_events > before and "loop" not in cache

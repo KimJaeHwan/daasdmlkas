@@ -72,6 +72,10 @@ class CallClobberDischarge:
     kinds: tuple[DischargeKind, ...]
 
 
+_PENDING = object()   # (a question being answered: met again, a cycle)
+_ABSENT = object()
+
+
 class CallClobberDischarger:
     """Per-program cache of callee facts; one instance per engine run.
 
@@ -97,7 +101,15 @@ class CallClobberDischarger:
         self._kept: dict = {}
         self._open_control_cache: dict = {}
         self._keep_depth = 0   # (Astra PE-d r1 P2: a bounded recursion)
-        self._keep_cut = False   # (a result on this path rests on the depth cut: not memoized)
+        # (PE-d r4, Astra r3 P2-4 / Fable r3 P2-1) every answer a depth bound or
+        # a cycle guard decided counts as a cut; an answer computed with no cut
+        # below it is memoized as before; a False resting on a cut is kept with
+        # the budget it had and its active callees, and reused only for the same
+        # question in the same context with no more budget (a True never rests
+        # on a cut: the guards only answer False) -- no root order changes a
+        # result, and a chain is not re-evaluated exponentially
+        self._cut_events = 0
+        self._cut_budgets: dict = {}
         self._frame_safe: dict[tuple[AddressCoordinate, int, int], bool] = {}
         from ..call_clobber import rows_by_debt
 
@@ -136,12 +148,46 @@ class CallClobberDischarger:
 
     def _judge(self, entry, read, context, active):
         """``_discharge_read`` once per (entry, row, context, active) within one
-        ``discharge()``: a read's debt nodes (one per crossing call) share rows."""
+        ``discharge()``: a read's debt nodes (one per crossing call) share rows.
+        (PE-d r4) a judgement resting on a cut below it (the keep depth is not
+        part of this key) is not memoized."""
         key = (entry, read, id(context), active)
         judged = self._judged.get(key)
         if judged is None or judged[0] is not context:   # (the context kept: its id is not reused)
-            judged = self._judged[key] = (context, self._discharge_read(entry, read, context, active))
+            before = self._cut_events
+            value = self._discharge_read(entry, read, context, active)
+            if self._cut_events != before:
+                return value
+            judged = self._judged[key] = (context, value)
         return judged[1]
+
+    def _cached(self, kind, cache, key, remaining, active, compute):
+        """(PE-d r4) ``compute()`` once per question, budget-aware (see
+        ``_cut_events``): ``remaining`` -- the proof depth still available."""
+        held = cache.get(key, _ABSENT)
+        if held is _PENDING:
+            self._cut_events += 1   # (a cycle: answered False on this path)
+            return False
+        if held is not _ABSENT:
+            return held
+        context = (kind, key, frozenset(item[0] for item in active))
+        budget = self._cut_budgets.get(context)
+        if budget is not None and remaining <= budget:
+            self._cut_events += 1   # (still resting on that cut)
+            return False
+        cache[key] = _PENDING
+        before = self._cut_events
+        try:
+            value = bool(compute())
+        except BaseException:
+            cache.pop(key, None)
+            raise
+        if value or self._cut_events == before:
+            cache[key] = value
+        else:
+            del cache[key]
+            self._cut_budgets[context] = max(remaining, budget) if budget is not None else remaining
+        return value
 
     def _rows(self, entry) -> tuple:
         """Every row of ``entry``'s debt nodes, once."""
@@ -151,6 +197,7 @@ class CallClobberDischarger:
     def _discharge_read(self, entry, read, context, active):
         marker = (entry, read.operation_key)
         if marker in active or len(active) >= MAX_FRAME_DEPTH:
+            self._cut_events += 1   # (PE-d r4: a guard decided)
             return None
         active = (*active, marker)
         targets = self._targets[entry]
@@ -180,6 +227,8 @@ class CallClobberDischarger:
             # (PE-d, amendment 7) the proven write is the value at every exit
             and (span.object_id.kind is not StorageObjectKind.REGISTER_FILE
                  or row.proof.callee_entry in self._views
+                 # (Astra PE-d r3 P1-1) the sole terminal value on every exit
+                 and self._terminal_register_write(row.proof.callee_entry, row.proof.callee_write_operation_key, span)
                  and not self._crossed_at_exit(row.proof.callee_entry, self._views[row.proof.callee_entry], span,
                                                active))
             and self._write_slice_effective(
@@ -275,7 +324,9 @@ class CallClobberDischarger:
         own call debt must be discharged so its address chain is exact.
         """
         view = self._views.get(callee)
-        frame = None if view is None else self._frame(callee)
+        if view is None or self._open_control(callee, view):
+            return False   # (Astra PE-d r3 P1-3: what runs after may rewrite the caller bytes)
+        frame = self._frame(callee)
         if frame is None or frame.unresolved_writes:
             return False
         written = tuple(
@@ -410,23 +461,16 @@ class CallClobberDischarger:
 
     # -- PRESERVED -----------------------------------------------------------
     def _preserves(self, callee: AddressCoordinate, span: ByteSpan, active) -> bool:
-        key = (callee, span.canonical_key)
-        if key not in self._preserved:
+        def compute():
             view = self._views.get(callee)
-            self._preserved[key] = False   # (a cycle through this question proves nothing)
-            cut_before, self._keep_cut = self._keep_cut, False
-            result = view is not None and _callee_preserves(
+            return view is not None and _callee_preserves(
                 view,
                 span,
                 lambda operation_key: self._callee_read_discharged(callee, operation_key, active),
             ) and not self._crossed_at_exit(callee, view, span, active)
-            if self._keep_cut:   # (rests on the depth cut: not memoized)
-                del self._preserved[key]
-                self._keep_cut = True
-                return result
-            self._keep_cut = cut_before
-            self._preserved[key] = result
-        return self._preserved[key]
+
+        return self._cached("preserves", self._preserved, (callee, span.canonical_key),
+                            MAX_FRAME_DEPTH - self._keep_depth, active, compute)
 
     def _crossed_at_exit(self, callee, view, span, active) -> bool:
         """(PE-d, S3 design r18 amendment 7) Some byte of ``span`` may change
@@ -491,14 +535,21 @@ class CallClobberDischarger:
             from ..control_context import unknown_transfer_sites
             from ..interprocedural import _tail_jumps, function_key
 
+            from ..pcode_blocks import control_exits
+
             unit = view.analysis.evidence.unit
             rows = unit.observation.instructions
             local = {row.address for row in rows}
             leaves = any(any(operation.opcode == "BRANCHIND" for operation in row.operations)
                          and (not row.flow_targets or any(target not in local for target in row.flow_targets))
                          for row in rows)
+            # (Astra PE-d r3 P1-2) the block graph's own exit facts: an
+            # unsupported graph, a reachable exit not ending in RETURN (a tail,
+            # an override branch, a jump out), a row that may leave
+            exits = control_exits(unit.observation, unit.scopes.function.entry)
             held = self._open_control_cache[callee] = bool(
-                unknown_transfer_sites(function_key(callee), unit.observation) or leaves or _tail_jumps(unit)
+                exits is None or exits.non_return_exits or exits.may_leave
+                or unknown_transfer_sites(function_key(callee), unit.observation) or leaves or _tail_jumps(unit)
                 or getattr(unit.observation, "fallthrough_exits", ()))
         return held
 
@@ -506,45 +557,36 @@ class CallClobberDischarger:
         """(PE-d) ``callee`` returns ``span`` unchanged on every exit: it never
         writes those bytes and nothing crosses them at an exit, or its saved
         copy restores them (``_preserves``)."""
-        key = (callee, span.canonical_key)
-        if key in self._kept:
-            return self._kept[key]
-        self._kept[key] = False   # (a cycle proves nothing)
-        view = self._views.get(callee)
-        if view is None or self._open_control(callee, view):
-            return False
-        if self._keep_depth >= MAX_FRAME_DEPTH:
-            # (too deep: withheld for this question, not decided -- and no caller
-            # on this path memoizes a result the cut decided, Astra r2 P2-1)
-            del self._kept[key]
-            self._keep_cut = True
-            return False
-        cut_before, self._keep_cut = self._keep_cut, False
-        # never written by the callee itself, and every call in it a direct
-        # internal call whose callee keeps those bytes too (an untouched byte
-        # has no exit crossing of its own: the calls decide -- a CALLOTHER, an
-        # indirect or opaque call may change it)
-        targets = self._targets.get(callee, {})
-        calls = [operation for operation in view.operations
-                 if operation.endswith((":CALL", ":CALLIND", ":CALLOTHER"))]
-        # (Fable PE-d r1 P1-1) untouched = no definition but ENTRY overlaps the
-        # span -- not "no write shared by every exit": a write on one path, two
-        # exits writing differently, or a JOIN at one exit all touch it
-        self._keep_depth += 1
-        try:
-            untouched = (
-                not any(definition.kind is not MemoryDefinitionKind.ENTRY and definition.span.overlaps(span)
-                        for definition in view.memory.definitions)
-                and not view.normalized.memory_graph.unresolved_write_nodes
-                and all(call in targets and self._keeps(targets[call], span, active) for call in calls)
-            )
-            result = self._kept[key] = untouched or self._preserves(callee, span, active)
-        finally:
-            self._keep_depth -= 1
-            if self._keep_cut:
-                self._kept.pop(key, None)
-            self._keep_cut = self._keep_cut or cut_before
-        return result
+        def compute():
+            view = self._views.get(callee)
+            if view is None or self._open_control(callee, view):
+                return False
+            if self._keep_depth >= MAX_FRAME_DEPTH:
+                self._cut_events += 1   # (too deep: withheld, by the budget)
+                return False
+            # never written by the callee itself, and every call in it a direct
+            # internal call whose callee keeps those bytes too (an untouched byte
+            # has no exit crossing of its own: the calls decide -- a CALLOTHER,
+            # an indirect or opaque call may change it). (Fable PE-d r1 P1-1)
+            # untouched = no definition but ENTRY overlaps the span -- not "no
+            # write shared by every exit"
+            targets = self._targets.get(callee, {})
+            calls = [operation for operation in view.operations
+                     if operation.endswith((":CALL", ":CALLIND", ":CALLOTHER"))]
+            self._keep_depth += 1
+            try:
+                untouched = (
+                    not any(definition.kind is not MemoryDefinitionKind.ENTRY and definition.span.overlaps(span)
+                            for definition in view.memory.definitions)
+                    and not view.normalized.memory_graph.unresolved_write_nodes
+                    and all(call in targets and self._keeps(targets[call], span, active) for call in calls)
+                )
+                return untouched or self._preserves(callee, span, active)
+            finally:
+                self._keep_depth -= 1
+
+        return self._cached("keeps", self._kept, (callee, span.canonical_key),
+                            MAX_FRAME_DEPTH - self._keep_depth, active, compute)
 
     def _callee_read_discharged(self, callee, operation_key, active) -> bool:
         context = _EMPTY_CONTEXT
@@ -571,11 +613,10 @@ class CallClobberDischarger:
         if abs(start) >= MAX_FRAME_OFFSET or abs(stop) >= MAX_FRAME_OFFSET:
             return False
         if len(active) >= MAX_FRAME_DEPTH or any(item[0] == callee for item in active):
+            self._cut_events += 1   # (PE-d r4: a guard decided)
             return False
-        key = (callee, start, stop)
-        if key not in self._frame_safe:
-            self._frame_safe[key] = self._check_callee_frame(callee, start, stop, active)
-        return self._frame_safe[key]
+        return self._cached("frame", self._frame_safe, (callee, start, stop), MAX_FRAME_DEPTH - len(active),
+                            active, lambda: self._check_callee_frame(callee, start, stop, active))
 
     def _check_callee_frame(self, callee, start: int, stop: int, active) -> bool:
         view = self._views.get(callee)
