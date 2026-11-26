@@ -871,7 +871,7 @@ def pcodeop_digest(models) -> str:
 
 
 def refusal(model_file, entry, *, external_models, pcodeop_models, private_frame_above,
-            language=None, catalog=None, stack_authority=None) -> str | None:
+            language=None, catalog=None, policy="s3-off", stack_authority=None) -> str | None:
     """Why a template may not be applied in this run, or None: another engine
     version or language version (register offsets are read in this program's
     register file); other analysis parameters or p-code op models; a model
@@ -884,7 +884,9 @@ def refusal(model_file, entry, *, external_models, pcodeop_models, private_frame
 
     if entry.refusal is not None:
         return entry.refusal
-    if stack_authority is not None:
+    if policy == "s3-on" and stack_authority is None:
+        return "an s3-on run needs the stack-switch authority of this template's library"   # (Fable r1 P2-1)
+    if policy == "s3-on":
         # (X-1 r4 4.5 item 4) an s3-on run: the template carries what it was
         # derived under -- the library Bundle's verified seal, the evidence
         # digest, the policy and the coverage decision -- and it must be this

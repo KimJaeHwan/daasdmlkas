@@ -186,6 +186,8 @@ public class GhidraV2BundleExport extends HeadlessScript {
     private static final String PRODUCER_PROFILE = "x1-producer-v1";
     // (X-1, design_x1 r4 4.2) the exported row map the scanner's verifiable digest covers
     private final Map<Address, List<Address>> exportedRows = new LinkedHashMap<>();
+    // (Astra X-1a r1 P1-7) each exported row's attested digest line, taken when it was collected
+    private final Map<Address, String> collectedLines = new HashMap<>();
 
     private static final class ObservedFunction {
         final AddressSet body;
@@ -729,11 +731,11 @@ public class GhidraV2BundleExport extends HeadlessScript {
             // observations are collected, inside the scan and before sealing: any
             // difference (or a scan failure) fails the export.
             Map<String, Object> collected = GhidraV2StackSwitchScanner.listingDigest(
-                currentProgram, exportedRows, monitor);
+                currentProgram, exportedRows, collectedLines, monitor);
             Map<String, Object> scanEvidence = new GhidraV2StackSwitchScanner(currentProgram, monitor, true)
                 .evidence(options.originalSha256, exportedRows);
             Map<String, Object> sealing = GhidraV2StackSwitchScanner.listingDigest(
-                currentProgram, exportedRows, monitor);
+                currentProgram, exportedRows, null, monitor);
             if (!collected.equals(scanEvidence.get("listing_digest")) || !collected.equals(sealing)) {
                 throw new IOException("the listing changed between observation, stack scan and sealing");
             }
@@ -1533,6 +1535,7 @@ public class GhidraV2BundleExport extends HeadlessScript {
             rows.add(instruction);
             exportedRows.computeIfAbsent(function.getEntryPoint(), ignored -> new ArrayList<>())
                 .add(instruction.getAddress());
+            collectedLines.put(instruction.getAddress(), GhidraV2StackSwitchScanner.attestedLine(instruction));
             Map<String, Object> row = instruction(
                 instruction,
                 observed.exceptionalTargets.getOrDefault(

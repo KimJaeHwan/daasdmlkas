@@ -65,7 +65,7 @@ public class GhidraV2StackSwitchScan extends GhidraScript {
         GhidraV2StackSwitchScanner scanner = new GhidraV2StackSwitchScanner(currentProgram, monitor, conservative);
         Map<String, Object> evidence = conservative ? scanner.evidence(expected, null)
             : scanner.legacyEvidence(expected);
-        Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(evidence) + "\n",
+        Files.writeString(output, new GsonBuilder().serializeNulls().setPrettyPrinting().create().toJson(evidence) + "\n",
             StandardCharsets.UTF_8);
         println("stack-switch scan: " + evidence.get("functions_scanned") + " functions, " +
             evidence.get("instructions_scanned") + " instructions (" + evidence.get("instructions_outside_functions") +

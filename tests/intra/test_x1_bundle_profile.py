@@ -115,12 +115,13 @@ def test_a_legacy_bundle_admits_as_before(generation):
     assert observations and all(item is not None and item.producer_profile is None for item in observations)
 
 
-def test_a_full_profile_admits(generation):
+def test_a_full_profile_with_placeholder_evidence_is_refused(generation):
+    """Astra X-1a r1 P1-3: normal admission verifies the sealed evidence -- a structurally complete profile
+    whose evidence member is a placeholder is refused (the real-export positive case is in
+    test_x1_bundle_evidence)."""
     _declare(generation)
-    observations = _observations(generation)
-    assert observations and all(item is not None and item.producer_profile == PRODUCER_PROFILE_X1
-                                for item in observations)
-    assert all(row.override.none for item in observations for row in item.instructions)
+    with pytest.raises(BundleAdmissionError, match="stack-switch evidence"):
+        _observations(generation)
 
 
 @pytest.mark.parametrize("variant", ("no evidence member", "evidence out of its slot", "unknown profile",
@@ -138,14 +139,46 @@ def test_a_partial_bundle_profile_is_refused(generation, variant):
         _observations(generation)
 
 
-def test_a_function_without_the_bundle_profile_is_refused(generation):
-    _declare(generation, skip=1)
-    observations = _observations(generation)
-    assert observations[1] is None
-    assert all(item is not None for index, item in enumerate(observations) if index != 1)
-
-
 def test_a_profiled_function_in_a_legacy_bundle_is_refused(generation):
     _declare(generation, evidence=False, profile=None)
     observations = _observations(generation)
     assert observations and all(item is None for item in observations)
+
+
+def test_a_format_1_bundle_reads_as_before(generation, tmp_path):
+    """Astra X-1a r1 P1-1: the profile check lives on the shared provider -- a format-1 Bundle (made here from the
+    corpus generation: observations only) reads through the compatibility provider with the same observation
+    digests as the format-2 admission."""
+    from tdo_v2._configured_bundle_reader import read_configured_bundle_v1_compatibility
+    from tdo_v2._scope_wire import _observation_digest
+    from tdo_v2.integration.configured_bundle import ConfiguredBundleCapture
+
+    expected = [_observation_digest(item) for item in _observations(generation)]
+    manifest = json.loads((generation / "manifest.json").read_text())
+    root = tmp_path / "v1root"
+    root.mkdir(mode=0o750)
+    with ConfiguredBundleCapture(root) as capture:
+        target = capture.published_path
+        target.mkdir(mode=0o750)
+        keep = {"original", "program", *(row["member_id"] for row in manifest["blocks"] if row.get("member_id")),
+                *(row["observation_member"] for row in manifest["functions"])}
+        members = [row for row in manifest["members"] if row["id"] in keep]
+        for row in members:
+            shutil.copy2(generation / row["path"], target / row["path"])
+            (target / row["path"]).chmod(0o640)
+        v1 = {"schema_version": 1, "generation_id": capture.generation_hex, "original_member_id": "original",
+              "program_member_id": "program", "members": members, "blocks": manifest["blocks"],
+              "functions": [{"id": row["id"], "member_id": row["observation_member"]}
+                            for row in manifest["functions"]]}
+        data = json.dumps(v1, separators=(",", ":")).encode()
+        (target / "manifest.json").write_bytes(data)
+        (target / "seal.json").write_text(json.dumps(
+            {"schema_version": 1, "generation_id": capture.generation_hex, "manifest_size": len(data),
+             "manifest_sha256": _sha(data)}, separators=(",", ":")))
+        for path in (target / "manifest.json", target / "seal.json"):
+            path.chmod(0o640)
+        provider = read_configured_bundle_v1_compatibility(capture.admit_published_v1_compatibility())
+        with open_configured_extraction(provider, _mint_orchestrator_capability()) as session:
+            digests = [None if unit.observation is None else _observation_digest(unit.observation)
+                       for unit in session.iter_scoped_functions()]
+    assert digests == expected and all(item is not None for item in digests)

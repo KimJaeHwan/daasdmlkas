@@ -35,7 +35,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import struct
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 FORMAT = "tdo-v2-stack-switch-evidence"
@@ -104,7 +105,20 @@ class StackEvidence:
     kernel_transfers: tuple = ()
     bound: bool = False
     listing_digest: tuple | None = None   # (verifiable, attested)
+    # (Astra X-1a r1 P1-3 / P1-4) set only by ``verify_bundle_evidence`` -- the
+    # admission of the Bundle the evidence is sealed in: that Bundle's manifest
+    # SHA-256, the S3 applicability of its original image (True / False / None
+    # undecidable) and whether the scanner's stack pointer is the unique
+    # eight-byte RSP of its sealed register table
     seal: str | None = None
+    verified: bool = False
+    applicable: bool | None = None
+    rsp_verified: bool = False
+    # (v2) the s3-on scan's language flag and the fallback verdict (every
+    # instruction start a destination, r4 4.8 -- measured, not authority)
+    stack_pointer: tuple | None = None
+    language_x86_64: bool | None = None
+    fallback_switches: tuple | None = None
 
     def _scanned(self) -> bool:
         return self.functions_scanned > 0 and self.instructions_scanned > 0
@@ -123,9 +137,10 @@ class StackEvidence:
         return text
 
 
-def load_stack_evidence(path, *, data: bytes | None = None, seal: str | None = None) -> StackEvidence:
-    """A v1 or v2 evidence file. ``data`` / ``seal``: the bytes of a Bundle's
-    sealed evidence member and that Bundle's manifest SHA-256 (X-1)."""
+def load_stack_evidence(path, *, data: bytes | None = None) -> StackEvidence:
+    """A v1 or v2 evidence file (``data``: its bytes, e.g. a Bundle member).
+    The result is unverified: only ``verify_bundle_evidence`` binds it to a
+    Bundle (Astra X-1a r1 P1-3)."""
     if data is None:
         data = Path(path).read_bytes()
     try:
@@ -133,7 +148,7 @@ def load_stack_evidence(path, *, data: bytes | None = None, seal: str | None = N
     except ValueError as error:
         raise EvidenceError(f"{path}: not JSON") from error
     if type(raw) is dict and raw.get("version") == 2:
-        return _load_v2(path, data, raw, seal)
+        return _load_v2(path, data, raw)
     if type(raw) is not dict or set(raw) != _FIELDS or raw["format"] != FORMAT \
             or type(raw["version"]) is not int or raw["version"] != 1:
         raise EvidenceError(f"{path}: not a {FORMAT} file (version 1)")
@@ -185,7 +200,7 @@ def _switches(rows, path, *, cause: bool = False) -> list:
     return switches
 
 
-def _load_v2(path, data: bytes, raw: dict, seal: str | None) -> StackEvidence:
+def _load_v2(path, data: bytes, raw: dict) -> StackEvidence:
     if set(raw) != _FIELDS_V2 or raw["format"] != FORMAT or raw["detector"] != DETECTORS[2]:
         raise EvidenceError(f"{path}: not a {FORMAT} file (version 2, {DETECTORS[2]})")
     if any(type(raw[key]) is not str or not raw[key] for key in ("program", "language", "stack_pointer")):
@@ -196,8 +211,9 @@ def _load_v2(path, data: bytes, raw: dict, seal: str | None) -> StackEvidence:
     off, on = policies["s3-off"], policies["s3-on"]
     if type(off) is not dict or set(off) != {"switches", "exceptions"} or off["exceptions"] != list(V5_OFF_EXCEPTIONS):
         raise EvidenceError(f"{path}: s3-off policy")
-    if type(on) is not dict or set(on) != {"switches", "exceptions", "kernel_transfers"} \
-            or on["exceptions"] != list(V5_ON_EXCEPTIONS):
+    if type(on) is not dict or set(on) != {"switches", "exceptions", "kernel_transfers", "language_x86_64",
+                                           "fallback_switches"} \
+            or on["exceptions"] != list(V5_ON_EXCEPTIONS) or type(on["language_x86_64"]) is not bool:
         raise EvidenceError(f"{path}: s3-on policy")
     if type(raw["bound"]) is not bool:
         raise EvidenceError(f"{path}: bound")
@@ -227,7 +243,9 @@ def _load_v2(path, data: bytes, raw: dict, seal: str | None) -> StackEvidence:
         *_counts(raw, path), tuple(row[:4] for row in _switches(off["switches"], path)), version=2,
         on_switches=tuple(_switches(on["switches"], path, cause=True)), kernel_transfers=tuple(kernels),
         bound=raw["bound"], listing_digest=(digest["verifiable_sha256"], digest["attested_sha256"]),
-        seal=seal if raw["bound"] else None)
+        stack_pointer=(pointer["space_id"], pointer["byte_offset"], pointer["size"]),
+        language_x86_64=on["language_x86_64"],
+        fallback_switches=tuple(_switches(on["fallback_switches"], path, cause=True)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +257,9 @@ class Coverage:
 
     admitted: frozenset = frozenset()
     trap_decisions: frozenset = frozenset()
+    # (Astra X-1a r1 P1-5) the verified Bundle seal these decisions were made
+    # for: a decision of another export (another seal) decides nothing here
+    seal: str | None = None
 
 
 def authority(evidences, *, policy: str = "s3-off", images=(), seals=None, coverage=None) -> tuple[bool, list[str]]:
@@ -246,14 +267,20 @@ def authority(evidences, *, policy: str = "s3-off", images=(), seals=None, cover
     these evidence files, with the reasons when not -- the one reader.
 
     ``images``: executable SHA-256s that must each have evidence (the main
-    image and every linked one; a missing image is a failure).
+    image and every linked one; a missing image is a failure). Under s3-on the
+    inventory is required and nonempty (Astra X-1a r1 P1-5, Fable r1 P2-1).
     ``seals`` (s3-on): executable SHA-256 -> the verified Bundle manifest
     SHA-256 the evidence must be bound to.
-    ``coverage`` (s3-on): executable SHA-256 -> ``Coverage``."""
+    ``coverage`` (s3-on): executable SHA-256 -> ``Coverage`` (bound to a seal).
+    Under s3-on an image whose sealed original is affirmatively not S3's (not
+    PE32+ / AMD64 / subsystem 1-3) is read by its s3-off verdict."""
     if policy not in POLICIES:
         raise ValueError(f"unknown stack evidence policy {policy!r}")
     evidences = tuple(evidences)
+    images = tuple(images)
     reasons = []
+    if policy == "s3-on" and not images:
+        reasons.append("no participating-image inventory given (s3-on)")
     by_sha = {}
     for item in evidences:
         by_sha.setdefault(item.executable_sha256, []).append(item)
@@ -264,30 +291,42 @@ def authority(evidences, *, policy: str = "s3-off", images=(), seals=None, cover
         if not item._scanned():
             reasons.append(f"{item.program}: nothing scanned")
             continue
-        if policy == "s3-off":
+        if policy == "s3-off" or (item.verified and item.applicable is False):
             if item.switches:
                 reasons.append(f"stack switch evidence in {item.program}")
             continue
         if item.version != 2 or item.on_switches is None:
             reasons.append(f"{item.program}: stack evidence predates S3-aware scanning")
             continue
-        if not item.bound or item.seal is None:
-            reasons.append(f"{item.program}: unbound stack evidence carries no s3-on authority")
+        if not item.bound or item.seal is None or not item.verified:
+            reasons.append(f"{item.program}: unbound stack evidence carries no s3-on authority "
+                           "(not verified by its Bundle's admission)")
             continue
         expected = None if seals is None else seals.get(item.executable_sha256)
         if expected is None or item.seal != expected:
             reasons.append(f"{item.program}: stack evidence is not bound to the run's verified Bundle")
             continue
+        if item.applicable is None:
+            reasons.append(f"{item.program}: S3 applicability of the image is undecidable")
+            continue
+        if not item.rsp_verified or item.language_x86_64 is not True:
+            reasons.append(f"{item.program}: the scan's stack pointer is not the sealed eight-byte RSP")
+            continue
         if item.on_switches:
             reasons.append(f"stack switch evidence (s3-on) in {item.program}")
             continue
         decided = (coverage or {}).get(item.executable_sha256, Coverage())
+        if decided.seal != item.seal:
+            decided = Coverage()   # (decisions of another export decide nothing)
         open_rows = [row for row in item.kernel_transfers
                      if (row.kind == "covered" and row.site not in decided.admitted)
                      or (row.kind == "trap" and row.site not in decided.trap_decisions)
                      or row.kind in ("uncovered", "undecidable")]
         if open_rows:
-            reasons.append(f"{item.program}: {len(open_rows)} kernel transfer row(s) not admitted or decided by the run")
+            listed = ", ".join(f"{row.kind}@{row.space_id}:{row.byte_offset:x}" for row in open_rows[:5])
+            more = f" (+{len(open_rows) - 5})" if len(open_rows) > 5 else ""
+            reasons.append(f"{item.program}: kernel transfer row(s) not admitted or decided by the run: "
+                           f"{listed}{more}")
     return not reasons, reasons
 
 
@@ -301,9 +340,12 @@ def assumption_allowed(evidences, *, requested: bool, require_for: str | None = 
     lines = [item.describe() for item in evidences]
     if not requested:
         return False, lines
-    allowed, reasons = authority([item for item in evidences], policy=policy)
+    # (s3-on: the inventory the one reader requires; s3-off reads as before)
+    images = (require_for,) if require_for is not None and policy == "s3-on" else ()
+    allowed, reasons = authority([item for item in evidences], policy=policy, images=images)
     if not allowed:
-        dirty = [item for item in evidences if not authority([item], policy=policy)[0]]
+        dirty = [item for item in evidences if not authority([item], policy=policy, images=images)[0]] \
+            or list(evidences)
         return False, lines + [f"globals-disjoint-from-stack withdrawn: stack switch evidence in "
                                f"{', '.join(item.program for item in dirty)}"]
     if require_for is not None and not any(item.executable_sha256 == require_for for item in evidences):
@@ -312,15 +354,7 @@ def assumption_allowed(evidences, *, requested: bool, require_for: str | None = 
     return True, lines
 
 
-def _member_bytes(generation: Path, members: dict, member_id: str) -> bytes:
-    row = members[member_id]
-    data = (generation / row["path"]).read_bytes()
-    if len(data) != row["size"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
-        raise EvidenceError(f"{generation}: member {member_id} does not match its seal")
-    return data
-
-
-def verifiable_row_line(row: dict, blocks) -> str:
+def verifiable_row_line(row: dict, read_bytes) -> str:
     """One row of the verifiable listing digest, exactly as
     ``GhidraV2StackSwitchScanner.rowLine`` writes it: ``R <space>:<offset hex>
     <length> <bytes hex | -> <flow override> <fallthrough 0/1> <length 0/1>
@@ -328,11 +362,8 @@ def verifiable_row_line(row: dict, blocks) -> str:
     block member that holds the whole row."""
     address = row["address"]
     space, offset, length = address["space_id"], address["byte_offset"], row["length"]
-    data = "-"
-    for block_space, start, payload in blocks:
-        if block_space == space and start <= offset and offset + length <= start + len(payload):
-            data = payload[offset - start:offset - start + length].hex()
-            break
+    payload = read_bytes(space, offset, length)
+    data = "-" if payload is None else payload.hex()
     override = row["override"]
     references = sorted(f"{item['address']['space_id']}:{item['address']['byte_offset']:x}:{item['type']}:"
                         f"{int(item['primary'])}" for item in override["override_references"])
@@ -341,46 +372,98 @@ def verifiable_row_line(row: dict, blocks) -> str:
             f"{','.join(references) if references else '-'}")
 
 
-def bundle_stack_evidence(generation) -> StackEvidence:
-    """(X-1, design_x1 r4 4.2) the stack-switch evidence sealed into a profiled
-    Bundle, bound to it: the seal's manifest SHA-256 is the evidence's seal, and
-    the verifiable part of its listing digest is recomputed from the sealed
-    function observations and block members (a mismatch is an
-    ``EvidenceError``: the evidence is not this Bundle's)."""
-    generation = Path(generation)
-    manifest_bytes = (generation / "manifest.json").read_bytes()
-    seal = json.loads((generation / "seal.json").read_text(encoding="utf-8"))
-    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
-    if seal.get("manifest_sha256") != manifest_sha or seal.get("manifest_size") != len(manifest_bytes):
-        raise EvidenceError(f"{generation}: the manifest does not match its seal")
-    manifest = json.loads(manifest_bytes)
-    if manifest.get("producer_profile") is None:
-        raise EvidenceError(f"{generation}: not a profiled Bundle (no sealed stack-switch evidence)")
-    members = {row["id"]: row for row in manifest["members"]}
-    evidence_id = manifest["stack_switch_evidence_member"]
-    item = load_stack_evidence(generation / members[evidence_id]["path"],
-                               data=_member_bytes(generation, members, evidence_id), seal=manifest_sha)
-    if not item.bound:
-        raise EvidenceError(f"{generation}: the sealed stack-switch evidence is not bound")
-    blocks = [(row["space_id"], row["byte_start"], _member_bytes(generation, members, row["member_id"]))
-              for row in manifest["blocks"] if row.get("member_id")]
-    functions = []
-    for row in manifest["functions"]:
-        observation = json.loads(_member_bytes(generation, members, row["observation_member"]))
-        functions.append(observation)
-    functions.sort(key=lambda item: (item["entry"]["space_id"], item["entry"]["byte_offset"]))
+def pe_header_facts(head: bytes) -> tuple[int, int, int] | None:
+    """(design_s3_r16 1.1) (optional-header magic, COFF machine, subsystem) of a
+    PE image from its first bytes; None when they are not decidable (a DOS
+    header whose PE header lies beyond ``head`` or is malformed)."""
+    if len(head) < 0x40:
+        return None
+    (offset,) = struct.unpack_from("<I", head, 0x3C)
+    if offset + 24 + 70 > len(head) or head[offset:offset + 4] != b"PE\0\0":
+        return None
+    (machine,) = struct.unpack_from("<H", head, offset + 4)
+    (magic,) = struct.unpack_from("<H", head, offset + 24)
+    (subsystem,) = struct.unpack_from("<H", head, offset + 24 + 68)
+    return magic, machine, subsystem
+
+
+def s3_applicable(head: bytes) -> bool | None:
+    """(design_s3_r16 1.1) True for a PE32+ AMD64 image of subsystem 1 / 2 / 3,
+    False for any other image (not PE at all, or another kind of PE), None when
+    a PE's headers are not decidable."""
+    if head[:2] != b"MZ":
+        return False
+    facts = pe_header_facts(head)
+    if facts is None:
+        return None
+    magic, machine, subsystem = facts
+    return magic == 0x20B and machine == 0x8664 and subsystem in (1, 2, 3)
+
+
+def sealed_rsp(program: dict) -> tuple[int, int, int] | None:
+    """(Astra X-1a r1 P1-4) the unique eight-byte RSP of the sealed register
+    table, when no other register of eight bytes or more overlaps it (its
+    aliases -- ESP, SP, SPL -- lie inside it); None otherwise."""
+    rows = ((program.get("register_evidence") or {}).get("registers") or [])
+    rsp = [row for row in rows if str(row.get("name", "")).upper() == "RSP" and row.get("byte_size") == 8]
+    if len(rsp) != 1:
+        return None
+    space, offset = rsp[0]["space_id"], rsp[0]["byte_offset"]
+    for row in rows:
+        if row is rsp[0] or row.get("space_id") != space:
+            continue
+        start, size = row.get("byte_offset"), row.get("byte_size")
+        if type(start) is not int or type(size) is not int:
+            return None
+        overlaps = start < offset + 8 and offset < start + size
+        if overlaps and (size >= 8 or not (offset <= start and start + size <= offset + 8)):
+            return None
+    return space, offset, 8
+
+
+def verify_bundle_evidence(*, evidence_bytes: bytes, manifest_sha256: str, original_sha256: str, original_head: bytes,
+                           program: dict, observations, read_bytes) -> StackEvidence:
+    """(X-1 r4 4.2, Astra X-1a r1 P1-3 / P1-4) the admission check of a profiled
+    Bundle's sealed stack-switch evidence; the only path that binds it:
+    bound v2, the executable SHA-256 of the sealed original, the verifiable
+    listing digest recomputed from the sealed observations and block bytes
+    (``read_bytes(space, offset, length) -> bytes | None``), then the S3
+    applicability of the original and the RSP identity. Raises
+    ``EvidenceError`` when the evidence is not this Bundle's."""
+    item = load_stack_evidence("stack-switch-evidence", data=evidence_bytes)
+    if item.version != 2 or not item.bound:
+        raise EvidenceError("the sealed stack-switch evidence is not bound version-2 evidence")
+    if item.executable_sha256 != original_sha256:
+        raise EvidenceError("the sealed stack-switch evidence is of another executable than the sealed original")
+    observations = sorted(observations, key=lambda raw: (raw["entry"]["space_id"], raw["entry"]["byte_offset"]))
     digest = hashlib.sha256()
-    for observation in functions:
-        entry = observation["entry"]
+    for raw in observations:
+        entry = raw["entry"]
         digest.update(f"F {entry['space_id']}:{entry['byte_offset']:x}\n".encode())
-        rows = sorted(observation["instructions"],
-                      key=lambda row: (row["address"]["space_id"], row["address"]["byte_offset"]))
-        for instruction in rows:
-            digest.update((verifiable_row_line(instruction, blocks) + "\n").encode())
+        for row in sorted(raw["instructions"], key=lambda row: (row["address"]["space_id"],
+                                                                row["address"]["byte_offset"])):
+            digest.update((verifiable_row_line(row, read_bytes) + "\n").encode())
     if digest.hexdigest() != item.listing_digest[0]:
-        raise EvidenceError(f"{generation}: the stack-switch evidence's listing digest is not this Bundle's")
-    return item
+        raise EvidenceError("the sealed stack-switch evidence's listing digest is not this Bundle's")
+    applicable = s3_applicable(original_head)
+    rsp = sealed_rsp(program)
+    return replace(item, seal=manifest_sha256, verified=True, applicable=applicable,
+                   rsp_verified=rsp is not None and item.stack_pointer == rsp)
+
+
+def bundle_stack_evidence(generation) -> StackEvidence:
+    """(X-1) the verified stack-switch evidence of a profiled frozen Bundle,
+    through its normal admission (the provider verifies it while admitting)."""
+    from ._configured_bundle_reader import read_configured_bundle
+    from .integration.configured_bundle import admit_frozen_bundle
+
+    provider = read_configured_bundle(admit_frozen_bundle(generation))
+    try:
+        return provider.stack_switch_evidence()
+    finally:
+        provider.close()
 
 
 __all__ = ("Coverage", "DETECTORS", "EvidenceError", "FORMAT", "KernelTransfer", "POLICIES", "StackEvidence",
-           "assumption_allowed", "authority", "bundle_stack_evidence", "load_stack_evidence", "verifiable_row_line")
+           "assumption_allowed", "authority", "bundle_stack_evidence", "load_stack_evidence", "pe_header_facts",
+           "s3_applicable", "sealed_rsp", "verifiable_row_line", "verify_bundle_evidence")

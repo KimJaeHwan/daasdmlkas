@@ -63,6 +63,7 @@ class _ConfiguredBundleProvider:
     __slots__ = (
         "_active_guards", "_block_handles", "_block_indexes", "_block_used",
         "_closed", "_function_handles", "_function_indexes", "_function_parsed", "_profile_agrees",
+        "_stack_evidence",
         "_function_used", "_functions_claimed", "_inventory", "_observation_used",
         "_original_claimed", "_owner", "_program_claimed", "_program_verified",
         "_snapshot", "_snapshot_claim",
@@ -87,6 +88,12 @@ class _ConfiguredBundleProvider:
         self._function_used = [False] * len(self._inventory.functions)
         self._function_parsed = [False] * len(self._inventory.functions)
         self._profile_agrees = [True] * len(self._inventory.functions)
+        # (X-1, Astra X-1a r1 P1-3) a profiled Bundle's sealed stack-switch
+        # evidence is verified here, through the admitted snapshot, or the
+        # Bundle is refused
+        self._stack_evidence = None
+        if getattr(self._inventory, "producer_profile", None) is not None:
+            self._stack_evidence = _verify_stack_evidence(self._snapshot, self._snapshot_claim, self._inventory)
         self._observation_used = [False] * len(self._inventory.functions)
         self._original_claimed = False
         self._program_claimed = False
@@ -156,6 +163,16 @@ class _ConfiguredBundleProvider:
             raise RuntimeError("configured function handles are single-use")
         self._functions_claimed = True
         return self._function_handles
+    def _note_profile(self, index: int, raw) -> None:
+        """(X-1, Astra X-1a r1 P1-1: on the shared provider, format 1 too) whether the observation declares exactly the Bundle's profile."""
+        declared = _raw_field(raw, "producer_profile")
+        self._profile_agrees[index] = (
+            declared.value == self._inventory.producer_profile
+            if declared.state is _RawFieldState.PRESENT else self._inventory.producer_profile is None)
+    def stack_switch_evidence(self):
+        """(X-1) the Bundle's verified stack-switch evidence; None for a legacy Bundle."""
+        self._require_active()
+        return self._stack_evidence
     def observation_complete(self, handle: object) -> bool:
         self._require_active()
         index = self._function_index(handle)
@@ -310,12 +327,6 @@ class _ConfiguredBundleV2Provider(_ConfiguredBundleProvider):
         self._function_parsed[index] = True
         self._note_profile(index, raw)
         return raw
-    def _note_profile(self, index: int, raw) -> None:
-        """(X-1) whether the observation declares exactly the Bundle's profile."""
-        declared = _raw_field(raw, "producer_profile")
-        self._profile_agrees[index] = (
-            declared.value == self._inventory.producer_profile
-            if declared.state is _RawFieldState.PRESENT else self._inventory.producer_profile is None)
     def _function_transport_identity(self, index: int):
         return self._inventory.functions[index].transport_identity
     def _finish_function_guard(self, index: int) -> None:
@@ -395,6 +406,40 @@ class _FunctionTransportGuard:
         self._provider._require_active()
     def __reduce_ex__(self, protocol: int):
         raise TypeError("configured function guard cannot be serialized")
+
+
+def _verify_stack_evidence(snapshot, claim, inventory):
+    """(X-1, Astra X-1a r1 P1-3 / P1-4) ``stack_evidence.verify_bundle_evidence``
+    over the admitted snapshot's verified bytes; a failure refuses the Bundle."""
+    import json
+
+    from .integration.configured_bundle import BundleAdmissionError
+    from .stack_evidence import EvidenceError, verify_bundle_evidence
+
+    blocks = [row for row in inventory.blocks if row.member is not None]
+
+    def read_bytes(space, offset, length):
+        for row in blocks:
+            if row.space_id == space and row.byte_start <= offset and offset + length <= row.byte_start + row.byte_size:
+                data = b"".join(chunk.data for chunk in snapshot.verified_chunks(
+                    claim, row.member, offset - row.byte_start, length))
+                return data if len(data) == length else None
+        return None
+
+    original = inventory.original
+    head = b"".join(chunk.data for chunk in snapshot.verified_chunks(
+        claim, original, 0, min(original.byte_size, 4096)))
+    try:
+        return verify_bundle_evidence(
+            evidence_bytes=snapshot.verified_bytes(claim, inventory.stack_switch_evidence_member),
+            manifest_sha256=inventory.container_identity.manifest_sha256_digest.hex(),
+            original_sha256=original.sha256_digest.hex(), original_head=head,
+            program=json.loads(snapshot.verified_bytes(claim, inventory.program)),
+            observations=[json.loads(snapshot.verified_bytes(claim, row.observation_member))
+                          for row in inventory.functions],
+            read_bytes=read_bytes)
+    except (EvidenceError, ValueError, KeyError, TypeError) as error:
+        raise BundleAdmissionError(f"sealed stack-switch evidence: {error}") from error
 
 
 def _construct_provider(snapshot, expected_type, provider_type):

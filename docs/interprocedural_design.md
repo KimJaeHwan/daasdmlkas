@@ -7531,3 +7531,30 @@ TBR 세션과 합의): Bundle에는 생산자의 원래 주장만, TBR 증거에
 - 시험 `test_x1_producer_evidence.py`, `test_x1_bundle_profile.py`(실제 Bundle 복사 + 재봉인), `test_x1_bundle_evidence.py`,
   `test_x1_stack_authority.py`, `test_stack_evidence.py`의 Java 하네스(s3-on 시드 / 커널 상태); 돌연변이 `cob/x1_mutants.py`
   19/20(M2는 중복 방어: 행 주장이 없으면 파서와 관찰 계약이 이미 거부).
+- 코드 리뷰 r1(Astra REJECT 7 P1 + 4 P2, Fable APPROVE WITH FIXES 3 P2) -> r2:
+  - 형식 1 Bundle: 프로필 검사를 공유 제공자로 옮겼다(전에는 V2에만 있어 형식 1 추출이 첫 함수에서 실패했다; 형식 1로
+    바꾼 말뭉치 Bundle이 같은 관찰 다이제스트로 읽히는 시험).
+  - 단독 검사 파일이 null 필드를 버리지 않는다(`serializeNulls`): 전에는 syscall 행의 `vector`가 빠져 읽기가 거부되고
+    링커가 s3-off 스위치까지 버렸다.
+  - 정상 수용이 증거를 검증한다(`_configured_bundle_reader._verify_stack_evidence` -> `stack_evidence.verify_bundle_evidence`,
+    수용된 스냅숏의 검증된 바이트로): 묶인 v2, 봉인된 원본의 실행 파일 SHA-256, 검증 가능한 다이제스트 재계산, S3 적용
+    가능성(`s3_applicable`: PE32+ / AMD64 / subsystem 1-3, 판정 불가는 None), 봉인된 레지스터 표의 유일한 8바이트 RSP와
+    별칭(`sealed_rsp`) -- 실패하면 Bundle 거부. 봉인은 이 길만 붙인다(`load_stack_evidence`는 묶지 않는다); 예전 경로 도우미는
+    없앴다(`bundle_stack_evidence`는 정상 수용을 지난다).
+  - 판정기는 닫힌 쪽으로 실패한다: s3-on은 비지 않은 참여 이미지 목록을 요구하고, 수용 결정(`Coverage`)은 그 봉인에 묶인다
+    (다른 내보내기의 결정은 아무것도 결정하지 않는다); 적용 불가 이미지는 s3-off 판정으로, 판정 불가는 철회, RSP가 아니거나
+    x86-64 검사가 아니면 철회. 템플릿 검사는 정책을 명시로 받는다(s3-on인데 `stack_authority`가 없으면 거부). 철회 이유는
+    열린 행의 종류와 주소를 적는다.
+  - 검사기: x86-64에서만 바이트 분류; 순수 함수 `classifyBytes` -- `0F`, `0F 01`, `CD`가 끊김에서 끝나면 undecidable,
+    분류한 바이트만 기록(하네스 시험 21경우); 커널 행은 전파 전에 행 전체로 판정(`validateKernels`: 빈 / 모순 번역, 길이,
+    covered 행의 SP 접근, `0F 05`는 syscall 사용자 연산, `CD 2E`는 벡터 0x2E, trap의 바이트 / 번역 벡터 일치)하고, 행을 떠나는
+    모든 간선(앞선 분기 포함)이 커널 뒤 상태를 받는다; 검증된 trap 행(UD2의 대상 없는 BRANCHIND)은 목적지 모를 이동으로
+    세지 않는다; trap 다음 행은 다른 앞 행이 닿아도 모름 시드를 합친다; 증명 다이제스트는 모든 행(내보낸 행 포함)의 소유
+    함수, 실제 fallthrough, 나열된 flow, p-code를 담고, 첫 검사점은 내보내기 도구가 행을 모을 때 만든 줄로 계산한다
+    (`attestedLine`, `collectedLines`).
+  - s3-on 정책에 `language_x86_64`와 대체 판정 `fallback_switches`(목적지 모를 이동을 "모든 명령 시작이 목적지"로 읽은
+    것; 소유자 선택용 측정)를 더했다.
+  - S3로 넘긴 연결은 `.census6/s3_prereqs_from_x1.md`에 S3 머지 선행 조건으로 적었다(Fable P2-2): 실행 전체 이미지 목록,
+    s3-on 링커 조회 순서와 캐시 키, 템플릿 적용 인자, Astra r3 A3-4 시험, UE 템플릿, 목적지 모를 이동과 UD2의 소유자 결정.
+  - 행 단위 Java 고정(번역 하나만 바뀐 행, 대상 하나만 바뀐 행, 벡터가 다른 `CD 2E`, 마지막 연산을 건너뛰는 분기)은 Ghidra
+    프로그램 없이 만들 수 없어 실제 내보내기와 코드 읽기로 확인했다 -- [ASTRA-OPEN 후보]로 리뷰에 남긴다.

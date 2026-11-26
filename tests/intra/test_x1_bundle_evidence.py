@@ -1,11 +1,13 @@
-"""X-1a (design_x1 r3 4.1 / 4.2, r4 4.2): a real headless export with the X-1 exporter.
+"""X-1a (design_x1 r3 4.1 / 4.2, r4 4.2; code review r1 P1-3 / P1-4): a real headless export with the X-1 exporter.
 
 ``TDO_X1_EXPORTED_BUNDLE`` names a generation exported by ``tools/bundle_export/export_bundle.py`` with this
-tree's exporter (skipped when unset or absent). The exporter scanned its locked program inside the export
-session and sealed the v2 evidence as the last member; the engine admits the Bundle (every function declares
-the producer profile), reads the evidence bound to the Bundle's seal, and recomputes the verifiable part of the
-listing digest from the sealed observations and block members. Changing one loaded byte, one override fact or
-the seal breaks the binding."""
+tree's exporter (default: the clang-x64-O0 corpus binary, ``--entry 433 1057856``; skipped when absent). The
+exporter scanned its locked program inside the export session and sealed the v2 evidence as the last member.
+The engine's normal admission verifies it through the admitted snapshot -- bound v2, the sealed original's
+executable SHA-256, the verifiable listing digest recomputed from the sealed observations and block bytes, the
+S3 applicability of the original and the sealed RSP -- and only that path binds the evidence to the Bundle's
+seal. Changing one loaded byte, one override fact, the evidence's executable SHA-256 or the seal breaks it; a
+function that stops declaring the profile is refused alone."""
 
 from __future__ import annotations
 
@@ -19,14 +21,14 @@ import pytest
 
 from tdo_v2._configured_bundle_reader import read_configured_bundle
 from tdo_v2._scope_contracts import PRODUCER_PROFILE_X1, _mint_orchestrator_capability
-from tdo_v2.integration.configured_bundle import admit_frozen_bundle
+from tdo_v2.integration.configured_bundle import BundleAdmissionError, admit_frozen_bundle
 from tdo_v2.integration.observed_function_session import _ObservedScopeProvider
 from tdo_v2.scope_identity import open_configured_extraction
-from tdo_v2.stack_evidence import Coverage, EvidenceError, authority, bundle_stack_evidence
+from tdo_v2.stack_evidence import Coverage, authority, bundle_stack_evidence
 
 SOURCE = Path(os.environ.get(
     "TDO_X1_EXPORTED_BUNDLE",   # (exported 2026-11-27 from the clang-x64-O0 corpus binary, --entry 433 1057856)
-    "/root/x1_export_test/149c1cb8c70d3933c0fa74009fbf01d4fa7391d071db8cccd30376fe8e3141f3"))
+    "/root/x1_export_test/23e34289fd77697e5cfa577495d850bbbd0adee9ddeadde77efe91fa01583af3"))
 
 
 @pytest.fixture
@@ -44,6 +46,10 @@ def _manifest(generation: Path) -> dict:
     return json.loads((generation / "manifest.json").read_text())
 
 
+def _path(generation: Path, manifest: dict, member_id: str) -> Path:
+    return generation / next(item["path"] for item in manifest["members"] if item["id"] == member_id)
+
+
 def _reseal(generation: Path, manifest: dict) -> None:
     data = json.dumps(manifest, separators=(",", ":")).encode()
     (generation / "manifest.json").write_bytes(data)
@@ -52,70 +58,107 @@ def _reseal(generation: Path, manifest: dict) -> None:
     (generation / "seal.json").write_text(json.dumps(seal, separators=(",", ":")))
 
 
-def _replace_member(generation: Path, manifest: dict, member_id: str, data: bytes) -> None:
+def _replace_member(generation: Path, manifest: dict, member_id: str, data: bytes) -> str:
     row = next(item for item in manifest["members"] if item["id"] == member_id)
+    old = row["sha256"]
     (generation / row["path"]).write_bytes(data)
     row["size"], row["sha256"] = len(data), hashlib.sha256(data).hexdigest()
+    return old
+
+
+def _replace_observation(generation: Path, manifest: dict, index: int, edit) -> None:
+    """Edit one function observation and rebind its naming / effect sidecars to the new member digest."""
+    row = manifest["functions"][index]
+    path = _path(generation, manifest, row["observation_member"])
+    observation = json.loads(path.read_text())
+    edit(observation)
+    old = _replace_member(generation, manifest, row["observation_member"], json.dumps(observation).encode())
+    new = next(item["sha256"] for item in manifest["members"] if item["id"] == row["observation_member"])
+    for sidecar in (row["call_names_member"], row["call_effects_member"]):
+        data = _path(generation, manifest, sidecar).read_bytes().replace(old.encode(), new.encode())
+        _replace_member(generation, manifest, sidecar, data)
+
+
+def _observations(generation: Path) -> list:
+    adapter = _ObservedScopeProvider(read_configured_bundle(admit_frozen_bundle(generation)))
+    with open_configured_extraction(adapter, _mint_orchestrator_capability()) as session:
+        result = []
+        for unit in session.iter_scoped_functions():
+            adapter.collect_function_roles()
+            result.append(unit.observation)
+    return result
 
 
 def test_the_exported_bundle_is_profiled_and_admitted(generation):
     manifest = _manifest(generation)
     assert manifest["producer_profile"] == PRODUCER_PROFILE_X1
     assert manifest["members"][-1]["id"] == manifest["stack_switch_evidence_member"]
-    adapter = _ObservedScopeProvider(read_configured_bundle(admit_frozen_bundle(generation)))
-    with open_configured_extraction(adapter, _mint_orchestrator_capability()) as session:
-        observations = []
-        for unit in session.iter_scoped_functions():
-            adapter.collect_function_roles()
-            observations.append(unit.observation)
+    observations = _observations(generation)
     assert observations and all(item is not None and item.producer_profile == PRODUCER_PROFILE_X1
                                 for item in observations)
 
 
-def test_the_sealed_evidence_is_bound_and_verified(generation):
+def test_admission_verifies_and_binds_the_sealed_evidence(generation):
     item = bundle_stack_evidence(generation)
     seal = hashlib.sha256((generation / "manifest.json").read_bytes()).hexdigest()
-    assert item.version == 2 and item.bound and item.seal == seal
+    original = next(row for row in _manifest(generation)["members"] if row["id"] == "original")
+    assert item.version == 2 and item.bound and item.verified and item.seal == seal
+    assert item.executable_sha256 == original["sha256"]
+    assert item.applicable is False   # (an ELF: S3's predicate is PE32+ / AMD64 only -> read by s3-off)
+    assert item.rsp_verified and item.stack_pointer[2] == 8 and item.language_x86_64
     assert authority([item])[0] is (not item.switches)   # (s3-off as v4)
-    covered = frozenset(row.site for row in item.kernel_transfers if row.kind == "covered")
-    traps = frozenset(row.site for row in item.kernel_transfers if row.kind == "trap")
-    allowed, reasons = authority([item], policy="s3-on", images=(item.executable_sha256,),
-                                 seals={item.executable_sha256: seal},
-                                 coverage={item.executable_sha256: Coverage(covered, traps)})
-    assert allowed is (not item.on_switches and all(row.kind in ("covered", "trap") for row in item.kernel_transfers))
+    coverage = {item.executable_sha256: Coverage(seal=seal)}
+    assert authority([item], policy="s3-on", images=(item.executable_sha256,),
+                     seals={item.executable_sha256: seal}, coverage=coverage)[0] is (not item.switches)
 
 
-def test_a_changed_loaded_byte_breaks_the_binding(generation):
+def test_a_changed_loaded_byte_is_refused_at_admission(generation):
     manifest = _manifest(generation)
-    observation = json.loads((generation / next(
-        item["path"] for item in manifest["members"]
-        if item["id"] == manifest["functions"][0]["observation_member"])).read_text())
+    observation = json.loads(_path(generation, manifest, manifest["functions"][0]["observation_member"]).read_text())
     row = observation["instructions"][0]["address"]
     block = next(item for item in manifest["blocks"] if item.get("member_id") and item["space_id"] == row["space_id"]
                  and item["byte_start"] <= row["byte_offset"] < item["byte_start"] + item["byte_size"])
-    path = generation / next(item["path"] for item in manifest["members"] if item["id"] == block["member_id"])
-    data = bytearray(path.read_bytes())
-    index = row["byte_offset"] - block["byte_start"]
-    data[index] ^= 0xFF
+    data = bytearray(_path(generation, manifest, block["member_id"]).read_bytes())
+    data[row["byte_offset"] - block["byte_start"]] ^= 0xFF
     _replace_member(generation, manifest, block["member_id"], bytes(data))
     _reseal(generation, manifest)
-    with pytest.raises(EvidenceError):
+    with pytest.raises(BundleAdmissionError, match="listing digest"):
         bundle_stack_evidence(generation)
 
 
-def test_a_changed_override_fact_breaks_the_binding(generation):
+def test_a_changed_override_fact_is_refused_at_admission(generation):
     manifest = _manifest(generation)
-    member = manifest["functions"][0]["observation_member"]
-    path = generation / next(item["path"] for item in manifest["members"] if item["id"] == member)
-    observation = json.loads(path.read_text())
-    observation["instructions"][0]["override"]["length_overridden"] = True
-    _replace_member(generation, manifest, member, json.dumps(observation).encode())
+    _replace_observation(generation, manifest, 0,
+                         lambda raw: raw["instructions"][0]["override"].update(length_overridden=True))
     _reseal(generation, manifest)
-    with pytest.raises(EvidenceError):
+    with pytest.raises(BundleAdmissionError, match="listing digest"):
+        bundle_stack_evidence(generation)
+
+
+def test_evidence_of_another_executable_is_refused_at_admission(generation):
+    manifest = _manifest(generation)
+    member = manifest["stack_switch_evidence_member"]
+    evidence = json.loads(_path(generation, manifest, member).read_text())
+    evidence["executable_sha256"] = "0" * 64
+    _replace_member(generation, manifest, member, json.dumps(evidence).encode())
+    _reseal(generation, manifest)
+    with pytest.raises(BundleAdmissionError, match="another executable"):
         bundle_stack_evidence(generation)
 
 
 def test_another_seal_is_not_this_bundles(generation):
     item = bundle_stack_evidence(generation)
-    allowed, reasons = authority([item], policy="s3-on", seals={item.executable_sha256: "0" * 64})
+    item = item.__class__(**{**{name: getattr(item, name) for name in item.__slots__}, "applicable": True})
+    allowed, reasons = authority([item], policy="s3-on", images=(item.executable_sha256,),
+                                 seals={item.executable_sha256: "0" * 64})
     assert not allowed and any("not bound to the run's verified Bundle" in reason for reason in reasons)
+
+
+def test_a_function_that_stops_declaring_the_profile_is_refused_alone(generation):
+    """r3 part 1: the reader refuses a function whose observation does not declare the Bundle's profile (its
+    rows keep their fields, so the sealed evidence still verifies)."""
+    manifest = _manifest(generation)
+    _replace_observation(generation, manifest, 0, lambda raw: raw.pop("producer_profile"))
+    _reseal(generation, manifest)
+    observations = _observations(generation)
+    assert observations[0] is None

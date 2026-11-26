@@ -1,24 +1,31 @@
-"""X-1a (design_x1 r2 part 4, r3 4.5 / 4.7, r4 4.4 / 4.5): version-2 stack evidence and the one reader.
+"""X-1a (design_x1 r2 part 4, r3 4.5 / 4.7, r4 4.4 / 4.5; code review r1): version-2 stack evidence and the one
+reader.
 
-A v2 file (detector v5) carries the s3-off verdict (today's v4 rule), the S3-aware s3-on verdict and the
-kernel-transfer rows. ``authority`` reads every file: under s3-off as before; under s3-on only bound evidence of
-the run's verified Bundle counts, with a clean s3-on verdict, every covered row admitted and every trap row
-decided by the run; v1, unbound or mis-sealed evidence, an image without evidence, an uncovered or undecidable
-kernel row withdraw the assumption with their reasons."""
+A v2 file (detector v5) carries the s3-off verdict (today's v4 rule), the S3-aware s3-on verdict, the fallback
+verdict and the kernel-transfer rows. Loading binds nothing: only the admission of the Bundle the evidence is
+sealed in (``verify_bundle_evidence``) assigns its seal, its S3 applicability and the RSP check. ``authority``
+reads every file: under s3-off as before; under s3-on it needs a nonempty participating-image inventory and,
+per image, verified evidence of the run's verified Bundle, a decidable applicability (an inapplicable image is
+read by its s3-off verdict), the sealed eight-byte RSP, a clean s3-on verdict, every covered row admitted and
+every trap row decided by the run -- decisions bound to the same seal; anything less withdraws the assumption
+with its reason."""
 
 from __future__ import annotations
 
 import json
+import struct
+from dataclasses import replace
 
 import pytest
 
 from tdo_v2.stack_evidence import (
     Coverage, DETECTORS, EvidenceError, V5_OFF_EXCEPTIONS, V5_ON_EXCEPTIONS, assumption_allowed, authority,
-    load_stack_evidence,
+    load_stack_evidence, pe_header_facts, s3_applicable, sealed_rsp,
 )
 
 CORE = "c" * 64
 SEAL = "5" * 64
+COVERED, TRAP = (1, 0x100), (1, 0x200)
 
 
 def _row(address: str, cause: str | None = None) -> dict:
@@ -33,7 +40,7 @@ def _kernel(offset: int, kind: str, vector: str | None = None) -> dict:
             "lift": "callother:syscall", "lift_vector": None, "exported": True}
 
 
-def _v2(tmp_path, *, off=(), on=(), kernels=(), bound=True, name="core", **change) -> dict:
+def _v2(tmp_path, *, off=(), on=(), kernels=(), bound=True, name="core", x86=True, fallback=(), **change):
     raw = {
         "format": "tdo-v2-stack-switch-evidence", "version": 2, "detector": DETECTORS[2],
         "executable_sha256": CORE, "program": "/core.dll", "language": "x86:LE:64:default", "stack_pointer": "RSP",
@@ -41,7 +48,8 @@ def _v2(tmp_path, *, off=(), on=(), kernels=(), bound=True, name="core", **chang
         "stack_pointer_coordinate": {"space_id": 4, "byte_offset": 32, "size": 8},
         "policies": {"s3-off": {"switches": list(off), "exceptions": list(V5_OFF_EXCEPTIONS)},
                      "s3-on": {"switches": list(on), "exceptions": list(V5_ON_EXCEPTIONS),
-                               "kernel_transfers": list(kernels)}},
+                               "kernel_transfers": list(kernels), "language_x86_64": x86,
+                               "fallback_switches": list(fallback)}},
         "bound": bound, "listing_digest": {"verifiable_sha256": "a" * 64, "attested_sha256": "b" * 64},
     }
     raw.update(change)
@@ -50,19 +58,31 @@ def _v2(tmp_path, *, off=(), on=(), kernels=(), bound=True, name="core", **chang
     return path
 
 
-def _load(tmp_path, *, seal=SEAL, **kwargs):
-    return load_stack_evidence(_v2(tmp_path, **kwargs), seal=seal)
+def _load(tmp_path, **kwargs):
+    return load_stack_evidence(_v2(tmp_path, **kwargs))
 
 
-def test_v2_reads_both_verdicts(tmp_path):
-    item = _load(tmp_path, on=[_row("2000", "value")], kernels=[_kernel(0x100, "covered")])
+def _verified(item, *, seal=SEAL, applicable=True, rsp=True):
+    """What a successful admission (``verify_bundle_evidence``) makes of it."""
+    return replace(item, seal=seal, verified=True, applicable=applicable, rsp_verified=rsp)
+
+
+FULL = Coverage(frozenset({COVERED}), frozenset({TRAP}), SEAL)
+
+
+def _on(items, *, images=(CORE,), seals=None, coverage=None):
+    return authority(items, policy="s3-on", images=images, seals={CORE: SEAL} if seals is None else seals,
+                     coverage={CORE: FULL} if coverage is None else coverage)
+
+
+def test_v2_reads_its_verdicts_and_binds_nothing(tmp_path):
+    item = _load(tmp_path, on=[_row("2000", "value")], kernels=[_kernel(0x100, "covered")],
+                 fallback=[_row("3000", "value")])
     assert item.version == 2 and item.switches == () and len(item.on_switches) == 1
-    assert item.on_switches[0][4] == "value" and item.kernel_transfers[0].site == (1, 0x100)
-    assert item.bound and item.seal == SEAL and "s3-on: 1 switch(es)" in item.describe()
-
-
-def test_an_unbound_file_has_no_seal(tmp_path):
-    assert _load(tmp_path, bound=False).seal is None
+    assert item.on_switches[0][4] == "value" and item.kernel_transfers[0].site == COVERED
+    assert item.fallback_switches[0][1] == "3000" and item.language_x86_64 is True
+    assert item.stack_pointer == (4, 32, 8)
+    assert item.seal is None and not item.verified and "s3-on: 1 switch(es)" in item.describe()
 
 
 def test_s3_off_reads_v2_by_its_s3_off_verdict(tmp_path):
@@ -73,45 +93,85 @@ def test_s3_off_reads_v2_by_its_s3_off_verdict(tmp_path):
     assert not authority([dirty])[0]
 
 
-@pytest.mark.parametrize("case", ("v1", "unbound", "other seal", "no seal given", "s3-on switch", "uncovered",
-                                  "undecidable", "covered not admitted", "trap not decided", "missing image"))
+KERNELS = [_kernel(0x100, "covered"), _kernel(0x200, "trap", "3")]
+CASES = {
+    "v1": "predates S3-aware scanning",
+    "unbound": "not verified by its Bundle's admission",
+    "loaded, not verified": "not verified by its Bundle's admission",
+    "other seal": "not bound to the run's verified Bundle",
+    "no seal given": "not bound to the run's verified Bundle",
+    "applicability undecidable": "applicability of the image is undecidable",
+    "rsp not verified": "not the sealed eight-byte RSP",
+    "not x86-64 scan": "not the sealed eight-byte RSP",
+    "s3-on switch": "stack switch evidence (s3-on)",
+    "uncovered": "uncovered@1:300",
+    "undecidable": "undecidable@1:300",
+    "covered not admitted": "covered@1:100",
+    "trap not decided": "trap@1:200",
+    "coverage of another seal": "covered@1:100",
+    "missing image": "no whole-program stack evidence for dddddddddddd",
+    "no image inventory": "no participating-image inventory",
+}
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
 def test_s3_on_withdraws_without_full_authority(tmp_path, case):
-    seals, coverage, images = {CORE: SEAL}, {CORE: Coverage(frozenset({(1, 0x100)}), frozenset({(1, 0x200)}))}, ()
-    kernels = [_kernel(0x100, "covered"), _kernel(0x200, "trap", "3")]
-    kwargs = dict(kernels=kernels)
+    """Astra X-1a r1 P1-3 / P1-4 / P1-5, Fable r1 P2-1: each missing piece withdraws, with its reason."""
+    kwargs, verify, images, seals, coverage = dict(kernels=KERNELS), {}, (CORE,), None, None
     if case == "unbound":
         kwargs["bound"] = False
     elif case == "s3-on switch":
         kwargs["on"] = [_row("3000", "kernel-uncovered")]
-    elif case == "uncovered":
-        kwargs["kernels"] = [*kernels, _kernel(0x300, "uncovered", "128")]
-    elif case == "undecidable":
-        kwargs["kernels"] = [*kernels, _kernel(0x300, "undecidable")]
+    elif case in ("uncovered", "undecidable"):
+        kwargs["kernels"] = [*KERNELS, _kernel(0x300, case, "128")]
+    elif case == "not x86-64 scan":
+        kwargs["x86"] = False
+    elif case == "applicability undecidable":
+        verify["applicable"] = None
+    elif case == "rsp not verified":
+        verify["rsp"] = False
     elif case == "covered not admitted":
-        coverage = {CORE: Coverage(frozenset(), frozenset({(1, 0x200)}))}
+        coverage = {CORE: Coverage(frozenset(), frozenset({TRAP}), SEAL)}
     elif case == "trap not decided":
-        coverage = {CORE: Coverage(frozenset({(1, 0x100)}), frozenset())}
+        coverage = {CORE: Coverage(frozenset({COVERED}), frozenset(), SEAL)}
+    elif case == "coverage of another seal":   # (a UD2 discharge / admission of an earlier export)
+        coverage = {CORE: Coverage(frozenset({COVERED}), frozenset({TRAP}), "6" * 64)}
     elif case == "other seal":
         seals = {CORE: "6" * 64}
     elif case == "no seal given":
-        seals = None
+        seals = {}
     elif case == "missing image":
         images = (CORE, "d" * 64)
+    elif case == "no image inventory":
+        images = ()
     if case == "v1":
         from tdo_v2.stack_evidence import StackEvidence
 
         item = StackEvidence("p", "0" * 64, CORE, "/core.dll", (), DETECTORS[1], 1, 1, 0, ())
     else:
         item = _load(tmp_path, **kwargs)
-    allowed, reasons = authority([item], policy="s3-on", images=images, seals=seals, coverage=coverage)
-    assert not allowed and reasons
-    expected = {"v1": "predates S3-aware scanning", "unbound": "unbound stack evidence",
-                "other seal": "not bound to the run's verified Bundle"}.get(case)
-    assert expected is None or any(expected in reason for reason in reasons), reasons
-    # the control: the same file, fully covered, under the same run
-    control = _load(tmp_path, kernels=kernels, name="control")
-    assert authority([control], policy="s3-on", seals={CORE: SEAL},
-                     coverage={CORE: Coverage(frozenset({(1, 0x100)}), frozenset({(1, 0x200)}))})[0]
+        if case not in ("unbound", "loaded, not verified"):
+            item = _verified(item, **verify)
+    allowed, reasons = _on([item], images=images, seals=seals, coverage=coverage)
+    assert not allowed and any(CASES[case] in reason for reason in reasons), reasons
+    # the control: the same file, verified and fully covered, under the same run
+    control = _verified(_load(tmp_path, kernels=KERNELS, name="control"))
+    assert _on([control]) == (True, [])
+
+
+def test_an_inapplicable_image_is_read_by_its_s3_off_verdict(tmp_path):
+    """r4 4.3: an image affirmatively outside S3 (not PE32+ / AMD64 / subsystem 1-3) uses s3-off."""
+    clean = _verified(_load(tmp_path, on=[_row("3000", "kernel-uncovered")]), applicable=False)
+    assert _on([clean])[0]
+    dirty = _verified(_load(tmp_path, off=[_row("3000")], name="dirty"), applicable=False)
+    assert not _on([dirty])[0]
+
+
+def test_empty_s3_on_input_fails_closed():
+    """Astra X-1a r1 P1-5 / Fable r1 P2-1: no evidence and no inventory does not pass under s3-on."""
+    assert authority([], policy="s3-on") == (False, ["no participating-image inventory given (s3-on)"])
+    assert not assumption_allowed([], requested=True, policy="s3-on")[0]
+    assert authority([])[0]   # (s3-off: as before)
 
 
 def test_every_image_needs_evidence_under_either_policy(tmp_path):
@@ -119,6 +179,46 @@ def test_every_image_needs_evidence_under_either_policy(tmp_path):
     assert not authority([item], images=(CORE, "d" * 64))[0]   # (a linked image without a scan)
     assert authority([item], images=(CORE,))[0]
     assert not authority([], images=(CORE,))[0]
+
+
+def _pe(magic=0x20B, machine=0x8664, subsystem=3, *, offset=0x80, size=0x200) -> bytes:
+    data = bytearray(size)
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3C, offset)
+    data[offset:offset + 4] = b"PE\0\0"
+    struct.pack_into("<H", data, offset + 4, machine)
+    struct.pack_into("<H", data, offset + 24, magic)
+    struct.pack_into("<H", data, offset + 24 + 68, subsystem)
+    return bytes(data)
+
+
+def test_the_s3_applicability_predicate():
+    """design_s3_r16 1.1 / Astra X-1a r1 P1-4: PE32+, AMD64, subsystem 1 / 2 / 3; anything else inapplicable;
+    a PE whose headers cannot be read undecidable."""
+    assert pe_header_facts(_pe()) == (0x20B, 0x8664, 3) and s3_applicable(_pe()) is True
+    assert s3_applicable(_pe(subsystem=1)) is True and s3_applicable(_pe(subsystem=2)) is True
+    assert s3_applicable(_pe(subsystem=10)) is False       # (an EFI application: excluded subsystem)
+    assert s3_applicable(_pe(magic=0x10B)) is False        # (PE32)
+    assert s3_applicable(_pe(machine=0x14C)) is False      # (i386)
+    assert s3_applicable(b"\x7fELF" + bytes(60)) is False  # (not a PE at all)
+    assert s3_applicable(_pe(offset=0x1F0, size=0x300)[:0x200]) is None   # (the headers lie beyond the bytes read)
+    assert s3_applicable(b"MZ" + bytes(10)) is None        # (truncated)
+
+
+def _registers(*rows):
+    return {"register_evidence": {"revision": 1, "registers": [
+        {"name": name, "space_id": 4, "byte_offset": offset, "byte_size": size} for name, offset, size in rows]}}
+
+
+def test_the_sealed_rsp_identity():
+    """Astra X-1a r1 P1-4: the unique eight-byte RSP with its aliases inside it; anything else has none."""
+    ok = _registers(("RSP", 32, 8), ("ESP", 32, 4), ("SP", 32, 2), ("SPL", 32, 1), ("RAX", 0, 8))
+    assert sealed_rsp(ok) == (4, 32, 8)
+    assert sealed_rsp(_registers(("RSP", 32, 4))) is None                         # (a four-byte SP)
+    assert sealed_rsp(_registers(("RSP", 32, 8), ("RSP", 40, 8))) is None         # (not unique)
+    assert sealed_rsp(_registers(("RSP", 32, 8), ("XSP", 32, 8))) is None         # (another 8-byte alias)
+    assert sealed_rsp(_registers(("RSP", 32, 8), ("WIDE", 24, 16))) is None       # (a wider overlap)
+    assert sealed_rsp({}) is None
 
 
 @pytest.mark.parametrize("change", [{"detector": DETECTORS[1]}, {"policies": {}}, {"bound": 1},
@@ -134,6 +234,8 @@ def test_malformed_v2_rows_are_rejected(tmp_path):
         _load(tmp_path, on=[_row("2000")])   # (an s3-on row without its cause)
     with pytest.raises(EvidenceError):
         _load(tmp_path, kernels=[{**_kernel(0x100, "covered"), "class": "maybe"}])
+    with pytest.raises(EvidenceError):
+        _load(tmp_path, x86="yes")
 
 
 def test_unknown_policy_is_an_error(tmp_path):
@@ -142,8 +244,8 @@ def test_unknown_policy_is_an_error(tmp_path):
 
 
 def test_an_s3_on_template_needs_its_recorded_authority():
-    """r4 4.5 item 4: an s3-on run refuses a template without the stack-switch authority it was derived under,
-    or with another (seal, evidence, policy or coverage); an s3-off run (no authority asked) is unchanged."""
+    """r4 4.5 item 4 / Fable r1 P2-1: an s3-on run refuses a template without the stack-switch authority it was
+    derived under, with another, or when the run passes none; an s3-off run is unchanged."""
     from types import SimpleNamespace
 
     from tdo_v2.summary_templates import refusal
@@ -155,10 +257,12 @@ def test_an_s3_on_template_needs_its_recorded_authority():
 
     entry = SimpleNamespace(refusal=None)
     common = dict(external_models=None, pcodeop_models=None, private_frame_above=0)
-    assert "without the s3-on" in refusal(template(None), entry, stack_authority=current, **common)
+    on = dict(common, policy="s3-on")
+    assert "without the s3-on" in refusal(template(None), entry, stack_authority=current, **on)
     assert "another stack-switch authority" in refusal(template({**current, "seal": "6" * 64}), entry,
-                                                       stack_authority=current, **common)
+                                                       stack_authority=current, **on)
     assert "another stack-switch authority" in refusal(template({**current, "coverage": "d" * 64}), entry,
-                                                       stack_authority=current, **common)
+                                                       stack_authority=current, **on)
+    assert "needs the stack-switch authority" in refusal(template(current), entry, **on)   # (forgotten argument)
     refused = SimpleNamespace(refusal="engine version")
-    assert refusal(template(None), refused, stack_authority=current, **common) == "engine version"
+    assert refusal(template(None), refused, stack_authority=current, **on) == "engine version"
