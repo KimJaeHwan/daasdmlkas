@@ -290,6 +290,8 @@ class CommonFactsCollector:
         self.lengths = {}
         self.groups = {}
         self.branch_self = 0
+        self.code_rows = {}          # (id, observation) -> (x86, verified, trap outcome): G2b (code_facts)
+        self.global_reason = False
 
     def __call__(self, fid, facts, result, lift, ballot, window=None):
         import common_facts as cf
@@ -306,6 +308,13 @@ class CommonFactsCollector:
         self.rows[k] = cf.derive_row(facts, lift, fid, self.facts["registers"], data,
                                      cf.split_needed(ballot, result))
         self.branch_self += int(lift is not None and lift.pattern == "branch-self")
+        # G2b (design_tbr_g2b_code_facts r2 E2 / r3 E2): the trap decision uses the raw window and ballots here,
+        # where they still exist (ballots are not kept after collection)
+        import code_facts
+
+        x86 = facts.get("isa") == "x86-64"
+        self.code_rows[k] = (x86, (result or {}).get("window", {}).get("verified", 0) if result else 0,
+                             code_facts.trap_outcome(result, ballot, window, self.global_reason) if x86 else None)
         # Retain only the comparison inputs: per vendor view a vote summary (r1 C1); the ballots themselves are
         # not kept. Non-x86 rows and rows without accepted votes share the EMPTY summary (r2 D2).
         accepted = {v: cf.votes(ballot, result, v) for v in (None, *cf.VENDORS)}
@@ -664,6 +673,8 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     collector = IsaCollector() if want_common or (isa_facts or producer_override) and evidence_out is not None else None
     verdicts = OverrideCollector(manifest.get("producer_profile")) if producer_override else None
     common = CommonFactsCollector(facts, collector) if want_common else None
+    if common is not None:
+        common.global_reason = reason is not None
     rows.extend(check.decode_rows(image, facts["functions"], use_table, reason, full, states, facts["language"] or "",
                                   unverified, isa=collector, override=_chain(verdicts, common)))
     isa_block = collector.block(facts, states) if collector else None
@@ -682,8 +693,17 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
             dict(name="tbr-derive-ghidra-p-code", lift_table=lifting.TABLE["id"], rule=cf.FACTS_RULE),
             dict(isa=facts["isa"] or cf.U("unsupported language"), address_spaces=facts["address_spaces"],
                  stack_register=facts["registers"]["sp"] or cf.U("no validated stack register"),
-                 code=cf.U("code surveys belong to G2b"), tbi=cf.U("no TBI evidence")),
+                 code=None, tbi=cf.U("no TBI evidence")),
             common.rows.values())
+        import code_facts
+
+        # G2b: program.code (regions, verified windows, sites, survey) bound to the document's row order
+        _, names_sha256 = code_facts.name_table()
+        spaces = sorted({r["space"] for r in doc["rows"]})
+        binder = code_facts.CodeBinder(code_facts.file_facts(mapping, original), base,
+                                       spaces[0] if len(spaces) == 1 else None, doc["rows"], common.code_rows,
+                                       cf.row_set_digest(doc["rows"]))
+        doc["program"]["code"] = binder.program_code(names_sha256)
         # (r1 C4: the facts file is streamed, byte-identical to canonical(doc) + LF; its digest excludes the LF)
         common_block = cf.verdict_block5(doc, cf.write_canonical(common_facts_out, doc), common.unit_sets,
                                          common.row_set)
@@ -691,6 +711,7 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
             facts, common, doc, complete=complete,
             missing_functions={m["id"] for m in manifest["functions"]} - seen,
         )
+        header["common_facts"]["code"] = code_facts.summary(doc["program"]["code"])
     override_block = None
     engine = engine_source() if evidence_out is not None or verdicts is not None else None
     if verdicts is not None:

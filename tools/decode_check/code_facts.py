@@ -608,3 +608,314 @@ def _elf_imports(image, data, sections, out):
                                                          "entry": table_basis["file_record"][0] + cursor,
                                                          "symbol": sym_basis, "string": name_basis}}}
     out.import_state = "partial" if partial else "complete"
+
+
+# -- trap sites (r2 E2, r3 E2) ------------------------------------------------------------------------------------
+
+TRAP_BYTES = {0xCC: ("int3", 1, 3, None), 0xF1: ("int1", 1, 1, None)}   # opcode -> (form, length, vector, imm)
+TRAP_FLOWS = {"int3", "int_n", "int1", "into", "syscall", "sysenter"}
+
+
+def _ballot_ok(ballot):
+    import decoders
+
+    if not ballot:
+        return False
+    for vendor, names in (("intel", decoders.INTEL_VOTERS), ("amd", decoders.AMD_VOTERS)):
+        votes = ballot.get(vendor, ())
+        if sorted(d.voter for d in votes) != sorted(names) or any(d.amd != (vendor == "amd") for d in votes):
+            return False
+    return True
+
+
+def ballot_digest(votes):
+    import hashlib
+    import json
+
+    payload = [d.as_json() for d in sorted(votes, key=lambda d: d.voter)]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                                     allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _byte_form(data):
+    """(form, length, vector, immediate) from the verified bytes after a prefix run; ("none", None, ...) when the
+    opcode is not a trap; None when the bytes end before the opcode is complete."""
+    import compare
+
+    prefix = compare._prefix_run(data)
+    p = len(prefix)
+    rest = data[p:]
+    if not rest:
+        return None
+    op = rest[0]
+    if op == 0xCD:
+        if len(rest) < 2:
+            return None
+        return "int_n", p + 2, rest[1], rest[1]
+    if op in TRAP_BYTES:
+        form, length, vector, imm = TRAP_BYTES[op]
+        return form, p + length, vector, imm
+    if op == 0x0F:
+        if len(rest) < 2:
+            return None
+        if rest[1] == 0x05:
+            return "syscall", p + 2, None, None
+        if rest[1] == 0x34:
+            return "sysenter", p + 2, None, None
+    if op == 0xCE:
+        return "ce", p + 1, None, None
+    return "none", None, None, None
+
+
+def _vote_form(d):
+    if d.flow == "int_n":
+        return "int_n", d.int_vector
+    return d.flow, None
+
+
+def trap_outcome(result, ballot, window_bytes, global_reason=False):
+    """None = decided non-trap; ("site", fields) = a trap site; ("unresolved", reason). Inputs are the raw window,
+    its verified length and relocations, and the raw ballots: G1's attribute filter is not used (r3 E2)."""
+    if result is None:
+        return "unresolved", "GLOBAL_REASON" if global_reason else "NO_WINDOW"
+    window = result.get("window") or {}
+    verified = window.get("verified", 0)
+    data = (window_bytes or b"")[:verified]
+    if not verified or not data:
+        return "unresolved", "NO_WINDOW"
+    if not _ballot_ok(ballot):
+        return "unresolved", "BALLOT_MISSING"
+    shape = _byte_form(data)
+    if shape is None:
+        return "unresolved", "TRAP_FORM_UNDECIDED"
+    form, length, vector, immediate = shape
+    votes = list(ballot["intel"]) + list(ballot["amd"])
+    relocations = window.get("relocations") or ()
+
+    def relocated(n):
+        return any(start < n and start + size > 0 for start, size, _ in relocations)
+
+    if form == "none":
+        if all(d.status == "invalid" for d in votes):
+            return "unresolved", "ALL_INVALID_NOT_CE"
+        if any(d.status != "ok" for d in votes) or len({d.length for d in votes}) != 1 or \
+                len({_vote_form(d) for d in votes}) != 1:
+            return "unresolved", "TRAP_FORM_UNDECIDED"
+        n = votes[0].length
+        if n > verified or any(d.flow in TRAP_FLOWS for d in votes):
+            return "unresolved", "TRAP_FORM_UNDECIDED"
+        return None
+    if length > verified:
+        return "unresolved", "TRAP_FORM_UNDECIDED"
+    if relocated(length):
+        return "unresolved", "RELOCATED_OPCODE"
+    if form == "ce":
+        if all(d.status == "invalid" for d in votes):
+            return None                              # (long-mode CE: invalid encoding, decided non-trap)
+        return "unresolved", "TRAP_FORM_UNDECIDED"
+    want = ("int_n", vector) if form == "int_n" else (form, None)
+
+    def agreed(group):
+        return group and all(d.status == "ok" and d.length == length and _vote_form(d) == want for d in group)
+
+    intel, amd = list(ballot["intel"]), list(ballot["amd"])
+    basis = {"decoders": {"intel": ballot_digest(intel), "amd": ballot_digest(amd)}}
+    if form == "sysenter":
+        if not agreed(intel):
+            return "unresolved", "TRAP_FORM_UNDECIDED"
+        if agreed(amd) or all(d.status == "invalid" for d in amd):
+            return "site", {"form": {"unobserved": "VENDOR_SPLIT_FORM"}, "vector": None, "immediate": None,
+                            "syscall_abi": {"unobserved": "NO_ABI_BASIS"}, "length": length, "basis": basis,
+                            "vendor_views": {"intel": {"form": "sysenter"},
+                                             "amd": {"form": "invalid_encoding",
+                                                     "basis": {"isa_conditions": "SYSENTER.f5.amd"}}}}
+        return "unresolved", "TRAP_FORM_UNDECIDED"
+    if not (agreed(intel) and agreed(amd)):
+        return "unresolved", "TRAP_FORM_UNDECIDED"
+    abi = None if form in ("int3", "int1") else {"unobserved": "NO_ABI_BASIS"}
+    return "site", {"form": form, "vector": vector, "immediate": immediate, "syscall_abi": abi, "length": length,
+                    "basis": basis}
+
+
+# -- Bundle binding (r1 s3 / s5, r2 E5 / E6, r3 E5 / E6) ----------------------------------------------------------
+
+def name_table():
+    """(kinds {kind: [names]}, sha256 of the file bytes): the table is data, versioned with FACTS_RULE."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    raw = Path(__file__).with_name("code_site_names.json").read_bytes()
+    table = json.loads(raw)
+    assert table["rule"] == FACTS_RULE
+    return table["kinds"], hashlib.sha256(raw).hexdigest()
+
+
+def _hx(value):
+    return format(value, "x")
+
+
+def _canonical(x):
+    import json
+
+    return json.dumps(x, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+def _item_key(item):
+    return (item["row"], -1 if item.get("op") is None else item["op"]) if "row" in item else (-1, -1)
+
+
+def _groups(pairs):
+    """[(reason, item)] -> [{"reason", "items"}]: reasons sorted, items sorted and deduplicated (r3 E5)."""
+    import json
+
+    out = {}
+    for reason, item in pairs:
+        assert reason in REASONS, reason
+        out.setdefault(reason, set()).add(_canonical(item))
+    return [{"reason": reason, "items": sorted((json.loads(x) for x in items), key=_item_key)}
+            for reason, items in sorted(out.items())]
+
+
+def _union_length(intervals):
+    total, end = 0, None
+    for a, b in sorted(intervals):
+        if end is None or a > end:
+            total += b - a
+            end = b
+        elif b > end:
+            total += b - end
+            end = b
+    return total
+
+
+class CodeBinder:
+    """Binds file facts to the Bundle: regions in Bundle VAs, per-window verified records (explicit or compact),
+    rows outside code, trap sites and coverage. Later steps add import and store sites."""
+
+    def __init__(self, ff, base, space, rows, code_rows, row_set_sha256):
+        self.ff, self.base, self.space = ff, base, space
+        self.rows = rows                                   # facts rows in document order
+        self.code_rows = code_rows                         # (id, observation) -> (x86, verified, trap outcome)
+        self.row_set_sha256 = row_set_sha256
+        self.index = {(r["id"], r["observation"]): i for i, r in enumerate(rows)}
+        self.va = [int(r["offset"], 16) for r in rows]
+        self.sites, self.coverage = [], []
+
+    def _range(self, start, end):
+        return {"space": self.space, "load_base": _hx(self.base), "start": _hx(self.base + start),
+                "end": _hx(self.base + end) if end is not None else {"unobserved": "end not determined"}}
+
+    def regions(self):
+        ff = self.ff
+        all_regions = ff.code + ff.unwind
+        regions = []
+        for r in all_regions:
+            item = {"range": self._range(r.start, r.end), "role": r.role, "name": r.name, "basis": r.basis}
+            if r.role == "code":
+                item.update(executable=r.executable, writable=r.writable)
+            regions.append(item)
+        windows = sorted((self.index[k], self.va[self.index[k]], self.va[self.index[k]] + verified)
+                         for k, (_, verified, _) in self.code_rows.items() if verified)
+        lists = [[] for _ in regions]
+        spans = [[] for _ in regions]
+        # (sweep: windows by start, regions by start; only decided intervals take part, r2 E5)
+        decided = sorted((self.base + r.start, self.base + r.end, ri) for ri, r in enumerate(all_regions)
+                         if r.end is not None)
+        hits = []
+        active, j = [], 0
+        for i, w0, w1 in sorted(windows, key=lambda w: (w[1], w[0])):
+            while j < len(decided) and decided[j][0] < w1:
+                active.append(decided[j])
+                j += 1
+            active = [reg for reg in active if reg[1] > w0]
+            for a, b, ri in active:
+                lo, hi = max(a, w0), min(b, w1)
+                if lo < hi:
+                    hits.append((ri, i, lo, hi))
+        for ri, i, lo, hi in sorted(hits):
+            lists[ri].append({"interval": [_hx(lo), _hx(hi)], "basis": {"g1_window": {"row": i}}})
+            spans[ri].append((lo, hi))
+        size = len(_canonical(lists))
+        compact = size > VERIFIED_THRESHOLD
+        for ri, item in enumerate(regions):
+            item["verified_bytes"] = _union_length(spans[ri])
+            if not compact:
+                item["verified"] = lists[ri]
+        out = {"regions": regions,
+               "verified_encoding": {"explicit_bytes": size, "threshold": VERIFIED_THRESHOLD,
+                                     "form": "compact" if compact else "explicit"}}
+        if compact:
+            lengths = [0] * len(self.rows)
+            for k, (_, verified, _) in self.code_rows.items():
+                lengths[self.index[k]] = verified
+            out["verified_rule"] = {"per_row_window": self.row_set_sha256}
+            out["verified_lengths"] = lengths
+        code = [(self.base + r.start, self.base + r.end) for r in ff.code]
+        out["rows_outside_code"] = [i for i, va in enumerate(self.va) if not any(a <= va < b for a, b in code)]
+        out["diagnostics"] = [dict(d, range=self._range(d["range"]["start"], d["range"]["end"]))
+                              if "range" in d else d for d in ff.diagnostics]
+        return out
+
+    def _excluded(self, predicate, reason):
+        items = sorted(self.index[k] for k, row in self.code_rows.items() if predicate(row))
+        return [{"reason": reason, "items": items}] if items else []
+
+    def traps(self):
+        unresolved, syscall_rows = [], []
+        for k, (x86, _, outcome) in self.code_rows.items():
+            if not x86 or outcome is None:
+                continue
+            i = self.index[k]
+            kind, value = outcome
+            if kind == "unresolved":
+                unresolved.append((value, {"row": i, "op": None}))
+                continue
+            site = {"row": i, "kind": "trap_instruction", "symbol": None, "arguments": [], "holds_if": [PREMISE],
+                    "basis": dict(value["basis"], g1_window={"row": i})}
+            site.update({f: value[f] for f in ("form", "vector", "immediate", "syscall_abi")})
+            if "vendor_views" in value:
+                site["vendor_views"] = value["vendor_views"]
+            self.sites.append(site)
+            if value["form"] in ("syscall", "int_n") or "vendor_views" in value:
+                syscall_rows.append(i)
+        examined = {"facts_rows": self.row_set_sha256, "excluded": self._excluded(lambda row: not row[0], "NOT_X86")}
+        self.coverage.append({"kind": "trap_instruction", "method": "x86_instruction", "rows_examined": examined,
+                              "ranges_examined": [], "unsupported": [], "unresolved": _groups(unresolved)})
+        self.coverage.append({"kind": "cache_maintenance", "method": "syscall", "rows_examined": examined,
+                              "ranges_examined": [], "unresolved": [],
+                              "unsupported": _groups(("NO_ABI_BASIS", {"row": i, "op": None}) for i in syscall_rows)})
+        a64 = sorted(self.index[k] for k, row in self.code_rows.items() if not row[0])
+        if a64:
+            others = self._excluded(lambda row: row[0], "NOT_X86")
+            for kind in ("trap_instruction", "cache_maintenance"):
+                self.coverage.append({"kind": kind, "method": "a64_instruction",
+                                      "rows_examined": {"facts_rows": self.row_set_sha256, "excluded": others},
+                                      "ranges_examined": [], "unresolved": [],
+                                      "unsupported": _groups(("G2C", {"row": i, "op": None}) for i in a64)})
+
+    def program_code(self, name_table_sha256):
+        out = {"premise": PREMISE, "name_table_sha256": name_table_sha256,
+               "file": {"format": self.ff.format, "ok": self.ff.ok, "why": self.ff.why}}
+        out.update(self.regions())
+        self.traps()
+        out["sites"] = sorted(self.sites, key=lambda s: (s["row"], s["kind"], -1 if s.get("op") is None else s["op"]))
+        out["survey"] = self.coverage
+        return out
+
+
+def summary(code):
+    from collections import Counter
+
+    kinds = Counter(s["kind"] for s in code["sites"])
+    groups = {}
+    for field_name in ("unresolved", "unsupported"):
+        groups[field_name] = {f"{c['kind']}/{c['method']}": {g["reason"]: len(g["items"]) for g in c[field_name]}
+                              for c in code["survey"] if c[field_name]}
+    forms = Counter(s["form"] if isinstance(s["form"], str) else "vendor_split" for s in code["sites"]
+                    if s["kind"] == "trap_instruction")
+    return {"rule": FACTS_RULE, "sites": dict(kinds), "trap_forms": dict(forms), **groups,
+            "regions": [{"name": r["name"], "role": r["role"], "verified_bytes": r["verified_bytes"]}
+                        for r in code["regions"]],
+            "rows_outside_code": len(code["rows_outside_code"]), "verified_encoding": code["verified_encoding"],
+            "name_table_sha256": code["name_table_sha256"]}

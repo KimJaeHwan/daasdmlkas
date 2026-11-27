@@ -1,0 +1,15 @@
+{
+ "rule": "g2b-1",
+ "kinds": {
+  "self_modify_import_call": ["VirtualProtect", "VirtualProtectEx", "NtProtectVirtualMemory", "ZwProtectVirtualMemory",
+                              "WriteProcessMemory", "NtWriteVirtualMemory", "ZwWriteVirtualMemory",
+                              "FlushInstructionCache", "NtFlushInstructionCache", "mprotect", "pkey_mprotect"],
+  "dynamic_resolution": ["GetProcAddress", "LdrGetProcedureAddress", "LdrGetProcedureAddressForCaller", "dlsym",
+                         "dlvsym"],
+  "rwx_allocation_constant_args": ["VirtualAlloc", "VirtualAllocEx", "VirtualAlloc2", "NtAllocateVirtualMemory",
+                                   "ZwAllocateVirtualMemory", "mmap", "mmap64"],
+  "cache_maintenance": ["__clear_cache"],
+  "dynamic_unwind_registration": ["RtlAddFunctionTable", "RtlInstallFunctionTableCallback",
+                                  "RtlAddGrowableFunctionTable", "__register_frame", "__register_frame_info"]
+ }
+}

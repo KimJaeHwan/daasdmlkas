@@ -4271,7 +4271,7 @@ def test_g2a_end_to_end(tmp_path):
     assert ev["schema"] == evidence.SCHEMA5 and doc["schema"] == cf.SCHEMA
     block = ev["common_facts"]
     assert (block["schema"], block["rule_version"]) == (cf.VERDICT_SCHEMA2, cf.VERDICT_RULE)
-    assert doc["producer"]["rule"] == cf.FACTS_RULE == "g2a-3" and header["common_facts"]["rule"] == "g2a-4"
+    assert doc["producer"]["rule"] == cf.FACTS_RULE == "g2b-1" and header["common_facts"]["rule"] == "g2a-4"
     # (r2 D4) the whole file is canonical(doc) + LF; the block digest excludes the LF
     import hashlib
     assert facts_out.read_bytes() == cf.canonical(doc) + b"\n"
@@ -4881,3 +4881,56 @@ def test_g2b_elf_imports_with_dynamic_in_written():
     assert {s: (i["name"], i["undefined"]) for s, i in ff.imports.items()} == {0x5000: ("mprotect", True),
                                                                                 0x5008: ("dlsym", False)}
     assert {"reason": "NO_SECTION_HEADERS", "what": "eh_frame"} in ff.diagnostics
+
+
+def _g2b_votes(flow, length, status="ok", vector=None, amd_flow=None, amd_status=None):
+    import decoders
+
+    def one(name, amd):
+        f = (amd_flow or flow) if amd else flow
+        s = (amd_status or status) if amd else status
+        return decoders.Decoded(voter=name, version="t", amd=amd, status=s, length=length if s == "ok" else 0,
+                                flow=f, int_vector=vector)
+    return {"intel": tuple(one(n, False) for n in decoders.INTEL_VOTERS),
+            "amd": tuple(one(n, True) for n in decoders.AMD_VOTERS)}
+
+
+@pytest.mark.parametrize("data, ballot, relocs, expect", [
+    (b"\xcc", ("int3", 1), (), ("site", "int3", 3, None)),
+    (b"\xcd\x29", ("int_n", 2, "ok", 0x29), (), ("site", "int_n", 0x29, 0x29)),
+    (b"\xcd\x03", ("int_n", 2, "ok", 3), (), ("site", "int_n", 3, 3)),
+    (b"\xcd\x03", ("int3", 2), (), ("unresolved", "TRAP_FORM_UNDECIDED")),
+    (b"\x48\xcd\x29", ("int_n", 3, "ok", 0x29), (), ("site", "int_n", 0x29, 0x29)),     # (REX in the prefix run)
+    (b"\x0f\x05", ("syscall", 2), (), ("site", "syscall", None, None)),
+    (b"\x0f\x34", ("sysenter", 2, "ok", None, None, "invalid"), (), ("site", "split")),
+    (b"\xce", ("none", 0, "invalid"), (), None),
+    (b"\xff\xff", ("none", 0, "invalid"), (), ("unresolved", "ALL_INVALID_NOT_CE")),
+    (b"\x90", ("none", 1), (), None),
+    (b"\xcd\x29", ("int_n", 2, "ok", 0x29), ((1, 1, "DIR64"),), ("unresolved", "RELOCATED_OPCODE")),
+    (b"\xcd", ("int_n", 2, "ok", 0x29), (), ("unresolved", "TRAP_FORM_UNDECIDED")),          # (ib not verified)
+], ids=["int3", "int29", "cd03", "cd03-voted-int3", "rex-int29", "syscall", "sysenter-split", "ce", "invalid",
+        "nop", "relocated-ib", "truncated"])
+def test_g2b_trap_outcome(data, ballot, relocs, expect):
+    import code_facts as cf2
+
+    result = {"window": {"verified": len(data), "relocations": list(relocs)}}
+    got = cf2.trap_outcome(result, _g2b_votes(*ballot), data)
+    if expect is None or expect[0] == "unresolved":
+        assert got == expect
+    elif expect[1] == "split":
+        assert got[0] == "site" and got[1]["form"] == {"unobserved": "VENDOR_SPLIT_FORM"}
+        assert got[1]["vendor_views"]["amd"]["form"] == "invalid_encoding"
+    else:
+        assert got[0] == "site" and (got[1]["form"], got[1]["vector"], got[1]["immediate"]) == expect[1:]
+        assert got[1]["syscall_abi"] == (None if expect[1] in ("int3", "int1") else {"unobserved": "NO_ABI_BASIS"})
+
+
+def test_g2b_trap_outcome_missing_inputs():
+    import code_facts as cf2
+
+    assert cf2.trap_outcome(None, None, None, True) == ("unresolved", "GLOBAL_REASON")
+    assert cf2.trap_outcome(None, None, None, False) == ("unresolved", "NO_WINDOW")
+    assert cf2.trap_outcome({"window": {"verified": 0}}, _g2b_votes("int3", 1), b"") == ("unresolved", "NO_WINDOW")
+    partial = _g2b_votes("int3", 1)
+    partial["amd"] = partial["amd"][:1]
+    assert cf2.trap_outcome({"window": {"verified": 1}}, partial, b"\xcc") == ("unresolved", "BALLOT_MISSING")

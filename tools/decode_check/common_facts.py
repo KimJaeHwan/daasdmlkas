@@ -16,7 +16,7 @@ import lifting
 SCHEMA = "tbr-common-facts-1"
 VERDICT_SCHEMA = "tbr-common-facts-verdicts-1"    # (-4 block, read only, with rule "g2a-3")
 VERDICT_SCHEMA2 = "tbr-common-facts-verdicts-2"   # (-5 block: interned unit sets, design_tbr_g2a_cost r1 C3)
-FACTS_RULE = "g2a-3"     # the facts file's producer.rule (the -5 compaction leaves the facts bytes unchanged)
+FACTS_RULE = "g2b-1"     # the facts file's producer.rule (g2b-1: program.code added, design_tbr_g2b r1 s1)
 VERDICT_RULE = "g2a-4"   # the -5 block and the report header (design_tbr_g2a_cost r2 D3)
 PREMISE = "image-code-unmodified-at-runtime"
 VENDORS = ("intel", "amd")
