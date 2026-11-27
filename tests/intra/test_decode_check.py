@@ -3934,6 +3934,17 @@ def _g2_binding(c):
     return doc, ev, args
 
 
+def _g2_binding5(c):
+    import common_facts as cf
+    import evidence
+
+    doc, ev, args = _g2_binding(c)
+    block = cf.verdict_block5(doc, cf.digest(doc), c.unit_sets, c.row_set)
+    ev5 = dict(ev, schema=evidence.SCHEMA5, common_facts=block)
+    args = dict(args, allowlist=[evidence.allowlist_entry(ev5)])
+    return doc, ev5, args
+
+
 def test_g2a_required_vendor():
     from copy import deepcopy
 
@@ -4111,7 +4122,8 @@ def test_g2a_required_blr_x30():
         assert cf.parity(fn, c.rows, regs, {})[0]["status"] == "matched"
 
 
-def test_g2a_required_binding():
+@pytest.mark.parametrize("binding", [_g2_binding, _g2_binding5])
+def test_g2a_required_binding(binding):
     from copy import deepcopy
 
     import common_facts as cf
@@ -4121,7 +4133,7 @@ def test_g2a_required_binding():
     c = _g2_collect([(fid, f, lift, ballot, result, data),
                      ("other", f, None, None, None, b""),
                      (fid, dict(f, view="1"), None, None, None, b"")])
-    doc, ev, args = _g2_binding(c)
+    doc, ev, args = binding(c)
     lookup = evidence.bind_common_facts(ev, doc, **args)
     base = cf.identity(f, fid)
     row = cf.ref(c.rows[base])
@@ -4142,7 +4154,7 @@ def test_g2a_required_binding():
     old = c.units[base]
     c.units[base] = [u for u in old if not u["path"].startswith("vendor_views.amd.")]
     c.units[base] += cf.row_verdicts(changed, cf.votes(ballot, result, "amd"), cf.Index([], True), {}, "amd")
-    doc2, ev2, args2 = _g2_binding(c)
+    doc2, ev2, args2 = binding(c)
     lookup2 = evidence.bind_common_facts(ev2, doc2, **args2)
     assert lookup2(dict(row=row, path="vendor_views.intel.link_write.continuation")) == "confirmed"
     assert lookup2(dict(row=row, path="vendor_views.amd.link_write.continuation")) == "contradicted"
@@ -4385,9 +4397,8 @@ def _g2_jrcxz():
     return "f0", f, lifting.identify(f), ballot, result, data
 
 
-def test_g2a_round3_opaque_op_output_binding(monkeypatch):
-    from copy import deepcopy
-
+@pytest.mark.parametrize("binding", [_g2_binding, _g2_binding5])
+def test_g2a_round3_opaque_op_output_binding(monkeypatch, binding):
     import common_facts as cf
     import evidence
 
@@ -4402,19 +4413,16 @@ def test_g2a_round3_opaque_op_output_binding(monkeypatch):
     assert r["transfer"]["condition"]["test"] == {"op_output": {"ordinal": 0, "opcode": "INT_EQUAL"}}
     assert _g2_code(c.units[k], path) == "u"
 
-    doc, ev, args = _g2_binding(c)
+    doc, ev, args = binding(c)
     query = dict(row=cf.ref(r), path=path)
     lookup = evidence.bind_common_facts(ev, doc, **args)
     assert lookup(query) == "unobserved"
     assert lookup(dict(query, path="transfer.condition")) == "confirmed"
 
-    bad = deepcopy(ev)
-    vr, = bad["common_facts"]["rows"]
-    i, = [i for i, u in enumerate(vr["units"]) if u["path"] == path]
-    vr["units"][i] = cf.unit(path, "c")
-    vr["state"] = cf.row_state(vr["units"])
+    c.units[k] = [dict(u, code="c") if u["path"] == path else u for u in c.units[k]]
+    bad_doc, bad_ev, bad_args = binding(c)
     with pytest.raises(evidence.Rejected, match="confirmed opaque op_output"):
-        evidence.bind_common_facts(bad, doc, **args)
+        evidence.bind_common_facts(bad_ev, bad_doc, **bad_args)
 
 
 @pytest.mark.parametrize("fixture,parent,roles", [
@@ -4468,17 +4476,6 @@ def test_g2a_round3_trap_return_input_not_applicable():
 
 # -- G2a cost compaction (design_tbr_g2a_cost r1 + r2): -5 interned verdicts, vote summaries, streamed facts ------
 
-def _g2_binding5(c):
-    import common_facts as cf
-    import evidence
-
-    doc, ev, args = _g2_binding(c)
-    block = cf.verdict_block5(doc, cf.digest(doc), c.unit_sets, c.row_set)
-    ev5 = dict(ev, schema=evidence.SCHEMA5, common_facts=block)
-    args = dict(args, allowlist=[evidence.allowlist_entry(ev5)])
-    return doc, ev5, args
-
-
 def _g2_all_queries(c, doc):
     import common_facts as cf
 
@@ -4528,6 +4525,8 @@ def test_g2a_cost_block5_expands_to_block4():
     # two rows with the same verdicts share one set; numbering is by first use
     ids = [r["set"] for r in five["rows"]]
     assert list(dict.fromkeys(ids)) == list(range(len(five["unit_sets"])))
+    # (Astra impl r1: an independent 798b903 oracle value for the same three-row fixture)
+    assert cf.digest(cf.expand_block5(five)) == "067dd5124bc0e4878f18e2c049ba19d5a805ba4ff565d8b9308d22025ea1bf2a"
     assert len(five["unit_sets"]) < len(five["rows"])
 
 
@@ -4562,11 +4561,22 @@ def test_g2a_cost_block5_rejections():
     doc, ev, args = _g2_binding5(c)
     evidence.bind_common_facts(ev, doc, **args)
 
-    def bad(change):
+    def bad(change, match=None):
         e = deepcopy(ev)
         change(e["common_facts"])
-        with pytest.raises(evidence.Rejected):
+        with pytest.raises(evidence.Rejected, match=match):
             evidence.bind_common_facts(e, doc, **dict(args, allowlist=[evidence.allowlist_entry(e)]))
+
+    def wrong_first_use(block):
+        sets = block["unit_sets"]
+        sets[0], sets[1] = sets[1], sets[0]
+        for row in block["rows"]:
+            if row["set"] in (0, 1):
+                row["set"] = 1 - row["set"]
+
+    bad(wrong_first_use, "not numbered by first use")
+    for pid in (True, -1, len(cf.FIELD_PATHS)):
+        bad(lambda b, pid=pid: b["unit_sets"][0][0].__setitem__(0, pid), "unit path id or code")
 
     def setfield(i, value):
         return lambda b: b["rows"][i].__setitem__("set", value)
@@ -4580,7 +4590,6 @@ def test_g2a_cost_block5_rejections():
     bad(lambda b: b["unit_sets"][0].append([0, "u", None]))                             # arity 3 bad edge
     bad(lambda b: b["unit_sets"][0].append([0, "u", ["always", "encoded_target", None], {"ordinal": 0, "opcode": "X"}]))
     bad(lambda b: b["unit_sets"][0].append(deepcopy(b["unit_sets"][0][0])))             # duplicate selector
-    bad(lambda b: b["unit_sets"].insert(0, b["unit_sets"].pop()))                       # numbering not by first use
     opaque = cf.PATH_ID["transfer.link_write.relocation"]           # confirmed opaque field
 
     def confirm_opaque(b):
@@ -4649,3 +4658,89 @@ def test_g2a_cost_crosscheck_switch(monkeypatch):
     monkeypatch.setenv("TDO_V2_G2A_COST_CROSSCHECK", "1")
     c = _g2_collect([_g2_golden(), _g2_jrcxz(), ("f1", *_g2_golden()[1:])])
     assert c.crosscheck and c.crosschecked == 7 and not c.checked
+
+
+@pytest.mark.parametrize("binding", [_g2_binding, _g2_binding5])
+@pytest.mark.parametrize("mode", ["star", "uncovered"])
+def test_g2a_shared_set_coverage(binding, mode):
+    import common_facts as cf
+    import evidence
+
+    c = _g2_collect([_g2_golden(), ("f1", *_g2_golden()[1:])])
+    doc, ev, args = binding(c)
+    first, second = doc["rows"]
+    if mode == "star":
+        ev["functions"][1]["exceptions"] = [
+            dict(space=second["space"], offset=second["offset"], attributes={"*": "unobserved"})]
+    else:
+        args["bundle"]["functions"]["f1"]["kept"] = False
+    lookup = evidence.bind_common_facts(ev, doc, **args)
+    assert lookup(dict(row=cf.ref(first), path="transfer.kind")) == "confirmed"
+    assert lookup(dict(row=cf.ref(second), path="transfer.kind")) == "unobserved"
+
+
+def test_g2a_explicit_owner_and_normalized_duplicate():
+    import common_facts as cf
+    import evidence
+
+    doc, ev, args = _g2_binding5(_g2_collect([_g2_golden()]))
+    row = cf.ref(doc["rows"][0])
+    units = ev["common_facts"]["unit_sets"][0]
+    u = next(u for u in units if len(u) == 4)
+    implicit = dict(u[3])
+    u[3]["row"] = row
+    query = dict(row=row, path=cf.FIELD_PATHS[u[0]])
+    lookup = evidence.bind_common_facts(ev, doc, **args)
+    assert lookup(dict(query, op=implicit)) == "unobserved"
+    assert lookup(dict(query, op=u[3])) == "unobserved"
+    assert lookup(dict(query, op=dict(implicit, row=dict(row, observation="other")))) is None   # (Fable P2-1)
+    units.append([u[0], u[1], None, implicit])
+    with pytest.raises(evidence.Rejected, match="duplicate normalized lookup"):
+        evidence.bind_common_facts(ev, doc, **args)
+
+
+def test_g2a_one_vendor_rejected_at_collection():
+    import common_facts as cf
+    import decode_check
+
+    fid, f, lift, ballot, result, data = _g2_golden()
+    c = decode_check.CommonFactsCollector({"functions": [], "registers": {}})
+    c(fid, dict(f, isa="x86-64"), result, lift, dict(ballot, amd=()), data)
+    union, intel, amd = next(iter(c.summaries.values()))
+    assert union is cf.EMPTY and amd is cf.EMPTY
+    assert (intel.length, intel.a7_width, intel.a7_bits) == (6, 64, START + 6)
+
+
+def test_g2a_vendor_path_on_row_without_view():
+    import common_facts as cf
+    import evidence
+
+    c = _g2_collect([_g2_jrcxz()])                 # (no vendor views)
+    doc, ev, args = _g2_binding5(c)
+    lookup = evidence.bind_common_facts(ev, doc, **args)
+    assert lookup(dict(row=cf.ref(doc["rows"][0]), path="vendor_views.intel.length")) is None
+
+
+def test_g2a_crosscheck_reports_one_sided_exception(monkeypatch):
+    import common_facts as cf
+
+    monkeypatch.setenv("TDO_V2_G2A_COST_CROSSCHECK", "1")
+    real = cf.row_verdicts
+
+    def broken(r, vs, index, isa, vendor=None):
+        raise ValueError("summary path only")
+
+    monkeypatch.setattr(cf, "row_verdicts", broken)
+    with pytest.raises(AssertionError, match="summary=ValueError"):
+        _g2_collect([_g2_jrcxz()])
+    monkeypatch.setattr(cf, "row_verdicts", real)
+
+
+def test_g2a_verdicts5_schema_file():
+    import json
+    import common_facts as cf
+
+    schema = json.loads((REPO / "tools/decode_check/common_facts_verdicts5.schema.json").read_bytes())
+    assert schema["properties"]["field_paths"]["const"] == list(cf.FIELD_PATHS)
+    assert schema["properties"]["schema"]["const"] == cf.VERDICT_SCHEMA2
+    assert schema["properties"]["rule_version"]["const"] == cf.VERDICT_RULE

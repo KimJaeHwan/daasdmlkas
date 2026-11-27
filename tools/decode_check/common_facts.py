@@ -953,6 +953,8 @@ def denominators_of_sets(sets, row_set):
     uses = Counter(row_set.values())
     counts = defaultdict(Counter)
     for sid, units in enumerate(sets):
+        if not uses[sid]:
+            continue
         for u in units:
             counts[FIELD_PATHS[u[0]]][u[1]] += uses[sid]
     return _rates(counts)
@@ -1353,10 +1355,14 @@ CODES = ("c", "x", "u", "n", "?")
 def to_unit(u):
     """A unit dict (row_verdicts' output) as an immutable value: (path_id, code, edge | None, op | None) with
     edge = (when, source, requires) and op = (ordinal, opcode, (id, observation) | None)."""
+    if not set(u) <= {"path", "code", "edge", "op"} or ("edge" in u and "op" in u):
+        raise ValueError(f"unit shape {sorted(u)}")
     edge = triple(u["edge"]) if "edge" in u else None
     op = None
     if "op" in u:
         o = u["op"]
+        if set(o) not in ({"ordinal", "opcode"}, {"row", "ordinal", "opcode"}):
+            raise ValueError(f"unit op shape {sorted(o)}")
         op = (o["ordinal"], o["opcode"], rr(o["row"]) if "row" in o else None)
     return PATH_ID[u["path"]], u["code"], edge, op
 
@@ -1375,6 +1381,8 @@ def from_unit(x):
 
 def unit_json(x):
     pid, state, edge, op = x
+    if edge is not None and op is not None:
+        raise ValueError("a unit has an edge or an op, never both")
     if op is not None:
         o = {"ordinal": op[0], "opcode": op[1]}
         if op[2] is not None:
@@ -1470,11 +1478,22 @@ def streamed_digest(doc, stream_key="rows"):
 
 
 def write_canonical(path, doc, stream_key="rows"):
-    """Writes canonical(doc) + LF chunk by chunk; returns SHA256(canonical(doc)) (the LF excluded, r2 D4)."""
+    """Writes canonical(doc) + LF chunk by chunk; returns SHA256(canonical(doc)) (the LF excluded, r2 D4). The bytes
+    go to a sibling temporary file renamed over the target only when complete (Fable impl r1 P3-8)."""
+    import os
+
     h = hashlib.sha256()
-    with open(path, "wb") as out:
-        for chunk in _chunks(doc, stream_key):
-            h.update(chunk)
-            out.write(chunk)
-        out.write(b"\n")
+    path = os.fspath(path)
+    temporary = path + ".partial"
+    try:
+        with open(temporary, "wb") as out:
+            for chunk in _chunks(doc, stream_key):
+                h.update(chunk)
+                out.write(chunk)
+            out.write(b"\n")
+        os.replace(temporary, path)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+        raise
     return h.hexdigest()

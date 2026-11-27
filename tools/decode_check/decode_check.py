@@ -312,8 +312,18 @@ class CommonFactsCollector:
         for v, vs in accepted.items():
             self.lengths[k, v] = cf.independent_length(vs)
         x86 = facts.get("isa") == "x86-64"
-        summary = tuple(cf.summarize_votes(accepted[v], facts["address"]) if x86 else cf.EMPTY
-                        for v in (None, *cf.VENDORS))
+
+        def summarize(vendor):
+            if not x86:
+                return cf.EMPTY
+            try:
+                return cf.summarize_votes(accepted[vendor], facts["address"])
+            except Exception as error:      # (crosscheck: carried to finish and compared with the reference)
+                if self.crosscheck and (vendor is None or self.rows[k]["vendor_views"]):
+                    return error
+                raise
+
+        summary = tuple(summarize(v) for v in (None, *cf.VENDORS))
         self.summaries[k] = self._empty3 if summary == self._empty3 else summary
         if self.crosscheck:
             self.checked[k] = accepted
@@ -344,9 +354,11 @@ class CommonFactsCollector:
             for j, v in enumerate(views):
                 if v and not r["vendor_views"]:
                     continue
-                part = cf.row_verdicts(r, self.summaries[k][j], index[v], info, v)
+                summary = self.summaries[k][j]
                 if self.crosscheck:
-                    self._crosscheck(k, r, f, v, index[v], info, part)
+                    part = self._crosscheck(k, r, f, v, index[v], info, summary)
+                else:
+                    part = cf.row_verdicts(r, summary, index[v], info, v)
                 units.extend(part)
             key = tuple(cf.to_unit(u) for u in units)    # values only after row_verdicts returned (r1 C2)
             sid = numbered.get(key)
@@ -357,17 +369,35 @@ class CommonFactsCollector:
         self.summaries.clear()
         self.checked.clear()
 
-    def _crosscheck(self, k, r, f, v, idx, info, part):
+    def _crosscheck(self, k, r, f, vendor, index, info, summary):
+        """Both paths run; the same exception on both is the original failure, any other mismatch is reported
+        with its row and view (Astra impl r1 item 3)."""
+        import common_facts as cf
         import _g2a_reference as ref
 
-        vs = self.checked[k][v] if f.get("isa") == "x86-64" else []
-        try:
-            want = ref.row_verdicts(r, vs, idx, info, v)
-        except Exception as error:               # (the reference raising must match the new path raising)
-            raise AssertionError(f"crosscheck {k} {v}: reference raised {error!r}, summary path did not") from error
-        if want != part:
-            raise AssertionError(f"crosscheck {k} {v}: units differ")
+        def outcome(call):
+            try:
+                return call(), None
+            except Exception as error:
+                return None, error
+
+        def new_units():
+            if isinstance(summary, Exception):
+                raise summary
+            return cf.row_verdicts(r, summary, index, info, vendor)
+
+        votes = self.checked[k][vendor] if f.get("isa") == "x86-64" else []
+        got, new_error = outcome(new_units)
+        want, old_error = outcome(lambda: ref.row_verdicts(r, votes, index, info, vendor))
+        if new_error is not None or old_error is not None:
+            if (new_error is not None and old_error is not None
+                    and type(new_error) is type(old_error) and new_error.args == old_error.args):
+                raise new_error
+            raise AssertionError(f"crosscheck {k} {vendor}: summary={new_error!r}, reference={old_error!r}")
+        if got != want:
+            raise AssertionError(f"crosscheck {k} {vendor}: units differ")
         self.crosschecked += 1
+        return got
 
     def denominators(self):
         import common_facts as cf
@@ -556,7 +586,6 @@ def _summarize_rows(facts: dict, common, document: dict) -> dict:
             "unit": "(id, observation), field path, edge triple when applicable, op reference when applicable",
             "fields": common.denominators(),
             "row_states": common.row_states(),
-            "unit_sets": len(common.unit_sets),
             "vendor_rows": vendor_counts, "ambiguous_hlt_or_self_jump": common.branch_self,
             "parity": {"source_rows": source_rows, "source_ops": source_ops, "base_joins": len(base),
                        "base_status": dict(counts), "base_outside_engine_relation": counts["neither"] + counts["extra"],
@@ -711,7 +740,7 @@ def main(argv=None) -> int:
     parser.add_argument("--producer-override", action="store_true",
                         help="write g1-decode-evidence-3: -2 plus the per-row producer-override verdicts (X-1)")
     parser.add_argument("--common-facts", type=Path, default=None,
-                        help="G2a: write the derived tbr-common-facts-1 file here (evidence becomes -4 with --evidence-out)")
+                        help="G2a: write the derived tbr-common-facts-1 file here (evidence becomes -5 with --evidence-out)")
     parser.add_argument("--evidence-out", type=Path, default=None,
                         help="also write the engine evidence file g1-decode-evidence-1 (outside the Bundle)")
     args = parser.parse_args(argv)

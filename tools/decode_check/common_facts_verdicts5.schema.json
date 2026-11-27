@@ -1,0 +1,312 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "tbr-common-facts-verdicts-2",
+ "title": "G2a -5 common_facts verdict block (design_tbr_g2a_cost r1 C3, r2 D1-D4)",
+ "description": "Structure only. Cross-reference rules JSON Schema cannot express (sets numbered by first use in row order, every set used once or more, no duplicate set, no duplicate (path, edge, op) selector within a set, rows sorted and unique by (id, observation), state == row_state(set), per-row binding) are in tools/decode_check/README.md and enforced by evidence.py _check_common_facts5 / _bind_checked_rows; conformance vectors: tests test_g2a_cost_*.",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "rule_version",
+  "facts_sha256",
+  "row_set_sha256",
+  "field_paths",
+  "unit_sets",
+  "rows"
+ ],
+ "properties": {
+  "schema": {
+   "const": "tbr-common-facts-verdicts-2"
+  },
+  "rule_version": {
+   "const": "g2a-4"
+  },
+  "facts_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "row_set_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "field_paths": {
+   "const": [
+    "length",
+    "bytes.range",
+    "transfer.kind",
+    "transfer.exception_basis",
+    "transfer.edges",
+    "transfer.edges.to",
+    "transfer.edges.lands_on",
+    "transfer.edges.lands_on.class",
+    "transfer.edges.lands_on.starts",
+    "transfer.edges.lands_on.inside",
+    "transfer.edges.lands_on.mapping",
+    "transfer.edges.lands_on.import",
+    "transfer.condition",
+    "transfer.condition.taken_when",
+    "transfer.condition.test",
+    "transfer.condition.test.inputs",
+    "transfer.target_auth",
+    "transfer.op_keys",
+    "transfer.op_keys.transfer",
+    "transfer.op_keys.target",
+    "transfer.op_keys.condition",
+    "transfer.op_keys.auth",
+    "transfer.op_keys.link",
+    "transfer.op_keys.sp_adjust",
+    "transfer.op_keys.setup",
+    "transfer.op_keys.transient",
+    "transfer.op_keys.persistent",
+    "transfer.op_keys.encoding_only",
+    "transfer.op_keys.entry_ordinal",
+    "transfer.target_value",
+    "transfer.link_write",
+    "transfer.link_write.value.width",
+    "transfer.link_write.value.bits",
+    "transfer.link_write.continuation",
+    "transfer.link_write.location",
+    "transfer.link_write.location.memory.relative_to",
+    "transfer.link_write.location.memory.slot_offset",
+    "transfer.link_write.location.memory.base",
+    "transfer.link_write.location.memory.space",
+    "transfer.link_write.sp_delta",
+    "transfer.link_write.relocation",
+    "transfer.link_write.derivation",
+    "vendor_views.intel.length",
+    "vendor_views.intel.bytes",
+    "vendor_views.intel.edges",
+    "vendor_views.intel.edges.to",
+    "vendor_views.intel.edges.lands_on",
+    "vendor_views.intel.edges.lands_on.class",
+    "vendor_views.intel.edges.lands_on.starts",
+    "vendor_views.intel.edges.lands_on.inside",
+    "vendor_views.intel.edges.lands_on.mapping",
+    "vendor_views.intel.edges.lands_on.import",
+    "vendor_views.intel.target_value",
+    "vendor_views.intel.link_write",
+    "vendor_views.intel.link_write.value.width",
+    "vendor_views.intel.link_write.value.bits",
+    "vendor_views.intel.link_write.continuation",
+    "vendor_views.intel.link_write.location",
+    "vendor_views.intel.link_write.location.memory.relative_to",
+    "vendor_views.intel.link_write.location.memory.slot_offset",
+    "vendor_views.intel.link_write.location.memory.base",
+    "vendor_views.intel.link_write.location.memory.space",
+    "vendor_views.intel.link_write.sp_delta",
+    "vendor_views.intel.link_write.relocation",
+    "vendor_views.intel.link_write.derivation",
+    "vendor_views.amd.length",
+    "vendor_views.amd.bytes",
+    "vendor_views.amd.edges",
+    "vendor_views.amd.edges.to",
+    "vendor_views.amd.edges.lands_on",
+    "vendor_views.amd.edges.lands_on.class",
+    "vendor_views.amd.edges.lands_on.starts",
+    "vendor_views.amd.edges.lands_on.inside",
+    "vendor_views.amd.edges.lands_on.mapping",
+    "vendor_views.amd.edges.lands_on.import",
+    "vendor_views.amd.target_value",
+    "vendor_views.amd.link_write",
+    "vendor_views.amd.link_write.value.width",
+    "vendor_views.amd.link_write.value.bits",
+    "vendor_views.amd.link_write.continuation",
+    "vendor_views.amd.link_write.location",
+    "vendor_views.amd.link_write.location.memory.relative_to",
+    "vendor_views.amd.link_write.location.memory.slot_offset",
+    "vendor_views.amd.link_write.location.memory.base",
+    "vendor_views.amd.link_write.location.memory.space",
+    "vendor_views.amd.link_write.sp_delta",
+    "vendor_views.amd.link_write.relocation",
+    "vendor_views.amd.link_write.derivation"
+   ]
+  },
+  "unit_sets": {
+   "type": "array",
+   "items": {
+    "type": "array",
+    "minItems": 1,
+    "items": {
+     "oneOf": [
+      {
+       "type": "array",
+       "prefixItems": [
+        {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 87
+        },
+        {
+         "enum": [
+          "c",
+          "x",
+          "u",
+          "n",
+          "?"
+         ]
+        }
+       ],
+       "minItems": 2,
+       "maxItems": 2,
+       "items": false
+      },
+      {
+       "type": "array",
+       "prefixItems": [
+        {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 87
+        },
+        {
+         "enum": [
+          "c",
+          "x",
+          "u",
+          "n",
+          "?"
+         ]
+        },
+        {
+         "type": "array",
+         "minItems": 3,
+         "maxItems": 3,
+         "prefixItems": [
+          {
+           "enum": [
+            "always",
+            "taken",
+            "not_taken",
+            "normal_entry",
+            "abort",
+            "trap",
+            "trap_return"
+           ]
+          },
+          {
+           "enum": [
+            "sequential",
+            "encoded_target",
+            "computed",
+            "os",
+            "os_return"
+           ]
+          },
+          {
+           "enum": [
+            null,
+            "os-contract",
+            "normal-transaction-start",
+            "outermost-transaction",
+            "nested-transaction"
+           ]
+          }
+         ],
+         "items": false
+        }
+       ],
+       "minItems": 3,
+       "maxItems": 3,
+       "items": false
+      },
+      {
+       "type": "array",
+       "prefixItems": [
+        {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 87
+        },
+        {
+         "enum": [
+          "c",
+          "x",
+          "u",
+          "n",
+          "?"
+         ]
+        },
+        {
+         "type": "null"
+        },
+        {
+         "type": "object",
+         "additionalProperties": false,
+         "required": [
+          "ordinal",
+          "opcode"
+         ],
+         "properties": {
+          "ordinal": {
+           "type": "integer",
+           "minimum": 0
+          },
+          "opcode": {
+           "type": "string",
+           "minLength": 1
+          },
+          "row": {
+           "type": "object",
+           "additionalProperties": false,
+           "required": [
+            "id",
+            "observation"
+           ],
+           "properties": {
+            "id": {
+             "type": "string",
+             "minLength": 1
+            },
+            "observation": {
+             "type": "string",
+             "minLength": 1
+            }
+           }
+          }
+         }
+        }
+       ],
+       "minItems": 4,
+       "maxItems": 4,
+       "items": false
+      }
+     ]
+    }
+   }
+  },
+  "rows": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "id",
+     "observation",
+     "set",
+     "state"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "minLength": 1
+     },
+     "observation": {
+      "type": "string",
+      "minLength": 1
+     },
+     "set": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "state": {
+      "enum": [
+       "c",
+       "x",
+       "u"
+      ]
+     }
+    }
+   }
+  }
+ }
+}

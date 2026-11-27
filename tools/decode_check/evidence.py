@@ -706,8 +706,13 @@ def _bind_checked_rows(document: dict, facts_document: dict, *, bundle: dict, al
             check_refs(r, r)
             row_keys = set()
             never = accepted._never_compared(k[1], f["space"], f["address"])
+            build_selectors = False
             if five:
-                row_info[k] = (vr["set"], never)
+                sid = vr["set"]
+                row_info[k] = (sid, never)
+                build_selectors = sid not in selectors
+                if build_selectors:
+                    selectors[sid] = {}
             for u in units_of(vr):
                 path = u["path"]
                 v = None
@@ -750,8 +755,8 @@ def _bind_checked_rows(document: dict, facts_document: dict, *, bundle: dict, al
                     out[lookup_key] = state
                 elif "op" in u and "row" in u["op"]:
                     row_extra.setdefault(k, {})[lookup_key] = state
-                else:
-                    selectors.setdefault(vr["set"], {}).setdefault(_selector(u), u["code"])
+                elif build_selectors:
+                    selectors[sid][_selector(u)] = u["code"]
     except (KeyError, IndexError, TypeError, ValueError) as error:
         raise Rejected(f"malformed common facts binding: {error}") from error
 

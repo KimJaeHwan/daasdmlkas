@@ -258,3 +258,10 @@ Port notes (Rust kernels later):
   returns.
 - Conformance vectors: `TDO_V2_G2A_COST_CROSSCHECK=1` checks every row view against the frozen 798b903 functions in
   `_g2a_reference.py`. The `test_g2a_cost_*` tests are the positive and negative vectors for the -5 reader.
+- The -5 structure check is stricter than -4: an empty opcode or a path outside FIELD_PATHS is rejected when the file
+  is accepted, not later at binding.
+- Exception timing differs from 798b903. `summarize_votes` reads voter values for every row view whose votes are all
+  ok, at collection time; the reference read them only on the call_near, encoded_target and jcc paths. Both are total
+  for ok voters. The crosscheck runs both paths and reports a one-sided exception with its row and view.
+- `common_facts_verdicts5.schema.json` gives the structure as JSON Schema; the cross-reference rules above are prose
+  only.
