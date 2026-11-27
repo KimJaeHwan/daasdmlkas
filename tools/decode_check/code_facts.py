@@ -617,6 +617,8 @@ class ImportSites:
         self.starts, self.by_space = defaultdict(list), defaultdict(list)
         self.entries, self.unknown_edges = defaultdict(set), set()
         self.parents, self.endbr, self.stubs, self.states = {}, {}, {}, {}
+        # G2b's indexes can use a verified decoder length without changing the G2a row.
+        self.lengths = bytearray(_index_length(row, proof) for row, proof in zip(b.rows, b.proofs, strict=True))
 
         for i, r in enumerate(b.rows):
             space, a = r["space"], b.va[i]
@@ -633,13 +635,38 @@ class ImportSites:
                     self.unknown_edges.add(space)
                     continue
                 for e in edges:
-                    to = e.get("to")
-                    if isinstance(to, dict) and "offset" in to:
-                        self.entries[to["space"], int(to["offset"], 16)].add((i, e["source"]))
+                    to = self.edge_coord(i, e)
+                    if to is not None:
+                        self.entries[to].add((i, e["source"]))
                     elif e.get("source") in ("encoded_target", "sequential"):
                         self.unknown_edges.add(space)
         for spans in self.by_space.values():
             spans.sort()
+
+    def edge_coord(self, i, edge):
+        to = edge.get("to")
+        if isinstance(to, dict) and "offset" in to:
+            return to["space"], int(to["offset"], 16)
+        if edge.get("source") != "sequential" or to != {"unobserved": "length unavailable"}:
+            return None
+
+        import lifting
+        import producer_override
+
+        b = self.b
+        row, proof = b.rows[i], b.proofs[i]
+        length = self.lengths[i]
+        if (row["length"] is not None or not length or proof.failure or proof.signature is None
+                or proof.signature[:2] != proof.form):
+            return None
+        coordinate = row["space"], (b.va[i] + length) % (1 << 64)
+        raw = self.raw[i]
+        observed = lifting.continuation(raw)
+        override = raw.get("override")
+        if (raw["flow"].get("is_override") or (override is not None and producer_override.present(override))
+                or (observed is not None and observed != coordinate)):
+            return None
+        return coordinate
 
     def between(self, space, a, z):
         spans = self.by_space.get(space, ())
@@ -647,10 +674,9 @@ class ImportSites:
 
     def covering(self, space, va):
         for a, j in self.between(space, va - 14, va):
-            n = self.b.rows[j]["length"]
-            known = type(n) is int and 0 < n <= 15
-            if not known or a + n > va:
-                yield j, known
+            length = self.lengths[j]
+            if not length or a + length > va:
+                yield j, bool(length)
 
     def predecessor(self, i):
         import lifting
@@ -671,10 +697,10 @@ class ImportSites:
             j = seq[0]
             s = b.rows[j]
             edges = s["transfer"].get("edges")
-            if (self.entries[here] == {(j, "sequential")} and type(s["length"]) is int
-                    and 0 < s["length"] <= 15 and b.va[j] + s["length"] == here[1]
+            if (self.entries[here] == {(j, "sequential")} and self.lengths[j]
+                    and b.va[j] + self.lengths[j] == here[1]
                     and s["transfer"]["kind"] == "none" and isinstance(edges, list) and len(edges) == 1
-                    and edges[0]["source"] == "sequential"
+                    and edges[0]["source"] == "sequential" and self.edge_coord(j, edges[0]) == here
                     and not any(same(k) for k, _ in self.covering(*here))
                     and not any(same(k) for k, _ in self.covering(r["space"], b.va[j]))
                     and not any(a > b.va[j] and same(k) for a, k in self.between(r["space"], b.va[j], here[1]))
@@ -820,13 +846,17 @@ class ImportSites:
         if edge is not None:
             step["edge"] = edge
             return form, False, dst, step
+        if mem and p.target_kind != "memory":
+            raise Unread("FORM_MISMATCH")
         addr = mem.get("address", {})
         if set(addr) != {"constant", "width"} or addr["width"] != 64:
             raise Unread("COMPUTED_TARGET")
         return form, True, int(addr["constant"], 16), step
 
     def read_endbr(self, i):
-        if self.b.rows[i]["length"] != 4:
+        if not self.lengths[i]:
+            raise Unread("INDEX_INCOMPLETE")
+        if self.lengths[i] != 4:
             return False
         va = self.b.va[i]
         if va not in self.endbr:
@@ -900,7 +930,7 @@ class ImportSites:
                       and b.rows[k]["observation"] == r["observation"]]
                 edges = r["transfer"]["edges"]
                 if (len(ns) != 1 or len(edges) != 1 or edges[0]["source"] != "sequential"
-                        or edges[0].get("to") != {"space": r["space"], "offset": _hx(va)}
+                        or self.edge_coord(j, edges[0]) != (r["space"], va)
                         or any(b.rows[k]["observation"] == r["observation"] and b.rows[k]["view"] == r["view"]
                                for k, _ in self.covering(r["space"], va))):
                     raise Unread("TARGET_LIFT_U")
@@ -1544,6 +1574,8 @@ class Proof:
     failure: str | None
     form: tuple
     segment: bool
+    decoded_length: int | None = None
+    target_kind: str | None = None
 
 
 def row_proof(f, result, lift, ballot, window, global_reason=False):
@@ -1551,7 +1583,7 @@ def row_proof(f, result, lift, ballot, window, global_reason=False):
     import compare
     import decoders
 
-    w = (result or {}).get("window", {})
+    w = (result or {}).get("window") or {}
     n = w.get("verified", 0)
     data = (window or b"")[:n]
     isa = f.get("isa")
@@ -1566,20 +1598,45 @@ def row_proof(f, result, lift, ballot, window, global_reason=False):
     votes = [d for v, names in (("intel", decoders.INTEL_VOTERS), ("amd", decoders.AMD_VOTERS))
              for d in (ballot or {}).get(v, ()) if d.voter in names and d.amd == (v == "amd")]
     candidate = any(d.status == "ok" and d.flow in DECODER_FORMS for d in votes)
-    sig = failure = None
+    sig = failure = decoded_length = target_kind = None
     if not _ballot_ok(ballot):
         failure = "BALLOT_MISSING"
-    elif any(d.status != "ok" or not 0 < d.length <= len(data) for d in votes):
+    elif any(d.status != "ok" or type(d.length) is not int
+             or not 1 <= d.length <= min(15, len(data)) for d in votes):
         failure = "VENDOR_VIEW_CONFLICT"
     else:
+        length = votes[0].length
+        if all(d.length == length for d in votes) and not any(
+                offset < length and offset + size > 0 for offset, size, _ in w.get("relocations", ())):
+            decoded_length = length
         signatures = {(d.flow, d.indirect, d.length, None if d.indirect else d.target) for d in votes}
         if len(signatures) == 1:
             sig = signatures.pop()
+            if sig[0] in ("call_near", "jmp_near") and sig[1]:
+                kinds = {d.target_kind for d in votes}
+                if kinds in ({"memory"}, {"register"}):
+                    target_kind = kinds.pop()
+                else:
+                    failure = "VENDOR_VIEW_CONFLICT"
         else:
             failure = "VENDOR_VIEW_CONFLICT"
     prefix = compare._prefix_run(data)
     return Proof(isa, n, trap, ops, candidate, sig, failure, cf.producer_form(f, lift, data),
-                 any(b in (0x64, 0x65) for b in prefix))
+                 any(b in (0x64, 0x65) for b in prefix), decoded_length, target_kind)
+
+
+def _index_length(row, proof):
+    claimed = row["length"]
+    length = proof.decoded_length if claimed is None else claimed
+    if type(length) is not int or not 1 <= length <= 15:
+        return 0
+    if proof.decoded_length is not None and proof.decoded_length != length:
+        return 0
+    for member in (row.get("vendor_views") or {}).values():
+        vendor_length = member["length"]
+        if vendor_length is not None and (type(vendor_length) is not int or vendor_length != length):
+            return 0
+    return length
 
 
 def window_ref(rows, i):

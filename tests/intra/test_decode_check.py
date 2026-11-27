@@ -1618,7 +1618,7 @@ def test_evidence_strict_json_and_allowlist():
 
 
 @needs
-def test_evidence_end_to_end_on_a_synthetic_bundle(tmp_path):
+def test_evidence_end_to_end_on_a_synthetic_bundle(tmp_path, monkeypatch):
     """decode_check --evidence-out on the 66 E8 pair: accepted against the engine's own view, the withheld call
     row withholds A's S1 at level A, B's S1 is confirmed by G1. The golden pins the file minus producer fields."""
     import json
@@ -1627,6 +1627,11 @@ def test_evidence_end_to_end_on_a_synthetic_bundle(tmp_path):
     import decode_check
     import evidence
 
+    # The office golden seals the naming source with CRLF. Pin the fixture's
+    # bytes so its manifest digest is independent of the checkout line endings.
+    naming = tmp_path / "GhidraV2CallNaming.java"
+    naming.write_bytes(s.NAMING_SOURCE.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(s, "NAMING_SOURCE", naming)
     functions, code = _pair(s, call_bytes=b"\x66\xE8\x0A\x00\x00\x00")
     generation = _bundle(tmp_path / "b", functions, code) if (tmp_path / "b").mkdir() is None else None
     path = tmp_path / "evidence.json"
@@ -4874,9 +4879,14 @@ def _g2b_elf(kind=7, sym=1, defined=0, linked=False):
     return bytes(data)
 
 
-def _g2b_votes(flow="none", length=1, indirect=False, target=None, status="ok", vector=None):
+def _g2b_votes(flow="none", length=1, indirect=False, target=None, status="ok", vector=None, target_kind=None):
+    if target_kind is None:
+        target_kind = "none"
+        if flow in ("call_near", "jmp_near"):
+            target_kind = "memory" if indirect else "direct"
     return {v: tuple(decoders.Decoded(n, "fixture", v == "amd", status, length if status == "ok" else 0,
-                                      flow=flow, indirect=indirect, target=target, int_vector=vector)
+                                      flow=flow, indirect=indirect, target=target, int_vector=vector,
+                                      target_kind=target_kind)
                      for n in names)
             for v, names in (("intel", decoders.INTEL_VOTERS), ("amd", decoders.AMD_VOTERS))}
 
@@ -4946,6 +4956,59 @@ def _case(entries, raw=None, *, isa="x86-64", complete=True, missing=(), reader=
 def _reasons(code, kind=g.RWX_KIND, method="import_transfer", field="unresolved"):
     cov, = [c for c in code["survey"] if (c["kind"], c["method"]) == (kind, method)]
     return {group["reason"]: group["items"] for group in cov[field]}
+
+
+def test_g2b_missing_length_index():
+    from dataclasses import replace
+
+    def no_length(entry):
+        fid, row, _, votes, result, data = entry
+        row = dict(row, length=None)
+        return fid, row, lifting.identify(row), votes, result, data
+
+    prev = no_length(_entry(_plain([_op("COPY", [_c(START)], _r(RAX_))]), "90"))
+    use = no_length(_entry(_plain([_store(_r(RAX_))], START + 1), "90"))
+    doc, ev, args = _case([prev, use], reader=True)
+    evidence.bind_common_facts(ev, doc, **args)
+    assert all(row["length"] is None for row in doc["rows"])
+    site, = doc["program"]["code"]["sites"]
+    assert site["static_basis"]["register_values"][0]["path"] == [0, 1]
+
+    profiled = _entry(dict(prev[1], override=NONE_REPORT), "90")
+    site, = _case([profiled, use])["sites"]
+    assert site["static_basis"]["register_values"][0]["path"] == [0, 1]
+
+    missing = (*prev[:3], None, *prev[4:])
+    relocated = _entry(prev[1], "90", prev[3], rel=((0, 1, "R"),))
+    long_vote = _entry(prev[1], "90", _g2b_votes(length=2))
+    split = dict(prev[3], amd=tuple(replace(d, length=2) for d in prev[3]["amd"]))
+    disagreement = _entry(prev[1], "9090", split)
+    wrong_ft = _entry(dict(prev[1], fallthrough=START + 2), "90")
+    override = _entry(dict(prev[1], override=dict(NONE_REPORT, fallthrough_overridden=True)), "90")
+    ref = {"type": "JUMP_OVERRIDE_UNCONDITIONAL", "primary": True, "in_index": True}
+    reference_override = _entry(dict(prev[1], override=dict(NONE_REPORT, references=[ref])), "90")
+    for blocked in (missing, relocated, long_vote, disagreement, wrong_ft, override, reference_override):
+        code = _case([blocked, use])
+        assert _reasons(code, "code_write", "static_store") == {"INDEX_INCOMPLETE": [dict(row=1, op=0)]}
+
+    marker = no_length(_entry(_plain([], START, 4), g.ENDBR64))
+    jump = no_length(_slot(START + 4, BASE + 0x5000, False))
+    caller = no_length(_direct(START + 32, START, True))
+    code = _case([caller, marker, jump], _g2b_elf())
+    assert g.summary(code)["import_routes"] == {"via_thunk": 1, "thunk_row": 1}
+
+    mid = no_length(_direct(START + 32, START + 5))
+    assert "TARGET_NOT_ROW_START" in _reasons(_case([mid, jump], _g2b_elf()))
+
+
+@pytest.mark.parametrize("is_call,data", [(False, "ffe0"), (True, "ffd0")])
+def test_g2b_indirect_register_is_not_import_slot(is_call, data):
+    _, slot_row, _, _, _, _ = _slot(START, BASE + 0x5000, is_call)
+    row = dict(slot_row, length=None)
+    flow = "call_near" if is_call else "jmp_near"
+    votes = _g2b_votes(flow, 2, True, target_kind="register")
+    code = _case([_entry(row, data, votes)], _g2b_elf())
+    assert not code["sites"] and "FORM_MISMATCH" in _reasons(code)
 
 
 @pytest.mark.parametrize("data,flow,status,vector,rel,expected", [
