@@ -7,6 +7,8 @@ usage: x1b_stages.py <tree> <pairs.json> <pair key> [--out /root/x1b_runs] [--co
 """
 import argparse
 import concurrent.futures
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import os
 import subprocess
@@ -21,7 +23,7 @@ import x1b_bundle_tools as tools  # noqa: E402
 # s1+fte+len)
 GROUPS = {"s1+fte": ("s1", "fte"), "s1+fte+len": ("s1", "fte", "len"), "s1+fte+len+proof": ("s1", "fte", "len", "proof"),
           "reg": ("reg",), "len": ("len",), "x1+len": ("x1", "len")}
-PY = os.path.expanduser("~/venvs/tdo/bin/python")
+PY = sys.executable
 
 
 def digests(path: Path) -> dict:
@@ -42,12 +44,16 @@ def dump(tree: Path, generation: Path, out: Path, config: str) -> str:
     return f"{out.name}: {time.time() - start:.0f}s"
 
 
-def compare(tree: Path, pairs: Path, key: str, left: Path, right: Path, projected: bool) -> dict:
-    done = subprocess.run([PY, "tools/graph_fidelity/semantic_snapshot.py", "compare", str(left), str(right),
-                           "--pair", str(pairs), key, *(["--paired"] if projected else [])], cwd=tree,
-                          env={**os.environ, "PYTHONPATH": "src"}, capture_output=True, text=True)
-    lines = done.stdout.strip().splitlines()
-    return {"rc": done.returncode, "summary": lines[-1] if lines else done.stderr[-300:],
+def compare(comparison, pair: dict, left: Path, right: Path, projected: bool) -> dict:
+    with redirect_stdout(StringIO()) as output:
+        try:
+            rc = comparison.compare(left, right, pair, projected)
+        except Exception as error:
+            # A failed comparison must leave a result and allow the next pair to run.
+            rc = 2
+            print(f"[compare] {left.name} vs {right.name}: {type(error).__name__}: {error}")
+    lines = output.getvalue().strip().splitlines()
+    return {"rc": rc, "summary": lines[-1] if lines else "",
             "differences": [line for line in lines[:-1]][:40]}
 
 
@@ -101,18 +107,24 @@ def main() -> int:
 
 
 def finish(args, work, result, local_pairs, comparisons) -> int:
+    sys.path.insert(0, str(args.tree.resolve() / "tools" / "graph_fidelity"))
+    from semantic_snapshot import PairedComparison
+
     configs = args.configs.split(",")
-    for stage, left, right in comparisons:
-        for config in configs:
-            a, b = work / f"{left}.{config}.json.gz", work / f"{right}.{config}.json.gz"
-            entry = {"strict": None, "projected": None}
-            if a.exists() and b.exists():
-                entry["strict"] = compare(args.tree, local_pairs, f"{left}~{right}", a, b, False)
-                entry["projected"] = compare(args.tree, local_pairs, f"{left}~{right}", a, b, True)
-            else:
-                entry["missing"] = [str(path) for path in (a, b) if not path.exists()]
-            target = result["stage0"] if stage == "stage0" else result["stage1"] if stage == "stage1" else result
-            target.setdefault(f"{left}~{right}", {})[config] = entry
+    pairs = json.loads(local_pairs.read_text())["pairs"]
+    for config in configs:
+        with PairedComparison() as comparison:
+            for stage, left, right in comparisons:
+                key = f"{left}~{right}"
+                a, b = work / f"{left}.{config}.json.gz", work / f"{right}.{config}.json.gz"
+                entry = {"strict": None, "projected": None}
+                if a.exists() and b.exists():
+                    entry["strict"] = compare(comparison, pairs[key], a, b, False)
+                    entry["projected"] = compare(comparison, pairs[key], a, b, True)
+                else:
+                    entry["missing"] = [str(path) for path in (a, b) if not path.exists()]
+                target = result["stage0"] if stage == "stage0" else result["stage1"] if stage == "stage1" else result
+                target.setdefault(key, {})[config] = entry
     (work / "result.json").write_text(json.dumps(result, indent=1))
     ok = not result["stage0"]["members"] and all(
         entry.get("strict", {}) and entry["strict"]["rc"] == 0

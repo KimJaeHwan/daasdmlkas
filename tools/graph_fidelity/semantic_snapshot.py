@@ -25,6 +25,7 @@ any difference, 2 on a missing / truncated / failed artifact.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from contextvars import ContextVar
 import dataclasses
 import enum
@@ -34,6 +35,7 @@ import json
 import os
 import sys
 import time
+import zlib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -518,30 +520,104 @@ def load_pair(path: Path, name: str) -> dict:
 
 
 def compare(left: Path, right: Path, pair: dict | None = None, projected: bool = False) -> int:
+    if pair is not None:
+        return _compare_pair(left, right, pair, projected)
+    if projected:
+        print("[compare] --paired needs --pair")
+        return 2
     a, b = _load(left), _load(right)
-    differences = 0
+    return _compare_sections(left, right, a, b) if _same_inputs(a, b, None) else 2
+
+
+def _same_inputs(a, b, pair):
     if pair is not None:
         problem = _check_pair(a, b, pair)
         if problem:
             print(f"[compare] pair check: {problem}")
-            return 2
-    elif projected:
-        print("[compare] --paired needs --pair")
-        return 2
+            return False
     for name in ("generation", "config", "bindings", "options", "models"):
         if name == "generation" and pair is not None:
             continue   # (a verified pair: the inputs are named by their digests)
         if a["meta"].get(name) != b["meta"].get(name):
             print(f"[compare] input differs: {name}: {a['meta'].get(name)} vs {b['meta'].get(name)}")
-            return 2
+            return False
     if pair is None and a["meta"].get("manifest_sha256") and b["meta"].get("manifest_sha256") and \
             a["meta"]["manifest_sha256"] != b["meta"]["manifest_sha256"]:
         print("[compare] input differs: manifest_sha256 (a reused generation id; use --pair)")
-        return 2
-    if projected:
-        from paired_projection import project_document
+        return False
+    return True
 
-        a, b = project_document(a), project_document(b)
+
+def _compare_pair(left, right, pair, projected):
+    with PairedComparison() as comparison:
+        return comparison.compare(left, right, pair, projected)
+
+
+class PairedComparison(ExitStack):
+    """Reuse decoded indexes and disk-backed projections within one frozen run."""
+
+    def __init__(self):
+        super().__init__()
+        self.inputs = {}
+        self.projections = {}
+        self.projection_failures = {}
+        self.validated = set()
+
+    def _open(self, path):
+        from snapshot_sections import open_snapshot
+
+        if path not in self.inputs:
+            self.inputs[path] = self.enter_context(open_snapshot(path))
+        return self.inputs[path]
+
+    def _prepare(self, path, projected):
+        from tempfile import TemporaryFile
+
+        from paired_projection import Ambiguous, project_snapshot
+        from snapshot_sections import Sections
+
+        snapshot = self.inputs[path]
+        if projected:
+            if path in self.projection_failures:
+                raise Ambiguous(self.projection_failures[path])
+            if path not in self.projections:
+                with ExitStack() as attempt:
+                    sections = Sections(attempt.enter_context(TemporaryFile()))
+                    try:
+                        digests = project_snapshot(snapshot, sections)
+                    except Ambiguous as error:
+                        self.projection_failures[path] = str(error)
+                        raise
+                    self.enter_context(attempt.pop_all())
+                    self.projections[path] = {**snapshot, "sections": sections, "digests": digests}
+                    self.validated.add(path)
+            return self.projections[path]
+        if path not in self.validated:
+            # Decode one section at a time for syntax validation, including
+            # sections with equal stored digests.
+            for name in snapshot["sections"]:
+                snapshot["sections"][name]
+            self.validated.add(path)
+        return snapshot
+
+    def compare(self, left, right, pair, projected=False):
+        from paired_projection import Ambiguous
+
+        try:
+            a, b = self._open(left), self._open(right)
+            if not _same_inputs(a, b, pair):
+                return 2
+            return _compare_sections(left, right, self._prepare(left, projected), self._prepare(right, projected))
+        except Ambiguous as error:
+            print(f"[compare] {left.name} vs {right.name}: projection incomplete: {error}")
+            return 2
+        except (OSError, EOFError, ValueError, zlib.error) as error:
+            print(f"[compare] unreadable pair: {error}")
+            return 2
+
+
+def _compare_sections(left, right, a, b):
+    differences = 0
     for name in sorted(set(a["digests"]) | set(b["digests"])):
         if a["digests"].get(name) == b["digests"].get(name):
             continue
@@ -549,8 +625,14 @@ def compare(left: Path, right: Path, pair: dict | None = None, projected: bool =
         if name not in a["sections"] or name not in b["sections"]:
             print(f"[compare] {name}: only in {'right' if name not in a['sections'] else 'left'}")
             continue
-        path, x, y = _first_difference(a["sections"][name], b["sections"][name])
-        print(f"[compare] {name}: first difference at {path}: {str(x)[:200]} | {str(y)[:200]}")
+        left_sections, right_sections = a["sections"], b["sections"]
+        found = (left_sections.first_difference(name, right_sections) if hasattr(left_sections, "first_difference")
+                 else _first_difference(left_sections[name], right_sections[name]))
+        if found:
+            path, x, y = found
+            print(f"[compare] {name}: first difference at {path}: {str(x)[:200]} | {str(y)[:200]}")
+        else:
+            print(f"[compare] {name}: section digests differ without a JSON value difference")
         if differences >= 20:
             print("[compare] ... (more differences not shown)")
             break

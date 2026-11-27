@@ -15,6 +15,7 @@ refers to their members by index. The projection makes a snapshot identity-free 
 from __future__ import annotations
 
 import hashlib
+from heapq import merge
 import json
 import re
 
@@ -47,6 +48,8 @@ TREE_LINKS_ERASED = {"left_node_id": "state-tree layout", "right_node_id": "stat
                      "state_nodes / call_state_nodes rows": "a persistent tree arena (path copying): its intermediate "
                      "nodes depend on the tree shape; every state is compared by the node set its root reaches"}
 NODE_KEY_INDEX = re.compile(r":definition:(\d+)$")
+NORMALIZED_OWNER = re.compile(r"function:(.+):normalized(?:\[0\])?$")
+FUNCTION_SECTION = re.compile(r"function:(.+):(normalized(?:\[\d+\])?|summary|analyzed)$")
 
 
 class Ambiguous(ValueError):
@@ -67,7 +70,7 @@ def _function_sections(document):
     """{function key: normalized dict} (default: ``:normalized``; legacy: ``:normalized[0]``)."""
     result = {}
     for name, data in document["sections"].items():
-        match = re.fullmatch(r"function:(.+):normalized(\[0\])?", name)
+        match = NORMALIZED_OWNER.fullmatch(name)
         if match and isinstance(data, dict) and "memory_ssa" in data:
             result[match.group(1)] = data
     return result
@@ -83,80 +86,114 @@ def _walk(value, visit, path=()):
             _walk(item, visit, path + ("[]",))
 
 
+def _scope_references(value, found):
+    if isinstance(value, dict):
+        if value.get("type") == "StorageScopeId":
+            found.add((value["kind"]["enum"], value["digest"]["bytes"]))
+        for item in value.values():
+            _scope_references(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            _scope_references(item, found)
+
+
+def _effect_users(normalized):
+    users = {}
+    for effect in normalized.get("effects") or ():
+        for side in ("reads", "writes"):
+            for storage in effect.get(side) or ():
+                span = (storage or {}).get("span") or {}
+                object_id = span.get("object_id") or {}
+                if isinstance(object_id.get("space_key"), int) and object_id["space_key"] >= SMALL:
+                    users.setdefault(object_id["space_key"], set()).add(
+                        f"{side}:{effect.get('operation_key')}@{span.get('start')}+{span.get('size')}")
+    return users
+
+
+def _owner_facts(normalized):
+    return (normalized["memory_ssa"].get("function_scope"), normalized["memory_ssa"].get("unit_digest"),
+            normalized.get("address_atoms") or (), normalized.get("address_objects") or (),
+            _effect_users(normalized))
+
+
+def _verify_unused(data, unused):
+    if not unused:
+        return
+
+    def stray(value, path):
+        if type(value) is int and value in unused and "address_atoms" not in path:
+            raise Ambiguous("an unused address atom sharing its label is referenced outside address_atoms")
+
+    _walk(data, stray)
+
+
 def build_tokens(document) -> dict:
+    scopes = set()
+    for data in document["sections"].values():
+        _scope_references(data, scopes)
+    tokens, unused = _build_tokens({key: _owner_facts(value) for key, value in _function_sections(document).items()},
+                                  scopes)
+    for data in document["sections"].values():
+        _verify_unused(data, unused)
+    return tokens
+
+
+def _build_tokens(owners, scopes):
     tokens: dict = {}
 
     def bind(raw, token):
         if tokens.setdefault(raw, token) != token:
             raise Ambiguous(f"identity {str(raw)[:24]} has two owners: {tokens[raw]} / {token}")
 
-    for key, normalized in _function_sections(document).items():
-        ssa = normalized["memory_ssa"]
-        if ssa.get("function_scope"):
-            bind(ssa["function_scope"]["digest"]["bytes"], f"F:{key}")
-        if ssa.get("unit_digest"):
-            bind(ssa["unit_digest"]["bytes"], f"U:{key}")
+    for key, (function_scope, unit_digest, _, _, _) in owners.items():
+        if function_scope:
+            bind(function_scope["digest"]["bytes"], f"F:{key}")
+        if unit_digest:
+            bind(unit_digest["bytes"], f"U:{key}")
     programs = set()
 
-    def scopes(value, path):
-        if isinstance(value, dict) and value.get("type") == "StorageScopeId":
-            kind, digest = value["kind"]["enum"], value["digest"]["bytes"]
-            if kind == "StorageScopeKind.PROGRAM":
-                programs.add(digest)
-            elif digest not in tokens:
-                raise Ambiguous(f"function scope {digest[:16]} is owned by no function of this snapshot")
-
-    for data in document["sections"].values():
-        _walk(data, scopes)
+    for kind, digest in scopes:
+        if kind == "StorageScopeKind.PROGRAM":
+            programs.add(digest)
+        elif digest not in tokens:
+            raise Ambiguous(f"function scope {digest[:16]} is owned by no function of this snapshot")
     if len(programs) > 1:
         raise Ambiguous(f"{len(programs)} program scopes")
     for digest in programs:
         bind(digest, "P")
     labels: dict = {}   # raw atom -> {(function, label)}
-    for key, normalized in _function_sections(document).items():
-        for raw, label in normalized.get("address_atoms") or ():
+    for key, (_, _, address_atoms, _, _) in owners.items():
+        for raw, label in address_atoms:
             labels.setdefault(raw, set()).add((key, ATOM_SUFFIX.sub("", rename_text(label, tokens))))
-    for raw, owners in labels.items():
-        if len({label for _, label in owners}) != 1:
+    for raw, atom_owners in labels.items():
+        if len({label for _, label in atom_owners}) != 1:
             raise Ambiguous(f"address atom {str(raw)[:16]} has two labels")
     # every atom's occurrence shapes: its function, coefficient, the other terms (labels where unique), the space,
     # and the operations accessing objects built on it -- names unlabeled atoms and separates label collisions
-    users_of: dict = {}
-    for key, normalized in _function_sections(document).items():
-        users: dict = {}   # relative space key -> the operations whose effects read / write that object
-        for effect in normalized.get("effects") or ():
-            for side in ("reads", "writes"):
-                for storage in effect.get(side) or ():
-                    span = (storage or {}).get("span") or {}
-                    object_id = span.get("object_id") or {}
-                    if isinstance(object_id.get("space_key"), int) and object_id["space_key"] >= SMALL:
-                        users.setdefault(object_id["space_key"], set()).add(
-                            f"{side}:{effect.get('operation_key')}@{span.get('start')}+{span.get('size')}")
-        users_of[key] = users
     plain = {raw: next(iter(owners))[1] for raw, owners in labels.items()}
     shapes: dict = {}
-    for key, normalized in _function_sections(document).items():
-        for entry in normalized.get("address_objects") or ():
+    for key, (_, _, _, address_objects, users) in owners.items():
+        for entry in address_objects:
             terms, space = entry[1][0], entry[1][1]
             space_key = entry[0].get("space_key") if isinstance(entry[0], dict) else None
             for atom, coefficient in terms:
                 others = sorted([plain.get(other, "?"), weight] for other, weight in terms if other != atom)
                 shapes.setdefault(atom, set()).add(canonical([key, coefficient, others, space,
-                                                              sorted(users_of[key].get(space_key, ()))]))
+                                                              sorted(users.get(space_key, ()))]))
     by_label: dict = {}
     for raw, label in plain.items():
         by_label.setdefault(label, set()).add(raw)
     atoms: dict = {}
-    for raw, owners in labels.items():
+    for raw, atom_owners in labels.items():
         label = plain[raw]
         if len(by_label[label]) == 1:
             atoms[raw] = f"A:{label}"
             continue
         # one label, several hashes: per function (x86), then by occurrence shape (one function, e.g. one LOAD
         # read at two widths)
-        name = f"A:{','.join(sorted(key for key, _ in owners))}:{label}"
+        name = f"A:{','.join(sorted(key for key, _ in atom_owners))}:{label}"
         rivals = [other for other in by_label[label]
-                  if other != raw and {key for key, _ in labels[other]} & {key for key, _ in owners}]
+                  if other != raw and {key for key, _ in labels[other]} & {key for key, _ in atom_owners}]
         atoms[raw] = name if not rivals else name + ":" + canonical(sorted(shapes.get(raw, ())))
     for atom, occurrences in shapes.items():
         if atom not in atoms:
@@ -173,17 +210,11 @@ def build_tokens(document) -> dict:
             if any(json.loads(shape)[4] for raw in raws for shape in shapes.get(raw, ())):
                 raise Ambiguous("two address atoms share one coordinate")
             unused.update(raw for raw in raws if raw not in shapes)
-    if unused:
-        def stray(value, path):
-            if isinstance(value, int) and not isinstance(value, bool) and value in unused                     and "address_atoms" not in path:
-                raise Ambiguous("an unused address atom sharing its label is referenced outside address_atoms")
-        for data in document["sections"].values():
-            _walk(data, stray)
     # a relative space key is the hash of its base expression (address_objects: object -> atoms x coefficients,
     # space id): its coordinate is that expression written with atom labels
     spaces: dict = {}
-    for normalized in _function_sections(document).values():
-        for entry in normalized.get("address_objects") or ():
+    for _, _, _, address_objects, _ in owners.values():
+        for entry in address_objects:
             object_id, expression = entry[0], entry[1]
             raw = object_id.get("space_key") if isinstance(object_id, dict) else None
             if not isinstance(raw, int) or raw < SMALL:
@@ -202,20 +233,20 @@ def build_tokens(document) -> dict:
         bind(format(raw, "064x"), label)
         if format(raw, "x") != format(raw, "064x"):
             bind(format(raw, "x"), label)
-    return {"digests": tokens, "spaces": spaces, "atoms": atoms}
+    return {"digests": tokens, "spaces": spaces, "atoms": atoms}, unused
 
 
 def rename_text(text: str, digests: dict) -> str:
     return HEX64.sub(lambda match: digests.get(match.group(0), match.group(0)), text)
 
 
-def rename(value, tokens):
+def rename(value, tokens, *, owned=False):
     """Every identity token replaced by its coordinate (structure unchanged)."""
     digests, spaces, atoms = tokens["digests"], tokens["spaces"], tokens["atoms"]
     if isinstance(value, dict):
         if set(value) == {"bytes"} and value["bytes"] in digests:
             return {"token": digests[value["bytes"]]}
-        result = {}
+        result = value if owned else {}
         for key, item in value.items():
             if key in DIGEST_FIELDS_ERASED and (isinstance(item, dict) and set(item) == {"bytes"}
                                                 or isinstance(item, str) and HEX64.fullmatch(item)):
@@ -224,9 +255,13 @@ def rename(value, tokens):
             if key == "space_key" and isinstance(item, int) and item in spaces:   # (small keys stay)
                 result[key] = spaces[item]
             else:
-                result[key] = rename(item, tokens)
+                result[key] = rename(item, tokens, owned=owned)
         return result
     if isinstance(value, list):
+        if owned:
+            for index, item in enumerate(value):
+                value[index] = rename(item, tokens, owned=True)
+            return value
         return [rename(item, tokens) for item in value]
     if isinstance(value, str):
         return ATOM_SUFFIX.sub("", rename_text(value, digests)) if ATOM_SUFFIX.search(value) else             rename_text(value, digests)
@@ -281,6 +316,8 @@ class _Ssa:
 
     def __init__(self, ssa):
         self.ssa, self.memo, self.active = ssa, {}, set()
+        self.digests = {}
+        self.references = {}
 
     def resolve(self, table: str, index, arena: str = "state_nodes"):
         if index is None:
@@ -310,40 +347,66 @@ class _Ssa:
                 raise Ambiguous(f"{arena}[{current}] out of range")
             seen.add(current)
             pending += [rows[current].get("left_node_id"), rows[current].get("right_node_id")]
-        return sorted(short(self.resolve(arena, item, arena)) for item in seen)
+        return sorted(self.digest(arena, item, arena) for item in seen)
+
+    def digest(self, table, index, arena="state_nodes"):
+        key = (table, index)
+        if key not in self.digests:
+            self.digests[key] = short(self.resolve(table, index, arena))
+        return self.digests[key]
 
     def row(self, value, arena: str = "state_nodes"):
         if isinstance(value, dict):
-            result = {}
+            result = value
             for name, item in value.items():
                 table = SSA_REFERENCES.get(name)
                 if table == "state_nodes":
                     table = arena
                 if name in TREE_LINKS_ERASED and value.get("type") == "MemoryStateNode":
+                    if result is value:
+                        result = dict(value)
+                    del result[name]
                     continue
                 if name == "root_node_id":
-                    result[name] = None if item is None else {"state": arena, "nodes": self.reach(arena, item)}
-                    continue
-                if name == "stop_atom" and isinstance(item, int):
-                    result[name] = self.ref("atomic_spans", item - 1, arena, last=True)
+                    resolved = None if item is None else {"state": arena, "nodes": self.reach(arena, item)}
+                elif name == "stop_atom" and isinstance(item, int):
+                    resolved = self.ref("atomic_spans", item - 1, arena, last=True)
                 elif table is not None and isinstance(item, list):
-                    result[name] = [self.ref(table, entry, arena) for entry in item]
+                    resolved = [self.ref(table, entry, arena) for entry in item]
                 elif table is not None and (isinstance(item, int) or item is None):
-                    result[name] = self.ref(table, item, arena)
+                    resolved = self.ref(table, item, arena)
                 else:
-                    result[name] = self.row(item, arena)
+                    resolved = self.row(item, arena)
+                if resolved is not item:
+                    if result is value:
+                        result = dict(value)
+                    result[name] = resolved
             return result
         if isinstance(value, list):
-            return [self.row(item, arena) for item in value]
+            result = value
+            for index, item in enumerate(value):
+                resolved = self.row(item, arena)
+                if resolved is not item:
+                    if result is value:
+                        result = list(value)
+                    result[index] = resolved
+            return result
         return value
 
     def ref(self, table, index, arena="state_nodes", last=False):
         if isinstance(index, dict) and "ref" in index:
             return index   # (already resolved by its own SSA object)
-        resolved = self.resolve(table, index, arena)
-        if resolved is None:
+        if index is None:
             return None
-        return {"ref": table, "to": short(resolved), **({"end": True} if last else {})}
+        if not isinstance(index, int):
+            raise Ambiguous(f"{table}[{index}] out of range")
+        key = (table, index, last)
+        if key not in self.references:
+            if self.resolve(table, index, arena) is None:
+                return None
+            self.references[key] = {"ref": table, "to": self.digest(table, index, arena),
+                                    **({"end": True} if last else {})}
+        return self.references[key]
 
     def top(self):
         """The SSA object with every reference resolved (call arenas use their own state nodes); the arenas
@@ -358,16 +421,18 @@ def _resolve_ssa_objects(value):
     if _is_ssa(value):
         return _Ssa(value).top()
     if isinstance(value, dict):
-        return {name: _resolve_ssa_objects(item) for name, item in value.items()}
+        for name, item in value.items():
+            value[name] = _resolve_ssa_objects(item)
     if isinstance(value, list):
-        return [_resolve_ssa_objects(item) for item in value]
+        for index, item in enumerate(value):
+            value[index] = _resolve_ssa_objects(item)
     return value
 
 
-def _node_coordinate(nodes, index):
-    if not isinstance(index, int) or not 0 <= index < len(nodes):
+def _node_coordinate(coordinates, index):
+    if not isinstance(index, int) or not 0 <= index < len(coordinates):
         raise Ambiguous(f"dependency node {index} out of range")
-    return {"node": short(nodes[index])}
+    return coordinates[index]
 
 
 STRUCTURAL = "dependency nodes still carrying an identity hash: their own form refined twice by their edges"
@@ -442,53 +507,56 @@ def _resolve_graph(normalized):
         nodes = [{**node, "key": re.sub(r"<h>", "", node.get("key", "")) + ":" + current[index],
                   "semantic_identity": current[index]} if index in incident else node
                  for index, node in enumerate(nodes)]
-    coordinates = [canonical(node) for node in nodes]
-    if len(set(coordinates)) != len(coordinates):
-        raise Ambiguous("two dependency nodes share one coordinate")
-    result = dict(normalized)
-    result["dependencies"] = {
-        "nodes": nodes,
-        "edges": [[_node_coordinate(nodes, source), _node_coordinate(nodes, target), payload]
-                  for source, target, payload in graph["edges"]],
-    }
+    seen, coordinates = set(), []
+    for node in nodes:
+        wire = canonical(node)
+        if wire in seen:
+            raise Ambiguous("two dependency nodes share one coordinate")
+        seen.add(wire)
+        coordinates.append({"node": hashlib.sha256(wire.encode()).hexdigest()[:16]})
+    del seen
+    edges = graph["edges"]
+    for edge in edges:
+        source, target, _ = edge
+        edge[0] = _node_coordinate(coordinates, source)
+        edge[1] = _node_coordinate(coordinates, target)
+    normalized["dependencies"] = {"nodes": nodes, "edges": edges}
     cfg = normalized.get("cfg")
     if isinstance(cfg, dict) and "nodes" in cfg:
-        result["cfg"] = {"nodes": cfg["nodes"], "edges": [
-            [{"cfg": short(cfg["nodes"][source])}, {"cfg": short(cfg["nodes"][target])}, payload]
+        cfg_coordinates = [{"cfg": short(node)} for node in cfg["nodes"]]
+        normalized["cfg"] = {"nodes": cfg["nodes"], "edges": [
+            [cfg_coordinates[source], cfg_coordinates[target], payload]
             for source, target, payload in cfg["edges"]]}
 
     aligned = {"definition_nodes": "definitions", "action_nodes": "actions"}   # (positional: entry i <-> row i)
 
     def nodes_in(value):
         if isinstance(value, dict):
-            out = {}
             for name, item in value.items():
                 if name in aligned and isinstance(item, list) and ssa is not None:
                     rows = ssa.ssa.get(aligned[name]) or ()
                     if len(rows) != len(item):
                         raise Ambiguous(f"{name} does not pair with {aligned[name]}")
-                    out[name] = [{"row": short(ssa.resolve(aligned[name], index)), **_node_coordinate(nodes, entry)}
-                                 for index, entry in enumerate(item)]
+                    value[name] = [{"row": ssa.digest(aligned[name], index), **_node_coordinate(coordinates, entry)}
+                                   for index, entry in enumerate(item)]
                 elif name in NODE_REFERENCE_LISTS and isinstance(item, list):
-                    out[name] = [_node_coordinate(nodes, entry) for entry in item]
+                    value[name] = [_node_coordinate(coordinates, entry) for entry in item]
                 elif name == "entry_bindings" and isinstance(item, list):
-                    out[name] = [[_node_coordinate(nodes, entry[0]), *entry[1:]] for entry in item]
+                    value[name] = [[_node_coordinate(coordinates, entry[0]), *entry[1:]] for entry in item]
                 else:
-                    out[name] = nodes_in(item)
-            return out
+                    nodes_in(item)
         if isinstance(value, list):
-            return [nodes_in(item) for item in value]
-        return value
+            for item in value:
+                nodes_in(item)
 
     if resolved_image is not None:
-        memory_graph = dict(result["memory_graph"])
-        memory_graph["image_reads"] = {**image, "plan": {**image["plan"], "reads": resolved_image}}
-        result["memory_graph"] = memory_graph
+        image["plan"]["reads"] = resolved_image
     if resolved_reads is not None:
-        memory_graph = dict(result["memory_graph"])
-        memory_graph["local_reads"] = {**local_reads, "plan": {**local_reads["plan"], "reads": resolved_reads}}
-        result["memory_graph"] = memory_graph
-    return {name: (item if name in ("dependencies", "cfg") else nodes_in(item)) for name, item in result.items()}
+        local_reads["plan"]["reads"] = resolved_reads
+    for name, item in normalized.items():
+        if name not in ("dependencies", "cfg"):
+            nodes_in(item)
+    return normalized
 
 
 def _resolve_summary(summary, normalized):
@@ -517,9 +585,23 @@ def _resolve_summary(summary, normalized):
 
 # -- 3. collections ---------------------------------------------------------------------------------------------------
 
+_SORT_BLOCK = 16_384
+
+
+def _sort_by_canonical(items):
+    if len(items) <= _SORT_BLOCK:
+        items.sort(key=canonical)
+        return
+    # list.sort retains a full serialized key for every row. Sort blocks and
+    # merge them to keep the same lexicographic order with fewer live keys.
+    blocks = [items[start:start + _SORT_BLOCK] for start in range(0, len(items), _SORT_BLOCK)]
+    for block in blocks:
+        block.sort(key=canonical)
+    items[:] = merge(*blocks, key=canonical)
+
+
 def _multisets(value):
     if isinstance(value, dict):
-        out = {}
         for name, item in value.items():
             if name == "address_objects" and isinstance(item, list):
                 # an expression's terms are ordered by atom hash: a sum, compared as a multiset of (atom, coefficient)
@@ -527,31 +609,101 @@ def _multisets(value):
                         if isinstance(entry, list) and len(entry) == 2 and isinstance(entry[1], list) else entry
                         for entry in item]
             item = _multisets(item)
-            if name in COLLECTIONS and isinstance(item, list):
-                item = sorted(item, key=canonical)
-            elif name in ("set", "items") and isinstance(item, list):
-                item = sorted(item, key=canonical)
-            out[name] = item
-        return out
+            if isinstance(item, list) and (name in COLLECTIONS or name in ("set", "items")):
+                _sort_by_canonical(item)
+            value[name] = item
     if isinstance(value, list):
-        return [_multisets(item) for item in value]
+        for item in value:
+            _multisets(item)
     return value
 
 
+def _project_section(name, value, normalized=None):
+    match = FUNCTION_SECTION.fullmatch(name)
+    if match and match.group(2).startswith("normalized"):
+        value = _resolve_graph(_resolve_ssa_objects(value))
+    elif match and match.group(2) == "summary":
+        value = _resolve_summary(value, normalized)
+    else:
+        value = _resolve_ssa_objects(value)
+    return _multisets(value)
+
+
 def project_document(document) -> dict:
-    """The projected document: sections identity-free, digests recomputed."""
+    """In-memory entry point for small documents and compatibility tests."""
     tokens = build_tokens(document)
     normalized = {key: rename(value, tokens) for key, value in _function_sections(document).items()}
     sections = {}
     for name, data in document["sections"].items():
-        match = re.fullmatch(r"function:(.+):(normalized(?:\[\d+\])?|summary|analyzed)", name)
+        match = FUNCTION_SECTION.fullmatch(name)
         value = rename(data, tokens)   # (identities first: referents are hashed identity-free)
-        if match and match.group(2).startswith("normalized"):
-            value = _resolve_graph(_resolve_ssa_objects(value))
-        elif match and match.group(2) == "summary":
-            value = _resolve_summary(value, normalized.get(match.group(1)))
-        else:
-            value = _resolve_ssa_objects(value)
-        sections[name] = _multisets(value)
+        sections[name] = _project_section(name, value, normalized.get(match.group(1)) if match else None)
     digests = {name: hashlib.sha256(canonical(data).encode()).hexdigest() for name, data in sections.items()}
     return {"meta": document["meta"], "complete": True, "sections": sections, "digests": digests}
+
+
+_ENCODER = json.JSONEncoder(sort_keys=True, separators=(",", ":"))
+
+
+def _canonical_bytes(value):
+    """Canonical JSON without building a single string for a whole section."""
+    pending = bytearray()
+    for piece in _ENCODER.iterencode(value):
+        pending.extend(piece.encode())
+        if len(pending) >= 1 << 20:
+            yield pending
+            pending = bytearray()
+    if pending:
+        yield pending
+
+
+def project_snapshot(snapshot, projected=None):
+    """Project indexed input, optionally saving projected sections for difference display."""
+    sections = snapshot["sections"]
+    owners, owner_sections, scopes = {}, {}, set()
+    for name in sections:
+        data = sections[name]
+        _scope_references(data, scopes)
+        match = NORMALIZED_OWNER.fullmatch(name)
+        if match and isinstance(data, dict) and "memory_ssa" in data:
+            key = match.group(1)
+            owners[key] = _owner_facts(data)
+            owner_sections[key] = name
+        del data
+    tokens, unused = _build_tokens(owners, scopes)
+    del owners, scopes
+    summaries = {owner: f"function:{key}:summary" for key, owner in owner_sections.items()
+                 if f"function:{key}:summary" in sections}
+    deferred = set(summaries.values())
+    digests = {}
+
+    def load(name):
+        data = sections[name]
+        _verify_unused(data, unused)
+        return rename(data, tokens, owned=True)
+
+    def record(name, value):
+        digest = hashlib.sha256()
+
+        def chunks():
+            for chunk in _canonical_bytes(value):
+                digest.update(chunk)
+                yield chunk
+
+        if projected is None:
+            for _ in chunks():
+                pass
+        else:
+            projected.write(name, chunks())
+        digests[name] = digest.hexdigest()
+
+    for name in sections:
+        if name in deferred:
+            continue
+        data = load(name)
+        if name in summaries:
+            summary = summaries[name]
+            record(summary, _project_section(summary, load(summary), data))
+        record(name, _project_section(name, data))
+        del data
+    return digests

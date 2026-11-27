@@ -5,7 +5,6 @@ the projected snapshots). Run in WSL with the tdo venv.
 usage: x1b_report.py [--runs /root/x1b_runs] [--tree <wt_x1b>] > report.md
 """
 import argparse
-import gzip
 import json
 import sys
 from pathlib import Path
@@ -42,8 +41,14 @@ def short(entry):
 
 
 def projected_sections(path: Path, project):
-    with gzip.open(path, "rt", encoding="utf-8") as handle:
-        return project(json.load(handle))["digests"]
+    from paired_projection import Ambiguous
+    from snapshot_sections import open_snapshot
+
+    with open_snapshot(path) as snapshot:
+        try:
+            return project(snapshot)
+        except Ambiguous as error:
+            raise Ambiguous(f"{path.name}: {error}") from error
 
 
 def interaction(work: Path, config: str, project):
@@ -68,12 +73,13 @@ def main() -> int:
     parser.add_argument("--no-interaction", action="store_true")
     args = parser.parse_args()
     sys.path.insert(0, str(args.tree / "tools" / "graph_fidelity"))
-    from paired_projection import project_document
+    from paired_projection import Ambiguous, project_snapshot
 
     print("| pair | stage 0 members | stage 0 default / legacy | " +
           " | ".join(GROUPS) + " | proof effect | old vs published | interaction (default) |")
     print("|---" * (6 + len(GROUPS)) + "|")
     notes = []
+    status = 0
     for path in sorted(args.runs.glob("*/result.json")):
         result = json.loads(path.read_text())
         work = path.parent
@@ -97,19 +103,27 @@ def main() -> int:
         proof_cell = " ; ".join(f"{c[0]}:{short(proof.get(c))}" for c in ("default", "legacy"))
         cut = result.get("old~published", {})
         cut_cell = " ; ".join(f"{c[0]}:{short(cut.get(c))}" for c in ("default", "legacy"))
-        inter = "-" if args.no_interaction else interaction(work, "default", project_document)
-        inter_cell = "missing" if inter is None else "-" if inter == "-" else \
-            ("=" if not inter["full_only"] and not inter["groups_only"] else
-             f"**full-only {len(inter['full_only'])}, groups-only {len(inter['groups_only'])}**")
-        if inter not in (None, "-") and (inter["full_only"] or inter["groups_only"]):
+        inter = None
+        inter_cell = "-"
+        if not args.no_interaction:
+            try:
+                inter = interaction(work, "default", project_snapshot)
+                inter_cell = "=" if inter is not None else "missing"
+            except Ambiguous as error:
+                inter_cell = "**incomplete**"
+                notes.append(f"- {result['key']} interaction: {error}")
+                status = 2
+        if inter and (inter["full_only"] or inter["groups_only"]):
+            inter_cell = f"**full-only {len(inter['full_only'])}, groups-only {len(inter['groups_only'])}**"
             notes.append(f"- {result['key']}: interaction: full-only {inter['full_only'][:6]}, "
                          f"groups-only {inter['groups_only'][:6]}")
         for name, entry in [("stage1 " + g, result["stage1"].get(f"control~{g}", {})) for g in GROUPS] + \
                            [("proof", proof), ("old vs published", cut)]:
             for config, item in entry.items():
                 if item.get("projected") and item["projected"]["rc"] != 0:
+                    details = item["projected"]["differences"] or [item["projected"]["summary"]]
                     notes.append(f"- {result['key']} {name} {config}: " +
-                                 "; ".join(line[:220] for line in item["projected"]["differences"][:4]))
+                                 "; ".join(line[:220] for line in details[:4]))
         print(f"| {result['key']} | {member_cell} | {s0} | " + " | ".join(cells) +
               f" | {proof_cell} | {cut_cell} | {inter_cell} |")
     print("\nCells: strict / projected per config (d = default, l = legacy); '=' identical, a number = sections "
@@ -123,7 +137,7 @@ def main() -> int:
     if notes:
         print("\nDifferences to explain:")
         print("\n".join(notes))
-    return 0
+    return status
 
 
 if __name__ == "__main__":

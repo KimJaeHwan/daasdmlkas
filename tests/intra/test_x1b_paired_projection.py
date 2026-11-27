@@ -12,6 +12,7 @@ import gzip
 import json
 import sys
 from pathlib import Path
+from tempfile import TemporaryFile
 
 import pytest
 
@@ -20,7 +21,9 @@ sys.path.insert(0, str(TOOLS))
 
 import paired_projection  # noqa: E402
 import semantic_snapshot  # noqa: E402
+import snapshot_sections  # noqa: E402
 from paired_projection import Ambiguous, project_document  # noqa: E402
+from snapshot_sections import Sections, open_snapshot  # noqa: E402
 
 KEY = "1b1:1000"
 
@@ -136,6 +139,9 @@ def test_generation_only_change_passes_the_pair_check(tmp_path):
     wrong = {**pair, "right": {"manifest_sha256": "m-other", "seal_sha256": "s-g2"}}
     assert semantic_snapshot.compare(*paths, pair=wrong) == 2
     assert semantic_snapshot.compare(*paths) == 2   # (no pair: the differing generation stops the plain compare)
+    with semantic_snapshot.PairedComparison() as comparison:
+        assert comparison.compare(*paths, pair, projected=True) == 0
+        assert comparison.compare(*paths, wrong, projected=True) == 2
 
 
 @pytest.mark.parametrize("change", [
@@ -176,3 +182,85 @@ def test_the_erased_fields_are_listed_with_reasons():
     for table in (paired_projection.IDENTITY_RENAMED, paired_projection.DIGEST_FIELDS_ERASED,
                   paired_projection.TREE_LINKS_ERASED):
         assert table and all(isinstance(reason, str) and reason for reason in table.values())
+
+
+def test_multiset_sort_keeps_lexical_order_across_blocks(monkeypatch):
+    monkeypatch.setattr(paired_projection, "_SORT_BLOCK", 2)
+    rows = [{"a": [item]} for item in (2, 10, 3, 10, 0)]
+    expected = sorted(rows, key=paired_projection.canonical)
+    paired_projection._sort_by_canonical(rows)
+    assert rows == expected
+
+
+def write_snapshot(path, value):
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=1, ensure_ascii=False)
+    return path
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_indexed_projection_resolves_summary_from_unsorted_sections(tmp_path, monkeypatch, legacy):
+    monkeypatch.setattr(snapshot_sections, "_SHARE_IDENTIFIERS_ABOVE", 0)
+    source = document(order=(2, 0, 1))
+    sections = source["sections"]
+    owner = f"function:{KEY}:normalized" + ("[0]" if legacy else "")
+    normalized = sections.pop(f"function:{KEY}:normalized")
+    source["sections"] = {"run:comment": '문자열 ["\\"] }', **sections, owner: normalized}
+    source["digests"] = {name: semantic_snapshot._digest(data) for name, data in source["sections"].items()}
+    original = copy.deepcopy(source)
+    expected = project_document(source)
+    assert source == original
+    path = write_snapshot(tmp_path / "shuffled.json.gz", source)
+    with open_snapshot(path) as snapshot, TemporaryFile() as stream:
+        projected = Sections(stream)
+        assert paired_projection.project_snapshot(snapshot, projected) == expected["digests"]
+        assert {key: projected[key] for key in projected} == expected["sections"]
+
+
+@pytest.mark.parametrize("fault", [
+    "no sections", "missing digest", "trailing data", "truncated gzip", "invalid deflate", "broken value",
+])
+def test_indexed_pair_fails_closed_even_against_itself(tmp_path, fault):
+    source = document()
+    if fault == "no sections":
+        del source["sections"]
+        source["digests"] = {}
+    if fault == "missing digest":
+        source["digests"].pop("run:supports")
+    contents = json.dumps(source)
+    if fault == "trailing data":
+        contents += " true"
+    if fault == "broken value":
+        contents = contents.replace('"run:supports": [', '"run:supports": [,', 1)
+    path = tmp_path / "broken.json.gz"
+    compressed = gzip.compress(contents.encode())
+    if fault == "truncated gzip":
+        compressed = compressed[:-4]
+    if fault == "invalid deflate":
+        compressed = compressed[:10] + b"\x07" + compressed[11:]
+    path.write_bytes(compressed)
+    identity = {key: source["meta"][key] for key in ("manifest_sha256", "seal_sha256")}
+    pair = {"left": identity, "right": identity}
+    for projected in (False, True):
+        assert semantic_snapshot.compare(path, path, pair=pair, projected=projected) == 2
+
+
+def test_bounded_pair_shows_a_change_of_read_ordinal(tmp_path, capsys):
+    a, b = document(), document(generation="g2")
+    name = f"function:{KEY}:normalized"
+    b["sections"][name]["memory_ssa"]["reads"][0]["read_ordinal"] = 1
+    b["digests"][name] = semantic_snapshot._digest(b["sections"][name])
+    paths = [write_snapshot(tmp_path / f"{side}.json.gz", source) for side, source in [("a", a), ("b", b)]]
+    pair = {"left": {"manifest_sha256": "m-g1", "seal_sha256": "s-g1"},
+            "right": {"manifest_sha256": "m-g2", "seal_sha256": "s-g2"}}
+    for projected in (False, True):
+        assert semantic_snapshot.compare(*paths, pair=pair, projected=projected) == 1
+        assert "at $.memory_ssa.reads[0].read_ordinal: 0 | 1" in capsys.readouterr().out
+
+
+def test_indexed_projection_checks_a_scope_in_a_run_section(tmp_path):
+    source = document()
+    source["sections"]["run:supports"] = [relative("9" * 64, 5, 0)]
+    path = write_snapshot(tmp_path / "scope.json.gz", source)
+    with open_snapshot(path) as snapshot, pytest.raises(Ambiguous, match="owned by no function"):
+        paired_projection.project_snapshot(snapshot)
