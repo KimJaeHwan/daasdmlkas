@@ -22,6 +22,7 @@ import compare
 SCHEMA = "g1-decode-evidence-1"
 SCHEMA2 = "g1-decode-evidence-2"
 SCHEMA3 = "g1-decode-evidence-3"            # (design_tbr_g1_x1 r1-r3: -2 + producer_override)
+SCHEMA4 = "g1-decode-evidence-4"            # (design_tbr_g2_common_facts_r5 s8: -3 + common_facts verdicts)
 OVERRIDE_STATUS = ("checked", "not_reported")   # or "failed:<reason>"
 ISA_STATUS = ("checked", "not_run")         # or "failed:<reason>"
 CONSUMERS_VERSION = "consumers-2"
@@ -97,7 +98,8 @@ def exception_of(states: dict) -> dict | None:
 
 
 def build(*, bundle: dict, producer: dict, mapping: dict, premises: list, table_applied: bool,
-          global_reason, functions: list, isa: dict | None = None, override: dict | None = None) -> dict:
+          global_reason, functions: list, isa: dict | None = None, override: dict | None = None,
+          common: dict | None = None) -> dict:
     """The evidence document. ``functions``: [{"function_id", "observation_sha256", "rows": [(space, offset)],
     "states": {(space, offset): attribute_states}}] -- every processed row of the function.
 
@@ -127,7 +129,7 @@ def build(*, bundle: dict, producer: dict, mapping: dict, premises: list, table_
                 item["producer_override"] = _override_section(override["functions"].get(function["function_id"]),
                                                              rows, function["states"])
             body.append(item)
-    schema = SCHEMA if isa is None else SCHEMA2 if override is None else SCHEMA3
+    schema = SCHEMA if isa is None else SCHEMA2 if override is None else SCHEMA3 if common is None else SCHEMA4
     document = {"schema": schema, "bundle": bundle, "producer": producer,
                 "mapping": mapping, "premises": sorted(premises), "translation": {"table_applied": table_applied},
                 "compared_attributes": list(compare.COMPARED), "mode_constant": list(compare.MODE_CONSTANT),
@@ -137,6 +139,8 @@ def build(*, bundle: dict, producer: dict, mapping: dict, premises: list, table_
         document["isa_facts"] = isa["header"]
     if override is not None:
         document["producer_override"] = override["header"]
+    if common is not None:
+        document["common_facts"] = common
     return document
 
 
@@ -424,9 +428,9 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
     """Every header, body and coverage-precondition check of design s2 / s3 / s5 / s7; raises Rejected."""
     schema = document.get("schema") if isinstance(document, dict) else None
     pinned = None
-    if schema in (SCHEMA2, SCHEMA3):
-        _keys(document, HEADER_KEYS + ("isa_facts",) + (("producer_override",) if schema == SCHEMA3 else ()),
-              "header")
+    if schema in (SCHEMA2, SCHEMA3, SCHEMA4):
+        _keys(document, HEADER_KEYS + ("isa_facts",) + (("producer_override",) if schema in (SCHEMA3, SCHEMA4) else ())
+              + (("common_facts",) if schema == SCHEMA4 else ()), "header")
         _check_isa_header(document["isa_facts"])                 # (r2 Fable P2-1: the header before the rows)
         if tables is None:
             import isa_tables
@@ -438,7 +442,9 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
         _keys(document, HEADER_KEYS, "header")
         if schema != SCHEMA:
             raise Rejected(f"schema {schema!r}")
-    if schema == SCHEMA3:
+    if schema == SCHEMA4:
+        _check_common_facts(document["common_facts"])
+    if schema in (SCHEMA3, SCHEMA4):
         _check_override_header(document["producer_override"])
         # (impl r2 Astra P1-2: the Bundle's profile is checked once, also for a file with no functions)
         if not isinstance(bundle, dict) or "producer_profile" not in bundle:
@@ -485,8 +491,8 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
         raise Rejected("functions not sorted by function_id")
     for item in functions:
         _keys(item, ("function_id", "observation_sha256", "rows_total", "rows_digest", "exceptions")
-              + (("isa_facts",) if schema in (SCHEMA2, SCHEMA3) else ())
-              + (("producer_override",) if schema == SCHEMA3 else ()), "function")
+              + (("isa_facts",) if schema in (SCHEMA2, SCHEMA3, SCHEMA4) else ())
+              + (("producer_override",) if schema in (SCHEMA3, SCHEMA4) else ()), "function")
         fid = item["function_id"]
         if fid not in bundle["functions"]:
             raise Rejected(f"function {fid} is not in the Bundle")
@@ -519,15 +525,54 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
         outside = [render(*c) for c in coordinates if c not in rows]
         if outside:
             raise Rejected(f"{fid}: exception coordinates outside the function's rows: {outside[:3]}")
-        if schema in (SCHEMA2, SCHEMA3):
+        if schema in (SCHEMA2, SCHEMA3, SCHEMA4):
             never = {c for c, e in zip(coordinates, item["exceptions"]) if "*" in e["attributes"]}
             _check_isa(item["isa_facts"], fid, rows, never, pinned)
-        if schema == SCHEMA3:
+        if schema in (SCHEMA3, SCHEMA4):
             exceptions = {coordinate: exception["attributes"]
                           for coordinate, exception in zip(coordinates, item["exceptions"])}
             _check_override(item["producer_override"], fid, rows, never, bundle["functions"][fid], exceptions,
                             bundle["producer_profile"])
     return Evidence(document, bundle, tables)
+
+
+def _check_common_facts(block) -> None:
+    """G2 r5 s8: the -4 section's shape; binding to a facts file is checked by ``bind_common_facts``."""
+    import common_facts as cf
+
+    _keys(block, ("schema", "rule_version", "facts_sha256", "row_set_sha256", "fields", "rows"), "common_facts")
+    if block["schema"] != cf.VERDICT_SCHEMA or block["rule_version"] != cf.RULE_VERSION \
+            or block["fields"] != list(cf.FIELDS):
+        raise Rejected("common_facts schema / rule / fields differ from the reader's")
+    if not isinstance(block["rows"], list):
+        raise Rejected("common_facts rows is not a list")
+    seen = []
+    for row in block["rows"]:
+        if not isinstance(row, dict) or set(row) != {"id", "observation", "codes"} \
+                or not isinstance(row["codes"], str) or len(row["codes"]) != len(cf.FIELDS) \
+                or set(row["codes"]) - set("cxun"):
+            raise Rejected("common_facts row shape")
+        seen.append((row["id"], row["observation"]))
+    if seen != sorted(set(seen)):
+        raise Rejected("common_facts rows duplicated or not sorted")
+
+
+def bind_common_facts(document: dict, facts_document: dict) -> dict:
+    """The -4 verdicts bound to a facts file (s8 binding): facts digest, row-set digest and the row set itself must
+    match, else Rejected. Returns {(id, observation): {field: state}}."""
+    import common_facts as cf
+
+    block = document["common_facts"]
+    if block["facts_sha256"] != cf.digest(facts_document):
+        raise Rejected("common_facts bound to another facts file")
+    if block["row_set_sha256"] != cf.row_set_digest(facts_document["rows"]):
+        raise Rejected("common_facts row set differs from the facts file")
+    rows = {(row["id"], row["observation"]) for row in facts_document["rows"]}
+    if {(row["id"], row["observation"]) for row in block["rows"]} != rows:
+        raise Rejected("common_facts rows differ from the facts file")
+    names = {"c": "confirmed", "x": "contradicted", "u": "unobserved", "n": "not_applicable"}
+    return {(row["id"], row["observation"]): {field: names[code] for field, code in zip(cf.FIELDS, row["codes"])}
+            for row in block["rows"]}
 
 
 def _check_override_header(block) -> None:

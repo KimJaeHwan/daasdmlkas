@@ -96,6 +96,12 @@ def collect(generation: Path, naming_source: Path) -> dict:
         found["language_version"] = (evidence.translation_namespace.major_version,
                                      evidence.translation_namespace.minor_version)
         found["image_base"] = evidence.image_base.byte_offset
+        try:   # (G2a parity: the engine's own stack register and call relations)
+            from tdo_v2.isa_identity import stack_register as _stack_register
+
+            found["stack_register"] = _stack_register(evidence)
+        except Exception:   # noqa: BLE001
+            found["stack_register"] = None
         function_keys = {claim.entry for claim in diagnosis.claims if claim.entry}
         last = {claim.entry: claim for claim in diagnosis.claims if claim.evidence is not None}
         for claim in diagnosis.claims:
@@ -114,7 +120,16 @@ def collect(generation: Path, naming_source: Path) -> dict:
                 baseline_error = None
             except Exception as error:   # (one function's baseline never stops the report)
                 baseline, baseline_error = None, f"{type(error).__qualname__}: {error}"
+            try:   # (G2a parity: the engine's call relations of this unit, as plain fields)
+                import common_facts
+                from tdo_v2.call_relations import call_relations as _call_relations
+
+                engine_relations = {key: common_facts.engine_fields(relation) for key, relation in
+                                    _call_relations(observation, claim.unit.scopes).items()}
+            except Exception as error:   # noqa: BLE001
+                engine_relations = {"error": f"{type(error).__qualname__}: {error}"}
             found["functions"].append({"function_id": claim.function_id, "entry": claim.entry,
+                                       "engine_relations": engine_relations,
                                        "s1": bool(getattr(observation, "call_fallthrough_isa", False)),
                                        "producer_profile": getattr(observation, "producer_profile", None),
                                        "rows": rows, "baseline": baseline, "baseline_error": baseline_error})
@@ -193,6 +208,33 @@ class IsaCollector:
                                            "rows": {}}
         return {"header": isa_facts.header_block(self.tables, decoders.profile_catalogue()),
                 "functions": self.functions}
+
+
+class CommonFactsCollector:
+    """G2a (design_tbr_g2_common_facts_r5): derives each row's common-facts claim and its -4 code string."""
+
+    def __init__(self, functions: list) -> None:
+        self.index = {f["function_id"]: {(r["space"], r["address"]): r["length"] for r in f["rows"]}
+                      for f in functions}
+        self.rows, self.codes = {}, {}
+
+    def __call__(self, fid, facts, result, lift, ballot, window=None) -> None:
+        import common_facts
+
+        row = common_facts.derive_row(facts, lift, fid, self.index.get(fid, {}))
+        self.rows[(fid, facts["space"], facts["address"])] = row
+        self.codes[(row["id"], fid)] = common_facts.row_verdicts(row, ballot, result)
+
+
+def _chain(*hooks):
+    hooks = [hook for hook in hooks if hook is not None]
+    if not hooks:
+        return None
+
+    def call(*args):
+        for hook in hooks:
+            hook(*args)
+    return call
 
 
 class OverrideCollector:
@@ -292,7 +334,7 @@ def engine_source() -> dict:
 
 def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: dict, original: bytes, mapping,
                    facts: dict, states: dict, use_table: bool, reason, isa: dict | None = None,
-                   override: dict | None = None, engine: dict | None = None) -> None:
+                   override: dict | None = None, engine: dict | None = None, common: dict | None = None) -> None:
     """``g1-decode-evidence-1`` (design .census6/design_g1_engine_evidence_r3.md, s2 / s3 / s7); with ``isa``
     ``g1-decode-evidence-2`` (design .census6/design_tbr_isa_facts_r3.md s5)."""
     import hashlib
@@ -320,13 +362,51 @@ def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: 
                                                                            row["address"]), {"*": "unobserved"})
                                for row in function["rows"]}}
                    for function in facts["functions"]],
-        isa=isa, override=override)
+        isa=isa, override=override, common=common)
     path.write_bytes(evidence.dumps(document))
+
+
+def common_summary(facts: dict, common, document: dict) -> dict:
+    """G2a report: per-field verdict counts over transfer rows (with denominators) and the parity with the
+    engine's call relations (missing by recognizer check, extra, field differences)."""
+    import collections
+
+    import common_facts
+
+    counts = {name: collections.Counter() for name in common_facts.FIELDS}
+    for row in document["rows"]:
+        if row["transfer"]["kind"] in ("none",):
+            continue
+        for name, code in zip(common_facts.FIELDS, common.codes[(row["id"], row["observation"])]):
+            counts[name][code] += 1
+    by_row = {(row["observation"], int(row["offset"], 16)): row for row in document["rows"]}
+    missing, extra, differs = collections.Counter(), 0, collections.Counter()
+    examples = {"extra": [], "differs": [], "engine-has-no-relation": []}
+    for function in facts["functions"]:
+        if "error" in (function.get("engine_relations") or {}):
+            missing["engine-error"] += 1
+            continue
+        derived = {(r["space"], r["address"]): by_row[(function["function_id"], r["address"])] for r in function["rows"]}
+        result = common_facts.parity(function, derived, facts.get("stack_register"))
+        for _, why in result["missing"]:
+            missing[why] += 1
+            if why == "engine-has-no-relation" and len(examples[why]) < 5:
+                examples[why].append(_)
+        extra += len(result["extra"])
+        examples["extra"].extend(result["extra"][:max(0, 5 - len(examples["extra"]))])
+        for key, name in result["differs"]:
+            differs[name] += 1
+            if len(examples["differs"]) < 5:
+                examples["differs"].append([key, name])
+    return {"schema": common_facts.SCHEMA, "rule": common_facts.RULE_VERSION, "rows": len(document["rows"]),
+            "verdicts_over_transfer_rows": {name: dict(counter) for name, counter in counts.items()},
+            "parity": {"missing_by_check": dict(missing), "extra": extra, "differs_by_field": dict(differs),
+                       "examples": examples}}
 
 
 def run(generation: Path, naming_source: Path, premise: bool, full: bool = False,
         evidence_out: Path | None = None, isa_facts: bool = False,
-        producer_override: bool = False) -> tuple[dict, list]:
+        producer_override: bool = False, common_facts_out: Path | None = None) -> tuple[dict, list]:
     facts = collect(generation, naming_source)
     manifest = json.loads((generation / "manifest.json").read_bytes())
     original_path = next(row["path"] for row in manifest["members"] if row["id"] == manifest["original_member_id"])
@@ -363,10 +443,28 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     header["translation_identity"] = {**identity, "premise": premise, "table_applied": use_table}
     states = {}
     # (design_tbr_g1_x1: schema -3 = -2 + the producer-override verdicts; always with the ISA facts)
+    producer_override = producer_override or common_facts_out is not None   # (-4 = -3 + common facts)
     collector = IsaCollector() if (isa_facts or producer_override) and evidence_out is not None else None
     verdicts = OverrideCollector(manifest.get("producer_profile")) if producer_override else None
+    common = CommonFactsCollector(facts["functions"]) if common_facts_out is not None else None
     rows.extend(check.decode_rows(image, facts["functions"], use_table, reason, full, states, facts["language"] or "",
-                                  unverified, isa=collector, override=verdicts))
+                                  unverified, isa=collector, override=_chain(verdicts, common)))
+    common_block = None
+    if common is not None:
+        import common_facts
+
+        seal = json.loads((generation / "seal.json").read_bytes())
+        document = common_facts.document(
+            {"generation_id": seal["generation_id"], "manifest_sha256": seal["manifest_sha256"]},
+            {"name": "tbr-derive-ghidra-p-code", "lift_table": lifting.TABLE["id"], "rule": common_facts.RULE_VERSION},
+            {"isa": "x86-64", "address_spaces": [],
+             "stack_register": common_facts.U("no stack-register evidence") if facts.get("stack_register") is None
+             else {"space": facts["stack_register"].space_id, "offset": facts["stack_register"].byte_offset,
+                   "size": facts["stack_register"].byte_size, "name": facts["stack_register"].name}},
+            list(common.rows.values()))
+        common_facts_out.write_bytes(common_facts.canonical(document) + b"\n")
+        common_block = common_facts.verdict_block(common_facts.digest(document), document["rows"], common.codes)
+        header["common_facts"] = common_summary(facts, common, document)
     override_block = None
     engine = engine_source() if evidence_out is not None or verdicts is not None else None
     if verdicts is not None:
@@ -387,7 +485,8 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     header["counts"] = g1_counts(rows)
     if evidence_out is not None:
         write_evidence(evidence_out, generation, naming_source, manifest, original, mapping, facts, states, use_table,
-                       reason, None if collector is None else collector.block(facts, states), override_block, engine)
+                       reason, None if collector is None else collector.block(facts, states), override_block, engine,
+                       common_block)
         header["evidence_out"] = str(evidence_out)
     return header, rows
 
@@ -419,6 +518,8 @@ def main(argv=None) -> int:
                         help="write g1-decode-evidence-2: the evidence file plus the per-row ISA facts")
     parser.add_argument("--producer-override", action="store_true",
                         help="write g1-decode-evidence-3: -2 plus the per-row producer-override verdicts (X-1)")
+    parser.add_argument("--common-facts", type=Path, default=None,
+                        help="G2a: write the derived tbr-common-facts-1 file here (evidence becomes -4 with --evidence-out)")
     parser.add_argument("--evidence-out", type=Path, default=None,
                         help="also write the engine evidence file g1-decode-evidence-1 (outside the Bundle)")
     args = parser.parse_args(argv)
@@ -426,7 +527,7 @@ def main(argv=None) -> int:
         print("decode_check: the generation directory and the naming source must exist", file=sys.stderr)
         return 2
     header, rows = run(args.generation, args.naming_source, args.assume_stock_ghidra_translator, args.full,
-                       args.evidence_out, args.isa_facts, args.producer_override)
+                       args.evidence_out, args.isa_facts, args.producer_override, args.common_facts)
     args.out.write_text(dumps(header, rows), encoding="utf-8")
     return 0
 

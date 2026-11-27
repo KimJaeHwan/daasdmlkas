@@ -3858,3 +3858,132 @@ def test_g1x1_generated_verdicts_round_trip_through_the_reader():
     assert first["verdict"] == "effect_attested" and first["exemption"]["pattern"] == "interrupt"
     second = ev.override("f0", *rows[1])
     assert second["verdict"] == "unobserved" and "kernel-boundary-contract" in second["premises"]
+
+
+# -- G2a: common facts derived from Ghidra p-code, -4 verdicts, engine parity (design_tbr_g2_common_facts_r5) ----
+
+def _g2(facts, data):
+    import common_facts
+    import decoders
+
+    lift, result = _compare(facts, data)
+    index = {(facts["space"], facts["address"]): facts["length"]}
+    row = common_facts.derive_row(facts, lift, "f0", index)
+    return row, common_facts.row_verdicts(row, decoders.ballot(data, facts["address"]), result)
+
+
+def _codes(code_string):
+    import common_facts
+
+    return dict(zip(common_facts.FIELDS, code_string))
+
+
+@needs
+def test_g2a_direct_call_push_link_and_verdicts():
+    """r5 s3.1 / s3.6 / s8: a near direct call: direct kind, one encoded_target edge (no sequential edge: TBR
+    states no return), a push link_write checked against a7 / a11b / the verified length."""
+    row, codes = _g2(_direct_call(START + 0x20), bytes.fromhex("e81b000000"))
+    transfer = row["transfer"]
+    assert transfer["kind"] == "direct" and [(e["when"], e["source"]) for e in transfer["edges"]] == [
+        ("always", "encoded_target")]
+    link = transfer["link_write"]
+    assert link["sp_delta"] == -8 and link["location"]["memory"]["slot_offset"] == -8
+    assert link["value"] == {"bits": f"{START + 5:x}", "width": 64} and link["relocation"] == "instruction_relative"
+    assert [r["ordinal"] for r in transfer["op_keys"]["transient"]] == [0, 1]
+    c = _codes(codes)
+    assert (c["kind"], c["edges"], c["link.value"], c["link.continuation"], c["link.slot"]) == ("c",) * 5
+    assert c["to.encoded_target"] == "u" and c["link.relocation"] == "u" and c["link.register"] == "u"
+
+
+@needs
+def test_g2a_conditional_and_trap_rows():
+    import common_facts
+
+    row, codes = _g2(_jcc(2, START + 0x40), bytes.fromhex("743e"))
+    assert row["transfer"]["kind"] == "conditional" and row["transfer"]["condition"]["taken_when"] == "true"
+    c = _codes(codes)
+    assert (c["kind"], c["edges"], c["to.sequential"]) == ("c", "c", "c") and c["condition"] == "u"
+    row, codes = _g2(_int_pair(0x29), bytes.fromhex("cd29"))
+    edges = [(e["when"], e["source"], e["requires"]) for e in row["transfer"]["edges"]]
+    assert edges == [("trap", "os", None), ("trap_return", "os_return", "os-contract")]
+    c = _codes(codes)
+    assert (c["kind"], c["edges"], c["to.computed_os"], c["to.os_return"]) == ("c", "c", "c", "c")
+    unknown = dict(_syscall(), length=None, fallthrough=None)
+    lift, result = _compare(_syscall(), bytes.fromhex("0f05"))
+    row = common_facts.derive_row(unknown, lift, "f0", {})
+    assert "unobserved" in row["transfer"]["edges"][1]["to"]       # (no length: the address is unknown, not wrong)
+
+
+def test_g2a_indirect_targets_are_pre_state_expressions():
+    """r5 s3.5: call [rsp+8] reads the old RSP before the push; ret reads [RSP]; a LOAD after a STORE is
+    unobserved."""
+    import common_facts
+    import lifting
+
+    load = [_op("INT_ADD", [_r(RSP_), _c(8)], _u(0x10)), _op("LOAD", [_c(1), _u(0x10)], _u(0x20))]
+    facts = _row(4, load + _push(START + 4) + [_op("CALLIND", [_u(0x20)])])
+    row = common_facts.derive_row(facts, lifting.identify(facts), "f0", {})
+    target = row["transfer"]["target_value"]
+    assert target["memory"]["size"] == 8 and target["memory"]["address"]["add"][0]["pre_register"]["offset"] == RSP_
+    assert row["transfer"]["link_write"] is not None and row["transfer"]["edges"][0]["to"] is None
+    aliased = [_op("STORE", [_c(1), _r(RAX_), _r(RCX_)]), _op("LOAD", [_c(1), _r(RSP_)], _u(0x30)),
+               _op("BRANCHIND", [_u(0x30)])]
+    value = common_facts._value_ref(aliased, aliased[2]["inputs"][0], 2, {"id": "x", "observation": "f0"})
+    assert value == {"unobserved": "intra-row store may alias"}
+
+
+def test_g2a_parity_classes():
+    """G2a parity: an exact match, the explained recognizer failures (no fallthrough, no stack register), an engine
+    relation without a fact (extra) and a field difference."""
+    from types import SimpleNamespace
+
+    import common_facts
+    import lifting
+
+    facts = _direct_call(START + 0x20)
+    row = common_facts.derive_row(facts, lifting.identify(facts), "f0", {})
+    sp = SimpleNamespace(space_id=2, byte_offset=RSP_, byte_size=8)
+    fields, why = common_facts.projection(row, facts, sp)
+    assert why is None and fields["entry_ordinal"] == 2 and fields["relocation"] == "instruction-relative"
+    function = {"rows": [facts], "engine_relations": {fields["call_key"]: dict(fields)}}
+    derived = {(facts["space"], facts["address"]): row}
+    assert common_facts.parity(function, derived, sp) == {"missing": [], "extra": [], "differs": []}
+    assert common_facts.projection(row, dict(facts, fallthrough=None), sp) == (None, "no-fallthrough")
+    assert common_facts.projection(row, facts, None) == (None, "no-stack-register")
+    function["engine_relations"]["other:key"] = dict(fields, kind="push")
+    assert common_facts.parity(function, derived, sp)["extra"] == ["other:key"]
+    function["engine_relations"] = {fields["call_key"]: dict(fields, delta=-4)}
+    assert common_facts.parity(function, derived, sp)["differs"] == [(fields["call_key"], "delta")]
+
+
+@needs
+def test_g2a_end_to_end_facts_and_evidence4_binding(tmp_path):
+    """decode_check --common-facts writes the facts file and -4; the reader binds -4 to that facts file and
+    rejects another facts file or a changed row set."""
+    import json
+
+    import _sealed as s
+    import decode_check
+    import evidence
+
+    functions, code = _pair(s)
+    (tmp_path / "b").mkdir()
+    generation = _bundle(tmp_path / "b", functions, code)
+    out, facts_out = tmp_path / "evidence4.json", tmp_path / "facts.json"
+    header, _ = decode_check.run(generation, s.NAMING_SOURCE, True, full=True, evidence_out=out,
+                                 common_facts_out=facts_out)
+    document = evidence.parse(out.read_bytes())
+    facts_document = json.loads(facts_out.read_bytes())
+    assert document["schema"] == "g1-decode-evidence-4" and facts_document["schema"] == "tbr-common-facts-1"
+    assert header["common_facts"]["parity"]["extra"] == 0
+    verdicts = evidence.bind_common_facts(document, facts_document)
+    first = facts_document["rows"][0]
+    assert verdicts[(first["id"], first["observation"])]["kind"] in ("confirmed", "not_applicable", "unobserved")
+    changed = json.loads(facts_out.read_bytes())
+    changed["rows"][0]["transfer"]["hint"] = "changed"
+    with pytest.raises(evidence.Rejected):
+        evidence.bind_common_facts(document, changed)
+    fewer = json.loads(facts_out.read_bytes())
+    del fewer["rows"][0]
+    with pytest.raises(evidence.Rejected):
+        evidence.bind_common_facts(document, fewer)
