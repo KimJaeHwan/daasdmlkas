@@ -216,7 +216,7 @@ class CommonFactsCollector:
     def __init__(self, functions: list) -> None:
         self.index = {f["function_id"]: {(r["space"], r["address"]): r["length"] for r in f["rows"]}
                       for f in functions}
-        self.rows, self.codes = {}, {}
+        self.rows, self.codes, self.vendor = {}, {}, {}
 
     def __call__(self, fid, facts, result, lift, ballot, window=None) -> None:
         import common_facts
@@ -224,6 +224,7 @@ class CommonFactsCollector:
         row = common_facts.derive_row(facts, lift, fid, self.index.get(fid, {}))
         self.rows[(fid, facts["space"], facts["address"])] = row
         self.codes[(row["id"], fid)] = common_facts.row_verdicts(row, ballot, result)
+        self.vendor[(row["id"], fid)] = common_facts.vendor_verdicts(row, ballot)
 
 
 def _chain(*hooks):
@@ -373,12 +374,7 @@ def common_summary(facts: dict, common, document: dict) -> dict:
 
     import common_facts
 
-    counts = {name: collections.Counter() for name in common_facts.FIELDS}
-    for row in document["rows"]:
-        if row["transfer"]["kind"] in ("none",):
-            continue
-        for name, code in zip(common_facts.FIELDS, common.codes[(row["id"], row["observation"])]):
-            counts[name][code] += 1
+    counts = common_facts.denominators(document, common.codes)
     by_row = {(row["observation"], int(row["offset"], 16)): row for row in document["rows"]}
     missing, extra, differs = collections.Counter(), 0, collections.Counter()
     examples = {"extra": [], "differs": [], "engine-has-no-relation": []}
@@ -399,7 +395,7 @@ def common_summary(facts: dict, common, document: dict) -> dict:
             if len(examples["differs"]) < 5:
                 examples["differs"].append([key, name])
     return {"schema": common_facts.SCHEMA, "rule": common_facts.RULE_VERSION, "rows": len(document["rows"]),
-            "verdicts_over_transfer_rows": {name: dict(counter) for name, counter in counts.items()},
+            "verdicts_over_transfer_rows": counts,
             "parity": {"missing_by_check": dict(missing), "extra": extra, "differs_by_field": dict(differs),
                        "examples": examples}}
 
@@ -463,7 +459,8 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
                    "size": facts["stack_register"].byte_size, "name": facts["stack_register"].name}},
             list(common.rows.values()))
         common_facts_out.write_bytes(common_facts.canonical(document) + b"\n")
-        common_block = common_facts.verdict_block(common_facts.digest(document), document["rows"], common.codes)
+        common_block = common_facts.verdict_block(common_facts.digest(document), document["rows"], common.codes,
+                                                  common.vendor)
         header["common_facts"] = common_summary(facts, common, document)
     override_block = None
     engine = engine_source() if evidence_out is not None or verdicts is not None else None

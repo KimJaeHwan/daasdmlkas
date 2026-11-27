@@ -3987,3 +3987,109 @@ def test_g2a_end_to_end_facts_and_evidence4_binding(tmp_path):
     del fewer["rows"][0]
     with pytest.raises(evidence.Rejected):
         evidence.bind_common_facts(document, fewer)
+
+
+# -- G2a fixtures with required results (design_tbr_g2_common_facts_r5 G2a table) ---------------------------------
+
+def _vendor_view(length, width, stored, slot):
+    return {"length": length, "bytes": [f"{START:x}", f"{START + length:x}"], "edges": [],
+            "link_write": {"location": {"memory": {"space": 1, "base": {"space": 2, "offset": RSP_, "size": 8},
+                                                   "relative_to": "pre_sp", "slot_offset": slot}},
+                           "sp_delta": slot, "value": {"bits": f"{stored:x}", "width": width},
+                           "continuation": {"space": 1, "offset": f"{START + length:x}"},
+                           "relocation": "instruction_relative", "derivation": "isa_next_ip"},
+            "target_value": None}
+
+
+@needs
+def test_g2a_fixture_66e8_vendor_views():
+    """66 E8 at the row start: Intel length 6 / width 64 / stored next / slot -8; AMD length 4 / width 16 / stored
+    0x1004-style truncated bits / slot -2; the truncated bits as the full continuation contradict that field."""
+    import common_facts
+    import decoders
+
+    data = bytes.fromhex("66e80a000000")
+    row, _ = _g2(_row(6, _push(START + 6) + [_op("CALL", [_a(START + 0x10)])], flow=_flow("call_direct")), data)
+    amd_stored = (START + 4) & 0xFFFF
+    row["vendor_views"] = {"intel": _vendor_view(6, 64, START + 6, -8), "amd": _vendor_view(4, 16, amd_stored, -2)}
+    ballot = decoders.ballot(data, START)
+    codes = common_facts.vendor_verdicts(row, ballot)
+    assert codes == {"intel": "cccc", "amd": "cccc"}, codes
+    row["vendor_views"]["amd"]["link_write"]["continuation"] = {"space": 1, "offset": f"{amd_stored:x}"}
+    assert common_facts.vendor_verdicts(row, ballot)["amd"][2] == "x"
+
+
+@needs
+def test_g2a_fixture_xbegin_and_incomplete_edges():
+    """XBEGIN: exactly the three triples with condition null; a removed nested-abort triple is contradicted, a keyed
+    placeholder leaves the edge set unobserved; input order never changes the canonical digest."""
+    import copy
+
+    import common_facts
+    import decoders
+
+    data = bytes.fromhex("c7f810000000")
+    facts = _row(6, [_op("CALLOTHER", [_c(85)])])
+    row, _ = _g2(facts, data)
+    nxt, target = f"{START + 6:x}", f"{START + 6 + 0x10:x}"
+    row["transfer"].update(kind="conditional", condition=None, edges=[
+        {"when": "abort", "source": "computed", "requires": "nested-transaction", "to": None,
+         "lands_on": {"class": "unresolved"}},
+        {"when": "normal_entry", "source": "sequential", "requires": "normal-transaction-start",
+         "to": {"space": 1, "offset": nxt}, "lands_on": {"class": "unclassified"}},
+        {"when": "abort", "source": "encoded_target", "requires": "outermost-transaction",
+         "to": {"space": 1, "offset": target}, "lands_on": {"class": "unclassified"}}])
+    lift, result = _compare(facts, data)
+    ballot = decoders.ballot(data, START)
+    c = _codes(common_facts.row_verdicts(row, ballot, result))
+    assert (c["kind"], c["edges"], c["condition"], c["to.sequential"], c["to.computed_os"]) == ("c",) * 5
+    reordered = copy.deepcopy(row)
+    reordered["transfer"]["edges"].reverse()
+    doc = lambda r: common_facts.document({}, {}, {}, [copy.deepcopy(r)])   # noqa: E731
+    assert common_facts.digest(doc(row)) == common_facts.digest(doc(reordered))
+    missing = copy.deepcopy(row)
+    missing["transfer"]["edges"] = [e for e in missing["transfer"]["edges"] if e["requires"] != "nested-transaction"]
+    assert _codes(common_facts.row_verdicts(missing, ballot, result))["edges"] == "x"
+    placeholder = copy.deepcopy(row)
+    placeholder["transfer"]["edges"][0] = {"when": "abort", "source": "computed", "requires": "nested-transaction",
+                                           "unobserved": "no observation of this edge"}
+    assert _codes(common_facts.row_verdicts(placeholder, ballot, result))["edges"] == "u"
+
+
+def test_g2a_fixture_colliding_starts_and_arm_round_trip(tmp_path):
+    """Two views at one start keep distinct ids and verdicts; moving a verdict to the other view's id fails the
+    binding. BLR x30 round-trips (target = incoming x30, link x30 with zero delta, target_auth null) and an ARM row
+    without a voter stays applicability-unknown."""
+    import copy
+    import json
+
+    import common_facts
+    import evidence
+
+    base = {"space": 1, "offset": f"{START:x}", "observation": "f0", "vendor_views": None, "isa": [],
+            "bytes": {"range": [f"{START:x}", f"{START + 4:x}"], "holds_if": common_facts.PREMISE}}
+    x30 = {"space": 2, "offset": 0xf0, "size": 8, "name": "x30"}
+    blr = dict(base, id=f"1:{START:x}:4:0", length=4, view="0", transfer={
+        "kind": "indirect", "edges": [{"when": "always", "source": "computed", "requires": None, "to": None,
+                                       "lands_on": {"class": "unresolved"}}],
+        "condition": None, "target_value": {"pre_register": x30, "width": 64}, "target_auth": None,
+        "link_write": {"location": {"register": x30}, "sp_delta": 0, "value": {"bits": f"{START + 4:x}", "width": 64},
+                       "continuation": {"space": 1, "offset": f"{START + 4:x}"}, "relocation": "instruction_relative",
+                       "derivation": "pc_plus_4"},
+        "hint": "call", "op_keys": {"transfer": None, "target": [], "condition": [], "auth": [], "link": [],
+                                    "sp_adjust": [], "setup": [], "transient": [], "persistent": [],
+                                    "entry_ordinal": None, "encoding_only": ["link_write"]}})
+    other = copy.deepcopy(blr)
+    other.update(id=f"1:{START:x}:2:1", length=2, view="1")
+    facts_doc = common_facts.document({"generation_id": "g"}, {}, {"isa": "aarch64"}, [blr, other])
+    assert json.loads(common_facts.canonical(facts_doc)) == json.loads(json.dumps(facts_doc))
+    codes = {(r["id"], r["observation"]): common_facts.row_verdicts(r, None, None) for r in facts_doc["rows"]}
+    assert set(codes.values()) == {"?" * len(common_facts.FIELDS)}
+    block = common_facts.verdict_block(common_facts.digest(facts_doc), facts_doc["rows"], codes)
+    document = {"common_facts": block}
+    verdicts = evidence.bind_common_facts(document, facts_doc)
+    assert len(verdicts) == 2 and all(v["kind"] == "unobserved" for v in verdicts.values())
+    moved = copy.deepcopy(document)
+    moved["common_facts"]["rows"][0]["id"] = moved["common_facts"]["rows"][1]["id"]
+    with pytest.raises(evidence.Rejected):
+        evidence.bind_common_facts(moved, facts_doc)

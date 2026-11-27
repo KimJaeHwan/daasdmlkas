@@ -28,7 +28,7 @@ WHEN_ORDER = ("always", "taken", "not_taken", "normal_entry", "abort", "trap", "
 SOURCE_ORDER = ("sequential", "encoded_target", "computed", "os", "os_return")
 REQUIRES_ORDER = (None, "os-contract", "normal-transaction-start", "outermost-transaction", "nested-transaction")
 # the -4 field order of the per-row code string (one character per field: c confirmed, x contradicted,
-# u unobserved, n not applicable)
+# u unobserved, n not applicable, ? applicability unknown -- the form is undecided; read as unobserved)
 FIELDS = ("kind", "edges", "to.sequential", "to.encoded_target", "to.computed_os", "to.os_return", "condition",
           "link.value", "link.continuation", "link.slot", "link.location_kind", "link.register", "link.space",
           "link.relocation", "target_value", "op_keys", "lands_on")
@@ -93,7 +93,7 @@ def _value_ref(ops, varnode, upto, row_ref, depth=0):
             return {"memory": {"space": inputs[0]["offset"], "address": _value_ref(ops, inputs[1], index, row_ref,
                                                                                  depth + 1),
                                "size": varnode["size"], "segment_base": None}}
-        return {"op_output": {"row": row_ref, "ordinal": index, "opcode": name}}
+        return {"op_output": {"ordinal": index, "opcode": name}}
     if varnode["kind"] == "REGISTER":
         return {"pre_register": _reg(varnode), "width": varnode["size"] * 8}
     return U(f"{varnode['kind']} used before any definition in the row")
@@ -186,8 +186,8 @@ def derive_row(facts: dict, lift, observation: str, rows_index: dict) -> dict:
         if pattern == "call $+5":
             edges = [_edge("always", "encoded_target", _addr(space, ops[last]["inputs"][0]["offset"]))]
 
-    def ref(ordinal):
-        return {"row": row_ref, "ordinal": ordinal, "opcode": ops[ordinal]["opcode"]}
+    def ref(ordinal):     # (s2: an op of the containing row needs no row_ref)
+        return {"ordinal": ordinal, "opcode": ops[ordinal]["opcode"]}
 
     for edge in edges:
         to = edge["to"]
@@ -236,6 +236,11 @@ def _lands_on(address, space, rows_index, observation):
 
 def document(bundle: dict, producer: dict, program: dict, rows: list) -> dict:
     rows = sorted(rows, key=lambda row: (row["id"], row["observation"]))
+    for row in rows:      # (s3.2: canonical edge order, placeholders included, whatever the input order)
+        row["transfer"]["edges"] = sorted(row["transfer"]["edges"], key=_edge_key)
+        for view in (row.get("vendor_views") or {}).values():
+            if view and isinstance(view.get("edges"), list):
+                view["edges"] = sorted(view["edges"], key=_edge_key)
     return {"schema": SCHEMA, "source": "derived", "bundle": bundle, "producer": producer, "program": program,
             "rows": rows}
 
@@ -250,7 +255,8 @@ def digest(document_: dict) -> str:
 
 # -- -4 verdicts (s8) --------------------------------------------------------------------------------------------
 
-VOTER_FORM = {"none": "none", "jcc": "conditional", "jmp_near": None, "call_near": None, "ret_near": "indirect",
+VOTER_FORM = {"none": "none", "jcc": "conditional", "xbegin": "conditional", "jmp_near": None, "call_near": None,
+              "ret_near": "indirect",
               "syscall": "trap", "sysenter": "trap", "int_n": "trap", "int3": "trap", "int1": "trap", "hlt": "trap",
               "ud": "trap"}
 
@@ -277,7 +283,9 @@ def _expected(form):
         return None, None
     triples = {
         "none": [("always", "sequential", None)],
-        "conditional": [("taken", "encoded_target", None), ("not_taken", "sequential", None)],
+        "conditional": [("taken", "encoded_target", None), ("not_taken", "sequential", None)] if flow != "xbegin"
+        else [("normal_entry", "sequential", "normal-transaction-start"),
+              ("abort", "encoded_target", "outermost-transaction"), ("abort", "computed", "nested-transaction")],
         "direct": [("always", "encoded_target", None)],
         "indirect": [("always", "computed", None)],
         "trap": [("trap", "os", None)] + ([] if flow == "ud" else [("trap_return", "os_return", "os-contract")]),
@@ -295,21 +303,25 @@ def row_verdicts(row: dict, ballot: dict | None, result: dict | None) -> str:
     codes = dict.fromkeys(FIELDS, "u")
     transfer = row["transfer"]
     if ballot is None or result is None or not result.get("attributes"):
-        return "".join(codes[f] for f in FIELDS)            # never compared: unobserved throughout
+        return "?" * len(FIELDS)                             # never compared: applicability unknown
     form, length = _consensus(ballot)
     if form is None:
-        return "".join(codes[f] for f in FIELDS)
+        return "?" * len(FIELDS)
     if form == "invalid":
         codes["kind"] = "c" if transfer["kind"] == "trap" else "x"
         return "".join(codes[f] for f in FIELDS)
     kind, triples = _expected(form)
     if kind is None:
-        return "".join(codes[f] for f in FIELDS)
+        return "?" * len(FIELDS)
     codes["kind"] = "c" if transfer["kind"] == kind else "x"
     claimed = sorted((e["when"], e["source"], e["requires"]) for e in transfer["edges"])
-    codes["edges"] = "c" if claimed == sorted(triples) else "x"
+    if claimed != sorted(triples):
+        codes["edges"] = "x"            # (missing, duplicate or extra triple: s3.2 / s8 step 2)
+    else:
+        # (a keyed placeholder occupies its triple and leaves that edge unobserved)
+        codes["edges"] = "u" if any("unobserved" in e for e in transfer["edges"]) else "c"
     start = int(row["offset"], 16)
-    by_source = {e["source"]: e for e in transfer["edges"]}
+    by_source = {e["source"]: e for e in transfer["edges"] if "unobserved" not in e}
     sources = {t[1] for t in triples}
     codes["to.sequential"] = "n"
     if "sequential" in sources:
@@ -320,7 +332,7 @@ def row_verdicts(row: dict, ballot: dict | None, result: dict | None) -> str:
     codes["to.encoded_target"] = "u" if "encoded_target" in sources else "n"   # (XED computed: unobserved today)
     if sources & {"computed", "os"}:
         nulls = [by_source[s]["to"] is None for s in ("computed", "os") if s in by_source]
-        codes["to.computed_os"] = "c" if nulls and all(nulls) else "x"
+        codes["to.computed_os"] = "u" if not nulls else ("c" if all(nulls) else "x")
     else:
         codes["to.computed_os"] = "n"
     if "os_return" in sources:
@@ -332,7 +344,10 @@ def row_verdicts(row: dict, ballot: dict | None, result: dict | None) -> str:
             codes["to.os_return"] = "u" if edge is None else ("c" if edge["to"] is None else "x")
     else:
         codes["to.os_return"] = "n"
-    codes["condition"] = "u" if kind == "conditional" else "n"      # (opaque test: no independent comparison)
+    if form[0] == "xbegin":   # (s3.4: XBEGIN has condition null; its guards are compared on the edges)
+        codes["condition"] = "c" if transfer["condition"] is None else "x"
+    else:
+        codes["condition"] = "u" if kind == "conditional" else "n"  # (opaque test: no independent comparison)
     link = transfer["link_write"]
     is_call = form[0] == "call_near"
     if not is_call:
@@ -364,18 +379,84 @@ def row_verdicts(row: dict, ballot: dict | None, result: dict | None) -> str:
     return "".join(codes[f] for f in FIELDS)
 
 
+VENDOR_FIELDS = ("length", "link.value", "link.continuation", "link.slot")
+
+
+def vendor_verdicts(row: dict, ballot: dict | None) -> dict | None:
+    """s3.6 / s8: a claim with vendor_views is judged per vendor against that vendor's voters (intel: iced / Zydis /
+    XED; amd: iced / Zydis AMD mode): length, stored bits and width, continuation, slot / delta. None when the
+    claim states no vendor views."""
+    views = row.get("vendor_views")
+    if not views:
+        return None
+    out = {}
+    start = int(row["offset"], 16)
+    for vendor in ("intel", "amd"):
+        view = views.get(vendor)
+        codes = dict.fromkeys(VENDOR_FIELDS, "u")
+        voters = list(ballot[vendor]) if ballot is not None and vendor in ballot else []
+        if view is None or not voters or any(v.status != "ok" for v in voters):
+            out[vendor] = "".join(codes[f] for f in VENDOR_FIELDS)
+            continue
+        lengths = {v.length for v in voters}
+        widths = {v.operand_bits for v in voters if v.operand_bits}
+        if len(lengths) == 1 and not _unknown(view.get("length")):
+            length = lengths.pop()
+            codes["length"] = "c" if view["length"] == length else "x"
+            link = view.get("link_write")
+            if link and not _unknown(link):
+                cont = link["continuation"]
+                if not _unknown(cont):
+                    codes["link.continuation"] = "c" if cont == _addr(row["space"], start + length) else "x"
+                if len(widths) == 1 and not _unknown(link["value"]):
+                    width = widths.pop()
+                    stored = (start + length) % (1 << width)
+                    codes["link.value"] = "c" if (link["value"]["width"], int(link["value"]["bits"], 16)) == \
+                        (width, stored) else "x"
+                    slot = link["location"].get("memory", {}).get("slot_offset")
+                    codes["link.slot"] = "c" if slot == link["sp_delta"] == -(width // 8) else "x"
+        out[vendor] = "".join(codes[f] for f in VENDOR_FIELDS)
+    return out
+
+
 def row_set_digest(rows: list) -> str:
     lines = "".join(f"{row['space']:x}:{row['offset']}:{row['length']}:{row['view']}:{row['observation']}\n"
                     for row in sorted(rows, key=lambda r: (r["id"], r["observation"])))
     return hashlib.sha256(lines.encode("utf-8")).hexdigest()
 
 
-def verdict_block(facts_digest: str, rows: list, codes: dict) -> dict:
-    """The -4 section: binding (facts digest, rule version, row-set digest) and one code string per row."""
+def verdict_block(facts_digest: str, rows: list, codes: dict, vendor: dict | None = None) -> dict:
+    """The -4 section: binding (facts digest, rule version, row-set digest) and one code string per row; a row with
+    vendor views also carries one code string per vendor over VENDOR_FIELDS."""
+    vendor = vendor or {}
+    out_rows = []
+    for row in sorted(rows, key=lambda r: (r["id"], r["observation"])):
+        key = (row["id"], row["observation"])
+        item = {"id": row["id"], "observation": row["observation"], "codes": codes[key]}
+        if vendor.get(key):
+            item["vendor_codes"] = vendor[key]
+        out_rows.append(item)
     return {"schema": VERDICT_SCHEMA, "rule_version": RULE_VERSION, "facts_sha256": facts_digest,
-            "row_set_sha256": row_set_digest(rows), "fields": list(FIELDS),
-            "rows": [{"id": row["id"], "observation": row["observation"], "codes": codes[(row["id"], row["observation"])]}
-                     for row in sorted(rows, key=lambda r: (r["id"], r["observation"]))]}
+            "row_set_sha256": row_set_digest(rows), "fields": list(FIELDS), "vendor_fields": list(VENDOR_FIELDS),
+            "rows": out_rows}
+
+
+def denominators(document_: dict, codes: dict, kinds=("direct", "conditional", "indirect", "trap", "unknown")) -> dict:
+    """G2a report: per field over transfer rows, N_considered = N_applicable + N_not_applicable +
+    N_applicability_unknown, N_applicable = confirmed + contradicted + unobserved_applicable."""
+    out = {name: {"confirmed": 0, "contradicted": 0, "unobserved_applicable": 0, "not_applicable": 0,
+                  "applicability_unknown": 0} for name in FIELDS}
+    names = {"c": "confirmed", "x": "contradicted", "u": "unobserved_applicable", "n": "not_applicable",
+             "?": "applicability_unknown"}
+    for row in document_["rows"]:
+        if row["transfer"]["kind"] not in kinds:
+            continue
+        for name, code in zip(FIELDS, codes[(row["id"], row["observation"])]):
+            out[name][names[code]] += 1
+    for item in out.values():
+        item["N_applicable"] = item["confirmed"] + item["contradicted"] + item["unobserved_applicable"]
+        item["N_considered"] = item["N_applicable"] + item["not_applicable"] + item["applicability_unknown"]
+    return out
 
 
 # -- parity with the engine's call relations (G2a) -----------------------------------------------------------

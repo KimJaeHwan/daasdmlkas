@@ -540,18 +540,24 @@ def _check_common_facts(block) -> None:
     """G2 r5 s8: the -4 section's shape; binding to a facts file is checked by ``bind_common_facts``."""
     import common_facts as cf
 
-    _keys(block, ("schema", "rule_version", "facts_sha256", "row_set_sha256", "fields", "rows"), "common_facts")
+    _keys(block, ("schema", "rule_version", "facts_sha256", "row_set_sha256", "fields", "vendor_fields", "rows"),
+          "common_facts")
     if block["schema"] != cf.VERDICT_SCHEMA or block["rule_version"] != cf.RULE_VERSION \
-            or block["fields"] != list(cf.FIELDS):
+            or block["fields"] != list(cf.FIELDS) or block["vendor_fields"] != list(cf.VENDOR_FIELDS):
         raise Rejected("common_facts schema / rule / fields differ from the reader's")
     if not isinstance(block["rows"], list):
         raise Rejected("common_facts rows is not a list")
     seen = []
     for row in block["rows"]:
-        if not isinstance(row, dict) or set(row) != {"id", "observation", "codes"} \
+        if not isinstance(row, dict) or not {"id", "observation", "codes"} <= set(row) \
+                <= {"id", "observation", "codes", "vendor_codes"} \
                 or not isinstance(row["codes"], str) or len(row["codes"]) != len(cf.FIELDS) \
-                or set(row["codes"]) - set("cxun"):
+                or set(row["codes"]) - set("cxun?"):
             raise Rejected("common_facts row shape")
+        vendor = row.get("vendor_codes")
+        if vendor is not None and (not isinstance(vendor, dict) or set(vendor) != {"intel", "amd"} or not all(
+                isinstance(v, str) and len(v) == len(cf.VENDOR_FIELDS) and not set(v) - set("cxun") for v in vendor.values())):
+            raise Rejected("common_facts vendor codes")
         seen.append((row["id"], row["observation"]))
     if seen != sorted(set(seen)):
         raise Rejected("common_facts rows duplicated or not sorted")
@@ -570,9 +576,14 @@ def bind_common_facts(document: dict, facts_document: dict) -> dict:
     rows = {(row["id"], row["observation"]) for row in facts_document["rows"]}
     if {(row["id"], row["observation"]) for row in block["rows"]} != rows:
         raise Rejected("common_facts rows differ from the facts file")
-    names = {"c": "confirmed", "x": "contradicted", "u": "unobserved", "n": "not_applicable"}
-    return {(row["id"], row["observation"]): {field: names[code] for field, code in zip(cf.FIELDS, row["codes"])}
-            for row in block["rows"]}
+    names = {"c": "confirmed", "x": "contradicted", "u": "unobserved", "n": "not_applicable", "?": "unobserved"}
+    out = {}
+    for row in block["rows"]:
+        fields = {field: names[code] for field, code in zip(cf.FIELDS, row["codes"])}
+        for vendor, codes in (row.get("vendor_codes") or {}).items():   # (s8: the vendor path is part of the key)
+            fields.update({f"vendor_views.{vendor}.{field}": names[code] for field, code in zip(cf.VENDOR_FIELDS, codes)})
+        out[(row["id"], row["observation"])] = fields
+    return out
 
 
 def _check_override_header(block) -> None:
