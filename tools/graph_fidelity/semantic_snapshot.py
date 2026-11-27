@@ -157,6 +157,13 @@ class Unhandled(TypeError):
 
 _BASE_GRAPH_EXPORT = ContextVar("tdo_base_graph_export", default=False)
 
+# (X-1b paired comparison, design_x1b_method_r3 C) lossless encoding for paired
+# dumps: renamed fields keep their own name and full value (e.g. the stack
+# restoration verdict, not its boolean projection) and the reporting fields
+# premise_uses / supports are encoded; ordinary snapshots are unchanged
+_LOSSLESS = ContextVar("tdo_snapshot_lossless", default=False)
+LOSSLESS_INCLUDED = {"premise_uses", "supports"}
+
 
 def encode_base_graph(value, path="$"):
     """Opt-in lossless graph payload without expanding virtual writer edges.
@@ -231,6 +238,8 @@ def encode(value, path="$"):
         excluded = _check_contract(value, path) or set()
         added = ADDED_FIELDS.get(type(value).__name__, {})
         renamed = RENAMED_FIELDS.get(type(value).__name__, {})
+        if _LOSSLESS.get():
+            excluded, renamed = excluded - LOSSLESS_INCLUDED, {}
 
         def named(field):
             old = renamed.get(field.name)
@@ -333,7 +342,24 @@ def _run_legacy(generation: Path):
     return run, captured
 
 
-def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
+def _bundle_digests(generation: Path) -> dict:
+    """(X-1b) the input's manifest and seal digests, recorded by paired dumps."""
+    return {name: hashlib.sha256((generation / file).read_bytes()).hexdigest()
+            for name, file in (("manifest_sha256", "manifest.json"), ("seal_sha256", "seal.json"))}
+
+
+def dump(generation: Path, out: Path, config: str, bindings=(), paired: bool = False) -> int:
+    """``paired`` (X-1b, design_x1b_method_r3 B / C): every section encoded
+    losslessly, the run's supports and control records added, the input's
+    manifest / seal digests in ``meta`` -- for ``compare --pair`` / ``--paired``."""
+    token = _LOSSLESS.set(paired)
+    try:
+        return _dump(generation, out, config, bindings, paired)
+    finally:
+        _LOSSLESS.reset(token)
+
+
+def _dump(generation: Path, out: Path, config: str, bindings, paired: bool) -> int:
     from tdo_v2.relative_memory import INDEX_DIAGNOSTICS
     from tdo_v2.summary_engine import LANE_DIAGNOSTICS
 
@@ -349,6 +375,10 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
         meta = {"snapshot_version": SNAPSHOT_VERSION, "generation": generation.name, "config": config,
                 "bindings": [], "options": None, "models": None, "python": sys.version.split()[0],
                 "seconds": round(time.time() - started, 1)}
+        if paired:
+            meta.update(paired=True, **_bundle_digests(generation))
+            if getattr(run, "supports", None):
+                sections["run:supports"] = encode(run.supports, "supports")
         return _write(out, meta, sections, f"{len(normalized)} functions, {len(run.roots)} roots")
     run, results, options, models = _run(generation, config, bindings)
     functions = {}
@@ -377,6 +407,12 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
            if getattr(run, "control_exemptions", ()) else {}),
         "lane_diagnostics": encode(dict(LANE_DIAGNOSTICS), "lane"),
         "index_diagnostics": encode(dict(INDEX_DIAGNOSTICS), "index"),
+        # (X-1b paired dumps: the premise report and the run-level control records)
+        **({"supports": encode(run.supports, "supports")} if paired and getattr(run, "supports", ()) else {}),
+        **({"control_sites": encode(run.control_sites, "control_sites")}
+           if paired and getattr(run, "control_sites", ()) else {}),
+        **({"fault_report": encode(run.fault_report, "fault_report")}
+           if paired and getattr(run, "fault_report", ()) else {}),
     }
     meta = {
         "snapshot_version": SNAPSHOT_VERSION, "generation": generation.name, "config": config,
@@ -389,6 +425,8 @@ def dump(generation: Path, out: Path, config: str, bindings=()) -> int:
         "models": [[item.file_id, item.digest] for item in models.files] if models is not None else None,
         "python": sys.version.split()[0], "seconds": round(time.time() - started, 1),
     }
+    if paired:
+        meta.update(paired=True, **_bundle_digests(generation))
     sections = {f"function:{key}:{part}": data for key, item in functions.items() for part, data in item.items()}
     sections.update({f"root:{index}": root for index, root in enumerate(roots)})
     sections.update({f"run:{name}": data for name, data in run_level.items()})
@@ -461,13 +499,49 @@ def _first_difference(a, b, path="$"):
     return None if a == b else (path, a, b)
 
 
-def compare(left: Path, right: Path) -> int:
+def _check_pair(a, b, pair) -> str | None:
+    """(X-1b, design_x1b_method_r3 B) both snapshots are paired dumps of exactly
+    the inputs the pair record names."""
+    for side, document in (("left", a), ("right", b)):
+        meta = document["meta"]
+        if not meta.get("paired"):
+            return f"{side} is not a paired dump"
+        for name in ("manifest_sha256", "seal_sha256"):
+            if meta.get(name) != pair[side][name]:
+                return f"{side} {name} {meta.get(name)} is not the pair's {pair[side][name]}"
+    return None
+
+
+def load_pair(path: Path, name: str) -> dict:
+    record = json.loads(path.read_text())["pairs"][name]
+    return {"left": record["left"], "right": record["right"]}
+
+
+def compare(left: Path, right: Path, pair: dict | None = None, projected: bool = False) -> int:
     a, b = _load(left), _load(right)
     differences = 0
+    if pair is not None:
+        problem = _check_pair(a, b, pair)
+        if problem:
+            print(f"[compare] pair check: {problem}")
+            return 2
+    elif projected:
+        print("[compare] --paired needs --pair")
+        return 2
     for name in ("generation", "config", "bindings", "options", "models"):
+        if name == "generation" and pair is not None:
+            continue   # (a verified pair: the inputs are named by their digests)
         if a["meta"].get(name) != b["meta"].get(name):
             print(f"[compare] input differs: {name}: {a['meta'].get(name)} vs {b['meta'].get(name)}")
             return 2
+    if pair is None and a["meta"].get("manifest_sha256") and b["meta"].get("manifest_sha256") and \
+            a["meta"]["manifest_sha256"] != b["meta"]["manifest_sha256"]:
+        print("[compare] input differs: manifest_sha256 (a reused generation id; use --pair)")
+        return 2
+    if projected:
+        from paired_projection import project_document
+
+        a, b = project_document(a), project_document(b)
     for name in sorted(set(a["digests"]) | set(b["digests"])):
         if a["digests"].get(name) == b["digests"].get(name):
             continue
@@ -510,17 +584,23 @@ def main() -> int:
     one.add_argument("out", type=Path)
     one.add_argument("--config", default="default", choices=("default", "off", "accessor", "legacy"))
     one.add_argument("--binding", action="append", default=[], type=Path)
+    one.add_argument("--paired-sections", action="store_true",
+                     help="X-1b: lossless sections + supports + input digests (for compare --pair / --paired)")
     two = sub.add_parser("compare")
     two.add_argument("left", type=Path)
     two.add_argument("right", type=Path)
+    two.add_argument("--pair", nargs=2, metavar=("PAIRS_JSON", "NAME"),
+                     help="X-1b: compare a verified pair (left / right inputs named by manifest and seal digests)")
+    two.add_argument("--paired", action="store_true", help="X-1b: the coordinate projection (needs --pair)")
     three = sub.add_parser("manifest")
     three.add_argument("directory", type=Path)
     three.add_argument("expected", nargs="+")
     args = parser.parse_args()
     if args.command == "dump":
-        return dump(args.generation, args.out, args.config, args.binding)
+        return dump(args.generation, args.out, args.config, args.binding, args.paired_sections)
     if args.command == "compare":
-        return compare(args.left, args.right)
+        pair = load_pair(Path(args.pair[0]), args.pair[1]) if args.pair else None
+        return compare(args.left, args.right, pair, args.paired)
     return manifest(args.directory, args.expected)
 
 
