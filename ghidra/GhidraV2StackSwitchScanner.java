@@ -88,7 +88,7 @@ public class GhidraV2StackSwitchScanner {
 
     /** (Astra X-1a r3 #3) a row's facts read once: its lift, listed flows, effective fallthrough, the bytes the
      *  classifier reads (count: readable before a gap or 15) and its attested line built from exactly these. */
-    record Captured(PcodeOp[] pcode, Address[] flows, Address fallthrough, byte[] bytes, int count, String line) {}
+    record Captured(Address[] flows, Address fallthrough, byte[] bytes, int count, byte[] lineDigest) {}
 
     private final Program program;
     private final TaskMonitor monitor;
@@ -158,8 +158,8 @@ public class GhidraV2StackSwitchScanner {
         List<Map<String, Object>> off = new ArrayList<>();
         captures = captureRows();
         long[] counts = scanProgram(off);
-        Map<Address, String> captured = new HashMap<>();
-        captures.forEach((address, row) -> captured.put(address, row.line()));
+        Map<Address, byte[]> captured = new HashMap<>();
+        captures.forEach((address, row) -> captured.put(address, row.lineDigest()));
         s3on = true;
         // (Astra X-1a r1 P1-4) the byte classifier is x86-64's; another language
         // has no kernel-transfer rows here and its consumer reads s3-on as
@@ -263,8 +263,7 @@ public class GhidraV2StackSwitchScanner {
         Map<Address, PcodeOp[]> pcode = new LinkedHashMap<>();
         Map<Address, Instruction> rows = new HashMap<>();
         for (Instruction instruction : listing.getInstructions(body, true)) {
-            Captured row = captures == null ? null : captures.get(instruction.getAddress());
-            pcode.put(instruction.getAddress(), row != null ? row.pcode() : instruction.getPcode());
+            pcode.put(instruction.getAddress(), pcodeOf(instruction));
             rows.put(instruction.getAddress(), instruction);
         }
         Map<Node, Map<Loc, Integer>> in = new HashMap<>();
@@ -659,8 +658,7 @@ public class GhidraV2StackSwitchScanner {
         Listing listing = program.getListing();
         for (Map.Entry<Address, Kernel> entry : kernels.entrySet()) {
             Instruction row = listing.getInstructionAt(entry.getKey());
-            Captured captured = captures == null ? null : captures.get(entry.getKey());
-            PcodeOp[] ops = captured != null ? captured.pcode() : row == null ? new PcodeOp[0] : row.getPcode();
+            PcodeOp[] ops = row == null ? new PcodeOp[0] : pcodeOf(row);
             String cause = validateRow(entry.getValue(), ops, row == null ? 0 : row.getLength(), stack,
                 index -> program.getLanguage().getUserDefinedOpName(index));
             if (cause != null) {
@@ -914,8 +912,7 @@ public class GhidraV2StackSwitchScanner {
             item.put("class", kernel.kind());
             item.put("vector", kernel.vector());
             PcodeOp callother = null;
-            Captured captured = captures == null ? null : captures.get(entry.getKey());
-            PcodeOp[] ops = captured != null ? captured.pcode() : row == null ? new PcodeOp[0] : row.getPcode();
+            PcodeOp[] ops = row == null ? new PcodeOp[0] : pcodeOf(row);
             for (PcodeOp op : ops) {
                 if (op.getOpcode() == PcodeOp.CALLOTHER) {
                     callother = op;
@@ -938,7 +935,7 @@ public class GhidraV2StackSwitchScanner {
      *  {@code collected}: the exporter's attested lines of the exported rows, taken when it collected them (the
      *  first checkpoint); null: recomputed from the listing (the scan's and the sealing checkpoints). */
     public static Map<String, Object> listingDigest(Program program, Map<Address, List<Address>> exported,
-            Map<Address, String> collected, TaskMonitor monitor) throws Exception {
+            Map<Address, byte[]> collected, TaskMonitor monitor) throws Exception {
         MessageDigest verifiable = MessageDigest.getInstance("SHA-256");
         MessageDigest attested = MessageDigest.getInstance("SHA-256");
         Listing listing = program.getListing();
@@ -959,9 +956,10 @@ public class GhidraV2StackSwitchScanner {
         while (all.hasNext()) {
             monitor.checkCancelled();
             Instruction row = all.next();
-            String line = collected != null && collected.containsKey(row.getAddress())
-                ? collected.get(row.getAddress()) : attestedLine(row);
-            update(attested, line + "\n");
+            // (X-1b) the attested digest runs over per-row line digests: the checkpoints keep 32 bytes per row
+            byte[] line = collected != null && collected.containsKey(row.getAddress())
+                ? collected.get(row.getAddress()) : lineDigest(attestedLine(row));
+            attested.update(line);
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("verifiable_sha256", hex(verifiable.digest(), 32));
@@ -1004,6 +1002,16 @@ public class GhidraV2StackSwitchScanner {
         return line.toString();
     }
 
+    /** The SHA-256 of one attested line (X-1b: what captures and checkpoints keep). */
+    public static byte[] lineDigest(String line) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
     /** (Astra X-1a r3 #3) every listed row's facts, read once. */
     private TreeMap<Address, Captured> captureRows() throws Exception {
         TreeMap<Address, Captured> result = new TreeMap<>();
@@ -1017,15 +1025,27 @@ public class GhidraV2StackSwitchScanner {
             Address fallthrough = row.getFallThrough();
             byte[] bytes = new byte[MAX_INSTRUCTION_BYTES];
             int count = readBytes(memory, row.getAddress(), bytes);
-            result.put(row.getAddress(), new Captured(pcode, flows, fallthrough, bytes, count,
-                attestedLine(row, pcode, flows, fallthrough, bytes, count)));
+            result.put(row.getAddress(), new Captured(flows, fallthrough, Arrays.copyOf(bytes, count), count,
+                lineDigest(attestedLine(row, pcode, flows, fallthrough, bytes, count))));
         }
         return result;
     }
 
+    /** (X-1b) the lift is read again, never kept: it must give the captured row's line digest -- a row that
+     *  changed since the capture stops the scan (the same guarantee as keeping the lift, at 32 bytes a row). */
     private PcodeOp[] pcodeOf(Instruction row) {
         Captured captured = captures == null ? null : captures.get(row.getAddress());
-        return captured != null ? captured.pcode() : row.getPcode();
+        PcodeOp[] pcode = row.getPcode();
+        if (captured != null) {
+            byte[] bytes = Arrays.copyOf(captured.bytes(), MAX_INSTRUCTION_BYTES);
+            byte[] now = lineDigest(attestedLine(row, pcode, captured.flows(), captured.fallthrough(), bytes,
+                captured.count()));
+            if (!Arrays.equals(now, captured.lineDigest())) {
+                throw new IllegalStateException("instruction at " + row.getAddress() +
+                    " changed during the stack-switch scan");
+            }
+        }
+        return pcode;
     }
 
     private Address[] flowsOf(Instruction row) {

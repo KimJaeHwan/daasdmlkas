@@ -98,7 +98,8 @@ public class GhidraV2BundleExport extends HeadlessScript {
     // one the exception-handlers fact requires
     private static final String LONG_MODE = "x86:LE:64:default";
     // contract violations of every exported function, reported together
-    private final List<String> fallthroughViolations = new ArrayList<>();
+    // (X-1b, owner 2026-11-27) functions whose S1 contract does not hold: S1 withheld for them only
+    private final List<String> s1Withheld = new ArrayList<>();
     private final AddressSet recoveredExceptionCode = new AddressSet();
     // (G3b-7b-1) the x64 PE exception directory: RUNTIME_FUNCTION begin RVA ->
     // {end RVA, 1 when its unwind info or a chained one names a handler};
@@ -187,7 +188,7 @@ public class GhidraV2BundleExport extends HeadlessScript {
     // (X-1, design_x1 r4 4.2) the exported row map the scanner's verifiable digest covers
     private final Map<Address, List<Address>> exportedRows = new LinkedHashMap<>();
     // (Astra X-1a r1 P1-7) each exported row's attested digest line, taken when it was collected
-    private final Map<Address, String> collectedLines = new HashMap<>();
+    private final Map<Address, byte[]> collectedLines = new HashMap<>();   // (X-1b: line digests)
 
     private static final class ObservedFunction {
         final AddressSet body;
@@ -1036,9 +1037,9 @@ public class GhidraV2BundleExport extends HeadlessScript {
             row.put("call_effects_member", memberText(effectMember, "id"));
             result.add(row);
         }
-        if (!fallthroughViolations.isEmpty()) {
-            throw new IOException("call fallthrough contract violated (" + fallthroughViolations.size() +
-                "): " + String.join("; ", fallthroughViolations));
+        if (!s1Withheld.isEmpty()) {
+            println("[GhidraV2BundleExport] S1 withheld for " + s1Withheld.size() + " function(s): " +
+                String.join("; ", s1Withheld));
         }
         return result;
     }
@@ -1466,7 +1467,8 @@ public class GhidraV2BundleExport extends HeadlessScript {
     // another function, 4 nothing analysable. Records a violation for a native
     // call whose fallthrough is not its ISA one and for a fallthrough decoded
     // across another instruction (reported for the whole program at the end).
-    private List<Map<String, Object>> fallthroughExits(Function function, List<Instruction> rows) {
+    private List<Map<String, Object>> fallthroughExits(Function function, List<Instruction> rows,
+            List<String> violations) {
         Set<Address> local = new LinkedHashSet<>();
         for (Instruction row : rows) {
             local.add(row.getAddress());
@@ -1478,7 +1480,7 @@ public class GhidraV2BundleExport extends HeadlessScript {
                 Address isa = row.getDefaultFallThrough();
                 if (row.getFlowOverride() != FlowOverride.NONE || fallthrough == null ||
                         !fallthrough.equals(isa)) {
-                    fallthroughViolations.add(function.getEntryPoint() + "@" + row.getAddress() +
+                    violations.add(row.getAddress() +
                         " (fallthrough " + fallthrough + ", ISA " + isa + ", override " +
                         row.getFlowOverride() + ")");
                     continue;
@@ -1497,7 +1499,7 @@ public class GhidraV2BundleExport extends HeadlessScript {
             else {
                 Instruction cover = currentProgram.getListing().getInstructionContaining(fallthrough);
                 if (cover != null && !cover.getAddress().equals(fallthrough)) {
-                    fallthroughViolations.add(function.getEntryPoint() + "@" + row.getAddress() +
+                    violations.add(row.getAddress() +
                         " (fallthrough " + fallthrough + " inside the instruction at " + cover.getAddress() + ")");
                     continue;
                 }
@@ -1537,7 +1539,8 @@ public class GhidraV2BundleExport extends HeadlessScript {
                 .add(instruction.getAddress());
             // (Astra X-1a r3 #3) one read of the lift: serialized and attested alike
             PcodeOp[] lift = instruction.getPcode();
-            collectedLines.put(instruction.getAddress(), GhidraV2StackSwitchScanner.attestedLine(instruction, lift));
+            collectedLines.put(instruction.getAddress(),
+                GhidraV2StackSwitchScanner.lineDigest(GhidraV2StackSwitchScanner.attestedLine(instruction, lift)));
             Map<String, Object> row = instruction(
                 instruction,
                 observed.exceptionalTargets.getOrDefault(
@@ -1557,12 +1560,24 @@ public class GhidraV2BundleExport extends HeadlessScript {
         // the exception fact (it exports as from a prepared project)
         boolean isa = callFallthroughIsa && (!LONG_MODE.equals(currentProgram.getLanguageID().getIdAsString())
             || rows.stream().noneMatch(GhidraV2BundleExport::cpuDependentLength));   // (Fable r11: x86-64 only)
+        List<Map<String, Object>> exits = null;
+        if (isa) {
+            // (X-1b, owner 2026-11-27) a native call without its ISA continuation (e.g. a CALL_RETURN override
+            // on a call to a non-returning callee) or a fallthrough into another instruction withholds S1 for
+            // THIS function -- it exports as from a prepared project; the rest of the Bundle keeps S1
+            List<String> violations = new ArrayList<>();
+            exits = fallthroughExits(function, rows, violations);
+            if (!violations.isEmpty()) {
+                isa = false;
+                s1Withheld.add(function.getEntryPoint() + ": " + String.join(", ", violations));
+            }
+        }
         if (isa) {
             result.put("call_fallthrough", "isa");
             // (G3b-7b r9, Astra proof-inputs r3 P1-2) the attested fresh import:
             // the engine uses the exception fact only with this
             result.put("proof_input", "attested-fresh-import-v1");
-            result.put("fallthrough_exits", fallthroughExits(function, rows));
+            result.put("fallthrough_exits", exits);
         }
         if (isa && noStaticExceptionHandler(function, observed, rows)) {   // (r9: fresh import only)
             result.put("exception_handlers", "none");
