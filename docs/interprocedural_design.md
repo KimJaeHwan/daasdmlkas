@@ -7621,3 +7621,7 @@ TBR 세션과 합의): Bundle에는 생산자의 원래 주장만, TBR 증거에
   있는 맵). 수용은 건드린 멤버마다 한 번만 열고(수용 동안 기술자 하나) 그 기술자로 조각을 읽는다. ntdll 출력은 35a01c4와
   같다(`/root/x1_scan_ntdll5`). 돌연변이 36/37(M35-M37 추가: CC의 0 아닌 RETURN, RETURN 없는 CC, 내보내기 줄의 p-code 재읽기;
   M2는 중복 방어).
+- 마감(2026-11-27): Astra r5 목록 닫힘, Fable r5 APPROVE; 게이트 x1a4(250a858 대 ped6) 테스트 7560 x2, 스냅숏 차이 0,
+  UE 템플릿 OK, 오라클 x1a3과 같음. [ASTRA-OPEN] P2: 수용의 멤버 기술자 맵에 상한이 없어 건드린 블록 멤버가 1024개를
+  넘으면 EMFILE로 수용이 실패한다(닫힌 쪽으로 실패) -- X-1b에서 상한 있는 캐시 + BundleAdmissionError로 고친다
+  (`.census6/x1b_scope.md` 3, Fable 동의).
