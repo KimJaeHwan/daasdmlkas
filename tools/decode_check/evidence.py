@@ -537,53 +537,163 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
 
 
 def _check_common_facts(block) -> None:
-    """G2 r5 s8: the -4 section's shape; binding to a facts file is checked by ``bind_common_facts``."""
+    import re
     import common_facts as cf
 
-    _keys(block, ("schema", "rule_version", "facts_sha256", "row_set_sha256", "fields", "vendor_fields", "rows"),
-          "common_facts")
-    if block["schema"] != cf.VERDICT_SCHEMA or block["rule_version"] != cf.RULE_VERSION \
-            or block["fields"] != list(cf.FIELDS) or block["vendor_fields"] != list(cf.VENDOR_FIELDS):
-        raise Rejected("common_facts schema / rule / fields differ from the reader's")
+    _keys(block, ("schema", "rule_version", "facts_sha256", "row_set_sha256", "rows"), "common_facts")
+    if block["schema"] != cf.VERDICT_SCHEMA or block["rule_version"] != cf.RULE_VERSION:
+        raise Rejected("unknown common facts comparison rule")
+    for name in ("facts_sha256", "row_set_sha256"):
+        if not isinstance(block[name], str) or not re.fullmatch("[0-9a-f]{64}", block[name]):
+            raise Rejected("bad common facts digest")
     if not isinstance(block["rows"], list):
-        raise Rejected("common_facts rows is not a list")
+        raise Rejected("common facts rows")
     seen = []
-    for row in block["rows"]:
-        if not isinstance(row, dict) or not {"id", "observation", "codes"} <= set(row) \
-                <= {"id", "observation", "codes", "vendor_codes"} \
-                or not isinstance(row["codes"], str) or len(row["codes"]) != len(cf.FIELDS) \
-                or set(row["codes"]) - set("cxun?"):
-            raise Rejected("common_facts row shape")
-        vendor = row.get("vendor_codes")
-        if vendor is not None and (not isinstance(vendor, dict) or set(vendor) != {"intel", "amd"} or not all(
-                isinstance(v, str) and len(v) == len(cf.VENDOR_FIELDS) and not set(v) - set("cxun") for v in vendor.values())):
-            raise Rejected("common_facts vendor codes")
-        seen.append((row["id"], row["observation"]))
+    for r in block["rows"]:
+        _keys(r, ("id", "observation", "state", "units"), "common facts verdict row")
+        if not all(isinstance(r[k], str) and r[k] for k in ("id", "observation")):
+            raise Rejected("bad verdict row reference")
+        if not isinstance(r["units"], list) or not r["units"]:
+            raise Rejected("empty common verdict row")
+        keys = set()
+        for u in r["units"]:
+            if not isinstance(u, dict) or not {"path", "code"} <= set(u) <= {"path", "code", "op", "edge"}:
+                raise Rejected("bad comparison unit")
+            if u["code"] not in ("c", "x", "u", "n", "?") or not isinstance(u["path"], str):
+                raise Rejected("bad comparison path or outcome")
+            if not re.fullmatch(r"(?:vendor_views\.(?:intel|amd)\.)?[A-Za-z_][A-Za-z0-9_.]*", u["path"]):
+                raise Rejected("invalid comparison path")
+            if "edge" in u:
+                _keys(u["edge"], cf.EC, "edge key")
+                if not all(v in order for v, order in zip(cf.triple(u["edge"]), cf.ORDERS)):
+                    raise Rejected("invalid edge triple")
+            if "op" in u:
+                op = u["op"]
+                if not isinstance(op, dict) or set(op) not in ({"ordinal", "opcode"}, {"row", "ordinal", "opcode"}):
+                    raise Rejected("invalid op key")
+                if type(op["ordinal"]) is not int or op["ordinal"] < 0 or not isinstance(op["opcode"], str):
+                    raise Rejected("invalid op ordinal or opcode")
+                if "row" in op:
+                    _keys(op["row"], ("id", "observation"), "op row")
+            key = cf.canonical({k: v for k, v in u.items() if k != "code"})
+            if key in keys:
+                raise Rejected("duplicate comparison unit")
+            keys.add(key)
+        if cf.row_state(r["units"]) != r["state"]:
+            raise Rejected("incorrect common row aggregate")
+        seen.append(cf.rr(r))
     if seen != sorted(set(seen)):
-        raise Rejected("common_facts rows duplicated or not sorted")
+        raise Rejected("duplicate or unordered common verdict rows")
 
 
-def bind_common_facts(document: dict, facts_document: dict) -> dict:
-    """The -4 verdicts bound to a facts file (s8 binding): facts digest, row-set digest and the row set itself must
-    match, else Rejected. Returns {(id, observation): {field: state}}."""
+def bind_common_facts(document: dict, facts_document: dict, *, bundle: dict, allowlist: list,
+                      observations: dict):
     import common_facts as cf
 
+    if document.get("schema") != SCHEMA4:
+        raise Rejected("common comparisons require -4")
+    accepted = accept(document, bundle, allowlist)
     block = document["common_facts"]
-    if block["facts_sha256"] != cf.digest(facts_document):
-        raise Rejected("common_facts bound to another facts file")
-    if block["row_set_sha256"] != cf.row_set_digest(facts_document["rows"]):
-        raise Rejected("common_facts row set differs from the facts file")
-    rows = {(row["id"], row["observation"]) for row in facts_document["rows"]}
-    if {(row["id"], row["observation"]) for row in block["rows"]} != rows:
-        raise Rejected("common_facts rows differ from the facts file")
-    names = {"c": "confirmed", "x": "contradicted", "u": "unobserved", "n": "not_applicable", "?": "unobserved"}
-    out = {}
-    for row in block["rows"]:
-        fields = {field: names[code] for field, code in zip(cf.FIELDS, row["codes"])}
-        for vendor, codes in (row.get("vendor_codes") or {}).items():   # (s8: the vendor path is part of the key)
-            fields.update({f"vendor_views.{vendor}.{field}": names[code] for field, code in zip(cf.VENDOR_FIELDS, codes)})
-        out[(row["id"], row["observation"])] = fields
-    return out
+    identity = {k: bundle[k] for k in ("generation_id", "manifest_sha256")}
+    if (facts_document.get("schema") != cf.SCHEMA or facts_document.get("bundle") != identity
+            or facts_document.get("source") not in ("producer", "derived")):
+        raise Rejected("facts schema, source or Bundle identity")
+    rows = facts_document.get("rows")
+    if not isinstance(rows, list) or block["facts_sha256"] != cf.digest(facts_document):
+        raise Rejected("facts digest")
+    try:
+        refs = [cf.rr(r) for r in rows]
+        if refs != sorted(set(refs)) or refs != [cf.rr(r) for r in block["rows"]]:
+            raise Rejected("facts and comparison row references")
+        if block["row_set_sha256"] != cf.row_set_digest(rows) or set(refs) != set(observations):
+            raise Rejected("bound row set")
+        if not all(cf.identity(f, k[1]) == k for k, f in observations.items()):
+            raise Rejected("invalid observation index")
+        projected = {(k[1], f["space"], f["address"]) for k, f in observations.items()}
+        required = {(fid, s, x) for fid, fn in bundle["functions"].items() for s, x in fn["rows"]}
+        if projected != required:
+            raise Rejected("observation index does not cover the admitted Bundle")
+
+        by_ref = dict(zip(refs, rows))
+        out = {}
+        names = {"c": "confirmed", "x": "contradicted", "u": "unobserved", "?": "unobserved",
+                 "n": "not_applicable"}
+
+        def resolve_op(op, owner):
+            target = cf.rr(op.get("row", cf.ref(owner)))
+            if target not in by_ref:
+                raise Rejected("unresolved op row")
+            cf.resolve(op, by_ref[target], observations[target])
+            return dict(row=cf.ref(by_ref[target]), ordinal=op["ordinal"], opcode=op["opcode"])
+
+        def check_refs(obj, owner):
+            for node in cf.nodes(obj):
+                if "ordinal" in node and "opcode" in node:
+                    resolve_op(node, owner)
+                elif set(node) == {"id", "observation"} and cf.rr(node) not in by_ref:
+                    raise Rejected("unresolved row reference")
+
+        for r, vr in zip(rows, block["rows"]):
+            k = cf.rr(r)
+            f = observations[k]
+            if (r["space"], r["offset"], r["length"], r["view"]) != (
+                    f["space"], format(f["address"], "x"), f["length"], f.get("view", "0")):
+                raise Rejected("row id disagrees with its components or observation")
+            check_refs(r, r)
+            for u in vr["units"]:
+                path = u["path"]
+                v = None
+                if path.startswith("vendor_views."):
+                    _, v, short = path.split(".", 2)
+                    if v not in cf.VENDORS or v not in (r.get("vendor_views") or {}):
+                        raise Rejected("unbound vendor")
+                else:
+                    short = path.removeprefix("transfer.")
+                m = cf.member(r, v)
+                query = dict(row=cf.ref(r), path=path)
+                if "edge" in u:
+                    if not (short == "edges" or short.startswith("edges.")):
+                        raise Rejected("edge attached to unrelated field")
+                    key = cf.triple(u["edge"])
+                    es = m["edges"]
+                    matches = [e for e in es if cf.triple(e) == key] if isinstance(es, list) else []
+                    if short != "edges" and (len(matches) != 1 or cf.unknown(matches[0])):
+                        raise Rejected("edge subfield without a unique ordinary member")
+                    if short == "edges" and u["code"] == "c" and (len(matches) != 1 or cf.unknown(matches[0])):
+                        raise Rejected("confirmed missing, placeholder or duplicate edge")
+                    query["edge"] = u["edge"]
+                elif short.startswith("edges."):
+                    raise Rejected("edge subfield without triple")
+                if "op" in u:
+                    if v or not short.startswith("op_keys."):
+                        raise Rejected("operation attached to unrelated field")
+                    actual = r["transfer"]["op_keys"].get(short.split(".", 1)[1])
+                    choices = actual if isinstance(actual, list) else [actual] if actual else []
+                    resolved = resolve_op(u["op"], r)
+                    if resolved not in [resolve_op(a, r) for a in choices]:
+                        raise Rejected("operation outside the claimed op list")
+                    query["op"] = resolved
+                lookup_key = cf.canonical(query)
+                if lookup_key in out:
+                    raise Rejected("duplicate normalized lookup")
+                state = names[u["code"]]
+                if accepted._never_compared(k[1], f["space"], f["address"]):
+                    state = "unobserved"
+                out[lookup_key] = state
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise Rejected(f"malformed common facts binding: {error}") from error
+
+    def lookup(query):
+        try:
+            q = dict(query)
+            if "op" in q:
+                owner = by_ref[cf.rr(q["row"])]
+                q["op"] = resolve_op(q["op"], owner)
+            return out.get(cf.canonical(q))
+        except (KeyError, TypeError, ValueError, Rejected):
+            return None
+
+    return lookup
 
 
 def _check_override_header(block) -> None:

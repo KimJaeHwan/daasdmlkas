@@ -3860,236 +3860,409 @@ def test_g1x1_generated_verdicts_round_trip_through_the_reader():
     assert second["verdict"] == "unobserved" and "kernel-boundary-contract" in second["premises"]
 
 
-# -- G2a: common facts derived from Ghidra p-code, -4 verdicts, engine parity (design_tbr_g2_common_facts_r5) ----
+# -- G2a: common facts derived from Ghidra p-code -----------------------------------------------
 
-def _g2(facts, data):
-    import common_facts
+def _g2_fields(units):
+    import common_facts as cf
+
+    return {(u["path"], cf.triple(u["edge"]) if "edge" in u else None,
+             (u["op"]["ordinal"], u["op"]["opcode"]) if "op" in u else None): u["code"] for u in units}
+
+
+def _g2_code(units, path, edge=None):
+    return _g2_fields(units).get((path, edge, None))
+
+
+def _g2_collect(entries, isa="x86-64", regs=None):
+    import decode_check
+
+    facts = dict(registers=regs or {}, functions=[])
+    c = decode_check.CommonFactsCollector(facts)
+    for fid, f, lift, ballot, result, data in entries:
+        c(fid, dict(f, isa=isa), result, lift, ballot, data)
+    c.finish(True)
+    return c
+
+
+def _g2_golden():
+    import json
+    import decoders
+    import lifting
+
+    doc = json.loads((REPO / "tests/intra/golden/decode_check_pair_66e8.json").read_bytes())
+    detail = next(r["detail"] for r in doc["rows"]
+                  if r["detail"].get("window", {}).get("hex", "").startswith("66e8"))
+    ballot = {v: tuple(decoders.Decoded(**d) for d in ds) for v, ds in detail["votes"].items()}
+    data = bytes.fromhex(detail["window"]["hex"])
+    f = _row(6, _push(START + 6) + [_op("CALL", [_a(START + 0x10)])], flow=_flow("call_direct"))
+    return "f0", f, lifting.identify(f), ballot, detail, data
+
+
+def _g2_live(f, hexbytes, fid="f0"):
     import decoders
 
-    lift, result = _compare(facts, data)
-    index = {(facts["space"], facts["address"]): facts["length"]}
-    row = common_facts.derive_row(facts, lift, "f0", index)
-    return row, common_facts.row_verdicts(row, decoders.ballot(data, facts["address"]), result)
+    data = (bytes.fromhex(hexbytes) + ISA_PAD)[:15]
+    lift, result = _compare(f, data)
+    return fid, f, lift, decoders.ballot(data, f["address"]), result, data
 
 
-def _codes(code_string):
-    import common_facts
+def _g2_document(c):
+    import common_facts as cf
 
-    return dict(zip(common_facts.FIELDS, code_string))
+    return cf.document({k: EV_BUNDLE[k] for k in ("generation_id", "manifest_sha256")},
+                       {"name": "fixture"}, {"isa": "x86-64"}, list(c.rows.values()))
+
+
+def _g2_binding(c):
+    import common_facts as cf
+    import evidence
+
+    doc = _g2_document(c)
+    block = cf.verdict_block(doc, c.units)
+    coordinates = {}
+    for (_, fid), f in c.raw.items():
+        coordinates.setdefault(fid, set()).add((f["space"], f["address"]))
+    functions = [_ev_function(fid, sorted(cs), {xy: _ev_confirmed() for xy in cs})
+                 for fid, cs in coordinates.items()]
+    ev = _ov_document(functions, {}, profile=None)
+    ev.update(schema=evidence.SCHEMA4, common_facts=block)
+    view = _ev_view(functions)
+    view["producer_profile"] = None
+    for fn in view["functions"].values():
+        fn["override_report"] = None
+    args = dict(bundle=view, allowlist=[evidence.allowlist_entry(ev)], observations=c.raw)
+    return doc, ev, args
+
+
+def test_g2a_required_vendor():
+    from copy import deepcopy
+
+    import common_facts as cf
+
+    entry = _g2_golden()
+    c = _g2_collect([entry])
+    k, r = next(iter(c.rows.items()))
+    for v, n, width, stored in (("intel", 6, 64, START + 6), ("amd", 4, 16, 0x1004)):
+        p = "vendor_views." + v + "."
+        m = r["vendor_views"][v]
+        assert m["length"] == n and m["bytes"] == [f"{START:x}", f"{START+n:x}"]
+        assert [cf.triple(e) for e in m["edges"]] == [cf.DIRECT]
+        assert "lands_on" in m["edges"][0]
+        link = m["link_write"]
+        assert link["continuation"] == cf.addr(1, START + n)
+        assert link["value"] == {"width": width, "bits": f"{stored:x}"}
+        assert link["location"]["memory"]["slot_offset"] == link["sp_delta"] == -(width // 8)
+        for field in ("length", "bytes", "link_write.value.width", "link_write.value.bits", "link_write.continuation",
+                      "link_write.location.memory.slot_offset", "link_write.sp_delta"):
+            assert _g2_code(c.units[k], p + field) == "c", field
+        assert _g2_code(c.units[k], p + "edges.to", cf.DIRECT) == "u"
+    changed = deepcopy(r)
+    changed["vendor_views"]["amd"]["link_write"]["continuation"] = cf.addr(1, 0x1004)
+    for v, expected in (("intel", "c"), ("amd", "x")):
+        units = cf.row_verdicts(changed, cf.votes(entry[3], entry[4], v), cf.Index([], True), {}, v)
+        assert _g2_code(units, f"vendor_views.{v}.link_write.continuation") == expected
+    assert not cf.votes(entry[3], dict(entry[4], attributes={}), "amd")
 
 
 @needs
-def test_g2a_direct_call_push_link_and_verdicts():
-    """r5 s3.1 / s3.6 / s8: a near direct call: direct kind, one encoded_target edge (no sequential edge: TBR
-    states no return), a push link_write checked against a7 / a11b / the verified length."""
-    row, codes = _g2(_direct_call(START + 0x20), bytes.fromhex("e81b000000"))
-    transfer = row["transfer"]
-    assert transfer["kind"] == "direct" and [(e["when"], e["source"]) for e in transfer["edges"]] == [
-        ("always", "encoded_target")]
-    link = transfer["link_write"]
-    assert link["sp_delta"] == -8 and link["location"]["memory"]["slot_offset"] == -8
-    assert link["value"] == {"bits": f"{START + 5:x}", "width": 64} and link["relocation"] == "instruction_relative"
-    assert [r["ordinal"] for r in transfer["op_keys"]["transient"]] == [0, 1]
-    c = _codes(codes)
-    assert (c["kind"], c["edges"], c["link.value"], c["link.continuation"], c["link.slot"]) == ("c",) * 5
-    assert c["to.encoded_target"] == "u" and c["link.relocation"] == "u" and c["link.register"] == "u"
+def test_g2a_required_xbegin():
+    from copy import deepcopy
+
+    import common_facts as cf
+
+    entry = _g2_live(_row(6, [_op("CALLOTHER", [_c(85)])]), "c7f810000000")
+    c = _g2_collect([entry])
+    k, r = next(iter(c.rows.items()))
+    t = r["transfer"]
+    assert t["kind"] == "conditional" and t["condition"] is None
+    assert [cf.triple(e) for e in t["edges"]] == [cf.NORMAL, cf.OUTER, cf.NESTED]
+    normal, outer, nested = t["edges"]
+    assert normal["to"] == cf.addr(1, START + 6) and outer["to"] == cf.addr(1, START + 22)
+    assert nested["to"] is None and nested["lands_on"] == {"class": "unresolved"}
+    assert _g2_code(c.units[k], "transfer.condition") == "n"
+    assert _g2_code(c.units[k], "transfer.edges.to", cf.NORMAL) == "c"
+    assert _g2_code(c.units[k], "transfer.edges.lands_on.class", cf.NESTED) == "c"
+
+    before = cf.digest(_g2_document(c))
+    t["edges"].reverse()
+    assert cf.digest(_g2_document(c)) == before
+    for variant in ("missing", "duplicate", "placeholder", "wrong-guard"):
+        changed = deepcopy(r)
+        es = changed["transfer"]["edges"]
+        es[:] = [e for e in es if cf.triple(e) != cf.NESTED]
+        if variant == "duplicate":
+            es.append(deepcopy(outer))
+        if variant == "placeholder":
+            es.append(dict(zip(cf.EC, cf.NESTED), unobserved="unavailable"))
+        if variant == "wrong-guard":
+            es.append(dict(nested, requires=None))
+        units = cf.row_verdicts(changed, cf.votes(entry[3], entry[4]), cf.Index([], True), {})
+        expected = "u" if variant == "placeholder" else "x"
+        assert _g2_code(units, "transfer.edges", cf.NESTED) == expected
+        assert _g2_code(units, "transfer.edges.to", cf.NESTED) is None
+        assert _g2_code(units, "transfer.edges.to", cf.NORMAL) == "c"
+        assert _g2_code(units, "transfer.edges", cf.OUTER) == ("x" if variant == "duplicate" else "c")
 
 
-@needs
-def test_g2a_conditional_and_trap_rows():
-    import common_facts
+def _g2_unit(arm=False, constant_link=False):
+    from dataclasses import replace
 
-    row, codes = _g2(_jcc(2, START + 0x40), bytes.fromhex("743e"))
-    assert row["transfer"]["kind"] == "conditional" and row["transfer"]["condition"]["taken_when"] == "true"
-    c = _codes(codes)
-    assert (c["kind"], c["edges"], c["to.sequential"]) == ("c", "c", "c") and c["condition"] == "u"
-    row, codes = _g2(_int_pair(0x29), bytes.fromhex("cd29"))
-    edges = [(e["when"], e["source"], e["requires"]) for e in row["transfer"]["edges"]]
-    assert edges == [("trap", "os", None), ("trap_return", "os_return", "os-contract")]
-    c = _codes(codes)
-    assert (c["kind"], c["edges"], c["to.computed_os"], c["to.os_return"]) == ("c", "c", "c", "c")
-    unknown = dict(_syscall(), length=None, fallthrough=None)
-    lift, result = _compare(_syscall(), bytes.fromhex("0f05"))
-    row = common_facts.derive_row(unknown, lift, "f0", {})
-    assert "unobserved" in row["transfer"]["edges"][1]["to"]       # (no length: the address is unknown, not wrong)
-
-
-def test_g2a_indirect_targets_are_pre_state_expressions():
-    """r5 s3.5: call [rsp+8] reads the old RSP before the push; ret reads [RSP]; a LOAD after a STORE is
-    unobserved."""
-    import common_facts
+    import common_facts as cf
     import lifting
+    from synthetic import (AARCH64, CODE_BASE, X30, X64, FunctionBuilder, const, copy, program_units,
+                           reg, register_evidence)
+    from tdo_v2.call_relations import call_relations
+    from tdo_v2.isa_identity import link_register, program_counter, stack_register
 
-    load = [_op("INT_ADD", [_r(RSP_), _c(8)], _u(0x10)), _op("LOAD", [_c(1), _u(0x10)], _u(0x20))]
-    facts = _row(4, load + _push(START + 4) + [_op("CALLIND", [_u(0x20)])])
-    row = common_facts.derive_row(facts, lifting.identify(facts), "f0", {})
-    target = row["transfer"]["target_value"]
-    assert target["memory"]["size"] == 8 and target["memory"]["address"]["add"][0]["pre_register"]["offset"] == RSP_
-    assert row["transfer"]["link_write"] is not None and row["transfer"]["edges"][0]["to"] is None
-    aliased = [_op("STORE", [_c(1), _r(RAX_), _r(RCX_)]), _op("LOAD", [_c(1), _r(RSP_)], _u(0x30)),
-               _op("BRANCHIND", [_u(0x30)])]
-    value = common_facts._value_ref(aliased, aliased[2]["inputs"][0], 2, {"id": "x", "observation": "f0"})
-    assert value == {"unobserved": "intra-row store may alias"}
-
-
-def test_g2a_parity_classes():
-    """G2a parity: an exact match, the explained recognizer failures (no fallthrough, no stack register), an engine
-    relation without a fact (extra) and a field difference."""
-    from types import SimpleNamespace
-
-    import common_facts
-    import lifting
-
-    facts = _direct_call(START + 0x20)
-    row = common_facts.derive_row(facts, lifting.identify(facts), "f0", {})
-    sp = SimpleNamespace(space_id=2, byte_offset=RSP_, byte_size=8)
-    fields, why = common_facts.projection(row, facts, sp)
-    assert why is None and fields["entry_ordinal"] == 2 and fields["relocation"] == "instruction-relative"
-    function = {"rows": [facts], "engine_relations": {fields["call_key"]: dict(fields)}}
-    derived = {(facts["space"], facts["address"]): row}
-    assert common_facts.parity(function, derived, sp) == {"missing": [], "extra": [], "differs": []}
-    assert common_facts.projection(row, dict(facts, fallthrough=None), sp) == (None, "no-fallthrough")
-    assert common_facts.projection(row, facts, None) == (None, "no-stack-register")
-    function["engine_relations"]["other:key"] = dict(fields, kind="push")
-    assert common_facts.parity(function, derived, sp)["extra"] == ["other:key"]
-    function["engine_relations"] = {fields["call_key"]: dict(fields, delta=-4)}
-    assert common_facts.parity(function, derived, sp)["differs"] == [(fields["call_key"], "delta")]
+    arch = AARCH64 if arm else X64
+    dest = CODE_BASE + 0x800
+    main = FunctionBuilder(entry=CODE_BASE, arch=arch)
+    main = main.call_indirect(X30) if arm else main.call(dest)
+    if constant_link:
+        main._rows[0].ops[-2] = copy(reg(X30), const(CODE_BASE + 4))
+    units = program_units(main.ret(), FunctionBuilder(entry=dest, arch=arch).ret(),
+                          registers=register_evidence(arch))
+    unit = next(u for u in units if u.scopes.function.entry.byte_offset == CODE_BASE)
+    evidence = unit.scopes.program.evidence
+    regs = {k: cf.register(fn(evidence)) for k, fn in
+            (("sp", stack_register), ("lr", link_register), ("pc", program_counter))}
+    ins = replace(unit.observation.instructions[0], length=4)
+    obs = replace(unit.observation, instructions=(ins, *unit.observation.instructions[1:]))
+    relations = {k: cf.engine_fields(rel) for k, rel in call_relations(obs, unit.scopes).items()}
+    f = dict(lifting.row_facts(ins), isa="aarch64" if arm else "x86-64")
+    entry = "f0", f, None if arm else lifting.identify(f), None, None, b""
+    c = _g2_collect([entry], isa=f["isa"], regs=regs)
+    fn = dict(function_id="f0", rows=[f], engine_relations=relations, engine_error=None)
+    return c, fn, regs
 
 
-@needs
-def test_g2a_end_to_end_facts_and_evidence4_binding(tmp_path):
-    """decode_check --common-facts writes the facts file and -4; the reader binds -4 to that facts file and
-    rejects another facts file or a changed row set."""
+def test_g2a_required_push_parity():
+    from copy import deepcopy
+
+    import common_facts as cf
+
+    c, fn, regs = _g2_unit()
+    k, r = next(iter(c.rows.items()))
+    f = fn["rows"][0]
+    assert len(fn["engine_relations"]) == 1
+    p, why = cf.projection(r, f, regs)
+    assert why is None and p == next(iter(fn["engine_relations"].values()))
+    assert cf.parity(fn, c.rows, regs, {})[0]["status"] == "matched"
+    assert cf.push_gate(dict(f, fallthrough=None), regs["sp"])[1] == "no-fallthrough"
+    assert cf.push_gate(f, None)[1] == "no-stack-register"
+    assert cf.push_gate(dict(f, flow=dict(f["flow"], is_call=False)), regs["sp"])[1] == "not-call-flow"
+    for field in ("continuation", "width", "bits", "slot", "sp", "setup", "transient", "entry", "transfer"):
+        changed = deepcopy(r)
+        t = changed["transfer"]
+        link, keys = t["link_write"], t["op_keys"]
+        if field == "continuation":
+            link["continuation"]["offset"] = "0"
+        elif field == "width":
+            link["value"]["width"] = 16
+        elif field == "bits":
+            link["value"]["bits"] = "0"
+        elif field == "slot":
+            link["location"]["memory"]["slot_offset"] = -2
+        elif field == "sp":
+            link["location"]["memory"]["base"]["space"] += 1
+        elif field in ("setup", "transient"):
+            keys[field] = []
+        elif field == "entry":
+            keys["entry_ordinal"] += 1
+        else:
+            keys["transfer"]["opcode"] = "CALLIND"
+        rec, = cf.parity(fn, {k: changed}, regs, {})
+        assert rec["status"] in ("missing", "differs"), field
+        if field == "sp":
+            assert "sp" in rec["differences"]
+
+    bad = deepcopy(f)
+    bad["ops"][1]["inputs"][2]["size"] = 2
+    assert cf.push_gate(bad, regs["sp"])[1] == "stored-width-or-fallthrough"
+    bad = deepcopy(f)
+    bad["ops"][1]["inputs"][0]["offset"] += 1
+    assert cf.push_gate(bad, regs["sp"])[1] == "store-space-or-base"
+
+
+def test_g2a_required_blr_x30():
     import json
 
+    import common_facts as cf
+
+    for constant in (False, True):
+        c, fn, regs = _g2_unit(True, constant)
+        k, r = next(iter(c.rows.items()))
+        t = r["transfer"]
+        assert json.loads(cf.canonical(r)) == r
+        assert t["kind"] == "indirect" and t["target_auth"] is None
+        assert cf.coord(t["target_value"]["pre_register"]) == cf.coord(regs["lr"])
+        assert t["target_value"]["width"] == 64
+        assert t["link_write"]["location"]["register"] == regs["lr"]
+        assert t["link_write"]["sp_delta"] == 0
+        assert t["link_write"]["continuation"] == cf.addr(r["space"], int(r["offset"], 16) + 4)
+        assert t["link_write"]["derivation"] == ("constant" if constant else "pc_plus_4")
+        keys = t["op_keys"]
+        assert [x["opcode"] for x in keys["setup"]] == ["COPY", "COPY" if constant else "INT_ADD"]
+        assert keys["target"] == keys["setup"][:1]
+        assert keys["persistent"] == keys["link"] == keys["setup"][1:]
+        assert keys["transient"] == [] and keys["entry_ordinal"] == 2
+        assert keys["transfer"] == {"ordinal": 2, "opcode": "CALLIND"}
+        assert {u["code"] for u in c.units[k]} == {"?"}
+        assert cf.parity(fn, c.rows, regs, {})[0]["status"] == "matched"
+
+
+def test_g2a_required_binding():
+    from copy import deepcopy
+
+    import common_facts as cf
+    import evidence
+
+    fid, f, lift, ballot, result, data = _g2_golden()
+    c = _g2_collect([(fid, f, lift, ballot, result, data),
+                     ("other", f, None, None, None, b""),
+                     (fid, dict(f, view="1"), None, None, None, b"")])
+    doc, ev, args = _g2_binding(c)
+    lookup = evidence.bind_common_facts(ev, doc, **args)
+    base = cf.identity(f, fid)
+    row = cf.ref(c.rows[base])
+    assert lookup(dict(row=row, path="transfer.kind")) == "confirmed"
+    assert lookup(dict(row=dict(row, observation="other"), path="transfer.kind")) == "unobserved"
+    alt = cf.ref(c.rows[cf.identity(dict(f, view="1"), fid)])
+    assert lookup(dict(row=alt, path="transfer.kind")) == "unobserved"
+    vpath = "vendor_views.intel.link_write.value.width"
+    assert lookup(dict(row=row, path=vpath)) == "confirmed"
+    assert lookup(dict(row=alt, path=vpath)) is None
+    assert lookup(dict(row=row, path="vendor_views.amd.edges.to", edge=dict(zip(cf.EC, cf.DIRECT)))) == "unobserved"
+    assert lookup(dict(row=row, path="vendor_views.amd.edges.to", edge=dict(zip(cf.EC, cf.NEXT)))) is None
+
+    # Different outcomes at the same path suffix prove that no vendor fallback occurs.
+    changed = deepcopy(c.rows[base])
+    changed["vendor_views"]["amd"]["link_write"]["continuation"] = cf.addr(1, 0x1004)
+    c.rows[base] = changed
+    old = c.units[base]
+    c.units[base] = [u for u in old if not u["path"].startswith("vendor_views.amd.")]
+    c.units[base] += cf.row_verdicts(changed, cf.votes(ballot, result, "amd"), cf.Index([], True), {}, "amd")
+    doc2, ev2, args2 = _g2_binding(c)
+    lookup2 = evidence.bind_common_facts(ev2, doc2, **args2)
+    assert lookup2(dict(row=row, path="vendor_views.intel.link_write.continuation")) == "confirmed"
+    assert lookup2(dict(row=row, path="vendor_views.amd.link_write.continuation")) == "contradicted"
+
+    # Rebind the facts digest alone so the row-set check is exercised independently.
+    fewer, evidence2 = deepcopy(doc), deepcopy(ev)
+    fewer["rows"].pop()
+    evidence2["common_facts"]["facts_sha256"] = cf.digest(fewer)
+    with pytest.raises(evidence.Rejected):
+        evidence.bind_common_facts(evidence2, fewer, **args)
+    for name in ("generation_id", "manifest_sha256"):
+        changed = deepcopy(doc)
+        changed["bundle"][name] = "different"
+        e = deepcopy(ev)
+        e["common_facts"]["facts_sha256"] = cf.digest(changed)
+        with pytest.raises(evidence.Rejected):
+            evidence.bind_common_facts(e, changed, **args)
+    changed = deepcopy(ev)
+    changed["common_facts"]["rule_version"] = "another rule"
+    with pytest.raises(evidence.Rejected):
+        evidence.bind_common_facts(changed, doc, **args)
+    broken = deepcopy(doc)
+    root = next(r for r in broken["rows"] if cf.rr(r) == base)
+    root["transfer"]["op_keys"]["transfer"]["ordinal"] = 300
+    e = deepcopy(ev)
+    e["common_facts"]["facts_sha256"] = cf.digest(broken)
+    with pytest.raises(evidence.Rejected):
+        evidence.bind_common_facts(e, broken, **args)
+
+
+def test_g2a_required_values_and_index():
+    import common_facts as cf
+
+    load = [_op("INT_ADD", [_r(RSP_), _c(8)], _u(0x10)), _op("LOAD", [_c(1), _u(0x10)], _u(0x20))]
+    f = _row(4, load + _push(START + 4) + [_op("CALLIND", [_u(0x20)])])
+    target, defs = cf.value(f, _u(0x20), 4, call_cut=2)
+    assert defs == [0, 1]
+    assert target["memory"]["address"]["add"][0]["pre_register"]["offset"] == RSP_
+    f = _row(6, [_op("BRANCHIND", [_a(START + 0x40)])])
+    target, _ = cf.value(f, f["ops"][0]["inputs"][0], 0)
+    assert target["memory"]["address"] == {"constant": f"{START + 0x40:x}", "width": 64}
+    assert target["memory"]["size"] == 8
+    f = _row(2, [_op("CALLOTHER", [_c(7)], _u(1)), _op("BRANCHIND", [_u(1)])])
+    assert cf.unknown(cf.value(f, _u(1), 1)[0])
+    f = _row(2, [_op("STORE", [_c(1), _r(RAX_), _r(RCX_)]),
+                 _op("LOAD", [_c(1), _r(RSP_)], _u(1)), _op("BRANCHIND", [_u(1)])])
+    assert cf.unknown(cf.value(f, _u(1), 2)[0])
+    f = _row(2, [_op("INT_ADD", [_r(0x110), _r(RAX_)], _u(0x80)),
+                 _op("LOAD", [_c(1), _u(0x80)], _u(0x90)), _op("BRANCHIND", [_u(0x90)])])
+    mem = cf.value(f, _u(0x90), 2, segment=0x110)[0]["memory"]
+    assert mem["segment_base"]["pre_register"]["offset"] == 0x110
+    assert mem["address"]["pre_register"]["offset"] == RAX_
+
+    idx = cf.Index([(1, START, 6, ("a", "f0")), (1, START + 2, None, ("b", "f1")),
+                    (1, START + 2, 2, ("c", "f1")), (2, START + 2, 1, ("d", "f2"))], True)
+    land = idx.landing(cf.addr(1, START + 2))
+    assert land["class"] == "row_start"
+    assert land["starts"] == [dict(id="b", observation="f1"), dict(id="c", observation="f1")]
+    assert land["inside"] == [dict(id="a", observation="f0")]
+    assert cf.unknown(idx.landing(cf.addr(1, START + 3))["inside"])
+
+
+@needs
+def test_g2a_required_conditions_and_traps():
+    import common_facts as cf
+
+    for f, data, key in (
+        (_jcc(2, START + 6, []), "7404", "flags"),
+        (_jcc(2, START, JRCXZ), "e3fe", "zero"),
+        (_jcc(2, START, LOOP), "e2fe", "nonzero"),
+        (_jcc(2, START, LOOP), "e1fe", "unobserved"),
+        (_jcc(2, START, LOOP), "e0fe", "unobserved"),
+    ):
+        c = _g2_collect([_g2_live(f, data)])
+        k, r = next(iter(c.rows.items()))
+        assert key in r["transfer"]["condition"]["test"]
+        if key == "flags":
+            assert r["transfer"]["condition"]["test"][key] == "e"
+        assert _g2_code(c.units[k], "transfer.edges", cf.TAKEN) == "c"
+    for f, data, saved in ((_int_pair(0x29), "cd29", cf.addr(1, START + 2)),
+                           (_syscall(), "0f05", cf.addr(1, START + 2)),
+                           (_row(2, [_op("CALLOTHER", [_c(3)])]), "0f34", None)):
+        c = _g2_collect([_g2_live(f, data)])
+        k, r = next(iter(c.rows.items()))
+        es = r["transfer"]["edges"]
+        assert [cf.triple(e) for e in es] == [cf.OS, cf.SAVED]
+        assert es[1]["to"] == saved
+        assert _g2_code(c.units[k], "transfer.edges.to", cf.SAVED) == ("c" if saved is None else "u")
+
+    f = _int_pair(0x29)
+    c = _g2_collect([_g2_live(f, "cd29")])
+    fn = dict(function_id="f0", rows=[f], engine_relations={}, engine_error=None)
+    record, = cf.parity(fn, c.rows, {}, {})
+    assert record["status"] == "neither" and "swi+CALLIND" in record["reason"]
+
+
+@needs
+def test_g2a_end_to_end(tmp_path):
+    import json
     import _sealed as s
+    import common_facts as cf
     import decode_check
     import evidence
 
     functions, code = _pair(s)
-    (tmp_path / "b").mkdir()
-    generation = _bundle(tmp_path / "b", functions, code)
-    out, facts_out = tmp_path / "evidence4.json", tmp_path / "facts.json"
-    header, _ = decode_check.run(generation, s.NAMING_SOURCE, True, full=True, evidence_out=out,
-                                 common_facts_out=facts_out)
-    document = evidence.parse(out.read_bytes())
-    facts_document = json.loads(facts_out.read_bytes())
-    assert document["schema"] == "g1-decode-evidence-4" and facts_document["schema"] == "tbr-common-facts-1"
-    assert header["common_facts"]["parity"]["extra"] == 0
-    verdicts = evidence.bind_common_facts(document, facts_document)
-    first = facts_document["rows"][0]
-    assert verdicts[(first["id"], first["observation"])]["kind"] in ("confirmed", "not_applicable", "unobserved")
-    changed = json.loads(facts_out.read_bytes())
-    changed["rows"][0]["transfer"]["hint"] = "changed"
-    with pytest.raises(evidence.Rejected):
-        evidence.bind_common_facts(document, changed)
-    fewer = json.loads(facts_out.read_bytes())
-    del fewer["rows"][0]
-    with pytest.raises(evidence.Rejected):
-        evidence.bind_common_facts(document, fewer)
-
-
-# -- G2a fixtures with required results (design_tbr_g2_common_facts_r5 G2a table) ---------------------------------
-
-def _vendor_view(length, width, stored, slot):
-    return {"length": length, "bytes": [f"{START:x}", f"{START + length:x}"], "edges": [],
-            "link_write": {"location": {"memory": {"space": 1, "base": {"space": 2, "offset": RSP_, "size": 8},
-                                                   "relative_to": "pre_sp", "slot_offset": slot}},
-                           "sp_delta": slot, "value": {"bits": f"{stored:x}", "width": width},
-                           "continuation": {"space": 1, "offset": f"{START + length:x}"},
-                           "relocation": "instruction_relative", "derivation": "isa_next_ip"},
-            "target_value": None}
-
-
-@needs
-def test_g2a_fixture_66e8_vendor_views():
-    """66 E8 at the row start: Intel length 6 / width 64 / stored next / slot -8; AMD length 4 / width 16 / stored
-    0x1004-style truncated bits / slot -2; the truncated bits as the full continuation contradict that field."""
-    import common_facts
-    import decoders
-
-    data = bytes.fromhex("66e80a000000")
-    row, _ = _g2(_row(6, _push(START + 6) + [_op("CALL", [_a(START + 0x10)])], flow=_flow("call_direct")), data)
-    amd_stored = (START + 4) & 0xFFFF
-    row["vendor_views"] = {"intel": _vendor_view(6, 64, START + 6, -8), "amd": _vendor_view(4, 16, amd_stored, -2)}
-    ballot = decoders.ballot(data, START)
-    codes = common_facts.vendor_verdicts(row, ballot)
-    assert codes == {"intel": "cccc", "amd": "cccc"}, codes
-    row["vendor_views"]["amd"]["link_write"]["continuation"] = {"space": 1, "offset": f"{amd_stored:x}"}
-    assert common_facts.vendor_verdicts(row, ballot)["amd"][2] == "x"
-
-
-@needs
-def test_g2a_fixture_xbegin_and_incomplete_edges():
-    """XBEGIN: exactly the three triples with condition null; a removed nested-abort triple is contradicted, a keyed
-    placeholder leaves the edge set unobserved; input order never changes the canonical digest."""
-    import copy
-
-    import common_facts
-    import decoders
-
-    data = bytes.fromhex("c7f810000000")
-    facts = _row(6, [_op("CALLOTHER", [_c(85)])])
-    row, _ = _g2(facts, data)
-    nxt, target = f"{START + 6:x}", f"{START + 6 + 0x10:x}"
-    row["transfer"].update(kind="conditional", condition=None, edges=[
-        {"when": "abort", "source": "computed", "requires": "nested-transaction", "to": None,
-         "lands_on": {"class": "unresolved"}},
-        {"when": "normal_entry", "source": "sequential", "requires": "normal-transaction-start",
-         "to": {"space": 1, "offset": nxt}, "lands_on": {"class": "unclassified"}},
-        {"when": "abort", "source": "encoded_target", "requires": "outermost-transaction",
-         "to": {"space": 1, "offset": target}, "lands_on": {"class": "unclassified"}}])
-    lift, result = _compare(facts, data)
-    ballot = decoders.ballot(data, START)
-    c = _codes(common_facts.row_verdicts(row, ballot, result))
-    assert (c["kind"], c["edges"], c["condition"], c["to.sequential"], c["to.computed_os"]) == ("c",) * 5
-    reordered = copy.deepcopy(row)
-    reordered["transfer"]["edges"].reverse()
-    doc = lambda r: common_facts.document({}, {}, {}, [copy.deepcopy(r)])   # noqa: E731
-    assert common_facts.digest(doc(row)) == common_facts.digest(doc(reordered))
-    missing = copy.deepcopy(row)
-    missing["transfer"]["edges"] = [e for e in missing["transfer"]["edges"] if e["requires"] != "nested-transaction"]
-    assert _codes(common_facts.row_verdicts(missing, ballot, result))["edges"] == "x"
-    placeholder = copy.deepcopy(row)
-    placeholder["transfer"]["edges"][0] = {"when": "abort", "source": "computed", "requires": "nested-transaction",
-                                           "unobserved": "no observation of this edge"}
-    assert _codes(common_facts.row_verdicts(placeholder, ballot, result))["edges"] == "u"
-
-
-def test_g2a_fixture_colliding_starts_and_arm_round_trip(tmp_path):
-    """Two views at one start keep distinct ids and verdicts; moving a verdict to the other view's id fails the
-    binding. BLR x30 round-trips (target = incoming x30, link x30 with zero delta, target_auth null) and an ARM row
-    without a voter stays applicability-unknown."""
-    import copy
-    import json
-
-    import common_facts
-    import evidence
-
-    base = {"space": 1, "offset": f"{START:x}", "observation": "f0", "vendor_views": None, "isa": [],
-            "bytes": {"range": [f"{START:x}", f"{START + 4:x}"], "holds_if": common_facts.PREMISE}}
-    x30 = {"space": 2, "offset": 0xf0, "size": 8, "name": "x30"}
-    blr = dict(base, id=f"1:{START:x}:4:0", length=4, view="0", transfer={
-        "kind": "indirect", "edges": [{"when": "always", "source": "computed", "requires": None, "to": None,
-                                       "lands_on": {"class": "unresolved"}}],
-        "condition": None, "target_value": {"pre_register": x30, "width": 64}, "target_auth": None,
-        "link_write": {"location": {"register": x30}, "sp_delta": 0, "value": {"bits": f"{START + 4:x}", "width": 64},
-                       "continuation": {"space": 1, "offset": f"{START + 4:x}"}, "relocation": "instruction_relative",
-                       "derivation": "pc_plus_4"},
-        "hint": "call", "op_keys": {"transfer": None, "target": [], "condition": [], "auth": [], "link": [],
-                                    "sp_adjust": [], "setup": [], "transient": [], "persistent": [],
-                                    "entry_ordinal": None, "encoding_only": ["link_write"]}})
-    other = copy.deepcopy(blr)
-    other.update(id=f"1:{START:x}:2:1", length=2, view="1")
-    facts_doc = common_facts.document({"generation_id": "g"}, {}, {"isa": "aarch64"}, [blr, other])
-    assert json.loads(common_facts.canonical(facts_doc)) == json.loads(json.dumps(facts_doc))
-    codes = {(r["id"], r["observation"]): common_facts.row_verdicts(r, None, None) for r in facts_doc["rows"]}
-    assert set(codes.values()) == {"?" * len(common_facts.FIELDS)}
-    block = common_facts.verdict_block(common_facts.digest(facts_doc), facts_doc["rows"], codes)
-    document = {"common_facts": block}
-    verdicts = evidence.bind_common_facts(document, facts_doc)
-    assert len(verdicts) == 2 and all(v["kind"] == "unobserved" for v in verdicts.values())
-    moved = copy.deepcopy(document)
-    moved["common_facts"]["rows"][0]["id"] = moved["common_facts"]["rows"][1]["id"]
-    with pytest.raises(evidence.Rejected):
-        evidence.bind_common_facts(moved, facts_doc)
+    directory = tmp_path / "b"
+    directory.mkdir()
+    generation = _bundle(directory, functions, code)
+    out, facts_out = tmp_path / "ev.json", tmp_path / "facts.json"
+    header, _ = decode_check.run(generation, s.NAMING_SOURCE, True, full=True,
+                                 evidence_out=out, common_facts_out=facts_out)
+    ev = evidence.parse(out.read_bytes())
+    doc = json.loads(facts_out.read_bytes())
+    assert ev["schema"] == evidence.SCHEMA4 and doc["schema"] == cf.SCHEMA
+    assert ev["common_facts"]["facts_sha256"] == cf.digest(doc)
+    assert ev["common_facts"]["row_set_sha256"] == cf.row_set_digest(doc["rows"])
+    report = header["common_facts"]
+    assert report["parity"]["base_joins"] == report["parity"]["source_ops"]
+    assert report["fixtures"] == {"source": "tests/intra/test_decode_check.py -k g2a_required_"}   # (not run here)
+    for counts in report["fields"].values():
+        assert counts["N_considered"] == (counts["N_applicable"] + counts["N_not_applicable"]
+                                          + counts["N_applicability_unknown"])
+        assert counts["unobserved"] == counts["unobserved_applicable"] + counts["N_applicability_unknown"]

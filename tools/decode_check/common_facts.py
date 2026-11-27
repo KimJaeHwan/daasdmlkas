@@ -1,549 +1,1059 @@
-"""TBR G2a: x86 common facts derived from a Ghidra Bundle, their G1 verdicts (-4) and the parity with the engine's
-call relations (design .census6/design_tbr_g2_common_facts_r5.md, closed 2026-11-27).
-
-- ``derive_row``: a claim (``source: "derived"``) per row, read from Ghidra's p-code through the lift table: the
-  form (s3.1), edges (s3.2 / s3.3), condition (s3.4), target_value (s3.5), link_write (s3.6), op references (s3.8),
-  lands_on (s4) and the byte premise (s2). TBR never states a return, an OS resumption or a premise default.
-- ``row_verdicts``: G1 evidence -4 per row, from the voters (s8). Only what an independent comparison supports is
-  confirmed; the rest stays unobserved.
-- ``parity``: the facts' link claims against the engine's ``call_relations`` (s3.8 / G2a): missing / extra / field
-  differences, each missing relation with the recognizer check that failed.
-
-Pure functions of plain facts (Rust-reproducible); the engine objects enter only through ``decode_check.collect``.
-"""
+"""G2a common claims, field comparisons, and observation-local parity."""
 
 from __future__ import annotations
 
+from bisect import bisect_left
+from collections import Counter, defaultdict
 import hashlib
 import json
 
+import compare
+import decoders
 import lifting
+
 
 SCHEMA = "tbr-common-facts-1"
 VERDICT_SCHEMA = "tbr-common-facts-verdicts-1"
-RULE_VERSION = "g2a-1"
-VIEW = "0"                      # Ghidra exports one decode view per row
+RULE_VERSION = "g2a-2"
 PREMISE = "image-code-unmodified-at-runtime"
-WHEN_ORDER = ("always", "taken", "not_taken", "normal_entry", "abort", "trap", "trap_return")
-SOURCE_ORDER = ("sequential", "encoded_target", "computed", "os", "os_return")
-REQUIRES_ORDER = (None, "os-contract", "normal-transaction-start", "outermost-transaction", "nested-transaction")
-# the -4 field order of the per-row code string (one character per field: c confirmed, x contradicted,
-# u unobserved, n not applicable, ? applicability unknown -- the form is undecided; read as unobserved)
-FIELDS = ("kind", "edges", "to.sequential", "to.encoded_target", "to.computed_os", "to.os_return", "condition",
-          "link.value", "link.continuation", "link.slot", "link.location_kind", "link.register", "link.space",
-          "link.relocation", "target_value", "op_keys", "lands_on")
-U = lambda reason: {"unobserved": reason}   # noqa: E731
+VENDORS = ("intel", "amd")
+CALLS = {"CALL", "CALLIND"}
+BRANCHES = {"BRANCH", "CBRANCH", "BRANCHIND", "RETURN"}
+EC = ("when", "source", "requires")
+ORDERS = (
+    ("always", "taken", "not_taken", "normal_entry", "abort", "trap", "trap_return"),
+    ("sequential", "encoded_target", "computed", "os", "os_return"),
+    (None, "os-contract", "normal-transaction-start", "outermost-transaction", "nested-transaction"),
+)
+SEQ = ("always", "sequential", None)
+DIRECT = ("always", "encoded_target", None)
+IND = ("always", "computed", None)
+TAKEN = ("taken", "encoded_target", None)
+NEXT = ("not_taken", "sequential", None)
+OS = ("trap", "os", None)
+SAVED = ("trap_return", "os_return", "os-contract")
+NORMAL = ("normal_entry", "sequential", "normal-transaction-start")
+OUTER = ("abort", "encoded_target", "outermost-transaction")
+NESTED = ("abort", "computed", "nested-transaction")
+MISS = object()
 
 
-def _addr(space, offset):
-    return {"space": space, "offset": f"{offset:x}"}
+def U(reason):
+    return {"unobserved": reason}
 
 
-def _reg(varnode):
-    return {"space": varnode["space"], "offset": varnode["offset"], "size": varnode["size"]}
+def unknown(x):
+    return isinstance(x, dict) and "unobserved" in x
 
 
-def row_id(facts: dict) -> str:
-    return f"{facts['space']:x}:{facts['address']:x}:{facts['length'] if facts['length'] is not None else 'u'}:{VIEW}"
+def canonical(x):
+    return json.dumps(x, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False).encode("utf-8")
 
 
-def _edge(when, source, to, requires=None):
-    return {"when": when, "source": source, "requires": requires, "to": to}
+def digest(x):
+    return hashlib.sha256(canonical(x)).hexdigest()
 
 
-def _edge_key(edge):
-    return (WHEN_ORDER.index(edge["when"]), SOURCE_ORDER.index(edge["source"]), REQUIRES_ORDER.index(edge["requires"]))
+def addr(space, offset):
+    return {"space": space, "offset": format(offset, "x")}
 
 
-# -- value_ref from the row's own p-code (s3.5) ------------------------------------------------------------------
-
-def _value_ref(ops, varnode, upto, row_ref, depth=0):
-    """The pre-state expression of ``varnode`` as used before op ``upto``: a register not redefined earlier in the
-    row is a pre-state leaf; a definition is followed through COPY / INT_ADD / INT_SUB / INT_MULT / INT_ZEXT /
-    INT_SEXT / LOAD; a LOAD preceded by any STORE in the row may alias (unobserved)."""
-    if varnode is None or depth > 16:
-        return U("expression too deep or missing")
-    if varnode["kind"] == "CONSTANT":
-        return {"constant": f"{varnode['offset']:x}", "width": varnode["size"] * 8}
-    if varnode["kind"] == "ADDRESS":
-        return {"constant": f"{varnode['offset']:x}", "width": varnode["size"] * 8}
-    for index in range(upto - 1, -1, -1):
-        op = ops[index]
-        if op["output"] != varnode:
-            if op["output"] is not None and varnode["kind"] in ("REGISTER", "UNIQUE") \
-                    and op["output"]["space"] == varnode["space"] \
-                    and op["output"]["offset"] < varnode["offset"] + varnode["size"] \
-                    and varnode["offset"] < op["output"]["offset"] + op["output"]["size"]:
-                return U("partial overlapping redefinition in the row")
-            continue
-        width = varnode["size"] * 8
-        name, inputs = op["opcode"], op["inputs"]
-        if name == "COPY" and len(inputs) == 1:
-            return _value_ref(ops, inputs[0], index, row_ref, depth + 1)
-        if name in ("INT_ADD", "INT_SUB", "INT_MULT") and len(inputs) == 2:
-            key = {"INT_ADD": "add", "INT_SUB": "sub", "INT_MULT": "mul"}[name]
-            return {key: [_value_ref(ops, inputs[0], index, row_ref, depth + 1),
-                          _value_ref(ops, inputs[1], index, row_ref, depth + 1)], "width": width}
-        if name in ("INT_ZEXT", "INT_SEXT") and len(inputs) == 1:
-            return {"zext" if name == "INT_ZEXT" else "sext": _value_ref(ops, inputs[0], index, row_ref, depth + 1),
-                    "width": width}
-        if name == "LOAD" and len(inputs) == 2 and inputs[0]["kind"] == "CONSTANT":
-            if any(prior["opcode"] == "STORE" for prior in ops[:index]):
-                return U("intra-row store may alias")
-            return {"memory": {"space": inputs[0]["offset"], "address": _value_ref(ops, inputs[1], index, row_ref,
-                                                                                 depth + 1),
-                               "size": varnode["size"], "segment_base": None}}
-        return {"op_output": {"ordinal": index, "opcode": name}}
-    if varnode["kind"] == "REGISTER":
-        return {"pre_register": _reg(varnode), "width": varnode["size"] * 8}
-    return U(f"{varnode['kind']} used before any definition in the row")
+def reg(v):
+    return {k: v[k] for k in ("space", "offset", "size", "name") if k in v}
 
 
-def _chain(ops, varnode, upto):
-    """Ordinals of the ops a value depends on (for op_keys.target)."""
-    out, todo = set(), [(varnode, upto)]
-    while todo:
-        item, limit = todo.pop()
-        if item is None or item["kind"] in ("CONSTANT", "ADDRESS"):
-            continue
-        for index in range(limit - 1, -1, -1):
-            if ops[index]["output"] == item:
-                if index not in out:
-                    out.add(index)
-                    todo.extend((inp, index) for inp in ops[index]["inputs"])
-                break
-    return sorted(out)
+def coord(r):
+    return r["space"], r["offset"], r["size"]
 
 
-# -- the derived row (claims) ------------------------------------------------------------------------------------
-
-FORM = {   # lift pattern -> kind (s3.1 applied to the producer's own decode, here Ghidra's p-code)
-    "plain": "none", "internal": "none", "cmov": "none", "rep": "none",
-    "jcc": "conditional", "jmp": "direct", "call": "direct", "call $+5": "direct",
-    "call indirect": "indirect", "jmp indirect": "indirect", "ret": "indirect",
-    "interrupt": "trap", "interrupt-return": "trap", "syscall": "trap", "fault": "trap",
-}
-
-
-def derive_row(facts: dict, lift, observation: str, rows_index: dict) -> dict:
-    """The derived claim of one row. ``rows_index`` = {(space, address): length} of the observation's rows."""
-    ops = facts["ops"]
-    space, start, length = facts["space"], facts["address"], facts["length"]
-    rid = row_id(facts)
-    row_ref = {"id": rid, "observation": observation}
-    nxt = None if length is None else start + length
-    pattern = None if lift is None else lift.pattern
-    kind = FORM.get(pattern, "unknown")
-    edges, transfer_ordinal, target_value, condition, link = [], None, None, None, None
-    target_ops, transient, sp_adjust, link_ops = [], [], [], []
-    seq = U("no exported length") if nxt is None else _addr(space, nxt)
-    flows = [i for i, op in enumerate(ops) if op["opcode"] in lifting.FLOW_OPS and i not in (lift.skipped if lift else ())]
-    last = flows[-1] if flows else None
-    if kind == "none":
-        edges = [_edge("always", "sequential", seq)]
-    elif kind == "conditional":
-        target = ops[last]["inputs"][0]
-        edges = [_edge("taken", "encoded_target", _addr(space, target["offset"])),
-                 _edge("not_taken", "sequential", seq)]
-        transfer_ordinal = last
-        cond = ops[last]["inputs"][1] if len(ops[last]["inputs"]) > 1 else None
-        value = _value_ref(ops, cond, last, row_ref)
-        condition = {"test": value if "unobserved" in value else
-                     ({"op_output": value["op_output"]} if "op_output" in value else {"nonzero": value}),
-                     "taken_when": "true"}
-    elif kind == "direct":
-        target = ops[last]["inputs"][0]
-        edges = [_edge("always", "encoded_target", _addr(space, target["offset"]))]
-        transfer_ordinal = last
-    elif kind == "indirect":
-        edges = [_edge("always", "computed", None)]
-        transfer_ordinal = last
-        if pattern == "ret":
-            target_value = _value_ref(ops, ops[last]["inputs"][0], last, row_ref)
-        else:
-            # (the target is read in the pre-state, before the push: follow it from the transfer's input)
-            target_value = _value_ref(ops, ops[last]["inputs"][0], last, row_ref)
-        target_ops = _chain(ops, ops[last]["inputs"][0], last)
-    elif kind == "trap":
-        edges = [_edge("trap", "os", None)]
-        transfer_ordinal = last
-        if pattern in ("interrupt", "interrupt-return", "syscall"):
-            edges.append(_edge("trap_return", "os_return", seq, "os-contract"))
-    if pattern in ("call", "call $+5", "call indirect") and last is not None and last >= 2:
-        sub_op, store_op = ops[last - 2], ops[last - 1]
-        width = store_op["inputs"][2]["size"] * 8
-        value = store_op["inputs"][2]
-        fallthrough = None if facts["fallthrough"] is None else _addr(facts.get("fallthrough_space", space),
-                                                                       facts["fallthrough"])
-        link = {"location": {"memory": {"space": store_op["inputs"][0]["offset"], "base": _reg(sub_op["inputs"][0]),
-                                        "relative_to": "pre_sp", "slot_offset": -(width // 8)}},
-                "sp_delta": -sub_op["inputs"][1]["offset"],
-                "value": {"bits": f"{value['offset']:x}", "width": width} if value["kind"] == "CONSTANT"
-                else U("stored value not a constant"),
-                "continuation": fallthrough if fallthrough is not None else U("no Ghidra fallthrough"),
-                "relocation": "instruction_relative", "derivation": "isa_next_ip"}
-        transient, sp_adjust, link_ops = [last - 2, last - 1], [last - 2], [last - 1]
-        if pattern == "call $+5":
-            edges = [_edge("always", "encoded_target", _addr(space, ops[last]["inputs"][0]["offset"]))]
-
-    def ref(ordinal):     # (s2: an op of the containing row needs no row_ref)
-        return {"ordinal": ordinal, "opcode": ops[ordinal]["opcode"]}
-
-    for edge in edges:
-        to = edge["to"]
-        if to is None:
-            edge["lands_on"] = {"class": "unresolved"}
-        elif "unobserved" in to:
-            edge["lands_on"] = U("address unknown")
-        else:
-            edge["lands_on"] = _lands_on(int(to["offset"], 16), to["space"], rows_index, observation)
-    edges.sort(key=_edge_key)
-    return {"id": rid, "space": space, "offset": f"{start:x}", "length": length, "view": VIEW,
-            "observation": observation,
-            "transfer": {"kind": kind, "edges": edges, "condition": condition,
-                         "target_value": target_value, "target_auth": None, "link_write": link,
-                         "hint": {"CALL": "call", "CALLIND": "call", "RETURN": "return", "BRANCH": "jump",
-                                  "BRANCHIND": "jump", "CBRANCH": "jump"}.get(ops[last]["opcode"]) if last is not None
-                         else None,
-                         "op_keys": {"transfer": None if transfer_ordinal is None else ref(transfer_ordinal),
-                                     "target": [ref(i) for i in target_ops],
-                                     "condition": [], "auth": [], "link": [ref(i) for i in link_ops],
-                                     "sp_adjust": [ref(i) for i in sp_adjust],
-                                     "setup": [ref(i) for i in range(transfer_ordinal)] if transfer_ordinal else [],
-                                     "transient": [ref(i) for i in transient], "persistent": [],
-                                     "entry_ordinal": transfer_ordinal, "encoding_only": []}},
-            "bytes": {"range": [f"{start:x}", f"{nxt:x}"] if nxt is not None else U("no exported length"),
-                      "holds_if": PREMISE},
-            "isa": [], "vendor_views": None}
-
-
-def _lands_on(address, space, rows_index, observation):
-    starts, inside = [], []
-    for (row_space, row_start), length in rows_index.items():
-        if row_space != space or length is None:
-            continue
-        if row_start == address:
-            starts.append({"id": f"{row_space:x}:{row_start:x}:{length}:{VIEW}", "observation": observation})
-        elif row_start < address < row_start + length:
-            inside.append({"id": f"{row_space:x}:{row_start:x}:{length}:{VIEW}", "observation": observation})
-    # (the search covers this observation's rows only: an empty list is not a whole-program zero, so the
-    #  class is decided only by a positive match; mapping / import are not wired in G2a)
-    cls = "row_start" if starts else ("mid_row" if inside else "unclassified")
-    return {"starts": starts if starts or inside else U("searched this observation's rows only"),
-            "inside": inside if starts or inside else U("searched this observation's rows only"),
-            "mapping": U("mapping not wired in G2a"), "import": U("import roles not wired in G2a"), "class": cls}
-
-
-def document(bundle: dict, producer: dict, program: dict, rows: list) -> dict:
-    rows = sorted(rows, key=lambda row: (row["id"], row["observation"]))
-    for row in rows:      # (s3.2: canonical edge order, placeholders included, whatever the input order)
-        row["transfer"]["edges"] = sorted(row["transfer"]["edges"], key=_edge_key)
-        for view in (row.get("vendor_views") or {}).values():
-            if view and isinstance(view.get("edges"), list):
-                view["edges"] = sorted(view["edges"], key=_edge_key)
-    return {"schema": SCHEMA, "source": "derived", "bundle": bundle, "producer": producer, "program": program,
-            "rows": rows}
-
-
-def canonical(document_: dict) -> bytes:
-    return json.dumps(document_, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-
-
-def digest(document_: dict) -> str:
-    return hashlib.sha256(canonical(document_)).hexdigest()
-
-
-# -- -4 verdicts (s8) --------------------------------------------------------------------------------------------
-
-VOTER_FORM = {"none": "none", "jcc": "conditional", "xbegin": "conditional", "jmp_near": None, "call_near": None,
-              "ret_near": "indirect",
-              "syscall": "trap", "sysenter": "trap", "int_n": "trap", "int3": "trap", "int1": "trap", "hlt": "trap",
-              "ud": "trap"}
-
-
-def _consensus(ballot):
-    voters = list(ballot["intel"]) + list(ballot["amd"])
-    if any(v.status != "ok" for v in voters):
-        statuses = {v.status for v in voters}
-        return ("invalid", None) if statuses == {"invalid"} else (None, None)
-    flows = {(v.flow, bool(v.indirect)) for v in voters}
-    lengths = {v.length for v in voters}
-    if len(flows) != 1 or len(lengths) != 1:
-        return None, None
-    return flows.pop(), lengths.pop()
-
-
-def _expected(form):
-    flow, indirect = form
-    if flow in ("jmp_near", "call_near"):
-        kind = "indirect" if indirect else "direct"
-    else:
-        kind = VOTER_FORM.get(flow)
-    if kind is None:
-        return None, None
-    triples = {
-        "none": [("always", "sequential", None)],
-        "conditional": [("taken", "encoded_target", None), ("not_taken", "sequential", None)] if flow != "xbegin"
-        else [("normal_entry", "sequential", "normal-transaction-start"),
-              ("abort", "encoded_target", "outermost-transaction"), ("abort", "computed", "nested-transaction")],
-        "direct": [("always", "encoded_target", None)],
-        "indirect": [("always", "computed", None)],
-        "trap": [("trap", "os", None)] + ([] if flow == "ud" else [("trap_return", "os_return", "os-contract")]),
-    }[kind]
-    return kind, triples
-
-
-def _unknown(value) -> bool:
-    """A claim the producer marked unobserved: its verdict is unobserved, never contradicted."""
-    return isinstance(value, dict) and "unobserved" in value
-
-
-def row_verdicts(row: dict, ballot: dict | None, result: dict | None) -> str:
-    """The -4 code string over FIELDS for one derived row (s8): c / x / u / n."""
-    codes = dict.fromkeys(FIELDS, "u")
-    transfer = row["transfer"]
-    if ballot is None or result is None or not result.get("attributes"):
-        return "?" * len(FIELDS)                             # never compared: applicability unknown
-    form, length = _consensus(ballot)
-    if form is None:
-        return "?" * len(FIELDS)
-    if form == "invalid":
-        codes["kind"] = "c" if transfer["kind"] == "trap" else "x"
-        return "".join(codes[f] for f in FIELDS)
-    kind, triples = _expected(form)
-    if kind is None:
-        return "?" * len(FIELDS)
-    codes["kind"] = "c" if transfer["kind"] == kind else "x"
-    claimed = sorted((e["when"], e["source"], e["requires"]) for e in transfer["edges"])
-    if claimed != sorted(triples):
-        codes["edges"] = "x"            # (missing, duplicate or extra triple: s3.2 / s8 step 2)
-    else:
-        # (a keyed placeholder occupies its triple and leaves that edge unobserved)
-        codes["edges"] = "u" if any("unobserved" in e for e in transfer["edges"]) else "c"
-    start = int(row["offset"], 16)
-    by_source = {e["source"]: e for e in transfer["edges"] if "unobserved" not in e}
-    sources = {t[1] for t in triples}
-    codes["to.sequential"] = "n"
-    if "sequential" in sources:
-        edge = by_source.get("sequential")
-        expected = _addr(row["space"], start + length)
-        codes["to.sequential"] = "u" if edge is None or _unknown(edge["to"]) else ("c" if edge["to"] == expected
-                                                                                 else "x")
-    codes["to.encoded_target"] = "u" if "encoded_target" in sources else "n"   # (XED computed: unobserved today)
-    if sources & {"computed", "os"}:
-        nulls = [by_source[s]["to"] is None for s in ("computed", "os") if s in by_source]
-        codes["to.computed_os"] = "u" if not nulls else ("c" if all(nulls) else "x")
-    else:
-        codes["to.computed_os"] = "n"
-    if "os_return" in sources:
-        edge = by_source.get("os_return")
-        if form[0] in ("syscall", "int_n", "int3", "int1"):
-            codes["to.os_return"] = "u" if edge is None or _unknown(edge["to"]) else (
-                "c" if edge["to"] == _addr(row["space"], start + length) else "x")
-        elif form[0] == "sysenter" or form[0] == "hlt":
-            codes["to.os_return"] = "u" if edge is None else ("c" if edge["to"] is None else "x")
-    else:
-        codes["to.os_return"] = "n"
-    if form[0] == "xbegin":   # (s3.4: XBEGIN has condition null; its guards are compared on the edges)
-        codes["condition"] = "c" if transfer["condition"] is None else "x"
-    else:
-        codes["condition"] = "u" if kind == "conditional" else "n"  # (opaque test: no independent comparison)
-    link = transfer["link_write"]
-    is_call = form[0] == "call_near"
-    if not is_call:
-        for name in ("link.value", "link.continuation", "link.slot", "link.location_kind", "link.register",
-                     "link.space", "link.relocation"):
-            codes[name] = "x" if link is not None else "n"
-    elif link is None:
-        for name in ("link.value", "link.continuation", "link.slot", "link.location_kind"):
-            codes[name] = "x"
-    else:
-        a7 = result["attributes"].get("a7", {})
-        a11b = result["attributes"].get("a11b", {})
-        value = link["value"]
-        if a7.get("state") == "applied" and "unobserved" not in value:
-            width, stored = a7["value"]
-            codes["link.value"] = "c" if (value["width"], int(value["bits"], 16)) == (width, stored) else "x"
-        elif a7.get("state") == "unrecognized":
-            codes["link.value"] = "x"
-        cont = link["continuation"]
-        if "unobserved" not in cont:
-            codes["link.continuation"] = "c" if cont == _addr(row["space"], start + length) else "x"
-        if a11b.get("state") == "applied":
-            size = a11b["value"]
-            memory = link["location"].get("memory", {})
-            codes["link.slot"] = "c" if memory.get("slot_offset") == -size and link["sp_delta"] == -size else "x"
-        codes["link.location_kind"] = "c" if "memory" in link["location"] else "x"
-    codes["target_value"] = "u" if kind == "indirect" else ("x" if transfer["target_value"] is not None else "n")
-    codes["lands_on"] = "u"
-    return "".join(codes[f] for f in FIELDS)
-
-
-VENDOR_FIELDS = ("length", "link.value", "link.continuation", "link.slot")
-
-
-def vendor_verdicts(row: dict, ballot: dict | None) -> dict | None:
-    """s3.6 / s8: a claim with vendor_views is judged per vendor against that vendor's voters (intel: iced / Zydis /
-    XED; amd: iced / Zydis AMD mode): length, stored bits and width, continuation, slot / delta. None when the
-    claim states no vendor views."""
-    views = row.get("vendor_views")
-    if not views:
+def register(r):
+    if r is None:
         return None
-    out = {}
-    start = int(row["offset"], 16)
-    for vendor in ("intel", "amd"):
-        view = views.get(vendor)
-        codes = dict.fromkeys(VENDOR_FIELDS, "u")
-        voters = list(ballot[vendor]) if ballot is not None and vendor in ballot else []
-        if view is None or not voters or any(v.status != "ok" for v in voters):
-            out[vendor] = "".join(codes[f] for f in VENDOR_FIELDS)
-            continue
-        lengths = {v.length for v in voters}
-        widths = {v.operand_bits for v in voters if v.operand_bits}
-        if len(lengths) == 1 and not _unknown(view.get("length")):
-            length = lengths.pop()
-            codes["length"] = "c" if view["length"] == length else "x"
-            link = view.get("link_write")
-            if link and not _unknown(link):
-                cont = link["continuation"]
-                if not _unknown(cont):
-                    codes["link.continuation"] = "c" if cont == _addr(row["space"], start + length) else "x"
-                if len(widths) == 1 and not _unknown(link["value"]):
-                    width = widths.pop()
-                    stored = (start + length) % (1 << width)
-                    codes["link.value"] = "c" if (link["value"]["width"], int(link["value"]["bits"], 16)) == \
-                        (width, stored) else "x"
-                    slot = link["location"].get("memory", {}).get("slot_offset")
-                    codes["link.slot"] = "c" if slot == link["sp_delta"] == -(width // 8) else "x"
-        out[vendor] = "".join(codes[f] for f in VENDOR_FIELDS)
-    return out
+    return dict(name=r.name, space=r.space_id, offset=r.byte_offset, size=r.byte_size)
 
 
-def row_set_digest(rows: list) -> str:
-    lines = "".join(f"{row['space']:x}:{row['offset']}:{row['length']}:{row['view']}:{row['observation']}\n"
-                    for row in sorted(rows, key=lambda r: (r["id"], r["observation"])))
-    return hashlib.sha256(lines.encode("utf-8")).hexdigest()
+def rid(space, start, length, view):
+    return f"{space:x}:{start:x}:{length if length is not None else 'u'}:{view}"
 
 
-def verdict_block(facts_digest: str, rows: list, codes: dict, vendor: dict | None = None) -> dict:
-    """The -4 section: binding (facts digest, rule version, row-set digest) and one code string per row; a row with
-    vendor views also carries one code string per vendor over VENDOR_FIELDS."""
-    vendor = vendor or {}
-    out_rows = []
-    for row in sorted(rows, key=lambda r: (r["id"], r["observation"])):
-        key = (row["id"], row["observation"])
-        item = {"id": row["id"], "observation": row["observation"], "codes": codes[key]}
-        if vendor.get(key):
-            item["vendor_codes"] = vendor[key]
-        out_rows.append(item)
-    return {"schema": VERDICT_SCHEMA, "rule_version": RULE_VERSION, "facts_sha256": facts_digest,
-            "row_set_sha256": row_set_digest(rows), "fields": list(FIELDS), "vendor_fields": list(VENDOR_FIELDS),
-            "rows": out_rows}
+def identity(f, fid):
+    return rid(f["space"], f["address"], f["length"], f.get("view", "0")), fid
 
 
-def denominators(document_: dict, codes: dict, kinds=("direct", "conditional", "indirect", "trap", "unknown")) -> dict:
-    """G2a report: per field over transfer rows, N_considered = N_applicable + N_not_applicable +
-    N_applicability_unknown, N_applicable = confirmed + contradicted + unobserved_applicable."""
-    out = {name: {"confirmed": 0, "contradicted": 0, "unobserved_applicable": 0, "not_applicable": 0,
-                  "applicability_unknown": 0} for name in FIELDS}
-    names = {"c": "confirmed", "x": "contradicted", "u": "unobserved_applicable", "n": "not_applicable",
-             "?": "applicability_unknown"}
-    for row in document_["rows"]:
-        if row["transfer"]["kind"] not in kinds:
-            continue
-        for name, code in zip(FIELDS, codes[(row["id"], row["observation"])]):
-            out[name][names[code]] += 1
-    for item in out.values():
-        item["N_applicable"] = item["confirmed"] + item["contradicted"] + item["unobserved_applicable"]
-        item["N_considered"] = item["N_applicable"] + item["not_applicable"] + item["applicability_unknown"]
-    return out
+def rr(r):
+    return r["id"], r["observation"]
 
 
-# -- parity with the engine's call relations (G2a) -----------------------------------------------------------
+def ref(r):
+    return {"id": r["id"], "observation": r["observation"]}
 
-def projection(row: dict, facts: dict, stack_register) -> tuple:
-    """(relation fields or None, failed check) of a derived row's link claim, with the s3.8 push checks the
-    engine applies (call_relations.py:61-108, observed_call_state.py:169-260) mirrored on the plain facts."""
-    link = row["transfer"]["link_write"]
-    if link is None or "memory" not in link["location"]:
-        return None, None
-    ops = facts["ops"]
-    if facts["fallthrough"] is None:
-        return None, "no-fallthrough"
-    if stack_register is None:
-        return None, "no-stack-register"
-    calls = [i for i, op in enumerate(ops) if op["opcode"] in ("CALL", "CALLIND")]
+
+def opref(ops, i):
+    return {"ordinal": i, "opcode": ops[i]["opcode"]}
+
+
+def opkey(f, i):
+    return f"{f['space']:x}:{f['address']:x}:{i}:{f['ops'][i]['opcode']}"
+
+
+def triple(e):
+    return tuple(e[k] for k in EC)
+
+
+def row_set_digest(rows):
+    return digest([[r[k] for k in ("space", "offset", "length", "view", "observation")]
+                   for r in sorted(rows, key=rr)])
+
+
+def document(bundle, producer, program, rows):
+    ordered = sorted(rows, key=rr)
+    if len({rr(r) for r in ordered}) != len(ordered):
+        raise ValueError("duplicate row reference")
+    for r in ordered:
+        for v in [r["transfer"], *(r.get("vendor_views") or {}).values()]:
+            if isinstance(v.get("edges"), list):
+                v["edges"].sort(key=lambda e: tuple(order.index(x) for order, x in zip(ORDERS, triple(e))))
+    return dict(schema=SCHEMA, source="derived", bundle=bundle, producer=producer,
+                program=program, rows=ordered)
+
+
+def schema(form):
+    flow, indirect = form
+    if flow == "none":
+        return "none", [SEQ]
+    if flow == "jcc":
+        return "conditional", [TAKEN, NEXT]
+    if flow == "xbegin":
+        return "conditional", [NORMAL, OUTER, NESTED]
+    if flow in ("call_near", "jmp_near"):
+        return ("indirect", [IND]) if indirect else ("direct", [DIRECT])
+    if flow in ("ret_near", "iret", "ret_far"):
+        return "indirect", [IND]
+    if flow in ("ud2", "invalid"):
+        return "trap", [OS]
+    if flow in ("int_n", "int3", "int1", "syscall", "sysenter", "hlt"):
+        return "trap", [OS, SAVED]
+    return "unknown", []
+
+
+def overlap(v, w):
+    return v["offset"] < w["offset"] + w["size"] and w["offset"] < v["offset"] + v["size"]
+
+
+def same_reg(v, r):
+    return r is not None and v is not None and v["kind"] == "REGISTER" and coord(v) == coord(r)
+
+
+def const(v):
+    return v is not None and v["kind"] == "CONSTANT"
+
+
+def push_gate(f, sp):
+    """Mirror observed_call_state first, then apply call_relations' validated-SP check."""
+    ops = f["ops"]
+    calls = [i for i, o in enumerate(ops) if o["opcode"] in CALLS]
     if len(calls) != 1:
-        return None, "not-exactly-one-call"
+        return None, "call-count"
     call = calls[0]
-    if any(op["opcode"] in ("BRANCH", "CBRANCH", "BRANCHIND", "RETURN") for op in ops[:call]):
-        return None, "transfer-before-call"
-    subs = [i for i in range(call) if ops[i]["opcode"] == "INT_SUB" and ops[i]["output"] is not None
-            and ops[i]["output"]["kind"] == "REGISTER" and ops[i]["inputs"][0] == ops[i]["output"]
-            and ops[i]["inputs"][1]["kind"] == "CONSTANT"
-            and ops[i]["inputs"][1]["offset"] == ops[i]["output"]["size"]]
-    if len(subs) != 1:
-        return None, "not-exactly-one-adjustment"
-    sub = subs[0]
-    between = ops[sub + 1:call]
-    if len(between) != 1 or between[0]["opcode"] != "STORE":
-        return None, "ops-between-adjust-and-call"
-    sp = ops[sub]["output"]
-    if (sp["space"], sp["offset"], sp["size"]) != (stack_register.space_id, stack_register.byte_offset,
-                                                  stack_register.byte_size):
-        return None, "adjustment-not-the-stack-register"
-    for index, op in enumerate(ops):
-        if index != sub and op["output"] is not None and op["output"]["space"] == sp["space"] \
-                and op["output"]["offset"] < sp["offset"] + sp["size"] and sp["offset"] < op["output"]["offset"] + op["output"]["size"]:
-            return None, "another-stack-register-write"
-    store = between[0]
-    value = store["inputs"][2]
-    if value["kind"] != "CONSTANT" or value["offset"] != facts["fallthrough"] % (1 << (value["size"] * 8)) \
-            or store["inputs"][1] != sp:
-        return None, "store-shape"
-    address = facts["address"]
-    key = lambda i: f"{facts['space']:x}:{address:x}:{i}:{ops[i]['opcode']}"   # noqa: E731
-    return {"call_key": key(call), "kind": "push", "delta": link["sp_delta"],
-            "continuation": (facts.get("fallthrough_space", facts["space"]), facts["fallthrough"]),
-            "relocation": "instruction-relative", "length": facts["fallthrough"] - address,
-            "entry_ordinal": call, "setup_ops": tuple(key(i) for i in range(call)),
-            "transient_ops": (key(sub), key(call - 1)),
-            "link": (facts.get("fallthrough_space", facts["space"]), value["size"])}, None   # LinkSlot(fallthrough space)
+    swi = any(o["opcode"] == "CALLOTHER" and o["inputs"] and const(o["inputs"][0])
+              and o["inputs"][0]["offset"] == 16 for o in ops[:call])
+    prefix = "swi+CALLIND: " if swi and ops[call]["opcode"] == "CALLIND" else ""
+    if not f["flow"]["is_call"]:
+        return None, prefix + "not-call-flow"
+    if f["fallthrough"] is None:
+        return None, prefix + "no-fallthrough"
+    if any(o["opcode"] in BRANCHES for o in ops[:call]):
+        return None, "branch-before-call"
 
-
-def engine_fields(relation) -> dict:
-    link = relation.link
-    link_tuple = (link.space_id, link.size) if hasattr(link, "size") else (link.space_id, link.byte_offset,
-                                                                            link.byte_size)
-    return {"call_key": relation.call_key, "kind": relation.kind, "delta": relation.delta,
-            "continuation": (relation.continuation.space_id, relation.continuation.byte_offset),
-            "relocation": relation.relocation, "length": relation.length, "entry_ordinal": relation.entry_ordinal,
-            "setup_ops": tuple(relation.setup_ops), "transient_ops": tuple(relation.transient_ops),
-            "link": link_tuple}
-
-
-def parity(function: dict, derived: dict, stack_register) -> dict:
-    """{missing: [(row, reason)], extra: [call_key], differs: [(call_key, field)]} for one function.
-    ``derived`` = {(space, address): derived row}; ``function["engine_relations"]`` = {call_key: fields}."""
-    engine = function.get("engine_relations") or {}
-    projected = {}
-    missing, extra, differs = [], [], []
-    for facts in function["rows"]:
-        row = derived[(facts["space"], facts["address"])]
-        fields, reason = projection(row, facts, stack_register)
-        if fields is not None:
-            projected[fields["call_key"]] = fields
-        elif reason is not None:
-            missing.append((row["id"], reason))
-    for key, fields in projected.items():
-        other = engine.get(key)
-        if other is None:
-            missing.append((key, "engine-has-no-relation"))
+    accepted = []
+    reason = prefix + "no-stack-adjustment"
+    for i, o in enumerate(ops[:call]):
+        r, a = o["output"], o["inputs"]
+        if o["opcode"] != "INT_SUB" or not r or r["kind"] != "REGISTER" or len(a) != 2 or a[0] != r:
             continue
-        for name, value in fields.items():
-            if other.get(name) != value:
-                differs.append((key, name))
-    for key in engine:
-        if key not in projected and engine[key]["kind"] == "push":
-            extra.append(key)
-    return {"missing": missing, "extra": extra, "differs": differs}
+        if not const(a[1]) or a[1]["offset"] != r["size"]:
+            reason = "adjustment-width"
+            continue
+        stores = []
+        reason = "no-matching-store"
+        for j in range(i + 1, call):
+            s = ops[j]["inputs"]
+            if ops[j]["opcode"] != "STORE" or len(s) != 3:
+                continue
+            if not const(s[0]) or s[0]["offset"] != f["space"] or s[1] != r:
+                reason = "store-space-or-base"
+                continue
+            if const(s[2]) and s[2]["size"] == r["size"] and s[2]["offset"] == f["fallthrough"]:
+                stores.append(j)
+            else:
+                reason = "stored-width-or-fallthrough"
+        if len(stores) != 1:
+            if len(stores) > 1:
+                reason = "multiple-matching-stores"
+            continue
+        if call != i + 2:
+            return None, "intervening-operation"
+        # _writes_register in the pinned engine compares REGISTER byte slices.
+        if any(k != i and w and w["kind"] == "REGISTER" and overlap(w, r)
+               for k, w in enumerate(op["output"] for op in ops)):
+            return None, "overlapping-adjustment-write"
+        accepted.append(i)
+
+    if len(accepted) != 1:
+        return None, reason if not accepted else "multiple-accepted-adjustments"
+    i = accepted[0]
+    if sp is None:
+        return None, "no-stack-register"
+    if not same_reg(ops[i]["output"], sp):
+        return None, "adjustment-not-stack-register"
+    return (i, i + 1, call), None
+
+
+def arm_shape(f, regs):
+    ops = f["ops"]
+    sp, lr, pc = (regs.get(k) for k in ("sp", "lr", "pc"))
+    if not all((sp, lr, pc)) or len(ops) not in (2, 3) or not f["flow"]["is_call"]:
+        return None
+    write, call = ops[-2:]
+    if not same_reg(write["output"], lr) or call["opcode"] not in CALLS:
+        return None
+    a = write["inputs"]
+    if not all(map(const, a)):
+        return None
+    if write["opcode"] == "INT_ADD" and len(a) == 2:
+        bits = a[0]["offset"] + a[1]["offset"]
+        relative = a[0]["offset"] == f["address"]
+        if relative and a[1]["offset"] != 4:
+            return None
+    elif write["opcode"] == "COPY" and len(a) == 1:
+        bits, relative = a[0]["offset"], False
+    else:
+        return None
+    if call["opcode"] == "CALLIND":
+        c = ops[0]
+        if len(ops) != 3 or c["opcode"] != "COPY" or not same_reg(c["output"], pc) or len(c["inputs"]) != 1:
+            return None
+        t = c["inputs"][0]
+        if call["inputs"] != [c["output"]] or t["kind"] != "REGISTER" or t["size"] != pc["size"]:
+            return None
+        if any(t["space"] == r["space"] and overlap(t, r) for r in (sp, pc)):
+            return None
+    elif len(ops) != 2:
+        return None
+    return bits % (1 << (8 * lr["size"])), relative
+
+
+def nodes(x):
+    if isinstance(x, dict):
+        yield x
+        for v in x.values():
+            yield from nodes(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from nodes(v)
+
+
+def value(f, operand, use, *, segment=None, call_cut=None):
+    """Return a pre-state expression and its checked reaching definitions."""
+    ops, seen = f["ops"], set()
+
+    def fail(reason):
+        raise ValueError(reason)
+
+    def memory(space, address, size, i):
+        for prior in ops[:i]:
+            a, out = prior["inputs"], prior["output"]
+            if prior["opcode"] == "STORE" and (not a or not const(a[0]) or a[0]["offset"] == space):
+                fail("earlier STORE may alias")
+            if out and out["kind"] == "ADDRESS" and out["space"] == space:
+                fail("earlier memory output may alias")
+        base = None
+        if f.get("isa", "x86-64") == "x86-64":
+            leaves = [x for x in nodes(address)
+                      if x.get("pre_register", {}).get("offset") in (0x110, 0x118)
+                      and x["pre_register"]["size"] == 8]
+            if leaves:
+                if len(leaves) != 1 or leaves[0] not in address.get("add", ()):
+                    fail("segment base cannot be separated")
+                base = leaves[0]
+                if segment is not None and base["pre_register"]["offset"] != segment:
+                    fail("segment override differs from lift")
+                address = next(x for x in address["add"] if x != base)
+            elif segment is not None:
+                fail("segment base not identified")
+        if address.get("width") == 32:
+            address = {"zext": address, "width": 64}
+        if address.get("width") != 64:
+            fail("unresolved effective address width")
+        return {"memory": dict(space=space, address=address, size=size, segment_base=base)}
+
+    def read(v, limit, depth):
+        if not v or depth > 40 or v["size"] <= 0:
+            fail("missing or excessively deep operand")
+        w = v["size"] * 8
+        if const(v):
+            return {"constant": format(v["offset"] % (1 << w), "x"), "width": w}
+        if v["kind"] == "ADDRESS":
+            return memory(v["space"], {"constant": format(v["offset"], "x"), "width": 64}, v["size"], limit)
+        if v["kind"] not in ("REGISTER", "UNIQUE"):
+            fail("unsupported value space")
+        for i in range(limit - 1, -1, -1):
+            o = ops[i]
+            out = o["output"]
+            if not out or out["space"] != v["space"] or not overlap(v, out):
+                continue
+            if out != v:
+                fail("partial or ambiguous reaching definition")
+            if call_cut is not None and i >= call_cut:
+                fail("operand depends on the call setup")
+            seen.add(i)
+            name, a = o["opcode"], o["inputs"]
+            if name == "LOAD" and len(a) == 2 and const(a[0]) and a[0]["offset"] == f["space"]:
+                return memory(a[0]["offset"], read(a[1], i, depth + 1), v["size"], i)
+            arithmetic = {"INT_ADD": "add", "INT_SUB": "sub", "INT_MULT": "mul"}
+            comparisons = {"INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_SLESS"}
+            boolean = {"BOOL_AND", "BOOL_OR", "BOOL_XOR"}
+            bitwise = {"INT_AND", "INT_OR", "INT_XOR"}
+            if name not in (set(arithmetic) | comparisons | boolean | bitwise |
+                            {"COPY", "INT_ZEXT", "INT_SEXT", "SUBPIECE", "BOOL_NEGATE"}):
+                fail("unsupported defining opcode " + name)
+            args = [read(t, i, depth + 1) for t in a]
+            sizes = [t["size"] * 8 for t in a]
+            if name == "COPY" and sizes == [w]:
+                return args[0]
+            if name in arithmetic and sizes == [w, w]:
+                return {arithmetic[name]: args, "width": w}
+            if name in ("INT_ZEXT", "INT_SEXT") and len(a) == 1 and sizes[0] < w:
+                return {"zext" if name == "INT_ZEXT" else "sext": args[0], "width": w}
+            if name == "SUBPIECE" and len(a) == 2 and const(a[1]) and a[1]["offset"] == 0 and sizes[0] > w:
+                return {"trunc": args[0], "width": w}
+            if ((name in comparisons and w == 8 and len(a) == 2 and sizes[0] == sizes[1])
+                    or (name in boolean and sizes == [8, 8] and w == 8)
+                    or (name == "BOOL_NEGATE" and sizes == [8] and w == 8)
+                    or (name in bitwise and sizes == [w, w])):
+                return {"op_output": opref(ops, i)}
+            fail("ill-typed defining opcode " + name)
+        if v["kind"] == "REGISTER":
+            return {"pre_register": reg(v), "width": w}
+        fail("undefined unique")
+
+    try:
+        if any(o["opcode"] in lifting.FLOW_OPS for o in ops[:use]):
+            fail("non-linear path or opaque userop")
+        return read(operand, use, 0), sorted(seen)
+    except ValueError as error:
+        return U(str(error)), []
+
+
+CC = "o no b ae e ne be a s ns p np l ge le g".split()
+ALIASES = {"z": "e", "nz": "ne", "c": "b", "nae": "b", "nb": "ae", "nc": "ae",
+           "na": "be", "nbe": "a", "pe": "p", "po": "np", "nge": "l", "nl": "ge",
+           "ng": "le", "nle": "g"}
+PATTERN = {"plain": "none", "rep": "none", "internal": "none", "cmov": "none", "jcc": "jcc",
+           "jmp": "jmp_near", "jmp indirect": "jmp_near", "call": "call_near",
+           "call indirect": "call_near", "call $+5": "call_near", "ret": "ret_near",
+           "interrupt": "int_n", "interrupt-return": "int_n", "syscall": "syscall"}
+
+
+def producer_form(f, lift, data):
+    if lift is None:
+        return "unknown", False
+    p, ops = lift.pattern, f["ops"]
+    b = data[len(compare._prefix_run(data)):]
+    if p == "transactional" and ops[0]["inputs"][0]["offset"] == 85:
+        return "xbegin", False
+    if p == "userop" and len(ops) == 1 and ops[0]["inputs"] and const(ops[0]["inputs"][0]):
+        if ops[0]["inputs"][0]["offset"] == 3:
+            return "sysenter", False
+    if p == "fault":
+        if b.startswith(b"\x0f\x0b"):
+            return "ud2", False
+        return ("invalid" if b[:1] == b"\xce" else "unknown"), False
+    if b[:1] in (b"\xcb", b"\xca", b"\xcf") and ops and ops[-1]["opcode"] == "RETURN":
+        return ("iret" if b[0] == 0xcf else "ret_far"), True
+    if b[:1] == b"\xff" and len(b) >= 2 and ((b[1] >> 3) & 7) in (3, 5):
+        return "far", False
+    return PATTERN.get(p, "unknown"), p in ("jmp indirect", "call indirect", "ret")
+
+
+def cc_bytes(b):
+    if b and 0x70 <= b[0] <= 0x7f:
+        return CC[b[0] & 15]
+    if len(b) > 1 and b[0] == 15 and 0x80 <= b[1] <= 0x8f:
+        return CC[b[1] & 15]
+    return None
+
+
+def predicate(f, i, b, prefix):
+    a = f["ops"][i]["inputs"]
+    v, used = value(f, a[1] if len(a) == 2 else None, i)
+    cc = cc_bytes(b)
+    if cc is not None:
+        positive = {"e": 0x206, "b": 0x200, "s": 0x207, "p": 0x202, "o": 0x20b}
+        leaf = v.get("pre_register", {})
+        proven = cc in positive and leaf.get("offset") == positive[cc] and v.get("width") == 8
+        return {"flags": cc, "inputs": [v] if proven else U("incoming flag identities")}, used
+    if b[:1] in (b"\xe2", b"\xe3") and "op_output" in v:
+        j = v["op_output"]["ordinal"]
+        o = f["ops"][j]
+        w = 32 if 0x67 in prefix else 64
+        if o["opcode"] == ("INT_EQUAL" if b[0] == 0xe3 else "INT_NOTEQUAL") and len(o["inputs"]) == 2:
+            t, zero = o["inputs"]
+            expr, _ = value(f, t, j)
+            original = expr if b[0] == 0xe3 else (expr.get("sub") or [{}])[0]
+            if (const(zero) and zero["offset"] == 0 and expr.get("width") == w
+                    and original.get("pre_register", {}).get("offset") == lifting.RCX
+                    and (b[0] == 0xe3 or expr["sub"][1] == {"constant": "1", "width": w})):
+                return {"zero" if b[0] == 0xe3 else "nonzero": expr}, used
+    # In particular, a counter-only LOOPZ/LOOPNZ lift cannot establish the conjunction.
+    return U("whole encoded predicate not established"), used
+
+
+def next_addr(f, length):
+    if type(length) is int:
+        return addr(f["space"], (f["address"] + length) % (1 << 64))
+    return U("length unavailable")
+
+
+def interval(f, length):
+    if type(length) is int:
+        return [format(f["address"], "x"), format(f["address"] + length, "x")]
+    return U("length unavailable")
+
+
+def make_push(f, base, space, width, bits, delta, length):
+    return {"location": {"memory": {"space": space, "base": base, "relative_to": "pre_sp", "slot_offset": delta}},
+            "value": {"width": width, "bits": bits}, "sp_delta": delta, "continuation": next_addr(f, length),
+            "relocation": "instruction_relative", "derivation": "isa_next_ip"}
+
+
+def make_edges(form, f, length, target):
+    seq = next_addr(f, length)
+    dest = {"encoded_target": target, "sequential": seq, "os": None, "computed": None,
+            "os_return": None if form[0] in ("sysenter", "hlt") else seq}
+    return [dict(zip(EC, k), to=dest[k[1]]) for k in schema(form)[1]]
+
+
+def derive_row(f, lift, fid, regs, data=b"", split=False):
+    ops, n = f["ops"], f["length"]
+    arm = f.get("isa") == "aarch64"
+    shape = arm_shape(f, regs) if arm else None
+    form = producer_form(f, lift, data) if not arm else ("unknown", False)
+    if shape is not None:
+        form = "call_near", ops[-1]["opcode"] == "CALLIND"
+    flow, _ = form
+    kind, _ = schema(form)
+    skipped = lift.skipped if lift else ()
+    flows = [i for i, o in enumerate(ops) if o["opcode"] in lifting.FLOW_OPS and i not in skipped]
+    i = flows[-1] if flows and kind not in ("unknown", "none") else None
+    if kind == "trap" or flow == "xbegin":
+        i = next((j for j, o in enumerate(ops) if o["opcode"] == "CALLOTHER"), i)
+    keys = {k: [] for k in ("condition", "target", "auth", "link", "sp_adjust", "setup",
+                            "transient", "persistent", "encoding_only")}
+    keys.update(transfer=opref(ops, i) if i is not None else None, entry_ordinal=i)
+    keys["setup"] = [opref(ops, j) for j in range(i or 0)]
+    dest = U("encoded destination unavailable")
+    operand = ops[i]["inputs"][0] if i is not None and ops[i]["inputs"] else None
+    if operand and operand["kind"] == "ADDRESS":
+        dest = addr(operand["space"], operand["offset"])
+    prefix = compare._prefix_run(data)
+    b = data[len(prefix):]
+    if flow == "xbegin" and b.startswith(b"\xc7\xf8"):
+        size = 2 if 0x66 in prefix else 4
+        if n == len(prefix) + 2 + size and len(b) >= 2 + size:
+            disp = int.from_bytes(b[2:2 + size], "little", signed=True)
+            dest = addr(f["space"], (f["address"] + n + disp) % (1 << 64))
+    target = condition = link = None
+    if kind == "indirect":
+        seg = next(({0x64: 0x110, 0x65: 0x118}.get(x) for x in reversed(prefix)
+                    if x in (0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65)), None)
+        target, used = value(f, operand, i, segment=seg,
+                             call_cut=i - 2 if flow == "call_near" and not arm else None)
+        keys["target"] = [opref(ops, j) for j in used]
+    if flow == "jcc":
+        test, used = predicate(f, i, b, prefix)
+        condition = {"taken_when": "true", "test": test}
+        keys["condition"] = [opref(ops, j) for j in used]
+    if shape is not None:
+        bits, relative = shape
+        lr = regs["lr"]
+        link = {"location": {"register": lr}, "sp_delta": 0,
+                "value": {"width": 8 * lr["size"], "bits": format(bits, "x")},
+                "continuation": next_addr(f, 4), "relocation": "instruction_relative" if relative else "unknown",
+                "derivation": "pc_plus_4" if relative else "constant"}
+        keys["link"] = [opref(ops, i - 1)]
+        keys["persistent"] = keys["link"][:]
+    elif flow == "call_near":
+        sub_op, store = ops[i - 2:i]
+        sel, _, v = store["inputs"]
+        base = regs.get("sp") if same_reg(sub_op["output"], regs.get("sp")) else reg(sub_op["output"])
+        link = make_push(f, base, sel["offset"], 8 * v["size"], format(v["offset"], "x") if const(v)
+                         else U("stored operand"), -sub_op["inputs"][1]["offset"], n)
+        keys["link"], keys["sp_adjust"] = [opref(ops, i - 1)], [opref(ops, i - 2)]
+        gate, _ = push_gate(f, regs.get("sp"))
+        if gate is not None:
+            keys["transient"] = [opref(ops, j) for j in gate[:2]]
+        else:
+            keys["persistent"] = keys["sp_adjust"] + keys["link"]
+    t = dict(kind=kind, edges=make_edges(form, f, n, dest), condition=condition, target_value=target,
+             target_auth=None, link_write=link, op_keys=keys, hint=None)
+    if i is not None:
+        t["hint"] = {"CALL": "call", "CALLIND": "call", "BRANCH": "jump", "CBRANCH": "jump",
+                     "BRANCHIND": "jump", "RETURN": "return"}.get(ops[i]["opcode"])
+    isa = []
+    if flow in ("invalid", "ud2"):
+        t["exception_basis"] = "invalid_encoding" if flow == "invalid" else "defined_ud"
+        if flow == "invalid":
+            isa.append(dict(kind="F1", value="invalid_encoding", conditions=[]))
+    if flow in ("int_n", "syscall"):
+        isa.append(dict(kind="F3", value="saved_next_pc",
+                        conditions=[dict(what="taken as encoded trap", source="os_model", state="unknown")]))
+    vendors = None
+    family = (0x66 in prefix and flow in ("call_near", "jmp_near", "ret_near", "jcc"))
+    if not arm and (split or family):
+        vendors = {}
+        for vendor in VENDORS:
+            if data.startswith(b"\x66\xe8") and form == ("call_near", False):
+                size = 4 if vendor == "intel" else 2
+                length, width = 2 + size, 64 if vendor == "intel" else 16
+                stored = (f["address"] + length) % (1 << width)
+                dst = U("displacement not covered")
+                if len(data) >= length:
+                    disp = int.from_bytes(data[2:length], "little", signed=True)
+                    dst = addr(f["space"], (f["address"] + length + disp) % (1 << width))
+                vl = make_push(f, base, f["space"], width, format(stored, "x"), -(width // 8), length)
+                vendors[vendor] = dict(length=length, bytes=interval(f, length),
+                                       edges=make_edges(form, f, length, dst), link_write=vl, target_value=None)
+            else:
+                u = U("vendor-specific constructor unavailable")
+                es = [dict(zip(EC, k), **u) for k in schema(form)[1]] if kind != "unknown" else u
+                vendors[vendor] = dict(length=u, bytes=u, edges=es, link_write=u, target_value=u)
+    return dict(id=identity(f, fid)[0], observation=fid, space=f["space"], offset=format(f["address"], "x"),
+                length=n, view=f.get("view", "0"), transfer=t, bytes=dict(range=interval(f, n), holds_if=PREMISE),
+                vendor_views=vendors, isa=isa)
+
+
+class Index:
+    """The raw Bundle supplies starts. Length evidence may differ per vendor."""
+    def __init__(self, entries, complete):
+        self.complete = complete
+        self.starts = defaultdict(list)
+        self.width = defaultdict(int)
+        self.unknown_start = {}
+        for space, start, length, key in entries:
+            self.starts[space].append((start, key, length))
+            if type(length) is int:
+                self.width[space] = max(self.width[space], length)
+            else:
+                self.unknown_start[space] = min(start, self.unknown_start.get(space, start))
+        for items in self.starts.values():
+            items.sort(key=lambda x: (x[0], x[1]))
+
+    def landing(self, to):
+        if unknown(to):
+            return U("unknown destination")
+        if to is None:
+            return {"class": "unresolved"}
+        s, x = to["space"], int(to["offset"], 16)
+        items = self.starts.get(s, [])
+        lo = bisect_left(items, (x - self.width[s],))
+        hi = bisect_left(items, (x + 1,))
+        starts, inside = [], []
+        for y, key, n in items[lo:hi]:
+            if y == x:
+                starts.append(key)
+            elif type(n) is int and y < x < y + n:
+                inside.append(key)
+
+        def refs(keys):
+            return [dict(id=i, observation=o) for i, o in sorted(keys)]
+
+        ins_complete = self.complete and self.unknown_start.get(s, x) >= x
+        return {"starts": refs(starts) if self.complete else U("incomplete row set"),
+                "inside": refs(inside) if ins_complete else U("incomplete intervals"),
+                "mapping": U("mapping not compared"), "import": U("import role not compared"),
+                "class": "row_start" if starts else "mid_row" if self.complete and inside else "unclassified"}
+
+
+def member(r, vendor):
+    if vendor and r["vendor_views"]:
+        return r["vendor_views"][vendor]
+    return dict(r["transfer"], length=r["length"], bytes=r["bytes"]["range"])
+
+
+def finish_landings(rows, complete):
+    for vendor in (None, *VENDORS):
+        idx = Index(((r["space"], int(r["offset"], 16), member(r, vendor)["length"], rr(r))
+                     for r in rows), complete)
+        for r in rows:
+            if vendor and not r["vendor_views"]:
+                continue
+            edges = member(r, vendor)["edges"]
+            if isinstance(edges, list):
+                for e in edges:
+                    if not unknown(e):
+                        e["lands_on"] = idx.landing(e["to"])
+
+
+def common(values):
+    a = list(values)
+    return a[0] if a and all(x == a[0] for x in a) else MISS
+
+
+def votes(ballot, result, vendor=None):
+    if not ballot or not result or not result.get("attributes"):
+        return []
+    out = []
+    for v in (VENDORS if vendor is None else (vendor,)):
+        vs = ballot.get(v, ())
+        names = decoders.INTEL_VOTERS if v == "intel" else decoders.AMD_VOTERS
+        if Counter(d.voter for d in vs) != Counter(names) or any(d.amd != (v == "amd") for d in vs):
+            return []
+        out.extend(vs)
+    w = result["window"]
+    for d in out:
+        if d.status not in ("ok", "invalid") or (d.status == "ok" and not 0 < d.length <= w["verified"]):
+            return []
+        for start, size, kind in w["relocations"]:
+            if d.status == "invalid" or (start < d.length and start + size > 0 and
+                    (kind != "DIR64" or not any(a <= start and start + size <= a + n for a, n in d.value_fields))):
+                return []
+    return out
+
+
+def vote_form(vs, isa):
+    if vs and all(v.status == "invalid" for v in vs):
+        if (isa.get("facts", {}).get("F1", {}).get("class") == "invalid_encoding"
+                and "F1" not in isa.get("unobserved", {})):
+            return "invalid", False
+        return MISS
+    if any(v.status != "ok" for v in vs):
+        return MISS
+
+    def form(v):
+        if v.flow == "ud":
+            return ("ud2", False) if v.mnemonic.lower() == "ud2" else MISS
+        if v.flow not in ("none", "call_near", "jmp_near", "ret_near", "jcc", "xbegin", "int_n",
+                          "int3", "int1", "syscall", "sysenter", "hlt", "iret", "ret_far", "call_far", "jmp_far"):
+            return MISS
+        return v.flow, bool(v.indirect) if v.flow in ("jmp_near", "call_near") else False
+
+    return common(map(form, vs))
+
+
+def mnemonic(d):
+    m = d.mnemonic.lower()
+    if m.startswith("j") and not m.endswith("cxz"):
+        return ALIASES.get(m[1:], m[1:])
+    return {"loopz": "loope", "loopnz": "loopne"}.get(m, m)
+
+
+def code(actual, want):
+    if actual is MISS or unknown(actual) or want is MISS:
+        return "u"
+    return "c" if type(actual) is type(want) and actual == want else "x"
+
+
+def sub(d, *path):
+    for k in path:
+        d = d.get(k, MISS) if isinstance(d, dict) else MISS
+    return d
+
+
+def split_needed(ballot, result):
+    if any(x.get("kind") == "vendor" for x in (result or {}).get("attributes", {}).values()):
+        return True
+
+    def signature(d):
+        return d.status, d.length, d.flow, d.indirect, d.operand_bits, d.target_ip_bits, d.encoded_disp_bits
+
+    a, b = (common(signature(d) for d in votes(ballot, result, v)) for v in VENDORS)
+    return a is not MISS and b is not MISS and a != b
+
+
+def independent_length(vs):
+    n = common(d.length if d.status == "ok" else MISS for d in vs)
+    return n if type(n) is int else MISS
+
+
+def unit(path, state, edge=None, op=None):
+    item = {"path": path, "code": state}
+    if edge is not None:
+        item["edge"] = dict(zip(EC, edge))
+    if op is not None:
+        item["op"] = op
+    return item
+
+
+def row_verdicts(r, vs, index, isa, vendor=None):
+    t, m = r["transfer"], member(r, vendor)
+    f = dict(space=r["space"], address=int(r["offset"], 16))
+    prefix = f"vendor_views.{vendor}." if vendor else ""
+    stem = "" if vendor else "transfer."
+    units = []
+
+    def add(path, state, edge=None, op=None):
+        units.append(unit(prefix + path, state, edge, op))
+
+    def cmp(path, actual, want, edge=None):
+        state = code(actual, want)
+        add(path, state, edge)
+        return state
+
+    def excluded(path, x):
+        add(path, "n" if x is None or x is MISS or unknown(x) else "x")
+
+    form = vote_form(vs, isa)
+    path = "bytes" if vendor else "bytes.range"
+    if form is MISS:
+        for p in ("length", path, stem + "edges", stem + "link_write", stem + "target_value"):
+            add(p, "?")
+        if not vendor:
+            for p in ("kind", "exception_basis", "condition", "target_auth", "op_keys"):
+                add(stem + p, "?")
+        return units
+    length = independent_length(vs)
+    cmp("length", m.get("length") if m.get("length") is not None else MISS, length)
+    cmp(path, m.get("bytes", MISS), interval(f, length) if length is not MISS else MISS)
+    flow = form[0]
+    kind, keys = schema(form)
+    if not vendor:
+        cmp("transfer.kind", t.get("kind", MISS), kind)
+        basis = {"ud2": "defined_ud", "invalid": "invalid_encoding"}.get(flow)
+        if basis:
+            cmp("transfer.exception_basis", t.get("exception_basis", MISS), basis)
+        else:
+            excluded("transfer.exception_basis", t.get("exception_basis"))
+
+    edges = m.get("edges", MISS)
+    path = stem + "edges"
+    groups = defaultdict(list)
+    if isinstance(edges, list):
+        for e in edges:
+            groups[triple(e)].append(e)
+    if not keys and not groups:
+        cmp(path, edges, [])
+    for k in dict.fromkeys([*keys, *groups]):
+        group = groups[k]
+        if k not in keys or len(group) != 1:
+            add(path, "u" if unknown(edges) else "x", k)
+            continue
+        e = group[0]
+        if unknown(e):
+            add(path, "u" if set(e) == set(EC) | {"unobserved"} else "x", k)
+            continue
+        add(path, "c", k)
+        expected = MISS
+        source = k[1]
+        if source in ("computed", "os") or source == "os_return" and flow == "sysenter":
+            expected = None
+        elif source == "sequential" and length is not MISS:
+            expected = next_addr(f, length)
+        elif source == "encoded_target":
+            dest = common(compare.voter_values(v, f["address"]).get("a5") if v.target_derivation == "decoder"
+                          else MISS for v in vs)
+            if type(dest) is int:
+                expected = addr(f["space"], dest)
+        elif source == "os_return" and length is not MISS and flow in ("int_n", "int3", "int1", "syscall"):
+            f3 = isa.get("facts", {}).get("F3", {})
+            if "F3" not in isa.get("unobserved", {}) and f3.get("flow") == flow:
+                expected = next_addr(f, length)
+        to = e.get("to", MISS)
+        if flow == "hlt" and k == SAVED:
+            state = "u" if to is None or to is MISS or unknown(to) else "x"
+            add(path + ".to", state, k)
+        else:
+            state = cmp(path + ".to", to, expected, k)
+        land = e.get("lands_on", {})
+        observed = index.landing(expected) if state == "c" else {}
+        cls = observed.get("class", MISS)
+        cmp(path + ".lands_on.class", sub(land, "class"), MISS if cls == "unclassified" else cls, k)
+        if expected is not None:
+            for field in ("starts", "inside", "mapping", "import"):
+                want = observed.get(field, MISS)
+                cmp(path + ".lands_on." + field, sub(land, field), MISS if unknown(want) else want, k)
+
+    if not vendor:
+        condition = t.get("condition", MISS)
+        cp = "transfer.condition"
+        if flow != "jcc":
+            excluded(cp, condition)
+        elif not isinstance(condition, dict) or unknown(condition):
+            add(cp, "u" if condition is MISS or unknown(condition) else "x")
+        else:
+            add(cp, "c")
+            cmp(cp + ".taken_when", sub(condition, "taken_when"), "true")
+            test = sub(condition, "test")
+            name = common(mnemonic(v) for v in vs)
+            if name in CC:
+                actual = test if not isinstance(test, dict) or unknown(test) else test.get("flags", False)
+                cmp(cp + ".test", actual, name)
+                add(cp + ".test.inputs", "u")
+            elif name in ("jrcxz", "jecxz", "loop"):
+                width = common(v.address_bits for v in vs)
+                key = "nonzero" if name == "loop" else "zero"
+                val = sub(test, key)
+                if val is MISS and isinstance(test, dict) and not unknown(test):
+                    add(cp + ".test", "x")
+                elif width not in (32, 64) or val is MISS or unknown(val):
+                    add(cp + ".test", "u")
+                else:
+                    original = val
+                    if key == "nonzero":
+                        pair = val.get("sub", []) if isinstance(val, dict) else []
+                        original = pair[0] if len(pair) == 2 and pair[1] == {"constant": "1", "width": width} else {}
+                    ok = (sub(original, "pre_register", "offset") == lifting.RCX
+                          and sub(original, "width") == width and sub(val, "width") == width)
+                    # Decoder evidence supplies predicate shape and width. Coordinate identity is separate.
+                    add(cp + ".test", "c" if ok else "x")
+                    add(cp + ".test.inputs", "u")
+            elif name in ("loope", "loopne") and isinstance(test, dict) and not unknown(test):
+                add(cp + ".test", "u" if "op_output" in test else "x")
+            else:
+                add(cp + ".test", "u")
+        excluded("transfer.target_auth", t.get("target_auth"))
+        for name, refs in t["op_keys"].items():
+            p = "transfer.op_keys." + name
+            if name in ("encoding_only", "entry_ordinal"):
+                add(p, "u")
+            else:
+                for op in refs if isinstance(refs, list) else [refs] if refs else []:
+                    add(p, "u", op=op)
+
+    target = m.get("target_value", MISS)
+    if kind == "indirect":
+        add(stem + "target_value", "u")
+    else:
+        excluded(stem + "target_value", target)
+    link = m.get("link_write", MISS)
+    lp = stem + "link_write"
+    if flow != "call_near":
+        excluded(lp, link)
+    elif not isinstance(link, dict) or unknown(link):
+        add(lp, "x" if link is None else "u")
+    else:
+        a7 = [compare.voter_values(v, f["address"])["a7"] for v in vs]
+        width, bits = (common(tup[j] for tup in a7) for j in (0, 1))
+        size = common(compare.voter_values(v, f["address"])["a11b"] for v in vs)
+        cmp(lp + ".value.width", sub(link, "value", "width"),
+            width if size is not MISS and width == 8 * size else MISS)
+        cmp(lp + ".value.bits", sub(link, "value", "bits"),
+            format(bits, "x") if bits is not MISS and width is not MISS else MISS)
+        cmp(lp + ".continuation", sub(link, "continuation"), next_addr(f, length) if length is not MISS else MISS)
+        loc = sub(link, "location")
+        cmp(lp + ".location", set(loc) if isinstance(loc, dict) and not unknown(loc) else MISS, {"memory"})
+        cmp(lp + ".location.memory.relative_to", sub(loc, "memory", "relative_to"), "pre_sp")
+        delta = -size if type(size) is int else MISS
+        cmp(lp + ".location.memory.slot_offset", sub(loc, "memory", "slot_offset"), delta)
+        cmp(lp + ".sp_delta", sub(link, "sp_delta"), delta)
+        for field in ("location.memory.base", "location.memory.space", "relocation", "derivation"):
+            add(lp + "." + field, "u")
+    return units
+
+
+def row_state(units):
+    states = {u["code"] for u in units}
+    return "x" if "x" in states else "u" if states & {"?", "u"} or "c" not in states else "c"
+
+
+def verdict_block(doc, units):
+    return dict(schema=VERDICT_SCHEMA, rule_version=RULE_VERSION, facts_sha256=digest(doc),
+                row_set_sha256=row_set_digest(doc["rows"]),
+                rows=[dict(ref(r), units=units[rr(r)], state=row_state(units[rr(r)])) for r in doc["rows"]])
+
+
+def denominators(units):
+    counts = defaultdict(Counter)
+    for row in units.values():
+        for u in row:
+            counts[u["path"]][u["code"]] += 1
+    out = {}
+    for path, c in sorted(counts.items()):
+        n = c["c"] + c["u"] + c["x"]
+        out[path] = dict(confirmed=c["c"], contradicted=c["x"], unobserved_applicable=c["u"],
+                         unobserved=c["u"] + c["?"], N_applicable=n, N_not_applicable=c["n"],
+                         N_applicability_unknown=c["?"], N_considered=sum(c.values()))
+        if n:
+            out[path]["confirmed_rate"] = c["c"] / n
+    return out
+
+
+def resolve(op, r, f):
+    if not isinstance(op, dict) or op.get("row", ref(r)) != ref(r):
+        raise ValueError("wrong op row")
+    i = op.get("ordinal")
+    if type(i) is not int or not 0 <= i < len(f["ops"]) or op.get("opcode") != f["ops"][i]["opcode"]:
+        raise ValueError("wrong op ordinal or opcode")
+    return opkey(f, i)
+
+
+def engine_fields(rel):
+    return dict(call_key=rel.call_key, kind=rel.kind, sp=coord(register(rel.sp)),
+                link=(rel.link.space_id, rel.link.size) if rel.kind == "push" else coord(register(rel.link)),
+                delta=rel.delta, continuation=(rel.continuation.space_id, rel.continuation.byte_offset),
+                relocation=rel.relocation, length=rel.length, entry_ordinal=rel.entry_ordinal,
+                setup_ops=tuple(rel.setup_ops), transient_ops=tuple(rel.transient_ops))
+
+
+def projection(r, f, regs, vendor=None):
+    arm = f.get("isa") == "aarch64"
+    if arm:
+        shape = arm_shape(f, regs)
+        if shape is None or not f["flow"]["has_fallthrough"] or f["fallthrough"] is None:
+            return None, "register-link shape, registers or fallthrough"
+        if shape[0] != f["fallthrough"]:
+            return None, "link write differs from fallthrough"
+        gate = (len(f["ops"]) - 2, len(f["ops"]) - 1)
+    else:
+        gate, why = push_gate(f, regs.get("sp"))
+        if gate is None:
+            return None, why
+
+    m, keys = member(r, vendor), r["transfer"]["op_keys"]
+    try:
+        link = m["link_write"]
+        val, loc = link["value"], link["location"]
+        width, bits = val["width"], int(val["bits"], 16)
+        if type(width) is not int or width not in (16, 32, 64):
+            raise ValueError("stored width")
+        cont = link["continuation"]
+        at = cont["space"], int(cont["offset"], 16)
+        if bits != at[1] % (1 << width):
+            raise ValueError("stored bits differ from continuation")
+        if arm:
+            lr = loc["register"]
+            where, sp = coord(lr), coord(regs["sp"])
+            if bits != shape[0] or width != lr["size"] * 8 or where != coord(regs["lr"]):
+                raise ValueError("link register or value")
+            expected_derivation = "pc_plus_4" if shape[1] else "constant"
+            expected_link, expected_adjust = [gate[0]], []
+        else:
+            mem = loc["memory"]
+            sp = coord(mem["base"])
+            where = mem["space"], width // 8
+            if (mem["relative_to"] != "pre_sp" or mem["slot_offset"] != link["sp_delta"]
+                    or mem["slot_offset"] != -(width // 8)):
+                raise ValueError("inconsistent pre-SP slot")
+            store = f["ops"][gate[1]]["inputs"]
+            if width != 8 * store[2]["size"] or bits != store[2]["offset"] or mem["space"] != store[0]["offset"]:
+                raise ValueError("claim differs from observed STORE")
+            expected_derivation = "isa_next_ip"
+            expected_link, expected_adjust = [gate[1]], [gate[0]]
+        if link["derivation"] != expected_derivation:
+            raise ValueError("derivation")
+        for name, indices in (("link", expected_link), ("sp_adjust", expected_adjust)):
+            if [resolve(x, r, f) for x in keys[name]] != [opkey(f, j) for j in indices]:
+                raise ValueError("op_keys." + name)
+        reloc = {"unknown": "unknown", "instruction_relative": "instruction-relative"}[link["relocation"]]
+        return dict(call_key=resolve(keys["transfer"], r, f), kind="link" if arm else "push", sp=sp,
+                    link=where, delta=link["sp_delta"], continuation=at, relocation=reloc,
+                    length=at[1] - f["address"], entry_ordinal=keys["entry_ordinal"],
+                    setup_ops=tuple(resolve(x, r, f) for x in keys["setup"]),
+                    transient_ops=tuple(resolve(x, r, f) for x in keys["transient"])), None
+    except (KeyError, TypeError, ValueError, IndexError) as error:
+        return None, "claim: " + str(error)
+
+
+def parity(fn, rows, regs, vendor_lengths):
+    records, joined = [], set()
+    engine, fid = fn["engine_relations"], fn["function_id"]
+    for f in fn["rows"]:
+        r = rows[identity(f, fid)]
+        for i, o in enumerate(f["ops"]):
+            if o["opcode"] not in CALLS:
+                continue
+            key = opkey(f, i)
+            joined.add(key)
+            for v in (None, *(r.get("vendor_views") or {})):
+                ctx = dict(row=ref(r), view=r["view"], vendor=v, op=opref(f["ops"], i), call_key=key)
+                if engine is None:
+                    records.append(dict(ctx, status="engine-error", reason=fn["engine_error"]))
+                    continue
+                other = engine.get(key)
+                n = vendor_lengths.get((rr(r), v))
+                if v and (type(n) is not int or f["length"] != n):
+                    records.append(dict(ctx, status="outside-observed-view",
+                                        reason="vendor interval not established for this lift"))
+                    continue
+                p, why = projection(r, f, regs, v)
+                if p is None:
+                    status = "missing" if other is not None else "neither"
+                elif other is None:
+                    status = "extra"
+                else:
+                    differences = {k: {"claim": p[k], "engine": other[k]} for k in other if p[k] != other[k]}
+                    status = "differs" if differences else "matched"
+                    if differences:
+                        ctx["differences"] = differences
+                records.append(dict(ctx, status=status, reason=why))
+    for key in sorted(set(engine or {}) - joined):
+        records.append(dict(observation=fid, call_key=key, status="missing", reason="engine key outside source calls"))
+    return records
+
+
+def input_checks(fn, rows):
+    result = []
+    for f in fn["rows"]:
+        r = rows[identity(f, fn["function_id"])]
+        t = r["transfer"]
+        for i, o in enumerate(f["ops"]):
+            key = opkey(f, i)
+            tail = (fn.get("tails") or {}).get(key)
+            if o["opcode"] != "RETURN" and (tail is None or tail["kind"] == "branchind"):
+                continue
+            fields = {"transfer": code(t["op_keys"]["transfer"], opref(f["ops"], i))}
+            if o["opcode"] == "RETURN":
+                want, _ = value(f, o["inputs"][0] if len(o["inputs"]) == 1 else None, i)
+                fields["target_value"] = "u" if unknown(want) else code(t["target_value"], want)
+            else:
+                form = ("jcc" if tail["kind"] == "cbranch" else "jmp_near", False)
+                wanted = make_edges(form, f, f["length"], tail["target"])
+                es = t["edges"]
+                fields["edges"] = "c" if Counter(map(triple, es)) == Counter(map(triple, wanted)) else "x"
+                for e in wanted:
+                    match = [a for a in es if triple(a) == triple(e)]
+                    fields[e["source"]] = ("u" if len(match) != 1 or unknown(e["to"])
+                                           else code(match[0].get("to", MISS), e["to"]))
+            result.append(dict(row=ref(r), op=opref(f["ops"], i), fields=fields))
+    return result
+
+
+def different_lifts(groups, rows, raw, regs):
+    """Groups are at the same coordinate with the same verified instruction bytes."""
+    out = []
+    for keys in groups.values():
+        if len({digest(raw[k]["ops"]) for k in keys}) < 2:
+            continue
+        for vendor in (None, *VENDORS):
+            selected = [k for k in keys if vendor is None or rows[k]["vendor_views"]]
+            if len(selected) < 2:
+                continue
+            members = []
+            for k in selected:
+                r, f = rows[k], raw[k]
+                t, m = r["transfer"], member(r, vendor)
+                for node in nodes(r):
+                    if {"ordinal", "opcode"} <= node.keys():
+                        resolve(node, r, f)
+                p, why = projection(r, f, regs, vendor) if any(
+                    o["opcode"] in CALLS for o in f["ops"]) else (None, "no call operation")
+                es = m["edges"]
+                architecture = {"length": m["length"], "kind": t["kind"], "condition": t["condition"],
+                                "target_value": m["target_value"], "target_auth": t["target_auth"],
+                                "edges": [{field: e[field] for field in (*EC, "to") if field in e}
+                                          if not unknown(e) else U(e["unobserved"]) for e in es]
+                                if isinstance(es, list) else es}
+                link = m["link_write"]
+                architecture["link_write"] = ({key: val for key, val in link.items()
+                                               if key not in ("relocation", "derivation")}
+                                              if isinstance(link, dict) else link)
+                members.append((r, architecture, {"row": ref(r), "op_refs": "resolved",
+                                "relocation": p["relocation"] if p else U(why)}))
+            fields = {}
+            for field in members[0][1]:
+                values = [a[field] for _, a, _ in members]
+                opaque = any(unknown(x) or "op_output" in x for val in values for x in nodes(val))
+                fields[field] = "u" if opaque else "c" if common(values) is not MISS else "x"
+            out.append(dict(vendor=vendor, fields=fields, lifts=[details for _, _, details in members]))
+    return out

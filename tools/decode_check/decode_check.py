@@ -78,61 +78,75 @@ def baseline_of(claim, raw, function_keys, superseded) -> dict:
     return {"calls": list(calls.values()), "exits": exits, "branchind": branchind, "returns": returns}
 
 
-def collect(generation: Path, naming_source: Path) -> dict:
-    """The G0 diagnosis pass, reduced to plain facts (functions, language, base,
-    and per function the G0 baseline facts the dependents table reads)."""
+def collect(generation: Path, naming_source: Path, *, common_facts=False) -> dict:
+    from dataclasses import asdict
+
     import diagnose
     import engine_api
     import ops_layer
 
-    found = {"functions": [], "language": None, "image_base": None}
+    found = {"functions": [], "language": None, "image_base": None, "complete": False,
+             "registers": {}, "address_spaces": []}
 
     def keep(diagnosis):
         program = diagnosis.program_value
         if program is None or not diagnosis.program.get("ok"):
             return
-        evidence = program.evidence
-        found["language"] = evidence.translation_namespace.language_id
-        found["language_version"] = (evidence.translation_namespace.major_version,
-                                     evidence.translation_namespace.minor_version)
-        found["image_base"] = evidence.image_base.byte_offset
-        try:   # (G2a parity: the engine's own stack register and call relations)
-            from tdo_v2.isa_identity import stack_register as _stack_register
+        ev = program.evidence
+        ns = ev.translation_namespace
+        found.update(language=ns.language_id, language_version=(ns.major_version, ns.minor_version),
+                     image_base=ev.image_base.byte_offset)
+        if common_facts:
+            import common_facts as cf
+            from tdo_v2.call_relations import call_relations
+            from tdo_v2.isa_identity import link_register, program_counter, stack_register
+            from tdo_v2.pcode_blocks import tail_transfers
 
-            found["stack_register"] = _stack_register(evidence)
-        except Exception:   # noqa: BLE001
-            found["stack_register"] = None
-        function_keys = {claim.entry for claim in diagnosis.claims if claim.entry}
-        last = {claim.entry: claim for claim in diagnosis.claims if claim.evidence is not None}
+            prefix = tuple(ns.language_id.split(":")[:3])
+            found["isa"] = {("x86", "LE", "64"): "x86-64", ("AARCH64", "LE", "64"): "aarch64"}.get(prefix)
+            found["address_spaces"] = [asdict(s) for s in ev.address_spaces]
+            found["registers"] = {name: cf.register(reader(ev)) for name, reader in
+                                  (("sp", stack_register), ("lr", link_register), ("pc", program_counter))}
+            found["complete"] = not diagnosis.fatal and all(c.evidence is not None for c in diagnosis.claims)
+        function_keys = {c.entry for c in diagnosis.claims if c.entry}
+        last = {c.entry: c for c in diagnosis.claims if c.evidence is not None}
         for claim in diagnosis.claims:
             if claim.evidence is None:
                 continue
-            observation = claim.unit.observation
-            exits = {row.source: row for row in getattr(observation, "fallthrough_exits", ())}
+            unit = claim.unit
+            obs = unit.observation
+            exits = {r.source: r for r in getattr(obs, "fallthrough_exits", ())}
             rows = []
-            for instruction in observation.instructions:
-                facts = lifting.row_facts(instruction, exits.get(instruction.address))
-                facts["native_call"] = engine_api.is_native_call(instruction)
-                rows.append(facts)
+            for instruction in obs.instructions:
+                f = lifting.row_facts(instruction, exits.get(instruction.address))
+                f["native_call"] = engine_api.is_native_call(instruction)
+                if common_facts:
+                    f["isa"] = found["isa"]
+                rows.append(f)
             try:
                 raw = ops_layer._raw_observation(generation, claim)
                 baseline = baseline_of(claim, raw, function_keys, last.get(claim.entry) is not claim)
                 baseline_error = None
-            except Exception as error:   # (one function's baseline never stops the report)
+            except Exception as error:
                 baseline, baseline_error = None, f"{type(error).__qualname__}: {error}"
-            try:   # (G2a parity: the engine's call relations of this unit, as plain fields)
-                import common_facts
-                from tdo_v2.call_relations import call_relations as _call_relations
-
-                engine_relations = {key: common_facts.engine_fields(relation) for key, relation in
-                                    _call_relations(observation, claim.unit.scopes).items()}
-            except Exception as error:   # noqa: BLE001
-                engine_relations = {"error": f"{type(error).__qualname__}: {error}"}
-            found["functions"].append({"function_id": claim.function_id, "entry": claim.entry,
-                                       "engine_relations": engine_relations,
-                                       "s1": bool(getattr(observation, "call_fallthrough_isa", False)),
-                                       "producer_profile": getattr(observation, "producer_profile", None),
-                                       "rows": rows, "baseline": baseline, "baseline_error": baseline_error})
+            fn = {"function_id": claim.function_id, "entry": claim.entry, "rows": rows,
+                  "s1": bool(getattr(obs, "call_fallthrough_isa", False)),
+                  "producer_profile": getattr(obs, "producer_profile", None),
+                  "baseline": baseline, "baseline_error": baseline_error}
+            if common_facts:
+                try:
+                    rels = call_relations(obs, unit.scopes)
+                    fn.update(engine_relations={k: cf.engine_fields(r) for k, r in rels.items()}, engine_error=None)
+                except Exception as error:
+                    fn.update(engine_relations=None, engine_error=f"{type(error).__qualname__}: {error}")
+                try:
+                    tails = tail_transfers(obs, unit.scopes.function.entry)
+                    fn.update(tails={k: dict(kind=x.kind, target=cf.addr(x.target.space_id, x.target.byte_offset)
+                                             if x.target is not None else None) for k, x in tails.items()},
+                              tail_error=None)
+                except Exception as error:
+                    fn.update(tails=None, tail_error=f"{type(error).__qualname__}: {error}")
+            found["functions"].append(fn)
 
     diagnosis = diagnose.diagnose(generation, naming_source, keep=keep)
     found["admission"] = diagnosis.admission
@@ -211,20 +225,64 @@ class IsaCollector:
 
 
 class CommonFactsCollector:
-    """G2a (design_tbr_g2_common_facts_r5): derives each row's common-facts claim and its -4 code string."""
+    def __init__(self, facts, isa_collector=None):
+        self.facts = facts
+        self.isa_collector = isa_collector
+        self.rows = {}
+        self.raw = {}
+        self.checked = {}
+        self.units = {}
+        self.lengths = {}
+        self.groups = {}
+        self.branch_self = 0
 
-    def __init__(self, functions: list) -> None:
-        self.index = {f["function_id"]: {(r["space"], r["address"]): r["length"] for r in f["rows"]}
-                      for f in functions}
-        self.rows, self.codes, self.vendor = {}, {}, {}
+    def __call__(self, fid, facts, result, lift, ballot, window=None):
+        import common_facts as cf
 
-    def __call__(self, fid, facts, result, lift, ballot, window=None) -> None:
-        import common_facts
+        k = cf.identity(facts, fid)
+        if k in self.rows:
+            raise ValueError(f"duplicate common row {k}")
+        w = (result or {}).get("window", {})
+        data = (window or b"")[:w.get("verified", 0)]
+        # Bytes covered by a relocation do not establish an encoded displacement or a prefix.
+        stop = min((max(0, a) for a, n, _ in w.get("relocations", ()) if a + n > 0), default=len(data))
+        data = data[:stop]
+        self.raw[k] = facts
+        self.rows[k] = cf.derive_row(facts, lift, fid, self.facts["registers"], data,
+                                     cf.split_needed(ballot, result))
+        self.branch_self += int(lift is not None and lift.pattern == "branch-self")
+        # Retain only the comparison inputs. The large G1 per-attribute dictionary is no longer needed.
+        accepted = {v: cf.votes(ballot, result, v) for v in (None, *cf.VENDORS)}
+        self.checked[k] = accepted
+        for v, vs in accepted.items():
+            self.lengths[k, v] = cf.independent_length(vs)
+        n = facts["length"]
+        if type(n) is int and 0 < n <= len(data):
+            group = facts.get("isa"), facts["space"], facts["address"], facts.get("view", "0"), data[:n]
+            self.groups.setdefault(group, []).append(k)
 
-        row = common_facts.derive_row(facts, lift, fid, self.index.get(fid, {}))
-        self.rows[(fid, facts["space"], facts["address"])] = row
-        self.codes[(row["id"], fid)] = common_facts.row_verdicts(row, ballot, result)
-        self.vendor[(row["id"], fid)] = common_facts.vendor_verdicts(row, ballot)
+    def finish(self, complete):
+        import common_facts as cf
+
+        cf.finish_landings(list(self.rows.values()), complete)
+        for v in (None, *cf.VENDORS):
+            idx = cf.Index(((f["space"], f["address"], self.lengths[k, v], k)
+                            for k, f in self.raw.items()), complete)
+            for k, r in self.rows.items():
+                if v and not r["vendor_views"]:
+                    continue
+                f = self.raw[k]
+                info = {}
+                if self.isa_collector:
+                    fn = self.isa_collector.functions.get(k[1], {})
+                    source = fn.get("rows", {}).get((f["space"], f["address"]), {})
+                    status = fn.get("status", {})
+                    info = dict(facts={name: val for name, val in source.get("facts", {}).items()
+                                       if status.get(name) == "checked"},
+                                unobserved=source.get("unobserved", {}))
+                vs = self.checked[k][v] if f.get("isa") == "x86-64" else []
+                self.units.setdefault(k, []).extend(cf.row_verdicts(r, vs, idx, info, v))
+        self.checked.clear()
 
 
 def _chain(*hooks):
@@ -368,44 +426,53 @@ def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: 
 
 
 def common_summary(facts: dict, common, document: dict) -> dict:
-    """G2a report: per-field verdict counts over transfer rows (with denominators) and the parity with the
-    engine's call relations (missing by recognizer check, extra, field differences)."""
-    import collections
+    from collections import Counter
 
-    import common_facts
+    import common_facts as cf
 
-    counts = common_facts.denominators(document, common.codes)
-    by_row = {(row["observation"], int(row["offset"], 16)): row for row in document["rows"]}
-    missing, extra, differs = collections.Counter(), 0, collections.Counter()
-    examples = {"extra": [], "differs": [], "engine-has-no-relation": []}
-    for function in facts["functions"]:
-        if "error" in (function.get("engine_relations") or {}):
-            missing["engine-error"] += 1
-            continue
-        derived = {(r["space"], r["address"]): by_row[(function["function_id"], r["address"])] for r in function["rows"]}
-        result = common_facts.parity(function, derived, facts.get("stack_register"))
-        for _, why in result["missing"]:
-            missing[why] += 1
-            if why == "engine-has-no-relation" and len(examples[why]) < 5:
-                examples[why].append(_)
-        extra += len(result["extra"])
-        examples["extra"].extend(result["extra"][:max(0, 5 - len(examples["extra"]))])
-        for key, name in result["differs"]:
-            differs[name] += 1
-            if len(examples["differs"]) < 5:
-                examples["differs"].append([key, name])
-    return {"schema": common_facts.SCHEMA, "rule": common_facts.RULE_VERSION, "rows": len(document["rows"]),
-            "verdicts_over_transfer_rows": counts,
-            "parity": {"missing_by_check": dict(missing), "extra": extra, "differs_by_field": dict(differs),
-                       "examples": examples}}
+    records, inputs, errors = [], [], []
+    source_rows = source_ops = 0
+    for fn in facts["functions"]:
+        for f in fn["rows"]:
+            count = sum(op["opcode"] in cf.CALLS for op in f["ops"])
+            source_rows += bool(count)
+            source_ops += count
+        records.extend(cf.parity(fn, common.rows, facts["registers"], common.lengths))
+        inputs.extend(cf.input_checks(fn, common.rows))
+        for field in ("engine_error", "tail_error"):
+            if fn.get(field):
+                errors.append(dict(observation=fn["function_id"], check=field, reason=fn[field]))
+    base = [item for item in records if item.get("vendor") is None and "op" in item]
+    counts = Counter(item["status"] for item in base)
+    if len(base) != source_ops:
+        raise ValueError("source CALL/CALLIND join multiplicity")
+    vendor_counts = {v: sum(bool(r["vendor_views"]) for r in document["rows"]) for v in cf.VENDORS}
+
+    # (fixture results come from the test suite (test_g2a_required_*), never from an analysis run: a run
+    #  that executes the test suite would be slow and environment-dependent)
+    fixtures = {"source": "tests/intra/test_decode_check.py -k g2a_required_"}
+
+    return {"schema": cf.SCHEMA, "rule": cf.RULE_VERSION, "rows": len(document["rows"]),
+            "unit": "(id, observation), field path, edge triple when applicable, op reference when applicable",
+            "fields": cf.denominators(common.units),
+            "row_states": dict(Counter(cf.row_state(u) for u in common.units.values())),
+            "vendor_rows": vendor_counts, "ambiguous_hlt_or_self_jump": common.branch_self,
+            "parity": {"source_rows": source_rows, "source_ops": source_ops, "base_joins": len(base),
+                       "base_status": dict(counts), "base_outside_engine_relation": counts["neither"] + counts["extra"],
+                       "reasons": dict(Counter(x["reason"] for x in records if x.get("reason"))),
+                       "records": records, "errors": errors, "return_and_tail_inputs": inputs,
+                       "different_lifts": cf.different_lifts(common.groups, common.rows, common.raw,
+                                                             facts["registers"])},
+            "fixtures": fixtures}
 
 
 def run(generation: Path, naming_source: Path, premise: bool, full: bool = False,
         evidence_out: Path | None = None, isa_facts: bool = False,
         producer_override: bool = False, common_facts_out: Path | None = None) -> tuple[dict, list]:
-    facts = collect(generation, naming_source)
+    want_common = common_facts_out is not None
+    facts = collect(generation, naming_source, common_facts=True) if want_common else collect(generation, naming_source)
     manifest = json.loads((generation / "manifest.json").read_bytes())
-    original_path = next(row["path"] for row in manifest["members"] if row["id"] == manifest["original_member_id"])
+    original_path = next(r["path"] for r in manifest["members"] if r["id"] == manifest["original_member_id"])
     original = (generation / original_path).read_bytes()
     mapping = check.parse_original(original)
     header = {"tool": "decode_check", "revision": REVISION, "generation": generation.name,
@@ -416,7 +483,7 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
               "decoders": decoders.manifest(), "voters": {"intel": list(decoders.INTEL_VOTERS),
                                                           "amd": list(decoders.AMD_VOTERS)},
               "scope": SCOPE, "PYTHONHASHSEED": "0", "layers": {"g1": list(G1_LAYERS), "derived": ["dependents"],
-                                                              "reserved": RESERVED_LAYERS}}
+                                                               "reserved": RESERVED_LAYERS}}
     if not facts["admission"].get("ok"):
         return header, [Row("mapping", "original", "bundle", "unobserved", None, "lint",
                             {"reason": "the Bundle is not admitted", "admission": facts["admission"]})]
@@ -427,41 +494,40 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     image = check.Image(generation, mapping, base, original)
     rows = check.mapping_rows(image)
     reason = check.global_reason(mapping, base, facts["language"] or "")
-    # r4 s2: the table applies only when the premise is on AND the Bundle's own identity fields match it
     identity = lifting.table_identity(facts["language"] or "", *(facts.get("language_version") or (None, None)))
     use_table = premise and identity["state"] != "mismatch"
     unverified = None
     if premise and not use_table:
         unverified = f"translation identity mismatch ({identity['checks']['language']}): the table does not apply"
     elif not premise:
-        unverified = "translation-unverified (no compiled-SLEIGH digest in the Bundle; premise " \
-                     f"{lifting.TRANSLATION_PREMISE} off)"
+        unverified = f"translation-unverified (no compiled-SLEIGH digest in the Bundle; premise {lifting.TRANSLATION_PREMISE} off)"
     header["translation_identity"] = {**identity, "premise": premise, "table_applied": use_table}
     states = {}
-    # (design_tbr_g1_x1: schema -3 = -2 + the producer-override verdicts; always with the ISA facts)
-    producer_override = producer_override or common_facts_out is not None   # (-4 = -3 + common facts)
-    collector = IsaCollector() if (isa_facts or producer_override) and evidence_out is not None else None
+    producer_override = producer_override or want_common
+    collector = IsaCollector() if want_common or (isa_facts or producer_override) and evidence_out is not None else None
     verdicts = OverrideCollector(manifest.get("producer_profile")) if producer_override else None
-    common = CommonFactsCollector(facts["functions"]) if common_facts_out is not None else None
+    common = CommonFactsCollector(facts, collector) if want_common else None
     rows.extend(check.decode_rows(image, facts["functions"], use_table, reason, full, states, facts["language"] or "",
                                   unverified, isa=collector, override=_chain(verdicts, common)))
+    isa_block = collector.block(facts, states) if collector else None
     common_block = None
     if common is not None:
-        import common_facts
+        import common_facts as cf
 
+        seen = {fn["function_id"] for fn in facts["functions"]}
+        complete = facts["complete"] and seen == {m["id"] for m in manifest["functions"]}
+        common.finish(complete)
         seal = json.loads((generation / "seal.json").read_bytes())
-        document = common_facts.document(
-            {"generation_id": seal["generation_id"], "manifest_sha256": seal["manifest_sha256"]},
-            {"name": "tbr-derive-ghidra-p-code", "lift_table": lifting.TABLE["id"], "rule": common_facts.RULE_VERSION},
-            {"isa": "x86-64", "address_spaces": [],
-             "stack_register": common_facts.U("no stack-register evidence") if facts.get("stack_register") is None
-             else {"space": facts["stack_register"].space_id, "offset": facts["stack_register"].byte_offset,
-                   "size": facts["stack_register"].byte_size, "name": facts["stack_register"].name}},
-            list(common.rows.values()))
-        common_facts_out.write_bytes(common_facts.canonical(document) + b"\n")
-        common_block = common_facts.verdict_block(common_facts.digest(document), document["rows"], common.codes,
-                                                  common.vendor)
-        header["common_facts"] = common_summary(facts, common, document)
+        doc = cf.document(
+            {k: seal[k] for k in ("generation_id", "manifest_sha256")},
+            dict(name="tbr-derive-ghidra-p-code", lift_table=lifting.TABLE["id"], rule=cf.RULE_VERSION),
+            dict(isa=facts["isa"] or cf.U("unsupported language"), address_spaces=facts["address_spaces"],
+                 stack_register=facts["registers"]["sp"] or cf.U("no validated stack register"),
+                 code=cf.U("code surveys belong to G2b"), tbi=cf.U("no TBI evidence")),
+            common.rows.values())
+        common_block = cf.verdict_block(doc, common.units)
+        common_facts_out.write_bytes(cf.canonical(doc) + b"\n")
+        header["common_facts"] = common_summary(facts, common, doc)
     override_block = None
     engine = engine_source() if evidence_out is not None or verdicts is not None else None
     if verdicts is not None:
@@ -474,16 +540,14 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
                          "load_bias": base - mapping.image_base}
     header["mapping_id"] = mapping.mapping_id
     header["global_reason"] = reason
-    # (r3 s8) the guard inputs known once per export; firing at production is never decidable from a Bundle
     header["guard"] = {"revision": guards.REVISION, "fired_at_production": guards.FIRED_AT_PRODUCTION,
-                       "format": mapping.format, "machine": mapping.header_fields.get("machine",
-                                                                                  mapping.header_fields.get("e_machine")),
+                       "format": mapping.format,
+                       "machine": mapping.header_fields.get("machine", mapping.header_fields.get("e_machine")),
                        "language": facts["language"], "language_agrees": (facts["language"] or "") == check.LANGUAGE}
     header["counts"] = g1_counts(rows)
     if evidence_out is not None:
         write_evidence(evidence_out, generation, naming_source, manifest, original, mapping, facts, states, use_table,
-                       reason, None if collector is None else collector.block(facts, states), override_block, engine,
-                       common_block)
+                       reason, isa_block, override_block, engine, common_block)
         header["evidence_out"] = str(evidence_out)
     return header, rows
 
