@@ -904,6 +904,10 @@ class CodeBinder:
             sites, unresolved = imports.run()
             self.sites.extend(sites)
             self.coverage.extend(imports.coverage(unresolved))
+            stores = StoreSites(self, imports, imports.raw)
+            sites, unresolved = stores.run()
+            self.sites.extend(sites)
+            self.coverage.extend(stores.coverage(unresolved))
         out["sites"] = sorted(self.sites, key=lambda s: (s["row"], s["kind"], -1 if s.get("op") is None else s["op"]))
         out["survey"] = self.coverage
         return out
@@ -1218,8 +1222,12 @@ class ImportSites:
                     return ("unresolved", "TARGET_LIFT_U")
                 op = t["op_keys"].get("transfer") if isinstance(t.get("op_keys"), dict) else None
                 if op and op["opcode"] == "BRANCHIND":
-                    slot, _ = self._memory_slot(b.rows[j])
-                    return ("unresolved", "MULTI_HOP") if slot is not None else ("negative",)
+                    slot, why = self._memory_slot(b.rows[j])
+                    if slot is None:
+                        return ("unresolved", why)
+                    _, why = self._slot_name(slot)
+                    # (MULTI_HOP only when the chain ends at an import slot; otherwise the slot's own state)
+                    return ("unresolved", "MULTI_HOP" if why in (None, "IMPORT_BY_ORDINAL") else why)
                 if not (op and op["opcode"] == "BRANCH"):
                     return ("negative",)
             return ("unresolved", "MULTI_HOP")
@@ -1341,3 +1349,135 @@ class ImportSites:
                         "unsupported": unsupported, "unresolved": mine,
                         "import_table": {"state": self.ff.import_state, "problems": self.ff.import_problems}})
         return out
+
+
+# -- code_write static candidates (r1 s4.4, r2 E4 / E5) ------------------------------------------------------------
+
+def _leaves(e):
+    if isinstance(e, dict):
+        if "pre_register" in e:
+            yield e
+        for v in e.values():
+            yield from _leaves(v)
+    elif isinstance(e, list):
+        for v in e:
+            yield from _leaves(v)
+
+
+def _evaluate(e, regs):
+    """The integer value of a value() expression of constants and register constants, else None (memory never)."""
+    if not isinstance(e, dict) or "unobserved" in e or "memory" in e or "op_output" in e:
+        return None
+    w = e.get("width")
+    mask = (1 << w) - 1 if type(w) is int else None
+    if "constant" in e:
+        return int(e["constant"], 16)
+    if "pre_register" in e:
+        r = e["pre_register"]
+        return regs.get((r["space"], r["offset"], r["size"]))
+    for op in ("add", "sub", "mul"):
+        if op in e:
+            a, b = (_evaluate(x, regs) for x in e[op])
+            if a is None or b is None or mask is None:
+                return None
+            return (a + b if op == "add" else a - b if op == "sub" else a * b) & mask
+    for op in ("zext", "trunc"):
+        if op in e:
+            a = _evaluate(e[op], regs)
+            return None if a is None or mask is None else a & mask
+    if "sext" in e:
+        inner = e["sext"]
+        a = _evaluate(inner, regs)
+        iw = inner.get("width") if isinstance(inner, dict) else None
+        if a is None or mask is None or type(iw) is not int:
+            return None
+        if a >> (iw - 1) & 1:
+            a -= 1 << iw
+        return a & mask
+    return None
+
+
+class StoreSites:
+    def __init__(self, binder, imports, raw):
+        self.b, self.imports, self.raw = binder, imports, raw
+        b = binder
+        self.code = [(b.base + r.start, b.base + r.end, n) for n, r in enumerate(b.ff.code)]
+        self.ambiguous = [(b.base + d["range"]["start"], b.base + (d["range"]["end"] or d["range"]["start"] + 1))
+                          for d in b.ff.diagnostics if d["reason"] == "AMBIGUOUS_MAPPING" and "range" in d]
+        self.cache = {}
+
+    def _regs(self, i):
+        if i not in self.cache:
+            values, _ = self.imports.register_values(i)
+            regs = {}
+            for v in values:
+                r = v["register"]
+                regs[(r["space"], r["offset"], r["size"])] = int(v["value"]["constant"], 16)
+            self.cache[i] = (regs, sorted({p for v in values for p in v["path"]}))
+        return self.cache[i]
+
+    def run(self):
+        import common_facts as cf
+        import lifting
+
+        b = self.b
+        sites, unresolved = [], []
+        keys = self.imports.keys
+        for i, r in enumerate(b.rows):
+            k = keys[i]
+            if not b.code_rows[k][0]:
+                continue
+            f = self.raw[k]
+            ops = f["ops"]
+            for n, op in enumerate(ops):
+                if op["opcode"] != "STORE":
+                    continue
+                item = {"row": i, "op": n}
+                ins = op.get("inputs") or []
+                if len(ins) != 3 or not ins[0] or ins[0]["kind"] != "CONSTANT":
+                    unresolved.append(("STORE_SPACE_U", item))
+                    continue
+                if not ins[2] or not ins[2].get("size"):
+                    unresolved.append(("STORE_WIDTH_U", item))
+                    continue
+                if any(o["opcode"] in lifting.FLOW_OPS for o in ops[:n]):
+                    unresolved.append(("INTRA_ROW_FLOW", item))
+                    continue
+                space, width = ins[0]["offset"], ins[2]["size"]
+                expr, _ = cf.value(f, ins[1], n)
+                path = []
+                address = _evaluate(expr, {})
+                if address is None and not cf.unknown(expr):
+                    leaves = list(_leaves(expr))
+                    if leaves and not any(leaf["pre_register"]["offset"] & ~7 == 0x20 for leaf in leaves):
+                        regs, path = self._regs(i)
+                        address = _evaluate(expr, regs)
+                if address is None:
+                    unresolved.append(("STORE_ADDRESS_NOT_CONSTANT", item))
+                    continue
+                end = address + width
+                if end > 1 << 64:
+                    unresolved.append(("ADDRESS_WRAP", item))
+                    continue
+                if space != b.space:
+                    continue                               # (another space: an examined non-match)
+                hit = [n2 for a, z, n2 in self.code if a < end and address < z]
+                if not hit and any(a < end and address < z for a, z in self.ambiguous):
+                    unresolved.append(("TARGET_MAPPING_U", item))
+                    continue
+                if not hit:
+                    continue                               # (a concrete address outside the code regions)
+                sites.append({"row": i, "op": n, "kind": "code_write", "write": "static_store_candidate",
+                              "symbol": None, "arguments": [],
+                              "target_range": b._range(address - b.base, end - b.base), "regions": hit,
+                              "static_basis": {"rows": path + [i], "op": n, "step": "ghidra_pcode"},
+                              "holds_if": [PREMISE] + ([LINEAR_PREMISE] if path else [])})
+        return sites, unresolved
+
+    def coverage(self, unresolved):
+        b = self.b
+        examined = {"facts_rows": b.row_set_sha256, "excluded": b._excluded(lambda row: not row[0], "NOT_X86")}
+        return [{"kind": "code_write", "method": "static_store", "write": "static_store_candidate",
+                 "rows_examined": examined,
+                 "ranges_examined": [b._range(r.start, r.end) for r in b.ff.code],
+                 "unsupported": [], "unresolved": _groups(unresolved)}]

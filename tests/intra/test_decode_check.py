@@ -4993,3 +4993,59 @@ def test_g2b_import_site_unresolved(name, imports, reason):
 def test_g2b_import_outside_table_is_negative():
     sites, unresolved, _ = _g2b_import_case(name="Sleep")
     assert sites == [] and unresolved == {}
+
+
+def _g2b_store_case(rows):
+    import code_facts as cf2
+    import common_facts as cf
+    import lifting
+
+    entries = [("f0", f, lifting.identify(f), None, None, b"") for f in rows]
+    c = _g2_collect(entries)
+    doc = _g2_document(c)
+    base = 0x140000000
+    ff = cf2.FileFacts("pe", True, code=[cf2.Region(0x1000, 0x2000, "code", True, False, ".text")],
+                       import_state="absent")
+    binder = cf2.CodeBinder(ff, base, 1, doc["rows"], c.code_rows, cf.row_set_digest(doc["rows"]))
+    names, sha = cf2.name_table()
+    imports = cf2.ImportSites(binder, c.rows, c.raw, {k: row[3] for k, row in c.code_rows.items()}, ff, names, True)
+    code = binder.program_code(sha, imports)
+    stores = [s for s in code["sites"] if s["kind"] == "code_write"]
+    unresolved = {g["reason"]: g["items"] for cov in code["survey"] if cov["kind"] == "code_write"
+                  for g in cov["unresolved"]}
+    return stores, unresolved
+
+
+def test_g2b_store_constant_into_code():
+    f = dict(_row(10, [_op("STORE", [_c(1), _c(START + 0x800), _r(RCX_, 4)])]), address=START,
+             fallthrough=START + 10)
+    stores, unresolved = _g2b_store_case([f])
+    site, = stores
+    assert (site["row"], site["op"], site["write"], site["regions"]) == (0, 0, "static_store_candidate", [0])
+    assert site["target_range"]["start"] == format(START + 0x800, "x") and \
+        site["target_range"]["end"] == format(START + 0x804, "x")
+    assert site["holds_if"] == ["image-code-unmodified-at-runtime"] and not unresolved
+
+
+def test_g2b_store_through_register_constant():
+    r0 = dict(_row(10, [_op("COPY", [_c(START + 0x900)], _r(RAX_))]), address=START, fallthrough=START + 10)
+    r1 = dict(_row(2, [_op("STORE", [_c(1), _r(RAX_), _r(RCX_, 4)])]), address=START + 10, fallthrough=START + 12)
+    stores, unresolved = _g2b_store_case([r0, r1])
+    site, = stores
+    assert site["row"] == 1 and site["static_basis"]["rows"] == [0, 1]
+    assert "linear-entry-at-first-path-row" in site["holds_if"]
+
+
+@pytest.mark.parametrize("ops, reason", [
+    ([_op("INT_SUB", [_r(RSP_), _c(8)], _r(RSP_)), _op("STORE", [_c(1), _r(RSP_), _r(RCX_)])],
+     "STORE_ADDRESS_NOT_CONSTANT"),
+    ([_op("STORE", [_c(1), _c(0x10000), _r(RCX_)])], None),                       # (outside the code region)
+    ([_op("CBRANCH", [_a(START + 4), _r(0x206, 1)]), _op("STORE", [_c(1), _c(START + 0x800), _r(RCX_)])],
+     "INTRA_ROW_FLOW"),
+], ids=["stack", "outside", "intra-row-flow"])
+def test_g2b_store_unresolved_or_negative(ops, reason):
+    f = dict(_row(4, ops), address=START, fallthrough=START + 4)
+    stores, unresolved = _g2b_store_case([f])
+    assert stores == []
+    store_op = next(n for n, op in enumerate(ops) if op["opcode"] == "STORE")
+    assert unresolved == ({} if reason is None else {reason: [{"row": 0, "op": store_op}]})
