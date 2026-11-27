@@ -4788,3 +4788,96 @@ def test_g2a_write_canonical_keeps_other_files(tmp_path):
         pass
     assert target.read_bytes() == cf.canonical(doc) + b"\n"           # (the old file survives a failed write)
     assert sorted(x.name for x in tmp_path.iterdir()) == ["facts.json", "facts.json.partial"]
+
+
+# -- G2b code-byte facts (design_tbr_g2b_code_facts r1 + r2 + r3): file layer ---------------------------------------
+
+def _g2b_pe(bound=False):
+    import struct
+    import _pe_fixture as pf
+
+    text = bytes([0xC3]) * 0x30
+    rdata = bytearray(0x500)
+    descs = [(0x2100, 0, 0, 0x2200, 0x4000),
+             (0, 7 if bound else 0, 0, 0x2210, 0x4020)]
+    for i, d in enumerate(descs):
+        struct.pack_into("<IIIII", rdata, 20 * i, *d)
+    struct.pack_into("<QQQ", rdata, 0x100, 0x2300, 1 << 63 | 5, 0)
+    rdata[0x200:0x20D] = b"kernel32.dll\0"
+    rdata[0x210:0x21B] = b"user32.dll\0"
+    rdata[0x300:0x302 + 15] = b"\0\0VirtualProtect\0"
+    rdata[0x320:0x322 + 15] = b"\0\0GetProcAddress\0"
+    rdata[0x400:0x408] = bytes([0x01, 0x04, 0x02, 0x00]) + bytes(4)            # v1, no flags, 2 codes
+    rdata[0x410:0x41C] = bytes([0x01 | 1 << 3, 0x04, 0x01, 0x00]) + bytes(4) + struct.pack("<I", 0x1000)  # EHANDLER
+    rdata[0x430:0x440] = bytes([0x01 | 4 << 3, 0, 0, 0]) + struct.pack("<III", 0x1000, 0x1010, 0x2400)  # CHAININFO
+    pdata = struct.pack("<III", 0x1000, 0x1010, 0x2400) + struct.pack("<III", 0x1010, 0x1020, 0x2410) + \
+        struct.pack("<III", 0x1020, 0x1030, 0x2430)
+    data = struct.pack("<QQQ", 0x2300, 1 << 63 | 5, 0) + bytes(8) + struct.pack("<QQ", 0x2320, 0)
+    sections = [pf.Section(".text", 0x1000, text),
+                pf.Section(".rdata", 0x2000, bytes(rdata), characteristics=0x40000040),
+                pf.Section(".pdata", 0x3000, pdata, characteristics=0x40000040),
+                pf.Section(".data", 0x4000, data, characteristics=0xC0000040)]
+    return pf.make_pe(sections, directories=[pf.Directory(1, 0x2000, 60), pf.Directory(3, 0x3000, 36)])
+
+
+def test_g2b_pe_file_facts():
+    import code_facts as cf2
+    import pe_map
+
+    raw = _g2b_pe()
+    image = pe_map.parse(raw)
+    ff = cf2.file_facts(image, raw)
+    assert ff.ok and [(r.start, r.end, r.executable, r.writable) for r in ff.code] == [(0x1000, 0x1030, True, False)]
+    unwind = sorted((r.name, r.start, r.end) for r in ff.unwind)
+    assert unwind == [(".pdata", 0x3000, 0x3024), (".xdata", 0x2400, 0x2408), (".xdata", 0x2410, 0x241C),
+                      (".xdata", 0x2430, 0x2440)]
+    assert ff.diagnostics == [{"reason": "HANDLER_DATA_LENGTH", "range": {"start": 0x241C, "end": None}}]
+    names = {slot: item["name"] for slot, item in ff.imports.items()}
+    assert names == {0x4000: "VirtualProtect", 0x4008: "#5", 0x4020: "GetProcAddress"}
+    assert ff.imports[0x4000]["dll"] == "kernel32.dll" and ff.import_state == "complete"
+    # the IAT is loader-written: a record read works, a runtime read does not
+    assert cf2.record_read(image, raw, 0x4000, 8)[0] == (0x2300).to_bytes(8, "little")
+    with pytest.raises(cf2.Unread, match="LOADER_WRITTEN"):
+        cf2.runtime_read(image, raw, 0x4000, 8)
+    assert cf2.runtime_read(image, raw, 0x2200, 4)[0] == b"kern"
+
+
+def test_g2b_pe_bound_iat_without_ilt():
+    import code_facts as cf2
+    import pe_map
+
+    raw = _g2b_pe(bound=True)
+    ff = cf2.file_facts(pe_map.parse(raw), raw)
+    assert ff.import_state == "partial" and 0x4020 not in ff.imports
+    assert [p["reason"] for p in ff.import_problems] == ["BOUND_IAT_NO_ILT"]
+
+
+def _g2b_elf():
+    import struct
+    import _elf_fixture as ef
+
+    symtab = bytes(24) + struct.pack("<IBBHQQ", 1, 0x12, 0, 0, 0, 0) + struct.pack("<IBBHQQ", 10, 0x12, 0, 5, 0, 0)
+    strtab = b"\0mprotect\0dlsym\0"
+    ro = bytearray(0x300)
+    ro[0:len(symtab)] = symtab
+    ro[0x100:0x100 + len(strtab)] = strtab
+    ro[0x200:0x208] = struct.pack("<II", 1, 3)                     # DT_HASH: nbucket 1, nchain 3
+    segments = [ef.Segment(0x1000, bytes([0xC3]) * 0x20), ef.Segment(0x3000, bytes(ro), flags=4),
+                ef.Segment(0x5000, bytes(16), flags=6)]
+    extra = [(6, 0x3000), (11, 24), (5, 0x3100), (10, len(strtab)), (4, 0x3200)]
+    return ef.make_elf(segments, jmprel=[ef.Reloc(0x5000, 7, 1), ef.Reloc(0x5008, 7, 2)], extra_dynamic=extra)
+
+
+def test_g2b_elf_imports_with_dynamic_in_written():
+    import code_facts as cf2
+    import elf_map
+
+    elf = _g2b_elf()
+    image = elf_map.parse(elf.data)
+    dynamic = [p for p in image.phdrs if p[0] == 2][0]
+    assert any(a <= dynamic[3] - image.image_base < b for a, b, _ in image.written.ranges)   # PT_DYNAMIC written
+    ff = cf2.file_facts(image, elf.data)
+    assert ff.import_state == "complete" and [(r.start, r.end) for r in ff.code] == [(0x1000, 0x1020)]
+    assert {s: (i["name"], i["undefined"]) for s, i in ff.imports.items()} == {0x5000: ("mprotect", True),
+                                                                                0x5008: ("dlsym", False)}
+    assert {"reason": "NO_SECTION_HEADERS", "what": "eh_frame"} in ff.diagnostics

@@ -67,6 +67,7 @@ class PeImage:
     relocations: Parsed = None
     written: Parsed = None                          # IAT, delay-load IAT / handle, TLS index, load-config slots
     mapping_id: str = ""
+    directories: list = field(default_factory=list)  # (rva, size) per data directory (G2b; not in mapping_id)
 
     def at(self, rva: int) -> Range | None:
         for item in self.ranges:
@@ -212,6 +213,7 @@ def _parse(data: bytes) -> PeImage:
     count = min(rva_count, (optional_size - 112) // 8)
     for index in range(count):
         directories.append((_u32(data, optional + 112 + 8 * index), _u32(data, optional + 116 + 8 * index)))
+    image.directories = directories
     image.relocations = _relocations(image, data, directories)
     image.written = _written(image, data, directories)
     return _finish(image)

@@ -92,6 +92,7 @@ class ElfImage:
     relocations: Parsed = None      # ELF relocations are loader writes: listed under ``written``
     written: Parsed = None
     mapping_id: str = ""
+    phdrs: list = field(default_factory=list)       # every program header tuple (G2b; not in mapping_id)
 
     def at(self, rva: int) -> Range | None:
         for item in self.ranges:
@@ -147,6 +148,7 @@ def _parse(data: bytes) -> ElfImage:
               "e_shoff": e_shoff, "e_shnum": e_shnum, "e_shentsize": e_shentsize, "image_base": image_base,
               "file_size": len(data), "file_sha256": hashlib.sha256(data).hexdigest()}
     image = ElfImage(True, image_base=image_base, fixed_base=e_type == ET_EXEC, e_type=e_type, header_fields=fields)
+    image.phdrs = phdrs
     ranges = []
     for index, (_, flags, offset, vaddr, _, filesz, memsz, align) in enumerate(loads):
         why = ""
