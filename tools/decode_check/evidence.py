@@ -1039,7 +1039,7 @@ def bind_common_facts(document, facts_document, *, bundle, allowlist, observatio
     import common_facts as cf
 
     rule = facts_document.get("producer", {}).get("rule")
-    arm = rule == "g2c-1"
+    arm = rule in ("g2c-1", "g2c-2")
     lookup = _bind_checked_rows(
         document, facts_document, bundle=bundle, allowlist=allowlist,
         observations=observations,
@@ -1143,7 +1143,7 @@ def bind_common_facts(document, facts_document, *, bundle, allowlist, observatio
             g2c["arm"].check_document(facts_document, observations, g2c["complete"])
         elif ("aarch64" in facts_document["program"]
               or any("aarch64" in r for r in facts_document["rows"])):
-            raise Rejected("AArch64 instruction claims require producer.rule g2c-1")
+            raise Rejected("AArch64 instruction claims require a supported G2c rule")
         units_of = cf.block_units(document["common_facts"])
         for r, vr in zip(facts_document["rows"], document["common_facts"]["rows"], strict=True):
             validate_refs(r)

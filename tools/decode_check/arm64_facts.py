@@ -7,7 +7,8 @@ import lifting
 import producer_override
 
 
-RULE = "g2c-1"
+LEGACY_RULE = "g2c-1"
+RULE = "g2c-2"
 FILE_RUNTIME_UNOBSERVED = "AArch64 file mapping is outside the G2b survey"
 NEXT_PC_MASK = (1 << 64) - 1
 CC = "eq ne cs cc mi pl vs vc hi ls ge lt gt le al nv".split()
@@ -21,6 +22,8 @@ ENCODINGS = (
     (0xFF000010, 0x54000000, "b.cond"),
     (0x7F000000, 0x34000000, "cbz"), (0x7F000000, 0x35000000, "cbnz"),
     (0x7F000000, 0x36000000, "tbz"), (0x7F000000, 0x37000000, "tbnz"),
+    (0x7FE00C00, 0x1A800000, "csel"), (0x7FE00C00, 0x1A800400, "csinc"),
+    (0x7FE00C00, 0x5A800000, "csinv"), (0x7FE00C00, 0x5A800400, "csneg"),
     (0xFFFFFC1F, 0xD61F0000, "br"), (0xFFFFFC1F, 0xD63F0000, "blr"),
     (0xFFFFFC1F, 0xD65F0000, "ret"),
     (0xFFFFFC00, 0xD71F0800, "braa"), (0xFFFFFC00, 0xD71F0C00, "brab"),
@@ -53,6 +56,7 @@ ENCODINGS = (
     (0xFFFFFFE0, 0xD5381000, "mrs_sctlr_el1"), (0xFFFFFFE0, 0xD5181000, "msr_sctlr_el1"),
 )
 COND_BITS = {"b.cond": 19, "cbz": 19, "cbnz": 19, "tbz": 14, "tbnz": 14}
+SELECT_FALSE_OP = {"csel": "identity", "csinc": "increment", "csinv": "invert", "csneg": "negate"}
 CALLS = {"bl", "blr", "blraa", "blrab", "blraaz", "blrabz"}
 RETURNS = {"ret", "retaa", "retab"}
 TRAPS = {"svc", "hvc", "smc", "brk", "hlt", "udf"}
@@ -69,9 +73,11 @@ SYSTEM_CONTROLS = {
 }
 
 
-def decode(word):
+def decode(word, *, rule=RULE):
     for mask, expected, form in ENCODINGS:
         if word & mask == expected:
+            if rule == LEGACY_RULE and form in SELECT_FALSE_OP:
+                return None
             if form in ("load_exclusive", "store_exclusive"):
                 size = ("b", "h", "", "")[word >> 30]
                 variants = ("ldxr", "ldaxr") if form == "load_exclusive" else ("stxr", "stlxr")
@@ -98,13 +104,16 @@ def gp(regs, number, width=64, *, sp=False):
     return pre(regs.get(name), width)
 
 
+def flag_test(cc, regs):
+    inputs = [pre(regs.get(name), 8) for name in FLAGS[cc].split()]
+    if any(cf.unknown(part) for part in inputs):
+        inputs = cf.U("no validated flag identity")
+    return {"flags": CC[cc], "inputs": inputs}
+
+
 def cond(form, word, regs):
     if form == "b.cond":
-        cc = word & 15
-        inputs = [pre(regs.get(name), 8) for name in FLAGS[cc].split()]
-        if any(cf.unknown(part) for part in inputs):
-            inputs = cf.U("no validated flag identity")
-        test = {"flags": CC[cc], "inputs": inputs}
+        test = flag_test(word & 15, regs)
     else:
         width = 64 if word >> 31 else 32
         operand = gp(regs, word & 31, width)
@@ -114,6 +123,23 @@ def cond(form, word, regs):
         else:
             test = {"zero" if form == "cbz" else "nonzero": operand}
     return {"taken_when": "true", "test": test}
+
+
+def value_select(form, word, regs):
+    """An encoding-derived value claim. Arithmetic in either arm uses the operand width."""
+    width = 64 if word >> 31 else 32
+    rd, rn, rm = word & 31, (word >> 5) & 31, (word >> 16) & 31
+    cc = (word >> 12) & 15
+    # A64 ConditionHolds treats both AL and NV as true. Alias spellings such
+    # as CINC invert the displayed condition; use the encoded bits here.
+    predicate = {"constant": True, "encoded_condition": CC[cc]} if cc >= 14 else flag_test(cc, regs)
+    destination = None  # Rd == 31 discards the selected value.
+    if rd != 31:
+        register = gp(regs, rd)
+        destination = dict(register=register.get("pre_register", register),
+                           extension="zero_extend" if width == 32 else "identity")
+    return dict(width=width, destination=destination, condition=predicate, when_true=gp(regs, rn, width),
+                when_false=dict(operation=SELECT_FALSE_OP[form], operand=gp(regs, rm, width)))
 
 
 def condition(what, source):
@@ -357,7 +383,7 @@ class Arm64Facts:
         word = int.from_bytes(data[offset:offset + 4], "little")
         return dict(source="sealed_bundle_bytes", member_id=b["member_id"], offset=offset, size=4, word=f"{word:08x}")
 
-    def row(self, f, fid):
+    def row(self, f, fid, *, rule=RULE):
         basis = self.basis(f)
         row = cf.derive_row(f, None, fid, self.registers)
         capsule = dict(form=cf.U("instruction bytes unavailable"), basis=basis)
@@ -368,12 +394,14 @@ class Arm64Facts:
                 capsule["observation"] = "ghidra_pcode"
         else:
             word = int(basis["word"], 16)
-            form = decode(word)
+            form = decode(word, rule=rule)
             row["bytes"]["range"] = cf.interval(f, 4)
             if form:
                 capsule["form"] = form
                 row["transfer"] = transfer_for(form, word, f, self.registers)
                 row["isa"] = isa_for(form, word, self.registers)
+                if form in SELECT_FALSE_OP:
+                    capsule["value_select"] = value_select(form, word, self.registers)
             else:
                 capsule["form"] = cf.U("encoding outside supported A64 forms")
                 row["transfer"] = empty_transfer()
@@ -387,7 +415,8 @@ class Arm64Facts:
         """Replay claim construction from admitted bytes and register identities."""
         if type(complete) is not bool:
             raise ValueError("missing AArch64 observation completeness")
-        rows = [self.row(observations[key], key[1]) for key in sorted(observations)]
+        rule = document["producer"]["rule"]
+        rows = [self.row(observations[key], key[1], rule=rule) for key in sorted(observations)]
         cf.finish_landings(rows, complete)
         fragments, _ = program_fragments(rows, observations)
         program = dict(document["program"], aarch64=fragments, tbi=tbi(), code=cf.U(FILE_RUNTIME_UNOBSERVED),

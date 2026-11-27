@@ -4200,6 +4200,78 @@ def test_g2c_sealed_blr_and_evidence_binding():
             evidence.bind_common_facts(ev, forged, **args)
 
 
+@pytest.mark.parametrize("word,form,width,condition,rd,rn,rm,operation", [
+    (0x9A883128, "csel", 64, "cc", 8, 9, 8, "identity"),
+    (0x1A9F1421, "csinc", 32, "ne", 1, 1, 31, "increment"),
+    (0xDA9F4043, "csinv", 64, "mi", 3, 2, 31, "invert"),
+    (0x5A85A484, "csneg", 32, "ge", 4, 4, 5, "negate"),
+    (0x9A8634C6, "csinc", 64, "cc", 6, 6, 6, "increment"),  # CINC HS
+    (0x1A9F17EA, "csinc", 32, "ne", 10, 31, 31, "increment"),  # CSET EQ
+    (0xDA9F73EB, "csinv", 64, "vc", 11, 31, 31, "invert"),  # CSETM VS
+    (0x9A83905F, "csel", 64, "ls", 31, 2, 3, "identity"),
+    (0x9A8EE3EC, "csel", 64, "al", 12, 31, 14, "identity"),
+    (0x5A8FF5CD, "csneg", 32, "nv", 13, 14, 15, "negate"),
+])
+def test_g2c_value_select_and_sequential_flow(word, form, width, condition, rd, rn, rm, operation):
+    import arm64_facts as arm
+
+    regs = {f"{prefix}{i}": dict(name=f"{prefix}{i}", space=2, offset=i * 8, size=size)
+            for i in range(31) for prefix, size in (("x", 8), ("w", 4))}
+    regs.update({name: dict(name=name, space=2, offset=300 + i, size=1)
+                 for i, name in enumerate(("ZR", "CY", "NG", "OV"))})
+    f = dict(_row(4, [_op("CBRANCH", [_c(1), _r(301, 1)])]), isa="aarch64")
+    f.update(fallthrough_space=f["space"], fallthrough=f["address"] + 4)
+    collector = _g2c_arm(f["address"], [word], regs)
+    row = collector.row(f, "f0")
+    assert row["aarch64"]["form"] == form
+    transfer = row["transfer"]
+    assert transfer["kind"] == "none" and transfer["condition"] is None
+    assert [cf.triple(e) for e in transfer["edges"]] == [cf.SEQ]
+    assert transfer["edges"][0]["to"] == cf.addr(f["space"], f["address"] + 4)
+    assert transfer["op_keys"]["transfer"] is None
+    claim = row["aarch64"]["value_select"]
+    assert claim["width"] == width
+    if condition in ("al", "nv"):
+        assert claim["condition"] == {"constant": True, "encoded_condition": condition}
+    else:
+        assert claim["condition"]["flags"] == condition
+        assert claim["condition"]["inputs"]
+    if rd == 31:
+        assert claim["destination"] is None
+    else:
+        assert claim["destination"] == {
+            "register": regs[f"x{rd}"], "extension": "zero_extend" if width == 32 else "identity",
+        }
+    operands = [claim["when_true"], claim["when_false"]["operand"]]
+    for n, operand in zip((rn, rm), operands, strict=True):
+        if n == 31:
+            assert operand == {"constant": "0", "width": width}
+        else:
+            assert operand == {"pre_register": regs[f"{'x' if width == 64 else 'w'}{n}"], "width": width}
+    assert claim["when_false"]["operation"] == operation
+
+    legacy = collector.row(f, "f0", rule=arm.LEGACY_RULE)
+    assert legacy["transfer"]["kind"] == "unknown" and "value_select" not in legacy["aarch64"]
+    assert arm.decode(word ^ (1 << 29)) is None  # Fixed S bit.
+    assert arm.decode(word ^ (1 << 11)) is None  # Reserved o2 bit.
+
+
+def test_g2c_value_select_missing_registers():
+    import arm64_facts as arm
+
+    f = dict(_row(4, []), isa="aarch64")
+    collector = _g2c_arm(f["address"], [0x9A883128], {})
+    row = collector.row(f, "f0")
+    claim = row["aarch64"]["value_select"]
+    assert claim["condition"]["flags"] == "cc" and cf.unknown(claim["condition"]["inputs"])
+    assert cf.unknown(claim["destination"]["register"])
+    assert cf.unknown(claim["when_true"]) and cf.unknown(claim["when_false"]["operand"])
+    assert [cf.triple(e) for e in row["transfer"]["edges"]] == [cf.SEQ]
+    outside = collector.row(dict(f, length=2), "f0")
+    assert outside["transfer"]["kind"] == "unknown" and "value_select" not in outside["aarch64"]
+    assert arm.decode(0x9A883128) == "csel"
+
+
 def test_g2c_branch_auth_traps_and_bti():
     import arm64_facts as arm
 
