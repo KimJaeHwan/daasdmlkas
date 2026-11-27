@@ -138,12 +138,33 @@ Bundles (`tdo_bundles3/*`, with only the UE template producer generation of `ue-
   whose Bundles are not packed (published `tdo_bundles4` copies are packed only for the seven pairs of the first pack),
   and anything on the full UE Core producer re-export.
 
+## 4c. Re-exporting at home (optional -- what "only the office" used to mean)
+
+A third pack, `x1b_home_binaries_2026-11-27.tar` (~133 MB, sha256 next to it), holds every original the recorded
+exports read, mirrored by absolute path under `x1b_binaries/` (the UE test DLLs with their PDBs next to them; the
+corpus, the v2 / v3 test programs and zlib carry their symbols inside; the Windows DLLs are selected by export
+names, UE Core by entry addresses -- no PDB needed). Third-party binaries: private, never publish.
+
+* Install Ghidra **12.0.4** (exactly this version; the exporter refuses another) and JDK 21 in WSL
+  (`apt-get install -y openjdk-21-jdk-headless`); point `TDO_GHIDRA` at the Ghidra folder.
+* Restore under `/root` (`/root/x1b_binaries/...`); `tools/x1b/x1b_reexport.py` reads a recorded original from its
+  mirror when the recorded path is absent (`TDO_BINARY_ROOT`, default `/root/x1b_binaries`); the original's SHA-256 is
+  still checked against the old Bundle.
+* Re-export into a separate root and pairs file, e.g.
+  `TDO_GHIDRA=<ghidra> python3 tools/x1b/x1b_reexport.py . --new /root/tdo_bundles4_home --pairs /root/x1b_pairs_home.json --only zlib`
+  (gate-tree Bundles from `/root/tdo_bundles3`, the default `--old`). The other kinds need their old roots, which are
+  not packed (`/root/tdo_dll_bundles`, `/root/tdo_g3b0`).
+* First check reproducibility: `tools/x1b/x1b_bundle_tools.py members <office published> <home published>` -- the
+  generation ids differ by design; any other difference means the home Ghidra / JDK / analysis is not the office's
+  (write it down; do not build on it). Exporter changes (`ghidra/`) are allowed only with this check passing.
+
 ## 5. Merging back (what the office session will do -- keep it fast)
 
 * Work only on this branch; commit per topic; **never mix `docs/handoff_x1b/` changes into a code commit** (prefix
   those commits with `handoff:`). The office cherry-picks every non-`handoff:` commit onto `feature/x1b-reexport`
   (frozen at `1b20dee` until you return) -- so a clean history merges by fast-forward.
-* Do not touch: `ghidra/` (a change there needs a re-export only the office can run), `tools/decode_check/` (TBR).
+* Do not touch `tools/decode_check/` (TBR). `ghidra/` changes only after the reproducibility check of 4c passes,
+  with the re-exports and stage 0 / 1 re-run at home and listed in `RESULTS.md`.
   `src/` changes are fine with tests; say in the commit message which gate effect you expect.
 * Leave a short `docs/handoff_x1b/RESULTS.md` (handoff commit): what was done, what is open, test commands and their
   results, anything the office must re-run (e.g. a re-export).
