@@ -23,6 +23,17 @@ from x1b_bundle_tools import Bundle, verify  # noqa: E402
 GHIDRA = __import__("os").environ.get("TDO_GHIDRA", "/mnt/d/01_gitproject/14_TDO_v2/ghidra_12.0.4_PUBLIC")
 SELECTORS = ("--function-name", "--exclude-function", "--stop-at-name", "--stop-at-internal-models")
 SUFFIXES = ("", ".second", ".third", ".fourth")
+# elsewhere than the office: originals mirrored by absolute path under this root (e.g. /root/x1b_binaries/mnt/d/...)
+BINARY_ROOT = Path(__import__("os").environ.get("TDO_BINARY_ROOT", "/root/x1b_binaries"))
+
+
+def binary_path(recorded: str) -> str:
+    """The recorded original, or its mirror under BINARY_ROOT when the recorded path is absent (the SHA-256 check
+    against the old Bundle still decides)."""
+    if Path(recorded).exists():
+        return recorded
+    mirror = BINARY_ROOT / recorded.lstrip("/")
+    return str(mirror) if mirror.exists() else recorded
 LOCK = threading.Lock()
 
 
@@ -98,7 +109,7 @@ def export(tree: Path, new: Path, pairs_file: Path, key: str, name: str, old_gen
         return f"{key}: FAILED more than one published generation under {out}"
     if not published:
         start = time.time()
-        done = subprocess.run(["python3", str(tree / "tools/bundle_export/export_bundle.py"), document["binary"],
+        done = subprocess.run(["python3", str(tree / "tools/bundle_export/export_bundle.py"), binary_path(document["binary"]),
                                "--output-root", str(out), "--ghidra", GHIDRA, *replay_args(document), *EXTRA],
                               capture_output=True, text=True)
         if done.returncode != 0:
