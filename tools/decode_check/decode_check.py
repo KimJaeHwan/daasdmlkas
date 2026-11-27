@@ -425,7 +425,7 @@ def write_evidence(path: Path, generation: Path, naming_source: Path, manifest: 
     path.write_bytes(evidence.dumps(document))
 
 
-def common_summary(facts: dict, common, document: dict) -> dict:
+def _summarize_rows(facts: dict, common, document: dict) -> dict:
     from collections import Counter
 
     import common_facts as cf
@@ -450,7 +450,11 @@ def common_summary(facts: dict, common, document: dict) -> dict:
 
     # (fixture results come from the test suite (test_g2a_required_*), never from an analysis run: a run
     #  that executes the test suite would be slow and environment-dependent)
-    fixtures = {"source": "tests/intra/test_decode_check.py -k g2a_required_"}
+    fixtures = {"source": "tests/intra/test_decode_check.py",
+                "required": ["test_g2a_required_vendor", "test_g2a_required_xbegin",
+                             "test_g2a_required_push_parity", "test_g2a_required_blr_x30",
+                             "test_g2a_required_binding", "test_g2a_required_values_and_index",
+                             "test_g2a_required_conditions_and_traps"]}
 
     return {"schema": cf.SCHEMA, "rule": cf.RULE_VERSION, "rows": len(document["rows"]),
             "unit": "(id, observation), field path, edge triple when applicable, op reference when applicable",
@@ -464,6 +468,30 @@ def common_summary(facts: dict, common, document: dict) -> dict:
                        "different_lifts": cf.different_lifts(common.groups, common.rows, common.raw,
                                                              facts["registers"])},
             "fixtures": fixtures}
+
+
+def common_summary(facts, common, document, *, complete, missing_functions):
+    from collections import Counter
+    import common_facts as cf
+
+    report = _summarize_rows(facts, common, document)
+    parity = report["parity"]
+    base = [x for x in parity["records"] if x.get("vendor") is None]
+    actual = Counter((cf.rr(x["row"]), x["call_key"]) for x in base if "op" in x)
+    expected = Counter(
+        (cf.identity(f, fn["function_id"]), cf.opkey(f, i))
+        for fn in facts["functions"] for f in fn["rows"]
+        for i, op in enumerate(f["ops"]) if op["opcode"] in cf.CALLS
+    )
+    if actual != expected or any(n != 1 for n in actual.values()):
+        raise ValueError("source row and call op join multiplicity")
+    parity.update(
+        complete=complete,
+        missing_functions=sorted(missing_functions),
+        base_status=dict(Counter(x["status"] for x in base)),
+        reasons=dict(Counter(x["reason"] for x in base if x.get("reason"))),
+    )
+    return report
 
 
 def run(generation: Path, naming_source: Path, premise: bool, full: bool = False,
@@ -527,7 +555,10 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
             common.rows.values())
         common_block = cf.verdict_block(doc, common.units)
         common_facts_out.write_bytes(cf.canonical(doc) + b"\n")
-        header["common_facts"] = common_summary(facts, common, doc)
+        header["common_facts"] = common_summary(
+            facts, common, doc, complete=complete,
+            missing_functions={m["id"] for m in manifest["functions"]} - seen,
+        )
     override_block = None
     engine = engine_source() if evidence_out is not None or verdicts is not None else None
     if verdicts is not None:

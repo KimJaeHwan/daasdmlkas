@@ -586,7 +586,7 @@ def _check_common_facts(block) -> None:
         raise Rejected("duplicate or unordered common verdict rows")
 
 
-def bind_common_facts(document: dict, facts_document: dict, *, bundle: dict, allowlist: list,
+def _bind_checked_rows(document: dict, facts_document: dict, *, bundle: dict, allowlist: list,
                       observations: dict):
     import common_facts as cf
 
@@ -906,3 +906,127 @@ def _check_isa(section, fid, rows, never, tables=None) -> None:
         coordinates.append(where)
     if len(set(coordinates)) != len(coordinates) or coordinates != sorted(coordinates):
         raise Rejected(f"{fid}: isa_facts rows duplicated or not sorted")
+
+
+def bind_common_facts(document, facts_document, *, bundle, allowlist, observations):
+    import common_facts as cf
+
+    lookup = _bind_checked_rows(
+        document, facts_document, bundle=bundle, allowlist=allowlist,
+        observations=observations,
+    )
+    edge_fields = {
+        "edges", "edges.to", "edges.lands_on", "edges.lands_on.class",
+        "edges.lands_on.starts", "edges.lands_on.inside",
+        "edges.lands_on.mapping", "edges.lands_on.import",
+    }
+    op_fields = {"op_keys." + name for name in (
+        "transfer", "target", "condition", "auth", "link", "sp_adjust",
+        "setup", "transient", "persistent",
+    )}
+    shared = {"link_write", "target_value"} | {"link_write." + f for f in cf.LINK_FIELDS}
+    transfer = shared | edge_fields | op_fields | {
+        "kind", "exception_basis", "condition", "target_auth", "op_keys",
+        "op_keys.encoding_only", "op_keys.entry_ordinal",
+    } | {"condition." + f for f in cf.PRED_FIELDS}
+    opaque = {
+        "op_keys", "target_value", "condition.test.inputs", "target_auth",
+        "link_write.location.memory.base", "link_write.location.memory.space",
+        "link_write.relocation", "link_write.derivation",
+        "edges.lands_on.mapping", "edges.lands_on.import",
+    }
+
+    def row_ref(obj):
+        return (isinstance(obj, dict) and set(obj) == {"id", "observation"}
+                and all(isinstance(v, str) and v for v in obj.values()))
+
+    def op_ref(obj):
+        return (
+            isinstance(obj, dict)
+            and set(obj) in ({"ordinal", "opcode"}, {"row", "ordinal", "opcode"})
+            and type(obj["ordinal"]) is int and obj["ordinal"] >= 0
+            and isinstance(obj["opcode"], str) and bool(obj["opcode"])
+            and ("row" not in obj or row_ref(obj["row"]))
+        )
+
+    def validate_refs(r):
+        owner = cf.ref(r)
+        for node in cf.nodes(r):
+            if "op_output" in node:
+                op = node["op_output"]
+                if not op_ref(op) or op.get("row", owner) != owner:
+                    raise Rejected("op_output outside its use row")
+            for field in ("starts", "inside"):
+                refs = node.get(field, cf.MISS)
+                if refs is cf.MISS or cf.unknown(refs):
+                    continue
+                if not isinstance(refs, list) or not all(row_ref(x) for x in refs):
+                    raise Rejected("landing needs full row references")
+                keys = [cf.rr(x) for x in refs]
+                if keys != sorted(set(keys)) or any(k not in observations for k in keys):
+                    raise Rejected("invalid landing row set")
+
+        keys = r["transfer"].get("op_keys", {})
+        for short in op_fields:
+            name = short.split(".")[1]
+            value = keys.get(name)
+            if value is None or cf.unknown(value):
+                continue
+            seq = [value] if name == "transfer" else value
+            if not isinstance(seq, list) or any(
+                not op_ref(op) or op.get("row", owner) != owner for op in seq
+            ):
+                raise Rejected("op_keys outside the owning lift")
+
+    def validate_unit(r, u):
+        path, state = u["path"], u["code"]
+        if path.startswith("vendor_views."):
+            _, vendor, short = path.split(".", 2)
+            allowed = shared | edge_fields | {"length", "bytes"}
+            obj = r["vendor_views"][vendor]
+        elif path.startswith("transfer."):
+            short, allowed, obj = path.removeprefix("transfer."), transfer, r["transfer"]
+        else:
+            short, allowed, obj = path, {"length", "bytes.range"}, r
+
+        if short not in allowed:
+            raise Rejected("unknown common field: " + path)
+        if (short in op_fields) != ("op" in u):
+            raise Rejected("wrong operation selector: " + path)
+        if "op" in u and not op_ref(u["op"]):
+            raise Rejected("invalid op reference")
+        if state == "c" and (short in opaque or short.startswith("op_keys.")):
+            raise Rejected("no confirming comparison for " + path)
+
+        if short in edge_fields:
+            es = obj.get("edges", cf.MISS)
+            if "edge" not in u:
+                if short != "edges" or (state == "c" and es != []):
+                    raise Rejected("edge role missing: " + path)
+                return
+            if short == "edges":
+                return
+            obj = next(e for e in es if cf.triple(e) == cf.triple(u["edge"]))
+            parts = short.split(".")[1:]
+        else:
+            parts = short.split(".")
+        actual = cf.sub(obj, *parts)
+        if state == "c" and (actual is cf.MISS or cf.unknown(actual)):
+            raise Rejected("confirmed absent or unobserved claim: " + path)
+
+    try:
+        for r, vr in zip(facts_document["rows"], document["common_facts"]["rows"], strict=True):
+            validate_refs(r)
+            for u in vr["units"]:
+                validate_unit(r, u)
+    except (KeyError, IndexError, TypeError, ValueError, StopIteration) as error:
+        raise Rejected(f"malformed common facts binding: {error}") from error
+
+    def exact_lookup(query):
+        if not isinstance(query, dict) or not row_ref(query.get("row")):
+            return None
+        if "op" in query and not op_ref(query["op"]):
+            return None
+        return lookup(query)
+
+    return exact_lookup

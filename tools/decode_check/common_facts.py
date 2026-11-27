@@ -14,7 +14,7 @@ import lifting
 
 SCHEMA = "tbr-common-facts-1"
 VERDICT_SCHEMA = "tbr-common-facts-verdicts-1"
-RULE_VERSION = "g2a-2"
+RULE_VERSION = "g2a-3"
 PREMISE = "image-code-unmodified-at-runtime"
 VENDORS = ("intel", "amd")
 CALLS = {"CALL", "CALLIND"}
@@ -435,7 +435,7 @@ def make_edges(form, f, length, target):
     return [dict(zip(EC, k), to=dest[k[1]]) for k in schema(form)[1]]
 
 
-def derive_row(f, lift, fid, regs, data=b"", split=False):
+def _derive_lift_row(f, lift, fid, regs, data=b"", split=False):
     ops, n = f["ops"], f["length"]
     arm = f.get("isa") == "aarch64"
     shape = arm_shape(f, regs) if arm else None
@@ -649,10 +649,23 @@ def mnemonic(d):
     return {"loopz": "loope", "loopnz": "loopne"}.get(m, m)
 
 
+LINK_FIELDS = (
+    "value.width", "value.bits", "continuation", "location",
+    "location.memory.relative_to", "location.memory.slot_offset",
+    "location.memory.base", "location.memory.space",
+    "sp_delta", "relocation", "derivation",
+)
+PRED_FIELDS = ("taken_when", "test", "test.inputs")
+
+
 def code(actual, want):
     if actual is MISS or unknown(actual) or want is MISS:
         return "u"
-    return "c" if type(actual) is type(want) and actual == want else "x"
+    if type(actual) is not type(want):
+        return "x"
+    if isinstance(want, (dict, list)):
+        return "c" if canonical(actual) == canonical(want) else "x"
+    return "c" if actual == want else "x"
 
 
 def sub(d, *path):
@@ -686,7 +699,7 @@ def unit(path, state, edge=None, op=None):
     return item
 
 
-def row_verdicts(r, vs, index, isa, vendor=None):
+def _compare_present_fields(r, vs, index, isa, vendor=None):
     t, m = r["transfer"], member(r, vendor)
     f = dict(space=r["space"], address=int(r["offset"], 16))
     prefix = f"vendor_views.{vendor}." if vendor else ""
@@ -896,7 +909,7 @@ def engine_fields(rel):
                 setup_ops=tuple(rel.setup_ops), transient_ops=tuple(rel.transient_ops))
 
 
-def projection(r, f, regs, vendor=None):
+def _project_claim(r, f, regs, vendor=None):
     arm = f.get("isa") == "aarch64"
     if arm:
         shape = arm_shape(f, regs)
@@ -978,7 +991,8 @@ def parity(fn, rows, regs, vendor_lengths):
                     continue
                 p, why = projection(r, f, regs, v)
                 if p is None:
-                    status = "missing" if other is not None else "neither"
+                    status = ("missing" if other is not None
+                              else "claim-error" if why.startswith("claim") else "neither")
                 elif other is None:
                     status = "extra"
                 else:
@@ -997,63 +1011,231 @@ def input_checks(fn, rows):
     for f in fn["rows"]:
         r = rows[identity(f, fn["function_id"])]
         t = r["transfer"]
-        for i, o in enumerate(f["ops"]):
-            key = opkey(f, i)
-            tail = (fn.get("tails") or {}).get(key)
-            if o["opcode"] != "RETURN" and (tail is None or tail["kind"] == "branchind"):
-                continue
-            fields = {"transfer": code(t["op_keys"]["transfer"], opref(f["ops"], i))}
-            if o["opcode"] == "RETURN":
-                want, _ = value(f, o["inputs"][0] if len(o["inputs"]) == 1 else None, i)
-                fields["target_value"] = "u" if unknown(want) else code(t["target_value"], want)
+        for i, op in enumerate(f["ops"]):
+            ref_op = opref(f["ops"], i)
+            tail = (fn.get("tails") or {}).get(opkey(f, i))
+            if op["opcode"] == "RETURN":
+                a = op["inputs"]
+                want, _ = value(f, a[0] if len(a) == 1 else None, i)
+                fields = {
+                    "target_value": "u" if unknown(want) else code(t.get("target_value", MISS), want)
+                }
+            elif tail and tail["kind"] in ("branch", "cbranch"):
+                destinations = {DIRECT: tail["target"]}
+                if tail["kind"] == "cbranch":
+                    ft = lifting.continuation(f)
+                    destinations = {
+                        TAKEN: tail["target"], NEXT: addr(*ft) if ft is not None else MISS,
+                    }
+                es = t.get("edges")
+                fields = {"transfer": code(sub(t, "op_keys", "transfer"), ref_op)}
+                if isinstance(es, list):
+                    fields["edges"] = "c" if Counter(map(triple, es)) == Counter(destinations.keys()) else "x"
+                else:
+                    fields["edges"] = "u"
+                for key, want in destinations.items():
+                    matches = [e for e in es if triple(e) == key] if isinstance(es, list) else []
+                    actual = matches[0].get("to", MISS) if len(matches) == 1 else MISS
+                    fields[key[1]] = code(actual, want)
             else:
-                form = ("jcc" if tail["kind"] == "cbranch" else "jmp_near", False)
-                wanted = make_edges(form, f, f["length"], tail["target"])
-                es = t["edges"]
-                fields["edges"] = "c" if Counter(map(triple, es)) == Counter(map(triple, wanted)) else "x"
-                for e in wanted:
-                    match = [a for a in es if triple(a) == triple(e)]
-                    fields[e["source"]] = ("u" if len(match) != 1 or unknown(e["to"])
-                                           else code(match[0].get("to", MISS), e["to"]))
-            result.append(dict(row=ref(r), op=opref(f["ops"], i), fields=fields))
+                continue
+            result.append(dict(row=ref(r), op=ref_op, fields=fields))
     return result
 
 
 def different_lifts(groups, rows, raw, regs):
-    """Groups are at the same coordinate with the same verified instruction bytes."""
-    out = []
-    for keys in groups.values():
-        if len({digest(raw[k]["ops"]) for k in keys}) < 2:
-            continue
+    by_instruction = defaultdict(list)
+    for (isa, space, start, view, data), keys in groups.items():
+        by_instruction[isa, space, start, data].extend(keys)
+
+    results = []
+    for keys in by_instruction.values():
         for vendor in (None, *VENDORS):
             selected = [k for k in keys if vendor is None or rows[k]["vendor_views"]]
-            if len(selected) < 2:
+            if len({digest(raw[k]["ops"]) for k in selected}) < 2:
                 continue
-            members = []
+            arch, lifts = [], []
             for k in selected:
                 r, f = rows[k], raw[k]
                 t, m = r["transfer"], member(r, vendor)
-                for node in nodes(r):
-                    if {"ordinal", "opcode"} <= node.keys():
-                        resolve(node, r, f)
-                p, why = projection(r, f, regs, vendor) if any(
-                    o["opcode"] in CALLS for o in f["ops"]) else (None, "no call operation")
-                es = m["edges"]
-                architecture = {"length": m["length"], "kind": t["kind"], "condition": t["condition"],
-                                "target_value": m["target_value"], "target_auth": t["target_auth"],
-                                "edges": [{field: e[field] for field in (*EC, "to") if field in e}
-                                          if not unknown(e) else U(e["unobserved"]) for e in es]
-                                if isinstance(es, list) else es}
+                edges = m["edges"]
+                if isinstance(edges, list):
+                    edges = [
+                        {field: e[field] for field in (*EC, "to", "unobserved") if field in e}
+                        for e in edges
+                    ]
                 link = m["link_write"]
-                architecture["link_write"] = ({key: val for key, val in link.items()
-                                               if key not in ("relocation", "derivation")}
-                                              if isinstance(link, dict) else link)
-                members.append((r, architecture, {"row": ref(r), "op_refs": "resolved",
-                                "relocation": p["relocation"] if p else U(why)}))
+                arch_link = (
+                    {key: val for key, val in link.items() if key not in ("relocation", "derivation")}
+                    if isinstance(link, dict) else link
+                )
+                arch.append(dict(
+                    length=m["length"], kind=t["kind"], condition=t["condition"],
+                    target_value=m["target_value"], target_auth=t["target_auth"],
+                    edges=edges, link_write=arch_link,
+                ))
+                detail = dict(
+                    row=ref(r), view=r["view"], op_refs="resolved",
+                    relocation_check="u", derivation_check="u",
+                )
+                try:
+                    for node in nodes(r):
+                        if {"ordinal", "opcode"} <= node.keys():
+                            resolve(node, r, f)
+                except (TypeError, ValueError, KeyError) as error:
+                    detail.update(op_refs="invalid", reason=str(error))
+
+                observed = vendor is None or type(m["length"]) is int and m["length"] == f["length"]
+                observed = observed and f.get("fallthrough_space", f["space"]) == f["space"]
+                want = None
+                if observed and f.get("isa") == "aarch64":
+                    shape = arm_shape(f, regs)
+                    if shape and f["flow"]["has_fallthrough"] and shape[0] == f["fallthrough"]:
+                        want = ("instruction_relative", "pc_plus_4") if shape[1] else ("unknown", "constant")
+                elif observed and push_gate(f, regs.get("sp"))[0] is not None:
+                    want = "instruction_relative", "isa_next_ip"
+                if want is not None:
+                    detail["relocation_check"] = code(sub(link, "relocation"), want[0])
+                    detail["derivation_check"] = code(sub(link, "derivation"), want[1])
+                lifts.append(detail)
+
             fields = {}
-            for field in members[0][1]:
-                values = [a[field] for _, a, _ in members]
-                opaque = any(unknown(x) or "op_output" in x for val in values for x in nodes(val))
-                fields[field] = "u" if opaque else "c" if common(values) is not MISS else "x"
-            out.append(dict(vendor=vendor, fields=fields, lifts=[details for _, _, details in members]))
-    return out
+            for field in arch[0]:
+                vals = [a[field] for a in arch]
+                known = [v for v in vals if not any(unknown(n) or "op_output" in n for n in nodes(v))]
+                if len({digest(v) for v in known}) > 1:
+                    fields[field] = "x"
+                else:
+                    fields[field] = "c" if len(known) == len(vals) else "u"
+            results.append(dict(vendor=vendor, fields=fields, lifts=lifts))
+    return results
+
+
+def derive_row(f, lift, fid, regs, data=b"", split=False):
+    r = _derive_lift_row(f, lift, fid, regs, data, split)
+    t = r["transfer"]
+    keys = t["op_keys"]
+    link = t["link_write"]
+
+    if isinstance(link, dict) and "memory" in link.get("location", {}):
+        mem = link["location"]["memory"]
+        val = link["value"]
+        width = val["width"]
+        cont = link["continuation"]
+        width_ok = type(width) is int and width in (16, 32, 64)
+        slot_ok = width_ok and mem["slot_offset"] == link["sp_delta"] == -(width // 8)
+        bits_ok = (
+            width_ok and not unknown(cont) and isinstance(val["bits"], str)
+            and int(val["bits"], 16) == int(cont["offset"], 16) % (1 << width)
+        )
+
+        if not width_ok:
+            val["width"] = U("unsupported near-call store width")
+        else:
+            if not slot_ok:
+                mem["slot_offset"] = link["sp_delta"] = U("adjustment and stored width disagree")
+            if not unknown(cont) and isinstance(val["bits"], str) and not bits_ok:
+                val["bits"] = U("stored bits disagree with architectural continuation")
+
+        observed = (f.get("fallthrough_space", f["space"]), f["fallthrough"])
+        claimed = None if unknown(cont) else (cont["space"], int(cont["offset"], 16))
+        removable = slot_ok and bits_ok and claimed == observed and mem["space"] == observed[0]
+        if keys["transient"] and not removable:
+            keys["persistent"] = keys["transient"]
+            keys["transient"] = []
+
+    prefix = compare._prefix_run(data)
+    if lift and lift.pattern in ("jmp indirect", "call indirect") and 0x67 in prefix:
+        for node in nodes(t.get("target_value")):
+            if "memory" not in node:
+                continue
+            a = node["memory"]["address"]
+            extended = a.get("width") == 64 and sub(a, "zext", "width") == 32
+            small_constant = (
+                "constant" in a and a.get("width") == 64
+                and int(a["constant"], 16) < (1 << 32)
+            )
+            if not extended and not small_constant:
+                t["target_value"] = U("32-bit effective offset not established")
+                keys["target"] = []
+                break
+    return r
+
+
+def projection(r, f, regs, vendor=None):
+    projected, reason = _project_claim(r, f, regs, vendor)
+    if projected is None:
+        return None, reason
+
+    ft = (f.get("fallthrough_space", f["space"]), f["fallthrough"])
+    if projected["continuation"] != ft:
+        return None, "claim: continuation differs from full observed fallthrough"
+    if projected["kind"] == "push" and projected["link"][0] != ft[0]:
+        return None, "claim: link slot space differs from observed fallthrough"
+    return projected, None
+
+
+def row_verdicts(r, vs, index, isa, vendor=None):
+    form = vote_form(vs, isa)
+    # The current F3 records decoded flow. It has no execution-path observation.
+    structural_isa = dict(
+        isa, unobserved=dict(isa.get("unobserved", {}), F3="execution path unknown")
+    )
+    units = _compare_present_fields(r, vs, index, structural_isa, vendor)
+    m = member(r, vendor)
+    prefix = f"vendor_views.{vendor}." if vendor else "transfer."
+    existing = {u["path"] for u in units}
+
+    def fill(root, fields, state):
+        for field in fields:
+            path = prefix + root + "." + field
+            if path not in existing:
+                units.append(unit(path, state))
+                existing.add(path)
+
+    link = m.get("link_write", MISS)
+    pred = r["transfer"].get("condition", MISS)
+    if form is MISS:
+        fill("link_write", LINK_FIELDS, "?")
+        if not vendor:
+            fill("condition", PRED_FIELDS, "?")
+        return units
+
+    t = r["transfer"]
+    if (not vendor and t.get("kind") == "unknown" and t.get("edges") == []
+            and schema(form)[0] != "unknown"):
+        # The producer stated no kind and no edges: an abstention, not a decided different value (r5 s8).
+        for u in units:
+            if u["code"] == "x" and (u["path"] == "transfer.kind"
+                                    or u["path"] == "transfer.edges" and "edge" in u):
+                u["code"] = "u"
+
+    flow = form[0]
+    if flow == "call_near":
+        fill("link_write", LINK_FIELDS, "u")
+    elif link is MISS or link is None or unknown(link):
+        fill("link_write", LINK_FIELDS, "n")
+
+    if not vendor:
+        if flow == "jcc":
+            if sub(pred, "test", "op_output") is not MISS:
+                for u in units:
+                    if u["path"] == prefix + "condition.test":
+                        u["code"] = "u"
+            fill("condition", PRED_FIELDS, "u")
+        elif pred is MISS or pred is None or unknown(pred):
+            fill("condition", PRED_FIELDS, "n")
+
+    es = m.get("edges")
+    if isinstance(es, list):
+        for e in es:
+            if unknown(e) or e.get("to", MISS) is not None:
+                continue
+            land = e.get("lands_on", MISS)
+            if isinstance(land, dict) and not unknown(land) and set(land) - {"class"}:
+                key = triple(e)
+                # Subfield comparisons exist only for a unique matched ordinary role.
+                if any(u["path"] == prefix + "edges.lands_on.class"
+                       and u.get("edge") == dict(zip(EC, key)) for u in units):
+                    units.append(unit(prefix + "edges.lands_on", "x", key))
+    return units

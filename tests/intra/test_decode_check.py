@@ -4261,8 +4261,96 @@ def test_g2a_end_to_end(tmp_path):
     assert ev["common_facts"]["row_set_sha256"] == cf.row_set_digest(doc["rows"])
     report = header["common_facts"]
     assert report["parity"]["base_joins"] == report["parity"]["source_ops"]
-    assert report["fixtures"] == {"source": "tests/intra/test_decode_check.py -k g2a_required_"}   # (not run here)
+    assert len(report["fixtures"]["required"]) == 7 and all(n.startswith("test_g2a_required_") for n in report["fixtures"]["required"])   # (not run here)
     for counts in report["fields"].values():
         assert counts["N_considered"] == (counts["N_applicable"] + counts["N_not_applicable"]
                                           + counts["N_applicability_unknown"])
         assert counts["unobserved"] == counts["unobserved_applicable"] + counts["N_applicability_unknown"]
+
+
+def test_g2a_round2_bound_units():
+    from copy import deepcopy
+    import common_facts as cf
+    import evidence
+
+    c = _g2_collect([_g2_golden()])
+    doc, ev, args = _g2_binding(c)
+    for path in ("transfer.op_keys.setup", "transfer.does_not_exist",
+                 "transfer.edges", "vendor_views.amd.op_keys.transfer"):
+        bad = deepcopy(ev)
+        vr = bad["common_facts"]["rows"][0]
+        vr["units"].append(cf.unit(path, "c"))
+        vr["state"] = cf.row_state(vr["units"])
+        with pytest.raises(evidence.Rejected):
+            evidence.bind_common_facts(bad, doc, **args)
+
+
+def test_g2a_round2_transient_and_coverage():
+    from copy import deepcopy
+    import common_facts as cf
+    import lifting
+
+    _, fn, regs = _g2_unit()
+    f = deepcopy(fn["rows"][0])
+    for bad in (dict(f, length=f["length"] + 1), dict(f, fallthrough_space=f["space"] + 1)):
+        r = cf.derive_row(bad, lifting.identify(bad), "f0", regs)
+        assert r["transfer"]["op_keys"]["transient"] == []
+        assert cf.projection(r, bad, regs)[0] is None
+
+    entry = _g2_golden()
+    c = _g2_collect([entry])
+    r = next(iter(c.rows.values()))
+    r["vendor_views"]["intel"]["link_write"] = cf.U("link unavailable")
+    units = cf.row_verdicts(r, cf.votes(entry[3], entry[4], "intel"), cf.Index([], True), {}, "intel")
+    assert all(_g2_code(units, "vendor_views.intel.link_write." + p) == "u" for p in cf.LINK_FIELDS)
+
+
+def test_g2a_round2_path_and_address_size():
+    from dataclasses import replace
+    import common_facts as cf
+    import lifting
+
+    entry = _g2_golden()
+    r = next(iter(_g2_collect([entry]).rows.values()))
+    vs = [replace(v, flow="syscall", length=2) for v in entry[3]["intel"]]
+    r["transfer"]["edges"] = cf.make_edges(("syscall", False), entry[1], 2, None)
+    units = cf.row_verdicts(r, vs, cf.Index([], True), {"facts": {"F3": {"flow": "syscall"}}})
+    assert _g2_code(units, "transfer.edges.to", cf.SAVED) == "u"
+
+    ops = [_op("LOAD", [_c(1), _r(RAX_)], _u(0x40))] + _push(START + 3)
+    f = _row(3, ops + [_op("CALLIND", [_u(0x40)])], flow=_flow("call_indirect"))
+    r = cf.derive_row(f, lifting.identify(f), "f0", {}, bytes.fromhex("67ff10"))
+    assert cf.unknown(r["transfer"]["target_value"])
+
+
+def test_g2a_round2_different_lift_relocation():
+    from copy import deepcopy
+    import common_facts as cf
+
+    c, fn, regs = _g2_unit()
+    k, r = next(iter(c.rows.items()))
+    f = fn["rows"][0]
+    f2 = deepcopy(f)
+    f2["ops"][0]["inputs"][1]["size"] = 4 if f2["ops"][0]["inputs"][1]["size"] == 8 else 8
+    r2 = deepcopy(r)
+    r2["observation"] = "f1"
+    r2["transfer"]["link_write"]["relocation"] = "unknown"
+    k2 = cf.rr(r2)
+    groups = {(f["isa"], f["space"], f["address"], r["view"], b"same"): [k, k2]}
+    group, = cf.different_lifts(groups, {k: r, k2: r2}, {k: f, k2: f2}, regs)
+    assert [x["relocation_check"] for x in group["lifts"]] == ["c", "x"]
+
+
+def test_g2a_round2_producer_abstention_is_unobserved():
+    # Fable r2 P2-1: kind "unknown" with no edges is an abstention; voters' decided form cannot contradict it.
+    import common_facts as cf
+
+    entry = _g2_golden()
+    r = next(iter(_g2_collect([entry]).rows.values()))
+    r["transfer"]["kind"], r["transfer"]["edges"] = "unknown", []
+    units = cf.row_verdicts(r, cf.votes(entry[3], entry[4], "intel"), cf.Index([], True), {})
+    assert _g2_code(units, "transfer.kind") == "u"
+    assert not [u for u in units if u["path"] == "transfer.edges" and u["code"] == "x"]
+    r["transfer"]["kind"] = "indirect"
+    units = cf.row_verdicts(r, cf.votes(entry[3], entry[4], "intel"), cf.Index([], True), {})
+    assert _g2_code(units, "transfer.kind") == "x"
