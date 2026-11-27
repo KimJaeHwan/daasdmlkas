@@ -1,0 +1,3 @@
+Round-4 items #3 and #11 are closed. The scanner uses the capture for both reported fields, and §25.121 records the ntdll fallback total of 347.
+
+**[ASTRA-OPEN] P2** — `250a858` keeps every touched block descriptor open until verification finishes. With a process limit of 1,024 descriptors, a valid bundle touching 1,024 distinct block members fails admission with `EMFILE`. The format permits 65,536 blocks. Bound the descriptor cache and close entries on eviction. [configured_bundle.py:415](D:/01_gitproject/14_TDO_v2/daasdmlkas/.census6/wt_x1/src/tdo_v2/integration/configured_bundle.py:415) · [Block limit](D:/01_gitproject/14_TDO_v2/daasdmlkas/.census6/wt_x1/src/tdo_v2/_configured_bundle_snapshot.py:17)
