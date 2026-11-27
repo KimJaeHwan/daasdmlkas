@@ -107,6 +107,9 @@ def collect(generation: Path, naming_source: Path, *, common_facts=False) -> dic
             found["address_spaces"] = [asdict(s) for s in ev.address_spaces]
             found["registers"] = {name: cf.register(reader(ev)) for name, reader in
                                   (("sp", stack_register), ("lr", link_register), ("pc", program_counter))}
+            if found["isa"] == "aarch64":
+                table = ev.register_evidence
+                found["arm_registers"] = {row.name: cf.register(row) for row in table.registers} if table else {}
             found["complete"] = not diagnosis.fatal and all(c.evidence is not None for c in diagnosis.claims)
         function_keys = {c.entry for c in diagnosis.claims if c.entry}
         last = {c.entry: c for c in diagnosis.claims if c.evidence is not None}
@@ -270,11 +273,12 @@ class CommonFactsCollector:
     (id, observation) order. TDO_V2_G2A_COST_CROSSCHECK=1 also keeps the ballots and checks every row against the
     frozen 798b903 verdict functions (_g2a_reference)."""
 
-    def __init__(self, facts, isa_collector=None):
+    def __init__(self, facts, isa_collector=None, arm=None):
         import os
 
         self.facts = facts
         self.isa_collector = isa_collector
+        self.arm = arm
         self.rows = {}
         self.raw = {}
         self.summaries = {}
@@ -305,14 +309,16 @@ class CommonFactsCollector:
         stop = min((max(0, a) for a, n, _ in w.get("relocations", ()) if a + n > 0), default=len(data))
         data = data[:stop]
         self.raw[k] = facts
-        self.rows[k] = cf.derive_row(facts, lift, fid, self.facts["registers"], data,
-                                     cf.split_needed(ballot, result))
+        roles = self.facts["registers"]
+        self.rows[k] = (self.arm.row(facts, fid) if self.arm is not None else
+                        cf.derive_row(facts, lift, fid, roles, data, cf.split_needed(ballot, result)))
         self.branch_self += int(lift is not None and lift.pattern == "branch-self")
         # G2b (design_tbr_g2b_code_facts r2 E2 / r3 E2): the trap decision uses the raw window and ballots here,
         # where they still exist (ballots are not kept after collection)
         import code_facts
 
-        self.code_rows[k] = code_facts.row_proof(facts, result, lift, ballot, window, self.global_reason)
+        if self.arm is None:
+            self.code_rows[k] = code_facts.row_proof(facts, result, lift, ballot, window, self.global_reason)
         # Retain only the comparison inputs: per vendor view a vote summary (r1 C1); the ballots themselves are
         # not kept. Non-x86 rows and rows without accepted votes share the EMPTY summary (r2 D2).
         accepted = {v: cf.votes(ballot, result, v) for v in (None, *cf.VENDORS)}
@@ -670,7 +676,12 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
     producer_override = producer_override or want_common
     collector = IsaCollector() if want_common or (isa_facts or producer_override) and evidence_out is not None else None
     verdicts = OverrideCollector(manifest.get("producer_profile")) if producer_override else None
-    common = CommonFactsCollector(facts, collector) if want_common else None
+    arm = None
+    if want_common and facts["isa"] == "aarch64":
+        import arm64_facts
+
+        arm = arm64_facts.Arm64Facts(image.blocks, facts["arm_registers"], facts["registers"])
+    common = CommonFactsCollector(facts, collector, arm) if want_common else None
     if common is not None:
         common.global_reason = reason is not None
     rows.extend(check.decode_rows(image, facts["functions"], use_table, reason, full, states, facts["language"] or "",
@@ -688,28 +699,36 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
         seal = json.loads((generation / "seal.json").read_bytes())
         doc = cf.document(
             {k: seal[k] for k in ("generation_id", "manifest_sha256")},
-            dict(name="tbr-derive-ghidra-p-code", lift_table=lifting.TABLE["id"], rule=cf.FACTS_RULE),
+            (dict(name="tbr-derive-aarch64-bundle", rule=arm64_facts.RULE) if arm is not None else
+             dict(name="tbr-derive-ghidra-p-code", lift_table=lifting.TABLE["id"], rule=cf.FACTS_RULE)),
             dict(isa=facts["isa"] or cf.U("unsupported language"), address_spaces=facts["address_spaces"],
                  stack_register=facts["registers"]["sp"] or cf.U("no validated stack register"),
                  code=None, tbi=cf.U("no TBI evidence")),
             common.rows.values())
-        import code_facts
-
-        # G2b: program.code (regions, verified windows, sites, survey) bound to the document's row order
         missing_functions = {m["id"] for m in manifest["functions"]} - seen
-        doc["program"]["code"] = code_facts.build_code(
-            doc["rows"], common.raw, common.code_rows, mapping, original,
-            facts["image_space"], base, complete, missing_functions,
-        )
+        program = doc["program"]
+        if arm is None:
+            import code_facts
+
+            # G2b facts are bound to the file mapping and verified G1 windows.
+            program["code"] = code_facts.build_code(
+                doc["rows"], common.raw, common.code_rows, mapping, original,
+                facts["image_space"], base, complete, missing_functions,
+            )
+        else:
+            program["tbi"] = arm64_facts.tbi()
+            program["code"] = cf.U(arm64_facts.FILE_RUNTIME_UNOBSERVED)
+            doc["program"]["aarch64"], arm_summary = arm64_facts.program_fragments(doc["rows"], common.raw)
         # (r1 C4: the facts file is streamed, byte-identical to canonical(doc) + LF; its digest excludes the LF)
         common_block = cf.verdict_block5(doc, cf.write_canonical(common_facts_out, doc), common.unit_sets,
                                          common.row_set)
         header["common_facts"] = common_summary(
             facts, common, doc, complete=complete, missing_functions=missing_functions,
         )
-        header["common_facts"]["code"] = dict(
-            code_facts.summary(doc["program"]["code"]), bundle=doc["bundle"],
-        )
+        if arm is None:
+            header["common_facts"]["code"] = dict(code_facts.summary(program["code"]), bundle=doc["bundle"])
+        else:
+            header["common_facts"]["aarch64"] = arm_summary
     override_block = None
     engine = engine_source() if evidence_out is not None or verdicts is not None else None
     if verdicts is not None:

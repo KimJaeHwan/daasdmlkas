@@ -1035,9 +1035,11 @@ def common_path_sets():
     return edge_fields, op_fields, shared, transfer
 
 
-def bind_common_facts(document, facts_document, *, bundle, allowlist, observations, g2b=None):
+def bind_common_facts(document, facts_document, *, bundle, allowlist, observations, g2b=None, g2c=None):
     import common_facts as cf
 
+    rule = facts_document.get("producer", {}).get("rule")
+    arm = rule == "g2c-1"
     lookup = _bind_checked_rows(
         document, facts_document, bundle=bundle, allowlist=allowlist,
         observations=observations,
@@ -1132,10 +1134,24 @@ def bind_common_facts(document, facts_document, *, bundle, allowlist, observatio
             raise Rejected("confirmed absent or unobserved claim: " + path)
 
     try:
+        if arm:
+            if g2c is None:
+                raise Rejected("G2c requires the admitted sealed blocks and register evidence")
+            if (facts_document["program"]["isa"] != "aarch64"
+                    or any(f.get("isa") != "aarch64" for f in observations.values())):
+                raise Rejected("G2c requires an AArch64 observation set")
+            g2c["arm"].check_document(facts_document, observations, g2c["complete"])
+        elif ("aarch64" in facts_document["program"]
+              or any("aarch64" in r for r in facts_document["rows"])):
+            raise Rejected("AArch64 instruction claims require producer.rule g2c-1")
         units_of = cf.block_units(document["common_facts"])
         for r, vr in zip(facts_document["rows"], document["common_facts"]["rows"], strict=True):
             validate_refs(r)
+            if arm and (r["vendor_views"] is not None or "aarch64" not in r):
+                raise Rejected("unbound G2c observation")
             for u in units_of(vr):
+                if arm and u["code"] not in ("?", "u"):
+                    raise Rejected("G2c claims have no independent AArch64 verdict")
                 validate_unit(r, u)
     except (KeyError, IndexError, TypeError, ValueError, StopIteration) as error:
         raise Rejected(f"malformed common facts binding: {error}") from error
@@ -1147,11 +1163,10 @@ def bind_common_facts(document, facts_document, *, bundle, allowlist, observatio
             return None
         return lookup(query)
 
-    rule = facts_document.get("producer", {}).get("rule")
     code = facts_document.get("program", {}).get("code")
     if rule == "g2b-1":
         exact_lookup.code = read_g2b(document, facts_document, observations, g2b)
-    elif isinstance(code, dict) and ("verified_encoding" in code or "survey" in code):
+    elif not arm and isinstance(code, dict) and ("verified_encoding" in code or "survey" in code):
         raise Rejected("program.code requires producer.rule g2b-1")
     return exact_lookup
 

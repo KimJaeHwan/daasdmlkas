@@ -4127,6 +4127,131 @@ def test_g2a_required_blr_x30():
         assert cf.parity(fn, c.rows, regs, {})[0]["status"] == "matched"
 
 
+def _g2c_arm(start, words, regs, **extra):
+    from arm64_facts import Arm64Facts
+
+    data = b"".join(word.to_bytes(4, "little") for word in words)
+    block = dict(space_id=1, byte_start=start, byte_size=len(data), member_id="memory-000000",
+                 is_initialized=True, is_loaded=True, is_overlay=False, is_mapped=False, is_external=False)
+    return Arm64Facts([(dict(block, **extra), data)], regs, {})
+
+
+def test_g2c_sealed_blr_and_evidence_binding():
+    from copy import deepcopy
+
+    import arm64_facts as arm
+    import decode_check
+
+    _, fn, regs = _g2_unit(True)
+    f = fn["rows"][0]
+    start = f["address"]
+    roles = dict(regs, x30=regs["lr"])
+    collector = decode_check.CommonFactsCollector({"registers": regs}, arm=_g2c_arm(start, [0xD63F03C0], roles))
+    collector("f0", f, None, None, None)
+    collector.finish(True)
+    r, = collector.rows.values()
+    transfer = r["transfer"]
+    assert r["aarch64"]["basis"]["word"] == "d63f03c0"
+    assert transfer["target_value"] == arm.pre(regs["lr"], 64)
+    assert transfer["link_write"]["continuation"] == cf.addr(1, start + 4)
+    assert transfer["op_keys"]["target"] == [{"ordinal": 0, "opcode": "COPY"}]
+    assert cf.parity(fn, collector.rows, regs, {})[0]["status"] == "matched"
+
+    older = collector.arm.row(dict(f, length=None), "f0")
+    assert older["length"] is None and older["aarch64"]["basis"]["size"] == 4
+    assert older["bytes"]["range"] == cf.interval(f, 4)
+    assert cf.unknown(collector.arm.basis(dict(f, length=2)))
+    assert cf.unknown(collector.arm.basis(dict(f, address=start + 1)))
+    assert cf.unknown(_g2c_arm(start, [0xD63F03C0], roles, space_id=2).basis(f))
+    assert cf.unknown(_g2c_arm(start, [0xD63F03C0], roles, is_mapped=True).basis(f))
+    duplicate = _g2c_arm(start, [0xD63F03C0], roles)
+    duplicate.blocks[1] *= 2
+    assert cf.unknown(duplicate.basis(f))
+
+    doc, ev, args = _g2_binding5(collector)
+    doc["producer"]["rule"] = arm.RULE
+    fragments, _ = arm.program_fragments(doc["rows"], collector.raw)
+    doc["program"].update(isa="aarch64", aarch64=fragments, tbi=arm.tbi(),
+                          code=cf.U(arm.FILE_RUNTIME_UNOBSERVED), stack_register=regs["sp"])
+    ev["common_facts"]["facts_sha256"] = cf.digest(doc)
+    args["allowlist"] = [evidence.allowlist_entry(ev)]
+    args["g2c"] = {"arm": collector.arm, "complete": True}
+    lookup = evidence.bind_common_facts(ev, doc, **args)
+    assert lookup(dict(row=cf.ref(r), path="transfer.kind")) == "unobserved"
+
+    changed = deepcopy(ev)
+    block = changed["common_facts"]
+    for units in block["unit_sets"]:
+        for u in units:
+            if u[0] == cf.PATH_ID["transfer.kind"]:
+                u[1] = "c"
+    for v in block["rows"]:
+        v["state"] = cf.row_state([cf.unit_from_json(u) for u in block["unit_sets"][v["set"]]])
+    args["allowlist"] = [evidence.allowlist_entry(changed)]
+    with pytest.raises(evidence.Rejected, match="no independent AArch64 verdict"):
+        evidence.bind_common_facts(changed, doc, **args)
+    for field, value in (("word", "d503201f"), ("size", 4.0), ("stack_register", regs["lr"])):
+        forged = deepcopy(doc)
+        owner = forged["program"] if field == "stack_register" else forged["rows"][0]["aarch64"]["basis"]
+        owner[field] = value
+        ev["common_facts"]["facts_sha256"] = cf.digest(forged)
+        args["allowlist"] = [evidence.allowlist_entry(ev)]
+        with pytest.raises(evidence.Rejected, match="claims differ from admitted inputs"):
+            evidence.bind_common_facts(ev, forged, **args)
+
+
+def test_g2c_branch_auth_traps_and_bti():
+    import arm64_facts as arm
+
+    _, fn, regs = _g2_unit(True)
+    f = fn["rows"][0]
+    start = f["address"]
+    roles = dict(regs, x30=regs["lr"])
+    # The source has two producer-listed targets, including an incompatible
+    # BTI class; another listed address has no row in this decode view.
+    words = [0xD63F03C0, 0xD503249F, 0xD65F0BFF, 0xD4000541, 0xD42000A0, 0x00000007]
+    collector = _g2c_arm(start, words, roles)
+    f["flow_target_coords"] = [(1, start + 4), (1, start + 8), (1, start + 12), (1, start + 32)]
+    f["recorded_landing_pads"] = [(1, start + 12)]
+    raw = [f, *(dict(f, address=start + i * 4, ops=[]) for i in range(1, len(words)))]
+    rows = [collector.row(row, "f0") for row in raw]
+    cf.finish_landings(rows, True)
+    doc, counts = arm.program_fragments(rows, {cf.identity(row, "f0"): row for row in raw})
+    bti = doc["branch_target_check"]
+    assert [pair["landing_instruction"] for pair in bti["pairs"]] == ["bti_j", "retaa"]
+    assert "10" not in bti["pairs"][0]["guarded_landing_accepts"]
+    assert all(cf.unknown(pair["verdict"]) for pair in bti["pairs"])
+    assert [gap["target"] for gap in bti["unresolved"]] == [cf.addr(1, start + 12), cf.addr(1, start + 32)]
+    auth = rows[2]["transfer"]
+    assert auth["target_value"] == arm.pre(regs["lr"], 64)
+    assert auth["target_auth"]["key"] == "ia"
+    assert auth["target_auth"]["modifier"] == arm.pre(regs["sp"], 64)
+    assert auth["op_keys"]["encoding_only"] == ["target_value", "target_auth"]
+    assert [r["transfer"]["edges"][-1]["to"] for r in rows[3:5]] == [cf.addr(1, start+16)] * 2
+    assert [cf.triple(e) for e in rows[5]["transfer"]["edges"]] == [cf.OS]
+    assert [site["immediate"] for site in doc["survey"]["sites"]["trap_instruction"]] == [42, 5, 7]
+    assert counts["rows"] == sum(counts["forms"].values()) == len(words)
+    assert arm.decode(0x54000010) is None  # BC.cond uses a different encoding and feature.
+    assert arm.decode(0xD63F03C1) is None  # Nonzero reserved bits on BLR.
+    tbnz = 0xB7480045
+    t = arm.transfer_for("tbnz", tbnz, f, {"x5": dict(regs["lr"], name="x5", offset=0x1234)})
+    assert t["condition"]["test"]["bit_set"][1] == 41
+    assert t["edges"][0]["to"] == cf.addr(1, start + 8)
+    store = arm.isa_for("stxr", 0xC8037C82, {"w3": dict(regs["lr"], name="w3", size=4)})[0]["value"]
+    assert cf.unknown(store["conditional_store"]) and store["encoded_status_register"]["width"] == 32
+    status_overlaps_input = arm.isa_for("stxr", 0xC81F7C9F, {})[-1]["value"]
+    assert status_overlaps_input["classification"] == "constrained_unpredictable"
+
+    capture = f["ops"][0]
+    ret = dict(f, ops=[capture, _op("RETURN", [capture["output"]])])
+    ret_row = _g2c_arm(start, [0xD65F03C0], roles).row(ret, "f0")
+    ret_fn, ret_rows = dict(function_id="f0", rows=[ret]), {cf.rr(ret_row): ret_row}
+    assert cf.input_checks(ret_fn, ret_rows)[0]["fields"] == {"transfer": "c", "target_value": "c"}
+    ret_t = ret_row["transfer"]
+    ret_t["target_value"]["pre_register"] = dict(regs["lr"], offset=regs["lr"]["offset"] + 8)
+    assert cf.input_checks(ret_fn, ret_rows)[0]["fields"]["target_value"] == "x"
+
+
 @pytest.mark.parametrize("binding", [_g2_binding, _g2_binding5])
 def test_g2a_required_binding(binding):
     from copy import deepcopy

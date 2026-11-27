@@ -1097,9 +1097,14 @@ def input_checks(fn, rows):
             if op["opcode"] == "RETURN":
                 a = op["inputs"]
                 want, _ = value(f, a[0] if len(a) == 1 else None, i)
+                actual = t.get("target_value", MISS)
+                if f.get("isa") == "aarch64" and isinstance(actual, dict) and "pre_register" in actual:
+                    # The sealed encoding uses the named register table. The
+                    # lift operand supplies the same coordinate without a name.
+                    actual = dict(actual, pre_register={k: v for k, v in actual["pre_register"].items() if k != "name"})
                 fields = {
                     "transfer": code(sub(t, "op_keys", "transfer"), ref_op),
-                    "target_value": "u" if unknown(want) else code(t.get("target_value", MISS), want),
+                    "target_value": "u" if unknown(want) else code(actual, want),
                 }
                 if t.get("kind") == "trap":
                     # A trap row's transfer op is its userop; a RETURN after it is not the row's transfer and
