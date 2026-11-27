@@ -116,6 +116,28 @@ Paths inside `pairs.json` / `result.json` are the office's `/root/...` paths: re
 Also `x1_scan_ntdll5/x1.json`: set `TDO_X1_STANDALONE_SCAN=/root/x1_scan_ntdll5/x1.json` for `test_x1_stack_authority.py` (its default `/root/x1_scan_ntdll2` no longer exists; the test skips without it).
 Size ~683 MB (`Downloads/x1b_home_2026-11-27.tar`, sha256 next to it). Bundle folders must keep their modes (owner uid, no group / other write): restore as root with plain `tar -xf`.
 
+## 4b. Regression testing at home (the same checks the office runs)
+
+A second pack, `x1b_home_gate_2026-11-27.tar` (~918 MB, sha256 next to it), holds everything the gate reads: all gate
+Bundles (`tdo_bundles3/*`, with only the UE template producer generation of `ue-core-probe`), the snapshot baseline
+`tdo_snapshots/x1a4`, the stack evidence `ghidra_link_evidence/`, the baseline gate's oracle outputs
+`gate_par_x1a4/oracle.*.out`, and the X-1b run dumps of the remaining pairs. Restore both packs under `/root`.
+
+* **Start-of-week check (do this first):** `bash tools/gate/gate_par.sh x1a4 home0` from the tree (paths:
+  `tools/gate/env.sh`, defaults under `$HOME`). Expected exactly as the office's x1a4: both suites pass, snapshot
+  compare 0 differences, `UETEMPLATE OK`, every oracle config ran; then `tools/gate/oracle_compare.sh x1a4 home0` =
+  identical. (This branch's X-1b changes do not change results on the old Bundles.) If home0 differs, stop and write
+  it down in `RESULTS.md` -- the environment differs, not the code.
+* **During the week:** focused tests per commit; the full suite (`pytest -n 6 tests` minus the three serial files, as in
+  the gate) before any `src/` commit; `tools/x1b/x1b_stages_all.sh` with `COMPARE_ONLY=1` for the X-1b pairs after a
+  projection change.
+* **Before handing back:** one gate `bash tools/gate/gate_par.sh x1a4 home1`. Any snapshot / oracle difference must be
+  intended and listed (commit + reason) in `RESULTS.md`; then the office can take `home1`'s verdict as the expected one
+  and re-run the same gate on the merged tree.
+* What only the office can run: re-exports (Ghidra + original binaries), the X-1b stages that need NEW dumps of pairs
+  whose Bundles are not packed (published `tdo_bundles4` copies are packed only for the seven pairs of the first pack),
+  and anything on the full UE Core producer re-export.
+
 ## 5. Merging back (what the office session will do -- keep it fast)
 
 * Work only on this branch; commit per topic; **never mix `docs/handoff_x1b/` changes into a code commit** (prefix
