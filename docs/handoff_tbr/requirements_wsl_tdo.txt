@@ -1,0 +1,11 @@
+execnet==2.1.2
+iniconfig==2.3.0
+-e git+https://github.com/KimJaeHwan/daasdmlkas@b8633a0906a98e10ae809b063093f9ce0278ba76#egg=lowpcode_data_origin_engine
+numpy==2.5.3
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0
+pytest==9.1.1
+pytest-xdist==3.8.0
+rustworkx==0.18.1
+z3-solver==4.16.0.0
