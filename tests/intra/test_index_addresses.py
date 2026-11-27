@@ -62,6 +62,39 @@ def test_the_same_element_is_one_exact_place():
     assert _bytes(RCX) <= found.register_bytes and not _bytes(RDX) & found.register_bytes
 
 
+def test_address_origin_keeps_both_raw_sites_of_a_shared_term():
+    from synthetic import CODE_BASE, RAM
+    from tdo_v2.relative_memory import CAPTURE_ADDRESS_ATOM_ORIGINS
+
+    a, b, addr = tmp(0x100), tmp(0x108), tmp(0x110)
+    builder = straight(
+        [op("INT_SEXT", [reg(RSI, 4)], a)],
+        [op("INT_SEXT", [reg(RSI, 4)], b)],
+        [add(addr, reg(RDI), a), store(addr, reg(RDX))],
+        [add(addr, reg(RDI), b), load(reg(RAX), addr)],
+    )
+    baseline = normalize(builder)
+    token = CAPTURE_ADDRESS_ATOM_ORIGINS.set(True)
+    try:
+        observed = normalize(builder)
+    finally:
+        CAPTURE_ADDRESS_ATOM_ORIGINS.reset(token)
+    assert not baseline.address_atom_origins
+    assert baseline.address_objects == observed.address_objects
+    assert baseline.memory_ssa == observed.memory_ssa
+    assert list(baseline.dependencies.weighted_edges()) == list(observed.dependencies.weighted_edges())
+
+    def key(instruction, opcode):
+        return f"{RAM:x}:{CODE_BASE + 4 * instruction:x}:0:{opcode}"
+
+    producing = {key(0, "INT_SEXT"), key(1, "INT_SEXT")}
+    (origins, uses), = [(origins, uses) for _, origins, uses in observed.address_atom_origins
+                       if any(kind == "operation" and site in producing for kind, site, _, _ in origins)]
+    assert {site for kind, site, _, _ in origins if kind == "operation"} == producing
+    assert {index for _, _, _, operands in origins for index, _ in operands} == {0}
+    assert {(key(2, "INT_ADD"), 1, 8), (key(3, "INT_ADD"), 1, 8)} <= uses
+
+
 def test_two_fields_of_one_element_are_separate():
     """a[i].f0 = rdx; a[i].f8 = rcx; rax = a[i].f0 (16-byte elements)."""
     t = tmp(0x100)

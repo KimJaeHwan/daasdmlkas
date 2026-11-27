@@ -44,7 +44,7 @@ def _end(buffer, start):
     raise ValueError(f"invalid or truncated JSON value at byte {start}")
 
 
-def _object(buffer, start):
+def _object(buffer, start, *, sections=None):
     """Yield the immediate member names and byte ranges of one JSON object."""
     if buffer[start:start + 1] != b"{":
         raise ValueError(f"expected a JSON object at byte {start}")
@@ -64,7 +64,10 @@ def _object(buffer, start):
         if buffer[offset:offset + 1] != b":":
             raise ValueError(f"expected ':' at byte {offset}")
         start_value = _SPACE.match(buffer, offset + 1).end()
-        stop_value = _end(buffer, start_value)
+        if name == "sections" and sections is not None:
+            stop_value = _index_object(buffer, start_value, sections)
+        else:
+            stop_value = _end(buffer, start_value)
         yield name, (start_value, stop_value)
         offset = _SPACE.match(buffer, stop_value).end()
         token = buffer[offset:offset + 1]
@@ -73,6 +76,16 @@ def _object(buffer, start):
         if token != b",":
             raise ValueError(f"expected ',' or '}}' at byte {offset}")
         offset = _SPACE.match(buffer, offset + 1).end()
+
+
+def _index_object(buffer, start, sections):
+    entries = _object(buffer, start)
+    while True:
+        try:
+            name, bounds = next(entries)
+        except StopIteration as end:
+            return end.value
+        sections[name] = bounds
 
 
 def _array(buffer, start):
@@ -145,10 +158,8 @@ class Sections:
 
     def __getitem__(self, name):
         start, stop = self.ranges[name]
-        self.stream.seek(start)
-        text = self.stream.read(stop - start).decode("utf-8")
         if stop - start <= _SHARE_IDENTIFIERS_ABOVE:
-            return json.loads(text)
+            return self._decode(start, stop)
 
         # Large function sections repeat scope digests, operation keys and
         # type tags in millions of rows. Share strings only within this read.
@@ -161,7 +172,19 @@ class Sections:
                     row[field] = identifiers.setdefault(value, value)
             return row
 
-        return json.loads(text, object_hook=share_identifiers)
+        self.stream.seek(start)
+        if self.stream.read(1) != b"{":
+            return self._decode(start, stop, share_identifiers)
+        # Parse the large function's fields one at a time. This avoids
+        # keeping the entire encoded section next to its decoded rows.
+        with mmap.mmap(self.stream.fileno(), 0, access=mmap.ACCESS_READ) as buffer:
+            fields = dict(_object(buffer, start))
+        return {key: self._decode(*bounds, share_identifiers) for key, bounds in fields.items()}
+
+    def _decode(self, start, stop, object_hook=None):
+        self.stream.seek(start)
+        text = self.stream.read(stop - start).decode("utf-8")
+        return json.loads(text, object_hook=object_hook)
 
     def write(self, name, chunks):
         self.stream.seek(0, 2)
@@ -192,7 +215,7 @@ def open_snapshot(path):
         header = {}
         seen_sections = False
         with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as buffer:
-            entries = _object(buffer, _SPACE.match(buffer).end())
+            entries = _object(buffer, _SPACE.match(buffer).end(), sections=sections.ranges)
             while True:
                 try:
                     name, (start, stop) = next(entries)
@@ -201,7 +224,6 @@ def open_snapshot(path):
                         raise ValueError("trailing data after snapshot")
                     break
                 if name == "sections":
-                    sections.ranges = dict(_object(buffer, start))
                     seen_sections = True
                 else:
                     header[name] = json.loads(buffer[start:stop].decode("utf-8"))

@@ -96,6 +96,7 @@ from .scope_identity import (
     VarnodeKindCode,
 )
 from .relative_memory import (
+    CAPTURE_ADDRESS_ATOM_ORIGINS, address_atom_origins,
     accessor_separations, project_function_relative_memory, single_execution_blocks, single_execution_keys,
     stale_reads,
 )
@@ -291,6 +292,7 @@ class NormalizedFunction:
     # to this round, effects or not: each callee's support, an unavailable key
     # for one without a usable summary, its own vetoed-noreturn keys (sorted)
     callee_support: tuple = ()
+    address_atom_origins: tuple = field(default=(), compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.call_clobber_reads) is not tuple or any(
@@ -1963,6 +1965,8 @@ class _ScopedNormalizer:
             pointer_rows: dict = {}
             value_inputs: dict = {}
             address_metadata: dict = {"objects": {}, "atoms": {}}
+            if CAPTURE_ADDRESS_ATOM_ORIGINS.get():
+                address_metadata.update(recipes={}, operand_uses={})
             fresh_rows = frozenset(
                 f"{key}~{index}"
                 for key, effect in proven_call_effects.items() if effect.fresh_registers
@@ -2627,6 +2631,7 @@ class _ScopedNormalizer:
             call_value_inputs=tuple(sorted(value_inputs.items())),
             address_objects=tuple(address_metadata["objects"].items()),
             address_atoms=tuple(address_metadata["atoms"].items()),
+            address_atom_origins=address_atom_origins(address_metadata),
             uncertain_writers=tuple(sorted(
                 ((key, conditions) for key, conditions in _uncertain.items()), key=lambda item: item[0])),
             call_anchors=anchors,

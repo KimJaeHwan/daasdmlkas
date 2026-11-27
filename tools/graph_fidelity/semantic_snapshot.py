@@ -57,6 +57,7 @@ CONTRACT = {
     "NormalizedFunction": (None, {"document": "input (the function document)",
                                   "scopes": "input (scope bundle)",
                                   "forward_inputs": "forward-on derivation inputs (docs 25.33 F4a); None when off",
+                                  "address_atom_origins": "paired comparison diagnostics for address expressions",
                                   "call_clobber_contract": "inputs of the call-clobber rows (docs 25.84); the rows,"
                                                            " debts and roots they decide remain encoded",
                                   "premise_uses": "2b-P use records (docs 25.91): which named assumptions the"
@@ -104,6 +105,7 @@ ADDED_FIELDS = {
                          "call_memory_decisions": (), "activation_rejections": {}, "allocation_lifetimes": (),
                          "lifetime_models": ()},
     "NormalizedFunction": {"activation_entry": None, "forward_memory_proofs": (), "forward_memory_requires": (),
+                           "address_atom_origins": (),
                            "load_value_proofs": (), "nonstack_spans": frozenset(), "intrinsic_refinements": (),
                            "assumes_opaque_callees_restore_stack_pointer": True,
                            "fault_cuts": (), "fault_reachable": False,
@@ -164,7 +166,7 @@ _BASE_GRAPH_EXPORT = ContextVar("tdo_base_graph_export", default=False)
 # restoration verdict, not its boolean projection) and the reporting fields
 # premise_uses / supports are encoded; ordinary snapshots are unchanged
 _LOSSLESS = ContextVar("tdo_snapshot_lossless", default=False)
-LOSSLESS_INCLUDED = {"premise_uses", "supports"}
+LOSSLESS_INCLUDED = {"premise_uses", "supports", "address_atom_origins"}
 
 
 def encode_base_graph(value, path="$"):
@@ -354,10 +356,14 @@ def dump(generation: Path, out: Path, config: str, bindings=(), paired: bool = F
     """``paired`` (X-1b, design_x1b_method_r3 B / C): every section encoded
     losslessly, the run's supports and control records added, the input's
     manifest / seal digests in ``meta`` -- for ``compare --pair`` / ``--paired``."""
+    from tdo_v2.relative_memory import CAPTURE_ADDRESS_ATOM_ORIGINS
+
     token = _LOSSLESS.set(paired)
+    origins = CAPTURE_ADDRESS_ATOM_ORIGINS.set(paired)
     try:
         return _dump(generation, out, config, bindings, paired)
     finally:
+        CAPTURE_ADDRESS_ATOM_ORIGINS.reset(origins)
         _LOSSLESS.reset(token)
 
 

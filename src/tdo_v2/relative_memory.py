@@ -7,6 +7,8 @@ from .phases import measured
 from .resource_limits import step
 from ._activation_entry import entry_seed
 
+from collections import Counter
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 import hashlib
 
@@ -53,6 +55,33 @@ class _AddressExpression:
     image: int | None = 0
 
 
+CAPTURE_ADDRESS_ATOM_ORIGINS = ContextVar("capture_address_atom_origins", default=False)
+
+
+def _origin_expression(value):
+    return frozenset(value.atoms), value.displacement, value.byte_size, value.image
+
+
+def address_atom_origins(metadata):
+    """Export origins reachable from the recorded relative objects."""
+    recipes = metadata.get("recipes")
+    if not recipes:
+        return ()
+    uses = metadata["operand_uses"]
+    pending = [atom for terms, _ in metadata["objects"].values() for atom, _ in terms]
+    seen = set()
+    for atom in pending:
+        if atom in seen:
+            continue
+        seen.add(atom)
+        # Recipes share (kind, site, detail, operands). An operand identifies
+        # its raw input number, join source, or the base of an entry object.
+        for _, _, _, operands in recipes.get(atom, ()):
+            pending.extend(child for _, (terms, *_) in operands for child, _ in terms)
+    return tuple((atom, frozenset(recipes[atom]), frozenset(uses.get(atom, ())))
+                 for atom in sorted(seen & recipes.keys()))
+
+
 # Deriving summaries for reuse as models (``summary_templates``): a constant
 # is an image address -- it moves with the library's load base -- only when
 # its instruction proves it (``relocates``: a relocation entry or a
@@ -62,8 +91,6 @@ class _AddressExpression:
 # relative to an entry value, an absolute place, an extent, a stack delta, a
 # null test -- is recorded in ``found`` (its function scope digest) and cannot
 # be exported. Off (None) everywhere else: no effect on analysis.
-from contextvars import ContextVar
-
 IMAGE_BASE_TRACKING: ContextVar = ContextVar("IMAGE_BASE_TRACKING", default=None)
 
 # Named assumption import-slots-hold-their-exports (docs section 25.2 B): set
@@ -381,6 +408,8 @@ def project_function_relative_memory(
         projector.ineligible_atoms = ineligible_atoms
     if address_metadata is not None:
         projector.address_metadata = address_metadata
+        if "recipes" in address_metadata:
+            projector._rewritten_operations = frozenset(operation_overrides or ())
     changed = False
     blocks: list[ObservedEffectBlock] = []
     for block in unit.blocks:
@@ -1282,6 +1311,7 @@ class _Projector:
         # space id) -- the object id is a function of exactly these, so entries
         # from any pass stay true -- and atom -> what defined it
         self.address_metadata: dict = {"objects": {}, "atoms": {}}
+        self._rewritten_operations = frozenset()
         self._action_ids = {
             action.operation_key: action_id
             for action_id, action in enumerate(first_pass.actions)
@@ -1445,8 +1475,36 @@ class _Projector:
         stack_span = self._stack_atoms[2]
         if stack_span is not None and span.object_id == stack_span.object_id                 and span.start < stack_span.end and stack_span.start < span.end:
             self._stack_derived.add(atom)
+        metadata = getattr(self, "address_metadata", {})
+        recipes = metadata.get("recipes")
+        if recipes is None:
+            return
+        obj = span.object_id
+        scope = self._context.program_scope if obj.kind in (
+            StorageObjectKind.REGISTER_FILE, StorageObjectKind.ADDRESS_SPACE) else self._ssa.function_scope
+        if obj.scope != scope:
+            return
+        place = obj.space_key
+        operands = ()
+        if obj.kind is StorageObjectKind.FUNCTION_RELATIVE:
+            expression = metadata["objects"].get(obj)
+            if expression is None:
+                return
+            terms, place = expression
+            operands = (("object-base", (frozenset(terms), 0, None, 0)),)
+        recipe = ("entry", None, (obj.kind.value, obj.scope.kind.value, place, span.start, span.size), operands)
+        recipes.setdefault(atom, set()).add(recipe)
 
-    def _boundary_expression(self, kind: str, value: _AddressExpression, byte_size: int, offset: int = 0):
+    def _record_operation_atom(self, atom, key, kind, byte_size, inputs):
+        recipes = self.address_metadata.get("recipes")
+        if recipes is None or key not in self._operations or key in self._rewritten_operations:
+            return
+        recipe = ("operation", key, (kind, byte_size),
+                  tuple((index, _origin_expression(value)) for index, value in enumerate(inputs)))
+        recipes.setdefault(atom, set()).add(recipe)
+
+    def _boundary_expression(self, kind: str, value: _AddressExpression, byte_size: int, offset: int = 0,
+                             *, operation_key=None):
         """INT_SEXT / INT_ZEXT of an expression with atoms (C1), or SUBPIECE
         (``offset``: the first byte kept, narrower output; docs 25.17): a new atom, a
         deterministic function of the input expression -- single-valued when
@@ -1478,6 +1536,11 @@ class _Projector:
             self._stack_derived.add(atom)
         if any(key in self._definition_atoms for key, _ in value.atoms):
             self._definition_atoms.add(atom)   # wild like its input
+        if operation_key is not None and "recipes" in self.address_metadata:
+            operation = self._operations[operation_key]
+            operands = (value, _AddressExpression((), offset, operation.inputs[1].byte_size)) \
+                if kind == "subpiece" else (value,)
+            self._record_operation_atom(atom, operation_key, ("boundary", kind), byte_size, operands)
         return _AddressExpression(((atom, 1),), 0, byte_size, 0)
 
     def _bitwise_expression(self, operation_key, operation, byte_size):
@@ -1512,6 +1575,7 @@ class _Projector:
         atom = _opaque_atom_key(operation.opcode, inputs, byte_size, domain=b"bitwise-address-atom-v1")
         self._boundary[atom] = ("bitwise", byte_size, byte_size, None)
         self._note_opaque_atom(atom, inputs)
+        self._record_operation_atom(atom, operation_key, ("bitwise", operation.opcode), byte_size, inputs)
         return _AddressExpression(((atom, 1),), 0, byte_size, _opaque_image(*inputs))
 
     def _once_join_expression(self, definition_id, requested_span, candidates) -> _AddressExpression:
@@ -1536,6 +1600,29 @@ class _Projector:
         span = (min(values), max(values)) if len(values) == len(candidates) else None
         self._boundary[atom] = ("once-join", requested_span.size, requested_span.size, span)
         self._note_opaque_atom(atom, candidates)
+        recipes = self.address_metadata.get("recipes")
+        if recipes is not None:
+            definition = self._ssa.definitions[definition_id]
+            definitions = [self._ssa.definitions[source] for source in self._join_sources[definition_id]]
+            # These spaces have context-independent numeric keys. For a
+            # relative span, an address recipe would also be needed.
+            def location(row):
+                span = row.span
+                obj = span.object_id
+                if obj.kind in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE):
+                    return (row.kind.name, row.operation_key, row.write_ordinal, row.block_key, obj.kind.value,
+                            obj.space_key, span.start, span.size)
+                return None
+
+            definitions = tuple(location(row) for row in definitions)
+            target = location(definition)
+            if target is not None and None not in definitions:
+                alternatives = Counter((source, _origin_expression(candidate))
+                                       for source, candidate in zip(definitions, candidates, strict=True))
+                recipe = ("join", definition.block_key, target,
+                          frozenset(((source, count), value)
+                                    for (source, value), count in alternatives.items()))
+                recipes.setdefault(atom, set()).add(recipe)
         return _AddressExpression(((atom, 1),), 0, requested_span.size)
 
     def _is_stack_derived(self, atom: int) -> bool:
@@ -2224,7 +2311,16 @@ class _Projector:
         definition = self._ssa.definitions[definition_id]
         if not definition.span.contains(span):
             return None
-        return self._expression_for_definition(definition_id, span)
+        value = self._expression_for_definition(definition_id, span)
+        uses = self.address_metadata.get("operand_uses")
+        if uses is not None and value is not None and len(value.atoms) == 1 and value.atoms[0][1] == 1 \
+                and value.displacement == 0 and value.image == 0 and operation_key not in self._rewritten_operations:
+            operation = self._operations.get(operation_key)
+            if operation is not None:
+                for index, operand in enumerate(operation.inputs):
+                    if operand == varnode:
+                        uses.setdefault(value.atoms[0][0], set()).add((operation_key, index, varnode.byte_size))
+        return value
 
     def _expression_for_definition(
         self,
@@ -2251,6 +2347,7 @@ class _Projector:
             # address (docs 25.80 R0): stack-derived, never an entry value
             atom = _stable_storage_key(requested_span)
             self._stack_derived.add(atom)
+            self._note_entry_atom(requested_span, atom)
             result = _AddressExpression(((atom, 1),), 0, requested_span.size)
             self._active.discard(cache_key)
             self._cache[cache_key] = result
@@ -2488,7 +2585,7 @@ class _Projector:
                     (), _unsigned_wrap(value.displacement, value.byte_size), byte_size, _opaque_image(value)
                 )
             if value is not None and value.atoms and value.byte_size < byte_size:
-                return self._boundary_expression("zext", value, byte_size)
+                return self._boundary_expression("zext", value, byte_size, operation_key=operation_key)
         if operation.opcode == "LOAD" and len(operation.inputs) >= 2:
             return self._expression_from_memory_read(operation_key, byte_size)
         if operation.opcode in ("INT_XOR", "INT_SUB", "BOOL_XOR") and len(operation.inputs) == 2 \
@@ -2509,7 +2606,8 @@ class _Projector:
             if value is not None and value.atoms \
                     and operation.inputs[1].coordinate.byte_offset + byte_size <= value.byte_size:
                 return self._boundary_expression("subpiece", value, byte_size,
-                                                 operation.inputs[1].coordinate.byte_offset)
+                                                 operation.inputs[1].coordinate.byte_offset,
+                                                 operation_key=operation_key)
         if operation.opcode == "INT_SEXT" and len(operation.inputs) == 1:
             value = self._expression_for_input(operation_key, operation.inputs[0])
             if value is not None and not value.atoms and value.byte_size < byte_size:
@@ -2518,7 +2616,7 @@ class _Projector:
                     _opaque_image(value),
                 )
             if value is not None and value.atoms and value.byte_size < byte_size:
-                return self._boundary_expression("sext", value, byte_size)
+                return self._boundary_expression("sext", value, byte_size, operation_key=operation_key)
         if operation.opcode == "INT_MULT" and len(operation.inputs) == 2:
             left, right = [self._expression_for_input(operation_key, item) for item in operation.inputs]
             if left is not None and right is not None and not left.atoms and not right.atoms \
@@ -2626,6 +2724,7 @@ class _Projector:
             return None
         atom = _opaque_atom_key(token, inputs, byte_size)
         self._note_opaque_atom(atom, inputs)
+        self._record_operation_atom(atom, operation_key, ("opaque", token), byte_size, inputs)
         return _AddressExpression(
             ((atom, 1),),
             0,

@@ -264,3 +264,103 @@ def test_indexed_projection_checks_a_scope_in_a_run_section(tmp_path):
     path = write_snapshot(tmp_path / "scope.json.gz", source)
     with open_snapshot(path) as snapshot, pytest.raises(Ambiguous, match="owned by no function"):
         paired_projection.project_snapshot(snapshot)
+
+
+def add_unlabelled_objects(source, *, offset=0):
+    part = source["sections"][f"function:{KEY}:normalized"]
+    digest = part["memory_ssa"]["function_scope"]["digest"]["bytes"]
+    atoms = ((1 << 221) + offset, (1 << 221) + offset + 1)
+    space_keys = ((1 << 220) + offset, (1 << 220) + offset + 1)
+    for atom, key in zip(atoms, space_keys, strict=True):
+        part["address_objects"].append([relative(digest, key, 0)["object_id"], [[[atom, 1]], 433]])
+    return part, atoms, space_keys
+
+
+def record_origins(part, atoms, *, same_site=False, first_operand=0, first_input=None):
+    origins = []
+    for index, atom in enumerate(atoms):
+        site = f"1b1:{0x1010 + (0 if same_site else index):x}:0:INT_SEXT"
+        terms = [] if first_input is None or index else [[first_input, 1]]
+        expr = [{"set": terms}, 0, 4, 0]
+        recipe = ["operation", site, [["boundary", "sext"], 8], [[first_operand if index == 0 else 0, expr]]]
+        origins.append([atom, {"set": [recipe]}, {"set": []}])
+    part["address_atom_origins"] = origins
+
+
+def test_origin_recipes_resolve_distinct_unaccessed_objects_across_renumbering(tmp_path):
+    a = document()
+    b = document(f="d" * 64, u="e" * 64, p="f" * 64, order=(2, 0, 1))
+    for shift, doc in enumerate((a, b)):
+        part, atoms, keys = add_unlabelled_objects(doc, offset=4 * shift)
+        with pytest.raises(Ambiguous, match="two space keys share one base expression"):
+            project_document(doc)
+        record_origins(part, atoms)
+        names = paired_projection.build_tokens(doc)["spaces"]
+        assert names[keys[0]] != names[keys[1]]
+    assert projected_equal(a, b)
+    path = write_snapshot(tmp_path / "origins.json.gz", b)
+    with open_snapshot(path) as indexed:
+        assert paired_projection.project_snapshot(indexed) == project_document(a)["digests"]
+
+
+def test_origin_coordinates_refuse_collisions_even_without_any_effect_user():
+    doc = document()
+    part, atoms, _ = add_unlabelled_objects(doc)
+    record_origins(part, atoms, same_site=True)
+    with pytest.raises(Ambiguous, match="two address atoms share one origin coordinate"):
+        project_document(doc)
+
+
+def test_rewiring_the_origin_operand_changes_the_object_coordinate():
+    a, b = document(), document()
+    for index, doc in enumerate((a, b)):
+        part, atoms, keys = add_unlabelled_objects(doc)
+        record_origins(part, atoms, first_operand=index)
+    assert paired_projection.build_tokens(a)["spaces"][keys[0]] != paired_projection.build_tokens(b)["spaces"][keys[0]]
+    assert not projected_equal(a, b)
+
+
+def test_unlabelled_origin_inputs_keep_raw_identity_even_with_a_unique_use():
+    names = []
+    for index in range(2):
+        doc = document()
+        part, atoms, keys = add_unlabelled_objects(doc)
+        unknown = (1 << 238) + index
+        obj = copy.deepcopy(part["address_objects"][0][0])
+        obj["space_key"] = (1 << 239) + index
+        part["address_objects"].append([obj, [[[unknown, 2]], 433]])
+        record_origins(part, atoms, first_input=unknown)
+        names.append(paired_projection.build_tokens(doc)["spaces"][keys[0]])
+    assert names[0] != names[1]
+
+
+def test_an_ssa_join_keeps_each_source_paired_with_its_expression():
+    names = []
+    for index in range(2):
+        doc = document()
+        part, atoms, keys = add_unlabelled_objects(doc)
+        record_origins(part, atoms)
+        target = ["JOIN", None, None, KEY, "register_file", 0, 32, 8]
+        operands = []
+        for position, literal in enumerate((1, 2) if index == 0 else (2, 1)):
+            source = ["DATA_WRITE", "1b1:1004:0:COPY", position, None, "register_file", 0, 32, 8]
+            operands.append([[source, 1], [{"set": []}, literal, 8, 0]])
+        part["address_atom_origins"][0][1]["set"] = [["join", KEY, target, {"set": operands}]]
+        names.append(paired_projection.build_tokens(doc)["spaces"][keys[0]])
+    assert names[0] != names[1]
+
+
+def test_a_relative_entry_base_overrides_an_identical_display_label():
+    names = []
+    for location in (32, 40):
+        doc = document()
+        part, atoms, keys = add_unlabelled_objects(doc)
+        record_origins(part, atoms)
+        original = part["address_atoms"][0][0]
+        part["address_atoms"][0][1] = f"entry register_file+{location:#x}:8"
+        part["address_atoms"].append([atoms[0], "entry function_relative+0x10000000000000000:4"])
+        payload = ["entry", None, ["function_relative", "function", 433, 1 << 64, 4],
+                   [["object-base", [{"set": [[original, 1]]}, 0, None, 0]]]]
+        part["address_atom_origins"][0][1]["set"] = [payload]
+        names.append(paired_projection.build_tokens(doc)["spaces"][keys[0]])
+    assert names[0] != names[1]

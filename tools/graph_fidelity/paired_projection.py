@@ -30,6 +30,8 @@ IDENTITY_RENAMED = {
     "StorageObjectId.space_key": "relative space identity (hash of its base) -> K:<base expression in atom labels>; "
                                  "a key with no recorded base expression is kept raw (compared as a value)",
     "address atom hash": "an address atom's hash -> its label without the '#xxxxxxxx' hash suffix",
+    "address atom origin": "an unnamed or ambiguous address atom -> its original operation and ordered operands, "
+                           "SSA join sources with alternatives, or exact entry storage; missing inputs stay raw",
     "64-hex substrings naming a renamed digest / space key": "the same tokens inside keys / labels",
 }
 # content digests of input members (the observation, its effect evidence, the cut set): they change whenever an
@@ -113,7 +115,7 @@ def _effect_users(normalized):
 def _owner_facts(normalized):
     return (normalized["memory_ssa"].get("function_scope"), normalized["memory_ssa"].get("unit_digest"),
             normalized.get("address_atoms") or (), normalized.get("address_objects") or (),
-            _effect_users(normalized))
+            _effect_users(normalized), normalized.get("address_atom_origins") or ())
 
 
 def _verify_unused(data, unused):
@@ -138,6 +140,60 @@ def build_tokens(document) -> dict:
     return tokens
 
 
+def _origin_coordinates(owners, atoms, labels):
+    """Name otherwise unlabeled atoms by their captured expression recipes."""
+    recipes, inputs, relative_entries = {}, set(), set()
+    for owner, (*_, origins) in owners.items():
+        for raw, witnesses, _ in origins:
+            for witness in witnesses["set"]:
+                recipes.setdefault(raw, []).append((owner, witness))
+                kind, _, _, wire = witness
+                if kind == "entry" and wire:
+                    relative_entries.add(raw)
+                operands = wire["set"] if kind == "join" else wire
+                for _, (terms, *_) in operands:
+                    inputs.update(atom for atom, _ in terms["set"])
+    if not recipes:
+        return {}
+    counts = {}
+    for value in atoms.values():
+        counts[value] = counts.get(value, 0) + 1
+    coordinates, active = {}, set()
+
+    def independently_named(raw):
+        return raw not in relative_entries and raw in labels and counts[atoms[raw]] == 1
+
+    def resolve(raw):
+        if independently_named(raw):
+            return atoms[raw]
+        if raw not in recipes:
+            return f"raw:{raw}"
+        if raw in coordinates:
+            return coordinates[raw]
+        if raw in active:
+            raise Ambiguous("address atom origin refers to itself through its inputs")
+        active.add(raw)
+        rows = []
+        for owner, (kind, location, detail, wire) in recipes[raw]:
+            operands = wire["set"] if kind == "join" else wire
+            values = [[slot, sorted([resolve(atom), coefficient] for atom, coefficient in terms["set"]),
+                       *geometry] for slot, (terms, *geometry) in operands]
+            rows.append([owner, kind, location, detail, sorted(values, key=canonical) if kind == "join" else values])
+        active.remove(raw)
+        coordinates[raw] = "A@:" + hashlib.sha256(canonical(sorted(rows, key=canonical)).encode()).hexdigest()
+        return coordinates[raw]
+
+    for raw in recipes:
+        if not independently_named(raw):
+            resolve(raw)
+    # A formerly unused duplicate label can now appear inside a recipe.
+    # Retain each unresolved input's own identity wherever it occurs.
+    for raw in inputs - recipes.keys():
+        if not independently_named(raw) and raw in atoms:
+            coordinates[raw] = f"raw:{raw}"
+    return coordinates
+
+
 def _build_tokens(owners, scopes):
     tokens: dict = {}
 
@@ -145,7 +201,7 @@ def _build_tokens(owners, scopes):
         if tokens.setdefault(raw, token) != token:
             raise Ambiguous(f"identity {str(raw)[:24]} has two owners: {tokens[raw]} / {token}")
 
-    for key, (function_scope, unit_digest, _, _, _) in owners.items():
+    for key, (function_scope, unit_digest, *_) in owners.items():
         if function_scope:
             bind(function_scope["digest"]["bytes"], f"F:{key}")
         if unit_digest:
@@ -162,7 +218,7 @@ def _build_tokens(owners, scopes):
     for digest in programs:
         bind(digest, "P")
     labels: dict = {}   # raw atom -> {(function, label)}
-    for key, (_, _, address_atoms, _, _) in owners.items():
+    for key, (_, _, address_atoms, *_) in owners.items():
         for raw, label in address_atoms:
             labels.setdefault(raw, set()).add((key, ATOM_SUFFIX.sub("", rename_text(label, tokens))))
     for raw, atom_owners in labels.items():
@@ -172,7 +228,7 @@ def _build_tokens(owners, scopes):
     # and the operations accessing objects built on it -- names unlabeled atoms and separates label collisions
     plain = {raw: next(iter(owners))[1] for raw, owners in labels.items()}
     shapes: dict = {}
-    for key, (_, _, _, address_objects, users) in owners.items():
+    for key, (_, _, _, address_objects, users, _) in owners.items():
         for entry in address_objects:
             terms, space = entry[1][0], entry[1][1]
             space_key = entry[0].get("space_key") if isinstance(entry[0], dict) else None
@@ -198,12 +254,15 @@ def _build_tokens(owners, scopes):
     for atom, occurrences in shapes.items():
         if atom not in atoms:
             atoms[atom] = "A?:" + canonical(sorted(occurrences))
+    atoms.update(_origin_coordinates(owners, atoms, labels))
     names: dict = {}
     for raw, name in atoms.items():
         names.setdefault(name, []).append(raw)
     unused = set()
     for name, raws in names.items():
         if len(raws) > 1:
+            if name.startswith("A@:"):
+                raise Ambiguous("two address atoms share one origin coordinate")
             # allowed only for atoms no effect reaches: in no expression, or only in expressions of objects no
             # operation reads or writes (their shapes' access lists are empty) -- they cannot carry a decision;
             # a space key built on them that collides still stops below
@@ -213,7 +272,7 @@ def _build_tokens(owners, scopes):
     # a relative space key is the hash of its base expression (address_objects: object -> atoms x coefficients,
     # space id): its coordinate is that expression written with atom labels
     spaces: dict = {}
-    for _, _, _, address_objects, _ in owners.values():
+    for _, _, _, address_objects, _, _ in owners.values():
         for entry in address_objects:
             object_id, expression = entry[0], entry[1]
             raw = object_id.get("space_key") if isinstance(object_id, dict) else None
@@ -295,7 +354,7 @@ REFERENCES = {"ssa": SSA_REFERENCES, "graph nodes": NODE_REFERENCE_LISTS,
               "memory graph": "entry_bindings[i][0] -> dependency node"}
 # collections the engine orders by identity: compared as multisets after resolution
 COLLECTIONS = {"definitions", "state_nodes", "atomic_spans", "actions", "reads", "flow_edges", "joins", "nodes",
-               "edges", "address_atoms", "address_objects", "runs", "entry_bindings", "observed_inputs",
+               "edges", "address_atoms", "address_objects", "address_atom_origins", "runs", "entry_bindings", "observed_inputs",
                "call_state_nodes", "observed_terminal_states", "call_memory_states", "sources", "address_witnesses",
                "definition_nodes", "action_nodes",
                # FunctionSummary run conditions: (span, span) pairs sorted by canonical key (function_summary.py:422)
