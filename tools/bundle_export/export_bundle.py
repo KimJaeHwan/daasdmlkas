@@ -253,6 +253,9 @@ def main() -> int:
     parser.add_argument("--ghidra-project", type=Path,
                         help="a prepared project (.gpr): process its analyzed program, no import, no analysis")
     parser.add_argument("--project-program", help="the program's path in the project, e.g. /libs/CORE.DLL")
+    parser.add_argument("--no-s1-prescript", action="store_true",
+                        help="(X-1b attribution evidence only) import without GhidraV2DisableNoReturn.java: Ghidra's "
+                             "flow-guess analyzers stay on, as for the pre-S1 Bundles; the export gets no S1 / proof facts")
     args = parser.parse_args()
     if (args.ghidra_project is None) != (args.project_program is None):
         raise SystemExit("--ghidra-project and --project-program go together")
@@ -285,7 +288,7 @@ def main() -> int:
         stops += internal_model_names(args.stop_at_internal_models, args.model_dir)
     for name in sorted(set(stops)):
         script_args += ["--stop-at-name", name]
-    if args.ghidra_project is not None:
+    if args.ghidra_project is not None or args.no_s1_prescript:
         script_args += ["--require-analyzed"]
     if args.entry:
         for space, offset in args.entry:
@@ -317,7 +320,8 @@ def main() -> int:
         "-scriptlog", str(logs / f"{generation}.script.log"),
         # (S1) a fresh analysis runs with Ghidra's non-returning analyzers off; a
         # prepared project keeps its own analysis and never gets call_fallthrough
-        *(() if args.ghidra_project is not None else ("-preScript", "GhidraV2DisableNoReturn.java")),
+        *(() if args.ghidra_project is not None or args.no_s1_prescript
+          else ("-preScript", "GhidraV2DisableNoReturn.java")),
         "-postScript", "GhidraV2BundleExport.java", *script_args,
     ]
     env = dict(os.environ)

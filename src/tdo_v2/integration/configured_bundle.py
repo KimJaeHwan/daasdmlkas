@@ -38,7 +38,8 @@ _LOCK_NAME = ".configured-bundle.lock"
 _MANIFEST_NAME = "manifest.json"
 _SEAL_NAME = "seal.json"
 _WIRE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
-MAX_FROZEN_BUNDLE_BYTES = 512 * 1024 * 1024
+# (X-1b, owner 2026-11-27: 512 MiB -> 1 GiB -- the UE Core producer Bundle carries the X-1 row fields, 558.9 MB)
+MAX_FROZEN_BUNDLE_BYTES = 1024 * 1024 * 1024
 _RECEIPT_MINT = object()
 
 

@@ -293,3 +293,14 @@ def test_descriptor_cache_open_failure_refuses(tmp_path):
     with pytest.raises(BundleAdmissionError, match="cannot open a member"):
         cache.get(_Record("a"))
     cache.close()
+
+
+def test_the_frozen_bundle_bound_is_one_gibibyte(generation):
+    """X-1b (owner 2026-11-27): a frozen Bundle up to 1 GiB is admissible; a larger bound is refused."""
+    from tdo_v2.integration import configured_bundle
+
+    assert configured_bundle.MAX_FROZEN_BUNDLE_BYTES == 1 << 30
+    provider = read_configured_bundle(admit_frozen_bundle(generation, max_total_bytes=1 << 30))
+    provider.close()
+    with pytest.raises((BundleAdmissionError, ValueError, TypeError)):
+        admit_frozen_bundle(generation, max_total_bytes=(1 << 30) + 1)

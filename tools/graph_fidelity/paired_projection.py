@@ -42,7 +42,9 @@ DIGEST_FIELDS_ERASED = {
 }
 # state-node trees: a balanced tree over atoms ordered by identity -- its shape (left / right links) is layout; a
 # node is compared by its own content (definitions, atom range) and a state by the set of nodes it reaches
-TREE_LINKS_ERASED = {"left_node_id": "state-tree layout", "right_node_id": "state-tree layout"}
+TREE_LINKS_ERASED = {"left_node_id": "state-tree layout", "right_node_id": "state-tree layout",
+                     "state_nodes / call_state_nodes rows": "a persistent tree arena (path copying): its intermediate "
+                     "nodes depend on the tree shape; every state is compared by the node set its root reaches"}
 NODE_KEY_INDEX = re.compile(r":definition:(\d+)$")
 
 
@@ -109,12 +111,21 @@ def build_tokens(document) -> dict:
         raise Ambiguous(f"{len(programs)} program scopes")
     for digest in programs:
         bind(digest, "P")
-    atoms: dict = {}
-    for normalized in _function_sections(document).values():
+    labels: dict = {}   # raw atom -> {(function, label)}
+    for key, normalized in _function_sections(document).items():
         for raw, label in normalized.get("address_atoms") or ():
-            text = ATOM_SUFFIX.sub("", rename_text(label, tokens))
-            if atoms.setdefault(raw, f"A:{text}") != f"A:{text}":
-                raise Ambiguous(f"address atom {str(raw)[:16]} has two labels")
+            labels.setdefault(raw, set()).add((key, ATOM_SUFFIX.sub("", rename_text(label, tokens))))
+    by_label: dict = {}
+    for raw, owners in labels.items():
+        if len({label for _, label in owners}) != 1:
+            raise Ambiguous(f"address atom {str(raw)[:16]} has two labels")
+        by_label.setdefault(next(iter(owners))[1], set()).add(raw)
+    atoms: dict = {}
+    for raw, owners in labels.items():
+        label = next(iter(owners))[1]
+        # (x86: one label, different hashes in different functions -> named per function)
+        atoms[raw] = f"A:{label}" if len(by_label[label]) == 1 else \
+            f"A:{','.join(sorted(key for key, _ in owners))}:{label}"
     if len(set(atoms.values())) != len(atoms):
         raise Ambiguous("two address atoms share one label")
     # atoms the engine does not label (boundary / join / shared-load atoms, relative_memory.py): named by their
@@ -185,7 +196,8 @@ def rename(value, tokens):
             return {"token": digests[value["bytes"]]}
         result = {}
         for key, item in value.items():
-            if key in DIGEST_FIELDS_ERASED and isinstance(item, dict) and set(item) == {"bytes"}:
+            if key in DIGEST_FIELDS_ERASED and (isinstance(item, dict) and set(item) == {"bytes"}
+                                                or isinstance(item, str) and HEX64.fullmatch(item)):
                 result[key] = {"erased": key}
                 continue
             if key == "space_key" and isinstance(item, int) and item in spaces:   # (small keys stay)
@@ -215,10 +227,12 @@ SSA_REFERENCES = {
     # (LocalReadFrom in memory_graph.local_reads.plan: definition ids of the function's memory_ssa,
     # _memory_read_sources.py:38 / :108)
     "source_definition_id": "definitions", "address_witnesses": "definitions",
+    # (GuardedImagePlan reads in memory_graph.image_reads.plan)
+    "address_definition_id": "definitions",
 }
 # dependency-graph node references of a normalized function (field -> how its ints sit)
 NODE_REFERENCE_LISTS = ("definition_nodes", "action_nodes", "unresolved_read_nodes", "unresolved_write_nodes",
-                        "effect_nodes", "source_nodes", "may_alias_nodes")
+                        "effect_nodes", "source_nodes", "may_alias_nodes", "candidate_nodes", "constant_nodes")
 REFERENCES = {"ssa": SSA_REFERENCES, "graph nodes": NODE_REFERENCE_LISTS,
               "graph edges": "dependencies.edges[i][0..1], cfg.edges[i][0..1]",
               "summary": "FunctionSummary exits[].runs[].definitions -> the function's memory_ssa.definitions",
@@ -311,8 +325,11 @@ class _Ssa:
         return {"ref": table, "to": short(resolved), **({"end": True} if last else {})}
 
     def top(self):
-        """The SSA object with every reference resolved (call arenas use their own state nodes)."""
-        return {name: self.row(item, "call_state_nodes" if name in self.CALL_ARENA else "state_nodes")
+        """The SSA object with every reference resolved (call arenas use their own state nodes); the arenas
+        themselves are not compared row by row -- only through the states that reach them (TREE_LINKS_ERASED)."""
+        return {name: ({"arena": "compared through the states whose roots reach it"}
+                       if name in ("state_nodes", "call_state_nodes") else
+                       self.row(item, "call_state_nodes" if name in self.CALL_ARENA else "state_nodes"))
                 for name, item in self.ssa.items()}
 
 
@@ -332,6 +349,9 @@ def _node_coordinate(nodes, index):
     return {"node": short(nodes[index])}
 
 
+STRUCTURAL = "dependency nodes still carrying an identity hash: their own form refined twice by their edges"
+
+
 def _resolve_graph(normalized):
     graph = normalized.get("dependencies")
     if not isinstance(graph, dict) or "nodes" not in graph:
@@ -347,10 +367,30 @@ def _resolve_graph(normalized):
         for index, node in enumerate(local_reads["effect_nodes"]):
             read_nodes[node] = short(resolved_reads[index])
 
+    # guarded image reads: candidate_nodes[k] <-> the k-th candidate of plan.reads (flattened); every node sharing
+    # that candidate node's semantic_identity (its alternative / source nodes) takes the candidate as coordinate
+    image = (normalized.get("memory_graph") or {}).get("image_reads") or None
+    identities, resolved_image = {}, None
+    if image and ssa is not None:
+        resolved_image = [ssa.row(read) for read in image["plan"]["reads"]]
+        flat = [({**read, "candidates": None}, candidate) for read in resolved_image
+                for candidate in read.get("candidates") or ()]
+        if len(flat) != len(image.get("candidate_nodes") or ()):
+            raise Ambiguous("guarded image candidate nodes and plan candidates do not pair")
+        for position, node_index in enumerate(image["candidate_nodes"]):
+            identity = graph["nodes"][node_index].get("semantic_identity")
+            coordinate = short(flat[position])
+            if identity is not None and identities.setdefault(identity, coordinate) != coordinate:
+                raise Ambiguous("one guarded image identity names two candidates")
+
     def node_form(node, index=None):
         """A node record with its key's definition index resolved and any remaining 64-hex content hash elided
         (a collision is caught below)."""
         key = node.get("key", "")
+        identity = node.get("semantic_identity")
+        if identity in identities:
+            key = re.sub(r":(image-[a-z]+):[0-9a-f]+$", r":\1:" + identities[identity], key)
+            node = {**node, "semantic_identity": identities[identity]}
         if index in read_nodes:
             key = re.sub(r":local-read:[0-9a-f]+$", ":local-read:" + read_nodes[index], key)
         match = NODE_KEY_INDEX.search(key)
@@ -360,6 +400,26 @@ def _resolve_graph(normalized):
         return {**node, "key": key}
 
     nodes = [node_form(node, index) for index, node in enumerate(graph["nodes"])]
+    # a node still carrying an identity hash (its key elided to <h>, or a raw semantic_identity): a structural
+    # coordinate -- its form refined twice by the multiset of its edges (direction, payload, neighbour)
+    pending = [index for index, node in enumerate(nodes)
+               if "<h>" in node.get("key", "") or HEX64.fullmatch(str(node.get("semantic_identity") or ""))]
+    if pending:
+        current = [short({**node, "semantic_identity": None}) for node in nodes]
+        incident: dict = {index: [] for index in pending}
+        for source, target, payload in graph["edges"]:
+            if source in incident:
+                incident[source].append(("out", canonical(payload), target))
+            if target in incident:
+                incident[target].append(("in", canonical(payload), source))
+        for _ in range(2):
+            current = [current[index] if index not in incident else
+                       short([current[index], sorted([direction, payload, current[other]]
+                                                     for direction, payload, other in incident[index])])
+                       for index in range(len(nodes))]
+        nodes = [{**node, "key": re.sub(r"<h>", "", node.get("key", "")) + ":" + current[index],
+                  "semantic_identity": current[index]} if index in incident else node
+                 for index, node in enumerate(nodes)]
     coordinates = [canonical(node) for node in nodes]
     if len(set(coordinates)) != len(coordinates):
         raise Ambiguous("two dependency nodes share one coordinate")
@@ -398,6 +458,10 @@ def _resolve_graph(normalized):
             return [nodes_in(item) for item in value]
         return value
 
+    if resolved_image is not None:
+        memory_graph = dict(result["memory_graph"])
+        memory_graph["image_reads"] = {**image, "plan": {**image["plan"], "reads": resolved_image}}
+        result["memory_graph"] = memory_graph
     if resolved_reads is not None:
         memory_graph = dict(result["memory_graph"])
         memory_graph["local_reads"] = {**local_reads, "plan": {**local_reads["plan"], "reads": resolved_reads}}
