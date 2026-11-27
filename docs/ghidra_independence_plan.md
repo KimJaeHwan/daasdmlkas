@@ -109,8 +109,14 @@
    - G2b가 모으는 VirtualProtect / 코드 쓰기 지점이 이 전제의 근거 자료다.
    - 예외: ELF RELRO와 BIND_NOW가 함께 있으면 로드 직후 그 구간이 읽기 전용이 된다. 이때는 파일 근거가 있는 더 강한 사실로
      기록한다.
-5. **쓰임**: TDO가 슬롯을 거치는 값 흐름(import 정체, 재배치된 포인터)을 따질 때 Ghidra 대신 이 사실을 읽는다.
-6. **G2b와의 관계**: G2b는 슬롯의 **파일 기록**(어느 import인가)만 쓴다. 실행 시 값은 쓰지 않는다. G2b 구현 설계 r2의
+5. **DVRT (Windows dynamic value relocation, 소유자 2026-11-27)**: 로더나 커널이 로드 때 **코드 바이트 자체**를 고쳐
+   쓰는 칸이다. G1은 이 칸을 쓰기 구간으로 빼 둔다(`pe-loader-rules-6`, DVRT v1 FUNCTION_OVERRIDE). 같은 틀로 처리한다:
+   - import 호출 변환(`call [IAT]` → 직접 호출): "import X를 부른다"는 정체가 유지됨을 증명한다.
+   - FUNCTION_OVERRIDE와 분기 전환(switchable branch 등): 가능한 대체 값이 표에 나열되어 있다. 실행 시 값을 **가능한 값의
+     집합**으로 쓴다. 어느 값이 고를지는 OS / 정책에 달린 것으로 모델에 둔다.
+   - DVRT가 덮는 코드 바이트에서는 G2b의 `image-code-unmodified-at-runtime` 전제가 이 사실로 바뀐다.
+6. **쓰임**: TDO가 슬롯을 거치는 값 흐름(import 정체, 재배치된 포인터)을 따질 때 Ghidra 대신 이 사실을 읽는다.
+7. **G2b와의 관계**: G2b는 슬롯의 **파일 기록**(어느 import인가)만 쓴다. 실행 시 값은 쓰지 않는다. G2b 구현 설계 r2의
    E1이 `file_record`와 `file_runtime` 근거를 나눈 것이 이 단계의 바탕이다.
 
 ### G4에서 가장 큰 선택: 해독 / lifter를 무엇으로 할까
