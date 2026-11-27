@@ -4790,262 +4790,573 @@ def test_g2a_write_canonical_keeps_other_files(tmp_path):
     assert sorted(x.name for x in tmp_path.iterdir()) == ["facts.json", "facts.json.partial"]
 
 
-# -- G2b code-byte facts (design_tbr_g2b_code_facts r1 + r2 + r3): file layer ---------------------------------------
+# -- G2b code-byte facts -----------------------------------------------------
 
-def _g2b_pe(bound=False):
-    import struct
+import copy
+import hashlib
+import struct
+
+import code_facts as g
+import common_facts as cf
+import decoders
+import evidence
+import lifting
+
+
+def _g2b_pe(name="VirtualProtect", *, text=b"\x90" * 128, delay=False, attr=1,
+            lookup=0x2100, stamp=0, second=0, uflags=9, tail=0x2400, count=1,
+            pointer=0x2400, directory_size=None, first=0x2300):
     import _pe_fixture as pf
 
-    text = bytes([0xC3]) * 0x30
-    rdata = bytearray(0x500)
-    descs = [(0x2100, 0, 0, 0x2200, 0x4000),
-             (0, 7 if bound else 0, 0, 0x2210, 0x4020)]
-    for i, d in enumerate(descs):
-        struct.pack_into("<IIIII", rdata, 20 * i, *d)
-    struct.pack_into("<QQQ", rdata, 0x100, 0x2300, 1 << 63 | 5, 0)
-    rdata[0x200:0x20D] = b"kernel32.dll\0"
-    rdata[0x210:0x21B] = b"user32.dll\0"
-    rdata[0x300:0x302 + 15] = b"\0\0VirtualProtect\0"
-    rdata[0x320:0x322 + 15] = b"\0\0GetProcAddress\0"
-    rdata[0x400:0x408] = bytes([0x01, 0x04, 0x02, 0x00]) + bytes(4)            # v1, no flags, 2 codes
-    rdata[0x410:0x41C] = bytes([0x01 | 1 << 3, 0x04, 0x01, 0x00]) + bytes(4) + struct.pack("<I", 0x1000)  # EHANDLER
-    rdata[0x430:0x440] = bytes([0x01 | 4 << 3, 0, 0, 0]) + struct.pack("<III", 0x1000, 0x1010, 0x2400)  # CHAININFO
-    pdata = struct.pack("<III", 0x1000, 0x1010, 0x2400) + struct.pack("<III", 0x1010, 0x1020, 0x2410) + \
-        struct.pack("<III", 0x1020, 0x1030, 0x2430)
-    data = struct.pack("<QQQ", 0x2300, 1 << 63 | 5, 0) + bytes(8) + struct.pack("<QQ", 0x2320, 0)
-    sections = [pf.Section(".text", 0x1000, text),
-                pf.Section(".rdata", 0x2000, bytes(rdata), characteristics=0x40000040),
-                pf.Section(".pdata", 0x3000, pdata, characteristics=0x40000040),
-                pf.Section(".data", 0x4000, data, characteristics=0xC0000040)]
-    return pf.make_pe(sections, directories=[pf.Directory(1, 0x2000, 60), pf.Directory(3, 0x3000, 36)])
+    ro = bytearray(0x500)
+    if delay:
+        desc = struct.pack("<8I", attr, 0x2200, 0, 0x4000, lookup, 0, 0, 0)
+    else:
+        desc = struct.pack("<5I", lookup, stamp, 0, 0x2200, 0x4000)
+    ro[:len(desc)] = desc
+    table = struct.pack("<3Q", first, second, 0)
+    ro[0x100:0x118] = table
+    ro[0x200:0x206] = b"k.dll\0"
+    payload = b"\0\0" + name.encode() + b"\0"
+    ro[0x300:0x300 + len(payload)] = payload
+    ro[0x400:0x404] = bytes([uflags, 0, count, 0])
+    struct.pack_into("<3I", ro, 0x404 + 2 * ((count + 1) & ~1), 0x1000, 0x1010, tail)
+    pdata = struct.pack("<3I", 0x1000, 0x1010, pointer)
+    sections = [
+        pf.Section(".text", 0x1000, text),
+        pf.Section(".rdata", 0x2000, bytes(ro), characteristics=0x40000040),
+        pf.Section(".pdata", 0x3000, pdata, characteristics=0x40000040),
+        pf.Section(".data", 0x4000, table, characteristics=0xc0000040),
+    ]
+    dirs = [pf.Directory(13 if delay else 1, 0x2000,
+                         directory_size if directory_size is not None else 2 * len(desc)),
+            pf.Directory(3, 0x3000, len(pdata))]
+    return pf.make_pe(sections, size_of_headers=0x400, directories=dirs)
 
 
-def test_g2b_pe_file_facts():
-    import code_facts as cf2
-    import pe_map
-
-    raw = _g2b_pe()
-    image = pe_map.parse(raw)
-    ff = cf2.file_facts(image, raw)
-    assert ff.ok and [(r.start, r.end, r.executable, r.writable) for r in ff.code] == [(0x1000, 0x1030, True, False)]
-    unwind = sorted((r.name, r.start, r.end) for r in ff.unwind)
-    assert unwind == [(".pdata", 0x3000, 0x3024), (".xdata", 0x2400, 0x2408), (".xdata", 0x2410, 0x241C),
-                      (".xdata", 0x2430, 0x2440)]
-    assert ff.diagnostics == [{"reason": "HANDLER_DATA_LENGTH", "range": {"start": 0x241C, "end": None}}]
-    names = {slot: item["name"] for slot, item in ff.imports.items()}
-    assert names == {0x4000: "VirtualProtect", 0x4008: "#5", 0x4020: "GetProcAddress"}
-    assert ff.imports[0x4000]["dll"] == "kernel32.dll" and ff.import_state == "complete"
-    # the IAT is loader-written: a record read works, a runtime read does not
-    assert cf2.record_read(image, raw, 0x4000, 8)[0] == (0x2300).to_bytes(8, "little")
-    with pytest.raises(cf2.Unread, match="LOADER_WRITTEN"):
-        cf2.runtime_read(image, raw, 0x4000, 8)
-    assert cf2.runtime_read(image, raw, 0x2200, 4)[0] == b"kern"
-
-
-def test_g2b_pe_bound_iat_without_ilt():
-    import code_facts as cf2
-    import pe_map
-
-    raw = _g2b_pe(bound=True)
-    ff = cf2.file_facts(pe_map.parse(raw), raw)
-    assert ff.import_state == "partial" and 0x4020 not in ff.imports
-    assert [p["reason"] for p in ff.import_problems] == ["BOUND_IAT_NO_ILT"]
-
-
-def _g2b_elf():
-    import struct
+def _g2b_elf(kind=7, sym=1, defined=0, linked=False):
     import _elf_fixture as ef
-
-    symtab = bytes(24) + struct.pack("<IBBHQQ", 1, 0x12, 0, 0, 0, 0) + struct.pack("<IBBHQQ", 10, 0x12, 0, 5, 0, 0)
-    strtab = b"\0mprotect\0dlsym\0"
-    ro = bytearray(0x300)
-    ro[0:len(symtab)] = symtab
-    ro[0x100:0x100 + len(strtab)] = strtab
-    ro[0x200:0x208] = struct.pack("<II", 1, 3)                     # DT_HASH: nbucket 1, nchain 3
-    segments = [ef.Segment(0x1000, bytes([0xC3]) * 0x20), ef.Segment(0x3000, bytes(ro), flags=4),
-                ef.Segment(0x5000, bytes(16), flags=6)]
-    extra = [(6, 0x3000), (11, 24), (5, 0x3100), (10, len(strtab)), (4, 0x3200)]
-    return ef.make_elf(segments, jmprel=[ef.Reloc(0x5000, 7, 1), ef.Reloc(0x5008, 7, 2)], extra_dynamic=extra)
-
-
-def test_g2b_elf_imports_with_dynamic_in_written():
-    import code_facts as cf2
     import elf_map
 
-    elf = _g2b_elf()
+    ro = bytearray(0x300)
+    struct.pack_into("<IBBHQQ", ro, 24, 1, 0x12, 0, defined, 0, 0)
+    ro[0x100:0x10a] = b"\0mprotect\0"
+    struct.pack_into("<5I", ro, 0x200, 1, 2, 1, 0, 0)
+    rel = [ef.Reloc(0x5000, kind, sym)]
+    kwargs = {"relocations" if kind == 6 else "jmprel": rel}
+    tags = [] if linked else [(6, 0x3000), (11, 24), (5, 0x3100), (10, 10), (4, 0x3200)]
+    elf = ef.make_elf([ef.Segment(0x1000, g.ENDBR64 + bytes(124)), ef.Segment(0x3000, ro, flags=4),
+                       ef.Segment(0x5000, bytes(16), flags=6)], extra_dynamic=tags, **kwargs)
+    if not linked:
+        return elf.data
+
+    data = bytearray(elf.data)
     image = elf_map.parse(elf.data)
-    dynamic = [p for p in image.phdrs if p[0] == 2][0]
-    assert any(a <= dynamic[3] - image.image_base < b for a, b, _ in image.written.ranges)   # PT_DYNAMIC written
-    ff = cf2.file_facts(image, elf.data)
-    assert ff.import_state == "complete" and [(r.start, r.end) for r in ff.code] == [(0x1000, 0x1020)]
-    assert {s: (i["name"], i["undefined"]) for s, i in ff.imports.items()} == {0x5000: ("mprotect", True),
-                                                                                0x5008: ("dlsym", False)}
-    assert {"reason": "NO_SECTION_HEADERS", "what": "eh_frame"} in ff.diagnostics
+    dyn = next(p for p in image.phdrs if p[0] == 2)
+    va = next(v for t, v in struct.iter_unpack("<qQ", data[dyn[2]:dyn[2] + dyn[5]]) if t in (7, 23))
+    names = b"\0.shstrtab\0.dynsym\0.dynstr\0.rela.plt\0.rela.dyn\0"
+    off = len(data)
+    data.extend(names)
+    sh = len(data)
+
+    def header(name, t, flags, a, fileoff, size, link=0, ent=0):
+        return struct.pack("<IIQQQQIIQQ", names.index(name.encode() + b"\0"), t, flags, a, fileoff,
+                           size, link, 0, 1, ent)
+
+    data.extend(bytes(64) + header(".shstrtab", 3, 0, 0, off, len(names)))
+    for name, t, a, size, link, ent in ((".dynsym", 11, 0x3000, 48, 3, 24),
+                                        (".dynstr", 3, 0x3100, 10, 0, 0),
+                                        (".rela.dyn" if kind == 6 else ".rela.plt", 4, va, 24, 2, 24)):
+        fileoff = g.record_read(image, elf.data, a - image.image_base, 1)[1]["file_record"][0]
+        data.extend(header(name, t, 2, a, fileoff, size, link, ent))
+    struct.pack_into("<Q", data, 40, sh)
+    struct.pack_into("<3H", data, 58, 64, 5, 1)
+    return bytes(data)
 
 
-def _g2b_votes(flow, length, status="ok", vector=None, amd_flow=None, amd_status=None):
-    import decoders
-
-    def one(name, amd):
-        f = (amd_flow or flow) if amd else flow
-        s = (amd_status or status) if amd else status
-        return decoders.Decoded(voter=name, version="t", amd=amd, status=s, length=length if s == "ok" else 0,
-                                flow=f, int_vector=vector)
-    return {"intel": tuple(one(n, False) for n in decoders.INTEL_VOTERS),
-            "amd": tuple(one(n, True) for n in decoders.AMD_VOTERS)}
+def _g2b_votes(flow="none", length=1, indirect=False, target=None, status="ok", vector=None):
+    return {v: tuple(decoders.Decoded(n, "fixture", v == "amd", status, length if status == "ok" else 0,
+                                      flow=flow, indirect=indirect, target=target, int_vector=vector)
+                     for n in names)
+            for v, names in (("intel", decoders.INTEL_VOTERS), ("amd", decoders.AMD_VOTERS))}
 
 
-@pytest.mark.parametrize("data, ballot, relocs, expect", [
-    (b"\xcc", ("int3", 1), (), ("site", "int3", 3, None)),
-    (b"\xcd\x29", ("int_n", 2, "ok", 0x29), (), ("site", "int_n", 0x29, 0x29)),
-    (b"\xcd\x03", ("int_n", 2, "ok", 3), (), ("site", "int_n", 3, 3)),
-    (b"\xcd\x03", ("int3", 2), (), ("unresolved", "TRAP_FORM_UNDECIDED")),
-    (b"\x48\xcd\x29", ("int_n", 3, "ok", 0x29), (), ("site", "int_n", 0x29, 0x29)),     # (REX in the prefix run)
-    (b"\x0f\x05", ("syscall", 2), (), ("site", "syscall", None, None)),
-    (b"\x0f\x34", ("sysenter", 2, "ok", None, None, "invalid"), (), ("site", "split")),
-    (b"\xce", ("none", 0, "invalid"), (), None),
-    (b"\xff\xff", ("none", 0, "invalid"), (), ("unresolved", "ALL_INVALID_NOT_CE")),
-    (b"\x90", ("none", 1), (), None),
-    (b"\xcd\x29", ("int_n", 2, "ok", 0x29), ((1, 1, "DIR64"),), ("unresolved", "RELOCATED_OPCODE")),
-    (b"\xcd", ("int_n", 2, "ok", 0x29), (), ("unresolved", "TRAP_FORM_UNDECIDED")),          # (ib not verified)
-], ids=["int3", "int29", "cd03", "cd03-voted-int3", "rex-int29", "syscall", "sysenter-split", "ce", "invalid",
-        "nop", "relocated-ib", "truncated"])
-def test_g2b_trap_outcome(data, ballot, relocs, expect):
-    import code_facts as cf2
+def _entry(f, data, votes=None, *, fid="f0", rel=(), missing=False):
+    data = bytes.fromhex(data) if isinstance(data, str) else data
+    result = dict(window=dict(verified=len(data), hex=data.hex(), relocations=rel), attributes={})
+    return (fid, f, lifting.identify(f), None if missing else votes or _g2b_votes(length=len(data)),
+            result, data)
 
-    result = {"window": {"verified": len(data), "relocations": list(relocs)}}
-    got = cf2.trap_outcome(result, _g2b_votes(*ballot), data)
-    if expect is None or expect[0] == "unresolved":
-        assert got == expect
-    elif expect[1] == "split":
-        assert got[0] == "site" and got[1]["form"] == {"unobserved": "VENDOR_SPLIT_FORM"}
-        assert got[1]["vendor_views"]["amd"]["form"] == "invalid_encoding"
+
+def _plain(ops, at=START, n=1, **kw):
+    return dict(_row(n, ops), address=at, fallthrough=at + n, **kw)
+
+
+def _slot(at, slot, call=True):
+    ops = [_op("LOAD", [_c(1), _c(slot)], _u(0x30))]
+    if call:
+        ops += _push(at + 6)
+    op = "CALLIND" if call else "BRANCHIND"
+    f = dict(_row(6, ops + [_op(op, [_u(0x30)])], flow=_flow("call_indirect" if call else "jmp_indirect")),
+             address=at, fallthrough=at + 6 if call else None)
+    data = (b"\xff\x15" if call else b"\xff\x25") + struct.pack("<i", slot - at - 6)
+    return _entry(f, data, _g2b_votes("call_near" if call else "jmp_near", 6, True))
+
+
+def _direct(at, dst, cond=False):
+    if cond:
+        f = dict(_jcc(2, dst), address=at, fallthrough=at + 2)
+        return _entry(f, bytes([0x75, (dst - at - 2) & 255]), _g2b_votes("jcc", 2, target=dst))
+    f = dict(_row(5, [_op("BRANCH", [_a(dst)])], fallthrough=False, flow=_flow("jmp_direct")), address=at)
+    return _entry(f, b"\xe9" + struct.pack("<i", dst - at - 5), _g2b_votes("jmp_near", 5, target=dst))
+
+
+def _case(entries, raw=None, *, isa="x86-64", complete=True, missing=(), reader=False):
+    import check
+
+    raw = _g2b_pe() if raw is None else raw
+    image = check.parse_original(raw)
+    c = _g2_collect(entries, isa=isa)
+    doc = _g2_document(c)
+    doc["producer"]["rule"] = g.FACTS_RULE
+    doc["program"]["isa"] = isa
+    code = g.build_code(doc["rows"], c.raw, c.code_rows, image, raw, 1, BASE, complete, missing)
+    doc["program"]["code"] = code
+    if not reader:
+        return code
+
+    _, ev, args = _g2_binding5(c)
+    ev["bundle"]["original_sha256"] = args["bundle"]["original_sha256"] = hashlib.sha256(raw).hexdigest()
+    ev["mapping"].update(format=image.format, mapping_id=image.mapping_id)
+    report = {"header": {"mapping_id": image.mapping_id, "common_facts": {
+        "code": dict(g.summary(code), bundle=doc["bundle"])}}, "rows": []}
+    for fid, f, _, ballot, result, _ in entries:
+        detail = dict(result or {})
+        if result and ballot is not None:
+            detail["votes"] = {v: [d.as_json() for d in ds] for v, ds in ballot.items()}
+        report["rows"].append(dict(layer="decode", check="row", key=f"{fid}/{f['space']:x}:{f['address']:x}",
+                                   detail=detail))
+    args.update(g2b=dict(original=raw, image_base=BASE, image_space=1, complete=complete,
+                         missing_functions=missing, report=report))
+    ev["common_facts"]["facts_sha256"] = cf.digest(doc)
+    args["allowlist"] = [evidence.allowlist_entry(ev)]
+    return doc, ev, args
+
+
+def _reasons(code, kind=g.RWX_KIND, method="import_transfer", field="unresolved"):
+    cov, = [c for c in code["survey"] if (c["kind"], c["method"]) == (kind, method)]
+    return {group["reason"]: group["items"] for group in cov[field]}
+
+
+@pytest.mark.parametrize("data,flow,status,vector,rel,expected", [
+    ("cc", "int3", "ok", None, (), "int3"),
+    ("f1", "int1", "ok", None, (), "int1"),
+    ("48cd29", "int_n", "ok", 41, (), "int_n"),
+    ("cd03", "int3", "ok", None, (), "TRAP_FORM_UNDECIDED"),
+    ("0f05", "syscall", "ok", None, (), "syscall"),
+    ("ce", "none", "invalid", None, (), None),
+    ("ffff", "none", "invalid", None, (), "TRAP_FORM_UNDECIDED"),
+    ("cd29", "int_n", "ok", 41, ((1, 1, "R"),), "RELOCATED_OPCODE"),
+    ("90", "none", "ok", None, ((0, 1, "R"),), "RELOCATED_OPCODE"),
+])
+def test_g2b_traps(data, flow, status, vector, rel, expected):
+    raw = bytes.fromhex(data)
+    votes = _g2b_votes(flow, len(raw), status=status, vector=vector)
+    doc, ev, args = _case([_entry(_row(6, []), raw, votes, rel=rel)], reader=True)
+    evidence.bind_common_facts(ev, doc, **args)
+    code = doc["program"]["code"]
+    sites = code["sites"]
+    u = _reasons(code, "trap_instruction", "x86_instruction")
+    if expected in g.REASONS:
+        assert not sites and u == {expected: [{"row": 0, "op": None}]}
+        assert _reasons(code, "cache_maintenance", "syscall") == u
+    elif expected is None:
+        assert not sites and not u
     else:
-        assert got[0] == "site" and (got[1]["form"], got[1]["vector"], got[1]["immediate"]) == expect[1:]
-        assert got[1]["syscall_abi"] == (None if expect[1] in ("int3", "int1") else {"unobserved": "NO_ABI_BASIS"})
+        site, = sites
+        assert (site["form"], site["vector"], site["immediate"]) == (
+            expected, {"int3": 3, "int1": 1}.get(expected, vector), vector)
+        assert site["basis"]["g1_window"] == {"row": 0, "decode_row": [1, f"{START:x}"]}
+        assert site["basis"]["decoders"] == {v: cf.digest([d.as_json() for d in ds]) for v, ds in votes.items()}
+        assert site["syscall_abi"] == (None if expected in ("int3", "int1") else {"unobserved": "NO_ABI_BASIS"})
+    if status == "invalid" and data != "ce":
+        assert g.summary(code)["trap_unresolved_details"] == {"ALL_INVALID_NOT_CE": 1}
 
 
-def test_g2b_trap_outcome_missing_inputs():
-    import code_facts as cf2
+@needs
+def test_g2b_real_split_and_ce():
+    import json
 
-    assert cf2.trap_outcome(None, None, None, True) == ("unresolved", "GLOBAL_REASON")
-    assert cf2.trap_outcome(None, None, None, False) == ("unresolved", "NO_WINDOW")
-    assert cf2.trap_outcome({"window": {"verified": 0}}, _g2b_votes("int3", 1), b"") == ("unresolved", "NO_WINDOW")
-    partial = _g2b_votes("int3", 1)
-    partial["amd"] = partial["amd"][:1]
-    assert cf2.trap_outcome({"window": {"verified": 1}}, partial, b"\xcc") == ("unresolved", "BALLOT_MISSING")
-
-
-def _g2b_import_case(name="VirtualAlloc", landing=False, imports=True):
-    import code_facts as cf2
-    import common_facts as cf
-    import lifting
-
-    slot = START + 0x5000
-    r0 = dict(_row(6, [_op("COPY", [_c(0x40, 4)], _r(0x88, 4)), _op("INT_ZEXT", [_r(0x88, 4)], _r(0x88))]),
-              address=START, fallthrough=START + 6)
-    ops = [_op("LOAD", [_c(1), _c(slot)], _u(0x30))] + _push(START + 12) + [_op("CALLIND", [_u(0x30)])]
-    r1 = dict(_row(6, ops, flow=_flow("call_indirect")), address=START + 6, fallthrough=START + 12)
-    entries = [("f0", r0, lifting.identify(r0), None, None, b""), ("f0", r1, lifting.identify(r1), None, None, b"")]
-    if landing:
-        r2 = dict(_row(5, [_op("BRANCH", [_a(START + 6)])], fallthrough=False, flow=_flow("jmp_direct")),
-                  address=START + 0x100)
-        entries.append(("f1", r2, lifting.identify(r2), None, None, b""))
-    c = _g2_collect(entries)
-    doc = _g2_document(c)
-    base = 0x140000000
-    table = {slot - base: {"name": name, "dll": "kernel32.dll", "basis": {"pe_import": {"name": name}}}} if imports else {}
-    ff = cf2.FileFacts("pe", True, imports=table, import_state="complete")
-    binder = cf2.CodeBinder(ff, base, 1, doc["rows"], c.code_rows, cf.row_set_digest(doc["rows"]))
-    names, sha = cf2.name_table()
-    sites = cf2.ImportSites(binder, c.rows, c.raw, {k: row[3] for k, row in c.code_rows.items()}, ff, names, True)
-    code = binder.program_code(sha, sites)
-    unresolved = {g["reason"]: g["items"] for cov in code["survey"] if cov["kind"] == "rwx_allocation_constant_args"
-                  for g in cov["unresolved"]}
-    return [s for s in code["sites"] if s["kind"] != "trap_instruction"], unresolved, doc
+    for data in (b"\xce", b"\x0f\x34"):
+        # (a G1 window: the verified bytes after the instruction too; a lone CE byte gives iced no_more_data)
+        window = data + b"\x90" * (15 - len(data))
+        ballot = decoders.ballot(window, START)
+        signatures = [(d.voter, d.amd, d.status, d.flow, d.length) for ds in ballot.values() for d in ds]
+        ce = len(data) == 1
+        assert signatures == [(n, amd, "invalid" if ce else "ok", "none" if ce else "sysenter", 0 if ce else 2)
+                              for amd, names in [(False, decoders.INTEL_VOTERS), (True, decoders.AMD_VOTERS)]
+                              for n in names]
+        sites = _case([_entry(_row(len(data), []), window, ballot)])["sites"]
+        if ce:
+            assert sites == []
+        else:
+            site, = sites
+            assert site["form"] == {"unobserved": "VENDOR_SPLIT_FORM"}
+            assert site["vendor_views"]["amd"]["basis"] == {"isa_conditions": "SYSENTER.f5.amd"}
+            table = json.loads((REPO / "tools/decode_check/isa_conditions_x64.json").read_bytes())
+            assert table["entries"]["SYSENTER"]["f5"]["amd"] == "#UD in long mode"
+            assert site["basis"]["decoders"] == {v: cf.digest([d.as_json() for d in ds]) for v, ds in ballot.items()}
 
 
-def test_g2b_import_site_with_register_constant():
-    sites, unresolved, doc = _g2b_import_case()
-    site, = sites
-    assert (site["kind"], site["form"], site["route"], site["symbol"]["name"]) == \
-        ("rwx_allocation_constant_args", "call", "direct_slot", "VirtualAlloc")
-    assert site["candidate"] and site["rwx_registers"] == ["R9"]
-    assert site["protection_argument"] == {"unobserved": "NO_ABI_BASIS"} and site["arguments"] == []
-    value, = site["register_values"]
-    assert value["register"]["name"] == "R9" and value["value"] == {"constant": "40", "width": 64}
-    assert value["path"] == [0] and value["definition"] == {"row": 0, "op": 1}
-    assert "linear-entry-at-first-path-row" in site["holds_if"] and not unresolved
+def test_g2b_length_rejection_and_amd_split():
+    from dataclasses import replace
+    import compare
+
+    votes = _g2b_votes("sysenter", 2)
+    invalid = tuple(replace(d, status="invalid", flow="none", length=0) for d in votes["amd"])
+    for amd, result in [(invalid, "site"), ((invalid[0], votes["amd"][1]), "unresolved")]:
+        got = g.trap_outcome({"window": {"verified": 2}}, dict(votes, amd=amd), bytes.fromhex("0f34"))
+        assert got[0] == result
+    e = _entry(_row(5, []), "cc", _g2b_votes("int3", 1))
+    w = dict(bytes=e[-1], verified=1, relocations=[], stop="test")
+    result = compare.compare_row(e[1], e[2], w, e[3], s1=False, native_call=False, premise=True)
+    assert not result["attributes"]
+    assert [s["form"] for s in _case([(*e[:4], result, e[-1])])["sites"]] == ["int3"]
 
 
-def test_g2b_import_site_landing_drops_values():
-    sites, unresolved, _ = _g2b_import_case(landing=True)
-    assert sites == [] and unresolved["NO_RWX_REGISTER"] == [{"row": 1, "op": 3, "api": "VirtualAlloc"}]
+def test_g2b_missing_and_candidates():
+    assert g.trap_outcome(None, None, None, True) == ("unresolved", "GLOBAL_REASON")
+    assert g.trap_outcome(None, None, None) == ("unresolved", "NO_WINDOW")
+    votes = _g2b_votes("call_near", 1)
+    votes["amd"] = ()
+    code = _case([_entry(_row(1, []), "90", votes)])
+    assert _reasons(code) == {"TRANSFER_UNBOUND": [dict(row=0, op=None)]}
+    assert _reasons(code, "trap_instruction", "x86_instruction") == {"BALLOT_MISSING": [dict(row=0, op=None)]}
+    code = _case([_entry(_row(4, _cmov(4)), "660f44c1")])
+    assert not _reasons(code) and not code["sites"]
+    e = _slot(START, BASE + 0x4000)
+    for ballot, reason in [(None, "BALLOT_MISSING"), (_g2b_votes("call_near", 6), "FORM_MISMATCH")]:
+        code = _case([(*e[:3], ballot, *e[4:])])
+        assert not code["sites"] and _reasons(code) == {reason: [dict(row=0, op=3)]}
+    assert "VENDOR_VIEW_CONFLICT" in _reasons(_case([_g2_golden()]))
 
 
-@pytest.mark.parametrize("name, imports, reason", [("#5", True, "IMPORT_BY_ORDINAL"), ("VirtualAlloc", False,
-                                                                                        "SLOT_NOT_IMPORT")])
-def test_g2b_import_site_unresolved(name, imports, reason):
-    sites, unresolved, _ = _g2b_import_case(name=name, imports=imports)
-    assert sites == [] and unresolved[reason] == [{"row": 1, "op": 3}]
+@pytest.mark.parametrize("name,kw,state,why", [
+    ("VirtualProtect", {}, "complete", None),
+    ("#named", {"lookup": 0}, "complete", None),
+    ("x", {"first": (1 << 63) | 5}, "complete", "IMPORT_BY_ORDINAL"),
+    ("x", {"lookup": 0, "stamp": 1}, "partial", "BOUND_IAT_NO_ILT"),
+    ("VirtualProtect", {"lookup": 0, "second": (1 << 63) | 0x10005}, "partial", "ILT_ENTRY_INVALID"),
+    ("VirtualProtect", {"delay": True}, "complete", None),
+    ("x", {"delay": True, "lookup": 0}, "partial", "DELAY_FORMAT"),
+    ("x", {"directory_size": 19}, "partial", "TRUNCATED"),
+])
+def test_g2b_pe(name, kw, state, why):
+    import pe_map
+
+    data = _g2b_pe(name, **kw)
+    image = pe_map.parse(data)
+    ff = g.file_facts(image, data)
+    assert ff.import_state == state
+    code = _case([_slot(START, BASE + 0x4000)], data)
+    if why is None:
+        assert ff.imports[0x4000]["name"] == name
+        assert len(code["sites"]) == int(name == "VirtualProtect")
+        ref = ff.imports[0x4000]["basis"]["pe_import"]
+        assert ref["descriptor"]["file_record"][1] == (32 if kw.get("delay") else 20)
+        assert ref["hint_name"]["file_record"][1] == 3 + len(name)
+        with pytest.raises(g.Unread, match="LOADER_WRITTEN"):
+            g.runtime_read(image, data, 0x4000, 8)
+    elif why == "IMPORT_BY_ORDINAL":
+        assert why in _reasons(code)
+    else:
+        assert why in [p["reason"] for p in ff.import_problems]
+        assert not code["sites"] and 0x4000 not in ff.imports
 
 
-def test_g2b_import_outside_table_is_negative():
-    sites, unresolved, _ = _g2b_import_case(name="Sleep")
-    assert sites == [] and unresolved == {}
+@pytest.mark.parametrize("kind,sym,defined,linked,delta,why", [
+    (7, 1, 0, False, 0, None), (6, 1, 0, False, 0, None),
+    (7, 1, 0, True, 0, None), (6, 1, 0, True, 0, None),
+    (7, 2, 0, False, 0, "SYM_COUNT_U"), (7, 1, 4, False, 0, "SLOT_NOT_IMPORT"),
+    (8, 1, 0, False, 0, "ELF_RELOC_UNSUPPORTED"), (7, 1, 0, False, 8, "SLOT_NOT_IMPORT"),
+])
+def test_g2b_elf(kind, sym, defined, linked, delta, why):
+    raw = _g2b_elf(kind, sym, defined, linked)
+    code = _case([_slot(START, BASE + 0x5000 + delta)], raw)
+    if why:
+        assert not code["sites"] and _reasons(code) == {why: [dict(row=0, op=3)]}
+    else:
+        site, = code["sites"]
+        assert site["symbol"]["basis"]["elf_reloc"]["slot_va"] == f"{BASE+0x5000:x}"
+        assert (site["symbol"]["name"], site["route"]) == ("mprotect", "direct_slot")
 
 
-def _g2b_store_case(rows):
-    import code_facts as cf2
-    import common_facts as cf
-    import lifting
-
-    entries = [("f0", f, lifting.identify(f), None, None, b"") for f in rows]
-    c = _g2_collect(entries)
-    doc = _g2_document(c)
-    base = 0x140000000
-    ff = cf2.FileFacts("pe", True, code=[cf2.Region(0x1000, 0x2000, "code", True, False, ".text")],
-                       import_state="absent")
-    binder = cf2.CodeBinder(ff, base, 1, doc["rows"], c.code_rows, cf.row_set_digest(doc["rows"]))
-    names, sha = cf2.name_table()
-    imports = cf2.ImportSites(binder, c.rows, c.raw, {k: row[3] for k, row in c.code_rows.items()}, ff, names, True)
-    code = binder.program_code(sha, imports)
-    stores = [s for s in code["sites"] if s["kind"] == "code_write"]
-    unresolved = {g["reason"]: g["items"] for cov in code["survey"] if cov["kind"] == "code_write"
-                  for g in cov["unresolved"]}
-    return stores, unresolved
+def test_g2b_transfer_precedence_and_observations():
+    e = _slot(START, BASE + 0x4000)
+    for segment, width, space, expected in [(True, 4, 7, "SEGMENT_BASE"), (False, 4, 7, "POINTER_WIDTH"),
+                                            (False, 8, 7, "SPACE_MISMATCH")]:
+        f = copy.deepcopy(e[1])
+        f["ops"][0]["inputs"][0] = _c(space)
+        f["ops"][0]["output"]["size"] = width
+        f["ops"][-1]["inputs"][0]["size"] = width
+        data = b"\x64" + e[-1] if segment else e[-1]
+        assert _reasons(_case([_entry(f, data, missing=True)])) == {expected: [dict(row=0, op=3)]}
+    f = _row(1, [])
+    assert _reasons(_case([("f0", f, None, None, None, b"")])) == {"TRANSFER_UNBOUND": [dict(row=0, op=None)]}
+    target = _slot(START + 8, BASE + 0x4000, False)
+    alt = _slot(START + 8, BASE + 0x4008, False)
+    code = _case([_direct(START, START + 8), target, ("another", *alt[1:])])
+    assert _reasons(code)["VENDOR_VIEW_CONFLICT"] == [dict(row=0, op=0)]
 
 
-def test_g2b_store_constant_into_code():
-    f = dict(_row(10, [_op("STORE", [_c(1), _c(START + 0x800), _r(RCX_, 4)])]), address=START,
-             fallthrough=START + 10)
-    stores, unresolved = _g2b_store_case([f])
-    site, = stores
-    assert (site["row"], site["op"], site["write"], site["regions"]) == (0, 0, "static_store_candidate", [0])
-    assert site["target_range"]["start"] == format(START + 0x800, "x") and \
-        site["target_range"]["end"] == format(START + 0x804, "x")
-    assert site["holds_if"] == ["image-code-unmodified-at-runtime"] and not unresolved
+def test_g2b_thunks():
+    caller = _direct(START + 32, START, True)
+    marker = _entry(_plain([], START, 4), g.ENDBR64)
+    jmp = _slot(START + 4, BASE + 0x5000, False)
+    raw = _g2b_elf()
+    code = _case([caller, marker, jmp], raw)
+    assert g.summary(code)["import_routes"] == {"via_thunk": 1, "thunk_row": 1}
+    s, = [s for s in code["sites"] if s["form"] == "jcc"]
+    path = s["symbol"]["basis"]["path"]
+    assert (path[0]["edge"]["when"], path[0]["edge"]["source"]) == ("taken", "encoded_target")
+    assert [x["op"] for x in path] == [1, None, 1]
+    code = _case([caller, _direct(START, START + 4), jmp], raw)
+    assert len(_reasons(code)["MULTI_HOP"]) == 1
+    for target, complete, why in [(START + 5, True, "TARGET_NOT_ROW_START"), (START + 64, False, "INDEX_INCOMPLETE")]:
+        assert why in _reasons(_case([_direct(START + 32, target), jmp], raw, complete=complete))
 
 
-def test_g2b_store_through_register_constant():
-    r0 = dict(_row(10, [_op("COPY", [_c(START + 0x900)], _r(RAX_))]), address=START, fallthrough=START + 10)
-    r1 = dict(_row(2, [_op("STORE", [_c(1), _r(RAX_), _r(RCX_, 4)])]), address=START + 10, fallthrough=START + 12)
-    stores, unresolved = _g2b_store_case([r0, r1])
-    site, = stores
-    assert site["row"] == 1 and site["static_basis"]["rows"] == [0, 1]
-    assert "linear-entry-at-first-path-row" in site["holds_if"]
+@pytest.mark.parametrize("marker,bnd", [(b"", b""), (b"", b"\xf2"), (g.ENDBR64, b""), (g.ENDBR64, b"\xf2")])
+def test_g2b_stub_exact_extent(monkeypatch, marker, bnd):
+    calls = []
+
+    def vote(raw, at):
+        calls.append(at)
+        return _g2b_votes("jmp_near", len(raw), True)
+
+    monkeypatch.setattr(decoders, "ballot", vote)
+    size = len(marker) + len(bnd) + 6
+    stub = marker + bnd + b"\xff\x25" + struct.pack("<i", BASE + 0x4000 - START - size)
+    data = _g2b_pe(text=stub)
+    entries = [_direct(START + 32, START), _direct(START + 64, START)]
+    code = _case(entries, data)
+    assert len(calls) == 1 and g.summary(code)["import_routes"] == {"via_stub_bytes": 2}
+    assert all(s["symbol"]["basis"]["path"][1]["file_runtime"][1] == size for s in code["sites"])
+    assert not _case(entries, data, complete=False)["sites"]
 
 
-@pytest.mark.parametrize("ops, reason", [
-    ([_op("INT_SUB", [_r(RSP_), _c(8)], _r(RSP_)), _op("STORE", [_c(1), _r(RSP_), _r(RCX_)])],
-     "STORE_ADDRESS_NOT_CONSTANT"),
-    ([_op("STORE", [_c(1), _c(0x10000), _r(RCX_)])], None),                       # (outside the code region)
-    ([_op("CBRANCH", [_a(START + 4), _r(0x206, 1)]), _op("STORE", [_c(1), _c(START + 0x800), _r(RCX_)])],
-     "INTRA_ROW_FLOW"),
-], ids=["stack", "outside", "intra-row-flow"])
-def test_g2b_store_unresolved_or_negative(ops, reason):
-    f = dict(_row(4, ops), address=START, fallthrough=START + 4)
-    stores, unresolved = _g2b_store_case([f])
-    assert stores == []
-    store_op = next(n for n, op in enumerate(ops) if op["opcode"] == "STORE")
-    assert unresolved == ({} if reason is None else {reason: [{"row": 0, "op": store_op}]})
+def test_g2b_unreadable_endbr_and_unknown_targets():
+    e = _direct(START + 32, START)
+    code = _case([e, _entry(_plain([], START, 4), "90909090")], _g2b_pe(text=b"\x90"))
+    assert not code["sites"] and _reasons(code)
+    for addr, space, expected in [(START + 64, 2, "SPACE_MISMATCH"), (START + 1, 1, "INDEX_INCOMPLETE")]:
+        src = dict(e[1], space=space)
+        src["ops"][0]["inputs"][0] = dict(_a(addr), space=space)
+        target = _entry(dict(_row(None, []), address=START), "")
+        code = _case([target, _entry(src, e[-1], _g2b_votes("jmp_near", 5, target=addr))])
+        assert expected in _reasons(code)
+
+
+@pytest.mark.parametrize("ops,rwx", [
+    ([_op("COPY", [_c(0x40, 4)], _r(0x88, 4)), _op("INT_ZEXT", [_r(0x88, 4)], _r(0x88))], True),
+    ([_op("COPY", [_c(0x40, 1)], _r(RAX_, 1))], False),
+    ([_op("COPY", [_c(0x40)], _r(RCX_)), _op("COPY", [_r(RAX_, 1)], _r(RCX_, 1))], False),
+])
+def test_g2b_rwx(ops, rwx):
+    entries = [_entry(_plain(ops), "90"), _slot(START + 1, BASE + 0x4000)]
+    code = _case(entries, _g2b_pe("VirtualAlloc"))
+    if rwx:
+        s, = code["sites"]
+        v, = s["register_values"]
+        assert s["rwx_registers"] == ["R9"] and s["arguments"] == []
+        assert s["protection_argument"] == {"unobserved": "NO_ABI_BASIS"}
+        assert v["value"] == {"width": 64, "constant": "40"} and v["path"] == [0, 1]
+        assert v["definition"] == dict(row=0, op=1) and v["use"] == dict(row=1, op=3)
+    else:
+        assert not code["sites"] and _reasons(code)["NO_RWX_REGISTER"] == [dict(row=1, op=3, api="VirtualAlloc")]
+
+
+def _store(addr, space=1):
+    return _op("STORE", [_c(space), addr, _r(RCX_, 4)])
+
+
+def test_g2b_stores_and_linear_path():
+    for reg in (RAX_, RSP_):
+        rows = [_entry(_plain([_op("COPY", [_c(START + 126)], _r(reg))]), "90")]
+        rows += [_entry(_plain([], START + i), "90") for i in range(1, 66)]
+        ops = [_store(_r(reg)), _store(_r(RCX_)), _store(_c(1), 9), _store(_c((1 << 64) - 1))]
+        rows.append(_entry(_plain(ops, START + 66), "90"))
+        code = _case(rows)
+        s, = code["sites"]
+        assert s["target_range"]["end"] == f"{START+130:x}" and s["regions"] == [0]
+        assert s["static_basis"]["register_values"][0]["path"] == list(range(67))
+        reasons = _reasons(code, "code_write", "static_store")
+        assert reasons == {"STORE_ADDRESS_NOT_CONSTANT": [dict(row=66, op=1)], "ADDRESS_WRAP": [dict(row=66, op=3)]}
+
+    f = _row(4, _cmov(4))
+    f["ops"][-1] = _op("COPY", [_c(START)], _r(RAX_))
+    use = _entry(_plain([_store(_r(RAX_))], START + 4), "90")
+    for prev in (_entry(f, "660f44c1"), _entry(_plain([_op("COPY", [_c(START)], _r(RAX_))]), "90")):
+        assert not _case([prev, use])["sites"]
+    code = _case([_entry(_plain([_op("CBRANCH", [_a(START + 1), _r(RCX_, 1)]), _store(_c(START))]), "90")])
+    assert _reasons(code, "code_write", "static_store") == {"INTRA_ROW_FLOW": [dict(row=0, op=1)]}
+
+
+@pytest.mark.parametrize("opc", ["INT_XOR", "INT_SUB"])
+def test_g2b_zero_and_entry_barriers(opc):
+    prev = _entry(_plain([_op(opc, [_r(RCX_), _r(RCX_)], _r(RCX_))]), "90")
+    call = _slot(START + 1, BASE + 0x4000)
+    s, = _case([prev, call])["sites"]
+    assert s["register_values"][0]["value"] == {"width": 64, "constant": "0"}
+    for field in ("flow_target_coords", "recorded_landing_pads"):
+        extra = _entry(_plain([], START + 64, **{field: [(1, START + 1)]}), "90", fid="f1")
+        assert _case([prev, call, extra])["sites"][0]["register_values"] == []
+
+
+def test_g2b_store_map_and_input_failures():
+    from dataclasses import replace
+    import check
+
+    data = _g2b_pe()
+    ops = [_store(_c(START + 9)), _store(_c(START + 30)), _store(_c(START + 200)),
+           _op("STORE", [_r(RAX_), _c(START), _c(2)]), _op("STORE", [_c(1), _c(START), None])]
+    c = _g2_collect([_entry(_plain(ops), "90")])
+    rows = _g2_document(c)["rows"]
+    image = check.parse_original(data)
+    old = image.at(0x1009)
+    image.ranges = [m for m in image.ranges if m != old] + [
+        replace(old, end=0x100a), replace(old, start=0x100a, end=0x1028, kind="ambiguous"),
+        replace(old, start=0x1028, file_offset=old.file_offset + 40)]
+    image.ranges.sort(key=lambda m: m.start)
+    code = g.build_code(rows, c.raw, c.code_rows, image, data, 1, BASE, True, ())
+    s, = code["sites"]
+    assert s["op"] == 0 and s["form"] == "store"
+    assert _reasons(code, "code_write", "static_store") == {
+        w: [dict(row=0, op=n)] for w, n in
+        (("TARGET_MAPPING_U", 1), ("STORE_SPACE_U", 3), ("STORE_WIDTH_U", 4))}
+    image.ok = False
+    code = g.build_code(rows, c.raw, c.code_rows, image, data, 1, BASE, True, ())
+    assert [x["op"] for x in _reasons(code, "code_write", "static_store")["TARGET_MAPPING_U"]] == [0, 1, 2]
+
+
+def test_g2b_unwind():
+    import pe_map
+
+    for kw, why in [({}, "HANDLER_DATA_LENGTH"), ({"uflags": 3}, "UNWIND_VERSION"),
+                    ({"uflags": 33, "count": 0}, "CHAIN_CYCLE"),
+                    ({"pointer": 0x24ff}, "UNWIND_INDIRECT"), ({"pointer": 0x24fe}, "AMBIGUOUS_MAPPING")]:
+        data = _g2b_pe(**kw)
+        image = pe_map.parse(data)
+        ff = g.file_facts(image, data)
+        d, = ff.diagnostics
+        assert d["reason"] == why and d["basis"] and any(r.name == ".pdata" for r in ff.unwind)
+        if not kw:
+            assert d["range"] == {"start": 0x240c, "end": None} and d["basis"]["file_runtime"][1] == 12
+            image.written = pe_map.Parsed("complete", [(0x2400, 0x2404, "test")])
+            assert g.file_facts(image, data).diagnostics[0]["reason"] == "LOADER_WRITTEN"
+            image.written = None
+            with pytest.raises(g.Unread, match="MAP_INDETERMINATE"):
+                g.runtime_read(image, data, 0x2400, 4)
+
+
+def test_g2b_boundaries_and_partial_unwind():
+    from dataclasses import replace
+    from types import SimpleNamespace
+    import pe_map
+
+    for last, reason in [("zero", "ZERO_FILL"), ("ambiguous", "AMBIGUOUS_MAPPING")]:
+        ranges = [pe_map.Range(0, 1, "file", 0), pe_map.Range(1, 2, "file", 1), pe_map.Range(2, 3, last, 2)]
+        image = SimpleNamespace(at=lambda a: next((m for m in ranges if m.start <= a < m.end), None))
+        assert g.record_read(image, b"abc", 0, 2)[0] == b"ab"
+        with pytest.raises(g.Unread, match=reason):
+            g.record_read(image, b"abc", 0, 3)
+
+    data = _g2b_pe()
+    image = pe_map.parse(data)
+    image.ranges = [replace(m, end=0x240a) if m.start <= 0x2408 < m.end else m for m in image.ranges]
+    ff = g.file_facts(image, data)
+    assert [(r.start, r.end) for r in ff.unwind if r.name == ".xdata"] == [(0x2400, 0x2408)]
+    assert ff.diagnostics[0]["reason"] == "TRUNCATED"
+    assert ff.diagnostics[0]["basis"]["file_runtime"][1] == 8
+
+
+def test_g2b_elf_pointer():
+    import elf_map
+
+    data = bytearray(_g2b_elf())
+    image = elf_map.parse(data)
+    va = 0x3280
+    off = g.record_read(image, data, va, 8)[1]["file_record"][0]
+    n = len(image.phdrs)
+    struct.pack_into("<H", data, 56, n + 1)
+    struct.pack_into("<IIQQQQQQ", data, 64 + 56*n, g.PT_GNU_EH_FRAME, 4, off, va, 0, 8, 8, 4)
+    for enc, why in [(0x1b, "NO_SECTION_HEADERS"), (0x9b, "EH_FRAME_PTR_ENCODING")]:
+        data[off:off + 8] = bytes([1, enc, 0, 0]) + struct.pack("<i", 0x3100 - va - 4)
+        code = _case([], bytes(data))
+        d, = code["diagnostics"]
+        assert d["reason"] == why
+        if enc == 0x1b:
+            r, = [r for r in code["regions"] if r["name"] == ".eh_frame"]
+            assert r["range"]["start"] == f"{BASE+0x3100:x}" and r["range"]["end"] == {"unobserved": why}
+            assert r["verified_bytes"] == 0 and d["scope_item"]["basis"]["file_runtime"][1] == 8
+        else:
+            assert d["what"] == "eh_frame"
+
+
+def test_g2b_regions_reader_and_tamper(monkeypatch):
+    es = [_entry(_plain([], START - 1, 3, view=v), "909090", fid=f) for v, f in [("0", "f0"), ("1", "f1")]]
+    es.append(_entry(dict(_plain([], START, 3), space=2), "909090", fid="f2"))
+
+    def bind(threshold, entries):
+        monkeypatch.setattr(g, "VERIFIED_THRESHOLD", threshold)
+        doc, ev, args = _case(entries, reader=True)
+        result = evidence.bind_common_facts(ev, doc, **args).code
+        return doc, ev, args, result
+
+    _, _, _, x = bind(8_388_608, es)
+    doc, ev, args, y = bind(1, es[::-1])
+    code = doc["program"]["code"]
+    assert code["verified_lengths"] == [3, 3, 3] and x == y
+    assert y["verified_bytes"][0] == 2 and len(y["verified"][0]) == 2
+    assert code["rows_outside_code"] == [0, 1, 2]
+    for change in (
+        lambda c: c.update(name_table_sha256="x"),
+        lambda c: c["verified_lengths"].__setitem__(0, 2),
+        lambda c: c["verified_rule"].update(per_row_window="x"),
+        lambda c: c["survey"][0]["rows_examined"].update(facts_rows="x"),
+        lambda c: c["survey"][0]["unsupported"].append({"reason": "G2C", "items": [dict(row=-1, op=0)]}),
+    ):
+        bad = copy.deepcopy(doc)
+        change(bad["program"]["code"])
+        ev["common_facts"]["facts_sha256"] = cf.digest(bad)
+        with pytest.raises(evidence.Rejected):
+            evidence.bind_common_facts(ev, bad, **args)
+    monkeypatch.setattr(g, "VERIFIED_THRESHOLD", 8_388_608)
+    assert [g.verified_encoding(n)["form"] for n in (8_388_608, 8_388_609)] == ["explicit", "compact"]
+
+
+def test_g2b_reader_rejects_resigned_op_and_missing_report_row():
+    doc, ev, args = _case([_slot(START, BASE + 0x4000)], reader=True)
+    evidence.bind_common_facts(ev, doc, **args)
+    bad = copy.deepcopy(doc)
+    bad["program"]["code"]["sites"][0]["symbol"]["basis"]["path"][0]["op"] = 2
+    ev["common_facts"]["facts_sha256"] = cf.digest(bad)
+    with pytest.raises(evidence.Rejected):
+        evidence.bind_common_facts(ev, bad, **args)
+    ev["common_facts"]["facts_sha256"] = cf.digest(doc)
+    row, = args["g2b"]["report"]["rows"]
+    for records in ([], [row, row]):
+        args["g2b"]["report"]["rows"] = records
+        with pytest.raises(evidence.Rejected):
+            evidence.bind_common_facts(ev, doc, **args)
+
+
+def test_g2b_empty_arm_and_order():
+    empty = _case([], missing=["f1"])
+    assert all(c["rows_examined"]["empty"] and c["missing_functions"] == ["f1"] for c in empty["survey"])
+    arm = _case([_entry(_row(4, []), "00000000")], isa="aarch64")
+    assert _reasons(arm, "trap_instruction", "a64_instruction", "unsupported") == {"G2C": [dict(row=0, op=None)]}
+    assert all(c["method"] != "run" for c in arm["survey"])
+    pairs = [("NO_RWX_REGISTER", dict(row=0, op=2, api=s)) for s in ("B", "A", "B")]
+    assert [i["api"] for i in g._groups(pairs)[0]["items"]] == ["A", "B"]
+    assert g._groups(pairs) == g._groups(reversed(pairs))

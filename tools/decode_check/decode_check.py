@@ -85,7 +85,7 @@ def collect(generation: Path, naming_source: Path, *, common_facts=False) -> dic
     import engine_api
     import ops_layer
 
-    found = {"functions": [], "language": None, "image_base": None, "complete": False,
+    found = {"functions": [], "language": None, "image_base": None, "image_space": None, "complete": False,
              "registers": {}, "address_spaces": []}
 
     def keep(diagnosis):
@@ -95,7 +95,7 @@ def collect(generation: Path, naming_source: Path, *, common_facts=False) -> dic
         ev = program.evidence
         ns = ev.translation_namespace
         found.update(language=ns.language_id, language_version=(ns.major_version, ns.minor_version),
-                     image_base=ev.image_base.byte_offset)
+                     image_base=ev.image_base.byte_offset, image_space=ev.image_base.space_id)
         if common_facts:
             import common_facts as cf
             from tdo_v2.call_relations import call_relations
@@ -312,10 +312,7 @@ class CommonFactsCollector:
         # where they still exist (ballots are not kept after collection)
         import code_facts
 
-        x86 = facts.get("isa") == "x86-64"
-        self.code_rows[k] = (x86, (result or {}).get("window", {}).get("verified", 0) if result else 0,
-                             code_facts.trap_outcome(result, ballot, window, self.global_reason) if x86 else None,
-                             code_facts.decoder_flows(ballot) if x86 else None)
+        self.code_rows[k] = code_facts.row_proof(facts, result, lift, ballot, window, self.global_reason)
         # Retain only the comparison inputs: per vendor view a vote summary (r1 C1); the ballots themselves are
         # not kept. Non-x86 rows and rows without accepted votes share the EMPTY summary (r2 D2).
         accepted = {v: cf.votes(ballot, result, v) for v in (None, *cf.VENDORS)}
@@ -699,24 +696,20 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
         import code_facts
 
         # G2b: program.code (regions, verified windows, sites, survey) bound to the document's row order
-        names, names_sha256 = code_facts.name_table()
-        file_facts = code_facts.file_facts(mapping, original)
-        spaces = sorted({r["space"] for r in doc["rows"]})
-        binder = code_facts.CodeBinder(file_facts, base,
-                                       spaces[0] if len(spaces) == 1 else None, doc["rows"], common.code_rows,
-                                       cf.row_set_digest(doc["rows"]))
-        imports = code_facts.ImportSites(binder, common.rows, common.raw,
-                                         {k: row[3] for k, row in common.code_rows.items()}, file_facts, names,
-                                         complete, mapping, original)
-        doc["program"]["code"] = binder.program_code(names_sha256, imports)
+        missing_functions = {m["id"] for m in manifest["functions"]} - seen
+        doc["program"]["code"] = code_facts.build_code(
+            doc["rows"], common.raw, common.code_rows, mapping, original,
+            facts["image_space"], base, complete, missing_functions,
+        )
         # (r1 C4: the facts file is streamed, byte-identical to canonical(doc) + LF; its digest excludes the LF)
         common_block = cf.verdict_block5(doc, cf.write_canonical(common_facts_out, doc), common.unit_sets,
                                          common.row_set)
         header["common_facts"] = common_summary(
-            facts, common, doc, complete=complete,
-            missing_functions={m["id"] for m in manifest["functions"]} - seen,
+            facts, common, doc, complete=complete, missing_functions=missing_functions,
         )
-        header["common_facts"]["code"] = code_facts.summary(doc["program"]["code"])
+        header["common_facts"]["code"] = dict(
+            code_facts.summary(doc["program"]["code"]), bundle=doc["bundle"],
+        )
     override_block = None
     engine = engine_source() if evidence_out is not None or verdicts is not None else None
     if verdicts is not None:

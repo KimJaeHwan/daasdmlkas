@@ -17,6 +17,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import struct
+from bisect import bisect_left, bisect_right
+from collections import Counter, defaultdict
+from dataclasses import replace
 
 FACTS_RULE = "g2b-1"
 PREMISE = "image-code-unmodified-at-runtime"
@@ -58,60 +61,52 @@ class Unread(Exception):
         self.reason = reason
 
 
-def _intersects(ranges, start, end):
-    return any(a < end and start < b for a, b, *_ in ranges)
-
-
-def record_read(image, data: bytes, rva: int, size: int):
-    """``file_record`` bytes at a map coordinate: one contiguous ``file`` run. Returns (bytes, basis)."""
-    if size <= 0:
+def record_read(image, data, rva, size):
+    if size < 0:
+        raise Unread("OUTSIDE_FILE")
+    if not size:
         return b"", {"file_record": [0, 0]}
-    item = image.at(rva)
-    if item is None:
-        raise Unread("OUTSIDE_FILE", f"{rva:#x}")
-    if item.kind == "ambiguous":
-        raise Unread("AMBIGUOUS_MAPPING", f"{rva:#x}")
-    if item.kind == "zero":
-        raise Unread("ZERO_FILL", f"{rva:#x}")
-    if rva + size > item.end:
-        nxt = image.at(item.end)
-        contiguous = nxt is not None and nxt.kind == "file" and \
-            nxt.file_offset == item.file_offset + (item.end - item.start)
-        if not contiguous:
-            raise Unread("NONCONTIGUOUS" if nxt is not None and nxt.kind == "file" else "TRUNCATED", f"{rva:#x}")
-        if rva + size > nxt.end:
-            raise Unread("TRUNCATED", f"{rva:#x}+{size}")
-    offset = item.file_offset + (rva - item.start)
-    if offset + size > len(data):
-        raise Unread("OUTSIDE_FILE", "past the end of the file")
-    return data[offset:offset + size], {"file_record": [offset, size]}
+
+    first = None
+    cursor = rva
+    end = rva + size
+    while cursor < end:
+        item = image.at(cursor)
+        if item is None:
+            raise Unread("OUTSIDE_FILE" if cursor == rva else "TRUNCATED")
+        if item.kind != "file":
+            raise Unread({"zero": "ZERO_FILL", "ambiguous": "AMBIGUOUS_MAPPING"}
+                         .get(item.kind, "OUTSIDE_FILE"))
+        offset = item.file_offset + cursor - item.start
+        if first is None:
+            first = offset
+        if offset != first + cursor - rva:
+            raise Unread("NONCONTIGUOUS")
+        stop = min(end, item.end)
+        if stop <= cursor or offset < 0 or offset + stop - cursor > len(data):
+            raise Unread("OUTSIDE_FILE")
+        cursor = stop
+    return data[first:first + size], {"file_record": [first, size]}
 
 
-def runtime_read(image, data: bytes, rva: int, size: int):
-    """``file_runtime`` bytes: a file_record read that is also not loader-written and not relocated."""
-    for parsed in (image.written, image.relocations):
-        if parsed is not None and parsed.state == "indeterminate":
-            raise Unread("MAP_INDETERMINATE", parsed.why)
+def runtime_read(image, data, rva, size):
+    for parsed, why in ((image.written, "LOADER_WRITTEN"), (image.relocations, "RELOCATED")):
+        if parsed is None or parsed.state not in ("complete", "absent"):
+            raise Unread("MAP_INDETERMINATE")
+        if _touches(parsed, rva, rva + size):
+            raise Unread(why)
     raw, basis = record_read(image, data, rva, size)
-    if _intersects(image.written.ranges, rva, rva + size):
-        raise Unread("LOADER_WRITTEN", f"{rva:#x}")
-    if _intersects(image.relocations.ranges, rva, rva + size):
-        raise Unread("RELOCATED", f"{rva:#x}")
     return raw, {"file_runtime": basis["file_record"]}
 
 
-def record_cstring(image, data: bytes, rva: int, limit: int = 4096, reader=record_read):
-    """A NUL-terminated string within one contiguous run (at most ``limit`` bytes). Returns (text, basis)."""
-    item = image.at(rva)
-    if item is None:
-        raise Unread("OUTSIDE_FILE", f"{rva:#x}")
-    run = min(item.end - rva, limit)
-    raw, _ = reader(image, data, rva, max(run, 1))
-    end = raw.find(b"\0")
-    if end < 0:
-        raise Unread("TRUNCATED", f"string at {rva:#x}")
-    text, basis = reader(image, data, rva, end + 1)
-    return text[:-1].decode("latin-1"), basis
+def record_cstring(image, data, rva, limit=4096):
+    _, ref = record_read(image, data, rva, 1)
+    off = ref["file_record"][0]
+    nul = data.find(b"\0", off, off + limit)
+    if nul < off:
+        raise Unread("TRUNCATED")
+    raw, ref = record_read(image, data, rva, nul - off + 1)
+    return raw[:-1].decode("latin-1"), ref
 
 
 @dataclass
@@ -154,24 +149,34 @@ def _diag(out, reason, *, start=None, end=None, what=None, basis=None):
     out.append(item)
 
 
-def _merge(regions):
-    """Merge contiguous / overlapping unwind regions with a known end; U-ended ones stay separate."""
-    known = sorted((r for r in regions if r.end is not None), key=lambda r: (r.start, r.end))
-    out = []
-    for r in known:
-        if out and out[-1].end is not None and r.start <= out[-1].end and out[-1].name == r.name:
-            out[-1].end = max(out[-1].end, r.end)
-        else:
-            out.append(Region(r.start, r.end, r.role, name=r.name, basis=dict(r.basis)))
-    return out + [r for r in regions if r.end is None]
-
-
-def file_facts(image, data: bytes) -> FileFacts:
+def file_facts(image, data):
     if image is None or not image.ok:
-        return FileFacts(getattr(image, "format", "none"), False, getattr(image, "why", "no file map"))
+        return FileFacts(getattr(image, "format", "none"), False,
+                         getattr(image, "why", "no map"), import_state="indeterminate")
+
+    out = FileFacts(image.format, True, image_base=image.image_base)
     if image.format == "pe":
-        return _pe(image, data)
-    return _elf(image, data)
+        for s in image.sections:
+            flags = s["characteristics"]
+            if flags & SCN_EXECUTE:
+                region = Region(s["va"], s["va"] + s["vsize"], "code", True,
+                                bool(flags & SCN_WRITE), s["name"],
+                                {"pe_section": [s["index"], s["name"], flags]})
+                _code_region(out, image, region, s["state"] == "mapped")
+        for n, directory in enumerate(image.directories):
+            if n == 3 and any(directory):
+                _pe_unwind(image, data, directory, out)
+            if n in (1, 13) and any(directory):
+                out.import_state = "complete"
+                _pe_table(image, data, directory, n, out)
+    elif image.format == "elf":
+        _elf_file(image, data, out)
+    else:
+        return FileFacts(image.format, False, "unsupported format", import_state="indeterminate")
+
+    if (out.import_problems or out.slot_failures) and out.import_state != "indeterminate":
+        out.import_state = "partial"
+    return out
 
 
 # -- PE32+ ------------------------------------------------------------------------------------------------------------
@@ -180,220 +185,62 @@ SCN_EXECUTE, SCN_WRITE = 0x20000000, 0x80000000
 UNW_EHANDLER, UNW_UHANDLER, UNW_CHAININFO = 1, 2, 4
 
 
-def _pe(image, data) -> FileFacts:
-    out = FileFacts("pe", True, image_base=image.image_base)
-    for s in image.sections:
-        if s["characteristics"] & SCN_EXECUTE:
-            if s["state"] != "mapped":
-                _diag(out.diagnostics, "AMBIGUOUS_MAPPING", start=s["va"], end=s["va"] + max(s["vsize"], 1),
-                      basis={"section": s["name"]})
-                continue
-            out.code.append(Region(s["va"], s["va"] + s["vsize"], "code", True,
-                                   bool(s["characteristics"] & SCN_WRITE), s["name"],
-                                   {"pe_section": [s["index"], s["name"], s["characteristics"]]}))
-    directories = image.directories
-    if len(directories) > 3 and directories[3][1]:
-        _pe_unwind(image, data, directories[3], out)
-    _pe_imports(image, data, directories, out)
-    out.unwind = _merge(out.unwind)
-    return out
-
-
 def _pe_unwind(image, data, directory, out):
-    rva, size = directory
-    try:
-        _, basis = record_read(image, data, rva, size)
-    except Unread as error:
-        _diag(out.diagnostics, error.reason, start=rva, end=rva + size, basis={"pe_directory": 3})
-        return
-    out.unwind.append(Region(rva, rva + size, "unwind_metadata", name=".pdata", basis=basis))
-    count = size // 12
-    if size % 12:
-        _diag(out.diagnostics, "TRUNCATED", start=rva + 12 * count, end=rva + size, basis={"pe_directory": 3})
+    start, size = directory
+    ref = {"pe_directory": 3}
+    out.unwind.append(Region(start, start + size, "unwind_metadata", name=".pdata", basis=ref))
     seen = set()
-    for index in range(count):
-        entry, _ = record_read(image, data, rva + 12 * index, 12)
-        _, _, unwind = struct.unpack("<III", entry)
-        _pe_unwind_info(image, data, unwind, out, seen, rva + 12 * index)
 
-
-def _pe_unwind_info(image, data, unwind, out, seen, entry_rva):
-    chain = set()
-    while True:
-        if unwind & 1:
-            _diag(out.diagnostics, "UNWIND_INDIRECT", start=entry_rva, end=entry_rva + 12)
-            return
-        if unwind in chain:
-            _diag(out.diagnostics, "CHAIN_CYCLE", start=unwind, end=unwind + 4)
-            return
-        chain.add(unwind)
-        if unwind in seen:
-            return
-        seen.add(unwind)
-        try:
-            head, basis = record_read(image, data, unwind, 4)
-        except Unread as error:
-            _diag(out.diagnostics, error.reason, start=unwind, end=unwind + 4)
-            return
-        version, flags, count = head[0] & 7, head[0] >> 3, head[2]
-        if version not in (1, 2):
-            _diag(out.diagnostics, "UNWIND_VERSION", start=unwind, end=unwind + 4, basis=basis)
-            return
-        if flags & ~(UNW_EHANDLER | UNW_UHANDLER | UNW_CHAININFO) or \
-                (flags & UNW_CHAININFO and flags & (UNW_EHANDLER | UNW_UHANDLER)):
-            _diag(out.diagnostics, "UNWIND_FLAGS", start=unwind, end=unwind + 4, basis=basis)
-            return
-        codes_end = unwind + 4 + 2 * (count + (count & 1))
-        try:
-            _, basis = record_read(image, data, unwind, codes_end - unwind)
-        except Unread as error:
-            _diag(out.diagnostics, error.reason, start=unwind, end=codes_end)
-            return
-        if flags & UNW_CHAININFO:
-            try:
-                raw, basis = record_read(image, data, codes_end, 12)
-            except Unread as error:
-                _diag(out.diagnostics, error.reason, start=codes_end, end=codes_end + 12)
-                return
-            out.unwind.append(Region(unwind, codes_end + 12, "unwind_metadata", name=".xdata", basis=basis))
-            entry_rva, unwind = codes_end, struct.unpack_from("<I", raw, 8)[0]
-            continue
-        if flags & (UNW_EHANDLER | UNW_UHANDLER):
-            try:
-                _, basis = record_read(image, data, codes_end, 4)
-            except Unread as error:
-                _diag(out.diagnostics, error.reason, start=codes_end, end=codes_end + 4)
-                return
-            out.unwind.append(Region(unwind, codes_end + 4, "unwind_metadata", name=".xdata", basis=basis))
-            # (the language-specific data follows the handler RVA field; its length is not in the format)
-            _diag(out.diagnostics, "HANDLER_DATA_LENGTH", start=codes_end + 4, end=None)
-            return
-        out.unwind.append(Region(unwind, codes_end, "unwind_metadata", name=".xdata", basis=basis))
-        return
-
-
-def _pe_imports(image, data, directories, out):
-    have_import = len(directories) > 1 and directories[1][0]
-    have_delay = len(directories) > 13 and directories[13][0]
-    if not have_import and not have_delay:
-        out.import_state = "absent"
-        return
-    partial = False
-    if have_import:
-        partial |= _pe_import_table(image, data, directories[1], out)
-    if have_delay:
-        partial |= _pe_delay_table(image, data, directories[13], out)
-    out.import_state = "partial" if partial else "complete"
-
-
-def _pe_import_table(image, data, directory, out) -> bool:
-    rva, _ = directory
-    partial = False
-    for index in range(1 << 14):
-        at = rva + 20 * index
-        try:
-            raw, _ = record_read(image, data, at, 20)
-        except Unread as error:
-            _diag(out.import_problems, error.reason, start=at, end=at + 20, basis={"pe_directory": 1})
-            return True
-        oft, stamp, _, name_rva, first = struct.unpack("<IIIII", raw)
-        if not (oft or stamp or name_rva or first):
-            return partial
-        try:
-            dll, _ = record_cstring(image, data, name_rva, 512)
-        except Unread as error:
-            _diag(out.import_problems, error.reason, start=at, end=at + 20, basis={"pe_directory": 1})
-            partial = True
-            continue
-        lookup = oft
-        fallback = False
-        if not oft:
-            if stamp != 0:
-                _diag(out.import_problems, "BOUND_IAT_NO_ILT", start=at, end=at + 20, basis={"dll": dll})
-                partial = True
-                continue
-            lookup, fallback = first, True
-        partial |= _pe_thunks(image, data, dll, lookup, first, "import", out, fallback, at)
-    _diag(out.import_problems, "TRUNCATED", start=rva, end=None, basis={"pe_directory": 1})
-    return True
-
-
-def _pe_thunks(image, data, dll, lookup, slots, kind, out, validate, descriptor) -> bool:
-    entries = []
-    for index in range(1 << 16):
-        try:
-            raw, basis = record_read(image, data, lookup + 8 * index, 8)
-        except Unread as error:
-            _diag(out.import_problems, error.reason, start=lookup + 8 * index, end=lookup + 8 * index + 8,
-                  basis={"dll": dll})
-            return True
-        value, = struct.unpack("<Q", raw)
-        if value == 0:
+    for pos in range(start, start + size, 12):
+        if pos + 12 > start + size:
+            _issue(out.diagnostics, "TRUNCATED", pos, start + size, ref)
             break
-        entries.append((index, value, basis))
-    else:
-        _diag(out.import_problems, "TRUNCATED", start=lookup, end=None, basis={"dll": dll})
-        return True
-    resolved = []
-    for index, value, basis in entries:
-        slot = slots + 8 * index
-        if value >> 63:
-            resolved.append((slot, {"dll": dll, "name": f"#{value & 0xFFFF}", "ordinal": value & 0xFFFF,
-                                    "kind": kind, "basis": {"pe_import": {"dll": dll, "ordinal": value & 0xFFFF,
-                                                                          "slot": slot, "lookup": basis}}}))
-            continue
-        if value >> 31:
-            if validate:
-                _diag(out.import_problems, "ILT_ENTRY_INVALID", start=descriptor, end=descriptor + 20,
-                      basis={"dll": dll})
-                return True
-            out.slot_failures[slot] = "ILT_ENTRY_INVALID"
-            continue
         try:
-            text, name_basis = record_cstring(image, data, (value & 0x7FFFFFFF) + 2, 1024)
-        except Unread as error:
-            if validate:
-                _diag(out.import_problems, "ILT_ENTRY_INVALID", start=descriptor, end=descriptor + 20,
-                      basis={"dll": dll})
-                return True
-            out.slot_failures[slot] = "SLOT_NAME_U"
+            entry, parent = record_read(image, data, pos, 12)
+        except Unread as exc:
+            _issue(out.diagnostics, exc.reason, pos, pos + 12, ref)
             continue
-        resolved.append((slot, {"dll": dll, "name": text, "kind": kind,
-                                "basis": {"pe_import": {"dll": dll, "name": text, "slot": slot, "lookup": basis,
-                                                        "hint_name": name_basis}}}))
-    for slot, item in resolved:
-        out.imports[slot] = item
-    if entries:
-        out.import_ranges.append((slots, slots + 8 * len(entries)))
-    return False
 
-
-def _pe_delay_table(image, data, directory, out) -> bool:
-    rva, _ = directory
-    partial = False
-    for index in range(1 << 14):
-        at = rva + 32 * index
-        try:
-            raw, _ = record_read(image, data, at, 32)
-        except Unread as error:
-            _diag(out.import_problems, error.reason, start=at, end=at + 32, basis={"pe_directory": 13})
-            return True
-        attributes, name_rva, _, iat, int_rva, _, _, _ = struct.unpack("<IIIIIIII", raw)
-        if not any(struct.unpack("<IIIIIIII", raw)):
-            return partial
-        if not attributes & 1:
-            _diag(out.import_problems, "DELAY_FORMAT", start=at, end=at + 32, basis={"pe_directory": 13})
-            partial = True
-            continue
-        try:
-            dll, _ = record_cstring(image, data, name_rva, 512)
-        except Unread as error:
-            _diag(out.import_problems, error.reason, start=at, end=at + 32, basis={"pe_directory": 13})
-            partial = True
-            continue
-        partial |= _pe_thunks(image, data, dll, int_rva, iat, "delay", out, False, at)
-    _diag(out.import_problems, "TRUNCATED", start=rva, end=None, basis={"pe_directory": 13})
-    return True
+        u = struct.unpack_from("<I", entry, 8)[0]
+        path = set()
+        while True:
+            if u & 1 or u in path:
+                _issue(out.diagnostics, "UNWIND_INDIRECT" if u & 1 else "CHAIN_CYCLE",
+                       u, u + 4, parent)
+                break
+            if u in seen:
+                break
+            seen.add(u)
+            path.add(u)
+            lo, hi = u, u + 4
+            known = 0
+            basis = parent
+            try:
+                head, basis = runtime_read(image, data, u, 4)
+                flags = head[0] >> 3
+                if (head[0] & 7) not in (1, 2):
+                    raise Unread("UNWIND_VERSION")
+                if flags not in (0, 1, 2, 3, 4):
+                    raise Unread("UNWIND_FLAGS")
+                known = 4
+                hi = u + 4 + 2 * ((head[2] + 1) & ~1)
+                _, basis = runtime_read(image, data, u, hi - u)
+                known = hi - u
+                lo = hi
+                hi += 12 if flags == 4 else 4 if flags else 0
+                raw, whole = runtime_read(image, data, u, hi - u)
+                out.unwind.append(Region(u, hi, "unwind_metadata", name=".xdata", basis=whole))
+                if flags == 4:
+                    parent = whole
+                    u = struct.unpack_from("<I", raw, len(raw) - 4)[0]
+                    continue
+                if flags:
+                    _issue(out.diagnostics, "HANDLER_DATA_LENGTH", hi, None, whole)
+            except Unread as exc:
+                if known:
+                    out.unwind.append(Region(u, u + known, "unwind_metadata", name=".xdata", basis=basis))
+                _issue(out.diagnostics, exc.reason, lo, hi, basis)
+            break
 
 
 # -- ELF64 ------------------------------------------------------------------------------------------------------------
@@ -403,211 +250,6 @@ PT_DYNAMIC, PT_GNU_EH_FRAME = 2, 0x6474E550
 SHT_DYNSYM = 11
 DT_STRTAB, DT_STRSZ, DT_HASH, DT_GNU_HASH = 5, 10, 4, 0x6FFFFEF5
 R_GLOB_DAT, R_JUMP_SLOT = 6, 7
-
-
-def _elf_sections(data, out):
-    """Section headers read by file offset (unmapped): [{name, type, flags, addr, offset, size, link, entsize}]."""
-    e_shoff, = struct.unpack_from("<Q", data, 40)
-    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", data, 58)
-    if not e_shoff or not e_shnum:
-        return None
-    if e_shentsize != 64 or e_shoff + 64 * e_shnum > len(data) or e_shstrndx >= e_shnum:
-        _diag(out.diagnostics, "TRUNCATED", what="section headers", basis={"file_record": [e_shoff, 64 * e_shnum]})
-        return None
-    rows = [struct.unpack_from("<IIQQQQIIQQ", data, e_shoff + 64 * i) for i in range(e_shnum)]
-    strtab = rows[e_shstrndx]
-    sections = []
-    for name, kind, flags, addr, offset, size, link, _, _, entsize in rows:
-        at = strtab[4] + name
-        end = data.find(b"\0", at, strtab[4] + strtab[5]) if at < strtab[4] + strtab[5] else -1
-        text = data[at:end].decode("latin-1") if end >= 0 else ""
-        sections.append({"name": text, "type": kind, "flags": flags, "addr": addr, "offset": offset, "size": size,
-                         "link": link, "entsize": entsize})
-    return sections
-
-
-def _loaded(image, va, size):
-    for p in image.phdrs:
-        if p[0] == 1 and p[3] <= va and va + size <= p[3] + p[6]:
-            return True
-    return False
-
-
-def _elf(image, data) -> FileFacts:
-    out = FileFacts("elf", True, image_base=image.image_base)
-    base = image.image_base
-    for s in image.segments:
-        if s["flags"] & PF_X:
-            if s["state"] != "mapped":
-                _diag(out.diagnostics, "AMBIGUOUS_MAPPING", start=s["vaddr"] - base,
-                      end=s["vaddr"] - base + max(s["memsz"], 1), basis={"segment": s["index"]})
-                continue
-            out.code.append(Region(s["vaddr"] - base, s["vaddr"] - base + s["memsz"], "code", True,
-                                   bool(s["flags"] & PF_W), f"PT_LOAD[{s['index']}]",
-                                   {"elf_segment": [s["index"], s["flags"]]}))
-    sections = _elf_sections(data, out)
-    by_name = {s["name"]: s for s in sections or () if s["name"]}
-    hdr = [p for p in image.phdrs if p[0] == PT_GNU_EH_FRAME]
-    eh_frame = by_name.get(".eh_frame")
-    for name in (".eh_frame", ".gcc_except_table"):
-        s = by_name.get(name)
-        if s is None:
-            continue
-        if not s["flags"] & 2 or not _loaded(image, s["addr"], s["size"]):
-            _diag(out.diagnostics, "SECTION_NOT_LOADED", what=name)
-            continue
-        out.unwind.append(Region(s["addr"] - base, s["addr"] - base + s["size"], "unwind_metadata", name=name,
-                                 basis={"elf_section": [name, s["offset"], s["size"]]}))
-    if hdr:
-        _, _, offset, vaddr, _, filesz, memsz, _ = hdr[0]
-        start = vaddr - base
-        try:
-            head, basis = record_read(image, data, start, min(filesz, 8))
-            out.unwind.append(Region(start, start + memsz, "unwind_metadata", name=".eh_frame_hdr", basis=basis))
-            if eh_frame is None:
-                _elf_eh_frame_ptr(image, data, start, head, out)
-        except Unread as error:
-            _diag(out.diagnostics, error.reason, start=start, end=start + memsz, basis={"phdr": "PT_GNU_EH_FRAME"})
-    elif eh_frame is None and sections is None:
-        _diag(out.diagnostics, "NO_SECTION_HEADERS", what="eh_frame")
-    _elf_imports(image, data, sections, out)
-    out.unwind = _merge(out.unwind)
-    return out
-
-
-def _elf_eh_frame_ptr(image, data, hdr_start, head, out):
-    if len(head) < 8 or head[0] != 1:
-        _diag(out.diagnostics, "EH_FRAME_PTR_ENCODING", what="eh_frame", basis={"eh_frame_hdr": hdr_start})
-        return
-    encoding = head[1]
-    if encoding == 0xFF:
-        _diag(out.diagnostics, "EH_FRAME_PTR_OMITTED", what="eh_frame", basis={"eh_frame_hdr": hdr_start})
-        return
-    form, application = encoding & 0x0F, encoding & 0x70
-    if form not in (0x03, 0x0B) or application not in (0x00, 0x10):
-        _diag(out.diagnostics, "EH_FRAME_PTR_ENCODING", what="eh_frame", basis={"eh_frame_hdr": hdr_start})
-        return
-    value, = struct.unpack_from("<i" if form == 0x0B else "<I", head, 4)
-    target = (hdr_start + out.image_base + 4 + value) if application == 0x10 else value
-    start = target - out.image_base
-    out.unwind.append(Region(start, None, "unwind_metadata", name=".eh_frame",
-                             basis={"eh_frame_ptr": {"hdr": hdr_start, "encoding": encoding}}))
-    _diag(out.diagnostics, "NO_SECTION_HEADERS", start=start, end=None, basis={"eh_frame_ptr": hdr_start})
-
-
-def _elf_dynamic_tags(image, data, out):
-    dynamic = [p for p in image.phdrs if p[0] == PT_DYNAMIC]
-    if len(dynamic) != 1:
-        return None
-    _, _, _, vaddr, _, filesz, _, _ = dynamic[0]
-    try:
-        raw, _ = record_read(image, data, vaddr - image.image_base, filesz)
-    except Unread as error:
-        _diag(out.import_problems, error.reason, what="PT_DYNAMIC")
-        return None
-    tags = {}
-    for cursor in range(0, len(raw) - 15, 16):
-        tag, value = struct.unpack_from("<qQ", raw, cursor)
-        if tag == 0:
-            break
-        tags[tag] = value
-    return tags
-
-
-def _elf_symbol_count(image, data, tags, sections):
-    for s in sections or ():
-        if s["type"] == SHT_DYNSYM and s["entsize"] == 24:
-            return s["size"] // 24
-    base = image.image_base
-    if DT_HASH in tags:
-        try:
-            raw, _ = record_read(image, data, tags[DT_HASH] - base, 8)
-            return struct.unpack("<II", raw)[1]
-        except Unread:
-            return None
-    if DT_GNU_HASH in tags:
-        try:
-            at = tags[DT_GNU_HASH] - base
-            head, _ = record_read(image, data, at, 16)
-            nbuckets, symoffset, bloom_size, _ = struct.unpack("<IIII", head)
-            buckets_at = at + 16 + 8 * bloom_size
-            raw, _ = record_read(image, data, buckets_at, 4 * nbuckets)
-            buckets = struct.unpack(f"<{nbuckets}I", raw)
-            last = max(buckets, default=0)
-            if last < symoffset:
-                return symoffset
-            chains_at = buckets_at + 4 * nbuckets
-            index = last
-            while True:
-                value, _ = record_read(image, data, chains_at + 4 * (index - symoffset), 4)
-                if struct.unpack("<I", value)[0] & 1:
-                    return index + 1
-                index += 1
-        except (Unread, struct.error):
-            return None
-    return None
-
-
-def _elf_imports(image, data, sections, out):
-    tags = _elf_dynamic_tags(image, data, out)
-    if tags is None:
-        out.import_state = "absent" if not any(p[0] == PT_DYNAMIC for p in image.phdrs) else "indeterminate"
-        return
-    base = image.image_base
-    needed = (6, DT_STRTAB, DT_STRSZ)          # DT_SYMTAB, DT_STRTAB, DT_STRSZ
-    if not all(t in tags for t in needed):
-        out.import_state = "absent" if not (23 in tags or 7 in tags) else "indeterminate"
-        if out.import_state == "indeterminate":
-            _diag(out.import_problems, "PARSER_UNSUPPORTED", what="dynamic symbol tables")
-        return
-    symtab, strtab, strsz = tags[6] - base, tags[DT_STRTAB] - base, tags[DT_STRSZ]
-    syment = tags.get(11, 24)
-    count = _elf_symbol_count(image, data, tags, sections)
-    partial = False
-    tables = []
-    if 23 in tags:                               # DT_JMPREL
-        if tags.get(20, 7) != 7:
-            _diag(out.import_problems, "ELF_RELOC_UNSUPPORTED", what="DT_PLTREL REL")
-            partial = True
-        else:
-            tables.append(("DT_JMPREL", tags[23] - base, tags.get(2, 0), 24))
-    if 7 in tags:                                # DT_RELA
-        tables.append(("DT_RELA", tags[7] - base, tags.get(8, 0), tags.get(9, 24)))
-    for label, at, size, entsize in tables:
-        if entsize != 24 or size % 24:
-            _diag(out.import_problems, "ELF_RELOC_UNSUPPORTED", what=label)
-            partial = True
-            continue
-        try:
-            raw, table_basis = record_read(image, data, at, size)
-        except Unread as error:
-            _diag(out.import_problems, error.reason, what=label)
-            partial = True
-            continue
-        for cursor in range(0, size, 24):
-            r_offset, info, _ = struct.unpack_from("<QQq", raw, cursor)
-            kind, index = info & 0xFFFFFFFF, info >> 32
-            if kind not in (R_GLOB_DAT, R_JUMP_SLOT):
-                continue
-            slot = r_offset - base
-            if syment != 24 or count is None or index >= count:
-                out.slot_failures[slot] = "SYM_COUNT_U"
-                continue
-            try:
-                sym, sym_basis = record_read(image, data, symtab + 24 * index, 24)
-                st_name, _, _, st_shndx = struct.unpack_from("<IBBH", sym, 0)
-                if st_name >= strsz:
-                    raise Unread("TRUNCATED", "st_name")
-                name, name_basis = record_cstring(image, data, strtab + st_name, strsz - st_name)
-            except Unread:
-                out.slot_failures[slot] = "SLOT_NAME_U"
-                continue
-            out.imports[slot] = {"name": name, "kind": "JUMP_SLOT" if kind == R_JUMP_SLOT else "GLOB_DAT",
-                                 "undefined": st_shndx == 0,
-                                 "basis": {"elf_reloc": {"name": name, "slot": slot, "type": kind, "table": label,
-                                                         "entry": table_basis["file_record"][0] + cursor,
-                                                         "symbol": sym_basis, "string": name_basis}}}
-    out.import_state = "partial" if partial else "complete"
 
 
 # -- trap sites (r2 E2, r3 E2) ------------------------------------------------------------------------------------
@@ -629,12 +271,12 @@ def _ballot_ok(ballot):
 
 
 def ballot_digest(votes):
-    import hashlib
-    import json
+    import common_facts as cf
+    import decoders
 
-    payload = [d.as_json() for d in sorted(votes, key=lambda d: d.voter)]
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                                     allow_nan=False).encode("utf-8")).hexdigest()
+    by_name = {d.voter: d for d in votes}
+    names = decoders.AMD_VOTERS if votes[0].amd else decoders.INTEL_VOTERS
+    return cf.digest([by_name[name].as_json() for name in names])
 
 
 def _byte_form(data):
@@ -674,67 +316,63 @@ def _vote_form(d):
 
 
 def trap_outcome(result, ballot, window_bytes, global_reason=False):
-    """None = decided non-trap; ("site", fields) = a trap site; ("unresolved", reason). Inputs are the raw window,
-    its verified length and relocations, and the raw ballots: G1's attribute filter is not used (r3 E2)."""
     if result is None:
         return "unresolved", "GLOBAL_REASON" if global_reason else "NO_WINDOW"
-    window = result.get("window") or {}
-    verified = window.get("verified", 0)
-    data = (window_bytes or b"")[:verified]
-    if not verified or not data:
+    w = result.get("window") or {}
+    data = (window_bytes or b"")[:w.get("verified", 0)]
+    if not data:
         return "unresolved", "NO_WINDOW"
     if not _ballot_ok(ballot):
         return "unresolved", "BALLOT_MISSING"
+    intel, amd = ballot["intel"], ballot["amd"]
+    votes = (*intel, *amd)
     shape = _byte_form(data)
+    undecided = "unresolved", "TRAP_FORM_UNDECIDED"
+    invalid = all(d.status == "invalid" for d in votes)
+    if invalid and (shape is None or shape[0] != "ce"):
+        return *undecided, "ALL_INVALID_NOT_CE"
     if shape is None:
-        return "unresolved", "TRAP_FORM_UNDECIDED"
+        return undecided
     form, length, vector, immediate = shape
-    votes = list(ballot["intel"]) + list(ballot["amd"])
-    relocations = window.get("relocations") or ()
-
-    def relocated(n):
-        return any(start < n and start + size > 0 for start, size, _ in relocations)
+    reloc = w.get("relocations") or ()
 
     if form == "none":
-        if all(d.status == "invalid" for d in votes):
-            return "unresolved", "ALL_INVALID_NOT_CE"
-        if any(d.status != "ok" for d in votes) or len({d.length for d in votes}) != 1 or \
-                len({_vote_form(d) for d in votes}) != 1:
-            return "unresolved", "TRAP_FORM_UNDECIDED"
         n = votes[0].length
-        if n > verified or any(d.flow in TRAP_FLOWS for d in votes):
-            return "unresolved", "TRAP_FORM_UNDECIDED"
+        if (not 0 < n <= len(data) or any(d.status != "ok" or d.length != n or
+                _vote_form(d) != _vote_form(votes[0]) or d.flow in TRAP_FLOWS for d in votes)):
+            return undecided
+        for a, size, _ in reloc:
+            for pos in range(max(a, 0), min(a + size, n)):
+                if not all(any(x <= pos < x + width for x, width in d.value_fields) for d in votes):
+                    return "unresolved", "RELOCATED_OPCODE"
         return None
-    if length > verified:
-        return "unresolved", "TRAP_FORM_UNDECIDED"
-    if relocated(length):
+
+    if length > len(data):
+        return undecided
+    if any(a < length and a + size > 0 for a, size, _ in reloc):
         return "unresolved", "RELOCATED_OPCODE"
     if form == "ce":
-        if all(d.status == "invalid" for d in votes):
-            return None                              # (long-mode CE: invalid encoding, decided non-trap)
-        return "unresolved", "TRAP_FORM_UNDECIDED"
-    want = ("int_n", vector) if form == "int_n" else (form, None)
+        return None if invalid else undecided
+
+    want = (form, vector if form == "int_n" else None)
 
     def agreed(group):
-        return group and all(d.status == "ok" and d.length == length and _vote_form(d) == want for d in group)
+        return all(d.status == "ok" and d.length == length and _vote_form(d) == want for d in group)
 
-    intel, amd = list(ballot["intel"]), list(ballot["amd"])
-    basis = {"decoders": {"intel": ballot_digest(intel), "amd": ballot_digest(amd)}}
-    if form == "sysenter":
-        if not agreed(intel):
-            return "unresolved", "TRAP_FORM_UNDECIDED"
-        if agreed(amd) or all(d.status == "invalid" for d in amd):
-            return "site", {"form": {"unobserved": "VENDOR_SPLIT_FORM"}, "vector": None, "immediate": None,
-                            "syscall_abi": {"unobserved": "NO_ABI_BASIS"}, "length": length, "basis": basis,
-                            "vendor_views": {"intel": {"form": "sysenter"},
-                                             "amd": {"form": "invalid_encoding",
-                                                     "basis": {"isa_conditions": "SYSENTER.f5.amd"}}}}
-        return "unresolved", "TRAP_FORM_UNDECIDED"
-    if not (agreed(intel) and agreed(amd)):
-        return "unresolved", "TRAP_FORM_UNDECIDED"
-    abi = None if form in ("int3", "int1") else {"unobserved": "NO_ABI_BASIS"}
-    return "site", {"form": form, "vector": vector, "immediate": immediate, "syscall_abi": abi, "length": length,
-                    "basis": basis}
+    if not agreed(intel):
+        return undecided
+    split = form == "sysenter"
+    if not agreed(amd) and not (split and all(d.status == "invalid" for d in amd)):
+        return undecided
+    site = dict(form=form, length=length, vector=vector, immediate=immediate,
+                syscall_abi=None if form in ("int1", "int3") else {"unobserved": "NO_ABI_BASIS"},
+                basis={"decoders": {v: ballot_digest(ballot[v]) for v in ("intel", "amd")}})
+    if split:
+        site["form"] = {"unobserved": "VENDOR_SPLIT_FORM"}
+        site["vendor_views"] = {"intel": {"form": "sysenter"},
+                                "amd": {"form": "invalid_encoding",
+                                        "basis": {"isa_conditions": "SYSENTER.f5.amd"}}}
+    return "site", site
 
 
 # -- Bundle binding (r1 s3 / s5, r2 E5 / E6, r3 E5 / E6) ----------------------------------------------------------
@@ -766,15 +404,13 @@ def _item_key(item):
 
 
 def _groups(pairs):
-    """[(reason, item)] -> [{"reason", "items"}]: reasons sorted, items sorted and deduplicated (r3 E5)."""
-    import json
-
-    out = {}
-    for reason, item in pairs:
-        assert reason in REASONS, reason
-        out.setdefault(reason, set()).add(_canonical(item))
-    return [{"reason": reason, "items": sorted((json.loads(x) for x in items), key=_item_key)}
-            for reason, items in sorted(out.items())]
+    grouped = defaultdict(dict)
+    for why, item in pairs:
+        if why not in REASONS:
+            raise ValueError(why)
+        grouped[why][_canonical(item)] = item
+    return [{"reason": why, "items": [items[k] for k in sorted(items, key=lambda k: (_item_key(items[k]), k))]}
+            for why, items in sorted(grouped.items())]
 
 
 def _union_length(intervals):
@@ -790,153 +426,152 @@ def _union_length(intervals):
 
 
 class CodeBinder:
-    """Binds file facts to the Bundle: regions in Bundle VAs, per-window verified records (explicit or compact),
-    rows outside code, trap sites and coverage. Later steps add import and store sites."""
+    def __init__(self, ff, base, space, rows, code_rows, row_set_sha256, missing=()):
+        import common_facts as cf
 
-    def __init__(self, ff, base, space, rows, code_rows, row_set_sha256):
-        self.ff, self.base, self.space = ff, base, space
-        self.rows = rows                                   # facts rows in document order
-        self.code_rows = code_rows                         # (id, observation) -> (x86, verified, trap, flows)
-        self.row_set_sha256 = row_set_sha256
-        self.index = {(r["id"], r["observation"]): i for i, r in enumerate(rows)}
+        self.ff, self.base, self.space, self.rows = ff, base, space, rows
+        self.keys = [cf.rr(r) for r in rows]
+        self.proofs = [code_rows[k] for k in self.keys]
         self.va = [int(r["offset"], 16) for r in rows]
-        self.sites, self.coverage = [], []
+        self.digest = row_set_sha256
+        self.missing = sorted(missing)
 
-    def _range(self, start, end):
+    def _range(self, start, end, why="SECTION_EXTENT_U"):
         return {"space": self.space, "load_base": _hx(self.base), "start": _hx(self.base + start),
-                "end": _hx(self.base + end) if end is not None else {"unobserved": "end not determined"}}
+                "end": {"unobserved": why} if end is None else _hx(self.base + end)}
 
-    def regions(self):
-        ff = self.ff
-        all_regions = ff.code + ff.unwind
+    def diagnostic(self, d):
+        why = d["reason"]
+        if "range" in d:
+            result = {"reason": why, "scope_item": {"basis": d["basis"],
+                      "range": self._range(**d["range"], why=why)}}
+        else:
+            result = dict(d)
+        if "file_runtime" in d["basis"]:
+            result["holds_if"] = [PREMISE]
+        return result
+
+    def coverage(self, kind, method, unresolved=(), unsupported=(), ranges=(), groups=None):
+        arm = method == "a64_instruction"
+        excluded = [{"row": i, "reason": "NOT_A64" if arm else "NOT_X86"}
+                    for i, p in enumerate(self.proofs) if p.isa != ("aarch64" if arm else "x86-64")]
+        scope = {"facts_rows": self.digest, "excluded": excluded}
+        if len(excluded) == len(self.rows):
+            scope["empty"] = True
+        return dict(kind=kind, method=method, rows_examined=scope, ranges_examined=list(ranges),
+                    unresolved=_groups(unresolved) if groups is None else groups,
+                    unsupported=_groups(unsupported), missing_functions=self.missing)
+
+    def program_code(self, sha, imports=None):
         regions = []
-        for r in all_regions:
-            item = {"range": self._range(r.start, r.end), "role": r.role, "name": r.name, "basis": r.basis}
+        diagnostics = [self.diagnostic(d) for d in self.ff.diagnostics]
+        unknown = {(d["range"]["start"], _canonical(d["basis"])): d["reason"] for d in self.ff.diagnostics
+                   if "range" in d and d["range"]["end"] is None}
+        for r in self.ff.code + self.ff.unwind:
+            why = unknown.get((r.start, _canonical(r.basis)), "SECTION_EXTENT_U") if r.end is None else None
+            item = dict(range=self._range(r.start, r.end, why), role=r.role, name=r.name, basis=r.basis)
             if r.role == "code":
                 item.update(executable=r.executable, writable=r.writable)
+            if "file_runtime" in r.basis:
+                item["holds_if"] = [PREMISE]
             regions.append(item)
-        windows = sorted((self.index[k], self.va[self.index[k]], self.va[self.index[k]] + row[1])
-                         for k, row in self.code_rows.items() if row[1])
-        lists = [[] for _ in regions]
-        spans = [[] for _ in regions]
-        # (sweep: windows by start, regions by start; only decided intervals take part, r2 E5)
-        decided = sorted((self.base + r.start, self.base + r.end, ri) for ri, r in enumerate(all_regions)
-                         if r.end is not None)
-        hits = []
-        active, j = [], 0
-        for i, w0, w1 in sorted(windows, key=lambda w: (w[1], w[0])):
-            while j < len(decided) and decided[j][0] < w1:
-                active.append(decided[j])
-                j += 1
-            active = [reg for reg in active if reg[1] > w0]
-            for a, b, ri in active:
-                lo, hi = max(a, w0), min(b, w1)
-                if lo < hi:
-                    hits.append((ri, i, lo, hi))
-        for ri, i, lo, hi in sorted(hits):
-            lists[ri].append({"interval": [_hx(lo), _hx(hi)], "basis": {"g1_window": {"row": i}}})
-            spans[ri].append((lo, hi))
-        size = len(_canonical(lists))
-        compact = size > VERIFIED_THRESHOLD
-        for ri, item in enumerate(regions):
-            item["verified_bytes"] = _union_length(spans[ri])
-            if not compact:
-                item["verified"] = lists[ri]
-        out = {"regions": regions,
-               "verified_encoding": {"explicit_bytes": size, "threshold": VERIFIED_THRESHOLD,
-                                     "form": "compact" if compact else "explicit"}}
-        if compact:
-            lengths = [0] * len(self.rows)
-            for k, row in self.code_rows.items():
-                lengths[self.index[k]] = row[1]
-            out["verified_rule"] = {"per_row_window": self.row_set_sha256}
-            out["verified_lengths"] = lengths
-        code = [(self.base + r.start, self.base + r.end) for r in ff.code]
-        out["rows_outside_code"] = [i for i, va in enumerate(self.va) if not any(a <= va < b for a, b in code)]
-        out["diagnostics"] = [dict(d, range=self._range(d["range"]["start"], d["range"]["end"]))
-                              if "range" in d else d for d in ff.diagnostics]
-        return out
 
-    def _excluded(self, predicate, reason):
-        items = sorted(self.index[k] for k, row in self.code_rows.items() if predicate(row))
-        return [{"reason": reason, "items": items}] if items else []
+        lengths = [p.verified for p in self.proofs]
+        verified, totals = verified_lists(self.rows, regions, lengths)
+        enc = verified_encoding(len(_canonical(verified)))
+        out = dict(premise=PREMISE, name_table_sha256=sha,
+                   file=dict(format=self.ff.format, ok=self.ff.ok, why=self.ff.why),
+                   regions=regions, diagnostics=diagnostics, verified_encoding=enc)
+        for r, v, total in zip(regions, verified, totals, strict=True):
+            r["verified_bytes"] = total
+            if enc["form"] == "explicit":
+                r["verified"] = v
+        if enc["form"] == "compact":
+            out.update(verified_lengths=lengths, verified_rule={"per_row_window": self.digest})
+        out["rows_outside_code"] = [i for i, a in enumerate(self.va) if self.rows[i]["space"] != self.space or
+                                    not any(r.start <= a - self.base < r.end for r in self.ff.code)]
 
-    def traps(self):
-        unresolved, syscall_rows = [], []
-        for k, row in self.code_rows.items():
-            x86, outcome = row[0], row[2]
-            if not x86 or outcome is None:
+        sites, unresolved, syscalls, arm, details = [], [], [], [], Counter()
+        for i, p in enumerate(self.proofs):
+            at = {"row": i, "op": None}
+            if p.isa == "aarch64":
+                arm.append(("G2C", at))
+            if not p.trap:
                 continue
-            i = self.index[k]
-            kind, value = outcome
-            if kind == "unresolved":
-                unresolved.append((value, {"row": i, "op": None}))
+            state, value, *detail = p.trap
+            if state == "unresolved":
+                unresolved.append((value, at))
+                details.update(detail)
                 continue
-            site = {"row": i, "kind": "trap_instruction", "symbol": None, "arguments": [], "holds_if": [PREMISE],
-                    "basis": dict(value["basis"], g1_window={"row": i})}
-            site.update({f: value[f] for f in ("form", "vector", "immediate", "syscall_abi")})
-            if "vendor_views" in value:
-                site["vendor_views"] = value["vendor_views"]
-            self.sites.append(site)
-            if value["form"] in ("syscall", "int_n") or "vendor_views" in value:
-                syscall_rows.append(i)
-        examined = {"facts_rows": self.row_set_sha256, "excluded": self._excluded(lambda row: not row[0], "NOT_X86")}
-        self.coverage.append({"kind": "trap_instruction", "method": "x86_instruction", "rows_examined": examined,
-                              "ranges_examined": [], "unsupported": [], "unresolved": _groups(unresolved)})
-        self.coverage.append({"kind": "cache_maintenance", "method": "syscall", "rows_examined": examined,
-                              "ranges_examined": [], "unresolved": [],
-                              "unsupported": _groups(("NO_ABI_BASIS", {"row": i, "op": None}) for i in syscall_rows)})
-        a64 = sorted(self.index[k] for k, row in self.code_rows.items() if not row[0])
-        if a64:
-            others = self._excluded(lambda row: row[0], "NOT_X86")
-            for kind in ("trap_instruction", "cache_maintenance"):
-                self.coverage.append({"kind": kind, "method": "a64_instruction",
-                                      "rows_examined": {"facts_rows": self.row_set_sha256, "excluded": others},
-                                      "ranges_examined": [], "unresolved": [],
-                                      "unsupported": _groups(("G2C", {"row": i, "op": None}) for i in a64)})
+            site = dict(value, row=i, kind="trap_instruction", symbol=None, arguments=[], holds_if=[PREMISE],
+                        basis=dict(value["basis"], **window_ref(self.rows, i)))
+            sites.append(site)
+            if "vendor_views" in site or site["form"] in ("syscall", "int_n"):
+                syscalls.append(("NO_ABI_BASIS", at))
 
-    def program_code(self, name_table_sha256, imports=None):
-        out = {"premise": PREMISE, "name_table_sha256": name_table_sha256,
-               "file": {"format": self.ff.format, "ok": self.ff.ok, "why": self.ff.why}}
-        out.update(self.regions())
-        self.traps()
+        surveys = [self.coverage("trap_instruction", "x86_instruction", unresolved),
+                   self.coverage("cache_maintenance", "syscall", unresolved, syscalls)]
+        for kind in ("trap_instruction", "cache_maintenance"):
+            surveys.append(self.coverage(kind, "a64_instruction", unsupported=arm))
+
         if imports is not None:
-            sites, unresolved = imports.run()
-            self.sites.extend(sites)
-            self.coverage.extend(imports.coverage(unresolved))
-            stores = StoreSites(self, imports, imports.raw)
-            sites, unresolved = stores.run()
-            self.sites.extend(sites)
-            self.coverage.extend(stores.coverage(unresolved))
-        out["sites"] = sorted(self.sites, key=lambda s: (s["row"], s["kind"], -1 if s.get("op") is None else s["op"]))
-        out["survey"] = self.coverage
-        return out
+            found, us = imports.run()
+            sites.extend(found)
+            groups = _groups((w, it) for w, it in us if w not in ("NO_RWX_REGISTER", "PARSER_UNSUPPORTED"))
+            rwx = _groups((w, it) for w, it in us if w == "NO_RWX_REGISTER")
+            failures = [(w, it) for w, it in us if w == "PARSER_UNSUPPORTED"]
+            problems = [self.diagnostic(d) for d in self.ff.import_problems]
+            for d in problems:
+                if "scope_item" in d:
+                    failures.append((d["reason"], d["scope_item"]))
+            for kind in sorted(set(imports.kind_of.values())):
+                selected = sorted(groups + rwx, key=lambda g: g["reason"]) if kind == RWX_KIND else groups
+                cov = self.coverage(kind, "import_transfer", unsupported=failures, groups=selected)
+                cov["import_table"] = {"state": self.ff.import_state, "problems": problems}
+                surveys.append(cov)
+
+            found, us = imports.stores()
+            sites.extend(found)
+            ranges = [dict(range=r["range"], basis=r["basis"]) for r in regions if r["role"] == "code"]
+            surveys.append(dict(self.coverage("code_write", "static_store", us, ranges=ranges),
+                                write="static_store_candidate"))
+        return dict(out, sites=sorted(sites, key=lambda s: (s["row"], s["kind"], s.get("op", -1))),
+                    survey=surveys, trap_unresolved_details=dict(details))
 
 
 def summary(code):
-    from collections import Counter
-
-    kinds = Counter(s["kind"] for s in code["sites"])
-    groups = {}
-    for field_name in ("unresolved", "unsupported"):
-        groups[field_name] = {f"{c['kind']}/{c['method']}": {g["reason"]: len(g["items"]) for g in c[field_name]}
-                              for c in code["survey"] if c[field_name]}
-    forms = Counter(s["form"] if isinstance(s["form"], str) else "vendor_split" for s in code["sites"]
-                    if s["kind"] == "trap_instruction")
-    routes = Counter(s["route"] for s in code["sites"] if "route" in s)
-    per_api = Counter((s["symbol"]["name"], "candidate") for s in code["sites"]
-                      if s["kind"] == "rwx_allocation_constant_args")
+    if code["name_table_sha256"] != name_table()[1]:
+        raise ValueError("name table digest mismatch")
+    sites = code["sites"]
+    counts = Counter(s["kind"] for s in sites)
+    forms = Counter(s["form"] if isinstance(s["form"], str) else "vendor_split"
+                    for s in sites if s["kind"] == "trap_instruction")
+    api = Counter((s["symbol"]["name"], "candidate") for s in sites if s.get("candidate"))
+    methods, unresolved, unsupported = {}, {}, {}
     for c in code["survey"]:
-        if c["kind"] == "rwx_allocation_constant_args":
-            for g in c["unresolved"]:
-                if g["reason"] == "NO_RWX_REGISTER":
-                    per_api.update((i["api"], "NO_RWX_REGISTER") for i in g["items"])
-    return {"rule": FACTS_RULE, "sites": dict(kinds), "trap_forms": dict(forms), **groups,
-            "import_routes": dict(routes), "rwx_per_api": {f"{a}/{b}": n for (a, b), n in sorted(per_api.items())},
-            "regions": [{"name": r["name"], "role": r["role"], "verified_bytes": r["verified_bytes"]}
-                        for r in code["regions"]],
-            "rows_outside_code": len(code["rows_outside_code"]), "verified_encoding": code["verified_encoding"],
-            "name_table_sha256": code["name_table_sha256"]}
+        k, m = c["kind"], c["method"]
+        key = k + "/" + m
+        if m == "import_transfer":
+            selected = [s for s in sites if s["kind"] == k and "route" in s]
+        elif m in ("x86_instruction", "static_store"):
+            selected = [s for s in sites if s["kind"] == k and "route" not in s]
+        else:
+            selected = []
+        for field, target in (("unsupported", unsupported), ("unresolved", unresolved)):
+            target[key] = {g["reason"]: len(g["items"]) for g in c[field]}
+        methods[key] = dict(sites=len(selected), candidates=sum(bool(s.get("candidate")) for s in selected),
+                            excluded=len(c["rows_examined"]["excluded"]),
+                            unresolved=unresolved[key], unsupported=unsupported[key])
+        for g in c["unresolved"]:
+            if g["reason"] == "NO_RWX_REGISTER":
+                api.update((it["api"], g["reason"]) for it in g["items"])
+    return dict(rule=FACTS_RULE, sites=dict(counts), trap_forms=dict(forms), methods=methods,
+                unresolved=unresolved, unsupported=unsupported, trap_unresolved_details=code["trap_unresolved_details"],
+                import_routes=dict(Counter(s["route"] for s in sites if "route" in s)),
+                rwx_per_api={a + "/" + why: n for (a, why), n in sorted(api.items())},
+                regions=[{k: r[k] for k in ("name", "role", "verified_bytes")} for r in code["regions"]],
+                rows_outside_code=len(code["rows_outside_code"]), verified_encoding=code["verified_encoding"],
+                name_table_sha256=code["name_table_sha256"])
 
 
 # -- import transfer sites and register values (r1 s4.2 / s4.3, r2 E3 / E4, r3 E3) --------------------------------
@@ -971,384 +606,493 @@ def _overlaps(a, b):
     return a["space"] == b["space"] and a["offset"] < b["offset"] + b["size"] and b["offset"] < a["offset"] + a["size"]
 
 
-class _Values:
-    """Register definitions along a linear path (r2 E4): constants survive until any overlapping write."""
-
-    def __init__(self):
-        self.defs = {}               # (space, offset, size) -> {"value", "width", "row", "op"}
-
-    def kill(self, out):
-        for key in [k for k in self.defs if _overlaps({"space": k[0], "offset": k[1], "size": k[2]}, out)]:
-            del self.defs[key]
-
-    def apply(self, row_index, ordinal, op):
-        out = op.get("output")
-        if not out:
-            return
-        key = (out["space"], out["offset"], out["size"])
-        ins = op.get("inputs") or []
-        value = None
-        if op["opcode"] == "COPY" and len(ins) == 1 and ins[0] and ins[0]["kind"] == "CONSTANT":
-            value = ins[0]["offset"] % (1 << (8 * out["size"]))
-        elif op["opcode"] in ("INT_XOR", "INT_SUB") and len(ins) == 2 and ins[0] and ins[1] and \
-                ins[0]["kind"] == "REGISTER" and ins[0] == ins[1] and ins[0]["size"] == out["size"]:
-            value = 0                                          # (xor r,r / sub r,r)
-        elif op["opcode"] == "INT_ZEXT" and len(ins) == 1 and ins[0] and ins[0]["kind"] == "REGISTER":
-            src = self.defs.get((ins[0]["space"], ins[0]["offset"], ins[0]["size"]))
-            if src is not None and src["row"] == row_index and src["op"] == ordinal - 1:
-                value = src["value"]                           # (mov r32, imm: COPY then ZEXT of that def)
-        self.kill(out)
-        if value is not None and out["kind"] == "REGISTER" and _gpr(out):
-            self.defs[key] = {"value": value, "width": 8 * out["size"], "row": row_index, "op": ordinal}
-
-
 class ImportSites:
-    """D4 / E3 / r3 E3 transfer sites through import slots, one hop through a slot-jump thunk, register values at
-    the source row entry, RWX candidates and the per-kind import coverage."""
-
-    def __init__(self, binder, derived, raw, flows, ff, kinds, complete, image=None, original=None):
-        self.b, self.derived, self.raw, self.flows, self.ff = binder, derived, raw, flows, ff
+    def __init__(self, binder, raw, kinds, complete, image=None, original=None):
+        b = self.b = binder
+        self.ff = b.ff
+        self.raw = [raw[k] for k in b.keys]
         self.kind_of = {name: kind for kind, names in kinds.items() for name in names}
         self.complete = complete
         self.image, self.original = image, original
-        b = binder
-        self.keys = [None] * len(b.rows)
-        for k, i in b.index.items():
-            self.keys[i] = k
-        self.starts = {}                                  # (space, va) -> [row index]
+        self.starts, self.by_space = defaultdict(list), defaultdict(list)
+        self.entries, self.unknown_edges = defaultdict(set), set()
+        self.parents, self.endbr, self.stubs, self.states = {}, {}, {}, {}
+
         for i, r in enumerate(b.rows):
-            self.starts.setdefault((r["space"], b.va[i]), []).append(i)
-        spans = sorted((r["space"], b.va[i], b.va[i] + r["length"], i) for i, r in enumerate(b.rows)
-                       if type(r["length"]) is int)
-        self.spans = spans
-        self.span_keys = [(s[0], s[1]) for s in spans]
-        # incoming edges per target VA (any source), and recorded landing pads
-        self.incoming = {}
-        for i, r in enumerate(b.rows):
-            edges = r["transfer"].get("edges")
-            for e in edges if isinstance(edges, list) else ():
-                to = e.get("to")
-                if isinstance(to, dict) and "offset" in to:
-                    self.incoming.setdefault((to["space"], int(to["offset"], 16)), []).append((i, e["source"]))
-        self.pads = set()
-        for f in raw.values():
-            for space, offset in f.get("recorded_landing_pads") or ():
-                self.pads.add((space, offset))
+            space, a = r["space"], b.va[i]
+            self.starts[space, a].append(i)
+            self.by_space[space].append((a, i))
+            f = self.raw[i]
+            for target in f.get("flow_target_coords", ()):
+                self.entries[tuple(target)].add((i, "encoded_target"))
+            for target in f.get("recorded_landing_pads") or ():
+                self.entries[tuple(target)].add((i, "pad"))
+            for t in (r["transfer"], *(r.get("vendor_views") or {}).values()):
+                edges = t.get("edges")
+                if not isinstance(edges, list):
+                    self.unknown_edges.add(space)
+                    continue
+                for e in edges:
+                    to = e.get("to")
+                    if isinstance(to, dict) and "offset" in to:
+                        self.entries[to["space"], int(to["offset"], 16)].add((i, e["source"]))
+                    elif e.get("source") in ("encoded_target", "sequential"):
+                        self.unknown_edges.add(space)
+        for spans in self.by_space.values():
+            spans.sort()
 
-    # -- rows and paths --
-    def _inside(self, space, va):
-        """Does some row (any length up to 15 bytes) cover ``va`` without starting there?"""
-        import bisect
+    def between(self, space, a, z):
+        spans = self.by_space.get(space, ())
+        return spans[bisect_left(spans, (a,)):bisect_left(spans, (z,))]
 
-        at = bisect.bisect_right(self.span_keys, (space, va)) - 1
-        while at >= 0 and self.spans[at][0] == space and self.spans[at][1] > va - 16:
-            if self.spans[at][1] < va < self.spans[at][2]:
-                return True
-            at -= 1
-        return False
+    def covering(self, space, va):
+        for a, j in self.between(space, va - 14, va):
+            n = self.b.rows[j]["length"]
+            known = type(n) is int and 0 < n <= 15
+            if not known or a + n > va:
+                yield j, known
 
-    def _predecessor(self, i):
-        """The unique linear predecessor of row i (r2 E4), or None."""
+    def predecessor(self, i):
+        import lifting
+
+        if i in self.parents:
+            return self.parents[i]
         b = self.b
-        r, k = b.rows[i], self.keys[i]
-        here = (r["space"], b.va[i])
-        if here in self.pads:
-            return None
-        # (one instruction exported in several observations is one source: count distinct source row ids)
-        sources = {(b.rows[j]["id"], source) for j, source in self.incoming.get(here, ())}
-        sequential = [j for j, source in self.incoming.get(here, ()) if source == "sequential"
-                      and b.rows[j]["observation"] == r["observation"] and b.rows[j]["view"] == r["view"]
-                      and type(b.rows[j]["length"]) is int and b.va[j] + b.rows[j]["length"] == b.va[i]]
-        if len(sources) != 1 or len(sequential) != 1:
-            return None                                    # (another entry, or no / several predecessors)
-        j = sequential[0]
-        pt = b.rows[j]["transfer"]
-        edges = pt.get("edges")
-        if pt.get("kind") != "none" or not isinstance(edges, list) or len(edges) != 1 or edges[0]["source"] != "sequential":
-            return None
-        if any(op["opcode"] in ("CALLOTHER",) for op in self.raw[self.keys[j]]["ops"]):
-            return None                                    # (an opaque userop stops the walk)
-        return j
+        r = b.rows[i]
 
-    def register_values(self, i):
-        """Register constants reaching the entry of row i along its linear path (holds_if linear entry)."""
-        if not self.complete:
+        def same(j):
+            s = b.rows[j]
+            return (s["observation"], s["view"]) == (r["observation"], r["view"])
+
+        here = r["space"], b.va[i]
+        seq = [j for j, role in self.entries[here] if role == "sequential" and same(j)]
+        parent = None
+        if len(seq) == 1:
+            j = seq[0]
+            s = b.rows[j]
+            edges = s["transfer"].get("edges")
+            if (self.entries[here] == {(j, "sequential")} and type(s["length"]) is int
+                    and 0 < s["length"] <= 15 and b.va[j] + s["length"] == here[1]
+                    and s["transfer"]["kind"] == "none" and isinstance(edges, list) and len(edges) == 1
+                    and edges[0]["source"] == "sequential"
+                    and not any(same(k) for k, _ in self.covering(*here))
+                    and not any(same(k) for k, _ in self.covering(r["space"], b.va[j]))
+                    and not any(a > b.va[j] and same(k) for a, k in self.between(r["space"], b.va[j], here[1]))
+                    and sum(same(k) for k in self.starts[r["space"], b.va[j]]) == 1
+                    and sum(same(k) for k in self.starts[here]) == 1
+                    and not any(o["opcode"] in lifting.FLOW_OPS for o in self.raw[j]["ops"])):
+                parent = j
+        self.parents[i] = parent
+        return parent
+
+    def _apply(self, defs, j):
+        for n, op in enumerate(self.raw[j]["ops"]):
+            out = op.get("output")
+            if not out:
+                continue
+            s, a, w = key = out["space"], out["offset"], out["size"]
+            args = op["inputs"]
+            value = None
+            if _gpr(out):
+                if (op["opcode"] == "COPY" and len(args) == 1 and args[0]
+                        and args[0]["kind"] == "CONSTANT" and args[0]["size"] == w):
+                    value = args[0]["offset"] % (1 << (8 * w))
+                elif (op["opcode"] in ("INT_XOR", "INT_SUB") and len(args) == 2
+                      and args[0] == args[1] and _gpr(args[0]) and args[0]["size"] == w):
+                    value = 0
+                elif (op["opcode"] == "INT_ZEXT" and w == 8 and a % 8 == 0
+                      and len(args) == 1 and args[0] == dict(out, size=4)):
+                    prior = defs.get((s, a, 4))
+                    if prior and prior[1:] == (j, n - 1):
+                        value = prior[0]
+            for k in list(defs):
+                if k[0] == s and k[1] < a + w and a < k[1] + k[2]:
+                    del defs[k]
+            if value is not None:
+                defs[key] = value, j, n
+
+    def register_values(self, i, ordinal, wanted=None):
+        if not self.complete or self.b.rows[i]["space"] in self.unknown_edges:
             return [], "INDEX_INCOMPLETE"
-        path, j = [], self._predecessor(i)
-        while j is not None and len(path) < 64:
-            path.append(j)
-            j = self._predecessor(j)
-        values = _Values()
-        for j in reversed(path):
-            for ordinal, op in enumerate(self.raw[self.keys[j]]["ops"]):
-                values.apply(j, ordinal, op)
-        out = []
-        for (space, offset, size), d in sorted(values.defs.items()):
-            base = offset & ~7
-            out.append({"register": {"name": GPR[base], "space": space, "offset": offset, "size": size},
-                        "value": {"constant": _hx(d["value"]), "width": d["width"]},
-                        "definition": {"row": d["row"], "op": d["op"]}, "use": {"row": i, "op": None},
-                        "path": sorted(path), "basis": "ghidra_pcode",
-                        "holds_if": [PREMISE, LINEAR_PREMISE]})
-        return out, None
+        j, todo = i, []
+        while j not in self.states:
+            j = self.predecessor(j)
+            if j is None:
+                break
+            todo.append(j)
+        defs = self.states.get(j, {}).copy()
+        for k in reversed(todo):
+            self._apply(defs, k)
+        if i not in self.states:
+            if len(self.states) >= 1024:
+                self.states.pop(next(iter(self.states)))
+            self.states[i] = defs
 
-    # -- targets --
-    def _slot_name(self, slot_va):
-        coord = slot_va - self.b.base
-        item = self.ff.imports.get(coord)
-        if item is not None:
-            if self.ff.format == "elf" and not item.get("undefined", True):
-                return None, "SLOT_NOT_IMPORT"             # (the image's own definition: not an import site)
-            if item["name"].startswith("#"):
-                return item, "IMPORT_BY_ORDINAL"
-            return item, None
-        if coord in self.ff.slot_failures:
-            return None, self.ff.slot_failures[coord]
-        if self.ff.import_state == "absent":
-            return None, "NO_IMPORT_DIRECTORY"
-        if self.ff.import_state == "complete":
-            return None, "SLOT_NOT_IMPORT"
-        return None, "PARSER_UNSUPPORTED"
+        values = []
+        for key, (v, j, n) in sorted(defs.items()):
+            if wanted is not None and key not in wanted:
+                continue
+            path = [i]
+            while path[-1] != j:
+                path.append(self.predecessor(path[-1]))
+            s, a, w = key
+            values.append(dict(register=dict(name=GPR[a & ~7], space=s, offset=a, size=w),
+                               value=dict(constant=_hx(v), width=8 * w), definition=dict(row=j, op=n),
+                               use=dict(row=i, op=ordinal), path=path[::-1], basis="ghidra_pcode",
+                               holds_if=[PREMISE, LINEAR_PREMISE]))
+        return values, None
 
-    def _memory_slot(self, r):
-        """(slot VA, None) for an indirect transfer through one constant 64-bit memory slot, else (None, reason)."""
-        tv = r["transfer"].get("target_value")
-        if not isinstance(tv, dict) or "memory" not in tv:
-            return None, "COMPUTED_TARGET"
-        m = tv["memory"]
-        if m.get("segment_base") is not None:
-            return None, "SEGMENT_BASE"
-        if m.get("size") != 8:
-            return None, "POINTER_WIDTH"
-        if m.get("space") != r["space"]:
-            return None, "SPACE_MISMATCH"
-        a = m.get("address") or {}
-        if set(a) != {"constant", "width"} or a["width"] != 64:
-            return None, "COMPUTED_TARGET"
-        return int(a["constant"], 16), None
+    def exact(self, i):
+        import common_facts as cf
 
-    def _form(self, i, op):
-        flows = self.flows.get(self.keys[i])
-        form = TRANSFER_OPS[op["opcode"]]
-        if flows is None:
-            return form, None
-        decoded = {DECODER_FORMS.get(f) for f in flows}
-        if len(decoded) != 1:
-            return None, "VENDOR_VIEW_CONFLICT"
-        if decoded != {form}:
-            return None, "FORM_MISMATCH"
-        return form, None
-
-    def _endbr(self, i):
+        r, p = self.b.rows[i], self.b.proofs[i]
+        keys = r["transfer"].get("op_keys")
+        op = keys.get("transfer") if isinstance(keys, dict) else None
+        if not op or op.get("ordinal") not in p.raw_ops:
+            return None
         try:
-            raw, _ = runtime_read(self.image, self.original, self.b.va[i] - self.b.base, 4)
-        except (Unread, AttributeError):
-            return False
-        return raw == ENDBR64
+            cf.resolve(op, r, self.raw[i])
+        except ValueError:
+            return None
+        return op["ordinal"]
 
-    def _stub_bytes(self, va):
-        """A slot-jump stub that is not an exported row (an ELF PLT entry, a PE import thunk), decoded from
-        file_runtime bytes: [endbr64] [bnd] jmp [rip+d32], confirmed by every voter (jmp_near, indirect, same
-        length). Returns ("slot", slot VA, path, basis) or None. (Implementation addition, flagged for review.)"""
+    def transfer(self, i, n):
+        import common_facts as cf
+
+        b = self.b
+        r, p = b.rows[i], b.proofs[i]
+        flow, ind = p.form
+        opcode = self.raw[i]["ops"][n]["opcode"]
+        mem = (r["transfer"].get("target_value") or {}).get("memory", {})
+        if ind:
+            operand = self.raw[i]["ops"][n]["inputs"][0]
+            if p.segment or mem.get("segment_base") is not None:
+                raise Unread("SEGMENT_BASE")
+            if (operand and operand["size"] != 8) or (mem and mem["size"] != 8):
+                raise Unread("POINTER_WIDTH")
+            if r["space"] != b.space or (mem and mem["space"] != b.space):
+                raise Unread("SPACE_MISMATCH")
+            if operand and operand["kind"] in ("REGISTER", "UNIQUE"):
+                for op in reversed(self.raw[i]["ops"][:n]):
+                    o = op.get("output")
+                    if o and _overlaps(o, operand):
+                        if o == operand and op["opcode"] == "LOAD":
+                            sel = op["inputs"][0]
+                            if sel and sel["kind"] == "CONSTANT" and sel["offset"] != b.space:
+                                raise Unread("SPACE_MISMATCH")
+                        break
+
+        if p.failure:
+            raise Unread(p.failure)
+        fl, indirect, length, dst = p.signature
+        if (fl, indirect) != (flow, ind) or fl not in DECODER_FORMS:
+            raise Unread("FORM_MISMATCH")
+        form = DECODER_FORMS[fl]
+        if r["space"] != b.space:
+            raise Unread("SPACE_MISMATCH")
+        # (a Bundle without row lengths claims none: the agreed decoder length stands; only a claimed different
+        #  length is a mismatch)
+        if r["length"] is not None and length != r["length"]:
+            raise Unread("FORM_MISMATCH")
+        if (ind != (opcode in ("CALLIND", "BRANCHIND")) or
+                TRANSFER_OPS[opcode] != form and not (form == "call" and opcode == "BRANCH")):
+            raise Unread("FORM_MISMATCH")
+
+        role = cf.TAKEN if form == "jcc" else cf.DIRECT
+        edge = None
+        for vendor in (None, *cf.VENDORS) if r.get("vendor_views") else (None,):
+            m = cf.member(r, vendor)
+            if (m["length"] is not None and m["length"] != length) or (
+                    ind and m.get("target_value") != r["transfer"]["target_value"]):
+                raise Unread("VENDOR_VIEW_CONFLICT")
+            if not ind:
+                es = [e for e in m["edges"] if cf.triple(e) == role] if isinstance(m["edges"], list) else []
+                if len(es) != 1 or not isinstance(es[0].get("to"), dict) or "offset" not in es[0]["to"]:
+                    raise Unread("VENDOR_VIEW_CONFLICT" if vendor else "TARGET_LIFT_U")
+                to = es[0]["to"]
+                if to["space"] != b.space:
+                    raise Unread("SPACE_MISMATCH")
+                if dst != int(to["offset"], 16):
+                    raise Unread("VENDOR_VIEW_CONFLICT" if vendor or r.get("vendor_views") else "FORM_MISMATCH")
+                edge = dict(zip(cf.EC, role), to=to)
+
+        step = dict(row=i, op=n, step="ghidra_pcode")
+        if edge is not None:
+            step["edge"] = edge
+            return form, False, dst, step
+        addr = mem.get("address", {})
+        if set(addr) != {"constant", "width"} or addr["width"] != 64:
+            raise Unread("COMPUTED_TARGET")
+        return form, True, int(addr["constant"], 16), step
+
+    def read_endbr(self, i):
+        if self.b.rows[i]["length"] != 4:
+            return False
+        va = self.b.va[i]
+        if va not in self.endbr:
+            try:
+                if self.image is None:
+                    raise Unread("MAP_INDETERMINATE")
+                raw, basis = runtime_read(self.image, self.original, va - self.b.base, 4)
+                self.endbr[va] = (basis if raw == ENDBR64 else False), None
+            except Unread as exc:
+                self.endbr[va] = None, exc.reason
+        result, why = self.endbr[va]
+        if why:
+            raise Unread(why)
+        return result
+
+    def stub(self, space, va):
+        """Fourth route for an unlisted [ENDBR64] [BND] RIP-relative slot jump in decided executable bytes."""
         import decoders
 
-        if self.image is None:
-            return None
-        try:
-            raw, basis = runtime_read(self.image, self.original, va - self.b.base, 11)
-        except Unread:
-            try:
-                raw, basis = runtime_read(self.image, self.original, va - self.b.base, 7)
-            except Unread:
-                return None
-        skip = 4 if raw.startswith(ENDBR64) else 0
-        jmp = raw[skip:]
-        prefix = 1 if jmp[:1] == b"\xf2" else 0
-        if jmp[prefix:prefix + 2] != b"\xff\x25" or len(jmp) < prefix + 6:
-            return None
-        length = prefix + 6
-        at = va + skip
-        ballot = decoders.ballot(raw[skip:skip + length], at)
-        votes = list(ballot.get("intel", ())) + list(ballot.get("amd", ()))
-        if not _ballot_ok(ballot) or any(d.status != "ok" or d.flow != "jmp_near" or not d.indirect
-                                         or d.length != length for d in votes):
-            return None
-        disp = int.from_bytes(jmp[prefix + 2:prefix + 6], "little", signed=True)
-        slot = (at + length + disp) % (1 << 64)
-        path = [{"stub": _hx(va), "length": skip + length, "file_runtime": basis["file_runtime"],
-                 "decoders": {"intel": ballot_digest(ballot["intel"]), "amd": ballot_digest(ballot["amd"])}}]
-        return ("slot", slot, path)
-
-    def _thunk(self, j):
-        """Interpret the row at a direct target: ("slot", slot VA, path) | ("negative",) | ("unresolved", reason)."""
         b = self.b
-        r = b.rows[j]
-        t = r["transfer"]
-        path = [{"row": j, "op": None}]
-        if t.get("kind") == "none" and type(r["length"]) is int and self._endbr(j):
-            nxt = [n for n in self.starts.get((r["space"], b.va[j] + r["length"]), ())
-                   if b.rows[n]["observation"] == r["observation"] and b.rows[n]["view"] == r["view"]]
-            if len(nxt) != 1:
-                return ("unresolved", "ELF_STUB_UNSUPPORTED")
-            j, r, t = nxt[0], b.rows[nxt[0]], b.rows[nxt[0]]["transfer"]
-            path.append({"row": j, "op": None})
-        if t.get("kind") == "unknown":
-            return ("unresolved", "TARGET_LIFT_U")
-        op = t["op_keys"].get("transfer") if isinstance(t.get("op_keys"), dict) else None
-        if op and op["opcode"] == "BRANCHIND":
-            slot, why = self._memory_slot(r)
-            if slot is None:
-                return ("unresolved", why)
-            path[-1]["op"] = op["ordinal"]
-            return ("slot", slot, path)
-        if op and op["opcode"] == "BRANCH":
-            # (a direct jump chain: deterministic. Ending at a slot jump is a second hop -> MULTI_HOP; ending at
-            #  any other interpreted row proves the transfer is not an import transfer)
-            seen = {j}
-            for _ in range(8):
-                edges = t.get("edges") or []
-                to = [e.get("to") for e in edges if e["source"] == "encoded_target"]
-                if len(to) != 1 or not isinstance(to[0], dict) or "offset" not in to[0]:
-                    return ("unresolved", "TARGET_LIFT_U")
-                nxt = self.starts.get((to[0]["space"], int(to[0]["offset"], 16)), [])
-                if len({b.rows[n]["id"] for n in nxt}) != 1:
-                    return ("unresolved", "TARGET_OUTSIDE_ROWS" if not nxt else "VENDOR_VIEW_CONFLICT")
-                j = nxt[0]
-                if j in seen:
-                    return ("unresolved", "MULTI_HOP")
-                seen.add(j)
-                t = b.rows[j]["transfer"]
-                if t.get("kind") == "unknown":
-                    return ("unresolved", "TARGET_LIFT_U")
-                op = t["op_keys"].get("transfer") if isinstance(t.get("op_keys"), dict) else None
-                if op and op["opcode"] == "BRANCHIND":
-                    slot, why = self._memory_slot(b.rows[j])
-                    if slot is None:
-                        return ("unresolved", why)
-                    _, why = self._slot_name(slot)
-                    # (MULTI_HOP only when the chain ends at an import slot; otherwise the slot's own state)
-                    return ("unresolved", "MULTI_HOP" if why in (None, "IMPORT_BY_ORDINAL") else why)
-                if not (op and op["opcode"] == "BRANCH"):
-                    return ("negative",)
-            return ("unresolved", "MULTI_HOP")
-        return ("negative",)
+        if space != b.space or not self.image or not self.ff.ok:
+            return None
+        if va in self.stubs:
+            return self.stubs[va]
+        self.stubs[va] = None
+        start = va - b.base
 
-    def _direct(self, i, r, op, form):
-        edges = r["transfer"].get("edges") or []
-        role = ("taken", "encoded_target") if form == "jcc" else ("always", "encoded_target")
-        to = [e.get("to") for e in edges if (e["when"], e["source"]) == role]
-        if len(to) != 1 or not isinstance(to[0], dict) or "offset" not in to[0]:
-            return ("unresolved", "TARGET_LIFT_U")
-        space, va = to[0]["space"], int(to[0]["offset"], 16)
-        rows = self.starts.get((space, va), [])
-        ids = {self.b.rows[j]["id"] for j in rows}
-        if not rows:
-            if self._inside(space, va):
-                return ("unresolved", "TARGET_NOT_ROW_START")
-            stub = self._stub_bytes(va)
-            if stub is not None:
-                return stub
-            return ("unresolved", "TARGET_OUTSIDE_ROWS" if self.complete else "INDEX_INCOMPLETE")
-        if len(ids) != 1:
-            return ("unresolved", "VENDOR_VIEW_CONFLICT")
-        return self._thunk(rows[0])
+        def read(offset, n):
+            return runtime_read(self.image, self.original, start + offset, n)
+
+        try:
+            first, _ = read(0, 1)
+            skip = 0
+            if first == b"\xf3":
+                if read(0, 4)[0] != ENDBR64:
+                    return None
+                skip = 4
+            bnd = int(read(skip, 1)[0] == b"\xf2")
+            n = bnd + 6
+            size = skip + n
+            if not any(r.executable and r.start <= start and start + size <= r.end for r in self.ff.code):
+                return None
+            raw, basis = read(0, size)
+        except Unread:
+            return None
+        jump = raw[skip:]
+        if jump[bnd:bnd + 2] != b"\xff\x25":
+            return None
+        votes = decoders.ballot(jump, va + skip)
+        if not _ballot_ok(votes) or any(d.status != "ok" or d.flow != "jmp_near" or
+                not d.indirect or d.length != n for v in ("intel", "amd") for d in votes[v]):
+            return None
+        slot = (va + size + int.from_bytes(jump[-4:], "little", signed=True)) % (1 << 64)
+        step = dict(stub=_hx(va), space=space, load_base=_hx(b.base), length=size, jump_offset=skip,
+                    decoders={v: ballot_digest(votes[v]) for v in ("intel", "amd")}, **basis)
+        self.stubs[va] = slot, [step]
+        return self.stubs[va]
+
+    def thunk(self, j):
+        b = self.b
+        path = []
+        if b.rows[j]["transfer"]["kind"] == "none":
+            marker = self.read_endbr(j)
+            if marker:
+                if b.proofs[j].signature != ("none", False, 4, None):
+                    raise Unread("TARGET_LIFT_U")
+                path.append(dict(row=j, op=None, **marker))
+                r = b.rows[j]
+                va = b.va[j] + 4
+                ns = [k for k in self.starts[r["space"], va] if b.rows[k]["view"] == r["view"]
+                      and b.rows[k]["observation"] == r["observation"]]
+                edges = r["transfer"]["edges"]
+                if (len(ns) != 1 or len(edges) != 1 or edges[0]["source"] != "sequential"
+                        or edges[0].get("to") != {"space": r["space"], "offset": _hx(va)}
+                        or any(b.rows[k]["observation"] == r["observation"] and b.rows[k]["view"] == r["view"]
+                               for k, _ in self.covering(r["space"], va))):
+                    raise Unread("TARGET_LIFT_U")
+                j = ns[0]
+        p = b.proofs[j]
+        n = self.exact(j)
+        if n is None:
+            if p.raw_ops or p.candidate or b.rows[j]["transfer"]["kind"] == "unknown" or p.failure:
+                raise Unread("TARGET_LIFT_U")
+            if path:
+                raise Unread("ELF_STUB_UNSUPPORTED" if self.ff.format == "elf" else "TARGET_LIFT_U")
+            return None
+        form, ind, dst, step = self.transfer(j, n)
+        if form == "jump":
+            if not ind:
+                raise Unread("MULTI_HOP")
+            return dst, path + [step]
+        if path:
+            raise Unread("ELF_STUB_UNSUPPORTED" if self.ff.format == "elf" else "TARGET_LIFT_U")
+        return None
+
+    def direct(self, i, va):
+        b = self.b
+        space = b.rows[i]["space"]
+        candidates = self.starts.get((space, va), ())
+        inside = list(self.covering(space, va))
+        if any(known for _, known in inside):
+            raise Unread("VENDOR_VIEW_CONFLICT" if candidates else "TARGET_NOT_ROW_START")
+        if inside:
+            raise Unread("INDEX_INCOMPLETE")
+        if not candidates:
+            if not self.complete:
+                raise Unread("INDEX_INCOMPLETE")
+            result = self.stub(space, va)
+            if result is None:
+                raise Unread("TARGET_OUTSIDE_ROWS")
+            return *result, [], "via_stub_bytes"
+        if any(b.rows[j]["view"] != b.rows[i]["view"] for j in candidates):
+            raise Unread("VENDOR_VIEW_CONFLICT")
+
+        outcomes = []
+        for j in candidates:
+            try:
+                outcomes.append((self.thunk(j), None))
+            except Unread as exc:
+                outcomes.append((None, exc.reason))
+
+        def meaning(result, why):
+            if result is None:
+                return why, None
+            return None, (result[0], tuple((b.va[s["row"]], s["op"]) for s in result[1]))
+
+        if len({meaning(*v) for v in outcomes}) != 1:
+            raise Unread("VENDOR_VIEW_CONFLICT")
+        first, why = outcomes[0]
+        if why:
+            raise Unread(why)
+        if first is None:
+            return None
+        paths = [v[0][1] for v in outcomes]
+        return first[0], paths[0], paths[1:], "via_thunk"
 
     def run(self):
         b = self.b
-        sites, unresolved, thunk_rows = [], [], {}
-        rwx_values = RWX.get(self.ff.format, ())
-        for i, r in enumerate(b.rows):
-            k = self.keys[i]
-            x86, _, trap, _ = b.code_rows[k]
-            if not x86:
+        sites, unresolved, reached = [], [], set()
+        for i, p in enumerate(b.proofs):
+            if p.isa != "x86-64":
                 continue
-            f = self.raw[k]
-            t = r["transfer"]
-            flows = self.flows.get(k) or ()
-            decoded = any(DECODER_FORMS.get(fl) for fl in flows)
-            raw_ops = [n for n, op in enumerate(f["ops"]) if op["opcode"] in TRANSFER_OPS]
-            if t.get("kind") == "trap" or (trap and trap[0] == "site"):
-                continue                                   # (precedence 1: transfers inside a trap lift)
-            op = t["op_keys"].get("transfer") if isinstance(t.get("op_keys"), dict) else None
-            if op is None or op["opcode"] not in TRANSFER_OPS:
-                if decoded or (raw_ops and t.get("kind") == "unknown"):
-                    for n in raw_ops or [None]:
-                        unresolved.append(("TRANSFER_UNBOUND", {"row": i, "op": n}))
+            n = self.exact(i)
+            for k in p.raw_ops:
+                if k != n:
+                    unresolved.append(("TRANSFER_UNBOUND", dict(row=i, op=k)))
+            if n is None:
+                if not p.raw_ops and (p.candidate or b.rows[i]["transfer"]["kind"] == "unknown" and p.failure):
+                    unresolved.append(("TRANSFER_UNBOUND", dict(row=i, op=None)))
                 continue
-            form, why = self._form(i, op)
-            if form is None:
-                unresolved.append((why, {"row": i, "op": op["ordinal"]}))
-                continue
-            route = "direct_slot"
-            path = [{"row": i, "op": op["ordinal"]}]
-            if op["opcode"] in ("CALLIND", "BRANCHIND"):
-                slot, why = self._memory_slot(r)
-                if slot is None:
-                    unresolved.append((why, {"row": i, "op": op["ordinal"]}))
+
+            at = dict(row=i, op=n)
+            try:
+                form, ind, slot, source = self.transfer(i, n)
+                hop, alternatives, route = [], [], "direct_slot"
+                if not ind:
+                    result = self.direct(i, slot)
+                    if result is None:
+                        continue
+                    slot, hop, alternatives, route = result
+
+                coord = slot - b.base
+                if coord in self.ff.slot_failures:
+                    raise Unread(self.ff.slot_failures[coord])
+                item = self.ff.imports.get(coord)
+                if item is None:
+                    raise Unread({"complete": "SLOT_NOT_IMPORT", "absent": "NO_IMPORT_DIRECTORY"}
+                                 .get(self.ff.import_state, "PARSER_UNSUPPORTED"))
+                if "ordinal" in item:
+                    raise Unread("IMPORT_BY_ORDINAL")
+                if not item.get("undefined", True):
+                    raise Unread("SLOT_NOT_IMPORT")
+                name = item["name"]
+                kind = self.kind_of.get(name)
+                if kind is None:
                     continue
-            else:
-                target = self._direct(i, r, op, form)
-                if target[0] == "negative":
-                    continue
-                if target[0] == "unresolved":
-                    unresolved.append((target[1], {"row": i, "op": op["ordinal"]}))
-                    continue
-                _, slot, hop = target
-                route = "via_stub_bytes" if "stub" in hop[0] else "via_thunk"
-                path += hop
-            item, why = self._slot_name(slot)
-            if why is not None:
-                entry = {"row": i, "op": op["ordinal"]}
-                unresolved.append((why, entry))
-                continue
-            kind = self.kind_of.get(item["name"])
-            if kind is None:
-                continue                                   # (an identified import outside the table: negative)
-            if route == "via_thunk":
-                thunk_rows.setdefault(path[-1]["row"], 0)
-            values, why_values = self.register_values(i)
-            site = {"row": i, "op": op["ordinal"], "kind": kind, "form": form, "route": route,
-                    "symbol": {"name": item["name"], "dll": item.get("dll"), "slot": _hx(slot),
-                               "basis": dict(item["basis"], path=path, step="ghidra_pcode")},
-                    "arguments": [], "register_values": values,
-                    "holds_if": [PREMISE, IMPORT_PREMISE] + ([LINEAR_PREMISE] if values else [])}
-            if why_values:
-                site["register_values_reason"] = why_values
-            if kind == "rwx_allocation_constant_args":
-                hits = [v["register"]["name"] for v in values
-                        if v["value"]["width"] >= 32 and int(v["value"]["constant"], 16) in rwx_values]
-                if not hits:
-                    unresolved.append(("NO_RWX_REGISTER", {"row": i, "op": op["ordinal"], "api": item["name"]}))
-                    continue
-                site.update(candidate=True, rwx_registers=hits,
-                            protection_argument={"unobserved": "NO_ABI_BASIS"})
-            if kind == "dynamic_resolution":
-                site["requested_name"] = {"unobserved": "NO_ABI_BASIS"}
-            sites.append(site)
-        # thunk rows reached by a via_thunk site are counted once as thunk_row (r3 E3)
+                if route == "via_thunk":
+                    reached.update((q[-1]["row"], q[-1]["op"], kind) for q in [hop, *alternatives])
+                values, reason = self.register_values(i, n)
+                basis = {k: dict(v, slot_va=_hx(slot)) for k, v in item["basis"].items()}
+                basis.update(path=[source, *hop], step="ghidra_pcode")
+                if alternatives:
+                    basis["equivalent_paths"] = [[source, *q] for q in alternatives]
+                site = dict(at, form=form, kind=kind, route=route, arguments=[], register_values=values,
+                            symbol=dict(name=name, dll=item.get("dll"), slot=_hx(slot), basis=basis),
+                            holds_if=[PREMISE, IMPORT_PREMISE] + ([LINEAR_PREMISE] if values else []))
+                if reason:
+                    site["register_values_reason"] = reason
+                if kind == RWX_KIND:
+                    hits = [v["register"]["name"] for v in values if v["register"]["offset"] % 8 == 0
+                            and v["value"]["width"] in (32, 64)
+                            and int(v["value"]["constant"], 16) in RWX[self.ff.format]]
+                    if not hits:
+                        unresolved.append(("NO_RWX_REGISTER", dict(at, api=name)))
+                        continue
+                    site.update(candidate=True, rwx_registers=hits, protection_argument={"unobserved": "NO_ABI_BASIS"})
+                if kind == "dynamic_resolution":
+                    site["requested_name"] = {"unobserved": "NO_ABI_BASIS"}
+                sites.append(site)
+            except Unread as exc:
+                unresolved.append((exc.reason, at))
+
         for s in sites:
-            if s["route"] == "direct_slot" and s["row"] in thunk_rows and s["form"] == "jump":
+            if s["route"] == "direct_slot" and (s["row"], s["op"], s["kind"]) in reached:
                 s["route"] = "thunk_row"
         return sites, unresolved
 
-    def coverage(self, unresolved):
+    def stores(self):
+        import common_facts as cf
+        import lifting
+
         b = self.b
-        excluded = b._excluded(lambda row: not row[0], "NOT_X86")
-        examined = {"facts_rows": b.row_set_sha256, "excluded": excluded}
-        unsupported = []
-        if self.ff.import_state == "indeterminate":
-            unsupported = [{"reason": "PARSER_UNSUPPORTED", "items": [p for p in self.ff.import_problems]}]
-        groups = _groups(unresolved)
-        out = []
-        for kind in ("self_modify_import_call", "dynamic_resolution", "rwx_allocation_constant_args",
-                     "cache_maintenance", "dynamic_unwind_registration"):
-            mine = groups
-            if kind != "rwx_allocation_constant_args":
-                mine = [g for g in groups if g["reason"] != "NO_RWX_REGISTER"]
-            out.append({"kind": kind, "method": "import_transfer", "rows_examined": examined, "ranges_examined": [],
-                        "unsupported": unsupported, "unresolved": mine,
-                        "import_table": {"state": self.ff.import_state, "problems": self.ff.import_problems}})
-        return out
+        sites, unresolved = [], []
+        for i, (p, f) in enumerate(zip(b.proofs, self.raw, strict=True)):
+            if p.isa != "x86-64":
+                continue
+            for n, op in enumerate(f["ops"]):
+                if op["opcode"] != "STORE":
+                    continue
+                at = dict(row=i, op=n)
+                try:
+                    args = op["inputs"]
+                    if len(args) != 3 or not cf.const(args[0]):
+                        raise Unread("STORE_SPACE_U")
+                    if not args[2] or type(args[2]["size"]) is not int or args[2]["size"] <= 0:
+                        raise Unread("STORE_WIDTH_U")
+                    if b.space is None:
+                        raise Unread("TARGET_MAPPING_U")
+                    if args[0]["offset"] != b.space:
+                        continue
+                    if any(o["opcode"] in lifting.FLOW_OPS for o in f["ops"][:n]):
+                        raise Unread("INTRA_ROW_FLOW")
+                    expr, used = cf.value(f, args[1], n)
+                    defs, regs = [], {}
+                    wanted = {(r["space"], r["offset"], r["size"])
+                              for leaf in _leaves(expr) for r in [leaf["pre_register"]]}
+                    if wanted:
+                        defs, why = self.register_values(i, n, wanted)
+                        if why:
+                            raise Unread(why)
+                        for v in defs:
+                            r = v["register"]
+                            regs[r["space"], r["offset"], r["size"]] = int(v["value"]["constant"], 16)
+                    address = _evaluate(expr, regs) if expr.get("width") == 64 else None
+                    if address is None:
+                        raise Unread("STORE_ADDRESS_NOT_CONSTANT")
+                    end = address + args[2]["size"]
+                    if end > 1 << 64:
+                        raise Unread("ADDRESS_WRAP")
+                    if not self.ff.ok:
+                        raise Unread("TARGET_MAPPING_U")
+                    a, z = address - b.base, end - b.base
+                    hit = [j for j, r in enumerate(self.ff.code) if r.start < z and a < r.end]
+                    if not hit:
+                        if any(d.get("basis", {}).keys() & {"pe_section", "elf_segment"} and
+                               d["range"]["start"] < z and a < d["range"]["end"] for d in self.ff.diagnostics):
+                            raise Unread("TARGET_MAPPING_U")
+                        continue
+                    basis = dict(step="ghidra_pcode", use=at, in_row=[dict(row=i, op=j) for j in sorted(used)],
+                                 expression=expr, register_values=defs)
+                    sites.append(dict(at, form="store", kind="code_write", write="static_store_candidate",
+                                      symbol=None, arguments=[], target_range=b._range(a, z), regions=hit,
+                                      static_basis=basis, holds_if=[PREMISE] + ([LINEAR_PREMISE] if defs else [])))
+                except Unread as exc:
+                    unresolved.append((exc.reason, at))
+        return sites, unresolved
 
 
 # -- code_write static candidates (r1 s4.4, r2 E4 / E5) ------------------------------------------------------------
@@ -1397,87 +1141,492 @@ def _evaluate(e, regs):
     return None
 
 
-class StoreSites:
-    def __init__(self, binder, imports, raw):
-        self.b, self.imports, self.raw = binder, imports, raw
-        b = binder
-        self.code = [(b.base + r.start, b.base + r.end, n) for n, r in enumerate(b.ff.code)]
-        self.ambiguous = [(b.base + d["range"]["start"], b.base + (d["range"]["end"] or d["range"]["start"] + 1))
-                          for d in b.ff.diagnostics if d["reason"] == "AMBIGUOUS_MAPPING" and "range" in d]
-        self.cache = {}
+# -- G2b impl review r1 fixes (Astra-written, g2b_impl_astra2_code.md) ---------------------------------------
 
-    def _regs(self, i):
-        if i not in self.cache:
-            values, _ = self.imports.register_values(i)
-            regs = {}
-            for v in values:
-                r = v["register"]
-                regs[(r["space"], r["offset"], r["size"])] = int(v["value"]["constant"], 16)
-            self.cache[i] = (regs, sorted({p for v in values for p in v["path"]}))
-        return self.cache[i]
+RWX_KIND = "rwx_allocation_constant_args"
 
-    def run(self):
-        import common_facts as cf
-        import lifting
+REASONS |= {"NOT_A64", "SECTION_EXTENT_U"}
 
-        b = self.b
-        sites, unresolved = [], []
-        keys = self.imports.keys
-        for i, r in enumerate(b.rows):
-            k = keys[i]
-            if not b.code_rows[k][0]:
-                continue
-            f = self.raw[k]
-            ops = f["ops"]
-            for n, op in enumerate(ops):
-                if op["opcode"] != "STORE":
-                    continue
-                item = {"row": i, "op": n}
-                ins = op.get("inputs") or []
-                if len(ins) != 3 or not ins[0] or ins[0]["kind"] != "CONSTANT":
-                    unresolved.append(("STORE_SPACE_U", item))
-                    continue
-                if not ins[2] or not ins[2].get("size"):
-                    unresolved.append(("STORE_WIDTH_U", item))
-                    continue
-                if any(o["opcode"] in lifting.FLOW_OPS for o in ops[:n]):
-                    unresolved.append(("INTRA_ROW_FLOW", item))
-                    continue
-                space, width = ins[0]["offset"], ins[2]["size"]
-                expr, _ = cf.value(f, ins[1], n)
-                path = []
-                address = _evaluate(expr, {})
-                if address is None and not cf.unknown(expr):
-                    leaves = list(_leaves(expr))
-                    if leaves and not any(leaf["pre_register"]["offset"] & ~7 == 0x20 for leaf in leaves):
-                        regs, path = self._regs(i)
-                        address = _evaluate(expr, regs)
-                if address is None:
-                    unresolved.append(("STORE_ADDRESS_NOT_CONSTANT", item))
-                    continue
-                end = address + width
-                if end > 1 << 64:
-                    unresolved.append(("ADDRESS_WRAP", item))
-                    continue
-                if space != b.space:
-                    continue                               # (another space: an examined non-match)
-                hit = [n2 for a, z, n2 in self.code if a < end and address < z]
-                if not hit and any(a < end and address < z for a, z in self.ambiguous):
-                    unresolved.append(("TARGET_MAPPING_U", item))
-                    continue
-                if not hit:
-                    continue                               # (a concrete address outside the code regions)
-                sites.append({"row": i, "op": n, "kind": "code_write", "write": "static_store_candidate",
-                              "symbol": None, "arguments": [],
-                              "target_range": b._range(address - b.base, end - b.base), "regions": hit,
-                              "static_basis": {"rows": path + [i], "op": n, "step": "ghidra_pcode"},
-                              "holds_if": [PREMISE] + ([LINEAR_PREMISE] if path else [])})
-        return sites, unresolved
 
-    def coverage(self, unresolved):
-        b = self.b
-        examined = {"facts_rows": b.row_set_sha256, "excluded": b._excluded(lambda row: not row[0], "NOT_X86")}
-        return [{"kind": "code_write", "method": "static_store", "write": "static_store_candidate",
-                 "rows_examined": examined,
-                 "ranges_examined": [b._range(r.start, r.end) for r in b.ff.code],
-                 "unsupported": [], "unresolved": _groups(unresolved)}]
+def _touches(parsed, start, end):
+    # G1 has finished constructing this Parsed object before file_facts runs.
+    index = getattr(parsed, "_g2_intervals", None)
+    if index is None:
+        starts, ends = [], []
+        for a, z, *_ in sorted(parsed.ranges):
+            if starts and a <= ends[-1]:
+                ends[-1] = max(z, ends[-1])
+            else:
+                starts.append(a)
+                ends.append(z)
+        index = parsed._g2_intervals = starts, ends
+    starts, ends = index
+    j = bisect_right(ends, start)
+    return start < end and j < len(starts) and starts[j] < end
+
+
+def _issue(out, reason, start, end, basis):
+    _diag(out, reason, start=start, end=end, basis=basis)
+
+
+def _code_region(out, image, region, valid):
+    cursor = region.start
+    for m in image.ranges:
+        lo, hi = max(cursor, m.start), min(region.end, m.end)
+        if hi <= lo:
+            continue
+        if cursor < lo:
+            _issue(out.diagnostics, "AMBIGUOUS_MAPPING", cursor, lo, region.basis)
+        if valid and m.kind in ("file", "zero"):
+            if out.code and out.code[-1].basis == region.basis and out.code[-1].end == lo:
+                out.code[-1].end = hi
+            else:
+                out.code.append(replace(region, start=lo, end=hi))
+        else:
+            _issue(out.diagnostics, "AMBIGUOUS_MAPPING", lo, hi, region.basis)
+        cursor = hi
+    if cursor < region.end:
+        _issue(out.diagnostics, "AMBIGUOUS_MAPPING", cursor, region.end, region.basis)
+
+
+def _publish(out, slot, item, reason=None):
+    if slot in out.imports or slot in out.slot_failures:
+        out.imports.pop(slot, None)
+        reason = "SLOT_NAME_U"
+    if reason:
+        out.slot_failures[slot] = reason
+    else:
+        out.imports[slot] = item
+
+
+def _mapped_slot(image, slot):
+    m = image.at(slot)
+    return m is not None and m.kind in ("file", "zero") and slot + 8 <= m.end
+
+
+def _pe_table(image, data, directory, n, out):
+    start, size = directory
+    stride = 20 if n == 1 else 32
+    parent = {"pe_directory": n}
+    for pos in range(start, start + size - stride + 1, stride):
+        basis = parent
+        staged = []
+        fallback = False
+        try:
+            raw, basis = record_read(image, data, pos, stride)
+            if not any(raw):
+                return
+            if n == 1:
+                lookup, stamp, _, name, slots = struct.unpack("<5I", raw)
+                if not lookup and stamp:
+                    raise Unread("BOUND_IAT_NO_ILT")
+                fallback = not lookup
+                lookup = lookup or slots
+                if not name or not slots:
+                    raise Unread("ILT_ENTRY_INVALID")
+            else:
+                attr, name, _, slots, lookup, _, _, _ = struct.unpack("<8I", raw)
+                if attr != 1 or not all((name, slots, lookup)):
+                    raise Unread("DELAY_FORMAT")
+
+            dll, dll_ref = record_cstring(image, data, name)
+            if not dll:
+                raise Unread("SLOT_NAME_U")
+            index = 0
+            while True:
+                slot = slots + 8 * index
+                raw, entry = record_read(image, data, lookup + 8 * index, 8)
+                v = int.from_bytes(raw, "little")
+                if not v:
+                    break
+                try:
+                    if not _mapped_slot(image, slot):
+                        raise Unread("ILT_ENTRY_INVALID")
+                    fact = dict(dll=dll, descriptor=basis, dll_record=dll_ref, lookup=entry)
+                    item = dict(dll=dll, kind="import" if n == 1 else "delay")
+                    if v >> 63:
+                        if v & ~((1 << 63) | 0xffff):
+                            raise Unread("ILT_ENTRY_INVALID")
+                        item["ordinal"] = fact["ordinal"] = v & 0xffff
+                        text = "#" + str(item["ordinal"])
+                    else:
+                        if v >= 1 << 31:
+                            raise Unread("ILT_ENTRY_INVALID")
+                        text, string = record_cstring(image, data, v + 2)
+                        if not text:
+                            raise Unread("SLOT_NAME_U")
+                        _, fact["hint_name"] = record_read(image, data, v, 2 + string["file_record"][1])
+                    fact["name"] = item["name"] = text
+                    item["basis"] = {"pe_import": fact}
+                    if fallback:
+                        staged.append((slot, item))
+                    else:
+                        _publish(out, slot, item)
+                except Unread as exc:
+                    if fallback:
+                        _publish(out, slot, None, "ILT_ENTRY_INVALID")
+                        raise Unread("ILT_ENTRY_INVALID") from exc
+                    _publish(out, slot, None, exc.reason)
+                index += 1
+            for slot, item in staged:
+                _publish(out, slot, item)
+        except Unread as exc:
+            for slot, _ in staged:
+                _publish(out, slot, None, "ILT_ENTRY_INVALID")
+            why = "ILT_ENTRY_INVALID" if fallback and staged else exc.reason
+            _issue(out.import_problems, why, pos, pos + stride, basis)
+    _issue(out.import_problems, "TRUNCATED", start, start + size, parent)
+
+
+def _sections(image, data, out):
+    shoff, = struct.unpack_from("<Q", data, 40)
+    stride, count, names = struct.unpack_from("<3H", data, 58)
+    if not shoff and not count:
+        return [], False
+    if not shoff or stride != 64 or not count or shoff + 64 * count > len(data) or names >= count:
+        raise Unread("TRUNCATED")
+
+    sections = []
+    for i in range(count):
+        at = shoff + 64 * i
+        n, t, flags, va, off, size, link, _, _, ent = struct.unpack_from("<IIQQQQIIQQ", data, at)
+        sections.append(dict(n=n, type=t, flags=flags, va=va, off=off, size=size,
+                             link=link, ent=ent, ref={"file_record": [at, 64]}))
+    strings = sections[names]
+    if names and (strings["type"] != 3 or strings["off"] + strings["size"] > len(data)):
+        raise Unread("TRUNCATED")
+    for s in sections:
+        s["name"] = ""
+        if s["type"] != 8 and s["off"] + s["size"] > len(data):
+            _issue(out.diagnostics, "TRUNCATED", s["va"] - image.image_base, None, s["ref"])
+        if names:
+            a = strings["off"] + s["n"]
+            z = data.find(b"\0", a, strings["off"] + strings["size"])
+            if z < 0:
+                _issue(out.diagnostics, "TRUNCATED", s["va"] - image.image_base, None, s["ref"])
+            else:
+                s["name"] = data[a:z].decode("latin-1")
+    return sections, True
+
+
+def _loaded_section(image, data, s):
+    if not s["flags"] & 2 or s["type"] == 8 or s["off"] + s["size"] > len(data):
+        raise Unread("SECTION_NOT_LOADED")
+    loads = [p for p in image.phdrs if p[0] == 1 and p[3] <= s["va"]
+             and s["va"] + s["size"] <= p[3] + min(p[5], p[6])
+             and p[2] + s["va"] - p[3] == s["off"]]
+    if len(loads) != 1:
+        raise Unread("SECTION_NOT_LOADED")
+    if s["size"]:
+        _, ref = record_read(image, data, s["va"] - image.image_base, s["size"])
+        if ref["file_record"][0] != s["off"]:
+            raise Unread("AMBIGUOUS_MAPPING")
+
+
+def _elf_file(image, data, out):
+    base = image.image_base
+    for s in image.segments:
+        if s["flags"] & PF_X:
+            a = s["vaddr"] - base
+            region = Region(a, a + s["memsz"], "code", True, bool(s["flags"] & PF_W),
+                            f"PT_LOAD[{s['index']}]", {"elf_segment": [s["index"], s["flags"]]})
+            _code_region(out, image, region, s["state"] == "mapped")
+    try:
+        sections, present = _sections(image, data, out)
+    except Unread as exc:
+        sections, present = [], True
+        for problems in (out.diagnostics, out.import_problems):
+            _diag(problems, exc.reason, what="section headers", basis={"file_record": [0, 64]})
+
+    body = False
+    for s in sections:
+        if s["name"] not in (".eh_frame", ".gcc_except_table"):
+            continue
+        a = s["va"] - base
+        try:
+            _loaded_section(image, data, s)
+        except Unread as exc:
+            _issue(out.diagnostics, exc.reason, a, a + s["size"], s["ref"])
+            continue
+        out.unwind.append(Region(a, a + s["size"], "unwind_metadata", name=s["name"], basis=s["ref"]))
+        body |= s["name"] == ".eh_frame"
+
+    hdrs = [(i, p) for i, p in enumerate(image.phdrs) if p[0] == PT_GNU_EH_FRAME]
+    if not hdrs and not present:
+        _diag(out.diagnostics, "NO_SECTION_HEADERS", what="eh_frame", basis={"file_record": [0, 64]})
+    for i, p in hdrs:
+        a = p[3] - base
+        basis = {"phdr": i}
+        out.unwind.append(Region(a, a + p[6], "unwind_metadata", name=".eh_frame_hdr", basis=basis))
+        if body:
+            continue
+        try:
+            head, basis = runtime_read(image, data, a, min(p[5], p[6], 8))
+            if len(head) < 2 or head[0] != 1:
+                raise Unread("EH_FRAME_PTR_ENCODING")
+            enc = head[1]
+            if enc == 255:
+                raise Unread("EH_FRAME_PTR_OMITTED")
+            if enc not in (3, 11, 0x13, 0x1b) or len(head) != 8:
+                raise Unread("EH_FRAME_PTR_ENCODING")
+            value = int.from_bytes(head[4:], "little", signed=bool(enc & 8))
+            start = value + (a + 4 if enc & 0x10 else -base)
+            if not 0 <= base + start < 1 << 64:
+                raise Unread("EH_FRAME_PTR_ENCODING")
+            why = "SECTION_EXTENT_U" if present else "NO_SECTION_HEADERS"
+            ref = dict(basis, encoding=enc)
+            out.unwind.append(Region(start, None, "unwind_metadata", name=".eh_frame", basis=ref))
+            _issue(out.diagnostics, why, start, None, ref)
+        except Unread as exc:
+            _diag(out.diagnostics, exc.reason, what="eh_frame", basis=basis)
+    _elf_tables(image, data, sections, out)
+
+
+def _dynamic_symbol_count(image, data, tags):
+    base = image.image_base
+    try:
+        if DT_HASH in tags:
+            at = tags[DT_HASH] - base
+            raw, _ = record_read(image, data, at, 8)
+            buckets, count = struct.unpack("<II", raw)
+            if not buckets:
+                return None
+            record_read(image, data, at, 8 + 4 * (buckets + count))
+            return count
+        if DT_GNU_HASH in tags:
+            at = tags[DT_GNU_HASH] - base
+            head, _ = record_read(image, data, at, 16)
+            buckets, first, bloom, _ = struct.unpack("<4I", head)
+            if not buckets or not bloom:
+                return None
+            at += 16 + 8 * bloom
+            raw, _ = record_read(image, data, at, 4 * buckets)
+            last = max(n for n, in struct.iter_unpack("<I", raw))
+            if last == 0:
+                return first
+            if last < first:
+                return None
+            at += 4 * (buckets + last - first)
+            while True:
+                raw, _ = record_read(image, data, at, 4)
+                last += 1
+                if raw[0] & 1:
+                    return last
+                at += 4
+    except Unread:
+        pass
+    return None
+
+
+def _elf_tables(image, data, sections, out):
+    base = image.image_base
+    dynamic = [p for p in image.phdrs if p[0] == PT_DYNAMIC]
+    tags = {}
+    table_ref = {"file_record": [0, 64]}
+    try:
+        if dynamic:
+            if len(dynamic) != 1:
+                raise Unread("PARSER_UNSUPPORTED")
+            p = dynamic[0]
+            raw, table_ref = record_read(image, data, p[3] - base, p[5])
+            for at in range(0, len(raw) - 15, 16):
+                tag, val = struct.unpack_from("<qQ", raw, at)
+                if not tag:
+                    break
+                if tag in {2, 4, 5, 6, 7, 8, 9, 10, 11, 20, 23, DT_GNU_HASH}:
+                    if tag in tags and tags[tag] != val:
+                        raise Unread("PARSER_UNSUPPORTED")
+                    tags[tag] = val
+                elif tag in (17, 18) and val:
+                    _diag(out.import_problems, "ELF_RELOC_UNSUPPORTED", what="DT_REL", basis=table_ref)
+            else:
+                raise Unread("TRUNCATED")
+    except Unread as exc:
+        out.import_state = "indeterminate"
+        _diag(out.import_problems, exc.reason, what="PT_DYNAMIC", basis=table_ref)
+        return
+
+    def linked(sym):
+        if sym["type"] != 11 or sym["ent"] != 24 or sym["size"] % 24 or sym["link"] >= len(sections):
+            raise Unread("SYM_COUNT_U")
+        st = sections[sym["link"]]
+        if st["type"] != 3:
+            raise Unread("SLOT_NAME_U")
+        for s in (sym, st):
+            _loaded_section(image, data, s)
+        if any(k in tags and tags[k] != v for k, v in
+               ((6, sym["va"]), (11, 24), (5, st["va"]), (10, st["size"]))):
+            raise Unread("SYM_COUNT_U")
+        return sym["va"], sym["size"] // 24, st["va"], st["size"]
+
+    def symbols(section):
+        if section:
+            if section["link"] >= len(sections):
+                raise Unread("SYM_COUNT_U")
+            return linked(sections[section["link"]])
+        matches = [s for s in sections if s["type"] == 11 and s["va"] == tags.get(6)]
+        if len(matches) == 1:
+            return linked(matches[0])
+        if matches or not {5, 6, 10, 11} <= tags.keys() or tags[11] != 24:
+            raise Unread("SYM_COUNT_U")
+        return tags[6], _dynamic_symbol_count(image, data, tags), tags[5], tags[10]
+
+    for label, ptr, sz, expected, names in (
+            ("DT_JMPREL", 23, 2, 7, (".rela.plt", ".rela.plt.sec")),
+            ("DT_RELA", 7, 8, 6, (".rela.dyn",))):
+        ss = [s for s in sections if s["type"] == 4 and s["name"] in names and s["flags"] & 2]
+        if ptr not in tags and sz not in tags and not ss:
+            continue
+        out.import_state = "complete"
+        try:
+            if ptr in tags or sz in tags:
+                encoding_ok = tags.get(20) == 7 if ptr == 23 else tags.get(9) == 24
+                if ptr not in tags or sz not in tags or not encoding_ok:
+                    raise Unread("ELF_RELOC_UNSUPPORTED")
+                matches = [s for s in sections if s["type"] == 4 and s["va"] == tags[ptr] and s["flags"] & 2]
+                if len(matches) > 1:
+                    raise Unread("ELF_RELOC_UNSUPPORTED")
+                tables = [(tags[ptr], tags[sz], next(iter(matches), None))]
+            else:
+                tables = [(s["va"], s["size"], s) for s in ss]
+
+            for va, size, section in tables:
+                if size % 24:
+                    raise Unread("ELF_RELOC_UNSUPPORTED")
+                if section:
+                    _loaded_section(image, data, section)
+                    if section["ent"] != 24 or section["size"] != size:
+                        raise Unread("ELF_RELOC_UNSUPPORTED")
+                symbol_error = None
+                try:
+                    symva, count, strva, strsz = symbols(section)
+                except Unread as exc:
+                    symbol_error = exc.reason
+                    _diag(out.import_problems, exc.reason, what=label, basis=table_ref)
+
+                for off in range(0, size, 24):
+                    raw, entry = record_read(image, data, va - base + off, 24)
+                    dest, info, _ = struct.unpack("<QQq", raw)
+                    slot, index, kind = dest - base, info >> 32, info & 0xffffffff
+                    try:
+                        if kind != expected:
+                            raise Unread("ELF_RELOC_UNSUPPORTED")
+                        if symbol_error:
+                            raise Unread(symbol_error)
+                        if count is None or index >= count:
+                            raise Unread("SYM_COUNT_U")
+                        if not _mapped_slot(image, slot):
+                            raise Unread("TARGET_MAPPING_U")
+                        raw, sym = record_read(image, data, symva - base + 24 * index, 24)
+                        n, _, _, shndx = struct.unpack_from("<IBBH", raw)
+                        if n >= strsz:
+                            raise Unread("SLOT_NAME_U")
+                        name, st = record_cstring(image, data, strva - base + n, strsz - n)
+                        if not name:
+                            raise Unread("SLOT_NAME_U")
+                        basis = {"elf_reloc": dict(name=name, type=kind, table=label, entry=entry,
+                                                   symbol=sym, string=st)}
+                        _publish(out, slot, dict(name=name, undefined=shndx == 0, basis=basis))
+                    except Unread as exc:
+                        _publish(out, slot, None, exc.reason)
+        except Unread as exc:
+            _diag(out.import_problems, exc.reason, what=label, basis=table_ref)
+
+
+@dataclass(frozen=True, slots=True)
+class Proof:
+    isa: str | None
+    verified: int
+    trap: tuple | None
+    raw_ops: tuple
+    candidate: bool
+    signature: tuple | None
+    failure: str | None
+    form: tuple
+    segment: bool
+
+
+def row_proof(f, result, lift, ballot, window, global_reason=False):
+    import common_facts as cf
+    import compare
+    import decoders
+
+    w = (result or {}).get("window", {})
+    n = w.get("verified", 0)
+    data = (window or b"")[:n]
+    isa = f.get("isa")
+    if isa != "x86-64":
+        return Proof(isa, n, None, (), False, None, None, (None, False), False)
+
+    skip = set(lift.skipped if lift else ())
+    if lift and lift.pattern in ("interrupt", "interrupt-return", "fault"):
+        skip.add(1)
+    ops = tuple(i for i, op in enumerate(f["ops"]) if i not in skip and op["opcode"] in TRANSFER_OPS)
+    trap = trap_outcome(result, ballot, data, global_reason)
+    votes = [d for v, names in (("intel", decoders.INTEL_VOTERS), ("amd", decoders.AMD_VOTERS))
+             for d in (ballot or {}).get(v, ()) if d.voter in names and d.amd == (v == "amd")]
+    candidate = any(d.status == "ok" and d.flow in DECODER_FORMS for d in votes)
+    sig = failure = None
+    if not _ballot_ok(ballot):
+        failure = "BALLOT_MISSING"
+    elif any(d.status != "ok" or not 0 < d.length <= len(data) for d in votes):
+        failure = "VENDOR_VIEW_CONFLICT"
+    else:
+        signatures = {(d.flow, d.indirect, d.length, None if d.indirect else d.target) for d in votes}
+        if len(signatures) == 1:
+            sig = signatures.pop()
+        else:
+            failure = "VENDOR_VIEW_CONFLICT"
+    prefix = compare._prefix_run(data)
+    return Proof(isa, n, trap, ops, candidate, sig, failure, cf.producer_form(f, lift, data),
+                 any(b in (0x64, 0x65) for b in prefix))
+
+
+def window_ref(rows, i):
+    return {"g1_window": {"row": i, "decode_row": [rows[i]["space"], rows[i]["offset"]]}}
+
+
+def verified_lists(rows, regions, lengths):
+    windows = defaultdict(list)
+    for i, (r, n) in enumerate(zip(rows, lengths, strict=True)):
+        if n:
+            a = int(r["offset"], 16)
+            windows[r["space"]].append((a, i, a + n))
+    for wins in windows.values():
+        wins.sort()
+
+    result, totals = [], []
+    for item in regions:
+        r = item["range"]
+        spans, refs = [], []
+        if isinstance(r["end"], str):
+            a, z = int(r["start"], 16), int(r["end"], 16)
+            wins = windows.get(r["space"], [])
+            j = bisect_left(wins, (a - 14,))
+            while j < len(wins) and wins[j][0] < z:
+                x, i, y = wins[j]
+                lo, hi = max(a, x), min(z, y)
+                if lo < hi:
+                    spans.append((lo, hi))
+                    refs.append((i, lo, hi))
+                j += 1
+        result.append([{"interval": [_hx(lo), _hx(hi)], "basis": window_ref(rows, i)}
+                       for i, lo, hi in sorted(refs)])
+        totals.append(_union_length(spans))
+    return result, totals
+
+
+def verified_encoding(size):
+    return {"form": "compact" if size > VERIFIED_THRESHOLD else "explicit",
+            "explicit_bytes": size, "threshold": VERIFIED_THRESHOLD}
+
+
+def build_code(rows, raw, proofs, image, original, space, base, complete, missing):
+    import common_facts as cf
+
+    ff = file_facts(image, original)
+    if ff.ok and image.fixed_base and image.image_base != base:
+        ff = FileFacts(ff.format, False, "fixed load base mismatch", import_state="indeterminate")
+    kinds, sha = name_table()
+    binder = CodeBinder(ff, base, space, rows, proofs, cf.row_set_digest(rows), missing)
+    return binder.program_code(sha, ImportSites(binder, raw, kinds, complete, image, original))

@@ -1035,7 +1035,7 @@ def common_path_sets():
     return edge_fields, op_fields, shared, transfer
 
 
-def bind_common_facts(document, facts_document, *, bundle, allowlist, observations):
+def bind_common_facts(document, facts_document, *, bundle, allowlist, observations, g2b=None):
     import common_facts as cf
 
     lookup = _bind_checked_rows(
@@ -1147,4 +1147,103 @@ def bind_common_facts(document, facts_document, *, bundle, allowlist, observatio
             return None
         return lookup(query)
 
+    rule = facts_document.get("producer", {}).get("rule")
+    code = facts_document.get("program", {}).get("code")
+    if rule == "g2b-1":
+        exact_lookup.code = read_g2b(document, facts_document, observations, g2b)
+    elif isinstance(code, dict) and ("verified_encoding" in code or "survey" in code):
+        raise Rejected("program.code requires producer.rule g2b-1")
     return exact_lookup
+
+
+def read_g2b(document, facts, observations, context):
+    import hashlib
+    import check
+    import code_facts as g
+    import common_facts as cf
+    import decoders
+    import lifting
+
+    try:
+        if context is None:
+            raise ValueError("g2b-1 requires the admitted image inputs and its G1 report")
+        rows = facts["rows"]
+        code = facts["program"]["code"]
+        if code["name_table_sha256"] != g.name_table()[1]:
+            raise ValueError("name table digest")
+        report = context["report"]
+        header = report["header"]
+        original = context["original"]
+        if (hashlib.sha256(original).hexdigest() != document["bundle"]["original_sha256"]
+                or header["common_facts"]["code"]["bundle"] != facts["bundle"]
+                or header["mapping_id"] != document["mapping"]["mapping_id"]):
+            raise ValueError("report or original belongs to a different Bundle")
+        image = check.parse_original(original)
+        if image.mapping_id != header["mapping_id"]:
+            raise ValueError("file mapping")
+
+        expected = {f"{r['observation']}/{r['space']:x}:{r['offset']}" for r in rows}
+        details = {}
+        for row in report["rows"]:
+            if (row["layer"], row["check"]) == ("decode", "row"):
+                key = row["key"]
+                if key in details:
+                    raise ValueError("duplicate G1 row " + key)
+                details[key] = row["detail"]
+        if expected != details.keys() or len(rows) != len(expected):
+            raise ValueError("G1 row set")
+
+        lengths, proofs = [], {}
+        global_reason = document["global_reason"] is not None
+        for r in rows:
+            k = cf.rr(r)
+            f = observations[k]
+            detail = details[f"{k[1]}/{r['space']:x}:{r['offset']}"]
+            w = detail.get("window")
+            raw = b"" if w is None else bytes.fromhex(w["hex"])
+            n = 0 if w is None else w["verified"]
+            if type(n) is not int or not 0 <= n <= 15 or n != len(raw):
+                raise ValueError("G1 window length")
+            lengths.append(n)
+            ballot = None
+            if w is not None and f.get("isa") == "x86-64":
+                if "votes" in detail:
+                    ballot = {v: tuple(decoders.Decoded(**d) for d in ds) for v, ds in detail["votes"].items()}
+                else:
+                    ballot = decoders.ballot(raw, f["address"])
+            lift = lifting.identify(f) if document["translation"]["table_applied"] and not global_reason else None
+            proofs[k] = g.row_proof(f, detail if w is not None else None, lift, ballot, raw, global_reason)
+
+        digest = cf.row_set_digest(rows)
+        if code["verified_encoding"]["form"] == "compact":
+            stored = code["verified_lengths"]
+            if (code["verified_rule"] != {"per_row_window": digest} or type(stored) is not list
+                    or any(type(n) is not int for n in stored) or stored != lengths):
+                raise ValueError("compact G1 binding")
+
+        # Reconstruct before exposing references. This checks the threshold, explicit
+        # bytes, bases, union lengths, exclusions, op ordinals, paths and API scopes.
+        rebuilt = g.build_code(rows, observations, proofs, image, original, context["image_space"],
+                               context["image_base"], context["complete"], context["missing_functions"])
+        if cf.streamed_digest(code) != cf.streamed_digest(rebuilt):
+            raise ValueError("program.code differs from its bound inputs")
+        if cf.canonical(dict(g.summary(code), bundle=facts["bundle"])) != cf.canonical(header["common_facts"]["code"]):
+            raise ValueError("G2b report summary")
+
+        lists, totals = g.verified_lists(rows, code["regions"], lengths)
+
+        def expand(group):
+            for item in group["items"]:
+                entry = dict(item, reason=group["reason"])
+                if "row" in item:
+                    i, n = item["row"], item["op"]
+                    entry["row"] = cf.ref(rows[i])
+                    if n is not None:
+                        entry["op"] = cf.opref(observations[cf.rr(rows[i])]["ops"], n)
+                yield entry
+
+        return dict(verified=lists, verified_bytes=totals, survey=[
+            dict(c, **{field: [it for group in c[field] for it in expand(group)]
+                       for field in ("unsupported", "unresolved")}) for c in code["survey"]])
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise Rejected(f"invalid g2b-1 binding: {exc}") from exc
