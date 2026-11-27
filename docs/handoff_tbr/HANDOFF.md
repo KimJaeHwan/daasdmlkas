@@ -6,7 +6,8 @@
 
 ## 1. 지금 어디까지 왔나
 
-- TBR = Ghidra 독립(Trace Bedrock). 계획 문서 `docs/ghidra_independence_plan.md` (브랜치 `docs/ghidra-independence`, push됨).
+- TBR = Ghidra 독립(Trace Bedrock). 계획 문서는 브랜치 `docs/ghidra-independence`(push됨)에 있고, 사본이 이 폴더의
+  `PLAN_ghidra_independence_dd7344f.md`. 전체 로드맵은 §1a.
 - G0 lint → G1 해독 교차확인 → **G2 공통 사실 층**: G2a 닫힘, 비용 압축 닫힘, **G2b 구현 리뷰 중** → G2c(AArch64) → G3 …
 - G2b = 코드 바이트 사실. 설계 `design/design_tbr_g2b_code_facts_r1.md` + `_r2.md` + `_r3.md`(닫힘), 바탕 `design_tbr_g2_common_facts_r5.md` §5.
   - 코드: `tools/decode_check/code_facts.py`, `code_site_names.json`, `decode_check.py`(collector `row_proof`, `run()`의
@@ -18,6 +19,41 @@
     작은 Bundle은 잡음 범위. (첫 UE 쌍은 다른 세션이 13 GB를 쓰던 때라 제외.)
   - facts 크기: UE +14.1%, ntdll +9.0%, zlib +23.8%, clang +19.5%, v3 +27.4%.
   - 지점: ntdll trap 200; UE trap 1734 + self_modify 4 + dynamic_resolution 5, VirtualAlloc 6 NO_RWX_REGISTER.
+
+## 1a. 전체 로드맵 G0 ~ G6 (상태 · 남은 작업량)
+
+**계획 원문은 이 폴더의 `PLAN_ghidra_independence_dd7344f.md`** (= `docs/ghidra-independence` dd7344f 사본).
+이 브랜치의 `docs/ghidra_independence_plan.md`는 **G2를 넣기 전 옛 번호(04ec1c7)라서 쓰지 않는다** (옛 G2~G5 = 지금 G3~G6).
+계획을 고칠 때는 `wt_docs`(브랜치 `docs/ghidra-independence`)에서 고치고, 이 사본은 참고용이다.
+
+작업량은 지금까지의 속도(G2a ≈ 설계 5라운드 + 구현 2라운드, G2b ≈ 설계 3라운드 + 구현 리뷰 진행 중)로 잡은 **대략치**다.
+"덩어리" = 설계 → 구현 → 측정 → 리뷰 종결까지 한 묶음 (대략 하루~며칠).
+
+| 단계 | 내용 | 상태 | 남은 작업량 |
+|---|---|---|---|
+| G0 | Bundle 규약 문서 + `bundle_lint` | 끝 (브랜치 `feat/g0-bundle-lint`, main에 넣지 않고 따로 둠) | 유지보수만 |
+| G1 | 독립 해독기(iced / Zydis / XED) 교차 확인 | 끝 (`feat/g1-decode-check`에 포함) | 후속: XED target shim, ARM 투표자 |
+| **G2** | x86 / ARM 공통 사실 층 (TBR 형식) | **진행 중** | **약 3~5 덩어리** |
+| └ G2a | x86 제어 이동 사실 + 판정 -4 | 닫힘 798b903 | — |
+| └ 비용 압축 | -5 판정 블록, UE peak 11.2 → 5.6 GB | 닫힘 c15a29a | 시간 줄이기는 Rust 포팅 때 |
+| └ **G2b** | 코드 바이트 사실 (trap, import 분기, 레지스터 값, 코드 쓰기) | **구현 리뷰 중 7a3cefe — 집 작업 §2** | 1 덩어리 (Astra r2 반영 → r3) |
+| └ G2c | AArch64 (EL0/EL1, PAC/BTI, exclusive, x30 link, TBI) | 다음 (시작 전 소유자 설명·승인) | 1~2 덩어리 (ARM 투표자 필요 여부에 따라) |
+| └ 엔진 읽기 | TDO가 G2 사실을 읽음 | S3 뒤, 메인 세션 몫 | (TBR 밖) |
+| G2 뒤 | **로더 적용 값** (재배치 식, import 정체, 채움 시점, RELRO+BIND_NOW, **DVRT**) | 계획만 (소유자 승인) | 1~2 덩어리 |
+| G2 뒤 | dynamic_resolution용 문자열 / LEA 사실 | 후속 목록 | 작음 |
+| G3 | 엔진의 Ghidra 관례 → "lifter 프로필" (엔진 코드, 회사 세션에서 게이트와 함께) | 시작 전 | 2~3 덩어리, 게이트 필요라 집 단독 불가 |
+| G4 | **자체 생산자**: PE/ELF 로더 + 해독/lifter(추천: pypcode/libsla) + 최소 분석 + call-names | 시작 전 | **가장 큼, 약 5~10 덩어리** |
+| └ G4 예약 | 바이트 출처 + 스냅샷 id, 해독 요청 id (G3/G4 형식에 자리만) | 계획에 기록 | G4 안에서 |
+| └ G4 점프 테이블 | 필요할 때 해독 / 질의 주소 시작 / 불변 라운드 (컴파일러 패턴 금지) | 아이디어만, 설계는 G4에서 (Fable 리뷰) | G4 안에서 1~2 덩어리 |
+| G5 | 대조: 같은 바이너리를 Ghidra Bundle vs 새 Bundle로 엔진 결과 비교, 차이 분류 | 시작 전 | 2~3 덩어리 (G4와 겹쳐 진행) |
+| G6 | 전환 또는 병행 운영 결정 | — | 소유자 결정 |
+
+추천 순서 (계획 §5): G0 → G1 → **G2 (지금)** → G4 1번 경로 + G5 → G3.
+전부 합치면 대략 **15~25 덩어리**이고, 가장 큰 덩어리는 G4다. Rust 포팅(R0~R5)은 이 일정과 따로 잡혀 있고,
+지금 만드는 형식은 언어 중립 스키마라서 포팅 때 다시 설계하지 않는다.
+
+집에서 할 수 있는 범위: G2b/G2c, 로더 적용 값, G4, G5 (형식만 맞추면 되는 부분).
+G3과 엔진 읽기는 엔진 코드라 회사 세션에서 게이트와 함께 한다.
 
 ## 2. 집에서 할 일 (순서대로)
 
@@ -81,3 +117,4 @@
 - `cost_probe/`: 회사(WSL) 측정·검증 스크립트 원본 (`equiv_g2b.py`는 Mac에서도 그대로 씀).
 - `design/`: G2 r5, G2b 구현 설계 r1–r3, 구현 리뷰(Astra r1·r2, Fable r1), Astra가 쓴 r1 수정 코드.
 - `requirements_wsl_tdo.txt`: 회사 venv 패키지 버전(`-e` 줄 제외하고 설치).
+- `PLAN_ghidra_independence_dd7344f.md`: 최신 전체 계획 G0~G6 사본 (§1a). 이 브랜치의 `docs/ghidra_independence_plan.md`는 옛 판.
