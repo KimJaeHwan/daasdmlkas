@@ -224,14 +224,69 @@ class IsaCollector:
                 "functions": self.functions}
 
 
+class _UnitsView:
+    """Read-only mapping (id, observation) -> unit dicts, expanded on access from the interned sets."""
+
+    def __init__(self, owner):
+        self._owner = owner
+
+    def __getitem__(self, k):
+        import common_facts as cf
+
+        return [cf.from_unit(x) for x in self._owner.unit_sets[self._owner.row_set[k]]]
+
+    def __iter__(self):
+        return iter(self._owner.row_set)
+
+    def __len__(self):
+        return len(self._owner.row_set)
+
+    def __contains__(self, k):
+        return k in self._owner.row_set
+
+    def __setitem__(self, k, units):
+        """(tests) replace one row's units: interned like finish does; verdict_block5 renumbers canonically"""
+        import common_facts as cf
+
+        key = tuple(cf.to_unit(u) for u in units)
+        sets = self._owner.unit_sets
+        self._owner.row_set[k] = sets.index(key) if key in sets else len(sets)
+        if self._owner.row_set[k] == len(sets):
+            sets.append(key)
+
+    def keys(self):
+        return self._owner.row_set.keys()
+
+    def values(self):
+        return (self[k] for k in self._owner.row_set)
+
+    def items(self):
+        return ((k, self[k]) for k in self._owner.row_set)
+
+
 class CommonFactsCollector:
+    """design_tbr_g2a_cost r1 C1 / C3: per row only vote summaries are kept (the ballots go to the other hooks and
+    the G1 report as before); finish interns each row's units into ordered unit sets numbered by first use in
+    (id, observation) order. TDO_V2_G2A_COST_CROSSCHECK=1 also keeps the ballots and checks every row against the
+    frozen 798b903 verdict functions (_g2a_reference)."""
+
     def __init__(self, facts, isa_collector=None):
+        import os
+
         self.facts = facts
         self.isa_collector = isa_collector
         self.rows = {}
         self.raw = {}
+        self.summaries = {}
+        import common_facts as cf
+
+        self._empty3 = (cf.EMPTY,) * 3
+        self.crosscheck = os.environ.get("TDO_V2_G2A_COST_CROSSCHECK") == "1"
         self.checked = {}
-        self.units = {}
+        self.unit_sets = []          # set id -> tuple of unit values
+        self.row_set = {}            # (id, observation) -> set id
+        self.units = _UnitsView(self)
+        self.crosschecked = 0
         self.lengths = {}
         self.groups = {}
         self.branch_self = 0
@@ -251,11 +306,17 @@ class CommonFactsCollector:
         self.rows[k] = cf.derive_row(facts, lift, fid, self.facts["registers"], data,
                                      cf.split_needed(ballot, result))
         self.branch_self += int(lift is not None and lift.pattern == "branch-self")
-        # Retain only the comparison inputs. The large G1 per-attribute dictionary is no longer needed.
+        # Retain only the comparison inputs: per vendor view a vote summary (r1 C1); the ballots themselves are
+        # not kept. Non-x86 rows and rows without accepted votes share the EMPTY summary (r2 D2).
         accepted = {v: cf.votes(ballot, result, v) for v in (None, *cf.VENDORS)}
-        self.checked[k] = accepted
         for v, vs in accepted.items():
             self.lengths[k, v] = cf.independent_length(vs)
+        x86 = facts.get("isa") == "x86-64"
+        summary = tuple(cf.summarize_votes(accepted[v], facts["address"]) if x86 else cf.EMPTY
+                        for v in (None, *cf.VENDORS))
+        self.summaries[k] = self._empty3 if summary == self._empty3 else summary
+        if self.crosscheck:
+            self.checked[k] = accepted
         n = facts["length"]
         if type(n) is int and 0 < n <= len(data):
             group = facts.get("isa"), facts["space"], facts["address"], facts.get("view", "0"), data[:n]
@@ -265,24 +326,61 @@ class CommonFactsCollector:
         import common_facts as cf
 
         cf.finish_landings(list(self.rows.values()), complete)
-        for v in (None, *cf.VENDORS):
-            idx = cf.Index(((f["space"], f["address"], self.lengths[k, v], k)
-                            for k, f in self.raw.items()), complete)
-            for k, r in self.rows.items():
+        views = (None, *cf.VENDORS)
+        index = {v: cf.Index(((f["space"], f["address"], self.lengths[k, v], k) for k, f in self.raw.items()),
+                             complete) for v in views}
+        numbered = {}
+        for k in sorted(self.rows):                  # == the facts document's (id, observation) order
+            r, f = self.rows[k], self.raw[k]
+            info = {}
+            if self.isa_collector:
+                fn = self.isa_collector.functions.get(k[1], {})
+                source = fn.get("rows", {}).get((f["space"], f["address"]), {})
+                status = fn.get("status", {})
+                info = dict(facts={name: val for name, val in source.get("facts", {}).items()
+                                   if status.get(name) == "checked"},
+                            unobserved=source.get("unobserved", {}))
+            units = []                               # base, then intel, then amd (the 798b903 order)
+            for j, v in enumerate(views):
                 if v and not r["vendor_views"]:
                     continue
-                f = self.raw[k]
-                info = {}
-                if self.isa_collector:
-                    fn = self.isa_collector.functions.get(k[1], {})
-                    source = fn.get("rows", {}).get((f["space"], f["address"]), {})
-                    status = fn.get("status", {})
-                    info = dict(facts={name: val for name, val in source.get("facts", {}).items()
-                                       if status.get(name) == "checked"},
-                                unobserved=source.get("unobserved", {}))
-                vs = self.checked[k][v] if f.get("isa") == "x86-64" else []
-                self.units.setdefault(k, []).extend(cf.row_verdicts(r, vs, idx, info, v))
+                part = cf.row_verdicts(r, self.summaries[k][j], index[v], info, v)
+                if self.crosscheck:
+                    self._crosscheck(k, r, f, v, index[v], info, part)
+                units.extend(part)
+            key = tuple(cf.to_unit(u) for u in units)    # values only after row_verdicts returned (r1 C2)
+            sid = numbered.get(key)
+            if sid is None:
+                sid = numbered[key] = len(self.unit_sets)
+                self.unit_sets.append(key)
+            self.row_set[k] = sid
+        self.summaries.clear()
         self.checked.clear()
+
+    def _crosscheck(self, k, r, f, v, idx, info, part):
+        import _g2a_reference as ref
+
+        vs = self.checked[k][v] if f.get("isa") == "x86-64" else []
+        try:
+            want = ref.row_verdicts(r, vs, idx, info, v)
+        except Exception as error:               # (the reference raising must match the new path raising)
+            raise AssertionError(f"crosscheck {k} {v}: reference raised {error!r}, summary path did not") from error
+        if want != part:
+            raise AssertionError(f"crosscheck {k} {v}: units differ")
+        self.crosschecked += 1
+
+    def denominators(self):
+        import common_facts as cf
+
+        return cf.denominators_of_sets(self.unit_sets, self.row_set)
+
+    def row_states(self):
+        from collections import Counter
+
+        import common_facts as cf
+
+        states = [cf.row_state(s) for s in self.unit_sets]
+        return dict(Counter(states[sid] for sid in self.row_set.values()))
 
 
 def _chain(*hooks):
@@ -454,10 +552,11 @@ def _summarize_rows(facts: dict, common, document: dict) -> dict:
                              "test_g2a_required_binding", "test_g2a_required_values_and_index",
                              "test_g2a_required_conditions_and_traps"]}
 
-    return {"schema": cf.SCHEMA, "rule": cf.RULE_VERSION, "rows": len(document["rows"]),
+    return {"schema": cf.SCHEMA, "rule": cf.VERDICT_RULE, "rows": len(document["rows"]),
             "unit": "(id, observation), field path, edge triple when applicable, op reference when applicable",
-            "fields": cf.denominators(common.units),
-            "row_states": dict(Counter(cf.row_state(u) for u in common.units.values())),
+            "fields": common.denominators(),
+            "row_states": common.row_states(),
+            "unit_sets": len(common.unit_sets),
             "vendor_rows": vendor_counts, "ambiguous_hlt_or_self_jump": common.branch_self,
             "parity": {"source_rows": source_rows, "source_ops": source_ops, "base_joins": len(base),
                        "base_status": dict(counts), "base_outside_engine_relation": counts["neither"] + counts["extra"],
@@ -543,16 +642,19 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
         seen = {fn["function_id"] for fn in facts["functions"]}
         complete = facts["complete"] and seen == {m["id"] for m in manifest["functions"]}
         common.finish(complete)
+        if common.crosscheck:
+            print(f"decode_check: crosscheck passed for {common.crosschecked} row views", file=sys.stderr)
         seal = json.loads((generation / "seal.json").read_bytes())
         doc = cf.document(
             {k: seal[k] for k in ("generation_id", "manifest_sha256")},
-            dict(name="tbr-derive-ghidra-p-code", lift_table=lifting.TABLE["id"], rule=cf.RULE_VERSION),
+            dict(name="tbr-derive-ghidra-p-code", lift_table=lifting.TABLE["id"], rule=cf.FACTS_RULE),
             dict(isa=facts["isa"] or cf.U("unsupported language"), address_spaces=facts["address_spaces"],
                  stack_register=facts["registers"]["sp"] or cf.U("no validated stack register"),
                  code=cf.U("code surveys belong to G2b"), tbi=cf.U("no TBI evidence")),
             common.rows.values())
-        common_block = cf.verdict_block(doc, common.units)
-        common_facts_out.write_bytes(cf.canonical(doc) + b"\n")
+        # (r1 C4: the facts file is streamed, byte-identical to canonical(doc) + LF; its digest excludes the LF)
+        common_block = cf.verdict_block5(doc, cf.write_canonical(common_facts_out, doc), common.unit_sets,
+                                         common.row_set)
         header["common_facts"] = common_summary(
             facts, common, doc, complete=complete,
             missing_functions={m["id"] for m in manifest["functions"]} - seen,

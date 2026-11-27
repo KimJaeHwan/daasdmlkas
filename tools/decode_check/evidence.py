@@ -23,6 +23,7 @@ SCHEMA = "g1-decode-evidence-1"
 SCHEMA2 = "g1-decode-evidence-2"
 SCHEMA3 = "g1-decode-evidence-3"            # (design_tbr_g1_x1 r1-r3: -2 + producer_override)
 SCHEMA4 = "g1-decode-evidence-4"            # (design_tbr_g2_common_facts_r5 s8: -3 + common_facts verdicts)
+SCHEMA5 = "g1-decode-evidence-5"            # (design_tbr_g2a_cost r1 C3: -3 + interned common_facts verdicts)
 OVERRIDE_STATUS = ("checked", "not_reported")   # or "failed:<reason>"
 ISA_STATUS = ("checked", "not_run")         # or "failed:<reason>"
 CONSUMERS_VERSION = "consumers-2"
@@ -129,7 +130,8 @@ def build(*, bundle: dict, producer: dict, mapping: dict, premises: list, table_
                 item["producer_override"] = _override_section(override["functions"].get(function["function_id"]),
                                                              rows, function["states"])
             body.append(item)
-    schema = SCHEMA if isa is None else SCHEMA2 if override is None else SCHEMA3 if common is None else SCHEMA4
+    schema = (SCHEMA if isa is None else SCHEMA2 if override is None else SCHEMA3 if common is None
+              else SCHEMA5 if common.get("schema") == "tbr-common-facts-verdicts-2" else SCHEMA4)
     document = {"schema": schema, "bundle": bundle, "producer": producer,
                 "mapping": mapping, "premises": sorted(premises), "translation": {"table_applied": table_applied},
                 "compared_attributes": list(compare.COMPARED), "mode_constant": list(compare.MODE_CONSTANT),
@@ -428,9 +430,9 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
     """Every header, body and coverage-precondition check of design s2 / s3 / s5 / s7; raises Rejected."""
     schema = document.get("schema") if isinstance(document, dict) else None
     pinned = None
-    if schema in (SCHEMA2, SCHEMA3, SCHEMA4):
-        _keys(document, HEADER_KEYS + ("isa_facts",) + (("producer_override",) if schema in (SCHEMA3, SCHEMA4) else ())
-              + (("common_facts",) if schema == SCHEMA4 else ()), "header")
+    if schema in (SCHEMA2, SCHEMA3, SCHEMA4, SCHEMA5):
+        _keys(document, HEADER_KEYS + ("isa_facts",) + (("producer_override",) if schema in (SCHEMA3, SCHEMA4, SCHEMA5) else ())
+              + (("common_facts",) if schema in (SCHEMA4, SCHEMA5) else ()), "header")
         _check_isa_header(document["isa_facts"])                 # (r2 Fable P2-1: the header before the rows)
         if tables is None:
             import isa_tables
@@ -442,9 +444,9 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
         _keys(document, HEADER_KEYS, "header")
         if schema != SCHEMA:
             raise Rejected(f"schema {schema!r}")
-    if schema == SCHEMA4:
-        _check_common_facts(document["common_facts"])
-    if schema in (SCHEMA3, SCHEMA4):
+    if schema in (SCHEMA4, SCHEMA5):
+        _check_common_facts(document["common_facts"], schema)
+    if schema in (SCHEMA3, SCHEMA4, SCHEMA5):
         _check_override_header(document["producer_override"])
         # (impl r2 Astra P1-2: the Bundle's profile is checked once, also for a file with no functions)
         if not isinstance(bundle, dict) or "producer_profile" not in bundle:
@@ -491,8 +493,8 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
         raise Rejected("functions not sorted by function_id")
     for item in functions:
         _keys(item, ("function_id", "observation_sha256", "rows_total", "rows_digest", "exceptions")
-              + (("isa_facts",) if schema in (SCHEMA2, SCHEMA3, SCHEMA4) else ())
-              + (("producer_override",) if schema in (SCHEMA3, SCHEMA4) else ()), "function")
+              + (("isa_facts",) if schema in (SCHEMA2, SCHEMA3, SCHEMA4, SCHEMA5) else ())
+              + (("producer_override",) if schema in (SCHEMA3, SCHEMA4, SCHEMA5) else ()), "function")
         fid = item["function_id"]
         if fid not in bundle["functions"]:
             raise Rejected(f"function {fid} is not in the Bundle")
@@ -525,10 +527,10 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
         outside = [render(*c) for c in coordinates if c not in rows]
         if outside:
             raise Rejected(f"{fid}: exception coordinates outside the function's rows: {outside[:3]}")
-        if schema in (SCHEMA2, SCHEMA3, SCHEMA4):
+        if schema in (SCHEMA2, SCHEMA3, SCHEMA4, SCHEMA5):
             never = {c for c, e in zip(coordinates, item["exceptions"]) if "*" in e["attributes"]}
             _check_isa(item["isa_facts"], fid, rows, never, pinned)
-        if schema in (SCHEMA3, SCHEMA4):
+        if schema in (SCHEMA3, SCHEMA4, SCHEMA5):
             exceptions = {coordinate: exception["attributes"]
                           for coordinate, exception in zip(coordinates, item["exceptions"])}
             _check_override(item["producer_override"], fid, rows, never, bundle["functions"][fid], exceptions,
@@ -536,12 +538,15 @@ def accept(document: dict, bundle: dict, allowlist: list, *, consumers_version: 
     return Evidence(document, bundle, tables)
 
 
-def _check_common_facts(block) -> None:
+def _check_common_facts(block, schema=SCHEMA4) -> None:
     import re
     import common_facts as cf
 
+    if schema == SCHEMA5:
+        return _check_common_facts5(block)
     _keys(block, ("schema", "rule_version", "facts_sha256", "row_set_sha256", "rows"), "common_facts")
-    if block["schema"] != cf.VERDICT_SCHEMA or block["rule_version"] != cf.RULE_VERSION:
+    # (the retained -4 reader: the literal pair, never a live constant; design_tbr_g2a_cost r2 D3)
+    if block["schema"] != "tbr-common-facts-verdicts-1" or block["rule_version"] != "g2a-3":
         raise Rejected("unknown common facts comparison rule")
     for name in ("facts_sha256", "row_set_sha256"):
         if not isinstance(block[name], str) or not re.fullmatch("[0-9a-f]{64}", block[name]):
@@ -586,20 +591,76 @@ def _check_common_facts(block) -> None:
         raise Rejected("duplicate or unordered common verdict rows")
 
 
+def _check_common_facts5(block) -> None:
+    """-5 structure (design_tbr_g2a_cost r1 C3 reader, structural; r2 D1): the rule's exact path table, unit
+    shape, non-empty canonical sets, unique selectors, rows sorted and unique, state == row_state(set)."""
+    import re
+    import common_facts as cf
+
+    _keys(block, ("schema", "rule_version", "facts_sha256", "row_set_sha256", "field_paths", "unit_sets", "rows"),
+          "common_facts")
+    if block["schema"] != cf.VERDICT_SCHEMA2 or block["rule_version"] != cf.VERDICT_RULE:
+        raise Rejected("unknown common facts comparison rule")
+    if block["field_paths"] != list(cf.FIELD_PATHS):
+        raise Rejected("common facts field path table differs from the rule's")
+    for name in ("facts_sha256", "row_set_sha256"):
+        if not isinstance(block[name], str) or not re.fullmatch("[0-9a-f]{64}", block[name]):
+            raise Rejected("bad common facts digest")
+    sets, rows = block["unit_sets"], block["rows"]
+    if not isinstance(sets, list) or not isinstance(rows, list):
+        raise Rejected("common facts unit sets or rows")
+    states, seen_sets = [], set()
+    for s in sets:
+        if not isinstance(s, list) or not s:
+            raise Rejected("empty or malformed unit set")
+        try:
+            units = [cf.unit_from_json(x) for x in s]
+        except (ValueError, TypeError, KeyError) as error:
+            raise Rejected(f"bad comparison unit: {error}") from error
+        selectors = [(u[0], u[2], u[3]) for u in units]
+        if len(set(selectors)) != len(selectors):
+            raise Rejected("duplicate comparison unit")
+        key = tuple(units)
+        if key in seen_sets:
+            raise Rejected("duplicate unit set")
+        seen_sets.add(key)
+        states.append(cf.row_state(units))
+    seen, next_new = [], 0
+    for r in rows:
+        _keys(r, ("id", "observation", "set", "state"), "common facts verdict row")
+        if not all(isinstance(r[k], str) and r[k] for k in ("id", "observation")):
+            raise Rejected("bad verdict row reference")
+        sid = r["set"]
+        if type(sid) is not int or not 0 <= sid < len(sets):
+            raise Rejected("verdict row set out of range")
+        if sid > next_new:
+            raise Rejected("unit sets not numbered by first use")
+        next_new += sid == next_new
+        if states[sid] != r["state"]:
+            raise Rejected("incorrect common row aggregate")
+        seen.append(cf.rr(r))
+    if next_new != len(sets):
+        raise Rejected("unreferenced unit set")
+    if seen != sorted(set(seen)):
+        raise Rejected("duplicate or unordered common verdict rows")
+
+
 def _bind_checked_rows(document: dict, facts_document: dict, *, bundle: dict, allowlist: list,
                       observations: dict):
     import common_facts as cf
 
-    if document.get("schema") != SCHEMA4:
-        raise Rejected("common comparisons require -4")
+    if document.get("schema") not in (SCHEMA4, SCHEMA5):
+        raise Rejected("common comparisons require -4 or -5")
     accepted = accept(document, bundle, allowlist)
     block = document["common_facts"]
+    five = document["schema"] == SCHEMA5
+    units_of = cf.block_units(block)
     identity = {k: bundle[k] for k in ("generation_id", "manifest_sha256")}
     if (facts_document.get("schema") != cf.SCHEMA or facts_document.get("bundle") != identity
             or facts_document.get("source") not in ("producer", "derived")):
         raise Rejected("facts schema, source or Bundle identity")
     rows = facts_document.get("rows")
-    if not isinstance(rows, list) or block["facts_sha256"] != cf.digest(facts_document):
+    if not isinstance(rows, list) or block["facts_sha256"] != cf.streamed_digest(facts_document):
         raise Rejected("facts digest")
     try:
         refs = [cf.rr(r) for r in rows]
@@ -616,6 +677,9 @@ def _bind_checked_rows(document: dict, facts_document: dict, *, bundle: dict, al
 
         by_ref = dict(zip(refs, rows))
         out = {}
+        # -5 lookups are lazy (r1 C3, Fable P2-9): per set a selector -> code map, per row (set, never-compared);
+        # a unit whose op names its row explicitly is kept per row (the writer never emits one, r2 D3)
+        selectors, row_info, row_extra = {}, {}, {}
         names = {"c": "confirmed", "x": "contradicted", "u": "unobserved", "?": "unobserved",
                  "n": "not_applicable"}
 
@@ -640,7 +704,11 @@ def _bind_checked_rows(document: dict, facts_document: dict, *, bundle: dict, al
                     f["space"], format(f["address"], "x"), f["length"], f.get("view", "0")):
                 raise Rejected("row id disagrees with its components or observation")
             check_refs(r, r)
-            for u in vr["units"]:
+            row_keys = set()
+            never = accepted._never_compared(k[1], f["space"], f["address"])
+            if five:
+                row_info[k] = (vr["set"], never)
+            for u in units_of(vr):
                 path = u["path"]
                 v = None
                 if path.startswith("vendor_views."):
@@ -674,12 +742,16 @@ def _bind_checked_rows(document: dict, facts_document: dict, *, bundle: dict, al
                         raise Rejected("operation outside the claimed op list")
                     query["op"] = resolved
                 lookup_key = cf.canonical(query)
-                if lookup_key in out:
+                if lookup_key in row_keys:
                     raise Rejected("duplicate normalized lookup")
-                state = names[u["code"]]
-                if accepted._never_compared(k[1], f["space"], f["address"]):
-                    state = "unobserved"
-                out[lookup_key] = state
+                row_keys.add(lookup_key)
+                state = "unobserved" if never else names[u["code"]]
+                if not five:
+                    out[lookup_key] = state
+                elif "op" in u and "row" in u["op"]:
+                    row_extra.setdefault(k, {})[lookup_key] = state
+                else:
+                    selectors.setdefault(vr["set"], {}).setdefault(_selector(u), u["code"])
     except (KeyError, IndexError, TypeError, ValueError) as error:
         raise Rejected(f"malformed common facts binding: {error}") from error
 
@@ -689,11 +761,39 @@ def _bind_checked_rows(document: dict, facts_document: dict, *, bundle: dict, al
             if "op" in q:
                 owner = by_ref[cf.rr(q["row"])]
                 q["op"] = resolve_op(q["op"], owner)
-            return out.get(cf.canonical(q))
+            if not five:
+                return out.get(cf.canonical(q))
+            k = cf.rr(q["row"])
+            if k not in row_info or q["row"] != cf.ref(by_ref[k]) or not set(q) <= {"row", "path", "edge", "op"}:
+                return None
+            extra = row_extra.get(k, {}).get(cf.canonical(q))
+            if extra is not None:
+                return extra
+            if "op" in q:
+                if q["op"]["row"] != q["row"]:
+                    return None
+                q["op"] = {"ordinal": q["op"]["ordinal"], "opcode": q["op"]["opcode"]}
+            sid, never = row_info[k]
+            state = selectors.get(sid, {}).get(_selector(q))
+            if state is None:
+                return None
+            return "unobserved" if never else names[state]
         except (KeyError, TypeError, ValueError, Rejected):
             return None
 
     return lookup
+
+
+def _selector(u):
+    """A -5 set-level lookup key: path, edge and an owner-relative op (ordinal, opcode)."""
+    import common_facts as cf
+
+    key = {"path": u["path"]}
+    if "edge" in u:
+        key["edge"] = u["edge"]
+    if "op" in u:
+        key["op"] = {"ordinal": u["op"]["ordinal"], "opcode": u["op"]["opcode"]}
+    return cf.canonical(key)
 
 
 def _check_override_header(block) -> None:
@@ -908,13 +1008,11 @@ def _check_isa(section, fid, rows, never, tables=None) -> None:
         raise Rejected(f"{fid}: isa_facts rows duplicated or not sorted")
 
 
-def bind_common_facts(document, facts_document, *, bundle, allowlist, observations):
+def common_path_sets():
+    """(edge_fields, op_fields, shared, transfer): the field suffixes bind_common_facts accepts; the full set must
+    equal common_facts.FIELD_PATHS (design_tbr_g2a_cost r1 E6)."""
     import common_facts as cf
 
-    lookup = _bind_checked_rows(
-        document, facts_document, bundle=bundle, allowlist=allowlist,
-        observations=observations,
-    )
     edge_fields = {
         "edges", "edges.to", "edges.lands_on", "edges.lands_on.class",
         "edges.lands_on.starts", "edges.lands_on.inside",
@@ -929,6 +1027,17 @@ def bind_common_facts(document, facts_document, *, bundle, allowlist, observatio
         "kind", "exception_basis", "condition", "target_auth", "op_keys",
         "op_keys.encoding_only", "op_keys.entry_ordinal",
     } | {"condition." + f for f in cf.PRED_FIELDS}
+    return edge_fields, op_fields, shared, transfer
+
+
+def bind_common_facts(document, facts_document, *, bundle, allowlist, observations):
+    import common_facts as cf
+
+    lookup = _bind_checked_rows(
+        document, facts_document, bundle=bundle, allowlist=allowlist,
+        observations=observations,
+    )
+    edge_fields, op_fields, shared, transfer = common_path_sets()
     opaque = {
         "op_keys", "target_value", "condition.test.inputs", "target_auth",
         "link_write.location.memory.base", "link_write.location.memory.space",
@@ -1018,9 +1127,10 @@ def bind_common_facts(document, facts_document, *, bundle, allowlist, observatio
             raise Rejected("confirmed absent or unobserved claim: " + path)
 
     try:
+        units_of = cf.block_units(document["common_facts"])
         for r, vr in zip(facts_document["rows"], document["common_facts"]["rows"], strict=True):
             validate_refs(r)
-            for u in vr["units"]:
+            for u in units_of(vr):
                 validate_unit(r, u)
     except (KeyError, IndexError, TypeError, ValueError, StopIteration) as error:
         raise Rejected(f"malformed common facts binding: {error}") from error

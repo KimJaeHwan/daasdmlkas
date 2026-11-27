@@ -229,3 +229,32 @@ Bundle (admission refuses unlisted entries) and is passed by explicit path.
 - repe / repne string compares (conditional loop-back CBRANCH): a named shape to add after a data check.
 - Far call / far ret lift patterns (today unidentified, never a false near-call suspect).
 - Block rows: count the "outside" tail beyond the file mapping apart from real differences.
+
+## G2a common facts and the -5 verdict block
+
+`--common-facts FILE` writes the derived claims (schema `tbr-common-facts-1`, `producer.rule` `g2a-3`;
+`common_facts.py`) and, with `--evidence-out`, evidence `g1-decode-evidence-5`: -3 plus a `common_facts` block
+`tbr-common-facts-verdicts-2`, rule `g2a-4` (design_tbr_g2a_cost r1 + r2). The reader still accepts -4
+(`tbr-common-facts-verdicts-1`, rule `g2a-3`, one unit list per row).
+
+-5 block: `{schema, rule_version, facts_sha256, row_set_sha256, field_paths, unit_sets, rows}`.
+
+- `field_paths` must equal `common_facts.FIELD_PATHS` in order; a unit names its field by index.
+- `unit_sets` is a list of non-empty ordered unit lists. A unit is `[path_id, code]`, `[path_id, code, edge]` or
+  `[path_id, code, null, op]`, with edge `[when, source, requires]` (values from `ORDERS`) and op
+  `{ordinal, opcode}`. The writer never emits `op.row`; a reader accepts it only through per-row binding. Codes are
+  `c x u n ?`.
+- `rows` is `[{id, observation, set, state}]` in `(id, observation)` order. Sets are numbered by first use in that
+  order; every set is used, none is repeated, and `state == row_state(set)`.
+- Denominators count a set once per row that uses it.
+- Binding is per referencing row, so two rows sharing a set can bind differently (coverage, `*`). A violation in any
+  row rejects the whole file.
+- `facts_sha256` is the SHA-256 of the facts file without its final LF. The facts file is streamed and is
+  byte-identical to `canonical(doc) + LF`.
+
+Port notes (Rust kernels later):
+- Pure functions: `derive_row`, `summarize_votes(votes, row_address) -> VoteSummary` (`None` = ABSENT) and
+  `row_verdicts(row, summary, final isa, vendor, landing index)`. Units become values only after `row_verdicts`
+  returns.
+- Conformance vectors: `TDO_V2_G2A_COST_CROSSCHECK=1` checks every row view against the frozen 798b903 functions in
+  `_g2a_reference.py`. The `test_g2a_cost_*` tests are the positive and negative vectors for the -5 reader.

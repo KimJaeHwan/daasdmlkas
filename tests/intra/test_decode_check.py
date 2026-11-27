@@ -4256,8 +4256,14 @@ def test_g2a_end_to_end(tmp_path):
                                  evidence_out=out, common_facts_out=facts_out)
     ev = evidence.parse(out.read_bytes())
     doc = json.loads(facts_out.read_bytes())
-    assert ev["schema"] == evidence.SCHEMA4 and doc["schema"] == cf.SCHEMA
-    assert ev["common_facts"]["facts_sha256"] == cf.digest(doc)
+    assert ev["schema"] == evidence.SCHEMA5 and doc["schema"] == cf.SCHEMA
+    block = ev["common_facts"]
+    assert (block["schema"], block["rule_version"]) == (cf.VERDICT_SCHEMA2, cf.VERDICT_RULE)
+    assert doc["producer"]["rule"] == cf.FACTS_RULE == "g2a-3" and header["common_facts"]["rule"] == "g2a-4"
+    # (r2 D4) the whole file is canonical(doc) + LF; the block digest excludes the LF
+    import hashlib
+    assert facts_out.read_bytes() == cf.canonical(doc) + b"\n"
+    assert block["facts_sha256"] == hashlib.sha256(cf.canonical(doc)).hexdigest() == cf.digest(doc)
     assert ev["common_facts"]["row_set_sha256"] == cf.row_set_digest(doc["rows"])
     report = header["common_facts"]
     assert report["parity"]["base_joins"] == report["parity"]["source_ops"]
@@ -4458,3 +4464,188 @@ def test_g2a_round3_trap_return_input_not_applicable():
     r["transfer"]["kind"] = "return"
     r["transfer"]["op_keys"]["transfer"] = cf.opref(f["ops"], 1)
     assert cf.input_checks(fn, {cf.identity(f, fid): r})[0]["fields"]["transfer"] == "c"
+
+
+# -- G2a cost compaction (design_tbr_g2a_cost r1 + r2): -5 interned verdicts, vote summaries, streamed facts ------
+
+def _g2_binding5(c):
+    import common_facts as cf
+    import evidence
+
+    doc, ev, args = _g2_binding(c)
+    block = cf.verdict_block5(doc, cf.digest(doc), c.unit_sets, c.row_set)
+    ev5 = dict(ev, schema=evidence.SCHEMA5, common_facts=block)
+    args = dict(args, allowlist=[evidence.allowlist_entry(ev5)])
+    return doc, ev5, args
+
+
+def _g2_all_queries(c, doc):
+    import common_facts as cf
+
+    queries = []
+    for r in doc["rows"]:
+        for u in c.units[cf.rr(r)]:
+            q = dict(row=cf.ref(r), path=u["path"])
+            if "edge" in u:
+                q["edge"] = u["edge"]
+            if "op" in u:
+                q["op"] = u["op"]
+            queries.append(q)
+    return queries
+
+
+def test_g2a_cost_field_paths_match_binding():
+    import common_facts as cf
+    import evidence
+
+    edge_fields, _, shared, transfer = evidence.common_path_sets()
+    allowed = ({"length", "bytes.range"} | {"transfer." + s for s in transfer}
+               | {f"vendor_views.{v}.{s}" for v in cf.VENDORS for s in shared | edge_fields | {"length", "bytes"}})
+    assert set(cf.FIELD_PATHS) == allowed and len(cf.FIELD_PATHS) == len(set(cf.FIELD_PATHS))
+
+
+def test_g2a_cost_streamed_facts_bytes(tmp_path):
+    import hashlib
+    import common_facts as cf
+
+    c = _g2_collect([_g2_golden(), _g2_jrcxz()])
+    doc = _g2_document(c)
+    path = tmp_path / "facts.json"
+    sha = cf.write_canonical(path, doc)
+    assert path.read_bytes() == cf.canonical(doc) + b"\n"
+    assert sha == hashlib.sha256(cf.canonical(doc)).hexdigest() == cf.streamed_digest(doc) == cf.digest(doc)
+
+
+def test_g2a_cost_block5_expands_to_block4():
+    import common_facts as cf
+
+    c = _g2_collect([_g2_golden(), _g2_jrcxz(), ("f1", *_g2_golden()[1:])])
+    doc = _g2_document(c)
+    four = cf.verdict_block(doc, c.units)
+    five = cf.verdict_block5(doc, cf.digest(doc), c.unit_sets, c.row_set)
+    assert cf.expand_block5(five) == [dict(id=r["id"], observation=r["observation"], units=r["units"],
+                                           state=r["state"]) for r in four["rows"]]
+    # two rows with the same verdicts share one set; numbering is by first use
+    ids = [r["set"] for r in five["rows"]]
+    assert list(dict.fromkeys(ids)) == list(range(len(five["unit_sets"])))
+    assert len(five["unit_sets"]) < len(five["rows"])
+
+
+def test_g2a_cost_lookups_equal_on_four_and_five():
+    import common_facts as cf
+    import evidence
+
+    fid, f, _, ballot, result, data = _g2_jrcxz()
+    entries = [_g2_golden(), ("f1", *_g2_golden()[1:]), (fid, dict(f, address=START + 0x40), None, ballot, result, data)]
+    c = _g2_collect(entries)
+    doc, ev4, args4 = _g2_binding(c)
+    _, ev5, args5 = _g2_binding5(c)
+    four = evidence.bind_common_facts(ev4, doc, **args4)
+    five = evidence.bind_common_facts(ev5, doc, **args5)
+    queries = _g2_all_queries(c, doc)
+    assert queries and all(four(q) == five(q) for q in queries)
+    assert any(five(q) == "unobserved" for q in queries if q["path"] == "transfer.edges")   # (D1: abstention row)
+    row = queries[0]["row"]
+    for q in (dict(row=row, path="transfer.nope"), dict(row=row, path="transfer.kind", extra=1),
+              dict(row=dict(row, observation="zz"), path="transfer.kind"),
+              dict(row=row, path="transfer.op_keys.transfer", op={"ordinal": 99, "opcode": "CALL"})):
+        assert four(q) is None and five(q) is None
+
+
+def test_g2a_cost_block5_rejections():
+    from copy import deepcopy
+
+    import common_facts as cf
+    import evidence
+
+    c = _g2_collect([_g2_golden(), ("f1", *_g2_golden()[1:]), _g2_jrcxz()])
+    doc, ev, args = _g2_binding5(c)
+    evidence.bind_common_facts(ev, doc, **args)
+
+    def bad(change):
+        e = deepcopy(ev)
+        change(e["common_facts"])
+        with pytest.raises(evidence.Rejected):
+            evidence.bind_common_facts(e, doc, **dict(args, allowlist=[evidence.allowlist_entry(e)]))
+
+    def setfield(i, value):
+        return lambda b: b["rows"][i].__setitem__("set", value)
+
+    bad(setfield(0, True))
+    bad(setfield(0, 99))
+    bad(lambda b: b["field_paths"].reverse())
+    bad(lambda b: b["rows"][0].__setitem__("state", "c" if b["rows"][0]["state"] != "c" else "x"))
+    bad(lambda b: b["unit_sets"].append(deepcopy(b["unit_sets"][0])))                  # duplicate, unused
+    bad(lambda b: b["unit_sets"].append([[0, "u"]]))                                    # unused
+    bad(lambda b: b["unit_sets"][0].append([0, "u", None]))                             # arity 3 bad edge
+    bad(lambda b: b["unit_sets"][0].append([0, "u", ["always", "encoded_target", None], {"ordinal": 0, "opcode": "X"}]))
+    bad(lambda b: b["unit_sets"][0].append(deepcopy(b["unit_sets"][0][0])))             # duplicate selector
+    bad(lambda b: b["unit_sets"].insert(0, b["unit_sets"].pop()))                       # numbering not by first use
+    opaque = cf.PATH_ID["transfer.link_write.relocation"]           # confirmed opaque field
+
+    def confirm_opaque(b):
+        b["unit_sets"] = [[[opaque, "c"] if u[0] == opaque else u for u in s] for s in b["unit_sets"]]
+        for r in b["rows"]:
+            r["state"] = cf.row_state([cf.unit_from_json(u) for u in b["unit_sets"][r["set"]]])
+
+    bad(confirm_opaque)
+
+
+def test_g2a_cost_shared_set_binding_fails_for_one_row():
+    from copy import deepcopy
+
+    import evidence
+
+    c = _g2_collect([_g2_golden(), ("f1", *_g2_golden()[1:])])
+    doc, ev, args = _g2_binding5(c)
+    assert len(ev["common_facts"]["unit_sets"]) == 1          # both rows share the set
+    broken = deepcopy(doc)
+    broken["rows"][1]["transfer"]["edges"] = []               # the shared set has edge-subfield units
+    e = deepcopy(ev)
+    import common_facts as cf
+    e["common_facts"]["facts_sha256"] = cf.digest(broken)
+    with pytest.raises(evidence.Rejected):
+        evidence.bind_common_facts(e, broken, **dict(args, allowlist=[evidence.allowlist_entry(e)]))
+
+
+def _g2_votes_variants():
+    from dataclasses import replace
+
+    fid, f, lift, ballot, result, data = _g2_golden()
+    intel = list(ballot["intel"])
+    amd = list(ballot["amd"])
+    yield "golden", intel + amd
+    yield "empty", []
+    yield "all-invalid", [replace(v, status="invalid") for v in intel]
+    yield "mixed-status", [replace(intel[0], status="invalid")] + intel[1:]
+    yield "a7-bits-split", [replace(v, length=v.length + (i % 2)) for i, v in enumerate(intel)]
+    yield "a5-non-decoder", [replace(intel[0], target_derivation="computed")] + intel[1:]
+    yield "intel-only", intel
+    yield "amd-only", amd
+
+
+def test_g2a_cost_summary_equals_reference():
+    import _g2a_reference as ref
+    import common_facts as cf
+
+    fid, f, lift, ballot, result, data = _g2_golden()
+    c = _g2_collect([_g2_golden()])
+    r = next(iter(c.rows.values()))
+    address = int(r["offset"], 16)
+    f1 = {"facts": {"F1": {"class": "invalid_encoding"}}}
+    for name, vs in _g2_votes_variants():
+        for isa in ({}, f1, dict(f1, unobserved={"F1": "late failure"})):
+            for vendor in (None, "intel", "amd"):
+                s = cf.summarize_votes(vs, address)            # (no raise on any variant: r2 D2)
+                assert cf.row_verdicts(r, s, cf.Index([], True), isa, vendor) == \
+                    ref.row_verdicts(r, vs, cf.Index([], True), isa, vendor), (name, isa, vendor)
+    invalid = [v for n, v in _g2_votes_variants() if n == "all-invalid"][0]
+    assert cf.vote_form(cf.summarize_votes(invalid, address), f1) == ("invalid", False)
+    assert cf.vote_form(cf.summarize_votes(invalid, address), dict(f1, unobserved={"F1": "x"})) is cf.MISS
+    assert cf.summarize_votes([], address) is cf.EMPTY
+
+
+def test_g2a_cost_crosscheck_switch(monkeypatch):
+    monkeypatch.setenv("TDO_V2_G2A_COST_CROSSCHECK", "1")
+    c = _g2_collect([_g2_golden(), _g2_jrcxz(), ("f1", *_g2_golden()[1:])])
+    assert c.crosscheck and c.crosschecked == 7 and not c.checked

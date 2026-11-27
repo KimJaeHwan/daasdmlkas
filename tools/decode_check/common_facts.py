@@ -6,6 +6,7 @@ from bisect import bisect_left
 from collections import Counter, defaultdict
 import hashlib
 import json
+from typing import NamedTuple
 
 import compare
 import decoders
@@ -13,8 +14,10 @@ import lifting
 
 
 SCHEMA = "tbr-common-facts-1"
-VERDICT_SCHEMA = "tbr-common-facts-verdicts-1"
-RULE_VERSION = "g2a-3"
+VERDICT_SCHEMA = "tbr-common-facts-verdicts-1"    # (-4 block, read only, with rule "g2a-3")
+VERDICT_SCHEMA2 = "tbr-common-facts-verdicts-2"   # (-5 block: interned unit sets, design_tbr_g2a_cost r1 C3)
+FACTS_RULE = "g2a-3"     # the facts file's producer.rule (the -5 compaction leaves the facts bytes unchanged)
+VERDICT_RULE = "g2a-4"   # the -5 block and the report header (design_tbr_g2a_cost r2 D3)
 PREMISE = "image-code-unmodified-at-runtime"
 VENDORS = ("intel", "amd")
 CALLS = {"CALL", "CALLIND"}
@@ -622,24 +625,85 @@ def votes(ballot, result, vendor=None):
     return out
 
 
+class VoteSummary(NamedTuple):
+    """The voter values G2a reads after collection (design_tbr_g2a_cost r1 C1, r2 D2). ``None`` is ABSENT: no
+    common value (port: Option); none of these values can be JSON null where it is read."""
+    empty: bool
+    all_invalid: bool
+    any_not_ok: bool
+    ok_form: tuple | None
+    length: int | None
+    a7_width: int | None
+    a7_bits: int | None
+    a11b: int | None
+    a5: int | None
+    mnemonic: str | None
+    address_bits: int | None
+
+
+ABSENT = None
+EMPTY = VoteSummary(True, False, False, None, None, None, None, None, None, None, None)
+
+
+def _form(v):
+    if v.flow == "ud":
+        return ("ud2", False) if v.mnemonic.lower() == "ud2" else MISS
+    if v.flow not in ("none", "call_near", "jmp_near", "ret_near", "jcc", "xbegin", "int_n",
+                      "int3", "int1", "syscall", "sysenter", "hlt", "iret", "ret_far", "call_far", "jmp_far"):
+        return MISS
+    return v.flow, bool(v.indirect) if v.flow in ("jmp_near", "call_near") else False
+
+
+def _agreed(values):
+    x = common(values)
+    return ABSENT if x is MISS else x
+
+
+def _val(x):
+    return MISS if x is ABSENT else x
+
+
+def summarize_votes(vs, address):
+    """A pure function of the accepted votes and the row address. Voter values are read only when every vote is
+    ok (the only case where G2a consumes them), so no new exception site exists (r2 D2)."""
+    vs = list(vs)
+    if not vs:
+        return EMPTY
+    all_invalid = all(v.status == "invalid" for v in vs)
+    any_not_ok = any(v.status != "ok" for v in vs)
+    n = independent_length(vs)
+    if any_not_ok:
+        return VoteSummary(False, all_invalid, True, ABSENT, ABSENT if n is MISS else n,
+                           ABSENT, ABSENT, ABSENT, ABSENT, ABSENT, ABSENT)
+    vals = [compare.voter_values(v, address) for v in vs]
+    a7 = [x.get("a7") for x in vals]
+    a7w = a7b = ABSENT
+    if all(t is not None for t in a7):
+        a7w, a7b = _agreed(t[0] for t in a7), _agreed(t[1] for t in a7)
+    a11 = [x.get("a11b") for x in vals]
+    a11b = _agreed(a11) if all(t is not None for t in a11) else ABSENT
+    a5 = ABSENT
+    if all(v.target_derivation == "decoder" for v in vs):
+        d = _agreed(x.get("a5") for x in vals)
+        a5 = d if type(d) is int else ABSENT
+    return VoteSummary(False, False, False, _agreed(map(_form, vs)), ABSENT if n is MISS else n, a7w, a7b, a11b,
+                       a5, _agreed(map(mnemonic, vs)), _agreed(v.address_bits for v in vs))
+
+
+def as_summary(vs, address):
+    return vs if isinstance(vs, VoteSummary) else summarize_votes(vs, address)
+
+
 def vote_form(vs, isa):
-    if vs and all(v.status == "invalid" for v in vs):
+    s = vs if isinstance(vs, VoteSummary) else summarize_votes(vs, 0)
+    if s.all_invalid:
         if (isa.get("facts", {}).get("F1", {}).get("class") == "invalid_encoding"
                 and "F1" not in isa.get("unobserved", {})):
             return "invalid", False
         return MISS
-    if any(v.status != "ok" for v in vs):
+    if s.any_not_ok:
         return MISS
-
-    def form(v):
-        if v.flow == "ud":
-            return ("ud2", False) if v.mnemonic.lower() == "ud2" else MISS
-        if v.flow not in ("none", "call_near", "jmp_near", "ret_near", "jcc", "xbegin", "int_n",
-                          "int3", "int1", "syscall", "sysenter", "hlt", "iret", "ret_far", "call_far", "jmp_far"):
-            return MISS
-        return v.flow, bool(v.indirect) if v.flow in ("jmp_near", "call_near") else False
-
-    return common(map(form, vs))
+    return _val(s.ok_form)
 
 
 def mnemonic(d):
@@ -717,6 +781,7 @@ def _compare_present_fields(r, vs, index, isa, vendor=None):
     def excluded(path, x):
         add(path, "n" if x is None or x is MISS or unknown(x) else "x")
 
+    vs = as_summary(vs, f["address"])
     form = vote_form(vs, isa)
     path = "bytes" if vendor else "bytes.range"
     if form is MISS:
@@ -726,7 +791,7 @@ def _compare_present_fields(r, vs, index, isa, vendor=None):
             for p in ("kind", "exception_basis", "condition", "target_auth", "op_keys"):
                 add(stem + p, "?")
         return units
-    length = independent_length(vs)
+    length = _val(vs.length)
     cmp("length", m.get("length") if m.get("length") is not None else MISS, length)
     cmp(path, m.get("bytes", MISS), interval(f, length) if length is not MISS else MISS)
     flow = form[0]
@@ -764,8 +829,7 @@ def _compare_present_fields(r, vs, index, isa, vendor=None):
         elif source == "sequential" and length is not MISS:
             expected = next_addr(f, length)
         elif source == "encoded_target":
-            dest = common(compare.voter_values(v, f["address"]).get("a5") if v.target_derivation == "decoder"
-                          else MISS for v in vs)
+            dest = _val(vs.a5)
             if type(dest) is int:
                 expected = addr(f["space"], dest)
         elif source == "os_return" and length is not MISS and flow in ("int_n", "int3", "int1", "syscall"):
@@ -798,13 +862,13 @@ def _compare_present_fields(r, vs, index, isa, vendor=None):
             add(cp, "c")
             cmp(cp + ".taken_when", sub(condition, "taken_when"), "true")
             test = sub(condition, "test")
-            name = common(mnemonic(v) for v in vs)
+            name = _val(vs.mnemonic)
             if name in CC:
                 actual = test if not isinstance(test, dict) or unknown(test) else test.get("flags", False)
                 cmp(cp + ".test", actual, name)
                 add(cp + ".test.inputs", "u")
             elif name in ("jrcxz", "jecxz", "loop"):
-                width = common(v.address_bits for v in vs)
+                width = _val(vs.address_bits)
                 key = "nonzero" if name == "loop" else "zero"
                 val = sub(test, key)
                 if val is MISS and isinstance(test, dict) and not unknown(test):
@@ -846,9 +910,8 @@ def _compare_present_fields(r, vs, index, isa, vendor=None):
     elif not isinstance(link, dict) or unknown(link):
         add(lp, "x" if link is None else "u")
     else:
-        a7 = [compare.voter_values(v, f["address"])["a7"] for v in vs]
-        width, bits = (common(tup[j] for tup in a7) for j in (0, 1))
-        size = common(compare.voter_values(v, f["address"])["a11b"] for v in vs)
+        width, bits = _val(vs.a7_width), _val(vs.a7_bits)
+        size = _val(vs.a11b)
         cmp(lp + ".value.width", sub(link, "value", "width"),
             width if size is not MISS and width == 8 * size else MISS)
         cmp(lp + ".value.bits", sub(link, "value", "bits"),
@@ -866,12 +929,13 @@ def _compare_present_fields(r, vs, index, isa, vendor=None):
 
 
 def row_state(units):
-    states = {u["code"] for u in units}
+    states = {u["code"] if isinstance(u, dict) else u[1] for u in units}
     return "x" if "x" in states else "u" if states & {"?", "u"} or "c" not in states else "c"
 
 
 def verdict_block(doc, units):
-    return dict(schema=VERDICT_SCHEMA, rule_version=RULE_VERSION, facts_sha256=digest(doc),
+    """The -4 block (tbr-common-facts-verdicts-1, rule g2a-3): kept for the retained -4 reader and its tests."""
+    return dict(schema=VERDICT_SCHEMA, rule_version="g2a-3", facts_sha256=digest(doc),
                 row_set_sha256=row_set_digest(doc["rows"]),
                 rows=[dict(ref(r), units=units[rr(r)], state=row_state(units[rr(r)])) for r in doc["rows"]])
 
@@ -881,6 +945,20 @@ def denominators(units):
     for row in units.values():
         for u in row:
             counts[u["path"]][u["code"]] += 1
+    return _rates(counts)
+
+
+def denominators_of_sets(sets, row_set):
+    """Same result as denominators() over the expanded rows: a set used by N rows counts N times (r1 C2)."""
+    uses = Counter(row_set.values())
+    counts = defaultdict(Counter)
+    for sid, units in enumerate(sets):
+        for u in units:
+            counts[FIELD_PATHS[u[0]]][u[1]] += uses[sid]
+    return _rates(counts)
+
+
+def _rates(counts):
     out = {}
     for path, c in sorted(counts.items()):
         n = c["c"] + c["u"] + c["x"]
@@ -1183,6 +1261,7 @@ def projection(r, f, regs, vendor=None):
 
 
 def row_verdicts(r, vs, index, isa, vendor=None):
+    vs = as_summary(vs, int(r["offset"], 16))
     form = vote_form(vs, isa)
     # The current F3 records decoded flow. It has no execution-path observation.
     structural_isa = dict(
@@ -1250,3 +1329,152 @@ def row_verdicts(r, vs, index, isa, vendor=None):
                        and u.get("edge") == dict(zip(EC, key)) for u in units):
                     units.append(unit(prefix + "edges.lands_on", "x", key))
     return units
+
+
+# -- cost compaction (design_tbr_g2a_cost r1 C2-C4, r2 D1-D4) ----------------------------------------------------
+
+_EDGE_FIELDS = ("edges", "edges.to", "edges.lands_on", "edges.lands_on.class", "edges.lands_on.starts",
+                "edges.lands_on.inside", "edges.lands_on.mapping", "edges.lands_on.import")
+_OP_NAMES = ("transfer", "target", "condition", "auth", "link", "sp_adjust", "setup", "transient", "persistent")
+FIELD_PATHS = tuple(
+    ["length", "bytes.range"]
+    + ["transfer." + p for p in (("kind", "exception_basis") + _EDGE_FIELDS + ("condition",)
+                                 + tuple("condition." + f for f in PRED_FIELDS) + ("target_auth", "op_keys")
+                                 + tuple("op_keys." + n for n in _OP_NAMES)
+                                 + ("op_keys.encoding_only", "op_keys.entry_ordinal", "target_value", "link_write")
+                                 + tuple("link_write." + f for f in LINK_FIELDS))]
+    + [f"vendor_views.{v}.{p}" for v in VENDORS
+       for p in (("length", "bytes") + _EDGE_FIELDS + ("target_value", "link_write")
+                 + tuple("link_write." + f for f in LINK_FIELDS))])
+PATH_ID = {p: i for i, p in enumerate(FIELD_PATHS)}
+CODES = ("c", "x", "u", "n", "?")
+
+
+def to_unit(u):
+    """A unit dict (row_verdicts' output) as an immutable value: (path_id, code, edge | None, op | None) with
+    edge = (when, source, requires) and op = (ordinal, opcode, (id, observation) | None)."""
+    edge = triple(u["edge"]) if "edge" in u else None
+    op = None
+    if "op" in u:
+        o = u["op"]
+        op = (o["ordinal"], o["opcode"], rr(o["row"]) if "row" in o else None)
+    return PATH_ID[u["path"]], u["code"], edge, op
+
+
+def from_unit(x):
+    pid, state, edge, op = x
+    out = {"path": FIELD_PATHS[pid], "code": state}
+    if edge is not None:
+        out["edge"] = dict(zip(EC, edge))
+    if op is not None:
+        out["op"] = {"ordinal": op[0], "opcode": op[1]}
+        if op[2] is not None:
+            out["op"]["row"] = {"id": op[2][0], "observation": op[2][1]}
+    return out
+
+
+def unit_json(x):
+    pid, state, edge, op = x
+    if op is not None:
+        o = {"ordinal": op[0], "opcode": op[1]}
+        if op[2] is not None:
+            o["row"] = {"id": op[2][0], "observation": op[2][1]}
+        return [pid, state, None, o]
+    return [pid, state, list(edge)] if edge is not None else [pid, state]
+
+
+def unit_from_json(x):
+    """Structural check of one -5 unit (r1 C3 reader, structural); raises ValueError."""
+    if not isinstance(x, list) or len(x) not in (2, 3, 4):
+        raise ValueError("unit arity")
+    pid, state = x[0], x[1]
+    if type(pid) is not int or not 0 <= pid < len(FIELD_PATHS) or not isinstance(state, str) or state not in CODES:
+        raise ValueError("unit path id or code")
+    edge = op = None
+    if len(x) == 3:
+        e = x[2]
+        if (not isinstance(e, list) or len(e) != 3
+                or not all((v is None or isinstance(v, str)) and v in order for v, order in zip(e, ORDERS))):
+            raise ValueError("unit edge")
+        edge = tuple(e)
+    elif len(x) == 4:
+        o = x[3]
+        if x[2] is not None or not isinstance(o, dict) or set(o) not in ({"ordinal", "opcode"},
+                                                                         {"row", "ordinal", "opcode"}):
+            raise ValueError("unit op slot")
+        if type(o["ordinal"]) is not int or o["ordinal"] < 0 or not isinstance(o["opcode"], str) or not o["opcode"]:
+            raise ValueError("unit op ordinal or opcode")
+        row = None
+        if "row" in o:
+            w = o["row"]
+            if (not isinstance(w, dict) or set(w) != {"id", "observation"}
+                    or not all(isinstance(v, str) and v for v in w.values())):
+                raise ValueError("unit op row")
+            row = rr(w)
+        op = (o["ordinal"], o["opcode"], row)
+    return pid, state, edge, op
+
+
+def block_units(block):
+    """Per verdict row, its units in dict form, for a -4 or a -5 block (-5 sets are expanded once)."""
+    if block.get("schema") == VERDICT_SCHEMA2:
+        sets = [[from_unit(unit_from_json(x)) for x in s] for s in block["unit_sets"]]
+        return lambda vr: sets[vr["set"]]
+    return lambda vr: vr["units"]
+
+
+def verdict_block5(doc, facts_sha256, sets, row_set):
+    """-5 block (tbr-common-facts-verdicts-2, rule g2a-4): the sets the rows use, numbered by first use in the
+    document's row order (r1 C3); a set no row uses is not written."""
+    number, used = {}, []
+    for r in doc["rows"]:
+        sid = row_set[rr(r)]
+        if sid not in number:
+            number[sid] = len(used)
+            used.append(sets[sid])
+    states = [row_state(s) for s in used]
+    return dict(schema=VERDICT_SCHEMA2, rule_version=VERDICT_RULE, facts_sha256=facts_sha256,
+                row_set_sha256=row_set_digest(doc["rows"]), field_paths=list(FIELD_PATHS),
+                unit_sets=[[unit_json(x) for x in s] for s in used],
+                rows=[dict(ref(r), set=number[row_set[rr(r)]], state=states[number[row_set[rr(r)]]])
+                      for r in doc["rows"]])
+
+
+def expand_block5(block):
+    """The -4 rows a -5 block stands for (equivalence checks, design r1 E1)."""
+    units = block_units(block)
+    return [dict(id=vr["id"], observation=vr["observation"], units=units(vr), state=vr["state"])
+            for vr in block["rows"]]
+
+
+def _chunks(doc, stream_key):
+    yield b"{"
+    for i, key in enumerate(sorted(doc)):
+        yield (b"," if i else b"") + canonical(key) + b":"
+        if key == stream_key and isinstance(doc[key], list):
+            yield b"["
+            for j, item in enumerate(doc[key]):
+                yield (b"," if j else b"") + canonical(item)
+            yield b"]"
+        else:
+            yield canonical(doc[key])
+    yield b"}"
+
+
+def streamed_digest(doc, stream_key="rows"):
+    """== digest(doc), without building canonical(doc) as one object (r1 C4)."""
+    h = hashlib.sha256()
+    for chunk in _chunks(doc, stream_key):
+        h.update(chunk)
+    return h.hexdigest()
+
+
+def write_canonical(path, doc, stream_key="rows"):
+    """Writes canonical(doc) + LF chunk by chunk; returns SHA256(canonical(doc)) (the LF excluded, r2 D4)."""
+    h = hashlib.sha256()
+    with open(path, "wb") as out:
+        for chunk in _chunks(doc, stream_key):
+            h.update(chunk)
+            out.write(chunk)
+        out.write(b"\n")
+    return h.hexdigest()
