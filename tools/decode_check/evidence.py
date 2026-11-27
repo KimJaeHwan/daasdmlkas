@@ -1011,6 +1011,9 @@ def bind_common_facts(document, facts_document, *, bundle, allowlist, observatio
         else:
             parts = short.split(".")
         actual = cf.sub(obj, *parts)
+        # A parent presence check can succeed while a child's value is opaque.
+        if state == "c" and isinstance(actual, dict) and "op_output" in actual:
+            raise Rejected("confirmed opaque op_output: " + path)
         if state == "c" and (actual is cf.MISS or cf.unknown(actual)):
             raise Rejected("confirmed absent or unobserved claim: " + path)
 

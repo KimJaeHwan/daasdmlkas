@@ -4354,3 +4354,107 @@ def test_g2a_round2_producer_abstention_is_unobserved():
     r["transfer"]["kind"] = "indirect"
     units = cf.row_verdicts(r, cf.votes(entry[3], entry[4], "intel"), cf.Index([], True), {})
     assert _g2_code(units, "transfer.kind") == "x"
+
+
+def _g2_jrcxz():
+    import decoders
+    import lifting
+
+    data = bytes.fromhex("e3fe")
+    f = _jcc(len(data), START, JRCXZ)
+    ballot = {
+        vendor: tuple(
+            decoders.Decoded(
+                voter=name, version="fixture", amd=(vendor == "amd"), status="ok",
+                length=2, flow="jcc", mnemonic="jrcxz", counter=True, address_bits=64,
+                target=START, target_ip_bits=64, encoded_disp_bits=8,
+                target_derivation="decoder",
+            )
+            for name in names
+        )
+        for vendor, names in (("intel", decoders.INTEL_VOTERS), ("amd", decoders.AMD_VOTERS))
+    }
+    result = {"window": {"verified": len(data), "relocations": []},
+              "attributes": {"a2": {"state": "applied", "value": len(data)}}}
+    return "f0", f, lifting.identify(f), ballot, result, data
+
+
+def test_g2a_round3_opaque_op_output_binding(monkeypatch):
+    from copy import deepcopy
+
+    import common_facts as cf
+    import evidence
+
+    # Model a producer that supplies only the reaching definition for the predicate.
+    def opaque_predicate(f, i, b, prefix):
+        return cf.value(f, f["ops"][i]["inputs"][1], i)
+
+    monkeypatch.setattr(cf, "predicate", opaque_predicate)
+    c = _g2_collect([_g2_jrcxz()])
+    k, r = next(iter(c.rows.items()))
+    path = "transfer.condition.test"
+    assert r["transfer"]["condition"]["test"] == {"op_output": {"ordinal": 0, "opcode": "INT_EQUAL"}}
+    assert _g2_code(c.units[k], path) == "u"
+
+    doc, ev, args = _g2_binding(c)
+    query = dict(row=cf.ref(r), path=path)
+    lookup = evidence.bind_common_facts(ev, doc, **args)
+    assert lookup(query) == "unobserved"
+    assert lookup(dict(query, path="transfer.condition")) == "confirmed"
+
+    bad = deepcopy(ev)
+    vr, = bad["common_facts"]["rows"]
+    i, = [i for i, u in enumerate(vr["units"]) if u["path"] == path]
+    vr["units"][i] = cf.unit(path, "c")
+    vr["state"] = cf.row_state(vr["units"])
+    with pytest.raises(evidence.Rejected, match="confirmed opaque op_output"):
+        evidence.bind_common_facts(bad, doc, **args)
+
+
+@pytest.mark.parametrize("fixture,parent,roles", [
+    (_g2_golden, "link_write", ("DIRECT",)),
+    (_g2_jrcxz, "condition", ("TAKEN", "NEXT")),
+], ids=["66e8-call", "jrcxz"])
+def test_g2a_round3_collector_abstention(fixture, parent, roles):
+    import common_facts as cf
+
+    fid, f, _, ballot, result, data = fixture()
+    c = _g2_collect([(fid, f, None, ballot, result, data)])
+    k, r = next(iter(c.rows.items()))
+    t = r["transfer"]
+    assert t["kind"] == "unknown" and t["edges"] == []
+    assert t["link_write"] is None and t["condition"] is None
+    units = c.units[k]
+    assert _g2_code(units, "transfer.kind") == "u"
+    assert _g2_code(units, "transfer." + parent) == "u"
+    for role in roles:
+        assert _g2_code(units, "transfer.edges", getattr(cf, role)) == "u"
+    assert cf.row_state(units) == "u"
+
+
+def test_g2a_round3_abstention_preserves_length_contradiction():
+    import common_facts as cf
+
+    fid, f, _, ballot, result, data = _g2_jrcxz()
+    f = dict(f, length=3, fallthrough=START + 3)
+    c = _g2_collect([(fid, f, None, ballot, result, data)])
+    units, = c.units.values()
+    assert _g2_code(units, "transfer.condition") == "u"
+    assert _g2_code(units, "length") == "x"
+    assert cf.row_state(units) == "x"
+
+
+def test_g2a_round3_trap_return_input_not_applicable():
+    import common_facts as cf
+
+    f = _row(2, [_co(1, _c(0x29, 4)), _op("RETURN", [_r(RAX_)])], fallthrough=False)
+    fid = "f0"
+    r = dict(id=cf.identity(f, fid)[0], observation=fid,
+             transfer=dict(kind="trap", target_value=None,
+                           op_keys=dict(transfer=cf.opref(f["ops"], 0))))
+    fn = {"function_id": fid, "rows": [f], "tails": {}}
+    checks = cf.input_checks(fn, {cf.identity(f, fid): r})
+    assert [c["fields"] for c in checks] == [{"transfer": "n", "target_value": "n"}]
+    r["transfer"]["kind"] = "return"
+    r["transfer"]["op_keys"]["transfer"] = cf.opref(f["ops"], 1)
+    assert cf.input_checks(fn, {cf.identity(f, fid): r})[0]["fields"]["transfer"] == "c"

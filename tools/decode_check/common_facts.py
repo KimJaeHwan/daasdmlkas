@@ -1018,8 +1018,13 @@ def input_checks(fn, rows):
                 a = op["inputs"]
                 want, _ = value(f, a[0] if len(a) == 1 else None, i)
                 fields = {
-                    "target_value": "u" if unknown(want) else code(t.get("target_value", MISS), want)
+                    "transfer": code(sub(t, "op_keys", "transfer"), ref_op),
+                    "target_value": "u" if unknown(want) else code(t.get("target_value", MISS), want),
                 }
+                if t.get("kind") == "trap":
+                    # A trap row's transfer op is its userop; a RETURN after it is not the row's transfer and
+                    # carries no target claim, so neither input comparison applies.
+                    fields = {"transfer": "n", "target_value": "n"}
             elif tail and tail["kind"] in ("branch", "cbranch"):
                 destinations = {DIRECT: tail["target"]}
                 if tail["kind"] == "cbranch":
@@ -1133,7 +1138,9 @@ def derive_row(f, lift, fid, regs, data=b"", split=False):
             val["width"] = U("unsupported near-call store width")
         else:
             if not slot_ok:
-                mem["slot_offset"] = link["sp_delta"] = U("adjustment and stored width disagree")
+                reason = "adjustment and stored width disagree"
+                mem["slot_offset"] = U(reason)
+                link["sp_delta"] = U(reason)
             if not unknown(cont) and isinstance(val["bits"], str) and not bits_ok:
                 val["bits"] = U("stored bits disagree with architectural continuation")
 
@@ -1202,15 +1209,19 @@ def row_verdicts(r, vs, index, isa, vendor=None):
         return units
 
     t = r["transfer"]
+    flow = form[0]
     if (not vendor and t.get("kind") == "unknown" and t.get("edges") == []
             and schema(form)[0] != "unknown"):
-        # The producer stated no kind and no edges: an abstention, not a decided different value (r5 s8).
+        absent = {"transfer.kind"}
+        if flow == "call_near" and link is None:
+            absent.add("transfer.link_write")
+        if flow == "jcc" and pred is None:
+            absent.add("transfer.condition")
         for u in units:
-            if u["code"] == "x" and (u["path"] == "transfer.kind"
-                                    or u["path"] == "transfer.edges" and "edge" in u):
+            missing_role = u["path"] == "transfer.edges" and "edge" in u
+            if u["code"] == "x" and (u["path"] in absent or missing_role):
                 u["code"] = "u"
 
-    flow = form[0]
     if flow == "call_near":
         fill("link_write", LINK_FIELDS, "u")
     elif link is MISS or link is None or unknown(link):

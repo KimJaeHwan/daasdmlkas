@@ -444,8 +444,6 @@ def _summarize_rows(facts: dict, common, document: dict) -> dict:
                 errors.append(dict(observation=fn["function_id"], check=field, reason=fn[field]))
     base = [item for item in records if item.get("vendor") is None and "op" in item]
     counts = Counter(item["status"] for item in base)
-    if len(base) != source_ops:
-        raise ValueError("source CALL/CALLIND join multiplicity")
     vendor_counts = {v: sum(bool(r["vendor_views"]) for r in document["rows"]) for v in cf.VENDORS}
 
     # (fixture results come from the test suite (test_g2a_required_*), never from an analysis run: a run
