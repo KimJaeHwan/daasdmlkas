@@ -362,10 +362,11 @@ def _resolve_graph(normalized):
     read_nodes, resolved_reads = {}, None
     if local_reads and ssa is not None:
         resolved_reads = [ssa.row(read) for read in local_reads["plan"]["reads"]]
-        if len(local_reads["effect_nodes"]) != len(resolved_reads):
-            raise Ambiguous("local-read effect nodes and plan reads do not pair")
-        for index, node in enumerate(local_reads["effect_nodes"]):
-            read_nodes[node] = short(resolved_reads[index])
+        # (one effect node per plan read when they pair; otherwise the local-read nodes keep their elided hash and
+        # take the structural coordinate below)
+        if len(local_reads["effect_nodes"]) == len(resolved_reads):
+            for index, node in enumerate(local_reads["effect_nodes"]):
+                read_nodes[node] = short(resolved_reads[index])
 
     # guarded image reads: candidate_nodes[k] <-> the k-th candidate of plan.reads (flattened); every node sharing
     # that candidate node's semantic_identity (its alternative / source nodes) takes the candidate as coordinate
@@ -396,7 +397,7 @@ def _resolve_graph(normalized):
         match = NODE_KEY_INDEX.search(key)
         if match and ssa is not None:
             key = key[:match.start()] + ":definition:" + ssa.ref("definitions", int(match.group(1)))["to"]
-        key = re.sub(r"(?<![A-Za-z]:)[0-9a-f]{40,64}", "<h>", key)
+        key = re.sub(r"(?<![0-9a-f])[0-9a-f]{40,64}(?![0-9a-f])", "<h>", key)   # (whole hashes only)
         return {**node, "key": key}
 
     nodes = [node_form(node, index) for index, node in enumerate(graph["nodes"])]
