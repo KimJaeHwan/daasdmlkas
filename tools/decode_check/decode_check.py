@@ -314,7 +314,8 @@ class CommonFactsCollector:
 
         x86 = facts.get("isa") == "x86-64"
         self.code_rows[k] = (x86, (result or {}).get("window", {}).get("verified", 0) if result else 0,
-                             code_facts.trap_outcome(result, ballot, window, self.global_reason) if x86 else None)
+                             code_facts.trap_outcome(result, ballot, window, self.global_reason) if x86 else None,
+                             code_facts.decoder_flows(ballot) if x86 else None)
         # Retain only the comparison inputs: per vendor view a vote summary (r1 C1); the ballots themselves are
         # not kept. Non-x86 rows and rows without accepted votes share the EMPTY summary (r2 D2).
         accepted = {v: cf.votes(ballot, result, v) for v in (None, *cf.VENDORS)}
@@ -698,12 +699,16 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
         import code_facts
 
         # G2b: program.code (regions, verified windows, sites, survey) bound to the document's row order
-        _, names_sha256 = code_facts.name_table()
+        names, names_sha256 = code_facts.name_table()
+        file_facts = code_facts.file_facts(mapping, original)
         spaces = sorted({r["space"] for r in doc["rows"]})
-        binder = code_facts.CodeBinder(code_facts.file_facts(mapping, original), base,
+        binder = code_facts.CodeBinder(file_facts, base,
                                        spaces[0] if len(spaces) == 1 else None, doc["rows"], common.code_rows,
                                        cf.row_set_digest(doc["rows"]))
-        doc["program"]["code"] = binder.program_code(names_sha256)
+        imports = code_facts.ImportSites(binder, common.rows, common.raw,
+                                         {k: row[3] for k, row in common.code_rows.items()}, file_facts, names,
+                                         complete, mapping, original)
+        doc["program"]["code"] = binder.program_code(names_sha256, imports)
         # (r1 C4: the facts file is streamed, byte-identical to canonical(doc) + LF; its digest excludes the LF)
         common_block = cf.verdict_block5(doc, cf.write_canonical(common_facts_out, doc), common.unit_sets,
                                          common.row_set)

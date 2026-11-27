@@ -796,7 +796,7 @@ class CodeBinder:
     def __init__(self, ff, base, space, rows, code_rows, row_set_sha256):
         self.ff, self.base, self.space = ff, base, space
         self.rows = rows                                   # facts rows in document order
-        self.code_rows = code_rows                         # (id, observation) -> (x86, verified, trap outcome)
+        self.code_rows = code_rows                         # (id, observation) -> (x86, verified, trap, flows)
         self.row_set_sha256 = row_set_sha256
         self.index = {(r["id"], r["observation"]): i for i, r in enumerate(rows)}
         self.va = [int(r["offset"], 16) for r in rows]
@@ -815,8 +815,8 @@ class CodeBinder:
             if r.role == "code":
                 item.update(executable=r.executable, writable=r.writable)
             regions.append(item)
-        windows = sorted((self.index[k], self.va[self.index[k]], self.va[self.index[k]] + verified)
-                         for k, (_, verified, _) in self.code_rows.items() if verified)
+        windows = sorted((self.index[k], self.va[self.index[k]], self.va[self.index[k]] + row[1])
+                         for k, row in self.code_rows.items() if row[1])
         lists = [[] for _ in regions]
         spans = [[] for _ in regions]
         # (sweep: windows by start, regions by start; only decided intervals take part, r2 E5)
@@ -847,8 +847,8 @@ class CodeBinder:
                                      "form": "compact" if compact else "explicit"}}
         if compact:
             lengths = [0] * len(self.rows)
-            for k, (_, verified, _) in self.code_rows.items():
-                lengths[self.index[k]] = verified
+            for k, row in self.code_rows.items():
+                lengths[self.index[k]] = row[1]
             out["verified_rule"] = {"per_row_window": self.row_set_sha256}
             out["verified_lengths"] = lengths
         code = [(self.base + r.start, self.base + r.end) for r in ff.code]
@@ -863,7 +863,8 @@ class CodeBinder:
 
     def traps(self):
         unresolved, syscall_rows = [], []
-        for k, (x86, _, outcome) in self.code_rows.items():
+        for k, row in self.code_rows.items():
+            x86, outcome = row[0], row[2]
             if not x86 or outcome is None:
                 continue
             i = self.index[k]
@@ -894,11 +895,15 @@ class CodeBinder:
                                       "ranges_examined": [], "unresolved": [],
                                       "unsupported": _groups(("G2C", {"row": i, "op": None}) for i in a64)})
 
-    def program_code(self, name_table_sha256):
+    def program_code(self, name_table_sha256, imports=None):
         out = {"premise": PREMISE, "name_table_sha256": name_table_sha256,
                "file": {"format": self.ff.format, "ok": self.ff.ok, "why": self.ff.why}}
         out.update(self.regions())
         self.traps()
+        if imports is not None:
+            sites, unresolved = imports.run()
+            self.sites.extend(sites)
+            self.coverage.extend(imports.coverage(unresolved))
         out["sites"] = sorted(self.sites, key=lambda s: (s["row"], s["kind"], -1 if s.get("op") is None else s["op"]))
         out["survey"] = self.coverage
         return out
@@ -914,8 +919,425 @@ def summary(code):
                               for c in code["survey"] if c[field_name]}
     forms = Counter(s["form"] if isinstance(s["form"], str) else "vendor_split" for s in code["sites"]
                     if s["kind"] == "trap_instruction")
+    routes = Counter(s["route"] for s in code["sites"] if "route" in s)
+    per_api = Counter((s["symbol"]["name"], "candidate") for s in code["sites"]
+                      if s["kind"] == "rwx_allocation_constant_args")
+    for c in code["survey"]:
+        if c["kind"] == "rwx_allocation_constant_args":
+            for g in c["unresolved"]:
+                if g["reason"] == "NO_RWX_REGISTER":
+                    per_api.update((i["api"], "NO_RWX_REGISTER") for i in g["items"])
     return {"rule": FACTS_RULE, "sites": dict(kinds), "trap_forms": dict(forms), **groups,
+            "import_routes": dict(routes), "rwx_per_api": {f"{a}/{b}": n for (a, b), n in sorted(per_api.items())},
             "regions": [{"name": r["name"], "role": r["role"], "verified_bytes": r["verified_bytes"]}
                         for r in code["regions"]],
             "rows_outside_code": len(code["rows_outside_code"]), "verified_encoding": code["verified_encoding"],
             "name_table_sha256": code["name_table_sha256"]}
+
+
+# -- import transfer sites and register values (r1 s4.2 / s4.3, r2 E3 / E4, r3 E3) --------------------------------
+
+GPR = {0x00: "RAX", 0x08: "RCX", 0x10: "RDX", 0x18: "RBX", 0x20: "RSP", 0x28: "RBP", 0x30: "RSI", 0x38: "RDI",
+       0x80: "R8", 0x88: "R9", 0x90: "R10", 0x98: "R11", 0xA0: "R12", 0xA8: "R13", 0xB0: "R14", 0xB8: "R15"}
+TRANSFER_OPS = {"CALL": "call", "CALLIND": "call", "BRANCH": "jump", "BRANCHIND": "jump", "CBRANCH": "jcc"}
+DECODER_FORMS = {"call_near": "call", "jmp_near": "jump", "jcc": "jcc"}
+RWX = {"pe": (0x40, 0x80), "elf": (7,)}
+ENDBR64 = b"\xf3\x0f\x1e\xfa"
+
+
+def decoder_flows(ballot):
+    """The flows of the required voters (Intel then AMD), or None when the ballot is not complete."""
+    if not _ballot_ok(ballot):
+        return None
+    return tuple(d.flow for d in sorted(ballot["intel"], key=lambda d: d.voter)) + \
+        tuple(d.flow for d in sorted(ballot["amd"], key=lambda d: d.voter))
+
+
+def _gpr(v):
+    """(offset of the 64-bit register, width in bits) of a REGISTER varnode inside a GPR, else None."""
+    if not v or v.get("kind") != "REGISTER":
+        return None
+    base = v["offset"] & ~7
+    if base in GPR and v["offset"] - base + v["size"] <= 8:
+        return base, v["offset"], v["size"]
+    return None
+
+
+def _overlaps(a, b):
+    return a["space"] == b["space"] and a["offset"] < b["offset"] + b["size"] and b["offset"] < a["offset"] + a["size"]
+
+
+class _Values:
+    """Register definitions along a linear path (r2 E4): constants survive until any overlapping write."""
+
+    def __init__(self):
+        self.defs = {}               # (space, offset, size) -> {"value", "width", "row", "op"}
+
+    def kill(self, out):
+        for key in [k for k in self.defs if _overlaps({"space": k[0], "offset": k[1], "size": k[2]}, out)]:
+            del self.defs[key]
+
+    def apply(self, row_index, ordinal, op):
+        out = op.get("output")
+        if not out:
+            return
+        key = (out["space"], out["offset"], out["size"])
+        ins = op.get("inputs") or []
+        value = None
+        if op["opcode"] == "COPY" and len(ins) == 1 and ins[0] and ins[0]["kind"] == "CONSTANT":
+            value = ins[0]["offset"] % (1 << (8 * out["size"]))
+        elif op["opcode"] in ("INT_XOR", "INT_SUB") and len(ins) == 2 and ins[0] and ins[1] and \
+                ins[0]["kind"] == "REGISTER" and ins[0] == ins[1] and ins[0]["size"] == out["size"]:
+            value = 0                                          # (xor r,r / sub r,r)
+        elif op["opcode"] == "INT_ZEXT" and len(ins) == 1 and ins[0] and ins[0]["kind"] == "REGISTER":
+            src = self.defs.get((ins[0]["space"], ins[0]["offset"], ins[0]["size"]))
+            if src is not None and src["row"] == row_index and src["op"] == ordinal - 1:
+                value = src["value"]                           # (mov r32, imm: COPY then ZEXT of that def)
+        self.kill(out)
+        if value is not None and out["kind"] == "REGISTER" and _gpr(out):
+            self.defs[key] = {"value": value, "width": 8 * out["size"], "row": row_index, "op": ordinal}
+
+
+class ImportSites:
+    """D4 / E3 / r3 E3 transfer sites through import slots, one hop through a slot-jump thunk, register values at
+    the source row entry, RWX candidates and the per-kind import coverage."""
+
+    def __init__(self, binder, derived, raw, flows, ff, kinds, complete, image=None, original=None):
+        self.b, self.derived, self.raw, self.flows, self.ff = binder, derived, raw, flows, ff
+        self.kind_of = {name: kind for kind, names in kinds.items() for name in names}
+        self.complete = complete
+        self.image, self.original = image, original
+        b = binder
+        self.keys = [None] * len(b.rows)
+        for k, i in b.index.items():
+            self.keys[i] = k
+        self.starts = {}                                  # (space, va) -> [row index]
+        for i, r in enumerate(b.rows):
+            self.starts.setdefault((r["space"], b.va[i]), []).append(i)
+        spans = sorted((r["space"], b.va[i], b.va[i] + r["length"], i) for i, r in enumerate(b.rows)
+                       if type(r["length"]) is int)
+        self.spans = spans
+        self.span_keys = [(s[0], s[1]) for s in spans]
+        # incoming edges per target VA (any source), and recorded landing pads
+        self.incoming = {}
+        for i, r in enumerate(b.rows):
+            edges = r["transfer"].get("edges")
+            for e in edges if isinstance(edges, list) else ():
+                to = e.get("to")
+                if isinstance(to, dict) and "offset" in to:
+                    self.incoming.setdefault((to["space"], int(to["offset"], 16)), []).append((i, e["source"]))
+        self.pads = set()
+        for f in raw.values():
+            for space, offset in f.get("recorded_landing_pads") or ():
+                self.pads.add((space, offset))
+
+    # -- rows and paths --
+    def _inside(self, space, va):
+        """Does some row (any length up to 15 bytes) cover ``va`` without starting there?"""
+        import bisect
+
+        at = bisect.bisect_right(self.span_keys, (space, va)) - 1
+        while at >= 0 and self.spans[at][0] == space and self.spans[at][1] > va - 16:
+            if self.spans[at][1] < va < self.spans[at][2]:
+                return True
+            at -= 1
+        return False
+
+    def _predecessor(self, i):
+        """The unique linear predecessor of row i (r2 E4), or None."""
+        b = self.b
+        r, k = b.rows[i], self.keys[i]
+        here = (r["space"], b.va[i])
+        if here in self.pads:
+            return None
+        # (one instruction exported in several observations is one source: count distinct source row ids)
+        sources = {(b.rows[j]["id"], source) for j, source in self.incoming.get(here, ())}
+        sequential = [j for j, source in self.incoming.get(here, ()) if source == "sequential"
+                      and b.rows[j]["observation"] == r["observation"] and b.rows[j]["view"] == r["view"]
+                      and type(b.rows[j]["length"]) is int and b.va[j] + b.rows[j]["length"] == b.va[i]]
+        if len(sources) != 1 or len(sequential) != 1:
+            return None                                    # (another entry, or no / several predecessors)
+        j = sequential[0]
+        pt = b.rows[j]["transfer"]
+        edges = pt.get("edges")
+        if pt.get("kind") != "none" or not isinstance(edges, list) or len(edges) != 1 or edges[0]["source"] != "sequential":
+            return None
+        if any(op["opcode"] in ("CALLOTHER",) for op in self.raw[self.keys[j]]["ops"]):
+            return None                                    # (an opaque userop stops the walk)
+        return j
+
+    def register_values(self, i):
+        """Register constants reaching the entry of row i along its linear path (holds_if linear entry)."""
+        if not self.complete:
+            return [], "INDEX_INCOMPLETE"
+        path, j = [], self._predecessor(i)
+        while j is not None and len(path) < 64:
+            path.append(j)
+            j = self._predecessor(j)
+        values = _Values()
+        for j in reversed(path):
+            for ordinal, op in enumerate(self.raw[self.keys[j]]["ops"]):
+                values.apply(j, ordinal, op)
+        out = []
+        for (space, offset, size), d in sorted(values.defs.items()):
+            base = offset & ~7
+            out.append({"register": {"name": GPR[base], "space": space, "offset": offset, "size": size},
+                        "value": {"constant": _hx(d["value"]), "width": d["width"]},
+                        "definition": {"row": d["row"], "op": d["op"]}, "use": {"row": i, "op": None},
+                        "path": sorted(path), "basis": "ghidra_pcode",
+                        "holds_if": [PREMISE, LINEAR_PREMISE]})
+        return out, None
+
+    # -- targets --
+    def _slot_name(self, slot_va):
+        coord = slot_va - self.b.base
+        item = self.ff.imports.get(coord)
+        if item is not None:
+            if self.ff.format == "elf" and not item.get("undefined", True):
+                return None, "SLOT_NOT_IMPORT"             # (the image's own definition: not an import site)
+            if item["name"].startswith("#"):
+                return item, "IMPORT_BY_ORDINAL"
+            return item, None
+        if coord in self.ff.slot_failures:
+            return None, self.ff.slot_failures[coord]
+        if self.ff.import_state == "absent":
+            return None, "NO_IMPORT_DIRECTORY"
+        if self.ff.import_state == "complete":
+            return None, "SLOT_NOT_IMPORT"
+        return None, "PARSER_UNSUPPORTED"
+
+    def _memory_slot(self, r):
+        """(slot VA, None) for an indirect transfer through one constant 64-bit memory slot, else (None, reason)."""
+        tv = r["transfer"].get("target_value")
+        if not isinstance(tv, dict) or "memory" not in tv:
+            return None, "COMPUTED_TARGET"
+        m = tv["memory"]
+        if m.get("segment_base") is not None:
+            return None, "SEGMENT_BASE"
+        if m.get("size") != 8:
+            return None, "POINTER_WIDTH"
+        if m.get("space") != r["space"]:
+            return None, "SPACE_MISMATCH"
+        a = m.get("address") or {}
+        if set(a) != {"constant", "width"} or a["width"] != 64:
+            return None, "COMPUTED_TARGET"
+        return int(a["constant"], 16), None
+
+    def _form(self, i, op):
+        flows = self.flows.get(self.keys[i])
+        form = TRANSFER_OPS[op["opcode"]]
+        if flows is None:
+            return form, None
+        decoded = {DECODER_FORMS.get(f) for f in flows}
+        if len(decoded) != 1:
+            return None, "VENDOR_VIEW_CONFLICT"
+        if decoded != {form}:
+            return None, "FORM_MISMATCH"
+        return form, None
+
+    def _endbr(self, i):
+        try:
+            raw, _ = runtime_read(self.image, self.original, self.b.va[i] - self.b.base, 4)
+        except (Unread, AttributeError):
+            return False
+        return raw == ENDBR64
+
+    def _stub_bytes(self, va):
+        """A slot-jump stub that is not an exported row (an ELF PLT entry, a PE import thunk), decoded from
+        file_runtime bytes: [endbr64] [bnd] jmp [rip+d32], confirmed by every voter (jmp_near, indirect, same
+        length). Returns ("slot", slot VA, path, basis) or None. (Implementation addition, flagged for review.)"""
+        import decoders
+
+        if self.image is None:
+            return None
+        try:
+            raw, basis = runtime_read(self.image, self.original, va - self.b.base, 11)
+        except Unread:
+            try:
+                raw, basis = runtime_read(self.image, self.original, va - self.b.base, 7)
+            except Unread:
+                return None
+        skip = 4 if raw.startswith(ENDBR64) else 0
+        jmp = raw[skip:]
+        prefix = 1 if jmp[:1] == b"\xf2" else 0
+        if jmp[prefix:prefix + 2] != b"\xff\x25" or len(jmp) < prefix + 6:
+            return None
+        length = prefix + 6
+        at = va + skip
+        ballot = decoders.ballot(raw[skip:skip + length], at)
+        votes = list(ballot.get("intel", ())) + list(ballot.get("amd", ()))
+        if not _ballot_ok(ballot) or any(d.status != "ok" or d.flow != "jmp_near" or not d.indirect
+                                         or d.length != length for d in votes):
+            return None
+        disp = int.from_bytes(jmp[prefix + 2:prefix + 6], "little", signed=True)
+        slot = (at + length + disp) % (1 << 64)
+        path = [{"stub": _hx(va), "length": skip + length, "file_runtime": basis["file_runtime"],
+                 "decoders": {"intel": ballot_digest(ballot["intel"]), "amd": ballot_digest(ballot["amd"])}}]
+        return ("slot", slot, path)
+
+    def _thunk(self, j):
+        """Interpret the row at a direct target: ("slot", slot VA, path) | ("negative",) | ("unresolved", reason)."""
+        b = self.b
+        r = b.rows[j]
+        t = r["transfer"]
+        path = [{"row": j, "op": None}]
+        if t.get("kind") == "none" and type(r["length"]) is int and self._endbr(j):
+            nxt = [n for n in self.starts.get((r["space"], b.va[j] + r["length"]), ())
+                   if b.rows[n]["observation"] == r["observation"] and b.rows[n]["view"] == r["view"]]
+            if len(nxt) != 1:
+                return ("unresolved", "ELF_STUB_UNSUPPORTED")
+            j, r, t = nxt[0], b.rows[nxt[0]], b.rows[nxt[0]]["transfer"]
+            path.append({"row": j, "op": None})
+        if t.get("kind") == "unknown":
+            return ("unresolved", "TARGET_LIFT_U")
+        op = t["op_keys"].get("transfer") if isinstance(t.get("op_keys"), dict) else None
+        if op and op["opcode"] == "BRANCHIND":
+            slot, why = self._memory_slot(r)
+            if slot is None:
+                return ("unresolved", why)
+            path[-1]["op"] = op["ordinal"]
+            return ("slot", slot, path)
+        if op and op["opcode"] == "BRANCH":
+            # (a direct jump chain: deterministic. Ending at a slot jump is a second hop -> MULTI_HOP; ending at
+            #  any other interpreted row proves the transfer is not an import transfer)
+            seen = {j}
+            for _ in range(8):
+                edges = t.get("edges") or []
+                to = [e.get("to") for e in edges if e["source"] == "encoded_target"]
+                if len(to) != 1 or not isinstance(to[0], dict) or "offset" not in to[0]:
+                    return ("unresolved", "TARGET_LIFT_U")
+                nxt = self.starts.get((to[0]["space"], int(to[0]["offset"], 16)), [])
+                if len({b.rows[n]["id"] for n in nxt}) != 1:
+                    return ("unresolved", "TARGET_OUTSIDE_ROWS" if not nxt else "VENDOR_VIEW_CONFLICT")
+                j = nxt[0]
+                if j in seen:
+                    return ("unresolved", "MULTI_HOP")
+                seen.add(j)
+                t = b.rows[j]["transfer"]
+                if t.get("kind") == "unknown":
+                    return ("unresolved", "TARGET_LIFT_U")
+                op = t["op_keys"].get("transfer") if isinstance(t.get("op_keys"), dict) else None
+                if op and op["opcode"] == "BRANCHIND":
+                    slot, _ = self._memory_slot(b.rows[j])
+                    return ("unresolved", "MULTI_HOP") if slot is not None else ("negative",)
+                if not (op and op["opcode"] == "BRANCH"):
+                    return ("negative",)
+            return ("unresolved", "MULTI_HOP")
+        return ("negative",)
+
+    def _direct(self, i, r, op, form):
+        edges = r["transfer"].get("edges") or []
+        role = ("taken", "encoded_target") if form == "jcc" else ("always", "encoded_target")
+        to = [e.get("to") for e in edges if (e["when"], e["source"]) == role]
+        if len(to) != 1 or not isinstance(to[0], dict) or "offset" not in to[0]:
+            return ("unresolved", "TARGET_LIFT_U")
+        space, va = to[0]["space"], int(to[0]["offset"], 16)
+        rows = self.starts.get((space, va), [])
+        ids = {self.b.rows[j]["id"] for j in rows}
+        if not rows:
+            if self._inside(space, va):
+                return ("unresolved", "TARGET_NOT_ROW_START")
+            stub = self._stub_bytes(va)
+            if stub is not None:
+                return stub
+            return ("unresolved", "TARGET_OUTSIDE_ROWS" if self.complete else "INDEX_INCOMPLETE")
+        if len(ids) != 1:
+            return ("unresolved", "VENDOR_VIEW_CONFLICT")
+        return self._thunk(rows[0])
+
+    def run(self):
+        b = self.b
+        sites, unresolved, thunk_rows = [], [], {}
+        rwx_values = RWX.get(self.ff.format, ())
+        for i, r in enumerate(b.rows):
+            k = self.keys[i]
+            x86, _, trap, _ = b.code_rows[k]
+            if not x86:
+                continue
+            f = self.raw[k]
+            t = r["transfer"]
+            flows = self.flows.get(k) or ()
+            decoded = any(DECODER_FORMS.get(fl) for fl in flows)
+            raw_ops = [n for n, op in enumerate(f["ops"]) if op["opcode"] in TRANSFER_OPS]
+            if t.get("kind") == "trap" or (trap and trap[0] == "site"):
+                continue                                   # (precedence 1: transfers inside a trap lift)
+            op = t["op_keys"].get("transfer") if isinstance(t.get("op_keys"), dict) else None
+            if op is None or op["opcode"] not in TRANSFER_OPS:
+                if decoded or (raw_ops and t.get("kind") == "unknown"):
+                    for n in raw_ops or [None]:
+                        unresolved.append(("TRANSFER_UNBOUND", {"row": i, "op": n}))
+                continue
+            form, why = self._form(i, op)
+            if form is None:
+                unresolved.append((why, {"row": i, "op": op["ordinal"]}))
+                continue
+            route = "direct_slot"
+            path = [{"row": i, "op": op["ordinal"]}]
+            if op["opcode"] in ("CALLIND", "BRANCHIND"):
+                slot, why = self._memory_slot(r)
+                if slot is None:
+                    unresolved.append((why, {"row": i, "op": op["ordinal"]}))
+                    continue
+            else:
+                target = self._direct(i, r, op, form)
+                if target[0] == "negative":
+                    continue
+                if target[0] == "unresolved":
+                    unresolved.append((target[1], {"row": i, "op": op["ordinal"]}))
+                    continue
+                _, slot, hop = target
+                route = "via_stub_bytes" if "stub" in hop[0] else "via_thunk"
+                path += hop
+            item, why = self._slot_name(slot)
+            if why is not None:
+                entry = {"row": i, "op": op["ordinal"]}
+                unresolved.append((why, entry))
+                continue
+            kind = self.kind_of.get(item["name"])
+            if kind is None:
+                continue                                   # (an identified import outside the table: negative)
+            if route == "via_thunk":
+                thunk_rows.setdefault(path[-1]["row"], 0)
+            values, why_values = self.register_values(i)
+            site = {"row": i, "op": op["ordinal"], "kind": kind, "form": form, "route": route,
+                    "symbol": {"name": item["name"], "dll": item.get("dll"), "slot": _hx(slot),
+                               "basis": dict(item["basis"], path=path, step="ghidra_pcode")},
+                    "arguments": [], "register_values": values,
+                    "holds_if": [PREMISE, IMPORT_PREMISE] + ([LINEAR_PREMISE] if values else [])}
+            if why_values:
+                site["register_values_reason"] = why_values
+            if kind == "rwx_allocation_constant_args":
+                hits = [v["register"]["name"] for v in values
+                        if v["value"]["width"] >= 32 and int(v["value"]["constant"], 16) in rwx_values]
+                if not hits:
+                    unresolved.append(("NO_RWX_REGISTER", {"row": i, "op": op["ordinal"], "api": item["name"]}))
+                    continue
+                site.update(candidate=True, rwx_registers=hits,
+                            protection_argument={"unobserved": "NO_ABI_BASIS"})
+            if kind == "dynamic_resolution":
+                site["requested_name"] = {"unobserved": "NO_ABI_BASIS"}
+            sites.append(site)
+        # thunk rows reached by a via_thunk site are counted once as thunk_row (r3 E3)
+        for s in sites:
+            if s["route"] == "direct_slot" and s["row"] in thunk_rows and s["form"] == "jump":
+                s["route"] = "thunk_row"
+        return sites, unresolved
+
+    def coverage(self, unresolved):
+        b = self.b
+        excluded = b._excluded(lambda row: not row[0], "NOT_X86")
+        examined = {"facts_rows": b.row_set_sha256, "excluded": excluded}
+        unsupported = []
+        if self.ff.import_state == "indeterminate":
+            unsupported = [{"reason": "PARSER_UNSUPPORTED", "items": [p for p in self.ff.import_problems]}]
+        groups = _groups(unresolved)
+        out = []
+        for kind in ("self_modify_import_call", "dynamic_resolution", "rwx_allocation_constant_args",
+                     "cache_maintenance", "dynamic_unwind_registration"):
+            mine = groups
+            if kind != "rwx_allocation_constant_args":
+                mine = [g for g in groups if g["reason"] != "NO_RWX_REGISTER"]
+            out.append({"kind": kind, "method": "import_transfer", "rows_examined": examined, "ranges_examined": [],
+                        "unsupported": unsupported, "unresolved": mine,
+                        "import_table": {"state": self.ff.import_state, "problems": self.ff.import_problems}})
+        return out

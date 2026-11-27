@@ -4934,3 +4934,62 @@ def test_g2b_trap_outcome_missing_inputs():
     partial = _g2b_votes("int3", 1)
     partial["amd"] = partial["amd"][:1]
     assert cf2.trap_outcome({"window": {"verified": 1}}, partial, b"\xcc") == ("unresolved", "BALLOT_MISSING")
+
+
+def _g2b_import_case(name="VirtualAlloc", landing=False, imports=True):
+    import code_facts as cf2
+    import common_facts as cf
+    import lifting
+
+    slot = START + 0x5000
+    r0 = dict(_row(6, [_op("COPY", [_c(0x40, 4)], _r(0x88, 4)), _op("INT_ZEXT", [_r(0x88, 4)], _r(0x88))]),
+              address=START, fallthrough=START + 6)
+    ops = [_op("LOAD", [_c(1), _c(slot)], _u(0x30))] + _push(START + 12) + [_op("CALLIND", [_u(0x30)])]
+    r1 = dict(_row(6, ops, flow=_flow("call_indirect")), address=START + 6, fallthrough=START + 12)
+    entries = [("f0", r0, lifting.identify(r0), None, None, b""), ("f0", r1, lifting.identify(r1), None, None, b"")]
+    if landing:
+        r2 = dict(_row(5, [_op("BRANCH", [_a(START + 6)])], fallthrough=False, flow=_flow("jmp_direct")),
+                  address=START + 0x100)
+        entries.append(("f1", r2, lifting.identify(r2), None, None, b""))
+    c = _g2_collect(entries)
+    doc = _g2_document(c)
+    base = 0x140000000
+    table = {slot - base: {"name": name, "dll": "kernel32.dll", "basis": {"pe_import": {"name": name}}}} if imports else {}
+    ff = cf2.FileFacts("pe", True, imports=table, import_state="complete")
+    binder = cf2.CodeBinder(ff, base, 1, doc["rows"], c.code_rows, cf.row_set_digest(doc["rows"]))
+    names, sha = cf2.name_table()
+    sites = cf2.ImportSites(binder, c.rows, c.raw, {k: row[3] for k, row in c.code_rows.items()}, ff, names, True)
+    code = binder.program_code(sha, sites)
+    unresolved = {g["reason"]: g["items"] for cov in code["survey"] if cov["kind"] == "rwx_allocation_constant_args"
+                  for g in cov["unresolved"]}
+    return [s for s in code["sites"] if s["kind"] != "trap_instruction"], unresolved, doc
+
+
+def test_g2b_import_site_with_register_constant():
+    sites, unresolved, doc = _g2b_import_case()
+    site, = sites
+    assert (site["kind"], site["form"], site["route"], site["symbol"]["name"]) == \
+        ("rwx_allocation_constant_args", "call", "direct_slot", "VirtualAlloc")
+    assert site["candidate"] and site["rwx_registers"] == ["R9"]
+    assert site["protection_argument"] == {"unobserved": "NO_ABI_BASIS"} and site["arguments"] == []
+    value, = site["register_values"]
+    assert value["register"]["name"] == "R9" and value["value"] == {"constant": "40", "width": 64}
+    assert value["path"] == [0] and value["definition"] == {"row": 0, "op": 1}
+    assert "linear-entry-at-first-path-row" in site["holds_if"] and not unresolved
+
+
+def test_g2b_import_site_landing_drops_values():
+    sites, unresolved, _ = _g2b_import_case(landing=True)
+    assert sites == [] and unresolved["NO_RWX_REGISTER"] == [{"row": 1, "op": 3, "api": "VirtualAlloc"}]
+
+
+@pytest.mark.parametrize("name, imports, reason", [("#5", True, "IMPORT_BY_ORDINAL"), ("VirtualAlloc", False,
+                                                                                        "SLOT_NOT_IMPORT")])
+def test_g2b_import_site_unresolved(name, imports, reason):
+    sites, unresolved, _ = _g2b_import_case(name=name, imports=imports)
+    assert sites == [] and unresolved[reason] == [{"row": 1, "op": 3}]
+
+
+def test_g2b_import_outside_table_is_negative():
+    sites, unresolved, _ = _g2b_import_case(name="Sleep")
+    assert sites == [] and unresolved == {}
