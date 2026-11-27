@@ -319,7 +319,7 @@ class CommonFactsCollector:
             try:
                 return cf.summarize_votes(accepted[vendor], facts["address"])
             except Exception as error:      # (crosscheck: carried to finish and compared with the reference)
-                if self.crosscheck and (vendor is None or self.rows[k]["vendor_views"]):
+                if self.crosscheck:
                     return error
                 raise
 
@@ -352,9 +352,12 @@ class CommonFactsCollector:
                             unobserved=source.get("unobserved", {}))
             units = []                               # base, then intel, then amd (the 798b903 order)
             for j, v in enumerate(views):
-                if v and not r["vendor_views"]:
-                    continue
                 summary = self.summaries[k][j]
+                if v and not r["vendor_views"]:
+                    if isinstance(summary, Exception):
+                        raise AssertionError(f"crosscheck {k} {v}: summary={summary!r}, reference view absent") \
+                            from summary
+                    continue
                 if self.crosscheck:
                     part = self._crosscheck(k, r, f, v, index[v], info, summary)
                 else:

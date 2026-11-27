@@ -1478,22 +1478,27 @@ def streamed_digest(doc, stream_key="rows"):
 
 
 def write_canonical(path, doc, stream_key="rows"):
-    """Writes canonical(doc) + LF chunk by chunk; returns SHA256(canonical(doc)) (the LF excluded, r2 D4). The bytes
-    go to a sibling temporary file renamed over the target only when complete (Fable impl r1 P3-8)."""
+    """Writes canonical(doc) + LF and returns SHA256(canonical(doc)) (the LF excluded, r2 D4). The bytes go to a
+    per-call temporary file created exclusively beside the target and renamed over it only when complete (Fable impl
+    r1 P3-8, Astra impl r2 item 2)."""
     import os
+    from uuid import uuid4
 
-    h = hashlib.sha256()
-    path = os.fspath(path)
-    temporary = path + ".partial"
+    target = os.path.abspath(os.fsdecode(path))
+    temporary = os.path.join(os.path.dirname(target), f".g2a-{uuid4().hex}.partial")
+    digest = hashlib.sha256()
+    out = open(temporary, "xb")
     try:
-        with open(temporary, "wb") as out:
+        with out:
             for chunk in _chunks(doc, stream_key):
-                h.update(chunk)
                 out.write(chunk)
+                digest.update(chunk)
             out.write(b"\n")
-        os.replace(temporary, path)
+        os.replace(temporary, target)
     except BaseException:
-        if os.path.exists(temporary):
-            os.remove(temporary)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
         raise
-    return h.hexdigest()
+    return digest.hexdigest()

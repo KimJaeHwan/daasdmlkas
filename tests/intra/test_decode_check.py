@@ -4744,3 +4744,47 @@ def test_g2a_verdicts5_schema_file():
     assert schema["properties"]["field_paths"]["const"] == list(cf.FIELD_PATHS)
     assert schema["properties"]["schema"]["const"] == cf.VERDICT_SCHEMA2
     assert schema["properties"]["rule_version"]["const"] == cf.VERDICT_RULE
+
+
+@pytest.mark.parametrize("failing", ["all", "intel"])
+def test_g2a_crosscheck_collection_exception(monkeypatch, failing):
+    # (Astra impl r2 item 1) a summarize_votes failure at collection reaches the crosscheck, also on rows
+    # without vendor views
+    import common_facts as cf
+
+    monkeypatch.setenv("TDO_V2_G2A_COST_CROSSCHECK", "1")
+    real = cf.summarize_votes
+    calls = []
+
+    def summarize(vs, address):
+        calls.append(len(calls))
+        if failing == "all" or len(calls) == 2:
+            raise ValueError("summary failed")
+        return real(vs, address)
+
+    monkeypatch.setattr(cf, "summarize_votes", summarize)
+    with pytest.raises(AssertionError, match="ValueError" if failing == "all" else "intel"):
+        _g2_collect([_g2_jrcxz()])
+
+
+def test_g2a_write_canonical_keeps_other_files(tmp_path):
+    import common_facts as cf
+
+    doc = _g2_document(_g2_collect([_g2_jrcxz()]))
+    target = tmp_path / "facts.json"
+    other = tmp_path / "facts.json.partial"
+    other.write_bytes(b"someone else's file")
+    cf.write_canonical(target, doc)
+    assert other.read_bytes() == b"someone else's file"
+    assert target.read_bytes() == cf.canonical(doc) + b"\n"
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["facts.json", "facts.json.partial"]
+
+    class Boom:
+        pass
+
+    try:
+        cf.write_canonical(target, dict(doc, rows=[*doc["rows"], Boom()]))
+    except TypeError:
+        pass
+    assert target.read_bytes() == cf.canonical(doc) + b"\n"           # (the old file survives a failed write)
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["facts.json", "facts.json.partial"]
