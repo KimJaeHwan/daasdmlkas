@@ -158,6 +158,29 @@ names, UE Core by entry addresses -- no PDB needed). Third-party binaries: priva
   generation ids differ by design; any other difference means the home Ghidra / JDK / analysis is not the office's
   (write it down; do not build on it). Exporter changes (`ghidra/`) are allowed only with this check passing.
 
+## 4d. The whole design history (private docs pack) and the work after X-1b
+
+`x1b_home_docs_2026-11-27.tar` (~11 MB, sha256 next to it; private -- it names analysed programs, never publish):
+`tdo_docs/census6/` = every design round, review, prompt, handoff and report of the office (1882 files),
+`tdo_docs/field_cases/` = the real-binary case notes, `tdo_docs/office_memory/` = the office session's project memory
+(start with `MEMORY.md`: one line per decision / feature, each pointing to its note). The engine's own design record
+is in the repo: `docs/interprocedural_design.md` (numbered sections; 25.121 = X-1a).
+
+Where to start for a topic: the newest `design_<topic>_rNN.md` in `census6/` plus its `*_astra*.md` / `*_fable*.md`
+reviews; `next_priorities.md`; the memory note of the topic.
+
+Work after X-1b (pick with the owner; each is its own branch-sized step, same merge rules):
+* **S3** (system calls / interrupts under an OS-contract model): `design_s3_r18.md` + `s3_prereqs_from_x1.md`
+  (+ T4's delta) -- the next planned step after X-1b.
+* **UE template migration** (the `__chkstk` switches, T5) -- decide with the owner first.
+* **PE-a2** (the PE work left after PE-a1 / PE-c / PE-d): memory `pe-steps-before-s3.md`.
+* **G-T leftovers**: G3b-6 (branch only), G3b-7b limits L1-L7 + Astra's plan (`g3b7b_wrapup_and_future.md`).
+* **SCC-D** (recursion; M14 left interrupts + syscall -> after S3): memory `scc-d-m12-no-go.md`.
+* **Windows DLL model library** next step I2a: memory `windows-dll-model-library.md`.
+* **Per-root diagnostics** next question: memory `per-root-diagnostics-proposal.md`.
+Engine-semantics changes need the gate (section 4b) and, at the office, a template / baseline bump where the memory
+notes say so (`ue-template-rederive.md`).
+
 ## 5. Merging back (what the office session will do -- keep it fast)
 
 * Work only on this branch; commit per topic; **never mix `docs/handoff_x1b/` changes into a code commit** (prefix
