@@ -26,7 +26,8 @@ SMALL = 1 << 32   # (a space key below this is a plain space id, not a hash)
 IDENTITY_RENAMED = {
     "StorageScopeId.digest": "scope identity: a content hash of the function unit / program -> F:<entry> / P",
     "LocalMemorySsaResult.unit_digest / MemoryGraph.unit_digest": "unit identity (content hash) -> U:<entry>",
-    "StorageObjectId.space_key": "relative space identity (hash of its base) -> K:<base expression in atom labels>",
+    "StorageObjectId.space_key": "relative space identity (hash of its base) -> K:<base expression in atom labels>; "
+                                 "a key with no recorded base expression is kept raw (compared as a value)",
     "address atom hash": "an address atom's hash -> its label without the '#xxxxxxxx' hash suffix",
     "64-hex substrings naming a renamed digest / space key": "the same tokens inside keys / labels",
 }
@@ -115,43 +116,69 @@ def build_tokens(document) -> dict:
     for key, normalized in _function_sections(document).items():
         for raw, label in normalized.get("address_atoms") or ():
             labels.setdefault(raw, set()).add((key, ATOM_SUFFIX.sub("", rename_text(label, tokens))))
-    by_label: dict = {}
     for raw, owners in labels.items():
         if len({label for _, label in owners}) != 1:
             raise Ambiguous(f"address atom {str(raw)[:16]} has two labels")
-        by_label.setdefault(next(iter(owners))[1], set()).add(raw)
-    atoms: dict = {}
-    for raw, owners in labels.items():
-        label = next(iter(owners))[1]
-        # (x86: one label, different hashes in different functions -> named per function)
-        atoms[raw] = f"A:{label}" if len(by_label[label]) == 1 else \
-            f"A:{','.join(sorted(key for key, _ in owners))}:{label}"
-    if len(set(atoms.values())) != len(atoms):
-        raise Ambiguous("two address atoms share one label")
-    # atoms the engine does not label (boundary / join / shared-load atoms, relative_memory.py): named by their
-    # function and the shapes of the base expressions they occur in; a collision stops the comparison (design F)
-    shapes: dict = {}
+    # every atom's occurrence shapes: its function, coefficient, the other terms (labels where unique), the space,
+    # and the operations accessing objects built on it -- names unlabeled atoms and separates label collisions
+    users_of: dict = {}
     for key, normalized in _function_sections(document).items():
         users: dict = {}   # relative space key -> the operations whose effects read / write that object
         for effect in normalized.get("effects") or ():
             for side in ("reads", "writes"):
                 for storage in effect.get(side) or ():
-                    object_id = ((storage or {}).get("span") or {}).get("object_id") or {}
+                    span = (storage or {}).get("span") or {}
+                    object_id = span.get("object_id") or {}
                     if isinstance(object_id.get("space_key"), int) and object_id["space_key"] >= SMALL:
-                        users.setdefault(object_id["space_key"], set()).add(f"{side}:{effect.get('operation_key')}")
+                        users.setdefault(object_id["space_key"], set()).add(
+                            f"{side}:{effect.get('operation_key')}@{span.get('start')}+{span.get('size')}")
+        users_of[key] = users
+    plain = {raw: next(iter(owners))[1] for raw, owners in labels.items()}
+    shapes: dict = {}
+    for key, normalized in _function_sections(document).items():
         for entry in normalized.get("address_objects") or ():
             terms, space = entry[1][0], entry[1][1]
             space_key = entry[0].get("space_key") if isinstance(entry[0], dict) else None
             for atom, coefficient in terms:
-                if atom in atoms:
-                    continue
-                others = sorted([atoms.get(other, "?"), weight] for other, weight in terms if other != atom)
+                others = sorted([plain.get(other, "?"), weight] for other, weight in terms if other != atom)
                 shapes.setdefault(atom, set()).add(canonical([key, coefficient, others, space,
-                                                              sorted(users.get(space_key, ()))]))
+                                                              sorted(users_of[key].get(space_key, ()))]))
+    by_label: dict = {}
+    for raw, label in plain.items():
+        by_label.setdefault(label, set()).add(raw)
+    atoms: dict = {}
+    for raw, owners in labels.items():
+        label = plain[raw]
+        if len(by_label[label]) == 1:
+            atoms[raw] = f"A:{label}"
+            continue
+        # one label, several hashes: per function (x86), then by occurrence shape (one function, e.g. one LOAD
+        # read at two widths)
+        name = f"A:{','.join(sorted(key for key, _ in owners))}:{label}"
+        rivals = [other for other in by_label[label]
+                  if other != raw and {key for key, _ in labels[other]} & {key for key, _ in owners}]
+        atoms[raw] = name if not rivals else name + ":" + canonical(sorted(shapes.get(raw, ())))
     for atom, occurrences in shapes.items():
-        atoms[atom] = "A?:" + canonical(sorted(occurrences))
-    if len(set(atoms.values())) != len(atoms):
-        raise Ambiguous("two unlabeled address atoms occur in the same expression shapes")
+        if atom not in atoms:
+            atoms[atom] = "A?:" + canonical(sorted(occurrences))
+    names: dict = {}
+    for raw, name in atoms.items():
+        names.setdefault(name, []).append(raw)
+    unused = set()
+    for name, raws in names.items():
+        if len(raws) > 1:
+            # allowed only for atoms no effect reaches: in no expression, or only in expressions of objects no
+            # operation reads or writes (their shapes' access lists are empty) -- they cannot carry a decision;
+            # a space key built on them that collides still stops below
+            if any(json.loads(shape)[4] for raw in raws for shape in shapes.get(raw, ())):
+                raise Ambiguous("two address atoms share one coordinate")
+            unused.update(raw for raw in raws if raw not in shapes)
+    if unused:
+        def stray(value, path):
+            if isinstance(value, int) and not isinstance(value, bool) and value in unused                     and "address_atoms" not in path:
+                raise Ambiguous("an unused address atom sharing its label is referenced outside address_atoms")
+        for data in document["sections"].values():
+            _walk(data, stray)
     # a relative space key is the hash of its base expression (address_objects: object -> atoms x coefficients,
     # space id): its coordinate is that expression written with atom labels
     spaces: dict = {}
@@ -167,14 +194,8 @@ def build_tokens(document) -> dict:
             if spaces.setdefault(raw, label) != label:
                 raise Ambiguous(f"space key {str(raw)[:16]} has two base expressions")
 
-    def unowned(value, path):
-        if isinstance(value, dict) and value.get("type") == "StorageObjectId":
-            raw = value.get("space_key")
-            if isinstance(raw, int) and raw >= SMALL and raw not in spaces:
-                raise Ambiguous(f"space key {str(raw)[:16]} has no base expression in this snapshot")
-
-    for data in document["sections"].values():
-        _walk(data, unowned)
+    # a space key with no base expression here (e.g. an import-static object, relative_memory.py) keeps its raw
+    # value: equal raw values compare equal, different ones show as a difference -- never merged
     if len(set(spaces.values())) != len(spaces):
         raise Ambiguous("two space keys share one base expression")
     for raw, label in spaces.items():   # (labels spell a space key in hex, padded or not)
