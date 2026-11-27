@@ -388,6 +388,45 @@ def _read_slice(fd, record, offset: int, length: int) -> bytes:
     return os.pread(fd, length, offset) if length else b""
 
 
+MAX_OPEN_DESCRIPTORS = 32
+
+
+class _DescriptorCache:
+    """(X-1b, Astra X-1a r5 [ASTRA-OPEN] / Fable r5 P3) the members one
+    admission reads slices from, at most ``limit`` open at once: the least
+    recently used is closed on eviction and reopened when needed again. A
+    failed open (e.g. EMFILE) refuses the Bundle."""
+
+    def __init__(self, generation_fd, opener, limit: int):
+        import collections
+
+        self._generation_fd, self._opener, self._limit = generation_fd, opener, max(1, limit)
+        self._open = collections.OrderedDict()
+        self.peak = 0
+
+    def get(self, record) -> int:
+        key = record.handle.member_id
+        fd = self._open.get(key)
+        if fd is not None:
+            self._open.move_to_end(key)
+            return fd
+        while len(self._open) >= self._limit:
+            _, oldest = self._open.popitem(last=False)
+            os.close(oldest)
+        try:
+            fd = self._opener(self._generation_fd, record)
+        except OSError as error:
+            raise BundleAdmissionError(f"sealed stack-switch evidence: cannot open a member: {error}") from error
+        self._open[key] = fd
+        self.peak = max(self.peak, len(self._open))
+        return fd
+
+    def close(self) -> None:
+        while self._open:
+            _, fd = self._open.popitem()
+            os.close(fd)
+
+
 def _verify_profile_evidence(generation_fd, inventory, records, *, hashed: bool):
     """(X-1, Astra X-1a r1 P1-3 / r2 P1-4 / r3 #6, Fable r3 P2-1) a profiled
     Bundle's sealed stack-switch evidence is verified in the common admission
@@ -396,8 +435,8 @@ def _verify_profile_evidence(generation_fd, inventory, records, *, hashed: bool)
     member is hashed once (not at all again when ``hashed`` -- the frozen path
     checked every member already) and only the row slices are read; only the
     original's headers are read; each observation becomes one blob of digest
-    lines. A failure refuses the Bundle. The inventory returned carries the
-    attested evidence."""
+    lines; at most ``MAX_OPEN_DESCRIPTORS`` members are open at once. A failure
+    refuses the Bundle. The inventory returned carries the attested evidence."""
     if inventory.producer_profile is None:
         return inventory
     import dataclasses
@@ -407,13 +446,8 @@ def _verify_profile_evidence(generation_fd, inventory, records, *, hashed: bool)
     records_by_id = {record.handle.member_id: record for record in records}
     blocks = [row for row in inventory.blocks if row.member is not None]
     checked: set = set()
-    descriptors: dict = {}   # (Fable X-1a r4 P2-1) one open per touched member for this admission
-
-    def descriptor(record):
-        fd = descriptors.get(record.handle.member_id)
-        if fd is None:
-            fd = descriptors[record.handle.member_id] = _open_regular_member(generation_fd, record)
-        return fd
+    # (Fable X-1a r4 P2-1, Astra r5) members opened once, at most MAX_OPEN_DESCRIPTORS at a time
+    descriptors = _DescriptorCache(generation_fd, _open_regular_member, MAX_OPEN_DESCRIPTORS)
 
     def member_record(member):
         record = records_by_id[member.member_id]
@@ -426,7 +460,7 @@ def _verify_profile_evidence(generation_fd, inventory, records, *, hashed: bool)
         for row in blocks:
             if row.space_id == space and row.byte_start <= offset and offset + length <= row.byte_start + row.byte_size:
                 record = member_record(row.member)
-                data = _read_slice(descriptor(record), record, offset - row.byte_start, length)
+                data = _read_slice(descriptors.get(record), record, offset - row.byte_start, length)
                 return data if len(data) == length else None
         return None
 
@@ -439,14 +473,13 @@ def _verify_profile_evidence(generation_fd, inventory, records, *, hashed: bool)
                                                  inventory.stack_switch_evidence_member),
             manifest_sha256=inventory.container_identity.manifest_sha256_digest.hex(),
             original_sha256=inventory.original.sha256_digest.hex(),
-            original=lambda offset, length: _read_slice(descriptor(original), original, offset, length),
+            original=lambda offset, length: _read_slice(descriptors.get(original), original, offset, length),
             program=json.loads(_read_verified_member(generation_fd, records_by_id, inventory.program)),
             functions=functions)
     except (EvidenceError, ValueError, KeyError, TypeError, struct.error) as error:
         raise BundleAdmissionError(f"sealed stack-switch evidence: {error}") from error
     finally:
-        for fd in descriptors.values():
-            os.close(fd)
+        descriptors.close()
     return dataclasses.replace(inventory, verified_stack_evidence=item)
 
 

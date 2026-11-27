@@ -224,3 +224,72 @@ def test_admission_reads_each_block_once(generation, monkeypatch):
     assert 0 < block_bytes <= sum(sizes.values())
     original = next(row["size"] for row in manifest["members"] if row["id"] == "original")
     assert sum(size for member, size in sliced if member == "original") < original
+
+
+def test_admission_with_one_open_descriptor(generation, monkeypatch):
+    """X-1b (Astra X-1a r5 [ASTRA-OPEN]): the descriptor cache is bounded; with room for one member at a time the
+    evidence still verifies (members are reopened after eviction)."""
+    from tdo_v2.integration import configured_bundle
+
+    peaks = []
+    real = configured_bundle._DescriptorCache
+
+    class Recording(real):
+        def close(self):
+            peaks.append(self.peak)
+            super().close()
+
+    monkeypatch.setattr(configured_bundle, "MAX_OPEN_DESCRIPTORS", 1)
+    monkeypatch.setattr(configured_bundle, "_DescriptorCache", Recording)
+    provider = read_configured_bundle(admit_frozen_bundle(generation))
+    try:
+        assert provider.stack_switch_evidence().verified
+    finally:
+        provider.close()
+    assert peaks == [1]
+
+
+class _Record:
+    def __init__(self, member_id):
+        self.handle = type("Handle", (), {"member_id": member_id})()
+
+
+def test_descriptor_cache_evicts_and_reopens(tmp_path):
+    from tdo_v2.integration.configured_bundle import _DescriptorCache
+
+    target = tmp_path / "member"
+    target.write_bytes(b"x")
+    opened, closed = [], []
+
+    def opener(_generation_fd, record):
+        fd = os.open(target, os.O_RDONLY)
+        opened.append((record.handle.member_id, fd))
+        return fd
+
+    cache = _DescriptorCache(None, opener, 2)
+    a, b, c = _Record("a"), _Record("b"), _Record("c")
+    first = cache.get(a)
+    assert cache.get(a) == first   # (a hit opens nothing)
+    cache.get(b)
+    cache.get(c)                   # (evicts a, the least recently used)
+    cache.get(a)                   # (reopened)
+    assert [member for member, _ in opened] == ["a", "b", "c", "a"]
+    assert cache.peak == 2
+    cache.close()
+    for _, fd in opened:           # (every descriptor is closed: evicted ones and the rest)
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_descriptor_cache_open_failure_refuses(tmp_path):
+    import errno
+
+    from tdo_v2.integration.configured_bundle import _DescriptorCache
+
+    def opener(_generation_fd, _record):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    cache = _DescriptorCache(None, opener, 4)
+    with pytest.raises(BundleAdmissionError, match="cannot open a member"):
+        cache.get(_Record("a"))
+    cache.close()
