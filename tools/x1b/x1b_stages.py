@@ -1,7 +1,7 @@
 """X-1b stages 0 and 1 for one pair (design_x1b_method_r3): derive the comparison copy from the published Bundle,
 strip it relative to the old input (the control), build one copy per feature group, compare members, dump paired
 snapshots (default + legacy) and compare strictly and through the coordinate projection. Run in WSL with the tdo
-venv; results go to <out>/<pair>/result.json.
+venv; results go to <out>/<pair>/result.json. The command's exit status describes stage 0.
 
 usage: x1b_stages.py <tree> <pairs.json> <pair key> [--out /root/x1b_runs] [--configs default,legacy] [--jobs N]
 """
@@ -35,13 +35,29 @@ def dump(tree: Path, generation: Path, out: Path, config: str) -> str:
     if out.exists():
         return f"{out.name}: cached"
     start = time.time()
+    log = out.with_suffix(".failed")
     done = subprocess.run(["timeout", "3600", PY, "tools/graph_fidelity/semantic_snapshot.py", "dump", str(generation),
                            str(out), "--config", config, "--paired-sections"], cwd=tree,
                           env={**os.environ, "PYTHONPATH": "src", "PYTHONHASHSEED": "0"}, capture_output=True, text=True)
     if done.returncode != 0:
-        out.with_suffix(".failed").write_text(done.stdout[-3000:] + done.stderr[-3000:])
+        header = {"input": digests(generation), "rc": done.returncode}
+        log.write_text(json.dumps(header) + "\n" + done.stdout[-3000:] + done.stderr[-3000:])
         return f"{out.name}: FAILED rc={done.returncode}"
+    log.unlink(missing_ok=True)
     return f"{out.name}: {time.time() - start:.0f}s"
+
+
+def failed_dump_log(path: Path, expected: dict) -> Path | None:
+    log = path.with_suffix(".failed")
+    try:
+        with log.open() as stream:
+            header = json.loads(stream.readline())
+    except (OSError, ValueError):
+        return None
+    if isinstance(header, dict) and header.get("input") == expected \
+            and type(header.get("rc")) is int and header["rc"] != 0:
+        return log
+    return None
 
 
 def compare(comparison, pair: dict, left: Path, right: Path, projected: bool) -> dict:
@@ -122,7 +138,12 @@ def finish(args, work, result, local_pairs, comparisons) -> int:
                     entry["strict"] = compare(comparison, pairs[key], a, b, False)
                     entry["projected"] = compare(comparison, pairs[key], a, b, True)
                 else:
-                    entry["missing"] = [str(path) for path in (a, b) if not path.exists()]
+                    missing = [(path, side) for path, side in ((a, "left"), (b, "right")) if not path.exists()]
+                    entry["missing"] = [str(path) for path, _ in missing]
+                    failed = {path.name: str(log) for path, side in missing
+                              if (log := failed_dump_log(path, pairs[key][side])) is not None}
+                    if failed:
+                        entry["generation_failed"] = failed
                 target = result["stage0"] if stage == "stage0" else result["stage1"] if stage == "stage1" else result
                 target.setdefault(key, {})[config] = entry
     (work / "result.json").write_text(json.dumps(result, indent=1))

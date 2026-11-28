@@ -62,6 +62,7 @@ NODE_KEY_INDEX = re.compile(r":definition:(\d+)$")
 NORMALIZED_OWNER = re.compile(r"function:(.+):normalized(?:\[0\])?$")
 FUNCTION_SECTION = re.compile(r"function:(.+):(normalized(?:\[\d+\])?|summary|analyzed)$")
 PROOF_REFERENCE = re.compile(r"register-delta-proof:([0-9a-f]{64}(?:,[0-9a-f]{64})*)")
+RAW_LOAD_KEY = re.compile(r"[0-9a-f]+:[0-9a-f]+:[0-9]+:LOAD")
 INDEX_ORIGIN_SECTION = "run:index_object_origins"
 
 
@@ -488,7 +489,9 @@ NODE_REFERENCE_LISTS = ("definition_nodes", "action_nodes", "unresolved_read_nod
 REFERENCES = {"ssa": SSA_REFERENCES, "graph nodes": NODE_REFERENCE_LISTS,
               "graph edges": "dependencies.edges[i][0..1], cfg.edges[i][0..1]",
               "summary": "FunctionSummary exits[].runs[].definitions -> the function's memory_ssa.definitions",
-              "memory graph": "entry_bindings[i][0] -> dependency node"}
+              "memory graph": "entry_bindings[i][0] -> dependency node",
+              "projected LOAD alternatives": "proved suffix of the owning action's reads; alias spans and both "
+                                             "SSA copies use the same alternatives; ordinary input ordinals stay raw"}
 # collections the engine orders by identity: compared as multisets after resolution
 COLLECTIONS = {"definitions", "state_nodes", "atomic_spans", "actions", "reads", "flow_edges", "joins", "nodes",
                "edges", "address_atoms", "address_objects", "address_atom_origins", "runs", "entry_bindings", "observed_inputs",
@@ -818,9 +821,127 @@ def _multisets(value):
     return value
 
 
+def _projected_load_spans(effect):
+    if effect.get("type") != "ObservedEffect" or effect.get("kind") != {"enum": "EffectKind.READ"} \
+            or effect.get("memory_read") is not None or effect.get("unresolved_reads"):
+        return None
+    reads = effect.get("reads") or ()
+    if len(reads) < 3 or any(row.get("type") != "ResolvedStorage" for row in reads):
+        return None
+    spans = [row["span"] for row in reads]
+    if spans[0]["object_id"]["kind"] != {"enum": "StorageObjectKind.REGISTER_FILE"}:
+        return None
+    alternatives = spans[1:]
+    if any(span["object_id"]["kind"] != {"enum": "StorageObjectKind.FUNCTION_RELATIVE"}
+           or span["size"] != alternatives[0]["size"] for span in alternatives):
+        return None
+    if len({canonical(span) for span in alternatives}) != len(alternatives):
+        return None
+    return spans
+
+
+def _load_reads_by_action(unit, ssa, operations):
+    """Match a LOAD's positional SSA reads to the spans in its own unit."""
+    unit_actions = {}
+    for block in unit.get("blocks", ()):
+        for action in block["actions"]:
+            key = action["operation_key"]
+            if key in operations:
+                unit_actions[key] = None if key in unit_actions else action
+    actions = {}
+    for index, action in enumerate(ssa.get("actions", ())):
+        key = action["operation_key"]
+        if key in operations:
+            actions[key] = None if key in actions else index
+    selected = {index for index in actions.values() if index is not None}
+    reads = {}
+    for row in ssa.get("reads", ()):
+        index = row.get("action_id")
+        if index in selected:
+            reads.setdefault(index, []).append(row)
+    result = {}
+    for key, spans in operations.items():
+        action = unit_actions.get(key)
+        if action is None or action.get("type") != "LocalStorageAction" or action.get("unresolved_reads") \
+                or action.get("reads") != spans:
+            continue
+        rows = reads.get(actions.get(key), ())
+        if len(rows) != len(spans) or any(
+                row.get("type") != "MemoryReadResolution" or type(row.get("read_ordinal")) is not int for row in rows):
+            continue
+        by_ordinal = {row["read_ordinal"]: row for row in rows}
+        if all(by_ordinal.get(ordinal, {}).get("span") == span for ordinal, span in enumerate(spans)):
+            result[key] = by_ordinal
+    return result
+
+
+def _has_other_read_ordinals(value, tables, *, ssa_read=False):
+    if isinstance(value, dict):
+        return ("read_ordinal" in value and not (ssa_read and value.get("type") == "MemoryReadResolution")
+                or any(_has_other_read_ordinals(item, tables) for item in value.values()
+                       if isinstance(item, (dict, list))))
+    if isinstance(value, list):
+        ssa_read = id(value) in tables
+        return any(_has_other_read_ordinals(item, tables, ssa_read=ssa_read)
+                   for item in value if isinstance(item, (dict, list)))
+    return False
+
+
+def _project_load_alternatives(normalized):
+    """Normalize only the generated suffix of a verified projected LOAD read."""
+    alias_rows = {}
+    for row in normalized.get("may_alias_reads") or ():
+        key = row.get("operation_key")
+        if isinstance(key, str) and RAW_LOAD_KEY.fullmatch(key):
+            alias_rows[key] = None if key in alias_rows else row
+    aliases = {key: row for key, row in alias_rows.items()
+               if row is not None and row.get("type") == "MayAliasRead"
+               and row.get("unknown_address") is False and len(row.get("spans") or ()) >= 2}
+    if not aliases:
+        return
+    operations = {}
+    for effect in normalized.get("effects") or ():
+        key = effect.get("operation_key")
+        if key in aliases:
+            operations[key] = None if key in operations else _projected_load_spans(effect)
+    operations = {key: spans for key, spans in operations.items() if spans and spans[1:] == aliases[key]["spans"]}
+    if not operations:
+        return
+    clobbers = {}
+    for row in normalized.get("call_clobber_reads") or ():
+        if row.get("operation_key") in operations:
+            clobbers.setdefault(row["operation_key"], []).append(row)
+    binding = (normalized.get("call_observations") or {}).get("memory_binding") or {}
+    tables = [(normalized.get("memory_unit"), normalized.get("memory_ssa")),
+              (binding.get("unit"), binding.get("result"))]
+    if not all(isinstance(unit, dict) and _is_ssa(ssa) for unit, ssa in tables):
+        return
+    primary, secondary = (_load_reads_by_action(unit, ssa, operations) for unit, ssa in tables)
+    eligible = primary.keys() & secondary.keys()
+    if not eligible:
+        return
+    # Other ordinal consumers (call ports, local read proofs, etc.) can carry
+    # positional references. Preserve the raw comparison when they are present.
+    if _has_other_read_ordinals(normalized, {id(ssa["reads"]) for _, ssa in tables}):
+        return
+    for key in eligible:
+        spans = operations[key]
+        rows = clobbers.get(key, ())
+        if any(row.get("type") != "CallClobberRead" or row.get("spans") != spans for row in rows):
+            continue
+        order = sorted(range(1, len(spans)), key=lambda index: canonical(spans[index]))
+        aliases[key]["spans"] = [spans[index] for index in order]
+        for row in rows:
+            row["spans"] = [spans[0], *aliases[key]["spans"]]
+        for position, index in enumerate(order, start=1):
+            for records in (primary[key], secondary[key]):
+                records[index]["read_ordinal"] = {"alternative": position}
+
+
 def _project_section(name, value, normalized=None):
     match = FUNCTION_SECTION.fullmatch(name)
     if match and match.group(2).startswith("normalized"):
+        _project_load_alternatives(value)
         value = _resolve_graph(_resolve_ssa_objects(value))
     elif match and match.group(2) == "summary":
         value = _resolve_summary(value, normalized)

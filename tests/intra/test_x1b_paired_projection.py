@@ -293,6 +293,71 @@ def test_bounded_pair_shows_a_change_of_read_ordinal(tmp_path, capsys):
         assert "at $.memory_ssa.reads[0].read_ordinal: 0 | 1" in capsys.readouterr().out
 
 
+def projected_load(alternatives=(0, 1), *, address_register=32):
+    value = document()
+    section = value["sections"][f"function:{KEY}:normalized"]
+    ssa = section["memory_ssa"]
+    action = "1b1:100c:0:LOAD"
+    spans = [register("c" * 64, address_register)] + [
+        relative("a" * 64, (1 << 200) + 7, offset * 8) for offset in alternatives
+    ]
+    section["effects"].append({"type": "ObservedEffect", "operation_key": action, "kind": {"enum": "EffectKind.READ"},
+                               "memory_read": None, "unresolved_reads": [],
+                               "reads": [{"type": "ResolvedStorage", "span": span} for span in spans]})
+    section["may_alias_reads"] = [{"type": "MayAliasRead", "operation_key": action, "unknown_address": False,
+                                   "spans": spans[1:], "writers": ["1b1:1004:0:STORE"]}]
+    section["call_clobber_reads"] = [{"type": "CallClobberRead", "operation_key": action,
+                                      "spans": spans, "intervening_calls": ["1b1:100a:0:CALL"]}]
+    unit = {"type": "LocalMemoryUnit", "blocks": [{"type": "LocalMemoryBlock", "actions": [
+        {"type": "LocalStorageAction", "operation_key": action, "reads": spans, "unresolved_reads": []}]}]}
+    section["memory_unit"] = unit
+    ssa["reads"][0]["type"] = "MemoryReadResolution"
+    ssa["actions"].append({"type": "MemoryActionResult", "operation_key": action, "write_definition_ids": []})
+    nodes = section["dependencies"]["nodes"]
+    section["memory_graph"]["action_nodes"].append(len(nodes))
+    nodes.append({"key": f"op:{action}", "type": "NodeRecord", "label": "LOAD",
+                  "kind": {"enum": "NodeKind.OPERATION"}})
+    ssa["reads"].extend(
+        {"type": "MemoryReadResolution", "action_id": 1, "read_ordinal": index, "span": span,
+         "fragments": [{"definition_ids": [definition]}]}
+        for index, (span, definition) in enumerate(zip(spans, [0, *(offset + 1 for offset in alternatives)]))
+    )
+    section["call_observations"] = {"memory_binding": {"unit": copy.deepcopy(unit), "result": copy.deepcopy(ssa)}}
+    return value, section
+
+
+def test_projected_load_reorders_the_candidates_with_their_own_ssa_reads():
+    left, _ = projected_load()
+    right, section = projected_load((1, 0))
+    assert projected_equal(left, right)
+
+    # Same candidates in both snapshots, but the mirrored SSA copy now binds
+    # one read to the other candidate's definition.
+    section["call_observations"]["memory_binding"]["result"]["reads"][-1]["fragments"][0]["definition_ids"] = [2]
+    assert not projected_equal(left, right)
+
+
+def test_projected_load_preserves_the_address_operand_and_candidate_count():
+    left, _ = projected_load()
+    assert not projected_equal(left, projected_load((1, 0), address_register=40)[0])
+    assert not projected_equal(left, projected_load((0,))[0])
+
+
+@pytest.mark.parametrize("inconsistent", ["duplicate ordinals", "additional consumer", "partial clobber"])
+def test_projected_load_keeps_ordinals_when_the_positional_uses_are_not_all_matched(inconsistent):
+    left, left_section = projected_load()
+    right, right_section = projected_load((1, 0))
+    for section in (left_section, right_section):
+        if inconsistent == "duplicate ordinals":
+            section["memory_ssa"]["reads"][-1]["read_ordinal"] = 1
+        elif inconsistent == "additional consumer":
+            section["call_observations"]["port_read"] = {"read_ordinal": 1}
+        else:
+            clobber = section["call_clobber_reads"][0]
+            clobber["spans"] = clobber["spans"][1:]
+    assert not projected_equal(left, right)
+
+
 def test_indexed_projection_checks_a_scope_in_a_run_section(tmp_path):
     source = document()
     source["sections"]["run:supports"] = [relative("9" * 64, 5, 0)]

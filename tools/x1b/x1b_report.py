@@ -1,6 +1,7 @@
 """X-1b report (design_x1b_method_r3 sections 2, 3, E, H): one markdown table from /root/x1b_runs/*/result.json plus
 the interaction set per pair (section level: D(full) vs the union of the single-group D(g), both directions, from
-the projected snapshots). Run in WSL with the tdo venv.
+the projected snapshots). Run in WSL with the tdo venv. Exit 2 on a recorded generation failure or ambiguous
+interaction.
 
 usage: x1b_report.py [--runs /root/x1b_runs] [--tree <wt_x1b>] > report.md
 """
@@ -32,6 +33,8 @@ PAIR_ATTRIBUTION = {
 def short(entry):
     if entry is None:
         return "skip"   # (legacy not run on this pair: owner 2026-11-27)
+    if entry.get("generation_failed"):
+        return "generation failed"
     if not entry.get("strict"):
         return "missing"
     strict, projected = entry["strict"]["summary"], entry["projected"]["summary"]
@@ -94,6 +97,7 @@ def main() -> int:
             notes.append(f"- {result['key']}: unexplained stage-0 member differences: {unexplained[:5]}")
         stage0 = result["stage0"].get("old~control", {})
         s0 = " / ".join(("skip" if c not in stage0 else
+                         "generation failed" if stage0[c].get("generation_failed") else
                          "=" if ((stage0.get(c) or {}).get("strict") or {}).get("rc") == 0 else "**DIFF**")
                         for c in ("default", "legacy"))
         cells = []
@@ -125,6 +129,11 @@ def main() -> int:
                     details = item["projected"]["differences"] or [item["projected"]["summary"]]
                     notes.append(f"- {result['key']} {name} {config}: " +
                                  "; ".join(line[:220] for line in details[:4]))
+        for name, entry in [("stage0", stage0), *result["stage1"].items(), ("old~published", cut)]:
+            for config, item in entry.items():
+                for log in item.get("generation_failed", {}).values():
+                    notes.append(f"- {result['key']} {name} {config} generation failed. Log: `{log}`")
+                    status = 2
         print(f"| {result['key']} | {member_cell} | {s0} | " + " | ".join(cells) +
               f" | {proof_cell} | {cut_cell} | {inter_cell} |")
     print("\nCells: strict / projected per config (d = default, l = legacy); '=' identical, a number = sections "
