@@ -9,7 +9,7 @@ import arm64_local
 import arm64_source_decode
 import arm64_source_evidence
 from arm64_encoding_index import EncodingIndex
-from arm64_encoding_coverage import _mops_sample, _witnesses, sample_index
+from arm64_encoding_coverage import _mops_sample, _size_witnesses, _witnesses, sample_index
 from arm64_source_facts import EXTENDED_RULE
 from arm64_local import digest, json_bytes
 
@@ -295,8 +295,33 @@ def test_sample_index_keeps_shared_paths_and_overlapping_table_rows():
 
 def test_sample_bits_can_vary_together_to_satisfy_table_exclusions():
     word = z3.BitVec("encoding_fixture", 32)
-    samples, mask = _witnesses(word, z3.And(word <= 3, word >= 0, word != 1, word != 2))
+    constraints = z3.And(word <= 3, word >= 0, word != 1, word != 2)
+    samples, mask = _witnesses(word, constraints)
     assert samples == (0, 3) and mask == 3
+    assert _size_witnesses(word, constraints, samples, mask) == ()
+
+
+def test_sample_size_field_covers_combinations_per_bit_sampling_can_miss():
+    word = z3.BitVec("encoding_fixture", 32)
+    base, size_mask = 0x0f00e000, (3 << 22) | (1 << 30)
+    constraint = z3.And(word & ~size_mask == base, z3.Extract(23, 22, word) != 1)
+    samples, mask = _witnesses(word, constraint)
+    extra = _size_witnesses(word, constraint, samples, size_mask)
+    assert extra and set(extra).isdisjoint(samples)
+    assert mask == size_mask
+    assert {sample & size_mask for sample in (*samples, *extra)} == {
+        size | q for size in (0, 2 << 22, 3 << 22) for q in (0, 1 << 30)
+    }
+
+
+def test_sample_size_field_can_vary_without_changing_a_lane_index():
+    word = z3.BitVec("encoding_fixture", 32)
+    base, size_mask, lane_bit = 0x2f001000, 3 << 22, 1 << 21
+    samples = (base, *(base | size << 22 | lane_bit for size in (1, 2, 3)))
+    constraints = word & ~(size_mask | lane_bit) == base
+    assert _size_witnesses(word, constraints, samples, size_mask) == (
+        0x2f401000, 0x2f801000, 0x2fc01000,
+    )
 
 
 def test_mops_sample_combines_register_choices_and_keeps_opcode_fields():

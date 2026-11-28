@@ -371,6 +371,8 @@ its original rules.
 pinned Arm encoding index. It records every allocated row by section and ordinal,
 including rows with the same encoding name. Each reachable row has a witness, and
 the sample set exercises both values of every bit that can vary within that row.
+It also uses the instruction diagrams to sample distinct operand size combinations
+that the per-bit pass missed, including vector length selectors such as `Q`.
 MOPS copy and set rows also get a word with distinct operand registers.
 The report retains alternate table candidates and both decoder outputs at a
 fixed synthetic address. For example:
@@ -383,7 +385,9 @@ PYTHONPATH=src python tools/decode_check/arm64_encoding_coverage.py arm-a64.tar.
 
 The default uses `sve-sme-v2`. `a64-all-instructions-v1` requests LLVM's `+all`
 option for a broader decoder comparison. The selected executable and exact
-options are recorded. Coverage of two bit values is per bit within a table row.
-Combinations of bits, instruction-specific decode constraints, feature availability
-on hardware and p-code effects have separate evidence. `unobserved` identifies a
-word for which at least one decoder produced no comparable normalized rendering.
+options are recorded. Operand size combinations are constrained by the table
+guards. Other combinations, instruction-specific decode constraints, feature
+availability on hardware and p-code effects need separate evidence. `unobserved`
+identifies a word for which at least one decoder produced no comparable normalized
+rendering. See [GNU's A64 UAO rendering discrepancy](ARM64_GNU_UAO.md) for a case
+where the printed operation needs to be checked against Arm's instruction definition.
