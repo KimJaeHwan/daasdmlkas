@@ -2,12 +2,14 @@ import json
 from xml.etree import ElementTree
 
 import pytest
+import z3
 
 from test_arm64_elf_functions import ENTRY, _elf
 import arm64_local
 import arm64_source_decode
 import arm64_source_evidence
 from arm64_encoding_index import EncodingIndex
+from arm64_encoding_coverage import _mops_sample, _witnesses, sample_index
 from arm64_source_facts import EXTENDED_RULE
 from arm64_local import digest, json_bytes
 
@@ -263,3 +265,41 @@ def test_index_keeps_overlapping_rows_and_negative_masks():
     assert index.candidates(0x80000000)["exclusions"] == [
         {"section": "reserved", "reason": "unallocated-hierarchy"},
     ]
+
+
+def test_sample_index_keeps_shared_paths_and_overlapping_table_rows():
+    index = EncodingIndex(ElementTree.fromstring("""
+      <encodingindex instructionset="A64">
+        <hierarchy>
+          <node iclass="shared"><decode><box hibit="0"><c>0</c></box></decode></node>
+          <node iclass="shared"><decode><box hibit="0"><c>1</c></box></decode></node>
+        </hierarchy>
+        <iclass_sect id="shared">
+          <regdiagram><box hibit="0" name="mode"><c/></box></regdiagram>
+          <instructiontable>
+            <thead><tr id="heading2"><th class="bitfields">mode</th></tr></thead>
+            <tbody>
+              <tr encname="OVERLAP" iformfile="first.xml"><td class="bitfield"/></tr>
+              <tr encname="OVERLAP" iformfile="second.xml"><td class="bitfield">1</td></tr>
+            </tbody>
+          </instructiontable>
+        </iclass_sect>
+      </encodingindex>
+    """))
+    first, second = sample_index(index)
+    assert first["row"] == 0 and first["variable_bit_mask"] == "ffffffff"
+    assert second["row"] == 1 and second["variable_bit_mask"] == "fffffffe"
+    assert all(word & 1 for word in second["samples"])
+    assert first == list(sample_index(index))[0]
+
+
+def test_sample_bits_can_vary_together_to_satisfy_table_exclusions():
+    word = z3.BitVec("encoding_fixture", 32)
+    samples, mask = _witnesses(word, z3.And(word <= 3, word >= 0, word != 1, word != 2))
+    assert samples == (0, 3) and mask == 3
+
+
+def test_mops_sample_combines_register_choices_and_keeps_opcode_fields():
+    assert _mops_sample("memcms", "CPYFP_CPY_memcms", (0x19000400,)) == 0x19010440
+    assert _mops_sample("memcms", "SETGP_SET_memcms", (0x1dc00400,)) == 0x1dc10440
+    assert _mops_sample("other", "CPYFP_CPY_memcms", (0x19000400,)) is None

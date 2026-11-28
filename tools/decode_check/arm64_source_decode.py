@@ -11,12 +11,15 @@ from arm64_source_facts import RULE, EXTENDED_RULE, compare_fields, common_field
 _IMMEDIATE = re.compile(r"#-?(?:0x[0-9a-f]+|[0-9]+)(?![\w.])")
 SVE_SME_PROFILE = "sve-sme-v1"
 SVE_SME_PROFILE_V2 = "sve-sme-v2"
+ALL_INSTRUCTIONS_PROFILE = "a64-all-instructions-v1"
 _SVE_SME_OPTIONS = (*LLVM_OPTIONS[:-1], LLVM_OPTIONS[-1] + ",+sve,+sve2,+bf16,+i8mm,+sme,+sme2,+sme-f64f64")
 SOURCE_DECODE_PROFILES = {
     SVE_SME_PROFILE: _SVE_SME_OPTIONS,
     SVE_SME_PROFILE_V2: _SVE_SME_OPTIONS,
+    ALL_INSTRUCTIONS_PROFILE: (*LLVM_OPTIONS[:-1], "--mattr=+all"),
 }
-SOURCE_DECODE_RULES = {SVE_SME_PROFILE: RULE, SVE_SME_PROFILE_V2: EXTENDED_RULE}
+SOURCE_DECODE_RULES = {SVE_SME_PROFILE: RULE, SVE_SME_PROFILE_V2: EXTENDED_RULE,
+                       ALL_INSTRUCTIONS_PROFILE: EXTENDED_RULE}
 
 
 def _rendered(raw, *, gnu):

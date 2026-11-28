@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Sample the pinned Arm A64 encoding table and compare the decoder outputs."""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter, defaultdict
+from contextlib import ExitStack
+from hashlib import sha256
+import json
+from pathlib import Path
+import struct
+from tempfile import NamedTemporaryFile
+
+import z3
+
+from arm64_encoding_index import load_index
+from arm64_source_decode import SOURCE_DECODE_PROFILES, SVE_SME_PROFILE_V2, observe
+
+
+SCHEMA = "tbr-a64-encoding-coverage-1"
+BASE = 0x100000
+
+
+def _guard_term(word, guard):
+    return z3.And(word & guard.mask == guard.value,
+                  *(word & mask != value for mask, value in guard.exclusions))
+
+
+def _section_paths(index, word):
+    paths = defaultdict(list)
+    pending = [(node, z3.BoolVal(True, ctx=word.ctx)) for node in index.roots]
+    while pending:
+        node, parent = pending.pop()
+        here = z3.And(parent, _guard_term(word, node.guard))
+        if node.children:
+            pending.extend((child, here) for child in node.children)
+        elif not node.unallocated:
+            paths[node.section].append(here)
+    return paths
+
+
+def _model_word(solver, word, *assumptions):
+    outcome = solver.check(*assumptions)
+    if outcome == z3.unsat:
+        return None
+    if outcome != z3.sat:
+        raise ValueError(f"could not solve the Arm table guards ({solver.reason_unknown()})")
+    return solver.model().eval(word, model_completion=True).as_long()
+
+
+def _witnesses(word, constraints):
+    solver = z3.SolverFor("QF_BV", ctx=word.ctx)
+    solver.set(random_seed=0)
+    solver.add(constraints)
+    anchor = _model_word(solver, word)
+    if anchor is None:
+        return (), 0
+
+    samples, variation = [anchor], 0
+    for position in range(32):
+        bit = 1 << position
+        if variation & bit:
+            continue
+        sample = _model_word(solver, word, word & bit != anchor & bit)
+        if sample is not None:
+            samples.append(sample)
+            variation |= anchor ^ sample
+    return tuple(sorted(samples)), variation
+
+
+def _mops_sample(section, encoding, samples):
+    if not samples or section != "memcms" or not encoding.endswith(("_CPY_memcms", "_SET_memcms")):
+        return None
+    # MOPS has coupled operand constraints. Select distinct low registers for Rd, Rn and Rs.
+    register_fields = 31 | (31 << 5) | (31 << 16)
+    return (samples[0] & ~register_fields) | (2 << 5) | (1 << 16)
+
+
+def sample_index(index):
+    """Find table witnesses and exercise both values of each individually variable bit."""
+    # Isolate the solver's symbol order from other analyses in this process.
+    word = z3.BitVec("a64_instruction", 32, ctx=z3.Context())
+    paths = _section_paths(index, word)
+    candidate_cache = {}
+    for section, (section_guard, rows) in sorted(index.sections.items()):
+        reachable = z3.Or(*paths[section]) if paths[section] else z3.BoolVal(False, ctx=word.ctx)
+        enclosing = z3.And(reachable, _guard_term(word, section_guard))
+        for ordinal, row in enumerate(rows):
+            if row.file is None:
+                continue
+            identity = dict(section=section, row=ordinal, id=row.encoding, file=row.file,
+                            feature_condition=row.feature_condition)
+            samples, variable_bits = _witnesses(word, z3.And(enclosing, _guard_term(word, row.guard)))
+            extra = _mops_sample(section, row.encoding, samples)
+            supplement = [] if extra is None or extra in samples else [dict(word=extra, basis="distinct-mops-registers")]
+            if supplement:
+                samples = tuple(sorted((*samples, extra)))
+            for sample in samples:
+                if sample not in candidate_cache:
+                    candidate_cache[sample] = index.candidates(sample)["candidates"]
+                if identity not in candidate_cache[sample]:
+                    raise ValueError(f"Arm table witness did not round-trip for {row.encoding}")
+            yield dict(**identity, variable_bit_mask=f"{variable_bits:08x}", samples=list(samples), supplement=supplement)
+
+
+def _summarize(rows, observations):
+    summary = Counter(allocated_rows=len(rows), unique_words=len(observations))
+    word_by_value = {int.from_bytes(bytes.fromhex(row["bytes_le"]), "little"): row for row in observations}
+    for row in rows:
+        witnessed = [word_by_value[value] for value in row["samples"]]
+        states = Counter(item["comparison"] for item in witnessed)
+        if witnessed:
+            summary["rows_with_witness"] += 1
+        if row["supplement"]:
+            summary["rows_with_supplementary_witness"] += 1
+        if states["same-rendering"] or states["different-rendering"]:
+            summary["rows_with_both_decoders_observed"] += 1
+        if witnessed and not states["unobserved"]:
+            summary["rows_with_all_samples_observed_by_both"] += 1
+        for tool in ("llvm", "gnu"):
+            if any(item[tool]["normalized"] is not None for item in witnessed):
+                summary[f"rows_with_{tool}_observed"] += 1
+        if states["different-rendering"]:
+            summary["rows_with_rendering_difference"] += 1
+        row["comparison_counts"] = dict(states)
+    for item in observations:
+        summary["words_" + item["comparison"].replace("-", "_")] += 1
+        for tool in ("llvm", "gnu"):
+            if item[tool]["normalized"] is None:
+                summary[f"words_{tool}_unobserved"] += 1
+        if len(item["encoding_index"]["candidates"]) > 1:
+            summary["words_with_multiple_table_candidates"] += 1
+        if item["encoding_index"]["exclusions"]:
+            summary["words_with_table_exclusions"] += 1
+    summary["rows_without_witness"] = len(rows) - summary["rows_with_witness"]
+    summary.setdefault("words_with_table_exclusions", 0)
+    return dict(summary)
+
+
+def collect_coverage(archive, llvm_objdump, gnu_objdump, *, profile=SVE_SME_PROFILE_V2):
+    index, identity = load_index(archive)
+    rows = list(sample_index(index))
+    words = sorted({word for row in rows for word in row["samples"]})
+    observations_by_address = [(BASE + 4 * i, word) for i, word in enumerate(words)]
+    decoders, observations = observe(observations_by_address, index, llvm_objdump, gnu_objdump, profile=profile)
+    binary = struct.pack(f"<{len(words)}I", *words)
+    report = dict(schema=SCHEMA, arm_index=identity, solver=z3.get_full_version(),
+                  scope="table-candidates-and-individually-variable-bits", profile=profile,
+                  synthetic_base=BASE, sample_sha256=sha256(binary).hexdigest(), decoders=decoders,
+                  summary=_summarize(rows, observations), rows=rows, words=observations)
+    return report, binary
+
+
+def _write_outputs(report_path, report, binary_path, binary):
+    serialized = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    payloads = [(report_path, serialized)]
+    if binary_path is not None:
+        payloads.insert(0, (binary_path, binary))
+    with ExitStack() as cleanup:
+        staged = []
+        for path, data in payloads:
+            with NamedTemporaryFile(mode="wb", dir=path.parent, delete=False) as temp:
+                staged_path = Path(temp.name)
+                cleanup.callback(staged_path.unlink, missing_ok=True)
+                temp.write(data)
+            staged.append((staged_path, path))
+        for staged_path, path in staged:
+            staged_path.replace(path)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("encoding_archive", type=Path)
+    parser.add_argument("report", type=Path)
+    parser.add_argument("--llvm-objdump", required=True, type=Path)
+    parser.add_argument("--gnu-objdump", required=True, type=Path)
+    parser.add_argument("--profile", choices=SOURCE_DECODE_PROFILES, default=SVE_SME_PROFILE_V2)
+    parser.add_argument("--words-out", type=Path, help="write the sampled little-endian A64 words for separate inspection")
+    args = parser.parse_args(argv)
+    inputs = (args.encoding_archive, args.llvm_objdump, args.gnu_objdump)
+    destinations = (args.report,) if args.words_out is None else (args.report, args.words_out)
+    if len({path.resolve() for path in (*inputs, *destinations)}) != len(inputs) + len(destinations):
+        parser.error("input and output paths must be distinct")
+    try:
+        report, binary = collect_coverage(*inputs, profile=args.profile)
+        _write_outputs(args.report, report, args.words_out, binary)
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"{parser.prog}: {error}\n")
+    print(json.dumps(report["summary"], sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

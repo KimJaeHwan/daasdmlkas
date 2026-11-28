@@ -364,3 +364,26 @@ value at the encoded width. `MOV` aliases report the effective value. Explicit
 `MOVZ` and `MOVN` also report the encoded immediate and shift. The original
 renderings remain available for both checks. `sve-sme-v1` evidence replays with
 its original rules.
+
+## A64 encoding table coverage
+
+`arm64_encoding_coverage.py` generates original instruction words from the
+pinned Arm encoding index. It records every allocated row by section and ordinal,
+including rows with the same encoding name. Each reachable row has a witness, and
+the sample set exercises both values of every bit that can vary within that row.
+MOPS copy and set rows also get a word with distinct operand registers.
+The report retains alternate table candidates and both decoder outputs at a
+fixed synthetic address. For example:
+
+```sh
+PYTHONPATH=src python tools/decode_check/arm64_encoding_coverage.py arm-a64.tar.gz coverage.json \
+    --llvm-objdump /path/to/llvm-objdump --gnu-objdump /path/to/aarch64-linux-gnu-objdump \
+    --profile a64-all-instructions-v1 --words-out coverage.bin
+```
+
+The default uses `sve-sme-v2`. `a64-all-instructions-v1` requests LLVM's `+all`
+option for a broader decoder comparison. The selected executable and exact
+options are recorded. Coverage of two bit values is per bit within a table row.
+Combinations of bits, instruction-specific decode constraints, feature availability
+on hardware and p-code effects have separate evidence. `unobserved` identifies a
+word for which at least one decoder produced no comparable normalized rendering.
