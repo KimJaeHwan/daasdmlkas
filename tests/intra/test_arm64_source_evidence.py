@@ -357,6 +357,47 @@ def test_definite_rejection_precedes_constrained_operand_checks():
     assert row["arm_check"]["verdict"] == "UNDEFINED"
 
 
+@pytest.mark.parametrize("word,verdict", [
+    (0x2538ffff, "UNDEFINED"),
+    (0x28c00000, "CONSTRAINED_UNPREDICTABLE"),
+])
+@pytest.mark.parametrize("selection", ["address", "symbol"])
+def test_source_profile_refuses_bundle_before_lifting(tmp_path, monkeypatch, word, verdict, selection):
+    code = b"".join(w.to_bytes(4, "little") for w in (0xD503201F, word, 0xD65F03C0))
+    original = _elf((2, [("guarded", 0x12, 1, ENTRY, len(code))]), code=code)
+    elf = tmp_path / "input.elf"
+    elf.write_bytes(original)
+    target = tmp_path / "bundles"
+    tools = dict(llvm_objdump="llvm", gnu_objdump="gnu", encoding_archive="arm")
+    range_args = dict(function="guarded") if selection == "symbol" else dict(entry=ENTRY, size=len(code))
+
+    def record(source, **kwargs):
+        assert source == original
+        assert kwargs == dict(entry=ENTRY, size=len(code), base=0x400000, page=4096, **tools,
+                              decode_profile=arm64_source_decode.ALL_INSTRUCTIONS_PROFILE_V3)
+        return dict(code_sha256=digest(code), slots=[
+            {"address": ENTRY, "bytes_le": code[:4].hex()},
+            {"address": ENTRY + 4, "bytes_le": code[4:8].hex(), "arm_check": {"verdict": verdict}},
+            {"address": ENTRY + 8, "bytes_le": code[8:].hex()},
+        ])
+
+    def forbid(*_args):
+        pytest.fail("attempted SLEIGH initialization before checking the source range")
+
+    monkeypatch.setattr(arm64_source_evidence, "_decode_record", record)
+    monkeypatch.setattr(arm64_local, "_context", forbid)
+    with pytest.raises(ValueError, match=f"{ENTRY+4:#x}: {verdict}"):
+        arm64_local.export(elf, target, **range_args, **tools)
+    assert not target.exists()
+
+
+def test_source_export_rejects_a_caller_byte_mismatch(monkeypatch):
+    monkeypatch.setattr(arm64_source_evidence, "_decode_record", lambda *_a, **_kw: {"code_sha256": digest(b"other")})
+    with pytest.raises(ValueError, match="Bundle caller bytes differ"):
+        arm64_source_evidence.check_source_export(b"ELF", b"code", entry=ENTRY, base=0x400000, page=4096,
+                                                  llvm_objdump="llvm", gnu_objdump="gnu", encoding_archive="arm")
+
+
 def test_index_keeps_overlapping_rows_and_negative_masks():
     index = EncodingIndex(ElementTree.fromstring("""
       <encodingindex instructionset="A64">

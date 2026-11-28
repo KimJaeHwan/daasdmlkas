@@ -75,6 +75,24 @@ ranges, conflicting names and marked AArch64 data (`$d`) are refused. A stripped
 ELF can still have dynamic symbols. Functions without a size-bearing symbol can
 be selected using the explicit address and size form above.
 
+Supply all three source-check options to apply `a64-all-instructions-v3` to
+the selected caller before lifting.
+
+```bash
+PYTHONPATH=src python tools/bundle_export/arm64_local.py libncnn.so output/ncnn-checked \
+    --function ncnn_blob_get_shape --encoding-archive arm-a64.tar.gz \
+    --llvm-objdump /path/to/llvm-objdump --gnu-objdump /path/to/aarch64-linux-gnu-objdump
+```
+
+The source check requires an executable section backed by the same ELF bytes
+as the caller block and excludes marked data and loader writes. The first
+`UNDEFINED` or `CONSTRAINED_UNPREDICTABLE` verdict refuses the entire export
+and reports the instruction address and bytes. The existing lift and Bundle
+admission checks run for ranges that pass. External transfer anchors retain
+their existing layout checks. The Bundle keeps its ordinary format. For
+replayable source observations, collect the same selected range with
+`arm64_source_evidence.py --decode-profile a64-all-instructions-v3`.
+
 For a range without a function symbol, list and select an unwind record by ID
 from the same ELF.
 

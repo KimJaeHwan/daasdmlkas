@@ -12,7 +12,7 @@ from arm64_local import _load_mapping, digest, json_bytes
 from arm64_elf_functions import _sections, _symbol_inputs
 from arm64_elf_unwind import _code_range
 from arm64_encoding_index import load_index
-from arm64_source_decode import SOURCE_DECODE_PROFILES, SOURCE_DECODE_RULES, observe
+from arm64_source_decode import ALL_INSTRUCTIONS_PROFILE_V3, SOURCE_DECODE_PROFILES, SOURCE_DECODE_RULES, observe
 from tdo_v2.integration.standalone_arm64 import MAX_CODE_BYTES
 
 
@@ -34,9 +34,8 @@ def _source_range(original, entry, size, base, page):
     return source, original[file_offset:file_offset + size]
 
 
-def collect_decode(original, *, entry, size, llvm_objdump, gnu_objdump, encoding_archive, base=None, page=4096,
+def _decode_record(original, *, entry, size, llvm_objdump, gnu_objdump, encoding_archive, base=None, page=4096,
                    decode_profile=None):
-    """Compare the two independent decoders without building a lift or Bundle."""
     source, code = _source_range(original, entry, size, base, page)
     reference, identity = load_index(encoding_archive)
     words = [(entry + offset, int.from_bytes(code[offset:offset+4], "little")) for offset in range(0, size, 4)]
@@ -51,7 +50,29 @@ def collect_decode(original, *, entry, size, llvm_objdump, gnu_objdump, encoding
                       common_facts_rule=SOURCE_DECODE_RULES[decode_profile],
                       runtime=dict(cpu_features="unobserved", streaming_mode="unobserved", za_state="unobserved",
                                    vector_length="unobserved"))
+    return record
+
+
+def collect_decode(original, *, entry, size, llvm_objdump, gnu_objdump, encoding_archive, base=None, page=4096,
+                   decode_profile=None):
+    """Compare the two independent decoders without building a lift or Bundle."""
+    record = _decode_record(original, entry=entry, size=size, llvm_objdump=llvm_objdump, gnu_objdump=gnu_objdump,
+                            encoding_archive=encoding_archive, base=base, page=page, decode_profile=decode_profile)
     return json_bytes(dict(digest=digest(json_bytes(record)), evidence=record)) + b"\n"
+
+
+def check_source_export(original, code, *, entry, base, page, llvm_objdump, gnu_objdump, encoding_archive):
+    """Reject a selected Bundle range with a v3 Arm verdict before lifting."""
+    record = _decode_record(original, entry=entry, size=len(code), base=base, page=page,
+                            llvm_objdump=llvm_objdump, gnu_objdump=gnu_objdump, encoding_archive=encoding_archive,
+                            decode_profile=ALL_INSTRUCTIONS_PROFILE_V3)
+    if record["code_sha256"] != digest(code):
+        raise ValueError("ARM64 source adjudication and Bundle caller bytes differ")
+    for slot in record["slots"]:
+        verdict = slot.get("arm_check", {}).get("verdict")
+        if verdict in ("UNDEFINED", "CONSTRAINED_UNPREDICTABLE"):
+            raise ValueError(f"ARM64 source profile {ALL_INSTRUCTIONS_PROFILE_V3} refused Bundle at "
+                             f"{slot['address']:#x}: {verdict} ({slot['bytes_le']} little-endian)")
 
 
 def verify_decode(original, encoded, *, llvm_objdump, gnu_objdump, encoding_archive):

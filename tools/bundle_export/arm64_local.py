@@ -252,9 +252,16 @@ def _range_record(selected, mapping, base):
 
 
 def _export(original, output_root, *, entry=None, size=None, function=None, unwind_fde=None, base=None, page=4096,
-            sla_directory=None, branches=False, pairs=False, before_publish=None):
+            sla_directory=None, branches=False, pairs=False, before_publish=None,
+            llvm_objdump=None, gnu_objdump=None, encoding_archive=None):
     if (entry is None) != (size is None) or sum(value is not None for value in (entry, function, unwind_fde)) > 1:
         raise ValueError("use --entry with --size, or select one ELF symbol or unwind record")
+    source_inputs = (llvm_objdump, gnu_objdump, encoding_archive)
+    check_source = any(value is not None for value in source_inputs)
+    if check_source:
+        if any(value is None for value in source_inputs):
+            raise ValueError("ARM64 source adjudication requires --llvm-objdump, --gnu-objdump and --encoding-archive")
+        original = bytes(original)
     mapping, base = _load_mapping(original, base, page)
     selection = None
     if entry is None:
@@ -271,6 +278,11 @@ def _export(original, output_root, *, entry=None, size=None, function=None, unwi
             or not 4 <= size <= MAX_CODE_BYTES or size % 4 or entry + size > elf_map.U64_END):
         raise ValueError("provide one aligned ARM64 function range of 4 to 65536 bytes")
     blocks, code = _code_blocks(original, mapping, base, entry, size)
+    if check_source:
+        from arm64_source_evidence import check_source_export
+
+        check_source_export(original, code, entry=entry, base=base, page=page, llvm_objdump=llvm_objdump,
+                            gnu_objdump=gnu_objdump, encoding_archive=encoding_archive)
     if pairs and before_publish is None:
         before_publish = _check_graph
     branches = branches or pairs
@@ -294,11 +306,13 @@ def _export(original, output_root, *, entry=None, size=None, function=None, unwi
 
 
 def export(elf, output_root, *, entry=None, size=None, function=None, unwind_fde=None, base=None, page=4096,
-           sla_directory=None, branches=False, pairs=False):
+           sla_directory=None, branches=False, pairs=False, llvm_objdump=None, gnu_objdump=None,
+           encoding_archive=None):
     """Export one explicit range, ELF symbol or unwind record."""
     generation, _ = _export(Path(elf).read_bytes(), output_root, entry=entry, size=size, function=function,
                             unwind_fde=unwind_fde, base=base, page=page, sla_directory=sla_directory,
-                            branches=branches, pairs=pairs)
+                            branches=branches, pairs=pairs, llvm_objdump=llvm_objdump,
+                            gnu_objdump=gnu_objdump, encoding_archive=encoding_archive)
     return generation
 
 
@@ -318,12 +332,17 @@ def main(argv=None):
     parser.add_argument("--sla-directory", type=Path)
     parser.add_argument("--branches", action="store_true", help="allow the bounded direct-branch profile")
     parser.add_argument("--pairs", action="store_true", help="also allow integer STP and LDP in the branch profile")
+    parser.add_argument("--llvm-objdump", type=Path, help="LLVM disassembler for the v3 source check")
+    parser.add_argument("--gnu-objdump", type=Path, help="AArch64 GNU disassembler for the v3 source check")
+    parser.add_argument("--encoding-archive", type=Path, help="pinned Arm archive for the v3 source check")
     parser.add_argument("--g2-out", type=Path, help="write local G2 memory comparisons linked to TDO graph operations")
     args = parser.parse_args(argv)
     listing = args.list_functions or args.list_unwind_ranges
     if listing:
         if args.output_root is not None or args.size is not None or args.g2_out is not None:
             parser.error("range listing takes no output root, --size or --g2-out")
+        if any(value is not None for value in (args.llvm_objdump, args.gnu_objdump, args.encoding_archive)):
+            parser.error("source adjudication applies to Bundle export")
     elif args.output_root is None:
         parser.error("output_root is required to export a Bundle")
     try:
@@ -354,6 +373,7 @@ def main(argv=None):
             original, args.output_root, entry=args.entry, size=args.size, function=args.function,
             unwind_fde=args.unwind_fde, base=args.base, page=args.page_size,
             sla_directory=args.sla_directory, branches=args.branches, pairs=args.pairs, before_publish=build_report if args.g2_out is not None else None,
+            llvm_objdump=args.llvm_objdump, gnu_objdump=args.gnu_objdump, encoding_archive=args.encoding_archive,
         )
         if report is not None:
             if selected is not None:
