@@ -1242,6 +1242,13 @@ def indexed_relations(normalized, observation, conditions_of=None) -> tuple:
             if entry is None or entry.object_id.kind not in (
                     StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_RELATIVE):
                 continue
+            # Two full-width entry reads of one object with unit weights
+            # describe the same sum in either order. Pick stable caller load
+            # roles by byte offset, independent of the atoms' scope hashes.
+            if extend == "identity" and scale == 1 and entry.size == 8 \
+                    and base.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE \
+                    and entry.object_id == base.object_id and entry.start < base.start:
+                base, entry = entry, base
             try:
                 relation = IndexedAnchor(base, entry, space.space_id, extend, preoffset, scale)
             except (TypeError, ValueError):

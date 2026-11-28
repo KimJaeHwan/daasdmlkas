@@ -178,7 +178,9 @@ TEMPLATE_VERSION = 7   # 2: stack_values_out; 3: exact scalar literals and entry
 # address slice must be debt-free.
 # 62: (PE-a1) direction-flag-clear covers the entry value of the architectural DF
 # only (register table, else the program-wide rep operand); no call return.
-ENGINE_SEMANTICS_VERSION = 62
+# 63: same-object, unit-weight entry memory pairs choose their base by byte
+# offset, stabilizing their caller's staged reads and serialized roles.
+ENGINE_SEMANTICS_VERSION = 63
 KEY_PREFIX = "dll:"
 _CROSSING_KINDS = ("call", "alias", "unknown", "uncertain")
 

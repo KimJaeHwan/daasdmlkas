@@ -110,6 +110,52 @@ def _oracle(item, program, pools=_pools):
     return report
 
 
+@pytest.mark.parametrize("higher_slot_first", [False, True])
+def test_unscaled_same_object_entry_sum_uses_stable_caller_load_order(monkeypatch, higher_slot_first):
+    from tdo_v2 import relative_memory
+    from tdo_v2.span_geometry import StorageObjectKind
+
+    monkeypatch.setenv("TDO_V2_FORWARD", "1")
+    low, high, slot, address = tmp(0x100), tmp(0x110), tmp(0x120), tmp(0x130)
+    leaf = (FunctionBuilder(entry=LEAF)
+            .ins(add(slot, reg(RCX), const(40)), load(high, slot))
+            .ins(add(slot, reg(RCX), const(16)), load(low, slot))
+            .ins(add(address, high, low), store(address, reg(RAX, 2))).ret())
+    caller = (FunctionBuilder().sub_rsp(0x58)
+              .ins(copy(reg(RCX), reg(RSP)))
+              .ins(add(slot, reg(RCX), const(40)), store(slot, reg(RDI)))
+              .ins(add(slot, reg(RCX), const(16)), store(slot, reg(RDX)))
+              .ins(add(reg(RSI), reg(RDI), reg(RDX)))
+              .call(LEAF).ins(load(reg(RAX, 2), reg(RSI))).add_rsp(0x58).ret())
+    units = program_units(caller, leaf)
+    callee_scope = units[1].scopes.function.scope
+    original = relative_memory._stable_storage_key
+
+    def renumber(span):
+        offset = span.start - (1 << 64)
+        if span.object_id.kind is StorageObjectKind.FUNCTION_RELATIVE \
+                and span.object_id.scope == callee_scope and span.size == 8 and offset in (16, 40):
+            return (1 << 248) + int((offset == 40) != higher_slot_first)
+        return original(span)
+
+    monkeypatch.setattr(relative_memory, "_stable_storage_key", renumber)
+    results = analyze_units(units)
+    client, callee = results["1:1000"], results[f"1:{LEAF:x}"]
+    (_, relation), = callee.summary.address_relations
+    assert relation.base.object_id == relation.index.object_id
+    assert (relation.base.start, relation.index.start) == ((1 << 64) + 16, (1 << 64) + 40)
+    (call, effect), = client.normalized.proven_call_effects
+    (access,) = [run.write for run in effect.memory_runs if run.write.index is not None]
+    assert (access.pointer.displacement, access.index.memory.displacement) == (16, 40)
+    planned = call_load_keys(call, effect)
+    sequence = [row.operation_key for block in client.normalized.forward_inputs.effect_unit.blocks
+                for row in block.effects]
+    assert sequence.index(planned[access.pointer]) < sequence.index(planned[access.index.memory])
+    program = {(1, unit.scopes.function.entry.byte_offset): unit.observation for unit in units}
+    report = _oracle(client, program, lambda seed: {**_pools(seed), RDI: 0x71000000, RDX: 2 * seed})
+    assert report.through_calls and report.place_covered
+
+
 @pytest.mark.parametrize("engine", ["sparse", "dense"])
 @pytest.mark.parametrize("source", ["register", "memory", "pointer-memory"])
 def test_later_register_index_memory_index_or_pointer_slot_updates_do_not_rebind_entry_place(monkeypatch,
