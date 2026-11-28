@@ -218,7 +218,8 @@ def collect_coverage(archive, llvm_objdump, gnu_objdump, *, profile=SVE_SME_PROF
     rows = list(sample_index(index, size_masks=_size_masks(archive, index)))
     words = sorted({word for row in rows for word in row["samples"]})
     observations_by_address = [(BASE + 4 * i, word) for i, word in enumerate(words)]
-    decoders, observations = observe(observations_by_address, index, llvm_objdump, gnu_objdump, profile=profile)
+    decoders, observations = observe(observations_by_address, index, llvm_objdump, gnu_objdump,
+                                     profile=profile, encoding_archive=archive)
     binary = struct.pack(f"<{len(words)}I", *words)
     report = dict(schema=SCHEMA, arm_index=identity, solver=z3.get_full_version(),
                   scope="table-candidates-variable-bits-and-operand-size-combinations", profile=profile,

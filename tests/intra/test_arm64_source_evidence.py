@@ -10,6 +10,7 @@ import arm64_source_decode
 import arm64_source_evidence
 from arm64_encoding_index import EncodingIndex
 from arm64_encoding_coverage import _mops_sample, _size_witnesses, _witnesses, sample_index
+from arm64_source_constraints import _ClauseRule, _Form, constrained_encoding
 from arm64_source_facts import EXTENDED_RULE
 from arm64_source_validity import undefined_encoding
 from arm64_local import digest, json_bytes
@@ -299,6 +300,61 @@ def test_undefined_verdict_is_independent_of_observer_agreement():
                                          profiled=True, check_undefined=True)
     assert row["arm_check"]["verdict"] == "UNDEFINED"
     assert row["arm_check"]["observers"] == {"llvm": "unobserved", "gnu": "unobserved"}
+
+
+def test_constrained_rules_follow_the_prescribed_bits_choice_in_source_order():
+    index = _source_index("STXRB_SR32_ldstexclr", "stxrb.xml", section="ldstexclr")
+    form = _Form(
+        (("Rt2", 10, 1),),
+        {"Rt": (4, 5), "Rn": (9, 5), "Rs": (20, 5)},
+        {"t": "Rt", "n": "Rn", "s": "Rs"}, None,
+        (
+            _ClauseRule("Unpredictable_DATAOVERLAP", "Decode", "s == t", ("UNKNOWN", "UNDEF", "NOP")),
+            _ClauseRule("Unpredictable_BASEOVERLAP", "Decode", "s == n && n != 31", ("UNKNOWN", "UNDEF", "NOP")),
+        ),
+        False,
+    )
+
+    class Index:
+        def candidates(self, word):
+            assert word == 0x08000400
+            return index
+
+    check = constrained_encoding(0x08000000, index, Index(), {("stxrb.xml", "STXRB_SR32_ldstexclr"): form})
+    fixed, data, base = check["clauses"]
+    assert [c["requires"] for c in (fixed, data, base)] == [
+        "instruction-decode", "execute-with-prescribed-bits", "prior-choice-continues",
+    ]
+    assert fixed["choices"][2]["word_le"] == "00040008"
+    assert fixed["choices"][3]["continues"] is None
+    assert data["choices"][0]["scope"] == "store-data"
+    assert base["choices"][0]["scope"] == "access-address"
+    assert data["choices"][1:] == [dict(kind="UNDEFINED", continues=False), dict(kind="NOP", continues=False)]
+
+
+@pytest.mark.parametrize("simd", [False, True])
+def test_constrained_duplicate_destination_distinguishes_simd_31_from_zero_register(simd):
+    index = _source_index("fixture", "fixture.xml")
+    form = _Form(
+        (), {"Rt": (4, 5), "Rt2": (14, 5)}, {"t": "Rt", "t2": "Rt2"}, None,
+        (_ClauseRule("Unpredictable_LDPOVERLAP", "Decode", "t == t2", ("UNKNOWN", "UNDEF", "NOP")),),
+        simd,
+    )
+    check = constrained_encoding(0x28407fff, index, None, {("fixture.xml", "fixture"): form})
+    rule, = check["clauses"]
+    assert rule["inputs"]["t"]["kind"] == ("register" if simd else "zero-register")
+    assert len(rule["choices"][0]["operands"]) == (2 if simd else 0)
+
+
+def test_definite_rejection_precedes_constrained_operand_checks():
+    index = _source_index("LDCLRP_128_memop_128", "ldclrp.xml", "FEAT_LSE128", "memop_128")
+
+    def forbid(*_args):
+        pytest.fail("checked constrained overlap after definite UNDEFINED")
+
+    row = arm64_source_decode._source_row(ENTRY, 0x193f101f, index, ("<unknown>", ""), ("ldclrp", "xzr, xzr, [x0]"),
+                                         profiled=True, check_undefined=True, check_constraints=forbid)
+    assert row["arm_check"]["verdict"] == "UNDEFINED"
 
 
 def test_index_keeps_overlapping_rows_and_negative_masks():

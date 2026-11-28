@@ -373,6 +373,13 @@ comparison remain available. The verdict covers the audited LSE128 and
 D128+THE register forms and SVE immediate `CPY` and `DUP`. Other words
 continue through the usual verification. See the [Arm rejection design](../../docs/handoff_tbr/design/design_tbr_arm64_undefined.md).
 
+Select `--decode-profile a64-all-instructions-v3` to retain those rejections
+and record `CONSTRAINED_UNPREDICTABLE` choices for the audited families.
+`arm_check.clauses` preserves Arm source order. Each choice records its
+scope and whether it continues; a prescribed-bit continuation is required
+before the operand clauses on combined cases. The CPU's selected outcome
+stays unobserved. See the [constraint design](../../docs/handoff_tbr/design/design_tbr_arm64_constrained_unpredictable.md).
+
 ## A64 encoding table coverage
 
 `arm64_encoding_coverage.py` generates original instruction words from the

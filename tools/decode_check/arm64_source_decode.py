@@ -1,10 +1,12 @@
 """Compare independent A64 disassemblies of the same original ELF words."""
 
+from functools import partial
 import re
 
 from arm64_decode import BATCH_WORDS, DIRECT, LLVM_OPTIONS, LlvmObjdump, normalize, number
 from arm64_facts import CC, signed
 from arm64_profiles import GnuObjdump
+from arm64_source_constraints import constrained_encoding, load_constraints
 from arm64_source_facts import RULE, EXTENDED_RULE, compare_fields, common_fields
 from arm64_source_validity import undefined_encoding
 
@@ -14,6 +16,7 @@ SVE_SME_PROFILE = "sve-sme-v1"
 SVE_SME_PROFILE_V2 = "sve-sme-v2"
 ALL_INSTRUCTIONS_PROFILE = "a64-all-instructions-v1"
 ALL_INSTRUCTIONS_PROFILE_V2 = "a64-all-instructions-v2"
+ALL_INSTRUCTIONS_PROFILE_V3 = "a64-all-instructions-v3"
 _SVE_SME_OPTIONS = (*LLVM_OPTIONS[:-1], LLVM_OPTIONS[-1] + ",+sve,+sve2,+bf16,+i8mm,+sme,+sme2,+sme-f64f64")
 _ALL_INSTRUCTIONS_OPTIONS = (*LLVM_OPTIONS[:-1], "--mattr=+all")
 SOURCE_DECODE_PROFILES = {
@@ -21,9 +24,11 @@ SOURCE_DECODE_PROFILES = {
     SVE_SME_PROFILE_V2: _SVE_SME_OPTIONS,
     ALL_INSTRUCTIONS_PROFILE: _ALL_INSTRUCTIONS_OPTIONS,
     ALL_INSTRUCTIONS_PROFILE_V2: _ALL_INSTRUCTIONS_OPTIONS,
+    ALL_INSTRUCTIONS_PROFILE_V3: _ALL_INSTRUCTIONS_OPTIONS,
 }
 SOURCE_DECODE_RULES = {SVE_SME_PROFILE: RULE, SVE_SME_PROFILE_V2: EXTENDED_RULE,
-                       ALL_INSTRUCTIONS_PROFILE: EXTENDED_RULE, ALL_INSTRUCTIONS_PROFILE_V2: EXTENDED_RULE}
+                       ALL_INSTRUCTIONS_PROFILE: EXTENDED_RULE, ALL_INSTRUCTIONS_PROFILE_V2: EXTENDED_RULE,
+                       ALL_INSTRUCTIONS_PROFILE_V3: EXTENDED_RULE}
 
 
 def _rendered(raw, *, gnu):
@@ -77,7 +82,7 @@ def _profile_probe(llvm, gnu, reference):
     return rows
 
 
-def _source_row(pc, word, index, llvm, gnu, *, profiled, rule=RULE, check_undefined=False):
+def _source_row(pc, word, index, llvm, gnu, *, profiled, rule=RULE, check_undefined=False, check_constraints=None):
     first, second = _rendered(llvm, gnu=False), _rendered(gnu, gnu=True)
     state = ("unobserved" if first is None or second is None else
              "same-rendering" if first == second else "different-rendering")
@@ -89,6 +94,9 @@ def _source_row(pc, word, index, llvm, gnu, *, profiled, rule=RULE, check_undefi
             name: "contradicted" if rendered is not None and rendered["form"] != "udf" else "unobserved"
             for name, rendered in (("llvm", first), ("gnu", second))
         }
+        row["arm_check"] = verdict
+        return row
+    if check_constraints is not None and (verdict := check_constraints(word, index)) is not None:
         row["arm_check"] = verdict
         return row
     check = _arm_check(pc, word, index, first, second)
@@ -103,10 +111,15 @@ def _source_row(pc, word, index, llvm, gnu, *, profiled, rule=RULE, check_undefi
     return row
 
 
-def observe(words, reference, llvm_path, gnu_path, *, profile=None):
+def observe(words, reference, llvm_path, gnu_path, *, profile=None, encoding_archive=None):
     """Keep both rendered decodes and only check the Arm fields modeled here."""
     if profile is not None and profile not in SOURCE_DECODE_PROFILES:
         raise ValueError("unknown AArch64 source decode profile")
+    check_constraints = None
+    if profile == ALL_INSTRUCTIONS_PROFILE_V3:
+        if encoding_archive is None:
+            raise ValueError("constraint verification requires the pinned Arm archive")
+        check_constraints = partial(constrained_encoding, reference=reference, forms=load_constraints(encoding_archive))
     llvm = (LlvmObjdump(llvm_path) if profile is None else
             LlvmObjdump(llvm_path, options=SOURCE_DECODE_PROFILES[profile]))
     gnu = GnuObjdump(gnu_path)
@@ -114,13 +127,14 @@ def observe(words, reference, llvm_path, gnu_path, *, profile=None):
     if profile is not None:
         decoders["profile_probes"] = _profile_probe(llvm, gnu, reference)
     rule = SOURCE_DECODE_RULES.get(profile, RULE)
-    check_undefined = profile == ALL_INSTRUCTIONS_PROFILE_V2
+    check_undefined = profile in (ALL_INSTRUCTIONS_PROFILE_V2, ALL_INSTRUCTIONS_PROFILE_V3)
     results = []
     for start in range(0, len(words), BATCH_WORDS):
         chunk = dict(words[start:start + BATCH_WORDS])
         left, right = llvm.decode(chunk), gnu.decode(chunk)
         results.extend(_source_row(pc, word, reference.candidates(word), left[pc], right[pc],
-                                   profiled=profile is not None, rule=rule, check_undefined=check_undefined)
+                                   profiled=profile is not None, rule=rule, check_undefined=check_undefined,
+                                   check_constraints=check_constraints)
                        for pc, word in chunk.items())
     llvm.check_identity()
     gnu.check_identity()

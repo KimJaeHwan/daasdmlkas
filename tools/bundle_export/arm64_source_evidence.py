@@ -40,7 +40,8 @@ def collect_decode(original, *, entry, size, llvm_objdump, gnu_objdump, encoding
     source, code = _source_range(original, entry, size, base, page)
     reference, identity = load_index(encoding_archive)
     words = [(entry + offset, int.from_bytes(code[offset:offset+4], "little")) for offset in range(0, size, 4)]
-    decoders, rows = observe(words, reference, llvm_objdump, gnu_objdump, profile=decode_profile)
+    decoders, rows = observe(words, reference, llvm_objdump, gnu_objdump, profile=decode_profile,
+                            encoding_archive=encoding_archive)
     for offset, row in enumerate(rows):
         row["file_offset"] = source["file_offset"] + offset * 4
     record = dict(schema=DECODE_SCHEMA, source=source, original_sha256=digest(original), code_sha256=digest(code),
