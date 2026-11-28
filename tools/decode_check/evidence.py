@@ -1039,7 +1039,7 @@ def bind_common_facts(document, facts_document, *, bundle, allowlist, observatio
     import common_facts as cf
 
     rule = facts_document.get("producer", {}).get("rule")
-    arm = rule in ("g2c-1", "g2c-2")
+    arm = rule in ("g2c-1", "g2c-2", "g2c-3")
     lookup = _bind_checked_rows(
         document, facts_document, bundle=bundle, allowlist=allowlist,
         observations=observations,

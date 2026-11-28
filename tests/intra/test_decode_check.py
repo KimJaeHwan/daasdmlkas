@@ -4272,6 +4272,108 @@ def test_g2c_value_select_missing_registers():
     assert arm.decode(0x9A883128) == "csel"
 
 
+@pytest.mark.parametrize("word,form,width,cc,operands,nzcv", [
+    (0x7A420025, "ccmp", 32, "eq", ("w1", "w2"), 5),
+    (0xFA5F1BEF, "ccmp", 64, "ne", (0, 31), 15),
+    (0xBA44E060, "ccmn", 64, "al", ("x3", "x4"), 0),
+    (0xFA5FF0A7, "ccmp", 64, "nv", ("x5", 0), 7),
+    (0x3A4098CA, "ccmn", 32, "ls", ("w6", 0), 10),
+    (0x3A4860E3, "ccmn", 32, "vs", ("w7", "w8"), 3),
+])
+def test_g2c_conditional_integer_compare(word, form, width, cc, operands, nzcv):
+    import arm64_facts as arm
+
+    regs = {f"{prefix}{i}": dict(name=f"{prefix}{i}", space=2, offset=i * 8, size=size)
+            for i in range(31) for prefix, size in (("x", 8), ("w", 4))}
+    regs.update({name: dict(name=name, space=2, offset=300 + i, size=1)
+                 for i, name in enumerate(("NG", "ZR", "CY", "OV"))})
+    f = dict(_row(4, [_op("CBRANCH", [_a(START + 4), _r(301, 1)])]), isa="aarch64")
+    f.update(fallthrough_space=f["space"], fallthrough=f["address"] + 4)
+    collector = _g2c_arm(f["address"], [word], regs)
+    r = collector.row(f, "f0")
+    assert r["aarch64"]["form"] == form
+    c = r["aarch64"]["flag_compare"]
+    assert c["width"] == width and c["when_false"] == {"nzcv": nzcv}
+    assert c["when_true"] == {
+        "operation": "subtract_flags" if form == "ccmp" else "add_flags",
+        "operands": [{"constant": format(v, "x"), "width": width} if isinstance(v, int)
+                     else {"pre_register": regs[v], "width": width} for v in operands],
+    }
+    assert c["destination"] == dict(zip("nzcv", (regs[n] for n in ("NG", "ZR", "CY", "OV")), strict=True))
+    if cc in ("al", "nv"):
+        assert c["condition"] == {"constant": True, "encoded_condition": cc}
+    else:
+        assert c["condition"]["flags"] == cc and c["condition"]["inputs"]
+    t = r["transfer"]
+    assert t["kind"] == "none" and t["condition"] is None
+    e, = t["edges"]
+    assert cf.triple(e) == cf.SEQ and e["to"] == cf.addr(f["space"], f["address"] + 4)
+    for rule in (arm.LEGACY_RULE, arm.SELECT_RULE):
+        assert cf.unknown(collector.row(f, "f0", rule=rule)["aarch64"]["form"])
+    assert arm.decode(word ^ 0x400) is None and arm.decode(word ^ 0x10) is None
+
+
+def test_g2c_float_compare_normal_completion():
+    import arm64_facts as arm
+
+    words = [0x1E212000, 0x1E6023E8, 0x1E641465, 0x1EE720C0, 0x1E24F46F]
+    regs = {
+        name: dict(name=name, space=2, offset=offset, size=size)
+        for name, offset, size in (("s0", 0, 4), ("s1", 16, 4), ("d31", 496, 8),
+                                   ("d3", 48, 8), ("d4", 64, 8), ("h6", 96, 2), ("h7", 112, 2))
+    }
+    f = dict(_row(4, []), isa="aarch64")
+    start = f["address"]
+    collector = _g2c_arm(start, words, regs)
+    rows = [collector.row(dict(f, address=start + i * 4), "f0") for i in range(len(words))]
+    assert [r["aarch64"]["form"] for r in rows] == ["fcmp", "fcmp", "fccmp", "fcmp", "fccmp"]
+    single, zero, conditional, half, always = [r["aarch64"]["flag_compare"] for r in rows]
+    assert single["when_true"]["operands"] == [arm.pre(regs["s0"], 32), arm.pre(regs["s1"], 32)]
+    assert zero["when_true"]["operands"] == [arm.pre(regs["d31"], 64), {"constant": "0", "width": 64}]
+    assert conditional["condition"]["flags"] == "ne" and conditional["when_false"] == {"nzcv": 5}
+    assert always["condition"] == {"constant": True, "encoded_condition": "nv"}
+    assert half["width"] == 16 and half["when_true"]["operands"][1] == arm.pre(regs["h7"], 16)
+    assert "FEAT_FP16" in {c["what"] for c in rows[3]["isa"][0]["conditions"]}
+    assert all(c["applies_on"] == "normal_completion" for c in (single, zero, conditional, half, always))
+    assert conditional["when_true"]["nzcv"] == {"less": 8, "equal": 6, "greater": 2, "unordered": 3}
+    assert all(r["transfer"]["condition"] is None and cf.triple(r["transfer"]["edges"][0]) == cf.SEQ for r in rows)
+    assert all(arm.decode(word, rule=arm.SELECT_RULE) is None for word in words)
+    assert arm.decode(words[0] | (2 << 22)) is None
+    assert arm.decode(words[0] | 0x10) is None and arm.decode(words[2] | 0x10) is None  # Signaling forms.
+    assert arm.decode(words[1] | (1 << 16)) is None  # Rm field is zero in the immediate form.
+
+
+def test_g2c_divide_and_atomic_effects():
+    import arm64_facts as arm
+
+    _, _, roles = _g2_unit(True)
+    regs = dict(roles, **{f"x{i}": dict(name=f"x{i}", space=2, offset=i * 8, size=8) for i in range(31)})
+    regs.update({f"w{i}": dict(regs[f"x{i}"], name=f"w{i}", size=4) for i in range(31)})
+    f = dict(_row(4, []), isa="aarch64")
+    start = f["address"]
+    words = [0x1ADF0841, 0x9ACD099F, 0xB8E10062, 0xF8E403FF]
+    collector = _g2c_arm(start, words, regs)
+    rows = [collector.row(dict(f, address=start + i * 4), "f0") for i in range(len(words))]
+    div, discard = [r["aarch64"]["value_operation"] for r in rows[:2]]
+    assert div == {"operation": "unsigned_divide", "width": 32, "zero_divisor_result": 0,
+                   "destination": {"register": regs["x1"], "extension": "zero_extend"},
+                   "operands": [arm.pre(regs["w2"], 32), {"constant": "0", "width": 32}]}
+    assert discard["destination"] is None and discard["width"] == 64
+    word, dword = [r["aarch64"]["atomic_access"] for r in rows[2:]]
+    assert word["address"] == arm.pre(regs["x3"], 64)
+    assert word["ordering"] == {"acquire": True, "release": True}
+    assert word["old_value_destination"] == {"register": regs["x2"], "extension": "zero_extend"}
+    assert dword["address"] == arm.pre(regs["sp"], 64)
+    assert dword["old_value_destination"] is None and dword["ordering"] == {"acquire": False, "release": True}
+    assert cf.unknown(word["memory_binding"]) and cf.unknown(dword["memory_binding"])
+    assert all(r["isa"][0]["conditions"][0]["what"] == "FEAT_LSE" for r in rows[2:])
+    assert all(cf.triple(r["transfer"]["edges"][0]) == cf.SEQ for r in rows)
+    assert all(arm.decode(w, rule=arm.SELECT_RULE) is None for w in words)
+    assert arm.decode(words[0] ^ 0x400) is None  # SDIV.
+    for bit in (31, 23, 22, 12):
+        assert arm.decode(words[2] ^ (1 << bit)) is None
+
+
 def test_g2c_branch_auth_traps_and_bti():
     import arm64_facts as arm
 

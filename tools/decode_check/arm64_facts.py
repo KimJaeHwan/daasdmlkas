@@ -8,7 +8,8 @@ import producer_override
 
 
 LEGACY_RULE = "g2c-1"
-RULE = "g2c-2"
+SELECT_RULE = "g2c-2"
+RULE = "g2c-3"
 FILE_RUNTIME_UNOBSERVED = "AArch64 file mapping is outside the G2b survey"
 NEXT_PC_MASK = (1 << 64) - 1
 CC = "eq ne cs cc mi pl vs vc hi ls ge lt gt le al nv".split()
@@ -24,6 +25,12 @@ ENCODINGS = (
     (0x7F000000, 0x36000000, "tbz"), (0x7F000000, 0x37000000, "tbnz"),
     (0x7FE00C00, 0x1A800000, "csel"), (0x7FE00C00, 0x1A800400, "csinc"),
     (0x7FE00C00, 0x5A800000, "csinv"), (0x7FE00C00, 0x5A800400, "csneg"),
+    (0x7FE00C10, 0x7A400000, "ccmp"), (0x7FE00C10, 0x7A400800, "ccmp"),
+    (0x7FE00C10, 0x3A400000, "ccmn"), (0x7FE00C10, 0x3A400800, "ccmn"),
+    (0xFF20FC1F, 0x1E202000, "fcmp"), (0xFF3FFC1F, 0x1E202008, "fcmp"),
+    (0xFF200C10, 0x1E200400, "fccmp"),
+    (0x7FE0FC00, 0x1AC00800, "udiv"),
+    (0xBFE0FC00, 0xB8E00000, "ldaddal"),
     (0xFFFFFC1F, 0xD61F0000, "br"), (0xFFFFFC1F, 0xD63F0000, "blr"),
     (0xFFFFFC1F, 0xD65F0000, "ret"),
     (0xFFFFFC00, 0xD71F0800, "braa"), (0xFFFFFC00, 0xD71F0C00, "brab"),
@@ -57,6 +64,10 @@ ENCODINGS = (
 )
 COND_BITS = {"b.cond": 19, "cbz": 19, "cbnz": 19, "tbz": 14, "tbnz": 14}
 SELECT_FALSE_OP = {"csel": "identity", "csinc": "increment", "csinv": "invert", "csneg": "negate"}
+INTEGER_COMPARE_OP = {"ccmp": "subtract_flags", "ccmn": "add_flags"}
+FLOAT_COMPARE_FORMS = {"fcmp", "fccmp"}
+FLOAT_TYPES = {0: ("s", 32), 1: ("d", 64), 3: ("h", 16)}
+G2C3_FORMS = INTEGER_COMPARE_OP.keys() | FLOAT_COMPARE_FORMS | {"udiv", "ldaddal"}
 CALLS = {"bl", "blr", "blraa", "blrab", "blraaz", "blrabz"}
 RETURNS = {"ret", "retaa", "retab"}
 TRAPS = {"svc", "hvc", "smc", "brk", "hlt", "udf"}
@@ -77,6 +88,10 @@ def decode(word, *, rule=RULE):
     for mask, expected, form in ENCODINGS:
         if word & mask == expected:
             if rule == LEGACY_RULE and form in SELECT_FALSE_OP:
+                return None
+            if rule in (LEGACY_RULE, SELECT_RULE) and form in G2C3_FORMS:
+                return None
+            if form in FLOAT_COMPARE_FORMS and ((word >> 22) & 3) not in FLOAT_TYPES:
                 return None
             if form in ("load_exclusive", "store_exclusive"):
                 size = ("b", "h", "", "")[word >> 30]
@@ -111,6 +126,19 @@ def flag_test(cc, regs):
     return {"flags": CC[cc], "inputs": inputs}
 
 
+def encoded_predicate(cc, regs):
+    # Both AL and NV are true for A64 instructions using ConditionHolds.
+    return {"constant": True, "encoded_condition": CC[cc]} if cc >= 14 else flag_test(cc, regs)
+
+
+def gpr_destination(regs, rd, width):
+    if rd == 31:
+        return None
+    register = gp(regs, rd)
+    return dict(register=register.get("pre_register", register),
+                extension="zero_extend" if width == 32 else "identity")
+
+
 def cond(form, word, regs):
     if form == "b.cond":
         test = flag_test(word & 15, regs)
@@ -130,16 +158,65 @@ def value_select(form, word, regs):
     width = 64 if word >> 31 else 32
     rd, rn, rm = word & 31, (word >> 5) & 31, (word >> 16) & 31
     cc = (word >> 12) & 15
-    # A64 ConditionHolds treats both AL and NV as true. Alias spellings such
-    # as CINC invert the displayed condition; use the encoded bits here.
-    predicate = {"constant": True, "encoded_condition": CC[cc]} if cc >= 14 else flag_test(cc, regs)
-    destination = None  # Rd == 31 discards the selected value.
-    if rd != 31:
-        register = gp(regs, rd)
-        destination = dict(register=register.get("pre_register", register),
-                           extension="zero_extend" if width == 32 else "identity")
-    return dict(width=width, destination=destination, condition=predicate, when_true=gp(regs, rn, width),
+    # Alias spellings such as CINC invert the displayed condition.
+    predicate = encoded_predicate(cc, regs)
+    return dict(width=width, destination=gpr_destination(regs, rd, width),
+                condition=predicate, when_true=gp(regs, rn, width),
                 when_false=dict(operation=SELECT_FALSE_OP[form], operand=gp(regs, rm, width)))
+
+
+def flag_destinations(regs):
+    destinations = {}
+    for flag, name in zip("nzcv", ("NG", "ZR", "CY", "OV"), strict=True):
+        ref = pre(regs.get(name), 8)
+        destinations[flag] = ref.get("pre_register", ref)
+    return destinations
+
+
+def integer_compare(form, word, regs):
+    """Set NZCV by a width-limited add/subtract or by the encoded literal.
+
+    Subtraction sets C on no borrow. Neither arithmetic arm reads incoming C.
+    """
+    width = 64 if word >> 31 else 32
+    rn, second = (word >> 5) & 31, (word >> 16) & 31
+    rhs = ({"constant": format(second, "x"), "width": width} if word & (1 << 11)
+           else gp(regs, second, width))
+    return dict(width=width, condition=encoded_predicate((word >> 12) & 15, regs),
+                destination=flag_destinations(regs),
+                when_true=dict(operation=INTEGER_COMPARE_OP[form], operands=[gp(regs, rn, width), rhs]),
+                when_false={"nzcv": word & 15})
+
+
+def float_compare(form, word, regs):
+    prefix, width = FLOAT_TYPES[(word >> 22) & 3]
+    rn, rm = (word >> 5) & 31, (word >> 16) & 31
+    conditional = form == "fccmp"
+    left = pre(regs.get(f"{prefix}{rn}"), width)
+    right = ({"constant": "0", "width": width} if not conditional and word & 8
+             else pre(regs.get(f"{prefix}{rm}"), width))
+    return dict(width=width, condition=encoded_predicate((word >> 12) & 15, regs) if conditional else None,
+                destination=flag_destinations(regs), applies_on="normal_completion",
+                when_true=dict(operation="quiet_float_compare", operands=[left, right],
+                               nzcv={"less": 8, "equal": 6, "greater": 2, "unordered": 3}),
+                when_false={"nzcv": word & 15} if conditional else None)
+
+
+def unsigned_divide(word, regs):
+    width = 64 if word >> 31 else 32
+    rd, rn, rm = word & 31, (word >> 5) & 31, (word >> 16) & 31
+    return dict(operation="unsigned_divide", width=width, destination=gpr_destination(regs, rd, width),
+                operands=[gp(regs, rn, width), gp(regs, rm, width)], zero_divisor_result=0)
+
+
+def atomic_add(word, regs):
+    """The encoded fetch-add effect on a completed access."""
+    width = 64 if (word >> 30) & 1 else 32
+    rt, rn, rs = word & 31, (word >> 5) & 31, (word >> 16) & 31
+    return dict(operation="atomic_fetch_add", width=width, address=gp(regs, rn, sp=True),
+                addend=gp(regs, rs, width), old_value_destination=gpr_destination(regs, rt, width),
+                ordering={"acquire": rt != 31, "release": True}, applies_on="normal_completion",
+                memory_binding=cf.U("no validated atomic userop identities"))
 
 
 def condition(what, source):
@@ -308,6 +385,16 @@ def exclusive(form, word, regs):
 
 
 def isa_for(form, word, regs):
+    if form in FLOAT_COMPARE_FORMS:
+        features = [condition("FEAT_FP", "profile")]
+        if (word >> 22) & 3 == 3:
+            features.append(condition("FEAT_FP16", "profile"))
+        return [isa_fact("F4", "floating-point comparison feature requirements", *features),
+                isa_fact("F2", "floating-point access can trap", condition("FP access enabled", "os_model")),
+                isa_fact("F3", "floating-point exceptions depend on inputs and FPCR",
+                         condition("normal completion", "profile"))]
+    if form == "ldaddal":
+        return [isa_fact("F4", "undefined without FEAT_LSE", condition("FEAT_LSE", "profile"))]
     if form in AUTH_KEYS:
         facts = [isa_fact("F1", "undefined without FEAT_PAuth", condition("FEAT_PAuth", "profile")),
                  pac_failure(combined=True)]
@@ -402,6 +489,14 @@ class Arm64Facts:
                 row["isa"] = isa_for(form, word, self.registers)
                 if form in SELECT_FALSE_OP:
                     capsule["value_select"] = value_select(form, word, self.registers)
+                elif form in INTEGER_COMPARE_OP:
+                    capsule["flag_compare"] = integer_compare(form, word, self.registers)
+                elif form in FLOAT_COMPARE_FORMS:
+                    capsule["flag_compare"] = float_compare(form, word, self.registers)
+                elif form == "udiv":
+                    capsule["value_operation"] = unsigned_divide(word, self.registers)
+                elif form == "ldaddal":
+                    capsule["atomic_access"] = atomic_add(word, self.registers)
             else:
                 capsule["form"] = cf.U("encoding outside supported A64 forms")
                 row["transfer"] = empty_transfer()
