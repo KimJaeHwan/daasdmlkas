@@ -47,7 +47,7 @@ import struct
 from pe_map import Parsed, Range, disjoint
 
 RULES = "elf-loader-rules-4"
-ARM64_RULES = "elf-aarch64-loader-rules-1"
+ARM64_RULES = "elf-aarch64-loader-rules-2"
 EM_X86_64, EM_AARCH64 = 62, 183
 ET_EXEC, ET_DYN = 2, 3
 PT_LOAD, PT_DYNAMIC = 1, 2
@@ -372,9 +372,43 @@ def _plt_entries(image, data, tags, plt_size, ranges) -> list:
     return []
 
 
+def _arm64_mapped_span(image, address, size, *, executable=False):
+    if not any(s["state"] == "mapped" and s["vaddr"] <= address
+               and (address + size <= s["vaddr"] + s["filesz"] and s["flags"] & 1 if executable else
+                    address + size <= s["vaddr"] + s["memsz"]) for s in image.segments):
+        return False
+    cursor = address - image.image_base
+    end = cursor + size
+    while cursor < end:
+        span = image.at(cursor)
+        if span is None or span.kind not in (("file",) if executable else ("file", "zero")):
+            return False
+        cursor = span.end
+    return True
+
+
+def _arm64_tlsdesc_tags(image, tags, ranges):
+    """Legacy lazy loaders write the GOT resolver slot and use the PLT as a code pointer."""
+    plt, got = tags.get(DT["TLSDESC_PLT"]), tags.get(DT["TLSDESC_GOT"])
+    if plt is None and got is None:
+        return []
+    problems = []
+    if plt is None or got is None:
+        problems.append("DT_TLSDESC_PLT and DT_TLSDESC_GOT must be paired")
+    if plt is not None and (plt % 4 or not _arm64_mapped_span(image, plt, 4, executable=True)):
+        problems.append("DT_TLSDESC_PLT does not identify an aligned file-backed executable address")
+    if got is not None:
+        if got % 8 or not _arm64_mapped_span(image, got, 8):
+            problems.append("DT_TLSDESC_GOT does not identify an aligned mapped 8-byte slot")
+        else:
+            ranges.append((got, got + 8, "tlsdesc-got-resolver"))
+    return problems
+
+
 def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize, *, arm64=False) -> Parsed:
     ranges = []
     problems = []
+    relocation_inputs = []
     dynamic = [p for p in phdrs if p[0] == PT_DYNAMIC]
     tags = {}
     if len(dynamic) > 1:
@@ -382,6 +416,8 @@ def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize, *, arm64=False) 
     if dynamic:
         _, _, offset, vaddr, _, filesz, memsz, _ = dynamic[0]
         ranges.append((vaddr, vaddr + memsz, "dynamic"))
+        if arm64 and memsz:
+            relocation_inputs.append((vaddr, vaddr + memsz))
         try:
             if arm64 and (filesz < 16 or filesz % 16 or filesz > memsz
                           or not _maps_file_table(image, vaddr, offset, filesz)):
@@ -397,7 +433,7 @@ def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize, *, arm64=False) 
             else:
                 if arm64:
                     problems.append("PT_DYNAMIC without DT_NULL")
-            relevant = (*WRITE_TAGS, "RELACOUNT", "RELCOUNT") if arm64 else WRITE_TAGS
+            relevant = (*WRITE_TAGS, "RELACOUNT", "RELCOUNT", "TLSDESC_PLT", "TLSDESC_GOT") if arm64 else WRITE_TAGS
             duplicated = sorted(name for name in relevant if seen.get(DT[name], 0) > 1)
             if duplicated:
                 problems.append("duplicated dynamic tags: " + ", ".join("DT_" + name for name in duplicated))
@@ -420,9 +456,9 @@ def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize, *, arm64=False) 
         if arm64 and any(0x70000000 <= tag <= 0x7FFFFFFF for tag in tags):
             problems.append("unsupported processor-specific AArch64 dynamic tag")
         if arm64:
-            for name in ("CREL", "TLSDESC_PLT", "TLSDESC_GOT"):
-                if DT[name] in tags:
-                    problems.append(f"DT_{name} is unsupported for AArch64")
+            if DT["CREL"] in tags:
+                problems.append("DT_CREL is unsupported for AArch64")
+            problems.extend(_arm64_tlsdesc_tags(image, tags, ranges))
             for table, count in (("RELA", "RELACOUNT"), ("REL", "RELCOUNT")):
                 if DT[count] in tags and DT[table] not in tags:
                     problems.append(f"DT_{count} without DT_{table}")
@@ -452,7 +488,10 @@ def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize, *, arm64=False) 
             if DT[start] not in tags:
                 continue
             try:
-                table = _read(image, data, tags[DT[start]], tags.get(DT[size], 0), file_only=arm64)
+                va = tags[DT[start]]
+                table = _read(image, data, va, tags.get(DT[size], 0), file_only=arm64)
+                if arm64 and table:
+                    relocation_inputs.append((va, va + len(table)))
                 if arm64 and start in ("REL", "RELA"):
                     count_tag = start + "COUNT"
                     count = tags.get(DT[count_tag], 0)
@@ -468,7 +507,10 @@ def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize, *, arm64=False) 
             if DT[start] not in tags:
                 continue
             try:
-                table = _read(image, data, tags[DT[start]], tags.get(DT[size], 0), file_only=arm64)
+                va = tags[DT[start]]
+                table = _read(image, data, va, tags.get(DT[size], 0), file_only=arm64)
+                if arm64 and table:
+                    relocation_inputs.append((va, va + len(table)))
                 ranges.extend(_relr_targets(table, tags.get(DT[ent], 8), f"DT_{start}", arm64=arm64))
             except _Unreadable as error:
                 problems.append(f"DT_{start}: {error}")
@@ -497,6 +539,8 @@ def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize, *, arm64=False) 
                     problems.append("allocated relocation section does not name its mapped file bytes")
                     continue
                 table = data[offset:offset + size]
+                if arm64 and table:
+                    relocation_inputs.append((va, va + size))
 
                 def section_symbol_size(symbol, link=link):
                     if link >= len(sections):
@@ -522,6 +566,18 @@ def _written(image, data, phdrs, e_shoff, e_shnum, e_shentsize, *, arm64=False) 
     if arm64 and any(not any(s["state"] == "mapped" and s["vaddr"] <= start < end <= s["vaddr"] + s["memsz"]
                              for s in image.segments) for start, end, _ in ranges):
         problems.append("loader write range is outside an eligible PT_LOAD")
+    if arm64:
+        descriptors = [(start, end) for start, end, label in ranges if label == "R_AARCH64_TLSDESC"]
+        if any(start % 8 for start, _ in descriptors):
+            problems.append("R_AARCH64_TLSDESC target is not 8-byte aligned")
+        if any(not _arm64_mapped_span(image, start, end - start) for start, end in descriptors):
+            problems.append("R_AARCH64_TLSDESC target does not identify an unambiguous 16-byte mapped descriptor")
+        # Legacy setup can write before later relocations consume the dynamic table or relocation entries.
+        tls_writes = descriptors
+        if DT["TLSDESC_GOT"] in tags:
+            tls_writes = [(start, end) for start, end, label in ranges if label != "dynamic"]
+        if any(start < hi and lo < end for start, end in tls_writes for lo, hi in relocation_inputs):
+            problems.append("AArch64 loader write overlaps dynamic or relocation metadata under TLSDESC rules")
     ranges = sorted({(start - image.image_base, end - image.image_base, label) for start, end, label in ranges})
     if problems:
         return Parsed("indeterminate", ranges, "; ".join(problems))

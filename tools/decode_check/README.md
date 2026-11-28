@@ -93,7 +93,18 @@ or a row in another address space supplies no file comparison. The original and 
 checked against the same admitted Bundle.
 
 The loader model covers the listed AArch64 relocation widths, standard and dynamic Android RELR,
-PT_DYNAMIC and reserved PLT GOT slots. Unsupported encodings, malformed tables and unresolved widths
+PT_DYNAMIC and reserved PLT GOT slots. `elf-aarch64-loader-rules-2` models the aligned 16-byte
+`R_AARCH64_TLSDESC` write and the 8-byte resolver slot addressed by a paired `DT_TLSDESC_GOT`.
+`DT_TLSDESC_PLT` names executable code. The tag itself introduces no write to that code.
+The footprint includes the optional legacy lazy resolver write described by glibc and the
+two pointer-sized fields specified by AAELF64. A descriptor relocation can occur without the
+lazy tags. Malformed or ambiguous addresses, duplicate or unpaired tags, and writes that can
+change the relocation inputs under the TLS descriptor model withhold loader completeness.
+[Arm ELF ABI](https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst#relocations-for-thread-local-storage) ·
+[glibc loader change](https://ecos.sourceware.org/ml/libc-alpha/2017-10/msg00320.html) ·
+[GNU linker behavior](https://sourceware.org/pipermail/binutils-cvs/2019-April/050454.html)
+
+Unsupported encodings, malformed tables and unresolved widths
 (including COPY) leave loader coverage indeterminate. The report describes the captured snapshot and
 the selected loader model. Its results stay in the diagnostic report, with the existing G2c facts
 and engine evidence retaining their original format and meaning.

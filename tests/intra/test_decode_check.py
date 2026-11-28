@@ -1994,6 +1994,104 @@ def test_arm64_elf_relr_and_dynamic_table_terminator():
     assert "without DT_NULL" in image.mapping.written.why
 
 
+def test_arm64_tlsdesc_keeps_plt_code_and_models_got_and_descriptor_writes():
+    import _elf_fixture as ef
+    from arm64_file import FileMapping
+    from elf_map import DT
+
+    segments = [ef.Segment(0x1000, bytes(32)), ef.Segment(0x5000, bytes(16), memsz=64, flags=6)]
+    relocation = ef.Reloc(0x5028, 1031)
+    tags = [(DT["TLSDESC_PLT"], 0x1000), (DT["TLSDESC_GOT"], 0x5010)]
+    original = ef.make_elf(segments, machine=183, jmprel=[relocation], extra_dynamic=tags).data
+    image = FileMapping(original, 1, 0x100000, 4096)
+    assert image.mapping.written.state == "complete", image.mapping.written.why
+    assert image.word((1, 0x101000, 0))["loader"]["state"] == "no_modeled_write"
+    assert [(start, end, source) for start, end, source in image.mapping.written.ranges if "tlsdesc" in source.lower()] == [
+        (0x5010, 0x5018, "tlsdesc-got-resolver"),
+        (0x5028, 0x5038, "R_AARCH64_TLSDESC"),
+    ]
+
+    # An eager descriptor still occupies two words when there is no lazy trampoline.
+    eager = ef.make_elf(segments, machine=183, jmprel=[relocation], extra_dynamic=[(24, 0)]).data
+    mapping = FileMapping(eager, 1, 0x100000, 4096).mapping
+    assert mapping.written.state == "complete", mapping.written.why
+    assert (0x5028, 0x5038, "R_AARCH64_TLSDESC") in mapping.written.ranges
+    assert all(source != "tlsdesc-got-resolver" for _, _, source in mapping.written.ranges)
+
+
+@pytest.mark.parametrize("plt,got,descriptor,additional,why", [
+    (None, 0x5010, 0x5028, None, "must be paired"),
+    (0x1000, None, 0x5028, None, "must be paired"),
+    (0x1000, 0x5010, 0x5028, "TLSDESC_PLT", "duplicated dynamic tags: DT_TLSDESC_PLT"),
+    (0x1000, 0x5010, 0x5028, "TLSDESC_GOT", "duplicated dynamic tags: DT_TLSDESC_GOT"),
+    (0x1002, 0x5010, 0x5028, None, "file-backed executable address"),
+    (0x1020, 0x5010, 0x5028, None, "file-backed executable address"),
+    (0x5000, 0x5010, 0x5028, None, "file-backed executable address"),
+    (0x1000, 0x5014, 0x5028, None, "aligned mapped 8-byte slot"),
+    (0x1000, 0x6000, 0x5028, None, "aligned mapped 8-byte slot"),
+    (0x1000, 0x5010, 0x502c, None, "target is not 8-byte aligned"),
+    (0x1000, 0x5010, 0x5038, None, "unambiguous 16-byte mapped descriptor"),
+    (0x1000, 0x7000, 0x5028, None, "overlaps dynamic or relocation metadata"),
+    (0x1000, 0x7018, 0x5028, None, "overlaps dynamic or relocation metadata"),
+    (0x1000, 0x5010, 0x7008, None, "overlaps dynamic or relocation metadata"),
+])
+def test_arm64_tlsdesc_malformed_metadata_withholds_loader_completeness(plt, got, descriptor, additional, why):
+    import _elf_fixture as ef
+    from elf_map import DT, parse
+
+    segments = [ef.Segment(0x1000, bytes(32), memsz=64), ef.Segment(0x5000, bytes(16), memsz=64, flags=6)]
+    tags = [(DT[name], value) for name, value in (("TLSDESC_PLT", plt), ("TLSDESC_GOT", got)) if value is not None]
+    if additional is not None:
+        tags.append(next(tag for tag in tags if tag[0] == DT[additional]))
+    original = ef.make_elf(segments, machine=183, dyn_vaddr=0x7000, jmprel=[ef.Reloc(descriptor, 1031)],
+                           extra_dynamic=tags).data
+    model = parse(original, arm64_page=4096).written
+    assert model.state == "indeterminate" and why in model.why
+    if got in (0x5010, 0x7000, 0x7018):
+        assert (got, got+8, "tlsdesc-got-resolver") in model.ranges
+
+
+def test_arm64_tlsdesc_checks_shared_page_ambiguity_for_got_and_descriptor():
+    import _elf_fixture as ef
+    from elf_map import DT, parse
+
+    segments = [ef.Segment(0x1000, bytes(4)), ef.Segment(0x5000, bytes(64), flags=6),
+                ef.Segment(0x5080, bytes(32), flags=6)]
+    original = ef.make_elf(segments, machine=183, jmprel=[ef.Reloc(0x5028, 1031)],
+                           extra_dynamic=[(DT["TLSDESC_PLT"], 0x1000), (DT["TLSDESC_GOT"], 0x5010)]).data
+    model = parse(original, arm64_page=4096).written
+    assert model.state == "indeterminate"
+    assert "does not identify an aligned mapped 8-byte slot" in model.why
+    assert "does not identify an unambiguous 16-byte mapped descriptor" in model.why
+
+
+def test_arm64_misaligned_tlsdesc_retains_other_possible_writes_in_the_table():
+    import _elf_fixture as ef
+    from elf_map import parse
+
+    original = ef.make_elf([ef.Segment(0x1000, bytes(64))], machine=183, relocations=[
+        ef.Reloc(0x1000, 257), ef.Reloc(0x100c, 1031), ef.Reloc(0x1020, 1027),
+    ]).data
+    model = parse(original, arm64_page=4096).written
+    assert model.state == "indeterminate" and "target is not 8-byte aligned" in model.why
+    assert (0x1000, 0x1008, "R_AARCH64_ABS64") in model.ranges
+    assert (0x1020, 0x1028, "R_AARCH64_RELATIVE") in model.ranges
+
+
+def test_arm64_lazy_tlsdesc_withholds_if_other_writes_can_change_relocation_inputs():
+    import _elf_fixture as ef
+    from elf_map import DT, parse
+
+    segments = [ef.Segment(0x1000, bytes(4)), ef.Segment(0x5000, bytes(64), flags=6)]
+    original = ef.make_elf(segments, machine=183, dyn_vaddr=0x7000, relocations=[ef.Reloc(0x7018, 1027)],
+                           jmprel=[ef.Reloc(0x5028, 1031)], extra_dynamic=[(DT["TLSDESC_PLT"], 0x1000),
+                                                                          (DT["TLSDESC_GOT"], 0x5010)]).data
+    model = parse(original, arm64_page=4096).written
+    assert model.state == "indeterminate" and "overlaps dynamic or relocation metadata" in model.why
+    assert (0x5010, 0x5018, "tlsdesc-got-resolver") in model.ranges
+    assert (0x7018, 0x7020, "R_AARCH64_RELATIVE") in model.ranges
+
+
 def test_arm64_elf_checks_allocated_relocation_section_geometry():
     import struct
 
