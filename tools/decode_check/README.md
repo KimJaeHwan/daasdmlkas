@@ -315,3 +315,43 @@ Port notes (Rust kernels later):
   for ok voters. The crosscheck runs both paths and reports a one-sided exception with its row and view.
 - `common_facts_verdicts5.schema.json` gives the structure as JSON Schema; the cross-reference rules above are prose
   only.
+
+## ARM64 source decode profiles
+
+To cross-check original bytes before lifting, supply both `--llvm-objdump` and
+`--gnu-objdump` along with `--encoding-archive`. The tool checks the executable
+ELF range, passes the same four-byte words at their loaded PCs to both decoders,
+and records tool digests, raw outputs, and Arm encoding candidates. For example:
+
+```sh
+PYTHONPATH=src python tools/bundle_export/arm64_source_evidence.py lib.so decode.json \
+    --entry 0x184cd0 --size 80 --base 0x100000 --encoding-archive arm-a64.tar.gz \
+    --llvm-objdump /path/to/llvm-objdump --gnu-objdump /path/to/aarch64-linux-gnu-objdump
+```
+
+Replay uses `--verify` and the same archive and decoder paths. The cross-check
+runs before SLEIGH, Bundle admission, or TDO. `different-rendering` preserves
+different disassembly text for review. The Arm checks in this mode cover the
+encoded B.cond target and condition, and the feature-dependent PACIASP/HINT
+encoding. They leave CPU features and execution effects unobserved.
+
+Add `--decode-profile sve-sme-v1` for the versioned SVE/SME cross-check. Both
+decoders read every selected word. The v2 evidence records the named profile,
+actual decoder options and executable digests, and probe results for SVE/SME
+operands and scaled versus unscaled addresses. Replay selects the recorded
+profile from the registry. Baseline evidence also replays through `--verify`.
+
+V2 slots retain both raw renderings. A `common_facts` record contains the Arm
+encoding and only the checked fields for that encoding. These include register
+offsets for GPR and SIMD/FP loads and stores, the address operand of PRFM, the
+encoded start address of SVE LD1W (32- or 64-bit lanes), and operand shapes for
+BFMMLA, merging BFCVT, BFCVTN/BFCVTN2, FMOPA (32/64), and ZERO ZA. Per-field
+`field_evidence` marks a tool's stated value confirmed, contradicted or
+unobserved. A tool's wrong shift remains visible beside the Arm address. The
+LD1W address comparison checks the printed base and multiplier. Arm provides
+the vector-length scaling rule. Register-offset addresses contain the effective
+shift and extension. The original word preserves the option and scale bits,
+including byte accesses for which both scale bits produce a shift of zero.
+The payload uses named registers and applies to the source ELF word. CPU
+features, streaming mode, ZA state, vector length and lane access sets require
+runtime evidence.

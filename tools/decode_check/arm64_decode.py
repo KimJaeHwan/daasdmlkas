@@ -153,15 +153,17 @@ class Objdump:
 
 
 class LlvmObjdump(Objdump):
-    def __init__(self, path):
-        super().__init__(path, LLVM_OPTIONS)
+    def __init__(self, path, *, options=LLVM_OPTIONS):
+        self.options = tuple(options)
+        super().__init__(path, self.options)
         probe = self.decode({0x1000: 0x14000001, 0x1004: 0, 0x1008: 0xAA0103E0})
         if (normalize(*probe[0x1000])[0:2] != ("b", ["0x1004"])
                 or normalize(*probe[0x1004])[0] != "udf"
                 or normalize(*probe[0x1008])[0:2] != ("orr", ["x0", "xzr", "x1"])):
             raise ObserverError("LLVM did not pass the A64 word, address and no-alias probe")
 
-    def decode(self, words, *, options=LLVM_OPTIONS):
+    def decode(self, words, *, options=None):
+        options = self.options if options is None else options
         image, sections = elf_words(words)
         return parse_disassembly(self._run((*options, "-"), image), sections)
 
@@ -170,13 +172,13 @@ def condition_name(name):
     return {"hs": "cs", "lo": "cc"}.get(name, name)
 
 
-def normalize(mnemonic, operands):
+def normalize(mnemonic, operands, *, expand_hints=True):
     tokens = [p.strip() for p in re.sub(r"\s+<[^<>]*>", "", operands.split("//", 1)[0]).lower().split(",")]
     tokens = [] if tokens == [""] else tokens
     cond = None
     if mnemonic.startswith("b.") and condition_name(mnemonic[2:]) in CONDITIONS:
         cond, mnemonic = condition_name(mnemonic[2:]), "b.cond"
-    elif mnemonic == "hint" and len(tokens) == 1:
+    elif expand_hints and mnemonic == "hint" and len(tokens) == 1:
         mnemonic = HINT_FORMS.get(number(tokens[0]), mnemonic)
     elif mnemonic == "bti" and len(tokens) == 1 and tokens[0] in ("c", "j", "jc"):
         mnemonic += "_" + tokens[0]
