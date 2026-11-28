@@ -15,6 +15,20 @@ _KEY = re.compile(_STRING, re.DOTALL)
 _SPACE = re.compile(rb'[ \t\r\n]*')
 _VALUE_END = re.compile(rb'[ \t\r\n,}\]]')
 _SHARE_IDENTIFIERS_ABOVE = 32 << 20
+_CHUNK_SIZE = 1 << 20
+_ENCODER = json.JSONEncoder(sort_keys=True, separators=(",", ":"))
+
+
+def canonical_bytes(value):
+    """Yield canonical UTF-8 JSON in chunks without allocating a section-sized string."""
+    pending = bytearray()
+    for piece in _ENCODER.iterencode(value):
+        pending.extend(piece.encode())
+        if len(pending) >= _CHUNK_SIZE:
+            yield pending
+            pending = bytearray()
+    if pending:
+        yield pending
 
 
 def _end(buffer, start):
@@ -192,6 +206,16 @@ class Sections:
         for chunk in chunks:
             self.stream.write(chunk)
         self.ranges[name] = (start, self.stream.tell())
+
+    def chunks(self, name):
+        start, stop = self.ranges[name]
+        self.stream.seek(start)
+        while start < stop:
+            chunk = self.stream.read(min(stop - start, _CHUNK_SIZE))
+            if not chunk:
+                raise OSError(f"incomplete section {name}")
+            start += len(chunk)
+            yield chunk
 
     def first_difference(self, name, other):
         self.stream.flush()

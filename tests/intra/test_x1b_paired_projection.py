@@ -116,6 +116,41 @@ def projected_equal(left, right) -> bool:
     return project_document(left)["digests"] == project_document(right)["digests"]
 
 
+def test_snapshot_writer_preserves_canonical_bytes_and_exact_section_bounds(tmp_path, monkeypatch):
+    monkeypatch.setattr(snapshot_sections, "_CHUNK_SIZE", 16)
+    reference = document()
+    reference["meta"]["seconds"] = 0.0
+    reference["sections"]["a:unicode"] = ["한글", "quote\"backslash\\", None]
+    reference["digests"]["a:unicode"] = semantic_snapshot._digest(reference["sections"]["a:unicode"])
+    path = tmp_path / "sample.json.gz"
+
+    assert semantic_snapshot._write(path, reference["meta"], iter(reference["sections"].items()), "test") == 0
+    with gzip.open(path, "rb") as handle:
+        assert handle.read() == json.dumps(reference, sort_keys=True, separators=(",", ":")).encode()
+    with open_snapshot(path) as reopened:
+        assert reopened["digests"] == reference["digests"]
+        for name, data in reference["sections"].items():
+            assert reopened["sections"][name] == data
+
+
+def test_snapshot_writer_preserves_existing_output_when_section_copy_fails(tmp_path, monkeypatch):
+    reference = document()
+    reference["meta"]["seconds"] = 0.0
+    path = tmp_path / "sample.json.gz"
+    assert semantic_snapshot._write(path, reference["meta"], iter(reference["sections"].items()), "test") == 0
+    before = path.read_bytes()
+
+    def interrupt_copy(self, name):
+        yield b"["
+        raise OSError("section copy failed")
+
+    monkeypatch.setattr(Sections, "chunks", interrupt_copy)
+    with pytest.raises(OSError, match="section copy failed"):
+        semantic_snapshot._write(path, reference["meta"], iter(reference["sections"].items()), "test")
+    assert path.read_bytes() == before
+    assert sorted(tmp_path.iterdir()) == [path]
+
+
 def test_consistent_renumbering_with_new_digests_passes():
     base = document()
     renumbered = document(f="d" * 64, u="e" * 64, p="f" * 64, space=(1 << 201) + 3, atom=(1 << 211) + 5,

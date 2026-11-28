@@ -20,6 +20,11 @@ from heapq import merge
 import json
 import re
 
+if __package__:
+    from .snapshot_sections import canonical_bytes
+else:
+    from snapshot_sections import canonical_bytes
+
 HEX64 = re.compile(r"(?<![0-9a-f])[0-9a-f]{40,64}(?![0-9a-f])")   # (digests; space keys may drop leading zeros)
 ATOM_SUFFIX = re.compile(r" #[0-9a-f]{8}$")
 SMALL = 1 << 32   # (a space key below this is a plain space id, not a hash)
@@ -837,21 +842,6 @@ def project_document(document) -> dict:
     return {"meta": document["meta"], "complete": True, "sections": sections, "digests": digests}
 
 
-_ENCODER = json.JSONEncoder(sort_keys=True, separators=(",", ":"))
-
-
-def _canonical_bytes(value):
-    """Canonical JSON without building a single string for a whole section."""
-    pending = bytearray()
-    for piece in _ENCODER.iterencode(value):
-        pending.extend(piece.encode())
-        if len(pending) >= 1 << 20:
-            yield pending
-            pending = bytearray()
-    if pending:
-        yield pending
-
-
 def project_snapshot(snapshot, projected=None):
     """Project indexed input, optionally saving projected sections for difference display."""
     sections = snapshot["sections"]
@@ -886,7 +876,7 @@ def project_snapshot(snapshot, projected=None):
         digest = hashlib.sha256()
 
         def chunks():
-            for chunk in _canonical_bytes(value):
+            for chunk in canonical_bytes(value):
                 digest.update(chunk)
                 yield chunk
 

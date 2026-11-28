@@ -37,6 +37,12 @@ import sys
 import time
 import zlib
 from pathlib import Path
+from tempfile import NamedTemporaryFile, TemporaryFile
+
+if __package__:
+    from .snapshot_sections import Sections, canonical_bytes
+else:
+    from snapshot_sections import Sections, canonical_bytes
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
@@ -218,6 +224,26 @@ def _check_contract(value, path):
     return set(excluded)
 
 
+def _encode_dataclass(value, path, *, skip=()):
+    excluded = _check_contract(value, path) or set()
+    added = ADDED_FIELDS.get(type(value).__name__, {})
+    renamed = RENAMED_FIELDS.get(type(value).__name__, {})
+    if _LOSSLESS.get():
+        excluded, renamed = excluded - LOSSLESS_INCLUDED, {}
+
+    def named(field):
+        old = renamed.get(field.name)
+        if old is None:
+            return field.name, encode(getattr(value, field.name), f"{path}.{field.name}")
+        return old[0], encode(old[1](getattr(value, field.name)), f"{path}.{old[0]}")
+
+    return {"type": type(value).__name__, **dict(
+        named(field)
+        for field in dataclasses.fields(value) if field.name not in excluded and field.name not in skip
+        and not (field.name in added and getattr(value, field.name) == added[field.name])
+    )}
+
+
 def encode(value, path="$"):
     """The canonical JSON-ready form of ``value`` (raises ``Unhandled``)."""
     from tdo_v2.graph import RustworkxDependencyGraph
@@ -239,23 +265,7 @@ def encode(value, path="$"):
                       for source, target, record in value.weighted_edges()],
         }
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        excluded = _check_contract(value, path) or set()
-        added = ADDED_FIELDS.get(type(value).__name__, {})
-        renamed = RENAMED_FIELDS.get(type(value).__name__, {})
-        if _LOSSLESS.get():
-            excluded, renamed = excluded - LOSSLESS_INCLUDED, {}
-
-        def named(field):
-            old = renamed.get(field.name)
-            if old is None:
-                return field.name, encode(getattr(value, field.name), f"{path}.{field.name}")
-            return old[0], encode(old[1](getattr(value, field.name)), f"{path}.{old[0]}")
-
-        return {"type": type(value).__name__, **dict(
-            named(field)
-            for field in dataclasses.fields(value) if field.name not in excluded
-            and not (field.name in added and getattr(value, field.name) == added[field.name])
-        )}
+        return _encode_dataclass(value, path)
     if type(value) in (tuple, list):
         return [encode(item, f"{path}[{index}]") for index, item in enumerate(value)]
     if type(value) in (set, frozenset):
@@ -369,83 +379,46 @@ def dump(generation: Path, out: Path, config: str, bindings=(), paired: bool = F
         _LOSSLESS.reset(token)
 
 
-def _dump(generation: Path, out: Path, config: str, bindings, paired: bool) -> int:
+def _legacy_sections(run, normalized, paired):
+    for key, items in sorted(normalized.items()):
+        for index, item in enumerate(items):
+            yield f"function:{key}:normalized[{index}]", encode(item, f"{key}[{index}]")
+    for index, root in enumerate(run.roots):
+        yield f"root:{index}", encode(root, f"roots[{index}]")
+    yield "run:assumptions", encode(run.assumptions, "assumptions")
+    if getattr(run, "base_premises", ()):
+        yield "run:base_premises", encode(run.base_premises, "base_premises")
+    if paired and getattr(run, "supports", None):
+        yield "run:supports", encode(run.supports, "supports")
+
+
+def _summary_sections(generation, run, results, options, paired, forward):
     from tdo_v2.relative_memory import INDEX_DIAGNOSTICS, index_object_origins
     from tdo_v2.summary_engine import LANE_DIAGNOSTICS
 
-    started = time.time()
-    if config == "legacy":
-        run, normalized = _run_legacy(generation)
-        sections = {f"function:{key}:normalized[{index}]": encode(item, f"{key}[{index}]")
-                    for key, items in sorted(normalized.items()) for index, item in enumerate(items)}
-        sections.update({f"root:{index}": encode(root, f"roots[{index}]") for index, root in enumerate(run.roots)})
-        sections["run:assumptions"] = encode(run.assumptions, "assumptions")
-        if getattr(run, "base_premises", ()):
-            sections["run:base_premises"] = encode(run.base_premises, "base_premises")
-        meta = {"snapshot_version": SNAPSHOT_VERSION, "generation": generation.name, "config": config,
-                "bindings": [], "options": None, "models": None, "python": sys.version.split()[0],
-                "seconds": round(time.time() - started, 1)}
-        if paired:
-            meta.update(paired=True, **_bundle_digests(generation))
-            if getattr(run, "supports", None):
-                sections["run:supports"] = encode(run.supports, "supports")
-        return _write(out, meta, sections, f"{len(normalized)} functions, {len(run.roots)} roots")
-    run, results, options, models = _run(generation, config, bindings)
-    functions = {}
     for key, item in sorted(results.items()):
-        normalized = encode(item.normalized, f"{key}.normalized")
-        analyzed = encode(item, f"{key}")
-        analyzed.pop("normalized", None)
-        summary = analyzed.pop("summary", None)
-        functions[key] = {"normalized": normalized, "summary": summary, "analyzed": analyzed}
-    roots = [encode(root, f"roots[{index}]") for index, root in enumerate(run.roots)]
-    run_level = {
-        "assumptions": encode(run.assumptions, "assumptions"),
-        **({"base_premises": encode(run.base_premises, "base_premises")}
-           if getattr(run, "base_premises", ()) else {}),
-        "failed_functions": encode(getattr(run, "failed_functions", ()), "failed_functions"),
-        # Scope refusals have no admitted entry/summary; do not lose their
-        # sealed member identity when functions/roots happen to be empty.
-        **({"admission_failures": encode(run.admission_failures, "admission_failures")}
-           if getattr(run, "admission_failures", ()) else {}),
-        **({"refused_control_graphs": encode(run.refused_control_graphs, "refused_control_graphs")}
-           if getattr(run, "refused_control_graphs", ()) else {}),
-        # (U2a: only when a function has a control context)
-        **({"control_contexts": encode(run.control_contexts, "control_contexts")}
-           if getattr(run, "control_contexts", ()) else {}),
-        **({"control_exemptions": encode(run.control_exemptions, "control_exemptions")}
-           if getattr(run, "control_exemptions", ()) else {}),
-        "lane_diagnostics": encode(dict(LANE_DIAGNOSTICS), "lane"),
-        "index_diagnostics": encode(dict(INDEX_DIAGNOSTICS), "index"),
-        # (X-1b paired dumps: the premise report and the run-level control records)
-        **({"supports": encode(run.supports, "supports")} if paired and getattr(run, "supports", ()) else {}),
-        **({"control_sites": encode(run.control_sites, "control_sites")}
-           if paired and getattr(run, "control_sites", ()) else {}),
-        **({"fault_report": encode(run.fault_report, "fault_report")}
-           if paired and getattr(run, "fault_report", ()) else {}),
-    }
-    meta = {
-        "snapshot_version": SNAPSHOT_VERSION, "generation": generation.name, "config": config,
-        "bindings": [Path(path).name for path in bindings],
-        # (a switch added after the baselines is recorded only off its default)
-        "options": encode({name: value for name, value in options.items()
-                           if not (name == "assume_opaque_callees_restore_stack_pointer" and value)
-                           and not (name in ("assume_faults_end_execution", "assume_stock_ghidra_translator")
-                                    and not value)}, "options"),
-        "models": [[item.file_id, item.digest] for item in models.files] if models is not None else None,
-        "python": sys.version.split()[0], "seconds": round(time.time() - started, 1),
-    }
+        yield f"function:{key}:normalized", encode(item.normalized, f"{key}.normalized")
+        yield f"function:{key}:summary", encode(item.summary, f"{key}.summary")
+        yield f"function:{key}:analyzed", _encode_dataclass(item, key, skip=("normalized", "summary"))
+    for index, root in enumerate(run.roots):
+        yield f"root:{index}", encode(root, f"roots[{index}]")
+    yield "run:assumptions", encode(run.assumptions, "assumptions")
+    yield "run:failed_functions", encode(getattr(run, "failed_functions", ()), "failed_functions")
+    # Scope refusals still identify their sealed members when no root was admitted.
+    for name in ("base_premises", "admission_failures", "refused_control_graphs", "control_contexts", "control_exemptions"):
+        if value := getattr(run, name, ()):
+            yield f"run:{name}", encode(value, name)
+    yield "run:lane_diagnostics", encode(dict(LANE_DIAGNOSTICS), "lane")
+    yield "run:index_diagnostics", encode(dict(INDEX_DIAGNOSTICS), "index")
     if paired:
-        meta.update(paired=True, **_bundle_digests(generation))
-    sections = {f"function:{key}:{part}": data for key, item in functions.items() for part, data in item.items()}
-    sections.update({f"root:{index}": root for index, root in enumerate(roots)})
-    sections.update({f"run:{name}": data for name, data in run_level.items()})
-    if paired:
+        for name in ("supports", "control_sites", "fault_report"):
+            if value := getattr(run, name, ()):
+                yield f"run:{name}", encode(value, name)
         final_objects = {obj for item in results.values() for obj, _ in getattr(item.normalized, "address_objects", ())}
         index_origins = index_object_origins(final_objects)
         if index_origins:
-            sections["run:index_object_origins"] = encode(index_origins, "index_object_origins")
-    if os.environ.get("TDO_V2_FORWARD") == "1":
+            yield "run:index_object_origins", encode(index_origins, "index_object_origins")
+    if forward:
         # forward value facts (docs 25.33 F0): nothing in the engine reads them;
         # recorded only when asked, so forward-off snapshots stay as they were
         from tdo_v2.forward import context_facts, forward_facts
@@ -457,24 +430,93 @@ def _dump(generation: Path, out: Path, config: str, bindings, paired: bool) -> i
         for key, item in sorted(results.items()):
             if type(item.normalized) is NormalizedFunction:
                 labels = (*run.assumptions, *item.inherited_assumptions, *item.declared.values())
-                sections[f"forward:{key}"] = encode(forward_facts(
+                yield f"forward:{key}", encode(forward_facts(
                     item.normalized, item.unit, readonly_image=readonly, assumptions=labels), f"{key}.forward")
-        sections["forward-context"] = encode(context_facts(
+        yield "forward-context", encode(context_facts(
             results, readonly_image=readonly,
             assumptions=lambda key, item: (*run.assumptions, *item.inherited_assumptions, *item.declared.values())),
             "forward-context")
-        meta["forward"] = "F2a"
-    return _write(out, meta, sections, f"{len(functions)} functions, {len(roots)} roots")
 
 
-def _write(out: Path, meta, sections, what) -> int:
-    document = {"meta": meta, "complete": True,
-                "digests": {name: _digest(data) for name, data in sections.items()}, "sections": sections}
+def _dump(generation: Path, out: Path, config: str, bindings, paired: bool) -> int:
+    started = time.time()
+    meta = {"snapshot_version": SNAPSHOT_VERSION, "generation": generation.name, "config": config,
+            "bindings": [], "options": None, "models": None, "python": sys.version.split()[0]}
+    if config == "legacy":
+        run, normalized = _run_legacy(generation)
+        sections = _legacy_sections(run, normalized, paired)
+        count = len(normalized)
+    else:
+        run, results, options, models = _run(generation, config, bindings)
+        forward = os.environ.get("TDO_V2_FORWARD") == "1"
+        if forward:
+            meta["forward"] = "F2a"
+        sections = _summary_sections(generation, run, results, options, paired, forward)
+        count = len(results)
+        meta.update(
+            bindings=[Path(path).name for path in bindings],
+            # (a switch added after the baselines is recorded only off its default)
+            options=encode({name: value for name, value in options.items()
+                            if not (name == "assume_opaque_callees_restore_stack_pointer" and value)
+                            and not (name in ("assume_faults_end_execution", "assume_stock_ghidra_translator")
+                                     and not value)}, "options"),
+            models=[[item.file_id, item.digest] for item in models.files] if models is not None else None,
+        )
+    if paired:
+        meta.update(paired=True, **_bundle_digests(generation))
+    return _write(out, meta, sections, f"{count} functions, {len(run.roots)} roots", started=started)
+
+
+def _spool_section(spool, name, value):
+    digest = hashlib.sha256()
+
+    def chunks():
+        for chunk in canonical_bytes(value):
+            digest.update(chunk)
+            yield chunk
+
+    spool.write(name, chunks())
+    return digest.hexdigest()
+
+
+def _publish_snapshot(out, meta, spool, digests):
+    partial = None
+    try:
+        with NamedTemporaryFile(dir=out.parent, prefix=out.name + ".", suffix=".partial", delete=False) as raw:
+            partial = Path(raw.name)
+            with gzip.GzipFile(filename="", fileobj=raw, mode="wb") as handle:
+                handle.write(b'{"complete":true,"digests":')
+                handle.write(_canonical(digests).encode())
+                handle.write(b',"meta":')
+                handle.write(_canonical(meta).encode())
+                handle.write(b',"sections":{')
+                separator = b""
+                for name in sorted(digests):
+                    handle.write(separator + _canonical(name).encode() + b":")
+                    for chunk in spool.chunks(name):
+                        handle.write(chunk)
+                    separator = b","
+                handle.write(b"}}")
+        partial.replace(out)
+    finally:
+        if partial is not None:
+            partial.unlink(missing_ok=True)
+
+
+def _write(out: Path, meta, sections, what, *, started=None) -> int:
+    """Consume named sections one at a time and publish the existing JSON format."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    partial = out.with_name(out.name + ".partial")
-    with gzip.open(partial, "wt", encoding="utf-8") as handle:
-        json.dump(document, handle, sort_keys=True, separators=(",", ":"))
-    partial.replace(out)   # (a crash leaves no artifact that looks whole)
+    with TemporaryFile(dir=out.parent) as stream:
+        spool, digests = Sections(stream), {}
+        for name, data in sections:
+            if name in digests:
+                raise ValueError(f"duplicate section {name}")
+            digests[name] = _spool_section(spool, name, data)
+            del data
+        if started is not None:
+            meta = {**meta, "seconds": round(time.time() - started, 1)}
+        stream.flush()
+        _publish_snapshot(out, meta, spool, digests)
     print(f"[snapshot] {meta['generation']} {meta['config']}: {what}, {meta['seconds']} s -> {out}")
     return 0
 

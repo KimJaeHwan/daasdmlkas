@@ -67,7 +67,7 @@ def main() -> int:
     meta = {"snapshot_version": SNAPSHOT_VERSION, "generation": f"fixture:{name}", "config": "fixture",
             "bindings": [], "options": None, "models": None, "python": sys.version.split()[0],
             "seconds": round(time.time() - started, 1)}
-    return _write(out, meta, sections, f"{len(results)} functions")
+    return _write(out, meta, sections.items(), f"{len(results)} functions")
 
 
 if __name__ == "__main__":
