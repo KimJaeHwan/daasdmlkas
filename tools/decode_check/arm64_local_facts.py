@@ -8,7 +8,8 @@ from arm64_facts import Arm64Facts, program_fragments, tbi
 import common_facts as cf
 import lifting
 from tdo_v2.graph_contracts import NodeKind
-from tdo_v2.integration.standalone_arm64 import BRANCH_FORMS, build_standalone_arm64_graphs
+from tdo_v2.integration.arm64_pair import decode_pair, verify_pair
+from tdo_v2.integration.standalone_arm64 import BRANCH_FORMS, RAM, _register_node, build_standalone_arm64_graphs
 from tdo_v2.isa_identity import link_register, program_counter, stack_register
 
 
@@ -143,6 +144,27 @@ def _graph_branch(graph, row, raw):
                                                              for e in transfer["edges"]])
 
 
+def _graph_pair(form, raw, typed, registers, graph):
+    observation = verify_pair(form, typed, registers, RAM)
+    if observation is None:
+        raise ValueError("standalone G2 pair effects disagree with the admitted graph")
+    dependency = graph.normalized.dependencies
+
+    def operation(ordinal):
+        op = cf.opref(raw["ops"], ordinal)
+        return dict(op=op, graph_operation=_graph_operation(dependency, raw, op))
+
+    accesses = []
+    for name, offset, ordinal in zip(form.register_names, form.access_offsets, observation.accesses):
+        access = dict(register=name, width=form.width, offset_from_incoming_base=offset, **operation(ordinal))
+        if name.endswith("zr"):
+            access["register_effect"] = "discard_load" if form.load else "store_zero"
+        accesses.append(access)
+    writeback = None if observation.writeback is None else dict(
+        delta=form.displacement, **operation(observation.writeback))
+    return dict(form=form.mnemonic, base=form.base_name, mode=form.mode, accesses=accesses, writeback=writeback)
+
+
 def describe(generation):
     """Keep the ordinary G2 facts and attach checks to an existing graph operation."""
     snapshot, identity = build_standalone_arm64_graphs(generation)
@@ -165,7 +187,8 @@ def describe(generation):
     roles = {name: cf.register(fn(evidence)) for name, fn in (
         ("sp", stack_register), ("lr", link_register), ("pc", program_counter))}
     arm = Arm64Facts(blocks, names, roles)
-    observations, rows, memory, branches = {}, [], [], []
+    observations, rows, memory, branches, pairs = {}, [], [], [], []
+    pair_registers = None
     graph_nodes = graph.normalized.dependencies
     for inst in graph.unit.observation.instructions:
         raw = lifting.row_facts(inst)
@@ -180,7 +203,14 @@ def describe(generation):
             raise ValueError("standalone G2 observation has no exact word")
         if isinstance(row["aarch64"]["form"], str) and row["aarch64"]["form"] in BRANCH_FORMS:
             branches.append(_graph_branch(graph, row, raw))
-        compared = compare_memory(int(basis["word"], 16), raw, regs)
+        word = int(basis["word"], 16)
+        pair = decode_pair(word)
+        if pair is not None:
+            if pair_registers is None:
+                pair_registers = {r.name: _register_node(r) for r in evidence.register_evidence.registers}
+            compared_pair = _graph_pair(pair, raw, inst.operations, pair_registers, graph)
+            pairs.append(dict(row=cf.ref(row), basis=basis, **compared_pair))
+        compared = compare_memory(word, raw, regs)
         if compared is not None:
             linked = compared["op"]
             if linked is not None:
@@ -198,4 +228,6 @@ def describe(generation):
                 memory=memory)
     if branches:
         result["branches"] = branches
+    if pairs:
+        result["pairs"] = pairs
     return result

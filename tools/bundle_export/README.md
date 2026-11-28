@@ -99,13 +99,22 @@ the entire selected range.
 The address is a loaded virtual address. `--base` defaults to the ELF model's link base.
 `--page-size` selects the 4, 16 or 64 KiB ELF mapping model. Choose a range ending at
 `RET X30`. Supported body forms are immediate `ADD`/`SUB` without flag writes and
-unsigned-offset scalar 32/64-bit `LDR`/`STR`. Without `--branches`, the function must
+unsigned-offset scalar 32/64-bit `LDR`/`STR`. Without `--branches` or `--pairs`, the function must
 be straight-line code. Add `--branches` to use the second producer profile, which also
 accepts `CBZ` (W or X register), the 14 flag-dependent `B.cond` conditions (EQ through LE),
 direct `B` and immediate `CMP`. All successors must stay within the selected function and
 move forward. Conditional successors must be distinct, every row must be reachable in
 the CFG, and there is one terminal `RET X30`. Calls and indirect branches are outside
 both profiles.
+
+`--pairs` extends the direct-branch profile with integer W/X `STP` and `LDP`
+in offset, pre-index and post-index modes. Admission checks both memory
+operations against the encoded widths, incoming base, signed offsets,
+registers and writeback. It refuses constrained-unpredictable register
+overlap. The optional G2 report links both accesses and any base write to
+existing graph operations. The checks cover normal completion and leave
+fault ordering and atomicity to the execution model.
+
 Only the selected executable bytes and the required image-base anchor are committed as
 loaded memory. Each selected function is a separate program scope for this local prototype.
 

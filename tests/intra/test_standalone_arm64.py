@@ -22,7 +22,7 @@ import lifting
 ENTRY = 0x401000
 
 
-def arm64_export(tmp_path, code, *, branches=False):
+def arm64_export(tmp_path, code, *, branches=False, pairs=False):
     code = bytes.fromhex(code)
     image = bytearray(ef.make_elf([ef.Segment(ENTRY, code)],
                                  e_type=2, link_base=0x400000, machine=183, dynamic=False).data)
@@ -32,7 +32,7 @@ def arm64_export(tmp_path, code, *, branches=False):
     image.extend(bytes(64))
     path = tmp_path / "test.elf"
     path.write_bytes(image)
-    return export(path, tmp_path / "bundles", entry=ENTRY, size=len(code), branches=branches)
+    return export(path, tmp_path / "bundles", entry=ENTRY, size=len(code), branches=branches, pairs=pairs)
 
 
 def local_graph(generation):

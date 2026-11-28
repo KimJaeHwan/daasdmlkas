@@ -10,12 +10,14 @@ from ..base_graph import BaseGraphPolicy, BaseGraphPublication
 from ..isa_identity import link_register, program_counter
 from ..resource_limits import analysis_entry
 from ..scope_identity import AddressCoordinate, ConstructedProgramScope, ConstructedFunctionScope, open_configured_extraction
+from .arm64_pair import PAIR_FORMS, decode_pair, verify_pair, verify_pair_register_file
 from .configured_bundle import admit_frozen_bundle
 
 
 LANGUAGE = "AARCH64:LE:64:v8A"
 PROFILE = "tdo-arm64-pypcode-local-1"
 BRANCH_PROFILE = "tdo-arm64-pypcode-local-2"
+PAIR_PROFILE = "tdo-arm64-pypcode-local-3"
 RAM = 1
 MAX_CODE_BYTES = 65536
 RET = 0xD65F03C0
@@ -29,7 +31,9 @@ BRANCH_FORMS = {"b", "b.cond", "cbz"}
 CONDITION_NAMES = "eq ne cs cc mi pl vs vc hi ls ge lt gt le".split()
 
 
-def instruction_form(word, branches=False):
+def instruction_form(word, branches=False, *, pairs=False):
+    if pairs and (pair := decode_pair(word)) is not None:
+        return pair.mnemonic
     if branches:
         if word & 0x7F000000 == 0x34000000 and word & 31 != 31:
             return "cbz"
@@ -80,7 +84,7 @@ def _profile_pairs(pairs):
 def _read_profile(data):
     value = json.loads(data, object_pairs_hook=_profile_pairs)
     if (not isinstance(value, dict) or value.keys() != DIGEST_FIELDS | {"schema", "lifter_version", "context", "page_size"}
-            or value["schema"] not in (PROFILE, BRANCH_PROFILE) or value["context"] != f"{LANGUAGE} default"
+            or value["schema"] not in (PROFILE, BRANCH_PROFILE, PAIR_PROFILE) or value["context"] != f"{LANGUAGE} default"
             or type(value["page_size"]) is not int or value["page_size"] not in (4096, 16384, 65536)
             or not isinstance(value["lifter_version"], str) or not value["lifter_version"]
             or any(not isinstance(value[k], str) or not re.fullmatch("[0-9a-f]{64}", value[k])
@@ -225,7 +229,9 @@ def _covers_register_byte(storage, byte):
             and start <= byte.coordinate.byte_offset < start + storage.byte_size)
 
 
-def _require_local(unit, program, provider, branches):
+def _require_local(unit, program, provider, profile):
+    branches = profile != PROFILE
+    pairs = profile == PAIR_PROFILE
     if type(unit.scopes.function) is not ConstructedFunctionScope or unit.observation is None:
         raise ValueError("standalone ARM64 function scope was refused")
     obs = unit.observation
@@ -240,6 +246,8 @@ def _require_local(unit, program, provider, branches):
     flags = tuple(registers.get(name) for name in _FLAG_NAMES) if branches else ()
     if any(flag is None or flag.byte_size != 1 for flag in flags) or len(set(flags)) != len(flags):
         raise ValueError("standalone ARM64 requires distinct architectural flag bytes")
+    if pairs and not verify_pair_register_file(registers, flags):
+        raise ValueError("standalone ARM64 pair register file has conflicting architectural storage")
     limit = entry.byte_offset + len(code)
     reachable = {entry.byte_offset}
     for index, row in enumerate(obs.instructions):
@@ -247,7 +255,7 @@ def _require_local(unit, program, provider, branches):
         flow = row.flow
         offset = entry.byte_offset + index * 4
         word = int.from_bytes(code[index * 4:index * 4 + 4], "little")
-        form = instruction_form(word, branches)
+        form = instruction_form(word, branches, pairs=pairs)
         conditional = form in ("cbz", "b.cond")
         jump = form in BRANCH_FORMS
         next_address, target = local_successors(form, word, offset, limit)
@@ -262,6 +270,11 @@ def _require_local(unit, program, provider, branches):
             allowed = _branch_operations(form, word, targets[0], row.operations, registers)
         elif form == "cmp":
             allowed = _compare_immediate(word, row.operations, registers)
+        elif form in PAIR_FORMS:
+            allowed = verify_pair(decode_pair(word), row.operations, registers, RAM) is not None
+            if not allowed or any(_covers_register_byte(op.output, flag)
+                                  for op in row.operations for flag in flags):
+                raise ValueError(f"standalone ARM64 pair effects disagree with encoding at {offset:#x}")
         else:
             memory = tuple(name for name in ops if name in ("LOAD", "STORE"))
             expected_memory = {"ldr": ("LOAD",), "str": ("STORE",)}.get(form, ())
@@ -299,7 +312,7 @@ def build_standalone_arm64_graphs(generation_path):
             units = tuple(envelope.iter_scoped_functions())
             if len(units) != 1:
                 raise ValueError("standalone ARM64 analysis requires exactly one function")
-            _require_local(units[0], program, provider, profile["schema"] == BRANCH_PROFILE)
+            _require_local(units[0], program, provider, profile["schema"])
     finally:
         provider.close()
     return BaseGraphPublication(units, program=program, policy=BaseGraphPolicy()).build(), binding

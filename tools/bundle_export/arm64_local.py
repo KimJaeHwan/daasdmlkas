@@ -21,7 +21,7 @@ from arm64_elf_unwind import select_unwind, unwind_ranges
 import elf_map
 from tdo_v2.integration.standalone_arm64 import (
     BRANCH_PROFILE, CMP_OPERATIONS, CONDITION_NAMES, LANGUAGE, LOCAL_OPERATIONS, MAX_CODE_BYTES,
-    PROFILE, RAM, instruction_form, language_id, local_successors,
+    PAIR_PROFILE, PROFILE, RAM, instruction_form, language_id, local_successors,
 )
 
 
@@ -62,10 +62,10 @@ def operation(ordinal, op):
             "output": varnode(op.output) if op.output is not None else None}
 
 
-def _row(ctx, address, data, limit, branches):
+def _row(ctx, address, data, limit, branches, pairs=False):
     word = int.from_bytes(data, "little")
     last = address + 4 == limit
-    name = instruction_form(word, branches)
+    name = instruction_form(word, branches, pairs=pairs)
     if name is None or (name == "ret") != last:
         raise ValueError(f"unsupported ARM64 instruction or misplaced RET at {address:#x}")
     insns = ctx.disassemble(data, base_address=address, max_instructions=1).instructions
@@ -252,7 +252,7 @@ def _range_record(selected, mapping, base):
 
 
 def _export(original, output_root, *, entry=None, size=None, function=None, unwind_fde=None, base=None, page=4096,
-            sla_directory=None, branches=False, before_publish=None):
+            sla_directory=None, branches=False, pairs=False, before_publish=None):
     if (entry is None) != (size is None) or sum(value is not None for value in (entry, function, unwind_fde)) > 1:
         raise ValueError("use --entry with --size, or select one ELF symbol or unwind record")
     mapping, base = _load_mapping(original, base, page)
@@ -271,14 +271,18 @@ def _export(original, output_root, *, entry=None, size=None, function=None, unwi
             or not 4 <= size <= MAX_CODE_BYTES or size % 4 or entry + size > elf_map.U64_END):
         raise ValueError("provide one aligned ARM64 function range of 4 to 65536 bytes")
     blocks, code = _code_blocks(original, mapping, base, entry, size)
-    ctx, profile = _context(sla_directory, original, page, BRANCH_PROFILE if branches else PROFILE)
+    if pairs and before_publish is None:
+        before_publish = _check_graph
+    branches = branches or pairs
+    producer = PAIR_PROFILE if pairs else BRANCH_PROFILE if branches else PROFILE
+    ctx, profile = _context(sla_directory, original, page, producer)
     rows = []
     reachable = {entry}
     for i in range(0, size, 4):
         address = entry + i
         if address not in reachable:
             raise ValueError(f"unreachable instruction in standalone ARM64 range at {address:#x}")
-        row = _row(ctx, address, code[i:i + 4], entry + size, branches)
+        row = _row(ctx, address, code[i:i + 4], entry + size, branches, pairs)
         if row["fallthrough"] is not None:
             reachable.add(row["fallthrough"]["byte_offset"])
         reachable.update(c["byte_offset"] for c in row["flow_targets"])
@@ -290,11 +294,11 @@ def _export(original, output_root, *, entry=None, size=None, function=None, unwi
 
 
 def export(elf, output_root, *, entry=None, size=None, function=None, unwind_fde=None, base=None, page=4096,
-           sla_directory=None, branches=False):
+           sla_directory=None, branches=False, pairs=False):
     """Export one explicit range, ELF symbol or unwind record."""
     generation, _ = _export(Path(elf).read_bytes(), output_root, entry=entry, size=size, function=function,
                             unwind_fde=unwind_fde, base=base, page=page, sla_directory=sla_directory,
-                            branches=branches)
+                            branches=branches, pairs=pairs)
     return generation
 
 
@@ -313,6 +317,7 @@ def main(argv=None):
     parser.add_argument("--page-size", type=int, choices=elf_map.ARM64_PAGES, default=4096)
     parser.add_argument("--sla-directory", type=Path)
     parser.add_argument("--branches", action="store_true", help="allow the bounded direct-branch profile")
+    parser.add_argument("--pairs", action="store_true", help="also allow integer STP and LDP in the branch profile")
     parser.add_argument("--g2-out", type=Path, help="write local G2 memory comparisons linked to TDO graph operations")
     args = parser.parse_args(argv)
     listing = args.list_functions or args.list_unwind_ranges
@@ -348,7 +353,7 @@ def main(argv=None):
         generation, selected = _export(
             original, args.output_root, entry=args.entry, size=args.size, function=args.function,
             unwind_fde=args.unwind_fde, base=args.base, page=args.page_size,
-            sla_directory=args.sla_directory, branches=args.branches, before_publish=build_report if args.g2_out is not None else None,
+            sla_directory=args.sla_directory, branches=args.branches, pairs=args.pairs, before_publish=build_report if args.g2_out is not None else None,
         )
         if report is not None:
             if selected is not None:
