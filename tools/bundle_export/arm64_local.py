@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from hashlib import sha256
 import json
 from pathlib import Path
 import shutil
+import struct
 import sys
 import tempfile
 from xml.etree import ElementTree
@@ -14,6 +16,7 @@ from xml.etree import ElementTree
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "decode_check"))
 
+from arm64_elf_functions import code_file_offset, function_ranges, select_range
 import elf_map
 from tdo_v2.integration.standalone_arm64 import (
     BRANCH_PROFILE, CMP_OPERATIONS, CONDITION_NAMES, LANGUAGE, LOCAL_OPERATIONS, MAX_CODE_BYTES,
@@ -100,27 +103,26 @@ def _row(ctx, address, data, limit, branches):
             "operations": [operation(i, op) for i, op in enumerate(ops)]}
 
 
-def _load_code(data, entry, size, base, page):
+def _load_mapping(data, base, page):
     mapping = elf_map.parse(data, arm64_page=page)
     if not mapping.ok:
         raise ValueError(mapping.why)
     if base is None:
         base = mapping.image_base
+    if type(base) is not int or not 0 <= base < elf_map.U64_END:
+        raise ValueError("ELF loaded base must be a 64-bit address")
     bias = base - mapping.image_base
-    if base < 0 or (mapping.fixed_base and bias) or bias % page or any(
+    if (mapping.fixed_base and bias) or bias % page or any(
             segment["state"] != "mapped" or segment["align"] > 1 and bias % segment["align"]
+            or segment["vaddr"] + segment["memsz"] + bias > elf_map.U64_END
             for segment in mapping.segments):
         raise ValueError("ELF load bias or segment layout is incompatible with the selected model")
-    start = entry - base
-    end = start + size
-    span = mapping.at(start)
-    containing = [s for s in mapping.segments if s["flags"] & 1
-                  and s["vaddr"] <= entry - bias and entry - bias + size <= s["vaddr"] + s["filesz"]]
-    if span is None or span.kind != "file" or end > span.end or len(containing) != 1:
-        raise ValueError("function bytes require one file-backed executable PT_LOAD span")
-    if mapping.written.state != "complete" or any(a < end and start < b for a, b, _ in mapping.written.ranges):
-        raise ValueError("function span may be modified by a modeled ELF loader write")
-    offset = span.file_offset + start - span.start
+    return mapping, base
+
+
+def _code_blocks(data, mapping, base, entry, size):
+    link_entry = entry - (base - mapping.image_base)
+    offset = code_file_offset(mapping, link_entry, size)
     code = data[offset:offset + size]
     blocks = [(entry, code)]
     if entry != base:
@@ -130,7 +132,7 @@ def _load_code(data, entry, size, base, page):
         if anchor is None or anchor.kind != "file" or any(a == 0 < b for a, b, _ in mapping.written.ranges):
             raise ValueError("ELF image base requires a stable file-backed byte")
         blocks.insert(0, (base, data[anchor.file_offset:anchor.file_offset + 1]))
-    return base, blocks, code
+    return blocks, code
 
 
 def _context(sla_directory, original, page, producer):
@@ -178,14 +180,16 @@ def _program(base, ctx, profile):
                            register_evidence=dict(revision=1, registers=registers)))
 
 
-def _write_bundle(root, original, profile, program, blocks, observation):
+def _write_bundle(root, original, profile, program, blocks, observation, *, before_publish=None):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     generation = digest(json_bytes([digest(data) for data in (profile, program, observation)]))
     destination = root / generation
     if destination.exists():
         raise FileExistsError(destination)
-    staging = Path(tempfile.mkdtemp(prefix=".arm64-local-", dir=root))
+    temporary = Path(tempfile.mkdtemp(prefix=".arm64-local-", dir=root))
+    staging = temporary / generation
+    staging.mkdir(mode=0o700)
     members, block_rows = [], []
 
     def write(name, data):
@@ -219,19 +223,47 @@ def _write_bundle(root, original, profile, program, blocks, observation):
         write("manifest.json", manifest)
         write("seal.json", json_bytes(dict(schema_version=2, generation_id=generation,
                                            manifest_sha256=digest(manifest), manifest_size=len(manifest))))
+        if before_publish is not None:
+            before_publish(staging)
         staging.rename(destination)
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        shutil.rmtree(temporary)
     return destination
 
 
-def export(elf, output_root, *, entry, size, base=None, page=4096, sla_directory=None, branches=False):
+def _check_graph(generation):
+    from tdo_v2.integration.standalone_arm64 import build_standalone_arm64_graphs
+
+    snapshot, _ = build_standalone_arm64_graphs(generation)
+    if len(snapshot.graphs) != 1:
+        raise ValueError(f"standalone ARM64 graph was not published ({snapshot.stop})")
+
+
+def _function_record(selected, mapping, base):
+    bias = base - mapping.image_base
+    entry = selected.link_entry + bias
+    return {**asdict(selected), "names": selected.names, "load_bias": bias,
+            "entry": entry if 0 <= entry < elf_map.U64_END else None,
+            "original_sha256": mapping.header_fields["file_sha256"]}
+
+
+def _export(original, output_root, *, entry=None, size=None, function=None, base=None, page=4096,
+            sla_directory=None, branches=False, before_publish=None):
+    if (entry is None) != (size is None) or (entry is not None and function is not None):
+        raise ValueError("use --entry with --size, or select an ELF function without either")
+    mapping, base = _load_mapping(original, base, page)
+    selection = None
+    if entry is None:
+        selected = select_range(function_ranges(original, mapping, MAX_CODE_BYTES),
+                                name=function, elf_entry=struct.unpack_from("<Q", original, 24)[0])
+        selection = _function_record(selected, mapping, base)
+        entry, size = selection["entry"], selected.size
+        if before_publish is None:
+            before_publish = _check_graph
     if (type(entry) is not int or type(size) is not int or entry < 0 or entry % 4
             or not 4 <= size <= MAX_CODE_BYTES or size % 4 or entry + size > elf_map.U64_END):
         raise ValueError("provide one aligned ARM64 function range of 4 to 65536 bytes")
-    original = Path(elf).read_bytes()
-    base, blocks, code = _load_code(original, entry, size, base, page)
+    blocks, code = _code_blocks(original, mapping, base, entry, size)
     ctx, profile = _context(sla_directory, original, page, BRANCH_PROFILE if branches else PROFILE)
     rows = []
     reachable = {entry}
@@ -245,27 +277,68 @@ def export(elf, output_root, *, entry, size, base=None, page=4096, sla_directory
         reachable.update(c["byte_offset"] for c in row["flow_targets"])
         rows.append(row)
     observation = json_bytes(dict(entry=coord(entry), instructions=rows))
-    return _write_bundle(output_root, original, profile, _program(base, ctx, profile), blocks, observation)
+    generation = _write_bundle(output_root, original, profile, _program(base, ctx, profile), blocks, observation,
+                               before_publish=before_publish)
+    return generation, selection
+
+
+def export(elf, output_root, *, entry=None, size=None, function=None, base=None, page=4096,
+           sla_directory=None, branches=False):
+    """Export one explicit range, exact named ELF function or the ELF entry function."""
+    generation, _ = _export(Path(elf).read_bytes(), output_root, entry=entry, size=size, function=function,
+                            base=base, page=page, sla_directory=sla_directory, branches=branches)
+    return generation
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("elf", type=Path)
-    parser.add_argument("output_root", type=Path)
-    parser.add_argument("--entry", type=lambda v: int(v, 0), required=True)
-    parser.add_argument("--size", type=lambda v: int(v, 0), required=True)
+    parser.add_argument("output_root", type=Path, nargs="?")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--function", help="exact defined ELF function symbol name")
+    selection.add_argument("--list-functions", action="store_true", help="list ELF symbol ranges as JSON")
+    selection.add_argument("--entry", type=lambda v: int(v, 0))
+    parser.add_argument("--size", type=lambda v: int(v, 0))
     parser.add_argument("--base", type=lambda v: int(v, 0))
     parser.add_argument("--page-size", type=int, choices=elf_map.ARM64_PAGES, default=4096)
     parser.add_argument("--sla-directory", type=Path)
     parser.add_argument("--branches", action="store_true", help="allow the bounded direct-branch profile")
     parser.add_argument("--g2-out", type=Path, help="write local G2 memory comparisons linked to TDO graph operations")
     args = parser.parse_args(argv)
+    if args.list_functions:
+        if args.output_root is not None or args.size is not None or args.g2_out is not None:
+            parser.error("--list-functions takes no output root, --size or --g2-out")
+    elif args.output_root is None:
+        parser.error("output_root is required to export a Bundle")
     try:
-        generation = export(args.elf, args.output_root, entry=args.entry, size=args.size, base=args.base,
-                            page=args.page_size, sla_directory=args.sla_directory, branches=args.branches)
-        if args.g2_out is not None:
+        original = args.elf.read_bytes()
+        if args.list_functions:
+            mapping, base = _load_mapping(original, args.base, args.page_size)
+            functions = function_ranges(original, mapping, MAX_CODE_BYTES)
+            inventory = dict(original_sha256=mapping.header_fields["file_sha256"],
+                             elf_entry=struct.unpack_from("<Q", original, 24)[0],
+                             functions=[_function_record(item, mapping, base) for item in functions])
+            if not functions:
+                inventory["unavailable"] = "no defined function symbols in supported ELF section tables"
+            print(json.dumps(inventory, sort_keys=True))
+            return 0
+
+        report = None
+        def build_report(generation):
             from arm64_local_facts import describe
-            args.g2_out.write_bytes(json_bytes(describe(generation)) + b"\n")
+
+            nonlocal report
+            report = describe(generation)
+
+        generation, selected = _export(
+            original, args.output_root, entry=args.entry, size=args.size, function=args.function,
+            base=args.base, page=args.page_size, sla_directory=args.sla_directory, branches=args.branches,
+            before_publish=build_report if args.g2_out is not None else None,
+        )
+        if report is not None:
+            if selected is not None:
+                report["function_range"] = selected
+            args.g2_out.write_text(json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         print(generation)
     except (ValueError, OSError, RuntimeError) as error:
         print(f"arm64_local: {error}", file=sys.stderr)

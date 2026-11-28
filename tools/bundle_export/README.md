@@ -56,6 +56,25 @@ PYTHONPATH=src python tools/bundle_export/arm64_local.py libmmkv.so output/mmkv-
     --base 0x100000 --entry 0x13fac0 --size 28 --g2-out output/mmkv-local.g2.json
 ```
 
+Prefer a symbol name when the ELF has one. The exporter checks the symbol range and
+builds the existing TDO graph before publishing an automatically selected Bundle.
+
+```bash
+PYTHONPATH=src python tools/bundle_export/arm64_local.py libncnn.so --list-functions
+PYTHONPATH=src python tools/bundle_export/arm64_local.py libncnn.so output/ncnn-local \
+    --function ncnn_blob_get_shape --g2-out output/ncnn-local.g2.json
+```
+
+With no selector, export requires a function symbol starting exactly at the ELF
+entry point. `--function` takes one exact symbol name. `--list-functions` shows ranges
+from `.symtab` and `.dynsym`, including aliases, source entries and refusal reasons.
+It checks the recorded range. The export also validates the supported instruction
+forms and builds the graph. The range must identify the same file bytes in its
+executable section and a single executable load segment. Zero sizes, overlapping
+ranges, conflicting names and marked AArch64 data (`$d`) are refused. A stripped
+ELF can still have dynamic symbols. Functions without a size-bearing symbol can
+be selected using the explicit address and size form above.
+
 The address is a loaded virtual address. `--base` defaults to the ELF model's link base.
 `--page-size` selects the 4, 16 or 64 KiB ELF mapping model. Choose a range ending at
 `RET X30`. Supported body forms are immediate `ADD`/`SUB` without flag writes and
