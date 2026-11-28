@@ -6,20 +6,24 @@ from arm64_decode import BATCH_WORDS, DIRECT, LLVM_OPTIONS, LlvmObjdump, normali
 from arm64_facts import CC, signed
 from arm64_profiles import GnuObjdump
 from arm64_source_facts import RULE, EXTENDED_RULE, compare_fields, common_fields
+from arm64_source_validity import undefined_encoding
 
 
 _IMMEDIATE = re.compile(r"#-?(?:0x[0-9a-f]+|[0-9]+)(?![\w.])")
 SVE_SME_PROFILE = "sve-sme-v1"
 SVE_SME_PROFILE_V2 = "sve-sme-v2"
 ALL_INSTRUCTIONS_PROFILE = "a64-all-instructions-v1"
+ALL_INSTRUCTIONS_PROFILE_V2 = "a64-all-instructions-v2"
 _SVE_SME_OPTIONS = (*LLVM_OPTIONS[:-1], LLVM_OPTIONS[-1] + ",+sve,+sve2,+bf16,+i8mm,+sme,+sme2,+sme-f64f64")
+_ALL_INSTRUCTIONS_OPTIONS = (*LLVM_OPTIONS[:-1], "--mattr=+all")
 SOURCE_DECODE_PROFILES = {
     SVE_SME_PROFILE: _SVE_SME_OPTIONS,
     SVE_SME_PROFILE_V2: _SVE_SME_OPTIONS,
-    ALL_INSTRUCTIONS_PROFILE: (*LLVM_OPTIONS[:-1], "--mattr=+all"),
+    ALL_INSTRUCTIONS_PROFILE: _ALL_INSTRUCTIONS_OPTIONS,
+    ALL_INSTRUCTIONS_PROFILE_V2: _ALL_INSTRUCTIONS_OPTIONS,
 }
 SOURCE_DECODE_RULES = {SVE_SME_PROFILE: RULE, SVE_SME_PROFILE_V2: EXTENDED_RULE,
-                       ALL_INSTRUCTIONS_PROFILE: EXTENDED_RULE}
+                       ALL_INSTRUCTIONS_PROFILE: EXTENDED_RULE, ALL_INSTRUCTIONS_PROFILE_V2: EXTENDED_RULE}
 
 
 def _rendered(raw, *, gnu):
@@ -73,13 +77,20 @@ def _profile_probe(llvm, gnu, reference):
     return rows
 
 
-def _source_row(pc, word, index, llvm, gnu, *, profiled, rule=RULE):
+def _source_row(pc, word, index, llvm, gnu, *, profiled, rule=RULE, check_undefined=False):
     first, second = _rendered(llvm, gnu=False), _rendered(gnu, gnu=True)
     state = ("unobserved" if first is None or second is None else
              "same-rendering" if first == second else "different-rendering")
     row = dict(address=pc, bytes_le=word.to_bytes(4, "little").hex(), encoding_index=index,
                llvm=dict(mnemonic=llvm[0], operands=llvm[1], normalized=first),
                gnu=dict(mnemonic=gnu[0], operands=gnu[1], normalized=second), comparison=state)
+    if check_undefined and (verdict := undefined_encoding(word, index)) is not None:
+        verdict["observers"] = {
+            name: "contradicted" if rendered is not None and rendered["form"] != "udf" else "unobserved"
+            for name, rendered in (("llvm", first), ("gnu", second))
+        }
+        row["arm_check"] = verdict
+        return row
     check = _arm_check(pc, word, index, first, second)
     if check is not None:
         row["arm_check"] = check
@@ -103,12 +114,14 @@ def observe(words, reference, llvm_path, gnu_path, *, profile=None):
     if profile is not None:
         decoders["profile_probes"] = _profile_probe(llvm, gnu, reference)
     rule = SOURCE_DECODE_RULES.get(profile, RULE)
+    check_undefined = profile == ALL_INSTRUCTIONS_PROFILE_V2
     results = []
     for start in range(0, len(words), BATCH_WORDS):
         chunk = dict(words[start:start + BATCH_WORDS])
         left, right = llvm.decode(chunk), gnu.decode(chunk)
         results.extend(_source_row(pc, word, reference.candidates(word), left[pc], right[pc],
-                                   profiled=profile is not None, rule=rule) for pc, word in chunk.items())
+                                   profiled=profile is not None, rule=rule, check_undefined=check_undefined)
+                       for pc, word in chunk.items())
     llvm.check_identity()
     gnu.check_identity()
     return decoders, results

@@ -11,6 +11,7 @@ import arm64_source_evidence
 from arm64_encoding_index import EncodingIndex
 from arm64_encoding_coverage import _mops_sample, _size_witnesses, _witnesses, sample_index
 from arm64_source_facts import EXTENDED_RULE
+from arm64_source_validity import undefined_encoding
 from arm64_local import digest, json_bytes
 
 
@@ -182,17 +183,21 @@ def test_extended_profile_checks_opt_out_of_omitted_nonzero_address():
         assert row["field_evidence"]["address"]["gnu"]["state"] == "contradicted"
 
 
-def test_named_profile_selects_every_word_and_rejects_resealed_evidence(monkeypatch):
-    profile = arm64_source_decode.SVE_SME_PROFILE
+@pytest.mark.parametrize("profile", [
+    arm64_source_decode.SVE_SME_PROFILE, arm64_source_decode.ALL_INSTRUCTIONS_PROFILE_V2,
+])
+def test_named_profile_selects_every_word_and_rejects_resealed_evidence(monkeypatch, profile):
     options = arm64_source_decode.SOURCE_DECODE_PROFILES[profile]
-    word, unmodeled = 0x0ea16bff, 0xd503201f
-    original = _elf(code=word.to_bytes(4, "little") + unmodeled.to_bytes(4, "little"))
+    word, undef, unmodeled = 0x0ea16bff, 0x2538ffff, 0xd503201f
+    original = _elf(code=b"".join(value.to_bytes(4, "little") for value in (word, undef, unmodeled)))
     calls = []
 
     class Index:
         def candidates(self, queried):
             if queried == word:
                 return _source_index("BFCVTN_asimdmisc_4S", "bfcvtn_advsimd.xml", "FEAT_BF16")
+            if queried == undef:
+                return _source_index("dup_z_i_", "dup_z_i.xml", "FEAT_SVE || FEAT_SME", "sve_int_dup_imm")
             return {"candidates": [], "exclusions": []}
 
     class LLVM:
@@ -201,8 +206,9 @@ def test_named_profile_selects_every_word_and_rejects_resealed_evidence(monkeypa
             self.identity = {"options": list(options), "path": path}
 
         def decode(self, words):
-            assert words == {ENTRY: word, ENTRY + 4: unmodeled}
-            return {ENTRY: ("bfcvtn", "v31.4h, v31.4s"), ENTRY + 4: ("hint", "#0")}
+            assert words == {ENTRY: word, ENTRY + 4: undef, ENTRY + 8: unmodeled}
+            middle = ("dup", "z31.b, #-256") if self.identity["path"] == "gnu" else ("<unknown>", "")
+            return {ENTRY: ("bfcvtn", "v31.4h, v31.4s"), ENTRY + 4: middle, ENTRY + 8: ("hint", "#0")}
 
         def check_identity(self):
             pass
@@ -212,24 +218,87 @@ def test_named_profile_selects_every_word_and_rejects_resealed_evidence(monkeypa
     monkeypatch.setattr(arm64_source_decode, "_profile_probe", lambda llvm, gnu, index: [])
     monkeypatch.setattr(arm64_source_evidence, "load_index", lambda _: (Index(), {"archive": "fixture"}))
     paths = dict(llvm_objdump="llvm", gnu_objdump="gnu", encoding_archive="fixture")
-    encoded = arm64_source_evidence.collect_decode(original, entry=ENTRY, size=8, decode_profile=profile, **paths)
+    encoded = arm64_source_evidence.collect_decode(original, entry=ENTRY, size=12, decode_profile=profile, **paths)
     result = arm64_source_evidence.verify_decode(original, encoded, **paths)
     assert calls == [("llvm", options), ("gnu", ())] * 2
     assert result["schema"] == arm64_source_evidence.PROFILED_DECODE_SCHEMA
     assert all(status == "unobserved" for status in result["runtime"].values())
     assert result["slots"][0]["common_facts"]["operands"][1]["element_bits"] == 32
-    assert "common_facts" not in result["slots"][1]
-    for key in ("options", "profile", "operand"):
+    invalid = result["slots"][1]
+    assert "common_facts" not in invalid and "field_evidence" not in invalid
+    assert invalid["comparison"] == "unobserved" and invalid["gnu"]["operands"] == "z31.b, #-256"
+    edits = ["options", "profile", "operand"]
+    if profile == arm64_source_decode.ALL_INSTRUCTIONS_PROFILE_V2:
+        verdict = invalid["arm_check"]
+        assert verdict["verdict"] == "UNDEFINED" and verdict["fields"] == {"size": 0, "sh": 1}
+        assert verdict["observers"] == {"llvm": "unobserved", "gnu": "contradicted"}
+        edits.extend(("verdict", "bits"))
+    else:
+        assert "arm_check" not in invalid
+    for key in edits:
         edited = json.loads(encoded)["evidence"]
         if key == "options":
             edited["decoders"]["llvm"]["options"].pop()
         elif key == "profile":
             edited["decode_profile"] = "unknown"
+        elif key == "verdict":
+            edited["slots"][1].pop("arm_check")
+        elif key == "bits":
+            edited["slots"][1]["arm_check"]["fields"]["sh"] = 0
         else:
             edited["slots"][0]["common_facts"]["operands"][0]["element_bits"] = 32
         resealed = json_bytes(dict(digest=digest(json_bytes(edited)), evidence=edited)) + b"\n"
         with pytest.raises(ValueError, match="differs from replay|unknown AArch64 source decode profile"):
             arm64_source_evidence.verify_decode(original, resealed, **paths)
+
+
+def test_undefined_atomic_rule_binds_both_registers_and_the_exact_encoding():
+    index = _source_index("LDCLRP_128_memop_128", "ldclrp.xml", "FEAT_LSE128", "memop_128")
+    for rt, rt2, rn in ((31, 0, 0), (0, 31, 0), (31, 31, 31), (1, 0, 31), (1, 1, 0)):
+        word = 0x19201000 | (rt2 << 16) | (rn << 5) | rt
+        verdict = undefined_encoding(word, index)
+        if 31 in (rt, rt2):
+            assert verdict["reason"] == "atomic-data-register-31"
+            assert verdict["fields"] == {"Rt": rt, "Rt2": rt2}
+        else:
+            assert verdict is None
+    assert undefined_encoding(0x19200c1f, index) is None
+    assert undefined_encoding(0x19a0101f, index) is None
+    matched, = index["candidates"]
+    assert undefined_encoding(0x1920101f, dict(index, candidates=[matched, {"id": "another"}])) is None
+    assert undefined_encoding(0x1920101f, dict(index, exclusions=[{"section": "reserved"}])) is None
+    assert undefined_encoding(0x1920101f, dict(index, candidates=[dict(matched, file="other.xml")])) is None
+
+
+@pytest.mark.parametrize("section,name,base", [
+    ("sve_int_dup_imm_pred", "cpy_z_o_i_", 0x05100000),
+    ("sve_int_dup_imm_pred", "cpy_z_p_i_", 0x05104000),
+    ("sve_int_dup_imm", "dup_z_i_", 0x2538c000),
+])
+def test_undefined_sve_immediate_checks_the_size_shift_pair(section, name, base):
+    index = _source_index(name, name[:-1] + ".xml", "FEAT_SVE || FEAT_SME", section)
+    for size in range(4):
+        for sh in (0, 1):
+            word = base | (size << 22) | (sh << 13)
+            verdict = undefined_encoding(word, index)
+            if size == 0 and sh == 1:
+                assert verdict["reason"] == "sve-byte-immediate-shift"
+            else:
+                assert verdict is None
+    assert undefined_encoding(base ^ 0x4000 | 0x2000, index) is None
+
+
+def test_undefined_verdict_is_independent_of_observer_agreement():
+    index = _source_index("dup_z_i_", "dup_z_i.xml", "FEAT_SVE || FEAT_SME", "sve_int_dup_imm")
+    display = ("dup", "z31.b, #-256")
+    row = arm64_source_decode._source_row(ENTRY, 0x2538ffff, index, display, display,
+                                         profiled=True, check_undefined=True)
+    assert row["comparison"] == "same-rendering"
+    assert row["arm_check"]["observers"] == {"llvm": "contradicted", "gnu": "contradicted"}
+    row = arm64_source_decode._source_row(ENTRY, 0x2538ffff, index, ("udf", "#0"), (".inst", "0x2538ffff"),
+                                         profiled=True, check_undefined=True)
+    assert row["arm_check"]["verdict"] == "UNDEFINED"
+    assert row["arm_check"]["observers"] == {"llvm": "unobserved", "gnu": "unobserved"}
 
 
 def test_index_keeps_overlapping_rows_and_negative_masks():

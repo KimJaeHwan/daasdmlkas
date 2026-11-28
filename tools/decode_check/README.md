@@ -365,6 +365,14 @@ value at the encoded width. `MOV` aliases report the effective value. Explicit
 renderings remain available for both checks. `sve-sme-v1` evidence replays with
 its original rules.
 
+Select `--decode-profile a64-all-instructions-v2` for the Arm operand rejection
+rules. A matched word can carry an `arm_check` with `verdict: UNDEFINED`,
+the pinned candidate, the reason and the examined bits. A tool that reports a
+normal instruction is marked contradicted. The original renderings and their
+comparison remain available. The verdict covers the audited LSE128 and
+D128+THE register forms and SVE immediate `CPY` and `DUP`. Other words
+continue through the usual verification. See the [Arm rejection design](../../docs/handoff_tbr/design/design_tbr_arm64_undefined.md).
+
 ## A64 encoding table coverage
 
 `arm64_encoding_coverage.py` generates original instruction words from the
@@ -391,3 +399,5 @@ availability on hardware and p-code effects need separate evidence. `unobserved`
 identifies a word for which at least one decoder produced no comparable normalized
 rendering. See [GNU's A64 UAO rendering discrepancy](ARM64_GNU_UAO.md) for a case
 where the printed operation needs to be checked against Arm's instruction definition.
+See [GNU renderings of undefined A64 words](ARM64_GNU_UNDEFINED.md) for the
+operand restrictions and native CPU results for the 407 GNU-only words.
