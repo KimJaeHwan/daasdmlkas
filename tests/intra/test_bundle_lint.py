@@ -811,6 +811,7 @@ def test_guard_engine_language_literals_are_inventoried():
 LANGUAGE_LITERALS = {
     "code_only_profile.py": 2, "fault_premise.py": 2, "integration/configured_dynamic_alias_explanation.py": 1,
     "integration/configured_finite_byte_kernel.py": 1, "integration/configured_finite_context_scheduler.py": 1,
+    "integration/standalone_arm64.py": 1,
     "interprocedural.py": 1, "intrinsic_refinements.py": 2, "intrinsic_semantics.py": 1, "isa_identity.py": 7,
     "linking.py": 2, "may_alias.py": 2, "operation_records.py": 1, "return_relations.py": 3, "summary_engine.py": 1,
     "summary_store.py": 1, "summary_templates.py": 1,

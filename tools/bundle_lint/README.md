@@ -61,7 +61,7 @@ key is a difference); `"exhaustive": true` also fails on rows not listed.
   inventoried by `test_guard_engine_language_literals_are_inventoried` (a new file fails it); individually reported
   in G0 are only the x86-64 RSP / RIP offsets and the p-code op model language. Not yet rows: the x86 flag offsets
   (`interprocedural._X64_FLAGS`), `may_alias.CALL_PRESERVED`, the language-id string checks (summary_engine,
-  operation_records, configured_finite_byte_kernel, ...), the user-op tables (code_only_profile, fault_premise).
+  operation_records, configured_finite_byte_kernel, standalone_arm64, ...), the user-op tables (code_only_profile, fault_premise).
 - **The standalone `--normalize`** has no proven call effects: its rows are labelled `standalone`, never the summary's
   result. `stack_evidence` is not modelled (the summary's default is none).
 

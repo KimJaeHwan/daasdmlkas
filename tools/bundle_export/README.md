@@ -44,6 +44,32 @@ python3 tools/bundle_export/export_bundle.py $TB/build/win-debug/dfbench_win_cor
   matches `function-%06d`.
 * One binary takes about 60–100 s (Ghidra import + auto-analysis + export).
 
+## Standalone ARM64 local graph
+
+With `pypcode==4.1.0` available to Python, export a selected function in a little-endian
+ARM64 ELF. This command needs no Ghidra app or project. It uses pypcode's bundled SLEIGH
+specification by default. Set `--sla-directory` to compare against a specific compiled
+SLEIGH specification.
+
+```bash
+PYTHONPATH=src python tools/bundle_export/arm64_local.py libmmkv.so output/mmkv-local \
+    --base 0x100000 --entry 0x13fac0 --size 28 --g2-out output/mmkv-local.g2.json
+```
+
+The address is a loaded virtual address. `--base` defaults to the ELF model's link base.
+`--page-size` selects the 4, 16 or 64 KiB ELF mapping model. Choose a range ending at
+`RET X30`. Supported body forms are immediate `ADD`/`SUB` without flag writes and
+unsigned-offset scalar 32/64-bit `LDR`/`STR`. Calls, branches and other forms are refused.
+Only the selected executable bytes and the required image-base anchor are committed as
+loaded memory. Each selected function is a separate program scope for this local prototype.
+
+`tdo_v2.integration.standalone_arm64.build_standalone_arm64_graphs()` opens this sealed
+Bundle and builds the existing TDO base graph with the strict policy. The optional JSON
+compares encoded memory operands with the p-code and identifies their existing TDO
+operation nodes. It is a standalone G2 diagnostic, separate from Ghidra G2 verdicts.
+P-code records the selected producer's translation. The operand checks cover selected
+memory fields, while exact runtime equivalence and call effects remain outside this path.
+
 ## Exporting library (DLL) code from a prepared Ghidra project
 
 Linking a program with the real code of the DLLs it imports (design section 24) reads the libraries
