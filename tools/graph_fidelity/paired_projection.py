@@ -15,6 +15,7 @@ refers to their members by index. The projection makes a snapshot identity-free 
 from __future__ import annotations
 
 import hashlib
+from dataclasses import fields
 from heapq import merge
 import json
 import re
@@ -32,6 +33,9 @@ IDENTITY_RENAMED = {
     "address atom hash": "an address atom's hash -> its label without the '#xxxxxxxx' hash suffix",
     "address atom origin": "an unnamed or ambiguous address atom -> its original operation and ordered operands, "
                            "SSA join sources with alternatives, or exact entry storage; missing inputs stay raw",
+    "register delta proof reference": "the exact digest resolves to the owning summary's proof receipt; "
+                                      "only its scopes and observation input digest are projected",
+    "index diagnostic object": "an interim object uses its recorded base at creation; unnamed inputs stay raw",
     "64-hex substrings naming a renamed digest / space key": "the same tokens inside keys / labels",
 }
 # content digests of input members (the observation, its effect evidence, the cut set): they change whenever an
@@ -52,6 +56,8 @@ TREE_LINKS_ERASED = {"left_node_id": "state-tree layout", "right_node_id": "stat
 NODE_KEY_INDEX = re.compile(r":definition:(\d+)$")
 NORMALIZED_OWNER = re.compile(r"function:(.+):normalized(?:\[0\])?$")
 FUNCTION_SECTION = re.compile(r"function:(.+):(normalized(?:\[\d+\])?|summary|analyzed)$")
+PROOF_REFERENCE = re.compile(r"register-delta-proof:([0-9a-f]{64}(?:,[0-9a-f]{64})*)")
+INDEX_ORIGIN_SECTION = "run:index_object_origins"
 
 
 class Ambiguous(ValueError):
@@ -129,12 +135,61 @@ def _verify_unused(data, unused):
     _walk(data, stray)
 
 
+def _collect_register_proofs(name, data, receipts):
+    if not name.endswith(":summary") or not isinstance(data, dict) or data.get("type") != "FunctionSummary":
+        return
+    proofs = data.get("independent_delta_proofs")
+    if type(proofs) is not list or not proofs:
+        return
+    from tdo_v2.register_delta_proofs import PROOF_VERSION, RegisterDeltaBlock, RegisterDeltaCallFact, RegisterDeltaProof
+
+    def unwrap(wire, cls):
+        keys = {field.name for field in fields(cls)}
+        if type(wire) is not dict or wire.get("type") != cls.__name__ or set(wire) != keys | {"type"}:
+            return None
+        return {key: wire[key] for key in keys}
+
+    owner = name.removeprefix("function:").removesuffix(":summary")
+    for value in proofs:
+        payload = unwrap(value, RegisterDeltaProof)
+        if payload is None or any(type(payload[key]) is not list for key in ("blocks", "call_facts")):
+            continue
+        payload["blocks"] = [unwrap(row, RegisterDeltaBlock) for row in payload["blocks"]]
+        payload["call_facts"] = [unwrap(row, RegisterDeltaCallFact) for row in payload["call_facts"]]
+        if None in payload["blocks"] or None in payload["call_facts"]:
+            continue
+        payload["version"] = PROOF_VERSION
+        receipts.append((owner, payload))
+
+
+def _proof_coordinates(receipts, digests):
+    names, seen = {}, {}
+    for owner, payload in receipts:
+        fields = ("function_scope", "program_scope", "observation_digest")
+        function, program, observation = (payload[field] for field in fields)
+        if not all(type(value) is str and len(value) == 64 and HEX64.fullmatch(value)
+                   for value in (function, program, observation)):
+            continue
+        if digests.get(function) != f"F:{owner}" or digests.get(program) != "P":
+            continue
+        raw = hashlib.sha256(canonical(payload).encode()).hexdigest()
+        projected = {**payload, "function_scope": f"F:{owner}", "program_scope": "P", "observation_digest": None}
+        coordinate = "proof@" + hashlib.sha256(canonical(projected).encode()).hexdigest()
+        if seen.setdefault(coordinate, raw) != raw:
+            raise Ambiguous("two register delta proofs share one coordinate")
+        if names.setdefault(raw, coordinate) != coordinate:
+            raise Ambiguous("register delta proof digest has two receipts")
+    return names
+
+
 def build_tokens(document) -> dict:
-    scopes = set()
-    for data in document["sections"].values():
+    scopes, receipts = set(), []
+    for name, data in document["sections"].items():
         _scope_references(data, scopes)
+        _collect_register_proofs(name, data, receipts)
     tokens, unused = _build_tokens({key: _owner_facts(value) for key, value in _function_sections(document).items()},
-                                  scopes)
+                                  scopes, document["sections"].get(INDEX_ORIGIN_SECTION))
+    tokens["register_proofs"] = _proof_coordinates(receipts, tokens["digests"])
     for data in document["sections"].values():
         _verify_unused(data, unused)
     return tokens
@@ -142,6 +197,7 @@ def build_tokens(document) -> dict:
 
 def _origin_coordinates(owners, atoms, labels):
     """Name otherwise unlabeled atoms by their captured expression recipes."""
+    joins = ("join", "nonstack-join")
     recipes, inputs, relative_entries = {}, set(), set()
     for owner, (*_, origins) in owners.items():
         for raw, witnesses, _ in origins:
@@ -150,9 +206,13 @@ def _origin_coordinates(owners, atoms, labels):
                 kind, _, _, wire = witness
                 if kind == "entry" and wire:
                     relative_entries.add(raw)
-                operands = wire["set"] if kind == "join" else wire
+                operands = wire["set"] if kind in joins else wire
                 for _, (terms, *_) in operands:
                     inputs.update(atom for atom, _ in terms["set"])
+                if kind in joins:
+                    for span in (witness[2], *(source for (source, _), _ in operands)):
+                        if span[4] == "function_relative":
+                            inputs.update(atom for atom, _ in span[5][1]["set"])
     if not recipes:
         return {}
     counts = {}
@@ -161,7 +221,15 @@ def _origin_coordinates(owners, atoms, labels):
     coordinates, active = {}, set()
 
     def independently_named(raw):
-        return raw not in relative_entries and raw in labels and counts[atoms[raw]] == 1
+        return raw not in relative_entries and raw in labels and counts[atoms[raw]] == 1 \
+            and not any(label.startswith("entry function_relative+") for _, label in labels[raw])
+
+    def relative_span(span):
+        if span[4] != "function_relative":
+            return span
+        space, terms = span[5]
+        return [*span[:5], [space, sorted([resolve(atom), coefficient] for atom, coefficient in terms["set"])],
+                *span[6:]]
 
     def resolve(raw):
         if independently_named(raw):
@@ -175,10 +243,14 @@ def _origin_coordinates(owners, atoms, labels):
         active.add(raw)
         rows = []
         for owner, (kind, location, detail, wire) in recipes[raw]:
-            operands = wire["set"] if kind == "join" else wire
+            operands = wire["set"] if kind in joins else wire
+            if kind in joins:
+                detail = relative_span(detail)
+                operands = [([relative_span(source), count], expression)
+                            for (source, count), expression in operands]
             values = [[slot, sorted([resolve(atom), coefficient] for atom, coefficient in terms["set"]),
                        *geometry] for slot, (terms, *geometry) in operands]
-            rows.append([owner, kind, location, detail, sorted(values, key=canonical) if kind == "join" else values])
+            rows.append([owner, kind, location, detail, sorted(values, key=canonical) if kind in joins else values])
         active.remove(raw)
         coordinates[raw] = "A@:" + hashlib.sha256(canonical(sorted(rows, key=canonical)).encode()).hexdigest()
         return coordinates[raw]
@@ -194,7 +266,30 @@ def _origin_coordinates(owners, atoms, labels):
     return coordinates
 
 
-def _build_tokens(owners, scopes):
+def _add_index_origins(owners, evidence):
+    if evidence is None:
+        return ()
+    owner_keys = {facts[0]["digest"]["bytes"]: key for key, facts in owners.items() if facts[0]}
+    known_labels = {raw for _, _, labels, *_ in owners.values() for raw, _ in labels}
+    known_recipes = {raw for *_, recipes in owners.values() for raw, _, _ in recipes}
+    objects = []
+    for scope, item in evidence["items"]:
+        owner = owner_keys.get(scope["digest"]["bytes"])
+        if owner is None:
+            continue
+        data = item["dict"]
+        subjects = data["address_objects"]
+        if any(obj["scope"] != scope for obj, _ in subjects):
+            raise Ambiguous("index origin names an object outside its owner")
+        objects.extend(subjects)
+        function, unit, labels, final_objects, users, recipes = owners[owner]
+        extra_labels = [row for row in data["address_atoms"] if row[0] not in known_labels]
+        extra_recipes = [row for row in data["address_atom_origins"] if row[0] not in known_recipes]
+        owners[owner] = (function, unit, [*labels, *extra_labels], final_objects, users, [*recipes, *extra_recipes])
+    return objects
+
+
+def _build_tokens(owners, scopes, index_evidence=None):
     tokens: dict = {}
 
     def bind(raw, token):
@@ -217,6 +312,7 @@ def _build_tokens(owners, scopes):
         raise Ambiguous(f"{len(programs)} program scopes")
     for digest in programs:
         bind(digest, "P")
+    index_objects = _add_index_origins(owners, index_evidence)
     labels: dict = {}   # raw atom -> {(function, label)}
     for key, (_, _, address_atoms, *_) in owners.items():
         for raw, label in address_atoms:
@@ -272,17 +368,29 @@ def _build_tokens(owners, scopes):
     # a relative space key is the hash of its base expression (address_objects: object -> atoms x coefficients,
     # space id): its coordinate is that expression written with atom labels
     spaces: dict = {}
-    for _, _, _, address_objects, _, _ in owners.values():
-        for entry in address_objects:
-            object_id, expression = entry[0], entry[1]
+
+    def index_atom(raw):
+        name = atoms.get(raw)
+        if name is not None and not name.startswith("A?:") and len(names[name]) == 1:
+            if not plain.get(raw, "").startswith("entry function_relative+") or name.startswith("A@:"):
+                return name
+        return f"raw:{raw}"
+
+    def bind_spaces(objects, diagnostic=False):
+        for object_id, expression in objects:
             raw = object_id.get("space_key") if isinstance(object_id, dict) else None
             if not isinstance(raw, int) or raw < SMALL:
                 continue
-            terms, space = expression[0], expression[1]
-            label = "K:" + canonical([sorted([atoms.get(atom, f"?{atom}"), coefficient] for atom, coefficient in terms),
-                                      space])
+            terms, space = expression[:2]
+            named_terms = [[index_atom(atom) if diagnostic else atoms.get(atom, f"?{atom}"), coefficient]
+                           for atom, coefficient in terms]
+            label = "K:" + canonical([sorted(named_terms), space])
             if spaces.setdefault(raw, label) != label:
                 raise Ambiguous(f"space key {str(raw)[:16]} has two base expressions")
+
+    for _, _, _, address_objects, _, _ in owners.values():
+        bind_spaces(address_objects)
+    bind_spaces(index_objects, diagnostic=True)
 
     # a space key with no base expression here (e.g. an import-static object, relative_memory.py) keeps its raw
     # value: equal raw values compare equal, different ones show as a difference -- never merged
@@ -299,6 +407,11 @@ def rename_text(text: str, digests: dict) -> str:
     return HEX64.sub(lambda match: digests.get(match.group(0), match.group(0)), text)
 
 
+def _rename_proof_reference(match, tokens):
+    coordinates = tokens.get("register_proofs", {})
+    return "register-delta-proof:" + ",".join(coordinates.get(raw, raw) for raw in match[1].split(","))
+
+
 def rename(value, tokens, *, owned=False):
     """Every identity token replaced by its coordinate (structure unchanged)."""
     digests, spaces, atoms = tokens["digests"], tokens["spaces"], tokens["atoms"]
@@ -307,6 +420,25 @@ def rename(value, tokens, *, owned=False):
             return {"token": digests[value["bytes"]]}
         result = value if owned else {}
         for key, item in value.items():
+            if key == "semantic_identity" and value.get("type") == "NodeRecord" \
+                    and isinstance(item, str) and (reference := PROOF_REFERENCE.fullmatch(item)):
+                result[key] = _rename_proof_reference(reference, tokens)
+                continue
+            if key == "dependencies" and value.get("type") in ("ContinuationCertificate", "ExitRecord") \
+                    and isinstance(item, list):
+                dependencies = [_rename_proof_reference(reference, tokens)
+                                if isinstance(entry, str) and (reference := PROOF_REFERENCE.fullmatch(entry))
+                                else rename(entry, tokens, owned=owned) for entry in item]
+                result[key] = sorted(dependencies, key=canonical)
+                continue
+            if key == "id" and isinstance(item, str) and value.get("type") == "EvidenceRef" and value.get("kind") in (
+                    "proof", "register-delta-proof"):
+                result[key] = tokens.get("register_proofs", {}).get(item, item)
+                continue
+            if (key == "executable_sha256" and value.get("type") == "RegisterDeltaProof"
+                    or key == "effect_fingerprint" and value.get("type") == "RegisterDeltaCallFact"):
+                result[key] = item
+                continue
             if key in DIGEST_FIELDS_ERASED and (isinstance(item, dict) and set(item) == {"bytes"}
                                                 or isinstance(item, str) and HEX64.fullmatch(item)):
                 result[key] = {"erased": key}
@@ -668,7 +800,11 @@ def _multisets(value):
                         if isinstance(entry, list) and len(entry) == 2 and isinstance(entry[1], list) else entry
                         for entry in item]
             item = _multisets(item)
-            if isinstance(item, list) and (name in COLLECTIONS or name in ("set", "items")):
+            # The summary orders relation rows and writer-condition pairs by raw
+            # storage identity. Base/index and read/write roles stay ordered.
+            summary_rows = name in ("address_relations", "writer_conditions") \
+                and value.get("type") == "FunctionSummary"
+            if isinstance(item, list) and (name in COLLECTIONS or name in ("set", "items") or summary_rows):
                 _sort_by_canonical(item)
             value[name] = item
     if isinstance(value, list):
@@ -719,18 +855,23 @@ def _canonical_bytes(value):
 def project_snapshot(snapshot, projected=None):
     """Project indexed input, optionally saving projected sections for difference display."""
     sections = snapshot["sections"]
-    owners, owner_sections, scopes = {}, {}, set()
+    owners, owner_sections, scopes, receipts = {}, {}, set(), []
+    index_evidence = None
     for name in sections:
         data = sections[name]
         _scope_references(data, scopes)
+        _collect_register_proofs(name, data, receipts)
+        if name == INDEX_ORIGIN_SECTION:
+            index_evidence = data
         match = NORMALIZED_OWNER.fullmatch(name)
         if match and isinstance(data, dict) and "memory_ssa" in data:
             key = match.group(1)
             owners[key] = _owner_facts(data)
             owner_sections[key] = name
         del data
-    tokens, unused = _build_tokens(owners, scopes)
-    del owners, scopes
+    tokens, unused = _build_tokens(owners, scopes, index_evidence)
+    tokens["register_proofs"] = _proof_coordinates(receipts, tokens["digests"])
+    del owners, scopes, receipts, index_evidence
     summaries = {owner: f"function:{key}:summary" for key, owner in owner_sections.items()
                  if f"function:{key}:summary" in sections}
     deferred = set(summaries.values())

@@ -72,6 +72,7 @@ def main() -> int:
     parser.add_argument("--tree", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--no-interaction", action="store_true")
     args = parser.parse_args()
+    sys.path.insert(0, str(args.tree / "src"))
     sys.path.insert(0, str(args.tree / "tools" / "graph_fidelity"))
     from paired_projection import Ambiguous, project_snapshot
 

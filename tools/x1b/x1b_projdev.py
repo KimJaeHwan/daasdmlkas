@@ -1,7 +1,9 @@
 """dev: project two snapshots and show residual differences by pattern"""
 import gzip, json, re, sys
 from collections import Counter
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "graph_fidelity"))
+from pathlib import Path
+root = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(root / "src"), str(root / "tools" / "graph_fidelity")]
 from paired_projection import project_document
 def walk(a, b, path, out):
     if type(a) is not type(b): out.append((path, a, b)); return

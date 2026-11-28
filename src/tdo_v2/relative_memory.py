@@ -56,10 +56,34 @@ class _AddressExpression:
 
 
 CAPTURE_ADDRESS_ATOM_ORIGINS = ContextVar("capture_address_atom_origins", default=False)
+INDEX_OBJECT_ORIGINS = ContextVar("index_object_origins", default=None)
 
 
 def _origin_expression(value):
     return frozenset(value.atoms), value.displacement, value.byte_size, value.image
+
+
+def _origin_inputs(recipe):
+    kind, _, detail, operands = recipe
+    for _, (terms, *_) in operands:
+        yield from (atom for atom, _ in terms)
+    if kind in ("join", "nonstack-join"):
+        for span in (detail, *(source for (source, _), _ in operands)):
+            if span[4] == StorageObjectKind.FUNCTION_RELATIVE.value:
+                yield from (atom for atom, _ in span[5][1])
+
+
+def _reachable_origin_atoms(pending, recipes):
+    seen = set()
+    for atom in pending:
+        if atom in seen:
+            continue
+        seen.add(atom)
+        # Recipes share (kind, site, detail, operands). An operand identifies
+        # its raw input number, join source, or the base of an entry object.
+        for recipe in recipes.get(atom, ()):
+            pending.extend(_origin_inputs(recipe))
+    return seen
 
 
 def address_atom_origins(metadata):
@@ -69,17 +93,28 @@ def address_atom_origins(metadata):
         return ()
     uses = metadata["operand_uses"]
     pending = [atom for terms, _ in metadata["objects"].values() for atom, _ in terms]
-    seen = set()
-    for atom in pending:
-        if atom in seen:
-            continue
-        seen.add(atom)
-        # Recipes share (kind, site, detail, operands). An operand identifies
-        # its raw input number, join source, or the base of an entry object.
-        for _, _, _, operands in recipes.get(atom, ()):
-            pending.extend(child for _, (terms, *_) in operands for child, _ in terms)
+    seen = _reachable_origin_atoms(pending, recipes)
     return tuple((atom, frozenset(recipes[atom]), frozenset(uses.get(atom, ())))
                  for atom in sorted(seen & recipes.keys()))
+
+
+def index_object_origins(final_objects):
+    """The bases of diagnostic objects absent from the final functions."""
+    by_scope = {}
+    for obj, (bases, labels, recipes) in (INDEX_OBJECT_ORIGINS.get() or {}).items():
+        if obj in final_objects:
+            continue
+        objects, names, proofs = by_scope.setdefault(obj.scope, (set(), set(), {}))
+        objects.update((obj, basis) for basis in bases)
+        names.update((atom, label) for atom, labels_for_atom in labels.items() for label in labels_for_atom)
+        for atom, witnesses in recipes.items():
+            proofs.setdefault(atom, set()).update(witnesses)
+    return {
+        scope: {"address_objects": tuple(sorted(objects)), "address_atoms": tuple(sorted(names)),
+                "address_atom_origins": tuple((atom, frozenset(witnesses), frozenset())
+                                              for atom, witnesses in sorted(recipes.items()))}
+        for scope, (objects, names, recipes) in by_scope.items()
+    }
 
 
 # Deriving summaries for reuse as models (``summary_templates``): a constant
@@ -498,6 +533,9 @@ def reset_index_diagnostics() -> None:
     """At the start of one analysis run (``interprocedural.analyze_units``)."""
     INDEX_DIAGNOSTICS["index_objects"] = set()
     INDEX_DIAGNOSTICS["seam_refusals"] = 0
+    origins = INDEX_OBJECT_ORIGINS.get()
+    if origins is not None:
+        origins.clear()
 _VALUE_KINDS = frozenset({StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE})
 _WAIT = object()   # an accessor result whose key waits for pending writes (``_same_result_atom``)
 
@@ -746,6 +784,9 @@ def _final_projector(normalized, observation) -> "_Projector":
         operations, OpaqueValueEvidenceResolver(NullOpaqueValueEvidenceProvider()),
         scopes.program.evidence.translation_namespace.language_id,
     )
+    if INDEX_OBJECT_ORIGINS.get() is not None:
+        projector.address_metadata.update(recipes={}, operand_uses={})
+        projector._rewritten_operations = frozenset(key for key, _ in normalized.operation_overrides)
     from .may_alias import _unit_stub
 
     # (the stack pointer and the new frame, as the projection's: docs 25.80 R0)
@@ -1448,7 +1489,15 @@ class _Projector:
         index = _add_address_expressions(index, _AddressExpression((), preoffset, size), size)
         if extend != "identity":
             if index.atoms:
-                index = self._boundary_expression(extend, index, 8)
+                extended = self._boundary_expression(extend, index, 8)
+                recipes = self.address_metadata.get("recipes")
+                if extended is not None and recipes is not None:
+                    # This cast comes from a summarized address relation.
+                    # The caller's raw p-code did not supply an input slot.
+                    recipe = ("summary-index-extension", evaluation_key.split("~", 1)[0], (extend, 8),
+                              (("index", _origin_expression(index)),))
+                    recipes.setdefault(extended.atoms[0][0], set()).add(recipe)
+                index = extended
             else:
                 number = _signed_wrap(index.displacement, size) if extend == "sext" else \
                     _unsigned_wrap(index.displacement, size)
@@ -1600,30 +1649,39 @@ class _Projector:
         span = (min(values), max(values)) if len(values) == len(candidates) else None
         self._boundary[atom] = ("once-join", requested_span.size, requested_span.size, span)
         self._note_opaque_atom(atom, candidates)
-        recipes = self.address_metadata.get("recipes")
-        if recipes is not None:
-            definition = self._ssa.definitions[definition_id]
-            definitions = [self._ssa.definitions[source] for source in self._join_sources[definition_id]]
-            # These spaces have context-independent numeric keys. For a
-            # relative span, an address recipe would also be needed.
-            def location(row):
-                span = row.span
-                obj = span.object_id
-                if obj.kind in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE):
-                    return (row.kind.name, row.operation_key, row.write_ordinal, row.block_key, obj.kind.value,
-                            obj.space_key, span.start, span.size)
-                return None
-
-            definitions = tuple(location(row) for row in definitions)
-            target = location(definition)
-            if target is not None and None not in definitions:
-                alternatives = Counter((source, _origin_expression(candidate))
-                                       for source, candidate in zip(definitions, candidates, strict=True))
-                recipe = ("join", definition.block_key, target,
-                          frozenset(((source, count), value)
-                                    for (source, value), count in alternatives.items()))
-                recipes.setdefault(atom, set()).add(recipe)
+        self._record_join_origin(atom, "join", definition_id, candidates)
         return _AddressExpression(((atom, 1),), 0, requested_span.size)
+
+    def _record_join_origin(self, atom, kind, definition_id, candidates):
+        recipes = self.address_metadata.get("recipes")
+        if recipes is None:
+            return
+        definition = self._ssa.definitions[definition_id]
+
+        def location(row):
+            span = row.span
+            obj = span.object_id
+            if obj.kind is StorageObjectKind.FUNCTION_RELATIVE:
+                expression = self.address_metadata["objects"].get(obj)
+                if expression is None or obj.scope != self._ssa.function_scope:
+                    return None
+                terms, space = expression
+                place = (space, frozenset(terms))
+            elif obj.kind in (StorageObjectKind.REGISTER_FILE, StorageObjectKind.FUNCTION_UNIQUE):
+                place = obj.space_key
+            else:
+                return None
+            return (row.kind.name, row.operation_key, row.write_ordinal, row.block_key, obj.kind.value,
+                    place, span.start, span.size)
+
+        sources = tuple(location(self._ssa.definitions[source]) for source in self._join_sources[definition_id])
+        target = location(definition)
+        if target is not None and None not in sources:
+            alternatives = Counter((source, _origin_expression(candidate))
+                                   for source, candidate in zip(sources, candidates, strict=True))
+            recipe = (kind, definition.block_key, target,
+                      frozenset(((source, count), value) for (source, value), count in alternatives.items()))
+            recipes.setdefault(atom, set()).add(recipe)
 
     def _is_stack_derived(self, atom: int) -> bool:
         """An entry atom of (a part of) the stack pointer, or an opaque atom
@@ -1674,6 +1732,17 @@ class _Projector:
             # it may reach the private frame (docs 25.8)
             self.wild_objects.add(object_id)
             INDEX_DIAGNOSTICS["index_objects"].add(object_id)
+            origins = INDEX_OBJECT_ORIGINS.get()
+            if origins is not None and metadata is not None:
+                bases, labels, recipes = origins.setdefault(object_id, (set(), {}, {}))
+                bases.add((address.atoms, space_id))
+                available = metadata.get("recipes", {})
+                names = metadata["atoms"]
+                for atom in _reachable_origin_atoms([atom for atom, _ in address.atoms], available):
+                    if atom in names:
+                        labels.setdefault(atom, set()).add(names[atom])
+                    if atom in available:
+                        recipes.setdefault(atom, set()).update(available[atom])
         if any(self._is_stack_derived(atom) for atom, _ in address.atoms) \
                 and address.atoms != ((self._stack_atoms[0], 1),):
             # derived from the stack pointer but not the stack object
@@ -2447,6 +2516,7 @@ class _Projector:
                                  for source_id in self._join_sources.get(definition_id, ()))
                 atom = _digest_ints(b"join-nonstack-v3", (*sources, _stable_storage_key(requested_span)))
                 self._nonstack_atoms.add(atom)
+                self._record_join_origin(atom, "nonstack-join", definition_id, candidates)
                 result = _AddressExpression(((atom, 1),), 0, requested_span.size)
                 windows = [self._nonstack_extent.get(item.atoms[0][0]) if item.atoms else None for item in candidates]
                 if all(window is not None for window in windows) and not any(

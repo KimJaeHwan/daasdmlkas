@@ -356,19 +356,21 @@ def dump(generation: Path, out: Path, config: str, bindings=(), paired: bool = F
     """``paired`` (X-1b, design_x1b_method_r3 B / C): every section encoded
     losslessly, the run's supports and control records added, the input's
     manifest / seal digests in ``meta`` -- for ``compare --pair`` / ``--paired``."""
-    from tdo_v2.relative_memory import CAPTURE_ADDRESS_ATOM_ORIGINS
+    from tdo_v2.relative_memory import CAPTURE_ADDRESS_ATOM_ORIGINS, INDEX_OBJECT_ORIGINS
 
     token = _LOSSLESS.set(paired)
     origins = CAPTURE_ADDRESS_ATOM_ORIGINS.set(paired)
+    index_origins = INDEX_OBJECT_ORIGINS.set({} if paired and config != "legacy" else None)
     try:
         return _dump(generation, out, config, bindings, paired)
     finally:
+        INDEX_OBJECT_ORIGINS.reset(index_origins)
         CAPTURE_ADDRESS_ATOM_ORIGINS.reset(origins)
         _LOSSLESS.reset(token)
 
 
 def _dump(generation: Path, out: Path, config: str, bindings, paired: bool) -> int:
-    from tdo_v2.relative_memory import INDEX_DIAGNOSTICS
+    from tdo_v2.relative_memory import INDEX_DIAGNOSTICS, index_object_origins
     from tdo_v2.summary_engine import LANE_DIAGNOSTICS
 
     started = time.time()
@@ -438,6 +440,11 @@ def _dump(generation: Path, out: Path, config: str, bindings, paired: bool) -> i
     sections = {f"function:{key}:{part}": data for key, item in functions.items() for part, data in item.items()}
     sections.update({f"root:{index}": root for index, root in enumerate(roots)})
     sections.update({f"run:{name}": data for name, data in run_level.items()})
+    if paired:
+        final_objects = {obj for item in results.values() for obj, _ in getattr(item.normalized, "address_objects", ())}
+        index_origins = index_object_origins(final_objects)
+        if index_origins:
+            sections["run:index_object_origins"] = encode(index_origins, "index_object_origins")
     if os.environ.get("TDO_V2_FORWARD") == "1":
         # forward value facts (docs 25.33 F0): nothing in the engine reads them;
         # recorded only when asked, so forward-off snapshots stay as they were

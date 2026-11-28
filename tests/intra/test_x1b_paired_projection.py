@@ -334,7 +334,8 @@ def test_unlabelled_origin_inputs_keep_raw_identity_even_with_a_unique_use():
     assert names[0] != names[1]
 
 
-def test_an_ssa_join_keeps_each_source_paired_with_its_expression():
+@pytest.mark.parametrize("kind", ["join", "nonstack-join"])
+def test_an_ssa_join_keeps_each_source_paired_with_its_expression(kind):
     names = []
     for index in range(2):
         doc = document()
@@ -345,7 +346,7 @@ def test_an_ssa_join_keeps_each_source_paired_with_its_expression():
         for position, literal in enumerate((1, 2) if index == 0 else (2, 1)):
             source = ["DATA_WRITE", "1b1:1004:0:COPY", position, None, "register_file", 0, 32, 8]
             operands.append([[source, 1], [{"set": []}, literal, 8, 0]])
-        part["address_atom_origins"][0][1]["set"] = [["join", KEY, target, {"set": operands}]]
+        part["address_atom_origins"][0][1]["set"] = [[kind, KEY, target, {"set": operands}]]
         names.append(paired_projection.build_tokens(doc)["spaces"][keys[0]])
     assert names[0] != names[1]
 
@@ -362,5 +363,156 @@ def test_a_relative_entry_base_overrides_an_identical_display_label():
         payload = ["entry", None, ["function_relative", "function", 433, 1 << 64, 4],
                    [["object-base", [{"set": [[original, 1]]}, 0, None, 0]]]]
         part["address_atom_origins"][0][1]["set"] = [payload]
+        names.append(paired_projection.build_tokens(doc)["spaces"][keys[0]])
+    assert names[0] != names[1]
+
+
+@pytest.mark.parametrize("scale", [1, 4])
+def test_address_relation_rows_ignore_order_and_keep_operand_roles(scale):
+    def rows(doc):
+        value = doc["sections"][f"function:{KEY}:summary"]
+        return value.setdefault("address_relations", [
+            [relative("a" * 64, n, 0)["object_id"],
+             {"type": "IndexedAnchor", "base": register("c" * 64, i),
+              "index": register("c" * 64, i + 8), "scale": scale,
+              "space_id": 433, "extend": "identity", "preoffset": 0}]
+            for n, i in ((1, 16), (2, 32))
+        ])
+
+    before, after = document(), document()
+    rows(before)
+    rows(after).reverse()
+    assert projected_equal(before, after)
+    relation = rows(after)[0][1]
+    relation["base"], relation["index"] = relation["index"], relation["base"]
+    assert not projected_equal(before, after)
+    rows(after)[:] = [*rows(before), rows(before)[0]]
+    assert not projected_equal(before, after)
+
+
+def test_writer_condition_rows_ignore_order_and_keep_read_write_pairs():
+    def rows(doc):
+        value = doc["sections"][f"function:{KEY}:summary"]
+        return value.setdefault("writer_conditions", [
+            [register("c" * 64, position), relative("a" * 64, 433, position + 8)]
+            for position in (16, 32)
+        ])
+
+    before, after = document(), document()
+    rows(before)
+    rows(after).reverse()
+    assert projected_equal(before, after)
+    rows(after)[0].reverse()
+    assert not projected_equal(before, after)
+    rows(after)[:] = [*rows(before), rows(before)[0]]
+    assert not projected_equal(before, after)
+
+
+def add_register_proofs(source, *, f, p, observation, delta=8):
+    from tdo_v2.register_delta_proofs import RegisterDeltaBlock, RegisterDeltaCallFact, RegisterDeltaProof
+
+    operation = "1b1:1004:0:CALL"
+    fact = RegisterDeltaCallFact(operation, "1b1:2000", "call", 8, -8, "1" * 64)
+    proofs = [RegisterDeltaProof((reg, 8), delta, p, f, observation, "0" * 64, (operation,),
+                                (RegisterDeltaBlock(KEY, (), True, 0, delta),), (KEY,), (fact,), ())
+              for reg in (32, 40)]
+    summary = source["sections"][f"function:{KEY}:summary"]
+    summary["independent_delta_proofs"] = [semantic_snapshot.encode(proof) for proof in proofs]
+    hashes = [proof.record()["content_sha256"] for proof in proofs]
+    nodes = source["sections"][f"function:{KEY}:normalized"]["dependencies"]["nodes"]
+    nodes[0]["semantic_identity"] = "register-delta-proof:" + ",".join(hashes)
+    return nodes[0], hashes
+
+
+def test_register_proof_reference_uses_exact_receipts_and_preserves_order(tmp_path):
+    a, b = document(), document(f="d" * 64, u="e" * 64, p="f" * 64)
+    _, before = add_register_proofs(a, f="a" * 64, p="c" * 64, observation="2" * 64)
+    node, after = add_register_proofs(b, f="d" * 64, p="f" * 64, observation="3" * 64)
+    assert before != after and projected_equal(a, b)
+    path = write_snapshot(tmp_path / "proofs.json.gz", b)
+    with open_snapshot(path) as indexed:
+        assert paired_projection.project_snapshot(indexed) == project_document(a)["digests"]
+    node["semantic_identity"] = "register-delta-proof:" + ",".join(reversed(after))
+    assert not projected_equal(a, b)
+    add_register_proofs(b, f="d" * 64, p="f" * 64, observation="3" * 64, delta=16)
+    assert not projected_equal(a, b)
+
+
+def test_register_proof_reference_does_not_infer_an_unbound_receipt():
+    doc = document()
+    node, hashes = add_register_proofs(doc, f="a" * 64, p="c" * 64, observation="2" * 64)
+    doc["sections"]["run:unrelated"] = node["semantic_identity"]
+    summary = doc["sections"][f"function:{KEY}:summary"]
+    summary["independent_delta_proofs"][1]["blocks"][0]["type"] = "OtherBlock"
+    output = project_document(doc)["sections"]
+    assert output["run:unrelated"] == node["semantic_identity"]
+    mapped = output[f"function:{KEY}:normalized"]["dependencies"]["nodes"]
+    mapped_identity = next(item["semantic_identity"] for item in mapped if "semantic_identity" in item)
+    assert mapped_identity.startswith("register-delta-proof:proof@") and mapped_identity.endswith("," + hashes[1])
+
+
+def test_register_proof_supports_and_exit_dependencies_follow_the_receipt():
+    a, b = document(), document(f="d" * 64, u="e" * 64, p="f" * 64)
+    for doc, f, p, obs in ((a, "a", "c", "2"), (b, "d", "f", "3")):
+        _, hashes = add_register_proofs(doc, f=f * 64, p=p * 64, observation=obs * 64)
+        deps = sorted(f"register-delta-proof:{digest}" for digest in hashes)
+        doc["sections"]["run:supports"] = {"type": "ContinuationCertificate", "dependencies": deps,
+                                           "exits": [{"type": "ExitRecord", "dependencies": deps}],
+                                           "evidence": {"set": [{"type": "EvidenceRef", "kind": "proof", "id": hashes[0]}]}}
+    assert projected_equal(a, b)
+
+
+def test_interim_index_objects_use_their_own_recorded_bases(tmp_path):
+    a, b = document(), document(f="d" * 64, u="e" * 64, p="f" * 64)
+    for offset, doc in enumerate((a, b)):
+        part, atoms, keys = add_unlabelled_objects(doc, offset=4 * offset)
+        record_origins(part, atoms)
+        objects, origins = part["address_objects"][-2:], part.pop("address_atom_origins")
+        del part["address_objects"][-2:]
+        doc["sections"]["run:index_diagnostics"] = {
+            "dict": {"index_objects": {"set": [obj for obj, _ in objects]}, "seam_refusals": 0}}
+        doc["sections"]["run:index_object_origins"] = {"items": [
+            [part["memory_ssa"]["function_scope"],
+             {"dict": {"address_objects": objects, "address_atoms": [], "address_atom_origins": origins}}]]}
+        doc["digests"] = {name: semantic_snapshot._digest(data) for name, data in doc["sections"].items()}
+        tokens = paired_projection.build_tokens(doc)["spaces"]
+        assert tokens[keys[0]] != tokens[keys[1]]
+    assert projected_equal(a, b)
+    path = write_snapshot(tmp_path / "index.json.gz", b)
+    with open_snapshot(path) as indexed:
+        assert paired_projection.project_snapshot(indexed) == project_document(a)["digests"]
+    evidence = b["sections"]["run:index_object_origins"]["items"][0][1]["dict"]["address_objects"]
+    evidence[0][1][0][0][1] = -1
+    assert not projected_equal(a, b)
+
+
+def test_an_interim_relative_entry_label_alone_does_not_prove_its_base():
+    a, b = document(), document()
+    for offset, doc in enumerate((a, b)):
+        part, atoms, keys = add_unlabelled_objects(doc, offset=4 * offset)
+        obj, (_, space) = part["address_objects"].pop()
+        part["address_objects"].pop()
+        obj = [obj, [[[atoms[1], 2]], space]]
+        doc["sections"]["run:index_diagnostics"] = {"dict": {"index_objects": {"set": [obj[0]]}}}
+        doc["sections"]["run:index_object_origins"] = {"items": [
+            [part["memory_ssa"]["function_scope"], {"dict": {
+                "address_objects": [obj], "address_atom_origins": [],
+                "address_atoms": [[atoms[1], "entry function_relative+0x0:8"]]
+            }}]]}
+    assert not projected_equal(a, b)
+
+
+def test_a_join_span_with_an_unproven_relative_base_stays_distinct():
+    names = []
+    for offset in (0, 1):
+        doc = document()
+        part, atoms, keys = add_unlabelled_objects(doc)
+        record_origins(part, atoms)
+        raw = (1 << 215) + offset
+        part["address_atoms"].append([raw, "entry function_relative+0x10:8"])
+        target = ["JOIN", None, None, KEY, "function_relative", [433, {"set": [[raw, 1]]}], 16, 8]
+        source = ["DATA_WRITE", "1b1:1004:0:STORE", 0, None, *target[4:]]
+        operands = [[[source, 1], [{"set": []}, 0, 8, 0]]]
+        part["address_atom_origins"][0][1]["set"] = [["nonstack-join", KEY, target, {"set": operands}]]
         names.append(paired_projection.build_tokens(doc)["spaces"][keys[0]])
     assert names[0] != names[1]
