@@ -62,6 +62,7 @@ class Diagnosis:
     fatal: dict | None = None             # a transport / hash failure that stopped the scoped iterator
     image_info_value: object = None       # (in-process only)
     program_value: object = None
+    bundle_identity: object = None
 
     def as_json(self) -> dict:
         out = {"admission": self.admission, "program": self.program, "image_info": self.image_info,
@@ -124,7 +125,7 @@ def _diagnose(generation: Path, naming_source: Path, keep) -> Diagnosis:
             return result
         import engine_api
 
-        adapter, scoped = engine_api.scoped_functions(session)
+        adapter, scoped, result.bundle_identity = engine_api.scoped_functions(session)
         index = 0
         while True:
             claim = FunctionClaim(index)

@@ -1897,8 +1897,155 @@ def test_elf_map_missing_size_duplicate_tags_and_plt_rewrite():
 def test_elf_map_rejects_other_machines_and_types():
     import _elf_fixture as ef
 
-    assert not _elf([ef.Segment(0x1000, b"\x90")], machine=183).ok          # EM_AARCH64: later
+    assert not _elf([ef.Segment(0x1000, b"\x90")], machine=183).ok          # Default remains x86-64.
     assert not _elf([ef.Segment(0x1000, b"\x90")], e_type=1).ok             # ET_REL
+
+
+def test_arm64_elf_uses_segment_file_offset_and_distinguishes_loader_overlap():
+    import _elf_fixture as ef
+    from arm64_file import FileMapping
+
+    nop = bytes.fromhex("1f2003d5")
+    data = ef.make_elf(
+        [ef.Segment(0x1000, nop), ef.Segment(0x5000, nop * 4, memsz=32, offset=0x3000),
+         ef.Segment(0x6000, nop, flags=6)],
+        machine=183, relocations=[ef.Reloc(0x5002, 257)],
+    ).data
+    image = FileMapping(data, 1, 0x100000, 4096)
+    word = int.from_bytes(nop, "little")
+    assert image.mapping.written.state == "complete"
+    assert image.word((1, 0x105000, word)) == {
+        "state": "match", "file_offset": 0x3000, "program_header_index": 2, "file_bytes": "1f2003d5",
+        "loader": {"state": "possible_write", "sources": ["R_AARCH64_ABS64"]},
+    }
+    assert image.word((1, 0x105008, word))["loader"]["state"] == "possible_write"
+    assert image.word((1, 0x10500C, word ^ 1))["state"] == "mismatch"
+    assert image.word((1, 0x10500C, word))["loader"]["state"] == "no_modeled_write"
+    for pc in (0x105010, 0x106000, 0x109000):  # zero-fill, non-executable, outside
+        assert image.word((1, pc, word))["state"] == "unobserved"
+    assert image.word((2, 0x105000, word))["state"] == "unobserved"
+    assert FileMapping(data, 1, 0x100004, 4096).reason == "load bias is unaligned under the selected page model"
+
+
+def test_arm64_elf_respects_page_model_linked_base_and_alignment():
+    import _elf_fixture as ef
+    from arm64_file import FileMapping
+
+    data = ef.make_elf([ef.Segment(0x1000, bytes(4)), ef.Segment(0x2000, bytes(4))],
+                       machine=183, dynamic=False).data
+    assert FileMapping(data, 1, 0x100000, 4096).word((1, 0x101000, 0))["state"] == "match"
+    result = FileMapping(data, 1, 0x100000, 16384).word((1, 0x101000, 0))
+    assert result == {"state": "unobserved", "reason": "PT_LOAD segments share a page"}
+
+    data = ef.make_elf([ef.Segment(0x401000, bytes(4))], e_type=2, link_base=0x400000, machine=183).data
+    assert FileMapping(data, 1, 0x400000, 4096).word((1, 0x401000, 0))["state"] == "match"
+    assert FileMapping(data, 1, 0x100000, 4096).reason == "ET_EXEC snapshot is outside its linked base"
+
+    data = ef.make_elf([ef.Segment(0x1000, bytes(4), offset=0x2000, align=0x4000)], machine=183).data
+    assert "p_align" in FileMapping(data, 1, 0x100000, 4096).word((1, 0x101000, 0))["reason"]
+    data = ef.make_elf([ef.Segment(0x4000, bytes(4), offset=0x4000, align=0x4000)], machine=183).data
+    assert "does not preserve PT_LOAD p_align" in FileMapping(data, 1, 0x101000, 4096).reason
+
+
+@pytest.mark.parametrize("relocations,tags,reason", [
+    ([(0x1000, 5)], [], "unsupported AArch64 relocation 5"),
+    ([(0x1000, 1024)], [], "unsupported AArch64 relocation 1024"),
+    ([], [(0x60000011, 0x2000)], "Android packed relocations"),
+    ([], [(0x70000000, 0x1000)], "unsupported processor-specific"),
+    ([], [(8, 24)], "DT_RELASZ without DT_RELA"),
+    ([], [(7, 0x1000), (8, 0)], "DT_RELA without DT_RELAENT"),
+    ([], [(0x40000026, 0x2000)], "DT_CREL is unsupported"),
+    ([], [(0x6FFFFFF9, 1)], "DT_RELACOUNT without DT_RELA"),
+    ([(0x1000, 0)], [(0x6FFFFFF9, 1)], "disagrees with the R_AARCH64_RELATIVE prefix"),
+    ([(0x1000, 1027)], [(0x6FFFFFF9, 2)], "disagrees with the R_AARCH64_RELATIVE prefix"),
+    ([(0x100000000, 1027)], [], "outside an eligible PT_LOAD"),
+])
+def test_arm64_elf_incomplete_loader_manifest_retains_observed_file_comparison(relocations, tags, reason):
+    import _elf_fixture as ef
+    from arm64_file import FileMapping
+
+    data = ef.make_elf([ef.Segment(0x1000, bytes(16))], machine=183,
+                       relocations=[ef.Reloc(*r) for r in relocations], extra_dynamic=tags).data
+    image = FileMapping(data, 1, 0x100000, 4096)
+    result = image.word((1, 0x101008, 0))
+    assert image.mapping.written.state == "indeterminate" and reason in image.mapping.written.why
+    assert result["state"] == "match" and result["loader"] == {"state": "unobserved"}
+    if relocations == [(0x1000, 1027)]:
+        assert image.word((1, 0x101000, 0))["loader"]["state"] == "possible_write"
+
+
+def test_arm64_elf_relr_and_dynamic_table_terminator():
+    import struct
+
+    import _elf_fixture as ef
+    from arm64_file import FileMapping
+
+    ef = ef.make_elf([ef.Segment(0x1000, bytes(32))], machine=183, relr=[0x1000, 0b1011])
+    image = FileMapping(ef.data, 1, 0x100000, 4096)
+    assert image.mapping.written.state == "complete"
+    assert image.word((1, 0x101000, 0))["loader"] == {"state": "possible_write", "sources": ["RELR"]}
+    assert image.word((1, 0x101010, 0))["loader"] == {"state": "no_modeled_write"}
+    assert image.word((1, 0x101018, 0))["loader"] == {"state": "possible_write", "sources": ["RELR"]}
+
+    _, _, offset, _, _, size, _, _ = next(p for p in image.mapping.phdrs if p[0] == 2)
+    data = bytearray(ef.data)
+    struct.pack_into("<QQ", data, offset + size - 16, 1, 1)
+    image = FileMapping(bytes(data), 1, 0x100000, 4096)
+    assert "without DT_NULL" in image.mapping.written.why
+
+
+def test_arm64_elf_checks_allocated_relocation_section_geometry():
+    import struct
+
+    import _elf_fixture as ef
+    from arm64_file import FileMapping
+
+    table = struct.pack("<QQq", 0x1000, 1027, 0)
+    data = bytearray(ef.make_elf([ef.Segment(0x1000, table)], machine=183, dynamic=False).data)
+    start = len(data)
+    data.extend(bytes(128))
+    struct.pack_into("<Q", data, 40, start)
+    struct.pack_into("<H", data, 60, 2)
+    struct.pack_into("<IIQQQQIIQQ", data, start + 64, 0, 4, 2, 0x1000, 0x1000, 24, 0, 0, 8, 24)
+    assert FileMapping(bytes(data), 1, 0x100000, 4096).mapping.written.state == "complete"
+
+    struct.pack_into("<Q", data, start + 64 + 16, 0x1008)  # sh_addr no longer maps to sh_offset.
+    image = FileMapping(bytes(data), 1, 0x100000, 4096)
+    assert "does not name its mapped file bytes" in image.mapping.written.why
+    struct.pack_into("<Q", data, 40, 0)
+    assert "inconsistent or extended" in FileMapping(bytes(data), 1, 0x100000, 4096).mapping.written.why
+    struct.pack_into("<H", data, 52, 0)
+    assert "malformed" in FileMapping(bytes(data), 1, 0x100000, 4096).reason
+
+
+@pytest.mark.parametrize("tampered", [False, True])
+def test_arm64_elf_binds_original_to_same_admitted_snapshot(tampered):
+    from hashlib import sha256
+
+    import _elf_fixture as ef
+    import arm64_file
+
+    f = dict(_row(4, []), isa="aarch64", address=0x101000)
+    arm = _g2c_arm(f["address"], [0xD503201F], {})
+    blocks = arm.blocks[f["space"]]
+    block, word = blocks[0]
+    original = ef.make_elf([ef.Segment(0x1000, word)], machine=183).data
+    members = [dict(id=key, sha256=sha256(data).hexdigest(), size=len(data))
+               for key, data in (("original", original), (block["member_id"], word))]
+    manifest = cf.canonical(dict(generation_id="gen", original_member_id="original", blocks=[block], members=members))
+    bundle = dict(generation_id="gen", manifest_sha256=sha256(manifest).hexdigest())
+    rows = [arm.row(f, "f0")]
+    doc = dict(bundle=bundle.copy(), rows=rows)
+    binding = dict(facts_sha256=cf.digest(doc), row_set_sha256=cf.row_set_digest(rows))
+    data = original[:-1] + bytes([original[-1] ^ 1]) if tampered else original
+    result = arm64_file.diagnose(doc, {cf.rr(rows[0]): f}, data, admitted_bundle=bundle,
+                                manifest_bytes=manifest, blocks=blocks, binding=binding, complete=True,
+                                image_space=1, base=0x100000, page=4096)
+    if tampered:
+        assert result["status"] == "error" and "original member differs" in result["error"]
+    else:
+        assert result["file_counts"] == {"match": 1}
+        assert result["original"] == members[0]
 
 
 # -- ISA facts step 1: raw per-voter evidence of the shims (layout revision 3, design_tbr_isa_facts_r3) --------
@@ -4134,6 +4281,279 @@ def _g2c_arm(start, words, regs, **extra):
     block = dict(space_id=1, byte_start=start, byte_size=len(data), member_id="memory-000000",
                  is_initialized=True, is_loaded=True, is_overlay=False, is_mapped=False, is_external=False)
     return Arm64Facts([(dict(block, **extra), data)], regs, {})
+
+
+@pytest.mark.parametrize("change", ["none", "missing", "duplicate", "word", "section", "duplicate_section", "format"])
+def test_arm64_llvm_binds_output_to_section_pc_and_word(change):
+    import arm64_decode as observer
+
+    _, sections = observer.elf_words({0x1000: 0x14000001, 0x1004: 0, 0x2000: 0x14000001})
+    text = ("Disassembly of section .text0:\n"
+            "    1000: 14000001  b 0x1004\n"
+            "    1004: 00 00 00 00  udf #0\n"
+            "Disassembly of section .text1:\n"
+            "    2000: 14000001  b 0x2004\n")
+    mutations = {
+        "missing": ("    1004: 00 00 00 00  udf #0\n", ""),
+        "duplicate": ("    1000:", "    1000: 14000001  b 0x1004\n    1000:"),
+        "word": ("2000: 14000001", "2000: 14000002"),
+        "section": ("section .text1", "section .unexpected"),
+        "duplicate_section": ("section .text1", "section .text0:\nDisassembly of section .text1"),
+        "format": ("2000: 14000001", "2000: [14000001]"),
+    }
+    if change == "none":
+        assert observer.parse_disassembly(text, sections) == {
+            0x1000: ("b", "0x1004"), 0x1004: ("udf", "#0"), 0x2000: ("b", "0x2004"),
+        }
+    else:
+        with pytest.raises(observer.ObserverError):
+            observer.parse_disassembly(text.replace(*mutations[change]), sections)
+
+
+def test_arm64_llvm_checks_independent_target_condition_and_register_width():
+    import arm64_decode as observer
+
+    f = dict(_row(4, []), isa="aarch64", address=0x1000)
+    arm = _g2c_arm(0x1000, [0x54000020], {})  # b.eq 0x1004
+    row = arm.row(f, "f0")
+    llvm = ("b.eq", "0x1004 <.text0+0x4>")
+    assert {v["state"] for v in observer.compare_row(row, llvm, None).values()} == {"match"}
+    next(edge for edge in row["transfer"]["edges"] if edge["source"] == "encoded_target")["to"] = cf.addr(1, 0x1008)
+    row["transfer"]["condition"]["test"]["flags"] = "ne"
+    fields = observer.compare_row(row, llvm, None)
+    assert {k: v["state"] for k, v in fields.items()} == {
+        "form": "match", "target": "mismatch", "condition": "mismatch",
+    }
+    assert observer.compare_row(row, ("<unknown>", ""), None)["form"]["state"] == "unobserved"
+
+    regs = {name: dict(name=name, space=2, offset=9 * 8, size=size) for name, size in (("x9", 8), ("w9", 4))}
+    row = _g2c_arm(0x1000, [0xB4000029], regs).row(f, "f0")  # cbz x9, 0x1004
+    llvm = ("cbz", "x9, 0x1004")
+    row["transfer"]["condition"]["test"]["zero"]["pre_register"] = regs["w9"]
+    assert observer.compare_row(row, llvm, None)["source_register"]["state"] == "mismatch"
+    row["aarch64"]["form"] = "cbnz"
+    assert observer.compare_row(row, llvm, None)["form"]["state"] == "mismatch"
+
+    trap = _g2c_arm(0x1000, [0xD4000021], {}).row(f, "f0")  # svc #1
+    assert observer.compare_row(trap, ("svc", "#1"), None)["immediate"]["state"] == "unobserved"
+    assert observer.compare_row(trap, ("svc", "#1"), {"immediate": True})["immediate"]["state"] == "mismatch"
+    assert observer.value_ref({"width": 16, "constant": "0"}, zero_register=True) is None
+    assert observer.destination(None, 16) is None
+
+
+def test_arm64_llvm_admits_exact_observation_basis():
+    import arm64_decode as observer
+
+    f = dict(_row(4, []), isa="aarch64")
+    arm = _g2c_arm(f["address"], [0x14000001], {})
+    first, second = (arm.row(f, key) for key in ("f0", "f1"))
+    expected = f["space"], f["address"], 0x14000001
+    assert observer.require_basis(first, f, arm) == (expected, None)
+    assert observer.require_basis(second, f, arm) == (expected, None)
+    for bad in (dict(f, address=f["address"] + 4), dict(f, space=2), dict(f, view="1")):
+        assert observer.require_basis(first, bad, arm)[0] is None
+    first["aarch64"]["basis"]["word"] = "14000002"
+    assert observer.require_basis(first, f, arm)[0] is None
+    overlap = observer.Arm64Facts(arm.blocks[f["space"]] * 2, {}, {})
+    row = overlap.row(f, "f0")
+    assert observer.require_basis(row, f, overlap) == (None, "ambiguous overlapping sealed blocks")
+
+
+@pytest.mark.parametrize("failure", ["manifest", "memory", "digest", "row_set", "duplicate", "missing", "extra",
+                                     "trap", "trap_form", "trap_basis", "empty", "none"])
+def test_arm64_llvm_uses_the_verified_snapshot_and_exact_facts(monkeypatch, failure):
+    import hashlib
+
+    import arm64_decode as observer
+    from arm64_facts import program_fragments
+
+    f = dict(_row(4, []), isa="aarch64", address=0x1000)
+    arm = _g2c_arm(0x1000, [0xD4000021], {})  # svc #1
+    blocks = arm.blocks[f["space"]]
+    block, data = blocks[0]
+    manifest = cf.canonical(dict(generation_id="generation", blocks=[block], members=[
+        dict(id=block["member_id"], sha256=hashlib.sha256(data).hexdigest(), size=4),
+    ]))
+    admitted = dict(generation_id="generation", manifest_sha256=hashlib.sha256(manifest).hexdigest())
+    raw = {cf.identity(f, obs): f for obs in ("f0", "f1")}
+    rows = [arm.row(f, obs) for _, obs in raw]
+    program, _ = program_fragments(rows, raw)
+    document = dict(bundle=admitted.copy(), rows=rows, program=dict(aarch64=program))
+    binding = dict(facts_sha256=cf.digest(document), row_set_sha256=cf.row_set_digest(rows))
+    if failure == "manifest":
+        document["bundle"]["manifest_sha256"] = "different"
+    elif failure == "memory":
+        blocks = [(block, b"\0" * 4)]
+    elif failure == "digest":
+        binding["facts_sha256"] = "different"
+    elif failure == "row_set":
+        binding["row_set_sha256"] = "different"
+    elif failure == "duplicate":
+        rows[1] = rows[0]
+    elif failure == "missing":
+        rows.pop()
+    elif failure == "extra":
+        rows.append(arm.row(f, "f2"))
+    elif failure.startswith("trap"):
+        traps = program["survey"]["sites"]["trap_instruction"]
+        if failure == "trap_form":
+            traps[0]["form"] = "hvc"
+        elif failure == "trap_basis":
+            traps[0]["basis"] = dict(traps[0]["basis"], word="d4000022")
+        else:
+            traps.append(traps[0])
+        binding["facts_sha256"] = cf.digest(document)
+    elif failure == "empty":
+        raw.clear()
+        rows.clear()
+
+    class Decoder:
+        identity = {}
+
+        def __init__(self, path):
+            assert failure == "none"
+
+        def decode(self, words):
+            assert words == {0x1000: 0xD4000021}
+            return {0x1000: ("svc", "#1")}
+
+        def check_identity(self):
+            pass
+
+    monkeypatch.setattr(observer, "LlvmObjdump", Decoder)
+    report = observer.diagnose(document, raw, None, admitted_bundle=admitted,
+                               manifest_bytes=manifest, blocks=blocks, binding=binding, complete=True)
+    if failure == "none":
+        assert report["status"] == "ok"
+        assert report["counts"] == {"match": 2}
+        assert report["requested_words"] == 1 and report["decoded_rows"] == 2
+    else:
+        assert report["status"] == "error"
+        assert report["counts"].get("unobserved", 0) == len(rows)
+        assert report["decoded_rows"] == 0
+
+
+def test_arm64_llvm_rejects_a_warning_even_with_successful_exit(monkeypatch):
+    from types import SimpleNamespace
+
+    import arm64_decode as observer
+
+    monkeypatch.setattr(observer.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stderr=b"warning: option ignored", stdout=b"some output"))
+    llvm = object.__new__(observer.LlvmObjdump)
+    llvm.path = Path("llvm-objdump")
+    with pytest.raises(observer.ObserverError, match="warning: option ignored"):
+        llvm._run(observer.LLVM_OPTIONS)
+
+
+def test_arm64_feature_audit_distinguishes_decoder_disagreement_from_a_g2_mismatch():
+    from arm64_profiles import encoded_fields
+
+    f = dict(_row(4, []), isa="aarch64")
+    regs = {name: dict(name=name, space=2, offset=index * 8, size=8)
+            for index, name in enumerate(("x5", "sp"))}
+    row = _g2c_arm(f["address"], [0xD73F08BF], regs).row(f, "f0")  # blraa x5, sp
+    correct, different = ("blraa", "x5, sp"), ("blraa", "x5, x6")
+    assert encoded_fields(row, correct, different)["modifier"]["state"] == "withheld"
+    assert encoded_fields(row, different, different)["modifier"]["state"] == "mismatch"
+    assert encoded_fields(row, correct, (".inst", "0xd73f08bf"))["form"]["state"] == "unobserved"
+    assert encoded_fields(row, correct, correct)["modifier"]["state"] == "match"
+    row["aarch64"]["form"] = cf.U("no producer fact")
+    assert encoded_fields(row, correct, different)["modifier"]["state"] == "withheld"
+    form = encoded_fields(row, correct, correct)["form"]
+    assert form["state"] == "unobserved" and form["decoder_agreement"] == "match"
+
+
+def test_arm64_feature_audit_checks_atomic_register_width_and_discarded_destination():
+    from arm64_profiles import encoded_fields
+
+    f = dict(_row(4, []), isa="aarch64")
+    regs = dict(w0=dict(name="w0", space=2, offset=0, size=4),
+                x2=dict(name="x2", space=2, offset=16, size=8))
+    row = _g2c_arm(f["address"], [0xB8E0005F], regs).row(f, "f0")  # ldaddal w0, wzr, [x2]
+    correct = ("ldaddal", "w0, wzr, [x2]")
+    assert {v["state"] for v in encoded_fields(row, correct, correct).values()} == {"match"}
+    assert encoded_fields(row, correct, ("ldaddal", "x0, xzr, [x2]"))["addend"]["state"] == "withheld"
+
+
+@pytest.mark.parametrize("valid, malformed", [
+    (("hint", "#25"), ("paciasp", "x3")),
+    (("retaa", ""), ("retaa", "x5")),
+    (("bti", ""), ("bti", "nonsense")),
+])
+def test_arm64_feature_audit_abstains_on_malformed_implicit_operand_grammar(valid, malformed):
+    from arm64_profiles import decoder_fields
+
+    assert decoder_fields(valid)["form"] is not None
+    assert decoder_fields(malformed)["form"] is None
+
+
+@pytest.mark.parametrize("case", ["normal", "cross-feature", "profile-error", "wrong-coordinate"])
+def test_arm64_feature_audit_keeps_raw_hints_and_disables_one_feature(monkeypatch, case):
+    import arm64_profiles as profiles
+
+    observations = [dict(_row(4, []), isa="aarch64", address=pc) for pc in (0x1000, 0x1004)]
+    arm = _g2c_arm(0x1000, [0xD503233F, 0xD503201F], {})
+    rows = [arm.row(f, "f0") for f in observations]
+    row, nop = rows
+    keys = {cf.rr(r): (1, int(r["offset"], 16), int(r["aarch64"]["basis"]["word"], 16)) for r in rows}
+    raw = dict(zip(keys, observations))
+    enabled = {keys[cf.rr(row)]: ("hint", "#25"), keys[cf.rr(nop)]: ("hint", "#0")}
+    checks = {k: (request, None) for k, request in keys.items()}
+    if case == "cross-feature":
+        enabled[keys[cf.rr(row)]] = ("hint", "#0x24")  # bti j
+    elif case == "wrong-coordinate":
+        raw[cf.rr(row)] = dict(observations[0], address=0x1008)
+        checks[cf.rr(row)] = profiles.decode.require_basis(row, raw[cf.rr(row)], arm)
+
+    class Decoder:
+        identity = {"version": "test"}
+
+        def __init__(self, path):
+            pass
+
+        def decode(self, words, *, options=None):
+            assert words == {0x1000: 0xD503233F}
+            if options is None:
+                if case == "cross-feature":
+                    return {0x1000: ("bti", "j")}
+                return {0x1000: ("paciasp", "")}
+            if case == "profile-error":
+                raise profiles.decode.ObserverError("profile option unavailable")
+            if case == "cross-feature":
+                assert options[-1].endswith(",-bti")
+                return {0x1000: ("hint", "#0x24")}
+            assert options[-1].endswith(",-pauth")
+            assert ",-bti" not in options[-1] and ",-lse" not in options[-1]
+            return {0x1000: ("hint", "#25")}
+
+        def check_identity(self):
+            pass
+
+    monkeypatch.setattr(profiles, "GnuObjdump", Decoder)
+    report = profiles.audit(rows, raw, checks, enabled, Decoder(None), None)
+    assert report["candidate_rows"] == 1
+    found, = report["rows"]
+    assert found["g2_isa_indices"] == [0]
+    assert found["g2c_feature"] == "FEAT_PAuth"
+    assert cf.unknown(found["runtime_effect"])
+    if case == "cross-feature":
+        assert found["feature"] == found["llvm_feature"] == "FEAT_BTI"
+        assert found["state"] == "mismatch"
+    elif case == "profile-error":
+        assert report["status"] == "partial" and report["counts"] == {"match": 1}
+        assert found["llvm_feature_disabled"] == cf.U("profile option unavailable")
+    elif case == "wrong-coordinate":
+        assert found["state"] == "unobserved" and cf.unknown(found["ghidra"])
+    else:
+        assert report["counts"] == {"match": 1}
+        assert found["feature"] == "FEAT_PAuth"
+        assert found["gnu"]["mnemonic"] == "paciasp"
+        assert found["llvm_enabled"] == found["llvm_feature_disabled"] == {
+            "state": "decoded", "mnemonic": "hint", "operands": "#25",
+        }
+    empty = profiles.audit([nop], raw, checks, enabled, None, None)
+    assert empty["status"] == "unobserved" and empty["candidate_rows"] == 0
 
 
 def test_g2c_sealed_blr_and_evidence_binding():

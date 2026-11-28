@@ -153,6 +153,10 @@ def collect(generation: Path, naming_source: Path, *, common_facts=False) -> dic
 
     diagnosis = diagnose.diagnose(generation, naming_source, keep=keep)
     found["admission"] = diagnosis.admission
+    if diagnosis.bundle_identity is not None and found.get("isa") == "aarch64":
+        bundle = diagnosis.bundle_identity
+        found["bundle"] = dict(generation_id=bundle.generation_id.hex(),
+                               manifest_sha256=bundle.manifest_sha256_digest.hex())
     return found
 
 
@@ -638,10 +642,18 @@ def common_summary(facts, common, document, *, complete, missing_functions):
 
 def run(generation: Path, naming_source: Path, premise: bool, full: bool = False,
         evidence_out: Path | None = None, isa_facts: bool = False,
-        producer_override: bool = False, common_facts_out: Path | None = None) -> tuple[dict, list]:
+        producer_override: bool = False, common_facts_out: Path | None = None,
+        *, arm64_objdump: Path | None = None, arm64_elf_page_size: int | None = None,
+        arm64_gnu_objdump: Path | None = None) -> tuple[dict, list]:
     want_common = common_facts_out is not None
+    if arm64_gnu_objdump is not None and arm64_objdump is None:
+        raise ValueError("ARM64 feature audit requires --arm64-objdump")
+    arm64_requested = arm64_objdump is not None or arm64_elf_page_size is not None
+    if arm64_requested and not want_common:
+        raise ValueError("ARM64 decode diagnostics require --common-facts")
     facts = collect(generation, naming_source, common_facts=True) if want_common else collect(generation, naming_source)
-    manifest = json.loads((generation / "manifest.json").read_bytes())
+    manifest_bytes = (generation / "manifest.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
     original_path = next(r["path"] for r in manifest["members"] if r["id"] == manifest["original_member_id"])
     original = (generation / original_path).read_bytes()
     mapping = check.parse_original(original)
@@ -654,6 +666,10 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
                                                           "amd": list(decoders.AMD_VOTERS)},
               "scope": SCOPE, "PYTHONHASHSEED": "0", "layers": {"g1": list(G1_LAYERS), "derived": ["dependents"],
                                                                "reserved": RESERVED_LAYERS}}
+    if arm64_objdump is not None:
+        header["arm64_decode"] = dict(status="error", error="ARM64 decode diagnostics require an admitted AArch64 Bundle")
+    if arm64_elf_page_size is not None:
+        header["arm64_elf_mapping"] = dict(status="error", error="ARM64 ELF mapping requires an admitted AArch64 Bundle")
     if not facts["admission"].get("ok"):
         return header, [Row("mapping", "original", "bundle", "unobserved", None, "lint",
                             {"reason": "the Bundle is not admitted", "admission": facts["admission"]})]
@@ -686,7 +702,8 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
         common.global_reason = reason is not None
     rows.extend(check.decode_rows(image, facts["functions"], use_table, reason, full, states, facts["language"] or "",
                                   unverified, isa=collector, override=_chain(verdicts, common)))
-    isa_block = collector.block(facts, states) if collector else None
+    diagnostic_only = arm is not None and arm64_requested and evidence_out is None
+    isa_block = collector.block(facts, states) if collector and not diagnostic_only else None
     common_block = None
     if common is not None:
         import common_facts as cf
@@ -720,8 +737,8 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
             program["code"] = cf.U(arm64_facts.FILE_RUNTIME_UNOBSERVED)
             doc["program"]["aarch64"], arm_summary = arm64_facts.program_fragments(doc["rows"], common.raw)
         # (r1 C4: the facts file is streamed, byte-identical to canonical(doc) + LF; its digest excludes the LF)
-        common_block = cf.verdict_block5(doc, cf.write_canonical(common_facts_out, doc), common.unit_sets,
-                                         common.row_set)
+        facts_digest = cf.write_canonical(common_facts_out, doc)
+        common_block = cf.verdict_block5(doc, facts_digest, common.unit_sets, common.row_set)
         header["common_facts"] = common_summary(
             facts, common, doc, complete=complete, missing_functions=missing_functions,
         )
@@ -729,6 +746,22 @@ def run(generation: Path, naming_source: Path, premise: bool, full: bool = False
             header["common_facts"]["code"] = dict(code_facts.summary(program["code"]), bundle=doc["bundle"])
         else:
             header["common_facts"]["aarch64"] = arm_summary
+            diagnostic_args = dict(admitted_bundle=facts["bundle"], manifest_bytes=manifest_bytes, blocks=image.blocks,
+                                   binding=dict(facts_sha256=facts_digest, row_set_sha256=common_block["row_set_sha256"]),
+                                   complete=complete)
+            if arm64_objdump is not None:
+                import arm64_decode
+
+                header["arm64_decode"] = arm64_decode.diagnose(
+                    doc, common.raw, arm64_objdump, gnu_executable=arm64_gnu_objdump, **diagnostic_args,
+                )
+            if arm64_elf_page_size is not None:
+                import arm64_file
+
+                header["arm64_elf_mapping"] = arm64_file.diagnose(
+                    doc, common.raw, original, image_space=facts["image_space"], base=base,
+                    page=arm64_elf_page_size, **diagnostic_args,
+                )
     override_block = None
     engine = engine_source() if evidence_out is not None or verdicts is not None else None
     if verdicts is not None:
@@ -782,16 +815,35 @@ def main(argv=None) -> int:
                         help="write g1-decode-evidence-3: -2 plus the per-row producer-override verdicts (X-1)")
     parser.add_argument("--common-facts", type=Path, default=None,
                         help="G2a: write the derived tbr-common-facts-1 file here (evidence becomes -5 with --evidence-out)")
+    parser.add_argument("--arm64-objdump", type=Path,
+                        help="compare admitted AArch64 snapshot words with this llvm-objdump (requires --common-facts)")
+    parser.add_argument("--arm64-gnu-objdump", type=Path,
+                        help="audit PAC, BTI and LDADDAL with GNU objdump and LLVM feature toggles")
+    parser.add_argument("--arm64-elf-page-size", type=int, choices=check.elf_map.ARM64_PAGES,
+                        help="compare AArch64 words with the original ELF under the selected page model (bytes)")
     parser.add_argument("--evidence-out", type=Path, default=None,
                         help="also write the engine evidence file g1-decode-evidence-1 (outside the Bundle)")
     args = parser.parse_args(argv)
     if not args.generation.is_dir() or not args.naming_source.is_file():
         print("decode_check: the generation directory and the naming source must exist", file=sys.stderr)
         return 2
+    if (args.arm64_objdump is not None or args.arm64_elf_page_size is not None) and args.common_facts is None:
+        parser.error("ARM64 diagnostics require --common-facts")
+    if args.arm64_gnu_objdump is not None and args.arm64_objdump is None:
+        parser.error("--arm64-gnu-objdump requires --arm64-objdump")
     header, rows = run(args.generation, args.naming_source, args.assume_stock_ghidra_translator, args.full,
-                       args.evidence_out, args.isa_facts, args.producer_override, args.common_facts)
+                       args.evidence_out, args.isa_facts, args.producer_override, args.common_facts,
+                       arm64_objdump=args.arm64_objdump, arm64_elf_page_size=args.arm64_elf_page_size,
+                       arm64_gnu_objdump=args.arm64_gnu_objdump)
     args.out.write_text(dumps(header, rows), encoding="utf-8")
-    return 0
+    errors = [header[key]["error"] for key in ("arm64_decode", "arm64_elf_mapping")
+              if header.get(key, {}).get("status") == "error"]
+    audit = header.get("arm64_decode", {}).get("feature_audit", {})
+    if audit.get("status") == "error":
+        errors.append(audit["error"])
+    for error in errors:
+        print(f"decode_check: {error}", file=sys.stderr)
+    return int(bool(errors))
 
 
 if __name__ == "__main__":

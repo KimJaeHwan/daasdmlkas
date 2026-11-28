@@ -59,6 +59,45 @@ the engine venv is not touched:
 
 Reports made from real binaries stay local; never commit them.
 
+### AArch64 snapshot decode
+
+For an admitted AArch64 Bundle, add `--common-facts facts.json --arm64-objdump /path/to/llvm-objdump`.
+The report's `header.arm64_decode` records the decoder version, executable hash and options, and compares
+the listed instruction forms, direct targets, conditions and operands against the G2c facts for each row.
+The decoder reads authenticated snapshot words at their recorded addresses. Rows and fields without a shared
+claim are `unobserved`. The report preserves separate counts for decoded observations and matched claims.
+An observer error returns exit status 1. This option leaves the default G1 counts and engine evidence unchanged.
+Original-file mapping and runtime byte provenance are outside this comparison.
+
+Add `--arm64-gnu-objdump /path/to/aarch64-linux-gnu-objdump` for the feature audit of G2c's
+PAC and BTI forms and LDADDAL. This writes `header.arm64_decode.feature_audit` under the same
+admitted row and facts binding. LLVM and GNU compare encoded form and explicit operands.
+Decoder disagreements are withheld, and missing comparable fields remain unobserved.
+The audit records GNU's version, hash and options. GNU's ordinary AArch64 mode supplies encoding
+observations. The pilot was verified with GNU binutils 2.45. LLVM is also run with each selected
+feature disabled individually. A failed feature-specific observation leaves the encoding comparison available. Raw output
+is kept so that a HINT printed in both settings does not imply equal CPU effects. The report
+links to the applicable G2c ISA conditions and includes the Bundle's Ghidra flow and p-code
+observation. Effective CPU and OS behavior remains unobserved, and formal engine evidence retains
+its existing policy.
+
+### AArch64 ELF file provenance
+
+Add `--common-facts facts.json --arm64-elf-page-size 4096` to check the admitted snapshot against
+its original little-endian AArch64 ELF64 file. Page sizes are explicit model inputs (4096, 16384 or
+65536 bytes). The report records the linked base, snapshot base and load bias.
+`header.arm64_elf_mapping` gives an original file offset and program-header index for each
+four-byte word in a single file-backed executable PT_LOAD, then reports byte equality and possible
+loader writes separately. A matching word can overlap a relocation. An ambiguous segment, zero-fill,
+or a row in another address space supplies no file comparison. The original and memory members are
+checked against the same admitted Bundle.
+
+The loader model covers the listed AArch64 relocation widths, standard and dynamic Android RELR,
+PT_DYNAMIC and reserved PLT GOT slots. Unsupported encodings, malformed tables and unresolved widths
+(including COPY) leave loader coverage indeterminate. The report describes the captured snapshot and
+the selected loader model. Its results stay in the diagnostic report, with the existing G2c facts
+and engine evidence retaining their original format and meaning.
+
 ## Voters
 
 | mode | voters | rule |

@@ -126,13 +126,15 @@ def __getattr__(name: str):
 # -- session internals (internal): the diagnosis pass claims every function itself ------------
 
 def scoped_functions(session):
-    """(role adapter, scoped unit iterator) of an open session -- the steps of
+    """Role adapter, scoped unit iterator and container identity of an open session.
+
+    These are the steps of
     ``_ObservedFunctionIterator.__next__`` the diagnosis drives one by one
     (observed_function_session.py; pinned by the session guard tests)."""
     adapter = session._provider_adapter
     scoped = session._envelope.iter_scoped_functions()
     session._iterator_claimed = True   # (the session's own iterator is not used after this)
-    return adapter, scoped
+    return adapter, scoped, adapter._provider.container_identity
 
 
 def decode_function(session, unit, captured):
