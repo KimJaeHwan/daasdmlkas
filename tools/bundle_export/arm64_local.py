@@ -1,4 +1,4 @@
-"""Produce a sealed Bundle for a bounded, straight-line ARM64 ELF function."""
+"""Produce a sealed Bundle for a bounded, call-free ARM64 ELF function."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "decode_check"))
 
 import elf_map
 from tdo_v2.integration.standalone_arm64 import (
-    LANGUAGE, LOCAL_OPERATIONS, MAX_CODE_BYTES, PROFILE, RAM, instruction_form, language_id,
+    BRANCH_PROFILE, CMP_OPERATIONS, CONDITION_NAMES, LANGUAGE, LOCAL_OPERATIONS, MAX_CODE_BYTES,
+    PROFILE, RAM, instruction_form, language_id, local_successors,
 )
 
 
@@ -57,13 +58,14 @@ def operation(ordinal, op):
             "output": varnode(op.output) if op.output is not None else None}
 
 
-def _row(ctx, address, data, last):
+def _row(ctx, address, data, limit, branches):
     word = int.from_bytes(data, "little")
-    name = instruction_form(word)
+    last = address + 4 == limit
+    name = instruction_form(word, branches)
     if name is None or (name == "ret") != last:
         raise ValueError(f"unsupported ARM64 instruction or misplaced RET at {address:#x}")
     insns = ctx.disassemble(data, base_address=address, max_instructions=1).instructions
-    names = {name}
+    names = {f"b.{CONDITION_NAMES[word & 15]}" if name == "b.cond" else name}
     if name == "add" and (word >> 10) & 0x1FFF == 0 and (word & 31 == 31 or (word >> 5) & 31 == 31):
         names.add("mov")
     if len(insns) != 1 or insns[0].addr.offset != address or insns[0].length != 4 or insns[0].mnem.lower() not in names:
@@ -75,13 +77,26 @@ def _row(ctx, address, data, last):
     if (marker.space.name, marker.offset, marker.size) != ("ram", address, 4):
         raise ValueError(f"pypcode instruction extent disagrees at {address:#x}")
     opcodes = tuple(op.opcode.name for op in ops)
-    if not (opcodes == ("COPY", "RETURN") if last else bool(ops) and set(opcodes) <= LOCAL_OPERATIONS):
-        raise ValueError(f"pypcode did not produce an ordinary local instruction at {address:#x}")
-    return {"address": coord(address), "length": 4, "data_references": [], "flow_targets": [],
-            "fallthrough_present": not last, "fallthrough": None if last else coord(address + 4),
-            "flow_type": {"is_flow": True, "has_fallthrough": not last, "is_terminal": last,
-                          "is_call": False, "is_jump": False, "is_computed": False, "is_conditional": False,
-                          "is_unconditional": True, "is_override": False},
+    next_address, target = local_successors(name, word, address, limit)
+    conditional = name in ("cbz", "b.cond")
+    if name == "ret":
+        valid = opcodes == ("COPY", "RETURN")
+    elif target is not None:
+        valid = bool(ops) and opcodes[-1] == ("CBRANCH" if conditional else "BRANCH")
+        if valid:
+            destination = ops[-1].inputs[0]
+            valid = (destination.space.name, destination.offset, destination.size) == ("ram", target, 8)
+    else:
+        valid = bool(ops) and set(opcodes) <= (CMP_OPERATIONS if name == "cmp" else LOCAL_OPERATIONS)
+    if not valid:
+        raise ValueError(f"pypcode did not produce the expected local ARM64 flow at {address:#x}")
+    return {"address": coord(address), "length": 4, "data_references": [],
+            "flow_targets": [coord(target)] if target is not None else [],
+            "fallthrough_present": next_address is not None,
+            "fallthrough": coord(next_address) if next_address is not None else None,
+            "flow_type": {"is_flow": True, "has_fallthrough": next_address is not None, "is_terminal": last,
+                          "is_call": False, "is_jump": target is not None, "is_computed": False,
+                          "is_conditional": conditional, "is_unconditional": not conditional, "is_override": False},
             "operations": [operation(i, op) for i, op in enumerate(ops)]}
 
 
@@ -118,7 +133,7 @@ def _load_code(data, entry, size, base, page):
     return base, blocks, code
 
 
-def _context(sla_directory, original, page):
+def _context(sla_directory, original, page, producer):
     try:
         import pypcode
         import pypcode.pypcode_native as native
@@ -137,7 +152,7 @@ def _context(sla_directory, original, page):
     backend = Path(native.__file__)
     paths = {"sla_sha256": spec, "pspec_sha256": pspec, "lifter_sha256": backend}
     hashes = {k: digest(p.read_bytes()) for k, p in paths.items()}
-    profile = json_bytes(dict(schema=PROFILE, lifter_version=pypcode.__version__, context=f"{LANGUAGE} default", page_size=page,
+    profile = json_bytes(dict(schema=producer, lifter_version=pypcode.__version__, context=f"{LANGUAGE} default", page_size=page,
                               original_sha256=digest(original), language_sha256=digest(ldefs), **hashes))
     ctx = pypcode.Context(lang)
     if hashes != {k: digest(p.read_bytes()) for k, p in paths.items()}:
@@ -193,7 +208,7 @@ def _write_bundle(root, original, profile, program, blocks, observation):
                                    is_loaded=True, is_initialized=True, is_overlay=False, is_external=False,
                                    is_mapped=False, member_id=member(key, key + ".bin", data)))
         function_id = member("function-000000", "function-000000.json", observation)
-        no_call = json_bytes(dict(schema=PROFILE, state="unsupported", reason="local graph scope"))
+        no_call = json_bytes(dict(schema=json.loads(profile)["schema"], state="unsupported", reason="local graph scope"))
         naming = member("call-names-000000", "call-names-000000.json", no_call)
         effects = member("call-effects-000000", "call-effects-000000.json", no_call)
         manifest = json_bytes(dict(schema_version=2, generation_id=generation, original_member_id=original_id,
@@ -211,14 +226,24 @@ def _write_bundle(root, original, profile, program, blocks, observation):
     return destination
 
 
-def export(elf, output_root, *, entry, size, base=None, page=4096, sla_directory=None):
+def export(elf, output_root, *, entry, size, base=None, page=4096, sla_directory=None, branches=False):
     if (type(entry) is not int or type(size) is not int or entry < 0 or entry % 4
             or not 4 <= size <= MAX_CODE_BYTES or size % 4 or entry + size > elf_map.U64_END):
         raise ValueError("provide one aligned ARM64 function range of 4 to 65536 bytes")
     original = Path(elf).read_bytes()
     base, blocks, code = _load_code(original, entry, size, base, page)
-    ctx, profile = _context(sla_directory, original, page)
-    rows = [_row(ctx, entry + i, code[i:i + 4], last=i + 4 == size) for i in range(0, size, 4)]
+    ctx, profile = _context(sla_directory, original, page, BRANCH_PROFILE if branches else PROFILE)
+    rows = []
+    reachable = {entry}
+    for i in range(0, size, 4):
+        address = entry + i
+        if address not in reachable:
+            raise ValueError(f"unreachable instruction in standalone ARM64 range at {address:#x}")
+        row = _row(ctx, address, code[i:i + 4], entry + size, branches)
+        if row["fallthrough"] is not None:
+            reachable.add(row["fallthrough"]["byte_offset"])
+        reachable.update(c["byte_offset"] for c in row["flow_targets"])
+        rows.append(row)
     observation = json_bytes(dict(entry=coord(entry), instructions=rows))
     return _write_bundle(output_root, original, profile, _program(base, ctx, profile), blocks, observation)
 
@@ -232,11 +257,12 @@ def main(argv=None):
     parser.add_argument("--base", type=lambda v: int(v, 0))
     parser.add_argument("--page-size", type=int, choices=elf_map.ARM64_PAGES, default=4096)
     parser.add_argument("--sla-directory", type=Path)
+    parser.add_argument("--branches", action="store_true", help="allow the bounded direct-branch profile")
     parser.add_argument("--g2-out", type=Path, help="write local G2 memory comparisons linked to TDO graph operations")
     args = parser.parse_args(argv)
     try:
         generation = export(args.elf, args.output_root, entry=args.entry, size=args.size, base=args.base,
-                            page=args.page_size, sla_directory=args.sla_directory)
+                            page=args.page_size, sla_directory=args.sla_directory, branches=args.branches)
         if args.g2_out is not None:
             from arm64_local_facts import describe
             args.g2_out.write_bytes(json_bytes(describe(generation)) + b"\n")

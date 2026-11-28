@@ -59,14 +59,23 @@ PYTHONPATH=src python tools/bundle_export/arm64_local.py libmmkv.so output/mmkv-
 The address is a loaded virtual address. `--base` defaults to the ELF model's link base.
 `--page-size` selects the 4, 16 or 64 KiB ELF mapping model. Choose a range ending at
 `RET X30`. Supported body forms are immediate `ADD`/`SUB` without flag writes and
-unsigned-offset scalar 32/64-bit `LDR`/`STR`. Calls, branches and other forms are refused.
+unsigned-offset scalar 32/64-bit `LDR`/`STR`. Without `--branches`, the function must
+be straight-line code. Add `--branches` to use the second producer profile, which also
+accepts `CBZ` (W or X register), the 14 flag-dependent `B.cond` conditions (EQ through LE),
+direct `B` and immediate `CMP`. All successors must stay within the selected function and
+move forward. Conditional successors must be distinct, every row must be reachable in
+the CFG, and there is one terminal `RET X30`. Calls and indirect branches are outside
+both profiles.
 Only the selected executable bytes and the required image-base anchor are committed as
 loaded memory. Each selected function is a separate program scope for this local prototype.
 
 `tdo_v2.integration.standalone_arm64.build_standalone_arm64_graphs()` opens this sealed
 Bundle and builds the existing TDO base graph with the strict policy. The optional JSON
 compares encoded memory operands with the p-code and identifies their existing TDO
-operation nodes. It is a standalone G2 diagnostic, separate from Ghidra G2 verdicts.
+operation nodes. The optional `branches` section names the existing p-code operation,
+predicate and CFG destinations for each direct branch. At a join, TDO's memory SSA
+retains the reaching definition from each predecessor. It is a standalone G2 diagnostic,
+separate from Ghidra G2 verdicts.
 P-code records the selected producer's translation. The operand checks cover selected
 memory fields, while exact runtime equivalence and call effects remain outside this path.
 

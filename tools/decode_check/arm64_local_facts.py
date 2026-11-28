@@ -8,7 +8,7 @@ from arm64_facts import Arm64Facts, program_fragments, tbi
 import common_facts as cf
 import lifting
 from tdo_v2.graph_contracts import NodeKind
-from tdo_v2.integration.standalone_arm64 import build_standalone_arm64_graphs
+from tdo_v2.integration.standalone_arm64 import BRANCH_FORMS, build_standalone_arm64_graphs
 from tdo_v2.isa_identity import link_register, program_counter, stack_register
 
 
@@ -109,6 +109,40 @@ def compare_memory(word, row, regs):
     return dict(op=identifying_op, state=state, fields=fields)
 
 
+def _graph_operation(dependencies, raw, op):
+    key = f"op:{raw['space']:x}:{raw['address']:x}:{op['ordinal']}:{op['opcode']}"
+    node = dependencies.node_for_key(key)
+    if node is None or dependencies.node(node).kind is not NodeKind.OPERATION:
+        raise ValueError("standalone G2 comparison has no matching graph operation")
+    return key
+
+
+def _graph_branch(graph, row, raw):
+    transfer = row["transfer"]
+    op = transfer["op_keys"]["transfer"]
+    if op is None:
+        raise ValueError("standalone G2 branch has no matching p-code transfer")
+    cfg = graph.normalized.cfg
+    source = cfg.node_for_key(f"instruction:{raw['space']:x}:{raw['address']:x}")
+    if source is None:
+        raise ValueError("standalone G2 branch has no matching CFG instruction")
+    observed = {cfg.node(node).key for node in cfg.successors(source)}
+    destination = raw["ops"][op["ordinal"]]["inputs"][0]
+    target = cf.addr(destination["space"], destination["offset"])
+    outcomes = {"always": target}
+    if op["opcode"] == "CBRANCH":
+        outcomes = {"taken": target, "not_taken": cf.addr(raw["fallthrough_space"], raw["fallthrough"])}
+    encoded = {edge["when"]: edge["to"] for edge in transfer["edges"]}
+    if len(encoded) != len(transfer["edges"]) or encoded != outcomes:
+        raise ValueError("standalone G2 branch outcome disagrees with observed p-code and fallthrough")
+    targets = {f"instruction:{to['space']:x}:{to['offset']}" for to in outcomes.values()}
+    if targets != observed:
+        raise ValueError("standalone G2 branch successors disagree with the graph")
+    return dict(row=cf.ref(row), op=op, graph_operation=_graph_operation(graph.normalized.dependencies, raw, op),
+                condition=transfer["condition"], successors=[dict(outcome=e["when"], address=e["to"])
+                                                             for e in transfer["edges"]])
+
+
 def describe(generation):
     """Keep the ordinary G2 facts and attach checks to an existing graph operation."""
     snapshot, identity = build_standalone_arm64_graphs(generation)
@@ -131,7 +165,7 @@ def describe(generation):
     roles = {name: cf.register(fn(evidence)) for name, fn in (
         ("sp", stack_register), ("lr", link_register), ("pc", program_counter))}
     arm = Arm64Facts(blocks, names, roles)
-    observations, rows, memory = {}, [], []
+    observations, rows, memory, branches = {}, [], [], []
     graph_nodes = graph.normalized.dependencies
     for inst in graph.unit.observation.instructions:
         raw = lifting.row_facts(inst)
@@ -144,15 +178,13 @@ def describe(generation):
         basis = row["aarch64"]["basis"]
         if cf.unknown(basis):
             raise ValueError("standalone G2 observation has no exact word")
+        if isinstance(row["aarch64"]["form"], str) and row["aarch64"]["form"] in BRANCH_FORMS:
+            branches.append(_graph_branch(graph, row, raw))
         compared = compare_memory(int(basis["word"], 16), raw, regs)
         if compared is not None:
             linked = compared["op"]
             if linked is not None:
-                key = f"op:{raw['space']:x}:{raw['address']:x}:{linked['ordinal']}:{linked['opcode']}"
-                node = graph_nodes.node_for_key(key)
-                if node is None or graph_nodes.node(node).kind is not NodeKind.OPERATION:
-                    raise ValueError("standalone G2 comparison has no matching graph operation")
-                compared["graph_operation"] = key
+                compared["graph_operation"] = _graph_operation(graph_nodes, raw, linked)
             memory.append(dict(row=cf.ref(row), basis=basis, **compared))
     cf.finish_landings(rows, True)
     aarch64, _ = program_fragments(rows, observations)
@@ -160,7 +192,10 @@ def describe(generation):
                    code=cf.U("standalone local graph evidence"))
     facts = cf.document(bundle, dict(name="tbr-arm64-local", rule="pypcode-local-v1"), program, rows)
     facts["schema"] = "tbr-arm64-local-facts-1"
-    return dict(schema="tbr-arm64-local-diagnostics-1", facts=facts, facts_sha256=cf.streamed_digest(facts),
+    result = dict(schema="tbr-arm64-local-diagnostics-1", facts=facts, facts_sha256=cf.streamed_digest(facts),
                 graph=dict(program_scope=snapshot.program.scope.digest.hex(),
                            function_scope=graph.unit.scopes.function.scope.digest.hex()),
                 memory=memory)
+    if branches:
+        result["branches"] = branches
+    return result
