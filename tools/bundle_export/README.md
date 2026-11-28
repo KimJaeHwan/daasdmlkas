@@ -75,6 +75,27 @@ ranges, conflicting names and marked AArch64 data (`$d`) are refused. A stripped
 ELF can still have dynamic symbols. Functions without a size-bearing symbol can
 be selected using the explicit address and size form above.
 
+For a range without a function symbol, list and select an unwind record by ID
+from the same ELF.
+
+```bash
+PYTHONPATH=src python tools/bundle_export/arm64_local.py libmmkv.so --list-unwind-ranges
+PYTHONPATH=src python tools/bundle_export/arm64_local.py libmmkv.so output/mmkv-unwind \
+    --unwind-fde fde-00000250 --g2-out output/mmkv-unwind.g2.json
+```
+
+The ID denotes a record offset within this file's `.eh_frame`. The FDE supplies the
+start and size. `.eh_frame_hdr` and `PT_GNU_EH_FRAME` must agree on the mapped index,
+and all index entries must identify actual FDEs with the same starts. The tool checks
+the CIE, executable file mapping, loader writes and conflicts with other declared
+ranges. Only the supported 32-bit frame record and pointer encodings are read. Plain
+`zR` records may be selected for the existing local graph pass. The supported `zPLR`
+records have their extents checked for overlap and are withheld from graph selection
+because they carry exception metadata. An FDE supplies an unwind-covered code range,
+which can be a function fragment. The report binds the range and its metadata offsets
+to the original file digest. Successful publication still requires graph admission of
+the entire selected range.
+
 The address is a loaded virtual address. `--base` defaults to the ELF model's link base.
 `--page-size` selects the 4, 16 or 64 KiB ELF mapping model. Choose a range ending at
 `RET X30`. Supported body forms are immediate `ADD`/`SUB` without flag writes and

@@ -170,8 +170,7 @@ def _overlaps(ranges):
     return conflicts
 
 
-def function_ranges(data, mapping, max_size):
-    sections = _sections(data, mapping)
+def _symbol_inputs(data, mapping, sections):
     groups = defaultdict(list)
     markers = defaultdict(lambda: defaultdict(set))
     for kind, origin, entry, size in _symbol_rows(data, mapping, sections):
@@ -187,8 +186,22 @@ def function_ranges(data, mapping, max_size):
                 markers[index][entry].add(marker)
         else:
             groups[entry, size].append((kind, origin))
-    data_intervals = _data_intervals(sections, markers)
+    return groups, _data_intervals(sections, markers)
 
+
+def _touches_data(data_intervals, section, entry, size):
+    intervals = data_intervals.get(section, ())
+    position = bisect_left(intervals, (entry + size,))
+    return bool(position and intervals[position - 1][1] > entry)
+
+
+def function_ranges(data, mapping, max_size):
+    sections = _sections(data, mapping)
+    groups, data_intervals = _symbol_inputs(data, mapping, sections)
+    return _function_ranges(data, mapping, sections, groups, data_intervals, max_size)
+
+
+def _function_ranges(data, mapping, sections, groups, data_intervals, max_size):
     offsets, unavailable = {}, {}
     for (entry, size), rows in groups.items():
         try:
@@ -203,9 +216,7 @@ def function_ranges(data, mapping, max_size):
                 raise ValueError("function section and PT_LOAD refer to different file bytes")
             offsets[entry, size] = offset
             _require_loader_stable(mapping, entry, size)
-            intervals = data_intervals.get(index, ())
-            position = bisect_left(intervals, (entry + size,))
-            if position and intervals[position - 1][1] > entry:
+            if _touches_data(data_intervals, index, entry, size):
                 raise ValueError("function range overlaps an AArch64 $d data interval")
             if any(kind == _STT_GNU_IFUNC for kind, _ in rows):
                 raise ValueError("indirect-function resolver symbol is outside the standalone profile")

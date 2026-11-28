@@ -16,7 +16,8 @@ from xml.etree import ElementTree
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "decode_check"))
 
-from arm64_elf_functions import code_file_offset, function_ranges, select_range
+from arm64_elf_functions import FunctionRange, code_file_offset, function_ranges, select_range
+from arm64_elf_unwind import select_unwind, unwind_ranges
 import elf_map
 from tdo_v2.integration.standalone_arm64 import (
     BRANCH_PROFILE, CMP_OPERATIONS, CONDITION_NAMES, LANGUAGE, LOCAL_OPERATIONS, MAX_CODE_BYTES,
@@ -239,24 +240,30 @@ def _check_graph(generation):
         raise ValueError(f"standalone ARM64 graph was not published ({snapshot.stop})")
 
 
-def _function_record(selected, mapping, base):
+def _range_record(selected, mapping, base):
     bias = base - mapping.image_base
     entry = selected.link_entry + bias
-    return {**asdict(selected), "names": selected.names, "load_bias": bias,
+    details = {"names": selected.names} if isinstance(selected, FunctionRange) else {
+        "basis": "eh_frame_fde", "id": selected.id,
+    }
+    return {**asdict(selected), **details, "load_bias": bias,
             "entry": entry if 0 <= entry < elf_map.U64_END else None,
             "original_sha256": mapping.header_fields["file_sha256"]}
 
 
-def _export(original, output_root, *, entry=None, size=None, function=None, base=None, page=4096,
+def _export(original, output_root, *, entry=None, size=None, function=None, unwind_fde=None, base=None, page=4096,
             sla_directory=None, branches=False, before_publish=None):
-    if (entry is None) != (size is None) or (entry is not None and function is not None):
-        raise ValueError("use --entry with --size, or select an ELF function without either")
+    if (entry is None) != (size is None) or sum(value is not None for value in (entry, function, unwind_fde)) > 1:
+        raise ValueError("use --entry with --size, or select one ELF symbol or unwind record")
     mapping, base = _load_mapping(original, base, page)
     selection = None
     if entry is None:
-        selected = select_range(function_ranges(original, mapping, MAX_CODE_BYTES),
-                                name=function, elf_entry=struct.unpack_from("<Q", original, 24)[0])
-        selection = _function_record(selected, mapping, base)
+        if unwind_fde is None:
+            selected = select_range(function_ranges(original, mapping, MAX_CODE_BYTES),
+                                    name=function, elf_entry=struct.unpack_from("<Q", original, 24)[0])
+        else:
+            selected = select_unwind(unwind_ranges(original, mapping, MAX_CODE_BYTES), unwind_fde)
+        selection = _range_record(selected, mapping, base)
         entry, size = selection["entry"], selected.size
         if before_publish is None:
             before_publish = _check_graph
@@ -282,11 +289,12 @@ def _export(original, output_root, *, entry=None, size=None, function=None, base
     return generation, selection
 
 
-def export(elf, output_root, *, entry=None, size=None, function=None, base=None, page=4096,
+def export(elf, output_root, *, entry=None, size=None, function=None, unwind_fde=None, base=None, page=4096,
            sla_directory=None, branches=False):
-    """Export one explicit range, exact named ELF function or the ELF entry function."""
+    """Export one explicit range, ELF symbol or unwind record."""
     generation, _ = _export(Path(elf).read_bytes(), output_root, entry=entry, size=size, function=function,
-                            base=base, page=page, sla_directory=sla_directory, branches=branches)
+                            unwind_fde=unwind_fde, base=base, page=page, sla_directory=sla_directory,
+                            branches=branches)
     return generation
 
 
@@ -297,6 +305,8 @@ def main(argv=None):
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--function", help="exact defined ELF function symbol name")
     selection.add_argument("--list-functions", action="store_true", help="list ELF symbol ranges as JSON")
+    selection.add_argument("--list-unwind-ranges", action="store_true", help="list ELF unwind-covered ranges as JSON")
+    selection.add_argument("--unwind-fde", help="exact unwind record ID from --list-unwind-ranges")
     selection.add_argument("--entry", type=lambda v: int(v, 0))
     parser.add_argument("--size", type=lambda v: int(v, 0))
     parser.add_argument("--base", type=lambda v: int(v, 0))
@@ -305,21 +315,26 @@ def main(argv=None):
     parser.add_argument("--branches", action="store_true", help="allow the bounded direct-branch profile")
     parser.add_argument("--g2-out", type=Path, help="write local G2 memory comparisons linked to TDO graph operations")
     args = parser.parse_args(argv)
-    if args.list_functions:
+    listing = args.list_functions or args.list_unwind_ranges
+    if listing:
         if args.output_root is not None or args.size is not None or args.g2_out is not None:
-            parser.error("--list-functions takes no output root, --size or --g2-out")
+            parser.error("range listing takes no output root, --size or --g2-out")
     elif args.output_root is None:
         parser.error("output_root is required to export a Bundle")
     try:
         original = args.elf.read_bytes()
-        if args.list_functions:
+        if listing:
             mapping, base = _load_mapping(original, args.base, args.page_size)
-            functions = function_ranges(original, mapping, MAX_CODE_BYTES)
             inventory = dict(original_sha256=mapping.header_fields["file_sha256"],
-                             elf_entry=struct.unpack_from("<Q", original, 24)[0],
-                             functions=[_function_record(item, mapping, base) for item in functions])
-            if not functions:
-                inventory["unavailable"] = "no defined function symbols in supported ELF section tables"
+                             elf_entry=struct.unpack_from("<Q", original, 24)[0])
+            if args.list_unwind_ranges:
+                inventory["unwind_ranges"] = [_range_record(item, mapping, base)
+                                              for item in unwind_ranges(original, mapping, MAX_CODE_BYTES)]
+            else:
+                functions = function_ranges(original, mapping, MAX_CODE_BYTES)
+                inventory["functions"] = [_range_record(item, mapping, base) for item in functions]
+                if not functions:
+                    inventory["unavailable"] = "no defined function symbols in supported ELF section tables"
             print(json.dumps(inventory, sort_keys=True))
             return 0
 
@@ -332,12 +347,13 @@ def main(argv=None):
 
         generation, selected = _export(
             original, args.output_root, entry=args.entry, size=args.size, function=args.function,
-            base=args.base, page=args.page_size, sla_directory=args.sla_directory, branches=args.branches,
-            before_publish=build_report if args.g2_out is not None else None,
+            unwind_fde=args.unwind_fde, base=args.base, page=args.page_size,
+            sla_directory=args.sla_directory, branches=args.branches, before_publish=build_report if args.g2_out is not None else None,
         )
         if report is not None:
             if selected is not None:
-                report["function_range"] = selected
+                key = "unwind_range" if args.unwind_fde is not None else "function_range"
+                report[key] = selected
             args.g2_out.write_text(json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         print(generation)
     except (ValueError, OSError, RuntimeError) as error:
