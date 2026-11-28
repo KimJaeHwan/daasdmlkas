@@ -12,8 +12,7 @@ from arm64_local import _load_mapping, digest, json_bytes
 from arm64_elf_functions import _sections, _symbol_inputs
 from arm64_elf_unwind import _code_range
 from arm64_encoding_index import load_index
-from arm64_source_decode import SOURCE_DECODE_PROFILES, observe
-from arm64_source_facts import RULE
+from arm64_source_decode import SOURCE_DECODE_PROFILES, SOURCE_DECODE_RULES, observe
 from tdo_v2.integration.standalone_arm64 import MAX_CODE_BYTES
 
 
@@ -47,7 +46,8 @@ def collect_decode(original, *, entry, size, llvm_objdump, gnu_objdump, encoding
     record = dict(schema=DECODE_SCHEMA, source=source, original_sha256=digest(original), code_sha256=digest(code),
                   encoding_index=identity, decoders=decoders, slots=rows)
     if decode_profile is not None:
-        record.update(schema=PROFILED_DECODE_SCHEMA, decode_profile=decode_profile, common_facts_rule=RULE,
+        record.update(schema=PROFILED_DECODE_SCHEMA, decode_profile=decode_profile,
+                      common_facts_rule=SOURCE_DECODE_RULES[decode_profile],
                       runtime=dict(cpu_features="unobserved", streaming_mode="unobserved", za_state="unobserved",
                                    vector_length="unobserved"))
     return json_bytes(dict(digest=digest(json_bytes(record)), evidence=record)) + b"\n"

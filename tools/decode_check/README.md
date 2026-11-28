@@ -355,3 +355,12 @@ including byte accesses for which both scale bits produce a shift of zero.
 The payload uses named registers and applies to the source ELF word. CPU
 features, streaming mode, ZA state, vector length and lane access sets require
 runtime evidence.
+
+Select `--decode-profile sve-sme-v2` to include the Arm encodings for scalar
+integer unsigned-offset loads and stores and the `MOVZ` and `MOVN` forms of
+immediate `MOV`. The memory check compares the byte displacement, including an
+omitted zero. The move check compares the destination operand and the immediate
+value at the encoded width. `MOV` aliases report the effective value. Explicit
+`MOVZ` and `MOVN` also report the encoded immediate and shift. The original
+renderings remain available for both checks. `sve-sme-v1` evidence replays with
+its original rules.

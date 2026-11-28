@@ -8,6 +8,7 @@ import arm64_local
 import arm64_source_decode
 import arm64_source_evidence
 from arm64_encoding_index import EncodingIndex
+from arm64_source_facts import EXTENDED_RULE
 from arm64_local import digest, json_bytes
 
 
@@ -132,6 +133,51 @@ def test_sme_zero_alias_requires_complete_mask_and_unique_tiles():
     row = arm64_source_decode._source_row(ENTRY, 0xc0080001, index, left, right, profiled=True)
     assert row["common_facts"]["tile_mask"] == 1
     assert row["field_evidence"]["tile_mask"] == {"llvm": {"state": "unobserved"}, "gnu": {"state": "contradicted"}}
+
+
+def test_extended_profile_checks_move_alias_value_and_canonical_immediate_separately():
+    index = _source_index("MOVN_32_movewide", "movn.xml", section="movewide")
+    alias = "mov", "w3, #-0x28"
+    canonical = "movn", "w3, #0x27"
+    old = arm64_source_decode._source_row(ENTRY, 0x128004e3, index, alias, canonical, profiled=True)
+    assert "common_facts" not in old
+    row = arm64_source_decode._source_row(ENTRY, 0x128004e3, index, alias, canonical, profiled=True,
+                                        rule=EXTENDED_RULE)
+    assert row["comparison"] == "different-rendering"
+    assert row["common_facts"]["immediate"] == {
+        "width_bits": 32, "value_hex": "0xffffffd8", "encoded_value": 0x27, "shift": 0,
+    }
+    assert row["field_evidence"]["immediate_value"] == {"llvm": {"state": "confirmed"}, "gnu": {"state": "confirmed"}}
+    assert row["field_evidence"]["immediate_encoding"]["llvm"]["state"] == "unobserved"
+
+    wrong = "movn", "w3, #0x27, lsl #16"
+    row = arm64_source_decode._source_row(ENTRY, 0x128004e3, index, alias, wrong, profiled=True,
+                                        rule=EXTENDED_RULE)
+    assert row["field_evidence"]["immediate_value"]["gnu"]["state"] == "contradicted"
+    assert row["field_evidence"]["immediate_encoding"]["gnu"]["state"] == "contradicted"
+    wrong_width = "mov", "x3, #-0x28"
+    row = arm64_source_decode._source_row(ENTRY, 0x128004e3, index, wrong_width, canonical, profiled=True,
+                                        rule=EXTENDED_RULE)
+    assert row["field_evidence"]["operands"]["llvm"]["state"] == "contradicted"
+    assert row["field_evidence"]["immediate_value"]["llvm"]["state"] == "contradicted"
+    invalid = arm64_source_decode._source_row(ENTRY, 0x12c004e3, index, alias, canonical, profiled=True,
+                                            rule=EXTENDED_RULE)
+    assert "common_facts" not in invalid
+
+
+def test_extended_profile_checks_opt_out_of_omitted_nonzero_address():
+    index = _source_index("LDR_64_ldst_pos", "ldr_imm_gen.xml", section="ldst_pos")
+    explicit = "ldr", "x17, [x16, #0x0]"
+    omitted = "ldr", "x17, [x16]"
+    row = arm64_source_decode._source_row(ENTRY, 0xf9400211, index, explicit, omitted, profiled=True,
+                                        rule=EXTENDED_RULE)
+    assert row["common_facts"]["address"]["displacement_bytes"] == 0
+    assert row["field_evidence"]["address"] == {"llvm": {"state": "confirmed"}, "gnu": {"state": "confirmed"}}
+    for wrong in (omitted, ("ldr", "x17, [x16, #-8]")):
+        row = arm64_source_decode._source_row(ENTRY, 0xf9400611, index, ("ldr", "x17, [x16, #8]"), wrong,
+                                             profiled=True, rule=EXTENDED_RULE)
+        assert row["common_facts"]["address"]["displacement_bytes"] == 8
+        assert row["field_evidence"]["address"]["gnu"]["state"] == "contradicted"
 
 
 def test_named_profile_selects_every_word_and_rejects_resealed_evidence(monkeypatch):

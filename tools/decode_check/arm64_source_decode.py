@@ -5,14 +5,18 @@ import re
 from arm64_decode import BATCH_WORDS, DIRECT, LLVM_OPTIONS, LlvmObjdump, normalize, number
 from arm64_facts import CC, signed
 from arm64_profiles import GnuObjdump
-from arm64_source_facts import compare_fields, common_fields
+from arm64_source_facts import RULE, EXTENDED_RULE, compare_fields, common_fields
 
 
 _IMMEDIATE = re.compile(r"#-?(?:0x[0-9a-f]+|[0-9]+)(?![\w.])")
 SVE_SME_PROFILE = "sve-sme-v1"
+SVE_SME_PROFILE_V2 = "sve-sme-v2"
+_SVE_SME_OPTIONS = (*LLVM_OPTIONS[:-1], LLVM_OPTIONS[-1] + ",+sve,+sve2,+bf16,+i8mm,+sme,+sme2,+sme-f64f64")
 SOURCE_DECODE_PROFILES = {
-    SVE_SME_PROFILE: (*LLVM_OPTIONS[:-1], LLVM_OPTIONS[-1] + ",+sve,+sve2,+bf16,+i8mm,+sme,+sme2,+sme-f64f64"),
+    SVE_SME_PROFILE: _SVE_SME_OPTIONS,
+    SVE_SME_PROFILE_V2: _SVE_SME_OPTIONS,
 }
+SOURCE_DECODE_RULES = {SVE_SME_PROFILE: RULE, SVE_SME_PROFILE_V2: EXTENDED_RULE}
 
 
 def _rendered(raw, *, gnu):
@@ -66,7 +70,7 @@ def _profile_probe(llvm, gnu, reference):
     return rows
 
 
-def _source_row(pc, word, index, llvm, gnu, *, profiled):
+def _source_row(pc, word, index, llvm, gnu, *, profiled, rule=RULE):
     first, second = _rendered(llvm, gnu=False), _rendered(gnu, gnu=True)
     state = ("unobserved" if first is None or second is None else
              "same-rendering" if first == second else "different-rendering")
@@ -77,7 +81,7 @@ def _source_row(pc, word, index, llvm, gnu, *, profiled):
     if check is not None:
         row["arm_check"] = check
     if profiled:
-        fields = common_fields(word, index)
+        fields = common_fields(word, index, rule=rule)
         if fields is not None:
             facts, expected = fields
             row["common_facts"] = facts
@@ -95,12 +99,13 @@ def observe(words, reference, llvm_path, gnu_path, *, profile=None):
     decoders = dict(llvm=llvm.identity, gnu=gnu.identity)
     if profile is not None:
         decoders["profile_probes"] = _profile_probe(llvm, gnu, reference)
+    rule = SOURCE_DECODE_RULES.get(profile, RULE)
     results = []
     for start in range(0, len(words), BATCH_WORDS):
         chunk = dict(words[start:start + BATCH_WORDS])
         left, right = llvm.decode(chunk), gnu.decode(chunk)
         results.extend(_source_row(pc, word, reference.candidates(word), left[pc], right[pc],
-                                   profiled=profile is not None) for pc, word in chunk.items())
+                                   profiled=profile is not None, rule=rule) for pc, word in chunk.items())
     llvm.check_identity()
     gnu.check_identity()
     return decoders, results

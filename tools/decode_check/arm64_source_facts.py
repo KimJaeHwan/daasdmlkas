@@ -6,7 +6,12 @@ from arm64_facts import condition, signed
 
 
 RULE = "arm-a64-source-facts-1"
+EXTENDED_RULE = "arm-a64-source-facts-2"
 _ADDRESS = re.compile(r"\[(\w+),([wx]\w+)(?:,(lsl|uxtw|sxtw|sxtx)(?:#(\d+))?)?\]")
+_IMMEDIATE_ADDRESS = re.compile(r"\[(\w+)(?:,#(-?\d+))?\]")
+_MOVE_DESTINATION = r"([wx](?:[0-9]|[12][0-9]|30|zr))"
+_MOVE_ALIAS = re.compile(_MOVE_DESTINATION + r",#(-?\d+)")
+_MOVE_WIDE = re.compile(_MOVE_DESTINATION + r",#(\d+)(?:,lsl#(\d+))?")
 _VECTOR_BASE = re.compile(r"\[(\w+)(?:,#(-?\d+),mulvl)?\]")
 _ELEMENTS = {16: "h", 32: "s", 64: "d"}
 _INDEX_EXTENSIONS = {2: "uxtw", 3: "lsl", 6: "sxtw", 7: "sxtx"}
@@ -45,6 +50,16 @@ def _indexed_address(word, extension, scale):
                 index=_gpr(index), extension=extension, shift=scale if word & 0x1000 else 0)
 
 
+def _scalar_operand(size, opc, register_id):
+    if (opc == 3 and size >= 2) or (opc == 2 and size == 3):
+        return None
+    width = 64 if opc == 2 or size == 3 else 32
+    suffix = ("sb", "sh", "sw")[size] if opc >= 2 else ("b", "h", "", "")[size]
+    mnemonic = ("ldr" if opc else "str") + suffix
+    register = ("x" if width == 64 else "w") + ("zr" if register_id == 31 else str(register_id))
+    return mnemonic, suffix, _operand(register, "destination" if opc else "source", width_bits=width)
+
+
 def _offset_fields(word, encoding):
     if encoding["section"] != "ldst_regoff":
         return None
@@ -70,12 +85,12 @@ def _offset_fields(word, encoding):
         register, width = f"{tag.lower()}{register_id}", 8 << scale
         filename, feature, check = f"{mnemonic}_reg_fpsimd.xml", "FEAT_FP", "AArch64_CheckFPEnabled"
     elif layout == 0x38200800:
-        if (opc == 3 and size >= 2) or (opc == 2 and size == 3):
+        scalar = _scalar_operand(size, opc, register_id)
+        if scalar is None:
             return None
+        mnemonic, suffix, operand = scalar
         scale = size
-        width = 64 if opc == 2 or size == 3 else 32
-        suffix = ("sb", "sh", "sw")[size] if opc >= 2 else ("b", "h", "", "")[size]
-        mnemonic = ("ldr" if opc else "str") + suffix
+        register, width = operand["register"], operand["width_bits"]
         tag = str(width) + ("B" if scale == 0 else "")
         register = ("x" if width == 64 else "w") + ("zr" if register_id == 31 else str(register_id))
         filename, feature, check = f"{mnemonic}_reg{'_gen' if not suffix else ''}.xml", None, None
@@ -90,6 +105,48 @@ def _offset_fields(word, encoding):
     address = _indexed_address(word, option, scale)
     facts = dict(_facts(encoding, mnemonic, check), operands=[operand], address=address, transfer_width_bits=8 << scale)
     return facts, {"operands": register, "address": address}
+
+
+def _unsigned_offset(word, encoding):
+    if encoding["section"] != "ldst_pos" or word & 0x3f000000 != 0x39000000:
+        return None
+    size, opc, rn = word >> 30, word >> 22 & 3, word >> 5 & 31
+    scalar = _scalar_operand(size, opc, word & 31)
+    if scalar is None:
+        return None
+    mnemonic, suffix, operand = scalar
+    expected = (f"{mnemonic.upper()}_{operand['width_bits']}_ldst_pos",
+                f"{mnemonic}_imm{'_gen' if not suffix else ''}.xml", None)
+    if (encoding["id"], encoding["file"], encoding["feature_condition"]) != expected:
+        return None
+    base = "sp" if rn == 31 else f"x{rn}"
+    address = dict(kind="base-plus-immediate", width_bits=64, base=_gpr(base),
+                   displacement_bytes=(word >> 10 & 0xfff) << size)
+    facts = dict(_facts(encoding, mnemonic), operands=[operand], address=address, transfer_width_bits=8 << size)
+    return facts, {"operands": operand["register"], "address": address}
+
+
+def _move_wide(word, encoding):
+    if encoding["section"] != "movewide":
+        return None
+    name = {0x12800000: "movn", 0x52800000: "movz"}.get(word & 0x7f800000)
+    width, hw = 64 if word >> 31 else 32, word >> 21 & 3
+    if name is None or width == 32 and hw >= 2:
+        return None
+    expected = (f"{name.upper()}_{width}_movewide", f"{name}.xml", None)
+    if (encoding["id"], encoding["file"], encoding["feature_condition"]) != expected:
+        return None
+    rd, immediate, shift = word & 31, word >> 5 & 0xffff, hw * 16
+    register = ("x" if width == 64 else "w") + ("zr" if rd == 31 else str(rd))
+    value = _move_value(name, width, immediate, shift)
+    facts = dict(_facts(encoding, name), operands=[_operand(register, "destination", width_bits=width)],
+                 immediate=dict(width_bits=width, value_hex=hex(value), encoded_value=immediate, shift=shift))
+    return facts, {"operands": register, "immediate_value": (width, value), "immediate_encoding": (immediate, shift)}
+
+
+def _move_value(name, width, immediate, shift):
+    value = immediate << shift
+    return ((1 << width) - 1) ^ value if name == "movn" else value
 
 
 def _vectors(encoding, name, operands, display, check):
@@ -164,16 +221,23 @@ def _vector_load(word, encoding):
     return facts, {"operands": f"{{{target}.{_ELEMENTS[bits]}}},{pg}/z", "address": (base, imm)}
 
 
-def common_fields(word, index):
+def common_fields(word, index, *, rule=RULE):
     """Read modeled fields from sealed Arm candidates and exact instruction bits."""
     if len(index["candidates"]) != 1 or index.get("exclusions"):
         return None
     encoding, = index["candidates"]
-    return _offset_fields(word, encoding) or _vector_fields(word, encoding) or _vector_load(word, encoding)
+    original = _offset_fields(word, encoding) or _vector_fields(word, encoding) or _vector_load(word, encoding)
+    if original is not None or rule == RULE:
+        return original
+    return _move_wide(word, encoding) or _unsigned_offset(word, encoding)
 
 
 def _observed(fields, mnemonic, rendered):
-    if rendered is None or (rendered["form"] != mnemonic
+    if rendered is None:
+        return {}
+    if "immediate_value" in fields:
+        return _observed_move(mnemonic, rendered)
+    if (rendered["form"] != mnemonic
                             and not (mnemonic.startswith("bfcvtn") and rendered["form"].startswith("bfcvtn"))):
         return {}
     text = re.sub(r"\s+", "", ",".join(rendered["operands"]))
@@ -191,6 +255,10 @@ def _observed(fields, mnemonic, rendered):
         if isinstance(fields["address"], tuple):
             if match := _VECTOR_BASE.fullmatch("[" + address):
                 observed["address"] = match[1], int(match[2] or 0)
+        elif fields["address"]["kind"] == "base-plus-immediate":
+            if match := _IMMEDIATE_ADDRESS.fullmatch("[" + address):
+                observed["address"] = dict(kind="base-plus-immediate", width_bits=64, base=_gpr(match[1]),
+                                           displacement_bytes=int(match[2] or 0))
         elif match := _ADDRESS.fullmatch("[" + address):
             base, index, extension, shift = match.groups()
             observed["address"] = dict(kind="base-plus-extended-index", width_bits=64, base=_gpr(base),
@@ -199,6 +267,23 @@ def _observed(fields, mnemonic, rendered):
     if rendered["form"] != mnemonic:
         return {"operands": rendered["form"] + " " + text}
     return {"operands": text}
+
+
+def _observed_move(mnemonic, rendered):
+    form = rendered["form"]
+    text = re.sub(r"\s+", "", ",".join(rendered["operands"]))
+    if form == "mov" and (match := _MOVE_ALIAS.fullmatch(text)):
+        width = _gpr(match[1])["width_bits"]
+        value = int(match[2])
+        if -(1 << (width - 1)) <= value < 1 << width:
+            return dict(operands=match[1], immediate_value=(width, value % (1 << width)))
+    if form in ("movz", "movn") and (match := _MOVE_WIDE.fullmatch(text)):
+        width = _gpr(match[1])["width_bits"]
+        immediate, shift = int(match[2]), int(match[3] or 0)
+        if immediate < 1 << 16 and shift in range(0, width, 16):
+            return dict(operands=match[1], immediate_value=(width, _move_value(form, width, immediate, shift)),
+                        immediate_encoding=(immediate, shift) if form == mnemonic else (form, immediate, shift))
+    return {}
 
 
 def compare_fields(facts, expected, llvm, gnu):
